@@ -76,13 +76,17 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 
 ```
 src/
-├── index.ts   # REPL 入口(清屏 + 横幅 + readline 循环 + /exit /clear)
-├── agent.ts   # tool-call 循环(调 LLM→执行工具→回灌→再调,最多 25 步)
-├── llm.ts     # OpenAI 兼容客户端 + 工具格式转换 + chat()
-├── config.ts  # 读 .env、校验必填项、系统提示词
-├── tools.ts   # 6 个工具 + JSON Schema + 调度器(统一 try/catch)
-└── ui.ts      # TTY 感知的 ANSI 颜色 + 清屏
+├── index.ts              # 入口:装配 + 启动 REPL + process.exit
+├── repl/index.ts         # readline 循环、/exit /clear、清屏、横幅
+├── agent/index.ts        # tool-call 循环(调 LLM→执行工具→回灌→再调,≤25 步)
+├── llm/index.ts          # OpenAI 兼容客户端 + 工具格式转换 + chat()
+├── tools/                # types.ts + constants.ts + registry.ts + builtins/(一工具一文件)
+├── config/index.ts       # 读 .env、校验必填项、系统提示词
+├── ui/                   # theme.ts(颜色)+ render.ts(清屏 + 横幅)
+└── permissions/ session/ memory/ mcp/ commands/ agents/   # 未来子系统(空骨架,见各 README)
 ```
+
+> 完整架构、数据流与扩展指南见 [CLAUDE.md](./CLAUDE.md)。
 
 ## 类型检查
 
