@@ -4,6 +4,11 @@ import { executeTool } from '../tools/registry.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
 import { summarizeToolCall, summarizeToolResult } from '../ui/render.js';
+import {
+  maybeCompact,
+  capToolResultForHistory,
+  contextState,
+} from '../session/index.js';
 
 const MAX_STEPS = 25; // 防止无限循环
 
@@ -11,6 +16,8 @@ const MAX_STEPS = 25; // 防止无限循环
  * agent 核心循环:
  *  流式调 LLM(onText / onThinking 实时打印)→ 有 tool_calls 就执行并回灌
  *  → 否则流式正文即最终回复。history 在调用间持久,由 REPL 持有。
+ *  步前经 session/maybeCompact 自动压缩(接近窗口上限时三层压缩);
+ *  工具结果进 history 前经 capToolResultForHistory 裁到单条上限。
  *
  *  思考段在结束(切到 text / tool_call / 流结束)时用 ANSI 回卷并擦除,
  *  换成一行的折叠标题;原文存入 collapsedThinkings 供 /think N 重打。
@@ -73,11 +80,14 @@ export async function runAgent(
 
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
+      // 步前:接近窗口上限时自动压缩(三层)。此时 spinner 已停,通知行干净。
+      await maybeCompact(history);
       spinner.start('思考中');
       mode = 'idle';
       gotText = false;
       lastChar = '';
       const result = await chat(history, { onText, onThinking });
+      contextState.lastUsage = result.usage; // 供 /context 显示实测 token
       spinner.stop();
 
       if (result.toolCalls.length > 0) {
@@ -109,7 +119,7 @@ export async function runAgent(
           history.push({
             role: 'tool',
             tool_call_id: tc.id,
-            content: output,
+            content: capToolResultForHistory(tc.name, output),
           } as ChatMessage);
         }
         continue; // 带着工具结果再调一次 LLM

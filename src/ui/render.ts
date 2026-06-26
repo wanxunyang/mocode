@@ -71,7 +71,7 @@ export interface BannerInfo {
   tools: string;
 }
 
-const BOX_W = 70; // 内容区显示宽度(容下完整工具列表)
+const BOX_W = 76; // 内容区显示宽度(容下完整工具列表 + 命令提示)
 const MARGIN = '  '; // 盒外左缩进
 
 function boxBorder(left: string, mid: string, right: string): string {
@@ -104,7 +104,7 @@ export function printBanner(info: BannerInfo): void {
     labelRow('目录', info.cwd),
     labelRow('工具', info.tools),
     boxEmpty(),
-    boxLine(`${ui.dim}/exit 退出  ·  /clear 清空历史${ui.reset}`),
+    boxLine(`${ui.dim}/exit 退出 · /clear 清空 · /compact 压缩 · /context 用量 · /resume 续接${ui.reset}`),
     boxBorder('╰', '─', '╯'),
   ];
   stdout.write(rows.map((r) => MARGIN + r).join('\n') + '\n');

@@ -1,0 +1,134 @@
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs';
+import path from 'node:path';
+import { config } from '../config/index.js';
+import type { ChatMessage } from '../llm/index.js';
+import { truncateDisplay } from '../ui/render.js';
+
+/**
+ * 会话落盘:把 history 序列化到 <cwd>/.mocode/sessions/<id>.json,支持 --resume / /resume。
+ * session = 「这次对话说了啥」;与 memory/(跨会话长期事实)区分。
+ * 同步 fs(小文件,匹配 config 的同步风格);任何读/解析失败都返 null,不抛。
+ */
+
+export interface SessionMeta {
+  id: string;
+  createdAt: string;
+  model: string;
+  firstUser: string;
+}
+export interface SessionRecord extends SessionMeta {
+  history: ChatMessage[];
+}
+
+/** 会话目录(确保存在)。 */
+export function sessionDir(): string {
+  mkdirSync(config.sessionDir, { recursive: true });
+  return config.sessionDir;
+}
+
+/** 新会话 id:YYYYMMDD-HHmmss(运行时 Date 可用)。 */
+export function newSessionId(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(
+    d.getHours()
+  )}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/** id(YYYYMMDD-HHmmss)→ ISO 字符串,稳定可排序。解析失败回退原 id。 */
+function idToIso(id: string): string {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/.exec(id);
+  if (!m) return id;
+  return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`;
+}
+
+function toText(content: unknown): string {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return String(content);
+  }
+}
+
+function firstUserOf(history: ChatMessage[]): string {
+  for (const m of history) {
+    if (m.role === 'user') {
+      const text = toText((m as any).content).replace(/\n/g, ' ').trim();
+      return truncateDisplay(text, 40);
+    }
+  }
+  return '';
+}
+
+function sessionPath(id: string): string {
+  return path.join(config.sessionDir, `${id}.json`);
+}
+
+/** 保存会话到磁盘(history.length<=1 时跳过写盘,只返 meta)。 */
+export function saveSession(history: ChatMessage[], id: string): SessionMeta {
+  const meta: SessionMeta = {
+    id,
+    createdAt: idToIso(id),
+    model: config.model,
+    firstUser: history.length > 1 ? firstUserOf(history) : '',
+  };
+  if (history.length <= 1) return meta; // 仅 system,不落盘
+  sessionDir();
+  const record: SessionRecord = { ...meta, history };
+  writeFileSync(sessionPath(id), JSON.stringify(record), 'utf8');
+  return meta;
+}
+
+/** 加载会话;不存在 / 损坏返 null(不抛)。 */
+export function loadSession(id: string): SessionRecord | null {
+  const p = sessionPath(id);
+  if (!existsSync(p)) return null;
+  try {
+    const raw = readFileSync(p, 'utf8');
+    const rec = JSON.parse(raw) as SessionRecord;
+    if (!rec || !Array.isArray(rec.history)) return null;
+    return {
+      id: rec.id,
+      createdAt: rec.createdAt ?? idToIso(rec.id ?? id),
+      model: rec.model ?? '',
+      firstUser: rec.firstUser ?? '',
+      history: rec.history,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 列出所有会话,按 createdAt 降序。损坏文件跳过。 */
+export function listSessions(): SessionMeta[] {
+  if (!existsSync(config.sessionDir)) return [];
+  const out: SessionMeta[] = [];
+  for (const f of readdirSync(config.sessionDir)) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const rec = JSON.parse(
+        readFileSync(path.join(config.sessionDir, f), 'utf8')
+      ) as Partial<SessionRecord>;
+      if (rec && typeof rec.id === 'string') {
+        out.push({
+          id: rec.id,
+          createdAt: rec.createdAt ?? idToIso(rec.id),
+          model: rec.model ?? '',
+          firstUser: rec.firstUser ?? '',
+        });
+      }
+    } catch {
+      // 跳过损坏文件
+    }
+  }
+  out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  return out;
+}

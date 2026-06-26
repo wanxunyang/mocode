@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import path from 'node:path';
 
 export interface Config {
   baseURL: string;
@@ -6,6 +7,16 @@ export interface Config {
   model: string;
   maxTokens?: number;
   systemPrompt: string;
+  /** 模型上下文窗口(token)。须对齐真实模型窗口(GLM-4.6≈128k,DeepSeek-V3≈64k,Qwen 视版本)。 */
+  contextWindowTokens: number;
+  /** 自动压缩触发阈值(占窗口比例)。默认 0.85,保守偏早以吸收估算误差与下一步增长。 */
+  compactThreshold: number;
+  /** 流式请求里带 stream_options.include_usage 拿真实 usage。后端不认 stream_options 时关掉。 */
+  includeUsage: boolean;
+  /** 自动压缩总开关。关掉则只靠手动 /compact。 */
+  autoCompact: boolean;
+  /** 会话落盘目录(cwd 下)。 */
+  sessionDir: string;
 }
 
 function requireEnv(key: string): string {
@@ -43,4 +54,9 @@ export const config: Config = {
   model: process.env.LLM_MODEL || 'gpt-4o-mini',
   maxTokens: process.env.MAX_TOKENS ? Number(process.env.MAX_TOKENS) : undefined,
   systemPrompt: SYSTEM_PROMPT,
+  contextWindowTokens: Number(process.env.CONTEXT_WINDOW_TOKENS) || 128000,
+  compactThreshold: Number(process.env.COMPACT_THRESHOLD) || 0.85,
+  includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
+  autoCompact: process.env.AUTO_COMPACT !== 'false',
+  sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
 };
