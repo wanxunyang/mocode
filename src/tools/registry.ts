@@ -1,5 +1,6 @@
 import type { Tool } from './types.js';
 import { builtinTools } from './builtins/index.js';
+import { recordMutation } from '../rollback/index.js';
 
 /**
  * 工具注册表。当前 = 内置工具;
@@ -18,6 +19,14 @@ export async function executeTool(name: string, argsRaw: string): Promise<string
     return `错误:工具 ${name} 的 arguments 不是合法 JSON: ${argsRaw}`;
   }
   try {
+    // 撤销回滚用:write_file/edit_file 改动前记 before 快照(回滚时恢复到轮末状态)。
+    if (
+      (name === 'write_file' || name === 'edit_file') &&
+      typeof args.path === 'string' &&
+      args.path
+    ) {
+      recordMutation(args.path);
+    }
     return await tool.execute(args);
   } catch (e) {
     return `错误:工具 ${name} 执行失败: ${e instanceof Error ? e.message : String(e)}`;

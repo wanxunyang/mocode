@@ -11,6 +11,7 @@ import { config } from '../config/index.js';
 import { MAX_HISTORY_RESULT, MAX_OLD_TOOL_STUB } from '../tools/constants.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
+import { pruneAfterCompaction } from '../rollback/index.js';
 
 /**
  * 上下文压缩子系统(参考 Claude Code 的 auto-compact):
@@ -275,6 +276,7 @@ export async function compactHistory(
     const rebuilt: ChatMessage[] = [systemMsg, summaryMsg, ...flattenGroups(kept)];
     history.length = 0;
     history.push(...rebuilt);
+    pruneAfterCompaction(history); // 摘要删了旧轮次 → 按存活轮次裁剪回滚日志
     const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
     contextState.lastEstimate = estimateAfter;
     contextState.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用估算

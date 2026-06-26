@@ -3,7 +3,8 @@ import { chat, type ChatMessage } from '../llm/index.js';
 import { executeTool } from '../tools/registry.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
-import { summarizeToolCall, summarizeToolResult } from '../ui/render.js';
+import { summarizeToolCall, summarizeToolResult, truncateDisplay } from '../ui/render.js';
+import { beginTurn } from '../rollback/index.js';
 import {
   maybeCompact,
   capToolResultForHistory,
@@ -28,6 +29,8 @@ export async function runAgent(
   collapsedThinkings: string[] = []
 ): Promise<void> {
   history.push({ role: 'user', content: userInput });
+  // 开新轮次(回滚用):首行截断 40,供双击 Esc 轮次列表展示。
+  beginTurn(truncateDisplay(userInput.split('\n')[0] ?? '', 40));
   const spinner = new Spinner();
   // 本轮流式状态:区分「思考」与「正文」,首个 token 到达即停 spinner。
   let mode: 'idle' | 'thinking' | 'text' = 'idle';

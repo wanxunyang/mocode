@@ -17,6 +17,10 @@ export interface Config {
   autoCompact: boolean;
   /** 会话落盘目录(cwd 下)。 */
   sessionDir: string;
+  /** AnySearch 联网搜索 API key(可选)。不配则走匿名免费额度(按 IP 限流)。 */
+  searchApiKey?: string;
+  /** AnySearch API base,默认官方端点。 */
+  searchBaseUrl: string;
 }
 
 function requireEnv(key: string): string {
@@ -43,6 +47,8 @@ const SYSTEM_PROMPT = `你是 mocode,一个终端编码 agent。你以"思考 �
 - 局部改用 edit_file:old_string 须唯一且精确匹配(含缩进/换行),多带上下文行确保唯一;新建或整体重写用 write_file。
 - 找路径用 glob,找内容用 grep;不要用 run_command 拼 cat / sed / find / grep。
 - run_command 按平台执行(Win 用 cmd、其他用 bash);有副作用的命令(删文件、装包、git push、重置等)执行前先简述意图。
+- 需要训练数据之外的最新信息(新版本、新闻、实时数据、最新 API)时用 web_search 联网搜索,不要凭记忆答可能过时的内容。
+- 要读取某个具体 URL 的内容(搜索结果里的链接、用户给的 URL)时用 web_fetch 抓取;它只抓静态 HTML,JS 渲染页面拿不到正文时改用 web_search(其结果自带清洗后的正文)。
 
 ## 失败处理
 - 工具以字符串返回错误(edit_file 未匹配或不唯一、run_command 非零退出码等)。先分析根因,调整后重试,不要原样重发同一条调用。
@@ -67,4 +73,6 @@ export const config: Config = {
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
   autoCompact: process.env.AUTO_COMPACT !== 'false',
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
+  searchApiKey: process.env.ANYSEARCH_API_KEY,
+  searchBaseUrl: process.env.ANYSEARCH_BASE_URL || 'https://api.anysearch.com',
 };
