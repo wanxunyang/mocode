@@ -1,6 +1,6 @@
-# 终端编码 Agent
+# mocode
 
-一个最小可用的终端编码 agent:**LLM + tool-call 循环 + {读文件 / 写改文件 / 执行命令 / 搜索}**。
+一个终端编码 agent:**LLM + tool-call 循环 + 流式输出 + 思考可见 + {读文件 / 写改文件 / 执行命令 / 搜索}**。
 接任意 OpenAI 兼容接口(GLM、DeepSeek、Qwen、本地 Ollama/vLLM 等),交互式 REPL。
 
 ## 安装
@@ -44,7 +44,7 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 npm start
 ```
 
-进入 REPL 后直接对话。启动即清屏,只留本次会话。内置命令:`/exit`(或 `/quit`)退出,`/clear` 清空历史并清屏。
+进入 REPL 后直接对话。启动即清屏,只留本次会话。回复流式打印,边生成边显示;若模型支持思考(reasoning),思考过程实时可见。内置命令:`/exit`(或 `/quit`)退出,`/clear` 清空历史并清屏。
 
 agent 工作在**启动时所在的工作目录**——想让它操作某个项目,就 `cd` 到那个项目再 `npm start`(或把本目录加进 PATH)。
 
@@ -70,7 +70,7 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 > 跑一下 node -e "console.log(1+1)"  # 触发 run_command
 ```
 
-每步终端会打印 `[tool] 工具名  参数`,agent 在循环里自己决定下一步,最后给出文本回复。
+每步终端会打印 `● 工具名 + 参数摘要与结果预览`,agent 在循环里自己决定下一步;回复流式打印,边生成边显示。
 
 ## 结构
 
@@ -82,7 +82,7 @@ src/
 ├── llm/index.ts          # OpenAI 兼容客户端 + 工具格式转换 + chat()
 ├── tools/                # types.ts + constants.ts + registry.ts + builtins/(一工具一文件)
 ├── config/index.ts       # 读 .env、校验必填项、系统提示词
-├── ui/                   # theme.ts(颜色)+ render.ts(清屏 + 横幅)
+├── ui/                   # theme.ts(颜色)+ render.ts(清屏 / 横幅 / 显示宽度 / 工具摘要)+ spinner.ts(等待动画)
 └── permissions/ session/ memory/ mcp/ commands/ agents/   # 未来子系统(空骨架,见各 README)
 ```
 
@@ -96,4 +96,4 @@ npm run typecheck   # tsc --noEmit
 
 ## 可后续扩展
 
-子 agent / 并行任务、流式输出、上下文自动压缩、权限确认 UI、代码图谱(CodeGraph)。当前版本是「最小可用的终端编码 agent」。
+子 agent / 并行任务、上下文自动压缩、权限确认 UI、代码图谱(CodeGraph)。当前版本是一个流式、思考可见的终端编码 agent。

@@ -17,4 +17,7 @@ export const ui = {
   yellow: wrap('\x1B[33m'),
   cyan: wrap('\x1B[36m'),
   gray: wrap('\x1B[90m'),
+  magenta: wrap('\x1B[35m'),
+  brightCyan: wrap('\x1B[96m'),
+  brightMagenta: wrap('\x1B[95m'),
 };
