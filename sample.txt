@@ -1,0 +1,6 @@
+这是一个示例文件,用来测试终端 agent 的工具。
+
+关键词: foo
+
+把它上面的 foo 改成 bar 试试,验证 read_file + edit_file。
+也可以用 grep 搜一下 "foo",或用 glob 列出当前目录的 .txt 文件。
