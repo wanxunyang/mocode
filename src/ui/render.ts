@@ -13,7 +13,7 @@ export function clearScreen(): void {
 
 // ── 显示宽度:CJK / 全角算 2,控制符 / 组合符算 0;用于横幅边框对齐 ──
 
-function charWidth(cp: number): number {
+export function charWidth(cp: number): number {
   if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0; // 控制符
   if (cp >= 0x300 && cp <= 0x36f) return 0; // 组合附加符号
   if (cp >= 0x1ab0 && cp <= 0x1aff) return 0;
@@ -40,6 +40,16 @@ export function displayWidth(str: string): number {
   let w = 0;
   for (const ch of str) w += charWidth(ch.codePointAt(0) ?? 0);
   return w;
+}
+
+/** 去除 SGR 颜色转义(\x1B[…m),用于度量带色串的真实可见宽度。 */
+export function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+/** 带色串的可见显示宽度(先去 ANSI 再按 displayWidth 度量)。 */
+export function ansiDisplayWidth(s: string): number {
+  return displayWidth(stripAnsi(s));
 }
 
 /** 按显示宽度右补空格。 */
@@ -91,8 +101,8 @@ function labelRow(label: string, value: string): string {
   return boxLine(`${ui.dim}${padEndDisplay(label, 6)}${ui.reset}${value}`);
 }
 
-/** 启动横幅:带边框的信息盒 + 一行提示。纯渲染,不依赖 config / 业务。 */
-export function printBanner(info: BannerInfo): void {
+/** 横幅纯文本(带 ANSI 颜色,不写出)——供 TUI 经 contentWrite 写入内容区以跟踪续写位。 */
+export function bannerString(info: BannerInfo): string {
   const rows = [
     boxBorder('╭', '─', '╮'),
     boxLine(
@@ -107,11 +117,16 @@ export function printBanner(info: BannerInfo): void {
     boxLine(`${ui.dim}/exit 退出 · /clear 清空 · /compact 压缩 · /context 用量 · /resume 续接${ui.reset}`),
     boxBorder('╰', '─', '╯'),
   ];
-  stdout.write(rows.map((r) => MARGIN + r).join('\n') + '\n');
-  stdout.write('\n');
-  stdout.write(
+  return (
+    rows.map((r) => MARGIN + r).join('\n') +
+    '\n\n' +
     `${MARGIN}${ui.dim}直接描述任务,agent 会自动读写文件与执行命令。${ui.reset}\n`
   );
+}
+
+/** 启动横幅:带边框的信息盒 + 一行提示。纯渲染,不依赖 config / 业务。 */
+export function printBanner(info: BannerInfo): void {
+  stdout.write(bannerString(info));
 }
 
 // ── 工具调用 / 结果 摘要 ──

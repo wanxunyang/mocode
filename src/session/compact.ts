@@ -1,4 +1,3 @@
-import { stdout } from 'node:process';
 import {
   chat,
   type ChatMessage,
@@ -11,6 +10,7 @@ import { config } from '../config/index.js';
 import { MAX_HISTORY_RESULT, MAX_OLD_TOOL_STUB } from '../tools/constants.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
+import * as layout from '../ui/layout.js';
 import { pruneAfterCompaction } from '../rollback/index.js';
 
 /**
@@ -185,7 +185,9 @@ async function defaultSummarize(
       : `请将以下会话历史压缩成摘要:\n\n${transcript}\n\n摘要:`,
   } as ChatMessage;
 
-  const spinner = new Spinner();
+  const spinner = new Spinner((msg, frame) =>
+    layout.setStatus(msg, frame ?? undefined)
+  );
   spinner.start('压缩中');
   try {
     const r = await chat([sysMsg, userMsg], {}); // 空 handlers:不打印、不外显流式
@@ -236,7 +238,7 @@ export async function compactHistory(
   if (oldGroups.length === 0) {
     // 没有旧区可压缩
     if (estimateBefore >= opts.threshold * opts.window) {
-      stdout.write(
+      layout.contentWrite(
         `  ${ui.yellow}●${ui.reset} ${ui.yellow}上下文已超阈但无可压缩项,建议 /clear 或缩短输入。${ui.reset}\n`
       );
       return { ...noop, reason: 'too-large' };
@@ -280,12 +282,12 @@ export async function compactHistory(
     const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
     contextState.lastEstimate = estimateAfter;
     contextState.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用估算
-    stdout.write(
+    layout.contentWrite(
       `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
     );
     // 抖动保护:压缩后仍超阈 → 提示 /clear,不死循环
     if (estimateAfter >= opts.threshold * opts.window) {
-      stdout.write(
+      layout.contentWrite(
         `  ${ui.yellow}●${ui.reset} ${ui.yellow}压缩后仍超阈,可能存在超大单条;建议 /clear。${ui.reset}\n`
       );
     }
@@ -303,7 +305,7 @@ export async function compactHistory(
   contextState.lastEstimate = estimateAfter;
   contextState.lastUsage = undefined; // 结构虽未变,但 token 数已变,旧 usage 失效
   if (microcompactDone) {
-    stdout.write(
+    layout.contentWrite(
       `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
     );
     return {
