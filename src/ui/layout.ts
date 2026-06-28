@@ -1,12 +1,12 @@
-import { stdout } from 'node:process';
+import { stdin, stdout } from 'node:process';
 import {
   charWidth,
   displayWidth,
   truncateDisplay,
   ansiDisplayWidth,
-  stripAnsi,
 } from './render.js';
 import { ui } from './theme.js';
+import * as content from './content.js';
 
 /**
  * 全屏 TUI 布局(参考 Claude Code):alt screen + 单滚动区域(内容区)+ 区域外固定底栏(状态行 + 输入框)。
@@ -21,8 +21,10 @@ import { ui } from './theme.js';
  * 续写位(contentRow / contentCol)由 contentWrite 按字符宽度 + 折行模拟跟踪;CUP 到它即可随时回到内容续写位,
  * 故底栏刷新(状态行 / spinner)无需保存/恢复光标——CUP 回续写位即可。
  *
- * 关键洞察:prompt 与流式不同时活跃。INPUT 态光标常驻输入框、不调 drawStatusBar;RUNNING 态光标在续写位、
- * spinner 经 drawStatusBar 刷状态行后 CUP 回续写位。两态切换不重设区域(底栏高度恒 = 2),仅多行输入换行撑高时才 setRegion。
+ * 关键洞察:RUNNING 态也支持 typeahead 输入与滚动回看。INPUT 态光标常驻输入框;RUNNING 态光标在续写位,
+ * 运行中打的字经 paintRunningInputEcho 作 dim 回显(占位行换成已打文本,光标仍留续写位,不与流式争用);
+ * 运行中可滚动回看——contentWrite 在 scrollOffset>0 时只喂缓冲不物理写(否则新流式覆盖 viewport 历史行),
+ * 回尾(scrollOffset===0)才 cup 续写位写出。两态切换不重设区域(底栏高度恒 = 2),仅多行输入换行撑高时才 setRegion。
  *
  * 非 TTY:全部空操作,contentWrite 退化为 stdout.write,与改造前内联行为一致。
  */
@@ -58,9 +60,8 @@ let mode: 'input' | 'running' = 'input';
 let footerH = 2; // 1 状态行 + 输入行数
 let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
 let contentCol = 1; // 续写位列(1-based)
-let segmentStartRow = 1; // 当前思考段起始行(供 eraseSegmentBack 精确擦除,修预存 wrapping 漏擦 bug)
-let segLines = 0; // 当前段内累计物理行推进数(\n/折行/tab 换行),不受滚动钳位影响——据此判断段是否滚出过
-let segActive = false; // 是否处于段中(beginSegment 后到 eraseSegmentBack 前)
+let segmentStartRow = 1; // 当前思考段起始屏行(供 eraseSegmentBack 定位擦除起点;段内行数由 content 段标记跟踪)
+let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
 let base: { model: string; contextBar: string; cwd: string } | null = null;
 let statusText = '';
 let spinnerFrame: string | undefined;
@@ -74,6 +75,8 @@ let sigwinchHandler: (() => void) | null = null;
 const esc = {
   altOn: '\x1B[?1049h',
   altOff: '\x1B[?1049l',
+  altScrollOn: '\x1B[?1007h', // xterm alternate scroll:alt 屏内滚轮转发 ↑/↓(配合 onKey/onRunningKey 的 ↑/↓ 滚动)
+  altScrollOff: '\x1B[?1007l',
   cursorShow: '\x1B[?25h',
   clearLine: '\x1B[2K',
   home: '\x1B[H',
@@ -121,91 +124,127 @@ export function setRegion(fh: number): Geo {
 
 export function contentMode(): void {
   if (!active) return;
-  stdout.write(cup(contentRow, contentCol));
+  // 滚动回看时回内容区底(光标不入输入框,viewport 锁历史)
+  stdout.write(
+    cup(
+      scrollOffset === 0 ? contentRow : getGeo().contentBottom,
+      scrollOffset === 0 ? contentCol : 1
+    )
+  );
 }
 
 /**
- * 内容区正文写:CUP 到续写位 + 写出 + 按字符宽度/折行更新续写位。滚动区域内写满自动在区域内滚动,
- * 底栏在区域外不被顶。非 TTY / 未激活:直接 stdout.write(内联退化)。
+ * 内容区正文写:CUP 到续写位 + 写出 + 按字符宽度/折行更新续写位 + 同步入 content 缓冲(供滚动回看)。
+ * 滚动区域内写满自动在区域内滚动,底栏在区域外不被顶。非 TTY / 未激活:直接 stdout.write(内联退化)。
  *
- * 续写位跟踪按**剥离 ANSI 后的可见文本**计算——SGR 颜色码在终端是 0 宽,若按原串逐字符算会把
- * `[2m` 等可打印字符算成宽度,导致续写位与实际光标脱钩。故先 stripAnsi 再模拟。
+ * 逐字符分类(按码点取字符,SGR 序列整段识别):SGR 码 → 0 宽跟踪 + content.feedSgr;其他 CSI/OSC → 跳过
+ * (callers 理论上不传);\n / 折行 / tab 换行 → 行推进 + content.breakRow;可见字符 → charWidth 跟踪 +
+ * content.feedChar。SGR 在终端 0 宽,故续写位只按可见字符推进(与终端实际光标一致)。
  */
 export function contentWrite(s: string): void {
   if (!active || !ui.isTTY) {
     stdout.write(s);
     return;
   }
-  stdout.write(cup(contentRow, contentCol) + s);
+  // 滚动回看时(scrollOffset>0)只喂缓冲 + 推进续写位,不物理写——否则新流式内容覆盖 viewport 历史行。
+  // 回尾(scrollOffset===0)才 cup 到续写位物理写出(== 实时屏)。
+  if (scrollOffset === 0) stdout.write(cup(contentRow, contentCol) + s);
   const g = getGeo();
   const cols = g.cols;
   const bottom = g.contentBottom;
   const advanceRow = (r: number): number => (r >= bottom ? bottom : r + 1); // 到底则滚动,续写位留底
-  const tracked = stripAnsi(s); // 按"可见"跟踪(ANSI 0 宽)
-  for (const ch of tracked) {
+  let i = 0;
+  while (i < s.length) {
+    const rest = s.slice(i);
+    // SGR 序列 \x1B[...m:0 宽 + 喂缓冲
+    const sgr = /^\x1b\[[0-9;]*m/.exec(rest);
+    if (sgr) {
+      content.feedSgr(sgr[0]);
+      i += sgr[0].length;
+      continue;
+    }
+    // 其他 CSI / OSC 序列(兜底跳过,不喂缓冲——callers 不该传控制码)
+    if (s[i] === '\x1b') {
+      const csi = /^\x1b\[[0-9;]*[A-Za-z]/.exec(rest);
+      if (csi) {
+        i += csi[0].length;
+        continue;
+      }
+      const osc = /^\x1b\][^\x07]*(\x07|\x1b\\)/.exec(rest);
+      if (osc) {
+        i += osc[0].length;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    const cp = s.codePointAt(i) ?? 0;
+    const ch = String.fromCodePoint(cp);
     if (ch === '\n') {
       contentRow = advanceRow(contentRow);
-      if (segActive) segLines++;
+      content.breakRow();
       contentCol = 1;
+      i += ch.length;
       continue;
     }
     if (ch === '\r') {
       contentCol = 1;
+      i += ch.length;
       continue;
     }
     if (ch === '\t') {
       const next = Math.floor((contentCol - 1) / 8) * 8 + 8 + 1;
       if (next > cols) {
         contentRow = advanceRow(contentRow);
-        if (segActive) segLines++;
+        content.breakRow();
         contentCol = 1;
       } else contentCol = next;
+      i += ch.length;
       continue;
     }
-    const cw = charWidth(ch.codePointAt(0) ?? 0);
-    if (cw === 0) continue; // 组合符 / 零宽:不推进
+    const cw = charWidth(cp);
+    if (cw === 0) {
+      i += ch.length;
+      continue; // 组合符 / 零宽:不推进
+    }
     if (contentCol + cw - 1 > cols) {
       // 当前行放不下:折行
       contentRow = advanceRow(contentRow);
-      if (segActive) segLines++;
+      content.breakRow();
       contentCol = 1;
     }
     contentCol += cw;
+    content.feedChar(ch);
+    i += ch.length;
   }
 }
 
-/** 标记当前续写位为一个段(思考段)起点,供 eraseSegmentBack 精确擦除。 */
+/** 标记当前续写位为一个段(思考段)起点:记屏起点(供擦除定位)+ content 段标记(供缓冲同步删)。 */
 export function beginSegment(): void {
   segmentStartRow = contentRow;
-  segLines = 0;
-  segActive = true;
+  content.beginSegment();
 }
 
 /**
- * 擦除当前段的可见行(逐行 \x1B[2K,不用 ED——ED 会清穿底栏),续写位回段可见顶。
+ * 擦除当前段的可见行(逐行 \x1B[2K,不用 ED——ED 会清穿底栏),续写位回段可见顶;并同步 content 缓冲删段。
  *
- * 段物理行数 segLines(累计 \n/折行/tab 换行,不受滚动钳位影响)+ 末行若有内容算 1 = segRows。
- * 与段起点到内容区底的可用行 available 比较:
- *  - segRows > available:段写满触发过区域滚动,整屏都是段内容(前置内容已被滚出),
- *    从内容区顶 contentTop 擦——修「按绝对屏行 segmentStartRow 擦、滚动后段起点已滚出 →
- *    上方残留原始思考尾巴、折叠标题落在屏中」的 bug。
+ * content.eraseSegment() 返回段物理行数(segLines + 末行部分)并从缓冲删除该段——保证滚动回看只看到
+ * 折叠标题、不看到已擦的思考原文。该行数 = segRows,据此判段是否滚出过:
+ *  - segRows > available:段写满触发过区域滚动,整屏都是段内容(前置内容已被滚出),从内容区顶 contentTop 擦;
  *  - 否则未滚动:从段起点 segmentStartRow 擦。
- * 不越界到区域外(不擦底栏)。返回擦除行数。
+ * 不越界到区域外(不擦底栏)。返回擦除的屏幕行数。
  */
 export function eraseSegmentBack(): number {
-  if (!active) {
-    segActive = false;
-    return 0;
-  }
+  if (!active) return 0;
   const g = getGeo();
-  const segRows = segLines + (contentCol > 1 ? 1 : 0);
+  const segRows = content.eraseSegment(); // 删缓冲段,返回段物理行数
+  if (segRows <= 0) return 0;
   const available = g.contentBottom - segmentStartRow + 1;
   let start = segRows > available ? g.contentTop : segmentStartRow;
   if (start < g.contentTop) start = g.contentTop;
   let rows = (contentRow - start) + (contentCol > 1 ? 1 : 0);
   const maxRows = g.contentBottom - start + 1;
   if (rows > maxRows) rows = maxRows;
-  segActive = false;
   if (rows <= 0) return 0;
   let p = '';
   for (let i = 0; i < rows; i++) {
@@ -218,7 +257,7 @@ export function eraseSegmentBack(): number {
   return rows;
 }
 
-/** 清空内容区(保留底栏):全屏清 + 重设区域 + 续写位归 (1,1)。底栏由调用方随后重画。 */
+/** 清空内容区(保留底栏):全屏清 + 重设区域 + 续写位归 (1,1) + 清缓冲 + 回尾。底栏由调用方随后重画。 */
 export function clearContent(): void {
   if (!active) return;
   stdout.write('\x1B[1;1H\x1B[2J');
@@ -226,9 +265,58 @@ export function clearContent(): void {
   contentRow = 1;
   contentCol = 1;
   segmentStartRow = 1;
-  segLines = 0;
-  segActive = false;
+  scrollOffset = 0;
+  content.reset();
   stdout.write(esc.home);
+}
+
+// ── viewport 滚动回看(Phase 2)──
+
+/** 是否处于滚动回看态(offset>0,内容区显历史)。prompt 据此在非滚动键时回尾。 */
+export function isScrolled(): boolean {
+  return scrollOffset > 0;
+}
+
+/**
+ * 重画内容区 viewport:按 scrollOffset 取缓冲尾窗,逐行 cup+clearline+rowtext 映射到屏 1..contentBottom。
+ * offset=0 即尾窗(== 实时屏,resize / 回尾时用)。清行含 contentBottom——顺带擦 WT 边距漏影(状态行重复)。
+ */
+export function repaintViewport(): void {
+  if (!active) return;
+  const g = getGeo();
+  const h = g.contentBottom;
+  const slice = content.sliceFromEnd(scrollOffset, h);
+  let p = '';
+  for (let r = 1; r <= h; r++) {
+    const line = slice[r - 1] ?? '';
+    p += cup(r, 1) + esc.clearLine + line;
+  }
+  stdout.write(p);
+  // 光标:offset=0 回续写位(尾行末,contentWrite 维护);offset>0 留内容区底
+  stdout.write(
+    cup(scrollOffset === 0 ? contentRow : g.contentBottom, scrollOffset === 0 ? contentCol : 1)
+  );
+}
+
+/** 滚动 delta 行(正=往新、负=往旧);钳 [0, max(0, total-contentBottom)];变则重画 + 刷底栏(显指示、光标回输入框)。 */
+export function scrollBy(delta: number): void {
+  if (!active) return;
+  const g = getGeo();
+  const total = content.totalRows();
+  const maxOff = Math.max(0, total - g.contentBottom);
+  const off = Math.max(0, Math.min(scrollOffset + delta, maxOff));
+  if (off === scrollOffset) return;
+  scrollOffset = off;
+  repaintViewport();
+  repaint();
+}
+
+/** 回尾(offset=0);仅当原本滚动过才重画(避免每轮 enterRunningMode 闪烁)。 */
+export function resetScroll(): void {
+  if (scrollOffset === 0) return;
+  scrollOffset = 0;
+  repaintViewport();
+  repaint();
 }
 
 // ── 状态行 ──
@@ -241,7 +329,11 @@ function composeStatus(status: StatusBarData, cols: number): string {
   const model = truncateDisplay(status.model, 22);
   const ctx = status.contextBar; // 已带色
   const ctxW = ansiDisplayWidth(ctx);
-  const st = (status.spinnerFrame ? status.spinnerFrame + ' ' : '') + status.status;
+  // 滚动回看时状态段改显历史指示(无 spinner——滚动只在 INPUT 态)
+  const scrolled = scrollOffset > 0;
+  const st = scrolled
+    ? `历史 ↑${scrollOffset} (PgDn 回底)`
+    : (status.spinnerFrame ? status.spinnerFrame + ' ' : '') + status.status;
   const stW = displayWidth(st);
   const fixed = displayWidth(lead) + displayWidth(model) + sepW * 3 + ctxW + stW;
   const cwdBudget = cols - fixed - 1;
@@ -253,7 +345,7 @@ function composeStatus(status: StatusBarData, cols: number): string {
     sep,
     `${ui.dim}${cwd}${ui.reset}`,
     sep,
-    `${status.spinnerFrame ? ui.brightMagenta : ui.dim}${st}${ui.reset}`,
+    `${scrolled ? ui.yellow : status.spinnerFrame ? ui.brightMagenta : ui.dim}${st}${ui.reset}`,
   ].join('');
 }
 
@@ -264,7 +356,13 @@ export function drawStatusBar(status?: StatusBarData): void {
   const g = getGeo();
   const statusRow = g.contentBottom + 1;
   stdout.write(cup(statusRow, 1) + esc.clearLine + composeStatus(s, g.cols));
-  stdout.write(cup(contentRow, contentCol)); // 回续写位(不用 DECSC,直接 CUP 到跟踪位)
+  // 回续写位;滚动回看时回内容区底(光标不入输入框,viewport 锁历史)
+  stdout.write(
+    cup(
+      scrollOffset === 0 ? contentRow : g.contentBottom,
+      scrollOffset === 0 ? contentCol : 1
+    )
+  );
 }
 
 /** 更新易变状态(状态文字 + spinner 帧)并重画状态行。spinner / agent 用。 */
@@ -328,6 +426,13 @@ export function paintInput(view: InputView): void {
   let g = preGeo;
   if (needFooterH !== footerH) g = setRegion(needFooterH);
 
+  // 2b. 重画内容末行(底栏上一行)从缓冲:防 WT 边距漏影(状态行重复到该行),并保证该行显正确内容
+  {
+    const slice = content.sliceFromEnd(scrollOffset, g.contentBottom);
+    const line = slice[g.contentBottom - 1] ?? '';
+    stdout.write(cup(g.contentBottom, 1) + esc.clearLine + line);
+  }
+
   // 3. 状态行(footerH 变或始终重画——便宜且避免旧状态行残留)
   const statusRow = g.contentBottom + 1;
   const status: StatusBarData = { ...base, status: statusText, spinnerFrame };
@@ -368,12 +473,50 @@ export function paintInput(view: InputView): void {
 
   // 6. 光标
   if (view.dim) {
-    stdout.write(cup(contentRow, contentCol));
+    // 滚动回看时归内容区底(dim=运行态占位,光标不入输入框,viewport 锁历史)
+    stdout.write(
+      cup(
+        scrollOffset === 0 ? contentRow : g.contentBottom,
+        scrollOffset === 0 ? contentCol : 1
+      )
+    );
   } else {
     const r = firstInputRow + visLine;
     const col = promptW + view.cursorCol + 1;
     stdout.write(cup(r, col));
   }
+}
+
+/**
+ * 运行态 typeahead 回显:定向写输入行(底栏输入框),把 dim 占位换成已打字文本(无打字时仍显 placeholder)。
+ * 只 cup 输入行 + clearLine + dim 文本 + 归位——不调 setRegion(运行中禁多行,避免 DECSTBM 抖动)、
+ * 不重画状态行/contentBottom、不用 ED。同步 lastView 为 dim 视图,使 scrollBy/resize 的 repaint 仍显当前回显。
+ * 光标归续写位(滚动回看时归内容区底)——typeahead 无可见输入框光标,避开与 contentWrite/drawStatusBar 争用。
+ */
+export function paintRunningInputEcho(text: string, placeholder: string): void {
+  if (!active || !base) return;
+  const g = getGeo();
+  const inputRow = g.contentBottom + 2; // 运行态 footerH 恒 2:状态行(contentBottom+1)+ 输入行(contentBottom+2)
+  const shown = text.length > 0 ? text : placeholder;
+  stdout.write(
+    cup(inputRow, 1) + esc.clearLine + `${ui.dim}❯ ${shown}${ui.reset}`
+  );
+  // 同步 lastView:dim 视图(lines=回显文本),使滚动/resize 的 repaint 不擦掉已打字
+  lastView = {
+    prompt: '❯ ',
+    lines: [shown],
+    cursorLine: 0,
+    cursorCol: 0,
+    menu: null,
+    dim: true,
+  };
+  // 光标归续写位(滚动回看时归内容区底)
+  stdout.write(
+    cup(
+      scrollOffset === 0 ? contentRow : g.contentBottom,
+      scrollOffset === 0 ? contentCol : 1
+    )
+  );
 }
 
 /** 重画当前视图(resize / 内部用)。 */
@@ -400,11 +543,12 @@ export function enterInputMode(status: string = '空闲'): void {
   }
 }
 
-/** 进入运行态:底栏输入行改 dim 占位,光标回续写位。footerH 恒 2。 */
+/** 进入运行态:底栏输入行改 dim 占位,光标回续写位。footerH 恒 2。新轮回尾(确保新内容可见)。 */
 export function enterRunningMode(status: string, placeholder: string): void {
   mode = 'running';
   statusText = status;
   spinnerFrame = undefined;
+  resetScroll(); // 若上轮 INPUT 滚动过(未打字回底),新轮回尾
   if (active && base) {
     setRegion(2);
     paintInput({
@@ -425,10 +569,13 @@ export function enterAltScreen(): void {
   if (active || !ui.isTTY) return;
   active = true;
   stdout.write(esc.altOn);
+  stdout.write(esc.altScrollOn); // alt 屏滚轮转发 ↑/↓(滚轮滚动靠此 + onKey/onRunningKey 的 ↑/↓ 滚动)
   setRegion(2);
   contentRow = 1;
   contentCol = 1;
   segmentStartRow = 1;
+  scrollOffset = 0;
+  content.reset();
 
   exitHandler = () => exitAltScreen();
   process.on('exit', exitHandler);
@@ -441,21 +588,32 @@ export function enterAltScreen(): void {
       if (!active) return;
       const g = getGeo(footerH);
       if (contentRow > g.contentBottom) contentRow = g.contentBottom;
+      // offset 钳到新 maxOff(高度缩可能使旧 offset 失效)
+      const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
+      if (scrollOffset > maxOff) scrollOffset = maxOff;
       setRegion(footerH); // 用新 rows 重设区域(contentBottom 变)
-      repaint();
+      repaintViewport(); // 内容区按新高度 + 当前 offset 重画(物理行不 reflow)
+      repaint(); // 底栏重画
     }, 100);
     resizeTimer?.unref?.();
   };
   process.on('SIGWINCH', sigwinchHandler);
 }
 
-/** 复原:复位 margins + 显光标 + 退 alt。幂等。 */
+/** 复原:复位 margins + 显光标 + 退 alt + 还原 raw。幂等。 */
 export function exitAltScreen(): void {
   if (!active) return;
   active = false;
+  // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。
+  try {
+    stdin.setRawMode(false); // 还原 raw(RUNNING 态常驻 raw,退出时必须还原,否则终端残留 raw 模式)
+  } catch {
+    // 非 TTY / 不支持:忽略
+  }
   try {
     stdout.write('\x1B[r'); // 复位 DECSTBM margins
     stdout.write(esc.cursorShow);
+    stdout.write(esc.altScrollOff); // 关 alt 屏滚轮转发
     stdout.write(esc.altOff); // 退 alt(恢复主屏 + 光标)
   } catch {
     // 忽略

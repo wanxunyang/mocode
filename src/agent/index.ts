@@ -1,4 +1,8 @@
-import { chat, type ChatMessage } from '../llm/index.js';
+import {
+  chat,
+  type ChatMessage,
+  type ChatResult,
+} from '../llm/index.js';
 import { executeTool } from '../tools/registry.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
@@ -32,8 +36,12 @@ const MAX_STEPS = 25; // 防止无限循环
 export async function runAgent(
   history: ChatMessage[],
   userInput: string,
-  collapsedThinkings: string[] = []
+  collapsedThinkings: string[] = [],
+  signal?: AbortSignal
 ): Promise<void> {
+  // 中断回滚快照:入口(本 turn push 任何消息前)整段浅拷贝。abort 时 length=0;push(...saved) 还原。
+  // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
+  const savedHistory = history.slice();
   history.push({ role: 'user', content: userInput });
   // 开新轮次(回滚用):首行截断 40,供双击 Esc 轮次列表展示。
   beginTurn(truncateDisplay(userInput.split('\n')[0] ?? '', 40));
@@ -97,7 +105,26 @@ export async function runAgent(
       mode = 'idle';
       gotText = false;
       lastChar = '';
-      const result = await chat(history, { onText, onThinking });
+      let result: ChatResult;
+      try {
+        result = await chat(history, { onText, onThinking }, signal);
+      } catch (e) {
+        // 中断(用户运行中 Ctrl+C):停 spinner、补换行、提示、history 还原到本 turn 前、return(不抛)。
+        // abort 只在 await chat() 期生效;tool 执行不可中断,故不会留下未配对的 tool_call_id。
+        if (
+          signal?.aborted ||
+          (e instanceof Error &&
+            (e.name === 'AbortError' || e.name === 'APIUserAbortError'))
+        ) {
+          spinner.stop();
+          if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
+          layout.contentWrite(`${ui.dim}(已中断)${ui.reset}\n`);
+          history.length = 0;
+          history.push(...savedHistory);
+          return;
+        }
+        throw e;
+      }
       contextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
       spinner.stop();
 

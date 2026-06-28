@@ -56,16 +56,21 @@ export interface StreamHandlers {
  */
 export async function chat(
   messages: ChatMessage[],
-  handlers: StreamHandlers = {}
+  handlers: StreamHandlers = {},
+  signal?: AbortSignal
 ): Promise<ChatResult> {
-  const stream = await client.chat.completions.create({
-    model: config.model,
-    messages,
-    tools: chatTools,
-    stream: true,
-    ...(config.maxTokens ? { max_tokens: config.maxTokens } : {}),
-    ...(config.includeUsage ? { stream_options: { include_usage: true } } : {}),
-  });
+  // signal 透传给 SDK 第二参(RequestOptions);abort 后 for await 抛错,chat 不 catch,透传 runAgent 处理。
+  const stream = await client.chat.completions.create(
+    {
+      model: config.model,
+      messages,
+      tools: chatTools,
+      stream: true,
+      ...(config.maxTokens ? { max_tokens: config.maxTokens } : {}),
+      ...(config.includeUsage ? { stream_options: { include_usage: true } } : {}),
+    },
+    signal ? { signal } : undefined
+  );
 
   let content = '';
   let hasContent = false;

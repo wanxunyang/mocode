@@ -15,6 +15,8 @@ export interface PromptOpts {
   prompt: string;
   /** 斜杠命令列表,仅用于菜单显示与过滤。 */
   commands: SlashCommand[];
+  /** 预填初始行(运行中 typeahead 缓冲 → 下一轮 INPUT 态预填);光标置末行末尾。 */
+  initialLines?: string[];
 }
 
 /** emitKeypressEvents 后 stdin 会发 'keypress',但该事件不在 ReadStream 类型里,单独声明。 */
@@ -59,9 +61,13 @@ export async function promptWithSlashMenu(
 
   const emitter = stdin as unknown as KeypressEmitter;
   const promptW = displayWidth(opts.prompt);
-  let lines: string[] = [''];
-  let cl = 0; // 光标行(0-based)
-  let cc = 0; // 光标在该行的字符索引
+  // initialLines(运行中 typeahead 预填):用调用方给的行初始化,光标置末行末尾。
+  let lines: string[] =
+    opts.initialLines && opts.initialLines.length > 0
+      ? [...opts.initialLines]
+      : [''];
+  let cl = lines.length - 1; // 光标行(0-based)= 末行
+  let cc = lines[cl].length; // 光标在该行的字符索引 = 末行末尾
   let menuOpen = false;
   let selected = 0;
   let filtered: SlashCommand[] = [];
@@ -149,6 +155,33 @@ export async function promptWithSlashMenu(
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+
+    // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,Ctrl+↑↓ 与 plain ↑/↓ 单行。
+    // plain ↑/↓ 仅在单行输入且菜单关闭时作滚动(多行编辑留给光标移动,菜单打开留给选项);
+    // 兼鼠标滚轮——WT alt 屏(经 \x1B[?1007h)滚轮转发 ↑/↓。
+    const plainArrowScroll =
+      (key.name === 'up' || key.name === 'down') &&
+      !key.ctrl &&
+      !key.meta &&
+      !key.shift &&
+      lines.length <= 1 &&
+      !(menuOpen && filtered.length > 0);
+    if (
+      key.name === 'pageup' ||
+      key.name === 'pagedown' ||
+      (key.ctrl && (key.name === 'up' || key.name === 'down')) ||
+      plainArrowScroll
+    ) {
+      const pageH = layout.getGeo().contentBottom;
+      if (key.name === 'pageup') layout.scrollBy(pageH);
+      else if (key.name === 'pagedown') layout.scrollBy(-pageH);
+      else if (key.name === 'up') layout.scrollBy(1);
+      else layout.scrollBy(-1);
+      return;
+    }
+
+    // 其他键:若处于滚动回看,先回尾再处理(打字即回底)
+    if (layout.isScrolled()) layout.resetScroll();
 
     // raw 模式下 Ctrl+C 不触发 SIGINT,作为按键到达:先恢复终端再 reject
     if (key.ctrl && key.name === 'c') {

@@ -1,4 +1,5 @@
 import readline from 'node:readline/promises';
+import { emitKeypressEvents, type Key } from 'node:readline';
 import { stdin, stdout } from 'node:process';
 import { config } from '../config/index.js';
 import { runAgent } from '../agent/index.js';
@@ -105,7 +106,7 @@ function runningStateFor(
 ): { status: string; placeholder: string } {
   switch (cmd) {
     case '/compact':
-      return { status: '压缩', placeholder: '压缩中… Ctrl+C 中断' };
+      return { status: '压缩', placeholder: '压缩中…' };
     case '/resume':
       return { status: '续接', placeholder: '选择会话…' };
     case '/rollback':
@@ -115,6 +116,95 @@ function runningStateFor(
     default:
       return { status: '处理', placeholder: '思考中… Ctrl+C 中断' };
   }
+}
+
+/** stdin 的 keypress 事件接口(emitKeypressEvents 后发,不在 ReadStream 类型里)。 */
+interface KeypressEmitter {
+  on(event: 'keypress', listener: (str: string, key: Key) => void): this;
+  off(event: 'keypress', listener: (str: string, key: Key) => void): this;
+}
+const emitter = stdin as unknown as KeypressEmitter;
+
+// ── 运行态交互(typeahead 输入 + 滚动回看 + Ctrl+C 中断)──
+// 只在 await runAgent() 期间挂载;/resume /rollback /compact 等走 askLine(cooked readline)的分支不挂(避免抢 stdin)。
+let runningInput = ''; // 运行中已打字缓冲(单行;agent 结束后预填下一轮 INPUT 态)
+let runningPlaceholder = '';
+let currentAbort: AbortController | null = null;
+
+/** 运行态按键:滚动优先,再 Ctrl+C 中断,再 typeahead 编辑(单行,Enter=无操作)。 */
+function onRunningKey(_str: string, key?: Key): void {
+  if (!key) return;
+  // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,↑/↓ 单行(含鼠标滚轮——alt 屏滚轮转发↑↓)。
+  // 运行态无输入光标,↑/↓ 无其他用途,直接作滚动。
+  if (
+    key.name === 'pageup' ||
+    key.name === 'pagedown' ||
+    key.name === 'up' ||
+    key.name === 'down'
+  ) {
+    const pageH = layout.getGeo().contentBottom;
+    if (key.name === 'pageup') layout.scrollBy(pageH);
+    else if (key.name === 'pagedown') layout.scrollBy(-pageH);
+    else if (key.name === 'up') layout.scrollBy(1);
+    else layout.scrollBy(-1);
+    return;
+  }
+  // 其他键:若处于滚动回看,先回尾再处理(打字即回底)
+  if (layout.isScrolled()) layout.resetScroll();
+  // Ctrl+C 中断当前 agent 轮次(不退进程;raw 模式下 Ctrl+C 是按键,不触发 SIGINT)
+  if (key.ctrl && key.name === 'c') {
+    currentAbort?.abort();
+    return;
+  }
+  const s = key.sequence ?? '';
+  if (key.name === 'backspace') {
+    if (runningInput.length > 0) {
+      runningInput = runningInput.slice(0, -1);
+      layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+    }
+    return;
+  }
+  if (key.name === 'escape') {
+    runningInput = '';
+    layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+    return;
+  }
+  // Enter / Ctrl+J:运行中 no-op(单行 typeahead;agent 结束后预填,用户在 INPUT 态按 Enter 提交)
+  if (
+    key.name === 'return' ||
+    key.name === 'enter' ||
+    (key.ctrl && key.name === 'j')
+  ) {
+    return;
+  }
+  // 可打印字符(>= 空格,非 ctrl/meta)→ 追加 + dim 回显
+  if (s && s >= ' ' && !key.ctrl && !key.meta) {
+    runningInput += s;
+    layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+  }
+}
+
+/** 进入运行态:挂 keypress 监听 + raw mode + 新建 abort 控制器,返回其 signal。在 await runAgent 前、enterRunningMode 后调。 */
+function startRunningListener(placeholder: string): AbortSignal {
+  runningPlaceholder = placeholder;
+  runningInput = '';
+  emitKeypressEvents(stdin); // 幂等:首轮 prompt 已永久挂解析器,这里防御性再调
+  try {
+    stdin.setRawMode(true);
+  } catch {
+    // 非 TTY / 不支持 raw:监听器仍挂(按键可能不来,不影响 agent)
+  }
+  stdin.resume();
+  emitter.on('keypress', onRunningKey);
+  const ac = new AbortController();
+  currentAbort = ac;
+  return ac.signal;
+}
+
+/** 退出运行态:摘监听 + 清 abort。不 pause / 不 setRawMode(false)——紧接着 promptWithSlashMenu 自己接管 raw。 */
+function stopRunningListener(): void {
+  emitter.off('keypress', onRunningKey);
+  currentAbort = null;
 }
 
 /** 把多行提交输入回显进内容区(❯ 首行,续行按 prompt 宽度缩进)。仅 TUI 态回显(非 TTY 由 readline 自带回显)。 */
@@ -255,10 +345,13 @@ export async function startRepl(
       input = await promptWithSlashMenu({
         prompt: PROMPT,
         commands: SLASH_COMMANDS,
+        // 上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
+        ...(runningInput ? { initialLines: [runningInput] } : {}),
       });
     } catch {
       break; // Ctrl+C(SIGINT)/ 异常 → 退出
     }
+    runningInput = ''; // 预填已消费,清空(下轮运行态从空开始)
     if (input === null) break; // 空 prompt Ctrl+D
 
     const joined = input.join('\n');
@@ -373,7 +466,8 @@ export async function startRepl(
     }
 
     try {
-      await runAgent(history, joined, collapsedThinkings);
+      const signal = startRunningListener(placeholder);
+      await runAgent(history, joined, collapsedThinkings, signal);
       // 成功轮次自动落盘(崩溃也保住上一轮);新会话首轮分配 id
       if (!currentSessionId) currentSessionId = newSessionId();
       try {
@@ -386,6 +480,8 @@ export async function startRepl(
       layout.contentWrite(
         `${ui.red}[错误]${ui.reset} ${e instanceof Error ? e.message : String(e)}\n`
       );
+    } finally {
+      stopRunningListener();
     }
     layout.contentWrite('\n'); // 轮次之间空行
   }

@@ -55,12 +55,14 @@ const has = (re: RegExp): boolean => re.test(buf);
 
 // 动态导入:确保 theme 在 isTTY=true 之后加载(其 isTTY 在 import 时冻结)
 const layout = await import('../src/ui/layout.js');
+const content = await import('../src/ui/content.js');
 
 // 1. enterAltScreen
 reset();
 layout.enterAltScreen();
 ok('enterAltScreen 进备用屏', has(/\x1b\[\?1049h/));
 ok('enterAltScreen 设滚动区域 [1;22r](rows24 footerH2)', has(/\x1b\[1;22r/));
+ok('enterAltScreen 启 alt 滚轮转发(1007h)', has(/\x1b\[\?1007h/));
 
 // 2. clearContent
 reset();
@@ -181,12 +183,185 @@ layout.paintInput({
 });
 ok('paintInput 30 行输入不崩(开窗)', !out().includes('undefined'));
 
+// ── Phase 2:content 缓冲 + viewport 滚动 ──
+
+// 12. content 缓冲收行(breakRow 各成行;totalRows 含当前行)
+content.reset();
+content.feedChar('a');
+content.feedChar('b');
+content.breakRow(); // 'ab\n' → 1 提交 + 当前空行
+ok('content breakRow 后 totalRows=2(提交+当前空)', content.totalRows() === 2);
+content.feedChar('c'); // 当前空行填 'c'
+ok('content 填当前行 totalRows 仍 2', content.totalRows() === 2);
+content.breakRow(); // 'c\n' → 2 提交 + 当前空
+ok('content 再 breakRow totalRows=3', content.totalRows() === 3);
+
+// 13. content SGR 自洽:行内开合 dim/reset,单行含正确码
+content.reset();
+content.feedSgr('\x1b[2m');
+content.feedChar('a');
+content.feedChar('b');
+content.feedSgr('\x1b[0m');
+content.feedChar('c');
+content.breakRow();
+const sgrRow = content.sliceFromEnd(0, 10)[0];
+ok(
+  'content 行内开合 SGR 自洽(\\x1b[2m ab \\x1b[0m c)',
+  sgrRow === '\x1b[2mab\x1b[0mc\x1b[0m'
+);
+
+// 14. content 跨行继承 dim:折行后下行前缀含 dim
+content.reset();
+content.feedSgr('\x1b[2m');
+content.feedChar('a');
+content.breakRow(); // 'a' 提交(dim),下行继承 dim
+content.feedChar('b');
+content.feedSgr('\x1b[0m');
+content.breakRow();
+const inherited = content.sliceFromEnd(0, 10)[1];
+ok('content 跨行继承 dim(下行以 \\x1b[2m 起)', inherited.startsWith('\x1b[2m') && inherited.includes('b'));
+
+// 15. content eraseSegment 删段:begin→写段→erase,缓冲回段前、不含段内容
+content.reset();
+content.feedChar('x');
+content.breakRow(); // 段外 'x'
+content.beginSegment();
+content.feedChar('a');
+content.breakRow();
+content.feedChar('b'); // 段:'a\n' + 当前 'b'
+const erasedCnt = content.eraseSegment();
+ok('content eraseSegment 返回段行数 2', erasedCnt === 2);
+ok(
+  'content erase 后缓冲不含段内容(a/b)',
+  !content.sliceFromEnd(0, 10).some((r) => r.includes('a') || r.includes('b'))
+);
+ok('content erase 后缓冲回段前(只剩 x + 当前空)', content.totalRows() === 2);
+
+// 16. contentWrite 喂缓冲(layout 路径):写 30 行,缓冲 totalRows=31(30 提交 + 当前空)
+layout.clearContent();
+for (let i = 0; i < 30; i++) layout.contentWrite(`line${i}\n`);
+ok('contentWrite 喂缓冲 30 行 → totalRows 31', content.totalRows() === 31);
+// 尾窗 offset=0:末 22 行 = line9..line29(21)+当前空(1),首行 line9
+const tailWin = content.sliceFromEnd(0, 22);
+ok('content 尾窗 offset=0 含 line29(最新)', tailWin.some((r) => r.includes('line29')));
+ok('content 尾窗 offset=0 不含 line0(更旧)', !tailWin.some((r) => r.includes('line0')));
+// offset=9(往旧):窗 = line0..line21,含 line0
+const oldWin = content.sliceFromEnd(9, 22);
+ok('content offset=9 含 line0(最旧)', oldWin.some((r) => r.includes('line0')));
+
+// 17. scrollBy 钳位 + isScrolled + resetScroll
+ok('scrollBy 前未滚动', !layout.isScrolled());
+layout.scrollBy(10000); // 往旧,钳到 maxOff=31-22=9
+ok('scrollBy(+大) 钳到 maxOff=9 后处于滚动', layout.isScrolled());
+layout.scrollBy(-10000); // 往新,钳到 0
+ok('scrollBy(-大) 回尾后未滚动', !layout.isScrolled());
+layout.scrollBy(5);
+ok('scrollBy(+5) 滚动到 offset 5', layout.isScrolled());
+layout.resetScroll();
+ok('resetScroll 回尾', !layout.isScrolled());
+
+// 18. repaintViewport offset=0 重画 == 尾窗(写 line0..line29 后,尾窗含 line29 不含 line0)
+layout.clearContent();
+layout.setRegion(2); // 重置底栏高度(contentBottom=22,免受前面 paintInput 撑高影响)
+for (let i = 0; i < 30; i++) layout.contentWrite(`line${i}\n`);
+reset();
+layout.scrollBy(9); // 往旧到 offset 9,viewport 显 line0..line21
+ok('repaintViewport offset=9 含 line0', out().includes('line0'));
+reset();
+layout.scrollBy(-9); // 回尾
+ok('repaintViewport offset=0 含 line29(尾) 不含 line0', out().includes('line29') && !out().includes('line0'));
+
+// 19. paintInput 重画 contentBottom(底栏上一行)从缓冲——防 WT 边距漏影
+layout.clearContent();
+layout.contentWrite('hello\n'); // 内容在 row1,contentBottom=22 为空
+reset();
+layout.enterInputMode('空闲');
+ok('paintInput 清 contentBottom(row22)防漏影', has(/\x1b\[22;1H\x1b\[2K/));
+
+// 20. 思考折叠后缓冲只剩标题(滚动回看不现原文)——agent onThinking→flushThinkCollapsed 路径
+layout.clearContent();
+layout.setRegion(2);
+layout.contentWrite('reply-before\n'); // 段前内容
+layout.beginSegment();
+layout.contentWrite('\x1b[2m▎ 思考\x1b[0m\n'); // 展开标题
+layout.contentWrite('\x1b[2m这里是思考原文内容\x1b[0m\n'); // 思考原文
+layout.eraseSegmentBack(); // 折叠(擦屏 + content.eraseSegment 删缓冲段)
+layout.contentWrite('\x1b[2m▎ 思考 ▸ (16 字符)\x1b[0m\n'); // 折叠标题
+const scrollback = content.sliceFromEnd(0, 50).join('');
+ok('思考折叠后缓冲含折叠标题(思考 ▸)', scrollback.includes('思考 ▸'));
+ok('思考折叠后缓冲不含思考原文', !scrollback.includes('思考原文'));
+ok('思考折叠后缓冲保留段前内容', scrollback.includes('reply-before'));
+
+// ── RUNNING 态交互(typeahead 输入 + 滚动回看 + 中断)不变量 ──
+layout.setStatusBase({ model: 'm', contextBar: '', cwd: '/' });
+
+// 21. contentWrite 滚动感知:scrollOffset>0 时只喂缓冲不物理写(否则新流式覆盖 viewport 历史行)
+layout.clearContent();
+layout.setRegion(2);
+for (let i = 0; i < 30; i++) layout.contentWrite(`cw${i}\n`); // 31 行(30 提交 + 当前空)
+layout.scrollBy(9); // 上滚 offset=9,viewport 锁历史
+reset();
+layout.contentWrite('NEW\n'); // 滚动态:只喂缓冲,不物理写
+ok('滚动态 contentWrite 零物理输出(不撞穿 viewport)', out() === '');
+ok('滚动态 contentWrite 仍喂缓冲(totalRows 32)', content.totalRows() === 32);
+reset();
+layout.scrollBy(-9); // 回尾,repaintViewport 显新尾(含 NEW)
+ok('回尾后 viewport 含新内容 NEW', out().includes('NEW'));
+
+// 22. 滚动回看时光标归 contentBottom(不入输入框)
+layout.clearContent();
+layout.setRegion(2);
+for (let i = 0; i < 30; i++) layout.contentWrite(`g${i}\n`);
+layout.scrollBy(9); // offset=9
+reset();
+layout.drawStatusBar();
+ok('滚动态 drawStatusBar 末尾 CUP 归 contentBottom(22;1)', /\x1b\[22;1H$/.test(out()));
+reset();
+layout.contentMode();
+ok('滚动态 contentMode CUP 归 contentBottom(22;1)', has(/\x1b\[22;1H/));
+
+// 23. paintRunningInputEcho:定向写输入行(底栏),无 setRegion/ED
+layout.clearContent();
+layout.setRegion(2);
+reset();
+layout.paintRunningInputEcho('hi', '占位');
+ok('paintRunningInputEcho 含 ❯ hi', out().includes('❯ hi'));
+ok('paintRunningInputEcho 含 clearLine(\\x1B[2K)', has(/\x1b\[2K/));
+ok('paintRunningInputEcho cup 输入行(row24=contentBottom+2)', has(/\x1b\[24;1H/));
+ok('paintRunningInputEcho 不发 setRegion(\\x1B[1;Nr)', !has(/\x1b\[1;\d+r/));
+ok('paintRunningInputEcho 不发 ED(\\x1B[J)', !has(/\x1b\[\d*J/));
+reset();
+layout.paintRunningInputEcho('', '占位'); // 无打字 → 显 placeholder
+ok('paintRunningInputEcho 无打字显 placeholder', out().includes('占位'));
+
+// 24. paintRunningInputEcho 同步 lastView:滚动/resize 的 repaint 不擦已打字
+layout.clearContent();
+layout.setRegion(2);
+for (let i = 0; i < 30; i++) layout.contentWrite(`p${i}\n`); // 够多行让 scrollBy(1) 生效
+layout.paintRunningInputEcho('queued', '占位');
+reset();
+layout.scrollBy(1);
+layout.scrollBy(-1); // repaint → paintInput(lastView=queued dim),应仍显 queued
+ok('echo 后滚动+回尾仍显已打字 queued', out().includes('queued'));
+
+// 25. enterRunningMode 后可滚动;光标归 contentBottom,不入输入框
+layout.clearContent();
+layout.setRegion(2);
+for (let i = 0; i < 30; i++) layout.contentWrite(`r${i}\n`);
+layout.enterRunningMode('处理', '思考中…');
+ok('enterRunningMode 后未滚动', !layout.isScrolled());
+reset();
+layout.scrollBy(9);
+ok('enterRunningMode 后可滚动', layout.isScrolled());
+ok('运行态滚动后光标归 contentBottom(22;1)', /\x1b\[22;1H$/.test(out()));
+
 // 11. exitAltScreen 恢复
 reset();
 layout.exitAltScreen();
 ok('exitAltScreen 退备用屏', has(/\x1b\[\?1049l/));
 ok('exitAltScreen 复位 margins \\x1B[r', has(/\x1b\[r/));
 ok('exitAltScreen 显光标', has(/\x1b\[\?25h/));
+ok('exitAltScreen 关 alt 滚轮转发(1007l)', has(/\x1b\[\?1007l/));
 
 log(`\n${fail === 0 ? 'OK' : 'FAIL'}: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
