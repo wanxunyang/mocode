@@ -30,6 +30,7 @@ import {
   rebuildFromHistory,
   resetState,
 } from '../rollback/index.js';
+import { listSkills, effectiveSystemPrompt } from '../skills/index.js';
 
 /**
  * readline 的 prompt 必须是纯文本(无 ANSI):readline 按字符数算光标位置,
@@ -42,6 +43,7 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/exit', desc: '退出 mocode(同 /quit)' },
   { name: '/clear', desc: '清空历史(保留系统提示)' },
   { name: '/context', desc: '显示上下文用量条' },
+  { name: '/skills', desc: '列出已发现的 skill' },
   { name: '/compact', desc: '压缩历史(可带焦点 /compact …)' },
   { name: '/resume', desc: '续接已保存的会话' },
   { name: '/think', desc: '展开折叠思考段(/think N)' },
@@ -229,16 +231,17 @@ export async function startRepl(
 ): Promise<void> {
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
   // 否则新会话只塞 system 提示。
+  const systemPrompt = effectiveSystemPrompt(config.systemPrompt);
   const history: ChatMessage[] =
     initialHistory && initialHistory.length
       ? initialHistory
-      : [{ role: 'system', content: config.systemPrompt }];
+      : [{ role: 'system', content: systemPrompt }];
   if (
     initialHistory &&
     initialHistory.length &&
     history[0]?.role === 'system'
   ) {
-    history[0] = { role: 'system', content: config.systemPrompt };
+    history[0] = { role: 'system', content: systemPrompt };
   }
   // --resume:读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
   if (sessionId && initialHistory && initialHistory.length) {
@@ -381,6 +384,25 @@ export async function startRepl(
       layout.contentWrite(`  ${renderContextBar(history)}\n`);
       continue;
     }
+    if (line === '/skills') {
+      const skills = listSkills();
+      if (skills.length === 0) {
+        layout.contentWrite(`${ui.dim}(没有已发现的 skill)${ui.reset}\n`);
+      } else {
+        layout.contentWrite(
+          `${ui.dim}已发现 ${skills.length} 个 skill:${ui.reset}\n`
+        );
+        for (const s of skills) {
+          layout.contentWrite(
+            `  ${ui.cyan}${s.name}${ui.reset}  ${ui.dim}${s.description}${ui.reset}\n`
+          );
+        }
+        layout.contentWrite(
+          `${ui.dim}(用 use_skill 工具加载某 skill 的完整指令)${ui.reset}\n`
+        );
+      }
+      continue;
+    }
     if (line === '/compact' || line.startsWith('/compact ')) {
       const focus = line.startsWith('/compact ')
         ? line.slice('/compact '.length).trim()
@@ -421,7 +443,7 @@ export async function startRepl(
         continue;
       }
       if (loaded.history[0]?.role === 'system') {
-        loaded.history[0] = { role: 'system', content: config.systemPrompt };
+        loaded.history[0] = { role: 'system', content: systemPrompt };
       }
       history.length = 0;
       history.push(...loaded.history);

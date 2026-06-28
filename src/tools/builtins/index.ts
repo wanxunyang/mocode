@@ -7,6 +7,7 @@ import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { webSearchTool } from './web-search.js';
 import { webFetchTool } from './web-fetch.js';
+import { useSkillTool } from './use-skill.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
@@ -21,4 +22,5 @@ export const builtinTools: Tool[] = [
   grepTool,
   webSearchTool,
   webFetchTool,
+  useSkillTool,
 ];

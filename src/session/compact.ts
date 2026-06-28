@@ -7,7 +7,7 @@ import {
   estimateTokens,
 } from '../llm/index.js';
 import { config } from '../config/index.js';
-import { MAX_HISTORY_RESULT, MAX_OLD_TOOL_STUB } from '../tools/constants.js';
+import { MAX_HISTORY_RESULT, MAX_OLD_TOOL_STUB, MAX_SKILL_RESULT } from '../tools/constants.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
 import * as layout from '../ui/layout.js';
@@ -65,7 +65,17 @@ export function truncateMid(text: string, max: number): string {
  * push-time 第一层:工具结果进 history 前裁到 MAX_HISTORY_RESULT。
  * 显示层(summarizeToolResult)仍用原 output,不受影响。
  */
-export function capToolResultForHistory(_name: string, output: string): string {
+export function capToolResultForHistory(name: string, output: string): string {
+  if (name === 'use_skill') {
+    // skill 正文是指令,须尽量完整;超长才截断。用尾截(保头部指令、弃尾部),
+    // 不用 truncateMid 的中截——中截会劈断指令流、丢失开头步骤。
+    if (output.length <= MAX_SKILL_RESULT) return output;
+    const removed = output.length - MAX_SKILL_RESULT;
+    const marker = `…[skill 正文过长,已截断尾部 ${removed} 字符]…`;
+    const remain = MAX_SKILL_RESULT - marker.length;
+    if (remain <= 0) return marker.slice(0, MAX_SKILL_RESULT);
+    return output.slice(0, remain) + marker;
+  }
   if (output.length <= MAX_HISTORY_RESULT) return output;
   return truncateMid(output, MAX_HISTORY_RESULT);
 }
