@@ -4,6 +4,7 @@ import {
   displayWidth,
   truncateDisplay,
   ansiDisplayWidth,
+  wrapByDisplayWidth,
 } from './render.js';
 import { ui } from './theme.js';
 import * as content from './content.js';
@@ -383,19 +384,72 @@ export function setStatusBase(b: {
 
 // ── 输入区(底栏输入框 + 向上菜单)──
 
-/** 计算输入可见窗口(超 maxInputRows 时滑窗保光标可见),返回可见行 + 光标在窗口内行号。 */
-function windowInput(
+/**
+ * 把逻辑行软折成可视行并开窗(超 maxInputRows 时滑窗保光标可见)。返回可见可视行文本(已折行)+
+ * 光标在窗口内行号 + 光标在该可视行的显示列 + 所需输入行数 + 窗口起始全局可视行号。
+ *
+ * 光标可视位置按各行**实际**显示宽度逐行累加(不按 width×行号 除法):宽字符(CJK=2)在行尾放不下时
+ * 整字折到下行、本行留尾空格,简单除法会把光标算偏;逐行累加 displayWidth 才与终端实际光标一致。
+ */
+function windowInputVis(
   lines: string[],
   cursorLine: number,
+  cursorCol: number,
+  cols: number,
+  promptW: number,
   rows: number
-): { win: string[]; visLine: number } {
+): {
+  visRows: string[];
+  visLine: number;
+  cursorVisCol: number;
+  inputRows: number;
+  startVis: number;
+} {
+  const W = Math.max(1, cols - promptW);
+  const lineVis: string[][] = lines.map((l) => wrapByDisplayWidth(l, W));
+  const flat: string[] = [];
+  for (const lv of lineVis) for (const r of lv) flat.push(r);
+  const totalVis = flat.length;
+
+  // 光标在其逻辑行内的可视行 / 可视列
+  const clRows = lineVis[cursorLine] ?? [''];
+  let curVisRow = 0;
+  let curVisCol = cursorCol;
+  {
+    let acc = 0;
+    for (let i = 0; i < clRows.length; i++) {
+      const rw = displayWidth(clRows[i]);
+      if (cursorCol <= acc + rw) {
+        curVisRow = i;
+        curVisCol = cursorCol - acc;
+        break;
+      }
+      acc += rw;
+      curVisRow = i;
+      curVisCol = cursorCol - acc;
+    }
+  }
+
+  // 光标绝对可视行
+  let curAbs = 0;
+  for (let i = 0; i < cursorLine; i++) curAbs += lineVis[i].length;
+  curAbs += curVisRow;
+
   const maxInputRows = Math.max(1, Math.floor(rows * 0.4));
-  if (lines.length <= maxInputRows) return { win: lines, visLine: cursorLine };
-  let start = Math.max(0, cursorLine - maxInputRows + 1);
-  start = Math.min(start, lines.length - maxInputRows);
+  let startVis = 0;
+  if (totalVis > maxInputRows) {
+    startVis = Math.max(
+      0,
+      Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows)
+    );
+  }
+  const showCount = Math.min(maxInputRows, totalVis);
   return {
-    win: lines.slice(start, start + maxInputRows),
-    visLine: cursorLine - start,
+    visRows: flat.slice(startVis, startVis + showCount),
+    visLine: curAbs - startVis,
+    cursorVisCol: curVisCol,
+    inputRows: showCount,
+    startVis,
   };
 }
 
@@ -418,11 +472,25 @@ export function paintInput(view: InputView): void {
     lastMenuRows = 0;
   }
 
-  // 2. 算输入行数 + 必要时 setRegion
-  const inputRows = view.dim
-    ? 1
-    : windowInput(view.lines, view.cursorLine, preGeo.rows).win.length;
-  const needFooterH = 1 + inputRows;
+  // 2. 算输入可视行(软折行)+ 必要时 setRegion。dim=运行态占位:单行不折行。
+  const promptW = displayWidth(view.prompt);
+  const vis = view.dim
+    ? {
+        visRows: [view.lines[0] ?? ''],
+        visLine: 0,
+        cursorVisCol: 0,
+        inputRows: 1,
+        startVis: 0,
+      }
+    : windowInputVis(
+        view.lines,
+        view.cursorLine,
+        view.cursorCol,
+        preGeo.cols,
+        promptW,
+        preGeo.rows
+      );
+  const needFooterH = 1 + vis.inputRows;
   let g = preGeo;
   if (needFooterH !== footerH) g = setRegion(needFooterH);
 
@@ -440,18 +508,14 @@ export function paintInput(view: InputView): void {
     cup(statusRow, 1) + esc.clearLine + composeStatus(status, g.cols)
   );
 
-  // 4. 输入行(g.contentBottom+2 .. rows)
-  const promptW = displayWidth(view.prompt);
+  // 4. 输入行(g.contentBottom+2 .. rows)——按可视行画,首行带 prompt、其余缩进 promptW
   const firstInputRow = g.contentBottom + 2;
   const inputRowsAvail = g.footerH - 1;
-  const win = view.dim
-    ? [{ win: view.lines.slice(0, 1), visLine: 0 }]
-    : [windowInput(view.lines, view.cursorLine, g.rows)];
-  const { win: winLines, visLine } = win[0];
+  const indent = ' '.repeat(promptW);
   for (let i = 0; i < inputRowsAvail; i++) {
-    const line = winLines[i] ?? '';
+    const line = vis.visRows[i] ?? '';
     const r = firstInputRow + i;
-    const prefix = i === 0 ? view.prompt : ' '.repeat(promptW);
+    const prefix = vis.startVis === 0 && i === 0 ? view.prompt : indent;
     const text = view.dim
       ? `${ui.dim}${prefix}${line}${ui.reset}`
       : `${prefix}${line}`;
@@ -481,8 +545,8 @@ export function paintInput(view: InputView): void {
       )
     );
   } else {
-    const r = firstInputRow + visLine;
-    const col = promptW + view.cursorCol + 1;
+    const r = firstInputRow + vis.visLine;
+    const col = promptW + vis.cursorVisCol + 1;
     stdout.write(cup(r, col));
   }
 }

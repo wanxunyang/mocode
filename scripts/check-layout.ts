@@ -183,6 +183,39 @@ layout.paintInput({
 });
 ok('paintInput 30 行输入不崩(开窗)', !out().includes('undefined'));
 
+// 10b. 软折行(单逻辑行长于宽度)→ 撑高底栏、折到可视行,不溢出屏底
+// 旧实现只按 lines.length 算行数(单行=1),长文本被终端自动折到屏外、第二行藏底栏下——本测试锁住修复。
+layout.clearContent();
+reset();
+const longLine = 'a'.repeat(100); // W=cols(80)-promptW(2)=78 → 折成 78+22 两可视行
+layout.paintInput({
+  prompt: '❯ ',
+  lines: [longLine],
+  cursorLine: 0,
+  cursorCol: 100,
+  menu: null,
+});
+ok('软折行撑高底栏 footerH=3 → 区域 [1;21r]', has(/\x1b\[1;21r/));
+ok('软折行画首可视行(78 个 a)', out().includes('a'.repeat(78)));
+ok('软折行画次可视行(22 个 a)', out().includes('a'.repeat(22)));
+ok('软折行光标落次可视行末 [24;25H]', has(/\x1b\[24;25H/));
+ok('软折行不写到屏底之外(无 row≥25)', !has(/\x1b\[(2[5-9]|[3-9]\d);/));
+
+// 10c. 软折行遇宽字符(CJK=2):行尾放不下整字折下行、本行留尾空格,光标按各行实际宽度定位(非除法)
+layout.clearContent();
+layout.setRegion(2); // 复位底栏高(上例 10b 留下 footerH=3),使本例撑高可观测
+reset();
+const cjkLine = 'a'.repeat(77) + '字'; // 77(宽1)+字(宽2)=79 > W78 → 字折下行,首行留 1 空格
+layout.paintInput({
+  prompt: '❯ ',
+  lines: [cjkLine],
+  cursorLine: 0,
+  cursorCol: 79, // 光标在末尾(字之后)
+  menu: null,
+});
+ok('宽字折行撑高 footerH=3', has(/\x1b\[1;21r/));
+ok('宽字折行光标落次行字后 [24;5H]', has(/\x1b\[24;5H/));
+
 // ── Phase 2:content 缓冲 + viewport 滚动 ──
 
 // 12. content 缓冲收行(breakRow 各成行;totalRows 含当前行)

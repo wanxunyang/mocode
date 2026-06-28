@@ -72,6 +72,36 @@ export function truncateDisplay(str: string, width: number): string {
   return out + '…';
 }
 
+/**
+ * 按显示宽度把文本软折行为多行(供输入框软换行):每行可见宽度 ≤ width。
+ * 宽字符(CJK / emoji = 2)在剩余宽度放不下时整字折到下行(留尾部空格,与终端自动折行一致),
+ * 而非劈开半个字。零宽字符(组合符等)不计宽度、附在当前行。空串返回 [''](占一行)。
+ * 输入文本应全为可见字符(无控制码 / SGR)。
+ */
+export function wrapByDisplayWidth(text: string, width: number): string[] {
+  const w = Math.max(1, width);
+  const out: string[] = [];
+  let cur = '';
+  let curW = 0;
+  for (const ch of text) {
+    const cw = charWidth(ch.codePointAt(0) ?? 0);
+    if (cw <= 0) {
+      cur += ch; // 零宽:不计宽度
+      continue;
+    }
+    if (curW + cw > w) {
+      out.push(cur);
+      cur = ch;
+      curW = cw;
+    } else {
+      cur += ch;
+      curW += cw;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
 // ── 启动横幅 ──
 
 export interface BannerInfo {
