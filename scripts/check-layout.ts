@@ -129,6 +129,27 @@ ok('eraseSegmentBack 未滚动段擦 2 行', erasedMid === 2);
 ok('eraseSegmentBack 未滚动不擦段外 row1', !has(/\x1b\[1;1H\x1b\[2K/));
 ok('eraseSegmentBack 未滚动从段起点 [2;1H] 起', has(/\x1b\[2;1H\x1b\[2K/));
 
+// 5d. eraseSegmentBack 滚动回看态:段未物理写(contentWrite 跳过),折叠不物理清屏(只删缓冲),不覆盖历史视图
+// 修:用户流式输出时 PgUp 回看历史,思考折叠把整屏擦白(而非在底部默默隐藏)的 bug。
+layout.clearContent();
+layout.setRegion(2);
+for (let i = 0; i < 30; i++) layout.contentWrite(`hist${i}\n`); // 31 行(30 提交 + 当前空),够滚动
+layout.scrollBy(9); // 上滚 offset=9,viewport 显历史(hist0..hist21)
+ok('5d 前置:已滚动(offset>0)', layout.isScrolled());
+reset();
+// 思考段(滚动态:contentWrite 只喂缓冲,不物理写)
+layout.beginSegment();
+layout.contentWrite('\x1b[2m▎ 思考\x1b[0m\n');
+layout.contentWrite('\x1b[2m思考原文\x1b[0m\n');
+ok('滚动态 contentWrite 零物理输出(段未写屏)', out() === '');
+// 折叠(滚动态):eraseSegmentBack 不应物理清屏
+const erasedScrolled = layout.eraseSegmentBack();
+ok('滚动态 eraseSegmentBack 零物理输出(不擦屏)', out() === '');
+ok('滚动态 eraseSegmentBack 返回 0(未物理擦)', erasedScrolled === 0);
+// 缓冲段已删:回尾后 viewport 不含思考原文
+layout.scrollBy(-9);
+ok('滚动态折叠后回尾不含思考原文(缓冲已删)', !out().includes('思考原文'));
+
 // 6. setRegion 撑高底栏钳续写位
 layout.clearContent();
 // 把内容填到 contentBottom=22

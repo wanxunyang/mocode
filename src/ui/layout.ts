@@ -234,12 +234,23 @@ export function beginSegment(): void {
  *  - segRows > available:段写满触发过区域滚动,整屏都是段内容(前置内容已被滚出),从内容区顶 contentTop 擦;
  *  - 否则未滚动:从段起点 segmentStartRow 擦。
  * 不越界到区域外(不擦底栏)。返回擦除的屏幕行数。
+ *
+ * **滚动回看态(scrollOffset>0)只删缓冲、不物理擦**:段在滚动态经 contentWrite 只喂缓冲、未物理写屏,
+ * 屏上无段可见,此时按屏行 \x1B[2K 物理擦会清掉用户正在看的历史视图(思考折叠把整屏擦白,而非在底部默默隐藏)。
+ * 故滚动态仅 content.eraseSegment() 删缓冲 + 复位续写位到段起点(使回尾后续写落在折叠标题位),不发任何
+ * cup/clearLine;回尾时 repaintViewport 从缓冲重画即显折叠标题。返回 0(未物理擦)。
  */
 export function eraseSegmentBack(): number {
   if (!active) return 0;
   const g = getGeo();
   const segRows = content.eraseSegment(); // 删缓冲段,返回段物理行数
   if (segRows <= 0) return 0;
+  if (scrollOffset > 0) {
+    // 滚动回看态:段未物理写屏,不物理擦(否则清穿历史视图);仅复位续写位到段起点
+    contentRow = segmentStartRow;
+    contentCol = 1;
+    return 0;
+  }
   const available = g.contentBottom - segmentStartRow + 1;
   let start = segRows > available ? g.contentTop : segmentStartRow;
   if (start < g.contentTop) start = g.contentTop;
