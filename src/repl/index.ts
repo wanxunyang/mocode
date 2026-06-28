@@ -368,7 +368,6 @@ export async function startRepl(
     }
     if (picked === null) return; // Esc 取消
     // picked(0-based)= 第 (picked+1) 轮:删该轮及之后(planRollback(picked) 保 1..picked),预填该轮 user 输入
-    const X = picked + 1;
     const prefillText = userTexts[picked] ?? '';
     const plan = planRollback(picked, history);
     // 清屏(擦选轮菜单 + /rollback 回显)+ 复位 lastView(dim 空),给文件询问一个干净、resize 安全的画面
@@ -400,7 +399,7 @@ export async function startRepl(
         }
       }
     }
-    const r = applyRollback(plan, history, revertPaths);
+    applyRollback(plan, history, revertPaths);
     if (!currentSessionId) currentSessionId = newSessionId();
     try {
       saveSession(history, currentSessionId);
@@ -408,11 +407,9 @@ export async function startRepl(
       // 落盘失败不阻断
     }
     persistSnapshots(currentSessionId);
+    // 复显剩余对话(无提示行),输入框预填该轮 user 输入 → 下轮 Enter 重新跑
     layout.clearContent();
     renderHistory(history);
-    layout.contentWrite(
-      `${ui.dim}(已删除第 ${X} 轮及之后 ${r.deletedMsgs} 条消息${r.revertedFiles.length ? `,${r.revertedFiles.length} 个文件已撤销` : ''};输入框已预填第 ${X} 轮输入,Enter 重新运行)${ui.reset}\n`
-    );
     pendingPrefill = prefillText.split('\n');
   };
 
