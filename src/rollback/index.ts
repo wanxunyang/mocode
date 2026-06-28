@@ -11,7 +11,11 @@ import { truncateDisplay } from '../ui/render.js';
 import type { ChatMessage } from '../llm/index.js';
 
 /**
- * 回滚子系统:双击 Esc 回滚到历史轮次 + 撤销被删轮次的文件改动。
+ * 回滚子系统:`/rollback` 菜单(↑/↓)选轮次 → 选中第 X 轮 = 删该轮及之后 + 预填该轮 user 输入(仿 Claude Code
+ * rewind,Enter 重新跑);撤销被删轮次的文件改动(逐个「保留/撤销」询问)。
+ *
+ * 语义:选中下标 picked(0-based,= 第 picked+1 轮)→ `planRollback(picked)` 保 1..picked(删 picked+1 轮及之后),
+ * 预填 userTexts[picked](= 第 picked+1 轮 user 输入)。**不是**保 1..picked+1——选中第 X 轮即"从第 X 轮重跑"。
  *
  * 撤销方案 = 落盘快照(不用 git):write_file/edit_file 执行前由 executeTool 调
  * recordMutation,把 before 内容存入快照(按轮次 turnId 打标)。回滚到第 n 轮时,

@@ -43,7 +43,7 @@ export async function runAgent(
   // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
   const savedHistory = history.slice();
   history.push({ role: 'user', content: userInput });
-  // 开新轮次(回滚用):首行截断 40,供双击 Esc 轮次列表展示。
+  // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
   beginTurn(truncateDisplay(userInput.split('\n')[0] ?? '', 40));
   layout.contentMode(); // 防御性:确保光标在内容续写位(enterRunningMode 已置,这里兜底)
   const spinner = new Spinner((msg, frame) =>

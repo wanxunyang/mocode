@@ -339,3 +339,118 @@ export async function promptWithSlashMenu(
     redraw();
   });
 }
+
+/**
+ * 轮次选择菜单(供 /rollback 菜单化选择):↑/↓ 导航、Enter 选中、Esc/Ctrl+D 取消。
+ * 把 items 画成向上展开的菜单(经 layout.paintInput,与斜杠菜单同套渲染),输入框行作操作提示。
+ * 返回选中的 0-based 下标;null=取消 / 非 TTY / 空列表。纯导航(不收文本输入)。
+ * 长列表(超屏高)自动开窗保光标可见;默认聚焦末项(最新轮次,靠近输入框)。
+ */
+export async function promptTurnPicker(
+  items: { firstLine: string }[]
+): Promise<number | null> {
+  if (!layout.isActive() || items.length === 0) return null;
+  const emitter = stdin as unknown as KeypressEmitter;
+  const hint = '↑↓ 选择 · Enter 回滚到该轮 · Esc 取消';
+  let selected = items.length - 1; // 默认聚焦最新(末项,菜单底、靠近输入框)
+  let resolved = false;
+  let resolve!: (v: number | null) => void;
+  let reject!: (e: Error) => void;
+
+  /** 菜单行(带开窗):超屏高时以 selected 为中心取窗,保光标可见;末项在底(靠近输入框)。 */
+  function menuLines(): string[] {
+    const g = layout.getGeo();
+    const maxRows = Math.max(1, g.contentBottom);
+    let start = 0;
+    if (items.length > maxRows) {
+      start = Math.max(
+        0,
+        Math.min(selected - Math.floor(maxRows / 2), items.length - maxRows)
+      );
+    }
+    const count = Math.min(maxRows, items.length);
+    const cols = g.cols;
+    return Array.from({ length: count }, (_, i) => {
+      const idx = start + i;
+      const marker = idx === selected ? `${ui.cyan}▸${ui.reset}` : ' ';
+      const num = `${ui.dim}${idx + 1}${ui.reset}`;
+      const text = truncateDisplay(items[idx].firstLine, cols - 6);
+      return `${marker} ${num} ${ui.dim}${text}${ui.reset}`;
+    });
+  }
+
+  function redraw(): void {
+    layout.paintInput({
+      prompt: '❯ ',
+      lines: [hint],
+      cursorLine: 0,
+      cursorCol: displayWidth(hint),
+      menu: { lines: menuLines() },
+    });
+  }
+
+  function cleanup(): void {
+    try {
+      stdin.setRawMode(false);
+    } catch {
+      // 忽略
+    }
+    emitter.removeListener('keypress', onKey);
+    stdin.pause();
+  }
+  function finish(value: number | null): void {
+    if (resolved) return;
+    resolved = true;
+    cleanup();
+    resolve(value);
+  }
+
+  function onKey(_str: string, key?: Key): void {
+    if (resolved || !key) return;
+    if (key.ctrl && key.name === 'c') {
+      cleanup();
+      reject(new Error('SIGINT'));
+      return;
+    }
+    if (key.ctrl && key.name === 'd') {
+      finish(null);
+      return;
+    }
+    switch (key.name) {
+      case 'up':
+        selected = (selected - 1 + items.length) % items.length;
+        redraw();
+        return;
+      case 'down':
+        selected = (selected + 1) % items.length;
+        redraw();
+        return;
+      case 'return':
+      case 'enter':
+        finish(selected);
+        return;
+      case 'escape':
+        finish(null);
+        return;
+    }
+  }
+
+  return new Promise<number | null>((res, rej) => {
+    resolve = res;
+    reject = rej;
+    readline.emitKeypressEvents(stdin);
+    let rawOk = true;
+    try {
+      stdin.setRawMode(true);
+    } catch {
+      rawOk = false;
+    }
+    if (!rawOk) {
+      res(null);
+      return;
+    }
+    stdin.resume();
+    emitter.on('keypress', onKey);
+    redraw();
+  });
+}

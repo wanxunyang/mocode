@@ -6,7 +6,7 @@ import { runAgent } from '../agent/index.js';
 import { ui } from '../ui/theme.js';
 import { bannerString, displayWidth, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
-import { promptWithSlashMenu } from '../ui/prompt.js';
+import { promptWithSlashMenu, promptTurnPicker } from '../ui/prompt.js';
 import { tools } from '../tools/registry.js';
 import {
   estimateMessagesTokens,
@@ -47,7 +47,7 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/compact', desc: '压缩历史(可带焦点 /compact …)' },
   { name: '/resume', desc: '续接已保存的会话' },
   { name: '/think', desc: '展开折叠思考段(/think N)' },
-  { name: '/rollback', desc: '回滚到第 N 轮(/rollback N)' },
+  { name: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
 ];
 
 /** 临时 readline 读一行(cooked,用于子提问;主输入走 promptWithSlashMenu)。 */
@@ -132,6 +132,7 @@ const emitter = stdin as unknown as KeypressEmitter;
 let runningInput = ''; // 运行中已打字缓冲(单行;agent 结束后预填下一轮 INPUT 态)
 let runningPlaceholder = '';
 let currentAbort: AbortController | null = null;
+let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user 输入(下轮 INPUT 态消费)
 
 /** 运行态按键:滚动优先,再 Ctrl+C 中断,再 typeahead 编辑(单行,Enter=无操作)。 */
 function onRunningKey(_str: string, key?: Key): void {
@@ -343,42 +344,43 @@ export async function startRepl(
   }
 
   /**
-   * 回滚子流程(由 /rollback 命令触发;仿 /resume 用 rl.question 子提问)。
-   * rl.question 的 prompt 必须纯文本(无 ANSI)。运行态下光标已在内容续写位,readline 在此写提问 + 回显。
-   * preselect 给定时(/rollback N)跳过选轮提问,直接进文件保留/撤销。
+   * 回滚子流程(由 /rollback 触发):菜单(↑/↓)选轮次 → 选中第 X 轮 = 删第 X 轮及之后 + 预填第 X 轮 user 输入
+   * (仿 Claude Code rewind,Enter 重新跑该轮);被删轮次的文件改动仍逐个「保留/撤销」询问(cooked readline)。
+   * 选轮菜单走 promptTurnPicker(raw mode);文件询问走 askLine(cooked)。预填经 pendingPrefill 注入下轮 INPUT。
    */
-  const rollbackFlow = async (preselect?: number): Promise<void> => {
+  const rollbackFlow = async (): Promise<void> => {
     const turnList = listTurns();
-    if (turnList.length < 2) {
-      layout.contentWrite(`${ui.dim}(没有可回滚的轮次,至少需 2 轮)${ui.reset}\n`);
+    if (turnList.length < 1) {
+      layout.contentWrite(`${ui.dim}(没有可回滚的轮次)${ui.reset}\n`);
       return;
     }
-    let n = 0;
-    if (
-      preselect !== undefined &&
-      Number.isInteger(preselect) &&
-      preselect >= 1 &&
-      preselect < turnList.length
-    ) {
-      n = preselect;
-    } else {
-      layout.contentWrite(`${ui.brightCyan}回滚到第几轮?(之后对话将被删除)${ui.reset}\n`);
-      turnList.forEach((t, i) => {
-        layout.contentWrite(
-          `  ${ui.dim}${i + 1}${ui.reset}  ${t.firstLine}\n`
-        );
-      });
-      let pick = '';
-      try {
-        pick = (await askLine('序号(回车取消): ')).trim();
-      } catch {
-        return;
-      }
-      const nn = Number(pick);
-      if (!pick || !Number.isInteger(nn) || nn < 1 || nn >= turnList.length) return;
-      n = nn;
+    // 各轮 user 全文(预填用;按 user 消息顺序与 turnList 对齐)
+    const userTexts: string[] = [];
+    for (const m of history) {
+      if (m.role === 'user') userTexts.push(textOf((m as { content?: unknown }).content));
     }
-    const plan = planRollback(n, history);
+    const items = turnList.map((t) => ({ firstLine: t.firstLine }));
+    let picked: number | null;
+    try {
+      picked = await promptTurnPicker(items);
+    } catch {
+      return; // Ctrl+C(SIGINT)→ 取消回滚
+    }
+    if (picked === null) return; // Esc 取消
+    // picked(0-based)= 第 (picked+1) 轮:删该轮及之后(planRollback(picked) 保 1..picked),预填该轮 user 输入
+    const X = picked + 1;
+    const prefillText = userTexts[picked] ?? '';
+    const plan = planRollback(picked, history);
+    // 清屏(擦选轮菜单 + /rollback 回显)+ 复位 lastView(dim 空),给文件询问一个干净、resize 安全的画面
+    layout.clearContent();
+    layout.paintInput({
+      prompt: '❯ ',
+      lines: [''],
+      cursorLine: 0,
+      cursorCol: 0,
+      menu: null,
+      dim: true,
+    });
     const revertPaths = new Set<string>();
     for (const c of plan.changes) {
       layout.contentWrite(
@@ -409,8 +411,9 @@ export async function startRepl(
     layout.clearContent();
     renderHistory(history);
     layout.contentWrite(
-      `${ui.dim}(已回滚到第 ${n} 轮,之后 ${r.deletedMsgs} 条消息已删除${r.revertedFiles.length ? `,${r.revertedFiles.length} 个文件已撤销` : ''})${ui.reset}\n`
+      `${ui.dim}(已删除第 ${X} 轮及之后 ${r.deletedMsgs} 条消息${r.revertedFiles.length ? `,${r.revertedFiles.length} 个文件已撤销` : ''};输入框已预填第 ${X} 轮输入,Enter 重新运行)${ui.reset}\n`
     );
+    pendingPrefill = prefillText.split('\n');
   };
 
   while (true) {
@@ -423,12 +426,17 @@ export async function startRepl(
       input = await promptWithSlashMenu({
         prompt: PROMPT,
         commands: SLASH_COMMANDS,
-        // 上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
-        ...(runningInput ? { initialLines: [runningInput] } : {}),
+        // /rollback 预填优先;否则上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
+        ...(pendingPrefill
+          ? { initialLines: pendingPrefill }
+          : runningInput
+            ? { initialLines: [runningInput] }
+            : {}),
       });
     } catch {
       break; // Ctrl+C(SIGINT)/ 异常 → 退出
     }
+    pendingPrefill = null; // 预填已消费,清空
     runningInput = ''; // 预填已消费,清空(下轮运行态从空开始)
     if (input === null) break; // 空 prompt Ctrl+D
 
@@ -554,11 +562,9 @@ export async function startRepl(
       continue;
     }
     if (line === '/rollback' || line.startsWith('/rollback ')) {
-      // /rollback [N]:回滚到第 N 轮(删其后对话 + 逐项保留/撤销被删轮次的文件改动)。
-      // 给 N 则跳过选轮提问;不给或非法则交互选。无快照的旧轮次(/resume 重建)文件改动不可撤销。
-      const arg = line.slice('/rollback'.length).trim();
-      const pre = arg ? Number(arg) : NaN;
-      await rollbackFlow(Number.isInteger(pre) ? pre : undefined);
+      // /rollback:打开轮次菜单(↑/↓ 选,Enter 回滚到该轮并预填其输入,再 Enter 重新跑)。
+      // 忽略任何数字参数(原「输数字选回滚」已删,统一走菜单)。无快照的旧轮次(/resume 重建)文件改动不可撤销。
+      await rollbackFlow();
       continue;
     }
 
