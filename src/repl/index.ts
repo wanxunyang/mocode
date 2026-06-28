@@ -4,7 +4,7 @@ import { stdin, stdout } from 'node:process';
 import { config } from '../config/index.js';
 import { runAgent } from '../agent/index.js';
 import { ui } from '../ui/theme.js';
-import { bannerString, displayWidth } from '../ui/render.js';
+import { bannerString, displayWidth, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import { promptWithSlashMenu } from '../ui/prompt.js';
 import { tools } from '../tools/registry.js';
@@ -219,6 +219,77 @@ function echoInput(lines: string[]): void {
   layout.contentWrite(echo);
 }
 
+/** 把任意消息 content 拍平成字符串(OpenAI 可能 string / null / 多模态数组)。 */
+function textOf(c: unknown): string {
+  if (typeof c === 'string') return c;
+  if (c == null) return '';
+  if (Array.isArray(c)) {
+    return c
+      .map((p) =>
+        typeof p === 'string' ? p : (p as { text?: string })?.text ?? ''
+      )
+      .join('');
+  }
+  return String(c);
+}
+
+/**
+ * 把会话历史渲染成静态文本进内容区(回滚 / 续接 / --resume 后复显上下文,仿 Claude Code):
+ * user→❯ 回显、assistant→正文(+ tool_calls 作 ● 行)、tool→↳ 结果预览;system 跳过。
+ * 思考段不持久(history 只存正文),故无思考折叠。渲染后续写位在末尾,紧接 enterInputMode 画输入框。
+ * 内容长于屏时 viewport 显尾(最近轮次),PgUp 可看更早——与流式态一致。
+ */
+export function renderHistory(history: ChatMessage[]): void {
+  const indent = ' '.repeat(displayWidth(PROMPT));
+  const idToName = new Map<string, string>();
+  for (const m of history) {
+    if (m.role === 'system') continue;
+    if (m.role === 'user') {
+      const lines = textOf((m as { content?: unknown }).content).split('\n');
+      layout.contentWrite(
+        lines
+          .map((l, i) => (i === 0 ? `${PROMPT}${l}` : `${indent}${l}`))
+          .join('\n') + '\n'
+      );
+      continue;
+    }
+    if (m.role === 'assistant') {
+      const text = textOf((m as { content?: unknown }).content);
+      if (text) {
+        layout.contentWrite(text);
+        if (!text.endsWith('\n')) layout.contentWrite('\n');
+      }
+      const tcs = (m as {
+        tool_calls?: {
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        }[];
+      }).tool_calls;
+      if (Array.isArray(tcs)) {
+        for (const tc of tcs) {
+          const name = tc?.function?.name ?? '';
+          const args = tc?.function?.arguments ?? '';
+          if (tc?.id && name) idToName.set(tc.id, name);
+          layout.contentWrite(
+            `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}${name}${ui.reset}  ${ui.dim}${summarizeToolCall(name, args)}${ui.reset}\n`
+          );
+        }
+      }
+      continue;
+    }
+    if (m.role === 'tool') {
+      const id = (m as { tool_call_id?: string }).tool_call_id ?? '';
+      const name = idToName.get(id) ?? '';
+      const preview = summarizeToolResult(
+        name,
+        textOf((m as { content?: unknown }).content)
+      );
+      if (preview) layout.contentWrite(`  ${ui.gray}↳ ${preview}${ui.reset}\n`);
+      continue;
+    }
+  }
+}
+
 /**
  * 交互式 REPL:全屏 TUI(alt screen + 固定底栏)。INPUT 态底栏=状态行+输入框(raw mode 等按键);
  * 提交后 enterRunningMode(底栏改 dim 占位、光标回内容续写位),命令分发与 runAgent 的流式输出经
@@ -260,12 +331,16 @@ export async function startRepl(
     tools: toolsLine,
   });
 
-  // 开场:进 alt screen + 状态基线 + 清内容区 + 横幅进内容区
+  // 开场:进 alt screen + 状态基线 + 清内容区。--resume 有历史则渲染对话(仿 Claude Code),否则横幅。
   layout.enterAltScreen();
   refreshStatusBase(history);
   layout.clearContent();
   layout.contentMode();
-  layout.contentWrite(bannerString(banner()));
+  if (history.some((m) => m.role === 'user')) {
+    renderHistory(history);
+  } else {
+    layout.contentWrite(bannerString(banner()));
+  }
 
   /**
    * 回滚子流程(由 /rollback 命令触发;仿 /resume 用 rl.question 子提问)。
@@ -332,7 +407,7 @@ export async function startRepl(
     }
     persistSnapshots(currentSessionId);
     layout.clearContent();
-    layout.contentWrite(bannerString(banner()));
+    renderHistory(history);
     layout.contentWrite(
       `${ui.dim}(已回滚到第 ${n} 轮,之后 ${r.deletedMsgs} 条消息已删除${r.revertedFiles.length ? `,${r.revertedFiles.length} 个文件已撤销` : ''})${ui.reset}\n`
     );
@@ -453,7 +528,7 @@ export async function startRepl(
       contextState.lastUsage = undefined;
       collapsedThinkings.length = 0;
       layout.clearContent();
-      layout.contentWrite(bannerString(banner()));
+      renderHistory(history);
       layout.contentWrite(`${ui.dim}(已续接会话 ${loaded.id})${ui.reset}\n`);
       continue;
     }
