@@ -12,6 +12,7 @@ export const ui = {
   reset: wrap('\x1B[0m'),
   bold: wrap('\x1B[1m'),
   dim: wrap('\x1B[2m'),
+  reverse: wrap('\x1B[7m'), // 反白(fg/bg 互换):块状输入光标用,光标处字符整格反白
   red: wrap('\x1B[31m'),
   green: wrap('\x1B[32m'),
   yellow: wrap('\x1B[33m'),

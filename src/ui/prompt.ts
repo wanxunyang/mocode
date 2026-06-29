@@ -42,13 +42,14 @@ function ensurePasteDetector(): void {
   if (pasteDetectorInstalled) return;
   pasteDetectorInstalled = true;
   stdin.on('data', (chunk: Buffer | string) => {
-    const len = chunk.length;
-    const hasNL =
-      typeof chunk === 'string'
-        ? chunk.indexOf('\r') >= 0 || chunk.indexOf('\n') >= 0
-        : chunk.indexOf(0x0d) >= 0 || chunk.indexOf(0x0a) >= 0;
-    // 大块(>8 字节)或含换行的多字节块 = 粘贴;键盘单键(1 字节,含 Enter=\r)不触发
-    if (!(len > 8 || (len > 1 && hasNL))) return;
+    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    const hasNL = text.indexOf('\r') >= 0 || text.indexOf('\n') >= 0;
+    // 按字符数(码点)判粘贴,非字节:CJK 汉字占 3 UTF-8 字节,旧阈值(len>8 字节)会把 IME 提交的
+    // 3-10 个汉字误判为粘贴 → 进 50ms 缓冲 → finalizePaste→insertText 落字(且旧 insertText 把光标
+    // 置插入文本长度而非末尾,致"后续打字插到行中间")。改:含换行(多行粘贴)或 >16 字符(大块单行
+    // 粘贴)才算粘贴;普通 IME 提交走正常按键路径(逐字直插、光标随进、无延迟)。
+    const charCount = [...text].length;
+    if (!(charCount > 16 || (charCount > 1 && hasNL))) return;
     pasting = true;
     if (pasteTimer) clearTimeout(pasteTimer);
     const t = setTimeout(() => {
@@ -153,7 +154,9 @@ export async function promptWithSlashMenu(
     newLines[newLines.length - 1] += after;
     lines.splice(cl, 1, ...newLines);
     cl = cl + parts.length - 1;
-    cc = parts[parts.length - 1].length;
+    // 光标置于插入文本末尾 = 原 before + 末段长度(指向插入文本之后、after 之前)。
+    // 旧值 parts[...].length 漏算 before → 光标落到插入文本内部(行中间)→ 后续打字插到中间(bug)。
+    cc = before.length + parts[parts.length - 1].length;
   }
   /** 粘贴结束:长粘贴(>8 行或 >400 字符)落/并进 chip(原子,整段封预览),短粘贴落为可编辑文本。 */
   function finalizePaste(): void {
@@ -246,16 +249,54 @@ export async function promptWithSlashMenu(
     redraw();
   }
 
+  /** 清空输入(含 chip / 斜杠菜单 / 粘贴缓冲):Ctrl+C 在有内容时调用——清空而非退出。 */
+  function clearInput(): void {
+    if (layout.isScrolled()) layout.resetScroll(); // 回尾(若滚动回看),再清空
+    lines = [''];
+    cl = 0;
+    cc = 0;
+    chip = null;
+    menuOpen = false;
+    filtered = [];
+    selected = 0;
+    if (pasteTimer) {
+      clearTimeout(pasteTimer);
+      pasteTimer = null;
+    }
+    pasting = false;
+    pasteParts = [];
+    justSawCR = false;
+    computeFiltered();
+    redraw();
+  }
+
+  /** Ctrl+C:有内容(已打字 / 多行 / chip / 菜单草稿 / 粘贴缓冲 / 粘贴中)则清空,再按一次(空)才退出(仿 fish / Claude Code)。 */
+  function onCtrlC(): void {
+    const hasContent =
+      chip != null ||
+      lines.length > 1 ||
+      lines.some((l) => l !== '') ||
+      pasteParts.length > 0 ||
+      pasting;
+    if (hasContent) {
+      clearInput();
+      return;
+    }
+    cleanup();
+    reject(new Error('SIGINT'));
+  }
+
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
 
+    // Ctrl+C:有内容则清空,再按一次(空)才退出——置顶,使粘贴中也能被截到(否则被 pasting 分支吞掉)
+    if (key.ctrl && key.name === 'c') {
+      onCtrlC();
+      return;
+    }
+
     // 粘贴中:把键累积进 pasteParts(换行 \r\n 合一),不编辑 lines;末尾 finalizePaste 统一落 chip/文本
     if (pasting) {
-      if (key.ctrl && key.name === 'c') {
-        cleanup();
-        reject(new Error('SIGINT'));
-        return;
-      }
       const s = key.sequence ?? '';
       const isReturn = key.name === 'return' || key.name === 'enter';
       if (s === '\n' && justSawCR) {
@@ -299,12 +340,7 @@ export async function promptWithSlashMenu(
     // 其他键:若处于滚动回看,先回尾再处理(打字即回底)
     if (layout.isScrolled()) layout.resetScroll();
 
-    // raw 模式下 Ctrl+C 不触发 SIGINT,作为按键到达:先恢复终端再 reject
-    if (key.ctrl && key.name === 'c') {
-      cleanup();
-      reject(new Error('SIGINT'));
-      return;
-    }
+    // Ctrl+C 已在 onKey 顶部统一处理(清空或退出);Ctrl+D:空缓冲退出,否则忽略
     if (key.ctrl && key.name === 'd') {
       if (lines.every((l) => l === '') && cl === 0 && cc === 0) finish(null);
       return;
@@ -510,6 +546,7 @@ export async function promptTurnPicker(
       cursorLine: 0,
       cursorCol: displayWidth(hint),
       menu: { lines: menuLines() },
+      caret: false, // 纯导航菜单(非文本输入):不画输入框块状光标,聚焦由菜单 ▸ 标记
     });
   }
 

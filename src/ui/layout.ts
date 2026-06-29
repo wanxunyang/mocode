@@ -5,6 +5,7 @@ import {
   truncateDisplay,
   ansiDisplayWidth,
   wrapByDisplayWidth,
+  fmtElapsed,
 } from './render.js';
 import { ui } from './theme.js';
 import * as content from './content.js';
@@ -53,6 +54,7 @@ export interface InputView {
   cursorCol: number; // 显示宽度列(0-based)
   menu: { lines: string[] } | null; // 预渲染菜单行(带色),向上展开进内容区底
   dim?: boolean; // true=运行态占位(整行 dim)
+  caret?: boolean; // true=在光标处画块状光标(反白光标右侧字符,行末反白空格),示"现在在哪输入";默认 true。picker 等非文本输入传 false
 }
 
 // ── 内部状态 ──
@@ -66,6 +68,8 @@ let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 
 let base: { model: string; contextBar: string; cwd: string } | null = null;
 let statusText = '';
 let spinnerFrame: string | undefined;
+let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
+let turnTimer: NodeJS.Timeout | null = null; // 走时刷新计时器(独立于 spinner):流式期间 spinner 停转,由它续刷状态行。
 let lastView: InputView | null = null;
 let lastMenuStartRow = 0; // 上次菜单起始屏行(供擦除)
 let lastMenuRows = 0;
@@ -343,9 +347,16 @@ function composeStatus(status: StatusBarData, cols: number): string {
   const ctxW = ansiDisplayWidth(ctx);
   // 滚动回看时状态段改显历史指示(无 spinner——滚动只在 INPUT 态)
   const scrolled = scrollOffset > 0;
-  const st = scrolled
-    ? `历史 ↑${scrollOffset} (PgDn 回底)`
-    : (status.spinnerFrame ? status.spinnerFrame + ' ' : '') + status.status;
+  let st: string;
+  if (scrolled) {
+    st = `历史 ↑${scrollOffset} (PgDn 回底)`; // 滚动回看显历史指示,不显走时
+  } else {
+    st = (status.spinnerFrame ? status.spinnerFrame + ' ' : '') + status.status;
+    // RUNNING 态追加走时:整轮从 enterRunningMode 起计时,200ms 计时器续刷使其连续递增。
+    if (mode === 'running' && turnStart != null) {
+      st += ` · ${fmtElapsed(Date.now() - turnStart)}`;
+    }
+  }
   const stW = displayWidth(st);
   const fixed = displayWidth(lead) + displayWidth(model) + sepW * 3 + ctxW + stW;
   const cwdBudget = cols - fixed - 1;
@@ -382,6 +393,27 @@ export function setStatus(status: string, frame?: string): void {
   statusText = status;
   spinnerFrame = frame;
   drawStatusBar();
+}
+
+/**
+ * 启走时刷新计时器:RUNNING 态每 200ms 重画状态行,使 composeStatus 重算 elapsed。
+ * 必要性:spinner 在首 token 到达即 stop,思考/正文流式期间状态行不再经 spinner 刷新;
+ * 若走时只挂 spinner onFrame,流式那几十秒会冻住。此计时器独立续刷,与 spinner 80ms 重叠幂等无妨。
+ * 非 TTY 不启(active=false 时 drawStatusBar 为 no-op)。
+ */
+function startTurnTimer(): void {
+  if (!active) return;
+  stopTurnTimer();
+  turnTimer = setInterval(() => drawStatusBar(), 200);
+  turnTimer.unref();
+}
+
+/** 停走时计时器。enterInputMode / exitAltScreen 调。 */
+function stopTurnTimer(): void {
+  if (turnTimer) {
+    clearInterval(turnTimer);
+    turnTimer = null;
+  }
 }
 
 /**
@@ -482,6 +514,35 @@ function windowInputVis(
 }
 
 /**
+ * 把一行纯可见文本(无 ANSI / 零宽)在光标显示列处切成 before/cur/after:
+ * cur = 光标右侧那个字符(块状光标"压"在它上面);光标在行末(列 == 行宽)则 cur=''。
+ * 供 paintInput 画块状光标——反白 cur(行末反白一个空格),让用户看清"现在在哪输入"。
+ *
+ * 光标列恒落在字符边界:cursorCol = 显示宽度(slice 整字累加),不进字符内部,故按 acc===col 取字符即可。
+ * 宽字符(CJK=2)在行尾放不下时整字折下行,光标列仍在边界,acc 逐字累加 displayWidth 与终端光标一致。
+ */
+function splitAtVisCol(
+  line: string,
+  col: number
+): { before: string; cur: string; after: string } {
+  let acc = 0;
+  let i = 0;
+  for (const ch of line) {
+    const cw = charWidth(ch.codePointAt(0) ?? 0);
+    if (cw <= 0) {
+      i += ch.length;
+      continue; // 零宽(组合符等):不计列,跳过(输入文本一般无,稳妥)
+    }
+    if (acc === col) {
+      return { before: line.slice(0, i), cur: ch, after: line.slice(i + ch.length) };
+    }
+    acc += cw;
+    i += ch.length;
+  }
+  return { before: line, cur: '', after: '' }; // 光标在行末:无字符可反白
+}
+
+/**
  * 画输入区:擦旧菜单 → (必要时)setRegion → 画状态行 + 输入行 + 向上菜单,光标留输入框(dim 时回续写位)。
  * prompt.ts 每次按键调;enterInputMode / enterRunningMode 也调(空 / dim)。
  */
@@ -489,14 +550,15 @@ export function paintInput(view: InputView): void {
   if (!active || !base) return;
   lastView = view;
   const preGeo = getGeo();
+  // 累积本帧所有 cup/clearLine/文本,末尾一次写出——避免「擦旧菜单」与「重画」分多次 write 时,
+  // 终端把中间空白渲染出来 → 菜单/面板切换时闪烁(↑↓ 导航每次 redraw 都全帧擦后重画)。
+  let buf = '';
 
   // 1. 擦旧菜单(用上次记录的起始行 + 行数,与本次几何无关——setRegion 不动屏幕内容)
   if (lastMenuRows > 0) {
-    let p = '';
     for (let i = 0; i < lastMenuRows; i++) {
-      p += cup(lastMenuStartRow + i, 1) + esc.clearLine;
+      buf += cup(lastMenuStartRow + i, 1) + esc.clearLine;
     }
-    stdout.write(p);
     lastMenuRows = 0;
   }
 
@@ -520,45 +582,58 @@ export function paintInput(view: InputView): void {
       );
   const needFooterH = 1 + vis.inputRows;
   let g = preGeo;
-  if (needFooterH !== footerH) g = setRegion(needFooterH);
+  if (needFooterH !== footerH) {
+    // setRegion 自己 write(DECSTBM + 清行 + 归位):先把已累积的擦除 flush 出去保序(擦除用的是旧几何的
+    // lastMenuStartRow,须在 setRegion 改区域前落地),再 setRegion,之后 2b..6 重新累积。
+    // footerH 不变时(常见:单行输入 / 菜单切换 / ↑↓ 导航)整帧一次 write,终端原子应用,无中间空白→不闪烁。
+    if (buf) {
+      stdout.write(buf);
+      buf = '';
+    }
+    g = setRegion(needFooterH);
+  }
 
   // 2b. 重画内容末行(底栏上一行)从缓冲:防 WT 边距漏影(状态行重复到该行),并保证该行显正确内容
   {
     const slice = content.sliceFromEnd(scrollOffset, g.contentBottom);
     const line = slice[g.contentBottom - 1] ?? '';
-    stdout.write(cup(g.contentBottom, 1) + esc.clearLine + line);
+    buf += cup(g.contentBottom, 1) + esc.clearLine + line;
   }
 
   // 3. 状态行(footerH 变或始终重画——便宜且避免旧状态行残留)
   const statusRow = g.contentBottom + 1;
   const status: StatusBarData = { ...base, status: statusText, spinnerFrame };
-  stdout.write(
-    cup(statusRow, 1) + esc.clearLine + composeStatus(status, g.cols)
-  );
+  buf += cup(statusRow, 1) + esc.clearLine + composeStatus(status, g.cols);
 
   // 4. 输入行(g.contentBottom+2 .. rows)——按可视行画,首行带 prompt、其余缩进 promptW
   const firstInputRow = g.contentBottom + 2;
   const inputRowsAvail = g.footerH - 1;
   const indent = ' '.repeat(promptW);
+  const showCaret = view.caret !== false; // 默认 true;picker 等非文本输入传 false 关闭块状光标
   for (let i = 0; i < inputRowsAvail; i++) {
     const line = vis.visRows[i] ?? '';
     const r = firstInputRow + i;
     const prefix = vis.startVis === 0 && i === 0 ? view.prompt : indent;
-    const text = view.dim
-      ? `${ui.dim}${prefix}${line}${ui.reset}`
-      : `${prefix}${line}`;
-    stdout.write(cup(r, 1) + esc.clearLine + text);
+    let text: string;
+    if (view.dim) {
+      text = `${ui.dim}${prefix}${line}${ui.reset}`;
+    } else if (showCaret && i === vis.visLine) {
+      // 块状光标:反白光标右侧字符(cur),行末(无字符)反白一个空格——示"现在在哪输入"
+      const { before, cur, after } = splitAtVisCol(line, vis.cursorVisCol);
+      text = `${prefix}${before}${ui.reverse}${cur || ' '}${ui.reset}${after}`;
+    } else {
+      text = `${prefix}${line}`;
+    }
+    buf += cup(r, 1) + esc.clearLine + text;
   }
 
   // 5. 向上菜单(画在内容区底,底栏正上方)
   if (view.menu && view.menu.lines.length > 0) {
     const menuRows = Math.min(view.menu.lines.length, g.contentBottom);
     const menuStart = g.contentBottom - menuRows + 1;
-    let p = '';
     for (let i = 0; i < menuRows; i++) {
-      p += cup(menuStart + i, 1) + esc.clearLine + view.menu.lines[i];
+      buf += cup(menuStart + i, 1) + esc.clearLine + view.menu.lines[i];
     }
-    stdout.write(p);
     lastMenuStartRow = menuStart;
     lastMenuRows = menuRows;
   }
@@ -566,17 +641,17 @@ export function paintInput(view: InputView): void {
   // 6. 光标
   if (view.dim) {
     // 滚动回看时归内容区底(dim=运行态占位,光标不入输入框,viewport 锁历史)
-    stdout.write(
-      cup(
-        scrollOffset === 0 ? contentRow : g.contentBottom,
-        scrollOffset === 0 ? contentCol : 1
-      )
+    buf += cup(
+      scrollOffset === 0 ? contentRow : g.contentBottom,
+      scrollOffset === 0 ? contentCol : 1
     );
   } else {
     const r = firstInputRow + vis.visLine;
     const col = promptW + vis.cursorVisCol + 1;
-    stdout.write(cup(r, col));
+    buf += cup(r, col);
   }
+
+  if (buf) stdout.write(buf); // 整帧一次写出(footerH 不变时):终端原子应用,无中间空白→不闪烁
 }
 
 /**
@@ -623,6 +698,8 @@ export function enterInputMode(status: string = '空闲'): void {
   mode = 'input';
   statusText = status;
   spinnerFrame = undefined;
+  turnStart = null; // 停走时
+  stopTurnTimer();
   if (active && base) {
     setRegion(2);
     paintInput({
@@ -640,6 +717,7 @@ export function enterRunningMode(status: string, placeholder: string): void {
   mode = 'running';
   statusText = status;
   spinnerFrame = undefined;
+  turnStart = Date.now(); // 起走时(整轮从发起到 enterInputMode 止)
   resetScroll(); // 若上轮 INPUT 滚动过(未打字回底),新轮回尾
   if (active && base) {
     setRegion(2);
@@ -651,6 +729,7 @@ export function enterRunningMode(status: string, placeholder: string): void {
       menu: null,
       dim: true,
     });
+    startTurnTimer(); // 续刷状态行走时(流式期间 spinner 停转,由它兜底)
     contentMode();
   }
 }
@@ -696,6 +775,8 @@ export function enterAltScreen(): void {
 export function exitAltScreen(): void {
   if (!active) return;
   active = false;
+  stopTurnTimer(); // 兜底清走时计时器(防异常退出泄漏)
+  turnStart = null;
   // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。
   try {
     stdin.setRawMode(false); // 还原 raw(RUNNING 态常驻 raw,退出时必须还原,否则终端残留 raw 模式)

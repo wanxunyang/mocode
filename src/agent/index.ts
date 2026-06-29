@@ -12,6 +12,7 @@ import {
   summarizeToolCall,
   summarizeToolResult,
   truncateDisplay,
+  fmtElapsed,
 } from '../ui/render.js';
 import { renderFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
@@ -56,6 +57,10 @@ export async function runAgent(
   // 中断回滚快照:入口(本 turn push 任何消息前)整段浅拷贝。abort 时 length=0;push(...saved) 还原。
   // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
   const savedHistory = history.slice();
+  // 本轮计时:从入口到完毕(正常 return / 达上限),供 finally 打 ✻ Worked for 摘要行。
+  // 与 layout 的 turnStart 各自独立(差几毫秒),避免 agent 反向读 layout 状态的耦合。
+  const t0 = Date.now();
+  let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
   history.push({ role: 'user', content: userInput });
   // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
   beginTurn(truncateDisplay(userInput.split('\n')[0] ?? '', 40));
@@ -254,13 +259,21 @@ export async function runAgent(
       // 没有工具调用:流式正文即最终回复(已实时打印)
       if (!gotText) layout.contentWrite(`${ui.dim}(无回复)${ui.reset}\n`);
       history.push({ role: 'assistant', content: result.content });
+      done = true;
       return;
     }
 
     layout.contentWrite(
       `  ${ui.yellow}●${ui.reset} ${ui.yellow}达到最大步数(${MAX_STEPS}),本轮停止。${ui.reset}\n`
     );
+    done = true;
   } finally {
     spinner.stop();
+    // 跑完(正常 / 达上限)在回复末尾打耗时摘要行(仿 Claude Code);中断 done=false 不打。
+    if (done) {
+      layout.contentWrite(
+        `  ${ui.dim}✻ Worked for ${fmtElapsed(Date.now() - t0)}${ui.reset}\n`
+      );
+    }
   }
 }

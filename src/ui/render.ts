@@ -45,6 +45,22 @@ export function displayWidth(str: string): number {
   return w;
 }
 
+/**
+ * 毫秒 → Claude Code 式耗时串:运行中状态行走时与轮次结束摘要行共用。
+ * <10s 显 1 位小数(3.2s);10-59s 整数(12s);≥60s m+s(3m 3s);≥1h h+m(1h 2m)。
+ */
+export function fmtElapsed(ms: number): string {
+  const s = ms / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  const rs = Math.round(s % 60);
+  if (m < 60) return `${m}m ${rs}s`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return `${h}h ${rm}m`;
+}
+
 /** 去除 SGR 颜色转义(\x1B[…m),用于度量带色串的真实可见宽度。 */
 export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, '');

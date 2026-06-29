@@ -4,6 +4,13 @@ import { ui } from './theme.js';
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /**
+ * 当前活跃 spinner:`start()` 的 TTY 路径登记,`stop()` 不清——供 `pauseCurrent()` 在介入面板
+ * (ask_human)进入前停转,避免 onFrame 的 `paintLiveAtCursor` 每 80ms 覆盖面板。同进程同时刻至多一个在转;
+ * 下次 `start()` 自动替换引用,无泄漏。非 TTY 路径不登记(无 onFrame,无需暂停)。
+ */
+let activeSpinner: Spinner | null = null;
+
+/**
  * 等待动画:在 await 长操作(chat / 工具执行 / 压缩)时旋转,避免「卡死」错觉。
  *
  * 两种渲染模式:
@@ -29,6 +36,7 @@ export class Spinner {
       stdout.write(`${ui.dim}${msg}…${ui.reset}\n`);
       return;
     }
+    activeSpinner = this; // TTY 路径:登记为当前可暂停 spinner(介入面板进入前 pauseCurrent 停转)
     if (this.onFrame) {
       const cb = this.onFrame;
       this.frame = 0;
@@ -64,5 +72,14 @@ export class Spinner {
     } else if (ui.isTTY) {
       stdout.write('\r\x1B[K');
     }
+  }
+
+  /**
+   * 暂停当前活跃 spinner(供 ask_human 介入面板进入前停转,避免 onFrame 覆盖面板)。
+   * 未转则 no-op(stop 内 `!this.timer` 守护);停转时 onFrame(msg,null) 触发 clearLiveAtCursor 清续写位帧。
+   * 不 resume——ask_human 的活儿就是面板本身,退出后 agent 的 spinner.stop() 是 no-op,下一轮 start 自然重启。
+   */
+  static pauseCurrent(): void {
+    activeSpinner?.stop();
   }
 }
