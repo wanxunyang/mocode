@@ -1,5 +1,34 @@
-import 'dotenv/config';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import dotenv from 'dotenv';
+
+/**
+ * 按优先级加载配置文件并回填 process.env:
+ *   候选(文件内升序、后者覆盖前者):~/.mocode/config(全局)→ <cwd>/.mocode/config → <cwd>/.env(兼容旧用法)。
+ *   合并后只回填 process.env 里**尚未设置**的键——shell 里 export 的环境变量永远优先。
+ * 故 `mocode` 可在任意目录 / 任意终端启动:全局配置(~/.mocode/config)兜底,项目级文件按需覆盖。
+ */
+function loadEnvFiles(): void {
+  const candidates = [
+    path.join(os.homedir(), '.mocode', 'config'),
+    path.join(process.cwd(), '.mocode', 'config'),
+    path.join(process.cwd(), '.env'),
+  ];
+  const fromFiles: Record<string, string> = {};
+  for (const p of candidates) {
+    try {
+      Object.assign(fromFiles, dotenv.parse(fs.readFileSync(p, 'utf8')));
+    } catch {
+      // 文件不存在或不可读:跳过
+    }
+  }
+  for (const [k, v] of Object.entries(fromFiles)) {
+    if (process.env[k] === undefined) process.env[k] = v;
+  }
+}
+
+loadEnvFiles();
 
 export interface Config {
   baseURL: string;
@@ -27,7 +56,7 @@ function requireEnv(key: string): string {
   const v = process.env[key];
   if (!v) {
     console.error(
-      `\n[config] 缺少环境变量 ${key}。请在 .env 中设置(参考 .env.example)。\n`
+      `\n[config] 缺少 ${key}。运行 \`mocode config\` 初始化,或在 ~/.mocode/config / <cwd>/.env 中设置(参考 .env.example)。\n`
     );
     process.exit(1);
   }

@@ -1,11 +1,24 @@
 {
-  "name": "mocode",
+  "name": "mocode-ai",
   "version": "0.1.0",
-  "private": true,
+  "description": "终端编码 agent:LLM + tool-call 循环 + 流式输出(含思考)+ 9 个工具,接任意 OpenAI 兼容后端。",
   "type": "module",
+  "bin": {
+    "mocode": "bin/mocode.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "dotenv": "^16.0.0",
@@ -16,5 +29,11 @@
     "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wanxunyang/mocode.git"
+  },
+  "author": "wxy",
+  "license": "MIT"
 }

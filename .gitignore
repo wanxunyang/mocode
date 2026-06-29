@@ -2,6 +2,9 @@ node_modules/
 .env
 *.log
 
+# 构建产物(npm publish 经 files 字段打包,不入库)
+dist/
+
 CLAUDE.md
 .codegraph/
 .trae/
