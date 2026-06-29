@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="./assets/banner.svg" alt="mocode" width="480">
-</p>
+<img src="./assets/banner.svg" alt="mocode">
 
 # mocode
 
