@@ -10,7 +10,7 @@ const MAX_CONTENT_CHARS = 800;
 export const webSearchTool: Tool = {
   name: 'web_search',
   description:
-    '联网搜索(AnySearch)。返回每条结果的标题/URL/摘要/正文,用于查模型训练数据之外的最新信息(新版本发布、新闻、实时数据、最新 API 文档等)。可选 tag 切换子域:general.general(默认通用网页)/ code.doc(开发文档,须配 params.library)/ code.snippet(代码片段)。',
+    '联网搜索(AnySearch)。返回每条结果的标题/URL/摘要/正文。可选 tag 切换子域(见 tag 参数)。',
   parameters: {
     type: 'object',
     properties: {

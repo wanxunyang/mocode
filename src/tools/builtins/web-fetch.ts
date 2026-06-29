@@ -9,7 +9,7 @@ const UA =
 export const webFetchTool: Tool = {
   name: 'web_fetch',
   description:
-    '抓取指定 URL 的网页内容并清洗成纯文本(去 HTML 标签/脚本/样式,保留正文)。用于读取搜索结果里的某个链接、或用户给出的具体 URL。注意:只能抓静态 HTML,JS 渲染的页面(正文靠脚本填充)可能拿不到内容——那种情况改用 web_search(其结果自带清洗后的 content)。',
+    '抓取指定 URL 的网页内容并清洗成纯文本(去 HTML 标签/脚本/样式,保留正文)。用于读取搜索结果里的某个链接、或用户给出的具体 URL。',
   parameters: {
     type: 'object',
     properties: {

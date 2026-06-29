@@ -7,7 +7,7 @@ import { getSkillBody } from '../../skills/index.js';
 export const useSkillTool: Tool = {
   name: 'use_skill',
   description:
-    '加载并返回某个 skill 的完整 SKILL.md 指令。系统提示里列出了可用 skill(name + 何时用的 description)。只在任务相关时调用本工具传 skill 的 name,拿到完整指令后据此行动;不要无脑批量加载。',
+    '加载并返回某个 skill 的完整 SKILL.md 指令(传 name)。何时用见系统提示的 skill 列表。',
   parameters: {
     type: 'object',
     properties: {

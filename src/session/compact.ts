@@ -256,7 +256,12 @@ export async function compactHistory(
     return noop;
   }
 
-  // 第一层:微压缩——旧区 tool 结果原地截短(保 tool_call_id,无 LLM 调用)
+  // 第一层:微压缩——旧区原地截短(保 tool_call_id,无 LLM 调用)
+  // 覆盖三类大字段,均只裁模型/工具产物,不动 user 原话与 system(摘要):
+  //   ① tool 结果 content;
+  //   ② 旧 assistant 的 tool_calls.arguments —— 保 JSON 合法:整体超长才进,
+  //     逐字段值裁中截后重新 stringify(不裸中截会劈断 JSON、严格后端 400);parse 失败跳过;
+  //   ③ 旧 assistant 正文 content(模型长解释,回看价值低)。
   let microcompactDone = false;
   for (const g of oldGroups) {
     for (const t of g.tools) {
@@ -264,6 +269,36 @@ export async function compactHistory(
       if (typeof c === 'string' && c.length > MAX_OLD_TOOL_STUB) {
         (t as any).content = truncateMid(c, MAX_OLD_TOOL_STUB);
         microcompactDone = true;
+      }
+    }
+    const as = g.assistant as any;
+    if (as && as.role === 'assistant') {
+      // ③ 旧正文 content
+      if (typeof as.content === 'string' && as.content.length > MAX_OLD_TOOL_STUB) {
+        as.content = truncateMid(as.content, MAX_OLD_TOOL_STUB);
+        microcompactDone = true;
+      }
+      // ② tool_calls 参数:整体超长才进,逐字段裁值,保 JSON 合法
+      if (Array.isArray(as.tool_calls)) {
+        for (const tc of as.tool_calls) {
+          const args = tc?.function?.arguments;
+          if (typeof args !== 'string' || args.length <= MAX_OLD_TOOL_STUB) continue;
+          try {
+            const parsed = JSON.parse(args);
+            if (parsed && typeof parsed === 'object') {
+              for (const k of Object.keys(parsed)) {
+                const v = parsed[k];
+                if (typeof v === 'string' && v.length > MAX_OLD_TOOL_STUB) {
+                  parsed[k] = truncateMid(v, MAX_OLD_TOOL_STUB);
+                }
+              }
+              tc.function.arguments = JSON.stringify(parsed);
+              microcompactDone = true;
+            }
+          } catch {
+            // arguments 非合法 JSON(模型偶发):不裁,沿用「调度器永不抛错」
+          }
+        }
       }
     }
   }
