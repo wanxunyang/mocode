@@ -49,7 +49,9 @@ export async function runAgent(
   history: ChatMessage[],
   userInput: string,
   collapsedThinkings: string[] = [],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** 每步 chat() 返回后回调:repl 据此重算并重画状态行 context 用量条(运行中实时刷新,不冻结在轮首)。 */
+  onContextUpdate?: () => void
 ): Promise<void> {
   // 中断回滚快照:入口(本 turn push 任何消息前)整段浅拷贝。abort 时 length=0;push(...saved) 还原。
   // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
@@ -158,6 +160,8 @@ export async function runAgent(
       }
       contextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
       spinner.stop();
+      // lastUsage 已更新:触发状态行 context 用量条重算+重画,运行中不再冻结在轮首。
+      onContextUpdate?.();
 
       if (result.toolCalls.length > 0) {
         // 思考后直接进入 tool_call(无 text):先把可见的思考段折叠

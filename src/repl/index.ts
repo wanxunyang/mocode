@@ -572,7 +572,12 @@ export async function startRepl(
 
     try {
       const signal = startRunningListener(placeholder);
-      await runAgent(history, joined, collapsedThinkings, signal);
+      // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
+      // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
+      await runAgent(history, joined, collapsedThinkings, signal, () => {
+        refreshStatusBase(history);
+        layout.drawStatusBar();
+      });
       // 成功轮次自动落盘(崩溃也保住上一轮);新会话首轮分配 id
       if (!currentSessionId) currentSessionId = newSessionId();
       try {
