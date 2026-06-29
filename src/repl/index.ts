@@ -116,7 +116,9 @@ function runningStateFor(
     case '/clear':
       return { status: '清空', placeholder: '…' };
     default:
-      return { status: '处理', placeholder: '思考中… Ctrl+C 中断' };
+      // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由状态行 spinner 承载,
+      // 不再把「思考中… Ctrl+C 中断」塞进输入框占位——避免看起来像已有输入、妨碍正常输入。
+      return { status: '处理', placeholder: '' };
   }
 }
 
