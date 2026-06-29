@@ -1,4 +1,5 @@
 import { exitAltScreen } from './ui/layout.js';
+import { checkAndMaybeUpdate } from './updater/index.js';
 
 // 终端恢复兜底:任一退出 / 中断 / 未捕获异常路径都要恢复 alt screen,避免残留备用屏 + 滚动区域。
 // exitAltScreen 幂等(未激活时空操作),故全局注册安全——进 alt screen 前的路径(如 --resume 列表、缺环境变量、`mocode config`)调用它无副作用。
@@ -64,11 +65,13 @@ async function main(): Promise<void> {
       console.error(`[session] 找不到会话 ${id}(用 --resume 查看列表)`);
       process.exit(1);
     }
+    const updateNotice = checkAndMaybeUpdate();
     const { startRepl } = await import('./repl/index.js');
-    await startRepl(loaded.history, loaded.id);
+    await startRepl(loaded.history, loaded.id, updateNotice);
   } else {
+    const updateNotice = checkAndMaybeUpdate();
     const { startRepl } = await import('./repl/index.js');
-    await startRepl();
+    await startRepl(undefined, undefined, updateNotice);
   }
   process.exit(0);
 }

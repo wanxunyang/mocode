@@ -157,7 +157,7 @@ const LOGO_PAD = ' '.repeat(LOGO_W + LOGO_GAP); // 无 logo 行的缩进(对齐�
 
 // 坐着的小人:[●ᴗ●] 头 / |　| 身 / ╲|　|╱ 双手外撑 / |　| 身 / ＯＯ 脚
 const LOGO_LINES = [
-  '  [●ᴗ●]  ',
+  '  [◕ᴗ◕]  ',
   ' ●|   |●  ',
   '  ＯＯ   ',
 ];

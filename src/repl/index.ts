@@ -299,7 +299,8 @@ export function renderHistory(history: ChatMessage[]): void {
  */
 export async function startRepl(
   initialHistory?: ChatMessage[],
-  sessionId?: string
+  sessionId?: string,
+  updateNotice: string | null = null
 ): Promise<void> {
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
   // 否则新会话只塞 system 提示。
@@ -341,6 +342,10 @@ export async function startRepl(
     renderHistory(history);
   } else {
     layout.contentWrite(bannerString(banner()));
+  }
+  if (updateNotice) {
+    // 自更新提示:开场静态段(进 INPUT 态前),dim 一行,不与流式 / 输入争用。
+    layout.contentWrite(`  ${ui.gray}↳ ${updateNotice}${ui.reset}\n`);
   }
 
   /**
