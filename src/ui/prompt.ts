@@ -28,6 +28,39 @@ interface KeypressEmitter {
   ): this;
 }
 
+// ── 粘贴检测(块级 + 时间窗)──
+// 块级:多字节大块(len>8)或含 CR/LF 的小块 = 粘贴(键盘单键 1 字节,Enter=\r 单字节)。
+// 时间窗:每块重置 50ms 计时器,静默 50ms 即"粘贴结束"→ onPasteEnd。跨多块的大粘贴(块间 <50ms)累积进
+// 同一个 pasteParts、末尾一次性落 chip——避免"首块成 chip、后续块泄成文本"。粘贴中 onKey 把键累积进
+// pasteParts(不编辑 lines)。不启用 bracketed paste——emitKeypressEvents 会把 \x1B[200~ 标记当按键砸进输入框。
+let pasting = false;
+let pasteParts: string[] = [];
+let pasteTimer: NodeJS.Timeout | null = null;
+let onPasteEnd: (() => void) | null = null; // 粘贴结束回调(prompt 注入:落 chip 或保留为文本)
+let pasteDetectorInstalled = false;
+function ensurePasteDetector(): void {
+  if (pasteDetectorInstalled) return;
+  pasteDetectorInstalled = true;
+  stdin.on('data', (chunk: Buffer | string) => {
+    const len = chunk.length;
+    const hasNL =
+      typeof chunk === 'string'
+        ? chunk.indexOf('\r') >= 0 || chunk.indexOf('\n') >= 0
+        : chunk.indexOf(0x0d) >= 0 || chunk.indexOf(0x0a) >= 0;
+    // 大块(>8 字节)或含换行的多字节块 = 粘贴;键盘单键(1 字节,含 Enter=\r)不触发
+    if (!(len > 8 || (len > 1 && hasNL))) return;
+    pasting = true;
+    if (pasteTimer) clearTimeout(pasteTimer);
+    const t = setTimeout(() => {
+      pasteTimer = null;
+      pasting = false;
+      onPasteEnd?.();
+    }, 50);
+    t.unref();
+    pasteTimer = t;
+  });
+}
+
 /** 非 TTY / 未进 alt screen 时退化为普通 readline 行输入(无菜单、单行)。 */
 function questionFallback(prompt: string): Promise<string> {
   return new Promise<string>((res, rej) => {
@@ -68,6 +101,8 @@ export async function promptWithSlashMenu(
       : [''];
   let cl = lines.length - 1; // 光标行(0-based)= 末行
   let cc = lines[cl].length; // 光标在该行的字符索引 = 末行末尾
+  let justSawCR = false; // \r\n 合一:粘贴的 \r 折行后,紧跟的 \n 吞掉(避免折两行)
+  let chip: string | null = null; // 原子粘贴块:整段封进 [预览…],不可编辑;提交时拼回全文
   let menuOpen = false;
   let selected = 0;
   let filtered: SlashCommand[] = [];
@@ -94,6 +129,55 @@ export async function promptWithSlashMenu(
     return displayWidth(lines[cl].slice(0, cc));
   }
 
+  /** chip 预览前缀:整段扁平化(行界→空格,避免框内折行)取前 ~20 列,超长 truncateDisplay 自带 …;末尾空格与 suffix 分隔。 */
+  function chipPrefix(): string {
+    return chip ? `[${truncateDisplay(chip.split('\n').join(' '), 20)}] ` : '';
+  }
+  /** 供 layout 画的行:chip 存在时把前缀拼到第 0 行前(chip 原子显示,不可编辑;光标活在 suffix)。 */
+  function dispLines(): string[] {
+    if (!chip) return lines;
+    const pre = chipPrefix();
+    return lines.length > 0 ? [pre + lines[0], ...lines.slice(1)] : [pre];
+  }
+  /** 供 layout 定位光标列:chip 在第 0 行时偏移 chipPrefix 宽度(suffix 光标始终在 chip 之后)。 */
+  function dispCursorCol(): number {
+    return chip && cl === 0 ? displayWidth(chipPrefix()) + cursorCol() : cursorCol();
+  }
+  /** 在光标处插入文本(含换行则拆行)。供短粘贴 finalize 落为可编辑文本。 */
+  function insertText(text: string): void {
+    const parts = text.split('\n');
+    const before = lines[cl].slice(0, cc);
+    const after = lines[cl].slice(cc);
+    const newLines: string[] = [before + parts[0]];
+    for (let i = 1; i < parts.length; i++) newLines.push(parts[i]);
+    newLines[newLines.length - 1] += after;
+    lines.splice(cl, 1, ...newLines);
+    cl = cl + parts.length - 1;
+    cc = parts[parts.length - 1].length;
+  }
+  /** 粘贴结束:长粘贴(>8 行或 >400 字符)落/并进 chip(原子,整段封预览),短粘贴落为可编辑文本。 */
+  function finalizePaste(): void {
+    if (resolved) {
+      pasteParts = [];
+      return;
+    }
+    const buf = pasteParts.join('');
+    pasteParts = [];
+    justSawCR = false;
+    if (!buf) return;
+    const isLong = buf.split('\n').length > 8 || buf.length > 400;
+    if (isLong) {
+      chip = chip == null ? buf : chip + '\n' + buf; // 多块粘贴:并进同一 chip
+      lines = [''];
+      cl = 0;
+      cc = 0;
+    } else {
+      insertText(buf);
+    }
+    computeFiltered();
+    redraw();
+  }
+
   function computeFiltered(): void {
     if (cl === 0 && lines[0].startsWith('/')) {
       filtered = opts.commands.filter((c) => c.name.startsWith(lines[0]));
@@ -108,9 +192,9 @@ export async function promptWithSlashMenu(
   function redraw(): void {
     layout.paintInput({
       prompt: opts.prompt,
-      lines,
+      lines: dispLines(),
       cursorLine: cl,
-      cursorCol: cursorCol(),
+      cursorCol: dispCursorCol(),
       menu: menuLines().length ? { lines: menuLines() } : null,
     });
   }
@@ -122,6 +206,13 @@ export async function promptWithSlashMenu(
       // 忽略
     }
     emitter.removeListener('keypress', onKey);
+    if (pasteTimer) {
+      clearTimeout(pasteTimer);
+      pasteTimer = null;
+    }
+    pasting = false;
+    pasteParts = [];
+    onPasteEnd = null;
     stdin.pause();
   }
 
@@ -132,14 +223,16 @@ export async function promptWithSlashMenu(
     resolve(value);
   }
 
-  /** 提交:菜单打开时先补全选中项到第 0 行。 */
+  /** 提交:菜单打开时先补全选中项到第 0 行。chip 与 suffix 拼回全文(chip 在前,换行接 suffix)。 */
   function submit(): void {
     if (menuOpen && filtered[selected]) {
       lines = [filtered[selected].name];
       cl = 0;
       cc = lines[0].length;
     }
-    finish(lines);
+    const suffix = lines.join('\n');
+    const content = chip ? (suffix.length > 0 ? chip + '\n' + suffix : chip) : suffix;
+    finish(content === '' ? [''] : content.split('\n'));
   }
 
   /** 插换行:在光标处断行。 */
@@ -155,6 +248,29 @@ export async function promptWithSlashMenu(
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+
+    // 粘贴中:把键累积进 pasteParts(换行 \r\n 合一),不编辑 lines;末尾 finalizePaste 统一落 chip/文本
+    if (pasting) {
+      if (key.ctrl && key.name === 'c') {
+        cleanup();
+        reject(new Error('SIGINT'));
+        return;
+      }
+      const s = key.sequence ?? '';
+      const isReturn = key.name === 'return' || key.name === 'enter';
+      if (s === '\n' && justSawCR) {
+        justSawCR = false; // \r\n 的 \n:已随 \r 折行,吞掉
+        return;
+      }
+      if (isReturn || s === '\r' || s === '\n') {
+        justSawCR = s === '\r'; // \r 标记,待可能的尾随 \n
+        pasteParts.push('\n');
+        return;
+      }
+      justSawCR = false;
+      if (s && s >= ' ' && !key.ctrl && !key.meta) pasteParts.push(s);
+      return;
+    }
 
     // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,Ctrl+↑↓ 与 plain ↑/↓ 单行。
     // plain ↑/↓ 仅在单行输入且菜单关闭时作滚动(多行编辑留给光标移动,菜单打开留给选项);
@@ -205,19 +321,20 @@ export async function promptWithSlashMenu(
     }
 
     const isReturn = key.name === 'return' || key.name === 'enter';
-    // 换行:Ctrl+J / Alt+Enter(meta)/ Shift+Enter(终端区分时)/ 粘贴的 LF
+
+    // 换行:Ctrl+J / Alt+Enter(meta)/ Shift+Enter(终端区分时)/ lone LF
+    // (粘贴的 CR/LF 已在上方 pasting 分支累积进 pasteParts,不会到此)
     const wantNewline =
       (key.ctrl && key.name === 'j') ||
       (key.meta && isReturn) ||
       (key.shift && isReturn) ||
       (key.sequence === '\n' && !key.ctrl);
 
-    // 换行(Ctrl+J / Alt+Enter / Shift+Enter / 粘贴 LF)
     if (wantNewline) {
       insertNewline();
       return;
     }
-    // 提交(plain Enter)
+    // 提交(键盘 plain Enter)
     if (isReturn && !key.shift && !key.meta && !key.ctrl) {
       submit();
       return;
@@ -237,6 +354,11 @@ export async function promptWithSlashMenu(
           lines[cl - 1] = lines[cl - 1] + cur;
           lines.splice(cl, 1);
           cl--;
+          computeFiltered();
+          redraw();
+        } else if (chip) {
+          // 光标在 suffix 开头(紧贴 ] 后):退格删整个 chip(原子)
+          chip = null;
           computeFiltered();
           redraw();
         }
@@ -318,6 +440,8 @@ export async function promptWithSlashMenu(
   return new Promise<string[] | null>((res, rej) => {
     resolve = res;
     reject = rej;
+    ensurePasteDetector(); // 首次调用在 emitKeypressEvents 之前装 data 监听器(保序:mine 先于 解析器)
+    onPasteEnd = finalizePaste; // 粘贴结束回调:落 chip 或保留文本
     readline.emitKeypressEvents(stdin);
     let rawOk = true;
     try {
@@ -438,6 +562,7 @@ export async function promptTurnPicker(
   return new Promise<number | null>((res, rej) => {
     resolve = res;
     reject = rej;
+    ensurePasteDetector();
     readline.emitKeypressEvents(stdin);
     let rawOk = true;
     try {

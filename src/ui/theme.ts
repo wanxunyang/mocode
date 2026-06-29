@@ -21,4 +21,6 @@ export const ui = {
   magenta: wrap('\x1B[35m'),
   brightCyan: wrap('\x1B[96m'),
   brightMagenta: wrap('\x1B[95m'),
+  /** 用户消息满宽背景色(上滑时易辨认);bright black bg = 深灰,深色终端上微妙可辨。 */
+  userBg: wrap('\x1B[100m'),
 };

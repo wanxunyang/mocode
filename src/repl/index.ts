@@ -4,7 +4,7 @@ import { stdin, stdout } from 'node:process';
 import { config } from '../config/index.js';
 import { runAgent } from '../agent/index.js';
 import { ui } from '../ui/theme.js';
-import { bannerString, displayWidth, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
+import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import { promptWithSlashMenu, promptTurnPicker } from '../ui/prompt.js';
 import { tools } from '../tools/registry.js';
@@ -210,14 +210,32 @@ function stopRunningListener(): void {
   currentAbort = null;
 }
 
+/**
+ * 把用户消息格式化为带满宽背景色的文本(上滑时易辨认用户消息)。
+ * 每行用 padEndDisplay 填充到终端宽度(含 ❯ / 缩进),背景色 SGR 包裹整行 + 行末 reset。
+ * 满宽 pad 使终端背景色覆盖整行(含行尾空单元格),上滑滚动时用户消息呈连续色块、与 assistant 正文区分。
+ */
+function formatUserMessage(lines: string[]): string {
+  const cols = layout.getGeo().cols;
+  const promptW = displayWidth(PROMPT);
+  const indent = ' '.repeat(promptW);
+  const { userBg, reset } = ui;
+  return (
+    lines
+      .map((l, i) => {
+        const prefix = i === 0 ? PROMPT : indent;
+        const full = prefix + l;
+        const padded = padEndDisplay(full, cols);
+        return `${userBg}${padded}${reset}`;
+      })
+      .join('\n') + '\n'
+  );
+}
+
 /** 把多行提交输入回显进内容区(❯ 首行,续行按 prompt 宽度缩进)。仅 TUI 态回显(非 TTY 由 readline 自带回显)。 */
 function echoInput(lines: string[]): void {
   if (!layout.isActive()) return;
-  const indent = ' '.repeat(displayWidth(PROMPT));
-  const echo =
-    lines.map((l, i) => (i === 0 ? `${PROMPT}${l}` : `${indent}${l}`)).join('\n') +
-    '\n';
-  layout.contentWrite(echo);
+  layout.contentWrite(formatUserMessage(lines));
 }
 
 /** 把任意消息 content 拍平成字符串(OpenAI 可能 string / null / 多模态数组)。 */
@@ -241,17 +259,12 @@ function textOf(c: unknown): string {
  * 内容长于屏时 viewport 显尾(最近轮次),PgUp 可看更早——与流式态一致。
  */
 export function renderHistory(history: ChatMessage[]): void {
-  const indent = ' '.repeat(displayWidth(PROMPT));
   const idToName = new Map<string, string>();
   for (const m of history) {
     if (m.role === 'system') continue;
     if (m.role === 'user') {
       const lines = textOf((m as { content?: unknown }).content).split('\n');
-      layout.contentWrite(
-        lines
-          .map((l, i) => (i === 0 ? `${PROMPT}${l}` : `${indent}${l}`))
-          .join('\n') + '\n'
-      );
+      layout.contentWrite(formatUserMessage(lines));
       continue;
     }
     if (m.role === 'assistant') {

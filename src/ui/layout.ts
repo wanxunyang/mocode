@@ -418,6 +418,7 @@ export function setStatusBase(b: {
  * 光标可视位置按各行**实际**显示宽度逐行累加(不按 width×行号 除法):宽字符(CJK=2)在行尾放不下时
  * 整字折到下行、本行留尾空格,简单除法会把光标算偏;逐行累加 displayWidth 才与终端实际光标一致。
  */
+
 function windowInputVis(
   lines: string[],
   cursorLine: number,
