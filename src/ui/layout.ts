@@ -384,6 +384,22 @@ export function setStatus(status: string, frame?: string): void {
   drawStatusBar();
 }
 
+/**
+ * 在续写位画一行瞬时活动文本(spinner 帧):不进缓冲、不推进续写位,逐行 clearLine 重画。
+ * 仅 TTY + offset=0(实时尾)时物理写屏;滚动态跳过(由状态行 spinner 兜底,且避免覆盖 viewport 历史行)。
+ * 配合 clearLiveAtCursor 在 spinner 停时清掉,随后 contentWrite 的结果即写在该行(spinner 不入历史缓冲)。
+ */
+export function paintLiveAtCursor(text: string): void {
+  if (!active || !ui.isTTY || scrollOffset !== 0) return;
+  stdout.write(cup(contentRow, contentCol) + esc.clearLine + text);
+}
+
+/** 清掉续写位那行瞬时活动文本(配合 paintLiveAtCursor)。 */
+export function clearLiveAtCursor(): void {
+  if (!active || !ui.isTTY || scrollOffset !== 0) return;
+  stdout.write(cup(contentRow, contentCol) + esc.clearLine);
+}
+
 /** 更新状态行基线(模型 / context / cwd)。repl 在轮次边界调。 */
 export function setStatusBase(b: {
   model: string;

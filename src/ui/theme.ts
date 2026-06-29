@@ -15,6 +15,7 @@ export const ui = {
   red: wrap('\x1B[31m'),
   green: wrap('\x1B[32m'),
   yellow: wrap('\x1B[33m'),
+  blue: wrap('\x1B[34m'),
   cyan: wrap('\x1B[36m'),
   gray: wrap('\x1B[90m'),
   magenta: wrap('\x1B[35m'),

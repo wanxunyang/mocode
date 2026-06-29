@@ -150,6 +150,36 @@ ok('滚动态 eraseSegmentBack 返回 0(未物理擦)', erasedScrolled === 0);
 layout.scrollBy(-9);
 ok('滚动态折叠后回尾不含思考原文(缓冲已删)', !out().includes('思考原文'));
 
+// 5e. paintLiveAtCursor / clearLiveAtCursor(内联 spinner:不进缓冲、滚动态 no-op、停后结果写在该行)
+layout.clearContent();
+layout.contentWrite('  ● edit_file src/foo.ts\n'); // row1,续写位 row2 col1
+const rowsBefore = content.totalRows();
+reset();
+layout.paintLiveAtCursor('  ⠙ 执行 edit_file…');
+ok('paintLiveAtCursor CUP 续写位 [2;1H]', has(/\x1b\[2;1H/));
+ok('paintLiveAtCursor 逐行 clearLine \\x1B[2K', has(/\x1b\[2K/));
+ok('paintLiveAtCursor 含帧文本', out().includes('⠙'));
+ok('paintLiveAtCursor 不进缓冲(totalRows 不变)', content.totalRows() === rowsBefore);
+reset();
+layout.clearLiveAtCursor();
+ok('clearLiveAtCursor CUP + clearLine', has(/\x1b\[2;1H/) && has(/\x1b\[2K/));
+ok('clearLiveAtCursor 不进缓冲(totalRows 不变)', content.totalRows() === rowsBefore);
+// 停后 contentWrite 结果落在该行(spinner 不入历史缓冲)
+reset();
+layout.contentWrite('Update(src/foo.ts)\n');
+ok('clear 后 contentWrite 写续写位 [2;1H 且含结果', has(/\x1b\[2;1H/) && out().includes('Update(src/foo.ts)'));
+ok('结果入缓冲(spinner 仍不入)', content.totalRows() === rowsBefore + 1);
+// 滚动态:paintLiveAtCursor no-op(不写屏,改由状态行兜底)
+layout.clearContent();
+let liveFiller = '';
+for (let i = 0; i < 30; i++) liveFiller += `line${i}\n`;
+layout.contentWrite(liveFiller); // 30 行 > contentBottom22 → 可滚动
+layout.scrollBy(+1000); // 滚到顶(offset>0)
+reset();
+layout.paintLiveAtCursor('  ⠙ should not paint when scrolled');
+ok('paintLiveAtCursor 滚动态 no-op(不写屏)', out() === '');
+layout.scrollBy(-1000); // 回尾
+
 // 6. setRegion 撑高底栏钳续写位
 layout.clearContent();
 // 把内容填到 contentBottom=22

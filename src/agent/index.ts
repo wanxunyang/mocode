@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   chat,
   type ChatMessage,
@@ -11,6 +13,7 @@ import {
   summarizeToolResult,
   truncateDisplay,
 } from '../ui/render.js';
+import { renderFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
 import { beginTurn } from '../rollback/index.js';
 import {
@@ -20,6 +23,15 @@ import {
 } from '../session/index.js';
 
 const MAX_STEPS = 25; // 防止无限循环
+
+/** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
+function parseArgs(raw: string): Record<string, unknown> | null {
+  try {
+    return raw.trim() ? (JSON.parse(raw) as Record<string, unknown>) : {};
+  } catch {
+    return null;
+  }
+}
 
 /**
  * agent 核心循环:
@@ -46,9 +58,18 @@ export async function runAgent(
   // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
   beginTurn(truncateDisplay(userInput.split('\n')[0] ?? '', 40));
   layout.contentMode(); // 防御性:确保光标在内容续写位(enterRunningMode 已置,这里兜底)
-  const spinner = new Spinner((msg, frame) =>
-    layout.setStatus(msg, frame ?? undefined)
-  );
+  // spinner:状态行 + 续写位内联转圈(思考中 / 执行 工具时,内容区不再「干等」)。
+  // 内联帧不进缓冲、停时清掉,随后结果即写在该行——故 spinner 不入历史、PgUp 看不到。
+  const spinner = new Spinner((msg, frame) => {
+    layout.setStatus(msg, frame ?? undefined);
+    if (frame) {
+      layout.paintLiveAtCursor(
+        `  ${ui.brightMagenta}${frame}${ui.reset} ${ui.dim}${msg}…${ui.reset}`
+      );
+    } else {
+      layout.clearLiveAtCursor();
+    }
+  });
   // 本轮流式状态:区分「思考」与「正文」,首个 token 到达即停 spinner。
   let mode: 'idle' | 'thinking' | 'text' = 'idle';
   let gotText = false;
@@ -90,11 +111,21 @@ export async function runAgent(
 
   const onText = (s: string) => {
     flushThinkCollapsed(); // 思考→正文过渡时折叠
-    if (mode === 'idle') spinner.stop();
+    spinner.stop(); // 任何正文 token 都停 spinner(首 token 停「思考中」;onToolCall 重启后若又来文本则停「生成中」)。未旋转时 stop 为 no-op。
     mode = 'text';
     gotText = true;
     layout.contentWrite(s);
     if (s) lastChar = s[s.length - 1];
+  };
+
+  const onToolCall = (name: string) => {
+    // 文本/思考已流完,模型转而生成 tool_call 参数(可能很长,如 write_file 整篇内容):
+    // 补换行(让随后的 ● 行与 diff 不黏在正文末尾)+ 启「生成中」内联 spinner,内容区不再干等。
+    if (lastChar && lastChar !== '\n') {
+      layout.contentWrite('\n');
+      lastChar = '\n';
+    }
+    if (name) spinner.start(`生成 ${name}…`);
   };
 
   try {
@@ -107,7 +138,7 @@ export async function runAgent(
       lastChar = '';
       let result: ChatResult;
       try {
-        result = await chat(history, { onText, onThinking }, signal);
+        result = await chat(history, { onText, onThinking, onToolCall }, signal);
       } catch (e) {
         // 中断(用户运行中 Ctrl+C):停 spinner、补换行、提示、history 还原到本 turn 前、return(不抛)。
         // abort 只在 await chat() 期生效;tool 执行不可中断,故不会留下未配对的 tool_call_id。
@@ -131,6 +162,8 @@ export async function runAgent(
       if (result.toolCalls.length > 0) {
         // 思考后直接进入 tool_call(无 text):先把可见的思考段折叠
         flushThinkCollapsed();
+        // 流式正文末尾补换行(若 onToolCall 已补则 lastChar='\n',此处 no-op);防 ● 行黏在正文行尾
+        if (mode !== 'idle' && lastChar !== '\n') layout.contentWrite('\n');
         // 带工具调用的 assistant 消息原样回灌(OpenAI 格式要求)
         history.push({
           role: 'assistant',
@@ -147,12 +180,59 @@ export async function runAgent(
           layout.contentWrite(
             `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}${tc.name}${ui.reset}  ${ui.dim}${summary}${ui.reset}\n`
           );
+          const isMutation = tc.name === 'edit_file' || tc.name === 'write_file';
+          const parsed = isMutation ? parseArgs(tc.arguments) : null;
+          // write_file 覆盖场景:执行前读旧内容供 diff(不存在→null=新建)。
+          // edit_file:执行前读文件定位 old_string 起始行,供 diff 显示真实文件行号。
+          // 两者皆失败不阻断(读不到则 diff 退化为相对行号 / 不渲染)。
+          let preWriteOld: string | null = null;
+          let editStartLine = 1;
+          if (parsed) {
+            const p = String(parsed.path ?? '');
+            if (p) {
+              if (tc.name === 'write_file') {
+                try {
+                  preWriteOld = readFileSync(resolve(p), 'utf8');
+                } catch {
+                  preWriteOld = null; // 文件不存在(新建)或不可读
+                }
+              } else if (tc.name === 'edit_file') {
+                const oldStr = String(parsed.old_string ?? '');
+                try {
+                  const data = readFileSync(resolve(p), 'utf8');
+                  const idx = oldStr ? data.indexOf(oldStr) : -1;
+                  if (idx >= 0) editStartLine = data.slice(0, idx).split('\n').length;
+                } catch {
+                  // 读不到:startLine 保持 1(diff 退化为相对行号)
+                }
+              }
+            }
+          }
           spinner.start(`执行 ${tc.name}`);
           const output = await executeTool(tc.name, tc.arguments);
           spinner.stop();
-          const preview = summarizeToolResult(tc.name, output);
-          if (preview) {
-            layout.contentWrite(`  ${ui.gray}↳ ${preview}${ui.reset}\n`);
+          // edit_file / write_file 成功:渲染 diff 块(行号 + 语法高亮,仿 Claude Code);其余工具走一行 preview。
+          if (isMutation && parsed && !output.startsWith('错误')) {
+            layout.contentWrite(
+              renderFileChange({
+                path: String(parsed.path ?? ''),
+                kind: tc.name === 'edit_file' ? 'edit' : 'write',
+                oldStr:
+                  tc.name === 'edit_file'
+                    ? String(parsed.old_string ?? '')
+                    : preWriteOld,
+                newStr: String(
+                  (tc.name === 'edit_file' ? parsed.new_string : parsed.content) ??
+                    '',
+                ),
+                startLine: tc.name === 'edit_file' ? editStartLine : 1,
+              }),
+            );
+          } else {
+            const preview = summarizeToolResult(tc.name, output);
+            if (preview) {
+              layout.contentWrite(`  ${ui.gray}↳ ${preview}${ui.reset}\n`);
+            }
           }
           history.push({
             role: 'tool',

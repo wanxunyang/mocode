@@ -41,10 +41,12 @@ export interface ChatResult {
   usage?: ChatUsage;
 }
 
-/** 流式回调:文本增量 / 思考增量(reasoning_content)。 */
+/** 流式回调:文本增量 / 思考增量(reasoning_content)/ 首个 tool_call 工具名。 */
 export interface StreamHandlers {
   onText?: (delta: string) => void;
   onThinking?: (delta: string) => void;
+  /** 首次得知某个 tool_call 的工具名时回调——模型开始生成工具调用参数(可能很长,如 write_file 大段内容),调用方可据此启「生成中」spinner,避免内容区干等。 */
+  onToolCall?: (name: string) => void;
 }
 
 /**
@@ -112,7 +114,11 @@ export async function chat(
           toolAcc.set(idx, entry);
         }
         if (tc.id) entry.id = tc.id;
-        if (tc.function?.name) entry.name += tc.function.name;
+        const fname = tc.function?.name;
+        if (fname) {
+          if (!entry.name) handlers.onToolCall?.(fname); // 首次得知工具名:通知调用方启生成中 spinner
+          entry.name += fname;
+        }
         if (tc.function?.arguments) entry.arguments += tc.function.arguments;
       }
     }

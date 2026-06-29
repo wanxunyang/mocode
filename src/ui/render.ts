@@ -1,5 +1,8 @@
 import { stdout } from 'node:process';
+import { createRequire } from 'node:module';
 import { ui } from './theme.js';
+
+const VERSION = createRequire(import.meta.url)('../../package.json').version as string;
 
 /**
  * 清空整屏 + 滚动缓冲(向上滚动可见的历史输出),光标归位。
@@ -58,6 +61,39 @@ export function padEndDisplay(str: string, width: number): string {
   return w >= width ? str : str + ' '.repeat(width - w);
 }
 
+/** 带色串按可见宽度右补空格(先剥离 ANSI 算真实宽度,空格补在串末,不破坏颜色码)。 */
+export function padEndAnsi(str: string, width: number): string {
+  const w = ansiDisplayWidth(str);
+  return w >= width ? str : str + ' '.repeat(width - w);
+}
+
+/** 带色串按可见宽度截断(保留中间 ANSI 码,超出末尾加 …,补 reset 防 … 继承颜色)。 */
+export function truncateAnsi(str: string, width: number): string {
+  if (ansiDisplayWidth(str) <= width) return str;
+  let w = 0;
+  let out = '';
+  let hasStyle = false;
+  // 按 ANSI 转义切分:偶数索引=文本,奇数索引=SGR 码
+  const parts = str.split(/(\x1b\[[0-9;]*m)/);
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) {
+      out += parts[i];
+      hasStyle = parts[i] !== '\x1b[0m';
+      continue;
+    }
+    for (const ch of parts[i]) {
+      const cw = charWidth(ch.codePointAt(0) ?? 0);
+      if (cw > 0 && w + cw + 1 > width) {
+        if (hasStyle) out += '\x1b[0m';
+        return out + '…';
+      }
+      if (cw > 0) w += cw;
+      out += ch;
+    }
+  }
+  return out;
+}
+
 /** 按显示宽度截断,超出加 …。 */
 export function truncateDisplay(str: string, width: number): string {
   if (displayWidth(str) <= width) return str;
@@ -111,41 +147,39 @@ export interface BannerInfo {
   tools: string;
 }
 
-const BOX_W = 76; // 内容区显示宽度(容下完整工具列表 + 命令提示)
+const BOX_W = 60; // 内容区显示宽度(logo 区 + 信息区)
 const MARGIN = '  '; // 盒外左缩进
 
-function boxBorder(left: string, mid: string, right: string): string {
-  return `${ui.gray}${left}${mid.repeat(BOX_W + 2)}${right}${ui.reset}`;
+// ── 坐姿 logo(乌龟风,加双手)──
+const LOGO_W = 11; // logo 区显示宽度
+const LOGO_GAP = 4; // logo 与信息区之间的间隔
+const LOGO_PAD = ' '.repeat(LOGO_W + LOGO_GAP); // 无 logo 行的缩进(对齐信息区)
+
+// 坐着的小人:[●ᴗ●] 头 / |　| 身 / ╲|　|╱ 双手外撑 / |　| 身 / ＯＯ 脚
+const LOGO_LINES = [
+  '  [●ᴗ●]  ',
+  ' ●|   |●  ',
+  '  ＯＯ   ',
+];
+
+/** 取第 idx 行 logo(着色 + 补宽);越界返空格(logo 下方行仍缩进对齐)。 */
+function logoLine(idx: number): string {
+  if (idx >= LOGO_LINES.length) return LOGO_PAD;
+  return `${ui.brightCyan}${padEndDisplay(LOGO_LINES[idx], LOGO_W)}${ui.reset}${' '.repeat(LOGO_GAP)}`;
 }
 
-function boxLine(content: string): string {
-  const inner = padEndDisplay(truncateDisplay(content, BOX_W), BOX_W);
-  return `${ui.gray}│${ui.reset} ${inner} ${ui.gray}│${ui.reset}`;
+function labelContent(label: string, value: string): string {
+  return `${ui.dim}${padEndDisplay(label, 6)}${ui.reset}${value}`;
 }
 
-function boxEmpty(): string {
-  return `${ui.gray}│${ui.reset} ${' '.repeat(BOX_W)} ${ui.gray}│${ui.reset}`;
-}
-
-function labelRow(label: string, value: string): string {
-  return boxLine(`${ui.dim}${padEndDisplay(label, 6)}${ui.reset}${value}`);
-}
-
-/** 横幅纯文本(带 ANSI 颜色,不写出)——供 TUI 经 contentWrite 写入内容区以跟踪续写位。 */
+/** 横幅纯文本(带 ANSI 颜色,不写出)——供 TUI 经 contentWrite 写入内容区以跟踪续写位。
+ *  无边框:左侧实心小熊 + 右侧标题/信息(模型/目录),末尾一行提示。 */
 export function bannerString(info: BannerInfo): string {
+  const title = `${ui.bold}${ui.brightCyan}◆  mocode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
   const rows = [
-    boxBorder('╭', '─', '╮'),
-    boxLine(
-      `${ui.bold}${ui.brightCyan}◆  mocode${ui.reset}  ${ui.dim}终端编码 agent${ui.reset}`
-    ),
-    boxEmpty(),
-    labelRow('模型', info.model),
-    labelRow('后端', info.baseURL),
-    labelRow('目录', info.cwd),
-    labelRow('工具', info.tools),
-    boxEmpty(),
-    boxLine(`${ui.dim}/exit 退出 · /clear 清空 · /compact 压缩 · /context 用量 · /resume 续接${ui.reset}`),
-    boxBorder('╰', '─', '╯'),
+    logoLine(0) + title,
+    logoLine(1) + labelContent('模型', info.model),
+    logoLine(2) + labelContent('目录', truncateDisplay(info.cwd, 48)),
   ];
   return (
     rows.map((r) => MARGIN + r).join('\n') +
@@ -154,7 +188,7 @@ export function bannerString(info: BannerInfo): string {
   );
 }
 
-/** 启动横幅:带边框的信息盒 + 一行提示。纯渲染,不依赖 config / 业务。 */
+/** 启动横幅:小熊 logo + 标题/信息 + 一行提示。纯渲染,不依赖 config / 业务。 */
 export function printBanner(info: BannerInfo): void {
   stdout.write(bannerString(info));
 }
