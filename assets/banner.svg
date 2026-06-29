@@ -1,0 +1,41 @@
+<svg width="640" height="160" viewBox="0 0 640 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="160" y2="160" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0d1b2a"/>
+      <stop offset="1" stop-color="#1b263b"/>
+    </linearGradient>
+    <linearGradient id="cyanGrad" x1="30" y1="60" x2="130" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2afadf"/>
+      <stop offset="1" stop-color="#42a5f5"/>
+    </linearGradient>
+    <linearGradient id="textGrad" x1="200" y1="40" x2="600" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2afadf"/>
+      <stop offset="1" stop-color="#42a5f5"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Terminal window icon -->
+  <rect x="16" y="24" width="128" height="112" rx="16" fill="url(#bgGrad)" stroke="#2afadf" stroke-opacity="0.3" stroke-width="1.5"/>
+  <circle cx="36" cy="42" r="4" fill="#ff5f57"/>
+  <circle cx="50" cy="42" r="4" fill="#febc2e"/>
+  <circle cx="64" cy="42" r="4" fill="#28c840"/>
+
+  <!-- Prompt + code brackets -->
+  <path d="M36 80 L54 90 L36 100" stroke="url(#cyanGrad)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#glow)"/>
+  <g filter="url(#glow)">
+    <path d="M72 76 L62 90 L72 104" stroke="#2afadf" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    <path d="M96 76 L106 90 L96 104" stroke="#42a5f5" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  </g>
+  <rect x="118" y="82" width="6" height="16" rx="1.5" fill="#2afadf" filter="url(#glow)"/>
+
+  <!-- Wordmark -->
+  <text x="168" y="100" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="64" font-weight="700" fill="url(#textGrad)" letter-spacing="-2">mocode</text>
+  <text x="172" y="128" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="400" fill="#5a6a80" letter-spacing="3">TERMINAL CODING AGENT</text>
+</svg>
