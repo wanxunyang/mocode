@@ -20,20 +20,42 @@
 
 ## 安装
 
+要求 Node.js ≥ 18。
+
 ```bash
-cd mocode
-npm install
+npm install -g mocode-ai
 ```
 
-> 依赖:`openai`、`dotenv`、`fast-glob`(运行时);`tsx`、`typescript`、`@types/node`(开发)。
+装完即得 `mocode` 命令。不想全局装也可免装直跑:`npx mocode-ai`。
+
+> mocode 启动时自动检测新版本,后台 `npm i -g mocode-ai@latest` 自更新——下次启动生效,零启动延迟、断网 / 失败静默。开发态 `npm start`(tsx 跑 `.ts`)不触发。
+
+### 从源码运行(开发 / 贡献)
+
+```bash
+git clone https://github.com/wanxunyang/mocode.git
+cd mocode
+npm install
+npm start
+```
+
+源码经 tsx 直接跑,无构建步骤。改完代码需重启 `npm start` 生效(tsx 启动时加载模块,不热更新)。依赖:`openai`、`dotenv`、`fast-glob`(运行时);`tsx`、`typescript`、`@types/node`(开发)。
 
 ## 配置
 
-复制 `.env.example` 为 `.env`,填三个必填项:
+首次使用运行配置向导,交互填三项(API 地址 / key / 模型名),写入 `~/.mocode/config`(全局,任意目录、任意终端生效):
 
 ```bash
-cp .env.example .env
+mocode config
 ```
+
+也可手写配置文件。mocode 按以下优先级加载(后者覆盖前者,仅回填未设置的环境变量;shell 里 `export` 的永远最优先):
+
+1. `~/.mocode/config` — 全局(`mocode config` 写此文件)
+2. `<cwd>/.mocode/config` — 项目级覆盖
+3. `<cwd>/.env` — 旧用法兼容(源码仓库内有 `.env.example` 可参考)
+
+必填三项:
 
 ```env
 LLM_BASE_URL=https://open.bigmodel.cn/api/v3   # 换成你的后端
@@ -62,6 +84,8 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 | `COMPACT_THRESHOLD` | 自动压缩触发阈值(占窗口比例) | `0.85` |
 | `LLM_STREAM_USAGE` | 流式请求带 `stream_options.include_usage` 拿真实用量 | `true` |
 | `AUTO_COMPACT` | 自动压缩总开关 | `true` |
+| `AUTO_REFLECT` | 后台反思 pass 总开关(定期从会话挖掘记忆) | `true` |
+| `REFLECT_EVERY_N` | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞) | `5` |
 | `ANYSEARCH_API_KEY` | 联网搜索 API key(不配走匿名免费额度) | 无 |
 | `ANYSEARCH_BASE_URL` | 搜索 API 端点 | `https://api.anysearch.com` |
 | `SKILLS_DIRS` | 覆盖默认 skill 扫描目录(平台分隔符) | 三目录自动扫描 |
@@ -69,14 +93,17 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 ## 运行
 
 ```bash
-npm start                          # 新会话
-npm start -- --resume              # 列出已保存会话
-npm start -- --resume <id>         # 续接指定会话
+mocode                          # 新会话(在目标项目目录里跑)
+mocode --resume                 # 列出已保存会话
+mocode --resume <id>            # 续接指定会话
+mocode config                   # 改配置
 ```
+
+从源码跑则用 `npm start`(等价于 `mocode`,但不触发自更新)。
 
 进入 REPL 后直接对话。启动即进全屏 TUI,显示横幅(模型 / 后端 / 工作目录 / 工具列表)。回复流式打印,思考段实时可见后折叠。
 
-agent 工作在**启动时所在的工作目录**——想让它操作某个项目,就 `cd` 到那个项目再 `npm start`。
+agent 工作在**启动时所在的工作目录**——想让它操作某个项目,就 `cd` 到那个项目再 `mocode`。
 
 ## 工具
 
