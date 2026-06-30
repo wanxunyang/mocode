@@ -1,7 +1,7 @@
 {
   "name": "mocode-ai",
   "version": "0.1.4",
-  "description": "终端编码 agent:LLM + tool-call 循环 + 流式输出(含思考)+ 9 个工具,接任意 OpenAI 兼容后端。",
+  "description": "终端编码 agent:LLM + tool-call 循环 + 流式输出(含思考)+ 16 个工具,接任意 OpenAI 兼容后端。",
   "type": "module",
   "bin": {
     "mocode": "bin/mocode.js"

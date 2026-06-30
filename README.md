@@ -10,7 +10,7 @@
 
 - **流式输出** — 回复边生成边显示,模型支持 reasoning 时思考过程实时可见,思考段自动折叠(不占屏),`/think N` 按需展开
 - **全屏 TUI** — 备用屏(alt screen)+ 固定底栏状态行 + 滚动回看(PgUp/PgDn),运行中可打字(typeahead),下一轮自动预填
-- **9 个内置工具** — 读 / 写 / 改文件、执行命令、glob 找路径、grep 搜内容、联网搜索、抓取网页、加载 skill
+- **16 个内置工具** — 读 / 写 / 改文件、执行命令、glob 找路径、grep 搜内容、codegraph 代码索引、联网搜索、抓取网页、加载 skill、询问用户、5 个跨会话记忆工具(存/搜/列/改/遗忘)
 - **会话持久化** — 每轮自动落盘,`--resume` / `/resume` 续接历史会话
 - **轮次回滚** — `/rollback` 菜单选轮次,删该轮及之后 + 逐个文件「保留/撤销」(快照恢复,不依赖 git)
 - **上下文工程** — 接近窗口上限时自动三层压缩,`/context` 实时显示 token 用量条,`/compact` 手动压缩(可带焦点)
@@ -115,9 +115,16 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `run_command` | 执行 shell 命令,合并 stdout+stderr,默认 120s 超时 |
 | `glob` | 按 glob 模式找文件(排除 node_modules/.git) |
 | `grep` | 内容正则搜索,纯 JS 实现,不依赖 `rg` |
+| `codegraph` | 已建 `.codegraph/` 索引时,查代码符号源码与调用链(比 read_file/grep 更准更省) |
 | `web_search` | 联网搜索(AnySearch),返回标题/URL/摘要/正文 |
 | `web_fetch` | 抓取指定 URL,HTML 清洗成纯文本 |
 | `use_skill` | 加载某 skill 的完整 SKILL.md 指令 |
+| `ask_human` | 决策点弹终端问答面板,用户选预设项或自由输入(阻塞至回应) |
+| `memory_save` | 存一条跨会话长期记忆(标题进索引,正文按需取) |
+| `memory_search` | 按关键词搜记忆正文,命中即提升召回计数(影响遗忘衰减) |
+| `memory_list` | 列记忆索引(id/标题/摘要,无正文) |
+| `memory_update` | 原地改一条记忆(id 不变;纠正过时事实 / 改摘要 / 改 pin) |
+| `memory_forget` | 遗忘记忆:默认归档(可复活),`mode=delete` 硬删(pinned 拒删) |
 
 ## 斜杠命令
 
@@ -164,17 +171,18 @@ skill 的 `description` 注入系统提示(渐进式披露第①层),模型只�
 src/
 ├── index.ts              # 入口:装配 + 启动 REPL + --resume 续接
 ├── repl/index.ts         # 全屏 TUI、斜杠命令、运行态交互、Ctrl+C 中断
-├── agent/index.ts        # tool-call 循环(调 LLM→执行工具→回灌→再调,≤25 步)
+├── agent/index.ts        # tool-call 循环(调 LLM→执行工具→回灌→再调,≤200 步)
 ├── llm/index.ts          # OpenAI 兼容客户端 + 工具格式转换 + chat() 流式
 ├── tools/                # types / constants / registry + builtins/(一工具一文件)
 │   └── builtins/         # read-file write-file edit-file run-command glob grep
-│                          # web-search web-fetch use-skill
-├── config/index.ts       # 读 .env、校验必填项、系统提示词
+│                          # codegraph web-search web-fetch use-skill ask-human memory-*
+├── config/index.ts       # 读配置、校验必填项、系统提示词
 ├── skills/               # discover(扫描)+ index(缓存/拼系统提示)
 ├── session/              # 落盘/续接 + compact(三层压缩)+ token 估算
+├── memory/               # MOCODE.md 加载 + 跨会话记忆存储 + 后台反思
 ├── rollback/             # 轮次快照 + /rollback 菜单 + 文件撤销
 ├── ui/                   # theme(颜色)render(横幅/摘要)layout(全屏布局)spinner prompt
-└── agents/ commands/ mcp/ memory/ permissions/   # 未来子系统(空骨架)
+└── agents/ commands/ mcp/ permissions/   # 未来子系统(agents/mcp/permissions 为空骨架)
 ```
 
 ## 类型检查
@@ -185,4 +193,4 @@ npm run typecheck   # tsc --noEmit
 
 ## 可后续扩展
 
-子 agent / 并行任务、MCP 工具集成、权限确认 UI、代码图谱(CodeGraph)。当前版本是一个流式、思考可见、可回滚的终端编码 agent。
+子 agent / 并行任务、MCP 工具集成、权限确认 UI。当前版本是一个流式、思考可见、可回滚的终端编码 agent。
