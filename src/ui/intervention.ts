@@ -128,9 +128,12 @@ export async function promptIntervention(
     const count = Math.min(maxOptRows, optionCount);
     for (let i = 0; i < count; i++) {
       const idx = start + i;
-      const marker = idx === selected ? `${ui.cyan}▸${ui.reset}` : ' ';
+      // 选中项:▸ 与正文均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
+      const isSel = idx === selected;
+      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
       const body = truncateDisplay(items[idx], cols - 2);
-      lines.push(`${marker} ${ui.dim}${body}${ui.reset}`);
+      lines.push(`${marker} ${color}${body}${ui.reset}`);
     }
     return lines;
   }

@@ -117,11 +117,14 @@ export async function promptWithSlashMenu(
     const cols = layout.getGeo().cols;
     const maxName = Math.max(...filtered.map((c) => displayWidth(c.name)));
     return filtered.map((c, i) => {
-      const marker = i === selected ? `${ui.cyan}▸${ui.reset}` : ' ';
+      // 选中项:▸ 与文字均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
+      const isSel = i === selected;
+      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
       const name = padEndDisplay(c.name, maxName);
       const descW = cols - maxName - 5; // marker + 空格 + 2 间距
       const desc = descW > 0 ? truncateDisplay(c.desc, descW) : '';
-      return `${marker} ${ui.dim}${name}${ui.reset}  ${ui.dim}${desc}${ui.reset}`;
+      return `${marker} ${color}${name}${ui.reset}  ${color}${desc}${ui.reset}`;
     });
   }
 
@@ -532,10 +535,13 @@ export async function promptTurnPicker(
     const cols = g.cols;
     return Array.from({ length: count }, (_, i) => {
       const idx = start + i;
-      const marker = idx === selected ? `${ui.cyan}▸${ui.reset}` : ' ';
-      const num = `${ui.dim}${idx + 1}${ui.reset}`;
+      // 选中项:▸/序号/正文均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
+      const isSel = idx === selected;
+      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const num = `${color}${idx + 1}${ui.reset}`;
       const text = truncateDisplay(items[idx].firstLine, cols - 6);
-      return `${marker} ${num} ${ui.dim}${text}${ui.reset}`;
+      return `${marker} ${num} ${color}${text}${ui.reset}`;
     });
   }
 

@@ -60,7 +60,7 @@ export interface InputView {
 // ── 内部状态 ──
 let active = false;
 let mode: 'input' | 'running' = 'input';
-let footerH = 2; // 1 状态行 + 输入行数
+let footerH = 4; // 1 状态行 + 1 上线 + 输入行数 + 1 下线(上下线框住输入区)
 let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
 let contentCol = 1; // 续写位列(1-based)
 let segmentStartRow = 1; // 当前思考段起始屏行(供 eraseSegmentBack 定位擦除起点;段内行数由 content 段标记跟踪)
@@ -580,7 +580,7 @@ export function paintInput(view: InputView): void {
         promptW,
         preGeo.rows
       );
-  const needFooterH = 1 + vis.inputRows;
+  const needFooterH = 3 + vis.inputRows; // 1 状态 + 1 上线 + 输入行 + 1 下线
   let g = preGeo;
   if (needFooterH !== footerH) {
     // setRegion 自己 write(DECSTBM + 清行 + 归位):先把已累积的擦除 flush 出去保序(擦除用的是旧几何的
@@ -605,9 +605,12 @@ export function paintInput(view: InputView): void {
   const status: StatusBarData = { ...base, status: statusText, spinnerFrame };
   buf += cup(statusRow, 1) + esc.clearLine + composeStatus(status, g.cols);
 
-  // 4. 输入行(g.contentBottom+2 .. rows)——按可视行画,首行带 prompt、其余缩进 promptW
-  const firstInputRow = g.contentBottom + 2;
-  const inputRowsAvail = g.footerH - 1;
+  // 3b. 上线(输入框顶):满屏宽细线 ─(cyan),框住输入区上边界
+  buf += cup(g.contentBottom + 2, 1) + esc.clearLine + ui.cyan + '─'.repeat(g.cols) + ui.reset;
+
+  // 4. 输入行(g.contentBottom+3 .. rows-1)——按可视行画,首行带 prompt、其余缩进 promptW
+  const firstInputRow = g.contentBottom + 3;
+  const inputRowsAvail = g.footerH - 3; // 去掉状态/上线/下线,留输入行
   const indent = ' '.repeat(promptW);
   const showCaret = view.caret !== false; // 默认 true;picker 等非文本输入传 false 关闭块状光标
   for (let i = 0; i < inputRowsAvail; i++) {
@@ -626,6 +629,9 @@ export function paintInput(view: InputView): void {
     }
     buf += cup(r, 1) + esc.clearLine + text;
   }
+
+  // 4b. 下线(输入框底):满屏宽细线 ─(cyan),固定屏底 rows
+  buf += cup(g.rows, 1) + esc.clearLine + ui.cyan + '─'.repeat(g.cols) + ui.reset;
 
   // 5. 向上菜单(画在内容区底,底栏正上方)
   if (view.menu && view.menu.lines.length > 0) {
@@ -663,10 +669,11 @@ export function paintInput(view: InputView): void {
 export function paintRunningInputEcho(text: string, placeholder: string): void {
   if (!active || !base) return;
   const g = getGeo();
-  const inputRow = g.contentBottom + 2; // 运行态 footerH 恒 2:状态行(contentBottom+1)+ 输入行(contentBottom+2)
+  const inputRow = g.contentBottom + 3; // 运行态 footerH 恒 4:状态(+1)+上线(+2)+输入行(+3);下线在 rows
   const shown = text.length > 0 ? text : placeholder;
+  const trimmed = truncateDisplay(shown, g.cols - 2); // 截断防超长软折行写穿下线
   stdout.write(
-    cup(inputRow, 1) + esc.clearLine + `${ui.dim}❯ ${shown}${ui.reset}`
+    cup(inputRow, 1) + esc.clearLine + `${ui.dim}❯ ${trimmed}${ui.reset}`
   );
   // 同步 lastView:dim 视图(lines=回显文本),使滚动/resize 的 repaint 不擦掉已打字
   lastView = {
@@ -701,7 +708,7 @@ export function enterInputMode(status: string = '空闲'): void {
   turnStart = null; // 停走时
   stopTurnTimer();
   if (active && base) {
-    setRegion(2);
+    setRegion(4); // 1 状态 + 1 上线 + 1 输入 + 1 下线
     paintInput({
       prompt: '❯ ',
       lines: [''],
@@ -712,7 +719,7 @@ export function enterInputMode(status: string = '空闲'): void {
   }
 }
 
-/** 进入运行态:底栏输入行改 dim 占位,光标回续写位。footerH 恒 2。新轮回尾(确保新内容可见)。 */
+/** 进入运行态:底栏输入行改 dim 占位,光标回续写位。footerH 恒 4(状态+上线+输入+下线)。新轮回尾(确保新内容可见)。 */
 export function enterRunningMode(status: string, placeholder: string): void {
   mode = 'running';
   statusText = status;
@@ -720,7 +727,7 @@ export function enterRunningMode(status: string, placeholder: string): void {
   turnStart = Date.now(); // 起走时(整轮从发起到 enterInputMode 止)
   resetScroll(); // 若上轮 INPUT 滚动过(未打字回底),新轮回尾
   if (active && base) {
-    setRegion(2);
+    setRegion(4); // 1 状态 + 1 上线 + 1 输入 + 1 下线
     paintInput({
       prompt: '❯ ',
       lines: [placeholder],
@@ -741,7 +748,7 @@ export function enterAltScreen(): void {
   active = true;
   stdout.write(esc.altOn);
   stdout.write(esc.altScrollOn); // alt 屏滚轮转发 ↑/↓(滚轮滚动靠此 + onKey/onRunningKey 的 ↑/↓ 滚动)
-  setRegion(2);
+  setRegion(4); // 1 状态 + 1 上线 + 1 输入 + 1 下线(底栏始终含上下线)
   contentRow = 1;
   contentCol = 1;
   segmentStartRow = 1;

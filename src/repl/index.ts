@@ -31,6 +31,7 @@ import {
   resetState,
 } from '../rollback/index.js';
 import { listSkills, effectiveSystemPrompt } from '../skills/index.js';
+import { buildMemorySection } from '../memory/index.js';
 
 /**
  * readline 的 prompt 必须是纯文本(无 ANSI):readline 按字符数算光标位置,
@@ -48,7 +49,38 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/resume', desc: '续接已保存的会话' },
   { name: '/think', desc: '展开折叠思考段(/think N)' },
   { name: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
+  { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆' },
 ];
+
+/**
+ * /init 指令:发给 agent 扫描项目并生成 MOCODE.md(对标 Claude Code /init 生成 CLAUDE.md,
+ * 但 mocode 读 MOCODE.md)。已存在则让 agent 读后更新(不丢失事实)。写完供 memory 子系统下轮加载。
+ */
+const INIT_PROMPT = `分析当前项目(process.cwd()),生成 MOCODE.md 项目记忆文件,供 mocode 后续会话自动加载——目标是让后续会话无需重新摸索就能上手。
+
+先探查(尽量少调用拿全貌):
+- read_file package.json(或 Cargo.toml/pyproject.toml/go.mod 等):scripts、依赖、入口、模块类型。
+- glob 顶层目录;read_file 入口文件 + 各子系统 index.ts/README。
+- 若有 .codegraph/:run_command codegraph explore "<架构或入口符号>" 一次拿相关源码+调用路径,别逐文件读。
+- 若 MOCODE.md 已存在:read_file 读它,在其基础上更新(补缺、修正过时),不丢已有准确事实。
+
+MOCODE.md 按以下结构写(每节简短,只写稳定、非显然的事实):
+## 项目
+一两句:是什么、技术栈、运行环境。
+## 命令
+install / dev / build / test / typecheck / lint 等——从 package.json scripts 提炼,写原样命令行(如 \`npm run typecheck\`);没有的注明"无测试"/"无 lint"。
+## 目录结构
+顶层各目录与子系统职责,一句话/个;不逐文件列。
+## 约定
+从代码与现有文档提炼的硬约定:模块系统(ESM?)、命名、错误处理、工具/函数契约、易踩坑点。只写非显然、会让人踩坑的;不写"保持简洁"这种正确废话。
+## 扩展点
+加工具/命令/provider/模块的接缝(改哪个文件、加在哪)。
+
+硬要求:
+- 从实际代码提炼,引用具体文件名/命令/符号;不编造、不泛泛。
+- 总长 ≤ 1500 字;只写后续会话有用的稳定事实,不写易变项(当前 bug、临时文件、未决 TODO)。
+- 用 write_file 写入项目根 MOCODE.md。
+- 写完简述:写了哪几节 + 从代码里发现的 2-3 条非显然关键约定(供用户校验)。`;
 
 /** 临时 readline 读一行(cooked,用于子提问;主输入走 promptWithSlashMenu)。 */
 async function askLine(prompt: string): Promise<string> {
@@ -113,6 +145,8 @@ function runningStateFor(
       return { status: '续接', placeholder: '选择会话…' };
     case '/rollback':
       return { status: '回滚', placeholder: '选择轮次…' };
+    case '/init':
+      return { status: '初始化', placeholder: '生成 MOCODE.md…' };
     case '/clear':
       return { status: '清空', placeholder: '…' };
     default:
@@ -319,7 +353,7 @@ export async function startRepl(
 ): Promise<void> {
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
   // 否则新会话只塞 system 提示。
-  const systemPrompt = effectiveSystemPrompt(config.systemPrompt);
+  const systemPrompt = effectiveSystemPrompt(config.systemPrompt + buildMemorySection());
   const history: ChatMessage[] =
     initialHistory && initialHistory.length
       ? initialHistory
@@ -457,7 +491,7 @@ export async function startRepl(
     runningInput = ''; // 预填已消费,清空(下轮运行态从空开始)
     if (input === null) break; // 空 prompt Ctrl+D
 
-    const joined = input.join('\n');
+    let joined = input.join('\n');
     const line = joined.trim();
     if (!line) continue;
     if (line === '/exit' || line === '/quit') break;
@@ -468,6 +502,11 @@ export async function startRepl(
     const { status, placeholder } = runningStateFor(cmd);
     refreshStatusBase(history);
     layout.enterRunningMode(status, placeholder);
+
+    if (line === '/init') {
+      // /init:把 init 指令当 user 输入发给 agent(扫描项目 + 生成 MOCODE.md),fall through 走 runAgent
+      joined = INIT_PROMPT;
+    }
 
     if (line === '/clear') {
       history.length = 1; // 保留 system 提示
