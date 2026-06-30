@@ -44,6 +44,10 @@ export interface Config {
   includeUsage: boolean;
   /** 自动压缩总开关。关掉则只靠手动 /compact。 */
   autoCompact: boolean;
+  /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
+  autoReflect: boolean;
+  /** 每 N 个轮次触发一次后台反思 pass(与 agent 并发,不阻塞)。默认 5。 */
+  reflectEveryN: number;
   /** 会话落盘目录(cwd 下)。 */
   sessionDir: string;
   /** AnySearch 联网搜索 API key(可选)。不配则走匿名免费额度(按 IP 限流)。 */
@@ -89,6 +93,13 @@ const SYSTEM_PROMPT = `你是 mocode,一个终端编码 agent。你以"思考 �
 - 不可逆或外向操作(删除、覆盖既有文件、推送、请求外部服务)执行前向用户确认,除非已获明确授权。
 - 只在授权范围内操作;不确定就问,别猜。
 
+## 记忆(跨会话长期事实)
+- 系统提示已注入「记忆索引」(仅 id/标题/摘要)。需要某条正文时调 memory_search(传 id 或关键词)取;memory_list 看全部索引。
+- 遇到非显然、跨会话有用的事实/决策/坑(架构约定、易踩坑、用户偏好、已做决策),用 memory_save 存——只存长期稳定项,不存当前 bug / 临时文件 / 未决 TODO。
+- 发现已存记忆过时或与新事实矛盾,用 memory_update(id, …) 原地纠正(别新建重复条);明确失效的用 memory_forget(id) 归档。
+- 存前先 memory_search 看是否已有同类条,避免重复。宁可少记,不记正确废话。
+- 后台反思 pass 会定期从会话里挖掘并整理记忆(无需你手动),但你主动存的关键事实更可靠。
+
 ## 终止与汇报
 - 无需更多工具时立即停止,直接给结论。
 - 如实汇报:成功说成功,失败说卡在哪,跳过的也要说。引用代码用 "path:行号" 格式(如 src/index.ts:42)。保持简洁。`;
@@ -103,6 +114,8 @@ export const config: Config = {
   compactThreshold: Number(process.env.COMPACT_THRESHOLD) || 0.85,
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
   autoCompact: process.env.AUTO_COMPACT !== 'false',
+  autoReflect: process.env.AUTO_REFLECT !== 'false',
+  reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
   searchBaseUrl: process.env.ANYSEARCH_BASE_URL || 'https://api.anysearch.com',

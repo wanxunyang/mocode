@@ -4,6 +4,7 @@ import {
   chat,
   type ChatMessage,
   type ChatResult,
+  type ToolCallRef,
 } from '../llm/index.js';
 import { executeTool } from '../tools/registry.js';
 import { ui } from '../ui/theme.js';
@@ -32,6 +33,105 @@ function parseArgs(raw: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/** 只读工具集:一轮多个时,连续的只读工具成组 Promise.all 并行(无副作用、互不依赖)。 */
+const READ_TOOL_NAMES = new Set([
+  'read_file',
+  'glob',
+  'grep',
+  'web_search',
+  'web_fetch',
+]);
+/** mutation 工具:写盘 + 在 executeTool 内记回滚 before 快照,必须串行保快照序。 */
+const isMutationTool = (name: string): boolean =>
+  name === 'edit_file' || name === 'write_file';
+
+/** 工具调用 ● 头:工具名 + 参数摘要(按 tool_calls 原顺序打印,让用户看到本轮跑哪些工具)。 */
+function writeToolHeader(tc: ToolCallRef): void {
+  const summary = summarizeToolCall(tc.name, tc.arguments);
+  layout.contentWrite(
+    `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}${tc.name}${ui.reset}  ${ui.dim}${summary}${ui.reset}\n`
+  );
+}
+
+/**
+ * mutation 执行前读旧内容供 diff:write_file 取整文件旧内容(不存在→null=新建),
+ * edit_file 取 old_string 起始行号(供 diff 显示真实文件行号)。读不到则 diff 退化为相对行号。
+ * 非 mutation 或参数非法返 { preWriteOld: null, editStartLine: 1 }。失败不阻断。
+ */
+function readDiffContext(
+  tc: ToolCallRef,
+  parsed: Record<string, unknown> | null,
+): { preWriteOld: string | null; editStartLine: number } {
+  if (!parsed) return { preWriteOld: null, editStartLine: 1 };
+  const p = String(parsed.path ?? '');
+  if (!p) return { preWriteOld: null, editStartLine: 1 };
+  if (tc.name === 'write_file') {
+    try {
+      return { preWriteOld: readFileSync(resolve(p), 'utf8'), editStartLine: 1 };
+    } catch {
+      return { preWriteOld: null, editStartLine: 1 }; // 文件不存在(新建)或不可读
+    }
+  }
+  if (tc.name === 'edit_file') {
+    const oldStr = String(parsed.old_string ?? '');
+    try {
+      const data = readFileSync(resolve(p), 'utf8');
+      const idx = oldStr ? data.indexOf(oldStr) : -1;
+      return {
+        preWriteOld: null,
+        editStartLine: idx >= 0 ? data.slice(0, idx).split('\n').length : 1,
+      };
+    } catch {
+      return { preWriteOld: null, editStartLine: 1 }; // 读不到:diff 退化为相对行号
+    }
+  }
+  return { preWriteOld: null, editStartLine: 1 };
+}
+
+/** 渲染工具结果:mutation 成功走 diff 块(行号 + 语法高亮,仿 Claude Code);其余走一行 preview。 */
+function writeToolResult(
+  tc: ToolCallRef,
+  output: string,
+  parsed: Record<string, unknown> | null,
+  preWriteOld: string | null,
+  editStartLine: number,
+): void {
+  if (isMutationTool(tc.name) && parsed && !output.startsWith('错误')) {
+    layout.contentWrite(
+      renderFileChange({
+        path: String(parsed.path ?? ''),
+        kind: tc.name === 'edit_file' ? 'edit' : 'write',
+        oldStr:
+          tc.name === 'edit_file'
+            ? String(parsed.old_string ?? '')
+            : preWriteOld,
+        newStr: String(
+          (tc.name === 'edit_file' ? parsed.new_string : parsed.content) ?? '',
+        ),
+        startLine: tc.name === 'edit_file' ? editStartLine : 1,
+      }),
+    );
+  } else {
+    const preview = summarizeToolResult(tc.name, output);
+    if (preview) {
+      layout.contentWrite(`  ${ui.gray}↳ ${preview}${ui.reset}\n`);
+    }
+  }
+}
+
+/** 回灌 tool 结果到 history(裁到单条上限);tool_call_id 与 assistant.tool_calls 按序配对。 */
+function pushToolResult(
+  history: ChatMessage[],
+  tc: ToolCallRef,
+  output: string,
+): void {
+  history.push({
+    role: 'tool',
+    tool_call_id: tc.id,
+    content: capToolResultForHistory(tc.name, output),
+  } as ChatMessage);
 }
 
 /**
@@ -184,70 +284,48 @@ export async function runAgent(
           })),
         } as ChatMessage);
 
-        for (const tc of result.toolCalls) {
-          const summary = summarizeToolCall(tc.name, tc.arguments);
-          layout.contentWrite(
-            `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}${tc.name}${ui.reset}  ${ui.dim}${summary}${ui.reset}\n`
-          );
-          const isMutation = tc.name === 'edit_file' || tc.name === 'write_file';
-          const parsed = isMutation ? parseArgs(tc.arguments) : null;
-          // write_file 覆盖场景:执行前读旧内容供 diff(不存在→null=新建)。
-          // edit_file:执行前读文件定位 old_string 起始行,供 diff 显示真实文件行号。
-          // 两者皆失败不阻断(读不到则 diff 退化为相对行号 / 不渲染)。
-          let preWriteOld: string | null = null;
-          let editStartLine = 1;
-          if (parsed) {
-            const p = String(parsed.path ?? '');
-            if (p) {
-              if (tc.name === 'write_file') {
-                try {
-                  preWriteOld = readFileSync(resolve(p), 'utf8');
-                } catch {
-                  preWriteOld = null; // 文件不存在(新建)或不可读
-                }
-              } else if (tc.name === 'edit_file') {
-                const oldStr = String(parsed.old_string ?? '');
-                try {
-                  const data = readFileSync(resolve(p), 'utf8');
-                  const idx = oldStr ? data.indexOf(oldStr) : -1;
-                  if (idx >= 0) editStartLine = data.slice(0, idx).split('\n').length;
-                } catch {
-                  // 读不到:startLine 保持 1(diff 退化为相对行号)
-                }
-              }
+        // 工具分组执行(保 tool_calls 原顺序):连续的只读工具(READ_TOOL_NAMES)成组并发——一次性启动全部
+        // executeTool(调用即开始 I/O),再按原顺序逐个 await + 渲染(● 头与 ↳ 结果紧邻,修并行时"全 ● 后全 ↳"分离)。
+        // mutation(write_file/edit_file)及 run_command/use_skill 各为单步串行屏障——mutation 串行保
+        // recordMutation 调用序 = 回滚快照序(executeTool 内写前记 before 快照,同文件多次写需按序)。
+        // 渲染与 history 回灌一律按原顺序;并发只影响执行时序,tool_call_id 仍按序配对。
+        // executeTool 永不抛错(调度器 try/catch 返字符串),故 await 单个 promise 不会抛(永远 resolve 为字符串)。
+        const calls = result.toolCalls;
+        let i = 0;
+        while (i < calls.length) {
+          if (READ_TOOL_NAMES.has(calls[i].name)) {
+            // 收集连续只读组(≥1),并发执行:先一次性启动所有(executeTool 调用即开始 I/O),
+            // 再按原顺序逐个 await + 渲染——● 头与 ↳ 结果紧邻、顺序 = tool_calls 序(修"全 ● 后全 ↳"分离 bug)。
+            // 异步工具(web_fetch 等)并发跑、总耗时 ≈ 最慢一个;同步工具(glob/grep)map 时已顺序跑完,await 即返。
+            let j = i;
+            while (j < calls.length && READ_TOOL_NAMES.has(calls[j].name)) j++;
+            const batch = calls.slice(i, j);
+            const started = batch.map((tc) => executeTool(tc.name, tc.arguments));
+            for (let k = 0; k < batch.length; k++) {
+              const tc = batch[k];
+              writeToolHeader(tc);
+              spinner.start(`执行 ${tc.name}`);
+              const output = await started[k];
+              spinner.stop();
+              writeToolResult(tc, output, null, null, 1); // 只读工具无 diff
+              pushToolResult(history, tc, output);
             }
-          }
-          spinner.start(`执行 ${tc.name}`);
-          const output = await executeTool(tc.name, tc.arguments);
-          spinner.stop();
-          // edit_file / write_file 成功:渲染 diff 块(行号 + 语法高亮,仿 Claude Code);其余工具走一行 preview。
-          if (isMutation && parsed && !output.startsWith('错误')) {
-            layout.contentWrite(
-              renderFileChange({
-                path: String(parsed.path ?? ''),
-                kind: tc.name === 'edit_file' ? 'edit' : 'write',
-                oldStr:
-                  tc.name === 'edit_file'
-                    ? String(parsed.old_string ?? '')
-                    : preWriteOld,
-                newStr: String(
-                  (tc.name === 'edit_file' ? parsed.new_string : parsed.content) ??
-                    '',
-                ),
-                startLine: tc.name === 'edit_file' ? editStartLine : 1,
-              }),
-            );
+            i = j;
           } else {
-            const preview = summarizeToolResult(tc.name, output);
-            if (preview) {
-              layout.contentWrite(`  ${ui.gray}↳ ${preview}${ui.reset}\n`);
-            }
+            // 单步串行(mutation / run_command / use_skill)——逐个执行,保快照序
+            const tc = calls[i];
+            writeToolHeader(tc);
+            const parsed = isMutationTool(tc.name)
+              ? parseArgs(tc.arguments)
+              : null;
+            const { preWriteOld, editStartLine } = readDiffContext(tc, parsed);
+            spinner.start(`执行 ${tc.name}`);
+            const output = await executeTool(tc.name, tc.arguments);
+            spinner.stop();
+            writeToolResult(tc, output, parsed, preWriteOld, editStartLine);
+            pushToolResult(history, tc, output);
+            i++;
           }
-          history.push({
-            role: 'tool',
-            tool_call_id: tc.id,
-            content: capToolResultForHistory(tc.name, output),
-          } as ChatMessage);
         }
         continue; // 带着工具结果再调一次 LLM
       }

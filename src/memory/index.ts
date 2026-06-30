@@ -1,7 +1,30 @@
-// memory barrel:懒加载项目记忆、拼系统提示段。
-// 被 repl(注入 systemPrompt)依赖;自身仅依赖 discover.ts,是叶子级业务模块。
+// memory barrel:Tier-1 MOCODE.md 懒加载(buildMemorySection,叶子)+ Tier-2 工具库 re-export。
+// Tier-2:store.ts(叶子,node:fs)做 JSONL CRUD/GC/索引段;reflect.ts(→llm,同 session/)做后台反思 pass。
+// 被 repl 依赖(注入 systemPrompt + 轮末触发反思 + 退出 drain)。Tier-1 仅依赖 discover.ts。
 
 import { loadMemoryFiles } from './discover.js';
+
+export {
+  buildMemoryIndexSection,
+  loadAll,
+  gcMemories,
+  type MemoryEntry,
+  type MemoryIndexItem,
+  type MemoryType,
+  type MemoryStatus,
+  type MemoryScope,
+} from './store.js';
+
+export {
+  kickoffReflection,
+  drainMemoryBackground,
+  getLastReflectResult,
+  clearLastReflectResult,
+  snapshotTranscript,
+  formatReflectResult,
+  runReflection,
+  type ReflectResult,
+} from './reflect.js';
 
 /** system 消息中 memory 段的字符上限(防过大占窗口——system 在 history[0],compactHistory 不压缩)。 */
 const MAX_MEMORY_CHARS = 20000;

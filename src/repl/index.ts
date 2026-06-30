@@ -36,7 +36,17 @@ import {
   resetState,
 } from '../rollback/index.js';
 import { listSkills, effectiveSystemPrompt } from '../skills/index.js';
-import { buildMemorySection } from '../memory/index.js';
+import {
+  buildMemorySection,
+  buildMemoryIndexSection,
+  kickoffReflection,
+  drainMemoryBackground,
+  getLastReflectResult,
+  clearLastReflectResult,
+  snapshotTranscript,
+  formatReflectResult,
+  loadAll,
+} from '../memory/index.js';
 
 /**
  * readline 的 prompt 必须是纯文本(无 ANSI):readline 按字符数算光标位置,
@@ -54,6 +64,8 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/resume', desc: '续接已保存的会话' },
   { name: '/think', desc: '展开折叠思考段(/think N)' },
   { name: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
+  { name: '/memory', desc: '记忆库:条目计数与近期索引' },
+  { name: '/reflect', desc: '手动触发后台记忆反思 pass' },
   { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆' },
 ];
 
@@ -358,7 +370,9 @@ export async function startRepl(
 ): Promise<void> {
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
   // 否则新会话只塞 system 提示。
-  const systemPrompt = effectiveSystemPrompt(config.systemPrompt + buildMemorySection());
+  const systemPrompt = effectiveSystemPrompt(
+    config.systemPrompt + buildMemorySection() + buildMemoryIndexSection(),
+  );
   const history: ChatMessage[] =
     initialHistory && initialHistory.length
       ? initialHistory
@@ -375,6 +389,8 @@ export async function startRepl(
     if (!loadSnapshots(sessionId)) rebuildFromHistory(history);
   }
   let currentSessionId: string | undefined = sessionId;
+  // 反思 cadence 计数:每 reflectEveryN 轮 fire-and-forget 一次后台反思 pass。
+  let turnCount = 0;
 
   // 本会话累积的折叠思考段,供 /think N 重打原文。
   const collapsedThinkings: string[] = [];
@@ -475,6 +491,13 @@ export async function startRepl(
   while (true) {
     // INPUT 态:画底栏输入框 + 状态行,光标入输入框
     refreshStatusBase(history);
+    // 后台反思若已完成(上轮 fire-and-forget),在安全点 flush 一行 dim 摘要:
+    // 不在 RUNNING 态写——防与正在跑的 agent 争屏(contentWrite / 状态行)。
+    const reflectRes = getLastReflectResult();
+    if (reflectRes) {
+      layout.contentWrite(`  ${ui.gray}↳ ${formatReflectResult(reflectRes)}${ui.reset}\n`);
+      clearLastReflectResult();
+    }
     layout.enterInputMode('空闲');
 
     let input: string[] | null = null;
@@ -518,6 +541,7 @@ export async function startRepl(
       collapsedThinkings.length = 0; // 同步清空折叠的思考段
       resetState(); // 同步清空回滚轮次/快照
       currentSessionId = undefined; // 下轮起新会话文件
+      turnCount = 0; // 反思 cadence 重新计数
       contextState.lastUsage = undefined;
       layout.clearContent();
       layout.contentWrite(bannerString(banner()));
@@ -526,6 +550,42 @@ export async function startRepl(
     }
     if (line === '/context') {
       layout.contentWrite(`  ${renderContextBar(history)}\n`);
+      continue;
+    }
+    if (line === '/memory') {
+      // 记忆库概览:计数 + 近期 active 索引(详情用 memory_search)。
+      const all = loadAll();
+      const active = all.filter((e) => e.status === 'active');
+      const archived = all.filter((e) => e.status === 'archived').length;
+      const byType: Record<string, number> = {};
+      for (const e of active) byType[e.type] = (byType[e.type] || 0) + 1;
+      layout.contentWrite(
+        `${ui.dim}记忆库:active ${active.length}${archived ? ` · archived ${archived}` : ''}${ui.reset}\n`,
+      );
+      if (Object.keys(byType).length) {
+        layout.contentWrite(
+          `${ui.dim}按类:${Object.entries(byType).map(([t, n]) => `${t} ${n}`).join('  ')}${ui.reset}\n`,
+        );
+      }
+      const recent = [...active]
+        .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+        .slice(0, 10);
+      for (const e of recent) {
+        layout.contentWrite(
+          `  ${ui.cyan}${e.id}${ui.reset}  ${ui.dim}${e.name} — ${e.summary}${ui.reset}\n`,
+        );
+      }
+      if (active.length === 0)
+        layout.contentWrite(`${ui.dim}(无 active 记忆;用 memory_save 存,或 /init 生成 MOCODE.md)${ui.reset}\n`);
+      layout.contentWrite(`${ui.dim}(详情用 memory_search;启动索引已注入 systemPrompt)${ui.reset}\n`);
+      continue;
+    }
+    if (line === '/reflect') {
+      // 手动触发后台反思 pass(不等;完成后下次 INPUT 态显摘要)。
+      kickoffReflection(snapshotTranscript(history, 20));
+      layout.contentWrite(
+        `${ui.dim}(反思已触发,后台进行;完成后下次输入态显示摘要。日志见 .mocode/memory.log)${ui.reset}\n`,
+      );
       continue;
     }
     if (line === '/skills') {
@@ -645,6 +705,12 @@ export async function startRepl(
         // 落盘失败不阻断 REPL
       }
       persistSnapshots(currentSessionId); // 随会话落盘回滚快照(/resume 后仍可撤销)
+      // 后台反思:每 reflectEveryN 轮 fire-and-forget 一次(与下一轮 agent 并发,不阻塞)。
+      // 已有在飞任务 / autoReflect 关 → kickoff 内部自守卫。快照同步取(避免下一轮 mutate history 竞态)。
+      turnCount++;
+      if (turnCount % config.reflectEveryN === 0) {
+        kickoffReflection(snapshotTranscript(history, 20));
+      }
     } catch (e) {
       layout.contentWrite(
         `${ui.red}[错误]${ui.reset} ${e instanceof Error ? e.message : String(e)}\n`
@@ -655,5 +721,7 @@ export async function startRepl(
     layout.contentWrite('\n'); // 轮次之间空行
   }
 
+  // 退出前等在飞反思收尾(Ctrl+C 走 SIGINT 直退不等;fire-and-forget 不承诺中断时完成)。
+  await drainMemoryBackground();
   layout.exitAltScreen();
 }

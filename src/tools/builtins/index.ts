@@ -9,6 +9,11 @@ import { webSearchTool } from './web-search.js';
 import { webFetchTool } from './web-fetch.js';
 import { useSkillTool } from './use-skill.js';
 import { askHumanTool } from './ask-human.js';
+import { memorySaveTool } from './memory-save.js';
+import { memorySearchTool } from './memory-search.js';
+import { memoryListTool } from './memory-list.js';
+import { memoryUpdateTool } from './memory-update.js';
+import { memoryForgetTool } from './memory-forget.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
@@ -25,4 +30,9 @@ export const builtinTools: Tool[] = [
   webFetchTool,
   useSkillTool,
   askHumanTool,
+  memorySaveTool,
+  memorySearchTool,
+  memoryListTool,
+  memoryUpdateTool,
+  memoryForgetTool,
 ];

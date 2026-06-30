@@ -7,7 +7,7 @@ import {
   estimateTokens,
 } from '../llm/index.js';
 import { config } from '../config/index.js';
-import { MAX_HISTORY_RESULT, MAX_OLD_TOOL_STUB, MAX_SKILL_RESULT } from '../tools/constants.js';
+import { MAX_HISTORY_RESULT, MAX_MEMORY_RESULT, MAX_OLD_TOOL_STUB, MAX_SKILL_RESULT } from '../tools/constants.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
 import * as layout from '../ui/layout.js';
@@ -74,6 +74,15 @@ export function capToolResultForHistory(name: string, output: string): string {
     const marker = `…[skill 正文过长,已截断尾部 ${removed} 字符]…`;
     const remain = MAX_SKILL_RESULT - marker.length;
     if (remain <= 0) return marker.slice(0, MAX_SKILL_RESULT);
+    return output.slice(0, remain) + marker;
+  }
+  if (name === 'memory_search') {
+    // 召回的记忆正文是高价值事实/指令,中截会劈断语义;同 use_skill 走尾截(保头部、弃尾部)。
+    if (output.length <= MAX_MEMORY_RESULT) return output;
+    const removed = output.length - MAX_MEMORY_RESULT;
+    const marker = `…[记忆结果过长,已截断尾部 ${removed} 字符]…`;
+    const remain = MAX_MEMORY_RESULT - marker.length;
+    if (remain <= 0) return marker.slice(0, MAX_MEMORY_RESULT);
     return output.slice(0, remain) + marker;
   }
   if (output.length <= MAX_HISTORY_RESULT) return output;
