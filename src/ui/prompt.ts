@@ -622,3 +622,169 @@ export async function promptTurnPicker(
     redraw();
   });
 }
+
+/**
+ * 会话选择菜单(供 /resume 菜单化选择):↑/↓ 导航、Enter 续接、Esc/Ctrl+D 取消、a 切换「仅最近 N / 全部」。
+ * 把 items 画成向上展开的菜单(经 layout.paintInput,与斜杠菜单 / 轮次菜单同套渲染),输入框行作操作提示。
+ * 默认仅显示最近 N 条(默认 N=10,取 items 前缀——调用方按 createdAt 降序传入则前缀=最新 N);
+ * items 多于 N 时按 a 展开全部,再按 a 折回最近 N。选中项 cyan+bold + ▸ 高亮(同 promptTurnPicker)。
+ * 返回选中的 item(含 id);null=取消 / 非 TTY / 空列表。纯导航(不收文本输入)。
+ * 长列表(超屏高)自动开窗保光标可见;默认聚焦首项(最新会话,Enter 即续接最近一条)。
+ */
+export interface SessionPickerItem {
+  id: string;
+  title: string;
+  subtitle?: string;
+}
+export async function promptSessionPicker(
+  items: SessionPickerItem[],
+  recentCap = 10
+): Promise<SessionPickerItem | null> {
+  if (!layout.isActive() || items.length === 0) return null;
+  const emitter = stdin as unknown as KeypressEmitter;
+  const cap = Math.max(1, recentCap);
+  const canToggle = items.length > cap; // 不超过 cap 时无切换意义(本就全显)
+  let showAll = !canToggle; // 超过 cap 才默认折叠到最近 N,否则全显
+  let selected = 0; // 默认聚焦首项(调用方降序传入 → 最新会话)
+  let resolved = false;
+  let resolve!: (v: SessionPickerItem | null) => void;
+  let reject!: (e: Error) => void;
+
+  /** 当前可见项:折叠态取前 cap 条(=最近 N),展开态取全部。 */
+  function visible(): SessionPickerItem[] {
+    return showAll ? items : items.slice(0, cap);
+  }
+  /** 输入框行的操作提示;折叠态显「a 全部(N)」,展开态显「a 仅最近N」。不超 cap 时无 a 项。 */
+  function hint(): string {
+    const base = '↑↓ 选择 · Enter 续接 · Esc 取消';
+    if (!canToggle) return base;
+    return showAll
+      ? `↑↓ 选择 · Enter 续接 · a 仅最近${cap} · Esc 取消`
+      : `↑↓ 选择 · Enter 续接 · a 全部(${items.length}) · Esc 取消`;
+  }
+
+  /** 菜单行(带开窗):超屏高时以 selected 为中心取窗,保光标可见。行格式:▸ N  title  subtitle。 */
+  function menuLines(): string[] {
+    const g = layout.getGeo();
+    const cols = g.cols;
+    const maxRows = Math.max(1, g.contentBottom);
+    const vis = visible();
+    let start = 0;
+    if (vis.length > maxRows) {
+      start = Math.max(
+        0,
+        Math.min(selected - Math.floor(maxRows / 2), vis.length - maxRows)
+      );
+    }
+    const count = Math.min(maxRows, vis.length);
+    return Array.from({ length: count }, (_, i) => {
+      const idx = start + i;
+      // 选中项:▸/序号/正文/副标题均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
+      const isSel = idx === selected;
+      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const num = String(idx + 1);
+      const it = vis[idx];
+      const title = it.title || '(无)';
+      const sub = it.subtitle ?? '';
+      const leadW = displayWidth(num) + 4; // "▸ " + num + "  "
+      let subW = sub ? displayWidth(sub) + 2 : 0; // "  " + sub
+      let titleW = cols - leadW - subW;
+      if (titleW < 4 && sub) {
+        // 太窄:先丢副标题把空间让给标题
+        subW = 0;
+        titleW = cols - leadW;
+      }
+      const titleT = titleW > 0 ? truncateDisplay(title, titleW) : '';
+      const subPart = subW > 0 ? `  ${sub}` : '';
+      return `${marker} ${color}${num}  ${titleT}${subPart}${ui.reset}`;
+    });
+  }
+
+  function redraw(): void {
+    const h = hint();
+    layout.paintInput({
+      prompt: '❯ ',
+      lines: [h],
+      cursorLine: 0,
+      cursorCol: displayWidth(h),
+      menu: { lines: menuLines() },
+      caret: false, // 纯导航菜单(非文本输入):不画输入框块状光标,聚焦由菜单 ▸ 标记
+    });
+  }
+
+  function cleanup(): void {
+    try {
+      stdin.setRawMode(false);
+    } catch {
+      // 忽略
+    }
+    emitter.removeListener('keypress', onKey);
+    stdin.pause();
+  }
+  function finish(value: SessionPickerItem | null): void {
+    if (resolved) return;
+    resolved = true;
+    cleanup();
+    resolve(value);
+  }
+
+  function onKey(_str: string, key?: Key): void {
+    if (resolved || !key) return;
+    if (key.ctrl && key.name === 'c') {
+      cleanup();
+      reject(new Error('SIGINT'));
+      return;
+    }
+    if (key.ctrl && key.name === 'd') {
+      finish(null);
+      return;
+    }
+    // a 切换「仅最近 N / 全部」:纯导航菜单无文本输入,a 自由;key.name 不分大小写,Shift+A 亦触发。
+    if (canToggle && key.name === 'a' && !key.ctrl && !key.meta) {
+      showAll = !showAll;
+      const vis = visible();
+      if (selected > vis.length - 1) selected = vis.length - 1; // 折回 cap 时选中项越界则钳到末项
+      redraw();
+      return;
+    }
+    const n = visible().length;
+    switch (key.name) {
+      case 'up':
+        selected = (selected - 1 + n) % n;
+        redraw();
+        return;
+      case 'down':
+        selected = (selected + 1) % n;
+        redraw();
+        return;
+      case 'return':
+      case 'enter':
+        finish(visible()[selected] ?? null);
+        return;
+      case 'escape':
+        finish(null);
+        return;
+    }
+  }
+
+  return new Promise<SessionPickerItem | null>((res, rej) => {
+    resolve = res;
+    reject = rej;
+    ensurePasteDetector();
+    readline.emitKeypressEvents(stdin);
+    let rawOk = true;
+    try {
+      stdin.setRawMode(true);
+    } catch {
+      rawOk = false;
+    }
+    if (!rawOk) {
+      res(null);
+      return;
+    }
+    stdin.resume();
+    emitter.on('keypress', onKey);
+    redraw();
+  });
+}

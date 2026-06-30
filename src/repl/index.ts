@@ -6,7 +6,12 @@ import { runAgent } from '../agent/index.js';
 import { ui } from '../ui/theme.js';
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
-import { promptWithSlashMenu, promptTurnPicker } from '../ui/prompt.js';
+import {
+  promptWithSlashMenu,
+  promptTurnPicker,
+  promptSessionPicker,
+  type SessionPickerItem,
+} from '../ui/prompt.js';
 import { tools } from '../tools/registry.js';
 import {
   estimateMessagesTokens,
@@ -557,26 +562,26 @@ export async function startRepl(
       continue;
     }
     if (line === '/resume') {
+      // /resume:打开会话菜单(↑/↓ 选,Enter 续接,Esc 取消)。默认仅最近 10 条,按 a 展开全部。
+      // 仿 /rollback 菜单化(promptSessionPicker);选中项 cyan+bold + ▸ 高亮。
       const sessions = listSessions();
       if (sessions.length === 0) {
         layout.contentWrite(`${ui.dim}(没有已保存的会话)${ui.reset}\n`);
         continue;
       }
-      sessions.forEach((s, i) => {
-        layout.contentWrite(
-          `  ${ui.dim}${i + 1}${ui.reset}  ${s.id}  ${ui.cyan}${s.firstUser || '(无)'}${ui.reset}  ${ui.dim}${s.model}${ui.reset}\n`
-        );
-      });
-      let pick = '';
+      const items: SessionPickerItem[] = sessions.map((s) => ({
+        id: s.id,
+        title: s.firstUser || '(无)',
+        subtitle: `${s.id}  ${s.model}`,
+      }));
+      let pick: SessionPickerItem | null;
       try {
-        pick = (await askLine('序号(回车取消): ')).trim();
+        pick = await promptSessionPicker(items);
       } catch {
-        continue;
+        continue; // Ctrl+C(SIGINT)→ 取消
       }
-      const idx = Number(pick);
-      if (!pick || !Number.isInteger(idx) || idx < 1 || idx > sessions.length)
-        continue;
-      const loaded = loadSession(sessions[idx - 1].id);
+      if (!pick) continue; // Esc / Ctrl+D 取消
+      const loaded = loadSession(pick.id);
       if (!loaded || !loaded.history.length) {
         layout.contentWrite(`${ui.yellow}(加载失败)${ui.reset}\n`);
         continue;
