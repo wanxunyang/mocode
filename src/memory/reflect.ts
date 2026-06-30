@@ -109,19 +109,19 @@ function buildMemorySample(): string {
 
 const TYPES = 'decision | fact | pitfall | reference | feedback';
 
-const REFLECT_SYS = `你是 mocode 的记忆反思器。审阅近期会话与现有记忆,产出**仅**值得长期记住的更新。
-严格输出 JSON(无 markdown 代码块、无解释文字):{"saves":[{"type":"...","name":"...","summary":"...","body":"..."}],"updates":[{"id":"...","reason":"...","summary":"...","body":"..."}],"forgets":[{"id":"...","reason":"..."}]}
-空数组合法(无可记则三个数组都空)。
-规则:
-① 只记非显然、跨会话有用的事实/决策/坑;不记当前 bug、临时文件、未决 TODO、易变项;
-② 宁可少记,不记正确废话(如"保持简洁");
-③ updates/forgets 的 id 必须来自下方「现有记忆」列表;不在此列的不要编 id;
-④ saves 的 name 须简洁且与现有不撞;type ∈ {${TYPES}};
-⑤ 若现有记忆与新事实矛盾或过时,update 旧条(改 summary/body)而非新建重复条;
-⑥ forgets 用于明显已失效 / 被新条取代的记忆(归档,非硬删)。`;
+const REFLECT_SYS = `You are mocode's memory reflector. Review the recent session and existing memories, producing **only** updates worth remembering long-term.
+Output strictly JSON (no markdown code blocks, no explanatory text): {"saves":[{"type":"...","name":"...","summary":"...","body":"..."}],"updates":[{"id":"...","reason":"...","summary":"...","body":"..."}],"forgets":[{"id":"...","reason":"..."}]}
+Empty arrays are valid (if nothing is worth saving, all three arrays are empty).
+Rules:
+① Only store non-obvious, cross-session-useful facts/decisions/pitfalls; do not store current bugs, temp files, undecided TODOs, or volatile items;
+② Better to store less than to store trivially correct info (e.g. "keep it concise");
+③ ids in updates/forgets must come from the "existing memories" list below; do not fabricate ids not listed there;
+④ names in saves must be concise and not collide with existing ones; type ∈ {${TYPES}};
+⑤ If an existing memory contradicts new facts or is outdated, update the old entry (modify summary/body) rather than creating a duplicate;
+⑥ forgets are for memories clearly stale / superseded by a new entry (archive, not hard-delete).`;
 
 const REFLECT_USER = (transcript: string, sample: string) =>
-  `## 近期会话\n${transcript}\n\n## 现有记忆\n${sample}\n\n产出 JSON:`;
+  `## Recent session\n${transcript}\n\n## Existing memories\n${sample}\n\nProduce JSON:`;
 
 interface ReflectPlan {
   saves?: { type?: string; name?: string; summary?: string; body?: string }[];

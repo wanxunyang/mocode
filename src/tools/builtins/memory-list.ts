@@ -6,7 +6,7 @@ import { listEntries, type MemoryType, type MemoryStatus } from '../../memory/st
 export const memoryListTool: Tool = {
   name: 'memory_list',
   description:
-    '列出记忆索引(id/name/summary,不含正文)。默认列 active。拿 id 再 memory_search 取正文。',
+    'List the memory index (id/name/summary, no body). Defaults to active. Get an id, then use memory_search to retrieve the full body.',
   parameters: {
     type: 'object',
     properties: {
@@ -17,7 +17,7 @@ export const memoryListTool: Tool = {
       status: {
         type: 'string',
         enum: ['active', 'superseded', 'archived', 'any'],
-        description: '默认 active',
+        description: 'Default active',
       },
     },
   },

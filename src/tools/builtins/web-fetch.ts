@@ -9,11 +9,11 @@ const UA =
 export const webFetchTool: Tool = {
   name: 'web_fetch',
   description:
-    '抓取指定 URL 的网页内容并清洗成纯文本(去 HTML 标签/脚本/样式,保留正文)。用于读取搜索结果里的某个链接、或用户给出的具体 URL。',
+    'Fetch the web page at a given URL and clean it into plain text (strips HTML tags/scripts/styles, keeps the body). Use to read a link from search results, or a specific URL given by the user.',
   parameters: {
     type: 'object',
     properties: {
-      url: { type: 'string', description: '要抓取的完整 URL,须 http/https' },
+      url: { type: 'string', description: 'Full URL to fetch; must be http/https' },
     },
     required: ['url'],
   },

@@ -5,12 +5,12 @@ import type { Tool } from '../types.js';
 // ---------- write_file ----------
 export const writeFileTool: Tool = {
   name: 'write_file',
-  description: '创建或覆盖文件,自动创建父目录。',
+  description: 'Create or overwrite a file, creating parent directories as needed.',
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: '文件路径' },
-      content: { type: 'string', description: '完整文件内容' },
+      path: { type: 'string', description: 'File path' },
+      content: { type: 'string', description: 'Full file content' },
     },
     required: ['path', 'content'],
   },

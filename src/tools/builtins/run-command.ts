@@ -6,12 +6,12 @@ import type { Tool } from '../types.js';
 export const runCommandTool: Tool = {
   name: 'run_command',
   description:
-    '执行 shell 命令,返回合并的 stdout+stderr。默认超时 120 秒。用于跑测试、构建、git 等。',
+    'Execute a shell command, returning combined stdout+stderr. Default timeout 120s. Use for running tests, builds, git, etc.',
   parameters: {
     type: 'object',
     properties: {
-      command: { type: 'string', description: '要执行的命令(单行)' },
-      timeout: { type: 'integer', description: '超时毫秒,默认120000' },
+      command: { type: 'string', description: 'Command to execute (single line)' },
+      timeout: { type: 'integer', description: 'Timeout in milliseconds, default 120000' },
     },
     required: ['command'],
   },

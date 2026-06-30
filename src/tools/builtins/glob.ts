@@ -6,11 +6,12 @@ import type { Tool } from '../types.js';
 export const globTool: Tool = {
   name: 'glob',
   description:
-    '按 glob 模式查找文件路径(如 **/*.ts)。返回匹配列表(自动排除 node_modules / .git)。',
+    'Find file paths matching a glob pattern (e.g. **/*.ts). Returns a list of matches (auto-excludes node_modules / .git).' +
+    ' Note: when understanding code architecture/call chains, if a .codegraph/ index exists, prefer the codegraph tool over piecing together via glob one file at a time.',
   parameters: {
     type: 'object',
     properties: {
-      pattern: { type: 'string', description: 'glob 模式,如 **/*.ts 或 src/**/*.json' },
+      pattern: { type: 'string', description: 'Glob pattern, e.g. **/*.ts or src/**/*.json' },
     },
     required: ['pattern'],
   },

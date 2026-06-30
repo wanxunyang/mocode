@@ -60,8 +60,8 @@ export function buildMemorySection(): string {
   return [
     '',
     '',
-    '## 项目记忆(MOCODE.md)',
-    '以下是项目记忆(架构 / 约定 / 命令等跨会话长期事实),据此行动:',
+    '## Project Memory (MOCODE.md)',
+    'The following is project memory (architecture / conventions / commands and other cross-session long-term facts). Act accordingly:',
     mem,
   ].join('\n');
 }

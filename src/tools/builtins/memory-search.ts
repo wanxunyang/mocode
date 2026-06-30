@@ -7,11 +7,11 @@ import { searchEntries, type MemoryType, type MemoryStatus } from '../../memory/
 export const memorySearchTool: Tool = {
   name: 'memory_search',
   description:
-    '按关键词搜索记忆正文(多词子串匹配,按相关度排),返回匹配条目全文。命中记一次召回(影响遗忘衰减)。',
+    'Search memory entries by keyword (multi-word substring match, ranked by relevance), returning full body of matching entries. A hit bumps recall count (affects forgetting decay).',
   parameters: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: '关键词(id 或 name 里的词效果最好)' },
+      query: { type: 'string', description: 'Keywords (words in id or name work best)' },
       type: {
         type: 'string',
         enum: ['decision', 'fact', 'pitfall', 'reference', 'feedback'],
@@ -19,9 +19,9 @@ export const memorySearchTool: Tool = {
       status: {
         type: 'string',
         enum: ['active', 'superseded', 'archived', 'any'],
-        description: '默认 active(只搜活的)',
+        description: 'Default active (only search live entries)',
       },
-      limit: { type: 'integer', description: '返回条数,默认 5,上限 20' },
+      limit: { type: 'integer', description: 'Number of entries to return, default 5, max 20' },
     },
     required: ['query'],
   },

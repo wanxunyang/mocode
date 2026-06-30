@@ -7,23 +7,23 @@ import { saveEntry, type MemoryType } from '../../memory/store.js';
 export const memorySaveTool: Tool = {
   name: 'memory_save',
   description:
-    '保存一条长期记忆(跨会话)。只存非显然、长期有用的事实/决策/坑。启动时标题进索引,详情按需 memory_search 取。',
+    'Save a long-term memory entry (cross-session). Store only non-obvious, long-term-useful facts/decisions/pitfalls. The title goes into the startup index; retrieve full body on demand via memory_search.',
   parameters: {
     type: 'object',
     properties: {
-      name: { type: 'string', description: '简短唯一标题(转成 id,撞库会拒绝)' },
-      summary: { type: 'string', description: '一句话摘要(进索引,尽量短)' },
-      body: { type: 'string', description: '完整内容(细节/上下文/证据)' },
+      name: { type: 'string', description: 'Short unique title (converted to id; rejected if it collides with an existing one)' },
+      summary: { type: 'string', description: 'One-line summary (goes into the index; keep it short)' },
+      body: { type: 'string', description: 'Full content (details/context/evidence)' },
       type: {
         type: 'string',
         enum: ['decision', 'fact', 'pitfall', 'reference', 'feedback'],
-        description: '分类,默认 fact',
+        description: 'Category, default fact',
       },
-      pinned: { type: 'boolean', description: '钉住(豁免自动遗忘衰减),默认 false' },
+      pinned: { type: 'boolean', description: 'Pin (exempt from auto-forgetting decay), default false' },
       scope: {
         type: 'string',
         enum: ['project', 'global'],
-        description: '存到项目级(<cwd>/.mocode/)还是全局(~/.mocode/),默认 project',
+        description: 'Store at project level (<cwd>/.mocode/) or global (~/.mocode/), default project',
       },
     },
     required: ['name', 'summary', 'body'],

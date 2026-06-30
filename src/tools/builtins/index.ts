@@ -9,6 +9,7 @@ import { webSearchTool } from './web-search.js';
 import { webFetchTool } from './web-fetch.js';
 import { useSkillTool } from './use-skill.js';
 import { askHumanTool } from './ask-human.js';
+import { codegraphTool } from './codegraph.js';
 import { memorySaveTool } from './memory-save.js';
 import { memorySearchTool } from './memory-search.js';
 import { memoryListTool } from './memory-list.js';
@@ -26,6 +27,7 @@ export const builtinTools: Tool[] = [
   runCommandTool,
   globTool,
   grepTool,
+  codegraphTool,
   webSearchTool,
   webFetchTool,
   useSkillTool,

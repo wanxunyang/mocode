@@ -7,13 +7,13 @@ import { getSkillBody } from '../../skills/index.js';
 export const useSkillTool: Tool = {
   name: 'use_skill',
   description:
-    '加载并返回某个 skill 的完整 SKILL.md 指令(传 name)。何时用见系统提示的 skill 列表。',
+    'Load and return the full SKILL.md instructions for a given skill (pass name). See the skill list in the system prompt for when to use each.',
   parameters: {
     type: 'object',
     properties: {
       name: {
         type: 'string',
-        description: '要加载的 skill 名(见系统提示里的 skill 列表,或 /skills 命令)',
+        description: 'Name of the skill to load (see the skill list in the system prompt, or the /skills command)',
       },
     },
     required: ['name'],

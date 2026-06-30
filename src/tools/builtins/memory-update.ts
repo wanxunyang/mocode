@@ -6,16 +6,16 @@ import { updateEntry, type UpdatePatch } from '../../memory/store.js';
 export const memoryUpdateTool: Tool = {
   name: 'memory_update',
   description:
-    '更新一条记忆(id 不变)。用于事实变了/纠正过时/补 summary 或 body/切换 pinned。id 从 memory_list 或 memory_search 拿。',
+    'Update a memory entry in place (id unchanged). Use when facts changed / correcting outdated info / updating summary or body / toggling pinned. Get id from memory_list or memory_search.',
   parameters: {
     type: 'object',
     properties: {
       id: { type: 'string' },
-      summary: { type: 'string', description: '新摘要(只传要改的字段)' },
-      body: { type: 'string', description: '新正文(只传要改的字段)' },
-      name: { type: 'string', description: '新标题(id 不随 name 变)' },
-      pinned: { type: 'boolean', description: '切换钉住状态(true 钉住豁免衰减 / false 解钉)' },
-      reason: { type: 'string', description: '更新理由(记入 lastUpdateReason,便于追溯)' },
+      summary: { type: 'string', description: 'New summary (only pass fields to change)' },
+      body: { type: 'string', description: 'New body (only pass fields to change)' },
+      name: { type: 'string', description: 'New title (id does not change with name)' },
+      pinned: { type: 'boolean', description: 'Toggle pin status (true pins and exempts decay / false unpins)' },
+      reason: { type: 'string', description: 'Update reason (recorded in lastUpdateReason for traceability)' },
     },
     required: ['id'],
   },

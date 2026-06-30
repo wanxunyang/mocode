@@ -41,8 +41,8 @@ export function buildSkillsSection(): string {
   return [
     '',
     '',
-    '## Skills(按需加载)',
-    '以下 skill 可用。只在任务相关时调用 use_skill 工具(传 skill 的 name)加载其完整指令,据此行动;不要无脑批量加载。',
+    '## Skills (load on demand)',
+    'The following skills are available. Call the use_skill tool (passing the skill name) only when relevant to the current task, to load its full instructions and act on them; do not load them all blindly.',
     ...lines,
   ].join('\n');
 }

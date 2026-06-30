@@ -5,26 +5,26 @@ import { promptIntervention } from '../../ui/intervention.js';
 export const askHumanTool: Tool = {
   name: 'ask_human',
   description: [
-    '当你在执行任务中遇到需要人类做决策的岔路时调用此工具,在终端弹出问题面板让用户选择。',
-    '适用:多种实现方案需要用户拍板、不确定用户意图需要澄清、需要用户提供额外信息才能继续。',
-    '调用后阻塞等待用户响应;用户可挑预设选项,也可选"自定义输入"自由作答,结果作为工具返回值返回。',
-    '不要在任务明确、可自行决定时频繁调用——会打断用户。options 省略或为空时改为自由文本输入。',
+    'Call this tool when you hit a decision point during a task that requires human input — it pops up a question panel in the terminal for the user to choose.',
+    'Use when: multiple implementation approaches need a user decision, user intent is unclear and needs clarification, or extra info is needed to proceed.',
+    'Blocks until the user responds; the user can pick a preset option or choose "custom input" to answer freely; the result is returned as the tool result.',
+    'Do not call frequently when the task is clear and you can decide yourself — it interrupts the user. When options is omitted or empty, it becomes free-text input instead.',
   ].join(''),
   parameters: {
     type: 'object',
     properties: {
       question: {
         type: 'string',
-        description: '要问用户的问题,简明扼要(显示为面板标题)',
+        description: 'The question to ask the user; keep it concise (shown as the panel title)',
       },
       options: {
         type: 'array',
         items: { type: 'string' },
-        description: '供用户选择的选项(2~6 个)。可省略——省略或为空时改为自由文本输入',
+        description: 'Options for the user to choose from (2~6). May be omitted — when omitted or empty, it becomes free-text input instead',
       },
       context: {
         type: 'string',
-        description: '问题的背景说明(可选,帮助用户理解为何需要他决策;显示在标题下,可多行)',
+        description: 'Background explanation for the question (optional; helps the user understand why their decision is needed; shown under the title, may be multiline)',
       },
     },
     required: ['question'],

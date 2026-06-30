@@ -195,7 +195,7 @@ async function defaultSummarize(
   const sysMsg = {
     role: 'system' as const,
     content:
-      '你是会话摘要器。只输出摘要正文,不超过 300 字,保留:用户核心请求、已读写/改动的文件及关键变更、执行过的关键命令及结果要点、已做决策、当前任务进度与下一步、未决问题。不要复述全部细节。',
+      'You are a session summarizer. Output only the summary body, max 300 words, preserving: the user\'s core request; files read/written/modified and key changes; key commands run and their result highlights; decisions made; current task progress and next step; open questions. Do not recap every detail.',
   } as ChatMessage;
   const userMsg = {
     role: 'user' as const,

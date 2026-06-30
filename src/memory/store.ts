@@ -390,14 +390,14 @@ export function buildMemoryIndexSection(): string {
   const lines = shown.map((e) => `- ${e.id}: ${e.name} — ${e.summary} (${e.type})`);
   const tail =
     active.length > MAX_INDEX_ENTRIES
-      ? `\n\n…(共 ${active.length} 条,只显前 ${MAX_INDEX_ENTRIES};用 memory_search <id 或关键词> 查更多)`
+      ? `\n\n…(${active.length} total, showing first ${MAX_INDEX_ENTRIES}; use memory_search <id or keyword> for more)`
       : '';
   return [
     '',
     '',
-    '## 记忆索引(按需 memory_search 取详情)',
-    '以下是已保存的记忆条目(标题/摘要)。需要正文时调 memory_search(传 id 或关键词);用 memory_list 看全部,'
-      + 'memory_update 改、memory_forget 忘。本列表为启动快照,会话期间新增的不在此——用 memory_list/memory_search 查最新。',
+    '## Memory Index (retrieve full body via memory_search)',
+    'The following are saved memory entries (title/summary only). Retrieve full body via memory_search (pass id or keyword); use memory_list to see all,'
+      + ' memory_update to modify, memory_forget to archive. This list is a startup snapshot; entries added during the session are not listed here — use memory_list/memory_search to find them.',
     ...lines,
     tail,
   ].join('\n');

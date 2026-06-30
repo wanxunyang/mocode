@@ -76,9 +76,9 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
 const INIT_PROMPT = `分析当前项目(process.cwd()),生成 MOCODE.md 项目记忆文件,供 mocode 后续会话自动加载——目标是让后续会话无需重新摸索就能上手。
 
 先探查(尽量少调用拿全貌):
+- 若有 .codegraph/:用 codegraph 工具(explore "<架构或入口符号>")一次拿相关源码+调用路径,别逐文件读！！！
 - read_file package.json(或 Cargo.toml/pyproject.toml/go.mod 等):scripts、依赖、入口、模块类型。
 - glob 顶层目录;read_file 入口文件 + 各子系统 index.ts/README。
-- 若有 .codegraph/:run_command codegraph explore "<架构或入口符号>" 一次拿相关源码+调用路径,别逐文件读。
 - 若 MOCODE.md 已存在:read_file 读它,在其基础上更新(补缺、修正过时),不丢已有准确事实。
 
 MOCODE.md 按以下结构写(每节简短,只写稳定、非显然的事实):

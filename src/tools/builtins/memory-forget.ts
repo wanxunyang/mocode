@@ -6,7 +6,7 @@ import { forgetEntry } from '../../memory/store.js';
 export const memoryForgetTool: Tool = {
   name: 'memory_forget',
   description:
-    '遗忘一条记忆:默认归档(archived,从索引/默认搜索隐藏,可经 memory_update 复活);mode=delete 硬删。pinned 条目拒删(先 memory_update pinned=false 解钉)。',
+    'Forget a memory entry: by default archives (archived, hidden from index and default search, can be revived via memory_update); mode=delete hard-deletes. Pinned entries cannot be deleted (first memory_update pinned=false to unpin).',
   parameters: {
     type: 'object',
     properties: {
@@ -14,7 +14,7 @@ export const memoryForgetTool: Tool = {
       mode: {
         type: 'string',
         enum: ['archive', 'delete'],
-        description: '默认 archive',
+        description: 'Default archive',
       },
     },
     required: ['id'],

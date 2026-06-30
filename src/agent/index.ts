@@ -39,6 +39,7 @@ const READ_TOOL_NAMES = new Set([
   'read_file',
   'glob',
   'grep',
+  'codegraph',
   'web_search',
   'web_fetch',
 ]);

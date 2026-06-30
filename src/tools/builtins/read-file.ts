@@ -7,13 +7,14 @@ import type { Tool } from '../types.js';
 export const readFileTool: Tool = {
   name: 'read_file',
   description:
-    '读取文件内容,返回带行号的文本。改代码前先读。可选 offset(起始行,1-based,默认1)和 limit(行数,默认2000)。',
+    'Read file content, returning text with line numbers. Read before editing code. Optional offset (start line, 1-based, default 1) and limit (number of lines, default 2000).' +
+    ' Note: when understanding code architecture/call chains, if a .codegraph/ index exists, prefer the codegraph tool over piecing together via read_file one file at a time.',
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: '文件路径,相对工作目录' },
-      offset: { type: 'integer', description: '起始行号(1-based),默认1' },
-      limit: { type: 'integer', description: '最大读取行数,默认2000' },
+      path: { type: 'string', description: 'File path, relative to the working directory' },
+      offset: { type: 'integer', description: 'Start line (1-based), default 1' },
+      limit: { type: 'integer', description: 'Max number of lines to read, default 2000' },
     },
     required: ['path'],
   },

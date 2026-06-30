@@ -6,13 +6,13 @@ import type { Tool } from '../types.js';
 export const editFileTool: Tool = {
   name: 'edit_file',
   description:
-    '对文件做精确字符串替换。old_string 必须在文件中唯一出现且完全匹配(含缩进/换行)。新建文件请用 write_file。',
+    'Make a precise string replacement in a file. old_string must occur exactly once in the file and match exactly (including indentation/newlines). Use write_file for new files.',
   parameters: {
     type: 'object',
     properties: {
       path: { type: 'string' },
-      old_string: { type: 'string', description: '要被替换的原文,须精确匹配' },
-      new_string: { type: 'string', description: '替换后的新文本' },
+      old_string: { type: 'string', description: 'The original text to be replaced; must match exactly' },
+      new_string: { type: 'string', description: 'The new text to replace it with' },
     },
     required: ['path', 'old_string', 'new_string'],
   },

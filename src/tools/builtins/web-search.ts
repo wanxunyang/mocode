@@ -10,20 +10,20 @@ const MAX_CONTENT_CHARS = 800;
 export const webSearchTool: Tool = {
   name: 'web_search',
   description:
-    '联网搜索(AnySearch)。返回每条结果的标题/URL/摘要/正文。可选 tag 切换子域(见 tag 参数)。',
+    'Search the web (AnySearch). Returns title/url/snippet/body for each result. Optional tag to switch sub-domain capability (see tag param).',
   parameters: {
     type: 'object',
     properties: {
-      query: { type: 'string', description: '搜索查询词' },
-      max_results: { type: 'integer', description: '返回条数,1-20,默认 10' },
+      query: { type: 'string', description: 'Search query' },
+      max_results: { type: 'integer', description: 'Number of results, 1-20, default 10' },
       tag: {
         type: 'string',
-        description: '子域能力标签,如 general.general / code.doc / code.snippet;不传走通用搜索',
+        description: 'Sub-domain capability tag, e.g. general.general / code.doc / code.snippet; omit for general search',
       },
-      language: { type: 'string', description: '偏好语言,如 zh-CN / en,默认 zh-CN' },
+      language: { type: 'string', description: 'Preferred language, e.g. zh-CN / en, default zh-CN' },
       params: {
         type: 'object',
-        description: '特定 tag 的扩展参数,如 code.doc 的 {"library":"golang"};通用搜索不需要',
+        description: 'Extended params for a specific tag, e.g. {"library":"golang"} for code.doc; not needed for general search',
       },
     },
     required: ['query'],

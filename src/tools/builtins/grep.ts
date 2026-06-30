@@ -8,12 +8,13 @@ import type { Tool } from '../types.js';
 export const grepTool: Tool = {
   name: 'grep',
   description:
-    '在文件内容里按正则搜索,返回 file:line: 匹配行。默认递归搜索当前目录(排除 node_modules/.git)。可选 glob 限定文件类型。',
+    'Search file contents by regex, returning file:line: matched lines. Recursively searches the current directory by default (excluding node_modules/.git). Optional glob to restrict file types.' +
+    ' Note: when understanding code architecture/call chains, if a .codegraph/ index exists, prefer the codegraph tool over piecing together via grep one file at a time.',
   parameters: {
     type: 'object',
     properties: {
-      pattern: { type: 'string', description: '正则表达式' },
-      glob: { type: 'string', description: '可选,限定文件 glob,如 *.ts' },
+      pattern: { type: 'string', description: 'Regular expression' },
+      glob: { type: 'string', description: 'Optional, restrict to a file glob, e.g. *.ts' },
     },
     required: ['pattern'],
   },
