@@ -71,6 +71,11 @@ let statusText = '';
 let spinnerFrame: string | undefined;
 let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
 let turnTimer: NodeJS.Timeout | null = null; // 走时刷新计时器(独立于 spinner):流式期间 spinner 停转,由它续刷状态行。
+// 运行态用户打字时暂停流式物理写:流式每个 token 要 cup 到 contentRow 写入,IME 候选窗逐光标移动跟踪会跟过去;
+// 用户打字期间只喂缓冲、不物理写,光标留输入框;停手 USER_ACTIVE_PAUSE_MS 后 flush 重画缓冲内容。
+let userActiveUntil = 0; // 打字活跃截止时刻(Date.now()+PAUSE);0=未活跃
+let flushTimer: NodeJS.Timeout | null = null; // 用户停手后 flush 缓冲内容(repaintViewport)
+const USER_ACTIVE_PAUSE_MS = 1500;
 let lastView: InputView | null = null;
 let lastMenuStartRow = 0; // 上次菜单起始屏行(供擦除)
 let lastMenuRows = 0;
@@ -84,6 +89,7 @@ const esc = {
   altScrollOn: '\x1B[?1007h', // xterm alternate scroll:alt 屏内滚轮转发 ↑/↓(配合 onKey/onRunningKey 的 ↑/↓ 滚动)
   altScrollOff: '\x1B[?1007l',
   cursorShow: '\x1B[?25h',
+  cursorHide: '\x1B[?25l',
   clearLine: '\x1B[2K',
   home: '\x1B[H',
 };
@@ -128,15 +134,59 @@ export function setRegion(fh: number): Geo {
   return g;
 }
 
+/** 运行态真光标(隐藏)的归位点 = 输入框光标位:行 = 动态 contentBottom+3(resize 安全),列对齐 renderDimInputRow 的假光标(空→3,有字→❯+截断文本宽+1)。供 IME 锚定。 */
+function runningCaretPos(): { row: number; col: number } {
+  const g = getGeo();
+  const text = lastView?.dim ? lastView.lines[0] ?? '' : '';
+  const contentW = Math.max(0, g.cols - 3); // ❯ =2 + 光标=1
+  const w = displayWidth(truncateDisplay(text, contentW));
+  return { row: g.contentBottom + 3, col: Math.min(g.cols, 2 + w + 1) };
+}
+
 export function contentMode(): void {
   if (!active) return;
-  // 滚动回看时回内容区底(光标不入输入框,viewport 锁历史)
-  stdout.write(
-    cup(
-      scrollOffset === 0 ? contentRow : getGeo().contentBottom,
-      scrollOffset === 0 ? contentCol : 1
-    )
-  );
+  const g = getGeo();
+  if (mode === 'running' && scrollOffset === 0) {
+    // 运行态:真光标归输入框光标位(供 IME 锚定,气泡不跟流式跑);假光标做可见指示
+    const p = runningCaretPos();
+    stdout.write(cup(p.row, p.col));
+  } else {
+    // INPUT 态 / 滚动回看:归续写位(滚动回看时归内容区底,viewport 锁历史)
+    stdout.write(
+      cup(
+        scrollOffset === 0 ? contentRow : g.contentBottom,
+        scrollOffset === 0 ? contentCol : 1
+      )
+    );
+  }
+}
+
+/** 运行态用户是否在打字(近期有按键)——是则暂停流式物理写(contentWrite/drawStatusBar/paintLiveAtCursor 跳过物理写),光标留输入框,IME 候选窗稳定不跟流式跑。 */
+export function isStreamingPaused(): boolean {
+  return mode === 'running' && Date.now() < userActiveUntil;
+}
+
+/**
+ * 运行态用户打字时调(repl onRunningKey 每次按键):标记活跃 + 重置 flush 定时器。
+ * 活跃期间流式只喂缓冲不物理写(光标不入内容区);用户停手 USER_ACTIVE_PAUSE_MS 后 flush:
+ * repaintViewport 重画缓冲内容 + drawStatusBar 刷状态行 + 光标归输入框。
+ * 解决 IME 候选窗跟流式输出跑:流式写必须 cup 到 contentRow,IME 逐光标跟踪→气泡跟跑;打字时暂停写则光标不动。
+ */
+export function setUserActive(): void {
+  if (!active || mode !== 'running') return;
+  userActiveUntil = Date.now() + USER_ACTIVE_PAUSE_MS;
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    userActiveUntil = 0;
+    if (active && mode === 'running' && scrollOffset === 0) {
+      repaintViewport(); // 重画内容区(显示活跃期间缓冲的流式内容)
+      drawStatusBar(); // 刷状态行(活跃期间冻住,现恢复)
+      const p = runningCaretPos();
+      stdout.write(cup(p.row, p.col));
+    }
+  }, USER_ACTIVE_PAUSE_MS);
+  flushTimer.unref();
 }
 
 /**
@@ -153,8 +203,9 @@ export function contentWrite(s: string): void {
     return;
   }
   // 滚动回看时(scrollOffset>0)只喂缓冲 + 推进续写位,不物理写——否则新流式内容覆盖 viewport 历史行。
-  // 回尾(scrollOffset===0)才 cup 到续写位物理写出(== 实时屏)。
-  if (scrollOffset === 0) stdout.write(cup(contentRow, contentCol) + s);
+  // 回尾(scrollOffset===0)才物理写;写起点 = 当前续写位(loop 会推进续写位,故先捕获)。
+  const startRow = contentRow;
+  const startCol = contentCol;
   const g = getGeo();
   const cols = g.cols;
   const bottom = g.contentBottom;
@@ -222,6 +273,17 @@ export function contentWrite(s: string): void {
     contentCol += cw;
     content.feedChar(ch);
     i += ch.length;
+  }
+  // 物理写(回尾 offset=0 且未暂停):cup 写起点 + s + (运行态 cup 回输入框)一次写出。
+  // 用户打字中(isStreamingPaused)跳过物理写、只喂缓冲——光标不入内容区,IME 候选窗不跟流式跑;
+  // 停手后 setUserActive 的 flush 定时器 repaintViewport 重画缓冲内容。
+  if (scrollOffset === 0 && !isStreamingPaused()) {
+    let out = cup(startRow, startCol) + s;
+    if (mode === 'running') {
+      const p = runningCaretPos();
+      out += cup(p.row, p.col);
+    }
+    stdout.write(out);
   }
 }
 
@@ -381,17 +443,19 @@ function composeStatus(status: StatusBarData, cols: number): string {
 /** 画状态行(光标回续写位)。RUNNING 态 spinner 频繁调。 */
 export function drawStatusBar(status?: StatusBarData): void {
   if (!active || !base) return;
+  if (isStreamingPaused()) return; // 用户打字中:状态行暂不刷(避免光标去 statusRow 扰动 IME),停手后 flush 会刷
   const s = status ?? { ...base, status: statusText, spinnerFrame };
   const g = getGeo();
   const statusRow = g.contentBottom + 1;
-  stdout.write(cup(statusRow, 1) + esc.clearLine + composeStatus(s, g.cols));
-  // 回续写位;滚动回看时回内容区底(光标不入输入框,viewport 锁历史)
-  stdout.write(
-    cup(
-      scrollOffset === 0 ? contentRow : g.contentBottom,
-      scrollOffset === 0 ? contentCol : 1
-    )
-  );
+  // 一次写入:cup 状态行 + clearLine + 状态 + cup 回(运行态→输入框供 IME 锚定;否则续写位/内容区底)
+  let out = cup(statusRow, 1) + esc.clearLine + composeStatus(s, g.cols);
+  if (mode === 'running' && scrollOffset === 0) {
+    const p = runningCaretPos();
+    out += cup(p.row, p.col);
+  } else {
+    out += cup(scrollOffset === 0 ? contentRow : g.contentBottom, scrollOffset === 0 ? contentCol : 1);
+  }
+  stdout.write(out);
 }
 
 /** 更新易变状态(状态文字 + spinner 帧)并重画状态行。spinner / agent 用。 */
@@ -428,14 +492,25 @@ function stopTurnTimer(): void {
  * 配合 clearLiveAtCursor 在 spinner 停时清掉,随后 contentWrite 的结果即写在该行(spinner 不入历史缓冲)。
  */
 export function paintLiveAtCursor(text: string): void {
-  if (!active || !ui.isTTY || scrollOffset !== 0) return;
-  stdout.write(cup(contentRow, contentCol) + esc.clearLine + text);
+  if (!active || !ui.isTTY || scrollOffset !== 0 || isStreamingPaused()) return;
+  // 一次写入:cup 续写位 + clearLine + 帧 + (运行态 cup 回输入框)——避免光标在续写位歇脚被 IME 跟踪
+  let out = cup(contentRow, contentCol) + esc.clearLine + text;
+  if (mode === 'running') {
+    const p = runningCaretPos();
+    out += cup(p.row, p.col);
+  }
+  stdout.write(out);
 }
 
 /** 清掉续写位那行瞬时活动文本(配合 paintLiveAtCursor)。 */
 export function clearLiveAtCursor(): void {
-  if (!active || !ui.isTTY || scrollOffset !== 0) return;
-  stdout.write(cup(contentRow, contentCol) + esc.clearLine);
+  if (!active || !ui.isTTY || scrollOffset !== 0 || isStreamingPaused()) return;
+  let out = cup(contentRow, contentCol) + esc.clearLine;
+  if (mode === 'running') {
+    const p = runningCaretPos();
+    out += cup(p.row, p.col);
+  }
+  stdout.write(out);
 }
 
 /** 更新状态行基线(模型 / context / cwd)。repl 在轮次边界调。 */
@@ -652,11 +727,9 @@ export function paintInput(view: InputView): void {
 
   // 6. 光标
   if (view.dim) {
-    // 滚动回看时归内容区底(dim=运行态占位,光标不入输入框,viewport 锁历史)
-    buf += cup(
-      scrollOffset === 0 ? contentRow : g.contentBottom,
-      scrollOffset === 0 ? contentCol : 1
-    );
+    // 运行态:真光标归输入框光标位(供 IME 锚定);滚动回看时归内容区底(viewport 锁历史)
+    const p = runningCaretPos();
+    buf += cup(scrollOffset === 0 ? p.row : g.contentBottom, scrollOffset === 0 ? p.col : 1);
   } else {
     const r = firstInputRow + vis.visLine;
     const col = promptW + vis.cursorVisCol + 1;
@@ -715,13 +788,9 @@ export function paintRunningInputEcho(text: string, placeholder: string): void {
     menu: null,
     dim: true,
   };
-  // 真光标归续写位(滚动回看时归内容区底)——假光标已画在输入行,真光标不与其争用
-  stdout.write(
-    cup(
-      scrollOffset === 0 ? contentRow : g.contentBottom,
-      scrollOffset === 0 ? contentCol : 1
-    )
-  );
+  // 真光标归输入框光标位(供 IME 锚定,与假光标同位);滚动回看时归内容区底
+  const p = runningCaretPos();
+  stdout.write(cup(scrollOffset === 0 ? p.row : g.contentBottom, scrollOffset === 0 ? p.col : 1));
 }
 
 /** 重画当前视图(resize / 内部用)。 */
@@ -738,6 +807,12 @@ export function enterInputMode(status: string = '空闲'): void {
   spinnerFrame = undefined;
   turnStart = null; // 停走时
   stopTurnTimer();
+  // 运行态若有未 flush 的缓冲内容(用户打字暂停了流式写),切回 INPUT 前重画内容区显示之,免丢内容
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+  if (userActiveUntil) {
+    userActiveUntil = 0;
+    if (active) repaintViewport();
+  }
   if (active && base) {
     setRegion(4); // 1 状态 + 1 上线 + 1 输入 + 1 下线
     paintInput({
@@ -747,6 +822,7 @@ export function enterInputMode(status: string = '空闲'): void {
       cursorCol: 0,
       menu: null,
     });
+    stdout.write(esc.cursorShow); // 回 INPUT 态:显真光标(运行态藏了)
   }
 }
 
@@ -770,6 +846,9 @@ export function enterRunningMode(status: string, placeholder: string): void {
     });
     startTurnTimer(); // 续刷状态行走时(流式期间 spinner 停转,由它兜底)
     contentMode();
+    // 真光标可见,停在输入框光标位(供 IME 锚定气泡到光标处)。打字时 setUserActive 暂停流式写、
+    // 光标稳定在输入框;流式写时瞬时到 contentRow 但合并写入很快回输入框(光标跟流式是终端常态)。
+    // 不再藏光标:藏了 IME 气泡会跑到输入框最右边而非光标处(WT 不锚定隐藏光标)。
   }
 }
 
@@ -850,6 +929,11 @@ export function exitAltScreen(): void {
     clearTimeout(resizeTimer);
     resizeTimer = null;
   }
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  userActiveUntil = 0;
 }
 
 export function isActive(): boolean {

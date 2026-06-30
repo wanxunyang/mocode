@@ -208,6 +208,8 @@ function onRunningKey(_str: string, key?: Key): void {
     else layout.scrollBy(-1);
     return;
   }
+  // 用户在交互(非滚动键)→ 暂停流式物理写,避免光标去 contentRow 扰动 IME 候选窗(停手后自动 flush)
+  layout.setUserActive();
   // 其他键:若处于滚动回看,先回尾再处理(打字即回底)
   if (layout.isScrolled()) layout.resetScroll();
   // Ctrl+C 中断当前 agent 轮次(不退进程;raw 模式下 Ctrl+C 是按键,不触发 SIGINT)

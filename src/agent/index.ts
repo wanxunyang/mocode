@@ -164,7 +164,7 @@ export async function runAgent(
   history.push({ role: 'user', content: userInput });
   // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
   beginTurn(truncateDisplay(userInput.split('\n')[0] ?? '', 40));
-  layout.contentMode(); // 防御性:确保光标在内容续写位(enterRunningMode 已置,这里兜底)
+  layout.contentMode(); // 防御性:运行态光标归输入框光标位供 IME 锚定(enterRunningMode 已置,这里兜底)
   // spinner:续写位内联转圈(思考中 / 执行 工具时,内容区不再「干等」)。
   // 只走内联 paintLiveAtCursor——不调 setStatus,状态行不重复 spinner 文字(状态行只显走时,
   // 由 turnTimer 200ms 续刷);内联帧不进缓冲、停时清掉,随后结果即写在该行——故 spinner 不入历史、PgUp 看不到。
