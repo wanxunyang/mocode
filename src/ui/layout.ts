@@ -45,6 +45,7 @@ export interface StatusBarData {
   cwd: string;
   status: string; // '空闲' | '思考中' | '执行 read_file' …
   spinnerFrame?: string; // 可选 spinner 帧(运行态)
+  modeTag?: string; // 模式标识:plan 模式显黄色 'plan';auto 缺省=不显(状态行干净)
 }
 
 export interface InputView {
@@ -66,7 +67,7 @@ let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
 let contentCol = 1; // 续写位列(1-based)
 let segmentStartRow = 1; // 当前思考段起始屏行(供 eraseSegmentBack 定位擦除起点;段内行数由 content 段标记跟踪)
 let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
-let base: { model: string; contextBar: string; cwd: string } | null = null;
+let base: { model: string; contextBar: string; cwd: string; modeTag?: string } | null = null;
 let statusText = '';
 let spinnerFrame: string | undefined;
 let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
@@ -405,6 +406,11 @@ function composeStatus(status: StatusBarData, cols: number): string {
   const sep = '  ';
   const sepW = sep.length;
   const lead = `◆ `;
+  // 模式 chip:lead 之后、model 之前。auto 显 dim 'auto'(常态),plan 显亮黄 'plan'(切换时颜色+文字都变,明显)。
+  const modeChip = status.modeTag
+    ? ` ${status.modeTag === 'plan' ? ui.yellow : ui.dim}${status.modeTag}${ui.reset}`
+    : '';
+  const modeChipW = status.modeTag ? 1 + displayWidth(status.modeTag) : 0; // 1 = 前导空格
   const model = truncateDisplay(status.model, 22);
   const ctx = status.contextBar; // 已带色
   const ctxW = ansiDisplayWidth(ctx);
@@ -426,11 +432,11 @@ function composeStatus(status: StatusBarData, cols: number): string {
     }
   }
   const stW = displayWidth(st);
-  const fixed = displayWidth(lead) + displayWidth(model) + sepW * 3 + ctxW + stW;
+  const fixed = displayWidth(lead) + modeChipW + displayWidth(model) + sepW * 3 + ctxW + stW;
   const cwdBudget = cols - fixed - 1;
   const cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
   return [
-    `${ui.brightCyan}${lead}${ui.reset}${ui.bold}${model}${ui.reset}`,
+    `${ui.brightCyan}${lead}${ui.reset}${modeChip}${ui.bold}${model}${ui.reset}`,
     sep,
     ctx,
     sep,
@@ -513,11 +519,12 @@ export function clearLiveAtCursor(): void {
   stdout.write(out);
 }
 
-/** 更新状态行基线(模型 / context / cwd)。repl 在轮次边界调。 */
+/** 更新状态行基线(模型 / context / cwd / 模式标识)。repl 在轮次边界与切模式时调。 */
 export function setStatusBase(b: {
   model: string;
   contextBar: string;
   cwd: string;
+  modeTag?: string;
 }): void {
   base = b;
 }

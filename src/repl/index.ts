@@ -1,7 +1,7 @@
 import readline from 'node:readline/promises';
 import { emitKeypressEvents, type Key } from 'node:readline';
 import { stdin, stdout } from 'node:process';
-import { config } from '../config/index.js';
+import { config, PLAN_MODE_SUFFIX } from '../config/index.js';
 import { runAgent } from '../agent/index.js';
 import { ui } from '../ui/theme.js';
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
@@ -12,6 +12,7 @@ import {
   promptSessionPicker,
   type SessionPickerItem,
 } from '../ui/prompt.js';
+import { promptIntervention } from '../ui/intervention.js';
 import { tools } from '../tools/registry.js';
 import {
   estimateMessagesTokens,
@@ -67,6 +68,8 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/memory', desc: '记忆库:条目计数与近期索引' },
   { name: '/reflect', desc: '手动触发后台记忆反思 pass' },
   { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆' },
+  { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
+  { name: '/auto', desc: '切回 auto 模式(全工具执行)' },
 ];
 
 /**
@@ -144,12 +147,13 @@ function renderContextBarInline(history: ChatMessage[]): string {
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
 }
 
-/** 状态行基线:模型 / context / cwd。repl 在轮次边界调,刷新 context 用量。 */
+/** 状态行基线:模型 / context / cwd / 模式标识。repl 在轮次边界与切模式时调,刷新 context 用量与 mode chip。 */
 function refreshStatusBase(history: ChatMessage[]): void {
   layout.setStatusBase({
     model: config.model,
     contextBar: renderContextBarInline(history),
     cwd: process.cwd(),
+    modeTag: agentMode === 'plan' ? 'plan' : 'auto',
   });
 }
 
@@ -166,6 +170,10 @@ function runningStateFor(
       return { status: '回滚', placeholder: '选择轮次…' };
     case '/init':
       return { status: '初始化', placeholder: '生成 MOCODE.md…' };
+    case '/plan':
+      return { status: '切 plan', placeholder: '…' };
+    case '/auto':
+      return { status: '切 auto', placeholder: '…' };
     case '/clear':
       return { status: '清空', placeholder: '…' };
     default:
@@ -189,6 +197,7 @@ let runningInput = ''; // 运行中已打字缓冲(单行;agent 结束后预填�
 let runningPlaceholder = '';
 let currentAbort: AbortController | null = null;
 let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user 输入(下轮 INPUT 态消费)
+let agentMode: 'auto' | 'plan' = 'auto'; // 当前 agent 形态(auto=执行全工具 / plan=只读探查+产出计划);Shift+Tab 切换,不落盘(每会话重置)
 
 /** 运行态按键:滚动优先,再 Ctrl+C 中断,再 typeahead 编辑(单行,Enter=无操作)。 */
 function onRunningKey(_str: string, key?: Key): void {
@@ -373,21 +382,29 @@ export async function startRepl(
   sessionId?: string,
   updateNotice: string | null = null
 ): Promise<void> {
+  // 模式重置:agentMode 不落盘,每个 REPL 会话从 auto 开始(/resume / --resume 亦重置)。
+  agentMode = 'auto';
+  // 构造系统提示:auto 用 base;plan 在 config.systemPrompt 后追加 PLAN_MODE_SUFFIX。
+  // 切模式时 applyMode 重算 history[0](history[0] 恒 system,compaction 保它,不破坏)。
+  const buildSystemMessage = (planMode: boolean): string =>
+    effectiveSystemPrompt(
+      config.systemPrompt +
+        (planMode ? PLAN_MODE_SUFFIX : '') +
+        buildMemorySection() +
+        buildMemoryIndexSection(),
+    );
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
-  // 否则新会话只塞 system 提示。
-  const systemPrompt = effectiveSystemPrompt(
-    config.systemPrompt + buildMemorySection() + buildMemoryIndexSection(),
-  );
+  // 否则新会话只塞 system 提示(默认 auto)。
   const history: ChatMessage[] =
     initialHistory && initialHistory.length
       ? initialHistory
-      : [{ role: 'system', content: systemPrompt }];
+      : [{ role: 'system', content: buildSystemMessage(false) }];
   if (
     initialHistory &&
     initialHistory.length &&
     history[0]?.role === 'system'
   ) {
-    history[0] = { role: 'system', content: systemPrompt };
+    history[0] = { role: 'system', content: buildSystemMessage(false) };
   }
   // --resume:读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
   if (sessionId && initialHistory && initialHistory.length) {
@@ -422,6 +439,23 @@ export async function startRepl(
     // 自更新提示:开场静态段(进 INPUT 态前),dim 一行,不与流式 / 输入争用。
     layout.contentWrite(`  ${ui.gray}↳ ${updateNotice}${ui.reset}\n`);
   }
+  layout.contentWrite(
+    `${ui.dim}  /plan · /auto · Shift+Tab 切换模式(plan:只读探查 + 产出计划,审批后切 auto 执行)${ui.reset}\n`,
+  );
+
+  /**
+   * 切换 agent 模式(Shift+Tab 触发,经 prompt.ts 的 onCycleMode 回调)。
+   * cycleMode 翻 agentMode + applyMode 重写 history[0] + refreshStatusBase 设状态行 modeTag;
+   * 随后 prompt.ts 自调 redraw() 经 paintInput 把 chip 画出来(光标留输入框,不调 drawStatusBar)。
+   */
+  const applyMode = (planMode: boolean): void => {
+    history[0] = { role: 'system', content: buildSystemMessage(planMode) };
+  };
+  const cycleMode = (): void => {
+    agentMode = agentMode === 'plan' ? 'auto' : 'plan';
+    applyMode(agentMode === 'plan');
+    refreshStatusBase(history); // 设 base.modeTag;chip 由 prompt.ts 的 redraw() 画
+  };
 
   /**
    * 回滚子流程(由 /rollback 触发):菜单(↑/↓)选轮次 → 选中第 X 轮 = 删第 X 轮及之后 + 预填第 X 轮 user 输入
@@ -493,6 +527,59 @@ export async function startRepl(
     pendingPrefill = prefillText.split('\n');
   };
 
+  /**
+   * 跑一轮 agent(enterRunningMode 已由调用方完成):startRunningListener → runAgent → autosave / reflect。
+   * plan 模式传 planMode=true(runAgent 用 planChatTools 只读子集)。返 ok=正常结束(未中断 / 未抛错),
+   * 供调用方决定是否弹审批面板。execute 轮的合成输入也走这里。
+   */
+  const runTurn = async (
+    input: string,
+    planMode: boolean,
+    placeholder: string,
+  ): Promise<boolean> => {
+    let ok = false;
+    try {
+      const signal = startRunningListener(placeholder);
+      // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
+      // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
+      await runAgent(
+        history,
+        input,
+        collapsedThinkings,
+        signal,
+        () => {
+          refreshStatusBase(history);
+          layout.drawStatusBar();
+        },
+        planMode,
+      );
+      ok = !signal.aborted; // 中断(Ctrl+C)→ runAgent 已还原 history,ok=false 不弹审批
+      // 成功轮次自动落盘(崩溃也保住上一轮);新会话首轮分配 id
+      if (!currentSessionId) currentSessionId = newSessionId();
+      try {
+        saveSession(history, currentSessionId);
+      } catch {
+        // 落盘失败不阻断 REPL
+      }
+      persistSnapshots(currentSessionId); // 随会话落盘回滚快照(/resume 后仍可撤销)
+      // 后台反思:每 reflectEveryN 轮 fire-and-forget 一次(与下一轮 agent 并发,不阻塞)。
+      // 已有在飞任务 / autoReflect 关 → kickoff 内部自守卫。快照同步取(避免下一轮 mutate history 竞态)。
+      turnCount++;
+      if (turnCount % config.reflectEveryN === 0) {
+        kickoffReflection(snapshotTranscript(history, 20));
+      }
+    } catch (e) {
+      ok = false;
+      layout.contentWrite(
+        `${ui.red}[错误]${ui.reset} ${e instanceof Error ? e.message : String(e)}\n`
+      );
+    } finally {
+      stopRunningListener();
+    }
+    layout.contentWrite('\n'); // 轮次之间空行
+    return ok;
+  };
+
   while (true) {
     // INPUT 态:画底栏输入框 + 状态行,光标入输入框
     refreshStatusBase(history);
@@ -510,6 +597,7 @@ export async function startRepl(
       input = await promptWithSlashMenu({
         prompt: PROMPT,
         commands: SLASH_COMMANDS,
+        onCycleMode: cycleMode,
         // /rollback 预填优先;否则上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
         ...(pendingPrefill
           ? { initialLines: pendingPrefill }
@@ -539,6 +627,32 @@ export async function startRepl(
     if (line === '/init') {
       // /init:把 init 指令当 user 输入发给 agent(扫描项目 + 生成 MOCODE.md),fall through 走 runAgent
       joined = INIT_PROMPT;
+    }
+    if (line === '/plan') {
+      // /plan:切到 plan 模式(只读探查 + 产出计划)。Shift+Tab 的可靠后备——
+      // 中文 IME(微软拼音用 Shift 切中英)与部分终端会吞掉 Shift+Tab 的 \x1b[Z,命令不受影响。
+      if (agentMode === 'plan') {
+        layout.contentWrite(`${ui.dim}(已在 plan 模式)${ui.reset}\n`);
+      } else {
+        agentMode = 'plan';
+        applyMode(true);
+        refreshStatusBase(history);
+        layout.contentWrite(
+          `${ui.dim}(已切到 plan 模式:只读探查 + 产出计划,审批后切 auto 执行。/auto 或 Shift+Tab 切回)${ui.reset}\n`,
+        );
+      }
+      continue;
+    }
+    if (line === '/auto') {
+      if (agentMode === 'auto') {
+        layout.contentWrite(`${ui.dim}(已在 auto 模式)${ui.reset}\n`);
+      } else {
+        agentMode = 'auto';
+        applyMode(false);
+        refreshStatusBase(history);
+        layout.contentWrite(`${ui.dim}(已切回 auto 模式:全工具执行)${ui.reset}\n`);
+      }
+      continue;
     }
 
     if (line === '/clear') {
@@ -652,8 +766,9 @@ export async function startRepl(
         continue;
       }
       if (loaded.history[0]?.role === 'system') {
-        loaded.history[0] = { role: 'system', content: systemPrompt };
+        loaded.history[0] = { role: 'system', content: buildSystemMessage(false) };
       }
+      agentMode = 'auto'; // /resume 重置为 auto(mode 不落盘)
       history.length = 0;
       history.push(...loaded.history);
       currentSessionId = loaded.id;
@@ -694,36 +809,25 @@ export async function startRepl(
       continue;
     }
 
-    try {
-      const signal = startRunningListener(placeholder);
-      // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
-      // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
-      await runAgent(history, joined, collapsedThinkings, signal, () => {
-        refreshStatusBase(history);
-        layout.drawStatusBar();
+    const planMode = (agentMode as 'auto' | 'plan') === 'plan';
+    const ok = await runTurn(joined, planMode, placeholder);
+    // plan 模式且正常结束(未中断 / 未抛错)→ 弹审批面板:切 auto 执行 / 留 plan 细化(仿 Claude Code)。
+    // 计划正文已在 history 作 assistant 回复,execute 轮合成「请按上述计划执行。」续跑,agent 有上下文。
+    if (planMode && ok) {
+      const res = await promptIntervention({
+        type: 'choice',
+        title: '计划已就绪',
+        detail: '切换到 auto 模式按上述计划执行?(plan 模式只读探查,执行需切 auto)',
+        options: ['切 auto 执行', '留 plan 细化'],
       });
-      // 成功轮次自动落盘(崩溃也保住上一轮);新会话首轮分配 id
-      if (!currentSessionId) currentSessionId = newSessionId();
-      try {
-        saveSession(history, currentSessionId);
-      } catch {
-        // 落盘失败不阻断 REPL
+      if (res.action === 'selected' && res.value === '切 auto 执行') {
+        agentMode = 'auto';
+        applyMode(false); // 重写 history[0] 回 auto 系统提示(去掉 PLAN_MODE_SUFFIX)
+        refreshStatusBase(history);
+        layout.enterRunningMode('执行', '按计划执行…');
+        await runTurn('请按上述计划执行。', false, '按计划执行…');
       }
-      persistSnapshots(currentSessionId); // 随会话落盘回滚快照(/resume 后仍可撤销)
-      // 后台反思:每 reflectEveryN 轮 fire-and-forget 一次(与下一轮 agent 并发,不阻塞)。
-      // 已有在飞任务 / autoReflect 关 → kickoff 内部自守卫。快照同步取(避免下一轮 mutate history 竞态)。
-      turnCount++;
-      if (turnCount % config.reflectEveryN === 0) {
-        kickoffReflection(snapshotTranscript(history, 20));
-      }
-    } catch (e) {
-      layout.contentWrite(
-        `${ui.red}[错误]${ui.reset} ${e instanceof Error ? e.message : String(e)}\n`
-      );
-    } finally {
-      stopRunningListener();
     }
-    layout.contentWrite('\n'); // 轮次之间空行
   }
 
   // 退出前等在飞反思收尾(Ctrl+C 走 SIGINT 直退不等;fire-and-forget 不承诺中断时完成)。

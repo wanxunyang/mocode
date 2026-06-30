@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { config } from '../config/index.js';
 import { tools } from '../tools/registry.js';
+import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
 
 const client = new OpenAI({
   baseURL: config.baseURL,
@@ -21,6 +22,13 @@ export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = tools.map
     },
   })
 );
+
+/**
+ * plan 模式用的受限工具 schema:剔除写盘 / 命令 / 记忆写入类(PLAN_DISABLED_TOOLS),
+ * 模型在 plan 模式下只看得到只读工具 → 调不到会改文件的工具。runAgent 在 plan 模式传给 chat()。
+ */
+export const planChatTools: OpenAI.Chat.Completions.ChatCompletionTool[] =
+  chatTools.filter((t) => !PLAN_DISABLED_TOOLS.has(t.function.name));
 
 export interface ToolCallRef {
   id: string;
@@ -59,14 +67,16 @@ export interface StreamHandlers {
 export async function chat(
   messages: ChatMessage[],
   handlers: StreamHandlers = {},
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** 覆盖默认工具 schema;plan 模式传 planChatTools(只读子集),缺省=全量 chatTools。 */
+  toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[]
 ): Promise<ChatResult> {
   // signal 透传给 SDK 第二参(RequestOptions);abort 后 for await 抛错,chat 不 catch,透传 runAgent 处理。
   const stream = await client.chat.completions.create(
     {
       model: config.model,
       messages,
-      tools: chatTools,
+      tools: toolsOverride ?? chatTools,
       stream: true,
       ...(config.maxTokens ? { max_tokens: config.maxTokens } : {}),
       ...(config.includeUsage ? { stream_options: { include_usage: true } } : {}),

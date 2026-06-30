@@ -17,6 +17,8 @@ export interface PromptOpts {
   commands: SlashCommand[];
   /** 预填初始行(运行中 typeahead 缓冲 → 下一轮 INPUT 态预填);光标置末行末尾。 */
   initialLines?: string[];
+  /** Shift+Tab 循环切换 agent 模式(auto ↔ plan)的回调;repl 注入(翻 agentMode + 重写 history[0] + 设状态行 modeTag)。回调后 prompt 自调 redraw() 刷新底栏。 */
+  onCycleMode?: () => void;
 }
 
 /** emitKeypressEvents 后 stdin 会发 'keypress',但该事件不在 ReadStream 类型里,单独声明。 */
@@ -291,6 +293,15 @@ export async function promptWithSlashMenu(
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+
+    // Shift+Tab:循环切换 agent 模式(auto ↔ plan)。不插字符、不提交、不影响输入文本;
+    // 回调由 repl 注入(翻 agentMode + 重写 history[0] + 设状态行 modeTag),再 redraw() 经
+    // paintInput 重画底栏(状态行 chip 即时刷新 + 光标留输入框)。置于 case 'tab' 之前,故不触发菜单补全。
+    if (key.shift && key.name === 'tab') {
+      opts.onCycleMode?.();
+      redraw();
+      return;
+    }
 
     // Ctrl+C:有内容则清空,再按一次(空)才退出——置顶,使粘贴中也能被截到(否则被 pasting 分支吞掉)
     if (key.ctrl && key.name === 'c') {
