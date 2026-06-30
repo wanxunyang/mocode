@@ -23,8 +23,7 @@ import {
   capToolResultForHistory,
   contextState,
 } from '../session/index.js';
-
-const MAX_STEPS = 25; // 防止无限循环
+import { config } from '../config/index.js';
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
 function parseArgs(raw: string): Record<string, unknown> | null {
@@ -165,10 +164,10 @@ export async function runAgent(
   // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
   beginTurn(truncateDisplay(userInput.split('\n')[0] ?? '', 40));
   layout.contentMode(); // 防御性:确保光标在内容续写位(enterRunningMode 已置,这里兜底)
-  // spinner:状态行 + 续写位内联转圈(思考中 / 执行 工具时,内容区不再「干等」)。
-  // 内联帧不进缓冲、停时清掉,随后结果即写在该行——故 spinner 不入历史、PgUp 看不到。
+  // spinner:续写位内联转圈(思考中 / 执行 工具时,内容区不再「干等」)。
+  // 只走内联 paintLiveAtCursor——不调 setStatus,状态行不重复 spinner 文字(状态行只显走时,
+  // 由 turnTimer 200ms 续刷);内联帧不进缓冲、停时清掉,随后结果即写在该行——故 spinner 不入历史、PgUp 看不到。
   const spinner = new Spinner((msg, frame) => {
-    layout.setStatus(msg, frame ?? undefined);
     if (frame) {
       layout.paintLiveAtCursor(
         `  ${ui.brightMagenta}${frame}${ui.reset} ${ui.dim}${msg}…${ui.reset}`
@@ -236,7 +235,7 @@ export async function runAgent(
   };
 
   try {
-    for (let step = 0; step < MAX_STEPS; step++) {
+    for (let step = 0; step < config.maxSteps; step++) {
       // 步前:接近窗口上限时自动压缩(三层)。此时 spinner 已停,通知行干净。
       await maybeCompact(history);
       spinner.start('思考中');
@@ -342,7 +341,7 @@ export async function runAgent(
     }
 
     layout.contentWrite(
-      `  ${ui.yellow}●${ui.reset} ${ui.yellow}达到最大步数(${MAX_STEPS}),本轮停止。${ui.reset}\n`
+      `  ${ui.yellow}●${ui.reset} ${ui.yellow}达到最大步数(${config.maxSteps}),本轮停止。${ui.reset}\n`
     );
     done = true;
   } finally {

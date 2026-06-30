@@ -48,6 +48,8 @@ export interface Config {
   autoReflect: boolean;
   /** 每 N 个轮次触发一次后台反思 pass(与 agent 并发,不阻塞)。默认 5。 */
   reflectEveryN: number;
+  /** 每轮 agent 循环最大步数(防无限循环)。默认 25。 */
+  maxSteps: number;
   /** 会话落盘目录(cwd 下)。 */
   sessionDir: string;
   /** AnySearch 联网搜索 API key(可选)。不配则走匿名免费额度(按 IP 限流)。 */
@@ -116,6 +118,7 @@ export const config: Config = {
   autoCompact: process.env.AUTO_COMPACT !== 'false',
   autoReflect: process.env.AUTO_REFLECT !== 'false',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
+  maxSteps: Number(process.env.MAX_STEPS) || 200,
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
   searchBaseUrl: process.env.ANYSEARCH_BASE_URL || 'https://api.anysearch.com',

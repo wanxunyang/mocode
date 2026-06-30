@@ -54,6 +54,7 @@ export interface InputView {
   cursorCol: number; // 显示宽度列(0-based)
   menu: { lines: string[] } | null; // 预渲染菜单行(带色),向上展开进内容区底
   dim?: boolean; // true=运行态占位(整行 dim)
+  placeholder?: string; // dim 态专用:无打字时的 ghost 占位文本(画在光标右侧)
   caret?: boolean; // true=在光标处画块状光标(反白光标右侧字符,行末反白空格),示"现在在哪输入";默认 true。picker 等非文本输入传 false
 }
 
@@ -351,10 +352,15 @@ function composeStatus(status: StatusBarData, cols: number): string {
   if (scrolled) {
     st = `历史 ↑${scrollOffset} (PgDn 回底)`; // 滚动回看显历史指示,不显走时
   } else {
-    st = (status.spinnerFrame ? status.spinnerFrame + ' ' : '') + status.status;
-    // RUNNING 态追加走时:整轮从 enterRunningMode 起计时,200ms 计时器续刷使其连续递增。
+    // head = spinner 帧 + 状态文字。常态 agent 轮二者皆空:agent spinner 不调 setStatus,
+    // 其文字在内联 paintLiveAtCursor 显,状态行不重复——只显走时。命令态(如 /compact 的「压缩中」)
+    // 走 setStatus,在此显帧 + 文字(无内联,不重复)。
+    const head = (status.spinnerFrame ? status.spinnerFrame + ' ' : '') + status.status;
     if (mode === 'running' && turnStart != null) {
-      st += ` · ${fmtElapsed(Date.now() - turnStart)}`;
+      // RUNNING 态追加走时:整轮从 enterRunningMode 起计时,200ms 计时器续刷使其连续递增。
+      st = head ? `${head} · ${fmtElapsed(Date.now() - turnStart)}` : fmtElapsed(Date.now() - turnStart);
+    } else {
+      st = head; // INPUT 等态(如"空闲")
     }
   }
   const stW = displayWidth(st);
@@ -619,7 +625,7 @@ export function paintInput(view: InputView): void {
     const prefix = vis.startVis === 0 && i === 0 ? view.prompt : indent;
     let text: string;
     if (view.dim) {
-      text = `${ui.dim}${prefix}${line}${ui.reset}`;
+      text = renderDimInputRow(view.prompt, line, view.placeholder ?? '', g.cols);
     } else if (showCaret && i === vis.visLine) {
       // 块状光标:反白光标右侧字符(cur),行末(无字符)反白一个空格——示"现在在哪输入"
       const { before, cur, after } = splitAtVisCol(line, vis.cursorVisCol);
@@ -661,30 +667,55 @@ export function paintInput(view: InputView): void {
 }
 
 /**
- * 运行态 typeahead 回显:定向写输入行(底栏输入框),把 dim 占位换成已打字文本(无打字时仍显 placeholder)。
+ * 渲染运行态输入行(dim):❯ + (有打字:dim 文本 + 末尾反白块状光标;无打字:反白光标在起点 + dim 占位 ghost)。
+ * 光标是「画出来」的反白块(非真终端光标)——真光标仍归续写位,避开与 contentWrite/drawStatusBar 争用;
+ * 输入行在 RUNNING 期间只被按键回显重画(流式/spinner 不碰这行),故画上去的光标能稳住。
+ * 内容截断到 cols-promptW-1(留 ❯ 与光标各 1 cell),防超长软折行写穿下线。
+ */
+function renderDimInputRow(
+  prompt: string,
+  text: string,
+  placeholder: string,
+  cols: number
+): string {
+  const promptW = displayWidth(prompt);
+  const caret = `${ui.reverse} ${ui.reset}`; // 反白块状光标(1 cell,与 INPUT 态同款)
+  const contentW = Math.max(0, cols - promptW - 1);
+  if (text.length > 0) {
+    // 有打字:❯ dim + 文本(dim) + 反白光标(末尾)
+    return `${ui.dim}${prompt}${truncateDisplay(text, contentW)}${ui.reset}${caret}`;
+  }
+  // 空:❯ dim + 反白光标(打字起点) + dim 占位 ghost
+  const p = placeholder ? truncateDisplay(placeholder, contentW) : '';
+  return `${ui.dim}${prompt}${ui.reset}${caret}${ui.dim}${p}${ui.reset}`;
+}
+
+/**
+ * 运行态 typeahead 回显:定向写输入行(底栏输入框),把 dim 占位换成已打字文本 + 反白块状光标(无打字时光标在起点)。
  * 只 cup 输入行 + clearLine + dim 文本 + 归位——不调 setRegion(运行中禁多行,避免 DECSTBM 抖动)、
- * 不重画状态行/contentBottom、不用 ED。同步 lastView 为 dim 视图,使 scrollBy/resize 的 repaint 仍显当前回显。
- * 光标归续写位(滚动回看时归内容区底)——typeahead 无可见输入框光标,避开与 contentWrite/drawStatusBar 争用。
+ * 不重画状态行/contentBottom、不用 ED。同步 lastView 为 dim 视图(text 与 placeholder 拆开存),使 scrollBy/resize
+ * 的 repaint 仍显当前回显 + 光标。真光标归续写位(滚动回看时归内容区底)——不入输入框,假光标已画在行内。
  */
 export function paintRunningInputEcho(text: string, placeholder: string): void {
   if (!active || !base) return;
   const g = getGeo();
   const inputRow = g.contentBottom + 3; // 运行态 footerH 恒 4:状态(+1)+上线(+2)+输入行(+3);下线在 rows
-  const shown = text.length > 0 ? text : placeholder;
-  const trimmed = truncateDisplay(shown, g.cols - 2); // 截断防超长软折行写穿下线
   stdout.write(
-    cup(inputRow, 1) + esc.clearLine + `${ui.dim}❯ ${trimmed}${ui.reset}`
+    cup(inputRow, 1) +
+      esc.clearLine +
+      renderDimInputRow('❯ ', text, placeholder, g.cols)
   );
-  // 同步 lastView:dim 视图(lines=回显文本),使滚动/resize 的 repaint 不擦掉已打字
+  // 同步 lastView:text 与 placeholder 拆开存,使滚动/resize 的 repaint 重画时光标位置正确(空→起点,有字→末尾)
   lastView = {
     prompt: '❯ ',
-    lines: [shown],
+    lines: [text],
+    placeholder,
     cursorLine: 0,
     cursorCol: 0,
     menu: null,
     dim: true,
   };
-  // 光标归续写位(滚动回看时归内容区底)
+  // 真光标归续写位(滚动回看时归内容区底)——假光标已画在输入行,真光标不与其争用
   stdout.write(
     cup(
       scrollOffset === 0 ? contentRow : g.contentBottom,
@@ -730,7 +761,8 @@ export function enterRunningMode(status: string, placeholder: string): void {
     setRegion(4); // 1 状态 + 1 上线 + 1 输入 + 1 下线
     paintInput({
       prompt: '❯ ',
-      lines: [placeholder],
+      lines: [''],
+      placeholder,
       cursorLine: 0,
       cursorCol: 0,
       menu: null,

@@ -119,7 +119,8 @@ function renderContextBar(history: ChatMessage[]): string {
   const pct = Math.min(1, est / win);
   const W = 10;
   const filled = Math.round(pct * W);
-  const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
+  const bar =
+    filled === 0 ? ' '.repeat(W) : '█'.repeat(filled) + '░'.repeat(W - filled);
   const src = contextState.lastUsage ? '实测' : '估算';
   const k = (n: number) => `${Math.round(n / 1000)}k`;
   const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.cyan;
@@ -136,7 +137,8 @@ function renderContextBarInline(history: ChatMessage[]): string {
   const pct = Math.min(1, est / win);
   const W = 10;
   const filled = Math.round(pct * W);
-  const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
+  const bar =
+    filled === 0 ? ' '.repeat(W) : '█'.repeat(filled) + '░'.repeat(W - filled);
   const k = (n: number) => `${Math.round(n / 1000)}k`;
   const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.cyan;
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
@@ -167,9 +169,10 @@ function runningStateFor(
     case '/clear':
       return { status: '清空', placeholder: '…' };
     default:
-      // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由状态行 spinner 承载,
-      // 不再把「思考中… Ctrl+C 中断」塞进输入框占位——避免看起来像已有输入、妨碍正常输入。
-      return { status: '处理', placeholder: '' };
+      // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由内联 spinner 承载(思考中/执行…),
+      // 状态行只显走时——故常态 status 留空,不塞「处理」这种与内联重复的泛标签。
+      // 不把「思考中… Ctrl+C 中断」塞进输入框占位——避免看起来像已有输入、妨碍正常输入。
+      return { status: '', placeholder: '' };
   }
 }
 
