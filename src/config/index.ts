@@ -28,6 +28,8 @@ function loadEnvFiles(): void {
   }
 }
 
+// 在 loadEnvFiles 回填前捕获:MOCODE_THEME 是否由 shell 设置(决定 /theme 写文件是否下次启动生效)。
+const themeFromShell = process.env.MOCODE_THEME !== undefined;
 loadEnvFiles();
 
 export interface Config {
@@ -56,6 +58,10 @@ export interface Config {
   searchApiKey?: string;
   /** AnySearch API base,默认官方端点。 */
   searchBaseUrl: string;
+  /** 主题名(对应 src/ui/theme.ts 的 THEMES 表键)。默认 default;shell env MOCODE_THEME 覆盖文件。 */
+  theme: string;
+  /** MOCODE_THEME 是否由 shell 环境变量设置(非文件回填)。若是,/theme 写文件下次启动仍被 shell 盖。 */
+  themeFromShell: boolean;
 }
 
 function requireEnv(key: string): string {
@@ -139,4 +145,6 @@ export const config: Config = {
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
   searchBaseUrl: process.env.ANYSEARCH_BASE_URL || 'https://api.anysearch.com',
+  theme: process.env.MOCODE_THEME || 'default',
+  themeFromShell,
 };

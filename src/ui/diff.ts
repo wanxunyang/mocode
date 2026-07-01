@@ -1,5 +1,5 @@
 import { highlight, plain, type Theme } from 'cli-highlight';
-import { ui } from './theme.js';
+import { ui, type ColorKey } from './theme.js';
 import { charWidth, displayWidth } from './render.js';
 
 /**
@@ -56,36 +56,38 @@ function langForPath(p: string): string | undefined {
   return LANG_BY_EXT[base];
 }
 
-/** 包一层:token 文本 + 颜色 + reset,自成闭区间(防 SGR 跨行泄漏)。 */
-const paint = (color: string) => (s: string): string => `${color}${s}${ui.reset}`;
+/**
+ * 包一层:token 文本 + 颜色 + reset,自成闭区间(防 SGR 跨行泄漏)。
+ * 取 ColorKey 而非 ANSI 串——闭包调用时才读 `ui[key]`,故 setTheme 后 diff 高亮即跟随。 */
+const paint = (key: ColorKey) => (s: string): string => `${ui[key]}${s}${ui.reset}`;
 
 /** 自定义主题:default=plain(未匹配文本不着色,避免默认主题把普通代码染黄),常见 token 用 mocode ui 色板。 */
 const THEME: Theme = {
   default: plain,
-  keyword: paint(ui.magenta),
-  'built_in': paint(ui.cyan),
-  type: paint(ui.cyan),
-  literal: paint(ui.cyan),
-  number: paint(ui.green),
-  string: paint(ui.green),
-  subst: paint(ui.green),
-  comment: paint(ui.gray),
-  doctag: paint(ui.gray),
-  function: paint(ui.blue),
-  title: paint(ui.blue),
-  class: paint(ui.brightCyan),
-  meta: paint(ui.gray),
-  'meta-keyword': paint(ui.magenta),
-  regexp: paint(ui.red),
-  attr: paint(ui.cyan),
-  attribute: paint(ui.cyan),
-  variable: paint(ui.red),
-  tag: paint(ui.red),
-  name: paint(ui.cyan),
-  symbol: paint(ui.cyan),
-  section: paint(ui.brightMagenta),
-  addition: paint(ui.green),
-  deletion: paint(ui.red),
+  keyword: paint('magenta'),
+  'built_in': paint('cyan'),
+  type: paint('cyan'),
+  literal: paint('cyan'),
+  number: paint('green'),
+  string: paint('green'),
+  subst: paint('green'),
+  comment: paint('gray'),
+  doctag: paint('gray'),
+  function: paint('blue'),
+  title: paint('blue'),
+  class: paint('brightCyan'),
+  meta: paint('gray'),
+  'meta-keyword': paint('magenta'),
+  regexp: paint('red'),
+  attr: paint('cyan'),
+  attribute: paint('cyan'),
+  variable: paint('red'),
+  tag: paint('red'),
+  name: paint('cyan'),
+  symbol: paint('cyan'),
+  section: paint('brightMagenta'),
+  addition: paint('green'),
+  deletion: paint('red'),
 };
 
 function highlightLine(text: string, lang: string | undefined): string {

@@ -4,6 +4,7 @@ import type { Key } from 'node:readline';
 import { ui } from './theme.js';
 import { displayWidth, padEndDisplay, truncateDisplay } from './render.js';
 import * as layout from './layout.js';
+import * as mouse from './mouse.js';
 
 export interface SlashCommand {
   name: string;
@@ -44,7 +45,10 @@ function ensurePasteDetector(): void {
   if (pasteDetectorInstalled) return;
   pasteDetectorInstalled = true;
   stdin.on('data', (chunk: Buffer | string) => {
-    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    const raw = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    // 剔除 SGR 鼠标报告(\x1B[<…M/m,连半截也匹配):防快速滚轮/触控板动量在一个 chunk 里拼 ≥2 条
+    // 报表(22 字符 > 16 阈值)误判粘贴 50ms、把后续真按键泄进 pasteParts。
+    const text = raw.replace(/\x1b\[<[0-9;]*[Mm]/g, '');
     const hasNL = text.indexOf('\r') >= 0 || text.indexOf('\n') >= 0;
     // 按字符数(码点)判粘贴,非字节:CJK 汉字占 3 UTF-8 字节,旧阈值(len>8 字节)会把 IME 提交的
     // 3-10 个汉字误判为粘贴 → 进 50ms 缓冲 → finalizePaste→insertText 落字(且旧 insertText 把光标
@@ -294,6 +298,14 @@ export async function promptWithSlashMenu(
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
 
+    // SGR 鼠标滚轮:readline 把 \x1B[<btn;col;rowM 拆成多 fragment,经 mouse.consumeMouse 重组;
+    // 滚轮 → scrollBy(±5)(只重画内容区,底栏不动)。置于 pasting 之前——鼠标 fragment 永不进 pasteParts。
+    const _m = mouse.consumeMouse(key.sequence ?? '');
+    if (_m.suppress) {
+      if (_m.wheel) layout.scrollBy(_m.wheel * 5);
+      return;
+    }
+
     // Shift+Tab:循环切换 agent 模式(auto ↔ plan)。不插字符、不提交、不影响输入文本;
     // 回调由 repl 注入(翻 agentMode + 重写 history[0] + 设状态行 modeTag),再 redraw() 经
     // paintInput 重画底栏(状态行 chip 即时刷新 + 光标留输入框)。置于 case 'tab' 之前,故不触发菜单补全。
@@ -329,7 +341,7 @@ export async function promptWithSlashMenu(
 
     // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,Ctrl+↑↓ 与 plain ↑/↓ 每次 5 行。
     // plain ↑/↓ 仅在单行输入且菜单关闭时作滚动(多行编辑留给光标移动,菜单打开留给选项);
-    // 兼鼠标滚轮——WT alt 屏(经 \x1B[?1007h)滚轮转发 ↑/↓,1 行/格太慢故放大到 5。
+    // 鼠标滚轮已由 onKey 顶部 SGR 重组守卫处理(不经此分支);此分支仅键盘 plain ↑/↓,放大到 5 行/格。
     const plainArrowScroll =
       (key.name === 'up' || key.name === 'down') &&
       !key.ctrl &&
@@ -772,6 +784,138 @@ export async function promptSessionPicker(
       case 'return':
       case 'enter':
         finish(visible()[selected] ?? null);
+        return;
+      case 'escape':
+        finish(null);
+        return;
+    }
+  }
+
+  return new Promise<SessionPickerItem | null>((res, rej) => {
+    resolve = res;
+    reject = rej;
+    ensurePasteDetector();
+    readline.emitKeypressEvents(stdin);
+    let rawOk = true;
+    try {
+      stdin.setRawMode(true);
+    } catch {
+      rawOk = false;
+    }
+    if (!rawOk) {
+      res(null);
+      return;
+    }
+    stdin.resume();
+    emitter.on('keypress', onKey);
+    redraw();
+  });
+}
+
+/**
+ * 主题选择菜单(供 /theme):↑/↓ 导航、Enter 切换、Esc/Ctrl+D 取消、Ctrl+C 抛 SIGINT(调用方 try/catch)。
+ * 复用 SessionPickerItem 形状({id,title,subtitle?});选中项 cyan+bold + ▸ 高亮(同 /resume 菜单)。
+ * 返回选中的 item(含 id);null=取消 / 非 TTY / 空列表。纯导航(不收文本输入)。
+ * 长列表超屏高自动开窗保光标可见;默认聚焦首项。
+ */
+export async function promptThemePicker(
+  items: SessionPickerItem[]
+): Promise<SessionPickerItem | null> {
+  if (!layout.isActive() || items.length === 0) return null;
+  const emitter = stdin as unknown as KeypressEmitter;
+  let selected = 0;
+  let resolved = false;
+  let resolve!: (v: SessionPickerItem | null) => void;
+  let reject!: (e: Error) => void;
+
+  const hint = '↑↓ 选择 · Enter 切换 · Esc 取消';
+
+  /** 菜单行(带开窗):超屏高时以 selected 为中心取窗,保光标可见。行格式:▸ N  title  subtitle。 */
+  function menuLines(): string[] {
+    const g = layout.getGeo();
+    const cols = g.cols;
+    const maxRows = Math.max(1, g.contentBottom);
+    let start = 0;
+    if (items.length > maxRows) {
+      start = Math.max(
+        0,
+        Math.min(selected - Math.floor(maxRows / 2), items.length - maxRows)
+      );
+    }
+    const count = Math.min(maxRows, items.length);
+    return Array.from({ length: count }, (_, i) => {
+      const idx = start + i;
+      const isSel = idx === selected;
+      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const num = String(idx + 1);
+      const it = items[idx];
+      const title = it.title || '(无)';
+      const sub = it.subtitle ?? '';
+      const leadW = displayWidth(num) + 4; // "▸ " + num + "  "
+      let subW = sub ? displayWidth(sub) + 2 : 0; // "  " + sub
+      let titleW = cols - leadW - subW;
+      if (titleW < 4 && sub) {
+        subW = 0;
+        titleW = cols - leadW;
+      }
+      const titleT = titleW > 0 ? truncateDisplay(title, titleW) : '';
+      const subPart = subW > 0 ? `  ${sub}` : '';
+      return `${marker} ${color}${num}  ${titleT}${subPart}${ui.reset}`;
+    });
+  }
+
+  function redraw(): void {
+    layout.paintInput({
+      prompt: '❯ ',
+      lines: [hint],
+      cursorLine: 0,
+      cursorCol: displayWidth(hint),
+      menu: { lines: menuLines() },
+      caret: false, // 纯导航菜单:不画输入框块状光标,聚焦由菜单 ▸ 标记
+    });
+  }
+
+  function cleanup(): void {
+    try {
+      stdin.setRawMode(false);
+    } catch {
+      // 忽略
+    }
+    emitter.removeListener('keypress', onKey);
+    stdin.pause();
+  }
+  function finish(value: SessionPickerItem | null): void {
+    if (resolved) return;
+    resolved = true;
+    cleanup();
+    resolve(value);
+  }
+
+  function onKey(_str: string, key?: Key): void {
+    if (resolved || !key) return;
+    if (key.ctrl && key.name === 'c') {
+      cleanup();
+      reject(new Error('SIGINT'));
+      return;
+    }
+    if (key.ctrl && key.name === 'd') {
+      finish(null);
+      return;
+    }
+    const n = items.length;
+    switch (key.name) {
+      case 'up':
+        selected = (selected - 1 + n) % n;
+        redraw();
+        return;
+      case 'down':
+        selected = (selected + 1) % n;
+        redraw();
+        return;
+      case 'return':
+      case 'enter':
+        finish(items[selected] ?? null);
         return;
       case 'escape':
         finish(null);

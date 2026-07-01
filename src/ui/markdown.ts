@@ -12,7 +12,7 @@
 // 错位;若上层 <Text wrap=truncate> 补 … U+2026 在中文终端算 2 宽会顶屏)。所有路径软折行 +
 // clipAnsiLine 兜底,绝不溢出。颜色一律嵌入式 ANSI(ui.*)写进字符串。
 import { highlight, supportsLanguage } from 'cli-highlight';
-import { ui } from './theme.js';
+import { ui, getThemeVersion } from './theme.js';
 import { charWidth, displayWidth, ansiDisplayWidth, stripAnsi } from './render.js';
 
 const RESET = '\x1b[0m';
@@ -309,7 +309,7 @@ function highlightCodeBlock(code: string, lang: string): string {
 
 // ── 主渲染 ──
 
-const MEMO = new Map<string, { cols: number; lines: string[] }>();
+const MEMO = new Map<string, { cols: number; lines: string[]; themeVersion: number }>();
 const MEMO_CAP = 16;
 
 function renderMarkdownImpl(text: string, cols: number): string[] {
@@ -463,12 +463,13 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
 
 /**
  * 把 markdown 文本渲染成 ANSI 物理行数组(每行 ansiDisplayWidth ≤ cols,自洽带色)。
- * 纯函数 + LRU memo(key=text,值 {cols, lines}):同一 text 同一 cols 直接命中(MRU 提升),
- * cols 变(resize)则重算覆写。供 layout.contentWriteMd 每 chunk 调用(memo 使重复渲染命中缓存)。
+ * 纯函数 + LRU memo(key=text,值 {cols, lines, themeVersion}):同一 text 同一 cols 同一主题版本直接
+ * 命中(MRU 提升),cols 变(resize)或切主题(themeVersion 变)则重算覆写。供 layout.contentWriteMd
+ * 每 chunk 调用(memo 使重复渲染命中缓存)。themeVersion 使 setTheme 后全量重绘不命中旧主题缓存行。
  */
 export function renderMarkdown(text: string, cols: number): string[] {
   const hit = MEMO.get(text);
-  if (hit && hit.cols === cols) {
+  if (hit && hit.cols === cols && hit.themeVersion === getThemeVersion()) {
     MEMO.delete(text);
     MEMO.set(text, hit); // MRU 提升
     return hit.lines;
@@ -476,7 +477,7 @@ export function renderMarkdown(text: string, cols: number): string[] {
   const lines = renderMarkdownImpl(text, cols);
   if (MEMO.has(text)) MEMO.delete(text);
   else if (MEMO.size >= MEMO_CAP) MEMO.delete(MEMO.keys().next().value as string);
-  MEMO.set(text, { cols, lines });
+  MEMO.set(text, { cols, lines, themeVersion: getThemeVersion() });
   return lines;
 }
 

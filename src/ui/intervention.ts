@@ -4,6 +4,7 @@ import type { Key } from 'node:readline';
 import { ui } from './theme.js';
 import { displayWidth, truncateDisplay } from './render.js';
 import * as layout from './layout.js';
+import * as mouse from './mouse.js';
 import { Spinner } from './spinner.js';
 
 /**
@@ -209,6 +210,10 @@ export async function promptIntervention(
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+    // SGR 鼠标 fragment:readline 拆碎 \x1B[<…M,经 mouse.consumeMouse 重组;intervention 无 scrollback
+    // (进入时已 resetScroll),只 suppress 吞掉防 fragment 砸进 onKeyInput 的可打印插入。
+    const _m = mouse.consumeMouse(key.sequence ?? '');
+    if (_m.suppress) return;
     // Ctrl+C → 取消(不 reject SIGINT——否则经 executeTool 的 try/catch 变成 tool 错误串)
     if (key.ctrl && key.name === 'c') {
       finish({ action: 'cancelled' });

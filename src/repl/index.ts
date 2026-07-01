@@ -2,14 +2,17 @@ import readline from 'node:readline/promises';
 import { emitKeypressEvents, type Key } from 'node:readline';
 import { stdin, stdout } from 'node:process';
 import { config, PLAN_MODE_SUFFIX } from '../config/index.js';
+import { updateConfigKey } from '../config/file.js';
 import { runAgent } from '../agent/index.js';
-import { ui } from '../ui/theme.js';
+import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
+import * as mouse from '../ui/mouse.js';
 import {
   promptWithSlashMenu,
   promptTurnPicker,
   promptSessionPicker,
+  promptThemePicker,
   type SessionPickerItem,
 } from '../ui/prompt.js';
 import { promptIntervention } from '../ui/intervention.js';
@@ -67,9 +70,19 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/memory', desc: '记忆库:条目计数与近期索引' },
   { name: '/reflect', desc: '手动触发后台记忆反思 pass' },
   { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆' },
+  { name: '/theme', desc: '切换颜色主题(↑↓·Enter)' },
   { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
   { name: '/auto', desc: '切回 auto 模式(全工具执行)' },
 ];
+
+/** 主题名 → 一句描述(供 /theme 菜单 / 列表显示)。新增主题时在 src/ui/theme.ts THEMES 加键后于此补一句。 */
+const THEME_DESCRIPTIONS: Record<string, string> = {
+  default: '16 色原版(深底)',
+  light: '浅底终端',
+  solarized: 'Solarized 强调色',
+  gruvbox: 'Gruvbox 暖色',
+  nord: 'Nord 冷色',
+};
 
 /**
  * /init 指令:发给 agent 扫描项目并生成 MOCODE.md(对标 Claude Code /init 生成 CLAUDE.md,
@@ -175,6 +188,8 @@ function runningStateFor(
       return { status: '切 auto', placeholder: '…' };
     case '/clear':
       return { status: '清空', placeholder: '…' };
+    case '/theme':
+      return { status: '切主题', placeholder: '选择主题…' };
     default:
       // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由内联 spinner 承载(思考中/执行…),
       // 状态行只显走时——故常态 status 留空,不塞「处理」这种与内联重复的泛标签。
@@ -201,7 +216,14 @@ let agentMode: 'auto' | 'plan' = 'auto'; // 当前 agent 形态(auto=执行全�
 /** 运行态按键:滚动优先,再 Ctrl+C 中断,再 typeahead 编辑(单行,Enter=无操作)。 */
 function onRunningKey(_str: string, key?: Key): void {
   if (!key) return;
-  // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,↑/↓ 每次 5 行(含鼠标滚轮——alt 屏滚轮转发↑↓,1 行/格太慢故放大到 5)。
+  // SGR 鼠标滚轮:readline 把 \x1B[<btn;col;rowM 拆成多 fragment,经 mouse.consumeMouse 重组;
+  // 滚轮 → scrollBy(±5)(不调 setUserActive——与键盘滚动一致;流式 flushTimer 在 scrollOffset>0 时不重画,安全)。
+  const _m = mouse.consumeMouse(key.sequence ?? '');
+  if (_m.suppress) {
+    if (_m.wheel) layout.scrollBy(_m.wheel * 5);
+    return;
+  }
+  // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,↑/↓ 每次 5 行(键盘;鼠标滚轮已由上方守卫处理)。
   // 运行态无输入光标,↑/↓ 无其他用途,直接作滚动。
   if (
     key.name === 'pageup' ||
@@ -421,7 +443,9 @@ export async function startRepl(
     tools: toolsLine,
   });
 
-  // 开场:进 alt screen + 状态基线 + 清内容区。--resume 有历史则渲染对话(仿 Claude Code),否则横幅。
+  // 开场:按 config.theme 切主题(横幅 / 状态行 / 后续渲染皆用新色),再进 alt screen + 状态基线 + 清内容区。
+  // --resume 有历史则渲染对话(仿 Claude Code),否则横幅。
+  setTheme(config.theme);
   layout.enterAltScreen();
   refreshStatusBase(history);
   layout.clearContent();
@@ -772,6 +796,58 @@ export async function startRepl(
       layout.clearContent();
       renderHistory(history);
       layout.contentWrite(`${ui.dim}(已续接会话 ${loaded.id})${ui.reset}\n`);
+      continue;
+    }
+    if (line === '/theme' || line.startsWith('/theme ')) {
+      // /theme:无参开菜单(↑↓ 选,Enter 切换,Esc 取消);/theme <name> 直切;/theme list 或未知名 → 列出。
+      const arg = line.startsWith('/theme ') ? line.slice('/theme '.length).trim() : '';
+      let name: string | null;
+      if (arg === '') {
+        // 无参:菜单选(仿 /resume /rollback 的 picker)
+        const items: SessionPickerItem[] = listThemes().map((t) => ({
+          id: t,
+          title: t,
+          subtitle: THEME_DESCRIPTIONS[t] ?? '',
+        }));
+        let pick: SessionPickerItem | null;
+        try {
+          pick = await promptThemePicker(items);
+        } catch {
+          continue; // Ctrl+C(SIGINT)→ 取消
+        }
+        name = pick?.id ?? null;
+      } else if (arg === 'list' || !themeExists(arg)) {
+        layout.contentWrite(`${ui.dim}可用主题:${ui.reset}\n`);
+        for (const t of listThemes()) {
+          layout.contentWrite(
+            `  ${ui.cyan}${t}${ui.reset}  ${ui.dim}${THEME_DESCRIPTIONS[t] ?? ''}${ui.reset}\n`
+          );
+        }
+        layout.contentWrite(
+          `${ui.dim}(当前:${getTheme()};用 /theme <名称> 切换)${ui.reset}\n`
+        );
+        continue;
+      } else {
+        name = arg;
+      }
+      if (name === null) continue; // Esc / Ctrl+D 取消
+      // 切:setTheme → 重算状态行(新色)→ 清内容重绘(历史 / 横幅,镜像启动 + /resume)→ 确认 → 持久化。
+      // markdown MEMO 按 themeVersion 自动失效,故 renderHistory 取新色;状态栏 / 输入框由 continue 回 INPUT 态时读 getter 刷。
+      setTheme(name);
+      refreshStatusBase(history);
+      layout.clearContent();
+      if (history.some((m) => m.role === 'user')) {
+        renderHistory(history);
+      } else {
+        layout.contentWrite(bannerString(banner()));
+      }
+      layout.contentWrite(`${ui.dim}(已切换主题 ${name})${ui.reset}\n`);
+      updateConfigKey('MOCODE_THEME', name);
+      if (config.themeFromShell) {
+        layout.contentWrite(
+          `${ui.dim}(shell 环境变量 MOCODE_THEME 已设,文件写入下次启动被其覆盖;取消该 shell 设置后生效)${ui.reset}\n`
+        );
+      }
       continue;
     }
     if (line === '/rollback' || line.startsWith('/rollback ')) {

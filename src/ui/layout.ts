@@ -9,6 +9,7 @@ import {
 } from './render.js';
 import { ui } from './theme.js';
 import * as content from './content.js';
+import * as mouse from './mouse.js';
 import { renderMarkdown } from './markdown.js';
 
 /**
@@ -98,8 +99,8 @@ let mdBuf = '';
 const esc = {
   altOn: '\x1B[?1049h',
   altOff: '\x1B[?1049l',
-  altScrollOn: '\x1B[?1007h', // xterm alternate scroll:alt 屏内滚轮转发 ↑/↓(配合 onKey/onRunningKey 的 ↑/↓ 滚动)
-  altScrollOff: '\x1B[?1007l',
+  mouseOn: '\x1B[?1000h\x1B[?1006h', // SGR 鼠标:按键事件追踪(1000)+SGR 编码(1006)→ \x1B[<btn;col;rowM,经 mouse.consumeMouse 重组后滚轮滚动。副作用:TUI 内鼠标选区复制失效,按 Shift 用鼠标可让终端放行做原生选区
+  mouseOff: '\x1B[?1006l\x1B[?1000l', // 关:反序(先关 SGR 编码再关追踪)
   cursorShow: '\x1B[?25h',
   cursorHide: '\x1B[?25l',
   clearLine: '\x1B[2K',
@@ -946,7 +947,7 @@ export function enterAltScreen(): void {
   if (active || !ui.isTTY) return;
   active = true;
   stdout.write(esc.altOn);
-  stdout.write(esc.altScrollOn); // alt 屏滚轮转发 ↑/↓(滚轮滚动靠此 + onKey/onRunningKey 的 ↑/↓ 滚动)
+  stdout.write(esc.mouseOn); // SGR 鼠标追踪:滚轮发 \x1B[<btn;col;rowM 报表,经 mouse.consumeMouse 重组 → scrollBy(滚轮滚动靠此 + onKey/onRunningKey 顶部守卫)
   setRegion(4); // 1 状态 + 1 上线 + 1 输入 + 1 下线(底栏始终含上下线)
   contentRow = 1;
   contentCol = 1;
@@ -985,6 +986,7 @@ export function exitAltScreen(): void {
   active = false;
   stopTurnTimer(); // 兜底清走时计时器(防异常退出泄漏)
   turnStart = null;
+  mouse.resetMouse(); // 清鼠标重组残留(防退出后状态泄漏到下次进 alt 屏)
   // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。
   try {
     stdin.setRawMode(false); // 还原 raw(RUNNING 态常驻 raw,退出时必须还原,否则终端残留 raw 模式)
@@ -994,7 +996,7 @@ export function exitAltScreen(): void {
   try {
     stdout.write('\x1B[r'); // 复位 DECSTBM margins
     stdout.write(esc.cursorShow);
-    stdout.write(esc.altScrollOff); // 关 alt 屏滚轮转发
+    stdout.write(esc.mouseOff); // 关 SGR 鼠标追踪(反序:先 1006l 再 1000l)
     stdout.write(esc.altOff); // 退 alt(恢复主屏 + 光标)
   } catch {
     // 忽略
