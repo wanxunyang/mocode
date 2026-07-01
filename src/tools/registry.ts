@@ -8,8 +8,16 @@ import { recordMutation } from '../rollback/index.js';
  */
 export const tools: Tool[] = builtinTools;
 
-/** 按名调度工具,统一 try/catch + JSON 解析,返回字符串而非抛错。 */
-export async function executeTool(name: string, argsRaw: string): Promise<string> {
+/**
+ * 按名调度工具,统一 try/catch + JSON 解析,返回字符串而非抛错。
+ * signal 透传给 tool.execute(经 ctx):长任务工具(run_command/web_fetch)abort 即时取消,
+ * 让用户 Ctrl+C 能跟手中断工具执行(而非等命令跑完 / 超时)。
+ */
+export async function executeTool(
+  name: string,
+  argsRaw: string,
+  signal?: AbortSignal
+): Promise<string> {
   const tool = tools.find((t) => t.name === name);
   if (!tool) return `错误:未知工具 "${name}"`;
   let args: Record<string, unknown>;
@@ -27,7 +35,7 @@ export async function executeTool(name: string, argsRaw: string): Promise<string
     ) {
       recordMutation(args.path);
     }
-    return await tool.execute(args);
+    return await tool.execute(args, { signal });
   } catch (e) {
     return `错误:工具 ${name} 执行失败: ${e instanceof Error ? e.message : String(e)}`;
   }

@@ -204,8 +204,23 @@ export async function runAgent(
     if (name) spinner.start(`生成 ${name}…`);
   };
 
+  // 中断还原:停 spinner + 补换行 + (已中断)提示 + history 还原到本 turn 前 + 模式还原。
+  // 两处共用:① await chat() 抛 AbortError 的 catch;② 工具被 abort 杀后循环顶检查(不等下一步 chat())。
+  const abortRestore = (): void => {
+    spinner.stop();
+    if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
+    layout.contentWrite(`${ui.dim}(已中断)${ui.reset}\n`);
+    history.length = 0;
+    history.push(...savedHistory);
+    setAgentMode(savedMode);
+  };
   try {
     for (let step = 0; step < config.maxSteps; step++) {
+      // 上一步工具被 abort 杀(run_command/web_fetch 等)→ signal.aborted,直接还原退出,不等 maybeCompact + chat()
+      if (signal?.aborted) {
+        abortRestore();
+        return;
+      }
       // 步前:接近窗口上限时自动压缩(三层)。此时 spinner 已停,通知行干净。
       await maybeCompact(history);
       spinner.start('思考中');
@@ -218,19 +233,14 @@ export async function runAgent(
         // (auto=chatTools 全量;plan=planChatTools 只读子集)。模式由 src/agent/mode.ts 单一持有。
         result = await chat(history, { onText, onToolCall }, signal, getAgentMode() === 'plan' ? planChatTools : undefined);
       } catch (e) {
-        // 中断(用户运行中 Ctrl+C):停 spinner、补换行、提示、history 还原到本 turn 前、return(不抛)。
-        // abort 只在 await chat() 期生效;tool 执行不可中断,故不会留下未配对的 tool_call_id。
+        // 中断(用户运行中 Ctrl+C):chat() 抛 AbortError(signal.aborted)→ 还原 history + 模式 + return(不抛)。
+        // 工具执行现已串 signal:run_command/web_fetch 被 abort 即时杀,循环顶检查兜底(不会留未配对 tool_call_id)。
         if (
           signal?.aborted ||
           (e instanceof Error &&
             (e.name === 'AbortError' || e.name === 'APIUserAbortError'))
         ) {
-          spinner.stop();
-          if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
-          layout.contentWrite(`${ui.dim}(已中断)${ui.reset}\n`);
-          history.length = 0;
-          history.push(...savedHistory);
-          setAgentMode(savedMode); // 还原模式:listener 重写 history[0] 回轮首系统提示(与 savedHistory 幂等)
+          abortRestore();
           return;
         }
         throw e;
@@ -270,7 +280,7 @@ export async function runAgent(
             let j = i;
             while (j < calls.length && READ_TOOL_NAMES.has(calls[j].name)) j++;
             const batch = calls.slice(i, j);
-            const started = batch.map((tc) => executeTool(tc.name, tc.arguments));
+            const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal));
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
               writeToolHeader(tc);
@@ -300,7 +310,7 @@ export async function runAgent(
               : null;
             const { preWriteOld, editStartLine } = readDiffContext(tc, parsed);
             spinner.start(`执行 ${tc.name}`);
-            const output = await executeTool(tc.name, tc.arguments);
+            const output = await executeTool(tc.name, tc.arguments, signal);
             spinner.stop();
             writeToolResult(tc, output, parsed, preWriteOld, editStartLine);
             pushToolResult(history, tc, output);

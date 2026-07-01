@@ -17,7 +17,7 @@ export const webFetchTool: Tool = {
     },
     required: ['url'],
   },
-  async execute(args) {
+  async execute(args, ctx) {
     const rawUrl = String(args.url ?? '').trim();
     if (!rawUrl) return '错误:url 不能为空。';
 
@@ -33,6 +33,13 @@ export const webFetchTool: Tool = {
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+    // 外部 abort signal(用户 Ctrl+C,经 executeTool ctx.signal 透传)→ 合并到 ctrl,fetch 即时取消(不等 30s 超时)
+    const onExternalAbort = (): void => ctrl.abort();
+    const externalSignal = ctx?.signal;
+    if (externalSignal) {
+      if (externalSignal.aborted) ctrl.abort();
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
 
     try {
       const resp = await fetch(url.href, {
@@ -65,12 +72,14 @@ export const webFetchTool: Tool = {
       return out;
     } catch (e) {
       if (ctrl.signal.aborted) {
+        if (externalSignal?.aborted) return `错误:已中断: ${url.href}`;
         return `错误:抓取超时(${FETCH_TIMEOUT_MS}ms): ${url.href}`;
       }
       const msg = e instanceof Error ? e.message : String(e);
       return `错误:抓取失败: ${msg}`;
     } finally {
       clearTimeout(timer);
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
     }
   },
 };

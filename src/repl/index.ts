@@ -243,9 +243,16 @@ function onRunningKey(_str: string, key?: Key): void {
   layout.setUserActive();
   // 其他键:若处于滚动回看,先回尾再处理(打字即回底)
   if (layout.isScrolled()) layout.resetScroll();
-  // Ctrl+C 中断当前 agent 轮次(不退进程;raw 模式下 Ctrl+C 是按键,不触发 SIGINT)
+  // Ctrl+C 4 层语义(RUNNING 态):有 typeahead → 清空(层 1,不中断);空 → abort(层 2,中断 agent)。
+  // 两次 Ctrl+C 才中断(先清 typeahead 再 abort),与 INPUT 态 onCtrlC 的 fish 式一致。
+  // raw 模式下 Ctrl+C 是按键不触发 SIGINT;signal 经 executeTool 串进工具,run_command/web_fetch 即时被杀。
   if (key.ctrl && key.name === 'c') {
-    currentAbort?.abort();
+    if (runningInput.length > 0) {
+      runningInput = '';
+      layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+    } else {
+      currentAbort?.abort();
+    }
     return;
   }
   const s = key.sequence ?? '';
