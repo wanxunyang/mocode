@@ -73,10 +73,10 @@ let statusText = '';
 let spinnerFrame: string | undefined;
 let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
 let turnTimer: NodeJS.Timeout | null = null; // 走时刷新计时器(独立于 spinner):流式期间 spinner 停转,由它续刷状态行。
-// 运行态状态行 chip 旋转帧(braille,与 spinner.ts 同序列)。turnTimer 每 tick 推进一帧,
-// 让状态行前导符 ◆ 在 agent 运行时转圈——agent 的 spinner 走内容区续写位(paintLiveAtCursor),
-// 不调 setStatus,故状态行 chip 靠 turnTimer 独立驱动。INPUT 态 runningFrame=-1,composeStatus 退回静态 ◆。
-const RUNNING_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+// 运行态状态行 chip 心跳帧(♥/♡ 明灭)。turnTimer 每 tick 推进一帧,让状态行前导符在 agent
+// 运行时跳动——agent 的 spinner 走内容区续写位(paintLiveAtCursor),不调 setStatus,
+// 故状态行 chip 靠 turnTimer 独立驱动。INPUT 态 runningFrame=-1,composeStatus 退回静态 ◆。
+const RUNNING_FRAMES = ['♥', '♡'];
 let runningFrame = -1;
 // 运行态用户打字时暂停流式物理写:流式每个 token 要 cup 到 contentRow 写入,IME 候选窗逐光标移动跟踪会跟过去;
 // 用户打字期间只喂缓冲、不物理写,光标留输入框;停手 USER_ACTIVE_PAUSE_MS 后 flush 重画缓冲内容。
@@ -478,9 +478,9 @@ export function resetScroll(): void {
 function composeStatus(status: StatusBarData, cols: number): string {
   const sep = '  ';
   const sepW = sep.length;
-  // 运行态(非滚动回看)用旋转 braille 帧替换静态 ◆:agent 跑起来时状态行前导符转圈,
-  // 视觉上「活着」。帧宽=1(与 ◆ 同),fixed 宽度不变,布局不乱。INPUT / 滚动态仍显 ◆。
-  const spinning = mode === 'running' && scrollOffset === 0 && runningFrame >= 0;
+  // 运行态(含滚动回看)用心跳帧(♥/♡)替换静态 ◆:agent 跑起来时状态行前导符始终跳动,
+  // 滑到上面看历史也能感知 agent 在跑。帧宽=1(与 ◆ 同),fixed 不变,布局不乱。INPUT 态仍显 ◆。
+  const spinning = mode === 'running' && runningFrame >= 0;
   const lead = spinning ? `${RUNNING_FRAMES[runningFrame]} ` : `◆ `;
   // 模式 chip:lead 之后、model 之前。auto 显 dim 'auto'(常态),plan 显亮黄 'plan'(切换时颜色+文字都变,明显)。
   const modeChip = status.modeTag
@@ -556,9 +556,9 @@ export function setStatus(status: string, frame?: string): void {
 function startTurnTimer(): void {
   if (!active) return;
   stopTurnTimer();
-  runningFrame = 0; // 进入运行态:启动状态行 chip 旋转(首帧立即生效)
+  runningFrame = 0; // 进入运行态:启动状态行 chip 心跳(首帧立即生效)
   turnTimer = setInterval(() => {
-    runningFrame = (runningFrame + 1) % RUNNING_FRAMES.length; // 推进 braille 帧,让 ◆ 转圈
+    runningFrame = (runningFrame + 1) % RUNNING_FRAMES.length; // 推进心跳帧,让前导符跳动
     drawStatusBar();
   }, 200);
   turnTimer.unref();
