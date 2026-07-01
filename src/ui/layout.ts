@@ -66,6 +66,7 @@ let mode: 'input' | 'running' = 'input';
 let footerH = 4; // 1 状态行 + 1 上线 + 输入行数 + 1 下线(上下线框住输入区)
 let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
 let contentCol = 1; // 续写位列(1-based)
+let segmentStartRow = 1; // 当前 md 段起始屏行(供 contentWriteMd 定位段末续写位;段内行数由 content 段标记跟踪)
 let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
 let base: { model: string; contextBar: string; cwd: string; modeTag?: string } | null = null;
 let statusText = '';
