@@ -943,3 +943,113 @@ export async function promptThemePicker(
     redraw();
   });
 }
+
+/**
+ * 回滚方式二选一菜单(供 /rollback 选完轮次后):↑/↓ 导航、Enter 确认、Esc/Ctrl+D 保留文件。
+ * 两个选项:1=撤销文件改动(恢复到回滚前);2=只撤销消息,保留文件改动。
+ * 复用轮次/会话菜单的渲染骨架(raw mode + layout.paintInput 的 menu),选中项 cyan+bold + ▸ 高亮。
+ * 返回 true=撤销文件 / false=只撤销消息 / null=取消(调用方按 false=保留文件处理)。
+ * 默认聚焦首项(撤销文件)。无文件改动时调用方不应调此菜单(直接走只撤销消息)。
+ */
+export async function promptRevertChoice(fileCount: number): Promise<boolean | null> {
+  if (!layout.isActive()) return null;
+  const emitter = stdin as unknown as KeypressEmitter;
+  const hint = '↑↓ 选择 · Enter 确认 · Esc 保留文件';
+  const items = [
+    `撤销文件改动${fileCount > 0 ? `(${fileCount} 个文件恢复到回滚前)` : ''}`,
+    '只撤销消息,保留文件改动',
+  ];
+  let selected = 0; // 默认聚焦首项(撤销文件)
+  let resolved = false;
+  let resolve!: (v: boolean | null) => void;
+  let reject!: (e: Error) => void;
+
+  function menuLines(): string[] {
+    const cols = layout.getGeo().cols;
+    return items.map((text, idx) => {
+      const isSel = idx === selected;
+      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const num = `${color}${idx + 1}${ui.reset}`;
+      const t = truncateDisplay(text, cols - 6);
+      return `${marker} ${num} ${color}${t}${ui.reset}`;
+    });
+  }
+
+  function redraw(): void {
+    layout.paintInput({
+      prompt: '❯ ',
+      lines: [hint],
+      cursorLine: 0,
+      cursorCol: displayWidth(hint),
+      menu: { lines: menuLines() },
+      caret: false, // 纯导航菜单:不画输入框块状光标,聚焦由菜单 ▸ 标记
+    });
+  }
+
+  function cleanup(): void {
+    try {
+      stdin.setRawMode(false);
+    } catch {
+      // 忽略
+    }
+    emitter.removeListener('keypress', onKey);
+    stdin.pause();
+  }
+  function finish(value: boolean | null): void {
+    if (resolved) return;
+    resolved = true;
+    cleanup();
+    resolve(value);
+  }
+
+  function onKey(_str: string, key?: Key): void {
+    if (resolved || !key) return;
+    if (key.ctrl && key.name === 'c') {
+      cleanup();
+      reject(new Error('SIGINT'));
+      return;
+    }
+    if (key.ctrl && key.name === 'd') {
+      finish(null);
+      return;
+    }
+    switch (key.name) {
+      case 'up':
+        selected = (selected - 1 + items.length) % items.length;
+        redraw();
+        return;
+      case 'down':
+        selected = (selected + 1) % items.length;
+        redraw();
+        return;
+      case 'return':
+      case 'enter':
+        finish(selected === 0); // true=撤销文件, false=只撤销消息
+        return;
+      case 'escape':
+        finish(null); // 取消=保留文件
+        return;
+    }
+  }
+
+  return new Promise<boolean | null>((res, rej) => {
+    resolve = res;
+    reject = rej;
+    ensurePasteDetector();
+    readline.emitKeypressEvents(stdin);
+    let rawOk = true;
+    try {
+      stdin.setRawMode(true);
+    } catch {
+      rawOk = false;
+    }
+    if (!rawOk) {
+      res(null);
+      return;
+    }
+    stdin.resume();
+    emitter.on('keypress', onKey);
+    redraw();
+  });
+}

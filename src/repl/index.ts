@@ -14,6 +14,7 @@ import {
   promptTurnPicker,
   promptSessionPicker,
   promptThemePicker,
+  promptRevertChoice,
   type SessionPickerItem,
 } from '../ui/prompt.js';
 import { promptIntervention } from '../ui/intervention.js';
@@ -310,6 +311,7 @@ function stopRunningListener(): void {
  * 把用户消息格式化为带满宽背景色的文本(上滑时易辨认用户消息)。
  * 每行用 padEndDisplay 填充到终端宽度(含 ❯ / 缩进),背景色 SGR 包裹整行 + 行末 reset。
  * 满宽 pad 使终端背景色覆盖整行(含行尾空单元格),上滑滚动时用户消息呈连续色块、与 assistant 正文区分。
+ * 末尾多留一空行(\n\n 收尾):用户消息与后续(agent 流式输出 / 下条消息)之间空一行,仿 Claude Code。
  */
 function formatUserMessage(lines: string[]): string {
   const cols = layout.getGeo().cols;
@@ -324,7 +326,7 @@ function formatUserMessage(lines: string[]): string {
         const padded = padEndDisplay(full, cols);
         return `${userBg}${padded}${reset}`;
       })
-      .join('\n') + '\n'
+      .join('\n') + '\n\n'
   );
 }
 
@@ -492,8 +494,8 @@ export async function startRepl(
 
   /**
    * 回滚子流程(由 /rollback 触发):菜单(↑/↓)选轮次 → 选中第 X 轮 = 删第 X 轮及之后 + 预填第 X 轮 user 输入
-   * (仿 Claude Code rewind,Enter 重新跑该轮);被删轮次的文件改动仍逐个「保留/撤销」询问(cooked readline)。
-   * 选轮菜单走 promptTurnPicker(raw mode);文件询问走 askLine(cooked)。预填经 pendingPrefill 注入下轮 INPUT。
+   * (仿 Claude Code rewind,Enter 重新跑该轮);被删轮次的文件改动走二选一菜单(promptRevertChoice:
+   * 撤销文件 / 只撤销消息)。选轮 + 方式菜单均走 raw mode。预填经 pendingPrefill 注入下轮 INPUT。
    */
   const rollbackFlow = async (): Promise<void> => {
     const turnList = listTurns();
@@ -528,23 +530,22 @@ export async function startRepl(
       dim: true,
     });
     const revertPaths = new Set<string>();
-    for (const c of plan.changes) {
-      layout.contentWrite(
-        `  ${ui.cyan}${c.path}${ui.reset} ${ui.dim}(${c.ops.join(', ')})${ui.reset}\n`
-      );
-      let ans = '';
+    // 文件撤销:二选一菜单(1=撤销文件改动 / 2=只撤销消息保留文件)
+    // 返回 true=撤销文件(把 changes 里所有可撤销的路径加入 revertPaths);
+    // false/null(取消/非 TTY/Ctrl+C)=只撤销消息,保留文件改动。
+    const changes = plan.changes;
+    const revertable = changes.filter((c) => c.snapshotAvailable);
+    let revertFiles = false;
+    if (changes.length > 0) {
       try {
-        ans = (await askLine('  保留/撤销 [k/u](回车=保留): ')).trim();
+        const choice = await promptRevertChoice(revertable.length);
+        revertFiles = choice === true;
       } catch {
-        continue;
+        revertFiles = false; // Ctrl+C(SIGINT)→ 保留文件,只撤销消息
       }
-      if (ans.startsWith('u') || ans.startsWith('U')) {
-        if (c.snapshotAvailable) {
-          revertPaths.add(c.path);
-        } else {
-          layout.contentWrite(`${ui.dim}  (无快照,无法撤销——保留)${ui.reset}\n`);
-        }
-      }
+    }
+    if (revertFiles) {
+      for (const c of revertable) revertPaths.add(c.path);
     }
     applyRollback(plan, history, revertPaths);
     if (!currentSessionId) currentSessionId = newSessionId();
