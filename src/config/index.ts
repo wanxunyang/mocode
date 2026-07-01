@@ -75,7 +75,28 @@ function requireEnv(key: string): string {
   return v;
 }
 
+const PLATFORM_NOTE = (() => {
+  if (process.platform === 'win32') {
+    return `## Environment (Windows)
+- You are on Windows; run_command runs commands via cmd.exe (/c). Unix shell builtins are NOT available here.
+- Windows equivalents: which→where, cat→type, ls→dir, rm→del/rd, cp→copy, mv→move. cmd.exe uses %VAR% (not $VAR); pipes (|) and redirects (>, >>) work, but no $(...) command substitution or backticks.
+- head/tail/find/grep/sed have no cmd.exe equivalent — use the dedicated tools (read_file for head/tail, glob for find, grep for grep), or invoke PowerShell via run_command if you need more.
+- Prefer the dedicated tools (read_file/glob/grep) over shell equivalents — they're cross-platform and already wired in.`;
+  }
+  if (process.platform === 'darwin') {
+    return `## Environment (macOS)
+- You are on macOS; run_command runs via bash -c (user default shell may be zsh). BSD coreutils, not GNU.
+- Pitfalls: sed -i needs an empty backup-ext arg (sed -i '' 's/x/y/' file); grep -P unavailable (use grep -E or the grep tool); find/readlink/date are BSD variants; readlink -f unsupported (use realpath, or greadlink -f if GNU coreutils installed via brew).
+- Prefer the dedicated tools (read_file/glob/grep) over shell equivalents — they sidestep BSD/GNU differences.`;
+  }
+  return `## Environment (Linux/Unix)
+- You are on ${process.platform}; run_command runs via bash -c. GNU coreutils — standard POSIX/GNU shell syntax is safe.
+- Still prefer the dedicated tools (read_file/glob/grep) over hand-rolled shell where they fit — they avoid quoting pitfalls and are already wired in.`;
+})();
+
 const SYSTEM_PROMPT = `You are mocode, a terminal coding agent. You complete programming tasks through a "think → call tool → observe result → think again" loop until the problem is solved. Reply to the user in Chinese.
+
+${PLATFORM_NOTE}
 
 ## Workflow
 - Understand before acting: when unsure about requirements or code state, explore first; don't assume.
@@ -127,7 +148,8 @@ You are in PLAN mode: investigate and design only — do NOT execute or change a
 - Your editing / command / memory-write tools (write_file, edit_file, run_command, memory_save, memory_update, memory_forget) have been REMOVED from your tool list. Use only the read-only tools available to you (read_file, glob, grep, codegraph, web_search, web_fetch, use_skill, ask_human, memory_search, memory_list) to investigate.
 - Research thoroughly: locate the relevant code, trace call paths, and understand existing patterns and conventions before designing. Prefer codegraph when a .codegraph/ index exists.
 - Then produce a clear, actionable implementation plan: files to change (with paths), what to change in each and why, the ordered steps, edge cases to handle, and how to verify (typecheck / tests / build). Be specific enough to execute against.
-- Present the plan as your final reply and STOP. Do NOT attempt to implement it yourself in this mode. After you finish, the user will be asked to approve; on approval the session switches back to auto mode and executes the plan.`;
+- Present the plan as your final reply and STOP, unless the user explicitly asked you to "plan first then execute" / "先 plan 再 auto" / autonomous execution: in that case, after presenting the plan, call the switch_mode tool with mode="auto" to switch back to auto mode WITHIN THE SAME TURN and continue implementing the plan yourself (your write/edit/command/memory-write tools become available again immediately). The user will see no approval prompt because you self-switched.
+- If the user entered plan mode manually (via /plan or Shift+Tab) for a safety review and did NOT ask for autonomous execution, do NOT call switch_mode — present the plan and STOP; the user will approve via a prompt and execution happens in a follow-up turn.`;
 
 export const config: Config = {
   baseURL: requireEnv('LLM_BASE_URL'),

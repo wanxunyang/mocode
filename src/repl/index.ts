@@ -4,6 +4,7 @@ import { stdin, stdout } from 'node:process';
 import { config, PLAN_MODE_SUFFIX } from '../config/index.js';
 import { updateConfigKey } from '../config/file.js';
 import { runAgent } from '../agent/index.js';
+import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
@@ -165,7 +166,7 @@ function refreshStatusBase(history: ChatMessage[]): void {
     model: config.model,
     contextBar: renderContextBarInline(history),
     cwd: process.cwd(),
-    modeTag: agentMode === 'plan' ? 'plan' : 'auto',
+    modeTag: getAgentMode() === 'plan' ? 'plan' : 'auto',
   });
 }
 
@@ -211,7 +212,7 @@ let runningInput = ''; // 运行中已打字缓冲(单行;agent 结束后预填�
 let runningPlaceholder = '';
 let currentAbort: AbortController | null = null;
 let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user 输入(下轮 INPUT 态消费)
-let agentMode: 'auto' | 'plan' = 'auto'; // 当前 agent 形态(auto=执行全工具 / plan=只读探查+产出计划);Shift+Tab 切换,不落盘(每会话重置)
+// agent 模式状态已提到 src/agent/mode.ts(共享叶子:switch_mode 工具可写、agent 每步读、repl 注册 onModeChange 监听器)。
 
 /** 运行态按键:滚动优先,再 Ctrl+C 中断,再 typeahead 编辑(单行,Enter=无操作)。 */
 function onRunningKey(_str: string, key?: Key): void {
@@ -404,7 +405,7 @@ export async function startRepl(
   updateNotice: string | null = null
 ): Promise<void> {
   // 模式重置:agentMode 不落盘,每个 REPL 会话从 auto 开始(/resume / --resume 亦重置)。
-  agentMode = 'auto';
+  setAgentMode('auto');
   // 构造系统提示:auto 用 base;plan 在 config.systemPrompt 后追加 PLAN_MODE_SUFFIX。
   // 切模式时 applyMode 重算 history[0](history[0] 恒 system,compaction 保它,不破坏)。
   const buildSystemMessage = (planMode: boolean): string =>
@@ -472,10 +473,15 @@ export async function startRepl(
     history[0] = { role: 'system', content: buildSystemMessage(planMode) };
   };
   const cycleMode = (): void => {
-    agentMode = agentMode === 'plan' ? 'auto' : 'plan';
-    applyMode(agentMode === 'plan');
-    refreshStatusBase(history); // 设 base.modeTag;chip 由 prompt.ts 的 redraw() 画
+    setAgentMode(getAgentMode() === 'plan' ? 'auto' : 'plan'); // listener 接手 applyMode + refreshStatusBase
   };
+  // 注册模式变更监听器:switch_mode 工具 / cycleMode / /plan / /auto / runTurn 调 setAgentMode 时同步触发,
+  // 重写 history[0] 系统提示(切 plan 追加 PLAN_MODE_SUFFIX)+ 刷状态行 modeTag。
+  // 不调 drawStatusBar:INPUT 态靠 prompt.ts redraw 画 chip;RUNNING 态(switch_mode 中途切)靠 200ms turnTimer 兜底。
+  onModeChange((m) => {
+    applyMode(m === 'plan');
+    refreshStatusBase(history);
+  });
 
   /**
    * 回滚子流程(由 /rollback 触发):菜单(↑/↓)选轮次 → 选中第 X 轮 = 删第 X 轮及之后 + 预填第 X 轮 user 输入
@@ -560,6 +566,9 @@ export async function startRepl(
     let ok = false;
     try {
       const signal = startRunningListener(placeholder);
+      // 入口设定本轮初始模式(合成执行轮传 false→auto;用户轮传当前 mode)。
+      // setAgentMode 触发 listener 重写 history[0];LLM 可在轮中调 switch_mode 切模式,runAgent 每步读实时值。
+      setAgentMode(planMode ? 'plan' : 'auto');
       // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
       // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
       await runAgent(
@@ -570,7 +579,6 @@ export async function startRepl(
           refreshStatusBase(history);
           layout.drawStatusBar();
         },
-        planMode,
       );
       ok = !signal.aborted; // 中断(Ctrl+C)→ runAgent 已还原 history,ok=false 不弹审批
       // 成功轮次自动落盘(崩溃也保住上一轮);新会话首轮分配 id
@@ -650,12 +658,10 @@ export async function startRepl(
     if (line === '/plan') {
       // /plan:切到 plan 模式(只读探查 + 产出计划)。Shift+Tab 的可靠后备——
       // 中文 IME(微软拼音用 Shift 切中英)与部分终端会吞掉 Shift+Tab 的 \x1b[Z,命令不受影响。
-      if (agentMode === 'plan') {
+      if (getAgentMode() === 'plan') {
         layout.contentWrite(`${ui.dim}(已在 plan 模式)${ui.reset}\n`);
       } else {
-        agentMode = 'plan';
-        applyMode(true);
-        refreshStatusBase(history);
+        setAgentMode('plan'); // listener 接手 applyMode + refreshStatusBase
         layout.contentWrite(
           `${ui.dim}(已切到 plan 模式:只读探查 + 产出计划,审批后切 auto 执行。/auto 或 Shift+Tab 切回)${ui.reset}\n`,
         );
@@ -663,12 +669,10 @@ export async function startRepl(
       continue;
     }
     if (line === '/auto') {
-      if (agentMode === 'auto') {
+      if (getAgentMode() === 'auto') {
         layout.contentWrite(`${ui.dim}(已在 auto 模式)${ui.reset}\n`);
       } else {
-        agentMode = 'auto';
-        applyMode(false);
-        refreshStatusBase(history);
+        setAgentMode('auto'); // listener 接手 applyMode + refreshStatusBase
         layout.contentWrite(`${ui.dim}(已切回 auto 模式:全工具执行)${ui.reset}\n`);
       }
       continue;
@@ -786,9 +790,9 @@ export async function startRepl(
       if (loaded.history[0]?.role === 'system') {
         loaded.history[0] = { role: 'system', content: buildSystemMessage(false) };
       }
-      agentMode = 'auto'; // /resume 重置为 auto(mode 不落盘)
       history.length = 0;
       history.push(...loaded.history);
+      setAgentMode('auto'); // /resume 重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
       currentSessionId = loaded.id;
       // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
       if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
@@ -857,11 +861,12 @@ export async function startRepl(
       continue;
     }
 
-    const planMode = (agentMode as 'auto' | 'plan') === 'plan';
-    const ok = await runTurn(joined, planMode, placeholder);
-    // plan 模式且正常结束(未中断 / 未抛错)→ 弹审批面板:切 auto 执行 / 留 plan 细化(仿 Claude Code)。
-    // 计划正文已在 history 作 assistant 回复,execute 轮合成「请按上述计划执行。」续跑,agent 有上下文。
-    if (planMode && ok) {
+    const initialPlan = getAgentMode() === 'plan'; // 轮首模式(在 runTurn 之前读)
+    const ok = await runTurn(joined, initialPlan, placeholder);
+    // plan 轮正常结束(未中断 / 未抛错)→ 看轮末模式决定:
+    //  - 仍 plan:LLM 没自切(只产计划就 STOP)→ 弹审批面板(原行为)。
+    //  - 已 auto:LLM 调了 switch_mode('auto') 在同轮自主执行了 → 跳过审批,不重复打扰。
+    if (initialPlan && ok && getAgentMode() === 'plan') {
       const res = await promptIntervention({
         type: 'choice',
         title: '计划已就绪',
@@ -869,9 +874,7 @@ export async function startRepl(
         options: ['切 auto 执行', '留 plan 细化'],
       });
       if (res.action === 'selected' && res.value === '切 auto 执行') {
-        agentMode = 'auto';
-        applyMode(false); // 重写 history[0] 回 auto 系统提示(去掉 PLAN_MODE_SUFFIX)
-        refreshStatusBase(history);
+        // setAgentMode('auto') 由 runTurn 入口做(listener 重写 history[0] 回 auto);这里只切运行态 + 合成执行轮。
         layout.enterRunningMode('执行', '按计划执行…');
         await runTurn('请按上述计划执行。', false, '按计划执行…');
       }

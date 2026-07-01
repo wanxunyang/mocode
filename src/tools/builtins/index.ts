@@ -10,6 +10,7 @@ import { webFetchTool } from './web-fetch.js';
 import { useSkillTool } from './use-skill.js';
 import { askHumanTool } from './ask-human.js';
 import { codegraphTool } from './codegraph.js';
+import { switchModeTool } from './switch-mode.js';
 import { memorySaveTool } from './memory-save.js';
 import { memorySearchTool } from './memory-search.js';
 import { memoryListTool } from './memory-list.js';
@@ -18,7 +19,7 @@ import { memoryForgetTool } from './memory-forget.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
- * 加新工具:在本目录新建 `xxx.ts` 导出一个 Tool,再在下面数组里加一行。
+ * 加新工具:在本目录新建 `xxx.ts` 导出一个 Tool,再在下面数组里加一行。无需改 agent / llm。
  */
 export const builtinTools: Tool[] = [
   readFileTool,
@@ -32,6 +33,7 @@ export const builtinTools: Tool[] = [
   webFetchTool,
   useSkillTool,
   askHumanTool,
+  switchModeTool, // plan↔auto 自切(两模式都可见,不进 PLAN_DISABLED_TOOLS;副作用控制工具→串行分支)
   memorySaveTool,
   memorySearchTool,
   memoryListTool,

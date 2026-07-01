@@ -9,6 +9,7 @@ import {
 } from '../llm/index.js';
 import { executeTool } from '../tools/registry.js';
 import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
+import { getAgentMode, setAgentMode } from './mode.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
 import {
@@ -153,12 +154,13 @@ export async function runAgent(
   signal?: AbortSignal,
   /** 每步 chat() 返回后回调:repl 据此重算并重画状态行 context 用量条(运行中实时刷新,不冻结在轮首)。 */
   onContextUpdate?: () => void,
-  /** plan 模式:只读探查 + 产出计划,不执行。chat 传 planChatTools(剔除写盘/命令/记忆写入类);serial 分支再挡一道防后端幻觉。 */
-  planMode = false
 ): Promise<void> {
   // 中断回滚快照:入口(本 turn push 任何消息前)整段浅拷贝。abort 时 length=0;push(...saved) 还原。
   // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
   const savedHistory = history.slice();
+  // 中断还原:LLM 中途可能调 switch_mode 切了模式,abort 时连同模式一起还原回轮首
+  // (避免 mode.ts 留在 auto、history[0] 却被还原回 plan 的错位;listener 重写 history[0] 与 savedHistory 幂等)。
+  const savedMode = getAgentMode();
   // 本轮计时:从入口到完毕(正常 return / 达上限),供 finally 打 ✻ Worked for 摘要行。
   // 与 layout 的 turnStart 各自独立(差几毫秒),避免 agent 反向读 layout 状态的耦合。
   const t0 = Date.now();
@@ -212,7 +214,9 @@ export async function runAgent(
       lastChar = '';
       let result: ChatResult;
       try {
-        result = await chat(history, { onText, onToolCall }, signal, planMode ? planChatTools : undefined);
+        // 每步读实时模式:LLM 可能在上一步调 switch_mode 切了模式,这里立即用对应工具集
+        // (auto=chatTools 全量;plan=planChatTools 只读子集)。模式由 src/agent/mode.ts 单一持有。
+        result = await chat(history, { onText, onToolCall }, signal, getAgentMode() === 'plan' ? planChatTools : undefined);
       } catch (e) {
         // 中断(用户运行中 Ctrl+C):停 spinner、补换行、提示、history 还原到本 turn 前、return(不抛)。
         // abort 只在 await chat() 期生效;tool 执行不可中断,故不会留下未配对的 tool_call_id。
@@ -226,6 +230,7 @@ export async function runAgent(
           layout.contentWrite(`${ui.dim}(已中断)${ui.reset}\n`);
           history.length = 0;
           history.push(...savedHistory);
+          setAgentMode(savedMode); // 还原模式:listener 重写 history[0] 回轮首系统提示(与 savedHistory 幂等)
           return;
         }
         throw e;
@@ -281,7 +286,7 @@ export async function runAgent(
             const tc = calls[i];
             // plan 模式防御 backstop:schema 已剔除这些工具,正常不会进这里;防后端幻觉调用——
             // 不执行,直接返错回灌(让模型看到「plan 模式禁用」并停止),绝不写盘 / 跑命令。
-            if (planMode && PLAN_DISABLED_TOOLS.has(tc.name)) {
+            if (getAgentMode() === 'plan' && PLAN_DISABLED_TOOLS.has(tc.name)) {
               writeToolHeader(tc);
               const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
               writeToolResult(tc, err, null, null, 1);

@@ -18,11 +18,11 @@ function hasCodegraphIndex(): boolean {
 function runCodegraph(args: string[]): Promise<string> {
   return new Promise((done) => {
     const isWin = process.platform === 'win32';
-    const cmd = isWin ? 'codegraph.cmd' : 'codegraph';
-    const child = spawn(cmd, args, {
-      cwd: process.cwd(),
-      shell: false,
-    });
+    // win32 必须走 cmd.exe /c:Node 自 CVE-2024-27980 修复后,shell:false 直接 spawn
+    // .cmd/.bat 会抛 EINVAL;cmd.exe 是真二进制,直接 spawn 安全(与 run_command 同约定)。
+    const child = isWin
+      ? spawn('cmd.exe', ['/c', 'codegraph', ...args], { cwd: process.cwd() })
+      : spawn('codegraph', args, { cwd: process.cwd() });
     let out = '';
     let finished = false;
     const finish = (s: string) => {

@@ -307,6 +307,117 @@ function highlightCodeBlock(code: string, lang: string): string {
   return code;
 }
 
+// ── GFM 表格 ──
+// 表头行 + |---| 分隔行 + 数据行。列宽按渲染后可见宽度算(含内联样式),超 cols 时
+// 等分列宽上限、cell 软折成多行(行数取各列最大)。流式:每 chunk 重渲染整段(memo),
+// 表格按当前已收完整行重画;表头来了分隔没来时表头行暂走段落,分隔行到后整段重算变表格。
+
+type Align = 'left' | 'right' | 'center';
+
+/** 拆表格行成单元格:去首尾 | 后按 | split,每 cell trim。 */
+function parseTableRow(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  return s.split('|').map((c) => c.trim());
+}
+
+/** 分隔行每 cell :?-+:? → 对齐(left 默认)。 */
+function parseAlign(sep: string[]): Align[] {
+  return sep.map((c) => {
+    const t = c.trim();
+    const l = t.startsWith(':');
+    const r = t.endsWith(':');
+    return l && r ? 'center' : r ? 'right' : 'left';
+  });
+}
+
+/** ANSI 感知按可见宽度 pad(左/右/中),补空格;不截断(超宽原样返回,由 clipAnsiLine 兜底)。 */
+function padAnsi(str: string, width: number, align: Align): string {
+  const w = ansiDisplayWidth(str);
+  if (w >= width) return str;
+  const lack = width - w;
+  if (align === 'right') return ' '.repeat(lack) + str;
+  if (align === 'center') {
+    const l = Math.floor(lack / 2);
+    return ' '.repeat(l) + str + ' '.repeat(lack - l);
+  }
+  return str + ' '.repeat(lack);
+}
+
+/** 渲染 cell 为 ANSI 串:表头套 dim+bold,数据行裸(内联 markdown 照常)。 */
+function renderCell(text: string, isHeader: boolean): string {
+  const segs = isHeader ? withPrefix(renderInline(text), ui.dim + ui.bold) : renderInline(text);
+  return segsToAnsi(segs);
+}
+
+/**
+ * GFM 表格 → ANSI 物理行(│ 边框 + 表头下 ├─┼─┤ 分隔;每行 ≤ cols,clipAnsiLine 兜底)。
+ * 自然总宽 ≤ cols:单行模式,各列按自然宽。超 cols:每列等分上限 colMax,cell 软折多行,
+ * 行数取各列最大,缺 cell 行补空。对齐按分隔行(: 左 / : 右 / : : 中)。
+ */
+function renderTable(header: string[], aligns: Align[], rows: string[][], cols: number): string[] {
+  const n = header.length;
+  const align: Align[] = header.map((_, i) => aligns[i] ?? 'left');
+  const hCells = header.map((c) => renderCell(c, true));
+  const dCells = rows.map((r) => header.map((_, i) => renderCell(r[i] ?? '', false)));
+  const natW = header.map((_, i) => {
+    let w = ansiDisplayWidth(hCells[i]);
+    for (const r of dCells) w = Math.max(w, ansiDisplayWidth(r[i]));
+    return w;
+  });
+  const borders = n + 1; // │ 数
+  const padding = 2 * n; // 每 cell 前后 1 空格
+  const totalNat = natW.reduce((a, b) => a + b, 0) + borders + padding;
+  const out: string[] = [];
+
+  const rowLine = (cells: string[], widths: number[]): string =>
+    clipAnsiLine(
+      `${ui.dim}│${ui.reset}${cells
+        .map((c, i) => ' ' + padAnsi(c, widths[i], align[i]) + ' ')
+        .join(`${ui.dim}│${ui.reset}`)}${ui.dim}│${ui.reset}`,
+      cols
+    );
+  // 田字格横线:顶 ┌─┬─┐ / 行间(含表头下) ├─┼─┤ / 底 └─┴─┘ —— 每 cell 四周皆边框
+  const topLine = (widths: number[]): string =>
+    clipAnsiLine(`${ui.dim}┌${widths.map((w) => '─'.repeat(w + 2)).join('┬')}┐${ui.reset}`, cols);
+  const midLine = (widths: number[]): string =>
+    clipAnsiLine(`${ui.dim}├${widths.map((w) => '─'.repeat(w + 2)).join('┼')}┤${ui.reset}`, cols);
+  const botLine = (widths: number[]): string =>
+    clipAnsiLine(`${ui.dim}└${widths.map((w) => '─'.repeat(w + 2)).join('┴')}┘${ui.reset}`, cols);
+
+  // cell block:wrap=true 按各列宽软折多行(行数取最大,缺补空);false 直接 pad 单行
+  const emitBlock = (cells: string[], widths: number[], wrap: boolean) => {
+    const wrapped = wrap ? cells.map((c, i) => wrapAnsiString(c, widths[i])) : cells.map((c) => [c]);
+    const lines = Math.max(1, ...wrapped.map((w) => w.length));
+    for (let k = 0; k < lines; k++) {
+      out.push(rowLine(wrapped.map((w) => w[k] ?? ''), widths));
+    }
+  };
+
+  // 顶 → 表头 → (行间 + 数据行)* → 底;无数据行时 top+header+bot
+  if (totalNat <= cols) {
+    out.push(topLine(natW));
+    emitBlock(hCells, natW, false);
+    for (const r of dCells) {
+      out.push(midLine(natW));
+      emitBlock(r, natW, false);
+    }
+    out.push(botLine(natW));
+  } else {
+    const colMax = Math.max(1, Math.floor((cols - borders - padding) / n));
+    const widths = new Array(n).fill(colMax);
+    out.push(topLine(widths));
+    emitBlock(hCells, widths, true);
+    for (const r of dCells) {
+      out.push(midLine(widths));
+      emitBlock(r, widths, true);
+    }
+    out.push(botLine(widths));
+  }
+  return out;
+}
+
 // ── 主渲染 ──
 
 const MEMO = new Map<string, { cols: number; lines: string[]; themeVersion: number }>();
@@ -445,6 +556,32 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
       prevBlank = false;
       i++;
       continue;
+    }
+    // GFM 表格:表头(含 |,≥2 cell)+ 紧跟 |---| 分隔行 → 收齐整块渲染(详见 renderTable)
+    if (line.includes('|')) {
+      const headerCells = parseTableRow(line);
+      if (headerCells.length >= 2 && i + 1 < src.length) {
+        const sepCells = parseTableRow(src[i + 1]);
+        if (
+          sepCells.length === headerCells.length &&
+          sepCells.every((c) => /^:?-+:?$/.test(c.trim()))
+        ) {
+          flushPara();
+          const aligns = parseAlign(sepCells);
+          i += 2;
+          const trows: string[][] = [];
+          while (i < src.length) {
+            const r = src[i];
+            if (r.trim() === '' || !r.includes('|')) break;
+            trows.push(parseTableRow(r));
+            i++;
+          }
+          for (const l of renderTable(headerCells, aligns, trows, cols)) out.push(l);
+          out.push('');
+          prevBlank = true;
+          continue;
+        }
+      }
     }
     // 段落:累积(连续非空非特殊行 join ' ' 后渲染)
     para.push(line);
