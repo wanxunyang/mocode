@@ -52,6 +52,8 @@ export interface Config {
   reflectEveryN: number;
   /** 每轮 agent 循环最大步数(防无限循环)。默认 25。 */
   maxSteps: number;
+  /** 子 agent(task 工具派生)默认步数上限。防子任务失控耗尽配额。默认 50。 */
+  subAgentMaxSteps: number;
   /** 会话落盘目录(cwd 下)。 */
   sessionDir: string;
   /** AnySearch 联网搜索 API key(可选)。不配则走匿名免费额度(按 IP 限流)。 */
@@ -164,6 +166,7 @@ export const config: Config = {
   autoReflect: process.env.AUTO_REFLECT !== 'false',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   maxSteps: Number(process.env.MAX_STEPS) || 200,
+  subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || 50,
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
   searchBaseUrl: process.env.ANYSEARCH_BASE_URL || 'https://api.anysearch.com',

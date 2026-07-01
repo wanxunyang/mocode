@@ -16,6 +16,7 @@ import { memorySearchTool } from './memory-search.js';
 import { memoryListTool } from './memory-list.js';
 import { memoryUpdateTool } from './memory-update.js';
 import { memoryForgetTool } from './memory-forget.js';
+import { taskTool } from './task.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
@@ -39,4 +40,5 @@ export const builtinTools: Tool[] = [
   memoryListTool,
   memoryUpdateTool,
   memoryForgetTool,
+  taskTool, // 派生子 agent(独立 history + 可受限工具集);plan 模式禁用(见 PLAN_DISABLED_TOOLS)
 ];

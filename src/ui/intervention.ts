@@ -19,8 +19,10 @@ import { Spinner } from './spinner.js';
  *     paintLiveAtCursor 画帧会覆盖面板)→ 进入前 Spinner.pauseCurrent() 停转。
  *  2. repl 的 onRunningKey 在整个 runAgent 期间已挂载(↑/↓ 当滚动、Ctrl+C 当中断、可打印键当 typeahead
  *     回显)→ 快照并摘掉现有 keypress 监听、挂自己的 onKey,退出 finally 按原序恢复。
- * 退出时 paintInput(dim,menu:null) 擦菜单 + 复位 lastMenuRows,再 repaintViewport 从缓冲重画内容区
- * (恢复被菜单覆盖的 ● ask_human 行);顺序不可反——反了 stale lastMenuRows 会擦掉已恢复的内容。
+ * 滚轮:面板内滚轮只滚动查看 agent 输出内容(↑↓ 才选菜单),与 onRunningKey 一致;菜单经 scrollBy 末尾
+ * repaint()→paintInput(lastView) 重画,不被 viewport 滚动覆盖。进入时 resetScroll 回尾,退出时若滚过再回尾。
+ * 退出时 paintInput(dim,menu:null) 擦菜单 + 复位 lastMenuRows,再 resetScroll(面板内滚过)/repaintViewport
+ * 从缓冲重画内容区(恢复被菜单覆盖的 ● ask_human 行);顺序不可反——反了 stale lastMenuRows 会擦掉已恢复的内容。
  *
  * 非 TTY(管道/CI):不弹面板,choice 自动选第一项、input 返回 seed/空,打一行 stderr 日志,不阻塞。
  */
@@ -195,8 +197,9 @@ export async function promptIntervention(
     for (const l of savedListeners) emitter.on('keypress', l);
     savedListeners = [];
     // 先 paintInput(dim,menu:null):擦菜单(用 lastMenuRows)+ 画 dim 占位底栏 + 复位 lastMenuRows=0;
-    // 再 repaintViewport:从 content 缓冲重画内容区(恢复被菜单覆盖的 ● ask_human 行)。
-    // 顺序不可反——repaintViewport 后再 paintInput(menu:null) 会用 stale lastMenuRows 擦掉已恢复的内容。
+    // 再处理滚动:面板内可能滚过滚轮(scrollOffset>0)→ resetScroll 回尾让 agent 后续输出可见;
+    //   未滚则 repaintViewport 从 content 缓冲重画内容区(恢复被菜单覆盖的 ● ask_human 行)。
+    // 顺序不可反——resetScroll/repaintViewport 在菜单还在(lastMenuRows>0)时会用内容覆盖菜单区,擦不掉菜单。
     layout.paintInput({
       prompt: '❯ ',
       lines: [''],
@@ -205,15 +208,21 @@ export async function promptIntervention(
       menu: null,
       dim: true,
     });
-    layout.repaintViewport();
+    if (layout.isScrolled()) layout.resetScroll();
+    else layout.repaintViewport();
   }
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
-    // SGR 鼠标 fragment:readline 拆碎 \x1B[<…M,经 mouse.consumeMouse 重组;intervention 无 scrollback
-    // (进入时已 resetScroll),只 suppress 吞掉防 fragment 砸进 onKeyInput 的可打印插入。
+    // SGR 鼠标 fragment:readline 拆碎 \x1B[<…M,经 mouse.consumeMouse 重组;
+    // 滚轮 → scrollBy(±5) 滚动查看 agent 输出内容(菜单只靠 ↑↓ 选,滚轮不选菜单);
+    // fragment 期间 suppress 吞掉防砸进 onKeyInput 的可打印插入。菜单经 scrollBy 末尾
+    // repaint()→paintInput(lastView) 重画,不被 viewport 滚动覆盖。
     const _m = mouse.consumeMouse(key.sequence ?? '');
-    if (_m.suppress) return;
+    if (_m.suppress) {
+      if (_m.wheel) layout.scrollBy(_m.wheel * 5);
+      return;
+    }
     // Ctrl+C → 取消(不 reject SIGINT——否则经 executeTool 的 try/catch 变成 tool 错误串)
     if (key.ctrl && key.name === 'c') {
       finish({ action: 'cancelled' });
@@ -227,6 +236,12 @@ export async function promptIntervention(
         return;
       }
       finish({ action: 'cancelled' });
+      return;
+    }
+    // PgUp/PgDn:翻页滚动查看 agent 输出内容(与 onRunningKey/prompt.ts 一致;↑↓ 仍归菜单导航,不抢)。
+    if (key.name === 'pageup' || key.name === 'pagedown') {
+      const pageH = layout.getGeo().contentBottom;
+      layout.scrollBy(key.name === 'pageup' ? pageH : -pageH);
       return;
     }
     if (mode === 'choice') {

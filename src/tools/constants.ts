@@ -29,7 +29,8 @@ export const IGNORE = ['**/node_modules/**', '**/.git/**'];
 // ── plan 模式(只读规划,不执行)──────────────────────────────────────────────
 /**
  * plan 模式下从工具 schema 里剔除的工具(模型根本看不到 → 调不到):
- * 写盘 / 命令 / 记忆写入类。单一事实源,被 llm(planChatTools)与 agent(防御 backstop)共用。
+ * 写盘 / 命令 / 记忆写入类 + task(派生子 agent,plan 模式只读不可有副作用)。单一事实源,
+ * 被 llm(planChatTools)与 agent(防御 backstop)共用。
  * 只读工具(read_file/glob/grep/codegraph/web_search/web_fetch/use_skill/ask_human/memory_search/memory_list)保留。
  */
 export const PLAN_DISABLED_TOOLS = new Set([
@@ -39,4 +40,5 @@ export const PLAN_DISABLED_TOOLS = new Set([
   'memory_save',
   'memory_update',
   'memory_forget',
+  'task',
 ]);
