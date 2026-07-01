@@ -72,6 +72,11 @@ let statusText = '';
 let spinnerFrame: string | undefined;
 let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
 let turnTimer: NodeJS.Timeout | null = null; // 走时刷新计时器(独立于 spinner):流式期间 spinner 停转,由它续刷状态行。
+// 运行态状态行 chip 旋转帧(braille,与 spinner.ts 同序列)。turnTimer 每 tick 推进一帧,
+// 让状态行前导符 ◆ 在 agent 运行时转圈——agent 的 spinner 走内容区续写位(paintLiveAtCursor),
+// 不调 setStatus,故状态行 chip 靠 turnTimer 独立驱动。INPUT 态 runningFrame=-1,composeStatus 退回静态 ◆。
+const RUNNING_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+let runningFrame = -1;
 // 运行态用户打字时暂停流式物理写:流式每个 token 要 cup 到 contentRow 写入,IME 候选窗逐光标移动跟踪会跟过去;
 // 用户打字期间只喂缓冲、不物理写,光标留输入框;停手 USER_ACTIVE_PAUSE_MS 后 flush 重画缓冲内容。
 let userActiveUntil = 0; // 打字活跃截止时刻(Date.now()+PAUSE);0=未活跃
@@ -419,7 +424,10 @@ export function resetScroll(): void {
 function composeStatus(status: StatusBarData, cols: number): string {
   const sep = '  ';
   const sepW = sep.length;
-  const lead = `◆ `;
+  // 运行态(非滚动回看)用旋转 braille 帧替换静态 ◆:agent 跑起来时状态行前导符转圈,
+  // 视觉上「活着」。帧宽=1(与 ◆ 同),fixed 宽度不变,布局不乱。INPUT / 滚动态仍显 ◆。
+  const spinning = mode === 'running' && scrollOffset === 0 && runningFrame >= 0;
+  const lead = spinning ? `${RUNNING_FRAMES[runningFrame]} ` : `◆ `;
   // 模式 chip:lead 之后、model 之前。auto 显 dim 'auto'(常态),plan 显亮黄 'plan'(切换时颜色+文字都变,明显)。
   const modeChip = status.modeTag
     ? ` ${status.modeTag === 'plan' ? ui.yellow : ui.dim}${status.modeTag}${ui.reset}`
@@ -450,7 +458,7 @@ function composeStatus(status: StatusBarData, cols: number): string {
   const cwdBudget = cols - fixed - 1;
   const cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
   return [
-    `${ui.brightCyan}${lead}${ui.reset}${modeChip}${ui.bold}${model}${ui.reset}`,
+    `${spinning ? ui.brightMagenta : ui.brightCyan}${lead}${ui.reset}${modeChip}${ui.bold}${model}${ui.reset}`,
     sep,
     ctx,
     sep,
@@ -486,7 +494,7 @@ export function setStatus(status: string, frame?: string): void {
 }
 
 /**
- * 启走时刷新计时器:RUNNING 态每 200ms 重画状态行,使 composeStatus 重算 elapsed。
+ * 启走时刷新计时器:RUNNING 态每 80ms 重画状态行,使 composeStatus 重算 elapsed + 推进 braille 旋转帧。
  * 必要性:spinner 在首 token 到达即 stop,思考/正文流式期间状态行不再经 spinner 刷新;
  * 若走时只挂 spinner onFrame,流式那几十秒会冻住。此计时器独立续刷,与 spinner 80ms 重叠幂等无妨。
  * 非 TTY 不启(active=false 时 drawStatusBar 为 no-op)。
@@ -494,7 +502,11 @@ export function setStatus(status: string, frame?: string): void {
 function startTurnTimer(): void {
   if (!active) return;
   stopTurnTimer();
-  turnTimer = setInterval(() => drawStatusBar(), 200);
+  runningFrame = 0; // 进入运行态:启动状态行 chip 旋转(首帧立即生效)
+  turnTimer = setInterval(() => {
+    runningFrame = (runningFrame + 1) % RUNNING_FRAMES.length; // 推进 braille 帧,让 ◆ 转圈
+    drawStatusBar();
+  }, 80);
   turnTimer.unref();
 }
 
@@ -826,6 +838,7 @@ export function enterInputMode(status: string = '空闲'): void {
   mode = 'input';
   statusText = status;
   spinnerFrame = undefined;
+  runningFrame = -1; // 回 INPUT 态:停状态行 chip 旋转,composeStatus 退回静态 ◆
   turnStart = null; // 停走时
   stopTurnTimer();
   // 运行态若有未 flush 的缓冲内容(用户打字暂停了流式写),切回 INPUT 前重画内容区显示之,免丢内容
