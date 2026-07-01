@@ -138,20 +138,18 @@ function pushToolResult(
 
 /**
  * agent 核心循环:
- *  流式调 LLM(onText / onThinking 实时写内容区)→ 有 tool_calls 就执行并回灌
+ *  流式调 LLM(onText 实时写内容区)→ 有 tool_calls 就执行并回灌
  *  → 否则流式正文即最终回复。history 在调用间持久,由 REPL 持有。
  *  步前经 session/maybeCompact 自动压缩(接近窗口上限时三层压缩);
  *  工具结果进 history 前经 capToolResultForHistory 裁到单条上限。
  *
  *  所有正文写经 layout.contentWrite(保证落在内容区、跟踪续写位、底栏不被顶);
  *  spinner 经 onFrame 回调刷状态行(layout.drawStatusBar),等待时内容区静止、底栏转圈。
- *  思考段用 layout.beginSegment / eraseSegmentBack 精确按物理行折叠(修预存按 \n 数行漏擦 bug),
- *  原文存入 collapsedThinkings 供 /think N 重打。
+ *  思考期间不写思考内容,只让 spinner 持续转「思考中…」(首个正文 / tool_call token 到达才停)。
  */
 export async function runAgent(
   history: ChatMessage[],
   userInput: string,
-  collapsedThinkings: string[] = [],
   signal?: AbortSignal,
   /** 每步 chat() 返回后回调:repl 据此重算并重画状态行 context 用量条(运行中实时刷新,不冻结在轮首)。 */
   onContextUpdate?: () => void,
@@ -181,51 +179,16 @@ export async function runAgent(
       layout.clearLiveAtCursor();
     }
   });
-  // 本轮流式状态:区分「思考」与「正文」,首个 token 到达即停 spinner。
-  let mode: 'idle' | 'thinking' | 'text' = 'idle';
+  // 本轮流式状态:首个正文 token 到达即停 spinner(思考期间 spinner 持续转「思考中…」,不写思考内容)。
+  let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
   let lastChar = '';
-  // 折叠用:累计本段思考原文缓冲。
-  let thinkingBuffer = '';
-
-  /** 把当前还在屏幕上可见的思考段擦掉,换成一行折叠标题;原文入栈。 */
-  const flushThinkCollapsed = () => {
-    if (mode !== 'thinking') return;
-    collapsedThinkings.push(thinkingBuffer);
-    const idx = collapsedThinkings.length;
-    layout.eraseSegmentBack(); // 逐行擦思考段(不用 ED——ED 会清穿底栏)
-    layout.contentWrite(
-      `${ui.dim}▎ 思考 ▸ (${thinkingBuffer.length} 字符, /think ${idx} 展开)${ui.reset}\n`
-    );
-    thinkingBuffer = '';
-    // 之后任何输出按 text 走,不再回到 thinking(避免后续再被错误折叠)
-    mode = 'text';
-  };
-
-  const onThinking = (s: string) => {
-    if (mode === 'idle') {
-      spinner.stop();
-      if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
-      layout.beginSegment(); // 思考段起点(标题行)
-      layout.contentWrite(`${ui.dim}▎ 思考${ui.reset}\n`);
-    } else if (mode === 'text') {
-      // 续思考:先把续标题放到新行,再开新段(段起点 = 续标题行,擦除不误伤上文)
-      if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
-      layout.beginSegment();
-      layout.contentWrite(`${ui.dim}▎ 思考(续)${ui.reset}\n`);
-    }
-    mode = 'thinking';
-    thinkingBuffer += s;
-    layout.contentWrite(`${ui.dim}${s}${ui.reset}`);
-    if (s) lastChar = s[s.length - 1];
-  };
 
   const onText = (s: string) => {
-    flushThinkCollapsed(); // 思考→正文过渡时折叠
     spinner.stop(); // 任何正文 token 都停 spinner(首 token 停「思考中」;onToolCall 重启后若又来文本则停「生成中」)。未旋转时 stop 为 no-op。
     mode = 'text';
     gotText = true;
-    layout.contentWrite(s);
+    layout.contentWriteMd(s); // 正文走 markdown 渲染(代码块高亮 / 标题 / 列表 / 行内 …),见 ui/markdown.ts
     if (s) lastChar = s[s.length - 1];
   };
 
@@ -249,7 +212,7 @@ export async function runAgent(
       lastChar = '';
       let result: ChatResult;
       try {
-        result = await chat(history, { onText, onThinking, onToolCall }, signal, planMode ? planChatTools : undefined);
+        result = await chat(history, { onText, onToolCall }, signal, planMode ? planChatTools : undefined);
       } catch (e) {
         // 中断(用户运行中 Ctrl+C):停 spinner、补换行、提示、history 还原到本 turn 前、return(不抛)。
         // abort 只在 await chat() 期生效;tool 执行不可中断,故不会留下未配对的 tool_call_id。
@@ -273,8 +236,6 @@ export async function runAgent(
       onContextUpdate?.();
 
       if (result.toolCalls.length > 0) {
-        // 思考后直接进入 tool_call(无 text):先把可见的思考段折叠
-        flushThinkCollapsed();
         // 流式正文末尾补换行(若 onToolCall 已补则 lastChar='\n',此处 no-op);防 ● 行黏在正文行尾
         if (mode !== 'idle' && lastChar !== '\n') layout.contentWrite('\n');
         // 带工具调用的 assistant 消息原样回灌(OpenAI 格式要求)
@@ -341,11 +302,12 @@ export async function runAgent(
             i++;
           }
         }
+        // 工具步末尾补一空行:与下一轮的思考 / 正文分隔(否则 ↳ 后紧接 ▎ 思考,无空行不好看;
+        // 与正文→● 的 1 空行对称)。工具结果已以 \n 收尾,此处再补 \n 恰好 1 空行。
+        layout.contentWrite('\n');
         continue; // 带着工具结果再调一次 LLM
       }
 
-      // 思考后既无 tool_call 也无 text(纯思考):兜底折叠
-      flushThinkCollapsed();
       if (mode !== 'idle' && lastChar !== '\n') layout.contentWrite('\n'); // 流式末尾补换行
 
       // 没有工具调用:流式正文即最终回复(已实时打印)

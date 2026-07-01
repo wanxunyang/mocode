@@ -9,6 +9,7 @@ import {
 } from './render.js';
 import { ui } from './theme.js';
 import * as content from './content.js';
+import { renderMarkdown } from './markdown.js';
 
 /**
  * 全屏 TUI 布局(参考 Claude Code):alt screen + 单滚动区域(内容区)+ 区域外固定底栏(状态行 + 输入框)。
@@ -16,7 +17,7 @@ import * as content from './content.js';
  * 只依赖最成熟、Windows(WT / conhost)最稳的 ANSI 子集:
  *  - alt screen        \x1B[?1049h / \x1B[?1049l
  *  - DECSTBM 滚动区域  \x1B[<top>;<bottom>r   (区域内写满自动在区域内滚动,区域外底栏不被顶)
- *  - 逐行擦除          \x1B[2K / \x1B[K        (菜单 / 思考折叠 / 清屏,绝不用 ED \x1B[J 做边界擦除)
+ *  - 逐行擦除          \x1B[2K / \x1B[K        (菜单 / 清屏,绝不用 ED \x1B[J 做边界擦除)
  *  - CUP 绝对定位      \x1B[<row>;<col>H
  * 不用原点模式(\x1B[?6h)、不依赖 ED 边界、不用 DECSC/DECRC、不用 IL/DL/SU/SD——这些在 conhost 上不可靠。
  *
@@ -65,7 +66,6 @@ let mode: 'input' | 'running' = 'input';
 let footerH = 4; // 1 状态行 + 1 上线 + 输入行数 + 1 下线(上下线框住输入区)
 let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
 let contentCol = 1; // 续写位列(1-based)
-let segmentStartRow = 1; // 当前思考段起始屏行(供 eraseSegmentBack 定位擦除起点;段内行数由 content 段标记跟踪)
 let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
 let base: { model: string; contextBar: string; cwd: string; modeTag?: string } | null = null;
 let statusText = '';
@@ -88,6 +88,11 @@ let lastMenuRows = 0;
 let resizeTimer: NodeJS.Timeout | null = null;
 let exitHandler: (() => void) | null = null;
 let sigwinchHandler: (() => void) | null = null;
+// markdown 流式段:agent onText 的 chunk 累积到 mdBuf,每 chunk 把整段经 renderMarkdown
+// 渲成自洽行,replace 缓冲段(content.setLines)+ repaintViewport 重画。mdActive 期间任何
+// 非 md 写(contentWrite)先 commitMd 收尾(清 segMark,后续写不再被 setLines 截断)。
+let mdActive = false;
+let mdBuf = '';
 
 const esc = {
   altOn: '\x1B[?1049h',
@@ -208,6 +213,7 @@ export function contentWrite(s: string): void {
     stdout.write(s);
     return;
   }
+  if (mdActive) commitMd(); // 非 md 写接续:先收尾 md 段(清 segMark,否则 setLines 会截到旧段)
   // 滚动回看时(scrollOffset>0)只喂缓冲 + 推进续写位,不物理写——否则新流式内容覆盖 viewport 历史行。
   // 回尾(scrollOffset===0)才物理写;写起点 = 当前续写位(loop 会推进续写位,故先捕获)。
   const startRow = contentRow;
@@ -216,6 +222,12 @@ export function contentWrite(s: string): void {
   const cols = g.cols;
   const bottom = g.contentBottom;
   const advanceRow = (r: number): number => (r >= bottom ? bottom : r + 1); // 到底则滚动,续写位留底
+  // 滚动回看冻结(仿 ink store.pushBlock 的 offset+=newLines):scrollOffset>0 时新内容只入缓冲,
+  // 但缓冲增长后若 offset 不变,下次 scrollBy→repaintViewport 会取漂移窗口、把新内容画进历史视图
+  // (「工具消息跳到上面覆盖」bug;滚回底又正常,因 buffer 正确)。故入缓冲前后算 totalRows 差,
+  // offset += 差以冻住视图(窗口停原绝对行,无需 repaint;滚回底自显尾部新内容)。
+  const scrolled = scrollOffset > 0;
+  const totalBefore = scrolled ? content.totalRows() : 0;
   let i = 0;
   while (i < s.length) {
     const rest = s.slice(i);
@@ -292,6 +304,15 @@ export function contentWrite(s: string): void {
     contentRow = advanceRow(contentRow);
     contentCol = 1;
   }
+  // 滚动回看冻结:新内容入缓冲后 offset += delta(contentWrite 只增故 ≥0;md 路径可负),钳到 [0, maxOff],
+  // viewport 窗口停原绝对行(不漂移到新工具消息)。无需 repaint——窗口未变(屏仍显原历史)。
+  if (scrolled) {
+    const delta = content.totalRows() - totalBefore;
+    if (delta !== 0) {
+      const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
+      scrollOffset = Math.max(0, Math.min(scrollOffset + delta, maxOff));
+    }
+  }
   // 物理写(回尾 offset=0 且未暂停):cup 写起点 + s + (pending 时补 \n 提交换行)+ (运行态 cup 回输入框)。
   // 用户打字中(isStreamingPaused)跳过物理写、只喂缓冲——光标不入内容区,IME 候选窗不跟流式跑;
   // 停手后 setUserActive 的 flush 定时器 repaintViewport 重画缓冲内容。
@@ -306,53 +327,83 @@ export function contentWrite(s: string): void {
   }
 }
 
-/** 标记当前续写位为一个段(思考段)起点:记屏起点(供擦除定位)+ content 段标记(供缓冲同步删)。 */
-export function beginSegment(): void {
+/** 进入 markdown 流式段:标记段起点(layout 续写位 + content.beginSegment),清 accumulator。 */
+function beginMdSegment(): void {
   segmentStartRow = contentRow;
   content.beginSegment();
+  mdBuf = '';
+  mdActive = true;
+}
+
+/** 提交 markdown 段:清 accumulator + content.commitSegment(后续非 md 写不再被 setLines 截断)。 */
+function commitMd(): void {
+  if (!mdActive) return;
+  mdActive = false;
+  mdBuf = '';
+  content.commitSegment();
 }
 
 /**
- * 擦除当前段的可见行(逐行 \x1B[2K,不用 ED——ED 会清穿底栏),续写位回段可见顶;并同步 content 缓冲删段。
+ * markdown 正文写(替代 contentWrite 用于 agent onText):累积 chunk 到 mdBuf,每 chunk 把整段
+ * mdBuf 经 renderMarkdown 渲成自洽 ANSI 行,replace 缓冲段(content.setLines 截旧 + 写新),
+ * repaintViewport 重画(仅尾 offset=0 且未暂停)。流式安全:未闭合 fence 照常 emit 进行中代码块;
+ * renderMarkdown 内部 memo by text 使重复渲染命中缓存。非 TTY / 未激活:直接 stdout.write(与
+ * contentWrite 一致,管道流式可见)。
  *
- * content.eraseSegment() 返回段物理行数(segLines + 末行部分)并从缓冲删除该段——保证滚动回看只看到
- * 折叠标题、不看到已擦的思考原文。该行数 = segRows,据此判段是否滚出过:
- *  - segRows > available:段写满触发过区域滚动,整屏都是段内容(前置内容已被滚出),从内容区顶 contentTop 擦;
- *  - 否则未滚动:从段起点 segmentStartRow 擦。
- * 不越界到区域外(不擦底栏)。返回擦除的屏幕行数。
- *
- * **滚动回看态(scrollOffset>0)只删缓冲、不物理擦**:段在滚动态经 contentWrite 只喂缓冲、未物理写屏,
- * 屏上无段可见,此时按屏行 \x1B[2K 物理擦会清掉用户正在看的历史视图(思考折叠把整屏擦白,而非在底部默默隐藏)。
- * 故滚动态仅 content.eraseSegment() 删缓冲 + 复位续写位到段起点(使回尾后续写落在折叠标题位),不发任何
- * cup/clearLine;回尾时 repaintViewport 从缓冲重画即显折叠标题。返回 0(未物理擦)。
+ * 续写位 = 段末下一行(段占 lines.length 行从 segmentStartRow 起);超可视区则滚动留 contentBottom。
+ * 物理重画用 repaintViewport(全内容区,原子一次 write 无闪烁)— md 段是缓冲尾,viewport 显尾即显段。
+ * 用户打字中(isStreamingPaused)或滚动回看(scrollOffset>0)只更新缓冲,停手 flush / 回尾时显。
  */
-export function eraseSegmentBack(): number {
-  if (!active) return 0;
+export function contentWriteMd(s: string): void {
+  if (!active || !ui.isTTY) {
+    stdout.write(s);
+    return;
+  }
+  if (!mdActive) beginMdSegment();
+  mdBuf += s;
   const g = getGeo();
-  const segRows = content.eraseSegment(); // 删缓冲段,返回段物理行数
-  if (segRows <= 0) return 0;
-  if (scrollOffset > 0) {
-    // 滚动回看态:段未物理写屏,不物理擦(否则清穿历史视图);仅复位续写位到段起点
-    contentRow = segmentStartRow;
-    contentCol = 1;
-    return 0;
-  }
+  // 滚动回看冻结(同 contentWrite):scrollOffset>0 时 setLines 替换段会改缓冲行数,若 offset 不变,
+  // 下次 scrollBy→repaintViewport 取漂移窗口、把流式正文画进历史视图。故 setLines 前后算 totalRows 差,
+  // offset += delta(可负:setLines 重渲染可能缩行)冻住视图。md 段在尾,窗口在上方,冻结后不重叠。
+  const scrolled = scrollOffset > 0;
+  const totalBefore = scrolled ? content.totalRows() : 0;
+  const lines = renderMarkdown(mdBuf, g.cols);
+  content.setLines(lines);
+  const segRows = lines.length;
   const available = g.contentBottom - segmentStartRow + 1;
-  let start = segRows > available ? g.contentTop : segmentStartRow;
-  if (start < g.contentTop) start = g.contentTop;
-  let rows = (contentRow - start) + (contentCol > 1 ? 1 : 0);
-  const maxRows = g.contentBottom - start + 1;
-  if (rows > maxRows) rows = maxRows;
-  if (rows <= 0) return 0;
-  let p = '';
-  for (let i = 0; i < rows; i++) {
-    p += cup(start + i, 1) + esc.clearLine;
-  }
-  stdout.write(p);
-  contentRow = start;
+  contentRow = segRows >= available ? g.contentBottom : segmentStartRow + segRows;
   contentCol = 1;
-  stdout.write(cup(contentRow, contentCol));
-  return rows;
+  if (scrolled) {
+    const delta = content.totalRows() - totalBefore;
+    if (delta !== 0) {
+      const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
+      scrollOffset = Math.max(0, Math.min(scrollOffset + delta, maxOff));
+    }
+  }
+  if (scrollOffset === 0 && !isStreamingPaused()) {
+    repaintViewport();
+    if (mode === 'running') {
+      const p = runningCaretPos();
+      stdout.write(cup(p.row, p.col));
+    }
+  }
+}
+
+/**
+ * 把一段完整(非流式)assistant 文本一次性渲染成 markdown 写入(供 renderHistory 回显
+ * /resume / /rollback 复显上下文):渲染一次 → join('\n') → 经 contentWrite 增量写
+ * (无段 erase / 无 repaintViewport,无闪烁)。与流式 contentWriteMd 的区别:不累积 chunk、
+ * 不走段替换——一次性把渲染结果当普通带色文本喂入(渲染行各自 ≤ cols、自洽带色,contentWrite
+ * 的 SGR/折行状态机原样接纳)。非 TTY:退化为 stdout.write 原文(同 contentWrite)。
+ */
+export function contentWriteMdOnce(s: string): void {
+  if (!active || !ui.isTTY) {
+    stdout.write(s);
+    return;
+  }
+  const g = getGeo();
+  const lines = renderMarkdown(s, g.cols);
+  contentWrite(lines.join('\n'));
 }
 
 /** 清空内容区(保留底栏):全屏清 + 重设区域 + 续写位归 (1,1) + 清缓冲 + 回尾。底栏由调用方随后重画。 */
@@ -364,6 +415,8 @@ export function clearContent(): void {
   contentCol = 1;
   segmentStartRow = 1;
   scrollOffset = 0;
+  mdActive = false;
+  mdBuf = '';
   content.reset();
   stdout.write(esc.home);
 }
@@ -494,7 +547,7 @@ export function setStatus(status: string, frame?: string): void {
 }
 
 /**
- * 启走时刷新计时器:RUNNING 态每 80ms 重画状态行,使 composeStatus 重算 elapsed + 推进 braille 旋转帧。
+ * 启走时刷新计时器:RUNNING 态每 200ms 重画状态行,使 composeStatus 重算 elapsed。
  * 必要性:spinner 在首 token 到达即 stop,思考/正文流式期间状态行不再经 spinner 刷新;
  * 若走时只挂 spinner onFrame,流式那几十秒会冻住。此计时器独立续刷,与 spinner 80ms 重叠幂等无妨。
  * 非 TTY 不启(active=false 时 drawStatusBar 为 no-op)。
@@ -506,7 +559,7 @@ function startTurnTimer(): void {
   turnTimer = setInterval(() => {
     runningFrame = (runningFrame + 1) % RUNNING_FRAMES.length; // 推进 braille 帧,让 ◆ 转圈
     drawStatusBar();
-  }, 80);
+  }, 200);
   turnTimer.unref();
 }
 
@@ -898,6 +951,8 @@ export function enterAltScreen(): void {
   contentCol = 1;
   segmentStartRow = 1;
   scrollOffset = 0;
+  mdActive = false;
+  mdBuf = '';
   content.reset();
 
   exitHandler = () => exitAltScreen();

@@ -2,7 +2,7 @@
  * 内容物理行缓冲(Phase 2 滚动回滚用)。
  *
  * 存折行后的物理行,每行自洽带色,供 layout.repaintViewport 单行直出、无需继承 SGR 状态。
- * contentWrite 逐字符喂入(feedChar / feedSgr / breakRow);eraseSegmentBack 用 popRows 同步删段。
+ * contentWrite 逐字符喂入(feedChar / feedSgr / breakRow);setLines 替换当前段(md 流式渲染用)。
  *
  * **SGR 自洽模型**:每行存 `rowStartSgr + curRaw + \x1B[0m`:
  *  - rowStartSgr:本行起始时继承的活跃 SGR 前缀(来自上一行末状态);
@@ -30,7 +30,7 @@ let segMark: {
   curSgr: string;
   curRaw: string;
   hasCurrent: boolean;
-} | null = null; // 段起点快照(供 eraseSegment 恢复)
+} | null = null; // 段起点快照(md 段:setLines 截断用,commitSegment 清)
 
 export function reset(): void {
   rows = [];
@@ -64,27 +64,36 @@ export function breakRow(): void {
   hasCurrent = true; // 新空行即当前行
 }
 
-/** 标记段(思考段)起点:快照当前缓冲状态,供 eraseSegment 恢复。 */
+/** 标记段起点:快照当前缓冲状态,供 setLines 截断定位段头(md 流式渲染每 chunk 截断重渲)。 */
 export function beginSegment(): void {
   segMark = { rowIdx: rows.length, rowStartSgr, curSgr, curRaw, hasCurrent };
 }
 
 /**
- * 删段并恢复到 beginSegment 时的状态;返回段物理行数(= segLines + 末行部分,与屏幕擦除行数一致)。
- * 段足迹 = 自 mark 后提交的行(committedErased)+ 当前行若有内容(currentErased)。
- * 恢复后当前行 = 段起点的那一行(折叠标题将写入此处),保证滚动回看只看到标题、不看到原文。
+ * 用预渲染的自洽 ANSI 行替换当前段(从 segMark 起),供 markdown 流式渲染:
+ * layout.contentWriteMd 每 chunk 把累积 text 经 renderMarkdown 渲成自洽行,调此替换缓冲段。
+ * 截断 rows 到 segMark.rowIdx(擦上次渲染)+ push 新行;curSgr 复位为默认(行末 reset);
+ * **保留 segMark**(下次 setLines 还要截断),由 commitSegment 清除。
+ * 行须各自自洽(行内 SGR 自带、行末 reset)——不经 feedChar/feedSgr,直接入 rows,
+ * 故 setLines 后 hasCurrent=false(snapshot 只返 rows;续写位由 layout 跟踪)。
  */
-export function eraseSegment(): number {
-  if (!segMark) return 0;
-  const committedErased = rows.length - segMark.rowIdx;
-  const currentErased = hasCurrent && curRaw.length > 0 ? 1 : 0;
-  rows.length = segMark.rowIdx;
-  rowStartSgr = segMark.rowStartSgr;
-  curSgr = segMark.curSgr;
-  curRaw = segMark.curRaw;
-  hasCurrent = segMark.hasCurrent;
+export function setLines(lines: string[]): void {
+  if (segMark) {
+    rows.length = segMark.rowIdx;
+  }
+  for (const line of lines) {
+    rows.push(line);
+  }
+  if (rows.length > MAX_ROWS + 512) rows.splice(0, rows.length - MAX_ROWS);
+  curSgr = '';
+  rowStartSgr = '';
+  curRaw = '';
+  hasCurrent = false;
+}
+
+/** 提交段:清 segMark,后续写入不再被 setLines 截断(md 段结束、非 md 内容接续时调)。 */
+export function commitSegment(): void {
   segMark = null;
-  return committedErased + currentErased;
 }
 
 /** 快照(已提交行 + 当前行若有)。viewport 取行窗用。 */
@@ -93,7 +102,6 @@ function snapshot(): string[] {
     ? [...rows, rowStartSgr + curRaw + '\x1B[0m']
     : rows;
 }
-
 /** 距尾 offset 行、取 count 行的窗口(映射到屏 1..count)。offset=0 即尾窗。 */
 export function sliceFromEnd(offset: number, count: number): string[] {
   const all = snapshot();

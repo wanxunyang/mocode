@@ -191,7 +191,7 @@ function labelContent(label: string, value: string): string {
 /** 横幅纯文本(带 ANSI 颜色,不写出)——供 TUI 经 contentWrite 写入内容区以跟踪续写位。
  *  无边框:左侧实心小熊 + 右侧标题/信息(模型/目录),末尾一行提示。 */
 export function bannerString(info: BannerInfo): string {
-  const title = `${ui.bold}${ui.brightCyan}◆  mocode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
+  const title = `${ui.bold}${ui.brightCyan}◆  MoCode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
   const rows = [
     logoLine(0) + title,
     logoLine(1) + labelContent('模型', info.model),

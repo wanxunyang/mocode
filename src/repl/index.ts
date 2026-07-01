@@ -63,7 +63,6 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/skills', desc: '列出已发现的 skill' },
   { name: '/compact', desc: '压缩历史(可带焦点 /compact …)' },
   { name: '/resume', desc: '续接已保存的会话' },
-  { name: '/think', desc: '展开折叠思考段(/think N)' },
   { name: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
   { name: '/memory', desc: '记忆库:条目计数与近期索引' },
   { name: '/reflect', desc: '手动触发后台记忆反思 pass' },
@@ -337,7 +336,7 @@ export function renderHistory(history: ChatMessage[]): void {
     if (m.role === 'assistant') {
       const text = textOf((m as { content?: unknown }).content);
       if (text) {
-        layout.contentWrite(text);
+        layout.contentWriteMdOnce(text);
         if (!text.endsWith('\n')) layout.contentWrite('\n');
       }
       const tcs = (m as {
@@ -413,9 +412,6 @@ export async function startRepl(
   let currentSessionId: string | undefined = sessionId;
   // 反思 cadence 计数:每 reflectEveryN 轮 fire-and-forget 一次后台反思 pass。
   let turnCount = 0;
-
-  // 本会话累积的折叠思考段,供 /think N 重打原文。
-  const collapsedThinkings: string[] = [];
 
   const toolsLine = tools.map((t) => t.name).join(' · ');
   const banner = () => ({
@@ -545,7 +541,6 @@ export async function startRepl(
       await runAgent(
         history,
         input,
-        collapsedThinkings,
         signal,
         () => {
           refreshStatusBase(history);
@@ -657,7 +652,6 @@ export async function startRepl(
 
     if (line === '/clear') {
       history.length = 1; // 保留 system 提示
-      collapsedThinkings.length = 0; // 同步清空折叠的思考段
       resetState(); // 同步清空回滚轮次/快照
       currentSessionId = undefined; // 下轮起新会话文件
       turnCount = 0; // 反思 cadence 重新计数
@@ -775,31 +769,9 @@ export async function startRepl(
       // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
       if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
       contextState.lastUsage = undefined;
-      collapsedThinkings.length = 0;
       layout.clearContent();
       renderHistory(history);
       layout.contentWrite(`${ui.dim}(已续接会话 ${loaded.id})${ui.reset}\n`);
-      continue;
-    }
-    if (line === '/think' || line.startsWith('/think ')) {
-      const arg = line.split(/\s+/)[1];
-      if (!arg) {
-        layout.contentWrite(
-          `${ui.dim}折叠思考段: ${collapsedThinkings.length} 段  ·  用法: /think N (展开第 N 段)${ui.reset}\n`
-        );
-        continue;
-      }
-      const idx = Number(arg);
-      if (!Number.isInteger(idx) || idx < 1 || idx > collapsedThinkings.length) {
-        layout.contentWrite(
-          `${ui.yellow}无第 ${arg} 段(共 ${collapsedThinkings.length})${ui.reset}\n`
-        );
-        continue;
-      }
-      const content = collapsedThinkings[idx - 1];
-      layout.contentWrite(`${ui.dim}▎ 思考 ▾ (第 ${idx} 段)${ui.reset}\n`);
-      layout.contentWrite(`${ui.dim}${content}${ui.reset}\n`);
-      if (!content.endsWith('\n')) layout.contentWrite('\n');
       continue;
     }
     if (line === '/rollback' || line.startsWith('/rollback ')) {

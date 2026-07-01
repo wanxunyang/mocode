@@ -49,18 +49,15 @@ export interface ChatResult {
   usage?: ChatUsage;
 }
 
-/** 流式回调:文本增量 / 思考增量(reasoning_content)/ 首个 tool_call 工具名。 */
+/** 流式回调:文本增量 / 首个 tool_call 工具名。 */
 export interface StreamHandlers {
   onText?: (delta: string) => void;
-  onThinking?: (delta: string) => void;
   /** 首次得知某个 tool_call 的工具名时回调——模型开始生成工具调用参数(可能很长,如 write_file 大段内容),调用方可据此启「生成中」spinner,避免内容区干等。 */
   onToolCall?: (name: string) => void;
 }
 
 /**
- * 流式调一次 LLM:增量回调文本 / 思考,内部累加 tool_calls 片段。
- * 思考内容走 delta.reasoning_content(DeepSeek / GLM / Qwen 等推理模型,
- * SDK 类型无此字段,用 as any 取;不支持的模型则无思考,只流文本)。
+ * 流式调一次 LLM:增量回调文本,内部累加 tool_calls 片段。
  * tool_calls 跨 chunk 按 index 累加(id / name / arguments 拼接)。
  * include_usage 时末尾 chunk 携带 usage,先读再 continue(末尾 chunk 无 delta)。
  */
@@ -103,11 +100,6 @@ export async function chat(
     }
     const delta = chunk.choices[0]?.delta;
     if (!delta) continue; // 末尾 usage-only chunk 等无 delta
-
-    // 思考内容(非标准字段,SDK 类型无)
-    const reasoning =
-      (delta as any).reasoning_content ?? (delta as any).reasoning;
-    if (reasoning) handlers.onThinking?.(reasoning as string);
 
     if (delta.content) {
       content += delta.content;
