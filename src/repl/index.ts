@@ -202,7 +202,7 @@ let agentMode: 'auto' | 'plan' = 'auto'; // 当前 agent 形态(auto=执行全�
 /** 运行态按键:滚动优先,再 Ctrl+C 中断,再 typeahead 编辑(单行,Enter=无操作)。 */
 function onRunningKey(_str: string, key?: Key): void {
   if (!key) return;
-  // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,↑/↓ 单行(含鼠标滚轮——alt 屏滚轮转发↑↓)。
+  // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,↑/↓ 每次 5 行(含鼠标滚轮——alt 屏滚轮转发↑↓,1 行/格太慢故放大到 5)。
   // 运行态无输入光标,↑/↓ 无其他用途,直接作滚动。
   if (
     key.name === 'pageup' ||
@@ -213,8 +213,8 @@ function onRunningKey(_str: string, key?: Key): void {
     const pageH = layout.getGeo().contentBottom;
     if (key.name === 'pageup') layout.scrollBy(pageH);
     else if (key.name === 'pagedown') layout.scrollBy(-pageH);
-    else if (key.name === 'up') layout.scrollBy(1);
-    else layout.scrollBy(-1);
+    else if (key.name === 'up') layout.scrollBy(5);
+    else layout.scrollBy(-5);
     return;
   }
   // 用户在交互(非滚动键)→ 暂停流式物理写,避免光标去 contentRow 扰动 IME 候选窗(停手后自动 flush)

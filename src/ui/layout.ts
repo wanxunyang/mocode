@@ -275,11 +275,24 @@ export function contentWrite(s: string): void {
     content.feedChar(ch);
     i += ch.length;
   }
-  // 物理写(回尾 offset=0 且未暂停):cup 写起点 + s + (运行态 cup 回输入框)一次写出。
+  // 跨调用 pending-wrap 提交:循环末若 contentCol>cols(末字符恰好落在最后一列,终端 pending-wrap),
+  // 必须在此提交换行——否则下一 chunk 的 cup(startRow, cols+1) 被终端 clamp 到 col=cols 且 CUP 清除
+  // pending,下一可打印字符会覆盖上一行末字符(「新输出插到上文中间」bug);paintLiveAtCursor 也会
+  // cup 到 cols+1 并 \x1B[2K 擦掉整行。提交后模拟与终端都停在 (下一行,1)、无 pending,等价 ink 的
+  // 「新输出永远在底」。代价:chunk 恰在末列结束且下一 chunk 以 \n 开头时多一个空行(cosmetic,远好于覆盖)。
+  // 模拟归一化在物理写 guard 之外(滚动态也要保 buffer 自洽);物理补的 \n 在 guard 之内(滚动态/暂停态不物理写)。
+  const pendingWrap = contentCol > cols;
+  if (pendingWrap) {
+    content.breakRow();
+    contentRow = advanceRow(contentRow);
+    contentCol = 1;
+  }
+  // 物理写(回尾 offset=0 且未暂停):cup 写起点 + s + (pending 时补 \n 提交换行)+ (运行态 cup 回输入框)。
   // 用户打字中(isStreamingPaused)跳过物理写、只喂缓冲——光标不入内容区,IME 候选窗不跟流式跑;
   // 停手后 setUserActive 的 flush 定时器 repaintViewport 重画缓冲内容。
   if (scrollOffset === 0 && !isStreamingPaused()) {
     let out = cup(startRow, startCol) + s;
+    if (pendingWrap) out += '\n'; // 滚动区域底行触发 DECSTBM 上滚、中段 LF 下移到 (下一行,1)
     if (mode === 'running') {
       const p = runningCaretPos();
       out += cup(p.row, p.col);
@@ -349,6 +362,7 @@ export function clearContent(): void {
   content.reset();
   stdout.write(esc.home);
 }
+
 
 // ── viewport 滚动回看(Phase 2)──
 

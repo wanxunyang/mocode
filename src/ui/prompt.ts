@@ -327,9 +327,9 @@ export async function promptWithSlashMenu(
       return;
     }
 
-    // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,Ctrl+↑↓ 与 plain ↑/↓ 单行。
+    // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,Ctrl+↑↓ 与 plain ↑/↓ 每次 5 行。
     // plain ↑/↓ 仅在单行输入且菜单关闭时作滚动(多行编辑留给光标移动,菜单打开留给选项);
-    // 兼鼠标滚轮——WT alt 屏(经 \x1B[?1007h)滚轮转发 ↑/↓。
+    // 兼鼠标滚轮——WT alt 屏(经 \x1B[?1007h)滚轮转发 ↑/↓,1 行/格太慢故放大到 5。
     const plainArrowScroll =
       (key.name === 'up' || key.name === 'down') &&
       !key.ctrl &&
@@ -346,8 +346,8 @@ export async function promptWithSlashMenu(
       const pageH = layout.getGeo().contentBottom;
       if (key.name === 'pageup') layout.scrollBy(pageH);
       else if (key.name === 'pagedown') layout.scrollBy(-pageH);
-      else if (key.name === 'up') layout.scrollBy(1);
-      else layout.scrollBy(-1);
+      else if (key.name === 'up') layout.scrollBy(5);
+      else layout.scrollBy(-5);
       return;
     }
 
