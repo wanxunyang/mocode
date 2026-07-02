@@ -230,11 +230,18 @@ export function contentWrite(s: string): void {
   if (mdActive) commitMd(); // 非 md 写接续:先收尾 md 段(清 segMark,否则 setLines 会截到旧段)
   // 滚动回看时(scrollOffset>0)只喂缓冲 + 推进续写位,不物理写——否则新流式内容覆盖 viewport 历史行。
   // 回尾(scrollOffset===0)才物理写;写起点 = 当前续写位(loop 会推进续写位,故先捕获)。
-  const startRow = contentRow;
-  const startCol = contentCol;
   const g = getGeo();
   const cols = g.cols;
   const bottom = g.contentBottom;
+  // resize 后 contentRow 可能过时(拖终端框):
+  //  - 缩小:contentRow > 新 bottom → 钳到新 bottom
+  //  - 放大:contentRow < 新 bottom 且回尾 → 推进到 min(total, bottom)
+  if (contentRow > bottom) contentRow = bottom;
+  else if (scrollOffset === 0 && contentRow < bottom) {
+    contentRow = Math.min(content.totalRows(), bottom);
+  }
+  const startRow = contentRow;
+  const startCol = contentCol;
   const advanceRow = (r: number): number => (r >= bottom ? bottom : r + 1); // 到底则滚动,续写位留底
   // 滚动回看冻结(仿 ink store.pushBlock 的 offset+=newLines):scrollOffset>0 时新内容只入缓冲,
   // 但缓冲增长后若 offset 不变,下次 scrollBy→repaintViewport 会取漂移窗口、把新内容画进历史视图
@@ -481,6 +488,12 @@ export function scrollBy(delta: number): void {
   const maxOff = Math.max(0, total - g.contentBottom);
   const off = Math.max(0, Math.min(scrollOffset + delta, maxOff));
   if (off === scrollOffset) return;
+  // 进入滚动态前清掉 spinner 内联帧:滚动态由状态行心跳兜底,内联帧若残留会卡在历史视图某行。
+  if (scrollOffset === 0 && off > 0 && frameRow) {
+    stdout.write(cup(Math.min(frameRow, g.contentBottom), frameCol) + esc.clearLine);
+    frameRow = 0;
+    frameCol = 0;
+  }
   scrollOffset = off;
   repaintViewport();
   repaint();
@@ -521,7 +534,15 @@ function composeStatus(status: StatusBarData, cols: number): string {
   // 运行态(含滚动回看)用心跳帧(♥/♡)替换静态 ◆:agent 跑起来时状态行前导符始终跳动,
   // 滑到上面看历史也能感知 agent 在跑。帧宽=1(与 ◆ 同),fixed 不变,布局不乱。INPUT 态仍显 ◆。
   const spinning = mode === 'running' && runningFrame >= 0;
-  const lead = spinning ? `${RUNNING_FRAMES[runningFrame]} ` : `◆ `;
+  // spinner 激活(agent 思考中/生成/执行… 或命令态压缩中):帧 + 文字放状态行最前面(lead 位),
+  // 替代静态 ◆ / 心跳 ♥。文字经 setStatus 注入(status.spinnerFrame + status.status)。
+  // 无 spinner 时:RUNNING 态用心跳帧(♥/♡)前导符跳动,INPUT 态显静态 ◆。
+  const hasSpinner = !!status.spinnerFrame;
+  // spinner 激活:帧 + 空格 + 文字 + 尾随空格(与 ◆ / ♥ 的尾随空格对齐,使 model 位置不跳动)。
+  const lead = hasSpinner
+    ? `${ui.brightMagenta}${status.spinnerFrame}${ui.reset} ${ui.dim}${status.status}${ui.reset} `
+    : `${spinning ? ui.brightMagenta : ui.brightCyan}${spinning ? RUNNING_FRAMES[runningFrame] : '◆'} ${ui.reset}`;
+  const leadW = hasSpinner ? 1 + 1 + displayWidth(status.status) + 1 : 2; // 帧+空格+文字+尾随空格 / ◆+空格
   // 模式 chip:lead 之后、model 之前。auto 显 dim 'auto'(常态),plan 显亮黄 'plan'(切换时颜色+文字都变,明显)。
   const modeChip = status.modeTag
     ? ` ${status.modeTag === 'plan' ? ui.yellow : ui.dim}${status.modeTag}${ui.reset} `
@@ -536,10 +557,8 @@ function composeStatus(status: StatusBarData, cols: number): string {
   if (scrolled) {
     st = `历史 ↑${scrollOffset} (PgDn 回底)`; // 滚动回看显历史指示,不显走时
   } else {
-    // head = spinner 帧 + 状态文字。常态 agent 轮二者皆空:agent spinner 不调 setStatus,
-    // 其文字在内联 paintLiveAtCursor 显,状态行不重复——只显走时。命令态(如 /compact 的「压缩中」)
-    // 走 setStatus,在此显帧 + 文字(无内联,不重复)。
-    const head = (status.spinnerFrame ? status.spinnerFrame + ' ' : '') + status.status;
+    // spinner 文字已在 lead 显,状态段不重复;只显走时(RUNNING 态)或状态文字(命令态无 spinner 时)。
+    const head = hasSpinner ? '' : status.status;
     if (mode === 'running' && turnStart != null) {
       // RUNNING 态追加走时:整轮从 enterRunningMode 起计时,200ms 计时器续刷使其连续递增。
       st = head ? `${head} · ${fmtElapsed(Date.now() - turnStart)}` : fmtElapsed(Date.now() - turnStart);
@@ -548,17 +567,17 @@ function composeStatus(status: StatusBarData, cols: number): string {
     }
   }
   const stW = displayWidth(st);
-  const fixed = displayWidth(lead) + modeChipW + displayWidth(model) + sepW * 3 + ctxW + stW;
+  const fixed = leadW + modeChipW + displayWidth(model) + sepW * 3 + ctxW + stW;
   const cwdBudget = cols - fixed - 1;
   const cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
   return [
-    `${spinning ? ui.brightMagenta : ui.brightCyan}${lead}${ui.reset}${modeChip}${ui.bold}${model}${ui.reset}`,
+    `${lead}${modeChip}${ui.bold}${model}${ui.reset}`,
     sep,
     ctx,
     sep,
     `${ui.dim}${cwd}${ui.reset}`,
     sep,
-    `${scrolled ? ui.yellow : status.spinnerFrame ? ui.brightMagenta : ui.dim}${st}${ui.reset}`,
+    `${scrolled ? ui.yellow : ui.dim}${st}${ui.reset}`,
   ].join('');
 }
 
@@ -637,10 +656,34 @@ function dbgSpinner(msg: string): void {
  */
 export function paintLiveAtCursor(text: string): void {
   if (!active || !ui.isTTY || scrollOffset !== 0 || isStreamingPaused()) {
-    // 临时诊断:画帧被守卫跳过,但此前画过帧(frameRow)→ 该帧不会被这次 paint 覆盖,泄漏嫌疑
-    if (frameRow && scrollOffset !== 0)
-      dbgSpinner(`PAINT-SKIPPED frame=(${frameRow},${frameCol}) cur=(${contentRow},${contentCol}) off=${scrollOffset} paused=${isStreamingPaused()}`);
+    // 滚动态 / 暂停态:不画新帧。但若有旧帧残留(frameRow),必须清掉——
+    // 否则旧 spinner 帧停在历史视图某行,用户看到「思考中」卡在消息堆里(根因)。
+    // 滚动态由状态行心跳兜底显示运行状态,不需内联帧;清完后 frameRow 归零,回尾时下一帧自然重画。
+    if (frameRow) {
+      // resize 后 contentBottom 可能缩小:清旧帧时钳 frameRow 到当前可视区,避免 cup 到屏外行
+      const g = getGeo();
+      const fr = Math.min(frameRow, g.contentBottom);
+      let out = cup(fr, frameCol) + esc.clearLine;
+      if (mode === 'running') {
+        const p = runningCaretPos();
+        out += cup(p.row, p.col);
+      }
+      stdout.write(out);
+      frameRow = 0;
+      frameCol = 0;
+    }
     return;
+  }
+  // resize 后 contentRow 可能过时(拖终端框):
+  //  - 缩小:contentRow > 新 bottom → 钳到新 bottom
+  //  - 放大:contentRow < 新 bottom 且回尾 → 推进到 min(total, bottom)(内容末尾或新区底)
+  //    内容够填满:推进到 bottom(最底部);内容不够:推进到 total(紧跟内容尾)
+  // 否则 cup 到旧行号→帧画在屏幕中间(旧 bottom 位置),而非内容末尾/最底部。
+  const g = getGeo();
+  const total = content.totalRows();
+  if (contentRow > g.contentBottom) contentRow = g.contentBottom;
+  if (scrollOffset === 0 && contentRow < g.contentBottom) {
+    contentRow = Math.min(total, g.contentBottom);
   }
   // 临时诊断:续写位 != 上次画帧位置 = spinner 运行期间续写位漂移(泄漏根因嫌疑)
   if (frameRow && (frameRow !== contentRow || frameCol !== contentCol)) {
@@ -648,7 +691,8 @@ export function paintLiveAtCursor(text: string): void {
   }
   let out = '';
   if (frameRow && (frameRow !== contentRow || frameCol !== contentCol)) {
-    out += cup(frameRow, frameCol) + esc.clearLine; // 续写位漂移:先清旧帧行,否则残留
+    // 清旧帧同样钳到可视区(resize 后 frameRow 可能 > contentBottom)
+    out += cup(Math.min(frameRow, g.contentBottom), frameCol) + esc.clearLine; // 续写位漂移:先清旧帧行,否则残留
   }
   out += cup(contentRow, contentCol) + esc.clearLine + text;
   if (mode === 'running') {
@@ -661,19 +705,15 @@ export function paintLiveAtCursor(text: string): void {
 }
 
 /** 清掉 paintLiveAtCursor 画过的那行瞬时活动文本。清"实际画过的位置"(frameRow),非当前续写位。
- *  不加 isStreamingPaused 守卫——stop 时必须无条件清(只写一次、结尾 cup 回输入框,不扰 IME);否则打字中 stop 会跳过清帧、制造泄漏。 */
+ *  不加 isStreamingPaused 守卫——stop 时必须无条件清(只写一次、结尾 cup 回输入框,不扰 IME);否则打字中 stop 会跳过清帧、制造泄漏。
+ *  滚动态(scrollOffset≠0)也必须清残留帧——否则旧 spinner 帧卡在历史视图某行(「思考中在消息堆里」根因)。 */
 export function clearLiveAtCursor(): void {
-  // 临时诊断:clear 被守卫跳过,但此前画过帧(frameRow)→ 帧残留(泄漏嫌疑)
-  if (frameRow && (!active || !ui.isTTY || scrollOffset !== 0)) {
-    dbgSpinner(`CLEAR-SKIPPED frame=(${frameRow},${frameCol}) cur=(${contentRow},${contentCol}) off=${scrollOffset} active=${active}`);
-  }
-  if (!active || !ui.isTTY || scrollOffset !== 0) return;
+  if (!active || !ui.isTTY) return;
   if (!frameRow) return; // 没画过就不清(避免误清当前续写位内容)
-  // 临时诊断:画帧位置 != 当前续写位 → 旧设计(清续写位)会清错行
-  if (frameRow !== contentRow || frameCol !== contentCol) {
-    dbgSpinner(`CLEAR-MISMATCH frame=(${frameRow},${frameCol}) cur=(${contentRow},${contentCol}) mode=${mode}`);
-  }
-  let out = cup(frameRow, frameCol) + esc.clearLine; // 清"画过的行",非"当前续写位"
+  // 滚动态也清:旧帧不该残留。清"画过的行"(frameRow),回尾后该行由 repaintViewport 重画历史内容。
+  // resize 后 contentBottom 可能缩小:frameRow 钳到可视区,避免 cup 到屏外行清错位置。
+  const g = getGeo();
+  let out = cup(Math.min(frameRow, g.contentBottom), frameCol) + esc.clearLine;
   if (mode === 'running') {
     const p = runningCaretPos();
     out += cup(p.row, p.col);
@@ -1058,16 +1098,26 @@ export function enterAltScreen(): void {
 
   sigwinchHandler = () => {
     if (!active) return;
+    // 立即(同步)更新行号 + 重设 DECSTBM 区域:不 debounce,否则快速拖动边框时
+    // contentRow 停在旧值、区域未更新,spinner/contentWrite 画到旧行号(「思考中在消息堆里」根因)。
+    // 重画 repaintViewport 防抖(下面 timer),避免连续拖动闪烁;但行号/区域必须立即正确。
+    const g = getGeo(footerH);
+    const total = content.totalRows();
+    // 缩小:contentRow > 新 bottom → 钳到新 bottom
+    if (contentRow > g.contentBottom) contentRow = g.contentBottom;
+    // 放大:contentRow < 新 bottom 且回尾(offset=0)→ 推进到 min(total, bottom)
+    if (scrollOffset === 0 && contentRow < g.contentBottom) {
+      contentRow = Math.min(total, g.contentBottom);
+    }
+    if (frameRow && frameRow > g.contentBottom) frameRow = g.contentBottom;
+    const maxOff = Math.max(0, total - g.contentBottom);
+    if (scrollOffset > maxOff) scrollOffset = maxOff;
+    setRegion(footerH); // 用新 rows 立即重设 DECSTBM 区域(contentBottom 变)
+    // 重画防抖(仅 repaint,避免快速拖动闪烁);行号/区域已立即更新
     if (resizeTimer) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       resizeTimer = null;
       if (!active) return;
-      const g = getGeo(footerH);
-      if (contentRow > g.contentBottom) contentRow = g.contentBottom;
-      // offset 钳到新 maxOff(高度缩可能使旧 offset 失效)
-      const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
-      if (scrollOffset > maxOff) scrollOffset = maxOff;
-      setRegion(footerH); // 用新 rows 重设区域(contentBottom 变)
       repaintViewport(); // 内容区按新高度 + 当前 offset 重画(物理行不 reflow)
       repaint(); // 底栏重画
     }, 100);

@@ -120,6 +120,7 @@ ${PLATFORM_NOTE}
 
 ## Workflow
 - Understand before acting: when unsure about requirements or code state, explore first; don't assume.
+- **Code exploration first action**: before reading files with read_file or searching with grep, check if a .codegraph/ index exists. If it does, use the codegraph tool (explore for questions/features, node for a specific symbol) as your FIRST step — it returns source + call paths in one shot. Only fall back to read_file/grep when codegraph misses, you need just-changed content, or you're editing a known small file. Build the index with \`codegraph init\` if none exists.
 - Small steps: break tasks into verifiable sub-steps. Before each step, think clearly about what to change and why.
 - Verify after change: run typecheck / tests / build via run_command to confirm it works. Never claim done without verification.
 
@@ -167,7 +168,7 @@ export const PLAN_MODE_SUFFIX = `
 ## ⛯ PLAN MODE (active now)
 You are in PLAN mode: investigate and design only — do NOT execute or change anything.
 - Your editing / command / memory-write tools (write_file, edit_file, run_command, memory_save, memory_update, memory_forget) have been REMOVED from your tool list. Use only the read-only tools available to you (read_file, glob, grep, codegraph, web_search, web_fetch, use_skill, ask_human, memory_search, memory_list) to investigate.
-- Research thoroughly: locate the relevant code, trace call paths, and understand existing patterns and conventions before designing. Prefer codegraph when a .codegraph/ index exists.
+- Research thoroughly: locate the relevant code, trace call paths, and understand existing patterns and conventions before designing. Your FIRST action for code exploration should be the codegraph tool (explore/node) when a .codegraph/ index exists — not read_file/grep. Use read_file/grep only to fill gaps codegraph leaves.
 - Then produce a clear, actionable implementation plan: files to change (with paths), what to change in each and why, the ordered steps, edge cases to handle, and how to verify (typecheck / tests / build). Be specific enough to execute against.
 - Present the plan as your final reply and STOP, unless the user explicitly asked you to "plan first then execute" / "先 plan 再 auto" / autonomous execution: in that case, after presenting the plan, call the switch_mode tool with mode="auto" to switch back to auto mode WITHIN THE SAME TURN and continue implementing the plan yourself (your write/edit/command/memory-write tools become available again immediately). The user will see no approval prompt because you self-switched.
 - If the user entered plan mode manually (via /plan or Shift+Tab) for a safety review and did NOT ask for autonomous execution, do NOT call switch_mode — present the plan and STOP. Do NOT ask the user for confirmation or approval in your text reply (e.g. "is this plan OK?", "shall I proceed?", "需要你确认") — the REPL automatically shows an approval prompt after you STOP, so asking in text is redundant and forces the user to answer twice. Just present the plan and end your reply.`;

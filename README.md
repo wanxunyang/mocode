@@ -76,30 +76,35 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 
 常见后端 `base_url`:
 
-| 后端 | base_url |
-|------|----------|
-| GLM(智谱) | `https://open.bigmodel.cn/api/v3` |
-| DeepSeek | `https://api.deepseek.com` |
-| Qwen(阿里) | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| 本地 Ollama | `http://localhost:11434/v1` |
-| 本地 vLLM | `http://localhost:8000/v1` |
+| 后端        | base\_url                                           |
+| --------- | --------------------------------------------------- |
+| GLM(智谱)   | `https://open.bigmodel.cn/api/v3`                   |
+| DeepSeek  | `https://api.deepseek.com`                          |
+| Qwen(阿里)  | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| 本地 Ollama | `http://localhost:11434/v1`                         |
+| 本地 vLLM   | `http://localhost:8000/v1`                          |
 
 > 模型必须支持 OpenAI 风格的 function calling,否则工具不会触发。
 
 ### 可选配置
 
-| 环境变量 | 说明 | 默认值 |
-|----------|------|--------|
-| `MAX_TOKENS` | 单次回复最大 token | 不限 |
-| `CONTEXT_WINDOW_TOKENS` | 模型上下文窗口,须对齐真实模型 | `128000` |
-| `COMPACT_THRESHOLD` | 自动压缩触发阈值(占窗口比例) | `0.85` |
-| `LLM_STREAM_USAGE` | 流式请求带 `stream_options.include_usage` 拿真实用量 | `true` |
-| `AUTO_COMPACT` | 自动压缩总开关 | `true` |
-| `AUTO_REFLECT` | 后台反思 pass 总开关(定期从会话挖掘记忆) | `true` |
-| `REFLECT_EVERY_N` | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞) | `5` |
-| `ANYSEARCH_API_KEY` | 联网搜索 API key(不配走匿名免费额度) | 无 |
-| `ANYSEARCH_BASE_URL` | 搜索 API 端点 | `https://api.anysearch.com` |
-| `SKILLS_DIRS` | 覆盖默认 skill 扫描目录(平台分隔符) | 三目录自动扫描 |
+| 环境变量                    | 说明                                         | 默认值                         |
+| ----------------------- | ------------------------------------------ | --------------------------- |
+| `MAX_TOKENS`            | 单次回复最大 token                               | 不限                          |
+| `CONTEXT_WINDOW_TOKENS` | 模型上下文窗口,须对齐真实模型                            | `128000`                    |
+| `COMPACT_THRESHOLD`     | 自动压缩触发阈值(占窗口比例)                            | `0.85`                      |
+| `LLM_STREAM_USAGE`      | 流式请求带 `stream_options.include_usage` 拿真实用量 | `true`                      |
+| `AUTO_COMPACT`          | 自动压缩总开关                                    | `true`                      |
+| `AUTO_REFLECT`          | 后台反思 pass 总开关(定期从会话挖掘记忆)                   | `true`                      |
+| `REFLECT_EVERY_N`       | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞)              | `5`                         |
+| `ANYSEARCH_API_KEY`     | 联网搜索 API key(不配走匿名免费额度)                    | 无                           |
+| `ANYSEARCH_BASE_URL`    | 搜索 API 端点                                  | `https://api.anysearch.com` |
+| `SKILLS_DIRS`           | 覆盖默认 skill 扫描目录(平台分隔符)                     | 三目录自动扫描                     |
+| `MOCODE_CONTEXT_OPTIMIZE` | 工具结果进 LLM 前的类型化编码(树/搜索/日志…),关掉则原样进(仅长度裁剪) | `true`                      |
+| `MAX_STEPS`             | 每轮 agent 循环最大步数(防无限循环)                    | `200`                       |
+| `SUB_AGENT_MAX_STEPS`   | 子 agent(task 工具派生)默认步数上限                  | `50`                        |
+| `SANDBOX_ROOT`          | 沙箱根目录(文件操作边界;未配则用 cwd 兜底)                | 无                           |
+| `MOCODE_THEME`          | 颜色主题(default/dark/light…;shell 设置优先于文件)      | `default`                   |
 
 ## 运行
 
@@ -118,40 +123,45 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 
 ## 工具
 
-| 工具 | 作用 |
-|------|------|
-| `read_file` | 读文件,带行号,支持 `offset` / `limit` |
-| `write_file` | 创建/覆盖文件,自动建父目录 |
-| `edit_file` | 精确字符串替换(`old_string` 须唯一匹配) |
-| `run_command` | 执行 shell 命令,合并 stdout+stderr,默认 120s 超时 |
-| `glob` | 按 glob 模式找文件(排除 node_modules/.git) |
-| `grep` | 内容正则搜索,纯 JS 实现,不依赖 `rg` |
-| `codegraph` | 已建 `.codegraph/` 索引时,查代码符号源码与调用链(比 read_file/grep 更准更省) |
-| `web_search` | 联网搜索(AnySearch),返回标题/URL/摘要/正文 |
-| `web_fetch` | 抓取指定 URL,HTML 清洗成纯文本 |
-| `use_skill` | 加载某 skill 的完整 SKILL.md 指令 |
-| `ask_human` | 决策点弹终端问答面板,用户选预设项或自由输入(阻塞至回应) |
-| `switch_mode` | 在 `plan`(只读规划)与 `auto`(全量执行)间切换;agent 可自行调用,先探查再动手 |
-| `task` | 派生子 agent 执行独立子任务(独立历史、可受限工具集、可设步数上限);连续多个自动并行,只回摘要 |
-| `memory_save` | 存一条跨会话长期记忆(标题进索引,正文按需取) |
-| `memory_search` | 按关键词搜记忆正文,命中即提升召回计数(影响遗忘衰减) |
-| `memory_list` | 列记忆索引(id/标题/摘要,无正文) |
-| `memory_update` | 原地改一条记忆(id 不变;纠正过时事实 / 改摘要 / 改 pin) |
-| `memory_forget` | 遗忘记忆:默认归档(可复活),`mode=delete` 硬删(pinned 拒删) |
+| 工具              | 作用                                                       |
+| --------------- | -------------------------------------------------------- |
+| `read_file`     | 读文件,带行号,支持 `offset` / `limit`                            |
+| `write_file`    | 创建/覆盖文件,自动建父目录                                           |
+| `edit_file`     | 精确字符串替换(`old_string` 须唯一匹配)                              |
+| `run_command`   | 执行 shell 命令,合并 stdout+stderr,默认 120s 超时                  |
+| `glob`          | 按 glob 模式找文件(排除 node\_modules/.git)                      |
+| `grep`          | 内容正则搜索,纯 JS 实现,不依赖 `rg`                                  |
+| `codegraph`     | 已建 `.codegraph/` 索引时,查代码符号源码与调用链(比 read\_file/grep 更准更省) |
+| `web_search`    | 联网搜索(AnySearch),返回标题/URL/摘要/正文                           |
+| `web_fetch`     | 抓取指定 URL,HTML 清洗成纯文本                                     |
+| `use_skill`     | 加载某 skill 的完整 SKILL.md 指令                                |
+| `ask_human`     | 决策点弹终端问答面板,用户选预设项或自由输入(阻塞至回应)                            |
+| `switch_mode`   | 在 `plan`(只读规划)与 `auto`(全量执行)间切换;agent 可自行调用,先探查再动手       |
+| `drop_context`  | 把历史里无关的旧工具结果替换为存根释放上下文(保 tool_call_id 配对,不动 system 与当前轮;幂等) |
+| `task`          | 派生子 agent 执行独立子任务(独立历史、可受限工具集、可设步数上限);连续多个自动并行,只回摘要      |
+| `memory_save`   | 存一条跨会话长期记忆(标题进索引,正文按需取)                                  |
+| `memory_search` | 按关键词搜记忆正文,命中即提升召回计数(影响遗忘衰减)                              |
+| `memory_list`   | 列记忆索引(id/标题/摘要,无正文)                                      |
+| `memory_update` | 原地改一条记忆(id 不变;纠正过时事实 / 改摘要 / 改 pin)                      |
+| `memory_forget` | 遗忘记忆:默认归档(可复活),`mode=delete` 硬删(pinned 拒删)               |
 
 ## 斜杠命令
 
-| 命令 | 作用 |
-|------|------|
-| `/exit` `/quit` | 退出 mocode |
-| `/clear` | 清空历史(保留系统提示)+ 清屏 |
-| `/context` | 显示上下文用量条(token / 消息数 / 估算或实测) |
-| `/skills` | 列出已发现的 skill |
-| `/compact` | 压缩历史(可带焦点 `/compact …`) |
-| `/resume` | 续接已保存的会话 |
-| `/think` | 展开折叠思考段(`/think N`) |
-| `/rollback` | 菜单选轮次回滚(↑↓ · Enter) |
-| `/model` | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
+| 命令              | 作用                                                 |
+| --------------- | -------------------------------------------------- |
+| `/exit` `/quit` | 退出 mocode                                          |
+| `/clear`        | 清空历史(保留系统提示)+ 清屏                                   |
+| `/context`      | 显示上下文用量条(token / 消息数 / 估算或实测)                      |
+| `/skills`       | 列出已发现的 skill                                       |
+| `/compact`      | 压缩历史(可带焦点 `/compact …`)                            |
+| `/resume`       | 续接已保存的会话                                           |
+| `/think`        | 展开折叠思考段(`/think N`)                                |
+| `/rollback`     | 菜单选轮次回滚(↑↓ · Enter)                                |
+| `/model`        | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
+| `/init`         | 扫描项目生成 `MOCODE.md` 项目记忆(发给 agent 执行)               |
+| `/theme`        | 切换颜色主题(↑↓ · Enter,或 `/theme <name>` 直切)            |
+| `/plan`         | 切到 plan 模式(只读探查 + 产出计划,审批后切 auto 执行)              |
+| `/auto`         | 切回 auto 模式(全量工具执行)                                  |
 
 输入 `/` 触发下拉菜单,继续打字过滤;Esc 取消。
 

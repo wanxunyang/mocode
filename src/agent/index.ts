@@ -88,17 +88,11 @@ export async function runAgent(
   beginTurn(truncateDisplay(userInput.split('\n')[0] ?? '', 40));
   layout.contentMode(); // 防御性:运行态光标归输入框光标位供 IME 锚定(enterRunningMode 已置,这里兜底)
 
-  // spinner:续写位内联转圈(思考中 / 执行 工具时,内容区不再「干等」)。
-  // 只走内联 paintLiveAtCursor——不调 setStatus,状态行不重复 spinner 文字(状态行只显走时,
-  // 由 turnTimer 200ms 续刷);内联帧不进缓冲、停时清掉,随后结果即写在该行——故 spinner 不入历史、PgUp 看不到。
+  // spinner:状态行最前面转圈(思考中 / 生成 / 执行 工具时,状态栏 lead 位显帧 + 文字)。
+  // 经 setStatus 注入状态行(spinnerFrame + statusText),composeStatus 把帧 + 文字放 lead 位;
+  // 不画内容区续写位——内容区在等待期间保持干净,首 token 到达即从续写位开始写正文。
   const spinner = new Spinner((msg, frame) => {
-    if (frame) {
-      layout.paintLiveAtCursor(
-        `  ${ui.brightMagenta}${frame}${ui.reset} ${ui.dim}${msg}…${ui.reset}`
-      );
-    } else {
-      layout.clearLiveAtCursor();
-    }
+    layout.setStatus(frame ? `${msg}…` : '', frame ?? undefined);
   });
 
   // lastChar 镜像:core 跟踪流式末字符决定补换行,但 TUI hooks 需读它决定 layout.contentWrite('\n')。
@@ -118,7 +112,7 @@ export async function runAgent(
         layout.contentWrite('\n');
         lastChar = '\n';
       }
-      if (name) spinner.start(`生成 ${name}…`);
+      if (name) spinner.start(`生成 ${name}`);
     },
     onStepStart: () => spinner.start('思考中'),
     onChatDone: () => spinner.stop(),
