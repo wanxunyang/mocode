@@ -127,12 +127,11 @@ async function askLine(prompt: string): Promise<string> {
   }
 }
 
-/** /context 的用量条(详情版,进内容区):优先用上次 chat() 返回的实测 usage,否则用启发式估算。 */
+/** /context 的用量条(详情版,进内容区):只算对话内容(不含 system prompt),方便用户感知自己发了多少、agent 回复了多少。 */
 function renderContextBar(history: ChatMessage[]): string {
-  const schema = estimateToolSchemaTokens();
-  const est =
-    contextState.lastUsage?.totalTokens ??
-    estimateMessagesTokens(history) + schema;
+  // 过滤掉 system 消息,只算对话内容
+  const dialog = history.filter(m => m.role !== 'system');
+  const est = estimateMessagesTokens(dialog);
   const win = config.contextWindowTokens;
   const pct = Math.min(1, est / win);
   const W = 10;
