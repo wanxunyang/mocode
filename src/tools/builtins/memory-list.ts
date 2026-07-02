@@ -6,7 +6,7 @@ import { listEntries, type MemoryType, type MemoryStatus } from '../../memory/st
 export const memoryListTool: Tool = {
   name: 'memory_list',
   description:
-    'List the memory index (id/name/summary, no body). Defaults to active. Get an id, then use memory_search to retrieve the full body.',
+    'List the memory index (id/name/summary, no body). Get an id, then use memory_search for the full body.',
   parameters: {
     type: 'object',
     properties: {

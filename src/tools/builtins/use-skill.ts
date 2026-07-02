@@ -7,7 +7,7 @@ import { getSkillBody } from '../../skills/index.js';
 export const useSkillTool: Tool = {
   name: 'use_skill',
   description:
-    'Load and return the full SKILL.md instructions for a given skill (pass name). See the skill list in the system prompt for when to use each.',
+    'Load the full SKILL.md instructions for a given skill. See the skill list in the system prompt for when to use each.',
   parameters: {
     type: 'object',
     properties: {

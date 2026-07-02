@@ -7,7 +7,7 @@ import type { Tool } from '../types.js';
 export const runCommandTool: Tool = {
   name: 'run_command',
   description:
-    'Execute a shell command, returning combined stdout+stderr. Default timeout 120s. Use for running tests, builds, git, etc.',
+    'Run a shell command, merging stdout+stderr. Default timeout 120s. For tests, builds, git, etc.',
   parameters: {
     type: 'object',
     properties: {

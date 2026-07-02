@@ -8,8 +8,8 @@ import type { Tool } from '../types.js';
 export const grepTool: Tool = {
   name: 'grep',
   description:
-    'Search file contents by regex, returning file:line: matched lines. Recursively searches the current directory by default (excluding node_modules/.git). Optional glob to restrict file types.' +
-    ' Note: when understanding code architecture/call chains, if a .codegraph/ index exists, prefer the codegraph tool over piecing together via grep one file at a time.',
+    'Search file contents by regex, returning file:line: matched lines. Recursively searches cwd excluding node_modules/.git. Optional glob restricts file types.' +
+    ' For architecture/call chains, prefer codegraph.',
   parameters: {
     type: 'object',
     properties: {

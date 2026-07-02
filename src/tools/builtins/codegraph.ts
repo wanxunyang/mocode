@@ -57,9 +57,9 @@ function runCodegraph(args: string[]): Promise<string> {
 export const codegraphTool: Tool = {
   name: 'codegraph',
   description:
-    'Preferred tool for understanding/locating code, tracing call chains, and assessing the impact of changes in repos with a code index (.codegraph/).' +
-    ' Returns relevant symbol source + call paths in one shot — more accurate and economical than piecing together via read_file/grep.' +
-    ' Returns a hint when .codegraph/ is absent (build it first with `codegraph init`).',
+    'Preferred for understanding/locating code, tracing call chains, assessing impact of changes in repos with a code index (.codegraph/).' +
+    ' Returns symbol source + call paths in one shot — more accurate/economical than read_file/grep.' +
+    ' Hints to run `codegraph init` when .codegraph/ is absent.',
   parameters: {
     type: 'object',
     properties: {

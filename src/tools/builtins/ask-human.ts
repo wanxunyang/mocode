@@ -5,10 +5,10 @@ import { promptIntervention } from '../../ui/intervention.js';
 export const askHumanTool: Tool = {
   name: 'ask_human',
   description: [
-    'Call this tool when you hit a decision point during a task that requires human input — it pops up a question panel in the terminal for the user to choose.',
-    'Use when: multiple implementation approaches need a user decision, user intent is unclear and needs clarification, or extra info is needed to proceed.',
-    'Blocks until the user responds; the user can pick a preset option or choose "custom input" to answer freely; the result is returned as the tool result.',
-    'Do not call frequently when the task is clear and you can decide yourself — it interrupts the user. When options is omitted or empty, it becomes free-text input instead.',
+    'Ask the user for input at a decision point (blocks until they respond).',
+    ' Use when: multiple approaches need a user decision, intent is unclear, or extra info is needed.',
+    ' Don\'t call when the task is clear and you can decide — it interrupts the user.',
+    ' Options (2-6) let the user pick; omit/empty for free-text input. Their answer is returned as the result.',
   ].join(''),
   parameters: {
     type: 'object',

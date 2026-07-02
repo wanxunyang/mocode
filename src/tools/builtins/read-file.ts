@@ -7,8 +7,8 @@ import type { Tool } from '../types.js';
 export const readFileTool: Tool = {
   name: 'read_file',
   description:
-    'Read file content, returning text with line numbers. Read before editing code. Optional offset (start line, 1-based, default 1) and limit (number of lines, default 2000).' +
-    ' Note: when understanding code architecture/call chains, if a .codegraph/ index exists, prefer the codegraph tool over piecing together via read_file one file at a time.',
+    'Read file content with line numbers. Read before editing. offset (1-based, default 1), limit (default 2000).' +
+    ' For architecture/call chains, prefer codegraph over reading files one at a time.',
   parameters: {
     type: 'object',
     properties: {

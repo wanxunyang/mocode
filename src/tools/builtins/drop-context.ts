@@ -20,14 +20,9 @@ import type { Tool, DropContextFilter } from '../types.js';
 export const dropContextTool: Tool = {
   name: 'drop_context',
   description: [
-    'Drop (stub-replace) irrelevant tool results from conversation history to free up context space.',
-    'COST-AWARE: the call itself adds a tool-call round-trip (~300 tokens). Only call it when the expected freed tokens clearly exceed that cost — i.e. targeting MULTIPLE bulky results (e.g. a wide grep/read sweep that returned mostly-irrelevant hits totaling thousands of tokens). Do NOT call it for a single small result, or when you are near done with the task.',
-    'Protection: the system prompt and the CURRENT turn (the last user message and everything after it) are never dropped — you are still using them. Only OLDER tool results can be dropped.',
-    'Idempotent: results already stubbed are not re-dropped.',
-    'Filters (all optional, AND-combined; pass none = drop all droppable older tool results):',
-    '  - toolNames: only drop results from these tool names (e.g. ["grep","read_file"]).',
-    '  - contains: only drop results whose content contains ALL of these keywords (AND, case-insensitive).',
-    'Returns: count of dropped results, estimated freed tokens, and the list of dropped tool names — so you can confirm what was removed.',
+    'Drop (stub-replace) irrelevant OLDER tool results from history to free context.',
+    'COST-AWARE: ~300-token round-trip; only call if freed tokens clearly exceed it — i.e. MULTIPLE bulky results (e.g. a wide grep/read sweep of mostly-irrelevant hits), not a single small one or near done.',
+    'Never dropped: system prompt and the CURRENT turn (last user message onward). Idempotent. Filters AND-combine; omit both = drop all droppable. Returns dropped count, freed tokens, tool names.',
   ].join(' '),
   parameters: {
     type: 'object',

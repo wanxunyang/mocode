@@ -7,8 +7,8 @@ import type { Tool } from '../types.js';
 export const globTool: Tool = {
   name: 'glob',
   description:
-    'Find file paths matching a glob pattern (e.g. **/*.ts). Returns a list of matches (auto-excludes node_modules / .git).' +
-    ' Note: when understanding code architecture/call chains, if a .codegraph/ index exists, prefer the codegraph tool over piecing together via glob one file at a time.',
+    'Find files matching a glob pattern (e.g. **/*.ts). Auto-excludes node_modules/.git.' +
+    ' For architecture/call chains, prefer codegraph.',
   parameters: {
     type: 'object',
     properties: {

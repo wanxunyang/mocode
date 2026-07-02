@@ -7,7 +7,7 @@ import { saveEntry, type MemoryType } from '../../memory/store.js';
 export const memorySaveTool: Tool = {
   name: 'memory_save',
   description:
-    'Save a long-term memory entry (cross-session). Store only non-obvious, long-term-useful facts/decisions/pitfalls. The title goes into the startup index; retrieve full body on demand via memory_search.',
+    'Save a cross-session long-term memory entry. Store only non-obvious, useful facts/decisions/pitfalls. Title enters the startup index; retrieve body via memory_search.',
   parameters: {
     type: 'object',
     properties: {

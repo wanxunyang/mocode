@@ -5,11 +5,9 @@ import { setAgentMode, getAgentMode, type AgentMode } from '../../agent/mode.js'
 export const switchModeTool: Tool = {
   name: 'switch_mode',
   description: [
-    'Switch the agent mode between "plan" (read-only investigation + planning) and "auto" (full tool execution).',
-    'In plan mode, write_file / edit_file / run_command / memory_save / memory_update / memory_forget are disabled; in auto mode, all tools are available.',
-    'Use this to autonomously transition from planning to execution WITHIN THE SAME TURN: investigate in plan mode, produce a plan, then call switch_mode("auto") and continue implementing it in the same turn — ONLY when the user has explicitly asked you to "plan first then execute" / "先 plan 再 auto" / autonomous execution.',
-    'Do NOT switch to auto if the user entered plan mode manually (via /plan or Shift+Tab) for a safety review — in that case present the plan and STOP; the user will approve via a prompt and execution happens in a follow-up turn.',
-    'Switching to plan from auto is rarely needed; do it only if you realize you should investigate before changing anything.',
+    'Switch agent mode between "plan" (read-only investigation) and "auto" (full tool execution).',
+    'Use to transition from planning to execution WITHIN THE SAME TURN: in plan, after presenting a plan, call switch_mode("auto") and continue — ONLY when the user asked for autonomous execution ("先 plan 再 auto" etc.).',
+    'If the user entered plan mode manually (/plan or Shift+Tab) for review, do NOT switch to auto — present the plan and STOP for approval.',
   ].join(' '),
   parameters: {
     type: 'object',

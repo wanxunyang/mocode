@@ -7,7 +7,7 @@ import { searchEntries, type MemoryType, type MemoryStatus } from '../../memory/
 export const memorySearchTool: Tool = {
   name: 'memory_search',
   description:
-    'Search memory entries by keyword (multi-word substring match, ranked by relevance), returning full body of matching entries. A hit bumps recall count (affects forgetting decay).',
+    'Search memory entries by keyword (substring match), returning full body.',
   parameters: {
     type: 'object',
     properties: {

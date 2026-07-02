@@ -9,7 +9,7 @@ const UA =
 export const webFetchTool: Tool = {
   name: 'web_fetch',
   description:
-    'Fetch the web page at a given URL and clean it into plain text (strips HTML tags/scripts/styles, keeps the body). Use to read a link from search results, or a specific URL given by the user.',
+    'Fetch a URL and clean HTML to body text. Use to read a link from search results or a URL given by the user.',
   parameters: {
     type: 'object',
     properties: {

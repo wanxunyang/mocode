@@ -6,7 +6,7 @@ import type { Tool } from '../types.js';
 export const editFileTool: Tool = {
   name: 'edit_file',
   description:
-    'Make a precise string replacement in a file. old_string must occur exactly once in the file and match exactly (including indentation/newlines). Use write_file for new files.',
+    'Replace a string in a file. old_string must occur exactly once and match exactly (including indentation/newlines). Use write_file for new files.',
   parameters: {
     type: 'object',
     properties: {

@@ -11,10 +11,9 @@ import { MAX_OUTPUT } from '../constants.js';
 export const taskTool: Tool = {
   name: 'task',
   description: [
-    'Spawn a sub-agent to handle an isolated sub-task with its own conversation history (independent of the main thread). The sub-agent runs to completion and returns a concise summary.',
-    'Use when: a task can be decomposed into independent sub-tasks, you want to explore multiple files/areas without polluting the main history, or a sub-task involves many tool calls that would bloat the main context window.',
-    'The sub-agent has its own history; only its final summary is returned to you as the tool result. It cannot recursively spawn further sub-agents (no "task" tool available to it).',
-    'Optionally restrict the sub-agent to a subset of tools (e.g. read-only tools for pure investigation) via the "tools" parameter.',
+    'Spawn a sub-agent for an isolated sub-task (independent history; only its final summary returns to you).',
+    'Use when a task splits into independent parts or its many tool calls would bloat your context.',
+    'Cannot recursively spawn sub-agents.',
   ].join(''),
   parameters: {
     type: 'object',
@@ -28,7 +27,7 @@ export const taskTool: Tool = {
         type: 'array',
         items: { type: 'string' },
         description:
-          'Optional whitelist of tool names the sub-agent is allowed to use (e.g. ["read_file","glob","grep","codegraph"] for read-only investigation). Omit to allow all tools.',
+          'Optional whitelist of tool names the sub-agent is allowed to use (e.g. ["read_file","glob","grep","codegraph"] for read-only investigation). Omit to allow all tools. If the sub-task needs verification/build/test (running scripts, typecheck, etc.), remember to include "run_command".',
       },
       maxSteps: {
         type: 'number',
