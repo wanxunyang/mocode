@@ -2,21 +2,30 @@
 
 # mocode
 
-一个终端编码 agent:**LLM + tool-call 循环 + 流式输出 + 思考可见**。
+一个终端编码 agent:你给一个目标,它**自主完成**——不需要你逐步指挥。
 
-接任意 OpenAI 兼容接口(GLM、DeepSeek、Qwen、本地 Ollama / vLLM 等),全屏 TUI 交互式 REPL。agent 自主探索代码、读写文件、执行命令、联网搜索,以「思考 → 调用工具 → 观察结果 → 再思考」的循环完成编程任务。
+mocode 自己探索代码、读写改文件、执行命令、联网查资料,以「思考 → 调用工具 → 观察结果 → 再思考」的循环一步步把任务推进到完成。接任意 OpenAI 兼容接口(GLM、DeepSeek、Qwen、本地 Ollama / vLLM 等),全屏 TUI 交互,流式输出、思考过程可见。
+
+## 为什么用 mocode
+
+mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
+
+- **自主多步推进** — 一次对话里连续多步:读代码、改代码、跑测试、根据报错再改……agent 自己决定下一步,中途不用你反复催。遇到卡点会调 `ask_human` 弹面板问你(阻塞到回应)。
+- **只读工具并行执行** — 一轮里连续的只读操作(读文件、grep、glob、codegraph、联网搜索/抓取)自动并发跑,总耗时 ≈ 最慢一个,而不是逐个排队。写文件 / 改文件这类有副作用的操作仍串行,保快照顺序与数据安全。
+- **子 agent 分而治之** — 复杂任务可派生独立子 agent:各自有自己的对话历史(不污染主线),可限定只读工具集和步数上限,并行探查多片代码 / 多个方向,最后只把摘要回灌主线。主线据此决定下一步。
+- **计划 / 执行双模式** — `plan` 模式下只读探查(读代码、查索引、搜索,绝不写盘、不跑命令、不派生子 agent),产出计划;`auto` 模式全量工具放开。agent 还能在两者间自切换——先把陌生代码库摸清,再动手改。
+- **上下文自动压缩** — 接近窗口上限时三层压缩(单条结果裁剪 → 旧工具结果原地微压缩 → 旧对话摘要),长会话也不爆窗口;`/context` 实时显示 token 用量,`/compact` 可手动压缩(能带焦点指令聚焦保留)。
+- **跨会话长期记忆** — agent 能把项目架构、约定、踩过的坑存成长期记忆,下次会话自动加载;后台还会定期从对话里反思挖掘值得记住的事。记忆可增删改、带召回衰减。
+- **可中断、可回滚** — Ctrl+C 随时打断当前轮次(树杀子进程,历史还原到本轮开始前,不留残半的工具调用);`/rollback` 按轮次快照恢复文件改动,逐个文件「保留/撤销」,不依赖 git。
+- **沙箱防护** — 文件读写经沙箱拦截,挡掉越界路径(`../../`、绝对外圈、软链出圈等),不碰工作目录之外的文件。
 
 ## 特性
 
-- **流式输出** — 回复边生成边显示,模型支持 reasoning 时思考过程实时可见,思考段自动折叠(不占屏),`/think N` 按需展开
+- **流式输出 + 思考可见** — 回复边生成边显示;模型支持 reasoning 时思考过程实时可见,思考段自动折叠(不占屏),`/think N` 按需展开
 - **全屏 TUI** — 备用屏(alt screen)+ 固定底栏状态行 + 滚动回看(PgUp/PgDn),运行中可打字(typeahead),下一轮自动预填
-- **16 个内置工具** — 读 / 写 / 改文件、执行命令、glob 找路径、grep 搜内容、codegraph 代码索引、联网搜索、抓取网页、加载 skill、询问用户、5 个跨会话记忆工具(存/搜/列/改/遗忘)
 - **会话持久化** — 每轮自动落盘,`--resume` / `/resume` 续接历史会话
-- **轮次回滚** — `/rollback` 菜单选轮次,删该轮及之后 + 逐个文件「保留/撤销」(快照恢复,不依赖 git)
-- **上下文工程** — 接近窗口上限时自动三层压缩,`/context` 实时显示 token 用量条,`/compact` 手动压缩(可带焦点)
-- **Skills 系统** — 自动扫描 `~/.mocode/skills/` 等目录,description 注入系统提示,模型按需调 `use_skill` 加载完整指令
+- **Skills 系统** — 自动扫描 `~/.mocode/skills/` 等目录,description 注入系统提示,模型按需调 `use_skill` 加载完整指令(渐进式披露:先看简介,任务相关才加载正文)
 - **斜杠命令** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/think` `/rollback`,输入时下拉过滤
-- **Ctrl+C 中断** — 运行中随时中断当前 agent 轮次(不退进程)
 
 ## 安装
 
@@ -120,6 +129,8 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `web_fetch` | 抓取指定 URL,HTML 清洗成纯文本 |
 | `use_skill` | 加载某 skill 的完整 SKILL.md 指令 |
 | `ask_human` | 决策点弹终端问答面板,用户选预设项或自由输入(阻塞至回应) |
+| `switch_mode` | 在 `plan`(只读规划)与 `auto`(全量执行)间切换;agent 可自行调用,先探查再动手 |
+| `task` | 派生子 agent 执行独立子任务(独立历史、可受限工具集、可设步数上限);连续多个自动并行,只回摘要 |
 | `memory_save` | 存一条跨会话长期记忆(标题进索引,正文按需取) |
 | `memory_search` | 按关键词搜记忆正文,命中即提升召回计数(影响遗忘衰减) |
 | `memory_list` | 列记忆索引(id/标题/摘要,无正文) |
@@ -164,26 +175,6 @@ mocode 自动扫描以下目录的 skill(每个 skill 是 `<name>/SKILL.md`,带 
 - `<cwd>/.mocode/skills/`
 
 skill 的 `description` 注入系统提示(渐进式披露第①层),模型只在任务相关时调 `use_skill` 加载完整正文(第②层)。用 `/skills` 查看已发现的 skill。
-
-## 结构
-
-```
-src/
-├── index.ts              # 入口:装配 + 启动 REPL + --resume 续接
-├── repl/index.ts         # 全屏 TUI、斜杠命令、运行态交互、Ctrl+C 中断
-├── agent/index.ts        # tool-call 循环(调 LLM→执行工具→回灌→再调,≤200 步)
-├── llm/index.ts          # OpenAI 兼容客户端 + 工具格式转换 + chat() 流式
-├── tools/                # types / constants / registry + builtins/(一工具一文件)
-│   └── builtins/         # read-file write-file edit-file run-command glob grep
-│                          # codegraph web-search web-fetch use-skill ask-human memory-*
-├── config/index.ts       # 读配置、校验必填项、系统提示词
-├── skills/               # discover(扫描)+ index(缓存/拼系统提示)
-├── session/              # 落盘/续接 + compact(三层压缩)+ token 估算
-├── memory/               # MOCODE.md 加载 + 跨会话记忆存储 + 后台反思
-├── rollback/             # 轮次快照 + /rollback 菜单 + 文件撤销
-├── ui/                   # theme(颜色)render(横幅/摘要)layout(全屏布局)spinner prompt
-└── agents/ commands/ mcp/ permissions/   # 未来子系统(agents/mcp/permissions 为空骨架)
-```
 
 ## 类型检查
 
