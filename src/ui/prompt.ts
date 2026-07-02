@@ -363,8 +363,7 @@ export async function promptWithSlashMenu(
       return;
     }
 
-    // 其他键:若处于滚动回看,先回尾再处理(打字即回底)
-    if (layout.isScrolled()) layout.resetScroll();
+    // 滚动回看时打字 / 编辑不回尾(保持历史视图,便于边看历史边编辑);仅 Enter 提交时回尾(见下方 submit 前)。
 
     // Ctrl+C 已在 onKey 顶部统一处理(清空或退出);Ctrl+D:空缓冲退出,否则忽略
     if (key.ctrl && key.name === 'd') {
@@ -396,8 +395,9 @@ export async function promptWithSlashMenu(
       insertNewline();
       return;
     }
-    // 提交(键盘 plain Enter)
+    // 提交(键盘 plain Enter):回尾(若滚动回看)再发送——发消息时跳到底部开始 agent 输出
     if (isReturn && !key.shift && !key.meta && !key.ctrl) {
+      if (layout.isScrolled()) layout.resetScroll();
       submit();
       return;
     }

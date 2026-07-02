@@ -125,6 +125,25 @@ export function truncateDisplay(str: string, width: number): string {
 }
 
 /**
+ * 按显示宽度从头部截断(保留尾部),超出前缀加 …。
+ * 用于单行只读预览需要始终看到最新内容的场景(如运行态输入回显:光标恒在文本末尾,
+ * 超长时应保留刚打的字,而非 truncateDisplay 那样保留开头、把刚打的内容截没)。
+ */
+export function truncateDisplayHead(str: string, width: number): string {
+  if (displayWidth(str) <= width) return str;
+  const chars = Array.from(str);
+  let w = 0;
+  const kept: string[] = [];
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const cw = charWidth(chars[i].codePointAt(0) ?? 0);
+    if (w + cw + 1 > width) break; // +1 留给前导的 …
+    kept.unshift(chars[i]);
+    w += cw;
+  }
+  return '…' + kept.join('');
+}
+
+/**
  * 按显示宽度把文本软折行为多行(供输入框软换行):每行可见宽度 ≤ width。
  * 宽字符(CJK / emoji = 2)在剩余宽度放不下时整字折到下行(留尾部空格,与终端自动折行一致),
  * 而非劈开半个字。零宽字符(组合符等)不计宽度、附在当前行。空串返回 [''](占一行)。

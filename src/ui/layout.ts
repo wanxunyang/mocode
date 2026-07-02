@@ -3,6 +3,7 @@ import {
   charWidth,
   displayWidth,
   truncateDisplay,
+  truncateDisplayHead,
   ansiDisplayWidth,
   wrapByDisplayWidth,
   fmtElapsed,
@@ -69,6 +70,8 @@ let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
 let contentCol = 1; // 续写位列(1-based)
 let segmentStartRow = 1; // 当前 md 段起始屏行(供 contentWriteMd 定位段末续写位;段内行数由 content 段标记跟踪)
 let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
+let scrollLockUntil = 0; // 发消息轮首滚动锁(绝对时间戳 ms,0=未锁):吸收 stdin 残留滚轮事件,防 resetScroll 回尾后被重新滚上去
+const SCROLL_LOCK_MS = 400; // 锁时长:覆盖 OS 缓冲残留 + 常规滚轮惯性;LLM TTFB 多 >200ms,不影响轮中后段滚动
 let base: { model: string; contextBar: string; cwd: string; modeTag?: string } | null = null;
 let statusText = '';
 let spinnerFrame: string | undefined;
@@ -152,19 +155,21 @@ function runningCaretPos(): { row: number; col: number } {
   const g = getGeo();
   const text = lastView?.dim ? lastView.lines[0] ?? '' : '';
   const contentW = Math.max(0, g.cols - 3); // ❯ =2 + 光标=1
-  const w = displayWidth(truncateDisplay(text, contentW));
+  const w = displayWidth(truncateDisplayHead(text, contentW));
   return { row: g.contentBottom + 3, col: Math.min(g.cols, 2 + w + 1) };
 }
 
 export function contentMode(): void {
   if (!active) return;
   const g = getGeo();
-  if (mode === 'running' && scrollOffset === 0) {
-    // 运行态:真光标归输入框光标位(供 IME 锚定,气泡不跟流式跑);假光标做可见指示
+  if (mode === 'running') {
+    // 运行态(回尾 / 滚动回看均):真光标归输入框光标位(供 IME 锚定,气泡不跟流式跑)。
+    // 滚动态也归输入框——否则上滑看历史时打字,IME 候选气泡会锚到内容区底而非输入框
+    // (conhost IME 不跟随 cup 后续移动,须让打字前光标已在输入框)。
     const p = runningCaretPos();
     stdout.write(cup(p.row, p.col));
   } else {
-    // INPUT 态 / 滚动回看:归续写位(滚动回看时归内容区底,viewport 锁历史)
+    // INPUT 态:回尾归续写位,滚动回看归内容区底(viewport 锁历史;INPUT 态无 IME 锚定需求)
     stdout.write(
       cup(
         scrollOffset === 0 ? contentRow : g.contentBottom,
@@ -315,10 +320,10 @@ export function contentWrite(s: string): void {
       scrollOffset = Math.max(0, Math.min(scrollOffset + delta, maxOff));
     }
   }
-  // 物理写(回尾 offset=0 且未暂停):cup 写起点 + s + (pending 时补 \n 提交换行)+ (运行态 cup 回输入框)。
-  // 用户打字中(isStreamingPaused)跳过物理写、只喂缓冲——光标不入内容区,IME 候选窗不跟流式跑;
-  // 停手后 setUserActive 的 flush 定时器 repaintViewport 重画缓冲内容。
-  if (scrollOffset === 0 && !isStreamingPaused()) {
+  // 物理写(回尾 offset=0):cup 写起点 + s + (pending 时补 \n 提交换行)+ (运行态 cup 回输入框)。
+  // 打字中不再暂停物理写——单次 write 结尾 cup 回 runningCaretPos(输入框),IME 锚定不动(跟踪每次 write
+  // 最终位置);旧设计 isStreamingPaused 暂停写致流式卡顿,现单次写归位已无需暂停。
+  if (scrollOffset === 0) {
     let out = cup(startRow, startCol) + s;
     if (pendingWrap) out += '\n'; // 滚动区域底行触发 DECSTBM 上滚、中段 LF 下移到 (下一行,1)
     if (mode === 'running') {
@@ -354,7 +359,7 @@ function commitMd(): void {
  *
  * 续写位 = 段末下一行(段占 lines.length 行从 segmentStartRow 起);超可视区则滚动留 contentBottom。
  * 物理重画用 repaintViewport(全内容区,原子一次 write 无闪烁)— md 段是缓冲尾,viewport 显尾即显段。
- * 用户打字中(isStreamingPaused)或滚动回看(scrollOffset>0)只更新缓冲,停手 flush / 回尾时显。
+ * 滚动回看(scrollOffset>0)只更新缓冲不物理写(回尾时显);打字中照常物理写——单次 write 结尾 cup 回输入框,IME 锚定不动。
  */
 export function contentWriteMd(s: string): void {
   if (!active || !ui.isTTY) {
@@ -382,8 +387,8 @@ export function contentWriteMd(s: string): void {
       scrollOffset = Math.max(0, Math.min(scrollOffset + delta, maxOff));
     }
   }
-  if (scrollOffset === 0 && !isStreamingPaused()) {
-    repaintViewport();
+  if (scrollOffset === 0) {
+    repaintViewport(); // 单次 write 结尾 cup 回 runningCaretPos(运行态),IME 锚输入框;打字中不再暂停
     if (mode === 'running') {
       const p = runningCaretPos();
       stdout.write(cup(p.row, p.col));
@@ -417,6 +422,7 @@ export function clearContent(): void {
   contentCol = 1;
   segmentStartRow = 1;
   scrollOffset = 0;
+  scrollLockUntil = 0;
   mdActive = false;
   mdBuf = '';
   content.reset();
@@ -445,16 +451,22 @@ export function repaintViewport(): void {
     const line = slice[r - 1] ?? '';
     p += cup(r, 1) + esc.clearLine + line;
   }
+  // 光标:合并进同一 write(若拆成两次 stdout.write,行写完光标会暂留 contentRow/contentBottom,
+  // 流式每 chunk 调一次 → contentBottom 频繁现块状光标白块;打字第一键赶上这瞬 IME 候选气泡锚到 contentBottom)。
+  // 运行态(回尾 / 滚动均)归输入框 runningCaretPos(供 IME 锚定);INPUT 态回尾归续写位 / 滚动归内容区底。
+  if (mode === 'running') {
+    const c = runningCaretPos();
+    p += cup(c.row, c.col);
+  } else {
+    p += cup(scrollOffset === 0 ? contentRow : g.contentBottom, scrollOffset === 0 ? contentCol : 1);
+  }
   stdout.write(p);
-  // 光标:offset=0 回续写位(尾行末,contentWrite 维护);offset>0 留内容区底
-  stdout.write(
-    cup(scrollOffset === 0 ? contentRow : g.contentBottom, scrollOffset === 0 ? contentCol : 1)
-  );
 }
 
 /** 滚动 delta 行(正=往新、负=往旧);钳 [0, max(0, total-contentBottom)];变则重画 + 刷底栏(显指示、光标回输入框)。 */
 export function scrollBy(delta: number): void {
   if (!active) return;
+  if (Date.now() < scrollLockUntil) return; // 轮首滚动锁:吸收发消息前后 stdin 残留滚轮事件,保 agent 输出从底部开始
   const g = getGeo();
   const total = content.totalRows();
   const maxOff = Math.max(0, total - g.contentBottom);
@@ -471,6 +483,24 @@ export function resetScroll(): void {
   scrollOffset = 0;
   repaintViewport();
   repaint();
+}
+
+/** 发消息轮首短时锁住滚动:吸收 stdin 残留滚轮事件(发消息前后的滚轮惯性 / OS 缓冲延迟到达),
+ *  防 resetScroll 回尾后被 onRunningKey 接到的残留事件重新滚上去——致 agent 输出进缓冲、显示在历史区。
+ *  锁只挡 scrollBy(滚轮 / PgUp-PgDn);不影响 contentWrite 写屏(offset=0 时照常物理写,agent 输出从底部开始)。
+ *  默认 SCROLL_LOCK_MS 后自动解锁;enterInputMode(轮末)也清锁。用户轮中后段仍可上滑(满足"输出时能看历史")。 */
+export function lockScrollToBottom(ms: number = SCROLL_LOCK_MS): void {
+  scrollLockUntil = Date.now() + ms;
+}
+
+/** 解锁(轮末 enterInputMode / 测试用)。 */
+export function unlockScroll(): void {
+  scrollLockUntil = 0;
+}
+
+/** 轮首滚动锁是否生效(测试用)。 */
+export function isScrollLocked(): boolean {
+  return Date.now() < scrollLockUntil;
 }
 
 // ── 状态行 ──
@@ -526,13 +556,14 @@ function composeStatus(status: StatusBarData, cols: number): string {
 /** 画状态行(光标回续写位)。RUNNING 态 spinner 频繁调。 */
 export function drawStatusBar(status?: StatusBarData): void {
   if (!active || !base) return;
-  if (isStreamingPaused()) return; // 用户打字中:状态行暂不刷(避免光标去 statusRow 扰动 IME),停手后 flush 会刷
   const s = status ?? { ...base, status: statusText, spinnerFrame };
   const g = getGeo();
   const statusRow = g.contentBottom + 1;
-  // 一次写入:cup 状态行 + clearLine + 状态 + cup 回(运行态→输入框供 IME 锚定;否则续写位/内容区底)
+  // 一次写入:cup 状态行 + clearLine + 状态 + cup 回(运行态→输入框供 IME 锚定;否则续写位/内容区底)。
+  // 打字中不再跳过——单次 write 结尾 cup 回 runningCaretPos,IME 锚输入框不动;旧 isStreamingPaused 门致状态行 / 心跳打字时冻住。
   let out = cup(statusRow, 1) + esc.clearLine + composeStatus(s, g.cols);
-  if (mode === 'running' && scrollOffset === 0) {
+  if (mode === 'running') {
+    // 运行态(回尾 / 滚动回看均):cup 回输入框光标位(供 IME 锚定)。
     const p = runningCaretPos();
     out += cup(p.row, p.col);
   } else {
@@ -579,8 +610,9 @@ function stopTurnTimer(): void {
  * 配合 clearLiveAtCursor 在 spinner 停时清掉,随后 contentWrite 的结果即写在该行(spinner 不入历史缓冲)。
  */
 export function paintLiveAtCursor(text: string): void {
-  if (!active || !ui.isTTY || scrollOffset !== 0 || isStreamingPaused()) return;
-  // 一次写入:cup 续写位 + clearLine + 帧 + (运行态 cup 回输入框)——避免光标在续写位歇脚被 IME 跟踪
+  if (!active || !ui.isTTY || scrollOffset !== 0) return;
+  // 一次写入:cup 续写位 + clearLine + 帧 + (运行态 cup 回输入框)——单次 write 结尾在输入框,
+  // IME 跟踪每次 write 最终位置故锚输入框;打字中不再暂停(旧 isStreamingPaused 门致 spinner 卡顿)。
   let out = cup(contentRow, contentCol) + esc.clearLine + text;
   if (mode === 'running') {
     const p = runningCaretPos();
@@ -591,7 +623,7 @@ export function paintLiveAtCursor(text: string): void {
 
 /** 清掉续写位那行瞬时活动文本(配合 paintLiveAtCursor)。 */
 export function clearLiveAtCursor(): void {
-  if (!active || !ui.isTTY || scrollOffset !== 0 || isStreamingPaused()) return;
+  if (!active || !ui.isTTY || scrollOffset !== 0) return;
   let out = cup(contentRow, contentCol) + esc.clearLine;
   if (mode === 'running') {
     const p = runningCaretPos();
@@ -815,9 +847,11 @@ export function paintInput(view: InputView): void {
 
   // 6. 光标
   if (view.dim) {
-    // 运行态:真光标归输入框光标位(供 IME 锚定);滚动回看时归内容区底(viewport 锁历史)
+    // 运行态(回尾 / 滚动回看均):真光标归输入框光标位(供 IME 锚定,气泡在输入框而非内容区)。
+    // 滚动态也归输入框——上滑看历史时打字,IME 候选气泡须锚到输入框(conhost IME 不跟随 cup 后续移动,
+    // 须让打字前光标已在输入框);viewport 锁历史靠 scrollOffset,不靠光标位置。
     const p = runningCaretPos();
-    buf += cup(scrollOffset === 0 ? p.row : g.contentBottom, scrollOffset === 0 ? p.col : 1);
+    buf += cup(p.row, p.col);
   } else {
     const r = firstInputRow + vis.visLine;
     const col = promptW + vis.cursorVisCol + 1;
@@ -843,8 +877,9 @@ function renderDimInputRow(
   const caret = `${ui.reverse} ${ui.reset}`; // 反白块状光标(1 cell,与 INPUT 态同款)
   const contentW = Math.max(0, cols - promptW - 1);
   if (text.length > 0) {
-    // 有打字:❯ dim + 文本(dim) + 反白光标(末尾)
-    return `${ui.dim}${prompt}${truncateDisplay(text, contentW)}${ui.reset}${caret}`;
+    // 有打字:❯ dim + 文本(dim,超长时从头部截断保留尾部——光标恒在末尾,须始终看到刚打的字,
+    // 而非 truncateDisplay 那样保留开头、把刚打的内容截没,显示成卡在开头不动的假象) + 反白光标(末尾)
+    return `${ui.dim}${prompt}${truncateDisplayHead(text, contentW)}${ui.reset}${caret}`;
   }
   // 空:❯ dim + 反白光标(打字起点) + dim 占位 ghost
   const p = placeholder ? truncateDisplay(placeholder, contentW) : '';
@@ -861,12 +896,7 @@ export function paintRunningInputEcho(text: string, placeholder: string): void {
   if (!active || !base) return;
   const g = getGeo();
   const inputRow = g.contentBottom + 3; // 运行态 footerH 恒 4:状态(+1)+上线(+2)+输入行(+3);下线在 rows
-  stdout.write(
-    cup(inputRow, 1) +
-      esc.clearLine +
-      renderDimInputRow('❯ ', text, placeholder, g.cols)
-  );
-  // 同步 lastView:text 与 placeholder 拆开存,使滚动/resize 的 repaint 重画时光标位置正确(空→起点,有字→末尾)
+  // 先同步 lastView(供 runningCaretPos 算真光标位 = 新文本末尾,与假光标同位)
   lastView = {
     prompt: '❯ ',
     lines: [text],
@@ -876,9 +906,16 @@ export function paintRunningInputEcho(text: string, placeholder: string): void {
     menu: null,
     dim: true,
   };
-  // 真光标归输入框光标位(供 IME 锚定,与假光标同位);滚动回看时归内容区底
+  // 单次 write:cup 输入行 + clearLine + dim 文本/假光标 + cup 真光标到输入框(供 IME 锚定)。
+  // 滚动态也归输入框——旧设计滚动态归 contentBottom,致 IME 候选气泡锚到内容区底白块
+  // (conhost IME 不跟随 cup 后续移动,须让打字前光标已在输入框);拆两次 write 会暂留 contentBottom 显白块。
   const p = runningCaretPos();
-  stdout.write(cup(scrollOffset === 0 ? p.row : g.contentBottom, scrollOffset === 0 ? p.col : 1));
+  stdout.write(
+    cup(inputRow, 1) +
+      esc.clearLine +
+      renderDimInputRow('❯ ', text, placeholder, g.cols) +
+      cup(p.row, p.col)
+  );
 }
 
 /** 重画当前视图(resize / 内部用)。 */
@@ -896,6 +933,7 @@ export function enterInputMode(status: string = '空闲'): void {
   runningFrame = -1; // 回 INPUT 态:停状态行 chip 旋转,composeStatus 退回静态 ◆
   turnStart = null; // 停走时
   stopTurnTimer();
+  scrollLockUntil = 0; // 轮末:清轮首滚动锁,INPUT 态可自由滚动
   // 运行态若有未 flush 的缓冲内容(用户打字暂停了流式写),切回 INPUT 前重画内容区显示之,免丢内容
   if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
   if (userActiveUntil) {
@@ -922,6 +960,7 @@ export function enterRunningMode(status: string, placeholder: string): void {
   spinnerFrame = undefined;
   turnStart = Date.now(); // 起走时(整轮从发起到 enterInputMode 止)
   resetScroll(); // 若上轮 INPUT 滚动过(未打字回底),新轮回尾
+  lockScrollToBottom(); // 轮首短时锁:吸收发消息前后残留滚轮事件,保 agent 输出从底部开始(锁过期或轮末 enterInputMode 解)
   if (active && base) {
     setRegion(4); // 1 状态 + 1 上线 + 1 输入 + 1 下线
     paintInput({
@@ -953,6 +992,7 @@ export function enterAltScreen(): void {
   contentCol = 1;
   segmentStartRow = 1;
   scrollOffset = 0;
+  scrollLockUntil = 0;
   mdActive = false;
   mdBuf = '';
   content.reset();
@@ -986,6 +1026,7 @@ export function exitAltScreen(): void {
   active = false;
   stopTurnTimer(); // 兜底清走时计时器(防异常退出泄漏)
   turnStart = null;
+  scrollLockUntil = 0; // 清轮首滚动锁(防状态泄漏到下次进 alt 屏)
   mouse.resetMouse(); // 清鼠标重组残留(防退出后状态泄漏到下次进 alt 屏)
   // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。
   try {
