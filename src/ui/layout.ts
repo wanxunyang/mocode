@@ -1,4 +1,7 @@
 import { stdin, stdout } from 'node:process';
+import { appendFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
   charWidth,
   displayWidth,
@@ -68,6 +71,10 @@ let mode: 'input' | 'running' = 'input';
 let footerH = 5; // 1 虚拟空行 + 1 状态行 + 1 上线 + 输入行数 + 1 下线(虚拟空行隔开内容与状态栏,上下线框住输入区)
 let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
 let contentCol = 1; // 续写位列(1-based)
+// 上一次 paintLiveAtCursor 实际画帧的屏坐标(0=未画)。clearLiveAtCursor 清"这行"而非当前续写位——
+// 防 spinner 运行期间续写位漂移时清错行、旧帧行残留(见 557e678 移除 isStreamingPaused 后的间歇性 frame 泄漏)。
+let frameRow = 0;
+let frameCol = 0;
 let segmentStartRow = 1; // 当前 md 段起始屏行(供 contentWriteMd 定位段末续写位;段内行数由 content 段标记跟踪)
 let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
 let scrollLockUntil = 0; // 发消息轮首滚动锁(绝对时间戳 ms,0=未锁):吸收 stdin 残留滚轮事件,防 resetScroll 回尾后被重新滚上去
@@ -420,6 +427,8 @@ export function clearContent(): void {
   setRegion(footerH);
   contentRow = 1;
   contentCol = 1;
+  frameRow = 0;
+  frameCol = 0;
   segmentStartRow = 1;
   scrollOffset = 0;
   scrollLockUntil = 0;
@@ -604,32 +613,74 @@ function stopTurnTimer(): void {
   }
 }
 
-/**
- * 在续写位画一行瞬时活动文本(spinner 帧):不进缓冲、不推进续写位,逐行 clearLine 重画。
- * 仅 TTY + offset=0(实时尾)时物理写屏;滚动态跳过(由状态行 spinner 兜底,且避免覆盖 viewport 历史行)。
- * 配合 clearLiveAtCursor 在 spinner 停时清掉,随后 contentWrite 的结果即写在该行(spinner 不入历史缓冲)。
- */
-export function paintLiveAtCursor(text: string): void {
-  if (!active || !ui.isTTY || scrollOffset !== 0) return;
-  // 一次写入:cup 续写位 + clearLine + 帧 + (运行态 cup 回输入框)——单次 write 结尾在输入框,
-  // IME 跟踪每次 write 最终位置故锚输入框;打字中不再暂停(旧 isStreamingPaused 门致 spinner 卡顿)。
-  let out = cup(contentRow, contentCol) + esc.clearLine + text;
-  if (mode === 'running') {
-    const p = runningCaretPos();
-    out += cup(p.row, p.col);
+// ── 临时诊断:spinner frame 泄漏追踪(定位 557e678 后的间歇性泄漏后删除)──
+// 记 paintLiveAtCursor/clearLiveAtCursor 的可疑时序:续写位漂移、clear 被守卫跳过、清错行。
+// 同步追加到 ~/.mocode/spinner-debug.log,全 try/catch 不抛、不阻塞、不抢屏。
+let _dbgSpinnerPath = '';
+function dbgSpinner(msg: string): void {
+  try {
+    if (!_dbgSpinnerPath) _dbgSpinnerPath = join(homedir(), '.mocode', 'spinner-debug.log');
+    appendFileSync(_dbgSpinnerPath, `[${new Date().toISOString()}] ${msg}\n`);
+  } catch {
+    // 诊断日志失败不影响渲染
   }
-  stdout.write(out);
 }
 
-/** 清掉续写位那行瞬时活动文本(配合 paintLiveAtCursor)。 */
-export function clearLiveAtCursor(): void {
-  if (!active || !ui.isTTY || scrollOffset !== 0) return;
-  let out = cup(contentRow, contentCol) + esc.clearLine;
+/**
+ * 在续写位画一行瞬时活动文本(spinner 帧):不进缓冲、不推进续写位,逐行 clearLine 重画。
+ * 仅 TTY + offset=0(实时尾)+ 非打字暂停态时物理写屏;滚动态跳过(由状态行 spinner 兜底,且避免覆盖 viewport 历史行)。
+ * 配合 clearLiveAtCursor 在 spinner 停时清掉,随后 contentWrite 的结果即写在该行(spinner 不入历史缓冲)。
+ *
+ * 记 frameRow/frameCol = 实际画帧位置;clearLiveAtCursor 清"这行"而非当前续写位,防续写位漂移时清错行。
+ * 续写位漂移时(运行期间被某次 contentWrite 推进,罕见但 557e678 后可能)先清旧 frameRow 再画新位,避免旧帧残留。
+ * 打字暂停态(isStreamingPaused)spinner 不画帧——恢复 557e678 前的 spinner 隐形行为(只关 spinner,不动 contentWrite)。
+ */
+export function paintLiveAtCursor(text: string): void {
+  if (!active || !ui.isTTY || scrollOffset !== 0 || isStreamingPaused()) {
+    // 临时诊断:画帧被守卫跳过,但此前画过帧(frameRow)→ 该帧不会被这次 paint 覆盖,泄漏嫌疑
+    if (frameRow && scrollOffset !== 0)
+      dbgSpinner(`PAINT-SKIPPED frame=(${frameRow},${frameCol}) cur=(${contentRow},${contentCol}) off=${scrollOffset} paused=${isStreamingPaused()}`);
+    return;
+  }
+  // 临时诊断:续写位 != 上次画帧位置 = spinner 运行期间续写位漂移(泄漏根因嫌疑)
+  if (frameRow && (frameRow !== contentRow || frameCol !== contentCol)) {
+    dbgSpinner(`DRIFT-PAINT old=(${frameRow},${frameCol}) cur=(${contentRow},${contentCol}) mode=${mode} off=${scrollOffset}`);
+  }
+  let out = '';
+  if (frameRow && (frameRow !== contentRow || frameCol !== contentCol)) {
+    out += cup(frameRow, frameCol) + esc.clearLine; // 续写位漂移:先清旧帧行,否则残留
+  }
+  out += cup(contentRow, contentCol) + esc.clearLine + text;
   if (mode === 'running') {
     const p = runningCaretPos();
     out += cup(p.row, p.col);
   }
   stdout.write(out);
+  frameRow = contentRow;
+  frameCol = contentCol;
+}
+
+/** 清掉 paintLiveAtCursor 画过的那行瞬时活动文本。清"实际画过的位置"(frameRow),非当前续写位。
+ *  不加 isStreamingPaused 守卫——stop 时必须无条件清(只写一次、结尾 cup 回输入框,不扰 IME);否则打字中 stop 会跳过清帧、制造泄漏。 */
+export function clearLiveAtCursor(): void {
+  // 临时诊断:clear 被守卫跳过,但此前画过帧(frameRow)→ 帧残留(泄漏嫌疑)
+  if (frameRow && (!active || !ui.isTTY || scrollOffset !== 0)) {
+    dbgSpinner(`CLEAR-SKIPPED frame=(${frameRow},${frameCol}) cur=(${contentRow},${contentCol}) off=${scrollOffset} active=${active}`);
+  }
+  if (!active || !ui.isTTY || scrollOffset !== 0) return;
+  if (!frameRow) return; // 没画过就不清(避免误清当前续写位内容)
+  // 临时诊断:画帧位置 != 当前续写位 → 旧设计(清续写位)会清错行
+  if (frameRow !== contentRow || frameCol !== contentCol) {
+    dbgSpinner(`CLEAR-MISMATCH frame=(${frameRow},${frameCol}) cur=(${contentRow},${contentCol}) mode=${mode}`);
+  }
+  let out = cup(frameRow, frameCol) + esc.clearLine; // 清"画过的行",非"当前续写位"
+  if (mode === 'running') {
+    const p = runningCaretPos();
+    out += cup(p.row, p.col);
+  }
+  stdout.write(out);
+  frameRow = 0;
+  frameCol = 0;
 }
 
 /** 更新状态行基线(模型 / context / cwd / 模式标识)。repl 在轮次边界与切模式时调。 */
@@ -937,6 +988,8 @@ export function enterInputMode(status: string = '空闲'): void {
   turnStart = null; // 停走时
   stopTurnTimer();
   scrollLockUntil = 0; // 轮末:清轮首滚动锁,INPUT 态可自由滚动
+  frameRow = 0; // 轮末:清 spinner 帧位置(防下轮残留)
+  frameCol = 0;
   // 运行态若有未 flush 的缓冲内容(用户打字暂停了流式写),切回 INPUT 前重画内容区显示之,免丢内容
   if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
   if (userActiveUntil) {
@@ -1030,6 +1083,8 @@ export function exitAltScreen(): void {
   stopTurnTimer(); // 兜底清走时计时器(防异常退出泄漏)
   turnStart = null;
   scrollLockUntil = 0; // 清轮首滚动锁(防状态泄漏到下次进 alt 屏)
+  frameRow = 0; // 清 spinner 帧位置(防状态泄漏到下次进 alt 屏)
+  frameCol = 0;
   mouse.resetMouse(); // 清鼠标重组残留(防退出后状态泄漏到下次进 alt 屏)
   // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。
   try {

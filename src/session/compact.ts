@@ -62,6 +62,43 @@ export function truncateMid(text: string, max: number): string {
 }
 
 /**
+ * Provenance 压缩:旧 tool_calls.arguments 超长时,把大字符串字段替换为 "<N 字符,已省略>" stub,
+ * 保留 path(/rollback planRollback 靠 JSON.parse(arguments).path 找文件,见 rollback/index.ts)+ 其余短字段。
+ * 比 truncateMid 的 head+tail 片段更短且更易读:LLM/摘要器看到 "<5000 字符,已省略>" 即知"写过 5000 字符",
+ * 而非混乱的 head+tail 片段。
+ *
+ * 保:JSON 合法(parse/stringify 失败均原样返回)+ tool_call_id 配对不动(只改 arguments 内容,不改
+ * tool_calls 数组结构)+ path 永不省(rollback 依赖)。永不抛错(对齐「调度器永不抛错」契约)。
+ *
+ * 触发:整体 arguments > MAX_OLD_TOOL_STUB 才进(同原 truncateMid 门槛);字段级也 > MAX_OLD_TOOL_STUB 才 stub。
+ */
+function stubToolCallArguments(argsRaw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(argsRaw);
+  } catch {
+    return argsRaw; // 非合法 JSON(模型偶发):不碰
+  }
+  if (!parsed || typeof parsed !== 'object') return argsRaw;
+  const obj = parsed as Record<string, unknown>;
+  let changed = false;
+  for (const k of Object.keys(obj)) {
+    if (k === 'path') continue; // path 永不省:/rollback planRollback 靠它定位文件
+    const v = obj[k];
+    if (typeof v === 'string' && v.length > MAX_OLD_TOOL_STUB) {
+      obj[k] = `<${v.length} 字符,已省略>`;
+      changed = true;
+    }
+  }
+  if (!changed) return argsRaw;
+  try {
+    return JSON.stringify(obj);
+  } catch {
+    return argsRaw; // stringify 失败(理论不会):不碰
+  }
+}
+
+/**
  * push-time 第一层:工具结果进 history 前裁到 MAX_HISTORY_RESULT。
  * 显示层(summarizeToolResult)仍用原 output,不受影响。
  */
@@ -268,8 +305,8 @@ export async function compactHistory(
   // 第一层:微压缩——旧区原地截短(保 tool_call_id,无 LLM 调用)
   // 覆盖三类大字段,均只裁模型/工具产物,不动 user 原话与 system(摘要):
   //   ① tool 结果 content;
-  //   ② 旧 assistant 的 tool_calls.arguments —— 保 JSON 合法:整体超长才进,
-  //     逐字段值裁中截后重新 stringify(不裸中截会劈断 JSON、严格后端 400);parse 失败跳过;
+  //   ② 旧 assistant 的 tool_calls.arguments —— provenance stub:整体超长才进,大字段
+  //     替换为 "<N 字符,已省略>"(保 path + JSON 合法,见 stubToolCallArguments);
   //   ③ 旧 assistant 正文 content(模型长解释,回看价值低)。
   let microcompactDone = false;
   for (const g of oldGroups) {
@@ -287,25 +324,16 @@ export async function compactHistory(
         as.content = truncateMid(as.content, MAX_OLD_TOOL_STUB);
         microcompactDone = true;
       }
-      // ② tool_calls 参数:整体超长才进,逐字段裁值,保 JSON 合法
+      // ② tool_calls 参数:整体超长才进,provenance stub 大字段(保 path + JSON 合法)。
+      //   stubToolCallArguments:大字符串字段 → "<N 字符,已省略>";path 永不省(/rollback 依赖)。
       if (Array.isArray(as.tool_calls)) {
         for (const tc of as.tool_calls) {
           const args = tc?.function?.arguments;
           if (typeof args !== 'string' || args.length <= MAX_OLD_TOOL_STUB) continue;
-          try {
-            const parsed = JSON.parse(args);
-            if (parsed && typeof parsed === 'object') {
-              for (const k of Object.keys(parsed)) {
-                const v = parsed[k];
-                if (typeof v === 'string' && v.length > MAX_OLD_TOOL_STUB) {
-                  parsed[k] = truncateMid(v, MAX_OLD_TOOL_STUB);
-                }
-              }
-              tc.function.arguments = JSON.stringify(parsed);
-              microcompactDone = true;
-            }
-          } catch {
-            // arguments 非合法 JSON(模型偶发):不裁,沿用「调度器永不抛错」
+          const stubbed = stubToolCallArguments(args);
+          if (stubbed !== args) {
+            tc.function.arguments = stubbed;
+            microcompactDone = true;
           }
         }
       }
