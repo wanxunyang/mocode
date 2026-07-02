@@ -58,6 +58,8 @@ export interface Config {
   sessionDir: string;
   /** AnySearch 联网搜索 API key(可选)。不配则走匿名免费额度(按 IP 限流)。 */
   searchApiKey?: string;
+  /** 沙箱根目录(文件操作边界,可选)。未配则 startRepl 用 process.cwd() 兜底。优先级:--sandbox-root > 本项 > cwd。 */
+  sandboxRoot?: string;
   /** AnySearch API base,默认官方端点。 */
   searchBaseUrl: string;
   /** 主题名(对应 src/ui/theme.ts 的 THEMES 表键)。默认 default;shell env MOCODE_THEME 覆盖文件。 */
@@ -169,6 +171,7 @@ export const config: Config = {
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || 50,
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
+  sandboxRoot: process.env.SANDBOX_ROOT || undefined,
   searchBaseUrl: process.env.ANYSEARCH_BASE_URL || 'https://api.anysearch.com',
   theme: process.env.MOCODE_THEME || 'default',
   themeFromShell,

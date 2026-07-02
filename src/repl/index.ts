@@ -5,6 +5,7 @@ import { config, PLAN_MODE_SUFFIX } from '../config/index.js';
 import { updateConfigKey } from '../config/file.js';
 import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
+import { setSandboxRoot } from '../sandbox/root.js';
 import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
@@ -411,10 +412,14 @@ export function renderHistory(history: ChatMessage[]): void {
 export async function startRepl(
   initialHistory?: ChatMessage[],
   sessionId?: string,
-  updateNotice: string | null = null
+  updateNotice: string | null = null,
+  sandboxRootOverride?: string
 ): Promise<void> {
   // 模式重置:agentMode 不落盘,每个 REPL 会话从 auto 开始(/resume / --resume 亦重置)。
   setAgentMode('auto');
+  // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
+  // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
+  setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
   // 构造系统提示:auto 用 base;plan 在 config.systemPrompt 后追加 PLAN_MODE_SUFFIX。
   // 切模式时 applyMode 重算 history[0](history[0] 恒 system,compaction 保它,不破坏)。
   const buildSystemMessage = (planMode: boolean): string =>

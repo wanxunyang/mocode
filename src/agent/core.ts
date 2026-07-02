@@ -6,7 +6,6 @@
 // spawn.ts 的 spawnAgent = runAgentCore + 静默 hooks(子 agent)。
 
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import type OpenAI from 'openai';
 import {
   chat,
@@ -24,6 +23,7 @@ import {
   contextState,
 } from '../session/index.js';
 import { config } from '../config/index.js';
+import { jailResolve } from '../sandbox/index.js';
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
 function parseArgs(raw: string): Record<string, unknown> | null {
@@ -66,22 +66,24 @@ function readDiffContext(
   if (!p) return { preWriteOld: null, editStartLine: 1 };
   if (tc.name === 'write_file') {
     try {
-      return { preWriteOld: readFileSync(resolve(p), 'utf8'), editStartLine: 1 };
+      // jailResolve:沙箱越界(../../、绝对外圈、软链出圈)抛错 → catch 兜底返 null,不泄露牢外内容(TOCTOU)
+      return { preWriteOld: readFileSync(jailResolve(p), 'utf8'), editStartLine: 1 };
     } catch {
-      return { preWriteOld: null, editStartLine: 1 }; // 文件不存在(新建)或不可读
+      return { preWriteOld: null, editStartLine: 1 }; // 文件不存在(新建)、不可读 或 沙箱越界(不泄露)
     }
   }
   if (tc.name === 'edit_file') {
     const oldStr = String(parsed.old_string ?? '');
     try {
-      const data = readFileSync(resolve(p), 'utf8');
+      // jailResolve:同上,沙箱越界抛错 → catch 兜底,不泄露牢外内容
+      const data = readFileSync(jailResolve(p), 'utf8');
       const idx = oldStr ? data.indexOf(oldStr) : -1;
       return {
         preWriteOld: null,
         editStartLine: idx >= 0 ? data.slice(0, idx).split('\n').length : 1,
       };
     } catch {
-      return { preWriteOld: null, editStartLine: 1 }; // 读不到:diff 退化为相对行号
+      return { preWriteOld: null, editStartLine: 1 }; // 读不到:diff 退化为相对行号(含沙箱越界)
     }
   }
   return { preWriteOld: null, editStartLine: 1 };

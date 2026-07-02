@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import fg from 'fast-glob';
 import { MAX_RESULTS, IGNORE } from '../constants.js';
+import { getSandboxRoot, isInsideRoot, jailResolve } from '../../sandbox/index.js';
 import type { Tool } from '../types.js';
 
 // ---------- grep ----------
@@ -27,21 +27,27 @@ export const grepTool: Tool = {
     } catch (e) {
       return `错误:非法正则 ${pattern}: ${e instanceof Error ? e.message : String(e)}`;
     }
-    const files = await fg(g, {
-      cwd: process.cwd(),
-      onlyFiles: true,
-      dot: true,
-      ignore: IGNORE,
-    });
+    const cwd = getSandboxRoot() ?? process.cwd();
+    const files = (
+      await fg(g, {
+        cwd,
+        onlyFiles: true,
+        dot: true,
+        ignore: IGNORE,
+        followSymbolicLinks: false, // 不跟随软链目录,防经软链扫到牢外文件
+        throwErrorOnBrokenSymbolicLink: false,
+      })
+    ).filter((f) => isInsideRoot(f)); // 后置兜底:仅留牢内
     const results: string[] = [];
     let scanned = 0;
     for (const f of files) {
       if (results.length >= MAX_RESULTS) break;
       let content: string;
       try {
-        content = await readFile(resolve(f), 'utf8');
+        // jailResolve:realpath 化,防「牢内文件软链→牢外」的内容泄露;越界/不可读均 catch 跳过
+        content = await readFile(jailResolve(f), 'utf8');
       } catch {
-        continue; // 跳过无法读的文件(二进制/权限)
+        continue; // 跳过无法读的文件(二进制/权限/沙箱越界)
       }
       scanned++;
       const lines = content.split(/\r?\n/);

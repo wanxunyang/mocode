@@ -485,9 +485,9 @@ function composeStatus(status: StatusBarData, cols: number): string {
   const lead = spinning ? `${RUNNING_FRAMES[runningFrame]} ` : `◆ `;
   // 模式 chip:lead 之后、model 之前。auto 显 dim 'auto'(常态),plan 显亮黄 'plan'(切换时颜色+文字都变,明显)。
   const modeChip = status.modeTag
-    ? ` ${status.modeTag === 'plan' ? ui.yellow : ui.dim}${status.modeTag}${ui.reset}`
+    ? ` ${status.modeTag === 'plan' ? ui.yellow : ui.dim}${status.modeTag}${ui.reset} `
     : '';
-  const modeChipW = status.modeTag ? 1 + displayWidth(status.modeTag) : 0; // 1 = 前导空格
+  const modeChipW = status.modeTag ? 2 + displayWidth(status.modeTag) : 0; // 2 = 前导+尾随空格
   const model = truncateDisplay(status.model, 22);
   const ctx = status.contextBar; // 已带色
   const ctxW = ansiDisplayWidth(ctx);

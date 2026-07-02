@@ -1,5 +1,6 @@
 import fg from 'fast-glob';
 import { IGNORE } from '../constants.js';
+import { getSandboxRoot, isInsideRoot } from '../../sandbox/index.js';
 import type { Tool } from '../types.js';
 
 // ---------- glob ----------
@@ -17,12 +18,17 @@ export const globTool: Tool = {
   },
   async execute(args) {
     const pattern = String(args.pattern);
-    const files = await fg(pattern, {
-      cwd: process.cwd(),
-      onlyFiles: true,
-      dot: true,
-      ignore: IGNORE,
-    });
+    const cwd = getSandboxRoot() ?? process.cwd();
+    const files = (
+      await fg(pattern, {
+        cwd,
+        onlyFiles: true,
+        dot: true,
+        ignore: IGNORE,
+        followSymbolicLinks: false, // 不跟随软链目录,防经软链列出牢外文件
+        throwErrorOnBrokenSymbolicLink: false,
+      })
+    ).filter((f) => isInsideRoot(f)); // 后置兜底:仅留牢内
     if (files.length === 0) return '无匹配文件';
     const shown = files.slice(0, 200);
     let out = shown.join('\n');

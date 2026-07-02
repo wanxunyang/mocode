@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { MAX_OUTPUT } from '../constants.js';
+import { getSandboxRoot, filterEnv, isCommandDenied } from '../../sandbox/index.js';
 import type { Tool } from '../types.js';
 
 // ---------- run_command ----------
@@ -18,12 +19,16 @@ export const runCommandTool: Tool = {
   async execute(args, ctx) {
     const command = String(args.command);
     const timeout = Number(args.timeout ?? 120000);
+    // 沙箱 best-effort:灾难性文件操作 denylist(非安全边界,只挡误操作;真隔离需 OS jailer)。
+    const deny = isCommandDenied(command);
+    if (deny) return `错误:${deny}`;
     return new Promise<string>((done) => {
       const isWin = process.platform === 'win32';
+      // 沙箱 best-effort:cwd 钉死 sandbox root(相对路径写落在牢内)+ env 脱敏(剥 *KEY/*TOKEN 等,防 LLM_API_KEY 泄子进程)
       const child = spawn(
         isWin ? 'cmd.exe' : 'bash',
         isWin ? ['/c', command] : ['-c', command],
-        { cwd: process.cwd() }
+        { cwd: getSandboxRoot() ?? process.cwd(), env: filterEnv(process.env) }
       );
       let out = '';
       let finished = false;

@@ -37,6 +37,17 @@ process.on('unhandledRejection', (e) => {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
+  // --sandbox-root <path>:覆盖沙箱根(文件操作边界)。缺值或以 -- 开头报错退出。
+  const sr = args.indexOf('--sandbox-root');
+  let sandboxRootOverride: string | undefined;
+  if (sr !== -1) {
+    sandboxRootOverride = args[sr + 1];
+    if (!sandboxRootOverride || sandboxRootOverride.startsWith('--')) {
+      console.error('[cli] --sandbox-root 需要一个路径参数');
+      process.exit(1);
+    }
+  }
+
   // 首跑配置向导:写 ~/.mocode/config。独立模块,不触发 config 校验,故零配置也能跑。
   if (args[0] === 'config') {
     const { runConfigWizard } = await import('./commands/config.js');
@@ -67,11 +78,11 @@ async function main(): Promise<void> {
     }
     const updateNotice = checkAndMaybeUpdate();
     const { startRepl } = await import('./repl/index.js');
-    await startRepl(loaded.history, loaded.id, updateNotice);
+    await startRepl(loaded.history, loaded.id, updateNotice, sandboxRootOverride);
   } else {
     const updateNotice = checkAndMaybeUpdate();
     const { startRepl } = await import('./repl/index.js');
-    await startRepl(undefined, undefined, updateNotice);
+    await startRepl(undefined, undefined, updateNotice, sandboxRootOverride);
   }
   process.exit(0);
 }
