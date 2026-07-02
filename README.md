@@ -58,6 +58,8 @@ npm start
 mocode config
 ```
 
+也可直接 `mocode` 进入 REPL 后用 `/model` 命令配置(交互选后端预设 + 逐项填写,即时生效 + 持久化)。未配置时 REPL 仍能打开,会提示你跑 `/model`。
+
 也可手写配置文件。mocode 按以下优先级加载(后者覆盖前者,仅回填未设置的环境变量;shell 里 `export` 的永远最优先):
 
 1. `~/.mocode/config` — 全局(`mocode config` 写此文件)
@@ -149,6 +151,7 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `/resume` | 续接已保存的会话 |
 | `/think` | 展开折叠思考段(`/think N`) |
 | `/rollback` | 菜单选轮次回滚(↑↓ · Enter) |
+| `/model` | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
 
 输入 `/` 触发下拉菜单,继续打字过滤;Esc 取消。
 

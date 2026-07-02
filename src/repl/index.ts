@@ -1,8 +1,8 @@
 import readline from 'node:readline/promises';
 import { emitKeypressEvents, type Key } from 'node:readline';
 import { stdin, stdout } from 'node:process';
-import { config, PLAN_MODE_SUFFIX } from '../config/index.js';
-import { updateConfigKey } from '../config/file.js';
+import { config, PLAN_MODE_SUFFIX, updateModelConfig, isModelConfigured } from '../config/index.js';
+import { updateConfigKey, writeConfigKeys, CONFIG_PATH } from '../config/file.js';
 import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { setSandboxRoot } from '../sandbox/root.js';
@@ -23,6 +23,7 @@ import { tools } from '../tools/registry.js';
 import {
   estimateMessagesTokens,
   estimateToolSchemaTokens,
+  reconfigureClient,
   type ChatMessage,
 } from '../llm/index.js';
 import {
@@ -74,6 +75,7 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/reflect', desc: '手动触发后台记忆反思 pass' },
   { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆' },
   { name: '/theme', desc: '切换颜色主题(↑↓·Enter)' },
+  { name: '/model', desc: '配置大模型(baseURL/key/model/窗口)' },
   { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
   { name: '/auto', desc: '切回 auto 模式(全工具执行)' },
 ];
@@ -86,6 +88,23 @@ const THEME_DESCRIPTIONS: Record<string, string> = {
   gruvbox: 'Gruvbox 暖色',
   nord: 'Nord 冷色',
 };
+
+/** /model 预设后端:选一个预填 baseURL,仍可逐项改。base_url 取自 README 常见表。 */
+const MODEL_PRESETS: { label: string; baseURL: string; model: string; window: number }[] = [
+  { label: 'GLM(智谱)', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', window: 128000 },
+  { label: 'DeepSeek', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', window: 64000 },
+  { label: 'Qwen(阿里)', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', window: 128000 },
+  { label: '本地 Ollama', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', window: 32768 },
+  { label: '本地 vLLM', baseURL: 'http://localhost:8000/v1', model: 'default', window: 32768 },
+  { label: '自定义 base_url', baseURL: '', model: '', window: 128000 },
+];
+
+/** apiKey 脱敏:只露末 4 位,前面打星号(显示用,绝不把明文 key 写进内容区)。 */
+function maskKey(k: string): string {
+  if (!k) return '(未设置)';
+  if (k.length <= 8) return '****';
+  return `${'='.repeat(Math.min(k.length - 4, 20))}${k.slice(-4)}`;
+}
 
 /**
  * /init 指令:发给 agent 扫描项目并生成 MOCODE.md(对标 Claude Code /init 生成 CLAUDE.md,
@@ -192,6 +211,8 @@ function runningStateFor(
       return { status: '清空', placeholder: '…' };
     case '/theme':
       return { status: '切主题', placeholder: '选择主题…' };
+    case '/model':
+      return { status: '配模型', placeholder: '配置中…' };
     default:
       // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由内联 spinner 承载(思考中/执行…),
       // 状态行只显走时——故常态 status 留空,不塞「处理」这种与内联重复的泛标签。
@@ -472,6 +493,12 @@ export async function startRepl(
   if (updateNotice) {
     // 自更新提示:开场静态段(进 INPUT 态前),dim 一行,不与流式 / 输入争用。
     layout.contentWrite(`  ${ui.gray}↳ ${updateNotice}${ui.reset}\n`);
+  }
+  if (!isModelConfigured()) {
+    // 未配置 baseURL/apiKey:醒目提示引导 /model(不退出,REPL 仍可用;发消息会失败但不崩)。
+    layout.contentWrite(
+      `${ui.yellow}  ⚠ 未配置大模型。输入 ${ui.cyan}/model${ui.yellow} 配置 baseURL / apiKey / model(即时生效),或退出后运行 ${ui.cyan}mocode config${ui.yellow} 走向导。${ui.reset}\n`,
+    );
   }
   layout.contentWrite(
     `${ui.dim}  /plan · /auto · Shift+Tab 切换模式(plan:只读探查 + 产出计划,审批后切 auto 执行)${ui.reset}\n`,
@@ -862,6 +889,172 @@ export async function startRepl(
       if (config.themeFromShell) {
         layout.contentWrite(
           `${ui.dim}(shell 环境变量 MOCODE_THEME 已设,文件写入下次启动被其覆盖;取消该 shell 设置后生效)${ui.reset}\n`
+        );
+      }
+      continue;
+    }
+    if (line === '/model' || line.startsWith('/model ')) {
+      // /model:运行时配置大模型(baseURL/apiKey/model/contextWindowTokens)。
+      // 即时生效(updateModelConfig 改内存 + env,reconfigureClient 重建 OpenAI 实例)+ 持久化(writeConfigKeys 写 ~/.mocode/config)。
+      // 仿 /theme:promptIntervention 弹菜单/输入 → 改 config → refreshStatusBase 刷底栏 → clearContent+banner 重显横幅 → dim 警告(shell env 覆盖)。
+      const arg = line.startsWith('/model ') ? line.slice('/model '.length).trim() : '';
+
+      // /model list:显示当前四项配置(apiKey 脱敏)。
+      if (arg === 'list' || arg === 'show') {
+        layout.contentWrite(`${ui.dim}当前模型配置:${ui.reset}\n`);
+        layout.contentWrite(`  ${ui.cyan}baseURL${ui.reset}  ${config.baseURL}\n`);
+        layout.contentWrite(`  ${ui.cyan}apiKey ${ui.reset}  ${maskKey(config.apiKey)}\n`);
+        layout.contentWrite(`  ${ui.cyan}model  ${ui.reset}  ${config.model}\n`);
+        layout.contentWrite(`  ${ui.cyan}窗口   ${ui.reset}  ${config.contextWindowTokens} tokens\n`);
+        layout.contentWrite(`${ui.dim}(配置文件: ${CONFIG_PATH})${ui.reset}\n`);
+        continue;
+      }
+
+      // 1) 选 provider 预设(预填 baseURL,后续仍可逐项改)。
+      let preset: typeof MODEL_PRESETS[number];
+      try {
+        const res = await promptIntervention({
+          type: 'choice',
+          title: '选择后端预设(预填 baseURL,后续可改)',
+          detail: '选一个会预填 baseURL/model/窗口,之后逐项确认。选「自定义」全部手填。',
+          options: MODEL_PRESETS.map((p) => p.label),
+        });
+        if (res.action === 'cancelled') { continue; }
+        const idx = MODEL_PRESETS.findIndex((p) => p.label === res.value);
+        if (idx === -1) { continue; }
+        preset = MODEL_PRESETS[idx];
+      } catch {
+        continue; // Ctrl+C
+      }
+
+      // 1.5) 一键应用确认:非「自定义」预设(带预填值)给直接应用入口,免连按 4 次回车。
+      //      直接应用 = 用预设 model/baseURL/window + 保留当前 apiKey(等价于下方逐项链连按回车)。
+      //      逐项修改 / 自定义输入(promptIntervention choice 自动追加的「其他」项 submitted)→ 回落 4 步链。
+      //      「自定义」预设字段空,跳过确认直接进链。
+      let quickApply = false;
+      if (preset.model || preset.baseURL) {
+        try {
+          const res = await promptIntervention({
+            type: 'choice',
+            title: `应用 ${preset.label}?`,
+            detail: `model   ${preset.model}\nbaseURL ${preset.baseURL}\napiKey  ${maskKey(config.apiKey)}(直接应用=保留当前)\n窗口    ${preset.window}`,
+            options: ['直接应用', '逐项修改'],
+          });
+          if (res.action === 'cancelled') { continue; }
+          if (res.action === 'selected' && res.value === '直接应用') {
+            quickApply = true;
+          }
+          // 其余(逐项修改 / 自定义输入 submitted)→ quickApply 保持 false,走下方逐项链
+        } catch {
+          continue; // Ctrl+C
+        }
+      }
+
+      // 2) 收集 baseURL / apiKey / model / contextWindowTokens。
+      //    quickApply:直接取预设值 + 当前 apiKey;否则逐项 input(预填 preset 值,回车=采纳;apiKey 不预填明文,回车=保留旧值)。
+      let baseURL: string;
+      let apiKey: string;
+      let model: string;
+      let window: number;
+      if (quickApply) {
+        baseURL = preset.baseURL;
+        apiKey = config.apiKey;
+        model = preset.model;
+        window = preset.window;
+      } else {
+        // baseURL
+        {
+          const res = await promptIntervention({
+            type: 'input',
+            title: 'LLM_BASE_URL',
+            detail: 'OpenAI 兼容 API 端点。回车采纳预填值。',
+            seed: preset.baseURL || config.baseURL,
+          });
+          if (res.action === 'cancelled') { continue; }
+          baseURL = (res.value ?? '').trim() || preset.baseURL || config.baseURL;
+        }
+        if (!baseURL) {
+          layout.contentWrite(`${ui.yellow}baseURL 不能为空,已取消。${ui.reset}\n`);
+          continue;
+        }
+
+        // apiKey(不预填明文:回车=保留旧值,输入新值=覆盖)
+        {
+          const res = await promptIntervention({
+            type: 'input',
+            title: 'LLM_API_KEY',
+            detail: `回车保留当前 ${maskKey(config.apiKey)};输入新值则覆盖。`,
+            seed: '',
+          });
+          if (res.action === 'cancelled') { continue; }
+          const v = (res.value ?? '').trim();
+          apiKey = v || config.apiKey;
+        }
+        if (!apiKey) {
+          layout.contentWrite(`${ui.yellow}apiKey 不能为空,已取消。${ui.reset}\n`);
+          continue;
+        }
+
+        // model
+        {
+          const res = await promptIntervention({
+            type: 'input',
+            title: 'LLM_MODEL',
+            detail: '模型名(须支持 function calling)。回车采纳预填值。',
+            seed: preset.model || config.model,
+          });
+          if (res.action === 'cancelled') { continue; }
+          model = (res.value ?? '').trim() || preset.model || config.model;
+        }
+        if (!model) {
+          layout.contentWrite(`${ui.yellow}model 不能为空,已取消。${ui.reset}\n`);
+          continue;
+        }
+
+        // contextWindowTokens
+        {
+          const res = await promptIntervention({
+            type: 'input',
+            title: 'CONTEXT_WINDOW_TOKENS',
+            detail: '模型上下文窗口(须对齐真实模型;GLM≈128k,DeepSeek-V3≈64k)。回车采纳预填值。',
+            seed: String(preset.window || config.contextWindowTokens),
+          });
+          if (res.action === 'cancelled') { continue; }
+          const v = (res.value ?? '').trim();
+          const n = Number(v);
+          if (!v || !Number.isFinite(n) || n <= 0) {
+            // 非法输入:保留旧值,不阻断(用 preset.window 或当前值兜底)
+            window = preset.window || config.contextWindowTokens;
+          } else {
+            window = Math.floor(n);
+          }
+        }
+      }
+
+      // 3) 应用:内存 config + env(updateModelConfig)→ 持久化(writeConfigKeys)→ 重建 client(reconfigureClient)。
+      updateModelConfig({ model, baseURL, apiKey, contextWindowTokens: window });
+      writeConfigKeys({
+        LLM_BASE_URL: baseURL,
+        LLM_API_KEY: apiKey,
+        LLM_MODEL: model,
+        CONTEXT_WINDOW_TOKENS: String(window),
+      });
+      reconfigureClient();
+
+      // 4) 刷新 UI:底栏模型名 + 重显横幅(banner() 闭包实时读 config,自动反映新值)。
+      refreshStatusBase(history);
+      layout.clearContent();
+      if (history.some((m) => m.role === 'user')) {
+        renderHistory(history);
+      } else {
+        layout.contentWrite(bannerString(banner()));
+      }
+      layout.contentWrite(`${ui.dim}(已切换模型 → ${model} @ ${baseURL})${ui.reset}\n`);
+
+      // 5) dim 警告:shell export 的 LLM 键下次启动会覆盖文件值。
+      if (config.llmKeysFromShell.length > 0) {
+        layout.contentWrite(
+          `${ui.dim}(shell 环境变量已设 ${config.llmKeysFromShell.join(' / ')},文件写入下次启动被其覆盖;取消该 shell 设置后生效)${ui.reset}\n`
         );
       }
       continue;

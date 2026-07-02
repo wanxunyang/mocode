@@ -30,6 +30,11 @@ function loadEnvFiles(): void {
 
 // 在 loadEnvFiles 回填前捕获:MOCODE_THEME 是否由 shell 设置(决定 /theme 写文件是否下次启动生效)。
 const themeFromShell = process.env.MOCODE_THEME !== undefined;
+// 在 loadEnvFiles 回填前捕获:哪些 LLM 键由 shell 设置(决定 /model 写文件是否下次启动生效)。
+// 仿 themeFromShell 模式:shell export 的环境变量在 loadEnvFiles 中不被回填(优先级最高),
+// 故 /model 写入 ~/.mocode/config 的同名键下次启动会被 shell 值覆盖——据此给 dim 警告。
+const LLM_ENV_KEYS = ['LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS'] as const;
+const llmKeysFromShell = LLM_ENV_KEYS.filter((k) => process.env[k] !== undefined);
 loadEnvFiles();
 
 export interface Config {
@@ -69,17 +74,25 @@ export interface Config {
   theme: string;
   /** MOCODE_THEME 是否由 shell 环境变量设置(非文件回填)。若是,/theme 写文件下次启动仍被 shell 盖。 */
   themeFromShell: boolean;
+  /** 由 shell 环境变量设置的 LLM 键名列表(非文件回填)。若含某键,/model 写该键下次启动仍被 shell 盖。 */
+  llmKeysFromShell: string[];
 }
 
+/**
+ * 取环境变量;缺则返回空字符串(不退出)。
+ * 历史上缺 LLM_BASE_URL/LLM_API_KEY 会 process.exit(1),但 /model 命令已能在 REPL 内配置模型,
+ * 故首次未配置也应让 REPL 起来,由开场提示引导用户跑 /model。发消息时 chat() 会抛错被 runTurn catch,不崩。
+ */
 function requireEnv(key: string): string {
-  const v = process.env[key];
-  if (!v) {
-    console.error(
-      `\n[config] 缺少 ${key}。运行 \`mocode config\` 初始化,或在 ~/.mocode/config / <cwd>/.env 中设置(参考 .env.example)。\n`
-    );
-    process.exit(1);
-  }
-  return v;
+  return process.env[key] || '';
+}
+
+/**
+ * 模型是否已配置(baseURL + apiKey 非空)。REPL 开场据此决定是否提示 /model。
+ * 未配置时 config.model 仍回退 'gpt-4o-mini',但发消息会因 baseURL/apiKey 空而失败——由 runTurn catch 友好提示。
+ */
+export function isModelConfigured(): boolean {
+  return !!config.baseURL && !!config.apiKey;
 }
 
 const PLATFORM_NOTE = (() => {
@@ -157,7 +170,7 @@ You are in PLAN mode: investigate and design only — do NOT execute or change a
 - Research thoroughly: locate the relevant code, trace call paths, and understand existing patterns and conventions before designing. Prefer codegraph when a .codegraph/ index exists.
 - Then produce a clear, actionable implementation plan: files to change (with paths), what to change in each and why, the ordered steps, edge cases to handle, and how to verify (typecheck / tests / build). Be specific enough to execute against.
 - Present the plan as your final reply and STOP, unless the user explicitly asked you to "plan first then execute" / "先 plan 再 auto" / autonomous execution: in that case, after presenting the plan, call the switch_mode tool with mode="auto" to switch back to auto mode WITHIN THE SAME TURN and continue implementing the plan yourself (your write/edit/command/memory-write tools become available again immediately). The user will see no approval prompt because you self-switched.
-- If the user entered plan mode manually (via /plan or Shift+Tab) for a safety review and did NOT ask for autonomous execution, do NOT call switch_mode — present the plan and STOP; the user will approve via a prompt and execution happens in a follow-up turn.`;
+- If the user entered plan mode manually (via /plan or Shift+Tab) for a safety review and did NOT ask for autonomous execution, do NOT call switch_mode — present the plan and STOP. Do NOT ask the user for confirmation or approval in your text reply (e.g. "is this plan OK?", "shall I proceed?", "需要你确认") — the REPL automatically shows an approval prompt after you STOP, so asking in text is redundant and forces the user to answer twice. Just present the plan and end your reply.`;
 
 export const config: Config = {
   baseURL: requireEnv('LLM_BASE_URL'),
@@ -180,4 +193,37 @@ export const config: Config = {
   searchBaseUrl: process.env.ANYSEARCH_BASE_URL || 'https://api.anysearch.com',
   theme: process.env.MOCODE_THEME || 'default',
   themeFromShell,
+  llmKeysFromShell,
 };
+
+/**
+ * 运行时更新模型相关配置(/model 命令调)。
+ * - 更新 config 对象字段(即时生效:chat() 读 config.model,reconfigureClient 读 config.baseURL/apiKey)。
+ * - 同步 process.env(保持内存一致:其他读 process.env 的路径也拿到新值;且使新值在下次启动的
+ *   loadEnvFiles 中被视为"已设",不被文件回填覆盖——即"优先拿这里的")。
+ * 持久化(写 ~/.mocode/config)由调用方走 writeConfigKeys,此处只管内存 + env。
+ * 重建 OpenAI 客户端(baseURL/apiKey 是构造时固化的实例字段)由调用方走 reconfigureClient。
+ */
+export function updateModelConfig(opts: {
+  model?: string;
+  baseURL?: string;
+  apiKey?: string;
+  contextWindowTokens?: number;
+}): void {
+  if (opts.model !== undefined) {
+    config.model = opts.model;
+    process.env.LLM_MODEL = opts.model;
+  }
+  if (opts.baseURL !== undefined) {
+    config.baseURL = opts.baseURL;
+    process.env.LLM_BASE_URL = opts.baseURL;
+  }
+  if (opts.apiKey !== undefined) {
+    config.apiKey = opts.apiKey;
+    process.env.LLM_API_KEY = opts.apiKey;
+  }
+  if (opts.contextWindowTokens !== undefined) {
+    config.contextWindowTokens = opts.contextWindowTokens;
+    process.env.CONTEXT_WINDOW_TOKENS = String(opts.contextWindowTokens);
+  }
+}

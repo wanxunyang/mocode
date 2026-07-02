@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 /**
  * ~/.mocode/config 全局 dotenv 配置的读写叶子(纯 node:fs / node:os / node:path + dotenv)。
  *
- * 独立于 `config/index.ts`——**不**触发 requireEnv / process.exit,故 `commands/config.ts`
+ * 独立于 `config/index.ts`——**不**触发 config 单例初始化 / loadEnvFiles,故 `commands/config.ts`
  * (首跑向导,刻意不 import config/index.ts)与 `repl/index.ts`(`/theme` 持久化)都能安全共享。
  * 主题等 UI 偏好走 `updateConfigKey` 单键写;向导多键一次性写走 `writeConfigKeys`。
  */

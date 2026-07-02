@@ -3,10 +3,23 @@ import { config } from '../config/index.js';
 import { tools } from '../tools/registry.js';
 import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
 
-const client = new OpenAI({
+let client = new OpenAI({
   baseURL: config.baseURL,
   apiKey: config.apiKey,
 });
+
+/**
+ * 运行时重建 OpenAI 客户端(/model 切换 baseURL/apiKey 后调)。
+ * config.model 已在 chat() 每次读取(热切),但 client 的 baseURL/apiKey 是构造时固化的实例字段,
+ * 改 config 后必须重建 client 才能让新 baseURL/apiKey 对后续请求生效。
+ * 子 agent 复用本模块 chat(),故只此一处重建即全链路生效。
+ */
+export function reconfigureClient(): void {
+  client = new OpenAI({
+    baseURL: config.baseURL,
+    apiKey: config.apiKey,
+  });
+}
 
 export type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 

@@ -11,7 +11,7 @@ function ask(rl: readline.Interface, q: string): Promise<string> {
  * 首跑配置向导:交互填 LLM_BASE_URL / LLM_API_KEY / LLM_MODEL,写 ~/.mocode/config。
  * 只交互三键、保留文件里其它键(MAX_TOKENS / CONTEXT_WINDOW_TOKENS / MOCODE_THEME 等)。
  * prompt 全纯文本(readline 光标按字符算,不能含 ANSI)。
- * 由 index.ts 在 `mocode config` 时动态加载,故不 import config/index.ts(避免缺配置时 requireEnv
+ * 由 index.ts 在 `mocode config` 时动态加载,故不 import config/index.ts(避免触发 config 单例初始化 / loadEnvFiles,
  * 直接退出);只 import config/file.ts(纯 I/O 叶子,无 env 校验 / process.exit)。
  */
 export async function runConfigWizard(): Promise<void> {
