@@ -145,12 +145,12 @@ function renderContextBar(history: ChatMessage[]): string {
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${history.length} 条消息 (${src})${ui.reset}`;
 }
 
-/** 状态行用量条(精简版,进底栏):[bar] pct% k/k。 */
+/** 状态行用量条(精简版,进底栏):[bar] pct% k/k。
+ * 只计算对话内容(不含 system prompt),让用户感知"我发了多少、agent 回复了多少"占用 context。 */
 function renderContextBarInline(history: ChatMessage[]): string {
-  const schema = estimateToolSchemaTokens();
-  const est =
-    contextState.lastUsage?.totalTokens ??
-    estimateMessagesTokens(history) + schema;
+  // 过滤掉 system 消息,只算对话内容
+  const dialog = history.filter(m => m.role !== 'system');
+  const est = estimateMessagesTokens(dialog);
   const win = config.contextWindowTokens;
   const pct = Math.min(1, est / win);
   const W = 10;
