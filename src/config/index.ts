@@ -46,6 +46,9 @@ export interface Config {
   includeUsage: boolean;
   /** 自动压缩总开关。关掉则只靠手动 /compact。 */
   autoCompact: boolean;
+  /** Context Optimization Pipeline 总开关(工具结果进 LLM 前的类型化编码:tree/search/log/…)。
+   *  关掉则工具结果原样进 LLM(仅长度裁剪),零行为变化。默认 true。 */
+  contextOptimize: boolean;
   /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
   autoReflect: boolean;
   /** 每 N 个轮次触发一次后台反思 pass(与 agent 并发,不阻塞)。默认 5。 */
@@ -165,6 +168,7 @@ export const config: Config = {
   compactThreshold: Number(process.env.COMPACT_THRESHOLD) || 0.85,
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
   autoCompact: process.env.AUTO_COMPACT !== 'false',
+  contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
   autoReflect: process.env.AUTO_REFLECT !== 'false',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   maxSteps: Number(process.env.MAX_STEPS) || 200,

@@ -17,11 +17,8 @@ import {
 import { executeTool } from '../tools/registry.js';
 import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
-import {
-  maybeCompact,
-  capToolResultForHistory,
-  contextState,
-} from '../session/index.js';
+import { maybeCompact, contextState } from '../session/index.js';
+import { optimizeToolResult } from '../context/index.js';
 import { config } from '../config/index.js';
 import { jailResolve } from '../sandbox/index.js';
 
@@ -89,7 +86,9 @@ function readDiffContext(
   return { preWriteOld: null, editStartLine: 1 };
 }
 
-/** 回灌 tool 结果到 history(裁到单条上限);tool_call_id 与 assistant.tool_calls 按序配对。 */
+/** 回灌 tool 结果到 history:经 Context Optimization Pipeline 编码(tree/search/log/...)后裁到单条上限。
+ *  tool_call_id 与 assistant.tool_calls 按序配对。未注册 encoder 时回落 capToolResultForHistory(零行为变化)。
+ *  TUI 渲染(hooks.onToolResult)用原始 output,与此解耦——屏上看全量,LLM 看编码后紧凑版。 */
 function pushToolResult(
   history: ChatMessage[],
   tc: ToolCallRef,
@@ -98,7 +97,9 @@ function pushToolResult(
   history.push({
     role: 'tool',
     tool_call_id: tc.id,
-    content: capToolResultForHistory(tc.name, output),
+    // optimizeToolResult:classifier 选 encoder → encode(保不变量压缩)→ capToolResultForHistory 兜底。
+    // tc.arguments 透传给 encoder(上下文感知编码,如 read_file 的 offset/limit)。永不抛错。
+    content: optimizeToolResult(tc.name, output, tc.arguments),
   } as ChatMessage);
 }
 
@@ -176,7 +177,7 @@ export interface AgentRunResult {
  *  流式调 LLM(经 hooks.onText 实时渲染)→ 有 tool_calls 就分组执行并回灌
  *  → 否则流式正文即最终回复。history 在调用间持久,由调用方持有。
  *  步前经 session/maybeCompact 自动压缩(接近窗口上限时三层压缩);
- *  工具结果进 history 前经 capToolResultForHistory 裁到单条上限。
+ *  工具结果进 history 前经 Context Optimization Pipeline(optimizeToolResult:类型化编码 + 长度裁剪)。
  *
  *  中断语义:signal 经 executeTool(name, args, signal) 串进工具;run_command/web_fetch 等 abort 即时杀
  *  (树杀子进程 / 取消 fetch),循环顶 if(signal.aborted) 兜底还原。不会留下未配对的 tool_call_id。
