@@ -17,10 +17,11 @@ import {
 import { executeTool } from '../tools/registry.js';
 import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
-import { maybeCompact, contextState } from '../session/index.js';
+import { maybeCompact, contextState, dropContextFromHistory } from '../session/index.js';
 import { optimizeToolResult } from '../context/index.js';
 import { config } from '../config/index.js';
 import { jailResolve } from '../sandbox/index.js';
+import type { DropContextFilter, DropContextResult } from '../tools/types.js';
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
 function parseArgs(raw: string): Record<string, unknown> | null {
@@ -201,6 +202,11 @@ export async function runAgentCore(
   const t0 = Date.now();
   let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
   history.push({ role: 'user', content: userInput });
+  // drop_context 工具的上下文剔除回调:闭包捕获 history,原地剔除无关旧 tool 结果。
+  // 保护由 dropContextFromHistory 内部保证:history[0](system)+ 当前轮(最后 user 及其后)永不剔除。
+  // 子 agent 也在自己的 history 上操作(子 agent 独立 history);skipRollback 不影响此行为。
+  const dropContext = (filter: DropContextFilter): DropContextResult =>
+    dropContextFromHistory(history, filter);
   // 本轮流式状态:首个正文 token 到达即停 spinner(思考期间 spinner 持续转「思考中…」,不写思考内容)。
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
@@ -304,7 +310,7 @@ export async function runAgentCore(
             let j = i;
             while (j < calls.length && READ_TOOL_NAMES.has(calls[j].name)) j++;
             const batch = calls.slice(i, j);
-            const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal, { skipRollback }));
+            const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext }));
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
               hooks.onToolHeader?.(tc);
@@ -338,7 +344,7 @@ export async function runAgentCore(
             let j = i;
             while (j < calls.length && calls[j].name === 'task') j++;
             const batch = calls.slice(i, j);
-            const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal, { skipRollback }));
+            const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext }));
             // 先批量打印所有头 + 启 spinner(多 task 并发,spinner 只显一个,但 ● 头都打出来)
             for (const tc of batch) {
               hooks.onToolHeader?.(tc);
@@ -372,7 +378,7 @@ export async function runAgentCore(
               : null;
             const { preWriteOld, editStartLine } = readDiffContext(tc, parsed);
             hooks.onToolStart?.(tc.name);
-            const output = await executeTool(tc.name, tc.arguments, signal, { skipRollback });
+            const output = await executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext });
             hooks.onToolDone?.();
             hooks.onToolResult?.(tc, output, parsed, preWriteOld, editStartLine);
             pushToolResult(history, tc, output);

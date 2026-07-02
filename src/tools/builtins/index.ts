@@ -11,6 +11,7 @@ import { useSkillTool } from './use-skill.js';
 import { askHumanTool } from './ask-human.js';
 import { codegraphTool } from './codegraph.js';
 import { switchModeTool } from './switch-mode.js';
+import { dropContextTool } from './drop-context.js';
 import { memorySaveTool } from './memory-save.js';
 import { memorySearchTool } from './memory-search.js';
 import { memoryListTool } from './memory-list.js';
@@ -35,6 +36,7 @@ export const builtinTools: Tool[] = [
   useSkillTool,
   askHumanTool,
   switchModeTool, // plan↔auto 自切(两模式都可见,不进 PLAN_DISABLED_TOOLS;副作用控制工具→串行分支)
+  dropContextTool, // 运行中剔除无关 tool 结果(上下文管理,无副作用;两模式都可见,串行分支)
   memorySaveTool,
   memorySearchTool,
   memoryListTool,

@@ -1,4 +1,4 @@
-import type { Tool } from './types.js';
+import type { Tool, ToolContext, DropContextFilter, DropContextResult } from './types.js';
 import { builtinTools } from './builtins/index.js';
 import { recordMutation } from '../rollback/index.js';
 import { enforceSandbox } from '../sandbox/index.js';
@@ -14,12 +14,13 @@ export const tools: Tool[] = builtinTools;
  * signal 透传给 tool.execute(经 ctx):长任务工具(run_command/web_fetch)abort 即时取消,
  * 让用户 Ctrl+C 能跟手中断工具执行(而非等命令跑完 / 超时)。
  * opts.skipRollback:子 agent 逻辑隔离用——跳过 recordMutation,子 agent 改动不进主回滚快照链。
+ * opts.dropContext:上下文剔除回调(drop_context 工具用),透传给 tool.execute 经 ctx。
  */
 export async function executeTool(
   name: string,
   argsRaw: string,
   signal?: AbortSignal,
-  opts?: { skipRollback?: boolean }
+  opts?: { skipRollback?: boolean; dropContext?: (filter: DropContextFilter) => DropContextResult }
 ): Promise<string> {
   const tool = tools.find((t) => t.name === name);
   if (!tool) return `错误:未知工具 "${name}"`;
@@ -45,10 +46,14 @@ export async function executeTool(
     ) {
       recordMutation(args.path);
     }
-    return await tool.execute(args, { signal, skipRollback: opts?.skipRollback });
+    return await tool.execute(args, {
+      signal,
+      skipRollback: opts?.skipRollback,
+      dropContext: opts?.dropContext,
+    });
   } catch (e) {
     return `错误:工具 ${name} 执行失败: ${e instanceof Error ? e.message : String(e)}`;
   }
 }
 
-export type { Tool } from './types.js';
+export type { Tool, ToolContext, DropContextFilter, DropContextResult } from './types.js';

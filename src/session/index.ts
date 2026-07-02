@@ -14,6 +14,11 @@ export {
 export type { CompactOptions, CompactResult } from './compact.js';
 
 export {
+  dropContextFromHistory,
+  formatDropResult,
+} from './drop.js';
+
+export {
   newSessionId,
   saveSession,
   loadSession,

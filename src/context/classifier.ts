@@ -10,7 +10,7 @@
 
 import type { ContextKind } from './types.js';
 
-/** 工具名 → ContextKind 的强先验表(覆盖全部 17 内置工具)。 */
+/** 工具名 → ContextKind 的强先验表(覆盖全部 18 内置工具)。 */
 const BY_NAME: Record<string, ContextKind> = {
   // tree:路径列表 → 缩进树
   glob: 'tree',
@@ -35,6 +35,7 @@ const BY_NAME: Record<string, ContextKind> = {
   write_file: 'status',
   ask_human: 'status',
   switch_mode: 'status',
+  drop_context: 'status',
   memory_save: 'status',
   memory_update: 'status',
   memory_forget: 'status',
