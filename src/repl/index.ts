@@ -298,6 +298,12 @@ function onRunningKey(_str: string, key?: Key): void {
   }
 }
 
+/** 鼠标右键单击输入框(未拖动)时 layout 读剪贴板后回调:追加到 typeahead 缓冲(简单粘贴,不分长短)。 */
+function onRunningMousePaste(text: string): void {
+  runningInput += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+}
+
 /** 进入运行态:挂 keypress 监听 + raw mode + 新建 abort 控制器,返回其 signal。在 await runAgent 前、enterRunningMode 后调。 */
 function startRunningListener(placeholder: string): AbortSignal {
   runningPlaceholder = placeholder;
@@ -310,6 +316,7 @@ function startRunningListener(placeholder: string): AbortSignal {
   }
   stdin.resume();
   emitter.on('keypress', onRunningKey);
+  layout.setPasteHandler(onRunningMousePaste); // 鼠标右键单击输入框(未拖动)→ 读剪贴板贴入
   const ac = new AbortController();
   currentAbort = ac;
   return ac.signal;
@@ -318,6 +325,7 @@ function startRunningListener(placeholder: string): AbortSignal {
 /** 退出运行态:摘监听 + 清 abort。不 pause / 不 setRawMode(false)——紧接着 promptWithSlashMenu 自己接管 raw。 */
 function stopRunningListener(): void {
   emitter.off('keypress', onRunningKey);
+  layout.setPasteHandler(null);
   currentAbort = null;
 }
 

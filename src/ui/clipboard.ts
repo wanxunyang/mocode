@@ -2,14 +2,18 @@ import { stdout, platform } from 'node:process';
 import { spawn } from 'node:child_process';
 
 /**
- * 系统剪贴板写入(叶子模块,无 UI 依赖)。选区复制(layout 鼠标选择)与 /copy 等命令共用。
+ * 系统剪贴板读写(叶子模块,无 UI 依赖)。
  *
- * 双通道:
+ * 写入(copyToClipboard):选区复制(layout 鼠标选择)与 /copy 等命令共用,双通道:
  *  1. OSC 52(`\x1B]52;c;<base64>\x07`):请求终端把文本写入系统剪贴板。经终端转发,SSH / 远程也生效;
  *     Windows Terminal ≥1.16、iTerm2、kitty、WezTerm 等支持(部分终端默认关,需开"允许应用访问剪贴板")。
  *  2. 本地原生工具(best-effort,失败静默):win32=clip.exe(UTF-16LE)、darwin=pbcopy、
  *     linux=wl-copy / xclip / xsel。覆盖 OSC52 被禁用的场景(如部分 VS Code 集成终端配置)。
  * 两条都发:哪条生效由环境决定,重复写同一内容无副作用。
+ *
+ * 读取(readClipboard):OSC 52 是单向的(终端不会把剪贴板内容回传给应用,即便发 `\x1B]52;c;?\x07`
+ * 请求读取,多数终端出于安全考虑不响应),故读只能靠本地原生工具:win32=PowerShell Get-Clipboard、
+ * darwin=pbpaste、linux=wl-paste / xclip -o / xsel -o。供鼠标点击输入框时"贴入"用。
  */
 
 /** OSC 52:base64(UTF-8) 写系统剪贴板(c=clipboard 选区)。 */
@@ -58,4 +62,58 @@ export function copyToClipboard(text: string): void {
   if (!text) return;
   osc52(text);
   nativeCopy(text);
+}
+
+/** spawn 一个不吃 stdin、把 stdout 收集成字符串的命令;失败返回 null(不抛)。 */
+function captureOutput(cmd: string, args: string[], encoding: BufferEncoding): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+      const chunks: Buffer[] = [];
+      let settled = false;
+      const finish = (v: string | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(v);
+      };
+      p.stdout.on('data', (c: Buffer) => chunks.push(c));
+      p.stdout.on('error', () => finish(null));
+      p.on('error', () => finish(null));
+      p.on('close', (code) => {
+        if (code !== 0) return finish(null);
+        finish(Buffer.concat(chunks).toString(encoding));
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * 读取系统剪贴板(本地原生工具,OSC52 无法读取——终端不回传)。
+ * win32 用 PowerShell -NoProfile Get-Clipboard(比 clip.exe 只写无读更可靠,系统自带无需安装);
+ * darwin=pbpaste;linux 依次尝试 wl-paste / xclip -o / xsel -o,装了哪个用哪个。
+ * 都失败返回空串(不抛),调用方按"无内容可贴"处理。
+ */
+export async function readClipboard(): Promise<string> {
+  if (platform === 'win32') {
+    // Get-Clipboard 默认按控制台代码页输出;显式转 UTF8 避免中文乱码。
+    const out = await captureOutput(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command',
+        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Clipboard -Raw'],
+      'utf8'
+    );
+    return out?.replace(/\r\n/g, '\n').replace(/\r$/, '') ?? '';
+  }
+  if (platform === 'darwin') {
+    return (await captureOutput('pbpaste', [], 'utf8')) ?? '';
+  }
+  // linux:按顺序试,第一个成功(非 null)即用
+  const wl = await captureOutput('wl-paste', ['--no-newline'], 'utf8');
+  if (wl != null) return wl;
+  const xc = await captureOutput('xclip', ['-selection', 'clipboard', '-o'], 'utf8');
+  if (xc != null) return xc;
+  const xs = await captureOutput('xsel', ['--clipboard', '--output'], 'utf8');
+  return xs ?? '';
 }

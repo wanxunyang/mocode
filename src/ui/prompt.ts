@@ -110,6 +110,7 @@ export async function promptWithSlashMenu(
   let cc = lines[cl].length; // 光标在该行的字符索引 = 末行末尾
   let justSawCR = false; // \r\n 合一:粘贴的 \r 折行后,紧跟的 \n 吞掉(避免折两行)
   let chip: string | null = null; // 原子粘贴块:整段封进 [预览…],不可编辑;提交时拼回全文
+  let chipPre = ''; // chip 之前已存在的文本(粘贴发生时光标前的原文,原样多行保留,不截断);随 chip 一起提交/删除
   let menuOpen = false;
   let selected = 0;
   let filtered: SlashCommand[] = [];
@@ -143,15 +144,28 @@ export async function promptWithSlashMenu(
   function chipPrefix(): string {
     return chip ? `[${truncateDisplay(chip.split('\n').join(' '), 20)}] ` : '';
   }
-  /** 供 layout 画的行:chip 存在时把前缀拼到第 0 行前(chip 原子显示,不可编辑;光标活在 suffix)。 */
+  /** chipPre 按行拆分(粘贴发生前光标之前已有的文本,可能多行,原样保留在 chip 之前)。 */
+  function chipPreLines(): string[] {
+    return chip ? chipPre.split('\n') : [];
+  }
+  /** 供 layout 画的行:chipPre 的行原样排在前面,最后一行接上 chip 前缀 + suffix 第 0 行
+   * (chip 原子显示,不可编辑;chipPre 同样不可直接编辑,光标只活在 suffix)。 */
   function dispLines(): string[] {
     if (!chip) return lines;
-    const pre = chipPrefix();
-    return lines.length > 0 ? [pre + lines[0], ...lines.slice(1)] : [pre];
+    const pre = chipPreLines();
+    const lastPre = pre[pre.length - 1];
+    const mergedRow = lastPre + chipPrefix() + lines[0];
+    return [...pre.slice(0, -1), mergedRow, ...lines.slice(1)];
   }
-  /** 供 layout 定位光标列:chip 在第 0 行时偏移 chipPrefix 宽度(suffix 光标始终在 chip 之后)。 */
+  /** 供 layout 定位光标行:chipPre 多出的行数计入偏移(suffix 的 cl=0 对应 chipPre 最后一行所在的合并行)。 */
+  function dispCursorLine(): number {
+    return chip ? chipPreLines().length - 1 + cl : cl;
+  }
+  /** 供 layout 定位光标列:chip 在合并行(cl===0)时偏移 chipPre 末行宽度 + chipPrefix 宽度。 */
   function dispCursorCol(): number {
-    return chip && cl === 0 ? displayWidth(chipPrefix()) + cursorCol() : cursorCol();
+    if (!chip || cl !== 0) return cursorCol();
+    const pre = chipPreLines();
+    return displayWidth(pre[pre.length - 1]) + displayWidth(chipPrefix()) + cursorCol();
   }
   /** 在光标处插入文本(含换行则拆行)。供短粘贴 finalize 落为可编辑文本。 */
   function insertText(text: string): void {
@@ -167,6 +181,33 @@ export async function promptWithSlashMenu(
     // 旧值 parts[...].length 漏算 before → 光标落到插入文本内部(行中间)→ 后续打字插到中间(bug)。
     cc = before.length + parts[parts.length - 1].length;
   }
+  /** 落一段粘贴文本(长/短判定与 chip 逻辑,finalizePaste 与鼠标点击贴入共用)。
+   * 长粘贴落 chip 时不再吞掉用户已打的字:光标前的文本并入 chipPre(原样保留,与 chip 一起原子化),
+   * 光标后的文本留在 suffix(lines)——即"前段文字 [长文本…] 后段文字"而非清空覆盖。 */
+  function applyPastedText(buf: string): void {
+    if (!buf) return;
+    const isLong = buf.split('\n').length > 8 || buf.length > 400;
+    if (isLong) {
+      const before = lines[cl].slice(0, cc);
+      const after = lines[cl].slice(cc);
+      if (chip == null) {
+        // 首次起 chip:光标前的行(含之前的整行)转入 chipPre,光标后的部分留作 suffix 首行。
+        chipPre = [...lines.slice(0, cl), before].join('\n');
+        chip = buf;
+      } else {
+        // 已有 chip:光标前若已打了字(chip 之后、本次粘贴之前),并入 chip 尾部保留(不丢字),
+        // 光标后的部分仍留作 suffix 首行。
+        chip = before ? chip + '\n' + before + '\n' + buf : chip + '\n' + buf;
+      }
+      lines = [after, ...lines.slice(cl + 1)];
+      cl = 0;
+      cc = 0;
+    } else {
+      insertText(buf);
+    }
+    computeFiltered();
+    redraw();
+  }
   /** 粘贴结束:长粘贴(>8 行或 >400 字符)落/并进 chip(原子,整段封预览),短粘贴落为可编辑文本。 */
   function finalizePaste(): void {
     if (resolved) {
@@ -176,18 +217,12 @@ export async function promptWithSlashMenu(
     const buf = pasteParts.join('');
     pasteParts = [];
     justSawCR = false;
-    if (!buf) return;
-    const isLong = buf.split('\n').length > 8 || buf.length > 400;
-    if (isLong) {
-      chip = chip == null ? buf : chip + '\n' + buf; // 多块粘贴:并进同一 chip
-      lines = [''];
-      cl = 0;
-      cc = 0;
-    } else {
-      insertText(buf);
-    }
-    computeFiltered();
-    redraw();
+    applyPastedText(buf);
+  }
+  /** 鼠标右键单击输入框(未拖动)时 layout 读剪贴板后回调:与键盘粘贴走同一落地逻辑(长/短判定)。 */
+  function onMousePaste(text: string): void {
+    if (resolved) return;
+    applyPastedText(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
   }
 
   function computeFiltered(): void {
@@ -205,13 +240,14 @@ export async function promptWithSlashMenu(
     layout.paintInput({
       prompt: opts.prompt,
       lines: dispLines(),
-      cursorLine: cl,
+      cursorLine: dispCursorLine(),
       cursorCol: dispCursorCol(),
       menu: menuLines().length ? { lines: menuLines() } : null,
     });
   }
 
   function cleanup(): void {
+    layout.setPasteHandler(null);
     try {
       stdin.setRawMode(false);
     } catch {
@@ -235,7 +271,7 @@ export async function promptWithSlashMenu(
     resolve(value);
   }
 
-  /** 提交:菜单打开时先补全选中项到第 0 行。chip 与 suffix 拼回全文(chip 在前,换行接 suffix)。 */
+  /** 提交:菜单打开时先补全选中项到第 0 行。chipPre + chip + suffix 依次拼回全文(保留粘贴前后原有文字)。 */
   function submit(): void {
     if (menuOpen && filtered[selected]) {
       lines = [filtered[selected].name];
@@ -243,7 +279,11 @@ export async function promptWithSlashMenu(
       cc = lines[0].length;
     }
     const suffix = lines.join('\n');
-    const content = chip ? (suffix.length > 0 ? chip + '\n' + suffix : chip) : suffix;
+    let content = suffix;
+    if (chip) {
+      content = suffix.length > 0 ? chip + '\n' + suffix : chip;
+      if (chipPre) content = chipPre + '\n' + content;
+    }
     finish(content === '' ? [''] : content.split('\n'));
   }
 
@@ -265,6 +305,7 @@ export async function promptWithSlashMenu(
     cl = 0;
     cc = 0;
     chip = null;
+    chipPre = '';
     menuOpen = false;
     filtered = [];
     selected = 0;
@@ -415,8 +456,14 @@ export async function promptWithSlashMenu(
           computeFiltered();
           redraw();
         } else if (chip) {
-          // 光标在 suffix 开头(紧贴 ] 后):退格删整个 chip(原子)
+          // 光标在 suffix 开头(紧贴 ] 后):退格删整个 chip(原子),chipPre 还原为可编辑行,
+          // 光标落在 chipPre 末尾(紧接原来打的字继续编辑)。
+          const preLines = chipPre ? chipPre.split('\n') : [''];
+          lines = [...preLines.slice(0, -1), preLines[preLines.length - 1] + lines[0], ...lines.slice(1)];
+          cl = preLines.length - 1;
+          cc = preLines[preLines.length - 1].length;
           chip = null;
+          chipPre = '';
           computeFiltered();
           redraw();
         }
@@ -508,13 +555,14 @@ export async function promptWithSlashMenu(
       rawOk = false;
     }
     if (!rawOk) {
-      // isTTY 但 setRawMode 失败(罕见):退化为 readline
+      // isTTY 但 setRawMode 失败(罕见):退化为 readline,不注册 setPasteHandler(不走 cleanup,防泄漏)
       questionFallback(opts.prompt).then(
         (a) => res([a]),
         (e) => rej(e)
       );
       return;
     }
+    layout.setPasteHandler(onMousePaste); // 鼠标右键单击输入框(未拖动)→ 读剪贴板贴入;cleanup 时注销
     stdin.resume();
     emitter.on('keypress', onKey);
     computeFiltered();

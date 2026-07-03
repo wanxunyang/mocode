@@ -16,7 +16,7 @@ import {
 import { ui } from './theme.js';
 import * as content from './content.js';
 import * as mouse from './mouse.js';
-import { copyToClipboard } from './clipboard.js';
+import { copyToClipboard, readClipboard } from './clipboard.js';
 import { renderMarkdown } from './markdown.js';
 
 /**
@@ -122,18 +122,22 @@ interface Selection {
 let selection: Selection | null = null;
 let selecting = false; // 左键按下中(press→release 之间)
 let mouseEnabled = true; // 导航菜单(picker)期间置 false:只吞报表不做选区/滚动,防菜单被 viewport 重画覆盖
-let toastText = ''; // 复制提示(画在虚拟空行,短时后清)
-let toastTimer: NodeJS.Timeout | null = null;
 const WHEEL_LINES = 3; // 滚轮每格滚动行数
+// 点击输入框粘贴:当前文本输入方(prompt.ts / repl 运行态 typeahead)注册回调,接收剪贴板文本贴入。
+// 只在输入区(底栏输入行)内右键单击(未拖动)时触发——与内容区选区互不干扰(内容区左键=框选,右键=复制)。
+let pasteHandler: ((text: string) => void) | null = null;
 
 const esc = {
   altOn: '\x1B[?1049h',
   altOff: '\x1B[?1049l',
   // 完整鼠标追踪(仿 Claude Code 全屏渲染):1000=按键(按下/释放)+ 1002=拖动 motion + 1006=SGR 编码。
   // 拿到按下/拖动/释放的坐标后,由 layout 在应用层维护选区(mouse.ts 重组报表 → handleMouseEvent):
-  // 拖过多屏(触边自动翻页)→ 松开时从 content 缓冲抠出完整文本 → 写系统剪贴板(clipboard.ts)。
-  // 代价:终端原生框选被鼠标捕获接管——想用终端原生选区可按住 Shift(多数终端放行);
-  // 滚轮报表(button&64)也经此转发,由 handleMouseEvent 转 scrollBy。
+  //  - 左键:内容区按下开选区、拖动扩展(触边自动翻页跨屏)、释放只留高亮,不自动复制;输入框不响应
+  //    (不干扰正常打字/焦点)。
+  //  - 右键(单击,press→release 未拖动):落在输入框 → 读剪贴板贴入(setPasteHandler 回调);
+  //    落在内容区 → 复制当前选区(若有)到剪贴板(clipboard.ts),静默不弹提示。
+  //  - 滚轮报表(button&64)转 scrollBy。
+  // 代价:终端原生框选被鼠标捕获接管——想用终端原生选区可按住 Shift(多数终端放行)。
   mouseOn: '\x1B[?1000h\x1B[?1002h\x1B[?1006h',
   mouseOff: '\x1B[?1006l\x1B[?1002l\x1B[?1000l', // 关:反序
   cursorShow: '\x1B[?25h',
@@ -597,6 +601,15 @@ export function clearSelection(): void {
   if (scrollOffset >= 0) repaintViewport();
 }
 
+/**
+ * 注册"点击输入框粘贴"回调:当前持有文本输入的模块(prompt.ts 的 promptWithSlashMenu / repl 运行态
+ * typeahead)在挂键盘监听时调,退出时传 null 注销。点击输入行(未拖动)时 layout 读剪贴板后回调此函数,
+ * 由回调方完成插入(各输入状态的行/光标结构不同,layout 不掺和文本编辑逻辑,只管"贴入"这个动作触发)。
+ */
+export function setPasteHandler(fn: ((text: string) => void) | null): void {
+  pasteHandler = fn;
+}
+
 /** picker / 介入面板期间禁用鼠标选区与滚轮(避免 viewport 重画覆盖菜单);面板退出后恢复。 */
 export function setMouseEnabled(v: boolean): void {
   mouseEnabled = v;
@@ -607,36 +620,6 @@ export function setMouseEnabled(v: boolean): void {
       repaintViewport();
     }
   }
-}
-
-function showToast(text: string): void {
-  toastText = text;
-  if (toastTimer) clearTimeout(toastTimer);
-  const g = getGeo();
-  stdout.write(cup(g.contentBottom + 1, 1) + esc.clearLine + `${ui.green}${text}${ui.reset}`);
-  // 光标归续写位 / 输入框(toast 是一次性旁写,不抢光标)
-  if (mode === 'running') {
-    const p = runningCaretPos();
-    stdout.write(cup(p.row, p.col));
-  } else {
-    stdout.write(cup(scrollOffset === 0 ? contentRow : g.contentBottom, scrollOffset === 0 ? contentCol : 1));
-  }
-  const t = setTimeout(() => {
-    toastTimer = null;
-    toastText = '';
-    if (active) {
-      const gg = getGeo();
-      stdout.write(cup(gg.contentBottom + 1, 1) + esc.clearLine);
-      if (mode === 'running') {
-        const p = runningCaretPos();
-        stdout.write(cup(p.row, p.col));
-      } else {
-        stdout.write(cup(scrollOffset === 0 ? contentRow : gg.contentBottom, scrollOffset === 0 ? contentCol : 1));
-      }
-    }
-  }, 1800);
-  t.unref();
-  toastTimer = t;
 }
 
 /** 从归一化选区抠出纯文本(去 ANSI,按显示列裁切,行间 \n 拼接)。越界行跳过(缓冲被 trim 等边界情况)。 */
@@ -654,10 +637,34 @@ function extractSelectionText(sel: { startLine: number; startCol: number; endLin
   return out.join('\n');
 }
 
+/** 屏行是否落在底栏输入行范围内(paintInput 的 firstInputRow..firstInputRow+inputRowsAvail-1)。 */
+function isInputRow(row: number): boolean {
+  const g = getGeo();
+  const firstInputRow = g.contentBottom + 4;
+  const inputRowsAvail = Math.max(0, g.footerH - 5);
+  return row >= firstInputRow && row < firstInputRow + inputRowsAvail;
+}
+
+/** 右键单击输入行(未拖动的 press→release):读剪贴板 + 回调 pasteHandler 贴入。异步但不阻塞其他事件。 */
+function pasteIntoInput(): void {
+  if (!pasteHandler) return;
+  const handler = pasteHandler;
+  readClipboard()
+    .then((text) => {
+      if (text && active) handler(text);
+    })
+    .catch(() => {});
+}
+
 /**
- * 鼠标事件分发(mouse.setHandler 注册)。press 开选区;drag 扩展选区(触内容区上下边缘自动翻页,
- * 边缘每次 motion 事件滚 WHEEL_LINES 行——无独立定时器,靠终端持续发 motion 驱动,足够跟手);
- * release 若真拖动过(dragged)则抠文字写剪贴板 + toast 提示,纯点击只清旧选区。
+ * 鼠标事件分发(mouse.setHandler 注册)。
+ *  - 左键(button 0):内容区按下开选区、拖动扩展(触边自动翻页)、释放只更新高亮**不复制**;
+ *    纯点击(未拖动)清空旧选区(点别处的常见预期);落在输入行不做任何特殊处理(不选区、不粘贴——
+ *    留给终端 / 正常打字焦点行为,避免误触发)。
+ *  - 右键(button 2,单击 = press→release 未拖动):落在输入行 → 读剪贴板贴入(仿常见终端"右键粘贴");
+ *    落在内容区 → 复制当前选区(若有)到剪贴板后立即清空高亮(视觉确认"已复制",不留旧选区误导),
+ *    静默不弹提示;都无对应状态则 no-op。
+ *  - 滚轮(button&64,由 mouse.ts 解析为 wheel 事件):照常 scrollBy。
  * 选区坐标存绝对缓冲行(viewportAbsStart + 屏行),故翻页 / 追加新内容期间选区锚点仍指向同段文字。
  */
 function handleMouseEvent(e: mouse.MouseEvent): void {
@@ -666,12 +673,32 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     if (mouseEnabled) scrollBy(e.dir * WHEEL_LINES);
     return;
   }
-  if (!mouseEnabled || e.button !== 0) return; // 仅左键框选;中/右键不处理(终端原生右键菜单等不受影响)
+  if (!mouseEnabled) return;
   const g = getGeo();
-  const rowInContent = Math.max(1, Math.min(e.row, g.contentBottom));
   const col = Math.max(0, e.col - 1); // SGR 报表列 1-based → 显示列 0-based
+
+  // 右键释放:落输入行 → 贴入;落内容区 → 复制当前选区后清空(去掉高亮),不可重复右键复制同一选区。
+  if (e.type === 'release' && e.button === 2) {
+    if (isInputRow(e.row)) {
+      pasteIntoInput();
+      return;
+    }
+    const sel = normalizeSelection();
+    if (!sel) return;
+    const text = extractSelectionText(sel);
+    selection = null;
+    repaintViewport(); // 复制后清高亮:视觉反馈"已复制",不留旧选区误导
+    if (!text) return;
+    copyToClipboard(text);
+    return;
+  }
+
+  if (e.button !== 0) return; // 其余中/右键 press/drag 不处理(终端原生右键菜单等不受影响)
+
   if (e.type === 'press') {
+    if (isInputRow(e.row)) return; // 输入行左键不做选区(不干扰正常打字/焦点)
     selecting = true;
+    const rowInContent = Math.max(1, Math.min(e.row, g.contentBottom));
     const absLine = screenRowToAbsLine(rowInContent);
     selection = { anchorLine: absLine, anchorCol: col, endLine: absLine, endCol: col, dragged: false };
     repaintViewport();
@@ -682,6 +709,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     // 触边自动翻页:motion 事件持续到达时靠此逐步滚动,把选区扩展到滚出去的历史行。
     if (e.row <= 1) scrollBy(WHEEL_LINES);
     else if (e.row >= g.contentBottom) scrollBy(-WHEEL_LINES);
+    const rowInContent = Math.max(1, Math.min(e.row, g.contentBottom));
     const absLine = screenRowToAbsLine(rowInContent);
     if (absLine !== selection.endLine || col !== selection.endCol) selection.dragged = true;
     selection.endLine = absLine;
@@ -689,23 +717,16 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     repaintViewport();
     return;
   }
-  // release
+  // release(左键)
   selecting = false;
   if (!selection) return;
   if (!selection.dragged) {
-    // 纯点击(未拖动):清掉可能存在的旧选区,不复制
-    if (selection) { selection = null; repaintViewport(); }
+    // 内容区纯点击(未拖动):只清选区,不复制(复制交给右键)。
+    selection = null;
+    repaintViewport();
     return;
   }
-  const sel = normalizeSelection();
-  selection = null;
-  repaintViewport();
-  if (!sel) return;
-  const text = extractSelectionText(sel);
-  if (!text) return;
-  copyToClipboard(text);
-  const lines = sel.endLine - sel.startLine + 1;
-  showToast(`已复制 ${lines} 行到剪贴板`);
+  // 拖动过:保留高亮选区供右键复制(不在此处复制,复制交给右键释放分支)。
 }
 
 /** 回尾(offset=0);仅当原本滚动过才重画(避免每轮 enterRunningMode 闪烁)。 */
@@ -1132,9 +1153,8 @@ export function paintInput(view: InputView): void {
     buf += cup(g.contentBottom, 1) + esc.clearLine + line;
   }
 
-  // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):恒清空,防底栏撑高时旧内容残留该行;
-  // 有 toast(如"已复制 N 行")时短时借用此行显示,不占内容区。
-  buf += cup(g.contentBottom + 1, 1) + esc.clearLine + (toastText ? `${ui.green}${toastText}${ui.reset}` : '');
+  // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):恒清空,防底栏撑高时旧内容残留该行。
+  buf += cup(g.contentBottom + 1, 1) + esc.clearLine;
 
   // 3. 状态行:spinner 行 + model 行(两行式底栏)
   const spinnerRow = g.contentBottom + 2; // +1 虚拟空行,+2 spinner 行
@@ -1385,7 +1405,6 @@ export function exitAltScreen(): void {
   mouse.resetMouse();
   selection = null;
   selecting = false;
-  if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
   // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。
   try {
     stdin.setRawMode(false); // 还原 raw(RUNNING 态常驻 raw,退出时必须还原,否则终端残留 raw 模式)
