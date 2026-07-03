@@ -1,0 +1,48 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bodyGrad" x1="48" y1="48" x2="208" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1b263b"/>
+      <stop offset="1" stop-color="#0d1b2a"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="60" y1="90" x2="196" y2="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffb74d"/>
+      <stop offset="1" stop-color="#ffa726"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Round ears -->
+  <circle cx="56" cy="46" r="24" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <circle cx="200" cy="46" r="24" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+
+  <!-- Body / head -->
+  <rect x="40" y="50" width="176" height="150" rx="30" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+
+  <!-- Screen face -->
+  <rect x="60" y="72" width="136" height="90" rx="14" fill="#0a1420" stroke="#ffb74d" stroke-opacity="0.4" stroke-width="1.5"/>
+
+  <!-- Eyes -->
+  <g filter="url(#glow)">
+    <rect x="86" y="104" width="14" height="26" rx="6" fill="url(#accentGrad)">
+      <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="156" y="104" width="14" height="26" rx="6" fill="url(#accentGrad)">
+      <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+
+  <!-- Round snout patch -->
+  <ellipse cx="128" cy="148" rx="26" ry="18" fill="#0a1420" stroke="#ffb74d" stroke-opacity="0.5" stroke-width="1.5"/>
+  <ellipse cx="128" cy="142" rx="6" ry="5" fill="#ffb74d"/>
+
+  <!-- Legs / feet -->
+  <rect x="72" y="200" width="24" height="26" rx="9" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <rect x="160" y="200" width="24" height="26" rx="9" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <rect x="62" y="222" width="44" height="10" rx="5" fill="#ffb74d" fill-opacity="0.6"/>
+  <rect x="150" y="222" width="44" height="10" rx="5" fill="#ffb74d" fill-opacity="0.6"/>
+</svg>

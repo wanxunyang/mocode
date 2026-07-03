@@ -1,0 +1,56 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bodyGrad" x1="48" y1="48" x2="208" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1b263b"/>
+      <stop offset="1" stop-color="#0d1b2a"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="60" y1="90" x2="196" y2="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2afadf"/>
+      <stop offset="1" stop-color="#42a5f5"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Ears -->
+  <path d="M52 62 L34 24 L78 48 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <path d="M204 62 L222 24 L178 48 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+
+  <!-- Body / head -->
+  <rect x="40" y="50" width="176" height="150" rx="28" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+
+  <!-- Screen face -->
+  <rect x="60" y="72" width="136" height="90" rx="14" fill="#0a1420" stroke="#2afadf" stroke-opacity="0.4" stroke-width="1.5"/>
+
+  <!-- Eyes -->
+  <g filter="url(#glow)">
+    <rect x="86" y="104" width="14" height="26" rx="6" fill="url(#accentGrad)">
+      <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="156" y="104" width="14" height="26" rx="6" fill="url(#accentGrad)">
+      <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+
+  <!-- Cat mouth -->
+  <path d="M118 148 L128 156 L138 148" stroke="#2afadf" stroke-width="4" fill="none" stroke-linecap="round" filter="url(#glow)"/>
+
+  <!-- Whiskers -->
+  <line x1="46" y1="128" x2="76" y2="124" stroke="url(#accentGrad)" stroke-width="2" stroke-linecap="round"/>
+  <line x1="46" y1="140" x2="76" y2="140" stroke="url(#accentGrad)" stroke-width="2" stroke-linecap="round"/>
+  <line x1="210" y1="128" x2="180" y2="124" stroke="url(#accentGrad)" stroke-width="2" stroke-linecap="round"/>
+  <line x1="210" y1="140" x2="180" y2="140" stroke="url(#accentGrad)" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Legs / feet -->
+  <rect x="76" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <rect x="160" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <rect x="66" y="222" width="40" height="10" rx="5" fill="#2afadf" fill-opacity="0.6"/>
+  <rect x="150" y="222" width="40" height="10" rx="5" fill="#2afadf" fill-opacity="0.6"/>
+
+  <!-- Tail -->
+  <path d="M216 180 Q246 190 240 150" stroke="url(#accentGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
+</svg>

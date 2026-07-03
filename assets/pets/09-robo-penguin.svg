@@ -1,0 +1,47 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bodyGrad" x1="48" y1="48" x2="208" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1b263b"/>
+      <stop offset="1" stop-color="#0d1b2a"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="60" y1="90" x2="196" y2="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2afadf"/>
+      <stop offset="1" stop-color="#42a5f5"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Body (oval) -->
+  <ellipse cx="128" cy="140" rx="88" ry="100" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <!-- Belly patch -->
+  <ellipse cx="128" cy="156" rx="52" ry="66" fill="#eef2f6"/>
+
+  <!-- Screen face -->
+  <rect x="76" y="86" width="104" height="62" rx="14" fill="#0a1420" stroke="#2afadf" stroke-opacity="0.4" stroke-width="1.5"/>
+
+  <!-- Eyes -->
+  <g filter="url(#glow)">
+    <rect x="98" y="108" width="12" height="20" rx="5" fill="url(#accentGrad)">
+      <animate attributeName="height" values="20;2;20" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      <animate attributeName="y" values="108;117;108" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="146" y="108" width="12" height="20" rx="5" fill="url(#accentGrad)">
+      <animate attributeName="height" values="20;2;20" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      <animate attributeName="y" values="108;117;108" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+
+  <!-- Beak -->
+  <path d="M116 156 L128 172 L140 156 Z" fill="#ffb74d"/>
+
+  <!-- Flipper arms -->
+  <path d="M42 148 Q22 172 40 200" stroke="url(#bodyGrad)" stroke-width="20" stroke-linecap="round" fill="none"/>
+  <path d="M214 148 Q234 172 216 200" stroke="url(#bodyGrad)" stroke-width="20" stroke-linecap="round" fill="none"/>
+
+  <!-- Feet -->
+  <ellipse cx="104" cy="234" rx="16" ry="8" fill="#ffb74d"/>
+  <ellipse cx="152" cy="234" rx="16" ry="8" fill="#ffb74d"/>
+</svg>

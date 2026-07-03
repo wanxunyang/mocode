@@ -1,0 +1,43 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="starGrad" x1="48" y1="30" x2="208" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd54f"/>
+      <stop offset="1" stop-color="#ff8f00"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Star body: 5-point star -->
+  <path d="M128 20
+           L156 92
+           L232 92
+           L170 138
+           L194 214
+           L128 168
+           L62 214
+           L86 138
+           L24 92
+           L100 92 Z"
+        fill="url(#starGrad)" stroke="#fff3c4" stroke-width="3">
+    <animateTransform attributeName="transform" type="rotate" values="0 128 128;6 128 128;0 128 128;-6 128 128;0 128 128" dur="4s" repeatCount="indefinite"/>
+  </path>
+
+  <!-- Screen face -->
+  <rect x="88" y="104" width="80" height="56" rx="12" fill="#0a1420" stroke="#ffe082" stroke-opacity="0.5" stroke-width="1.5"/>
+
+  <!-- Eyes -->
+  <g filter="url(#glow)">
+    <circle cx="112" cy="130" r="8" fill="#ffe082">
+      <animate attributeName="r" values="8;2;8" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="146" cy="130" r="8" fill="#ffe082">
+      <animate attributeName="r" values="8;2;8" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <!-- Smile -->
+  <path d="M114 148 Q128 158 142 148" stroke="#ffe082" stroke-width="3" fill="none" stroke-linecap="round"/>
+</svg>

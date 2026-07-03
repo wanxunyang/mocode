@@ -12,7 +12,7 @@ html, body {
   -webkit-app-region: drag; /* 允许拖拽悬浮窗(鼠标穿透关闭区域外);实际穿透行为由主进程 setIgnoreMouseEvents 控制 */
 }
 
-#pet-container {
+#pet-stage {
   width: 100%;
   height: 100%;
   display: flex;
@@ -20,9 +20,30 @@ html, body {
   justify-content: center;
 }
 
+#pet-container {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+
 #pet-container svg {
   width: 90%;
   height: 90%;
+}
+
+/* 信号灯挂在宠物右侧,尺寸远小于主体,不抢视觉重心。 */
+#signal-light-container {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#signal-light-container svg {
+  width: 30px;
+  height: 74px;
 }
 
 /* ── idle:轻微上下浮动呼吸,机身静止 ── */
@@ -128,4 +149,61 @@ html, body {
 .pet-error #pet-antenna {
   fill: #f87171;
   animation: pet-error-blink-red 0.3s ease-in-out 2;
+}
+
+/* ── 信号灯状态映射表(方案C:三色+闪烁区分,呼应 design.md 动画映射表) ──
+ * 灯泡默认态(未点亮)由 assets/signal-light.svg 内置 fill-opacity=0.22 定义,
+ * 以下规则只在对应状态下覆盖 fill-opacity 把目标灯泡点亮,不影响另外两个灯泡。
+ *
+ * | PetState  | 灯   | 行为                         |
+ * |-----------|------|------------------------------|
+ * | idle      | 绿   | 常亮(空闲/安全)             |
+ * | thinking  | 黄   | 慢速呼吸(等待 LLM 响应)     |
+ * | speaking  | 黄   | 常亮不闪(已在流式输出)      |
+ * | tool_call | 黄   | 快闪(正在执行工具动作)      |
+ * | done      | 绿   | 短暂高亮闪一下后回落         |
+ * | aborted   | 红   | 常亮不闪(用户主动中断)      |
+ * | error     | 红   | 快闪(报错,最高优先级)      |
+ */
+
+@keyframes lamp-pulse-slow {
+  0%, 100% { fill-opacity: 0.9; }
+  50% { fill-opacity: 0.45; }
+}
+@keyframes lamp-blink-fast {
+  0%, 100% { fill-opacity: 0.95; }
+  50% { fill-opacity: 0.15; }
+}
+@keyframes lamp-flash-in {
+  0% { fill-opacity: 0.22; }
+  30% { fill-opacity: 1; }
+  100% { fill-opacity: 0.85; }
+}
+
+.pet-idle #pet-lamp-green {
+  fill-opacity: 0.85;
+}
+
+.pet-thinking #pet-lamp-yellow {
+  animation: lamp-pulse-slow 1.4s ease-in-out infinite;
+}
+
+.pet-speaking #pet-lamp-yellow {
+  fill-opacity: 0.95;
+}
+
+.pet-tool #pet-lamp-yellow {
+  animation: lamp-blink-fast 0.4s ease-in-out infinite;
+}
+
+.pet-done #pet-lamp-green {
+  animation: lamp-flash-in 0.4s ease-out 1;
+}
+
+.pet-aborted #pet-lamp-red {
+  fill-opacity: 0.85;
+}
+
+.pet-error #pet-lamp-red {
+  animation: lamp-blink-fast 0.3s ease-in-out infinite;
 }

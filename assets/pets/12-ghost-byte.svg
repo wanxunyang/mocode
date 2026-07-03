@@ -1,0 +1,39 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="ghostGrad" x1="48" y1="40" x2="208" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e1f5fe" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#81d4fa" stop-opacity="0.7"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Floating shadow -->
+  <ellipse cx="128" cy="234" rx="50" ry="8" fill="#000" fill-opacity="0.15"/>
+
+  <!-- Ghost body -->
+  <path d="M128 34
+           C176 34 208 70 208 120
+           L208 190
+           C208 190 196 176 184 190
+           C172 204 160 176 148 190
+           C136 204 120 176 108 190
+           C96 204 84 176 72 190
+           C60 176 48 190 48 190
+           L48 120
+           C48 70 80 34 128 34 Z"
+        fill="url(#ghostGrad)" stroke="#4dd0e1" stroke-width="2">
+    <animateTransform attributeName="transform" type="translate" values="0 0;0 -8;0 0" dur="2.4s" repeatCount="indefinite"/>
+  </path>
+
+  <!-- Eyes -->
+  <g filter="url(#glow)">
+    <ellipse cx="98" cy="112" rx="9" ry="12" fill="#0a1420"/>
+    <ellipse cx="158" cy="112" rx="9" ry="12" fill="#0a1420"/>
+  </g>
+
+  <!-- Mouth -->
+  <ellipse cx="128" cy="142" rx="10" ry="8" fill="#0a1420" fill-opacity="0.85"/>
+</svg>

@@ -1,0 +1,45 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="domeGrad" x1="48" y1="30" x2="208" y2="120" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ce93d8" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#7e57c2" stop-opacity="0.8"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Dome head -->
+  <path d="M46 110 C46 56 82 26 128 26 C174 26 210 56 210 110 Z"
+        fill="url(#domeGrad)" stroke="#e1bee7" stroke-width="2.5"/>
+
+  <!-- Eyes -->
+  <g filter="url(#glow)">
+    <circle cx="102" cy="86" r="8" fill="#0a1420"/>
+    <circle cx="154" cy="86" r="8" fill="#0a1420"/>
+  </g>
+  <path d="M112 104 Q128 114 144 104" stroke="#0a1420" stroke-width="3" fill="none" stroke-linecap="round"/>
+
+  <!-- Tentacles -->
+  <path d="M64 110 Q56 150 66 190 Q72 210 62 232" stroke="#ba68c8" stroke-width="7" fill="none" stroke-linecap="round">
+    <animate attributeName="d" values="M64 110 Q56 150 66 190 Q72 210 62 232;M64 110 Q72 150 58 190 Q64 210 74 232;M64 110 Q56 150 66 190 Q72 210 62 232" dur="2.6s" repeatCount="indefinite"/>
+  </path>
+  <path d="M98 112 Q92 156 100 200 Q104 218 96 236" stroke="#ba68c8" stroke-width="7" fill="none" stroke-linecap="round">
+    <animate attributeName="d" values="M98 112 Q92 156 100 200 Q104 218 96 236;M98 112 Q104 156 92 200 Q96 218 106 236;M98 112 Q92 156 100 200 Q104 218 96 236" dur="2.9s" repeatCount="indefinite"/>
+  </path>
+  <path d="M132 114 Q128 158 134 202 Q136 220 130 238" stroke="#ba68c8" stroke-width="7" fill="none" stroke-linecap="round">
+    <animate attributeName="d" values="M132 114 Q128 158 134 202 Q136 220 130 238;M132 114 Q138 158 126 202 Q130 220 138 238;M132 114 Q128 158 134 202 Q136 220 130 238" dur="2.4s" repeatCount="indefinite"/>
+  </path>
+  <path d="M166 112 Q160 156 168 200 Q172 218 164 236" stroke="#ba68c8" stroke-width="7" fill="none" stroke-linecap="round">
+    <animate attributeName="d" values="M166 112 Q160 156 168 200 Q172 218 164 236;M166 112 Q172 156 160 200 Q164 218 174 236;M166 112 Q160 156 168 200 Q172 218 164 236" dur="2.7s" repeatCount="indefinite"/>
+  </path>
+  <path d="M196 110 Q204 150 194 190 Q188 210 198 232" stroke="#ba68c8" stroke-width="7" fill="none" stroke-linecap="round">
+    <animate attributeName="d" values="M196 110 Q204 150 194 190 Q188 210 198 232;M196 110 Q188 150 202 190 Q196 210 186 232;M196 110 Q204 150 194 190 Q188 210 198 232" dur="3.1s" repeatCount="indefinite"/>
+  </path>
+
+  <!-- Glow dots -->
+  <circle cx="66" cy="170" r="3" fill="#e040fb" filter="url(#glow)"/>
+  <circle cx="132" cy="180" r="3" fill="#e040fb" filter="url(#glow)"/>
+  <circle cx="196" cy="170" r="3" fill="#e040fb" filter="url(#glow)"/>
+</svg>

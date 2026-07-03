@@ -1,0 +1,25 @@
+{
+  "_description": "候选桌宠素材索引,供未来 desktop-pet '选皮' 功能读取。当前 packages/pet-app 实现仅使用 assets/mascot.svg(单一形象+CSS状态动画),这些素材是为后续换皮功能预留的候选库。",
+  "viewBox": "0 0 256 256",
+  "style": "赛博终端风,深色机身(#1b263b/#0d1b2a)+ 屏幕脸(黑底彩色像素眼,呼吸/眨眼动画),与 assets/mascot.svg 视觉语言一致",
+  "pets": [
+    { "id": "robo-cat",      "file": "01-robo-cat.svg",      "name": "机械猫",     "accent": "#2afadf" },
+    { "id": "robo-dog",      "file": "02-robo-dog.svg",      "name": "机械犬",     "accent": "#ffb74d" },
+    { "id": "robo-fox",      "file": "03-robo-fox.svg",      "name": "机械狐",     "accent": "#ff7043" },
+    { "id": "robo-panda",    "file": "04-robo-panda.svg",    "name": "机械熊猫",   "accent": "#2afadf" },
+    { "id": "robo-owl",      "file": "05-robo-owl.svg",      "name": "机械猫头鹰", "accent": "#7c4dff" },
+    { "id": "robo-bunny",    "file": "06-robo-bunny.svg",    "name": "机械兔",     "accent": "#ff6ec7" },
+    { "id": "robo-frog",     "file": "07-robo-frog.svg",     "name": "机械蛙",     "accent": "#00e676" },
+    { "id": "robo-bear",     "file": "08-robo-bear.svg",     "name": "机械熊",     "accent": "#ffa726" },
+    { "id": "robo-penguin",  "file": "09-robo-penguin.svg",  "name": "机械企鹅",   "accent": "#42a5f5" },
+    { "id": "robo-dino",     "file": "10-robo-dino.svg",     "name": "机械龙",     "accent": "#00c853" },
+    { "id": "slime-blob",    "file": "11-slime-blob.svg",    "name": "史莱姆",     "accent": "#00acc1" },
+    { "id": "ghost-byte",    "file": "12-ghost-byte.svg",    "name": "字节幽灵",   "accent": "#4dd0e1" },
+    { "id": "cactus-bot",    "file": "13-cactus-bot.svg",    "name": "仙人掌兽",   "accent": "#66bb6a" },
+    { "id": "crystal-bot",   "file": "14-crystal-bot.svg",   "name": "水晶精灵",   "accent": "#7c4dff" },
+    { "id": "satellite-bot", "file": "15-satellite-bot.svg", "name": "卫星兽",     "accent": "#42a5f5" },
+    { "id": "jellyfish-bot", "file": "16-jellyfish-bot.svg", "name": "水母兽",     "accent": "#ba68c8" },
+    { "id": "mushroom-bot",  "file": "17-mushroom-bot.svg",  "name": "菌菇兽",     "accent": "#c62828" },
+    { "id": "star-bot",      "file": "18-star-bot.svg",      "name": "星星兽",     "accent": "#ff8f00" }
+  ]
+}

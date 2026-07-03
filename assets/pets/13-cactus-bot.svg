@@ -1,0 +1,50 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bodyGrad" x1="48" y1="48" x2="208" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2e7d32"/>
+      <stop offset="1" stop-color="#1b5e20"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="60" y1="90" x2="196" y2="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#aed581"/>
+      <stop offset="1" stop-color="#66bb6a"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Flower -->
+  <circle cx="108" cy="30" r="8" fill="#ff8a65"/>
+  <circle cx="122" cy="22" r="8" fill="#ffab91"/>
+  <circle cx="136" cy="30" r="8" fill="#ff8a65"/>
+  <circle cx="122" cy="34" r="7" fill="#ffe082"/>
+
+  <!-- Body segments -->
+  <rect x="60" y="46" width="136" height="120" rx="46" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <rect x="48" y="150" width="160" height="70" rx="40" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+
+  <!-- Spike arms -->
+  <path d="M60 110 Q28 118 30 148" stroke="url(#accentGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <path d="M196 110 Q228 118 226 148" stroke="url(#accentGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <path d="M34 118 L24 108 M34 128 L22 124 M222 118 L232 108 M222 128 L234 124"
+        stroke="url(#accentGrad)" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Screen face -->
+  <rect x="80" y="76" width="96" height="66" rx="14" fill="#0a1420" stroke="#aed581" stroke-opacity="0.4" stroke-width="1.5"/>
+
+  <!-- Eyes -->
+  <g filter="url(#glow)">
+    <rect x="100" y="98" width="12" height="22" rx="5" fill="url(#accentGrad)">
+      <animate attributeName="height" values="22;2;22" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      <animate attributeName="y" values="98;108;98" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="144" y="98" width="12" height="22" rx="5" fill="url(#accentGrad)">
+      <animate attributeName="height" values="22;2;22" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      <animate attributeName="y" values="98;108;98" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+
+  <!-- Pot base / feet -->
+  <path d="M56 220 L200 220 L184 244 L72 244 Z" fill="#8d6e63" stroke="#a1887f" stroke-width="2"/>
+</svg>

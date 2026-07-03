@@ -1,0 +1,36 @@
+<svg id="signal-light-svg-root" width="90" height="220" viewBox="0 0 90 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="lampBodyGrad" x1="8" y1="8" x2="82" y2="212" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1b263b"/>
+      <stop offset="1" stop-color="#0d1b2a"/>
+    </linearGradient>
+    <linearGradient id="lampAccentGrad" x1="8" y1="8" x2="82" y2="212" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2afadf"/>
+      <stop offset="1" stop-color="#42a5f5"/>
+    </linearGradient>
+    <filter id="lampGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="4.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Mount arm: visually "attaches" the lamp housing to the pet's side -->
+  <rect x="0" y="102" width="12" height="16" rx="4" fill="url(#lampAccentGrad)" fill-opacity="0.55"/>
+
+  <!-- Housing -->
+  <rect x="10" y="8" width="72" height="204" rx="20" fill="url(#lampBodyGrad)" stroke="url(#lampAccentGrad)" stroke-width="3"/>
+
+  <!-- Lens visor hoods (purely decorative, echo the terminal-screen look of mascot.svg) -->
+  <path d="M20 40 Q46 24 72 40" stroke="url(#lampAccentGrad)" stroke-width="2" fill="none" stroke-opacity="0.45"/>
+  <path d="M20 95 Q46 79 72 95" stroke="url(#lampAccentGrad)" stroke-width="2" fill="none" stroke-opacity="0.45"/>
+  <path d="M20 150 Q46 134 72 150" stroke="url(#lampAccentGrad)" stroke-width="2" fill="none" stroke-opacity="0.45"/>
+
+  <!-- Lamps: default = dim (25% opacity of their own hue). CSS drives the active/blinking state
+       per PetState (see style.css "信号灯状态映射表"); ids are stable and must not be renamed. -->
+  <circle id="pet-lamp-red" cx="46" cy="55" r="20" fill="#f87171" fill-opacity="0.22" filter="url(#lampGlow)"/>
+  <circle id="pet-lamp-yellow" cx="46" cy="110" r="20" fill="#fbbf24" fill-opacity="0.22" filter="url(#lampGlow)"/>
+  <circle id="pet-lamp-green" cx="46" cy="165" r="20" fill="#4ade80" fill-opacity="0.22" filter="url(#lampGlow)"/>
+</svg>

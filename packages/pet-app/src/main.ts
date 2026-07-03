@@ -250,14 +250,16 @@ function probeIsPetServer(port: number): Promise<boolean> {
 /** 跨平台悬浮窗配置(design.md 跨平台 BrowserWindow 配置差异表)。 */
 function createPetWindow(): BrowserWindow {
   const { width } = screen.getPrimaryDisplay().workAreaSize;
-  const winSize = 220;
+  const winHeight = 220;
+  // 宽度在原有正方形基础上加宽,容纳宠物右侧的信号灯(见 renderer/style.css #signal-light-container)。
+  const winWidth = 260;
   const margin = 24;
 
   const win = new BrowserWindow({
-    width: winSize,
-    height: winSize,
-    x: width - winSize - margin,
-    y: screen.getPrimaryDisplay().workAreaSize.height - winSize - margin,
+    width: winWidth,
+    height: winHeight,
+    x: width - winWidth - margin,
+    y: screen.getPrimaryDisplay().workAreaSize.height - winHeight - margin,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
