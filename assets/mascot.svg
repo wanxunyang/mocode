@@ -41,9 +41,8 @@
     </rect>
   </g>
 
-  <!-- Mouth: cursor prompt smile -->
-  <path d="M96 144 L112 152 L96 160" stroke="#2afadf" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#glow)"/>
-  <rect x="130" y="148" width="34" height="5" rx="2.5" fill="#2afadf" fill-opacity="0.7"/>
+  <!-- Mouth: simple dash -->
+  <rect x="112" y="147" width="32" height="6" rx="3" fill="#2afadf" fill-opacity="0.8" filter="url(#glow)"/>
 
   <!-- Arms -->
   <path d="M40 120 Q16 130 20 158" stroke="url(#cyanGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
