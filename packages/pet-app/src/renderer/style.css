@@ -1,0 +1,131 @@
+/* 桌宠渲染进程样式:状态驱动 CSS 动画,叠加在 mascot.svg 之上(不修改素材文件本身的结构)。
+ * 容器 #pet-container 承载 mascot.svg 的 <object>/inline 内容;通过外层 class 切换驱动
+ * transform / filter 变换,SVG 内置的呼吸灯(#pet-antenna)/眨眼动画始终独立运行不受影响。 */
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  -webkit-app-region: drag; /* 允许拖拽悬浮窗(鼠标穿透关闭区域外);实际穿透行为由主进程 setIgnoreMouseEvents 控制 */
+}
+
+#pet-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#pet-container svg {
+  width: 90%;
+  height: 90%;
+}
+
+/* ── idle:轻微上下浮动呼吸,机身静止 ── */
+@keyframes pet-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+.pet-idle #pet-body-group {
+  animation: pet-float 3s ease-in-out infinite;
+}
+
+/* ── thinking:天线灯加速闪烁 + 头部左右轻摆 ── */
+@keyframes pet-think-nod {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-4deg); }
+}
+@keyframes pet-antenna-fast-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+.pet-thinking #pet-body-group {
+  animation: pet-think-nod 0.9s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+.pet-thinking #pet-antenna {
+  animation: pet-antenna-fast-blink 0.6s ease-in-out infinite;
+}
+
+/* ── speaking:嘴部开合模拟说话 ── */
+@keyframes pet-mouth-talk {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(2.4); }
+}
+.pet-speaking #pet-mouth {
+  animation: pet-mouth-talk 0.3s ease-in-out infinite;
+  transform-origin: 128px 150px;
+}
+
+/* ── tool_call:双臂交替摆动,天线灯常亮不闪 ── */
+@keyframes pet-arm-swing-left {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-12deg); }
+}
+@keyframes pet-arm-swing-right {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(12deg); }
+}
+.pet-tool #pet-arm-left {
+  animation: pet-arm-swing-left 0.5s ease-in-out infinite;
+  transform-origin: 40px 120px;
+}
+.pet-tool #pet-arm-right {
+  animation: pet-arm-swing-right 0.5s ease-in-out infinite 0.25s;
+  transform-origin: 216px 120px;
+}
+.pet-tool #pet-antenna {
+  animation: none;
+  opacity: 1;
+}
+
+/* ── done:短暂放大弹回 + 眼睛描边变绿(用滤镜近似) ── */
+@keyframes pet-done-bounce {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}
+.pet-done #pet-body-group {
+  animation: pet-done-bounce 0.4s ease-out 1;
+  transform-origin: 128px 125px;
+}
+.pet-done #pet-antenna {
+  filter: drop-shadow(0 0 6px #4ade80);
+}
+
+/* ── aborted:头部短暂低垂 + 天线灯熄灭 ── */
+@keyframes pet-aborted-droop {
+  0% { transform: rotate(0deg); }
+  50% { transform: rotate(8deg); }
+  100% { transform: rotate(0deg); }
+}
+.pet-aborted #pet-body-group {
+  animation: pet-aborted-droop 0.3s ease-in-out 1;
+  transform-origin: 128px 125px;
+}
+.pet-aborted #pet-antenna {
+  animation: none;
+  opacity: 0;
+}
+
+/* ── error:机身横向抖动 + 天线灯变红闪烁 ── */
+@keyframes pet-error-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-6px); }
+  75% { transform: translateX(6px); }
+}
+@keyframes pet-error-blink-red {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.pet-error #pet-body-group {
+  animation: pet-error-shake 0.3s ease-in-out 1;
+}
+.pet-error #pet-antenna {
+  fill: #f87171;
+  animation: pet-error-blink-red 0.3s ease-in-out 2;
+}

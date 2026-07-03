@@ -23,6 +23,7 @@ import {
   isMutationTool,
   type AgentHooks,
 } from './core.js';
+import { createPetHooks } from '../pet/state.js';
 
 /** 工具调用 ● 头:工具名 + 参数摘要(按 tool_calls 原顺序打印,让用户看到本轮跑哪些工具)。 */
 function writeToolHeader(tc: ToolCallRef): void {
@@ -145,15 +146,37 @@ export async function runAgent(
       ),
   };
 
+  // 桌宠状态广播:与 TUI hooks 并列注入,互不干扰(petHooks 只调 bridge.sendState,不写屏;
+  // 未 /pet 连接时 sendState 内部 no-op)。仅主 agent 走这里——子 agent(spawn.ts)不引用 createPetHooks,
+  // 故子 agent 永不广播桌宠状态。
+  const petHooks = createPetHooks();
+  const combinedHooks: AgentHooks = mergeHooks(hooks, petHooks);
+
   try {
     await runAgentCore({
       history,
       userInput,
       signal,
       onContextUpdate,
-      hooks,
+      hooks: combinedHooks,
     });
   } finally {
     spinner.stop();
   }
+}
+
+/** 把两组 AgentHooks 合并为一组:每个方法依次调用两侧已定义的实现(顺序不保证跨方法一致,
+ *  但同一事件内先 a 后 b)。用于把桌宠状态广播 hooks 与 TUI 渲染 hooks 并列挂载,互不影响。 */
+function mergeHooks(a: AgentHooks, b: AgentHooks): AgentHooks {
+  const merged: AgentHooks = {};
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof AgentHooks>;
+  for (const key of keys) {
+    const fa = a[key] as ((...args: unknown[]) => void) | undefined;
+    const fb = b[key] as ((...args: unknown[]) => void) | undefined;
+    (merged as Record<string, unknown>)[key] = (...args: unknown[]) => {
+      fa?.(...args);
+      fb?.(...args);
+    };
+  }
+  return merged;
 }

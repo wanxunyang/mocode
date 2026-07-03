@@ -5,6 +5,7 @@ import { config, PLAN_MODE_SUFFIX, updateModelConfig, isModelConfigured } from '
 import { updateConfigKey, writeConfigKeys, CONFIG_PATH } from '../config/file.js';
 import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
+import { togglePet } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
 import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
@@ -78,6 +79,7 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/model', desc: '配置大模型(baseURL/key/model/窗口)' },
   { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
   { name: '/auto', desc: '切回 auto 模式(全工具执行)' },
+  { name: '/pet', desc: '开关桌宠(独立悬浮窗,展示 agent 状态动画)' },
 ];
 
 /** 主题名 → 一句描述(供 /theme 菜单 / 列表显示)。新增主题时在 src/ui/theme.ts THEMES 加键后于此补一句。 */
@@ -211,6 +213,8 @@ function runningStateFor(
       return { status: '切主题', placeholder: '选择主题…' };
     case '/model':
       return { status: '配模型', placeholder: '配置中…' };
+    case '/pet':
+      return { status: '桌宠', placeholder: '连接中…' };
     default:
       // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由内联 spinner 承载(思考中/执行…),
       // 状态行只显走时——故常态 status 留空,不塞「处理」这种与内联重复的泛标签。
@@ -714,6 +718,17 @@ export async function startRepl(
       } else {
         setAgentMode('auto'); // listener 接手 applyMode + refreshStatusBase
         layout.contentWrite(`${ui.dim}(已切回 auto 模式:全工具执行)${ui.reset}\n`);
+      }
+      continue;
+    }
+    if (line === '/pet') {
+      // /pet:开关桌宠。已连接→断开;未连接→探测端口(已有实例则直连)或 spawn 拉起 + 退避重试连接。
+      // togglePet 不抛异常,所有失败路径转为返回值——桌宠是可选增强,任何异常都不能影响 REPL 主流程。
+      const { connected, reason } = await togglePet();
+      if (connected) {
+        layout.contentWrite(`${ui.dim}(桌宠已连接)${ui.reset}\n`);
+      } else {
+        layout.contentWrite(`${ui.dim}(${reason ?? '桌宠已断开'})${ui.reset}\n`);
       }
       continue;
     }

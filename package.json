@@ -24,10 +24,16 @@
     "cli-highlight": "^2.1.11",
     "dotenv": "^16.0.0",
     "fast-glob": "^3.0.0",
-    "openai": "^4.0.0"
+    "openai": "^4.0.0",
+    "ws": "8.21.0"
+  },
+  "optionalDependencies": {
+    "mocode-pet-app": "0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/ws": "8.5.13",
+    "fast-check": "3.23.1",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   },
