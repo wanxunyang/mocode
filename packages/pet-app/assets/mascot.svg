@@ -46,9 +46,9 @@
     <rect id="pet-mouth" x="112" y="147" width="32" height="6" rx="3" fill="#2afadf" fill-opacity="0.8" filter="url(#glow)"/>
   </g>
 
-  <!-- Arms(id 供 tool_call 状态的摆动动画) -->
-  <path id="pet-arm-left" d="M40 120 Q16 130 20 158" stroke="url(#cyanGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
-  <path id="pet-arm-right" d="M216 120 Q240 130 236 158" stroke="url(#cyanGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <!-- Arms(id 供 tool_call 状态的摆动动画;与 legs 同款风格的圆球——机身色填充 + 青色描边,不额外画手臂连接件) -->
+  <circle id="pet-arm-left" cx="34" cy="128" r="14" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>
+  <circle id="pet-arm-right" cx="222" cy="128" r="14" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>
 
   <!-- Legs / feet -->
   <rect x="76" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>

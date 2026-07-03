@@ -41,9 +41,11 @@
   <!-- Jagged mouth -->
   <path d="M108 148 L118 156 L128 148 L138 156 L148 148" stroke="#69f0ae" stroke-width="4" fill="none" stroke-linecap="round" filter="url(#glow)"/>
 
-  <!-- Small arms -->
-  <path d="M40 130 Q24 138 26 156" stroke="url(#accentGrad)" stroke-width="7" stroke-linecap="round" fill="none"/>
-  <path d="M216 130 Q232 138 230 156" stroke="url(#accentGrad)" stroke-width="7" stroke-linecap="round" fill="none"/>
+  <!-- Small arms(填充块面而非线条,末端一颗圆球小手) -->
+  <ellipse cx="31" cy="142" rx="5.5" ry="15" fill="url(#accentGrad)" transform="rotate(-34 31 142)"/>
+  <circle cx="25" cy="156" r="5" fill="url(#accentGrad)"/>
+  <ellipse cx="223" cy="142" rx="5.5" ry="15" fill="url(#accentGrad)" transform="rotate(34 223 142)"/>
+  <circle cx="231" cy="156" r="5" fill="url(#accentGrad)"/>
 
   <!-- Legs / feet -->
   <rect x="76" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>

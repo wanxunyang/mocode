@@ -105,11 +105,11 @@ html, body {
 }
 .pet-tool #pet-arm-left {
   animation: pet-arm-swing-left 0.5s ease-in-out infinite;
-  transform-origin: 40px 120px;
+  transform-origin: 34px 128px;
 }
 .pet-tool #pet-arm-right {
   animation: pet-arm-swing-right 0.5s ease-in-out infinite 0.25s;
-  transform-origin: 216px 120px;
+  transform-origin: 222px 128px;
 }
 .pet-tool #pet-antenna {
   animation: none;
