@@ -62,9 +62,9 @@ mocode config
 
 也可手写配置文件。mocode 按以下优先级加载(后者覆盖前者,仅回填未设置的环境变量;shell 里 `export` 的永远最优先):
 
-1. `~/.mocode/config` — 全局(`mocode config` 写此文件)
-2. `<cwd>/.mocode/config` — 项目级覆盖
-3. `<cwd>/.env` — 旧用法兼容(源码仓库内有 `.env.example` 可参考)
+1. `<cwd>/.env` — 旧用法兼容,优先级最低(源码仓库内有 `.env.example` 可参考)
+2. `~/.mocode/config` — 全局(`/model` 与 `mocode config` 写此文件)
+3. `<cwd>/.mocode/config` — 项目级覆盖,优先级最高
 
 必填三项:
 

@@ -4,7 +4,6 @@ import type { Key } from 'node:readline';
 import { ui } from './theme.js';
 import { displayWidth, padEndDisplay, truncateDisplay } from './render.js';
 import * as layout from './layout.js';
-import * as mouse from './mouse.js';
 
 export interface SlashCommand {
   name: string;
@@ -45,10 +44,7 @@ function ensurePasteDetector(): void {
   if (pasteDetectorInstalled) return;
   pasteDetectorInstalled = true;
   stdin.on('data', (chunk: Buffer | string) => {
-    const raw = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-    // 剔除 SGR 鼠标报告(\x1B[<…M/m,连半截也匹配):防快速滚轮/触控板动量在一个 chunk 里拼 ≥2 条
-    // 报表(22 字符 > 16 阈值)误判粘贴 50ms、把后续真按键泄进 pasteParts。
-    const text = raw.replace(/\x1b\[<[0-9;]*[Mm]/g, '');
+    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
     const hasNL = text.indexOf('\r') >= 0 || text.indexOf('\n') >= 0;
     // 按字符数(码点)判粘贴,非字节:CJK 汉字占 3 UTF-8 字节,旧阈值(len>8 字节)会把 IME 提交的
     // 3-10 个汉字误判为粘贴 → 进 50ms 缓冲 → finalizePaste→insertText 落字(且旧 insertText 把光标
@@ -298,14 +294,6 @@ export async function promptWithSlashMenu(
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
 
-    // SGR 鼠标滚轮:readline 把 \x1B[<btn;col;rowM 拆成多 fragment,经 mouse.consumeMouse 重组;
-    // 滚轮 → scrollBy(±5)(只重画内容区,底栏不动)。置于 pasting 之前——鼠标 fragment 永不进 pasteParts。
-    const _m = mouse.consumeMouse(key.sequence ?? '');
-    if (_m.suppress) {
-      if (_m.wheel) layout.scrollBy(_m.wheel * 5);
-      return;
-    }
-
     // Shift+Tab:循环切换 agent 模式(auto ↔ plan)。不插字符、不提交、不影响输入文本;
     // 回调由 repl 注入(翻 agentMode + 重写 history[0] + 设状态行 modeTag),再 redraw() 经
     // paintInput 重画底栏(状态行 chip 即时刷新 + 光标留输入框)。置于 case 'tab' 之前,故不触发菜单补全。
@@ -341,7 +329,7 @@ export async function promptWithSlashMenu(
 
     // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,Ctrl+↑↓ 与 plain ↑/↓ 每次 5 行。
     // plain ↑/↓ 仅在单行输入且菜单关闭时作滚动(多行编辑留给光标移动,菜单打开留给选项);
-    // 鼠标滚轮已由 onKey 顶部 SGR 重组守卫处理(不经此分支);此分支仅键盘 plain ↑/↓,放大到 5 行/格。
+    // 兼鼠标滚轮——alt 屏内(经 \x1B[?1007h)滚轮转发 ↑/↓,1 行/格太慢故放大到 5。
     const plainArrowScroll =
       (key.name === 'up' || key.name === 'down') &&
       !key.ctrl &&

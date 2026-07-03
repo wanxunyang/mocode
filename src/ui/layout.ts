@@ -13,7 +13,6 @@ import {
 } from './render.js';
 import { ui } from './theme.js';
 import * as content from './content.js';
-import * as mouse from './mouse.js';
 import { renderMarkdown } from './markdown.js';
 
 /**
@@ -51,7 +50,7 @@ export interface StatusBarData {
   cwd: string;
   status: string; // '空闲' | '思考中' | '执行 read_file' …
   spinnerFrame?: string; // 可选 spinner 帧(运行态)
-  modeTag?: string; // 模式标识:plan 模式显黄色 'plan';auto 缺省=不显(状态行干净)
+  modeTag?: string; // 模式标识:repl 传 'auto' / 'plan'(两段式布局左段显示)
 }
 
 export interface InputView {
@@ -68,7 +67,7 @@ export interface InputView {
 // ── 内部状态 ──
 let active = false;
 let mode: 'input' | 'running' = 'input';
-let footerH = 5; // 1 虚拟空行 + 1 状态行 + 1 上线 + 输入行数 + 1 下线(虚拟空行隔开内容与状态栏,上下线框住输入区)
+let footerH = 6; // 1 虚拟空行 + 1 spinner行 + 1 上线 + 输入行数 + 1 下线 + 1 model行(两行式底栏)
 let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
 let contentCol = 1; // 续写位列(1-based)
 // 上一次 paintLiveAtCursor 实际画帧的屏坐标(0=未画)。clearLiveAtCursor 清"这行"而非当前续写位——
@@ -109,8 +108,13 @@ let mdBuf = '';
 const esc = {
   altOn: '\x1B[?1049h',
   altOff: '\x1B[?1049l',
-  mouseOn: '\x1B[?1000h\x1B[?1006h', // SGR 鼠标:按键事件追踪(1000)+SGR 编码(1006)→ \x1B[<btn;col;rowM,经 mouse.consumeMouse 重组后滚轮滚动。副作用:TUI 内鼠标选区复制失效,按 Shift 用鼠标可让终端放行做原生选区
-  mouseOff: '\x1B[?1006l\x1B[?1000l', // 关:反序(先关 SGR 编码再关追踪)
+  // xterm alternate scroll mode(DECSET 1007):alt 屏内滚轮转发 ↑/↓ 键序列(\x1B[A/\x1B[B),
+  // 不抓取任何鼠标点击/拖拽事件——终端原生框选与复制全程可用,不需要按 Shift 逃生。
+  // 主流终端(Windows Terminal ≥1.14、xterm、VTE 系 GNOME Terminal、Konsole、iTerm2)均支持;
+  // 不支持的终端会静默忽略此转义序列,退化为"滚轮不滚动,但选区复制始终能用"——不会更差。
+  // 滚轮转发出的 ↑/↓ 由 onKey/onRunningKey 现有的 plain ↑/↓ 分支接住(见下方 scrollBy 调用点)。
+  altScrollOn: '\x1B[?1007h',
+  altScrollOff: '\x1B[?1007l',
   cursorShow: '\x1B[?25h',
   cursorHide: '\x1B[?25l',
   clearLine: '\x1B[2K',
@@ -525,71 +529,102 @@ export function isScrollLocked(): boolean {
   return Date.now() < scrollLockUntil;
 }
 
-// ── 状态行 ──
+// ── 状态行(两行式:spinner 行 + model 行)──
 
-/** 组合状态行可见串(带色),按 cols 截断防溢出(不折到输入行)。 */
-function composeStatus(status: StatusBarData, cols: number): string {
-  const sep = '  ';
-  const sepW = sep.length;
-  // 运行态(含滚动回看)用心跳帧(♥/♡)替换静态 ◆:agent 跑起来时状态行前导符始终跳动,
-  // 滑到上面看历史也能感知 agent 在跑。帧宽=1(与 ◆ 同),fixed 不变,布局不乱。INPUT 态仍显 ◆。
-  const spinning = mode === 'running' && runningFrame >= 0;
-  // spinner 激活(agent 思考中/生成/执行… 或命令态压缩中):帧 + 文字放状态行最前面(lead 位),
-  // 替代静态 ◆ / 心跳 ♥。文字经 setStatus 注入(status.spinnerFrame + status.status)。
-  // 无 spinner 时:RUNNING 态用心跳帧(♥/♡)前导符跳动,INPUT 态显静态 ◆。
-  const hasSpinner = !!status.spinnerFrame;
-  // spinner 激活:帧 + 空格 + 文字 + 尾随空格(与 ◆ / ♥ 的尾随空格对齐,使 model 位置不跳动)。
-  const lead = hasSpinner
-    ? `${ui.brightMagenta}${status.spinnerFrame}${ui.reset} ${ui.dim}${status.status}${ui.reset} `
-    : `${spinning ? ui.brightMagenta : ui.brightCyan}${spinning ? RUNNING_FRAMES[runningFrame] : '◆'} ${ui.reset}`;
-  const leadW = hasSpinner ? 1 + 1 + displayWidth(status.status) + 1 : 2; // 帧+空格+文字+尾随空格 / ◆+空格
-  // 模式 chip:lead 之后、model 之前。auto 显 dim 'auto'(常态),plan 显亮黄 'plan'(切换时颜色+文字都变,明显)。
-  const modeChip = status.modeTag
-    ? ` ${status.modeTag === 'plan' ? ui.yellow : ui.dim}${status.modeTag}${ui.reset} `
-    : '';
-  const modeChipW = status.modeTag ? 2 + displayWidth(status.modeTag) : 0; // 2 = 前导+尾随空格
-  const model = truncateDisplay(status.model, 22);
-  const ctx = status.contextBar; // 已带色
-  const ctxW = ansiDisplayWidth(ctx);
-  // 滚动回看时状态段改显历史指示(无 spinner——滚动只在 INPUT 态)
-  const scrolled = scrollOffset > 0;
-  let st: string;
-  if (scrolled) {
-    st = `历史 ↑${scrollOffset} (PgDn 回底)`; // 滚动回看显历史指示,不显走时
-  } else {
-    // spinner 文字已在 lead 显,状态段不重复;只显走时(RUNNING 态)或状态文字(命令态无 spinner 时)。
-    const head = hasSpinner ? '' : status.status;
-    if (mode === 'running' && turnStart != null) {
-      // RUNNING 态追加走时:整轮从 enterRunningMode 起计时,200ms 计时器续刷使其连续递增。
-      st = head ? `${head} · ${fmtElapsed(Date.now() - turnStart)}` : fmtElapsed(Date.now() - turnStart);
-    } else {
-      st = head; // INPUT 等态(如"空闲")
-    }
-  }
-  const stW = displayWidth(st);
-  const fixed = leadW + modeChipW + displayWidth(model) + sepW * 3 + ctxW + stW;
-  const cwdBudget = cols - fixed - 1;
-  const cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
-  return [
-    `${lead}${modeChip}${ui.bold}${model}${ui.reset}`,
-    sep,
-    ctx,
-    sep,
-    `${ui.dim}${cwd}${ui.reset}`,
-    sep,
-    `${scrolled ? ui.yellow : ui.dim}${st}${ui.reset}`,
-  ].join('');
+const STATUS_SEP = '  ';
+const STATUS_SEP_W = STATUS_SEP.length;
+
+/** 通用两段式排版:左段左端对齐 + 空格填充 + 右段右端对齐。pad 至少 1 空格防粘连。 */
+function twoColumn(leftStr: string, leftW: number, rightStr: string, rightW: number, cols: number): string {
+  const pad = Math.max(1, cols - leftW - rightW);
+  return `${leftStr}${' '.repeat(pad)}${rightStr}`;
 }
 
-/** 画状态行(光标回续写位)。RUNNING 态 spinner 频繁调。 */
+/** 上线之上那行(spinner 行):左段 = spinner 帧 + 状态文字 + 走时(全部左对齐,紧跟不分离)。
+ *  右段仅在滚动回看时显历史指示(右端对齐)。
+ *  示例:
+ *    INPUT:     ◆ 空闲
+ *    思考中:    ⠹ 思考中… 0.5s
+ *    运行心跳:  ♥ 0.5s
+ *    滚动回看:  ◆                        历史 ↑3 (PgDn 回底)  */
+function composeSpinnerLine(status: StatusBarData, cols: number): string {
+  const spinning = mode === 'running' && runningFrame >= 0;
+  const hasSpinner = !!status.spinnerFrame;
+  const scrolled = scrollOffset > 0;
+
+  // 走时(仅运行态)
+  const elapsed = (mode === 'running' && turnStart != null)
+    ? fmtElapsed(Date.now() - turnStart)
+    : '';
+
+  // ── 左段:帧 + 状态 + 走时,全部紧跟 ──
+  let lead: string;
+  let leadW: number;
+
+  if (scrolled) {
+    // 滚动回看:左段仅显 ◆(或心跳帧),右段显历史指示
+    lead = `${spinning ? ui.brightMagenta : ui.brightCyan}${spinning ? RUNNING_FRAMES[runningFrame] : '◆'}${ui.reset}`;
+    leadW = 1;
+  } else if (hasSpinner) {
+    // spinner 激活(思考中/执行工具…):帧 + 状态 + 走时
+    const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
+    lead = `${ui.brightMagenta}${status.spinnerFrame}${ui.reset} ${ui.dim}${status.status}${ui.reset}${ePart}`;
+    leadW = 1 + 1 + displayWidth(status.status) + (elapsed ? 1 + displayWidth(elapsed) : 0);
+  } else if (spinning) {
+    // 运行态心跳帧(流式输出中):帧 + 走时
+    const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
+    lead = `${ui.brightMagenta}${RUNNING_FRAMES[runningFrame]}${ui.reset}${ePart}`;
+    leadW = 1 + (elapsed ? 1 + displayWidth(elapsed) : 0);
+  } else {
+    // INPUT 态:◆ + 状态文字(无走时)
+    lead = `${ui.brightCyan}◆${ui.reset} ${ui.dim}${status.status}${ui.reset}`;
+    leadW = 1 + 1 + displayWidth(status.status);
+  }
+
+  // ── 右段:仅滚动回看时显历史指示 ──
+  let tail = '';
+  let tailW = 0;
+  if (scrolled) {
+    tail = `历史 ↑${scrollOffset} (PgDn 回底)`;
+    tailW = displayWidth(tail);
+  }
+  const rightStr = tail ? `${ui.yellow}${tail}${ui.reset}` : '';
+  return twoColumn(lead, leadW, rightStr, tailW, cols);
+}
+
+/** 下线之下那行(model 行):左 = 模式标识(auto 跟随主题色 / plan 显亮黄);右 = context + cwd,右端对齐。 */
+function composeModelLine(status: StatusBarData, cols: number): string {
+  const ctx = status.contextBar; // 已带色
+  const ctxW = ansiDisplayWidth(ctx);
+  // 左段:模式标识(auto 显 brightCyan 随主题 / plan 显亮黄)
+  const modeTag = status.modeTag ?? '';
+  const leftStr = modeTag
+    ? `${modeTag === 'plan' ? ui.yellow : ui.brightCyan}${modeTag}${ui.reset}`
+    : '';
+  const leftW = modeTag ? displayWidth(modeTag) : 0;
+  // 右段:ctx + sep + cwd,右端对齐。cwd 按预算截断,极窄(<6)隐藏。
+  const minGap = 2;
+  const cwdBudget = cols - leftW - minGap - ctxW - STATUS_SEP_W - 1;
+  const cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
+  const cwdW = displayWidth(cwd);
+  const rightStr = `${ctx}${STATUS_SEP}${ui.dim}${cwd}${ui.reset}`;
+  const rightW = ctxW + STATUS_SEP_W + cwdW;
+  return twoColumn(leftStr, leftW, rightStr, rightW, cols);
+}
+
+/** 画状态行(spinner 行 + model 行,两行)。RUNNING 态 spinner 频繁调。
+ *  行号(footerH=6):spinner 行=contentBottom+2,model 行=rows(屏底)。
+ *  上线 contentBottom+3 / 输入 contentBottom+4 / 下线 contentBottom+5 由 paintInput 画,此函数只刷两行信息。 */
 export function drawStatusBar(status?: StatusBarData): void {
   if (!active || !base) return;
   const s = status ?? { ...base, status: statusText, spinnerFrame };
   const g = getGeo();
-  const statusRow = g.contentBottom + 2; // +1 虚拟空行(内容与状态栏间隔),+2 状态行
-  // 一次写入:cup 状态行 + clearLine + 状态 + cup 回(运行态→输入框供 IME 锚定;否则续写位/内容区底)。
-  // 打字中不再跳过——单次 write 结尾 cup 回 runningCaretPos,IME 锚输入框不动;旧 isStreamingPaused 门致状态行 / 心跳打字时冻住。
-  let out = cup(statusRow, 1) + esc.clearLine + composeStatus(s, g.cols);
+  const spinnerRow = g.contentBottom + 2; // +1 虚拟空行,+2 spinner 行
+  const modelRow = g.rows; // 屏底:model 行
+  // 一次写入:cup spinner 行 + clearLine + spinner 行内容 + cup model 行 + clearLine + model 行内容 + cup 回。
+  let out =
+    cup(spinnerRow, 1) + esc.clearLine + composeSpinnerLine(s, g.cols) +
+    cup(modelRow, 1) + esc.clearLine + composeModelLine(s, g.cols);
   if (mode === 'running') {
     // 运行态(回尾 / 滚动回看均):cup 回输入框光标位(供 IME 锚定)。
     const p = runningCaretPos();
@@ -872,7 +907,7 @@ export function paintInput(view: InputView): void {
         promptW,
         preGeo.rows
       );
-  const needFooterH = 4 + vis.inputRows; // 1 虚拟空 + 1 状态 + 1 上线 + 输入行 + 1 下线
+  const needFooterH = 5 + vis.inputRows; // 1 虚拟空 + 1 spinner 行 + 1 上线 + 输入行 + 1 下线 + 1 model 行
   let g = preGeo;
   if (needFooterH !== footerH) {
     // setRegion 自己 write(DECSTBM + 清行 + 归位):先把已累积的擦除 flush 出去保序(擦除用的是旧几何的
@@ -895,17 +930,19 @@ export function paintInput(view: InputView): void {
   // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):恒清空,防底栏撑高时旧内容残留该行
   buf += cup(g.contentBottom + 1, 1) + esc.clearLine;
 
-  // 3. 状态行(footerH 变或始终重画——便宜且避免旧状态行残留)
-  const statusRow = g.contentBottom + 2; // +1 虚拟空行,+2 状态行
+  // 3. 状态行:spinner 行 + model 行(两行式底栏)
+  const spinnerRow = g.contentBottom + 2; // +1 虚拟空行,+2 spinner 行
+  const modelRow = g.rows; // 屏底:model 行
   const status: StatusBarData = { ...base, status: statusText, spinnerFrame };
-  buf += cup(statusRow, 1) + esc.clearLine + composeStatus(status, g.cols);
+  buf += cup(spinnerRow, 1) + esc.clearLine + composeSpinnerLine(status, g.cols);
+  buf += cup(modelRow, 1) + esc.clearLine + composeModelLine(status, g.cols);
 
   // 3b. 上线(输入框顶):满屏宽细线 ─(cyan),框住输入区上边界
   buf += cup(g.contentBottom + 3, 1) + esc.clearLine + ui.cyan + '─'.repeat(g.cols) + ui.reset;
 
   // 4. 输入行(g.contentBottom+4 .. rows-1)——按可视行画,首行带 prompt、其余缩进 promptW
   const firstInputRow = g.contentBottom + 4;
-  const inputRowsAvail = g.footerH - 4; // 去掉虚拟空/状态/上线/下线,留输入行
+  const inputRowsAvail = g.footerH - 5; // 去掉虚拟空/spinner行/上线/下线/model行,留输入行
   const indent = ' '.repeat(promptW);
   const showCaret = view.caret !== false; // 默认 true;picker 等非文本输入传 false 关闭块状光标
   for (let i = 0; i < inputRowsAvail; i++) {
@@ -925,8 +962,8 @@ export function paintInput(view: InputView): void {
     buf += cup(r, 1) + esc.clearLine + text;
   }
 
-  // 4b. 下线(输入框底):满屏宽细线 ─(cyan),固定屏底 rows
-  buf += cup(g.rows, 1) + esc.clearLine + ui.cyan + '─'.repeat(g.cols) + ui.reset;
+  // 4b. 下线(输入框底):满屏宽细线 ─(cyan),在 model 行上一行(model 行占屏底 rows)
+  buf += cup(g.rows - 1, 1) + esc.clearLine + ui.cyan + '─'.repeat(g.cols) + ui.reset;
 
   // 5. 向上菜单(画在内容区底,底栏正上方)
   if (view.menu && view.menu.lines.length > 0) {
@@ -1037,7 +1074,7 @@ export function enterInputMode(status: string = '空闲'): void {
     if (active) repaintViewport();
   }
   if (active && base) {
-    setRegion(5); // 1 虚拟空 + 1 状态 + 1 上线 + 1 输入 + 1 下线
+    setRegion(6); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行(两行式底栏)
     paintInput({
       prompt: '❯ ',
       lines: [''],
@@ -1049,7 +1086,7 @@ export function enterInputMode(status: string = '空闲'): void {
   }
 }
 
-/** 进入运行态:底栏输入行改 dim 占位,光标回续写位。footerH 恒 5(虚拟空+状态+上线+输入+下线)。新轮回尾(确保新内容可见)。 */
+/** 进入运行态:底栏输入行改 dim 占位,光标回续写位。footerH 恒 6(虚拟空+spinner行+上线+输入+下线+model行)。新轮回尾(确保新内容可见)。 */
 export function enterRunningMode(status: string, placeholder: string): void {
   mode = 'running';
   statusText = status;
@@ -1058,7 +1095,7 @@ export function enterRunningMode(status: string, placeholder: string): void {
   resetScroll(); // 若上轮 INPUT 滚动过(未打字回底),新轮回尾
   lockScrollToBottom(); // 轮首短时锁:吸收发消息前后残留滚轮事件,保 agent 输出从底部开始(锁过期或轮末 enterInputMode 解)
   if (active && base) {
-    setRegion(5); // 1 虚拟空 + 1 状态 + 1 上线 + 1 输入 + 1 下线
+    setRegion(6); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行
     paintInput({
       prompt: '❯ ',
       lines: [''],
@@ -1082,8 +1119,8 @@ export function enterAltScreen(): void {
   if (active || !ui.isTTY) return;
   active = true;
   stdout.write(esc.altOn);
-  stdout.write(esc.mouseOn); // SGR 鼠标追踪:滚轮发 \x1B[<btn;col;rowM 报表,经 mouse.consumeMouse 重组 → scrollBy(滚轮滚动靠此 + onKey/onRunningKey 顶部守卫)
-  setRegion(5); // 1 虚拟空 + 1 状态 + 1 上线 + 1 输入 + 1 下线(底栏始终含上下线)
+  stdout.write(esc.altScrollOn); // alt 屏滚轮转发 ↑/↓(不抓鼠标点击/拖拽,原生选区复制不受影响)
+  setRegion(6); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行(两行式底栏)
   contentRow = 1;
   contentCol = 1;
   segmentStartRow = 1;
@@ -1135,7 +1172,6 @@ export function exitAltScreen(): void {
   scrollLockUntil = 0; // 清轮首滚动锁(防状态泄漏到下次进 alt 屏)
   frameRow = 0; // 清 spinner 帧位置(防状态泄漏到下次进 alt 屏)
   frameCol = 0;
-  mouse.resetMouse(); // 清鼠标重组残留(防退出后状态泄漏到下次进 alt 屏)
   // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。
   try {
     stdin.setRawMode(false); // 还原 raw(RUNNING 态常驻 raw,退出时必须还原,否则终端残留 raw 模式)
@@ -1145,7 +1181,7 @@ export function exitAltScreen(): void {
   try {
     stdout.write('\x1B[r'); // 复位 DECSTBM margins
     stdout.write(esc.cursorShow);
-    stdout.write(esc.mouseOff); // 关 SGR 鼠标追踪(反序:先 1006l 再 1000l)
+    stdout.write(esc.altScrollOff); // 关 alt 屏滚轮转发
     stdout.write(esc.altOff); // 退 alt(恢复主屏 + 光标)
   } catch {
     // 忽略

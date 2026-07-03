@@ -9,7 +9,6 @@ import { setSandboxRoot } from '../sandbox/root.js';
 import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
-import * as mouse from '../ui/mouse.js';
 import {
   promptWithSlashMenu,
   promptTurnPicker,
@@ -155,8 +154,7 @@ function renderContextBar(history: ChatMessage[]): string {
   const pct = Math.min(1, est / win);
   const W = 10;
   const filled = Math.round(pct * W);
-  const bar =
-    filled === 0 ? ' '.repeat(W) : '█'.repeat(filled) + '░'.repeat(W - filled);
+  const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
   const src = contextState.lastUsage ? '实测' : '估算';
   const k = (n: number) => `${Math.round(n / 1000)}k`;
   const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.cyan;
@@ -173,8 +171,7 @@ function renderContextBarInline(history: ChatMessage[]): string {
   const pct = Math.min(1, est / win);
   const W = 10;
   const filled = Math.round(pct * W);
-  const bar =
-    filled === 0 ? ' '.repeat(W) : '█'.repeat(filled) + '░'.repeat(W - filled);
+  const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
   const k = (n: number) => `${Math.round(n / 1000)}k`;
   const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.cyan;
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
@@ -239,14 +236,8 @@ let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user
 /** 运行态按键:滚动优先,再 Ctrl+C 中断,再 typeahead 编辑(单行,Enter=无操作)。 */
 function onRunningKey(_str: string, key?: Key): void {
   if (!key) return;
-  // SGR 鼠标滚轮:readline 把 \x1B[<btn;col;rowM 拆成多 fragment,经 mouse.consumeMouse 重组;
-  // 滚轮 → scrollBy(±5)(不调 setUserActive——与键盘滚动一致;流式 flushTimer 在 scrollOffset>0 时不重画,安全)。
-  const _m = mouse.consumeMouse(key.sequence ?? '');
-  if (_m.suppress) {
-    if (_m.wheel) layout.scrollBy(_m.wheel * 5);
-    return;
-  }
-  // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,↑/↓ 每次 5 行(键盘;鼠标滚轮已由上方守卫处理)。
+  // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,↑/↓ 每次 5 行(键盘 + alt 屏内鼠标滚轮转发的
+  // \x1B[A/\x1B[B,经 DECSET 1007 转发,与键盘 ↑/↓ 同序列,天然共用此分支)。
   // 运行态无输入光标,↑/↓ 无其他用途,直接作滚动。
   if (
     key.name === 'pageup' ||

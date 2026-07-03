@@ -5,15 +5,17 @@ import dotenv from 'dotenv';
 
 /**
  * 按优先级加载配置文件并回填 process.env:
- *   候选(文件内升序、后者覆盖前者):~/.mocode/config(全局)→ <cwd>/.mocode/config → <cwd>/.env(兼容旧用法)。
+ *   候选(后者覆盖前者,优先级升序):<cwd>/.env(兼容旧用法,最低)→ ~/.mocode/config(全局)→ <cwd>/.mocode/config(项目级覆盖,最高)。
  *   合并后只回填 process.env 里**尚未设置**的键——shell 里 export 的环境变量永远优先。
- * 故 `mocode` 可在任意目录 / 任意终端启动:全局配置(~/.mocode/config)兜底,项目级文件按需覆盖。
+ * 故 `mocode` 可在任意目录 / 任意终端启动:全局配置(~/.mocode/config)兜底(/model 与 mocode config 写此),
+ *   项目级 .mocode/config 按需覆盖全局;旧用法 .env 优先级最低,不再盖过全局 config——
+ *   否则 /model 写入 ~/.mocode/config 的 LLM 键会被项目 .env 里的同名旧值盖回。
  */
 function loadEnvFiles(): void {
   const candidates = [
-    path.join(os.homedir(), '.mocode', 'config'),
-    path.join(process.cwd(), '.mocode', 'config'),
-    path.join(process.cwd(), '.env'),
+    path.join(process.cwd(), '.env'),              // 兼容旧用法,优先级最低
+    path.join(os.homedir(), '.mocode', 'config'),  // 全局(/model 与 mocode config 写此)
+    path.join(process.cwd(), '.mocode', 'config'), // 项目级覆盖,优先级最高
   ];
   const fromFiles: Record<string, string> = {};
   for (const p of candidates) {
