@@ -13,6 +13,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Antenna dish -->
   <line x1="128" y1="16" x2="128" y2="46" stroke="url(#accentGrad)" stroke-width="4"/>
@@ -49,4 +50,5 @@
   <!-- Struts / feet -->
   <line x1="106" y1="212" x2="90" y2="236" stroke="url(#accentGrad)" stroke-width="6" stroke-linecap="round"/>
   <line x1="150" y1="212" x2="166" y2="236" stroke="url(#accentGrad)" stroke-width="6" stroke-linecap="round"/>
+  </g>
 </svg>

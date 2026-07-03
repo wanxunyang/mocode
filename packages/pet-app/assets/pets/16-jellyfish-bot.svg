@@ -9,6 +9,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Dome head -->
   <path d="M46 110 C46 56 82 26 128 26 C174 26 210 56 210 110 Z"
@@ -42,4 +43,5 @@
   <circle cx="66" cy="170" r="3" fill="#e040fb" filter="url(#glow)"/>
   <circle cx="132" cy="180" r="3" fill="#e040fb" filter="url(#glow)"/>
   <circle cx="196" cy="170" r="3" fill="#e040fb" filter="url(#glow)"/>
+  </g>
 </svg>

@@ -5,24 +5,27 @@
       <stop offset="1" stop-color="#0d1b2a"/>
     </linearGradient>
     <linearGradient id="accentGrad" x1="60" y1="90" x2="196" y2="170" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#2afadf"/>
-      <stop offset="1" stop-color="#42a5f5"/>
+      <stop offset="0" stop-color="#ff6ec7"/>
+      <stop offset="1" stop-color="#f48fb1"/>
     </linearGradient>
     <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
       <feGaussianBlur stdDeviation="3" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
-  <!-- Ears -->
-  <path d="M52 62 L34 24 L78 48 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
-  <path d="M204 62 L222 24 L178 48 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <!-- Long ears -->
+  <rect x="66" y="0" width="22" height="66" rx="11" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <rect x="168" y="0" width="22" height="66" rx="11" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <rect x="72" y="8" width="10" height="42" rx="5" fill="#ff6ec7" fill-opacity="0.5"/>
+  <rect x="174" y="8" width="10" height="42" rx="5" fill="#ff6ec7" fill-opacity="0.5"/>
 
   <!-- Body / head -->
-  <rect x="40" y="50" width="176" height="150" rx="28" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <rect x="40" y="50" width="176" height="150" rx="30" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
 
   <!-- Screen face -->
-  <rect x="60" y="72" width="136" height="90" rx="14" fill="#0a1420" stroke="#2afadf" stroke-opacity="0.4" stroke-width="1.5"/>
+  <rect x="60" y="72" width="136" height="90" rx="14" fill="#0a1420" stroke="#ff6ec7" stroke-opacity="0.4" stroke-width="1.5"/>
 
   <!-- Eyes -->
   <g filter="url(#glow)">
@@ -36,21 +39,16 @@
     </rect>
   </g>
 
-  <!-- Cat mouth -->
-  <path d="M118 148 L128 156 L138 148" stroke="#2afadf" stroke-width="4" fill="none" stroke-linecap="round" filter="url(#glow)"/>
-
-  <!-- Whiskers -->
-  <line x1="46" y1="128" x2="76" y2="124" stroke="url(#accentGrad)" stroke-width="2" stroke-linecap="round"/>
-  <line x1="46" y1="140" x2="76" y2="140" stroke="url(#accentGrad)" stroke-width="2" stroke-linecap="round"/>
-  <line x1="210" y1="128" x2="180" y2="124" stroke="url(#accentGrad)" stroke-width="2" stroke-linecap="round"/>
-  <line x1="210" y1="140" x2="180" y2="140" stroke="url(#accentGrad)" stroke-width="2" stroke-linecap="round"/>
+  <!-- Nose -->
+  <path d="M122 148 L128 156 L134 148 Z" fill="#ff6ec7" filter="url(#glow)"/>
 
   <!-- Legs / feet -->
   <rect x="76" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
   <rect x="160" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
-  <rect x="66" y="222" width="40" height="10" rx="5" fill="#2afadf" fill-opacity="0.6"/>
-  <rect x="150" y="222" width="40" height="10" rx="5" fill="#2afadf" fill-opacity="0.6"/>
+  <rect x="66" y="222" width="40" height="10" rx="5" fill="#ff6ec7" fill-opacity="0.6"/>
+  <rect x="150" y="222" width="40" height="10" rx="5" fill="#ff6ec7" fill-opacity="0.6"/>
 
-  <!-- Tail -->
-  <path d="M216 180 Q246 190 240 150" stroke="url(#accentGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <!-- Fluffy tail -->
+  <circle cx="224" cy="184" r="16" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  </g>
 </svg>

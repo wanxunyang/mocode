@@ -9,7 +9,10 @@ html, body {
   height: 100%;
   background: transparent;
   overflow: hidden;
-  -webkit-app-region: drag; /* 允许拖拽悬浮窗(鼠标穿透关闭区域外);实际穿透行为由主进程 setIgnoreMouseEvents 控制 */
+  /* 拖拽放置:整窗标记为可拖动区域。默认鼠标穿透(main.ts setIgnoreMouseEvents(true,{forward:true})),
+   * 悬停到 #pet-stage 时 renderer.ts 请求取消穿透,此时该区域才真正可拖动;离开后恢复穿透。 */
+  -webkit-app-region: drag;
+  user-select: none; /* 拖拽时避免误选中文本 */
 }
 
 #pet-stage {

@@ -13,6 +13,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Pointed ears with white tips -->
   <path d="M56 60 L30 18 L82 46 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
@@ -50,4 +51,5 @@
   <!-- Bushy tail with white tip -->
   <path d="M216 180 Q252 186 248 142 Q244 120 220 128" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
   <circle cx="230" cy="132" r="10" fill="#fff" fill-opacity="0.85"/>
+  </g>
 </svg>

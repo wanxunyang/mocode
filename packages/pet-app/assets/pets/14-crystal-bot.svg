@@ -10,6 +10,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Shadow (floating) -->
   <ellipse cx="128" cy="236" rx="46" ry="8" fill="#000" fill-opacity="0.15"/>
@@ -27,4 +28,5 @@
   <!-- Angular eyes -->
   <path d="M100 110 L112 122 L100 134 L92 122 Z" fill="#0a1420"/>
   <path d="M156 110 L168 122 L156 134 L148 122 Z" fill="#0a1420"/>
+  </g>
 </svg>

@@ -13,6 +13,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Body / head (wide, squat) -->
   <rect x="34" y="66" width="188" height="134" rx="36" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
@@ -34,4 +35,5 @@
   <!-- Bent frog legs -->
   <path d="M50 176 Q20 190 30 224 Q46 236 56 214" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
   <path d="M206 176 Q236 190 226 224 Q210 236 200 214" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  </g>
 </svg>

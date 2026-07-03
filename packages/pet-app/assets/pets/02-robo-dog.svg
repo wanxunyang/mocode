@@ -6,20 +6,21 @@
     </linearGradient>
     <linearGradient id="accentGrad" x1="60" y1="90" x2="196" y2="170" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#ffb74d"/>
-      <stop offset="1" stop-color="#ffa726"/>
+      <stop offset="1" stop-color="#ff8a65"/>
     </linearGradient>
     <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
       <feGaussianBlur stdDeviation="3" result="blur"/>
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
-  <!-- Round ears -->
-  <circle cx="56" cy="46" r="24" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
-  <circle cx="200" cy="46" r="24" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <!-- Floppy ears -->
+  <path d="M50 68 Q16 88 26 142 Q42 152 58 122 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <path d="M206 68 Q240 88 230 142 Q214 152 198 122 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
 
   <!-- Body / head -->
-  <rect x="40" y="50" width="176" height="150" rx="30" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
+  <rect x="40" y="50" width="176" height="150" rx="28" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
 
   <!-- Screen face -->
   <rect x="60" y="72" width="136" height="90" rx="14" fill="#0a1420" stroke="#ffb74d" stroke-opacity="0.4" stroke-width="1.5"/>
@@ -36,13 +37,19 @@
     </rect>
   </g>
 
-  <!-- Round snout patch -->
-  <ellipse cx="128" cy="148" rx="26" ry="18" fill="#0a1420" stroke="#ffb74d" stroke-opacity="0.5" stroke-width="1.5"/>
-  <ellipse cx="128" cy="142" rx="6" ry="5" fill="#ffb74d"/>
+  <!-- Nose + tongue -->
+  <ellipse cx="128" cy="145" rx="9" ry="6" fill="#ff8a65" filter="url(#glow)"/>
+  <rect x="120" y="153" width="16" height="14" rx="6" fill="#ff8fa3"/>
 
   <!-- Legs / feet -->
-  <rect x="72" y="200" width="24" height="26" rx="9" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
-  <rect x="160" y="200" width="24" height="26" rx="9" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
-  <rect x="62" y="222" width="44" height="10" rx="5" fill="#ffb74d" fill-opacity="0.6"/>
-  <rect x="150" y="222" width="44" height="10" rx="5" fill="#ffb74d" fill-opacity="0.6"/>
+  <rect x="76" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <rect x="160" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <rect x="66" y="222" width="40" height="10" rx="5" fill="#ffb74d" fill-opacity="0.6"/>
+  <rect x="150" y="222" width="40" height="10" rx="5" fill="#ffb74d" fill-opacity="0.6"/>
+
+  <!-- Wagging tail -->
+  <path d="M216 178 Q250 168 244 138" stroke="url(#accentGrad)" stroke-width="8" stroke-linecap="round" fill="none">
+    <animateTransform attributeName="transform" type="rotate" values="0 216 178;18 216 178;0 216 178" dur="0.8s" repeatCount="indefinite"/>
+  </path>
+  </g>
 </svg>

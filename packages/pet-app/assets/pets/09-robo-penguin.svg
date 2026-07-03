@@ -13,6 +13,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Body (oval) -->
   <ellipse cx="128" cy="140" rx="88" ry="100" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
@@ -44,4 +45,5 @@
   <!-- Feet -->
   <ellipse cx="104" cy="234" rx="16" ry="8" fill="#ffb74d"/>
   <ellipse cx="152" cy="234" rx="16" ry="8" fill="#ffb74d"/>
+  </g>
 </svg>

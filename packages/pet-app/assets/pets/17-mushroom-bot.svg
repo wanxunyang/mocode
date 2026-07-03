@@ -13,6 +13,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Cap -->
   <path d="M30 112 C30 54 72 22 128 22 C184 22 226 54 226 112 Z" fill="url(#capGrad)" stroke="#8e1c1c" stroke-width="2.5"/>
@@ -42,4 +43,5 @@
   <!-- Root feet -->
   <ellipse cx="104" cy="238" rx="16" ry="8" fill="#bdbdbd"/>
   <ellipse cx="152" cy="238" rx="16" ry="8" fill="#bdbdbd"/>
+  </g>
 </svg>

@@ -63,7 +63,36 @@ export interface ByeMessage {
   ts: number;
 }
 
-export type ClientMessage = HelloMessage | StateMessage | PingMessage | ByeMessage;
+/** 主动请求桌宠进程整体退出(与 disconnect 不同:disconnect 只断开本连接,shutdown 让桌宠 app.quit()）。
+ *  不要求发送方是当前活跃连接——任何已连接的 mocode 进程都可以关闭桌宠(见 Requirement 补充:关闭桌宠)。 */
+export interface ShutdownMessage {
+  type: 'shutdown';
+  clientId: ClientId;
+  ts: number;
+}
+
+/** 请求切换桌宠皮肤(选宠物)。skinId 对应 assets/pets/manifest.json 里的 id,空字符串/'default' 表示恢复默认 mascot.svg。 */
+export interface SetSkinMessage {
+  type: 'set_skin';
+  clientId: ClientId;
+  skinId: string;
+  ts: number;
+}
+
+/** 请求当前可用皮肤列表(触发 server 回复 SkinListMessage)。 */
+export interface ListSkinsMessage {
+  type: 'list_skins';
+  ts: number;
+}
+
+export type ClientMessage =
+  | HelloMessage
+  | StateMessage
+  | PingMessage
+  | ByeMessage
+  | ShutdownMessage
+  | SetSkinMessage
+  | ListSkinsMessage;
 
 // ── Server → Client ───────────────────────────────────────────────────────
 
@@ -78,7 +107,15 @@ export interface PongMessage {
   ts: number;
 }
 
-export type ServerMessage = WelcomeMessage | PongMessage;
+/** 皮肤列表(供 /pet skin 菜单展示)。桌宠进程回复,ids 对应 assets/pets/ 下的候选素材。 */
+export interface SkinListMessage {
+  type: 'skin_list';
+  skins: { id: string; name: string }[];
+  currentSkinId: string;
+  ts: number;
+}
+
+export type ServerMessage = WelcomeMessage | PongMessage | SkinListMessage;
 
 /** 判断值是否为合法 PetState(供消息校验,非法值丢弃不崩)。 */
 export function isValidPetState(v: unknown): v is PetState {
@@ -119,6 +156,14 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     case 'bye':
       if (typeof m.clientId !== 'string') return null;
       return { type: 'bye', clientId: m.clientId, ts: m.ts };
+    case 'shutdown':
+      if (typeof m.clientId !== 'string') return null;
+      return { type: 'shutdown', clientId: m.clientId, ts: m.ts };
+    case 'set_skin':
+      if (typeof m.clientId !== 'string' || typeof m.skinId !== 'string') return null;
+      return { type: 'set_skin', clientId: m.clientId, skinId: m.skinId, ts: m.ts };
+    case 'list_skins':
+      return { type: 'list_skins', ts: m.ts };
     default:
       return null;
   }
@@ -141,6 +186,18 @@ export function parseServerMessage(raw: string): ServerMessage | null {
       return { type: 'welcome', isActive: m.isActive, ts: m.ts };
     case 'pong':
       return { type: 'pong', ts: m.ts };
+    case 'skin_list': {
+      if (!Array.isArray(m.skins) || typeof m.currentSkinId !== 'string') return null;
+      const skins: { id: string; name: string }[] = [];
+      for (const s of m.skins) {
+        if (!s || typeof s !== 'object') continue;
+        const ss = s as Record<string, unknown>;
+        if (typeof ss.id === 'string' && typeof ss.name === 'string') {
+          skins.push({ id: ss.id, name: ss.name });
+        }
+      }
+      return { type: 'skin_list', skins, currentSkinId: m.currentSkinId, ts: m.ts };
+    }
     default:
       return null;
   }

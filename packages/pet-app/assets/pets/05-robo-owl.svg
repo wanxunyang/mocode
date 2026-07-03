@@ -13,6 +13,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Ear tufts -->
   <path d="M60 58 L50 26 L76 46 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
@@ -43,4 +44,5 @@
   <rect x="160" y="200" width="20" height="24" rx="6" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
   <rect x="66" y="220" width="40" height="10" rx="5" fill="#b388ff" fill-opacity="0.6"/>
   <rect x="150" y="220" width="40" height="10" rx="5" fill="#b388ff" fill-opacity="0.6"/>
+  </g>
 </svg>

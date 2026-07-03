@@ -10,4 +10,14 @@ contextBridge.exposeInMainWorld('petBridge', {
       callback(payload.state, payload.meta);
     });
   },
+  /** 主进程推来的皮肤切换通知(托盘菜单选择 或 CLI set_skin 消息触发)。 */
+  onSkin: (callback: (assetPath: string) => void) => {
+    ipcRenderer.on('pet:skin', (_event, payload: { assetPath: string }) => {
+      callback(payload.assetPath);
+    });
+  },
+  /** 转发鼠标穿透状态请求(拖拽放置功能:悬停时取消穿透,离开后恢复穿透)。 */
+  setIgnoreMouseEvents: (ignore: boolean) => {
+    ipcRenderer.send('pet:set-ignore-mouse-events', ignore);
+  },
 });

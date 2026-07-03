@@ -13,6 +13,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Back spikes -->
   <path d="M64 52 L76 24 L90 52 Z" fill="url(#accentGrad)"/>
@@ -53,4 +54,5 @@
   <!-- Spiky tail -->
   <path d="M216 176 Q248 178 244 150" stroke="url(#accentGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
   <path d="M240 150 L248 138 L252 154 Z" fill="url(#accentGrad)"/>
+  </g>
 </svg>

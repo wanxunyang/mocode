@@ -1,7 +1,16 @@
 // 桌宠 Electron 主进程:WS Server 单例 + 最新连接覆盖 + BrowserWindow 生命周期。
 // 不感知 mocode CLI 内部逻辑,只是纯粹的状态转发枢纽:接收 WS state 消息 → IPC 推给渲染进程。
 
-import { app, BrowserWindow, screen } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  screen,
+  Tray,
+  Menu,
+  nativeImage,
+  ipcMain,
+  type MenuItemConstructorOptions,
+} from 'electron';
 import { WebSocketServer, WebSocket, type RawData } from 'ws';
 import { createServer as createHttpServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +20,8 @@ import {
   type PetState,
   type PetStateMeta,
 } from './protocol.js';
+import { loadConfig, saveConfig, type PetConfig } from './config.js';
+import { listSkinEntries, resolveSkinPath } from './skins.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -42,7 +53,10 @@ const connections = new Map<WebSocket, ConnectionRecord>();
 let activeSocket: WebSocket | null = null;
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
 let transientTimer: NodeJS.Timeout | null = null;
+/** 当前生效的皮肤 id('default' = assets/mascot.svg);启动时从持久化配置读取,运行期随 set_skin/托盘菜单变化。 */
+let currentSkinId = 'default';
 
 /** 把状态推给渲染进程(IPC)。渲染进程窗口未就绪时静默丢弃(下次状态到达会重推)。 */
 function broadcastToRenderer(state: PetState, meta?: PetStateMeta): void {
@@ -136,8 +150,47 @@ function onMessage(socket: WebSocket, raw: string): void {
       if (socket !== activeSocket) return; // 非活跃连接的状态消息静默丢弃
       broadcastToRenderer(msg.state, msg.meta);
       return;
+    case 'shutdown':
+      // 关闭桌宠(方案C的 CLI 入口):不要求发送方是活跃连接,任何已连接的 mocode 进程均可请求关闭。
+      console.log('[pet-app] 收到 shutdown 请求,进程退出。');
+      app.quit();
+      return;
+    case 'set_skin':
+      applySkin(msg.skinId);
+      return;
+    case 'list_skins':
+      send(socket, {
+        type: 'skin_list',
+        skins: listSkinEntries().map((e) => ({ id: e.id, name: e.name })),
+        currentSkinId,
+        ts: Date.now(),
+      });
+      return;
     default:
       return;
+  }
+}
+
+/** 切换皮肤:校验 skinId、更新内存态、持久化、通知渲染进程重新 inline 对应 SVG。
+ *  未知 skinId(非 'default' 且不在 manifest 里)静默忽略,不改变当前皮肤——选皮是可选增强,不能崩。 */
+function applySkin(skinId: string): void {
+  if (skinId !== 'default' && !listSkinEntries().some((e) => e.id === skinId)) return;
+  currentSkinId = skinId;
+  saveConfig({ skinId });
+  pushSkinToRenderer();
+  rebuildTrayMenu();
+}
+
+/** 把当前皮肤对应的素材相对路径(相对 renderer/index.html,供 fetch)推给渲染进程。 */
+function pushSkinToRenderer(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const abs = resolveSkinPath(currentSkinId);
+  // renderer/index.html 位于 dist/renderer/,mascot.svg 在 dist/assets/,候选皮肤在 dist/assets/pets/。
+  const assetPath = abs ? `../assets/pets/${path.basename(abs)}` : '../assets/mascot.svg';
+  try {
+    mainWindow.webContents.send('pet:skin', { assetPath });
+  } catch {
+    // 静默:渲染进程未就绪时忽略,下次 pushSkinToRenderer 调用(重建窗口时)会重新推送
   }
 }
 
@@ -247,19 +300,23 @@ function probeIsPetServer(port: number): Promise<boolean> {
   });
 }
 
-/** 跨平台悬浮窗配置(design.md 跨平台 BrowserWindow 配置差异表)。 */
+const WIN_WIDTH = 260;
+const WIN_HEIGHT = 220;
+
+/** 跨平台悬浮窗配置(design.md 跨平台 BrowserWindow 配置差异表)。
+ *  位置:优先用持久化配置里的 x/y(拖拽放置后记住的位置);无记忆位置时回退默认右下角。 */
 function createPetWindow(): BrowserWindow {
-  const { width } = screen.getPrimaryDisplay().workAreaSize;
-  const winHeight = 220;
-  // 宽度在原有正方形基础上加宽,容纳宠物右侧的信号灯(见 renderer/style.css #signal-light-container)。
-  const winWidth = 260;
+  const cfg = loadConfig();
+  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
   const margin = 24;
+  const defaultX = width - WIN_WIDTH - margin;
+  const defaultY = height - WIN_HEIGHT - margin;
 
   const win = new BrowserWindow({
-    width: winWidth,
-    height: winHeight,
-    x: width - winWidth - margin,
-    y: screen.getPrimaryDisplay().workAreaSize.height - winHeight - margin,
+    width: WIN_WIDTH,
+    height: WIN_HEIGHT,
+    x: typeof cfg.x === 'number' ? cfg.x : defaultX,
+    y: typeof cfg.y === 'number' ? cfg.y : defaultY,
     transparent: true,
     frame: false,
     alwaysOnTop: true,
@@ -269,7 +326,8 @@ function createPetWindow(): BrowserWindow {
     fullscreenable: false,
     minimizable: false,
     maximizable: false,
-    focusable: false,
+    // 注:focusable 不再固定为 false——拖拽放置(方案:hover 时取消鼠标穿透)需要窗口在悬停时可交互。
+    // 仍不出现在任务栏/Alt-Tab(skipTaskbar),不会抢主输入焦点造成困扰。
     webPreferences: {
       preload: path.join(__dirname, 'renderer', 'preload.js'),
       contextIsolation: true,
@@ -284,10 +342,18 @@ function createPetWindow(): BrowserWindow {
     win.setAlwaysOnTop(true);
   }
 
-  // 鼠标穿透:允许用户点击桌面下层内容,不遮挡操作。悬浮窗本身仍可接收自身渲染的动画更新。
-  win.setIgnoreMouseEvents(true);
+  // 默认鼠标穿透(不遮挡桌面操作);forward:true 转发 mousemove,使渲染进程能收到 mouseenter/mouseleave
+  // 从而按 Electron 官方推荐模式动态请求取消穿透(见 preload.ts setIgnoreMouseEvents 转发 + renderer.ts 拖拽逻辑)。
+  win.setIgnoreMouseEvents(true, { forward: true });
+
+  // 拖拽放置后持久化窗口位置(见 renderer.ts 的 -webkit-app-region:drag 拖拽 + 此处 'moved' 事件落盘)。
+  win.on('moved', () => {
+    const [x, y] = win.getPosition();
+    saveConfig({ x, y });
+  });
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  win.webContents.once('did-finish-load', () => pushSkinToRenderer());
 
   win.webContents.on('render-process-gone', () => {
     // 渲染进程崩溃但主进程(WS Server)存活:重建一次窗口,不重启 WS Server、不断开现有客户端连接。
@@ -301,15 +367,60 @@ function createPetWindow(): BrowserWindow {
   return win;
 }
 
+/** 渲染进程请求切换鼠标穿透状态(悬停时取消穿透以便拖拽,离开后恢复穿透)。见 preload.ts 转发。 */
+ipcMain.on('pet:set-ignore-mouse-events', (event, ignore: boolean) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  win?.setIgnoreMouseEvents(ignore, { forward: true });
+});
+
+/** 构建/刷新托盘右键菜单:退出桌宠 + 选择宠物子菜单(单选,当前皮肤打勾)。 */
+function rebuildTrayMenu(): void {
+  if (!tray) return;
+  const skinItems: MenuItemConstructorOptions[] = [
+    {
+      label: '默认(mascot)',
+      type: 'radio',
+      checked: currentSkinId === 'default',
+      click: () => applySkin('default'),
+    },
+    ...listSkinEntries().map((e) => ({
+      label: e.name,
+      type: 'radio' as const,
+      checked: currentSkinId === e.id,
+      click: () => applySkin(e.id),
+    })),
+  ];
+  const template: MenuItemConstructorOptions[] = [
+    { label: 'mocode 桌宠', enabled: false },
+    { type: 'separator' },
+    { label: '选择宠物', submenu: skinItems },
+    { type: 'separator' },
+    { label: '退出桌宠', click: () => app.quit() },
+  ];
+  tray.setContextMenu(Menu.buildFromTemplate(template));
+}
+
+/** 创建系统托盘图标(方案C的桌面侧退出/选皮入口,弥补悬浮窗本身鼠标穿透+无边框导致的不可交互问题)。 */
+function createTray(): Tray {
+  // dist/main.js 与 dist/assets/ 同级(scripts/copy-static.mjs 把源码 assets/ 整体复制到 dist/assets/)。
+  const iconPath = path.join(__dirname, 'assets', 'tray-icon.png');
+  const icon = nativeImage.createFromPath(iconPath);
+  const t = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
+  t.setToolTip('mocode 桌宠');
+  return t;
+}
+
 app.whenReady().then(async () => {
+  const cfg: PetConfig = loadConfig();
+  currentSkinId = cfg.skinId ?? 'default';
   const port = petPort();
   await startServer(port);
   startHeartbeatSweep();
   mainWindow = createPetWindow();
+  tray = createTray();
+  rebuildTrayMenu();
 });
 
-app.on('window-all-closed', () => {
-  // 用户关闭悬浮窗:整个桌宠进程退出(WS Server 一并关闭,已连 mocode 客户端会收到 close 事件,
-  // 按 bridge.ts 的"连接异常不自动重连"策略,下次 /pet 会重新探测并拉起新实例)。
-  app.quit();
-});
+// 不再监听 window-all-closed → app.quit():悬浮窗本身不可关闭(frame:false 且无关闭按钮),
+// 该事件设计上永不触发。退出统一走两个显式入口:托盘菜单"退出桌宠" 或 CLI 侧 shutdown 消息
+// (src/pet/bridge.ts killPetProcess,经 /pet quit 命令触发)。

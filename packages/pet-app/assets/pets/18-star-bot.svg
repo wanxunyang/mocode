@@ -9,6 +9,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Star body: 5-point star -->
   <path d="M128 20
@@ -40,4 +41,5 @@
 
   <!-- Smile -->
   <path d="M114 148 Q128 158 142 148" stroke="#ffe082" stroke-width="3" fill="none" stroke-linecap="round"/>
+  </g>
 </svg>

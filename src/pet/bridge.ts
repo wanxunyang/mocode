@@ -5,8 +5,16 @@
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import WebSocket from 'ws';
-import type { PetState, PetStateMeta, ClientId, StateMessage, HelloMessage } from './protocol.js';
+import WebSocket, { type RawData } from 'ws';
+import type {
+  PetState,
+  PetStateMeta,
+  ClientId,
+  StateMessage,
+  HelloMessage,
+  ServerMessage,
+  SkinListMessage,
+} from './protocol.js';
 import { parseServerMessage } from './protocol.js';
 
 /** 默认端口;MOCODE_PET_PORT 环境变量覆盖(design.md 默认假设)。 */
@@ -32,6 +40,8 @@ let socket: WebSocket | null = null;
 let lastSentState: PetState | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let heartbeatTimeoutTimer: NodeJS.Timeout | null = null;
+/** list_skins 请求的等待队列(先进先出;桌宠单连接场景下不会有并发歧义)。 */
+let pendingSkinListResolvers: ((msg: SkinListMessage) => void)[] = [];
 
 function clearHeartbeat(): void {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -205,13 +215,18 @@ function wireConnection(ws: WebSocket): void {
   } catch {
     // 静默:hello 发送失败不影响后续状态广播尝试(sendState 内部会再检查连接状态)
   }
-  ws.on('message', (data) => {
-    // 目前只需处理 pong/welcome 以维持心跳存活判定;解析失败静默丢弃(协议层已保证不抛错)。
-    const msg = parseServerMessage(String(data));
-    if (!msg) return;
+  ws.on('message', (data: RawData) => {
+    const msg: ServerMessage | null = parseServerMessage(String(data));
+    if (!msg) return; // 解析失败静默丢弃(协议层已保证不抛错)
     if (msg.type === 'pong' && heartbeatTimeoutTimer) {
       clearTimeout(heartbeatTimeoutTimer);
       heartbeatTimeoutTimer = null;
+      return;
+    }
+    if (msg.type === 'skin_list') {
+      const resolver = pendingSkinListResolvers.shift();
+      resolver?.(msg);
+      return;
     }
   });
   ws.once('close', () => {
@@ -267,6 +282,96 @@ export function disconnect(): void {
     ws.close(1000);
   } catch {
     // no-op
+  }
+}
+
+/**
+ * 请求桌宠进程整体退出(方案C:CLI 侧退出入口;托盘图标是桌面侧的另一入口,见 packages/pet-app/src/main.ts)。
+ * 不要求本连接是活跃连接——任何已连接的 mocode 进程都可以关闭桌宠。
+ * 前置条件:当前进程已建立连接(未连接则先尝试探测端口直连,再发 shutdown)。
+ * 后置条件:发送 shutdown 消息后主动断开本地连接;不等待桌宠进程确认退出(best-effort,不阻塞 REPL)。
+ */
+export async function killPetProcess(): Promise<{ ok: boolean; reason?: string }> {
+  const port = petPort();
+  let ws = socket;
+  let owned = false; // 是否为本函数临时建立的连接(需要负责关闭)
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    const already = await probePort(port, PROBE_TIMEOUT_MS);
+    if (!already) {
+      return { ok: false, reason: '桌宠未运行' };
+    }
+    try {
+      ws = await openConnection(port);
+      owned = true;
+    } catch (e) {
+      return { ok: false, reason: e instanceof Error ? e.message : '无法连接桌宠' };
+    }
+  }
+  try {
+    ws.send(JSON.stringify({ type: 'shutdown', clientId, ts: Date.now() }));
+  } catch {
+    // 静默:发送失败不影响后续清理
+  }
+  try {
+    ws.close(1000);
+  } catch {
+    // no-op
+  }
+  if (!owned && socket === ws) {
+    // 本连接原本就是活跃连接:同步清理本地状态(桌宠进程退出后 WS 也会被动关闭,这里主动先清)。
+    socket = null;
+    clearHeartbeat();
+  }
+  return { ok: true };
+}
+
+/**
+ * 请求当前可用皮肤列表(供 /pet skin 菜单展示)。
+ * 前置条件:当前进程已建立连接(未连接则先尝试探测端口直连;若桌宠未运行则失败)。
+ * 后置条件:resolve 桌宠回复的 SkinListMessage;超时(2s 内无回复)reject。
+ */
+export async function listSkins(): Promise<SkinListMessage> {
+  const port = petPort();
+  let ws = socket;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    const already = await probePort(port, PROBE_TIMEOUT_MS);
+    if (!already) throw new Error('桌宠未运行,请先 /pet 打开');
+    ws = await openConnection(port);
+    wireConnection(ws);
+  }
+  return new Promise<SkinListMessage>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const idx = pendingSkinListResolvers.indexOf(onMsg);
+      if (idx >= 0) pendingSkinListResolvers.splice(idx, 1);
+      reject(new Error('桌宠未响应皮肤列表请求'));
+    }, 2000);
+    const onMsg = (msg: SkinListMessage): void => {
+      clearTimeout(timer);
+      resolve(msg);
+    };
+    pendingSkinListResolvers.push(onMsg);
+    try {
+      ws!.send(JSON.stringify({ type: 'list_skins', ts: Date.now() }));
+    } catch (e) {
+      clearTimeout(timer);
+      const idx = pendingSkinListResolvers.indexOf(onMsg);
+      if (idx >= 0) pendingSkinListResolvers.splice(idx, 1);
+      reject(e instanceof Error ? e : new Error(String(e)));
+    }
+  });
+}
+
+/**
+ * 请求桌宠切换皮肤(选宠物)。
+ * 前置条件:当前进程已建立连接(未连接则静默 no-op,与 sendState 的降级策略一致)。
+ * 后置条件:已连接时发送 set_skin 消息;未连接时不抛错、无副作用。
+ */
+export function setSkin(skinId: string): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  try {
+    socket.send(JSON.stringify({ type: 'set_skin', clientId, skinId, ts: Date.now() }));
+  } catch {
+    // 静默:发送失败不影响 REPL 主流程
   }
 }
 

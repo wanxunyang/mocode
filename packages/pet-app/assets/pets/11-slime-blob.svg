@@ -9,6 +9,7 @@
       <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
+  <g id="pet-body-group">
 
   <!-- Blob body -->
   <path d="M128 40
@@ -38,4 +39,5 @@
 
   <!-- Highlight -->
   <ellipse cx="92" cy="86" rx="18" ry="10" fill="#ffffff" fill-opacity="0.25"/>
+  </g>
 </svg>

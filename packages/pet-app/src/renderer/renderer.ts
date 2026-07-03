@@ -8,6 +8,8 @@ declare global {
   interface Window {
     petBridge: {
       onState: (cb: (state: PetState, meta?: PetStateMeta) => void) => void;
+      onSkin: (cb: (assetPath: string) => void) => void;
+      setIgnoreMouseEvents: (ignore: boolean) => void;
     };
   }
 }
@@ -50,6 +52,12 @@ async function inlineSvgInto(container: HTMLElement, assetPath: string): Promise
   }
 }
 
+/** 切换皮肤:清空宠物容器后重新 inline 新素材(信号灯/状态 class 均不受影响,独立于宠物素材本身)。 */
+async function swapSkin(petContainer: HTMLElement, assetPath: string): Promise<void> {
+  petContainer.innerHTML = '';
+  await inlineSvgInto(petContainer, assetPath);
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
   // 状态 class 加在 #pet-stage 上(mascot 与信号灯共同的祖先容器),两者的动画/灯光规则
   // 均以 `.pet-xxx #element-id` 描述,不要求元素是直接子节点。
@@ -65,4 +73,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   ]);
 
   window.petBridge.onState((state) => applyState(stage, state));
+  window.petBridge.onSkin((assetPath) => swapSkin(petContainer, assetPath));
+
+  // 拖拽放置:窗口默认鼠标穿透(见 main.ts setIgnoreMouseEvents(true,{forward:true})),
+  // 鼠标悬停到宠物身上时取消穿透(可交互,配合 style.css 的 app-region:drag 即可拖动窗口),
+  // 离开后恢复穿透(不遮挡桌面下层点击)。这是 Electron 官方推荐的 hover 点击穿透模式
+  // (https://www.electronjs.org/docs/latest/tutorial/custom-window-interactions#forward-mouse-events-macos-windows)。
+  stage.addEventListener('mouseenter', () => window.petBridge.setIgnoreMouseEvents(false));
+  stage.addEventListener('mouseleave', () => window.petBridge.setIgnoreMouseEvents(true));
 });

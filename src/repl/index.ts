@@ -5,7 +5,7 @@ import { config, PLAN_MODE_SUFFIX, updateModelConfig, isModelConfigured } from '
 import { updateConfigKey, writeConfigKeys, CONFIG_PATH } from '../config/file.js';
 import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
-import { togglePet } from '../pet/bridge.js';
+import { togglePet, killPetProcess, listSkins, setSkin } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
 import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
@@ -80,6 +80,8 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
   { name: '/auto', desc: '切回 auto 模式(全工具执行)' },
   { name: '/pet', desc: '开关桌宠(独立悬浮窗,展示 agent 状态动画)' },
+  { name: '/pet skin', desc: '选择桌宠皮肤(↑↓·Enter)' },
+  { name: '/pet quit', desc: '完全关闭桌宠进程(而非仅断开本连接)' },
 ];
 
 /** 主题名 → 一句描述(供 /theme 菜单 / 列表显示)。新增主题时在 src/ui/theme.ts THEMES 加键后于此补一句。 */
@@ -214,7 +216,7 @@ function runningStateFor(
     case '/model':
       return { status: '配模型', placeholder: '配置中…' };
     case '/pet':
-      return { status: '桌宠', placeholder: '连接中…' };
+      return { status: '桌宠', placeholder: '处理中…' };
     default:
       // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由内联 spinner 承载(思考中/执行…),
       // 状态行只显走时——故常态 status 留空,不塞「处理」这种与内联重复的泛标签。
@@ -719,6 +721,44 @@ export async function startRepl(
         setAgentMode('auto'); // listener 接手 applyMode + refreshStatusBase
         layout.contentWrite(`${ui.dim}(已切回 auto 模式:全工具执行)${ui.reset}\n`);
       }
+      continue;
+    }
+    if (line === '/pet quit') {
+      // /pet quit:完全关闭桌宠进程(区别于 /pet 的仅断开本连接)。方案C的 CLI 侧退出入口,
+      // 另一入口是桌宠托盘菜单"退出桌宠"(见 packages/pet-app/src/main.ts)。
+      const { ok, reason } = await killPetProcess();
+      layout.contentWrite(`${ui.dim}(${ok ? '已关闭桌宠进程' : reason ?? '关闭失败'})${ui.reset}\n`);
+      continue;
+    }
+    if (line === '/pet skin') {
+      // /pet skin:菜单选皮(↑↓ 选,Enter 切换,Esc 取消),仿 /theme 的交互。要求桌宠已在运行
+      // (未运行则先提示 /pet 打开;不在此处自动 spawn,避免选皮命令产生"顺带开桌宠"的意外副作用)。
+      let skinList: { skins: { id: string; name: string }[]; currentSkinId: string };
+      try {
+        skinList = await listSkins();
+      } catch (e) {
+        layout.contentWrite(
+          `${ui.dim}(${e instanceof Error ? e.message : '获取皮肤列表失败'})${ui.reset}\n`,
+        );
+        continue;
+      }
+      const items: SessionPickerItem[] = [
+        { id: 'default', title: '默认(mascot)', subtitle: skinList.currentSkinId === 'default' ? '当前' : '' },
+        ...skinList.skins.map((s) => ({
+          id: s.id,
+          title: s.name,
+          subtitle: skinList.currentSkinId === s.id ? '当前' : '',
+        })),
+      ];
+      let pick: SessionPickerItem | null;
+      try {
+        pick = await promptThemePicker(items);
+      } catch {
+        continue; // Ctrl+C(SIGINT)→ 取消
+      }
+      if (pick === null) continue; // Esc / Ctrl+D 取消
+      setSkin(pick.id);
+      layout.contentWrite(`${ui.dim}(已切换桌宠皮肤:${pick.title})${ui.reset}\n`);
       continue;
     }
     if (line === '/pet') {
