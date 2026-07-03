@@ -1,4 +1,4 @@
-<img src="./assets/banner-en.svg" alt="MoCode">
+<img src="./assets/banner-en.svg?v=2" alt="MoCode">
 
 <p align="right">English | <a href="./README.zh-CN.md">简体中文</a></p>
 
