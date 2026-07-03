@@ -1,6 +1,6 @@
-<img src="./assets/banner.svg" alt="mocode">
+<img src="./assets/banner.svg" alt="MoCode">
 
-# mocode
+# MoCode
 
 一个终端编码 agent:你给一个目标,它**自主完成**——不需要你逐步指挥。
 
