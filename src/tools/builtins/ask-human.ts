@@ -1,5 +1,6 @@
 import type { Tool } from '../types.js';
 import { promptIntervention } from '../../ui/intervention.js';
+import { sendState } from '../../pet/bridge.js';
 
 // ---------- ask_human ----------
 export const askHumanTool: Tool = {
@@ -36,6 +37,9 @@ export const askHumanTool: Tool = {
       : [];
     const context = args.context ? String(args.context) : undefined;
 
+    // 桌宠:面板弹出期间广播 waiting_human(红灯闪烁,提示需要人工介入);拿到响应后 sendState 会被
+    // 下一个 hook 事件(如 onToolDone→tool_call)覆盖,这里不用手动切回——与其它工具状态转移逻辑一致。
+    sendState('waiting_human');
     const result = await promptIntervention({
       type: options.length > 0 ? 'choice' : 'input',
       title: question,

@@ -15,9 +15,10 @@
   </defs>
   <g id="pet-body-group">
 
-  <!-- Antenna dish -->
-  <line x1="128" y1="16" x2="128" y2="46" stroke="url(#accentGrad)" stroke-width="4"/>
-  <path d="M100 16 Q128 -4 156 16 Q128 28 100 16 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <!-- Antenna dish (kept 8px lower than original so the dish curve's peak stays clear
+       of the viewBox top edge during the idle float animation's -6px translateY) -->
+  <line x1="128" y1="24" x2="128" y2="54" stroke="url(#accentGrad)" stroke-width="4"/>
+  <path d="M100 24 Q128 4 156 24 Q128 36 100 24 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
 
   <!-- Solar panel wings -->
   <rect x="4" y="88" width="50" height="70" rx="6" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>

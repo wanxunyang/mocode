@@ -9,9 +9,11 @@ html, body {
   height: 100%;
   background: transparent;
   overflow: hidden;
-  /* 拖拽放置:整窗标记为可拖动区域。默认鼠标穿透(main.ts setIgnoreMouseEvents(true,{forward:true})),
-   * 悬停到 #pet-stage 时 renderer.ts 请求取消穿透,此时该区域才真正可拖动;离开后恢复穿透。 */
-  -webkit-app-region: drag;
+  /* 拖拽放置:不使用 -webkit-app-region:drag(Windows 上带 app-region:drag 的区域会吞掉所有指针事件,
+   * 详见 https://www.electronjs.org/docs/latest/tutorial/custom-window-interactions ,
+   * 这会导致 #pet-stage 的 mouseenter/mouseleave 永远不触发,setIgnoreMouseEvents(false) 也就永远不会被调用,
+   * 窗口会一直停留在鼠标穿透状态——这正是"拖不动"的根因)。改为在 renderer.ts 里手动用
+   * mousedown/mousemove/mouseup 算位移量,经 IPC 通知主进程 setPosition 移动窗口。 */
   user-select: none; /* 拖拽时避免误选中文本 */
 }
 
@@ -136,37 +138,48 @@ html, body {
   opacity: 0;
 }
 
-/* ── error:机身横向抖动 + 天线灯变红闪烁 ── */
+/* ── error:机身横向抖动 + 天线灯变红常亮(不闪——error 不要求用户立即处理,与 waiting_human 的
+ *   闪烁区分开:闪烁只留给"需要人工介入"这类必须响应的时刻) ── */
 @keyframes pet-error-shake {
   0%, 100% { transform: translateX(0); }
   25% { transform: translateX(-6px); }
   75% { transform: translateX(6px); }
-}
-@keyframes pet-error-blink-red {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
 }
 .pet-error #pet-body-group {
   animation: pet-error-shake 0.3s ease-in-out 1;
 }
 .pet-error #pet-antenna {
   fill: #f87171;
-  animation: pet-error-blink-red 0.3s ease-in-out 2;
+  animation: none;
+  opacity: 1;
+}
+
+/* ── waiting_human:等待人工介入(ask_human 面板 / plan 审批面板弹出期间)。
+ *   头部维持静止(面板本身已是强提示,机身不需要再抖动分散注意力),天线灯变红并快闪——
+ *   这是唯一"必须响应"的红灯状态,闪烁频率与 error 常亮形成对比。 ── */
+@keyframes pet-waiting-human-blink-red {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+.pet-waiting-human #pet-antenna {
+  fill: #f87171;
+  animation: pet-waiting-human-blink-red 0.5s ease-in-out infinite;
 }
 
 /* ── 信号灯状态映射表(方案C:三色+闪烁区分,呼应 design.md 动画映射表) ──
  * 灯泡默认态(未点亮)由 assets/signal-light.svg 内置 fill-opacity=0.22 定义,
  * 以下规则只在对应状态下覆盖 fill-opacity 把目标灯泡点亮,不影响另外两个灯泡。
  *
- * | PetState  | 灯   | 行为                         |
- * |-----------|------|------------------------------|
- * | idle      | 绿   | 常亮(空闲/安全)             |
- * | thinking  | 黄   | 慢速呼吸(等待 LLM 响应)     |
- * | speaking  | 黄   | 常亮不闪(已在流式输出)      |
- * | tool_call | 黄   | 快闪(正在执行工具动作)      |
- * | done      | 绿   | 短暂高亮闪一下后回落         |
- * | aborted   | 红   | 常亮不闪(用户主动中断)      |
- * | error     | 红   | 快闪(报错,最高优先级)      |
+ * | PetState      | 灯   | 行为                                   |
+ * |---------------|------|----------------------------------------|
+ * | idle          | 绿   | 常亮(空闲/安全)                       |
+ * | thinking      | 黄   | 慢速呼吸(等待 LLM 响应)               |
+ * | speaking      | 黄   | 常亮不闪(已在流式输出)                |
+ * | tool_call     | 黄   | 快闪(正在执行工具动作)                |
+ * | done          | 绿   | 短暂高亮闪一下后回落                   |
+ * | aborted       | 红   | 常亮不闪(用户主动中断)                |
+ * | error         | 红   | 常亮不闪(报错,与 waiting_human 区分)  |
+ * | waiting_human | 红   | 快闪(等待人工介入,最高优先级)        |
  */
 
 @keyframes lamp-pulse-slow {
@@ -208,5 +221,9 @@ html, body {
 }
 
 .pet-error #pet-lamp-red {
+  fill-opacity: 0.85;
+}
+
+.pet-waiting-human #pet-lamp-red {
   animation: lamp-blink-fast 0.3s ease-in-out infinite;
 }

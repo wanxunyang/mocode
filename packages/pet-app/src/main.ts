@@ -77,6 +77,8 @@ function broadcastToRenderer(state: PetState, meta?: PetStateMeta): void {
       broadcastToRenderer('idle');
     }, TRANSIENT_STATE_TIMEOUT_MS);
   }
+  // waiting_human 不设超时:人工介入面板可能长时间悬挂等待用户响应,不能自动回落——
+  // 面板关闭后 CLI 侧(ask-human.ts / repl/index.ts)会显式广播下一个真实状态覆盖它。
 }
 
 /**
@@ -380,6 +382,20 @@ function createPetWindow(): BrowserWindow {
 ipcMain.on('pet:set-ignore-mouse-events', (event, ignore: boolean) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   win?.setIgnoreMouseEvents(ignore, { forward: true });
+});
+
+/** 手动拖拽:渲染进程按 mousemove 计算的位移量,主进程据此平移窗口(替代不可靠的 -webkit-app-region:drag,
+ *  见 style.css 顶部注释)。
+ *  注:必须用 setBounds({x,y,width,height}) 而不是 setPosition(x,y)——Windows 下当系统 DPI 缩放不是 100%时,
+ *  连续调用 setPosition 会导致窗口尺寸被悄悄放大几个像素(Electron 已知问题,
+ *  见 https://github.com/electron/electron/issues/9477),拖动几次窗口就会明显变大。
+ *  显式带上当前 width/height 可以把尺寸钉死,只改变位置。 */
+ipcMain.on('pet:move-window', (event, dx: number, dy: number) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) return;
+  const [x, y] = win.getPosition();
+  const [width, height] = win.getSize();
+  win.setBounds({ x: Math.round(x + dx), y: Math.round(y + dy), width, height });
 });
 
 /** 构建/刷新托盘右键菜单:退出桌宠 + 选择宠物子菜单(单选,当前皮肤打勾)。 */

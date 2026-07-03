@@ -10,7 +10,8 @@ export type PetState =
   | 'tool_call'
   | 'done'
   | 'aborted'
-  | 'error';
+  | 'error'
+  | 'waiting_human';
 
 /** 全部合法状态值(供运行时校验)。 */
 export const PET_STATES: readonly PetState[] = [
@@ -21,6 +22,7 @@ export const PET_STATES: readonly PetState[] = [
   'done',
   'aborted',
   'error',
+  'waiting_human',
 ];
 
 /** 状态负载:随 state 消息携带的可选元数据。 */

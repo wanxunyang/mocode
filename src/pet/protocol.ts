@@ -10,7 +10,8 @@ export type PetState =
   | 'tool_call' // 正在调用/执行工具(onToolCall / onToolStart),可附带 toolName
   | 'done' // 本轮正常完毕(onDone),短暂展示后自动回 idle
   | 'aborted' // 用户中断(onAbort),短暂展示后自动回 idle
-  | 'error'; // 工具执行报错或步数上限,短暂展示后回 thinking 或 idle
+  | 'error' // 工具执行报错或步数上限,常亮不闪(与 waiting_human 的闪烁区分:error 无需用户立即操作)
+  | 'waiting_human'; // 等待人工介入(ask_human 工具调用 / plan 模式审批面板弹出期间),红灯闪烁,不自动超时回落
 
 /** 全部合法状态值(供运行时校验,如 Set 成员判断)。 */
 export const PET_STATES: readonly PetState[] = [
@@ -21,6 +22,7 @@ export const PET_STATES: readonly PetState[] = [
   'done',
   'aborted',
   'error',
+  'waiting_human',
 ];
 
 /** 状态负载:随 state 消息携带的可选元数据。 */

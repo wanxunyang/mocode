@@ -5,7 +5,7 @@ import { config, PLAN_MODE_SUFFIX, updateModelConfig, isModelConfigured } from '
 import { updateConfigKey, writeConfigKeys, CONFIG_PATH } from '../config/file.js';
 import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
-import { togglePet, killPetProcess, listSkins, setSkin } from '../pet/bridge.js';
+import { togglePet, killPetProcess, listSkins, setSkin, sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
 import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
@@ -1128,12 +1128,16 @@ export async function startRepl(
     //  - 仍 plan:LLM 没自切(只产计划就 STOP)→ 弹审批面板(原行为)。
     //  - 已 auto:LLM 调了 switch_mode('auto') 在同轮自主执行了 → 跳过审批,不重复打扰。
     if (initialPlan && ok && getAgentMode() === 'plan') {
+      // 桌宠:计划审批面板弹出期间广播 waiting_human(红灯闪烁);面板不在 runAgent/hooks 体系内,
+      // 需在此单独广播——用户响应后由下一次 /pet 状态事件(或 idle 兜底)覆盖。
+      sendState('waiting_human');
       const res = await promptIntervention({
         type: 'choice',
         title: '计划已就绪',
         detail: '切换到 auto 模式按上述计划执行?(plan 模式只读探查,执行需切 auto)',
         options: ['切 auto 执行', '留 plan 细化'],
       });
+      sendState('idle');
       if (res.action === 'selected' && res.value === '切 auto 执行') {
         // setAgentMode('auto') 由 runTurn 入口做(listener 重写 history[0] 回 auto);这里只切运行态 + 合成执行轮。
         layout.enterRunningMode('执行', '按计划执行…');
