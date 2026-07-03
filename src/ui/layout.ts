@@ -702,6 +702,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     const absLine = screenRowToAbsLine(rowInContent);
     selection = { anchorLine: absLine, anchorCol: col, endLine: absLine, endCol: col, dragged: false };
     repaintViewport();
+    repaint(); // 补一次输入区重画:INPUT 态 repaintViewport 把真光标留在内容区续写位,须靠 repaint 把它带回输入框(否则点内容区会现假闪烁光标,见 issue)
     return;
   }
   if (e.type === 'drag') {
@@ -715,6 +716,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     selection.endLine = absLine;
     selection.endCol = col;
     repaintViewport();
+    repaint(); // 同上:把真光标带回输入框,防拖动选区期间光标停留内容区闪烁
     return;
   }
   // release(左键)
@@ -724,9 +726,11 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     // 内容区纯点击(未拖动):只清选区,不复制(复制交给右键)。
     selection = null;
     repaintViewport();
+    repaint(); // 同上:把真光标带回输入框
     return;
   }
   // 拖动过:保留高亮选区供右键复制(不在此处复制,复制交给右键释放分支)。
+  repaint(); // 同上:把真光标带回输入框
 }
 
 /** 回尾(offset=0);仅当原本滚动过才重画(避免每轮 enterRunningMode 闪烁)。 */
