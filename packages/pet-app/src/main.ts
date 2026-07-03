@@ -384,18 +384,38 @@ ipcMain.on('pet:set-ignore-mouse-events', (event, ignore: boolean) => {
   win?.setIgnoreMouseEvents(ignore, { forward: true });
 });
 
-/** 手动拖拽:渲染进程按 mousemove 计算的位移量,主进程据此平移窗口(替代不可靠的 -webkit-app-region:drag,
- *  见 style.css 顶部注释)。
- *  注:必须用 setBounds({x,y,width,height}) 而不是 setPosition(x,y)——Windows 下当系统 DPI 缩放不是 100%时,
- *  连续调用 setPosition 会导致窗口尺寸被悄悄放大几个像素(Electron 已知问题,
- *  见 https://github.com/electron/electron/issues/9477),拖动几次窗口就会明显变大。
- *  显式带上当前 width/height 可以把尺寸钉死,只改变位置。 */
-ipcMain.on('pet:move-window', (event, dx: number, dy: number) => {
+/** 拖拽会话的起始 bounds(仅在 mousedown 时读取一次,拖拽过程中绝不重新读取 win.getBounds())。
+ *  这是修复"越拖越大"的关键:Windows 在非 100% DPI 缩放下,setBounds/setPosition 存在已知的舍入误差
+ *  (见 https://github.com/electron/electron/issues/27651、#9477),每调一次尺寸就可能被系统悄悄放大
+ *  一点。如果每次 mousemove 都用"读当前 getSize() → 原样传回 setBounds"的方式,这个误差会不断累加——
+ *  上一次被放大的尺寸被读回来又原样设进去,越拖越大,永远回不去。正确做法是把宽高钉死为拖拽开始那一刻
+ *  的固定值,拖拽期间只用"起始坐标 + 累计位移"算新位置,never 把 setBounds 返回后可能已变化的尺寸再喂回去。 */
+let dragStartBounds: { x: number; y: number; width: number; height: number } | null = null;
+
+/** 拖拽开始:记录窗口初始 bounds(渲染进程 mousedown 时调用一次)。 */
+ipcMain.on('pet:drag-start', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed()) return;
-  const [x, y] = win.getPosition();
-  const [width, height] = win.getSize();
-  win.setBounds({ x: Math.round(x + dx), y: Math.round(y + dy), width, height });
+  const b = win.getBounds();
+  dragStartBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+});
+
+/** 拖拽中:渲染进程传来"相对拖拽起点的累计位移"(不是相对上一帧的增量),
+ *  主进程据此从固定的起始 bounds 计算新位置,宽高恒为起始值,绝不重新读取当前窗口尺寸。 */
+ipcMain.on('pet:drag-move', (event, totalDx: number, totalDy: number) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed() || !dragStartBounds) return;
+  win.setBounds({
+    x: Math.round(dragStartBounds.x + totalDx),
+    y: Math.round(dragStartBounds.y + totalDy),
+    width: dragStartBounds.width,
+    height: dragStartBounds.height,
+  });
+});
+
+/** 拖拽结束:清空起始 bounds 记录(渲染进程 mouseup 时调用)。 */
+ipcMain.on('pet:drag-end', () => {
+  dragStartBounds = null;
 });
 
 /** 构建/刷新托盘右键菜单:退出桌宠 + 选择宠物子菜单(单选,当前皮肤打勾)。 */

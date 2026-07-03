@@ -11,7 +11,9 @@ declare global {
       onSkin: (cb: (assetPath: string) => void) => void;
       getInitialSkin: () => Promise<{ assetPath: string }>;
       setIgnoreMouseEvents: (ignore: boolean) => void;
-      moveWindow: (dx: number, dy: number) => void;
+      dragStart: () => void;
+      dragMove: (totalDx: number, totalDy: number) => void;
+      dragEnd: () => void;
     };
   }
 }
@@ -93,13 +95,15 @@ window.addEventListener('DOMContentLoaded', async () => {
   //
   // 拖动本身不使用 -webkit-app-region:drag——该 CSS 属性在 Windows 上会导致其覆盖区域吞掉所有指针事件
   // (见 https://www.electronjs.org/docs/latest/tutorial/custom-window-interactions 的说明:
-  // "draggable areas ignore all pointer events"),使 mouseenter/mouseleave 永远不会触发,
-  // setIgnoreMouseEvents(false) 也就永远不会被调用——这正是桌宠此前无法拖动的根因(窗口一直卡在
-  // 鼠标穿透状态)。改为手动监听 mousedown → mousemove → mouseup,用位移量经 IPC 让主进程
-  // setPosition 平移窗口。
+  // "draggable areas ignore all pointer events"),使 mouseenter/mouseleave 永远不会触发。
+  //
+  // 位移量必须是"相对拖拽起点的累计值",不能是"相对上一帧的增量"——原因见 main.ts dragStartBounds
+  // 注释:Windows 下 setBounds 存在 DPI 舍入误差,若主进程每次都读当前窗口尺寸再原样传回,
+  // 误差会不断累加导致窗口越拖越大。用累计位移 + 固定起始 bounds 可以彻底避免这个问题
+  // (每次都是"起点+累计位移",不依赖任何中间状态)。
   let dragging = false;
-  let lastX = 0;
-  let lastY = 0;
+  let startX = 0;
+  let startY = 0;
 
   stage.addEventListener('mouseenter', () => window.petBridge.setIgnoreMouseEvents(false));
   stage.addEventListener('mouseleave', () => {
@@ -108,17 +112,14 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   stage.addEventListener('mousedown', (e: MouseEvent) => {
     dragging = true;
-    lastX = e.screenX;
-    lastY = e.screenY;
+    startX = e.screenX;
+    startY = e.screenY;
+    window.petBridge.dragStart();
   });
 
   window.addEventListener('mousemove', (e: MouseEvent) => {
     if (!dragging) return;
-    const dx = e.screenX - lastX;
-    const dy = e.screenY - lastY;
-    lastX = e.screenX;
-    lastY = e.screenY;
-    if (dx !== 0 || dy !== 0) window.petBridge.moveWindow(dx, dy);
+    window.petBridge.dragMove(e.screenX - startX, e.screenY - startY);
   });
 
   window.addEventListener('mouseup', () => {
@@ -126,6 +127,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     // 若这里强行 setIgnoreMouseEvents(true),会导致窗口提前变回穿透态,而 mouseenter 只在"进入"
     // 时触发一次、不会因为穿透状态变化而重新触发,于是后续再也收不到 mousedown——表现为"只能拖动一次"。
     // 穿透状态改由 mouseleave 统一负责:真正移出宠物范围时才恢复穿透。
+    if (!dragging) return;
     dragging = false;
+    window.petBridge.dragEnd();
   });
 });

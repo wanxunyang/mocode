@@ -42,7 +42,5 @@
   <!-- Feet / talons -->
   <rect x="76" y="200" width="20" height="24" rx="6" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
   <rect x="160" y="200" width="20" height="24" rx="6" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
-  <rect x="66" y="220" width="40" height="10" rx="5" fill="#b388ff" fill-opacity="0.6"/>
-  <rect x="150" y="220" width="40" height="10" rx="5" fill="#b388ff" fill-opacity="0.6"/>
   </g>
 </svg>

@@ -44,7 +44,5 @@
   <!-- Legs / feet -->
   <rect x="72" y="200" width="24" height="26" rx="9" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
   <rect x="160" y="200" width="24" height="26" rx="9" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
-  <rect x="62" y="222" width="44" height="10" rx="5" fill="#ffb74d" fill-opacity="0.6"/>
-  <rect x="150" y="222" width="44" height="10" rx="5" fill="#ffb74d" fill-opacity="0.6"/>
   </g>
 </svg>

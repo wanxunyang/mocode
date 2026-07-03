@@ -21,14 +21,17 @@ html, body {
   width: 100%;
   height: 100%;
   display: flex;
-  align-items: center;
+  /* 底部对齐(而非居中):宠物脚部和信号灯杆底端需要落在同一条"地面线"上,
+   * 居中对齐会让二者按各自盒子的几何中心对齐,脚和杆底就对不上了。 */
+  align-items: flex-end;
   justify-content: center;
 }
 
 #pet-container {
   flex: 1 1 auto;
+  height: 100%;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: center;
   min-width: 0;
 }
@@ -41,14 +44,18 @@ html, body {
 /* 信号灯挂在宠物右侧,尺寸远小于主体,不抢视觉重心。 */
 #signal-light-container {
   flex: 0 0 auto;
+  height: 100%;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: center;
 }
 
 #signal-light-container svg {
+  /* signal-light.svg viewBox 由 90x220 改为 90x456(灯杆加长到与宠物脚部同一地平线),
+   * 高度与 #pet-container svg 保持一致的 90% 比例,两者又都用 flex-end 贴底对齐,
+   * 这样杆的底端和宠物脚部的落地线基本重合。 */
   width: 30px;
-  height: 74px;
+  height: 90%;
 }
 
 /* ── idle:轻微上下浮动呼吸,机身静止 ── */

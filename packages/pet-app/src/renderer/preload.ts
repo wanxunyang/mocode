@@ -22,10 +22,19 @@ contextBridge.exposeInMainWorld('petBridge', {
   setIgnoreMouseEvents: (ignore: boolean) => {
     ipcRenderer.send('pet:set-ignore-mouse-events', ignore);
   },
-  /** 手动拖拽:把鼠标位移量(屏幕坐标差)转发给主进程,由主进程调用 win.setPosition 移动窗口。
-   *  不使用 -webkit-app-region:drag——该 CSS 属性在 Windows 上会导致覆盖区域的所有指针事件被吞掉,
-   *  使 mouseenter/mouseleave 永远不触发,从而 setIgnoreMouseEvents(false) 也永远不会被调用。 */
-  moveWindow: (dx: number, dy: number) => {
-    ipcRenderer.send('pet:move-window', dx, dy);
+  /** 手动拖拽(替代不可靠的 -webkit-app-region:drag,见 style.css 顶部注释):
+   *  dragStart 在 mousedown 时调用一次,让主进程记住窗口起始 bounds;
+   *  dragMove 在 mousemove 时传"相对起点的累计位移"(不是相对上一帧的增量)——
+   *  这样主进程永远从固定的起始尺寸算新位置,不会因反复读取可能已被 Windows DPI 舍入误差
+   *  放大的当前尺寸而越拖越大(见 main.ts dragStartBounds 注释);
+   *  dragEnd 在 mouseup 时调用,清空起始记录。 */
+  dragStart: () => {
+    ipcRenderer.send('pet:drag-start');
+  },
+  dragMove: (totalDx: number, totalDy: number) => {
+    ipcRenderer.send('pet:drag-move', totalDx, totalDy);
+  },
+  dragEnd: () => {
+    ipcRenderer.send('pet:drag-end');
   },
 });
