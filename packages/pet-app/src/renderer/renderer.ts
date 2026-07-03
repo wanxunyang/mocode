@@ -9,6 +9,7 @@ declare global {
     petBridge: {
       onState: (cb: (state: PetState, meta?: PetStateMeta) => void) => void;
       onSkin: (cb: (assetPath: string) => void) => void;
+      getInitialSkin: () => Promise<{ assetPath: string }>;
       setIgnoreMouseEvents: (ignore: boolean) => void;
     };
   }
@@ -67,8 +68,15 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (!stage || !petContainer || !lampContainer) return;
   applyState(stage, 'idle');
 
+  // 启动时的初始皮肤:主动向主进程 invoke 拉取(而非等主进程 send 推送)——
+  // 消除 did-finish-load 推送与本文件异步注册监听器之间的时序竞争(见 main.ts pushSkinToRenderer 注释)。
+  const initialAssetPath = await window.petBridge
+    .getInitialSkin()
+    .then((r) => r.assetPath)
+    .catch(() => '../assets/mascot.svg');
+
   await Promise.all([
-    inlineSvgInto(petContainer, '../assets/mascot.svg'),
+    inlineSvgInto(petContainer, initialAssetPath),
     inlineSvgInto(lampContainer, '../assets/signal-light.svg'),
   ]);
 

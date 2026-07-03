@@ -181,18 +181,28 @@ function applySkin(skinId: string): void {
   rebuildTrayMenu();
 }
 
-/** 把当前皮肤对应的素材相对路径(相对 renderer/index.html,供 fetch)推给渲染进程。 */
+/** 当前皮肤对应的素材相对路径(相对 renderer/index.html,供 fetch)。
+ *  renderer/index.html 位于 dist/renderer/,mascot.svg 在 dist/assets/,候选皮肤在 dist/assets/pets/。 */
+function currentSkinAssetPath(): string {
+  const abs = resolveSkinPath(currentSkinId);
+  return abs ? `../assets/pets/${path.basename(abs)}` : '../assets/mascot.svg';
+}
+
+/** 把当前皮肤推给渲染进程(运行期切换用,如托盘菜单点击 / CLI set_skin 消息)。
+ *  注:启动时的初始皮肤不走这条路径——渲染进程通过 'pet:get-skin' invoke 主动拉取,
+ *  避免 did-finish-load 与渲染进程异步注册监听器之间的时序竞争(IPC 消息不会缓冲,
+ *  若渲染进程监听器尚未注册,send 过去的消息会直接丢失,导致重启后持久化的皮肤不生效)。 */
 function pushSkinToRenderer(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  const abs = resolveSkinPath(currentSkinId);
-  // renderer/index.html 位于 dist/renderer/,mascot.svg 在 dist/assets/,候选皮肤在 dist/assets/pets/。
-  const assetPath = abs ? `../assets/pets/${path.basename(abs)}` : '../assets/mascot.svg';
   try {
-    mainWindow.webContents.send('pet:skin', { assetPath });
+    mainWindow.webContents.send('pet:skin', { assetPath: currentSkinAssetPath() });
   } catch {
-    // 静默:渲染进程未就绪时忽略,下次 pushSkinToRenderer 调用(重建窗口时)会重新推送
+    // 静默:渲染进程未就绪时忽略,下次运行期切换会重新推送
   }
 }
+
+/** 渲染进程启动时主动拉取当前皮肤(同步于其自身初始化时机,不依赖 did-finish-load 的时序假设)。 */
+ipcMain.handle('pet:get-skin', () => ({ assetPath: currentSkinAssetPath() }));
 
 function send(socket: WebSocket, msg: Record<string, unknown>): void {
   try {
@@ -353,7 +363,6 @@ function createPetWindow(): BrowserWindow {
   });
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  win.webContents.once('did-finish-load', () => pushSkinToRenderer());
 
   win.webContents.on('render-process-gone', () => {
     // 渲染进程崩溃但主进程(WS Server)存活:重建一次窗口,不重启 WS Server、不断开现有客户端连接。

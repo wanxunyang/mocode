@@ -17,7 +17,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.preload.json && node scripts/copy-static.mjs",
     "start": "electron dist/main.js",
     "typecheck": "tsc --noEmit"
   },

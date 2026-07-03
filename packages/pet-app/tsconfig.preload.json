@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node10",
+    // 独立输出目录:preload.ts 以 CJS 编译时,tsc 会把它 import type 引用的 protocol.ts
+    // 也纳入编译程序一并输出——若直接输出到 dist/ 会用 CJS 版覆盖 dist/protocol.js(main.js
+    // 是原生 ESM,import 解析不到 CJS 的 named export 会直接崩)。故先输出到临时目录,
+    // 只取 preload.js 一个文件复制进 dist/renderer/(见 scripts/copy-static.mjs)。
+    "outDir": "dist-preload-tmp"
+  },
+  "include": ["src/renderer/preload.ts"],
+  "exclude": []
+}
