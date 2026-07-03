@@ -1,45 +1,47 @@
-<img src="./assets/banner.svg" alt="MoCode">
+<img src="./assets/banner-en.svg" alt="MoCode">
+
+<p align="right">English | <a href="./README.zh-CN.md">简体中文</a></p>
 
 # MoCode
 
-一个终端编码 agent:你给一个目标,它**自主完成**——不需要你逐步指挥。
+A terminal coding agent: give it a goal, and it **completes it autonomously** — no step-by-step hand-holding required.
 
-mocode 自己探索代码、读写改文件、执行命令、联网查资料,以「思考 → 调用工具 → 观察结果 → 再思考」的循环一步步把任务推进到完成。接任意 OpenAI 兼容接口(GLM、DeepSeek、Qwen、本地 Ollama / vLLM 等),全屏 TUI 交互,流式输出、思考过程可见。
+MoCode explores your code, reads/writes/edits files, runs shell commands, and searches the web on its own, driving the task forward through a loop of "think → call a tool → observe the result → think again." It works with any OpenAI-compatible endpoint (GLM, DeepSeek, Qwen, local Ollama / vLLM, etc.), runs as a full-screen TUI with streaming output and visible reasoning.
 
-## 为什么用 mocode
+## Why MoCode
 
-mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
+MoCode isn't a chat box with a coat of paint — it's an agent that actually gets things done:
 
-- **自主多步推进** — 一次对话里连续多步:读代码、改代码、跑测试、根据报错再改……agent 自己决定下一步,中途不用你反复催。遇到卡点会调 `ask_human` 弹面板问你(阻塞到回应)。
-- **只读工具并行执行** — 一轮里连续的只读操作(读文件、grep、glob、codegraph、联网搜索/抓取)自动并发跑,总耗时 ≈ 最慢一个,而不是逐个排队。写文件 / 改文件这类有副作用的操作仍串行,保快照顺序与数据安全。
-- **子 agent 分而治之** — 复杂任务可派生独立子 agent:各自有自己的对话历史(不污染主线),可限定只读工具集和步数上限,并行探查多片代码 / 多个方向,最后只把摘要回灌主线。主线据此决定下一步。
-- **计划 / 执行双模式** — `plan` 模式下只读探查(读代码、查索引、搜索,绝不写盘、不跑命令、不派生子 agent),产出计划;`auto` 模式全量工具放开。agent 还能在两者间自切换——先把陌生代码库摸清,再动手改。
-- **上下文自动压缩** — 接近窗口上限时三层压缩(单条结果裁剪 → 旧工具结果原地微压缩 → 旧对话摘要),长会话也不爆窗口;`/context` 实时显示 token 用量,`/compact` 可手动压缩(能带焦点指令聚焦保留)。
-- **跨会话长期记忆** — agent 能把项目架构、约定、踩过的坑存成长期记忆,下次会话自动加载;后台还会定期从对话里反思挖掘值得记住的事。记忆可增删改、带召回衰减。
-- **可中断、可回滚** — Ctrl+C 随时打断当前轮次(树杀子进程,历史还原到本轮开始前,不留残半的工具调用);`/rollback` 按轮次快照恢复文件改动,逐个文件「保留/撤销」,不依赖 git。
-- **沙箱防护** — 文件读写经沙箱拦截,挡掉越界路径(`../../`、绝对外圈、软链出圈等),不碰工作目录之外的文件。
+- **Autonomous multi-step execution** — In a single conversation, the agent chains multiple steps on its own: read code, edit code, run tests, fix based on errors, and so on. It decides the next step without you nagging it. When it hits a decision point, it calls `ask_human` to pop up a panel and ask you (blocking until you respond).
+- **Parallel read-only tools** — Consecutive read-only operations in a turn (reading files, grep, glob, codegraph, web search/fetch) run concurrently, so total time is roughly the slowest single call instead of the sum of all of them. Operations with side effects (writing/editing files) stay sequential to preserve snapshot ordering and data safety.
+- **Sub-agents divide and conquer** — Complex tasks can spawn independent sub-agents, each with its own conversation history (isolated from the main thread), an optional restricted toolset, and a step cap. They can explore multiple code areas or directions in parallel and report back only a summary, which the main thread uses to decide what's next.
+- **Plan / Auto dual mode** — In `plan` mode the agent is read-only (reads code, queries indexes, searches — never writes to disk, runs commands, or spawns sub-agents) and produces a plan; `auto` mode unlocks the full toolset. The agent can switch between the two on its own — scope out an unfamiliar codebase first, then start making changes.
+- **Automatic context compression** — As the context window fills up, a three-tier compression kicks in (trim individual results → compact older tool results in place → summarize older turns), so long sessions never overflow. `/context` shows live token usage; `/compact` triggers manual compression (optionally with a focus hint to preserve what matters).
+- **Cross-session long-term memory** — The agent can save project architecture, conventions, and lessons learned as long-term memory, auto-loaded in future sessions. A background process periodically reflects on conversations to mine things worth remembering. Memories can be created, searched, updated, and forgotten, with recall-based decay.
+- **Interruptible and reversible** — Ctrl+C interrupts the current turn at any time (kills child processes recursively, rolls history back to before the turn started, leaves no half-finished tool calls). `/rollback` restores file changes from per-turn snapshots, with a per-file keep/undo choice — no git dependency required.
+- **Sandbox protection** — File reads/writes go through a sandbox that blocks out-of-bounds paths (`../../`, absolute paths outside the root, symlink escapes, etc.), so the agent never touches files outside your working directory.
 
-## 特性
+## Features
 
-- **流式输出 + 思考可见** — 回复边生成边显示;模型支持 reasoning 时思考过程实时可见,思考段自动折叠(不占屏),`/think N` 按需展开
-- **全屏 TUI** — 备用屏(alt screen)+ 固定底栏状态行 + 滚动回看(PgUp/PgDn),运行中可打字(typeahead),下一轮自动预填
-- **会话持久化** — 每轮自动落盘,`--resume` / `/resume` 续接历史会话
-- **Skills 系统** — 自动扫描 `~/.mocode/skills/` 等目录,description 注入系统提示,模型按需调 `use_skill` 加载完整指令(渐进式披露:先看简介,任务相关才加载正文)
-- **斜杠命令** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/think` `/rollback`,输入时下拉过滤
+- **Streaming output + visible reasoning** — Responses render as they're generated; when the model supports reasoning, the thinking process is visible in real time and auto-collapses to save screen space, with `/think N` to expand it on demand.
+- **Full-screen TUI** — Alt-screen mode with a fixed status bar, scrollback (PgUp/PgDn), typeahead while the agent is running, and auto-prefill for the next turn.
+- **Session persistence** — Every turn is saved automatically; `--resume` / `/resume` picks up a past session.
+- **Skills system** — Scans directories like `~/.mocode/skills/` automatically; each skill's description is injected into the system prompt, and the model calls `use_skill` to load the full instructions only when relevant (progressive disclosure: skim the summary first, load the body only if needed).
+- **Slash commands** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/think` `/rollback`, with dropdown filtering as you type.
 
-## 安装
+## Installation
 
-要求 Node.js ≥ 18。
+Requires Node.js ≥ 18.
 
 ```bash
 npm install -g mocode-ai
 ```
 
-装完即得 `mocode` 命令。不想全局装也可免装直跑:`npx mocode-ai`。
+This gives you the `mocode` command. Prefer not to install globally? Run it directly with `npx mocode-ai`.
 
-> mocode 启动时自动检测新版本,后台 `npm i -g mocode-ai@latest` 自更新——下次启动生效,零启动延迟、断网 / 失败静默。开发态 `npm start`(tsx 跑 `.ts`)不触发。
+> MoCode checks for new versions on startup and self-updates in the background via `npm i -g mocode-ai@latest` — the update takes effect on the next launch, with zero startup delay and silent failure if offline. This is skipped in dev mode (`npm start`, running via tsx).
 
-### 从源码运行(开发 / 贡献)
+### Run from source (development / contributing)
 
 ```bash
 git clone https://github.com/wanxunyang/mocode.git
@@ -48,153 +50,153 @@ npm install
 npm start
 ```
 
-源码经 tsx 直接跑,无构建步骤。改完代码需重启 `npm start` 生效(tsx 启动时加载模块,不热更新)。依赖:`openai`、`dotenv`、`fast-glob`(运行时);`tsx`、`typescript`、`@types/node`(开发)。
+Source runs directly via tsx, no build step. After changing code, restart `npm start` for changes to take effect (tsx loads modules at startup, no hot reload). Runtime dependencies: `openai`, `dotenv`, `fast-glob`; dev dependencies: `tsx`, `typescript`, `@types/node`.
 
-## 配置
+## Configuration
 
-首次使用运行配置向导,交互填三项(API 地址 / key / 模型名),写入 `~/.mocode/config`(全局,任意目录、任意终端生效):
+On first use, run the setup wizard to fill in three fields interactively (API base URL / key / model name), written to `~/.mocode/config` (global, works from any directory or terminal):
 
 ```bash
 mocode config
 ```
 
-也可直接 `mocode` 进入 REPL 后用 `/model` 命令配置(交互选后端预设 + 逐项填写,即时生效 + 持久化)。未配置时 REPL 仍能打开,会提示你跑 `/model`。
+You can also configure it from inside the REPL with the `/model` command (pick a backend preset interactively and fill in each field, applied immediately and persisted). Without configuration, the REPL still opens and prompts you to run `/model`.
 
-也可手写配置文件。mocode 按以下优先级加载(后者覆盖前者,仅回填未设置的环境变量;shell 里 `export` 的永远最优先):
+You can also hand-edit the config files. MoCode loads them in the following priority order (later entries override earlier ones, only backfilling unset environment variables; anything `export`ed in your shell always takes precedence):
 
-1. `<cwd>/.env` — 旧用法兼容,优先级最低(源码仓库内有 `.env.example` 可参考)
-2. `~/.mocode/config` — 全局(`/model` 与 `mocode config` 写此文件)
-3. `<cwd>/.mocode/config` — 项目级覆盖,优先级最高
+1. `<cwd>/.env` — legacy compatibility, lowest priority (see `.env.example` in the source repo for reference)
+2. `~/.mocode/config` — global (written by `/model` and `mocode config`)
+3. `<cwd>/.mocode/config` — project-level override, highest priority
 
-必填三项:
+Three required fields:
 
 ```env
-LLM_BASE_URL=https://open.bigmodel.cn/api/v3   # 换成你的后端
+LLM_BASE_URL=https://open.bigmodel.cn/api/v3   # swap in your backend
 LLM_API_KEY=your-key-here
-LLM_MODEL=glm-4.6                              # 换成你的模型名
+LLM_MODEL=glm-4.6                              # swap in your model name
 ```
 
-常见后端 `base_url`:
+Common backend `base_url` values:
 
-| 后端        | base\_url                                           |
-| --------- | --------------------------------------------------- |
-| GLM(智谱)   | `https://open.bigmodel.cn/api/v3`                   |
-| DeepSeek  | `https://api.deepseek.com`                          |
-| Qwen(阿里)  | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
-| 本地 Ollama | `http://localhost:11434/v1`                         |
-| 本地 vLLM   | `http://localhost:8000/v1`                          |
+| Backend        | base\_url                                           |
+| -------------- | ---------------------------------------------------- |
+| GLM (Zhipu)    | `https://open.bigmodel.cn/api/v3`                   |
+| DeepSeek       | `https://api.deepseek.com`                          |
+| Qwen (Alibaba) | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| Local Ollama   | `http://localhost:11434/v1`                         |
+| Local vLLM     | `http://localhost:8000/v1`                          |
 
-> 模型必须支持 OpenAI 风格的 function calling,否则工具不会触发。
+> The model must support OpenAI-style function calling, otherwise tools won't be triggered.
 
-### 可选配置
+### Optional configuration
 
-| 环境变量                    | 说明                                         | 默认值                         |
-| ----------------------- | ------------------------------------------ | --------------------------- |
-| `MAX_TOKENS`            | 单次回复最大 token                               | 不限                          |
-| `CONTEXT_WINDOW_TOKENS` | 模型上下文窗口,须对齐真实模型                            | `128000`                    |
-| `COMPACT_THRESHOLD`     | 自动压缩触发阈值(占窗口比例)                            | `0.85`                      |
-| `LLM_STREAM_USAGE`      | 流式请求带 `stream_options.include_usage` 拿真实用量 | `true`                      |
-| `AUTO_COMPACT`          | 自动压缩总开关                                    | `true`                      |
-| `AUTO_REFLECT`          | 后台反思 pass 总开关(定期从会话挖掘记忆)                   | `true`                      |
-| `REFLECT_EVERY_N`       | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞)              | `5`                         |
-| `ANYSEARCH_API_KEY`     | 联网搜索 API key(不配走匿名免费额度)                    | 无                           |
-| `ANYSEARCH_BASE_URL`    | 搜索 API 端点                                  | `https://api.anysearch.com` |
-| `SKILLS_DIRS`           | 覆盖默认 skill 扫描目录(平台分隔符)                     | 三目录自动扫描                     |
-| `MOCODE_CONTEXT_OPTIMIZE` | 工具结果进 LLM 前的类型化编码(树/搜索/日志…),关掉则原样进(仅长度裁剪) | `true`                      |
-| `MAX_STEPS`             | 每轮 agent 循环最大步数(防无限循环)                    | `200`                       |
-| `SUB_AGENT_MAX_STEPS`   | 子 agent(task 工具派生)默认步数上限                  | `50`                        |
-| `SANDBOX_ROOT`          | 沙箱根目录(文件操作边界;未配则用 cwd 兜底)                | 无                           |
-| `MOCODE_THEME`          | 颜色主题(default/dark/light…;shell 设置优先于文件)      | `default`                   |
+| Environment variable       | Description                                                          | Default                     |
+| --------------------------- | ---------------------------------------------------------------------- | --------------------------- |
+| `MAX_TOKENS`                | Max tokens per response                                               | unlimited                   |
+| `CONTEXT_WINDOW_TOKENS`     | Model context window; must match the real model                      | `128000`                    |
+| `COMPACT_THRESHOLD`         | Auto-compaction trigger threshold (fraction of window)                | `0.85`                      |
+| `LLM_STREAM_USAGE`          | Include `stream_options.include_usage` on streaming requests for real usage | `true`                |
+| `AUTO_COMPACT`               | Auto-compaction master switch                                          | `true`                       |
+| `AUTO_REFLECT`               | Background reflection pass master switch (periodically mines memories from conversations) | `true`   |
+| `REFLECT_EVERY_N`            | Trigger a background reflection every N turns (runs alongside the agent, non-blocking) | `5`      |
+| `ANYSEARCH_API_KEY`         | Web search API key (falls back to anonymous free quota if unset)      | none                         |
+| `ANYSEARCH_BASE_URL`        | Search API endpoint                                                    | `https://api.anysearch.com` |
+| `SKILLS_DIRS`               | Override the default skill scan directories (platform path separator) | three default directories   |
+| `MOCODE_CONTEXT_OPTIMIZE`   | Typed encoding of tool results before they reach the LLM (tree/search/log…); disable for raw passthrough (length trimming only) | `true` |
+| `MAX_STEPS`                 | Max agent loop steps per turn (prevents infinite loops)               | `200`                        |
+| `SUB_AGENT_MAX_STEPS`       | Default step cap for sub-agents (spawned via the `task` tool)         | `50`                         |
+| `SANDBOX_ROOT`               | Sandbox root directory (file operation boundary; falls back to cwd if unset) | none                  |
+| `MOCODE_THEME`               | Color theme (default/dark/light…; shell env takes precedence over file) | `default`                   |
 
-## 运行
+## Usage
 
 ```bash
-mocode                          # 新会话(在目标项目目录里跑)
-mocode --resume                 # 列出已保存会话
-mocode --resume <id>            # 续接指定会话
-mocode config                   # 改配置
+mocode                          # new session (run inside your target project directory)
+mocode --resume                 # list saved sessions
+mocode --resume <id>            # resume a specific session
+mocode config                   # edit configuration
 ```
 
-从源码跑则用 `npm start`(等价于 `mocode`,但不触发自更新)。
+Running from source uses `npm start` (equivalent to `mocode`, but skips the self-update check).
 
-进入 REPL 后直接对话。启动即进全屏 TUI,显示横幅(模型 / 后端 / 工作目录 / 工具列表)。回复流式打印,思考段实时可见后折叠。
+Once in the REPL, just start chatting. It launches straight into the full-screen TUI, showing a banner (model / backend / working directory / tool list). Responses stream in, with the reasoning section visible in real time before collapsing.
 
-agent 工作在**启动时所在的工作目录**——想让它操作某个项目,就 `cd` 到那个项目再 `mocode`。
+The agent operates in **the working directory it was launched from** — to have it work on a specific project, `cd` into that project before running `mocode`.
 
-## 工具
+## Tools
 
-| 工具              | 作用                                                       |
-| --------------- | -------------------------------------------------------- |
-| `read_file`     | 读文件,带行号,支持 `offset` / `limit`                            |
-| `write_file`    | 创建/覆盖文件,自动建父目录                                           |
-| `edit_file`     | 精确字符串替换(`old_string` 须唯一匹配)                              |
-| `run_command`   | 执行 shell 命令,合并 stdout+stderr,默认 120s 超时                  |
-| `glob`          | 按 glob 模式找文件(排除 node\_modules/.git)                      |
-| `grep`          | 内容正则搜索,纯 JS 实现,不依赖 `rg`                                  |
-| `codegraph`     | 已建 `.codegraph/` 索引时,查代码符号源码与调用链(比 read\_file/grep 更准更省) |
-| `web_search`    | 联网搜索(AnySearch),返回标题/URL/摘要/正文                           |
-| `web_fetch`     | 抓取指定 URL,HTML 清洗成纯文本                                     |
-| `use_skill`     | 加载某 skill 的完整 SKILL.md 指令                                |
-| `ask_human`     | 决策点弹终端问答面板,用户选预设项或自由输入(阻塞至回应)                            |
-| `switch_mode`   | 在 `plan`(只读规划)与 `auto`(全量执行)间切换;agent 可自行调用,先探查再动手       |
-| `drop_context`  | 把历史里无关的旧工具结果替换为存根释放上下文(保 tool_call_id 配对,不动 system 与当前轮;幂等) |
-| `task`          | 派生子 agent 执行独立子任务(独立历史、可受限工具集、可设步数上限);连续多个自动并行,只回摘要      |
-| `memory_save`   | 存一条跨会话长期记忆(标题进索引,正文按需取)                                  |
-| `memory_search` | 按关键词搜记忆正文,命中即提升召回计数(影响遗忘衰减)                              |
-| `memory_list`   | 列记忆索引(id/标题/摘要,无正文)                                      |
-| `memory_update` | 原地改一条记忆(id 不变;纠正过时事实 / 改摘要 / 改 pin)                      |
-| `memory_forget` | 遗忘记忆:默认归档(可复活),`mode=delete` 硬删(pinned 拒删)               |
+| Tool             | Purpose                                                                  |
+| ---------------- | ------------------------------------------------------------------------- |
+| `read_file`       | Read a file with line numbers; supports `offset` / `limit`               |
+| `write_file`      | Create/overwrite a file, auto-creating parent directories                |
+| `edit_file`       | Precise string replacement (`old_string` must match uniquely)            |
+| `run_command`     | Run a shell command, merging stdout+stderr, 120s default timeout         |
+| `glob`            | Find files by glob pattern (excludes node\_modules/.git)                 |
+| `grep`            | Regex content search, pure JS implementation, no `rg` dependency         |
+| `codegraph`       | With a `.codegraph/` index built, query symbol source and call chains (more accurate and cheaper than read\_file/grep) |
+| `web_search`      | Web search (AnySearch), returns title/URL/snippet/body                   |
+| `web_fetch`       | Fetch a URL, cleaning HTML into plain text                                |
+| `use_skill`       | Load the full SKILL.md instructions for a given skill                    |
+| `ask_human`        | Pop up a Q&A panel at decision points; user picks a preset or types freely (blocks until answered) |
+| `switch_mode`      | Switch between `plan` (read-only planning) and `auto` (full execution); the agent can call this itself to explore before acting |
+| `drop_context`     | Replace irrelevant old tool results in history with stubs to free up context (preserves tool_call_id pairing, leaves system prompt and current turn untouched, idempotent) |
+| `task`             | Spawn a sub-agent for an independent subtask (isolated history, optional restricted toolset, optional step cap); consecutive calls run in parallel automatically, returning only a summary |
+| `memory_save`      | Save a piece of cross-session long-term memory (title indexed, body fetched on demand) |
+| `memory_search`    | Search memory bodies by keyword; hits boost the recall count (affects forgetting decay) |
+| `memory_list`       | List the memory index (id/title/summary, no body)                        |
+| `memory_update`     | Edit a memory in place (id unchanged; correct stale facts / update summary / toggle pin) |
+| `memory_forget`     | Forget a memory: archived by default (recoverable), `mode=delete` for a hard delete (pinned memories can't be deleted) |
 
-## 斜杠命令
+## Slash commands
 
-| 命令              | 作用                                                 |
-| --------------- | -------------------------------------------------- |
-| `/exit` `/quit` | 退出 mocode                                          |
-| `/clear`        | 清空历史(保留系统提示)+ 清屏                                   |
-| `/context`      | 显示上下文用量条(token / 消息数 / 估算或实测)                      |
-| `/skills`       | 列出已发现的 skill                                       |
-| `/compact`      | 压缩历史(可带焦点 `/compact …`)                            |
-| `/resume`       | 续接已保存的会话                                           |
-| `/think`        | 展开折叠思考段(`/think N`)                                |
-| `/rollback`     | 菜单选轮次回滚(↑↓ · Enter)                                |
-| `/model`        | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
-| `/init`         | 扫描项目生成 `MOCODE.md` 项目记忆(发给 agent 执行)               |
-| `/theme`        | 切换颜色主题(↑↓ · Enter,或 `/theme <name>` 直切)            |
-| `/plan`         | 切到 plan 模式(只读探查 + 产出计划,审批后切 auto 执行)              |
-| `/auto`         | 切回 auto 模式(全量工具执行)                                  |
+| Command           | Purpose                                                              |
+| ------------------ | ----------------------------------------------------------------------- |
+| `/exit` `/quit`     | Exit MoCode                                                          |
+| `/clear`            | Clear history (keeps the system prompt) + clear screen               |
+| `/context`          | Show a context usage bar (tokens / message count, estimated or measured) |
+| `/skills`           | List discovered skills                                               |
+| `/compact`          | Compress history (optionally with a focus hint: `/compact …`)        |
+| `/resume`           | Resume a saved session                                                |
+| `/think`            | Expand a collapsed reasoning section (`/think N`)                    |
+| `/rollback`         | Menu to pick a turn to roll back to (↑↓ · Enter)                     |
+| `/model`            | Configure the LLM (baseURL / apiKey / model / context window), applied immediately + persisted |
+| `/init`             | Scan the project and generate `MOCODE.md` project memory (dispatched to the agent) |
+| `/theme`            | Switch color theme (↑↓ · Enter, or `/theme <name>` directly)         |
+| `/plan`             | Switch to plan mode (read-only exploration + plan output, approve to switch to auto) |
+| `/auto`             | Switch back to auto mode (full toolset execution)                     |
 
-输入 `/` 触发下拉菜单,继续打字过滤;Esc 取消。
+Type `/` to trigger the dropdown menu, keep typing to filter; Esc to cancel.
 
-## 快速验证(配好 key 后)
+## Quick verification (after configuring your key)
 
 ```
-> 你好,你是谁                       # 验证 LLM 连通
-> 读一下 sample.txt                 # 触发 read_file
-> 把 sample.txt 里的 foo 改成 bar    # 触发 read_file + edit_file
-> 列出当前目录所有 .txt 文件         # 触发 glob
-> 搜一下代码里出现 runAgent 的地方   # 触发 grep
-> 跑一下 node -e "console.log(1+1)"  # 触发 run_command
-> 搜一下 TypeScript 5.5 有什么新特性  # 触发 web_search
+> hello, who are you                  # verify LLM connectivity
+> read sample.txt                     # triggers read_file
+> change foo to bar in sample.txt     # triggers read_file + edit_file
+> list all .txt files in this directory  # triggers glob
+> search the code for runAgent        # triggers grep
+> run node -e "console.log(1+1)"      # triggers run_command
+> search what's new in TypeScript 5.5 # triggers web_search
 ```
 
-每步终端会打印 `● 工具名 + 参数摘要` 与 `↳ 结果预览`,agent 在循环里自己决定下一步;回复流式打印,边生成边显示。
+Each step prints `● tool name + argument summary` and `↳ result preview` in the terminal; the agent decides the next step on its own within the loop, with responses streaming in as they're generated.
 
 ## Skills
 
-mocode 自动扫描以下目录的 skill(每个 skill 是 `<name>/SKILL.md`,带 frontmatter):
+MoCode automatically scans the following directories for skills (each skill is a `<name>/SKILL.md` with frontmatter):
 
 - `~/.claude/skills/`
 - `~/.mocode/skills/`
 - `<cwd>/.mocode/skills/`
 
-skill 的 `description` 注入系统提示(渐进式披露第①层),模型只在任务相关时调 `use_skill` 加载完整正文(第②层)。用 `/skills` 查看已发现的 skill。
+A skill's `description` is injected into the system prompt (progressive disclosure, tier 1); the model calls `use_skill` to load the full body (tier 2) only when the task is relevant. Use `/skills` to see discovered skills.
 
-## 类型检查
+## Type checking
 
 ```bash
 npm run typecheck   # tsc --noEmit
 ```
 
-## 可后续扩展
+## Future extensions
 
-子 agent / 并行任务、MCP 工具集成、权限确认 UI。当前版本是一个流式、思考可见、可回滚的终端编码 agent。
+Sub-agents / parallel tasks, MCP tool integration, a permission confirmation UI. The current version is a streaming, reasoning-visible, rollback-capable terminal coding agent.
