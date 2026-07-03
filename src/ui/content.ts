@@ -115,3 +115,9 @@ export function sliceFromEnd(offset: number, count: number): string[] {
 export function totalRows(): number {
   return rows.length + (hasCurrent ? 1 : 0);
 }
+
+/** 取绝对行索引(0-based,含当前行)的原始自洽行;越界返 null。供鼠标选区文本提取。 */
+export function lineAt(abs: number): string | null {
+  const all = snapshot();
+  return abs >= 0 && abs < all.length ? all[abs] : null;
+}

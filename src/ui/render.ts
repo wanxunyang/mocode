@@ -66,6 +66,21 @@ export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
+/** 按显示列范围 [start, end) 截取纯文本(不含 ANSI,按 charWidth 计位,CJK/宽字符占 2)。
+ *  跨宽字符边界时整字符归入(w+cw>start 即含入),供鼠标选区文本提取用。 */
+export function sliceByDisplayCol(str: string, start: number, end: number): string {
+  if (start >= end) return '';
+  let w = 0;
+  let out = '';
+  for (const ch of str) {
+    if (w >= end) break;
+    const cw = charWidth(ch.codePointAt(0) ?? 0);
+    if (w + cw > start) out += ch;
+    w += cw;
+  }
+  return out;
+}
+
 /** 带色串的可见显示宽度(先去 ANSI 再按 displayWidth 度量)。 */
 export function ansiDisplayWidth(s: string): number {
   return displayWidth(stripAnsi(s));

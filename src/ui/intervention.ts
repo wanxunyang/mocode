@@ -4,6 +4,7 @@ import type { Key } from 'node:readline';
 import { ui } from './theme.js';
 import { displayWidth, truncateDisplay } from './render.js';
 import * as layout from './layout.js';
+import * as mouse from './mouse.js';
 import { Spinner } from './spinner.js';
 
 /**
@@ -192,6 +193,7 @@ export async function promptIntervention(
 
   /** 退出:摘自己的监听 + 恢复快照监听 + 擦菜单恢复内容区。不 setRawMode(false)/pause stdin(运行态由 repl 接管)。 */
   function cleanup(): void {
+    layout.setMouseEnabled(true); // 恢复鼠标框选(面板期间禁,防拖拽覆盖菜单)
     emitter.removeListener('keypress', onKey);
     for (const l of savedListeners) emitter.on('keypress', l);
     savedListeners = [];
@@ -213,6 +215,9 @@ export async function promptIntervention(
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+    // 鼠标 fragment:滚轮走 handleMouseEvent(mouseEnabled=true 时仍可滚动查看内容,与之前行为一致);
+    // 框选/拖拽在面板期间被 layout.setMouseEnabled(false) 挡掉(防 viewport 重画覆盖菜单)。
+    if (mouse.swallow(key.sequence ?? '')) return;
     // Ctrl+C → 取消(不 reject SIGINT——否则经 executeTool 的 try/catch 变成 tool 错误串)
     if (key.ctrl && key.name === 'c') {
       finish({ action: 'cancelled' });
@@ -332,8 +337,9 @@ export async function promptIntervention(
   return new Promise<InterventionResult>((res, rej) => {
     resolve = res;
     try {
-      // 进入面板:停 spinner(避免 onFrame 覆盖)+ 回尾(若用户正滚动回看)
+      // 进入面板:停 spinner(避免 onFrame 覆盖)+ 禁鼠标框选(防拖拽 viewport 重画覆盖菜单)+ 回尾(若用户正滚动回看)
       Spinner.pauseCurrent();
+      layout.setMouseEnabled(false);
       layout.resetScroll();
       // 快照现有 keypress 监听(运行态的 onRunningKey)并摘掉,挂自己的 onKey
       savedListeners = emitter.listeners('keypress').slice();
@@ -350,6 +356,7 @@ export async function promptIntervention(
       redraw();
     } catch (e) {
       // 进入失败:必须恢复运行态监听,否则 onRunningKey 残留摘除 → 本 turns 的 Ctrl+C/滚动/typeahead 全废
+      layout.setMouseEnabled(true);
       try {
         emitter.removeListener('keypress', onKey);
       } catch {

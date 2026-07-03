@@ -10,9 +10,13 @@ import {
   ansiDisplayWidth,
   wrapByDisplayWidth,
   fmtElapsed,
+  stripAnsi,
+  sliceByDisplayCol,
 } from './render.js';
 import { ui } from './theme.js';
 import * as content from './content.js';
+import * as mouse from './mouse.js';
+import { copyToClipboard } from './clipboard.js';
 import { renderMarkdown } from './markdown.js';
 
 /**
@@ -105,16 +109,33 @@ let sigwinchHandler: (() => void) | null = null;
 let mdActive = false;
 let mdBuf = '';
 
+// ── 鼠标选区(应用层框选复制,仿 Claude Code)──
+// 选区以「绝对缓冲行索引 + 显示列」存(不用屏坐标)——滚动/追加新内容后 abs 索引仍稳定指向同段文字,
+// 故拖过多屏、触边自动翻页也能连续扩展。松开时从 content 缓冲抠纯文本(去 ANSI)写剪贴板。
+interface Selection {
+  anchorLine: number; // 起点绝对行索引(content 快照 0-based)
+  anchorCol: number; // 起点显示列(0-based)
+  endLine: number;
+  endCol: number;
+  dragged: boolean; // 是否真拖动过(纯点击不复制,只清选区)
+}
+let selection: Selection | null = null;
+let selecting = false; // 左键按下中(press→release 之间)
+let mouseEnabled = true; // 导航菜单(picker)期间置 false:只吞报表不做选区/滚动,防菜单被 viewport 重画覆盖
+let toastText = ''; // 复制提示(画在虚拟空行,短时后清)
+let toastTimer: NodeJS.Timeout | null = null;
+const WHEEL_LINES = 3; // 滚轮每格滚动行数
+
 const esc = {
   altOn: '\x1B[?1049h',
   altOff: '\x1B[?1049l',
-  // xterm alternate scroll mode(DECSET 1007):alt 屏内滚轮转发 ↑/↓ 键序列(\x1B[A/\x1B[B),
-  // 不抓取任何鼠标点击/拖拽事件——终端原生框选与复制全程可用,不需要按 Shift 逃生。
-  // 主流终端(Windows Terminal ≥1.14、xterm、VTE 系 GNOME Terminal、Konsole、iTerm2)均支持;
-  // 不支持的终端会静默忽略此转义序列,退化为"滚轮不滚动,但选区复制始终能用"——不会更差。
-  // 滚轮转发出的 ↑/↓ 由 onKey/onRunningKey 现有的 plain ↑/↓ 分支接住(见下方 scrollBy 调用点)。
-  altScrollOn: '\x1B[?1007h',
-  altScrollOff: '\x1B[?1007l',
+  // 完整鼠标追踪(仿 Claude Code 全屏渲染):1000=按键(按下/释放)+ 1002=拖动 motion + 1006=SGR 编码。
+  // 拿到按下/拖动/释放的坐标后,由 layout 在应用层维护选区(mouse.ts 重组报表 → handleMouseEvent):
+  // 拖过多屏(触边自动翻页)→ 松开时从 content 缓冲抠出完整文本 → 写系统剪贴板(clipboard.ts)。
+  // 代价:终端原生框选被鼠标捕获接管——想用终端原生选区可按住 Shift(多数终端放行);
+  // 滚轮报表(button&64)也经此转发,由 handleMouseEvent 转 scrollBy。
+  mouseOn: '\x1B[?1000h\x1B[?1002h\x1B[?1006h',
+  mouseOff: '\x1B[?1006l\x1B[?1002l\x1B[?1000l', // 关:反序
   cursorShow: '\x1B[?25h',
   cursorHide: '\x1B[?25l',
   clearLine: '\x1B[2K',
@@ -457,18 +478,84 @@ export function isScrolled(): boolean {
   return scrollOffset > 0;
 }
 
+/** viewport 窗口起点绝对行索引(0-based,对齐 content.sliceFromEnd 的 start)。 */
+function viewportAbsStart(): number {
+  const g = getGeo();
+  const total = content.totalRows();
+  const end = Math.max(0, total - scrollOffset);
+  return Math.max(0, end - g.contentBottom);
+}
+
+/** 屏行(1-based,内容区内)→ 绝对缓冲行索引(0-based)。 */
+function screenRowToAbsLine(row: number): number {
+  return viewportAbsStart() + (row - 1);
+}
+
+/** 选区归一化(anchor/end 按阅读顺序排序为 start/end)。无选区返 null。 */
+function normalizeSelection(): { startLine: number; startCol: number; endLine: number; endCol: number } | null {
+  if (!selection) return null;
+  const a = { line: selection.anchorLine, col: selection.anchorCol };
+  const b = { line: selection.endLine, col: selection.endCol };
+  const aFirst = a.line < b.line || (a.line === b.line && a.col <= b.col);
+  return aFirst
+    ? { startLine: a.line, startCol: a.col, endLine: b.line, endCol: b.col }
+    : { startLine: b.line, startCol: b.col, endLine: a.line, endCol: a.col };
+}
+
+/** 给自洽带色行的显示列区间 [colStart,colEnd) 套反白(\x1B[7m...\x1B[27m),SGR 码原样穿过不受影响。 */
+function highlightRange(line: string, colStart: number, colEnd: number): string {
+  if (colEnd <= colStart) return line;
+  const parts = line.split(/(\x1b\[[0-9;]*m)/);
+  let w = 0;
+  let out = '';
+  let opened = false;
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) {
+      out += parts[i]; // SGR 码原样穿过
+      continue;
+    }
+    for (const ch of parts[i]) {
+      const cw = charWidth(ch.codePointAt(0) ?? 0);
+      if (!opened && w >= colStart && w < colEnd) {
+        out += '\x1B[7m';
+        opened = true;
+      }
+      if (opened && w >= colEnd) {
+        out += '\x1B[27m';
+        opened = false;
+      }
+      out += ch;
+      w += cw;
+    }
+  }
+  if (opened) out += '\x1B[27m';
+  return out;
+}
+
 /**
  * 重画内容区 viewport:按 scrollOffset 取缓冲尾窗,逐行 cup+clearline+rowtext 映射到屏 1..contentBottom。
  * offset=0 即尾窗(== 实时屏,resize / 回尾时用)。清行含 contentBottom——顺带擦 WT 边距漏影(状态行重复)。
+ * 有活跃选区(鼠标拖拽中)时,对选中范围套反白——纯视觉,不影响缓冲内容。
  */
 export function repaintViewport(): void {
   if (!active) return;
   const g = getGeo();
   const h = g.contentBottom;
   const slice = content.sliceFromEnd(scrollOffset, h);
+  const sel = normalizeSelection();
+  const absStart = sel ? viewportAbsStart() : 0;
   let p = '';
   for (let r = 1; r <= h; r++) {
-    const line = slice[r - 1] ?? '';
+    let line = slice[r - 1] ?? '';
+    if (sel) {
+      const absLine = absStart + r - 1;
+      if (absLine >= sel.startLine && absLine <= sel.endLine) {
+        const lineW = ansiDisplayWidth(line);
+        const colStart = absLine === sel.startLine ? sel.startCol : 0;
+        const colEnd = absLine === sel.endLine ? sel.endCol : lineW;
+        line = highlightRange(line, colStart, colEnd);
+      }
+    }
     p += cup(r, 1) + esc.clearLine + line;
   }
   // 光标:合并进同一 write(若拆成两次 stdout.write,行写完光标会暂留 contentRow/contentBottom,
@@ -501,6 +588,124 @@ export function scrollBy(delta: number): void {
   scrollOffset = off;
   repaintViewport();
   repaint();
+}
+
+/** 清活跃选区(不复制),若原有选区则重画去掉反白。供 ESC / 点击别处 / 退出滚动态等场景调。 */
+export function clearSelection(): void {
+  if (!selection) return;
+  selection = null;
+  if (scrollOffset >= 0) repaintViewport();
+}
+
+/** picker / 介入面板期间禁用鼠标选区与滚轮(避免 viewport 重画覆盖菜单);面板退出后恢复。 */
+export function setMouseEnabled(v: boolean): void {
+  mouseEnabled = v;
+  if (!v) {
+    selecting = false;
+    if (selection) {
+      selection = null;
+      repaintViewport();
+    }
+  }
+}
+
+function showToast(text: string): void {
+  toastText = text;
+  if (toastTimer) clearTimeout(toastTimer);
+  const g = getGeo();
+  stdout.write(cup(g.contentBottom + 1, 1) + esc.clearLine + `${ui.green}${text}${ui.reset}`);
+  // 光标归续写位 / 输入框(toast 是一次性旁写,不抢光标)
+  if (mode === 'running') {
+    const p = runningCaretPos();
+    stdout.write(cup(p.row, p.col));
+  } else {
+    stdout.write(cup(scrollOffset === 0 ? contentRow : g.contentBottom, scrollOffset === 0 ? contentCol : 1));
+  }
+  const t = setTimeout(() => {
+    toastTimer = null;
+    toastText = '';
+    if (active) {
+      const gg = getGeo();
+      stdout.write(cup(gg.contentBottom + 1, 1) + esc.clearLine);
+      if (mode === 'running') {
+        const p = runningCaretPos();
+        stdout.write(cup(p.row, p.col));
+      } else {
+        stdout.write(cup(scrollOffset === 0 ? contentRow : gg.contentBottom, scrollOffset === 0 ? contentCol : 1));
+      }
+    }
+  }, 1800);
+  t.unref();
+  toastTimer = t;
+}
+
+/** 从归一化选区抠出纯文本(去 ANSI,按显示列裁切,行间 \n 拼接)。越界行跳过(缓冲被 trim 等边界情况)。 */
+function extractSelectionText(sel: { startLine: number; startCol: number; endLine: number; endCol: number }): string {
+  const out: string[] = [];
+  for (let abs = sel.startLine; abs <= sel.endLine; abs++) {
+    const raw = content.lineAt(abs);
+    if (raw == null) continue;
+    const plain = stripAnsi(raw);
+    const lineW = displayWidth(plain);
+    const colStart = abs === sel.startLine ? sel.startCol : 0;
+    const colEnd = abs === sel.endLine ? sel.endCol : lineW;
+    out.push(sliceByDisplayCol(plain, colStart, colEnd));
+  }
+  return out.join('\n');
+}
+
+/**
+ * 鼠标事件分发(mouse.setHandler 注册)。press 开选区;drag 扩展选区(触内容区上下边缘自动翻页,
+ * 边缘每次 motion 事件滚 WHEEL_LINES 行——无独立定时器,靠终端持续发 motion 驱动,足够跟手);
+ * release 若真拖动过(dragged)则抠文字写剪贴板 + toast 提示,纯点击只清旧选区。
+ * 选区坐标存绝对缓冲行(viewportAbsStart + 屏行),故翻页 / 追加新内容期间选区锚点仍指向同段文字。
+ */
+function handleMouseEvent(e: mouse.MouseEvent): void {
+  if (!active) return;
+  if (e.type === 'wheel') {
+    if (mouseEnabled) scrollBy(e.dir * WHEEL_LINES);
+    return;
+  }
+  if (!mouseEnabled || e.button !== 0) return; // 仅左键框选;中/右键不处理(终端原生右键菜单等不受影响)
+  const g = getGeo();
+  const rowInContent = Math.max(1, Math.min(e.row, g.contentBottom));
+  const col = Math.max(0, e.col - 1); // SGR 报表列 1-based → 显示列 0-based
+  if (e.type === 'press') {
+    selecting = true;
+    const absLine = screenRowToAbsLine(rowInContent);
+    selection = { anchorLine: absLine, anchorCol: col, endLine: absLine, endCol: col, dragged: false };
+    repaintViewport();
+    return;
+  }
+  if (e.type === 'drag') {
+    if (!selecting || !selection) return;
+    // 触边自动翻页:motion 事件持续到达时靠此逐步滚动,把选区扩展到滚出去的历史行。
+    if (e.row <= 1) scrollBy(WHEEL_LINES);
+    else if (e.row >= g.contentBottom) scrollBy(-WHEEL_LINES);
+    const absLine = screenRowToAbsLine(rowInContent);
+    if (absLine !== selection.endLine || col !== selection.endCol) selection.dragged = true;
+    selection.endLine = absLine;
+    selection.endCol = col;
+    repaintViewport();
+    return;
+  }
+  // release
+  selecting = false;
+  if (!selection) return;
+  if (!selection.dragged) {
+    // 纯点击(未拖动):清掉可能存在的旧选区,不复制
+    if (selection) { selection = null; repaintViewport(); }
+    return;
+  }
+  const sel = normalizeSelection();
+  selection = null;
+  repaintViewport();
+  if (!sel) return;
+  const text = extractSelectionText(sel);
+  if (!text) return;
+  copyToClipboard(text);
+  const lines = sel.endLine - sel.startLine + 1;
+  showToast(`已复制 ${lines} 行到剪贴板`);
 }
 
 /** 回尾(offset=0);仅当原本滚动过才重画(避免每轮 enterRunningMode 闪烁)。 */
@@ -927,8 +1132,9 @@ export function paintInput(view: InputView): void {
     buf += cup(g.contentBottom, 1) + esc.clearLine + line;
   }
 
-  // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):恒清空,防底栏撑高时旧内容残留该行
-  buf += cup(g.contentBottom + 1, 1) + esc.clearLine;
+  // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):恒清空,防底栏撑高时旧内容残留该行;
+  // 有 toast(如"已复制 N 行")时短时借用此行显示,不占内容区。
+  buf += cup(g.contentBottom + 1, 1) + esc.clearLine + (toastText ? `${ui.green}${toastText}${ui.reset}` : '');
 
   // 3. 状态行:spinner 行 + model 行(两行式底栏)
   const spinnerRow = g.contentBottom + 2; // +1 虚拟空行,+2 spinner 行
@@ -1119,7 +1325,8 @@ export function enterAltScreen(): void {
   if (active || !ui.isTTY) return;
   active = true;
   stdout.write(esc.altOn);
-  stdout.write(esc.altScrollOn); // alt 屏滚轮转发 ↑/↓(不抓鼠标点击/拖拽,原生选区复制不受影响)
+  stdout.write(esc.mouseOn); // 完整鼠标追踪(按下/拖动/释放/滚轮)→ mouse.swallow 重组 → handleMouseEvent
+  mouse.setHandler(handleMouseEvent);
   setRegion(6); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行(两行式底栏)
   contentRow = 1;
   contentCol = 1;
@@ -1128,6 +1335,8 @@ export function enterAltScreen(): void {
   scrollLockUntil = 0;
   mdActive = false;
   mdBuf = '';
+  selection = null;
+  selecting = false;
   content.reset();
 
   exitHandler = () => exitAltScreen();
@@ -1172,6 +1381,11 @@ export function exitAltScreen(): void {
   scrollLockUntil = 0; // 清轮首滚动锁(防状态泄漏到下次进 alt 屏)
   frameRow = 0; // 清 spinner 帧位置(防状态泄漏到下次进 alt 屏)
   frameCol = 0;
+  mouse.setHandler(null);
+  mouse.resetMouse();
+  selection = null;
+  selecting = false;
+  if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
   // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。
   try {
     stdin.setRawMode(false); // 还原 raw(RUNNING 态常驻 raw,退出时必须还原,否则终端残留 raw 模式)
@@ -1181,7 +1395,7 @@ export function exitAltScreen(): void {
   try {
     stdout.write('\x1B[r'); // 复位 DECSTBM margins
     stdout.write(esc.cursorShow);
-    stdout.write(esc.altScrollOff); // 关 alt 屏滚轮转发
+    stdout.write(esc.mouseOff); // 关鼠标追踪(反序:先 1006l 再 1002l 再 1000l)
     stdout.write(esc.altOff); // 退 alt(恢复主屏 + 光标)
   } catch {
     // 忽略

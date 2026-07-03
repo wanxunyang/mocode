@@ -4,6 +4,7 @@ import type { Key } from 'node:readline';
 import { ui } from './theme.js';
 import { displayWidth, padEndDisplay, truncateDisplay } from './render.js';
 import * as layout from './layout.js';
+import * as mouse from './mouse.js';
 
 export interface SlashCommand {
   name: string;
@@ -44,7 +45,10 @@ function ensurePasteDetector(): void {
   if (pasteDetectorInstalled) return;
   pasteDetectorInstalled = true;
   stdin.on('data', (chunk: Buffer | string) => {
-    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    const raw = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+    // 剔除 SGR 鼠标报告(\x1B[<…M/m,连半截也匹配):拖拽选区时终端连续发 motion 报表,
+    // 一个 chunk 里可能拼多条(22+ 字符 > 16 阈值)误判粘贴 50ms、把后续真按键泄进 pasteParts。
+    const text = raw.replace(/\x1b\[<[0-9;]*[Mm]/g, '');
     const hasNL = text.indexOf('\r') >= 0 || text.indexOf('\n') >= 0;
     // 按字符数(码点)判粘贴,非字节:CJK 汉字占 3 UTF-8 字节,旧阈值(len>8 字节)会把 IME 提交的
     // 3-10 个汉字误判为粘贴 → 进 50ms 缓冲 → finalizePaste→insertText 落字(且旧 insertText 把光标
@@ -293,6 +297,10 @@ export async function promptWithSlashMenu(
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+
+    // 鼠标 fragment(SGR 报表被 readline 拆碎):mouse.swallow 重组并派发 MouseEvent 给
+    // layout.handleMouseEvent(滚轮/框选/复制全在那处理);此处只需吞掉 fragment 不进 pasteParts/输入框。
+    if (mouse.swallow(key.sequence ?? '')) return;
 
     // Shift+Tab:循环切换 agent 模式(auto ↔ plan)。不插字符、不提交、不影响输入文本;
     // 回调由 repl 注入(翻 agentMode + 重写 history[0] + 设状态行 modeTag),再 redraw() 经
@@ -568,6 +576,7 @@ export async function promptTurnPicker(
   }
 
   function cleanup(): void {
+    layout.setMouseEnabled(true); // 恢复鼠标框选/滚轮(面板期间被禁,防拖拽覆盖菜单)
     try {
       stdin.setRawMode(false);
     } catch {
@@ -585,6 +594,7 @@ export async function promptTurnPicker(
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+    if (mouse.swallow(key.sequence ?? '')) return; // 鼠标 fragment 吞掉(框选已禁,滚轮 handleMouseEvent no-op)
     if (key.ctrl && key.name === 'c') {
       cleanup();
       reject(new Error('SIGINT'));
@@ -616,6 +626,7 @@ export async function promptTurnPicker(
   return new Promise<number | null>((res, rej) => {
     resolve = res;
     reject = rej;
+    layout.setMouseEnabled(false); // 面板期间禁鼠标框选/滚轮(防拖拽 viewport 重画覆盖菜单)
     ensurePasteDetector();
     readline.emitKeypressEvents(stdin);
     let rawOk = true;
@@ -725,6 +736,7 @@ export async function promptSessionPicker(
   }
 
   function cleanup(): void {
+    layout.setMouseEnabled(true);
     try {
       stdin.setRawMode(false);
     } catch {
@@ -742,6 +754,7 @@ export async function promptSessionPicker(
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+    if (mouse.swallow(key.sequence ?? '')) return;
     if (key.ctrl && key.name === 'c') {
       cleanup();
       reject(new Error('SIGINT'));
@@ -782,6 +795,7 @@ export async function promptSessionPicker(
   return new Promise<SessionPickerItem | null>((res, rej) => {
     resolve = res;
     reject = rej;
+    layout.setMouseEnabled(false);
     ensurePasteDetector();
     readline.emitKeypressEvents(stdin);
     let rawOk = true;
@@ -865,6 +879,7 @@ export async function promptThemePicker(
   }
 
   function cleanup(): void {
+    layout.setMouseEnabled(true);
     try {
       stdin.setRawMode(false);
     } catch {
@@ -882,6 +897,7 @@ export async function promptThemePicker(
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+    if (mouse.swallow(key.sequence ?? '')) return;
     if (key.ctrl && key.name === 'c') {
       cleanup();
       reject(new Error('SIGINT'));
@@ -914,6 +930,7 @@ export async function promptThemePicker(
   return new Promise<SessionPickerItem | null>((res, rej) => {
     resolve = res;
     reject = rej;
+    layout.setMouseEnabled(false);
     ensurePasteDetector();
     readline.emitKeypressEvents(stdin);
     let rawOk = true;
@@ -976,6 +993,7 @@ export async function promptRevertChoice(fileCount: number): Promise<boolean | n
   }
 
   function cleanup(): void {
+    layout.setMouseEnabled(true);
     try {
       stdin.setRawMode(false);
     } catch {
@@ -993,6 +1011,7 @@ export async function promptRevertChoice(fileCount: number): Promise<boolean | n
 
   function onKey(_str: string, key?: Key): void {
     if (resolved || !key) return;
+    if (mouse.swallow(key.sequence ?? '')) return;
     if (key.ctrl && key.name === 'c') {
       cleanup();
       reject(new Error('SIGINT'));
@@ -1024,6 +1043,7 @@ export async function promptRevertChoice(fileCount: number): Promise<boolean | n
   return new Promise<boolean | null>((res, rej) => {
     resolve = res;
     reject = rej;
+    layout.setMouseEnabled(false);
     ensurePasteDetector();
     readline.emitKeypressEvents(stdin);
     let rawOk = true;
