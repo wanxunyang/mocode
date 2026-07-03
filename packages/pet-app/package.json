@@ -1,6 +1,6 @@
 {
   "name": "mocode-pet-app",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "mocode 桌宠:独立 Electron 悬浮窗,展示 agent 执行状态动画。作为 mocode-ai 的可选子包,不随主包安装强制拉取。",
   "private": false,
   "type": "module",
