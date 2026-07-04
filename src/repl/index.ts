@@ -28,6 +28,13 @@ import {
   type ChatMessage,
 } from '../llm/index.js';
 import {
+  loadImageAttachment,
+  renderChip,
+  MAX_INLINE_BYTES_DEFAULT,
+  type ImageAttachment,
+} from '../attachments/image.js';
+import type { ContentPart } from '../agent/core.js';
+import {
   compactHistory,
   contextState,
   newSessionId,
@@ -91,6 +98,7 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/pet', desc: '开关桌宠(独立悬浮窗,展示 agent 状态动画)' },
   { name: '/pet skin', desc: '选择桌宠皮肤(↑↓·Enter)' },
   { name: '/pet quit', desc: '完全关闭桌宠进程(而非仅断开本连接)' },
+  { name: '/image', desc: '附加本地图片到下一条消息(/image <path> · list · clear)' },
 ];
 
 /** 主题名 → 一句描述(供 /theme 菜单 / 列表显示)。新增主题时在 src/ui/theme.ts THEMES 加键后于此补一句。 */
@@ -250,6 +258,11 @@ let currentAbort: AbortController | null = null;
 let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user 输入(下轮 INPUT 态消费)
 // agent 模式状态已提到 src/agent/mode.ts(共享叶子:switch_mode 工具可写、agent 每步读、repl 注册 onModeChange 监听器)。
 
+/** 多模态 user 输入的附件状态。pending = 本轮尚未提交的待发图片;messageAttachments = 已 push 进 history 的图片元数据
+ *  (供 renderHistory 复显文件名——base64 不可逆地塞进 history 后,只能从侧 channel 拿原文件名)。 */
+let pendingAttachments: ImageAttachment[] = [];
+const messageAttachments = new Map<number, ImageAttachment[]>();
+
 /** 运行态按键:滚动优先,再 Ctrl+C 中断,再 typeahead 编辑(单行,Enter=无操作)。 */
 function onRunningKey(_str: string, key?: Key): void {
   if (!key) return;
@@ -372,6 +385,10 @@ function formatUserMessage(lines: string[]): string {
 function echoInput(lines: string[]): void {
   if (!layout.isActive()) return;
   layout.contentWrite(formatUserMessage(lines));
+  // 多模态附件:每张一行 chip 跟在 user bubble 后(原 /rollback /resume 复显一致)
+  for (const a of pendingAttachments) {
+    layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
+  }
 }
 
 /** 把任意消息 content 拍平成字符串(OpenAI 可能 string / null / 多模态数组)。 */
@@ -393,14 +410,33 @@ function textOf(c: unknown): string {
  * user→❯ 回显、assistant→正文(+ tool_calls 作 ● 行)、tool→↳ 结果预览;system 跳过。
  * 思考段不持久(history 只存正文),故无思考折叠。渲染后续写位在末尾,紧接 enterInputMode 画输入框。
  * 内容长于屏时 viewport 显尾(最近轮次),PgUp 可看更早——与流式态一致。
+ * user 多模态:用 textOf 取 text parts;若侧 channel messageAttachments 有原文件名则追加 chip 行
+ * (避免 base64 解码不可逆,旧 session 没侧 channel 时只显文本,文件名 fallback 到 image/* mime)。
  */
 export function renderHistory(history: ChatMessage[]): void {
   const idToName = new Map<string, string>();
-  for (const m of history) {
+  for (let idx = 0; idx < history.length; idx++) {
+    const m = history[idx];
     if (m.role === 'system') continue;
     if (m.role === 'user') {
       const lines = textOf((m as { content?: unknown }).content).split('\n');
       layout.contentWrite(formatUserMessage(lines));
+      const atts = messageAttachments.get(idx);
+      if (atts && atts.length > 0) {
+        for (const a of atts) {
+          layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
+        }
+      } else if (Array.isArray((m as { content?: unknown }).content)) {
+        // 旧 session 没侧 channel:从 data URL 头抽 mime,显一个通用 chip
+        const c = (m as { content?: unknown }).content as unknown[];
+        for (const p of c) {
+          if (p && typeof p === 'object' && (p as { type?: string }).type === 'image_url') {
+            const url = (p as { image_url?: { url?: string } }).image_url?.url ?? '';
+            const mime = url.startsWith('data:') ? url.slice(5, url.indexOf(';')) : 'image';
+            layout.contentWrite(`  ${ui.dim}📷 ${mime}${ui.reset}\n`);
+          }
+        }
+      }
       continue;
     }
     if (m.role === 'assistant') {
@@ -625,12 +661,30 @@ export async function startRepl(
    * 跑一轮 agent(enterRunningMode 已由调用方完成):startRunningListener → runAgent → autosave / reflect。
    * plan 模式传 planMode=true(runAgent 用 planChatTools 只读子集)。返 ok=正常结束(未中断 / 未抛错),
    * 供调用方决定是否弹审批面板。execute 轮的合成输入也走这里。
+   *
+   * 多模态:把 pendingAttachments flush 进 userInput:有图时构造 ContentPart[] 数组;
+   * 无图时保持 string(向后兼容,且 messageTokens 走 estimateTokens 不走 IMAGE_TOKEN_COST)。
+   * side channel 记录本轮 msg 在 history 的 index → attachments,供 renderHistory 复显文件名。
    */
   const runTurn = async (
     input: string,
     planMode: boolean,
     placeholder: string,
   ): Promise<boolean> => {
+    const imgs = pendingAttachments;
+    pendingAttachments = []; // 入口即清,即使后续抛错也不留陈旧附件
+    const userInput: string | ContentPart[] =
+      imgs.length === 0
+        ? input
+        : [
+            { type: 'text' as const, text: input },
+            ...imgs.map((a) => ({
+              type: 'image_url' as const,
+              image_url: { url: a.dataUrl, detail: 'auto' as const },
+            })),
+          ];
+    const msgIndex = history.length; // runAgent push 后 = 这个 index
+    if (imgs.length) messageAttachments.set(msgIndex, imgs);
     let ok = false;
     try {
       const signal = startRunningListener(placeholder);
@@ -641,7 +695,7 @@ export async function startRepl(
       // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
       await runAgent(
         history,
-        input,
+        userInput,
         signal,
         () => {
           refreshStatusBase(history);
@@ -801,9 +855,51 @@ export async function startRepl(
       currentSessionId = undefined; // 下轮起新会话文件
       turnCount = 0; // 反思 cadence 重新计数
       contextState.lastUsage = undefined;
+      pendingAttachments = []; // 一并清空待发图片
       layout.clearContent();
       layout.contentWrite(bannerString(banner()));
       layout.contentWrite(`${ui.dim}(历史已清空,保留系统提示)${ui.reset}\n`);
+      continue;
+    }
+    // /image:附加本地图片到下一条 user 消息(支持 /image <path> · /image list · /image clear)。
+    // dispatch 阶段不调 runTurn:仅 mutate pendingAttachments 状态,提交时(runTurn 入口)才 flush 进 history。
+    if (line === '/image' || line === '/image list' || line === '/image clear' || line.startsWith('/image ')) {
+      if (line === '/image list' || (line === '/image' && pendingAttachments.length > 0)) {
+        // 空 /image 视为 list(无歧义;若用户想加图必须 /image <path>)
+        if (pendingAttachments.length === 0) {
+          layout.contentWrite(`${ui.dim}(无待发送图片)${ui.reset}\n`);
+        } else {
+          for (const a of pendingAttachments) {
+            layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
+          }
+        }
+        continue;
+      }
+      if (line === '/image clear' || (line === '/image' && pendingAttachments.length === 0)) {
+        // /image 单独输入 + 无 pending:也走 list(空集)
+        if (line === '/image' && pendingAttachments.length === 0) {
+          layout.contentWrite(`${ui.dim}(无待发送图片)${ui.reset}\n`);
+        } else {
+          pendingAttachments = [];
+          layout.contentWrite(`${ui.dim}(已清空待发送图片)${ui.reset}\n`);
+        }
+        continue;
+      }
+      const arg = line.slice('/image'.length).trim().replace(/^["']|["']$/g, '');
+      if (!arg) {
+        layout.contentWrite(`${ui.dim}用法: /image <path>${ui.reset}\n`);
+        continue;
+      }
+      const maxBytes = config.maxImageBytes ?? MAX_INLINE_BYTES_DEFAULT;
+      const r = await loadImageAttachment(arg, { maxBytes });
+      if (!r.ok) {
+        layout.contentWrite(`${ui.red}[image] ${r.reason}${ui.reset}\n`);
+        continue;
+      }
+      if (!pendingAttachments.find((a) => a.id === r.att.id)) {
+        pendingAttachments.push(r.att);
+      }
+      layout.contentWrite(`  ${ui.dim}${renderChip(r.att)} — will attach to next message${ui.reset}\n`);
       continue;
     }
     if (line === '/context') {

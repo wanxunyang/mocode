@@ -194,19 +194,43 @@ function contentToText(content: unknown): string {
   }
 }
 
+/** OpenAI 视觉模型单图固定 token(低细节 / auto 模式);高细节更大但属罕见路径,保守按 85 计。 */
+const IMAGE_TOKEN_COST = 85;
+
+/** 单个 content part 的 token:text part 走 estimateTokens,image_url part 固定 85。+2 结构开销。 */
+function partTokens(part: unknown): number {
+  if (!part || typeof part !== 'object') return 0;
+  const p = part as { type?: string; text?: string; image_url?: unknown };
+  if (p.type === 'text') return 2 + estimateTokens(p.text ?? '');
+  if (p.type === 'image_url') return 2 + IMAGE_TOKEN_COST;
+  return 2;
+}
+
+/** 估算多模态 content 的 token(text parts + 固定每图 85);不把 base64 走 estimateTokens,避免 1MB 图算成 25 万 token。 */
+export function contentTokens(content: unknown): number {
+  if (content == null) return 0;
+  if (typeof content === 'string') return estimateTokens(content);
+  if (Array.isArray(content)) {
+    let sum = 0;
+    for (const p of content) sum += partTokens(p);
+    return sum;
+  }
+  return estimateTokens(contentToText(content));
+}
+
 /** 估算单条消息的 token 数:结构开销 + content + tool_calls 参数。 */
 export function messageTokens(m: ChatMessage): number {
   const role = (m as { role?: string }).role;
   let structural = 4; // {role}\n{content}\n 框架基线
   if (role === 'system') structural = 3;
   else if (role === 'tool') structural = 6;
-  let body = contentToText((m as { content?: unknown }).content);
+  let body = contentTokens((m as { content?: unknown }).content);
   const tcs = (m as { tool_calls?: { function?: { arguments?: string } }[] })
     .tool_calls;
   if (tcs) {
-    for (const tc of tcs) body += tc?.function?.arguments ?? '';
+    for (const tc of tcs) body += estimateTokens(tc?.function?.arguments ?? '');
   }
-  return structural + estimateTokens(body);
+  return structural + body;
 }
 
 /** 估算整段 messages 的 token 数(不含工具 schema,含 priming 常数)。 */

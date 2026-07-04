@@ -138,6 +138,36 @@ function toText(content: unknown): string {
   }
 }
 
+/**
+ * 把多模态 content 拍平成纯文本(供摘要 transcript 用):text parts 拼接;image_url parts
+ * 替换为 `[图片已剥离: <mime>]` stub,避免 base64 进摘要 prompt(LLM 看到也无意义,反而撑爆 token)。
+ * 其它情况(string / 其它形状)原样返回。
+ */
+export function stripImagesForSummary(m: ChatMessage): ChatMessage {
+  const c = (m as { content?: unknown }).content;
+  if (Array.isArray(c)) {
+    const parts: string[] = [];
+    let imageCount = 0;
+    for (const p of c) {
+      if (p && typeof p === 'object') {
+        const part = p as { type?: string; text?: string; image_url?: { url?: string } };
+        if (part.type === 'text') parts.push(part.text ?? '');
+        else if (part.type === 'image_url') {
+          imageCount++;
+          const mime = part.image_url?.url?.startsWith('data:')
+            ? part.image_url.url.slice(5, part.image_url.url.indexOf(';'))
+            : 'image';
+          parts.push(`[图片已剥离: ${mime}]`);
+        }
+      }
+    }
+    if (imageCount > 0) {
+      return { ...m, content: parts.join('') };
+    }
+  }
+  return m;
+}
+
 interface Group {
   assistant: ChatMessage | null; // user / 纯 assistant / 带 tool_calls 的 assistant;孤儿 tool 时 null
   tools: ChatMessage[]; // 该 assistant 后紧跟的 tool 消息(可能空)
@@ -204,7 +234,9 @@ async function defaultSummarize(
   older: ChatMessage[],
   focus?: string
 ): Promise<string | null> {
-  let transcript = older
+  // 摘要前剥离多模态 user 消息里的图片(base64 会撑爆摘要 prompt;image 对摘要无信息量)。
+  const stripped = older.map(stripImagesForSummary);
+  let transcript = stripped
     .map((m) => {
       const role = m.role;
       let line = `${role}: ${toText((m as any).content)}`;

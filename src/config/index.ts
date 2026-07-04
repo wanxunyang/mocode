@@ -72,6 +72,8 @@ export interface Config {
   sandboxRoot?: string;
   /** AnySearch API base,默认官方端点。 */
   searchBaseUrl: string;
+  /** 单张图片内联字节上限(base64 前的原始字节);超此大小拒绝并提示 TODO 走 URL 上传。默认 4MB。 */
+  maxImageBytes?: number;
   /** 主题名(对应 src/ui/theme.ts 的 THEMES 表键)。默认 default;shell env MOCODE_THEME 覆盖文件。 */
   theme: string;
   /** MOCODE_THEME 是否由 shell 环境变量设置(非文件回填)。若是,/theme 写文件下次启动仍被 shell 盖。 */
@@ -208,6 +210,9 @@ export const config: Config = {
   searchApiKey: process.env.ANYSEARCH_API_KEY,
   sandboxRoot: process.env.SANDBOX_ROOT || undefined,
   searchBaseUrl: process.env.ANYSEARCH_BASE_URL || 'https://api.anysearch.com',
+  maxImageBytes: process.env.MOCODE_MAX_IMAGE_BYTES
+    ? Number(process.env.MOCODE_MAX_IMAGE_BYTES)
+    : undefined,
   theme: process.env.MOCODE_THEME || 'default',
   themeFromShell,
   llmKeysFromShell,

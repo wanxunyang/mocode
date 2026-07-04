@@ -22,8 +22,16 @@ import {
   readDiffContext,
   isMutationTool,
   type AgentHooks,
+  type ContentPart,
 } from './core.js';
 import { createPetHooks } from '../pet/state.js';
+
+/** 取 userInput 的首行:字符串直接 split;多模态 parts 找首个 text part 再 split。 */
+function firstLineOf(ui: string | ContentPart[]): string {
+  if (typeof ui === 'string') return ui.split('\n')[0] ?? '';
+  const first = ui.find((p) => p.type === 'text') as { text: string } | undefined;
+  return first?.text.split('\n')[0] ?? '';
+}
 
 /** 工具调用 ● 头:工具名 + 参数摘要(按 tool_calls 原顺序打印,让用户看到本轮跑哪些工具)。 */
 function writeToolHeader(tc: ToolCallRef): void {
@@ -80,13 +88,13 @@ function writeToolResult(
  */
 export async function runAgent(
   history: ChatMessage[],
-  userInput: string,
+  userInput: string | ContentPart[],
   signal?: AbortSignal,
   /** 每步 chat() 返回后回调:repl 据此重算并重画状态行 context 用量条(运行中实时刷新,不冻结在轮首)。 */
   onContextUpdate?: () => void,
 ): Promise<void> {
   // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
-  beginTurn(truncateDisplay(userInput.split('\n')[0] ?? '', 40));
+  beginTurn(truncateDisplay(firstLineOf(userInput), 40));
   layout.contentMode(); // 防御性:运行态光标归输入框光标位供 IME 锚定(enterRunningMode 已置,这里兜底)
 
   // spinner:状态行最前面转圈(思考中 / 生成 / 执行 工具时,状态栏 lead 位显帧 + 文字)。

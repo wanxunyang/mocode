@@ -150,7 +150,8 @@ export interface AgentHooks {
 /** runAgentCore 的运行选项。 */
 export interface AgentRunOptions {
   history: ChatMessage[];
-  userInput: string;
+  /** 纯文本字符串,或多模态 parts 数组(OpenAI content 数组,text + image_url)。 */
+  userInput: string | ContentPart[];
   signal?: AbortSignal;
   /** 每步 chat() 返回后回调:repl 据此重算并重画状态行 context 用量条。 */
   onContextUpdate?: () => void;
@@ -164,6 +165,11 @@ export interface AgentRunOptions {
    *  不进主回滚链,主 /rollback 不撤销。透传给 executeTool。 */
   skipRollback?: boolean;
 }
+
+/** OpenAI content array 的子集(text + image_url);repl 构造 user 多模态消息用。 */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
 
 /** runAgentCore 的运行结果。 */
 export interface AgentRunResult {
