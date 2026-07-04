@@ -3,9 +3,26 @@ import { config } from '../config/index.js';
 import { tools } from '../tools/registry.js';
 import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
 
+/**
+ * LLM 调用重试策略:
+ *   可重试  →  429 (rate limit) / 5xx (server) / APIConnectionError / Node 网络错 (ETIMEDOUT 等)
+ *   不重试  →  400 (bad request) / 401 (auth) / 其他 4xx / 用户中断 (AbortError / APIUserAbortError)
+ *
+ * 退避:指数 + ±20% jitter,首等 1s,翻倍,封顶 30s;若后端返回 Retry-After 头则优先按其值。
+ * 默认 4 次尝试(1 初始 + 3 重试),要调改 RETRY_MAX_ATTEMPTS。
+ *
+ * SDK 内置 maxRetries 默认 2(对所有 5xx+网络错重试),与本策略叠加会双重重试 5xx —— 显式置 0 让
+ * 全部重试由 chat() 外层重试循环统一控,行为可预期。
+ */
+const RETRY_MAX_ATTEMPTS = 4;
+const RETRY_BASE_MS = 1000;
+const RETRY_MAX_MS = 30000;
+const RETRY_JITTER = 0.2;
+
 let client = new OpenAI({
   baseURL: config.baseURL,
   apiKey: config.apiKey,
+  maxRetries: 0,
 });
 
 /**
@@ -18,7 +35,120 @@ export function reconfigureClient(): void {
   client = new OpenAI({
     baseURL: config.baseURL,
     apiKey: config.apiKey,
+    maxRetries: 0,
   });
+}
+
+// ── 重试 helper(纯函数 + sleep,被 chat() 调用;亦可单测导入验证)──────
+
+/** 可被 AbortSignal 取消的 sleep;signal 已 abort 时立即抛 AbortError。 */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('This operation was aborted', 'AbortError'));
+      return;
+    }
+    let onAbort: (() => void) | undefined;
+    const t = setTimeout(() => {
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    onAbort = () => {
+      clearTimeout(t);
+      reject(new DOMException('This operation was aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * 判定一个 chat 失败是否值得重试。
+ * 用户中断(signal.aborted / AbortError / APIUserAbortError)始终返回 false,避免退避中把中断吞了。
+ * 4xx(除 429)全不重试 —— 这是客户端请求错,重试只会再错一次。
+ */
+export function isRetryableError(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return false;
+  if (!err || typeof err !== 'object') return false;
+  const e = err as {
+    name?: string;
+    status?: number;
+    code?: string;
+    message?: string;
+  };
+  if (e.name === 'AbortError' || e.name === 'APIUserAbortError') return false;
+  // OpenAI SDK APIError 走 status 分支(覆盖 4xx/5xx/429)
+  const status = e.status;
+  if (typeof status === 'number') {
+    if (status === 429) return true;
+    if (status >= 500 && status < 600) return true;
+    return false;
+  }
+  // Node 网络错 code(APIConnectionError 内部也会带一个)
+  const code = e.code;
+  if (
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    code === 'ENOTFOUND' ||
+    code === 'EAI_AGAIN' ||
+    code === 'ECONNREFUSED' ||
+    code === 'EPIPE'
+  ) {
+    return true;
+  }
+  // OpenAI SDK 的网络错类(无 status)
+  if (e.name === 'APIConnectionError' || e.name === 'APIConnectionTimeoutError') return true;
+  // 兜底:错误信息里出现 timeout 字样(部分代理把错误折叠成普通 Error)
+  if (typeof e.message === 'string' && /\btime(d|ed)?\s*out\b|ETIMEDOUT/i.test(e.message)) {
+    return true;
+  }
+  return false;
+}
+
+/** 从 OpenAI APIError.headers 解析 Retry-After(秒);不支持或缺失返回 undefined。封顶 RETRY_MAX_MS。 */
+export function getRetryAfterMs(err: unknown): number | undefined {
+  const headers = (err as { headers?: unknown } | undefined)?.headers;
+  if (!headers) return undefined;
+  let raw: string | null = null;
+  if (typeof (headers as { get?: (k: string) => string | null }).get === 'function') {
+    raw = (headers as { get: (k: string) => string | null }).get('retry-after');
+  } else if (typeof headers === 'object') {
+    raw = (headers as Record<string, string>)['retry-after'] ?? null;
+  }
+  if (!raw) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return Math.min(n * 1000, RETRY_MAX_MS);
+}
+
+/** 第 N 次失败后等多久(retryAfterMs 有就用它,否则指数;再加 ±RETRY_JITTER 抖动)。 */
+export function computeBackoff(attempt: number, retryAfterMs?: number): number {
+  const exp = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempt - 1));
+  const base = retryAfterMs ?? exp;
+  const lo = base * (1 - RETRY_JITTER);
+  const hi = base * (1 + RETRY_JITTER);
+  return Math.max(0, Math.round(lo + Math.random() * (hi - lo)));
+}
+
+function logRetry(attempt: number, err: unknown, waitMs: number): void {
+  const e = err as { status?: number; name?: string; message?: string };
+  const tag = e.status ? `HTTP ${e.status}` : e.name || 'Error';
+  const msg = e.message ?? '未知错误';
+  // stderr 而非 stdout —— 不污染流式正文;行首换行防止黏在上一行尾巴。
+  process.stderr.write(
+    `\n[llm] 第 ${attempt}/${RETRY_MAX_ATTEMPTS} 次失败(${tag}: ${msg}),${(waitMs / 1000).toFixed(1)}s 后重试…\n`
+  );
+}
+
+type CreateImpl = (
+  body: Record<string, unknown>,
+  opts: { signal?: AbortSignal } | undefined
+) => Promise<AsyncIterable<unknown>>;
+
+let createImplOverride: CreateImpl | null = null;
+
+/** 仅供单测用:覆盖 chat() 内部实际调用的 create 桩。生产代码不要碰。 */
+export function __setChatCreateImpl(impl: CreateImpl | null): void {
+  createImplOverride = impl;
 }
 
 export type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -73,6 +203,9 @@ export interface StreamHandlers {
  * 流式调一次 LLM:增量回调文本,内部累加 tool_calls 片段。
  * tool_calls 跨 chunk 按 index 累加(id / name / arguments 拼接)。
  * include_usage 时末尾 chunk 携带 usage,先读再 continue(末尾 chunk 无 delta)。
+ *
+ * 包了一层重试:429/5xx/timeout/网络错按指数退避重试(默认 4 次),400/401/用户中断立即抛。
+ * 重试由 chat() 统一管,chatOnce() 只负责单次请求,职责单一便于单测。
  */
 export async function chat(
   messages: ChatMessage[],
@@ -81,8 +214,45 @@ export async function chat(
   /** 覆盖默认工具 schema;plan 模式传 planChatTools(只读子集),缺省=全量 chatTools。 */
   toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[]
 ): Promise<ChatResult> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
+    if (signal?.aborted) {
+      throw new DOMException('This operation was aborted', 'AbortError');
+    }
+    try {
+      return await chatOnce(messages, handlers, signal, toolsOverride);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= RETRY_MAX_ATTEMPTS || !isRetryableError(err, signal)) {
+        throw err;
+      }
+      const wait = computeBackoff(attempt, getRetryAfterMs(err));
+      logRetry(attempt, err, wait);
+      // sleep 自己会在 signal abort 时抛 AbortError——透传,让 runAgentCore 的 catch 按中断处理。
+      await sleep(wait, signal);
+    }
+  }
+  // 循环要么 return 要么 throw,理论上走不到这里;写出来让 TS 控制流分析满意。
+  throw lastErr;
+}
+
+/** 单次流式 LLM 请求(无重试);chat() 的内部实现,可被 __setChatCreateImpl 注入桩以做单测。 */
+async function chatOnce(
+  messages: ChatMessage[],
+  handlers: StreamHandlers,
+  signal: AbortSignal | undefined,
+  toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined
+): Promise<ChatResult> {
   // signal 透传给 SDK 第二参(RequestOptions);abort 后 for await 抛错,chat 不 catch,透传 runAgent 处理。
-  const stream = await client.chat.completions.create(
+  // createImplOverride 的 body 类型故意宽成 Record(测试桩用),生产走 client 分支时由 OpenAI 自己的类型守门。
+  const create = createImplOverride
+    ? createImplOverride
+    : (body: Record<string, unknown>, opts: { signal?: AbortSignal } | undefined) =>
+        client.chat.completions.create(
+          body as unknown as Parameters<typeof client.chat.completions.create>[0],
+          opts as unknown as Parameters<typeof client.chat.completions.create>[1]
+        );
+  const stream = await create(
     {
       model: config.model,
       messages,
@@ -102,7 +272,23 @@ export async function chat(
     { id?: string; name: string; arguments: string }
   >();
 
-  for await (const chunk of stream) {
+  for await (const chunk of stream as AsyncIterable<{
+    usage?: {
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+    };
+    choices?: Array<{
+      delta?: {
+        content?: string | null;
+        tool_calls?: Array<{
+          index?: number;
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        }>;
+      };
+    }>;
+  }>) {
     // usage:末尾 chunk(choices 可能为空)在 include_usage 时携带;先读再 continue。
     if (chunk.usage) {
       usage = {
@@ -111,7 +297,7 @@ export async function chat(
         totalTokens: chunk.usage.total_tokens,
       };
     }
-    const delta = chunk.choices[0]?.delta;
+    const delta = chunk.choices?.[0]?.delta;
     if (!delta) continue; // 末尾 usage-only chunk 等无 delta
 
     if (delta.content) {
