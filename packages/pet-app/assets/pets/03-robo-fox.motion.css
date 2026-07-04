@@ -61,3 +61,14 @@
   animation: fox-urging-mouth 0.55s ease-in-out infinite;
   transform-origin: 128px 150px;
 }
+
+/* ── petted:被点时狐式反应 —— 歪头卖萌(旋转 + 弹一下) ── */
+@keyframes fox-petted-tilt {
+  0%, 100% { transform: rotate(0deg) scale(1); }
+  30% { transform: rotate(-8deg) scale(1.18); }
+  60% { transform: rotate(5deg) scale(0.94); }
+}
+.pet-petted #pet-body-group {
+  animation: fox-petted-tilt 0.7s ease-out 1;
+  transform-origin: 128px 125px;
+}

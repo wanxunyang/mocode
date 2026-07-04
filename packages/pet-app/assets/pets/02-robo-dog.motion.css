@@ -40,3 +40,21 @@
   animation: dog-urging-tongue 0.4s ease-in-out infinite;
   transform-origin: 128px 153px;
 }
+
+/* ── petted:被点时狗式反应 —— 整只蹦起 + 嘴部猛张(汪!兴奋) ── */
+@keyframes dog-petted-hop {
+  0%, 100% { transform: translateY(0) scale(1); }
+  30% { transform: translateY(-10px) scale(1.15); }
+  60% { transform: translateY(0) scale(0.95); }
+}
+@keyframes dog-petted-bark {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.7); }
+}
+.pet-petted #pet-body-group {
+  animation: dog-petted-hop 0.7s ease-out 1;
+}
+.pet-petted #pet-mouth {
+  animation: dog-petted-bark 0.25s ease-out 2;
+  transform-origin: 128px 153px;
+}

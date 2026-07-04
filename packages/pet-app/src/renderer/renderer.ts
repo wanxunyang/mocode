@@ -13,6 +13,7 @@ declare global {
       onSkin: (cb: (payload: { assetPath: string; motionFile?: string }) => void) => void;
       getInitialSkin: () => Promise<{ assetPath: string; motionFile?: string }>;
       quipVisibleMs: number;
+      idleSleepMs: number;
       onMood: (cb: (mood: MoodKind | null, quip?: string) => void) => void;
       setIgnoreMouseEvents: (ignore: boolean) => void;
       dragStart: () => void;
@@ -24,6 +25,9 @@ declare global {
 
 /** 气泡文案展示时长,从 preload 经 MOCODE_PET_QUIP_VISIBLE_MS 环境变量注入,默认 6000(见 dom-mood.ts QUIP_VISIBLE_MS)。 */
 const QUIP_VISIBLE_MS = window.petBridge.quipVisibleMs;
+
+/** 闲置多久后桌宠进入"打盹"状态(ms),从 preload 经 MOCODE_PET_IDLE_SLEEP_MS 环境变量注入,默认 300000(5 分钟)。 */
+const IDLE_SLEEP_MS = window.petBridge.idleSleepMs;
 
 const ALL_STATE_CLASSES = [
   'pet-idle',
@@ -88,7 +92,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   const lampContainer = document.getElementById('signal-light-container');
   const bubbleEl = document.getElementById('pet-bubble');
   if (!stage || !petContainer || !lampContainer || !bubbleEl) return;
-  applyState(stage, 'idle');
+  // 把 stage 取一个非空本地别名,后续 markActive / triggerPetted 闭包引用它——
+  // TS 控制流收窄不会穿透到嵌套函数体,直接用 stage! 不优雅,这里取一个 const 别名一劳永逸。
+  const stageEl: HTMLElement = stage;
+  applyState(stageEl, 'idle');
 
   // 启动时的初始皮肤:主动向主进程 invoke 拉取(而非等主进程 send 推送)——
   // 消除 did-finish-load 推送与本文件异步注册监听器之间的时序竞争(见 main.ts pushSkinToRenderer 注释)。
@@ -104,10 +111,54 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   const bubbleController = createBubbleController();
 
-  window.petBridge.onState((state) => applyState(stage, state));
+  // === 闲置交互(hover/click/打盹) ============================================
+  // 这 3 个 class 跟 .pet-thinking / .pet-tool 等 state class 平行,但驱动源不同:
+  // state class 由 agent 状态机驱动(可预测、可节流),interaction class 由用户输入驱动(瞬时)。
+  // .pet-asleep 是持续态(进入后维持,直到 markActive 把它清掉),
+  // .pet-hover / .pet-petted 是瞬时态(进入后用 animation 跑完 1 帧后由 JS 主动清 class,
+  // 让通用规则或下一轮 hover/click 重新触发)。
+  // 通用规则见 style.css 末尾"闲置交互"小节,各宠物在 motion CSS 里追加角色化覆写。 ──
+
+  /** 闲置打盹计时器句柄;非 null 表示正在倒计时,归零时给 #pet-stage 加 .pet-asleep。 */
+  let asleepTimer: number | null = null;
+  /** 拖拽期间累计位移是否超过 5px 阈值(超过 → 视为"拖动",mouseup 时不再触发 pet-petted)。 */
+  let dragMoved = false;
+  /** 单次 .pet-petted 动画持续时长,需与 style.css @keyframes pet-petted-bounce 的 0.7s 对齐。 */
+  const PETTED_ANIM_MS = 700;
+
+  /** 标记"用户/agent 有活动":清掉 .pet-asleep 并重置闲置计时器。
+   *  任何状态变化(state IPC)、hover、click 都会调用一次,空闲 IDLE_SLEEP_MS 后再次进入打盹。 */
+  function markActive(): void {
+    if (stageEl.classList.contains('pet-asleep')) {
+      stageEl.classList.remove('pet-asleep');
+    }
+    if (asleepTimer !== null) {
+      clearTimeout(asleepTimer);
+    }
+    asleepTimer = window.setTimeout(() => {
+      stageEl.classList.add('pet-asleep');
+    }, IDLE_SLEEP_MS);
+  }
+
+  /** 被点一下:移除旧的 .pet-petted class → 强制 reflow → 重新加 class,触发 CSS 动画重跑;
+   *  动画结束后由 setTimeout 清掉 class,避免 animation:1 的关键帧在 class 存在期间再次触发动画(虽然 1 次也无所谓,
+   *  主要是为了语义清晰:"petted" 是瞬时态而非持续态)。 */
+  function triggerPetted(): void {
+    stageEl.classList.remove('pet-petted');
+    // 强制 reflow 让浏览器重新计算 animation,确保短时间内多次点击每次都从头播放
+    void stageEl.offsetWidth;
+    stageEl.classList.add('pet-petted');
+    window.setTimeout(() => stageEl.classList.remove('pet-petted'), PETTED_ANIM_MS);
+    markActive();
+  }
+
+  window.petBridge.onState((state) => {
+    applyState(stageEl, state);
+    markActive();
+  });
   window.petBridge.onSkin(({ assetPath, motionFile }) => swapSkin(petContainer, assetPath, motionFile));
   window.petBridge.onMood((mood, quip) => {
-    applyMood(stage, mood);
+    applyMood(stageEl, mood);
     // 状态文案(由 main.ts broadcastToRenderer 选 stateQuips 推送过来)和 mood 文案共用同一条 IPC;
     // 状态文案的 mood 字段为 null,只要 quip 存在就展示;mood 文案按之前的语义(mood 命中)也展示。
     if (quip) bubbleController.showQuip(bubbleEl, quip, QUIP_VISIBLE_MS);
@@ -130,20 +181,31 @@ window.addEventListener('DOMContentLoaded', async () => {
   let startX = 0;
   let startY = 0;
 
-  stage.addEventListener('mouseenter', () => window.petBridge.setIgnoreMouseEvents(false));
+  stage.addEventListener('mouseenter', () => {
+    window.petBridge.setIgnoreMouseEvents(false);
+    stageEl.classList.add('pet-hover');
+    markActive();
+  });
   stage.addEventListener('mouseleave', () => {
     if (!dragging) window.petBridge.setIgnoreMouseEvents(true);
+    stageEl.classList.remove('pet-hover');
   });
 
   stage.addEventListener('mousedown', (e: MouseEvent) => {
     dragging = true;
+    dragMoved = false;
     startX = e.screenX;
     startY = e.screenY;
     window.petBridge.dragStart();
+    markActive();
   });
 
   window.addEventListener('mousemove', (e: MouseEvent) => {
     if (!dragging) return;
+    // 5px 阈值:用户手抖不可避免,但凡有"想拖动"的意图(>5px)就不算 click,避免误触 pet-petted
+    if (!dragMoved && (Math.abs(e.screenX - startX) > 5 || Math.abs(e.screenY - startY) > 5)) {
+      dragMoved = true;
+    }
     window.petBridge.dragMove(e.screenX - startX, e.screenY - startY);
   });
 
@@ -153,7 +215,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     // 时触发一次、不会因为穿透状态变化而重新触发,于是后续再也收不到 mousedown——表现为"只能拖动一次"。
     // 穿透状态改由 mouseleave 统一负责:真正移出宠物范围时才恢复穿透。
     if (!dragging) return;
+    const wasClick = !dragMoved;
     dragging = false;
     window.petBridge.dragEnd();
+    // mousedown 到 mouseup 之间位移 < 5px → 视为点击(不是拖动),触发 pet-petted 弹一下
+    if (wasClick) triggerPetted();
   });
+
+  // 启动闲置计时器:launch 起来后 IDLE_SLEEP_MS 内没任何活动就进入打盹。
+  // 注意必须在 onState 监听器注册后调用,否则第一个 state 变化会早于 markActive 跑,逻辑仍然 OK
+  // (markActive 是幂等的),但顺序上让"先注册监听器,再启动计时"更清晰。
+  markActive();
 });

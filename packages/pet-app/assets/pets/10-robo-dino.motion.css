@@ -89,3 +89,22 @@
   animation: dino-done-stomp 0.5s ease-out 1;
   transform-origin: 128px 220px;
 }
+
+/* ── petted:被点时小龙式反应 —— 短促一跺 + 嘴部张合咆哮 ── */
+@keyframes dino-petted-stomp {
+  0%, 100% { transform: translateY(0) scale(1); }
+  30% { transform: translateY(0) scale(1.18) scaleY(0.92); }
+  60% { transform: translateY(-8px) scaleY(1.08) scaleX(0.95); }
+}
+@keyframes dino-petted-roar {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.6); }
+}
+.pet-petted #pet-body-group {
+  animation: dino-petted-stomp 0.7s ease-out 1;
+  transform-origin: 128px 220px;
+}
+.pet-petted #pet-mouth {
+  animation: dino-petted-roar 0.3s ease-out 2;
+  transform-origin: 128px 148px;
+}

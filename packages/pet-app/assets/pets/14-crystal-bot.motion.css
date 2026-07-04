@@ -61,3 +61,14 @@
   animation: crystal-done-twirl 0.55s ease-out 1;
   transform-origin: 128px 128px;
 }
+
+/* ── petted:被点时水晶式反应 —— 加速自转一圈(折射出彩虹) ── */
+@keyframes crystal-petted-twirl {
+  0% { transform: rotate(0deg) scale(1); }
+  40% { transform: rotate(180deg) scale(1.25); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+.pet-petted #pet-body-group {
+  animation: crystal-petted-twirl 0.7s ease-out 1;
+  transform-origin: 128px 128px;
+}

@@ -82,3 +82,14 @@
 .pet-done #pet-body-group {
   animation: bunny-done-bounce 0.5s ease-out 1;
 }
+
+/* ── petted:被点时兔子式反应 —— 一蹦老高(兴奋过头) ── */
+@keyframes bunny-petted-leap {
+  0%, 100% { transform: translateY(0) scale(1); }
+  30% { transform: translateY(-14px) scale(1.1); }
+  60% { transform: translateY(0) scale(0.92); }
+}
+.pet-petted #pet-body-group {
+  animation: bunny-petted-leap 0.7s ease-out 1;
+  transform-origin: 128px 125px;
+}

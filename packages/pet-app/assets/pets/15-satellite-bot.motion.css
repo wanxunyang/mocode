@@ -70,3 +70,14 @@
   animation: satellite-done-deploy 0.5s ease-out 1;
   transform-origin: 128px 220px;
 }
+
+/* ── petted:被点时卫星式反应 —— 倾斜 + 整体晃动(失重感) ── */
+@keyframes satellite-petted-tilt {
+  0%, 100% { transform: rotate(0deg) scale(1); }
+  30% { transform: rotate(-12deg) scale(1.12); }
+  60% { transform: rotate(6deg) scale(0.95); }
+}
+.pet-petted #pet-body-group {
+  animation: satellite-petted-tilt 0.7s ease-out 1;
+  transform-origin: 128px 220px;
+}

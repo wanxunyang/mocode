@@ -323,3 +323,54 @@ html, body {
   animation: pet-mood-flustered-arm-right 0.25s ease-in-out infinite 0.12s;
   transform-origin: 222px 128px;
 }
+
+/* ── 闲置交互(design.md 之外的设计,本轮新增):
+ *   这 3 个 class 跟 pet-thinking/pet-tool 等 state class 平行,
+ *   区别在于:state class 由 agent 状态机驱动(可预测),interaction class 由用户输入驱动(瞬时)。
+ *   .pet-asleep 是持续态(进入即维持,直到 markActive 把它清掉),
+ *   .pet-hover / .pet-petted 是瞬时态(进入后用 animation 跑完 1 帧后由 renderer.ts 主动清 class)。
+ *
+ *   通用规则:不指定 #pet-tail / #pet-arm-* / #pet-antenna 等皮肤元素,留给各 motion CSS 按角色覆写。
+ *   这样 18 只宠物共享同一套"被点会弹一下/被悬停会抬头/闲置会打盹"的视觉语义,只是各自具体动作不同。
+ *   闲置睡眠的 #pet-eye-* 半闭眼效果对没有该 id 的宠物优雅降级(选择器命中 0 元素)。 ── */
+
+/* ── .pet-asleep:闲置超时后,整机慢呼吸 + 眼睛变细线(模拟闭眼),motion CSS 可追加打鼾/Z 字等角色动作 ── */
+@keyframes pet-asleep-breath {
+  0%, 100% { transform: scale(1) translateY(0); }
+  50% { transform: scale(1.015) translateY(-2px); }
+}
+@keyframes pet-asleep-eye-squint {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.12); }
+}
+.pet-asleep #pet-body-group {
+  animation: pet-asleep-breath 4.5s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+.pet-asleep #pet-eye-left,
+.pet-asleep #pet-eye-right {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pet-asleep-eye-squint 4.5s ease-in-out infinite;
+}
+
+/* ── .pet-hover:鼠标悬停时,整体轻微上抬 + 信号灯同步进入"可点击"提示姿态
+ *   (信号灯 #pet-lamp-* 留给通用规则外的可选覆写,这里只动 body)。 ── */
+.pet-hover #pet-body-group {
+  transform: translateY(-4px);
+  transition: transform 0.18s ease-out;
+}
+
+/* ── .pet-petted:被点击时,弹一下(放大→挤压回弹),与现有 .pet-done 用同一套 transform-origin
+ *   中心 128px 125px(与 .pet-done 一致),保证视觉一致性;petted 比 done 更夸张(scale 1.18 vs 1.1)
+ *   因为是用户主动交互,需要更强的视觉反馈。 ── */
+@keyframes pet-petted-bounce {
+  0% { transform: scale(1); }
+  30% { transform: scale(1.18) translateY(-6px); }
+  60% { transform: scale(0.94) translateY(1px); }
+  100% { transform: scale(1); }
+}
+.pet-petted #pet-body-group {
+  animation: pet-petted-bounce 0.7s ease-out 1;
+  transform-origin: 128px 125px;
+}

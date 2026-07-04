@@ -88,3 +88,22 @@
   animation: cactus-done-arm-right 0.4s ease-out 1;
   transform-origin: 196px 130px;
 }
+
+/* ── petted:被点时仙人掌式反应 —— 整体轻弹 + 单臂大幅挥手(不要碰我刺!) ── */
+@keyframes cactus-petted-bounce {
+  0%, 100% { transform: scale(1); }
+  30% { transform: scale(1.1) translateY(-3px); }
+  60% { transform: scale(0.96); }
+}
+@keyframes cactus-petted-wave {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(35deg); }
+}
+.pet-petted #pet-body-group {
+  animation: cactus-petted-bounce 0.7s ease-out 1;
+  transform-origin: 128px 220px;
+}
+.pet-petted #pet-arm-right {
+  animation: cactus-petted-wave 0.35s ease-out 2;
+  transform-origin: 196px 130px;
+}

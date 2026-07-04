@@ -70,3 +70,15 @@
   animation: star-done-twinkle 0.5s ease-out 1;
   transform-origin: 128px 128px;
 }
+
+/* ── petted:被点时星星式反应 —— 急速脉冲 + 自转(魔法 Twinkle 爆发) ── */
+@keyframes star-petted-burst {
+  0% { transform: scale(1) rotate(0deg); }
+  30% { transform: scale(1.3) rotate(60deg); }
+  60% { transform: scale(0.85) rotate(-30deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+.pet-petted #pet-body-group {
+  animation: star-petted-burst 0.7s ease-out 1;
+  transform-origin: 128px 128px;
+}

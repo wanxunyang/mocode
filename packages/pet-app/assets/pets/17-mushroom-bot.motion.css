@@ -63,3 +63,14 @@
   animation: mushroom-done-hop 0.55s ease-out 1;
   transform-origin: 128px 240px;
 }
+
+/* ── petted:被点时蘑菇式反应 —— 大压扁弹起(根部为支点的 Q 弹) ── */
+@keyframes mushroom-petted-squish {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  30% { transform: translateY(0) scaleY(0.7) scaleX(1.18); }
+  60% { transform: translateY(-12px) scaleY(1.1) scaleX(0.92); }
+}
+.pet-petted #pet-body-group {
+  animation: mushroom-petted-squish 0.8s ease-out 1;
+  transform-origin: 128px 240px;
+}

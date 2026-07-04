@@ -16,6 +16,11 @@ function envNumber(name: string, defaultValue: number): number {
  *  渲染进程 renderer.ts 在模块顶层读取该值,后续 showQuip 调用都使用它——启动后变更需重启 pet-app 生效。 */
 const QUIP_VISIBLE_MS = envNumber('MOCODE_PET_QUIP_VISIBLE_MS', 6000);
 
+/** 闲置多久后桌宠进入"打盹"状态(ms),环境变量 MOCODE_PET_IDLE_SLEEP_MS 覆盖,默认 300000(5 分钟)。
+ *  任意状态变化(state IPC)/ 鼠标交互(hover/click/drag)都会重置这个计时器,计时归零后给 #pet-stage 加 .pet-asleep
+ *  (由 style.css 驱动慢呼吸 + 半闭眼动画,见 renderer.ts markActive / triggerAsleep)。 */
+const IDLE_SLEEP_MS = envNumber('MOCODE_PET_IDLE_SLEEP_MS', 300_000);
+
 contextBridge.exposeInMainWorld('petBridge', {
   onState: (callback: (state: PetState, meta?: PetStateMeta) => void) => {
     ipcRenderer.on('pet:state', (_event, payload: { state: PetState; meta?: PetStateMeta }) => {
@@ -33,6 +38,8 @@ contextBridge.exposeInMainWorld('petBridge', {
   getInitialSkin: (): Promise<{ assetPath: string; motionFile?: string }> => ipcRenderer.invoke('pet:get-skin'),
   /** 气泡文案展示时长(ms),renderer.ts 在模块顶层读取一次后用于所有 showQuip 调用。 */
   quipVisibleMs: QUIP_VISIBLE_MS,
+  /** 闲置进入打盹的时长(ms),renderer.ts 在模块顶层读取一次后用于 markActive 重置逻辑。 */
+  idleSleepMs: IDLE_SLEEP_MS,
   /** 主进程推来的 mood 求值结果(见 main.ts pushMoodEvaluation),mood 为 null 表示当前无需展示情绪演出。 */
   onMood: (callback: (mood: MoodKind | null, quip?: string) => void) => {
     ipcRenderer.on('pet:mood', (_event, payload: { mood: MoodKind | null; quip?: string }) => {
