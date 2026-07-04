@@ -12,40 +12,61 @@
       <stop offset="0" stop-color="#2afadf"/>
       <stop offset="1" stop-color="#42a5f5"/>
     </linearGradient>
+    <linearGradient id="bodyGrad" x1="48" y1="48" x2="208" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1b263b"/>
+      <stop offset="1" stop-color="#0d1b2a"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
   </defs>
 
   <!-- Background -->
   <rect width="1280" height="300" fill="url(#bgGrad)"/>
   <rect x="1" y="1" width="1278" height="298" fill="none" stroke="#2afadf" stroke-opacity="0.18" stroke-width="2"/>
 
-  <!-- Mascot icon (simplified) -->
-  <g transform="translate(50, 50)">
+  <!-- Mascot icon (256x256 native, scaled to 200x200 at 50,50) -->
+  <g transform="translate(50 50) scale(0.78125)">
     <!-- Antenna -->
-    <line x1="90" y1="0" x2="90" y2="16" stroke="#2afadf" stroke-width="4" stroke-linecap="round"/>
-    <circle cx="90" cy="-6" r="6" fill="#2afadf"/>
+    <line x1="128" y1="30" x2="128" y2="50" stroke="#2afadf" stroke-width="4" stroke-linecap="round"/>
+    <circle id="pet-antenna" cx="128" cy="24" r="7" fill="#2afadf" filter="url(#glow)">
+      <animate attributeName="opacity" values="1;0.3;1" dur="1.6s" repeatCount="indefinite"/>
+    </circle>
 
-    <!-- Body -->
-    <rect x="10" y="16" width="160" height="150" rx="26" fill="url(#bgGrad)" stroke="url(#cyanGrad)" stroke-width="3"/>
+    <!-- Body / terminal head -->
+    <g id="pet-body-group">
+      <rect id="pet-body" x="40" y="50" width="176" height="150" rx="28" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="3"/>
 
-    <!-- Screen face -->
-    <rect x="26" y="36" width="128" height="82" rx="12" fill="#0a1420" stroke="#2afadf" stroke-opacity="0.4" stroke-width="1.5"/>
+      <!-- Screen face -->
+      <rect x="60" y="72" width="136" height="90" rx="14" fill="#0a1420" stroke="#2afadf" stroke-opacity="0.4" stroke-width="1.5"/>
 
-    <!-- Eyes -->
-    <g>
-      <rect x="50" y="64" width="13" height="24" rx="6" fill="url(#cyanGrad)"/>
-      <rect x="117" y="64" width="13" height="24" rx="6" fill="url(#cyanGrad)"/>
+      <!-- Eyes (blinking) -->
+      <g filter="url(#glow)">
+        <rect x="86" y="104" width="14" height="26" rx="6" fill="url(#cyanGrad)">
+          <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+          <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+        </rect>
+        <rect x="156" y="104" width="14" height="26" rx="6" fill="url(#cyanGrad)">
+          <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+          <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+        </rect>
+      </g>
+
+      <!-- Mouth -->
+      <rect id="pet-mouth" x="112" y="147" width="32" height="6" rx="3" fill="#2afadf" fill-opacity="0.8" filter="url(#glow)"/>
     </g>
 
-    <!-- Mouth: simple dash -->
-    <rect x="75" y="103" width="30" height="5" rx="2.5" fill="#2afadf" fill-opacity="0.8"/>
-
     <!-- Arms -->
-    <path d="M10 76 Q-10 84 -6 106" stroke="url(#cyanGrad)" stroke-width="6" stroke-linecap="round" fill="none"/>
-    <path d="M170 76 Q190 84 186 106" stroke="url(#cyanGrad)" stroke-width="6" stroke-linecap="round" fill="none"/>
+    <circle id="pet-arm-left" cx="34" cy="128" r="14" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>
+    <circle id="pet-arm-right" cx="222" cy="128" r="14" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>
 
-    <!-- Feet -->
-    <rect x="38" y="166" width="16" height="20" rx="6" fill="url(#bgGrad)" stroke="url(#cyanGrad)" stroke-width="2"/>
-    <rect x="126" y="166" width="16" height="20" rx="6" fill="url(#bgGrad)" stroke="url(#cyanGrad)" stroke-width="2"/>
+    <!-- Legs / feet -->
+    <rect x="76" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>
+    <rect x="160" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>
   </g>
 
   <!-- Wordmark -->

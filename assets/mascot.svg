@@ -1,4 +1,4 @@
-<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+<svg id="pet-svg-root" width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="bodyGrad" x1="48" y1="48" x2="208" y2="220" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#1b263b"/>
@@ -17,36 +17,38 @@
     </filter>
   </defs>
 
-  <!-- Antenna -->
+  <!-- Antenna (id 供各状态切换灯光颜色/闪烁速率,不改变原始视觉/动画) -->
   <line x1="128" y1="30" x2="128" y2="50" stroke="#2afadf" stroke-width="4" stroke-linecap="round"/>
-  <circle cx="128" cy="24" r="7" fill="#2afadf" filter="url(#glow)">
+  <circle id="pet-antenna" cx="128" cy="24" r="7" fill="#2afadf" filter="url(#glow)">
     <animate attributeName="opacity" values="1;0.3;1" dur="1.6s" repeatCount="indefinite"/>
   </circle>
 
-  <!-- Body / terminal head -->
-  <rect x="40" y="50" width="176" height="150" rx="28" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="3"/>
+  <!-- Body / terminal head(id 供 tool_call/error 状态的抖动/摆动变换) -->
+  <g id="pet-body-group">
+    <rect id="pet-body" x="40" y="50" width="176" height="150" rx="28" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="3"/>
 
-  <!-- Screen face -->
-  <rect x="60" y="72" width="136" height="90" rx="14" fill="#0a1420" stroke="#2afadf" stroke-opacity="0.4" stroke-width="1.5"/>
+    <!-- Screen face -->
+    <rect x="60" y="72" width="136" height="90" rx="14" fill="#0a1420" stroke="#2afadf" stroke-opacity="0.4" stroke-width="1.5"/>
 
-  <!-- Eyes (blinking) -->
-  <g filter="url(#glow)">
-    <rect x="86" y="104" width="14" height="26" rx="6" fill="url(#cyanGrad)">
-      <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
-      <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
-    </rect>
-    <rect x="156" y="104" width="14" height="26" rx="6" fill="url(#cyanGrad)">
-      <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
-      <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
-    </rect>
+    <!-- Eyes (blinking) -->
+    <g filter="url(#glow)">
+      <rect x="86" y="104" width="14" height="26" rx="6" fill="url(#cyanGrad)">
+        <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+        <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="156" y="104" width="14" height="26" rx="6" fill="url(#cyanGrad)">
+        <animate attributeName="height" values="26;2;26" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+        <animate attributeName="y" values="104;117;104" keyTimes="0;0.5;1" dur="3.2s" repeatCount="indefinite"/>
+      </rect>
+    </g>
+
+    <!-- Mouth: simple dash(id 供 speaking 状态开合动画) -->
+    <rect id="pet-mouth" x="112" y="147" width="32" height="6" rx="3" fill="#2afadf" fill-opacity="0.8" filter="url(#glow)"/>
   </g>
 
-  <!-- Mouth: simple dash -->
-  <rect x="112" y="147" width="32" height="6" rx="3" fill="#2afadf" fill-opacity="0.8" filter="url(#glow)"/>
-
-  <!-- Arms -->
-  <path d="M40 120 Q16 130 20 158" stroke="url(#cyanGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
-  <path d="M216 120 Q240 130 236 158" stroke="url(#cyanGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <!-- Arms(id 供 tool_call 状态的摆动动画;与 legs 同款风格的圆球——机身色填充 + 青色描边,不额外画手臂连接件) -->
+  <circle id="pet-arm-left" cx="34" cy="128" r="14" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>
+  <circle id="pet-arm-right" cx="222" cy="128" r="14" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>
 
   <!-- Legs / feet -->
   <rect x="76" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#cyanGrad)" stroke-width="2.5"/>
