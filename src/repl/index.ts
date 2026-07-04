@@ -33,6 +33,7 @@ import {
   MAX_INLINE_BYTES_DEFAULT,
   type ImageAttachment,
 } from '../attachments/image.js';
+import { modelSupportsVision } from '../llm/capabilities.js';
 import type { ContentPart } from '../agent/core.js';
 import {
   compactHistory,
@@ -719,9 +720,24 @@ export async function startRepl(
       }
     } catch (e) {
       ok = false;
-      layout.contentWrite(
-        `${ui.red}[错误]${ui.reset} ${e instanceof Error ? e.message : String(e)}\n`
-      );
+      // 多模态相关错误友好提示:OpenAI/Anthropic 等会报 "does not support image" / "vision" / "multimodal" 等关键词,
+      // 直接给原文对中文用户不友好。这里翻译成中文 + 提示 /model 换视觉模型。
+      const msg = e instanceof Error ? e.message : String(e);
+      const lower = msg.toLowerCase();
+      const looksLikeImageError =
+        /\b(image|vision|multimodal|vision[-_ ]?capable|unsupported (media|image))\b/i.test(lower) ||
+        /不支持(视觉|图片|图像|多模态)/.test(msg) ||
+        (/图片|图像|视觉|多模态/.test(msg) && /不支持|invalid|reject|fail/i.test(lower));
+      if (looksLikeImageError) {
+        layout.contentWrite(
+          `${ui.red}[错误]${ui.reset} 当前模型 ${ui.cyan}${config.model}${ui.reset} 不支持视觉输入。${ui.dim}原始:${msg}${ui.reset}\n`
+        );
+        layout.contentWrite(
+          `${ui.dim}提示:运行 /model 切换到支持视觉的模型(如 gpt-4o / claude-3.5-sonnet / gemini-1.5-pro)。${ui.reset}\n`
+        );
+      } else {
+        layout.contentWrite(`${ui.red}[错误]${ui.reset} ${msg}\n`);
+      }
     } finally {
       stopRunningListener();
     }
