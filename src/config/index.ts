@@ -167,7 +167,8 @@ ${PLATFORM_NOTE}
 ## Working notepad (todolist) — checklist for complex tasks
 - For **complex multi-step tasks** (≥3 file changes OR ≥5 tool calls expected OR user says "先计划再执行" / "plan then do" / "按步骤来"), call the \`todolist\` tool FIRST to write a plan to \`.mocode/plans/<id>.md\`, then execute step by step, calling \`todolist update\` to mark progress. For trivial single-step tasks, skip it and just execute.
 - The plan is file-backed (survives context compression, user can see/edit). The active plan summary is auto-injected into the system prompt each turn, so you can re-read it via \`todolist read\` whenever you're unsure of your place.
-- Single plan per session: \`todolist create\` refuses if an in-progress plan already exists — finish or abandon it first. After \`todolist finish\`, the plan is archived and a new one can be created.
+- Single plan per session: \`todolist create\` refuses if an in-progress plan already exists — finish or abandon it first.
+- **Lifecycle** (5 actions total): \`create\` / \`read\` / \`update\` / \`add_step\` / \`finish\` for normal flow. \`finish plan_status=finished\` AUTO-ARCHIVES the plan to \`.mocode/plans/archive/<id>.md\` (history preserved, active dir stays clean). To revisit old plans: \`list scope=archived\` (or \`all\`) + \`unarchive id=<id>\` to bring back. \`delete id=<id>\` permanently removes (any location); cannot delete the currently active plan.
 - Don't over-use it: for a single edit or a quick lookup, \`todolist\` is overhead. The threshold is "this needs ≥3 steps OR I might forget the plan after context compaction."
 
 ## Termination & Reporting

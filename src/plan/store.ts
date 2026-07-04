@@ -45,9 +45,14 @@ export function plansDir(): string {
   return join(root, '.mocode', 'plans');
 }
 
-/** 单 plan 文件路径:<root>/.mocode/plans/<id>.md。 */
-export function planPath(id: string): string {
-  return join(plansDir(), `${id}.md`);
+/** 归档目录:<root>/.mocode/plans/archive/。finish 自动归档、用户手动 unarchive 都走这里。 */
+export function archiveDir(): string {
+  return join(plansDir(), 'archive');
+}
+
+/** 单 plan 文件路径:<root>/.mocode/plans/<id>.md。可选 baseDir:默认 plans,也可指 archive。 */
+export function planPath(id: string, baseDir: string = plansDir()): string {
+  return join(baseDir, `${id}.md`);
 }
 
 /** 确保 plans 目录存在(惰性,工具每次写前调)。 */
@@ -56,7 +61,27 @@ export function ensurePlansDir(): void {
   if (!existsSync(d)) mkdirSync(d, { recursive: true });
 }
 
+/** 确保归档目录存在(惰性)。 */
+export function ensureArchiveDir(): void {
+  const d = archiveDir();
+  if (!existsSync(d)) mkdirSync(d, { recursive: true });
+}
+
 // ── ID 生成 ──
+
+/** 本地时间戳(无时区后缀),与 filename 的 YYYY-MM-DDTHH-mm-ss 风格一致。
+ *  例:2026-07-04T22:54:51.729(本地时,便于人对读 frontmatter / progress log,
+ *  且与同 plan id 文件名"2026-07-04T22-54-51"对应)。
+ *  不带 Z 后缀 → JS Date 解析会按本地时读(一致 round-trip);
+ *  反例:toISOString() 返 2026-07-04T14:54:51.729Z(UTC),跟用户当地差 8 小时,易误解。 */
+export function localIsoTimestamp(d: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const padMs = (n: number) => String(n).padStart(3, '0');
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${padMs(d.getMilliseconds())}`
+  );
+}
 
 /** plan id:YYYY-MM-DDTHH-mm-ss-xxxxxx(本地时间,文件名安全)。xxxxxx = 4 字节随机 hex(防同秒并发撞)。 */
 export function newPlanId(now: Date = new Date()): string {
@@ -86,7 +111,7 @@ const LOG_RE = /^-\s+(\S+)\s+(.+?)\s*$/;
  * 解析成功但 step id 缺序 / 重号:按出现顺序重排为 1..N(保稳定)。
  */
 export function parsePlan(raw: string, fallbackId: string): Plan {
-  const now = new Date().toISOString();
+  const now = localIsoTimestamp();
   let meta: Record<string, string> = {};
   let body = raw;
   const m = FRONTMATTER_RE.exec(raw);
@@ -229,9 +254,10 @@ function checkboxMarker(s: StepStatus): string {
 
 // ── CRUD(直接落盘)──
 
-/** 读 plan 文件;不存在 → null,坏文件 → fallbackId 最小可用 Plan(不抛,工具契约)。 */
-export function readPlan(id: string): Plan | null {
-  const p = planPath(id);
+/** 读 plan 文件;不存在 → null,坏文件 → fallbackId 最小可用 Plan(不抛,工具契约)。
+ *  可选 baseDir:默认 plans,传 archiveDir() 可读归档。 */
+export function readPlan(id: string, baseDir: string = plansDir()): Plan | null {
+  const p = planPath(id, baseDir);
   if (!existsSync(p)) return null;
   try {
     return parsePlan(readFileSync(p, 'utf8'), id);
@@ -254,9 +280,9 @@ export function writePlan(p: Plan): boolean {
   }
 }
 
-/** 删 plan 文件;不存在静默 ok。 */
-export function deletePlan(id: string): boolean {
-  const p = planPath(id);
+/** 删 plan 文件;不存在静默 ok。可选 baseDir:默认 plans,传 archiveDir() 删归档。 */
+export function deletePlan(id: string, baseDir: string = plansDir()): boolean {
+  const p = planPath(id, baseDir);
   if (!existsSync(p)) return true;
   try {
     unlinkSync(p);
@@ -286,29 +312,80 @@ export function updatePlan(
     return null;
   }
   if (next === false) return cur; // 无改动:返原对象
-  next.updated = new Date().toISOString();
+  next.updated = localIsoTimestamp();
   if (!writePlan(next)) return null;
   return next;
 }
 
-/** 列 plans 目录下所有 plan(按 updated 倒序,最新在前)。解析失败的跳过。 */
-export function listPlans(): Plan[] {
-  const dir = plansDir();
-  if (!existsSync(dir)) return [];
-  let names: string[];
-  try {
-    names = readdirSync(dir).filter((n) => n.endsWith('.md'));
-  } catch {
-    return [];
+/** 列 plans 目录下所有 plan(按 updated 倒序,最新在前)。解析失败的跳过。
+ *  scope: 'active'(默认)=仅 plans/;'archived'=仅 archive/;'all'=合并(去重按 id)。 */
+export function listPlans(scope: 'active' | 'archived' | 'all' = 'active'): Plan[] {
+  const dirs: string[] = [];
+  if (scope === 'active') dirs.push(plansDir());
+  else if (scope === 'archived') dirs.push(archiveDir());
+  else {
+    dirs.push(plansDir());
+    dirs.push(archiveDir());
   }
   const out: Plan[] = [];
-  for (const n of names) {
-    const id = n.slice(0, -3);
-    const p = readPlan(id);
-    if (p) out.push(p);
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    let names: string[];
+    try {
+      names = readdirSync(dir).filter((n) => n.endsWith('.md'));
+    } catch {
+      continue;
+    }
+    for (const n of names) {
+      const id = n.slice(0, -3);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const p = readPlan(id, dir);
+      if (p) out.push(p);
+    }
   }
   out.sort((a, b) => (a.updated < b.updated ? 1 : a.updated > b.updated ? -1 : 0));
   return out;
+}
+
+// ── 归档/还原/全删 ──
+
+/** 把 plans/<id>.md mv 到 plans/archive/<id>.md(atomic rename)。
+ *  源不存在 → false(已归档 / 删了 / 从未存在都算)。 */
+export function archivePlan(id: string): boolean {
+  const src = planPath(id, plansDir());
+  if (!existsSync(src)) return false;
+  ensureArchiveDir();
+  const dst = planPath(id, archiveDir());
+  try {
+    renameSync(src, dst);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/** 把 plans/archive/<id>.md 还原到 plans/<id>.md。源不存在 → false。 */
+export function unarchivePlan(id: string): boolean {
+  const src = planPath(id, archiveDir());
+  if (!existsSync(src)) return false;
+  ensurePlansDir();
+  const dst = planPath(id, plansDir());
+  try {
+    renameSync(src, dst);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/** 任一处存在就都删(活跃 + 归档)。用于 todolist delete 不关心来源。 */
+export function deletePlanAnywhere(id: string): boolean {
+  let any = false;
+  if (existsSync(planPath(id, plansDir()))) any = deletePlan(id, plansDir()) || any;
+  if (existsSync(planPath(id, archiveDir()))) any = deletePlan(id, archiveDir()) || any;
+  return any;
 }
 
 // ── 渲染(给 LLM / UI 用)──

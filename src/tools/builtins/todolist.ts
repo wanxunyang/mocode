@@ -14,7 +14,11 @@ import {
   writePlan,
   updatePlan,
   listPlans,
+  archivePlan,
+  unarchivePlan,
+  deletePlanAnywhere,
   renderPlanForLLM,
+  localIsoTimestamp,
   type Plan,
   type StepStatus,
   type PlanStatus,
@@ -38,14 +42,15 @@ export const todolistTool: Tool = {
     'For complex multi-step tasks (≥3 file changes or ≥5 tool calls expected, OR user says "先计划再执行" / "plan then do"), CALL THIS FIRST to write the plan, then update each step as you go.',
     'For simple single-step tasks, skip it and just execute.',
     'Single plan per session: create refuses if an in-progress plan already exists — finish or abandon it first.',
+    'Lifecycle: finish AUTO-ARCHIVES the plan to .mocode/plans/archive/ (history preserved, active dir stays clean). To revisit, call list with scope=archived or unarchive. Use delete to permanently remove a plan (any location).',
   ].join(''),
   parameters: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['create', 'read', 'update', 'add_step', 'finish'],
-        description: 'create=新计划;read=读当前活跃;update=改步骤状态;add_step=追加步骤;finish=收尾',
+        enum: ['create', 'read', 'update', 'add_step', 'finish', 'list', 'delete', 'unarchive'],
+        description: 'create=新计划;read=读当前活跃;update=改步骤状态;add_step=追加步骤;finish=收尾(自动归档);list=列计划;delete=永久删除;unarchive=从归档还原到活跃',
       },
       title: { type: 'string', description: 'create 必填:计划标题' },
       goal: { type: 'string', description: 'create 可选:目标描述(写进「目标」段)' },
@@ -70,7 +75,16 @@ export const todolistTool: Tool = {
       plan_status: {
         type: 'string',
         enum: ['finished', 'abandoned'],
-        description: 'finish 必填:finished=完成;abandoned=放弃(中途取消)',
+        description: 'finish 必填:finished=完成;abandoned=放弃(中途取消)。finished 触发自动归档。',
+      },
+      scope: {
+        type: 'string',
+        enum: ['active', 'archived', 'all'],
+        description: 'list 可选:范围(active=默认,仅进行中;archived=仅归档;all=全)。',
+      },
+      id: {
+        type: 'string',
+        description: 'delete / unarchive 必填:目标 plan id(list 可拿到)。',
       },
     },
     required: ['action'],
@@ -79,13 +93,16 @@ export const todolistTool: Tool = {
     const action = String(args.action ?? '');
     try {
       switch (action) {
-        case 'create': return doCreate(args);
-        case 'read':   return doRead();
-        case 'update': return doUpdate(args);
-        case 'add_step': return doAddStep(args);
-        case 'finish': return doFinish(args);
+        case 'create':     return doCreate(args);
+        case 'read':       return doRead();
+        case 'update':     return doUpdate(args);
+        case 'add_step':   return doAddStep(args);
+        case 'finish':     return doFinish(args);
+        case 'list':       return doList(args);
+        case 'delete':     return doDelete(args);
+        case 'unarchive':  return doUnarchive(args);
         default:
-          return `错误:未知 action「${action}」,合法值:create / read / update / add_step / finish。`;
+          return `错误:未知 action「${action}」,合法值:create / read / update / add_step / finish / list / delete / unarchive。`;
       }
     } catch (e) {
       // 兜底:工具内部不抛,但防御性 catch 一道(契约对齐「永不抛」)。
@@ -114,7 +131,7 @@ function doCreate(args: Record<string, unknown>): string {
   }
 
   // 旧 plan 残留(finished/abandoned)→ 允许新建,不删历史(用户可后续 read 历史 plan)
-  const now = new Date().toISOString();
+  const now = localIsoTimestamp();
   const plan: Plan = {
     id: newPlanId(),
     title,
@@ -209,20 +226,73 @@ function doFinish(args: Record<string, unknown>): string {
   const updated = updatePlan(cur.id, (p) => {
     p.status = ps;
     p.log.push({
-      at: new Date().toISOString(),
+      at: localIsoTimestamp(),
       text: note || (ps === 'finished' ? '完成' : '放弃'),
     });
     return p;
   });
   if (!updated) return '错误:finish 写盘失败。';
   setActivePlan(updated);
-  // finish 后清活跃缓存(下轮 read 自动从 in_progress 列表兜底,本会话不再「活跃」)
-  if (ps === 'abandoned') clearActivePlan();
-  else {
-    // finished 也清:「活跃」专指 in_progress;finished 是历史归档
-    clearActivePlan();
+
+  // finished → 自动归档到 plans/archive/(历史完整保留,活跃目录保持干净)。
+  //   abandoned → 不归档(用户想丢就丢,但仍在 plans/ 下,可显式 delete 删掉)。
+  let archived = false;
+  if (ps === 'finished') {
+    archived = archivePlan(updated.id);
   }
-  return renderSuccess('finish', updated);
+  // finish 后清活跃缓存(下轮 read 自动从 in_progress 列表兜底,本会话不再「活跃」)
+  clearActivePlan();
+  const archivedNote = ps === 'finished'
+    ? (archived ? '(已自动归档到 plans/archive/)' : '(⚠ 归档失败,plan 仍留在 plans/,可手动 list 排查)')
+    : '';
+  return `${renderSuccess('finish', updated)}\n${archivedNote}`.trimEnd();
+}
+
+function doList(args: Record<string, unknown>): string {
+  const scopeRaw = String(args.scope ?? 'active');
+  const scope: 'active' | 'archived' | 'all' =
+    scopeRaw === 'archived' || scopeRaw === 'all' ? scopeRaw : 'active';
+  const plans = listPlans(scope);
+  if (plans.length === 0) {
+    return `list: 无 ${scope === 'active' ? '进行中' : scope === 'archived' ? '已归档' : ''}plan。`;
+  }
+  // 一行一条:id | status | 标题 | 进度
+  const lines = [`list (${scope},${plans.length} 条):`];
+  for (const p of plans) {
+    const done = p.steps.filter((s) => s.status === 'done' || s.status === 'skipped').length;
+    const status = p.status === 'in_progress' ? 'live' : p.status === 'finished' ? 'done' : 'gone';
+    lines.push(`  ${p.id}  [${status}]  ${p.title}  (${done}/${p.steps.length})`);
+  }
+  return lines.join('\n');
+}
+
+function doDelete(args: Record<string, unknown>): string {
+  const id = String(args.id ?? '').trim();
+  if (!id) return '错误:delete 必填 id(从 list 拿)。';
+  // 安全护栏:active 状态下不能直接 delete 当前活跃(避免误删正在用的 plan)
+  const cur = getActivePlan();
+  if (cur && cur.id === id) {
+    return `错误:不能 delete 当前活跃 plan「${cur.title}」,需先 finish(自动归档)再 delete 归档副本。`;
+  }
+  const ok = deletePlanAnywhere(id);
+  if (!ok) return `错误:delete 失败,id「${id}」在 plans/ 和 plans/archive/ 都找不到。`;
+  return `delete ✓: 已永久删除「${id}」(.mocode/plans/ 与 archive/ 都不再存在)。`;
+}
+
+function doUnarchive(args: Record<string, unknown>): string {
+  const id = String(args.id ?? '').trim();
+  if (!id) return '错误:unarchive 必填 id(从 list scope=archived 拿)。';
+  if (!unarchivePlan(id)) {
+    return `错误:unarchive 失败,id「${id}」在 plans/archive/ 找不到(可能已还原,或被 delete)。`;
+  }
+  // 还原后读一次拿回 plan 对象(若 status=in_progress 还可顺手恢复为活跃)
+  const fresh = readPlan(id);
+  if (!fresh) return `unarchive ✓: 「${id}」已还原到 plans/(读取失败,但文件在)。`;
+  if (fresh.status === 'in_progress') {
+    setActivePlan(fresh);
+    return `${renderSuccess('unarchive', fresh)}\n(已自动设为活跃)。`.trimEnd();
+  }
+  return `${renderSuccess('unarchive', fresh)}\n(注:该 plan 状态为 ${fresh.status},未自动激活 —— 显式 create 才激活)`;
 }
 
 // ── helpers ──

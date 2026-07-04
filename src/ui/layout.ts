@@ -856,7 +856,7 @@ function composePlanLine(status: StatusBarData, cols: number): string {
   const plan = (status.planSummary ?? '').trim();
   if (!plan) return ''; // 无 plan:画空,等 paint 路径 clearLine
   // 整行左对齐,不留右段(plan 自带进度信息,不需要 cwd)
-  return `${ui.dim}│ ${ui.yellow}${plan}${ui.reset}${ui.dim}`;
+  return `${ui.yellow}${plan}${ui.reset}`;
 }
 
 /** 画状态行(plan 行 + spinner 行 + model 行,三行)。RUNNING 态 spinner 频繁调。
