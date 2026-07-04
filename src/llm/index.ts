@@ -19,6 +19,15 @@ const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 30000;
 const RETRY_JITTER = 0.2;
 
+/**
+ * 流式响应里出现的推理模型自创 `think` 标签(DeepSeek R1 / Qwen3 / 部分自训模型):
+ * 与 OpenAI 兼容协议的独立 `reasoning_content` 字段不同,这些模型把 thinking 直接嵌进 content
+ * 字符串,期间不调 onText(spinner 持续转 ⠹ 思考中…),也不写入可见 content(history 不被思考段污染)。
+ */
+// 用 \u003c 表示 <,绕开本工具对 < 的处理(直接写 '<\u003cthink\u003e' 里 < 会被吃掉)。
+const THINK_OPEN = '<think>';
+const THINK_CLOSE = '</think>';
+
 let client = new OpenAI({
   baseURL: config.baseURL,
   apiKey: config.apiKey,
@@ -264,8 +273,13 @@ async function chatOnce(
     signal ? { signal } : undefined
   );
 
-  let content = '';
-  let hasContent = false;
+  // 流式  start end 标签过滤(见模块顶部 THINK_OPEN/CLOSE)。
+  // 跨 chunk 切分防御:buf 累积跨 chunk 边界,indexOf 扫描;为避免把跨 chunk 标签误判为
+  // 普通字符,buf 末尾为当前态保留 (label.length - 1) 个字符给下一 chunk 看。
+  let visibleContent = '';
+  let consumedAny = false;
+  let inThink = false;
+  let buf = '';
   let usage: ChatUsage | undefined;
   const toolAcc = new Map<
     number,
@@ -301,9 +315,56 @@ async function chatOnce(
     if (!delta) continue; // 末尾 usage-only chunk 等无 delta
 
     if (delta.content) {
-      content += delta.content;
-      hasContent = true;
-      handlers.onText?.(delta.content);
+      // 状态机切分 delta.content:inThink 外输出到 visibleContent + onText;
+      // inThink 内丢弃;标签起始/闭合用 indexOf 在 buf 里扫描。
+      // 末尾预留 (label.length - 1) 字符给下一 chunk 防切分误判。
+      buf += delta.content;
+      let i = 0;
+      while (true) {
+        if (inThink) {
+          // 思考段内,扫描 THINK_CLOSE;末尾预留 THINK_CLOSE.length - 1 防跨 chunk 切分
+          const endIdx = buf.indexOf(THINK_CLOSE, i);
+          if (endIdx === -1) {
+            // 思考段内未找到闭合;buf 短到不可能包含 </think> 时全丢(都是思考段内容),
+            // 否则留 (THINK_CLOSE.length - 1) 给下一 chunk 防跨边界切分。
+            const safeLen = buf.length >= THINK_CLOSE.length
+              ? buf.length - (THINK_CLOSE.length - 1)
+              : buf.length;
+            i = safeLen;
+            break;
+          }
+          inThink = false;
+          i = endIdx + THINK_CLOSE.length;
+        } else {
+          // 普通段,扫描 THINK_OPEN;末尾预留 THINK_OPEN.length - 1 防跨 chunk 切分
+          const startIdx = buf.indexOf(THINK_OPEN, i);
+          if (startIdx === -1) {
+            // buf 短到不可能包含 <think> 时全输出(无 think 标签的普通模型不受影响);
+            // 否则留 (THINK_OPEN.length - 1) 给下一 chunk 防跨边界切分误判。
+            const safeLen = buf.length >= THINK_OPEN.length
+              ? buf.length - (THINK_OPEN.length - 1)
+              : buf.length;
+            const seg = buf.slice(i, safeLen);
+            if (seg) {
+              visibleContent += seg;
+              handlers.onText?.(seg);
+              consumedAny = true;
+            }
+            i = safeLen;
+            break;
+          }
+          // THINK_OPEN 之前的普通段:输出
+          if (startIdx > i) {
+            const seg = buf.slice(i, startIdx);
+            visibleContent += seg;
+            handlers.onText?.(seg);
+            consumedAny = true;
+          }
+          inThink = true;
+          i = startIdx + THINK_OPEN.length;
+        }
+      }
+      buf = buf.slice(i);
     }
 
     if (delta.tool_calls) {
@@ -325,6 +386,17 @@ async function chatOnce(
     }
   }
 
+  // 防御:循环内 buf.slice 已把可确认部分消费;此处覆盖流末尾的"安全尾":
+  //  - 普通段(stream 已结束,标签不会再出现):作为可见内容追加到 visibleContent(不再调 onText)
+  //  - 思考段未闭合:丢弃,防 thinking 文本泄漏到 history
+  if (buf) {
+    if (!inThink) {
+      visibleContent += buf;
+      consumedAny = true;
+    }
+    buf = '';
+  }
+
   const toolCalls: ToolCallRef[] = [...toolAcc.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, e]) => ({
@@ -334,7 +406,7 @@ async function chatOnce(
     }));
 
   return {
-    content: hasContent ? content : null,
+    content: consumedAny ? visibleContent : null,
     toolCalls,
     usage,
   };
