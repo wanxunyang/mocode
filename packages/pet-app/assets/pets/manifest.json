@@ -3,8 +3,20 @@
   "viewBox": "0 0 256 256",
   "style": "赛博终端风,深色机身(#1b263b/#0d1b2a)+ 屏幕脸(黑底彩色像素眼,呼吸/眨眼动画),与 assets/mascot.svg 视觉语言一致",
   "pets": [
-    { "id": "robo-cat",      "file": "01-robo-cat.svg",      "name": "机械猫",     "accent": "#2afadf" },
-    { "id": "robo-dog",      "file": "02-robo-dog.svg",      "name": "机械犬",     "accent": "#ffb74d" },
+    { "id": "robo-cat",      "file": "01-robo-cat.svg",      "name": "机械猫",     "accent": "#2afadf",
+      "motionFile": "01-robo-cat.motion.css",
+      "quips": {
+        "tired": ["猫猫要趴一下…", "喵…有点累了,尾巴都垂下来了"],
+        "bored": ["理理毛,顺便等你", "尾巴甩甩,好无聊喵"],
+        "urging": ["喵?还没好吗", "尾巴都等急了喵"]
+      } },
+    { "id": "robo-dog",      "file": "02-robo-dog.svg",      "name": "机械犬",     "accent": "#ffb74d",
+      "motionFile": "02-robo-dog.motion.css",
+      "quips": {
+        "bored": ["打了个哈欠,好无聊呀", "尾巴都不知道摇给谁看了"],
+        "urging": ["快点快点,舌头都伸出来啦", "汪!还在等你呢"],
+        "flustered": ["汪汪汪,有点忙不过来了", "尾巴摇得比脑子转得快"]
+      } },
     { "id": "robo-fox",      "file": "03-robo-fox.svg",      "name": "机械狐",     "accent": "#ff7043" },
     { "id": "robo-panda",    "file": "04-robo-panda.svg",    "name": "机械熊猫",   "accent": "#2afadf" },
     { "id": "robo-owl",      "file": "05-robo-owl.svg",      "name": "机械猫头鹰", "accent": "#7c4dff" },
@@ -13,7 +25,12 @@
     { "id": "robo-bear",     "file": "08-robo-bear.svg",     "name": "机械熊",     "accent": "#ffa726" },
     { "id": "robo-penguin",  "file": "09-robo-penguin.svg",  "name": "机械企鹅",   "accent": "#42a5f5" },
     { "id": "robo-dino",     "file": "10-robo-dino.svg",     "name": "机械龙",     "accent": "#00c853" },
-    { "id": "slime-blob",    "file": "11-slime-blob.svg",    "name": "史莱姆",     "accent": "#00acc1" },
+    { "id": "slime-blob",    "file": "11-slime-blob.svg",    "name": "史莱姆",     "accent": "#00acc1",
+      "motionFile": "11-slime-blob.motion.css",
+      "quips": {
+        "tired": ["软软地瘫下去了…", "身体有点撑不住形状了"],
+        "urging": ["晃一晃,还在等你哦", "抖一抖,催你一下"]
+      } },
     { "id": "ghost-byte",    "file": "12-ghost-byte.svg",    "name": "字节幽灵",   "accent": "#4dd0e1" },
     { "id": "cactus-bot",    "file": "13-cactus-bot.svg",    "name": "仙人掌兽",   "accent": "#66bb6a" },
     { "id": "crystal-bot",   "file": "14-crystal-bot.svg",   "name": "水晶精灵",   "accent": "#7c4dff" },

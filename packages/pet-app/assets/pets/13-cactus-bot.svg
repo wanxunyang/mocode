@@ -26,8 +26,8 @@
   <rect x="48" y="150" width="160" height="70" rx="40" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
 
   <!-- Spike arms(填充块面而非线条,细刺仍保留为短线装饰) -->
-  <path d="M62 108 Q26 112 24 142 Q22 156 38 158 Q50 158 48 144 Q44 122 62 118 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
-  <path d="M194 108 Q230 112 232 142 Q234 156 218 158 Q206 158 208 144 Q212 122 194 118 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <path id="pet-arm-left" d="M62 108 Q26 112 24 142 Q22 156 38 158 Q50 158 48 144 Q44 122 62 118 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <path id="pet-arm-right" d="M194 108 Q230 112 232 142 Q234 156 218 158 Q206 158 208 144 Q212 122 194 118 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
   <path d="M34 118 L24 108 M34 128 L22 124 M222 118 L232 108 M222 128 L234 124"
         stroke="url(#accentGrad)" stroke-width="3" stroke-linecap="round"/>
 

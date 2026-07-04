@@ -40,7 +40,7 @@
   </g>
 
   <!-- Sharp muzzle line -->
-  <path d="M112 150 L128 158 L144 150" stroke="#ff7043" stroke-width="4" fill="none" stroke-linecap="round" filter="url(#glow)"/>
+  <path id="pet-mouth" d="M112 150 L128 158 L144 150" stroke="#ff7043" stroke-width="4" fill="none" stroke-linecap="round" filter="url(#glow)"/>
 
   <!-- Legs / feet -->
   <rect x="76" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>

@@ -3,13 +3,16 @@
 // mascot.svg 本身的呼吸灯/眨眼动画(inline <animate>)始终运行,不受这里的 class 切换影响。
 
 import type { PetState, PetStateMeta } from '../protocol.js';
+import type { MoodKind } from '../mood.js';
+import { applyMood, applySkinMotion, createBubbleController, QUIP_VISIBLE_MS } from './dom-mood.js';
 
 declare global {
   interface Window {
     petBridge: {
       onState: (cb: (state: PetState, meta?: PetStateMeta) => void) => void;
-      onSkin: (cb: (assetPath: string) => void) => void;
-      getInitialSkin: () => Promise<{ assetPath: string }>;
+      onSkin: (cb: (payload: { assetPath: string; motionFile?: string }) => void) => void;
+      getInitialSkin: () => Promise<{ assetPath: string; motionFile?: string }>;
+      onMood: (cb: (mood: MoodKind | null, quip?: string) => void) => void;
       setIgnoreMouseEvents: (ignore: boolean) => void;
       dragStart: () => void;
       dragMove: (totalDx: number, totalDy: number) => void;
@@ -46,6 +49,13 @@ function applyState(container: HTMLElement, state: PetState): void {
   container.classList.add(STATE_CLASS[state] ?? 'pet-idle');
 }
 
+/** 从真实 `#pet-skin-motion` <link> 取值后交给抽取出的纯函数 applySkinMotion(见 dom-mood.ts)处理。 */
+function setSkinMotion(motionFile?: string): void {
+  const link = document.getElementById('pet-skin-motion') as HTMLLinkElement | null;
+  if (!link) return;
+  applySkinMotion(link, motionFile);
+}
+
 /** 把 assets/ 下的 SVG 文本 inline 插入指定容器(保留内部 id,供 CSS 选择器跨状态切换样式)。 */
 async function inlineSvgInto(container: HTMLElement, assetPath: string): Promise<void> {
   try {
@@ -58,10 +68,12 @@ async function inlineSvgInto(container: HTMLElement, assetPath: string): Promise
   }
 }
 
-/** 切换皮肤:清空宠物容器后重新 inline 新素材(信号灯/状态 class 均不受影响,独立于宠物素材本身)。 */
-async function swapSkin(petContainer: HTMLElement, assetPath: string): Promise<void> {
+/** 切换皮肤:清空宠物容器后重新 inline 新素材(信号灯/状态 class 均不受影响,独立于宠物素材本身),
+ *  同时设置/清空个性化动作覆盖 CSS(见 applySkinMotion)。 */
+async function swapSkin(petContainer: HTMLElement, assetPath: string, motionFile?: string): Promise<void> {
   petContainer.innerHTML = '';
   await inlineSvgInto(petContainer, assetPath);
+  setSkinMotion(motionFile);
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
@@ -70,23 +82,30 @@ window.addEventListener('DOMContentLoaded', async () => {
   const stage = document.getElementById('pet-stage');
   const petContainer = document.getElementById('pet-container');
   const lampContainer = document.getElementById('signal-light-container');
-  if (!stage || !petContainer || !lampContainer) return;
+  const bubbleEl = document.getElementById('pet-bubble');
+  if (!stage || !petContainer || !lampContainer || !bubbleEl) return;
   applyState(stage, 'idle');
 
   // 启动时的初始皮肤:主动向主进程 invoke 拉取(而非等主进程 send 推送)——
   // 消除 did-finish-load 推送与本文件异步注册监听器之间的时序竞争(见 main.ts pushSkinToRenderer 注释)。
-  const initialAssetPath = await window.petBridge
+  const initialSkin = await window.petBridge
     .getInitialSkin()
-    .then((r) => r.assetPath)
-    .catch(() => '../assets/mascot.svg');
+    .catch(() => ({ assetPath: '../assets/mascot.svg', motionFile: undefined }));
 
   await Promise.all([
-    inlineSvgInto(petContainer, initialAssetPath),
+    inlineSvgInto(petContainer, initialSkin.assetPath),
     inlineSvgInto(lampContainer, '../assets/signal-light.svg'),
   ]);
+  setSkinMotion(initialSkin.motionFile);
+
+  const bubbleController = createBubbleController();
 
   window.petBridge.onState((state) => applyState(stage, state));
-  window.petBridge.onSkin((assetPath) => swapSkin(petContainer, assetPath));
+  window.petBridge.onSkin(({ assetPath, motionFile }) => swapSkin(petContainer, assetPath, motionFile));
+  window.petBridge.onMood((mood, quip) => {
+    applyMood(stage, mood);
+    if (mood !== null && quip) bubbleController.showQuip(bubbleEl, quip, QUIP_VISIBLE_MS);
+  });
 
   // 拖拽放置:窗口默认鼠标穿透(见 main.ts setIgnoreMouseEvents(true,{forward:true})),
   // 鼠标悬停到宠物身上时取消穿透(可交互),离开后恢复穿透(不遮挡桌面下层点击)。这是 Electron

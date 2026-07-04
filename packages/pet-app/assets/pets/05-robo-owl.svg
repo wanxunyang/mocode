@@ -33,11 +33,11 @@
   </circle>
 
   <!-- Beak -->
-  <path d="M120 156 L128 172 L136 156 Z" fill="#ffb74d"/>
+  <path id="pet-mouth" d="M120 156 L128 172 L136 156 Z" fill="#ffb74d"/>
 
   <!-- Folded wing arms(填充块面而非线条,末端贴身收圆) -->
-  <ellipse cx="26" cy="160" rx="14" ry="30" transform="rotate(-12 26 160)" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
-  <ellipse cx="230" cy="160" rx="14" ry="30" transform="rotate(12 230 160)" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <ellipse id="pet-arm-left" cx="26" cy="160" rx="14" ry="30" transform="rotate(-12 26 160)" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
+  <ellipse id="pet-arm-right" cx="230" cy="160" rx="14" ry="30" transform="rotate(12 230 160)" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
 
   <!-- Feet / talons -->
   <rect x="76" y="200" width="20" height="24" rx="6" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>

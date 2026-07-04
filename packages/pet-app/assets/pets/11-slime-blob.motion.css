@@ -1,0 +1,44 @@
+/* 史莱姆(slime-blob)专属演出:利用"形变"这个史莱姆独有的视觉语言覆盖通用规则。
+ * 史莱姆没有 arm-left/right/tail 等 id,通用规则里依赖这些 id 的动画(如 tool_call 摆臂、
+ * flustered 摆臂)对它本来就不生效,这里改用挤压/压扁形变来填补对应状态的演出。 */
+
+/* ── mood-tired:身体压扁变矮,模拟疲惫瘫软,替代通用的"下沉" ── */
+@keyframes slime-tired-squash {
+  0%, 100% { transform: scaleY(1) scaleX(1); }
+  50% { transform: scaleY(0.82) scaleX(1.08); }
+}
+.mood-tired #pet-body-group {
+  animation: slime-tired-squash 3.6s ease-in-out infinite;
+  transform-origin: 128px 200px;
+}
+
+/* ── tool_call:挤压弹跳形变代替通用双臂摆动 ── */
+@keyframes slime-tool-bounce {
+  0%, 100% { transform: scaleY(1) scaleX(1); }
+  30% { transform: scaleY(0.85) scaleX(1.12); }
+  60% { transform: scaleY(1.12) scaleX(0.9); }
+}
+.pet-tool #pet-body-group {
+  animation: slime-tool-bounce 0.5s ease-in-out infinite;
+  transform-origin: 128px 200px;
+}
+
+/* ── idle:呼吸感的轻微鼓起收缩,比通用的上下浮动更软糯 ── */
+@keyframes slime-idle-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.03); }
+}
+.pet-idle #pet-body-group {
+  animation: slime-idle-breathe 2.8s ease-in-out infinite;
+  transform-origin: 128px 138px;
+}
+
+/* ── mood-urging:急促地一颤一颤,像在催你快点 ── */
+@keyframes slime-urging-jiggle {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.92); }
+}
+.mood-urging #pet-body-group {
+  animation: slime-urging-jiggle 0.45s ease-in-out infinite;
+  transform-origin: 128px 200px;
+}

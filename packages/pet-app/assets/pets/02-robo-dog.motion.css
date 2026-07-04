@@ -1,0 +1,42 @@
+/* 机械犬(robo-dog)专属演出:体现"狗"活泼好奇的个性。
+ * 尾巴摆动已由 SVG 内置 animateTransform 独立驱动,这里不重复控制;
+ * 只覆盖头部摆动节奏和嘴部(舌头)形变。 */
+
+/* ── thinking:比通用更快更兴奋的点头,像狗狗好奇张望 ── */
+@keyframes dog-think-excited-nod {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-7deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: dog-think-excited-nod 0.5s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── mood-bored:舌头(嘴部元素)打哈欠似的拉长再收回 ── */
+@keyframes dog-bored-yawn {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.8); }
+}
+.mood-bored #pet-mouth {
+  animation: dog-bored-yawn 2.2s ease-in-out infinite;
+  transform-origin: 128px 153px;
+}
+
+/* ── idle:头部轻快小幅点动,比通用浮动更活泼 ── */
+@keyframes dog-idle-perk {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+.pet-idle #pet-body-group {
+  animation: dog-idle-perk 1.6s ease-in-out infinite;
+}
+
+/* ── mood-urging:舌头快速一伸一缩,像在催促着"快点快点" ── */
+@keyframes dog-urging-tongue {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.5); }
+}
+.mood-urging #pet-mouth {
+  animation: dog-urging-tongue 0.4s ease-in-out infinite;
+  transform-origin: 128px 153px;
+}

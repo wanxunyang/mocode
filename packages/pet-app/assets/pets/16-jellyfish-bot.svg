@@ -20,7 +20,7 @@
     <circle cx="102" cy="86" r="8" fill="#0a1420"/>
     <circle cx="154" cy="86" r="8" fill="#0a1420"/>
   </g>
-  <path d="M112 104 Q128 114 144 104" stroke="#0a1420" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path id="pet-mouth" d="M112 104 Q128 114 144 104" stroke="#0a1420" stroke-width="3" fill="none" stroke-linecap="round"/>
 
   <!-- Tentacles -->
   <path d="M64 110 Q56 150 66 190 Q72 210 62 232" stroke="#ba68c8" stroke-width="7" fill="none" stroke-linecap="round">

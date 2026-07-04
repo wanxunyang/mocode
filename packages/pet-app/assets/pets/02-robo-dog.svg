@@ -39,7 +39,7 @@
 
   <!-- Nose + tongue -->
   <ellipse cx="128" cy="145" rx="9" ry="6" fill="#ff8a65" filter="url(#glow)"/>
-  <rect x="120" y="153" width="16" height="14" rx="6" fill="#ff8fa3"/>
+  <rect id="pet-mouth" x="120" y="153" width="16" height="14" rx="6" fill="#ff8fa3"/>
 
   <!-- Legs / feet -->
   <rect x="76" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>

@@ -1,0 +1,42 @@
+/* 机械猫(robo-cat)专属演出:覆盖通用 style.css 的部分选择器,体现"猫"的悠闲与傲娇感。
+ * 未覆盖的选择器(如 speaking/tool_call 等)继续回退通用规则。 */
+
+/* ── thinking:比通用更慢更懒的摆动,像猫盯着屏幕犯懒 ── */
+@keyframes cat-think-lazy-nod {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-3deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: cat-think-lazy-nod 1.8s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── mood-tired:尾巴慢慢垂下并轻轻摇,模拟没精神耷拉着尾巴 ── */
+@keyframes cat-tail-droop-sway {
+  0%, 100% { transform: rotate(6deg); }
+  50% { transform: rotate(12deg); }
+}
+.mood-tired #pet-tail {
+  animation: cat-tail-droop-sway 3.5s ease-in-out infinite;
+  transform-origin: 216px 180px;
+}
+
+/* ── idle:尾巴悠闲地慢慢甩动,叠加在通用的上下浮动之上 ── */
+@keyframes cat-tail-flick {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-8deg); }
+}
+.pet-idle #pet-tail {
+  animation: cat-tail-flick 2.6s ease-in-out infinite;
+  transform-origin: 216px 180px;
+}
+
+/* ── mood-bored:尾巴无聊地左右扫动,比 idle 更明显 ── */
+@keyframes cat-tail-bored-sweep {
+  0%, 100% { transform: rotate(-10deg); }
+  50% { transform: rotate(10deg); }
+}
+.mood-bored #pet-tail {
+  animation: cat-tail-bored-sweep 1.6s ease-in-out infinite;
+  transform-origin: 216px 180px;
+}

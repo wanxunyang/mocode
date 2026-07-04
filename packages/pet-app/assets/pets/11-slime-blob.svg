@@ -31,7 +31,7 @@
   </g>
 
   <!-- Smile -->
-  <path d="M110 156 Q128 170 146 156" stroke="#0a1420" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path id="pet-mouth" d="M110 156 Q128 170 146 156" stroke="#0a1420" stroke-width="3.5" fill="none" stroke-linecap="round"/>
 
   <!-- Drips -->
   <path d="M84 216 Q84 232 92 232 Q100 232 96 216 Z" fill="url(#blobGrad)"/>

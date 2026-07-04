@@ -22,6 +22,8 @@ import {
 } from './protocol.js';
 import { loadConfig, saveConfig, type PetConfig } from './config.js';
 import { listSkinEntries, resolveSkinPath } from './skins.js';
+import { createMoodTracker, type MoodEvaluation } from './mood-tracker.js';
+import type { MoodKind } from './mood.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -40,6 +42,9 @@ const HEARTBEAT_TIMEOUT_MS = 10000;
 /** 状态展示超时后自动回落(design.md 默认假设:done/aborted/error 短暂展示 1500ms)。 */
 const TRANSIENT_STATE_TIMEOUT_MS = 1500;
 
+/** Mood ticker 检查间隔(design.md 默认假设:2000ms,状态变化时另外立即求值一次,不必等 ticker)。 */
+const MOOD_CHECK_INTERVAL_MS = 2000;
+
 interface ConnectionRecord {
   socket: WebSocket;
   clientId: string;
@@ -57,6 +62,9 @@ let tray: Tray | null = null;
 let transientTimer: NodeJS.Timeout | null = null;
 /** 当前生效的皮肤 id('default' = assets/mascot.svg);启动时从持久化配置读取,运行期随 set_skin/托盘菜单变化。 */
 let currentSkinId = 'default';
+
+/** Mood 判定与文案调度(纯逻辑,见 mood-tracker.ts);随活跃连接建立/断开重置,详见 onConnection/onDisconnect。 */
+const moodTracker = createMoodTracker();
 
 /** 把状态推给渲染进程(IPC)。渲染进程窗口未就绪时静默丢弃(下次状态到达会重推)。 */
 function broadcastToRenderer(state: PetState, meta?: PetStateMeta): void {
@@ -101,6 +109,7 @@ function onConnection(socket: WebSocket): void {
   };
   connections.set(socket, record);
   activeSocket = socket;
+  moodTracker.reset(); // 新会话从空事件历史开始,不受上一个活跃连接遗留事件影响(design.md 事件缓冲生命周期)
 
   send(socket, { type: 'welcome', isActive: true, ts: Date.now() });
   broadcastToRenderer('idle'); // 新连接刚建立还没收到它的第一条 state,先归 idle 兜底
@@ -121,6 +130,7 @@ function onDisconnect(socket: WebSocket): void {
   if (wasActive) {
     activeSocket = null; // 强制清空,不回退到任何仍 open 的连接
     broadcastToRenderer('idle');
+    moodTracker.reset(); // 避免下一个连接复用旧历史(design.md 事件缓冲生命周期)
   }
   // wasActive = false:该连接原本就被忽略,断开对当前状态源无影响
 }
@@ -151,6 +161,8 @@ function onMessage(socket: WebSocket, raw: string): void {
     case 'state':
       if (socket !== activeSocket) return; // 非活跃连接的状态消息静默丢弃
       broadcastToRenderer(msg.state, msg.meta);
+      moodTracker.recordState(msg.state);
+      pushMoodEvaluation(moodTracker.evaluate(Date.now(), currentSkinQuips()));
       return;
     case 'shutdown':
       // 关闭桌宠(方案C的 CLI 入口):不要求发送方是活跃连接,任何已连接的 mocode 进程均可请求关闭。
@@ -190,6 +202,12 @@ function currentSkinAssetPath(): string {
   return abs ? `../assets/pets/${path.basename(abs)}` : '../assets/mascot.svg';
 }
 
+/** 当前皮肤的个性化动作覆盖 CSS 文件名(manifest.json 的 motionFile 字段);
+ *  'default' 或未定制该字段时返回 undefined,渲染进程据此清空 `#pet-skin-motion` 的 href(回退通用样式)。 */
+function currentSkinMotionFile(): string | undefined {
+  return listSkinEntries().find((e) => e.id === currentSkinId)?.motionFile;
+}
+
 /** 把当前皮肤推给渲染进程(运行期切换用,如托盘菜单点击 / CLI set_skin 消息)。
  *  注:启动时的初始皮肤不走这条路径——渲染进程通过 'pet:get-skin' invoke 主动拉取,
  *  避免 did-finish-load 与渲染进程异步注册监听器之间的时序竞争(IPC 消息不会缓冲,
@@ -197,14 +215,46 @@ function currentSkinAssetPath(): string {
 function pushSkinToRenderer(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try {
-    mainWindow.webContents.send('pet:skin', { assetPath: currentSkinAssetPath() });
+    mainWindow.webContents.send('pet:skin', {
+      assetPath: currentSkinAssetPath(),
+      motionFile: currentSkinMotionFile(),
+    });
   } catch {
     // 静默:渲染进程未就绪时忽略,下次运行期切换会重新推送
   }
 }
 
 /** 渲染进程启动时主动拉取当前皮肤(同步于其自身初始化时机,不依赖 did-finish-load 的时序假设)。 */
-ipcMain.handle('pet:get-skin', () => ({ assetPath: currentSkinAssetPath() }));
+ipcMain.handle('pet:get-skin', () => ({
+  assetPath: currentSkinAssetPath(),
+  motionFile: currentSkinMotionFile(),
+}));
+
+/** 当前皮肤的专属文案池(manifest.json 的 quips 字段),供 mood-tracker 的 pickQuip 优先选取。 */
+function currentSkinQuips(): Partial<Record<MoodKind, string[]>> | undefined {
+  return listSkinEntries().find((e) => e.id === currentSkinId)?.quips;
+}
+
+/** 把 mood-tracker 求值结果推给渲染进程(IPC 频道 pet:mood)。result 为 null 表示本次求值无需推送。
+ *  写法与 broadcastToRenderer 一致的 null/isDestroyed 检查 + try/catch 静默降级,不影响 Server 主流程。 */
+function pushMoodEvaluation(result: MoodEvaluation | null): void {
+  if (!result) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send('pet:mood', result);
+  } catch {
+    // 静默:渲染进程尚未加载完毕或已崩溃,不影响 Server 侧状态机
+  }
+}
+
+/** Mood ticker:每 MOOD_CHECK_INTERVAL_MS 定时求值一次(状态变化时另有立即求值,见 onMessage 的 'state' 分支)。 */
+function startMoodTicker(): NodeJS.Timeout {
+  const timer = setInterval(() => {
+    pushMoodEvaluation(moodTracker.evaluate(Date.now(), currentSkinQuips()));
+  }, MOOD_CHECK_INTERVAL_MS);
+  timer.unref?.();
+  return timer;
+}
 
 function send(socket: WebSocket, msg: Record<string, unknown>): void {
   try {
@@ -464,6 +514,7 @@ app.whenReady().then(async () => {
   mainWindow = createPetWindow();
   tray = createTray();
   rebuildTrayMenu();
+  startMoodTicker();
 });
 
 // 不再监听 window-all-closed → app.quit():悬浮窗本身不可关闭(frame:false 且无关闭按钮),

@@ -43,10 +43,10 @@
   <path d="M122 148 L128 156 L134 148 Z" fill="#ff6ec7" filter="url(#glow)"/>
 
   <!-- Arms (gentle wave) -->
-  <ellipse cx="34" cy="150" rx="12" ry="22" transform="rotate(-18 34 130)" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5">
+  <ellipse id="pet-arm-left" cx="34" cy="150" rx="12" ry="22" transform="rotate(-18 34 130)" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5">
     <animateTransform attributeName="transform" type="rotate" values="-18 34 130;-30 34 130;-18 34 130;-6 34 130;-18 34 130" keyTimes="0;0.25;0.5;0.75;1" dur="2.6s" repeatCount="indefinite"/>
   </ellipse>
-  <ellipse cx="222" cy="150" rx="12" ry="22" transform="rotate(18 222 130)" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5">
+  <ellipse id="pet-arm-right" cx="222" cy="150" rx="12" ry="22" transform="rotate(18 222 130)" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5">
     <animateTransform attributeName="transform" type="rotate" values="18 222 130;30 222 130;18 222 130;6 222 130;18 222 130" keyTimes="0;0.25;0.5;0.75;1" dur="2.6s" repeatCount="indefinite"/>
   </ellipse>
 

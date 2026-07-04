@@ -3,6 +3,7 @@
 
 import { contextBridge, ipcRenderer } from 'electron';
 import type { PetState, PetStateMeta } from '../protocol.js';
+import type { MoodKind } from '../mood.js';
 
 contextBridge.exposeInMainWorld('petBridge', {
   onState: (callback: (state: PetState, meta?: PetStateMeta) => void) => {
@@ -10,14 +11,21 @@ contextBridge.exposeInMainWorld('petBridge', {
       callback(payload.state, payload.meta);
     });
   },
-  /** 主进程推来的皮肤切换通知(运行期切换:托盘菜单选择 或 CLI set_skin 消息触发)。 */
-  onSkin: (callback: (assetPath: string) => void) => {
-    ipcRenderer.on('pet:skin', (_event, payload: { assetPath: string }) => {
-      callback(payload.assetPath);
+  /** 主进程推来的皮肤切换通知(运行期切换:托盘菜单选择 或 CLI set_skin 消息触发)。
+   *  motionFile 有值时指向该皮肤的个性化动作覆盖 CSS(见 renderer.ts applySkinMotion),缺失表示回退通用样式。 */
+  onSkin: (callback: (payload: { assetPath: string; motionFile?: string }) => void) => {
+    ipcRenderer.on('pet:skin', (_event, payload: { assetPath: string; motionFile?: string }) => {
+      callback(payload);
     });
   },
   /** 启动时主动拉取当前皮肤(避免 did-finish-load 推送与监听器注册之间的时序竞争)。 */
-  getInitialSkin: (): Promise<{ assetPath: string }> => ipcRenderer.invoke('pet:get-skin'),
+  getInitialSkin: (): Promise<{ assetPath: string; motionFile?: string }> => ipcRenderer.invoke('pet:get-skin'),
+  /** 主进程推来的 mood 求值结果(见 main.ts pushMoodEvaluation),mood 为 null 表示当前无需展示情绪演出。 */
+  onMood: (callback: (mood: MoodKind | null, quip?: string) => void) => {
+    ipcRenderer.on('pet:mood', (_event, payload: { mood: MoodKind | null; quip?: string }) => {
+      callback(payload.mood, payload.quip);
+    });
+  },
   /** 转发鼠标穿透状态请求(拖拽放置功能:悬停/拖拽时取消穿透,离开后恢复穿透)。 */
   setIgnoreMouseEvents: (ignore: boolean) => {
     ipcRenderer.send('pet:set-ignore-mouse-events', ignore);

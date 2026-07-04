@@ -36,11 +36,11 @@
   </g>
 
   <!-- Beak -->
-  <path d="M116 156 L128 172 L140 156 Z" fill="#ffb74d"/>
+  <path id="pet-mouth" d="M116 156 L128 172 L140 156 Z" fill="#ffb74d"/>
 
   <!-- Flipper arms(填充块面而非线条,贴身收成圆润小翼) -->
-  <path d="M42 146 Q16 162 22 190 Q26 204 42 202 Q50 200 46 188 Q40 168 46 150 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2"/>
-  <path d="M214 146 Q240 162 234 190 Q230 204 214 202 Q206 200 210 188 Q216 168 210 150 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2"/>
+  <path id="pet-arm-left" d="M42 146 Q16 162 22 190 Q26 204 42 202 Q50 200 46 188 Q40 168 46 150 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2"/>
+  <path id="pet-arm-right" d="M214 146 Q240 162 234 190 Q230 204 214 202 Q206 200 210 188 Q216 168 210 150 Z" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2"/>
 
   <!-- Feet -->
   <ellipse cx="104" cy="234" rx="16" ry="8" fill="#ffb74d"/>

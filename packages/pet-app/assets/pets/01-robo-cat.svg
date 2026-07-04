@@ -38,7 +38,7 @@
   </g>
 
   <!-- Cat mouth -->
-  <path d="M118 148 L128 156 L138 148" stroke="#2afadf" stroke-width="4" fill="none" stroke-linecap="round" filter="url(#glow)"/>
+  <path id="pet-mouth" d="M118 148 L128 156 L138 148" stroke="#2afadf" stroke-width="4" fill="none" stroke-linecap="round" filter="url(#glow)"/>
 
   <!-- Whiskers -->
   <line x1="46" y1="128" x2="76" y2="124" stroke="url(#accentGrad)" stroke-width="2" stroke-linecap="round"/>
@@ -51,6 +51,6 @@
   <rect x="160" y="200" width="20" height="26" rx="8" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="2.5"/>
 
   <!-- Tail -->
-  <path d="M216 180 Q246 190 240 150" stroke="url(#accentGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <path id="pet-tail" d="M216 180 Q246 190 240 150" stroke="url(#accentGrad)" stroke-width="8" stroke-linecap="round" fill="none"/>
   </g>
 </svg>

@@ -40,6 +40,6 @@
   </g>
 
   <!-- Smile -->
-  <path d="M114 148 Q128 158 142 148" stroke="#ffe082" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <path id="pet-mouth" d="M114 148 Q128 158 142 148" stroke="#ffe082" stroke-width="3" fill="none" stroke-linecap="round"/>
   </g>
 </svg>

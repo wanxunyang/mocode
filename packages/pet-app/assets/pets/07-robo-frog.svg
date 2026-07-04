@@ -30,7 +30,7 @@
 
   <!-- Screen mouth panel -->
   <rect x="60" y="110" width="136" height="72" rx="14" fill="#0a1420" stroke="#69f0ae" stroke-opacity="0.4" stroke-width="1.5"/>
-  <path d="M76 150 Q128 176 180 150" stroke="url(#accentGrad)" stroke-width="5" fill="none" stroke-linecap="round" filter="url(#glow)"/>
+  <path id="pet-mouth" d="M76 150 Q128 176 180 150" stroke="url(#accentGrad)" stroke-width="5" fill="none" stroke-linecap="round" filter="url(#glow)"/>
 
   <!-- Bent frog legs -->
   <path d="M50 176 Q20 190 30 224 Q46 236 56 214" fill="url(#bodyGrad)" stroke="url(#accentGrad)" stroke-width="3"/>
