@@ -1,0 +1,72 @@
+/* 星星兽(star-bot)专属演出:体现"星"的闪光与魔法,动作以旋转/脉冲为主。
+ * SVG 自带 4s 慢速正负 6° 摆动(.pet-idle 时被替换);没有 #pet-arm-*;
+ * 整颗星就是身体,所有 transform 都以五角星中心 (128,128) 为原点。 */
+
+/* ── idle:保留并替换内置慢摆为"原地悬停" ── */
+@keyframes star-idle-hover {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-5px) rotate(0deg); }
+}
+.pet-idle #pet-body-group {
+  animation: star-idle-hover 3s ease-in-out infinite;
+}
+
+/* ── thinking:慢速连续旋转,像在展示星芒 ── */
+@keyframes star-think-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: star-think-spin 4s linear infinite;
+  transform-origin: 128px 128px;
+}
+
+/* ── tool_call:快速左右摇摆(代替双臂摆动) ── */
+@keyframes star-tool-sway {
+  0%, 100% { transform: rotate(-8deg); }
+  50% { transform: rotate(8deg); }
+}
+.pet-tool #pet-body-group {
+  animation: star-tool-sway 0.4s ease-in-out infinite;
+  transform-origin: 128px 128px;
+}
+
+/* ── mood-urging:急速脉冲式缩放 + 嘴部跟随张合 ── */
+@keyframes star-urging-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.12); }
+}
+@keyframes star-urging-mouth {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.5); }
+}
+.mood-urging #pet-body-group {
+  animation: star-urging-pulse 0.32s ease-in-out infinite;
+  transform-origin: 128px 128px;
+}
+.mood-urging #pet-mouth {
+  animation: star-urging-mouth 0.32s ease-in-out infinite;
+  transform-origin: 128px 148px;
+}
+
+/* ── mood-frustrated:暴怒式自转 + 脉冲(替换通用横向抖动) ── */
+@keyframes star-frustrated-spin {
+  0% { transform: rotate(0deg) scale(1); }
+  50% { transform: rotate(180deg) scale(0.92); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+.mood-frustrated #pet-body-group {
+  animation: star-frustrated-spin 0.4s linear infinite;
+  transform-origin: 128px 128px;
+}
+
+/* ── done:Twinkle 爆发(放大 + 收缩 + 旋转一次) ── */
+@keyframes star-done-twinkle {
+  0% { transform: scale(1) rotate(0deg); }
+  40% { transform: scale(1.2) rotate(60deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+.pet-done #pet-body-group {
+  animation: star-done-twinkle 0.5s ease-out 1;
+  transform-origin: 128px 128px;
+}

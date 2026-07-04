@@ -1,9 +1,11 @@
-// 单测:pickQuip 的回退逻辑(皮肤池覆盖 / 未覆盖 / 空数组 / 未传皮肤池)。
+// 单测:pickQuip 的回退逻辑(皮肤池覆盖 / 未覆盖 / 空数组 / 未传皮肤池)
 // 覆盖 5 种 MoodKind,并验证多次随机调用不会跑出候选池范围。
+// + pickStateQuip 的命中 / 跳过逻辑(独立于 mood 系统,见 quips.ts 顶部注释)。
 // 运行:npx tsx packages/pet-app/src/quips.test.ts
 
-import { pickQuip, UNIVERSAL_QUIPS } from './quips.js';
+import { pickQuip, pickStateQuip, UNIVERSAL_QUIPS } from './quips.js';
 import type { MoodKind } from './mood.js';
+import type { PetState } from './protocol.js';
 
 let passed = 0;
 const assert = (cond: boolean, msg: string): void => {
@@ -79,6 +81,52 @@ for (let i = 0; i < 20; i++) {
     UNIVERSAL_QUIPS.tired.includes(r),
     `第 ${i + 1} 次调用 pickQuip('tired')→ 返回值 ∈ UNIVERSAL_QUIPS.tired(实际:"${r}")`
   );
+}
+
+// ── 7) pickStateQuip:皮肤池覆盖该 state(单条)→ 必然返回那条 ───────────────
+{
+  const stateQuips = { done: ['Twinkle! 任务完成 ✨'] };
+  const r = pickStateQuip('done', stateQuips);
+  assert(r === 'Twinkle! 任务完成 ✨', `pickStateQuip 皮肤池覆盖 done(单条)→ 返回皮肤池文案(实际:"${r}")`);
+}
+
+// ── 8) pickStateQuip:皮肤池覆盖该 state(多条)→ 20 次随机都在候选池内 ───────
+{
+  const list = ['Twinkle! 任务完成 ✨', '✦ DONE ✦', '任务收工'];
+  const stateQuips = { done: list };
+  for (let i = 0; i < 20; i++) {
+    const r = pickStateQuip('done', stateQuips);
+    assert(list.includes(r ?? ''), `pickStateQuip done(多条)→ 返回值 ∈ 皮肤池(实际:"${r}")`);
+  }
+}
+
+// ── 9) pickStateQuip:皮肤池未配置该 state → 返回 null ─────────────────────
+{
+  const stateQuips = { aborted: ['再见'] };
+  const r = pickStateQuip('done', stateQuips);
+  assert(r === null, `pickStateQuip 皮肤池未配置 done → 返回 null(实际:${JSON.stringify(r)})`);
+}
+
+// ── 10) pickStateQuip:皮肤池该 state 是空数组 → 返回 null(视为未配置) ───
+{
+  const stateQuips: Partial<Record<PetState, string[]>> = { done: [] };
+  const r = pickStateQuip('done', stateQuips);
+  assert(r === null, `pickStateQuip done 为空数组 → 返回 null(实际:${JSON.stringify(r)})`);
+}
+
+// ── 11) pickStateQuip:未传 stateQuips → 返回 null ────────────────────────
+{
+  const r = pickStateQuip('error');
+  assert(r === null, `pickStateQuip 未传 stateQuips → 返回 null(实际:${JSON.stringify(r)})`);
+}
+
+// ── 12) pickStateQuip:8 种 PetState 全部可作为 key 命中,未命中返回 null ────
+{
+  const ALL_STATES: PetState[] = ['idle', 'thinking', 'speaking', 'tool_call', 'done', 'aborted', 'error', 'waiting_human'];
+  for (const state of ALL_STATES) {
+    const r = pickStateQuip(state);
+    assert(r === null, `pickStateQuip('${state}') 在空配置下 → 返回 null(实际:${JSON.stringify(r)})`);
+  }
 }
 
 console.log(`\nOK: ${passed} passed, 0 failed`);

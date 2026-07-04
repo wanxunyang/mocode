@@ -1,0 +1,71 @@
+/* 水母兽(jellyfish-bot)专属演出:体现"水母"的飘逸与梦幻,所有动作都是柔缓的弧线漂移。
+ * SVG 里触手已自带 <animate> 形变,这里不动触手,只对 #pet-body-group 做整体节奏;
+ * 没有 #pet-arm-*,tool_call 改用身体左右柔摆代替双臂摆动。 */
+
+/* ── idle:缓慢垂直上下漂移 ── */
+@keyframes jellyfish-idle-drift {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+.pet-idle #pet-body-group {
+  animation: jellyfish-idle-drift 3.2s ease-in-out infinite;
+}
+
+/* ── thinking:垂直 + 水平小幅弧线漂移,模拟随水流思考 ── */
+@keyframes jellyfish-think-drift {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(-3px, -4px); }
+  50% { transform: translate(0, -7px); }
+  75% { transform: translate(3px, -4px); }
+}
+.pet-thinking #pet-body-group {
+  animation: jellyfish-think-drift 3s ease-in-out infinite;
+}
+
+/* ── tool_call:身体柔摆(代替双臂) ── */
+@keyframes jellyfish-tool-sway {
+  0%, 100% { transform: rotate(-4deg); }
+  50% { transform: rotate(4deg); }
+}
+.pet-tool #pet-body-group {
+  animation: jellyfish-tool-sway 0.7s ease-in-out infinite;
+  transform-origin: 128px 130px;
+}
+
+/* ── mood-urging:快速上下窜动 + 嘴部张合 ── */
+@keyframes jellyfish-urging-surge {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-9px); }
+}
+@keyframes jellyfish-urging-mouth {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.5); }
+}
+.mood-urging #pet-body-group {
+  animation: jellyfish-urging-surge 0.4s ease-in-out infinite;
+}
+.mood-urging #pet-mouth {
+  animation: jellyfish-urging-mouth 0.4s ease-in-out infinite;
+  transform-origin: 128px 104px;
+}
+
+/* ── mood-tired:慢慢沉下去 + 透明度下降 ── */
+@keyframes jellyfish-tired-sink {
+  0%, 100% { transform: translateY(0); opacity: 1; }
+  50% { transform: translateY(5px); opacity: 0.7; }
+}
+.mood-tired #pet-body-group {
+  animation: jellyfish-tired-sink 4.4s ease-in-out infinite;
+}
+
+/* ── done:整只小水母轻快地向下压一次再弹回 ── */
+@keyframes jellyfish-done-pulse {
+  0% { transform: scale(1); }
+  40% { transform: scale(0.92) translateY(2px); }
+  70% { transform: scale(1.08) translateY(-4px); }
+  100% { transform: scale(1); }
+}
+.pet-done #pet-body-group {
+  animation: jellyfish-done-pulse 0.55s ease-out 1;
+  transform-origin: 128px 130px;
+}

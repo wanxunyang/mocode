@@ -1,0 +1,65 @@
+/* 菌菇兽(mushroom-bot)专属演出:体现"蘑菇"的弹性与Q弹,所有动作都是"弹"或"压"。
+ * 没有 #pet-arm-* 和 #pet-mouth,所有动作只能作用在 #pet-body-group 整体;
+ * 高度对称、底下两根脚,可以用 ground origin 做压扁弹起。 */
+
+/* ── idle:缓慢的"呼吸式"上下小弹(比通用浮动更有蘑菇的Q弹) ── */
+@keyframes mushroom-idle-spring {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+.pet-idle #pet-body-group {
+  animation: mushroom-idle-spring 2.4s ease-in-out infinite;
+}
+
+/* ── thinking:上下小幅点头,根部为支点(整颗菌盖跟着摆) ── */
+@keyframes mushroom-think-tilt {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-3deg); }
+  75% { transform: rotate(3deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: mushroom-think-tilt 1.1s ease-in-out infinite;
+  transform-origin: 128px 240px;
+}
+
+/* ── tool_call:整体左右小摇摆(代替双臂) ── */
+@keyframes mushroom-tool-sway {
+  0%, 100% { transform: rotate(-5deg); }
+  50% { transform: rotate(5deg); }
+}
+.pet-tool #pet-body-group {
+  animation: mushroom-tool-sway 0.45s ease-in-out infinite;
+  transform-origin: 128px 240px;
+}
+
+/* ── mood-urging:急促的连续小弹跳 ── */
+@keyframes mushroom-urging-bounce {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  50% { transform: translateY(-3px) scaleY(0.94); }
+}
+.mood-urging #pet-body-group {
+  animation: mushroom-urging-bounce 0.28s ease-in-out infinite;
+  transform-origin: 128px 240px;
+}
+
+/* ── mood-tired:慢慢萎缩变矮 ── */
+@keyframes mushroom-tired-shrink {
+  0%, 100% { transform: scaleY(1); opacity: 1; }
+  50% { transform: scaleY(0.92); opacity: 0.85; }
+}
+.mood-tired #pet-body-group {
+  animation: mushroom-tired-shrink 4.4s ease-in-out infinite;
+  transform-origin: 128px 240px;
+}
+
+/* ── done:大弹跳 + 落下一次 ── */
+@keyframes mushroom-done-hop {
+  0% { transform: translateY(0) scaleY(1); }
+  30% { transform: translateY(0) scaleY(0.8) scaleX(1.12); }
+  60% { transform: translateY(-16px) scaleY(1.05) scaleX(0.95); }
+  100% { transform: translateY(0) scaleY(1); }
+}
+.pet-done #pet-body-group {
+  animation: mushroom-done-hop 0.55s ease-out 1;
+  transform-origin: 128px 240px;
+}

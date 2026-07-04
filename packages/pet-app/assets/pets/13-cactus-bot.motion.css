@@ -1,0 +1,90 @@
+/* 仙人掌兽(cactus-bot)专属演出:体现"仙人掌"的呆萌与刺感,动作偏迟钝、带轻微摇摆。
+ * #pet-arm-left/right 是两片刺臂,旋转角度小一些避免"刺"飞出去;tool_call 复用刺臂摆动。 */
+
+/* ── thinking:整个身体轻微左右晃,像顶着烈日有点晃神 ── */
+@keyframes cactus-think-sway {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-2deg); }
+  75% { transform: rotate(2deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: cactus-think-sway 1.4s ease-in-out infinite;
+  transform-origin: 128px 220px;
+}
+
+/* ── idle:非常慢的上下浮动(像在晒太阳) ── */
+@keyframes cactus-idle-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+.pet-idle #pet-body-group {
+  animation: cactus-idle-bob 3.6s ease-in-out infinite;
+}
+
+/* ── tool_call:刺臂小幅拍打(代替通用双臂摆动) ── */
+@keyframes cactus-tool-arm-left {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-15deg); }
+}
+@keyframes cactus-tool-arm-right {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(15deg); }
+}
+.pet-tool #pet-arm-left {
+  animation: cactus-tool-arm-left 0.55s ease-in-out infinite;
+  transform-origin: 60px 130px;
+}
+.pet-tool #pet-arm-right {
+  animation: cactus-tool-arm-right 0.55s ease-in-out infinite 0.27s;
+  transform-origin: 196px 130px;
+}
+
+/* ── mood-urging:身体急促左右摇摆(像不耐烦地甩刺) ── */
+@keyframes cactus-urging-wiggle {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-4deg); }
+  75% { transform: rotate(4deg); }
+}
+.mood-urging #pet-body-group {
+  animation: cactus-urging-wiggle 0.35s ease-in-out infinite;
+  transform-origin: 128px 220px;
+}
+
+/* ── mood-tired:慢慢瘪下去 + 变暗 ── */
+@keyframes cactus-tired-droop {
+  0%, 100% { transform: translateY(0) scaleY(1); opacity: 1; }
+  50% { transform: translateY(4px) scaleY(0.94); opacity: 0.85; }
+}
+.mood-tired #pet-body-group {
+  animation: cactus-tired-droop 4s ease-in-out infinite;
+  transform-origin: 128px 220px;
+}
+
+/* ── done:小弹一下 + 刺臂举起 ── */
+@keyframes cactus-done-pop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+@keyframes cactus-done-arm-left {
+  0% { transform: rotate(0deg); }
+  40% { transform: rotate(-25deg); }
+  100% { transform: rotate(0deg); }
+}
+@keyframes cactus-done-arm-right {
+  0% { transform: rotate(0deg); }
+  40% { transform: rotate(25deg); }
+  100% { transform: rotate(0deg); }
+}
+.pet-done #pet-body-group {
+  animation: cactus-done-pop 0.4s ease-out 1;
+  transform-origin: 128px 220px;
+}
+.pet-done #pet-arm-left {
+  animation: cactus-done-arm-left 0.4s ease-out 1;
+  transform-origin: 60px 130px;
+}
+.pet-done #pet-arm-right {
+  animation: cactus-done-arm-right 0.4s ease-out 1;
+  transform-origin: 196px 130px;
+}

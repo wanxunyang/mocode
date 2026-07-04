@@ -1,0 +1,65 @@
+/* 机械熊(robo-bear)专属演出:体现"熊"的笨重与迟缓,所有动作幅度大但慢半拍。
+ * 没有 #pet-arm-*,tool_call 改为大角度身体摇摆代替双臂摆动。 */
+
+/* ── thinking:沉甸甸的大幅点头,模拟思考时整颗头都跟着动 ── */
+@keyframes bear-think-heavy-nod {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(7deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: bear-think-heavy-nod 1.6s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── idle:比通用更慢更沉的浮动 ── */
+@keyframes bear-idle-heavy-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+.pet-idle #pet-body-group {
+  animation: bear-idle-heavy-float 4s ease-in-out infinite;
+}
+
+/* ── tool_call:大幅左右晃身(代替双臂),动作慢但幅度大 ── */
+@keyframes bear-tool-sway {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-8deg); }
+  75% { transform: rotate(8deg); }
+}
+.pet-tool #pet-body-group {
+  animation: bear-tool-sway 1s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── mood-urging:熊式大甩头 ── */
+@keyframes bear-urging-shake {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-10deg); }
+  75% { transform: rotate(10deg); }
+}
+.mood-urging #pet-body-group {
+  animation: bear-urging-shake 0.5s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── mood-bored:慢悠悠的左右晃,像无聊到打哈欠 ── */
+@keyframes bear-bored-sway {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(5deg); }
+}
+.mood-bored #pet-body-group {
+  animation: bear-bored-sway 3.4s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── done:笨重但兴奋的小弹跳 ── */
+@keyframes bear-done-stomp {
+  0% { transform: translateY(0) scale(1); }
+  40% { transform: translateY(0) scale(0.94); }
+  60% { transform: translateY(-10px) scale(1.06); }
+  100% { transform: translateY(0) scale(1); }
+}
+.pet-done #pet-body-group {
+  animation: bear-done-stomp 0.6s ease-out 1;
+  transform-origin: 128px 220px;
+}

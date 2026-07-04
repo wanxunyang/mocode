@@ -17,26 +17,123 @@
         "urging": ["快点快点,舌头都伸出来啦", "汪!还在等你呢"],
         "flustered": ["汪汪汪,有点忙不过来了", "尾巴摇得比脑子转得快"]
       } },
-    { "id": "robo-fox",      "file": "03-robo-fox.svg",      "name": "机械狐",     "accent": "#ff7043" },
-    { "id": "robo-panda",    "file": "04-robo-panda.svg",    "name": "机械熊猫",   "accent": "#2afadf" },
-    { "id": "robo-owl",      "file": "05-robo-owl.svg",      "name": "机械猫头鹰", "accent": "#7c4dff" },
-    { "id": "robo-bunny",    "file": "06-robo-bunny.svg",    "name": "机械兔",     "accent": "#ff6ec7" },
-    { "id": "robo-frog",     "file": "07-robo-frog.svg",     "name": "机械蛙",     "accent": "#00e676" },
-    { "id": "robo-bear",     "file": "08-robo-bear.svg",     "name": "机械熊",     "accent": "#ffa726" },
-    { "id": "robo-penguin",  "file": "09-robo-penguin.svg",  "name": "机械企鹅",   "accent": "#42a5f5" },
-    { "id": "robo-dino",     "file": "10-robo-dino.svg",     "name": "机械龙",     "accent": "#00c853" },
+    { "id": "robo-fox",      "file": "03-robo-fox.svg",      "name": "机械狐",     "accent": "#ff7043",
+      "motionFile": "03-robo-fox.motion.css",
+      "quips": {
+        "thinking": ["嗅嗅…好像有什么线索喵…不对,狐狐嗅嗅"],
+        "bored": ["尾巴都扫累了,还是没动静"],
+        "urging": ["喂喂,狐狸都急得直摇尾巴了"]
+      } },
+    { "id": "robo-panda",    "file": "04-robo-panda.svg",    "name": "机械熊猫",   "accent": "#2afadf",
+      "motionFile": "04-robo-panda.motion.css",
+      "quips": {
+        "tired": ["呜…竹子嚼完了,想眯一会儿"],
+        "bored": ["翻个身…啊,翻不动"],
+        "urging": ["嗯…?完了吗?让我再翻个身想想"]
+      } },
+    { "id": "robo-owl",      "file": "05-robo-owl.svg",      "name": "机械猫头鹰", "accent": "#7c4dff",
+      "motionFile": "05-robo-owl.motion.css",
+      "quips": {
+        "bored": ["咕咕…360° 巡视中", "夜里都飞完了,白天可困"],
+        "urging": ["扇翅膀提示你,别再让我咕咕了"]
+      } },
+    { "id": "robo-bunny",    "file": "06-robo-bunny.svg",    "name": "机械兔",     "accent": "#ff6ec7",
+      "motionFile": "06-robo-bunny.motion.css",
+      "quips": {
+        "tired": ["耳朵都耷拉下来了…"],
+        "bored": ["蹦跶蹦跶!…啊,又没意思了"],
+        "urging": ["蹦蹦蹦!好了没呀"]
+      } },
+    { "id": "robo-frog",     "file": "07-robo-frog.svg",     "name": "机械蛙",     "accent": "#00e676",
+      "motionFile": "07-robo-frog.motion.css",
+      "quips": {
+        "thinking": ["呱…再想想"],
+        "bored": ["蹲得腿都麻了呱…"],
+        "urging": ["呱呱呱!快跳到下一题了呱"]
+      } },
+    { "id": "robo-bear",     "file": "08-robo-bear.svg",     "name": "机械熊",     "accent": "#ffa726",
+      "motionFile": "08-robo-bear.motion.css",
+      "quips": {
+        "tired": ["冬眠时间快到了…zzZ"],
+        "bored": ["蜂蜜都被我吃完了,无聊"],
+        "urging": ["熊!都!要!等!不!住!了!"]
+      } },
+    { "id": "robo-penguin",  "file": "09-robo-penguin.svg",  "name": "机械企鹅",   "accent": "#42a5f5",
+      "motionFile": "09-robo-penguin.motion.css",
+      "quips": {
+        "bored": ["左右摇,左右摇…站久了脚好冷"],
+        "urging": ["嘎嘎!鳍都拍红了!"],
+        "tired": ["南极了,太冷,想躺平"]
+      } },
+    { "id": "robo-dino",     "file": "10-robo-dino.svg",     "name": "机械龙",     "accent": "#00c853",
+      "motionFile": "10-robo-dino.motion.css",
+      "quips": {
+        "frustrated": ["嗷呜!侏罗纪的怒火在燃烧!"],
+        "urging":    ["跺脚!跺脚!小短腿都跺出火星了!"]
+      },
+      "stateQuips": {
+        "done":    ["哼,这次算你过关,本龙勉强点头"],
+        "aborted": ["嗷!本龙还没出手呢!"],
+        "error":   ["本龙摔了一跤,爬起来继续"]
+      } },
     { "id": "slime-blob",    "file": "11-slime-blob.svg",    "name": "史莱姆",     "accent": "#00acc1",
       "motionFile": "11-slime-blob.motion.css",
       "quips": {
         "tired": ["软软地瘫下去了…", "身体有点撑不住形状了"],
         "urging": ["晃一晃,还在等你哦", "抖一抖,催你一下"]
       } },
-    { "id": "ghost-byte",    "file": "12-ghost-byte.svg",    "name": "字节幽灵",   "accent": "#4dd0e1" },
-    { "id": "cactus-bot",    "file": "13-cactus-bot.svg",    "name": "仙人掌兽",   "accent": "#66bb6a" },
-    { "id": "crystal-bot",   "file": "14-crystal-bot.svg",   "name": "水晶精灵",   "accent": "#7c4dff" },
-    { "id": "satellite-bot", "file": "15-satellite-bot.svg", "name": "卫星兽",     "accent": "#42a5f5" },
-    { "id": "jellyfish-bot", "file": "16-jellyfish-bot.svg", "name": "水母兽",     "accent": "#ba68c8" },
-    { "id": "mushroom-bot",  "file": "17-mushroom-bot.svg",  "name": "菌菇兽",     "accent": "#c62828" },
-    { "id": "star-bot",      "file": "18-star-bot.svg",      "name": "星星兽",     "accent": "#ff8f00" }
+    { "id": "ghost-byte",    "file": "12-ghost-byte.svg",    "name": "字节幽灵",   "accent": "#4dd0e1",
+      "motionFile": "12-ghost-byte.motion.css",
+      "quips": {
+        "tired": ["电量耗尽了…要散了…"],
+        "bored": ["飘来飘去,连 bug 都飘光了"],
+        "urging": ["呜——呜——快看我一眼"]
+      } },
+    { "id": "cactus-bot",    "file": "13-cactus-bot.svg",    "name": "仙人掌兽",   "accent": "#66bb6a",
+      "motionFile": "13-cactus-bot.motion.css",
+      "quips": {
+        "bored": ["晒太阳晒到刺都软了"],
+        "tired": ["缺水…缺人理…"],
+        "urging": ["刺都竖起来了,快点快点"]
+      } },
+    { "id": "crystal-bot",   "file": "14-crystal-bot.svg",   "name": "水晶精灵",   "accent": "#7c4dff",
+      "motionFile": "14-crystal-bot.motion.css",
+      "quips": {
+        "bored": ["折射中…请勿直视"],
+        "tired": ["光谱变暗了…能量要充电"],
+        "urging": ["折射出警示光!快!快!"]
+      } },
+    { "id": "satellite-bot", "file": "15-satellite-bot.svg", "name": "卫星兽",     "accent": "#42a5f5",
+      "motionFile": "15-satellite-bot.motion.css",
+      "quips": {
+        "bored": ["轨道上只剩我一只,寂寞"],
+        "tired": ["太阳能板收起来了,需要补光"],
+        "urging": ["哔哔哔!信号强到溢出!"]
+      } },
+    { "id": "jellyfish-bot", "file": "16-jellyfish-bot.svg", "name": "水母兽",     "accent": "#ba68c8",
+      "motionFile": "16-jellyfish-bot.motion.css",
+      "quips": {
+        "tired": ["随波逐流,飘到没力气"],
+        "bored": ["深海里一只水母,在发呆"],
+        "urging": ["刺一下!刺一下!…啊我没有刺"]
+      } },
+    { "id": "mushroom-bot",  "file": "17-mushroom-bot.svg",  "name": "菌菇兽",     "accent": "#c62828",
+      "motionFile": "17-mushroom-bot.motion.css",
+      "quips": {
+        "tired": ["菌盖都瘪了,要孢子休了"],
+        "bored": ["在森林角落,洒了一把无聊的孢子"],
+        "urging": ["蹦!蹦!蹦!Q弹到爆!"]
+      } },
+    { "id": "star-bot",      "file": "18-star-bot.svg",      "name": "星星兽",     "accent": "#ff8f00",
+      "motionFile": "18-star-bot.motion.css",
+      "quips": {
+        "frustrated": ["星芒都烧起来了!急!急!"],
+        "urging":     ["一闪一闪亮晶晶,催你快回应"]
+      },
+      "stateQuips": {
+        "done":    ["Twinkle! 任务完成 ✨"],
+        "aborted": ["流星中途熄灭了…"],
+        "error":   ["星星也黯淡了一瞬,别慌,会再亮起来的"]
+      } }
   ]
 }

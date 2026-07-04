@@ -5,6 +5,17 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { PetState, PetStateMeta } from '../protocol.js';
 import type { MoodKind } from '../mood.js';
 
+/** 与 mood.ts 同样的环境变量读法:取合法正数,非法/缺失回退默认值。 */
+function envNumber(name: string, defaultValue: number): number {
+  const v = process.env[name];
+  const n = v ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : defaultValue;
+}
+
+/** 气泡文案展示时长(ms),环境变量 MOCODE_PET_QUIP_VISIBLE_MS 覆盖,默认 6000(2x 老值 3000)。
+ *  渲染进程 renderer.ts 在模块顶层读取该值,后续 showQuip 调用都使用它——启动后变更需重启 pet-app 生效。 */
+const QUIP_VISIBLE_MS = envNumber('MOCODE_PET_QUIP_VISIBLE_MS', 6000);
+
 contextBridge.exposeInMainWorld('petBridge', {
   onState: (callback: (state: PetState, meta?: PetStateMeta) => void) => {
     ipcRenderer.on('pet:state', (_event, payload: { state: PetState; meta?: PetStateMeta }) => {
@@ -20,6 +31,8 @@ contextBridge.exposeInMainWorld('petBridge', {
   },
   /** 启动时主动拉取当前皮肤(避免 did-finish-load 推送与监听器注册之间的时序竞争)。 */
   getInitialSkin: (): Promise<{ assetPath: string; motionFile?: string }> => ipcRenderer.invoke('pet:get-skin'),
+  /** 气泡文案展示时长(ms),renderer.ts 在模块顶层读取一次后用于所有 showQuip 调用。 */
+  quipVisibleMs: QUIP_VISIBLE_MS,
   /** 主进程推来的 mood 求值结果(见 main.ts pushMoodEvaluation),mood 为 null 表示当前无需展示情绪演出。 */
   onMood: (callback: (mood: MoodKind | null, quip?: string) => void) => {
     ipcRenderer.on('pet:mood', (_event, payload: { mood: MoodKind | null; quip?: string }) => {

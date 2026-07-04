@@ -1,0 +1,72 @@
+/* 卫星兽(satellite-bot)专属演出:体现"卫星"的机械感与扫描感,动作以旋转/信号脉冲为主。
+ * #pet-antenna 是顶部的碟形天线(在通用 style.css 里被当成"指示灯"做透明度闪烁,这里改用旋转);
+ * 两侧的"翅膀"是矩形太阳能板(无 id),通过 #pet-body-group 整体扫描带动视觉。 */
+
+/* ── idle:缓慢小幅旋转,模拟在轨道上微微漂移 ── */
+@keyframes satellite-idle-drift {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-2deg); }
+  75% { transform: rotate(2deg); }
+}
+.pet-idle #pet-body-group {
+  animation: satellite-idle-drift 3.4s ease-in-out infinite;
+  transform-origin: 128px 220px;
+}
+
+/* ── thinking:碟形天线慢速旋转(扫描天空),身体微微摆动 ── */
+@keyframes satellite-think-dish {
+  0% { transform: rotate(-15deg); }
+  100% { transform: rotate(15deg); }
+}
+@keyframes satellite-think-body {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-2deg); }
+}
+.pet-thinking #pet-antenna {
+  animation: satellite-think-dish 1.6s ease-in-out infinite alternate;
+  transform-origin: 128px 30px;
+}
+.pet-thinking #pet-body-group {
+  animation: satellite-think-body 1.6s ease-in-out infinite;
+  transform-origin: 128px 220px;
+}
+
+/* ── tool_call:碟形天线快速来回扫,代替通用双臂摆动 ── */
+@keyframes satellite-tool-dish {
+  0%, 100% { transform: rotate(-20deg); }
+  50% { transform: rotate(20deg); }
+}
+.pet-tool #pet-antenna {
+  animation: satellite-tool-dish 0.4s ease-in-out infinite;
+  transform-origin: 128px 30px;
+}
+
+/* ── mood-urging:信号脉冲(天线透明度快速闪烁代替通用 0.5s 旋转闪烁) ── */
+@keyframes satellite-urging-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.mood-urging #pet-antenna {
+  animation: satellite-urging-pulse 0.25s ease-in-out infinite;
+}
+
+/* ── mood-bored:身体非常慢的左右扫,模拟扫描不到东西 ── */
+@keyframes satellite-bored-scan {
+  0%, 100% { transform: rotate(-4deg); }
+  50% { transform: rotate(4deg); }
+}
+.mood-bored #pet-body-group {
+  animation: satellite-bored-scan 2.8s ease-in-out infinite;
+  transform-origin: 128px 220px;
+}
+
+/* ── done:快速收回(下沉 0 → -6 → 0) + 弹回 ── */
+@keyframes satellite-done-deploy {
+  0% { transform: translateY(0) scale(1); }
+  40% { transform: translateY(-8px) scale(1.08); }
+  100% { transform: translateY(0) scale(1); }
+}
+.pet-done #pet-body-group {
+  animation: satellite-done-deploy 0.5s ease-out 1;
+  transform-origin: 128px 220px;
+}

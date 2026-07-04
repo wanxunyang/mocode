@@ -1,0 +1,61 @@
+/* 机械熊猫(robo-panda)专属演出:体现"熊猫"的慵懒与迟缓,所有节奏都比通用更慢。
+ * 没有 #pet-arm-*,tool_call 改用身体大幅摇摆代替双臂摆动。 */
+
+/* ── thinking:非常慢的小幅点头,像在打盹时梦到什么 ── */
+@keyframes panda-think-drowsy {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-2deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: panda-think-drowsy 2.4s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── idle:非常慢的慵懒浮动,曲线比通用 3s 更沉 ── */
+@keyframes panda-idle-lazy-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+.pet-idle #pet-body-group {
+  animation: panda-idle-lazy-float 4.2s ease-in-out infinite;
+}
+
+/* ── tool_call:慢慢左右晃身(代替双臂),动作幅度大但迟缓,像在嚼竹子 ── */
+@keyframes panda-tool-sway {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(6deg); }
+}
+.pet-tool #pet-body-group {
+  animation: panda-tool-sway 1.2s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── mood-tired:缓慢下沉 + 略微变暗,疲惫感比通用更浓 ── */
+@keyframes panda-tired-sink {
+  0%, 100% { transform: translateY(0); opacity: 1; }
+  50% { transform: translateY(6px); opacity: 0.8; }
+}
+.mood-tired #pet-body-group {
+  animation: panda-tired-sink 4.8s ease-in-out infinite;
+}
+
+/* ── mood-bored:慢到极致的左右摇晃,像快睡着了 ── */
+@keyframes panda-bored-sway {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(3deg); }
+}
+.mood-bored #pet-body-group {
+  animation: panda-bored-sway 3.2s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── done:慵懒但满足的小弹 ── */
+@keyframes panda-done-soft-bounce {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+.pet-done #pet-body-group {
+  animation: panda-done-soft-bounce 0.6s ease-out 1;
+  transform-origin: 128px 220px;
+}

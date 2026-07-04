@@ -1,0 +1,88 @@
+/* 机械猫头鹰(robo-owl)专属演出:体现"猫头鹰"的机警与睿智。
+ * 头身一体的体型让"转头巡视"成为招牌动作;
+ * 双翼作为 #pet-arm-* 在这里承担"扇翅"的语义而非"挥臂"。 */
+
+/* ── thinking:慢速 360° 巡视(大角度旋转,因为体型方,看起来像头部旋转) ── */
+@keyframes owl-think-slow-scan {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: owl-think-slow-scan 4s linear infinite;
+  transform-origin: 128px 140px;
+}
+
+/* ── idle:缓慢左右转头巡视 ── */
+@keyframes owl-idle-turn {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-8deg); }
+  75% { transform: rotate(8deg); }
+}
+.pet-idle #pet-body-group {
+  animation: owl-idle-turn 3.6s ease-in-out infinite;
+  transform-origin: 128px 140px;
+}
+
+/* ── tool_call:双翼大幅拍动代替通用"双臂小幅摆动" ── */
+@keyframes owl-tool-wing-left {
+  0%, 100% { transform: rotate(-12deg); }
+  50% { transform: rotate(-30deg); }
+}
+@keyframes owl-tool-wing-right {
+  0%, 100% { transform: rotate(12deg); }
+  50% { transform: rotate(30deg); }
+}
+.pet-tool #pet-arm-left {
+  animation: owl-tool-wing-left 0.4s ease-in-out infinite;
+  transform-origin: 26px 160px;
+}
+.pet-tool #pet-arm-right {
+  animation: owl-tool-wing-right 0.4s ease-in-out infinite 0.2s;
+  transform-origin: 230px 160px;
+}
+
+/* ── mood-urging:急促的翅膀拍打 + 身体前倾 ── */
+@keyframes owl-urging-wing-left {
+  0%, 100% { transform: rotate(-12deg); }
+  50% { transform: rotate(-40deg); }
+}
+@keyframes owl-urging-wing-right {
+  0%, 100% { transform: rotate(12deg); }
+  50% { transform: rotate(40deg); }
+}
+@keyframes owl-urging-lean {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-2px) rotate(-3deg); }
+}
+.mood-urging #pet-arm-left {
+  animation: owl-urging-wing-left 0.2s ease-in-out infinite;
+  transform-origin: 26px 160px;
+}
+.mood-urging #pet-arm-right {
+  animation: owl-urging-wing-right 0.2s ease-in-out infinite 0.1s;
+  transform-origin: 230px 160px;
+}
+.mood-urging #pet-body-group {
+  animation: owl-urging-lean 0.4s ease-in-out infinite;
+  transform-origin: 128px 140px;
+}
+
+/* ── done:展翅庆祝 ── */
+@keyframes owl-done-spread-left {
+  0% { transform: rotate(-12deg); }
+  40% { transform: rotate(-50deg); }
+  100% { transform: rotate(-12deg); }
+}
+@keyframes owl-done-spread-right {
+  0% { transform: rotate(12deg); }
+  40% { transform: rotate(50deg); }
+  100% { transform: rotate(12deg); }
+}
+.pet-done #pet-arm-left {
+  animation: owl-done-spread-left 0.5s ease-out 1;
+  transform-origin: 26px 160px;
+}
+.pet-done #pet-arm-right {
+  animation: owl-done-spread-right 0.5s ease-out 1;
+  transform-origin: 230px 160px;
+}

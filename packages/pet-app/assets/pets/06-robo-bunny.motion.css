@@ -1,0 +1,84 @@
+/* 机械兔(robo-bunny)专属演出:体现"兔子"的轻快与活泼,节奏普遍偏快、幅度偏小。
+ * 注意:robo-bunny.svg 的 #pet-arm-left/right 自带 inline <animateTransform> 缓慢摆动,
+ * 这里在状态/mood class 下用更快的 keyframe 覆盖之;非覆盖状态下内置动画继续提供自然律动。 */
+
+/* ── thinking:短促高频的小点头 ── */
+@keyframes bunny-think-bob {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-3deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: bunny-think-bob 0.6s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── idle:轻微上下小跳,代替通用浮动 ── */
+@keyframes bunny-idle-hop {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+.pet-idle #pet-body-group {
+  animation: bunny-idle-hop 1.4s ease-in-out infinite;
+}
+
+/* ── tool_call:手臂快摆(覆盖内置慢摆),蹦跳式连续工作 ── */
+@keyframes bunny-tool-arm-left {
+  0%, 100% { transform: rotate(-18deg); }
+  50% { transform: rotate(-40deg); }
+}
+@keyframes bunny-tool-arm-right {
+  0%, 100% { transform: rotate(18deg); }
+  50% { transform: rotate(40deg); }
+}
+.pet-tool #pet-arm-left {
+  animation: bunny-tool-arm-left 0.3s ease-in-out infinite;
+  transform-origin: 34px 130px;
+}
+.pet-tool #pet-arm-right {
+  animation: bunny-tool-arm-right 0.3s ease-in-out infinite 0.15s;
+  transform-origin: 222px 130px;
+}
+
+/* ── mood-tired:身体略微下沉,叠加在内置慢摆之上 ── */
+@keyframes bunny-tired-sink {
+  0%, 100% { transform: translateY(0); opacity: 1; }
+  50% { transform: translateY(3px); opacity: 0.9; }
+}
+.mood-tired #pet-body-group {
+  animation: bunny-tired-sink 3.2s ease-in-out infinite;
+}
+
+/* ── mood-urging:高频小跳 + 急切摆臂 ── */
+@keyframes bunny-urging-hop {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+@keyframes bunny-urging-arm-left {
+  0%, 100% { transform: rotate(-18deg); }
+  50% { transform: rotate(-50deg); }
+}
+@keyframes bunny-urging-arm-right {
+  0%, 100% { transform: rotate(18deg); }
+  50% { transform: rotate(50deg); }
+}
+.mood-urging #pet-body-group {
+  animation: bunny-urging-hop 0.35s ease-in-out infinite;
+}
+.mood-urging #pet-arm-left {
+  animation: bunny-urging-arm-left 0.2s ease-in-out infinite;
+  transform-origin: 34px 130px;
+}
+.mood-urging #pet-arm-right {
+  animation: bunny-urging-arm-right 0.2s ease-in-out infinite 0.1s;
+  transform-origin: 222px 130px;
+}
+
+/* ── done:大弹跳一次 ── */
+@keyframes bunny-done-bounce {
+  0% { transform: translateY(0) scale(1); }
+  40% { transform: translateY(-14px) scale(1.05); }
+  100% { transform: translateY(0) scale(1); }
+}
+.pet-done #pet-body-group {
+  animation: bunny-done-bounce 0.5s ease-out 1;
+}

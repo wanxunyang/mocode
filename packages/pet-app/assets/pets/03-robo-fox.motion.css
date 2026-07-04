@@ -1,0 +1,63 @@
+/* 机械狐(robo-fox)专属演出:体现"狐"的狡黠与机敏,动作偏小巧、节奏偏快。
+ * 没有 #pet-arm-* 元素,故 tool_call 用头部抖动代替双臂摆动;
+ * 蓬松的尾巴在 SVG 里没有 id,这里通过 #pet-body-group 的偏转让尾巴自然跟着摇摆。 */
+
+/* ── thinking:小角度歪头,像盯着某处揣摩,比通用 4° 更轻 ── */
+@keyframes fox-think-cocked-head {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(5deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: fox-think-cocked-head 1.1s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── idle:细微左右探身,模拟警觉地东张西望 ── */
+@keyframes fox-idle-prowl {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-2deg); }
+  75% { transform: rotate(2deg); }
+}
+.pet-idle #pet-body-group {
+  animation: fox-idle-prowl 3.4s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── tool_call:头部快速左右抖动(代替双臂摆动),像在分析嗅探 ── */
+@keyframes fox-tool-shake {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-4deg); }
+  75% { transform: rotate(4deg); }
+}
+.pet-tool #pet-body-group {
+  animation: fox-tool-shake 0.35s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── mood-bored:慢慢左右扫视,比 idle 幅度更大 ── */
+@keyframes fox-bored-scan {
+  0%, 100% { transform: rotate(-6deg); }
+  50% { transform: rotate(6deg); }
+}
+.mood-bored #pet-body-group {
+  animation: fox-bored-scan 2.6s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── mood-urging:歪头 + 嘴部快速张合(催促式"开口说话") ── */
+@keyframes fox-urging-nod {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-6deg); }
+}
+.mood-urging #pet-body-group {
+  animation: fox-urging-nod 0.55s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+@keyframes fox-urging-mouth {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.6); }
+}
+.mood-urging #pet-mouth {
+  animation: fox-urging-mouth 0.55s ease-in-out infinite;
+  transform-origin: 128px 150px;
+}

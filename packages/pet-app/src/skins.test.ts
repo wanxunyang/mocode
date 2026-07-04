@@ -1,4 +1,4 @@
-// 单测 parseSkinEntryExtras:对 manifest 单个 pet 条目里 motionFile/quips 字段的宽容解析。
+// 单测 parseSkinEntryExtras:对 manifest 单个 pet 条目里 motionFile/quips/stateQuips 字段的宽容解析。
 // 纯函数、无文件 I/O,覆盖各种合法/非法输入的容错行为。
 // 运行:npx tsx packages/pet-app/src/skins.test.ts
 
@@ -86,6 +86,54 @@ const assert = (cond: boolean, msg: string): void => {
   assert(r.motionFile === undefined, '其余字段解析不受影响时,motionFile 仍为 undefined');
   assert(r.quips === undefined, '其余字段解析不受影响时,quips 仍为 undefined');
   assert(Object.keys(r).length === 0, '两字段皆缺失时返回空对象 {}');
+}
+
+// ── stateQuips 字段解析覆盖 ────────────────────────────────────────────────
+
+// 10) stateQuips 是合法对象 → 保留
+{
+  const r = parseSkinEntryExtras({
+    stateQuips: { done: ['Twinkle! 任务完成 ✨'], aborted: ['再见'] },
+  });
+  assert(
+    JSON.stringify(r.stateQuips) === JSON.stringify({ done: ['Twinkle! 任务完成 ✨'], aborted: ['再见'] }),
+    'stateQuips 为合法对象时按原样保留'
+  );
+}
+
+// 11) stateQuips 不是对象(字符串/数字/数组/null)→ 不设置
+{
+  assert(parseSkinEntryExtras({ stateQuips: 'foo' }).stateQuips === undefined, 'stateQuips 为字符串时不设置该字段');
+  assert(parseSkinEntryExtras({ stateQuips: 42 }).stateQuips === undefined, 'stateQuips 为数字时不设置该字段');
+  assert(parseSkinEntryExtras({ stateQuips: ['done'] }).stateQuips === undefined, 'stateQuips 为数组(无对象结构)时不设置该字段');
+  assert(parseSkinEntryExtras({ stateQuips: null }).stateQuips === undefined, 'stateQuips 为 null 时不设置该字段');
+}
+
+// 12) stateQuips 数组元素含非字符串 → 该 key 跳过,合法 key 保留
+{
+  const r = parseSkinEntryExtras({
+    stateQuips: { done: ['ok', 123], aborted: ['ok'] },
+  });
+  assert(r.stateQuips !== undefined, 'stateQuips 存在合法 key 时应设置该字段');
+  assert(r.stateQuips!.done === undefined, 'stateQuips 非法 key(done)被跳过');
+  assert(JSON.stringify(r.stateQuips!.aborted) === JSON.stringify(['ok']), 'stateQuips 合法 key(aborted)被保留');
+}
+
+// 13) stateQuips 是空对象 → 不设置
+{
+  assert(parseSkinEntryExtras({ stateQuips: {} }).stateQuips === undefined, 'stateQuips 为空对象(无 key)时不设置该字段');
+}
+
+// 14) 三字段同时存在 → 互不影响
+{
+  const r = parseSkinEntryExtras({
+    motionFile: '11.motion.css',
+    quips: { tired: ['困'] },
+    stateQuips: { done: ['完成'] },
+  });
+  assert(r.motionFile === '11.motion.css', '三字段同时存在时 motionFile 保留');
+  assert(JSON.stringify(r.quips) === JSON.stringify({ tired: ['困'] }), '三字段同时存在时 quips 保留');
+  assert(JSON.stringify(r.stateQuips) === JSON.stringify({ done: ['完成'] }), '三字段同时存在时 stateQuips 保留');
 }
 
 console.log(`\nOK: ${passed} passed, 0 failed`);

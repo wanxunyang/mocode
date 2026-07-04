@@ -1,0 +1,94 @@
+/* 机械企鹅(robo-penguin)专属演出:体现"企鹅"的摇摆与笨拙,所有动作以"左右晃"为核心。
+ * #pet-arm-left/right 是扁平鳍翼,这里当作鳍状手臂处理;pet-mouth 是橙色喙。 */
+
+/* ── thinking:鳍翼小幅度拍打 + 身体轻摇 ── */
+@keyframes penguin-think-flipper-left {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-10deg); }
+}
+@keyframes penguin-think-flipper-right {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(10deg); }
+}
+.pet-thinking #pet-arm-left {
+  animation: penguin-think-flipper-left 0.9s ease-in-out infinite;
+  transform-origin: 42px 170px;
+}
+.pet-thinking #pet-arm-right {
+  animation: penguin-think-flipper-right 0.9s ease-in-out infinite 0.45s;
+  transform-origin: 214px 170px;
+}
+
+/* ── idle:站着轻微左右晃 ── */
+@keyframes penguin-idle-wobble {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(3deg); }
+}
+.pet-idle #pet-body-group {
+  animation: penguin-idle-wobble 2.2s ease-in-out infinite;
+  transform-origin: 128px 230px;
+}
+
+/* ── tool_call:企鹅招牌的左右摇摆(代替双臂摆动) + 鳍翼配合 ── */
+@keyframes penguin-tool-waddle {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-7deg); }
+  75% { transform: rotate(7deg); }
+}
+@keyframes penguin-tool-flipper-left {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-18deg); }
+}
+@keyframes penguin-tool-flipper-right {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(18deg); }
+}
+.pet-tool #pet-body-group {
+  animation: penguin-tool-waddle 0.55s ease-in-out infinite;
+  transform-origin: 128px 230px;
+}
+.pet-tool #pet-arm-left {
+  animation: penguin-tool-flipper-left 0.55s ease-in-out infinite;
+  transform-origin: 42px 170px;
+}
+.pet-tool #pet-arm-right {
+  animation: penguin-tool-flipper-right 0.55s ease-in-out infinite 0.27s;
+  transform-origin: 214px 170px;
+}
+
+/* ── mood-urging:急促的鳍翼拍打 + 嘴部(喙)开合催促 ── */
+@keyframes penguin-urging-flipper-left {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-22deg); }
+}
+@keyframes penguin-urging-flipper-right {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(22deg); }
+}
+@keyframes penguin-urging-beak {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.5); }
+}
+.mood-urging #pet-arm-left {
+  animation: penguin-urging-flipper-left 0.18s ease-in-out infinite;
+  transform-origin: 42px 170px;
+}
+.mood-urging #pet-arm-right {
+  animation: penguin-urging-flipper-right 0.18s ease-in-out infinite 0.09s;
+  transform-origin: 214px 170px;
+}
+.mood-urging #pet-mouth {
+  animation: penguin-urging-beak 0.18s ease-in-out infinite;
+  transform-origin: 128px 156px;
+}
+
+/* ── done:小滑步式的弹跳 ── */
+@keyframes penguin-done-slide {
+  0% { transform: translateX(0) scale(1); }
+  40% { transform: translateX(0) scale(1.08); }
+  100% { transform: translateX(0) scale(1); }
+}
+.pet-done #pet-body-group {
+  animation: penguin-done-slide 0.45s ease-out 1;
+  transform-origin: 128px 230px;
+}

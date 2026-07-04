@@ -23,6 +23,7 @@ import {
 import { loadConfig, saveConfig, type PetConfig } from './config.js';
 import { listSkinEntries, resolveSkinPath } from './skins.js';
 import { createMoodTracker, type MoodEvaluation } from './mood-tracker.js';
+import { pickQuip, pickStateQuip } from './quips.js';
 import type { MoodKind } from './mood.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -233,6 +234,11 @@ ipcMain.handle('pet:get-skin', () => ({
 /** 当前皮肤的专属文案池(manifest.json 的 quips 字段),供 mood-tracker 的 pickQuip 优先选取。 */
 function currentSkinQuips(): Partial<Record<MoodKind, string[]>> | undefined {
   return listSkinEntries().find((e) => e.id === currentSkinId)?.quips;
+}
+
+/** 当前皮肤的状态专属文案池(manifest.json 的 stateQuips 字段),供 broadcastToRenderer 的 pickStateQuip 选取。 */
+function currentSkinStateQuips(): Partial<Record<PetState, string[]>> | undefined {
+  return listSkinEntries().find((e) => e.id === currentSkinId)?.stateQuips;
 }
 
 /** 把 mood-tracker 求值结果推给渲染进程(IPC 频道 pet:mood)。result 为 null 表示本次求值无需推送。

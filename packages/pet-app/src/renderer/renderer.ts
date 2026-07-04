@@ -4,7 +4,7 @@
 
 import type { PetState, PetStateMeta } from '../protocol.js';
 import type { MoodKind } from '../mood.js';
-import { applyMood, applySkinMotion, createBubbleController, QUIP_VISIBLE_MS } from './dom-mood.js';
+import { applyMood, applySkinMotion, createBubbleController } from './dom-mood.js';
 
 declare global {
   interface Window {
@@ -12,6 +12,7 @@ declare global {
       onState: (cb: (state: PetState, meta?: PetStateMeta) => void) => void;
       onSkin: (cb: (payload: { assetPath: string; motionFile?: string }) => void) => void;
       getInitialSkin: () => Promise<{ assetPath: string; motionFile?: string }>;
+      quipVisibleMs: number;
       onMood: (cb: (mood: MoodKind | null, quip?: string) => void) => void;
       setIgnoreMouseEvents: (ignore: boolean) => void;
       dragStart: () => void;
@@ -20,6 +21,9 @@ declare global {
     };
   }
 }
+
+/** 气泡文案展示时长,从 preload 经 MOCODE_PET_QUIP_VISIBLE_MS 环境变量注入,默认 6000(见 dom-mood.ts QUIP_VISIBLE_MS)。 */
+const QUIP_VISIBLE_MS = window.petBridge.quipVisibleMs;
 
 const ALL_STATE_CLASSES = [
   'pet-idle',
@@ -104,7 +108,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.petBridge.onSkin(({ assetPath, motionFile }) => swapSkin(petContainer, assetPath, motionFile));
   window.petBridge.onMood((mood, quip) => {
     applyMood(stage, mood);
-    if (mood !== null && quip) bubbleController.showQuip(bubbleEl, quip, QUIP_VISIBLE_MS);
+    // 状态文案(由 main.ts broadcastToRenderer 选 stateQuips 推送过来)和 mood 文案共用同一条 IPC;
+    // 状态文案的 mood 字段为 null,只要 quip 存在就展示;mood 文案按之前的语义(mood 命中)也展示。
+    if (quip) bubbleController.showQuip(bubbleEl, quip, QUIP_VISIBLE_MS);
   });
 
   // 拖拽放置:窗口默认鼠标穿透(见 main.ts setIgnoreMouseEvents(true,{forward:true})),

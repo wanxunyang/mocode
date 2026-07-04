@@ -1,0 +1,65 @@
+/* 机械蛙(robo-frog)专属演出:利用"挤压/弹跳"这个青蛙的核心视觉语言,
+ * SVG 里没有 #pet-arm-*,tool_call 用整体压扁弹起代替通用双臂摆动。 */
+
+/* ── thinking:嘴部开合(呱呱叫的雏形) ── */
+@keyframes frog-think-mouth {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.6); }
+}
+.pet-thinking #pet-mouth {
+  animation: frog-think-mouth 0.8s ease-in-out infinite;
+  transform-origin: 128px 150px;
+}
+
+/* ── idle:极轻微的鼓起呼吸 ── */
+@keyframes frog-idle-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+.pet-idle #pet-body-group {
+  animation: frog-idle-breathe 2.6s ease-in-out infinite;
+  transform-origin: 128px 200px;
+}
+
+/* ── tool_call:压扁弹起,代替双臂摆动,像青蛙蓄力跳 ── */
+@keyframes frog-tool-squash {
+  0%, 100% { transform: scaleY(1) scaleX(1); }
+  30% { transform: scaleY(0.78) scaleX(1.15); }
+  60% { transform: scaleY(1.18) scaleX(0.88); }
+}
+.pet-tool #pet-body-group {
+  animation: frog-tool-squash 0.55s ease-in-out infinite;
+  transform-origin: 128px 200px;
+}
+
+/* ── mood-urging:嘴部急速张合(急促呱呱催促) ── */
+@keyframes frog-urging-mouth {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(2.4); }
+}
+.mood-urging #pet-mouth {
+  animation: frog-urging-mouth 0.25s ease-in-out infinite;
+  transform-origin: 128px 150px;
+}
+
+/* ── mood-tired:身体整体慢慢压扁变矮,像没气了的蛙 ── */
+@keyframes frog-tired-squash {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.86); }
+}
+.mood-tired #pet-body-group {
+  animation: frog-tired-squash 4.4s ease-in-out infinite;
+  transform-origin: 128px 200px;
+}
+
+/* ── done:大跳跃一次 ── */
+@keyframes frog-done-jump {
+  0% { transform: translateY(0) scaleY(1); }
+  30% { transform: translateY(0) scaleY(0.78) scaleX(1.15); }
+  50% { transform: translateY(-18px) scaleY(1.1) scaleX(0.92); }
+  100% { transform: translateY(0) scaleY(1); }
+}
+.pet-done #pet-body-group {
+  animation: frog-done-jump 0.55s ease-out 1;
+  transform-origin: 128px 200px;
+}

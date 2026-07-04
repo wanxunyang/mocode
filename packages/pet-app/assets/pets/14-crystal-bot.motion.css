@@ -1,0 +1,63 @@
+/* 水晶精灵(crystal-bot)专属演出:体现"水晶"的折射与旋转,所有动作都是几何化的旋转/缩放。
+ * SVG 自带 translateY 浮动动画,这里 .pet-idle 用等效浮动覆盖内置,其他状态彻底接管;
+ * 没有 #pet-arm-*,tool_call 改用快速旋转代替双臂摆动。 */
+
+/* ── idle:保留并替换 SVG 内置浮动为更稳定的"原地悬停" ── */
+@keyframes crystal-idle-hover {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+.pet-idle #pet-body-group {
+  animation: crystal-idle-hover 3s ease-in-out infinite;
+}
+
+/* ── thinking:缓慢连续旋转(整颗水晶),模拟展示内部折射 ── */
+@keyframes crystal-think-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.pet-thinking #pet-body-group {
+  animation: crystal-think-spin 4s linear infinite;
+  transform-origin: 128px 128px;
+}
+
+/* ── tool_call:急促左右摇摆(代替双臂摆动),像光在晶体里来回折射 ── */
+@keyframes crystal-tool-sway {
+  0%, 100% { transform: rotate(-6deg); }
+  50% { transform: rotate(6deg); }
+}
+.pet-tool #pet-body-group {
+  animation: crystal-tool-sway 0.4s ease-in-out infinite;
+  transform-origin: 128px 128px;
+}
+
+/* ── mood-urging:急促脉冲式缩放(像能量过载) ── */
+@keyframes crystal-urging-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+.mood-urging #pet-body-group {
+  animation: crystal-urging-pulse 0.3s ease-in-out infinite;
+  transform-origin: 128px 128px;
+}
+
+/* ── mood-tired:慢慢缩小变暗,像水晶能量耗尽 ── */
+@keyframes crystal-tired-dim {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.92); opacity: 0.75; }
+}
+.mood-tired #pet-body-group {
+  animation: crystal-tired-dim 4.6s ease-in-out infinite;
+  transform-origin: 128px 128px;
+}
+
+/* ── done:快速自转一圈 + 回到原位 ── */
+@keyframes crystal-done-twirl {
+  0% { transform: rotate(0deg) scale(1); }
+  50% { transform: rotate(180deg) scale(1.12); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+.pet-done #pet-body-group {
+  animation: crystal-done-twirl 0.55s ease-out 1;
+  transform-origin: 128px 128px;
+}

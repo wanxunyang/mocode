@@ -1,7 +1,10 @@
 // 通用文案池:各 mood 对应的中文吐槽短句,以及随机选取逻辑。
 // 皮肤可提供自定义文案(skinQuips)覆盖某个 mood 的候选池;未覆盖或为空时回退到通用文案池。
+// 另提供 pickStateQuip:PetState 维度的文案(独立于 mood,见 protocol.ts)——
+// 让皮肤对"任务完成 / 用户中断 / 报错"等瞬时状态也能挂个性化吐槽。
 
 import type { MoodKind } from './mood.js';
+import type { PetState } from './protocol.js';
 
 /** 每种 mood 的通用吐槽短句候选池,语气轻松幽默(赛博终端风机器人设定)。 */
 export const UNIVERSAL_QUIPS: Record<MoodKind, string[]> = {
@@ -49,5 +52,20 @@ export function pickQuip(
 ): string {
   const skinList = skinQuips?.[mood];
   const list = skinList && skinList.length > 0 ? skinList : pool[mood];
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+/**
+ * 根据 PetState 选一条吐槽文案(独立于 mood 系统,见 quips.ts 顶部注释)。
+ * 命中条件:stateQuips 里该 state 有非空候选列表 → 随机选一条;否则返回 null。
+ * 返回 null 表示"该 state 在该皮肤下没有专属文案",调用方据此跳过推送(不影响主流程)。
+ * 纯函数,唯一的非确定性来源是 Math.random()。
+ */
+export function pickStateQuip(
+  state: PetState,
+  stateQuips?: Partial<Record<PetState, string[]>>,
+): string | null {
+  const list = stateQuips?.[state];
+  if (!list || list.length === 0) return null;
   return list[Math.floor(Math.random() * list.length)];
 }

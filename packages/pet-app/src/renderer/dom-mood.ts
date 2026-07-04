@@ -23,8 +23,10 @@ export interface LinkElementLike {
   href: string;
 }
 
-/** 气泡文案自动淡出隐藏前的展示时长(design.md "情绪 → 演出的驱动"默认假设)。 */
-export const QUIP_VISIBLE_MS = 3000;
+/** 气泡文案自动淡出隐藏前的默认展示时长(design.md "情绪 → 演出的驱动"默认假设);
+ *  运行期可由 MOCODE_PET_QUIP_VISIBLE_MS 环境变量(经 preload.ts → window.petBridge.quipVisibleMs)覆盖,
+ *  不用重新打包就能调"宠物说一句话停多久"。 */
+export const QUIP_VISIBLE_MS = 6000;
 
 export const ALL_MOOD_CLASSES = [
   'mood-tired',

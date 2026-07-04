@@ -1,0 +1,91 @@
+/* 机械龙(robo-dino)专属演出:体现"小龙"的凶猛与小只的暴躁,动作短促、节奏快、幅度大。
+ * #pet-arm-left/right 是两只小短手,只能用 rotate 模拟拍打;
+ * 嘴部 (#pet-mouth) 是锯齿状,适合用 scaleY 模拟咬合。 */
+
+/* ── thinking:上下颌咬合(嘴部张合,模拟正在思考时"哼"的表情) ── */
+@keyframes dino-think-jaw {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.7); }
+}
+.pet-thinking #pet-mouth {
+  animation: dino-think-jaw 0.5s ease-in-out infinite;
+  transform-origin: 128px 148px;
+}
+
+/* ── idle:小幅度来回甩头(像小恐龙好动) ── */
+@keyframes dino-idle-shake {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-3deg); }
+  75% { transform: rotate(3deg); }
+}
+.pet-idle #pet-body-group {
+  animation: dino-idle-shake 1.8s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── tool_call:小短手快速拍打 + 嘴部跟随咬合 ── */
+@keyframes dino-tool-arm-left {
+  0%, 100% { transform: rotate(-34deg); }
+  50% { transform: rotate(-65deg); }
+}
+@keyframes dino-tool-arm-right {
+  0%, 100% { transform: rotate(34deg); }
+  50% { transform: rotate(65deg); }
+}
+@keyframes dino-tool-jaw {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.4); }
+}
+.pet-tool #pet-arm-left {
+  animation: dino-tool-arm-left 0.25s ease-in-out infinite;
+  transform-origin: 31px 142px;
+}
+.pet-tool #pet-arm-right {
+  animation: dino-tool-arm-right 0.25s ease-in-out infinite 0.12s;
+  transform-origin: 223px 142px;
+}
+.pet-tool #pet-mouth {
+  animation: dino-tool-jaw 0.25s ease-in-out infinite;
+  transform-origin: 128px 148px;
+}
+
+/* ── mood-frustrated:暴躁甩头(替换通用 0.15s 平移抖动为更"角色化"的旋转甩头) ── */
+@keyframes dino-frustrated-slam {
+  0%, 100% { transform: rotate(0deg) translateX(0); }
+  20% { transform: rotate(-6deg) translateX(-4px); }
+  60% { transform: rotate(6deg) translateX(4px); }
+}
+.mood-frustrated #pet-body-group {
+  animation: dino-frustrated-slam 0.18s ease-in-out infinite;
+  transform-origin: 128px 125px;
+}
+
+/* ── mood-urging:急躁跺脚 ── */
+@keyframes dino-urging-stomp {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(0) rotate(-5deg); }
+}
+@keyframes dino-urging-jaw {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(1.8); }
+}
+.mood-urging #pet-body-group {
+  animation: dino-urging-stomp 0.35s ease-in-out infinite;
+  transform-origin: 128px 220px;
+}
+.mood-urging #pet-mouth {
+  animation: dino-urging-jaw 0.35s ease-in-out infinite;
+  transform-origin: 128px 148px;
+}
+
+/* ── done:跺脚庆祝 ── */
+@keyframes dino-done-stomp {
+  0% { transform: translateY(0) scale(1); }
+  30% { transform: translateY(0) scaleY(0.88) scaleX(1.1); }
+  60% { transform: translateY(-10px) scale(1.08); }
+  100% { transform: translateY(0) scale(1); }
+}
+.pet-done #pet-body-group {
+  animation: dino-done-stomp 0.5s ease-out 1;
+  transform-origin: 128px 220px;
+}
