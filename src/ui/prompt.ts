@@ -114,24 +114,40 @@ export async function promptWithSlashMenu(
   let menuOpen = false;
   let selected = 0;
   let filtered: SlashCommand[] = [];
+  const MENU_MAX_VISIBLE = 5;
+  let menuTop = 0; // 窗口首项在 filtered 中的索引,菜单最多显示 MENU_MAX_VISIBLE 条
   let resolved = false;
   let resolve!: (v: string[] | null) => void;
   let reject!: (e: Error) => void;
 
-  /** 菜单行(预渲染,带色)——向上展开进内容区底,由 layout 贴入。 */
+  /** 菜单行(预渲染,带色)——向上展开进内容区底,由 layout 贴入。最多显示 MENU_MAX_VISIBLE 条,支持上下滚动。 */
   function menuLines(): string[] {
     if (!menuOpen || filtered.length === 0) return [];
     const cols = layout.getGeo().cols;
-    const maxName = Math.max(...filtered.map((c) => displayWidth(c.name)));
-    return filtered.map((c, i) => {
+    const visibleCount = Math.min(MENU_MAX_VISIBLE, filtered.length);
+    // 保 selected 在窗口内:selected 顶到上/下边界时才挪 menuTop
+    if (selected < menuTop) menuTop = selected;
+    else if (selected >= menuTop + visibleCount) menuTop = selected - visibleCount + 1;
+    const windowItems = filtered.slice(menuTop, menuTop + visibleCount);
+    const maxName = Math.max(...windowItems.map((c) => displayWidth(c.name)));
+    const hasMoreAbove = menuTop > 0;
+    const hasMoreBelow = menuTop + visibleCount < filtered.length;
+    return windowItems.map((c, i) => {
+      const globalIdx = menuTop + i;
       // 选中项:▸ 与文字均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
-      const isSel = i === selected;
+      const isSel = globalIdx === selected;
       const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
       const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
       const name = padEndDisplay(c.name, maxName);
-      const descW = cols - maxName - 5; // marker + 空格 + 2 间距
-      const desc = descW > 0 ? truncateDisplay(c.desc, descW) : '';
-      return `${marker} ${color}${name}${ui.reset}  ${color}${desc}${ui.reset}`;
+      // 首/末附加滚动指示(▲/▼)而非替换整行
+      let desc = c.desc;
+      let scrollHint = '';
+      if (i === 0 && hasMoreAbove) scrollHint = ' ▲';
+      if (i === windowItems.length - 1 && hasMoreBelow) scrollHint = ' ▼';
+      const hintW = displayWidth(scrollHint);
+      const descW = cols - maxName - 5 - hintW; // marker + 空格 + 2 间距 + hint
+      const descStr = descW > 0 ? truncateDisplay(desc, descW) : '';
+      return `${marker} ${color}${name}${ui.reset}  ${color}${descStr}${ui.reset}${ui.dim}${scrollHint}${ui.reset}`;
     });
   }
 
@@ -229,10 +245,14 @@ export async function promptWithSlashMenu(
     if (cl === 0 && lines[0].startsWith('/')) {
       filtered = opts.commands.filter((c) => c.name.startsWith(lines[0]));
       menuOpen = filtered.length > 0;
-      if (selected >= filtered.length) selected = 0;
+      if (selected >= filtered.length) {
+        selected = 0;
+        menuTop = 0;
+      }
     } else {
       filtered = [];
       menuOpen = false;
+      menuTop = 0;
     }
   }
 
@@ -309,6 +329,7 @@ export async function promptWithSlashMenu(
     menuOpen = false;
     filtered = [];
     selected = 0;
+    menuTop = 0;
     if (pasteTimer) {
       clearTimeout(pasteTimer);
       pasteTimer = null;
@@ -500,6 +521,8 @@ export async function promptWithSlashMenu(
       case 'escape':
         menuOpen = false;
         filtered = [];
+        selected = 0;
+        menuTop = 0;
         redraw();
         return;
       case 'left':
