@@ -18,6 +18,7 @@ import { memoryListTool } from './memory-list.js';
 import { memoryUpdateTool } from './memory-update.js';
 import { memoryForgetTool } from './memory-forget.js';
 import { taskTool } from './task.js';
+import { todolistTool } from './todolist.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
@@ -43,4 +44,5 @@ export const builtinTools: Tool[] = [
   memoryUpdateTool,
   memoryForgetTool,
   taskTool, // 派生子 agent(独立 history + 可受限工具集);plan 模式禁用(见 PLAN_DISABLED_TOOLS)
+  todolistTool, // 工作记事本(plan 文件:复杂任务 checklist,落盘抗压缩);plan 模式可用(便于「先 plan 再 auto」时落地执行清单)
 ];

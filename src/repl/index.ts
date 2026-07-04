@@ -44,7 +44,10 @@ import {
   rebuildFromHistory,
   resetState,
 } from '../rollback/index.js';
-import { listSkills, effectiveSystemPrompt } from '../skills/index.js';
+import {
+  listSkills,
+  effectiveSystemPrompt,
+} from '../skills/index.js';
 import {
   buildMemorySection,
   buildMemoryIndexSection,
@@ -56,6 +59,12 @@ import {
   formatReflectResult,
   loadAll,
 } from '../memory/index.js';
+import {
+  buildActivePlanSection,
+  onActivePlanChange,
+  hasActivePlan,
+  getActivePlanSummary,
+} from '../plan/index.js';
 
 /**
  * readline 的 prompt 必须是纯文本(无 ANSI):readline 按字符数算光标位置,
@@ -182,13 +191,14 @@ function renderContextBarInline(history: ChatMessage[]): string {
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
 }
 
-/** 状态行基线:模型 / context / cwd / 模式标识。repl 在轮次边界与切模式时调,刷新 context 用量与 mode chip。 */
+/** 状态行基线:模型 / context / cwd / 模式标识 / 活跃 plan chip。repl 在轮次边界、切模式、plan 变更时调。 */
 function refreshStatusBase(history: ChatMessage[]): void {
   layout.setStatusBase({
     model: config.model,
     contextBar: renderContextBarInline(history),
     cwd: process.cwd(),
     modeTag: getAgentMode() === 'plan' ? 'plan' : 'auto',
+    planSummary: hasActivePlan() ? getActivePlanSummary(process.stdout.columns ?? 80) : '',
   });
 }
 
@@ -449,12 +459,14 @@ export async function startRepl(
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
   // 构造系统提示:auto 用 base;plan 在 config.systemPrompt 后追加 PLAN_MODE_SUFFIX。
   // 切模式时 applyMode 重算 history[0](history[0] 恒 system,compaction 保它,不破坏)。
+  // 活跃 plan 摘要拼在 memory 段后(systemPrompt 的尾段),todo 工具变更后 listener 重写 history[0]。
   const buildSystemMessage = (planMode: boolean): string =>
     effectiveSystemPrompt(
       config.systemPrompt +
         (planMode ? PLAN_MODE_SUFFIX : '') +
         buildMemorySection() +
-        buildMemoryIndexSection(),
+        buildMemoryIndexSection() +
+        buildActivePlanSection(),
     );
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
   // 否则新会话只塞 system 提示(默认 auto)。
@@ -527,6 +539,16 @@ export async function startRepl(
   // 不调 drawStatusBar:INPUT 态靠 prompt.ts redraw 画 chip;RUNNING 态(switch_mode 中途切)靠 200ms turnTimer 兜底。
   onModeChange((m) => {
     applyMode(m === 'plan');
+    refreshStatusBase(history);
+  });
+  // 注册活跃 plan 变更监听器:todolist 工具每次 create/update/add_step/finish 后调 setActivePlan,
+  // 触发本 listener 重写 history[0](plan 摘要段刷新)+ 刷状态行 plan chip。
+  // 不调 drawStatusBar:INPUT 态靠 prompt.ts redraw;RUNNING 态靠 200ms turnTimer 兜底。
+  // listener 内访问 history 是闭包捕获,保持同一引用(repl 持有)。
+  onActivePlanChange(() => {
+    if (history[0]?.role === 'system') {
+      history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
+    }
     refreshStatusBase(history);
   });
 

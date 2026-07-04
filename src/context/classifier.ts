@@ -41,6 +41,8 @@ const BY_NAME: Record<string, ContextKind> = {
   memory_forget: 'status',
   // summary:子 agent 摘要(轻量)
   task: 'summary',
+  // status:工作记事本 plan(单 plan/会话,文件级;state 一行 chip 即可)
+  todolist: 'status',
 };
 
 /**

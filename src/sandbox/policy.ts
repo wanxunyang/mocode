@@ -18,6 +18,7 @@ export const SANDBOX_EXEMPT_TOOLS = new Set([
   'ask_human', 'switch_mode',
   'codegraph',
   'task',
+  'todolist', // 写 .mocode/plans/<id>.md(id 服务端生成,无路径注入);操作项目内元数据
 ]);
 
 /**

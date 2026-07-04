@@ -55,6 +55,8 @@ export interface StatusBarData {
   status: string; // '空闲' | '思考中' | '执行 read_file' …
   spinnerFrame?: string; // 可选 spinner 帧(运行态)
   modeTag?: string; // 模式标识:repl 传 'auto' / 'plan'(两段式布局左段显示)
+  /** 活跃 plan 短摘要(无 plan=undefined,空串=有 plan 但 chip 不显)。repl 透传 getActivePlanSummary()。 */
+  planSummary?: string;
 }
 
 export interface InputView {
@@ -82,7 +84,7 @@ let segmentStartRow = 1; // 当前 md 段起始屏行(供 contentWriteMd 定位�
 let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
 let scrollLockUntil = 0; // 发消息轮首滚动锁(绝对时间戳 ms,0=未锁):吸收 stdin 残留滚轮事件,防 resetScroll 回尾后被重新滚上去
 const SCROLL_LOCK_MS = 400; // 锁时长:覆盖 OS 缓冲残留 + 常规滚轮惯性;LLM TTFB 多 >200ms,不影响轮中后段滚动
-let base: { model: string; contextBar: string; cwd: string; modeTag?: string } | null = null;
+let base: { model: string; contextBar: string; cwd: string; modeTag?: string; planSummary?: string } | null = null;
 let statusText = '';
 let spinnerFrame: string | undefined;
 let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
@@ -822,16 +824,27 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
   return twoColumn(lead, leadW, rightStr, tailW, cols);
 }
 
-/** 下线之下那行(model 行):左 = 模式标识(auto 跟随主题色 / plan 显亮黄);右 = context + cwd,右端对齐。 */
+/** 下线之下那行(model 行):左 = 模式标识(auto 跟随主题色 / plan 显亮黄)+ 活跃 plan chip;右 = context + cwd,右端对齐。 */
 function composeModelLine(status: StatusBarData, cols: number): string {
   const ctx = status.contextBar; // 已带色
   const ctxW = ansiDisplayWidth(ctx);
-  // 左段:模式标识(auto 显 brightCyan 随主题 / plan 显亮黄)
+  // 左段:模式标识 + (活跃 plan 时)「│ plan: <summary>」chip,plan 摘要显 dim 黄(醒目但弱于 mode tag)
   const modeTag = status.modeTag ?? '';
-  const leftStr = modeTag
-    ? `${modeTag === 'plan' ? ui.yellow : ui.brightCyan}${modeTag}${ui.reset}`
+  const modeColor = modeTag === 'plan' ? ui.yellow : ui.brightCyan;
+  const plan = (status.planSummary ?? '').trim();
+  const modePart = modeTag
+    ? `${modeColor}${modeTag}${ui.reset}`
     : '';
-  const leftW = modeTag ? displayWidth(modeTag) : 0;
+  const planPart = plan
+    ? `${ui.dim}│ ${ui.yellow}${plan}${ui.reset}${ui.dim}`
+    : '';
+  const leftStr = modePart && planPart
+    ? `${modePart} ${planPart}`
+    : modePart || planPart;
+  // 宽计算:modeTag 宽 + (plan 显)「 │ 」+ plan 字面宽(不含 ANSI)
+  const leftW =
+    (modeTag ? displayWidth(modeTag) : 0) +
+    (plan ? 3 + displayWidth(plan) : 0);
   // 右段:ctx + sep + cwd,右端对齐。cwd 按预算截断,极窄(<6)隐藏。
   const minGap = 2;
   const cwdBudget = cols - leftW - minGap - ctxW - STATUS_SEP_W - 1;
@@ -988,12 +1001,13 @@ export function clearLiveAtCursor(): void {
   frameCol = 0;
 }
 
-/** 更新状态行基线(模型 / context / cwd / 模式标识)。repl 在轮次边界与切模式时调。 */
+/** 更新状态行基线(模型 / context / cwd / 模式标识 / 活跃 plan chip)。repl 在轮次边界与切模式时调。 */
 export function setStatusBase(b: {
   model: string;
   contextBar: string;
   cwd: string;
   modeTag?: string;
+  planSummary?: string;
 }): void {
   base = b;
 }
