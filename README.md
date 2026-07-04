@@ -18,16 +18,18 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Plan / Auto dual mode** — In `plan` mode the agent is read-only (reads code, queries indexes, searches — never writes to disk, runs commands, or spawns sub-agents) and produces a plan; `auto` mode unlocks the full toolset. The agent can switch between the two on its own — scope out an unfamiliar codebase first, then start making changes.
 - **Automatic context compression** — As the context window fills up, a three-tier compression kicks in (trim individual results → compact older tool results in place → summarize older turns), so long sessions never overflow. `/context` shows live token usage; `/compact` triggers manual compression (optionally with a focus hint to preserve what matters).
 - **Cross-session long-term memory** — The agent can save project architecture, conventions, and lessons learned as long-term memory, auto-loaded in future sessions. A background process periodically reflects on conversations to mine things worth remembering. Memories can be created, searched, updated, and forgotten, with recall-based decay.
+- **Working notepad (todolist)** — For complex multi-step tasks (≥3 file changes / ≥5 tool calls), the agent first writes a plan to `.mocode/plans/<id>.md` (file-based, survives context compression), then ticks each step as it goes. A live progress chip in the TUI status bar shows `plan: [title] (3/7) ▸ [current step]`. `finish` auto-archives completed plans to `plans/archive/`, with explicit `list / delete / unarchive` actions.
 - **Interruptible and reversible** — Ctrl+C interrupts the current turn at any time (kills child processes recursively, rolls history back to before the turn started, leaves no half-finished tool calls). `/rollback` restores file changes from per-turn snapshots, with a per-file keep/undo choice — no git dependency required.
 - **Sandbox protection** — File reads/writes go through a sandbox that blocks out-of-bounds paths (`../../`, absolute paths outside the root, symlink escapes, etc.), so the agent never touches files outside your working directory.
 
 ## Features
 
-- **Streaming output + visible reasoning** — Responses render as they're generated; when the model supports reasoning, the thinking process is visible in real time and auto-collapses to save screen space, with `/think N` to expand it on demand.
+- **Streaming output + visible reasoning** — Responses render as they're generated; when the model supports reasoning, the thinking process is visible in real time and auto-collapses to save screen space.
 - **Full-screen TUI** — Alt-screen mode with a fixed status bar, scrollback (PgUp/PgDn), typeahead while the agent is running, and auto-prefill for the next turn.
 - **Session persistence** — Every turn is saved automatically; `--resume` / `/resume` picks up a past session.
 - **Skills system** — Scans directories like `~/.mocode/skills/` automatically; each skill's description is injected into the system prompt, and the model calls `use_skill` to load the full instructions only when relevant (progressive disclosure: skim the summary first, load the body only if needed).
-- **Slash commands** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/think` `/rollback`, with dropdown filtering as you type.
+- **Optional desktop pet** — A small floating window (`/pet`) shows a stateful character that mirrors agent activity (idle / thinking / tool running / waiting for human). Works as a separate process over WebSocket; quit it with `/pet quit`. Sits beside the terminal, never blocks it.
+- **Slash commands** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`, with dropdown filtering as you type.
 
 ## Installation
 
@@ -141,6 +143,7 @@ The agent operates in **the working directory it was launched from** — to have
 | `switch_mode`      | Switch between `plan` (read-only planning) and `auto` (full execution); the agent can call this itself to explore before acting |
 | `drop_context`     | Replace irrelevant old tool results in history with stubs to free up context (preserves tool_call_id pairing, leaves system prompt and current turn untouched, idempotent) |
 | `task`             | Spawn a sub-agent for an independent subtask (isolated history, optional restricted toolset, optional step cap); consecutive calls run in parallel automatically, returning only a summary |
+| `todolist`         | Working notepad: write a multi-step plan to `.mocode/plans/<id>.md` (survives compression) and tick steps as you go; `finish` auto-archives, with `list / delete / unarchive` for history |
 | `memory_save`      | Save a piece of cross-session long-term memory (title indexed, body fetched on demand) |
 | `memory_search`    | Search memory bodies by keyword; hits boost the recall count (affects forgetting decay) |
 | `memory_list`       | List the memory index (id/title/summary, no body)                        |
@@ -157,13 +160,17 @@ The agent operates in **the working directory it was launched from** — to have
 | `/skills`           | List discovered skills                                               |
 | `/compact`          | Compress history (optionally with a focus hint: `/compact …`)        |
 | `/resume`           | Resume a saved session                                                |
-| `/think`            | Expand a collapsed reasoning section (`/think N`)                    |
 | `/rollback`         | Menu to pick a turn to roll back to (↑↓ · Enter)                     |
+| `/memory`           | Show memory library: entry count + recent index                       |
+| `/reflect`          | Manually trigger a background memory reflection pass                  |
 | `/model`            | Configure the LLM (baseURL / apiKey / model / context window), applied immediately + persisted |
 | `/init`             | Scan the project and generate `MOCODE.md` project memory (dispatched to the agent) |
 | `/theme`            | Switch color theme (↑↓ · Enter, or `/theme <name>` directly)         |
 | `/plan`             | Switch to plan mode (read-only exploration + plan output, approve to switch to auto) |
 | `/auto`             | Switch back to auto mode (full toolset execution)                     |
+| `/pet`              | Toggle the optional desktop pet (floating window mirroring agent state) |
+| `/pet skin`         | Pick a pet skin (↑↓ · Enter)                                          |
+| `/pet quit`         | Fully shut down the pet process (not just disconnect)                 |
 
 Type `/` to trigger the dropdown menu, keep typing to filter; Esc to cancel.
 
@@ -199,4 +206,4 @@ npm run typecheck   # tsc --noEmit
 
 ## Future extensions
 
-Sub-agents / parallel tasks, MCP tool integration, a permission confirmation UI. The current version is a streaming, reasoning-visible, rollback-capable terminal coding agent.
+MCP tool integration, a permission confirmation UI, and a real worktree-isolated sub-agent mode. The current version is a streaming, reasoning-visible, rollback-capable terminal coding agent with 20 tools, working-notepad planning, cross-session memory, parallel sub-agents, and an optional desktop pet.

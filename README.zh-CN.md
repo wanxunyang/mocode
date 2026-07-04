@@ -18,16 +18,18 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **计划 / 执行双模式** — `plan` 模式下只读探查(读代码、查索引、搜索,绝不写盘、不跑命令、不派生子 agent),产出计划;`auto` 模式全量工具放开。agent 还能在两者间自切换——先把陌生代码库摸清,再动手改。
 - **上下文自动压缩** — 接近窗口上限时三层压缩(单条结果裁剪 → 旧工具结果原地微压缩 → 旧对话摘要),长会话也不爆窗口;`/context` 实时显示 token 用量,`/compact` 可手动压缩(能带焦点指令聚焦保留)。
 - **跨会话长期记忆** — agent 能把项目架构、约定、踩过的坑存成长期记忆,下次会话自动加载;后台还会定期从对话里反思挖掘值得记住的事。记忆可增删改、带召回衰减。
+- **工作记事本(todolist)** — 复杂多步任务(≥3 处文件改动 / ≥5 步工具调用)时,agent 先把计划写到 `.mocode/plans/<id>.md`(落盘抗压缩),执行过程逐步勾选;TUI 状态栏实时显示进度 chip:`plan: [标题] (3/7) ▸ [当前步]`。`finish` 自动归档到 `plans/archive/`,`list / delete / unarchive` 管理历史。
 - **可中断、可回滚** — Ctrl+C 随时打断当前轮次(树杀子进程,历史还原到本轮开始前,不留残半的工具调用);`/rollback` 按轮次快照恢复文件改动,逐个文件「保留/撤销」,不依赖 git。
 - **沙箱防护** — 文件读写经沙箱拦截,挡掉越界路径(`../../`、绝对外圈、软链出圈等),不碰工作目录之外的文件。
 
 ## 特性
 
-- **流式输出 + 思考可见** — 回复边生成边显示;模型支持 reasoning 时思考过程实时可见,思考段自动折叠(不占屏),`/think N` 按需展开
+- **流式输出 + 思考可见** — 回复边生成边显示;模型支持 reasoning 时思考过程实时可见,思考段自动折叠(不占屏)
 - **全屏 TUI** — 备用屏(alt screen)+ 固定底栏状态行 + 滚动回看(PgUp/PgDn),运行中可打字(typeahead),下一轮自动预填
 - **会话持久化** — 每轮自动落盘,`--resume` / `/resume` 续接历史会话
 - **Skills 系统** — 自动扫描 `~/.mocode/skills/` 等目录,description 注入系统提示,模型按需调 `use_skill` 加载完整指令(渐进式披露:先看简介,任务相关才加载正文)
-- **斜杠命令** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/think` `/rollback`,输入时下拉过滤
+- **可选桌宠** — 独立悬浮窗(`/pet`)显示一个小角色,镜像 agent 活动(空闲 / 思考 / 跑工具 / 等人工),独立进程走 WebSocket,`/pet quit` 完全关闭。挂在终端外,绝不挡终端。
+- **斜杠命令** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`,输入时下拉过滤
 
 ## 安装
 
@@ -141,6 +143,7 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `switch_mode`   | 在 `plan`(只读规划)与 `auto`(全量执行)间切换;agent 可自行调用,先探查再动手       |
 | `drop_context`  | 把历史里无关的旧工具结果替换为存根释放上下文(保 tool_call_id 配对,不动 system 与当前轮;幂等) |
 | `task`          | 派生子 agent 执行独立子任务(独立历史、可受限工具集、可设步数上限);连续多个自动并行,只回摘要      |
+| `todolist`      | 工作记事本:把多步计划写到 `.mocode/plans/<id>.md`(抗压缩),边执行边勾选;`finish` 自动归档,`list / delete / unarchive` 管历史 |
 | `memory_save`   | 存一条跨会话长期记忆(标题进索引,正文按需取)                                  |
 | `memory_search` | 按关键词搜记忆正文,命中即提升召回计数(影响遗忘衰减)                              |
 | `memory_list`   | 列记忆索引(id/标题/摘要,无正文)                                      |
@@ -157,13 +160,17 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `/skills`       | 列出已发现的 skill                                       |
 | `/compact`      | 压缩历史(可带焦点 `/compact …`)                            |
 | `/resume`       | 续接已保存的会话                                           |
-| `/think`        | 展开折叠思考段(`/think N`)                                |
 | `/rollback`     | 菜单选轮次回滚(↑↓ · Enter)                                |
+| `/memory`       | 看记忆库:条目数 + 近期索引                                    |
+| `/reflect`      | 手动触发一次后台记忆反思 pass                                   |
 | `/model`        | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
 | `/init`         | 扫描项目生成 `MOCODE.md` 项目记忆(发给 agent 执行)               |
 | `/theme`        | 切换颜色主题(↑↓ · Enter,或 `/theme <name>` 直切)            |
 | `/plan`         | 切到 plan 模式(只读探查 + 产出计划,审批后切 auto 执行)              |
 | `/auto`         | 切回 auto 模式(全量工具执行)                                  |
+| `/pet`          | 开关桌宠(独立悬浮窗,镜像 agent 状态动画)                          |
+| `/pet skin`     | 选桌宠皮肤(↑↓ · Enter)                                  |
+| `/pet quit`     | 完全关闭桌宠进程(而非仅断开本连接)                                 |
 
 输入 `/` 触发下拉菜单,继续打字过滤;Esc 取消。
 
@@ -199,4 +206,4 @@ npm run typecheck   # tsc --noEmit
 
 ## 可后续扩展
 
-子 agent / 并行任务、MCP 工具集成、权限确认 UI。当前版本是一个流式、思考可见、可回滚的终端编码 agent。
+MCP 工具集成、权限确认 UI、真·worktree 隔离的子 agent 模式。当前版本已是流式、思考可见、可回滚的终端编码 agent:20 个工具、工作记事本规划、跨会话记忆、并行子 agent、可选桌宠。
