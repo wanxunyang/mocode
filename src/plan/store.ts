@@ -336,37 +336,48 @@ export function renderPlanForLLM(p: Plan): string {
 
 /**
  * 状态行 chip 的短摘要:`plan: 标题 (done/total) ▸ <当前 in_progress 步骤>`。
- * 无活跃 plan → 空串。maxWidth 控制总长(终端窄时压短;layout 的 leftW 决定传多大)。
+ * 无活跃 plan → 空串。
+ *
+ * 字符截断(非终端宽,固定长度 ~50 字符,方便状态行收纳):
+ *  - 标题(plan 标题):超 10 字截断,加 "..."
+ *  - 步骤标题:超 17 字截断,加 "..."
+ *  - 例:`plan: 3D 贪吃蛇游戏 (0/9) ▸ 1. 搭建项目骨架:创建 snake3d...`
+ *
  * 当前步骤取 status=in_progress;无 in_progress 但有 pending 时回退到第一项 pending
  * (LLM 刚标记某步 done 还没动 next 时,这样能看清下一步)。
  * 全 done → 不带 tail;finished → 拼「✓ N/N」。
+ *
+ * maxWidth 是软上限:极端窄(<26)时只保 head+count 不带 tail;否则按上述字符限。
  */
+const PLAN_TITLE_MAX = 10;
+const STEP_TITLE_MAX = 17;
+const TRUNC_DOTS = '...';
 export function renderPlanChip(p: Plan | null, maxWidth: number = 56): string {
   if (!p) return '';
+  const title = truncateByChars(p.title, PLAN_TITLE_MAX);
   const head = p.status === 'finished'
-    ? `plan ✓ ${p.title}`
-    : `plan: ${p.title}`;
+    ? `plan ✓ ${title}`
+    : `plan: ${title}`;
   const total = p.steps.length;
   const done = p.steps.filter((s) => s.status === 'done' || s.status === 'skipped').length;
   const count = `(${done}/${total})`;
   const fixed = `${head} ${count}`;
-  // 标题本身超长也截(head 也吃预算)
-  if (fixed.length > maxWidth) {
-    const titleBudget = maxWidth - 'plan: '.length - count.length - 2; // 「✓ 」或「 」
-    if (titleBudget <= 2) return fixed.slice(0, maxWidth); // 极窄,硬切
-    return `plan: ${truncateForChip(p.title, titleBudget)} ${count}`;
-  }
+  // 极窄:没空间塞步骤,只保 head+count
+  if (maxWidth < 26) return fixed;
   const cur = p.status === 'in_progress'
     ? p.steps.find((s) => s.status === 'in_progress')
       ?? p.steps.find((s) => s.status === 'pending')
     : null; // finished / abandoned → 不显当前步
   if (!cur) return fixed;
-  // tail 形如「 ▸ 2. step title」;prefix「 ▸ N. 」= 3 + N.长度
-  const prefix = ` ▸ ${cur.id}. `;
-  const titleBudget = maxWidth - fixed.length - prefix.length;
-  if (titleBudget < 1) return fixed; // 没空间塞步骤,只保 head+count
-  const title = truncateForChip(cur.title, titleBudget);
-  return fixed + prefix + title;
+  const stepTitle = truncateByChars(cur.title, STEP_TITLE_MAX);
+  return `${fixed} ▸ ${cur.id}. ${stepTitle}`;
+}
+
+/** 字符数截断(非显示宽):超 max 字符截到 max + "..."(3 字符省略号固定)。
+ *  <= max → 原样返回;> max → 前 max 字符 + "..."。 */
+function truncateByChars(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max) + TRUNC_DOTS;
 }
 
 function truncateForChip(s: string, max: number = 18): string {

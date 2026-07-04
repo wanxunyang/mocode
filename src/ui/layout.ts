@@ -824,27 +824,20 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
   return twoColumn(lead, leadW, rightStr, tailW, cols);
 }
 
-/** 下线之下那行(model 行):左 = 模式标识(auto 跟随主题色 / plan 显亮黄)+ 活跃 plan chip;右 = context + cwd,右端对齐。 */
+/** 下线之下那行(model 行):左 = 模式标识;右 = context + cwd,右端对齐。
+ *  活跃 plan chip 不再放这里,改放 spinner 行上方的「虚拟空行」(contentBottom+1,见 drawStatusBar),
+ *  既不挤 model 行,又给输入区上方留出可视分隔带。 */
 function composeModelLine(status: StatusBarData, cols: number): string {
   const ctx = status.contextBar; // 已带色
   const ctxW = ansiDisplayWidth(ctx);
-  // 左段:模式标识 + (活跃 plan 时)「│ plan: <summary>」chip,plan 摘要显 dim 黄(醒目但弱于 mode tag)
+  // 左段:仅模式标识
   const modeTag = status.modeTag ?? '';
   const modeColor = modeTag === 'plan' ? ui.yellow : ui.brightCyan;
-  const plan = (status.planSummary ?? '').trim();
   const modePart = modeTag
     ? `${modeColor}${modeTag}${ui.reset}`
     : '';
-  const planPart = plan
-    ? `${ui.dim}│ ${ui.yellow}${plan}${ui.reset}${ui.dim}`
-    : '';
-  const leftStr = modePart && planPart
-    ? `${modePart} ${planPart}`
-    : modePart || planPart;
-  // 宽计算:modeTag 宽 + (plan 显)「 │ 」+ plan 字面宽(不含 ANSI)
-  const leftW =
-    (modeTag ? displayWidth(modeTag) : 0) +
-    (plan ? 3 + displayWidth(plan) : 0);
+  const leftStr = modePart;
+  const leftW = modeTag ? displayWidth(modeTag) : 0;
   // 右段:ctx + sep + cwd,右端对齐。cwd 按预算截断,极窄(<6)隐藏。
   const minGap = 2;
   const cwdBudget = cols - leftW - minGap - ctxW - STATUS_SEP_W - 1;
@@ -855,17 +848,35 @@ function composeModelLine(status: StatusBarData, cols: number): string {
   return twoColumn(leftStr, leftW, rightStr, rightW, cols);
 }
 
-/** 画状态行(spinner 行 + model 行,两行)。RUNNING 态 spinner 频繁调。
- *  行号(footerH=6):spinner 行=contentBottom+2,model 行=rows(屏底)。
- *  上线 contentBottom+3 / 输入 contentBottom+4 / 下线 contentBottom+5 由 paintInput 画,此函数只刷两行信息。 */
+/** spinner 行上方的「虚拟空行」(contentBottom+1)。
+ *  - 有活跃 plan:显「plan: <summary> ▸ N. step」整行左对齐(yellow + dim)
+ *  - 无活跃 plan:空(保留原分隔视觉,避免内容贴输入区)
+ *  这行在 DECSTBM 滚动区外([1, contentBottom]),稳定不滚。 */
+function composePlanLine(status: StatusBarData, cols: number): string {
+  const plan = (status.planSummary ?? '').trim();
+  if (!plan) return ''; // 无 plan:画空,等 paint 路径 clearLine
+  // 整行左对齐,不留右段(plan 自带进度信息,不需要 cwd)
+  return `${ui.dim}│ ${ui.yellow}${plan}${ui.reset}${ui.dim}`;
+}
+
+/** 画状态行(plan 行 + spinner 行 + model 行,三行)。RUNNING 态 spinner 频繁调。
+ *  行号(footerH=6):
+ *    plan 行     = contentBottom+1  (活跃 plan 时显 chip;无则空)
+ *    spinner 行  = contentBottom+2  (◆ 空闲 / ⠹ 思考中… / etc)
+ *    上线        = contentBottom+3  (画在 paintInput)
+ *    输入行      = contentBottom+4
+ *    下线        = contentBottom+5
+ *    model 行    = rows              (屏底:auto + ctx + cwd) */
 export function drawStatusBar(status?: StatusBarData): void {
   if (!active || !base) return;
   const s = status ?? { ...base, status: statusText, spinnerFrame };
   const g = getGeo();
-  const spinnerRow = g.contentBottom + 2; // +1 虚拟空行,+2 spinner 行
+  const planRow = g.contentBottom + 1;
+  const spinnerRow = g.contentBottom + 2;
   const modelRow = g.rows; // 屏底:model 行
-  // 一次写入:cup spinner 行 + clearLine + spinner 行内容 + cup model 行 + clearLine + model 行内容 + cup 回。
+  // 一次写入:三行 cup+clear+内容,末尾 cup 回续写位/输入框光标
   let out =
+    cup(planRow, 1) + esc.clearLine + composePlanLine(s, g.cols) +
     cup(spinnerRow, 1) + esc.clearLine + composeSpinnerLine(s, g.cols) +
     cup(modelRow, 1) + esc.clearLine + composeModelLine(s, g.cols);
   if (mode === 'running') {
@@ -1171,11 +1182,17 @@ export function paintInput(view: InputView): void {
     buf += cup(g.contentBottom, 1) + esc.clearLine + line;
   }
 
-  // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):恒清空,防底栏撑高时旧内容残留该行。
-  buf += cup(g.contentBottom + 1, 1) + esc.clearLine;
+  // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):
+  //     - 无活跃 plan:清空保留作分隔(原设计)
+  //     - 有活跃 plan:渲染 plan chip(整帧重画时也要更新,避免 listener 漏触发后残留)
+  {
+    const plan = (base.planSummary ?? '').trim();
+    buf += cup(g.contentBottom + 1, 1) + esc.clearLine;
+    if (plan) buf += `${ui.yellow}${plan}${ui.reset}`;
+  }
 
   // 3. 状态行:spinner 行 + model 行(两行式底栏)
-  const spinnerRow = g.contentBottom + 2; // +1 虚拟空行,+2 spinner 行
+  const spinnerRow = g.contentBottom + 2; // +1 虚拟空行(plan 行),+2 spinner 行
   const modelRow = g.rows; // 屏底:model 行
   const status: StatusBarData = { ...base, status: statusText, spinnerFrame };
   buf += cup(spinnerRow, 1) + esc.clearLine + composeSpinnerLine(status, g.cols);
