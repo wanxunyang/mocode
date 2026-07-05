@@ -66,6 +66,10 @@ export interface Config {
    *  观察类工具永远只到 REFERENCED,不自动 STUB)。与 contextRelprune 并列,纯静态、不调 LLM。
    *  默认 true;设 MOCODE_LIFECYCLE=false 全局回退。 */
   contextLifecycle: boolean;
+  /** Context Budget Scheduler 总开关(五区分账 + ROI 排序调度)。
+   *  关掉则 agent 步前退化为 maybeCompact(history) 老路径(只看总占用 0.85 阈值),
+   *  零行为变化。默认 true;设 MOCODE_BUDGET_SCHEDULER=false 全局回退。 */
+  contextBudget: boolean;
   /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
   autoReflect: boolean;
   /** 每 N 个轮次触发一次后台反思 pass(与 agent 并发,不阻塞)。默认 5。 */
@@ -222,6 +226,7 @@ export const config: Config = {
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',
+  contextBudget: process.env.MOCODE_BUDGET_SCHEDULER !== 'false',
   autoReflect: process.env.AUTO_REFLECT !== 'false',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   maxSteps: Number(process.env.MAX_STEPS) || 200,

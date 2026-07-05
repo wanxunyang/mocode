@@ -17,13 +17,15 @@ import {
 import { executeTool } from '../tools/registry.js';
 import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
-import { maybeCompact, contextState, dropContextFromHistory } from '../session/index.js';
+import { maybeCompact, runScheduler, contextState, dropContextFromHistory } from '../session/index.js';
+import { createBudgetScheduler } from '../session/scheduler.js';
 import { optimizeToolResult } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
 import { config } from '../config/index.js';
 import { jailResolve } from '../sandbox/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
+import type { BudgetScheduler } from '../session/scheduler.js';
 import type { DropContextFilter, DropContextResult } from '../tools/types.js';
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
@@ -106,6 +108,7 @@ function pushToolResult(
   output: string,
   pruner: ReturnType<typeof createRelevancePruner> | null,
   lifecycle: LifecycleEngine | null,
+  scheduler: BudgetScheduler | null,
 ): void {
   const msg = {
     role: 'tool' as const,
@@ -239,6 +242,11 @@ export async function runAgentCore(
   // producer 与 read/edit/write 的 consumer 引用关系;孤立+老化的非观察类工具自动 STUB。
   // 开关关闭时为 null,所有 pushToolResult / mutation 调用走无 lifecycle 路径(零行为变化)。
   const lifecycle = config.contextLifecycle ? createLifecycleEngine() : null;
+  // 预算调度器:每个 runAgentCore 实例一个,步前 evaluateBudget + scheduleActions。
+  // 决策按 ROI 分发(cold tools 优先 / history 摘要最后);contextBudget 开关关闭时为 null。
+  const scheduler: BudgetScheduler | null = config.contextBudget !== false
+    ? createBudgetScheduler() // 在 step 循环之外实例化一次,跨步持有 lastRunLog
+    : null;
   // 本轮流式状态:首个正文 token 到达即停 spinner(思考期间 spinner 持续转「思考中…」,不写思考内容)。
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
@@ -276,8 +284,14 @@ export async function runAgentCore(
         abortRestore();
         return { completed: false, finalText: null };
       }
-      // 步前:接近窗口上限时自动压缩(三层)。此时 spinner 已停,通知行干净。
-      await maybeCompact(history);
+      // 步前:五区 Budget Scheduler 决策——按 ROI 调度(冷工具优先 / history 摘要最后)。
+      // 开关关闭(scheduler=null)时退化回原 maybeCompact 路径,零行为变化。
+      // 此时 spinner 已停,通知行干净。
+      if (scheduler) {
+        await scheduler.runStep(history, step);
+      } else {
+        await maybeCompact(history);
+      }
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')
       mode = 'idle';
       gotText = false;
@@ -350,7 +364,7 @@ export async function runAgentCore(
               const output = await started[k];
               hooks.onToolDone?.();
               hooks.onToolResult?.(tc, output, null, null, 1); // 只读工具无 diff
-              pushToolResult(history, tc, output, relprune, lifecycle);
+              pushToolResult(history, tc, output, relprune, lifecycle, scheduler);
             }
             i = j;
           } else if (calls[i].name === 'task') {
@@ -369,7 +383,7 @@ export async function runAgentCore(
               hooks.onToolHeader?.(tc);
               const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
               hooks.onToolResult?.(tc, err, null, null, 1);
-              pushToolResult(history, tc, err, relprune, lifecycle);
+              pushToolResult(history, tc, err, relprune, lifecycle, scheduler);
               i++;
               continue;
             }
@@ -387,7 +401,7 @@ export async function runAgentCore(
               const tc = batch[k];
               const output = await started[k];
               hooks.onToolResult?.(tc, output, null, null, 1); // task 结果是摘要,无 diff
-              pushToolResult(history, tc, output, relprune, lifecycle);
+              pushToolResult(history, tc, output, relprune, lifecycle, scheduler);
             }
             hooks.onToolDone?.();
             i = j;
@@ -400,7 +414,7 @@ export async function runAgentCore(
               hooks.onToolHeader?.(tc);
               const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
               hooks.onToolResult?.(tc, err, null, null, 1);
-              pushToolResult(history, tc, err, relprune, lifecycle);
+              pushToolResult(history, tc, err, relprune, lifecycle, scheduler);
               i++;
               continue;
             }
@@ -413,7 +427,7 @@ export async function runAgentCore(
             const output = await executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext });
             hooks.onToolDone?.();
             hooks.onToolResult?.(tc, output, parsed, preWriteOld, editStartLine);
-            pushToolResult(history, tc, output, relprune, lifecycle);
+            pushToolResult(history, tc, output, relprune, lifecycle, scheduler);
             // 相关性裁剪 mutation 通知:edit_file/write_file 后,该 path 之前的所有 read_file
             // 结果已失效(已不再是文件当前状态)→ stub 为存根。pruner 内部 try/catch + 幂等。
             // 非 mutation 工具(run_command/use_skill/memory_* 等)此处 path="" 不触发。

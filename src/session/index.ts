@@ -13,6 +13,17 @@ export {
 } from './compact.js';
 export type { CompactOptions, CompactResult } from './compact.js';
 
+// ── Context Budget Scheduler 接缝 ────────────────────────────────────────
+// agent/core.ts 步前调 runScheduler(history, step):评估五区预算 → 按 ROI 调度
+// shrink_cold_tools / cap_hot_tools / compact_history。开关关闭时退化为 maybeCompact。
+// repl /compact 命令调 manualCompact(history, focus?):与自动路径完全一致,focus 透传摘要 prompt。
+export {
+  runScheduler,
+  manualCompact,
+  createBudgetScheduler,
+} from './scheduler.js';
+export type { BudgetScheduler, SchedulerRunLog } from './scheduler.js';
+
 export {
   dropContextFromHistory,
   formatDropResult,

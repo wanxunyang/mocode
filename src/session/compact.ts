@@ -33,6 +33,12 @@ export interface CompactOptions {
   focus?: string;
   /** 可注入的摘要器(测试用);缺省调 chat()。 */
   summarize?: (older: ChatMessage[], focus?: string) => Promise<string | null>;
+  /** 手动触发(repl /compact)开关:强制走 microcompact/summarize,绕过 autoCompact 阈。
+   *  设为 true 后,即便无 ROI 触发(history 不超/totalOver=false)也压——对齐用户拍板的"真·强制"。
+   *  force:在 manual 基础上再绕过「oldGroups 空 → 直接 noop」的硬边界,允许降 keepBudget 强压。
+   *  默认 manual=false / force=false(自动路径行为完全不变)。 */
+  manual?: boolean;
+  force?: boolean;
 }
 
 export interface CompactResult {
@@ -40,11 +46,27 @@ export interface CompactResult {
   summarized: boolean;
   estimateBefore: number;
   estimateAfter: number;
-  reason: 'noop' | 'microcompact' | 'summarize' | 'too-large';
+  reason:
+    | 'noop-empty' // 整段 history 太短(<2 message)→ 真无旧区
+    | 'noop-protected' // 全在保护区(系统 + 当前轮)→ 无可压
+    | 'noop-ml-only' // LLM 摘要失败 + 无超大单条可微压
+    | 'noop-shrunk-too-large' // 微压缩后仍超阈,且 LLM 不可用 → /clear
+    | 'noop-noold-noop' // 既不在 manual 又不在 force + 无 ROI 触发(自动 noop)
+    | 'microcompact' // 只跑了 C1 中截超大
+    | 'summarize'; // 跑了 LLM 摘要
+  /** 调试字段:保护区占比(0-1),供 /compact 显示"为什么没压"。force 时降 keepBudget 后可能更小。 */
+  protectedRatio?: number;
+  /** 调试字段:旧区可压组数,供 UI 显示。 */
+  oldGroupCount?: number;
 }
 
-/** 跨模块共享的上下文状态:agent 写 lastUsage,compact 写 lastEstimate,repl 的 /context 读。 */
-export const contextState: { lastUsage?: ChatUsage; lastEstimate: number } = {
+/** 跨模块共享的上下文状态:agent 写 lastUsage,compact 写 lastEstimate,repl 的 /context 读。
+ *  scheduler.ts 写最近一次调度日志(可选,repl 可读不到时 no-op)。 */
+export const contextState: {
+  lastUsage?: ChatUsage;
+  lastEstimate: number;
+  schedulerLog?: import('./scheduler.js').SchedulerRunLog;
+} = {
   lastEstimate: 0,
 };
 
@@ -320,18 +342,87 @@ export async function compactHistory(
     summarized: false,
     estimateBefore,
     estimateAfter: estimateBefore,
-    reason: 'noop',
+    reason: 'noop-noold-noop' as CompactResult['reason'],
+    protectedRatio: history.length > 0 ? kept.length / history.length : 0,
+    oldGroupCount: oldGroups.length,
   };
 
   if (oldGroups.length === 0) {
     // 没有旧区可压缩
+    const protectedRatio = history.length > 0 ? kept.length / history.length : 0;
+    if (opts.force && history.length > 2) {
+      // 真·强制压:把降 keepBudget 当 old group 强行创建一组可压区
+      // 取最早的 user/assistant/tool 当 old,后一段当 kept
+      const mid = Math.max(1, Math.floor(history.length / 2));
+      const older = history.slice(1, mid);
+      const keptAfter = history.slice(mid);
+      // 走仅微压缩(LLM 可能不可用,不强行 summarize)
+      let microcompactDone2 = false;
+      for (const m of older) {
+        const c = (m as any).content;
+        if (typeof c === 'string' && c.length > MAX_OLD_TOOL_STUB) {
+          (m as any).content = truncateMid(c, MAX_OLD_TOOL_STUB);
+          microcompactDone2 = true;
+        }
+        const as = m as any;
+        if (as.role === 'assistant') {
+          if (typeof as.content === 'string' && as.content.length > MAX_OLD_TOOL_STUB) {
+            as.content = truncateMid(as.content, MAX_OLD_TOOL_STUB);
+            microcompactDone2 = true;
+          }
+          if (Array.isArray(as.tool_calls)) {
+            for (const tc of as.tool_calls) {
+              const args = tc?.function?.arguments;
+              if (typeof args !== 'string' || args.length <= MAX_OLD_TOOL_STUB) continue;
+              const stubbed = stubToolCallArguments(args);
+              if (stubbed !== args) {
+                tc.function.arguments = stubbed;
+                microcompactDone2 = true;
+              }
+            }
+          }
+        }
+      }
+      const summaryMsg: ChatMessage = {
+        role: 'system',
+        content: older.length > 0
+          ? `# 会话摘要(force)\n被跳过的早期对话 ${older.length} 条已微压缩(token 数减少)。`
+          : `# 会话摘要(force)\n无内容。`,
+      } as ChatMessage;
+      const rebuilt = [history[0], summaryMsg, ...keptAfter];
+      history.length = 0;
+      history.push(...rebuilt);
+      pruneAfterCompaction(history);
+      const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
+      contextState.lastEstimate = estimateAfter;
+      contextState.lastUsage = undefined;
+      layout.contentWrite(
+        `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}强制压缩(focus on early history)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
+      );
+      return {
+        compacted: true,
+        summarized: false,
+        estimateBefore,
+        estimateAfter,
+        reason: microcompactDone2 ? 'microcompact' : 'summarize',
+        protectedRatio,
+        oldGroupCount: 0,
+      };
+    }
+    // 细分 noop 类型,供 repl 文案
+    const isEmpty = history.length <= 1; // 只有 system 提示
+    if (isEmpty) {
+      // 整段 history 太短,没有可压内容
+      return { ...noop, reason: 'noop-empty', protectedRatio };
+    }
+    // history 有内容但全在保护区(系统 + 当前轮)
     if (estimateBefore >= opts.threshold * opts.window) {
       layout.contentWrite(
-        `  ${ui.yellow}●${ui.reset} ${ui.yellow}上下文已超阈但无可压缩项,建议 /clear 或缩短输入。${ui.reset}\n`
+        `  ${ui.yellow}●${ui.reset} ${ui.yellow}上下文已超阈但无可压缩项(全在保护区),建议 /clear 或缩短输入。${ui.reset}\n`,
       );
-      return { ...noop, reason: 'too-large' };
+      return { ...noop, reason: 'noop-shrunk-too-large', protectedRatio };
     }
-    return noop;
+    return { ...noop, reason: 'noop-protected', protectedRatio };
   }
 
   // 第一层:微压缩——旧区原地截短(保 tool_call_id,无 LLM 调用)
@@ -428,23 +519,68 @@ export async function compactHistory(
       estimateBefore,
       estimateAfter,
       reason: 'microcompact',
+      protectedRatio: history.length > 0 ? kept.length / history.length : 0,
+      oldGroupCount: oldGroups.length,
     };
   }
-  return noop;
+  // 摘要失败 + 无超大单条可微压 = 真 noop
+  return {
+    ...noop,
+    reason: 'noop-ml-only',
+    protectedRatio: history.length > 0 ? kept.length / history.length : 0,
+    oldGroupCount: oldGroups.length,
+  };
 }
 
 /**
  * 自动压缩门槛:agent 每步调 chat() 前调用。
  * 用全量启发式估算(始终可用、安全侧、无 stale-usage 问题);超阈则压缩。
+ *
+ * 升级到 Budget Scheduler:可传 `report: BudgetReport`。传了就**按 ROI 调度**:
+ *   - 只有当 `report.layers.history.overBudget` 或 `report.totalOver` 时才压;
+ *   - 冷工具超(Cold Tool ROI 最低)→ 不压 history,留给调度器的 cold tools 路径处理。
+ * 这样 cold tools 路径(L1 中截 / L2 relevance / L3 age stub)能先动,history
+ * 摘要(最贵)只在 cold tools 解不开时才触发。
+ *
+ * 不传 report 时退化为原行为:仅看总占用是否超 `compactThreshold * window`——
+ * 兼容老调用方(子 agent / 测试直接调时),零行为变化。
+ *
+ * manual 选项(repl /compact 用):true 时旁路 autoCompact 开关与 ROI 阈,
+ * 强制走 compactHistory(manual/force 参数透传)。返 CompactResult 给 caller 文案展示。
+ * 默认 manual=false 自动路径完全不变。
  */
-export async function maybeCompact(history: ChatMessage[]): Promise<void> {
+export async function maybeCompact(
+  history: ChatMessage[],
+  report?: {
+    layers: { history: { overBudget: boolean } };
+    totalOver: boolean;
+  },
+  manualOpts?: { manual?: boolean; force?: boolean; focus?: string },
+): Promise<CompactResult | void> {
   const schemaTokens = estimateToolSchemaTokens();
   const est = estimateMessagesTokens(history) + schemaTokens;
   contextState.lastEstimate = est;
-  if (!config.autoCompact) return;
-  if (est < config.compactThreshold * config.contextWindowTokens) return;
-  await compactHistory(history, {
+  const isManual = manualOpts?.manual === true;
+
+  // 手动路径:旁路 autoCompact / report / 总阈三重门
+  if (!isManual) {
+    if (!config.autoCompact) return;
+    if (report) {
+      // 调度模式:只压 history 层超或兜底总超
+      const needsCompact = report.layers.history.overBudget || report.totalOver;
+      if (!needsCompact) return;
+    } else {
+      // 老路径:总占用超阈才压
+      if (est < config.compactThreshold * config.contextWindowTokens) return;
+    }
+  }
+
+  const r = await compactHistory(history, {
     window: config.contextWindowTokens,
     threshold: config.compactThreshold,
+    focus: manualOpts?.focus,
+    manual: isManual,
+    force: manualOpts?.force,
   });
+  if (isManual) return r;
 }

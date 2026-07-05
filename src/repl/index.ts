@@ -36,7 +36,7 @@ import {
 import { modelSupportsVision } from '../llm/capabilities.js';
 import type { ContentPart } from '../agent/core.js';
 import {
-  compactHistory,
+  manualCompact,
   contextState,
   newSessionId,
   saveSession,
@@ -978,16 +978,58 @@ export async function startRepl(
       continue;
     }
     if (line === '/compact' || line.startsWith('/compact ')) {
-      const focus = line.startsWith('/compact ')
-        ? line.slice('/compact '.length).trim()
-        : undefined;
-      const r = await compactHistory(history, {
-        window: config.contextWindowTokens,
-        threshold: config.compactThreshold,
-        focus,
-      });
-      if (r.reason === 'noop') {
-        layout.contentWrite(`${ui.dim}(无需压缩:没有可压缩的旧消息)${ui.reset}\n`);
+      // /compact 可选语法:/compact [focus]  或  /compact --force [focus]
+      // --force:即便 oldGroups 空(history 全在保护区)也强行把早期消息降级压一次。
+      const rest = line.slice('/compact'.length).trim();
+      let force = false;
+      let focus: string | undefined;
+      if (rest === '--force') force = true;
+      else if (rest.startsWith('--force ')) {
+        force = true;
+        focus = rest.slice('--force '.length).trim() || undefined;
+      } else if (rest) focus = rest;
+      // 走调度器路径:与自动每步压缩完全一致——五区按 ROI 压(cold tools 优先 → history 摘要最后)。
+      // focus 透传到 compact_history action 的 LLM 摘要 prompt。
+      // 返回 SchedulerRunLog 给 UI 显示决策;退化路径(开关关时)在 manualCompact 内部走 compactHistory。
+      const log = await manualCompact(history, focus, { force });
+      const d = log.compactDetail;
+      if (!d) {
+        // 兜底(旧调用):只显示 old 文案
+        if (!log.compactHistoryCalled) {
+          layout.contentWrite(`${ui.dim}(无需压缩:没有可压缩的旧消息)${ui.reset}\n`);
+        } else if (focus) {
+          layout.contentWrite(`${ui.dim}(带焦点压缩:${focus})${ui.reset}\n`);
+        }
+        continue;
+      }
+      // 详细文案:按 reason 分类
+      const reason = d.reason;
+      const before = d.estimateBefore;
+      const after = d.estimateAfter;
+      const proto = d.protectedRatio !== undefined ? `保护区占比 ${(d.protectedRatio * 100).toFixed(0)}%` : '';
+      const oldCt = d.oldGroupCount !== undefined ? `旧区组数 ${d.oldGroupCount}` : '';
+      const focusNote = focus ? `焦点:${focus}` : '';
+      const stats = [proto, oldCt].filter(Boolean).join(' · ');
+
+      if (reason === 'microcompact') {
+        layout.contentWrite(`${ui.cyan}✓ 微压缩:${ui.reset} ${before} → ${after} tokens${stats ? `  (${ui.dim}${stats}${ui.reset})` : ''}\n`);
+      } else if (reason === 'summarize') {
+        layout.contentWrite(`${ui.cyan}✓ LLM 摘要:${ui.reset} ${before} → ${after} tokens${focusNote ? `  (${ui.dim}${focusNote}${ui.reset})` : ''}\n`);
+      } else if (reason === 'noop-empty') {
+        layout.contentWrite(`${ui.dim}(history 太短,只有 system 提示,无可压旧区)${ui.reset}\n`);
+      } else if (reason === 'noop-protected') {
+        layout.contentWrite(`${ui.dim}(无可压旧区:全部在保护区 system + 当前轮)${ui.reset}${stats ? `  ${ui.dim}(${stats})${ui.reset}` : ''}\n`);
+        layout.contentWrite(`${ui.dim}提示:/compact --force 强行把早期对话压成摘要${ui.reset}\n`);
+      } else if (reason === 'noop-ml-only') {
+        layout.contentWrite(`${ui.dim}(LLM 摘要失败,且无超大单条可微压;可能是后端不可用)${ui.reset}\n`);
+        layout.contentWrite(`${ui.dim}回退:只跑了 keep-current 结构,history 未变${ui.reset}\n`);
+      } else if (reason === 'noop-shrunk-too-large') {
+        layout.contentWrite(`${ui.yellow}● 上下文已超阈但无可压缩项(全在保护区),建议 /clear 或缩短输入。${ui.reset}\n`);
+        if (stats) layout.contentWrite(`${ui.dim}(${stats})${ui.reset}\n`);
+      } else if (reason === 'noop-noold-noop') {
+        layout.contentWrite(`${ui.dim}(无需压缩:没有可压缩的旧消息,且不在手动触发)${ui.reset}\n`);
+      } else {
+        layout.contentWrite(`${ui.dim}(reason=${reason},${before} → ${after} tokens)${ui.reset}\n`);
       }
       continue;
     }
