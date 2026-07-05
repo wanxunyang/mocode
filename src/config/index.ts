@@ -61,6 +61,11 @@ export interface Config {
    *  单条上限与 microcompact 旧区截短影响)。默认 true;
    *  设 MOCODE_CONTEXT_RELPRUNE=false 全局回退。 */
   contextRelprune: boolean;
+  /** 观察者生命周期总开关(LIVE→REFERENCED→OBSOLETE→STUB 四态机;grep/glob/codegraph
+   *  producer ↔ read/edit/write consumer 引用追踪;孤立+老化非观察类工具自动 STUB;
+   *  观察类工具永远只到 REFERENCED,不自动 STUB)。与 contextRelprune 并列,纯静态、不调 LLM。
+   *  默认 true;设 MOCODE_LIFECYCLE=false 全局回退。 */
+  contextLifecycle: boolean;
   /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
   autoReflect: boolean;
   /** 每 N 个轮次触发一次后台反思 pass(与 agent 并发,不阻塞)。默认 5。 */
@@ -149,6 +154,7 @@ ${PLATFORM_NOTE}
 - Use web_fetch to read a specific URL (a link from search results, or a URL given by the user); it only fetches static HTML — if a JS-rendered page yields no body, switch to web_search (its results include cleaned body text).
 - Call ask_human when you hit a decision point requiring user input (multiple implementation approaches, unclear intent, or needing extra info to proceed) — list options for the user to pick (they can also choose "custom input" to answer freely). Don't call it frequently when the task is clear and you can decide yourself; if the user cancels, switch approach or proceed with available info — don't re-ask the same question.
 - **Drop irrelevant context proactively**: call drop_context to stub-replace tool results in history that are no longer needed. This is your primary lever for keeping context lean — every step grows history until the threshold-triggered compact fires (which costs an extra LLM call and is more aggressive). Call when any of: (a) you just finished a grep/read sweep and only 1-2 hits mattered; (b) history has >20 tool messages and you are early in the task; (c) you switched sub-goals and the old sub-goal's exploration is dead weight. The call itself adds ~300 tokens, so only call when freed tokens clearly exceed that (≥1 large grep hit or ≥2 medium results). Do NOT call when near completion, when history is short (<10 tool messages), or when the candidate results are still in active use. It preserves tool_call_id pairing (only content changes); the system prompt and current turn are never dropped. Use filters (toolNames / contains) to target precisely.
+- **Observation lifecycle is automatic**: behind the scenes every tool result goes LIVE→REFERENCED→OBSOLETE→STUB. grep/glob/codegraph/web_search/web_fetch are always kept as REFERENCED (never auto-stubbed) because they may surface multiple candidates. read/edit/write results that nobody consumes after two more consumer pushes get auto-stubbed. This is zero-cost (static analysis, no LLM call). You don't need to manage lifecycle yourself — just trust that stale tool results get pruned.
 - **Batch independent tool calls in one turn**: the executor runs ALL returned tool calls before the next LLM call, so emitting [read_file, glob, read_file] together is dramatically cheaper than three separate turns. Default to bundling exploration reads and parallel writes.
 - **Chain shell workflows in a single \`run_command\`**: use \`&&\`, \`;\`, \`|\`, \`>\`, heredocs to fold multi-step scripts (\`mkdir -p x && cat > x/file.ts <<'EOF' ... EOF && npm test\`) into one call. Only emit a follow-up turn when the result forces a decision (error, ambiguous output, branching logic).
 
@@ -215,6 +221,7 @@ export const config: Config = {
   autoCompact: process.env.AUTO_COMPACT !== 'false',
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
+  contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',
   autoReflect: process.env.AUTO_REFLECT !== 'false',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   maxSteps: Number(process.env.MAX_STEPS) || 200,
