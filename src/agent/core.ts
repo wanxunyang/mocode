@@ -19,6 +19,7 @@ import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import { maybeCompact, contextState, dropContextFromHistory } from '../session/index.js';
 import { optimizeToolResult } from '../context/index.js';
+import { createRelevancePruner } from '../context/relevance.js';
 import { config } from '../config/index.js';
 import { jailResolve } from '../sandbox/index.js';
 import type { DropContextFilter, DropContextResult } from '../tools/types.js';
@@ -89,19 +90,27 @@ function readDiffContext(
 
 /** 回灌 tool 结果到 history:经 Context Optimization Pipeline 编码(tree/search/log/...)后裁到单条上限。
  *  tool_call_id 与 assistant.tool_calls 按序配对。未注册 encoder 时回落 capToolResultForHistory(零行为变化)。
- *  TUI 渲染(hooks.onToolResult)用原始 output,与此解耦——屏上看全量,LLM 看编码后紧凑版。 */
+ *  TUI 渲染(hooks.onToolResult)用原始 output,与此解耦——屏上看全量,LLM 看编码后紧凑版。
+ *  出口再经 Relevance Pruner 做跨条裁剪:同 path 旧 read_file 自动 stub 为存根。
+ *  - pruner 在每个 runAgentCore 实例化一次(本闭包持有),会话级状态。
+ *  - 开关关闭时 pruner 不创建(零开销、零行为变化)。 */
 function pushToolResult(
   history: ChatMessage[],
   tc: ToolCallRef,
   output: string,
+  pruner: ReturnType<typeof createRelevancePruner> | null,
 ): void {
-  history.push({
-    role: 'tool',
+  const msg = {
+    role: 'tool' as const,
     tool_call_id: tc.id,
     // optimizeToolResult:classifier 选 encoder → encode(保不变量压缩)→ capToolResultForHistory 兜底。
     // tc.arguments 透传给 encoder(上下文感知编码,如 read_file 的 offset/limit)。永不抛错。
     content: optimizeToolResult(tc.name, output, tc.arguments),
-  } as ChatMessage);
+  } as ChatMessage;
+  history.push(msg);
+  // 相关性裁剪:只动 read_file / edit_file / write_file 三类(其它 tool 与本层无关)。
+  // pruner 内部 try/catch + 幂等,永不抛错;开关关闭时 pruner=null 完全跳过。
+  if (pruner) pruner.observePush(history, msg);
 }
 
 // ── hooks:把 runAgent 的展示副作用参数化 ──────────────────────────────────
@@ -213,6 +222,9 @@ export async function runAgentCore(
   // 子 agent 也在自己的 history 上操作(子 agent 独立 history);skipRollback 不影响此行为。
   const dropContext = (filter: DropContextFilter): DropContextResult =>
     dropContextFromHistory(history, filter);
+  // 相关性裁剪 pruner:每个 runAgentCore 实例一个,纯静态、不调 LLM、自动判定 read_file 失效。
+  // 开关关闭时为 null,所有 pushToolResult 调用走无 pruner 路径(零行为变化)。
+  const relprune = config.contextRelprune ? createRelevancePruner() : null;
   // 本轮流式状态:首个正文 token 到达即停 spinner(思考期间 spinner 持续转「思考中…」,不写思考内容)。
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
@@ -324,7 +336,7 @@ export async function runAgentCore(
               const output = await started[k];
               hooks.onToolDone?.();
               hooks.onToolResult?.(tc, output, null, null, 1); // 只读工具无 diff
-              pushToolResult(history, tc, output);
+              pushToolResult(history, tc, output, relprune);
             }
             i = j;
           } else if (calls[i].name === 'task') {
@@ -343,7 +355,7 @@ export async function runAgentCore(
               hooks.onToolHeader?.(tc);
               const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
               hooks.onToolResult?.(tc, err, null, null, 1);
-              pushToolResult(history, tc, err);
+              pushToolResult(history, tc, err, relprune);
               i++;
               continue;
             }
@@ -361,7 +373,7 @@ export async function runAgentCore(
               const tc = batch[k];
               const output = await started[k];
               hooks.onToolResult?.(tc, output, null, null, 1); // task 结果是摘要,无 diff
-              pushToolResult(history, tc, output);
+              pushToolResult(history, tc, output, relprune);
             }
             hooks.onToolDone?.();
             i = j;
@@ -374,7 +386,7 @@ export async function runAgentCore(
               hooks.onToolHeader?.(tc);
               const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
               hooks.onToolResult?.(tc, err, null, null, 1);
-              pushToolResult(history, tc, err);
+              pushToolResult(history, tc, err, relprune);
               i++;
               continue;
             }
@@ -387,7 +399,14 @@ export async function runAgentCore(
             const output = await executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext });
             hooks.onToolDone?.();
             hooks.onToolResult?.(tc, output, parsed, preWriteOld, editStartLine);
-            pushToolResult(history, tc, output);
+            pushToolResult(history, tc, output, relprune);
+            // 相关性裁剪 mutation 通知:edit_file/write_file 后,该 path 之前的所有 read_file
+            // 结果已失效(已不再是文件当前状态)→ stub 为存根。pruner 内部 try/catch + 幂等。
+            // 非 mutation 工具(run_command/use_skill/memory_* 等)此处 path="" 不触发。
+            if (relprune && isMutationTool(tc.name)) {
+              const mp = parsed?.path;
+              if (typeof mp === 'string' && mp) relprune.observeMutation(history, mp);
+            }
             i++;
           }
         }

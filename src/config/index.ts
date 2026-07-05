@@ -56,6 +56,11 @@ export interface Config {
   /** Context Optimization Pipeline 总开关(工具结果进 LLM 前的类型化编码:tree/search/log/…)。
    *  关掉则工具结果原样进 LLM(仅长度裁剪),零行为变化。默认 true。 */
   contextOptimize: boolean;
+  /** 相关性裁剪总开关(read_file 跨条裁剪:同 path 旧 read + 已被 mutation 覆写的旧 read
+   *  自动替换为存根)。纯静态、不调 LLM;关掉则保留所有 read 结果(只受 capToolResultForHistory
+   *  单条上限与 microcompact 旧区截短影响)。默认 true;
+   *  设 MOCODE_CONTEXT_RELPRUNE=false 全局回退。 */
+  contextRelprune: boolean;
   /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
   autoReflect: boolean;
   /** 每 N 个轮次触发一次后台反思 pass(与 agent 并发,不阻塞)。默认 5。 */
@@ -209,6 +214,7 @@ export const config: Config = {
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
   autoCompact: process.env.AUTO_COMPACT !== 'false',
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
+  contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
   autoReflect: process.env.AUTO_REFLECT !== 'false',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   maxSteps: Number(process.env.MAX_STEPS) || 200,
