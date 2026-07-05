@@ -72,6 +72,13 @@ export interface Config {
   contextBudget: boolean;
   /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
   autoReflect: boolean;
+  /**
+   * 记忆子系统总开关。关闭时:5 个 memory_* 工具不进工具表,buildSystemPrompt
+   * 里的 Memory Index 段 + memory_* 工具使用说明整段不出现,plan 模式提示词里的
+   * 工具名也跟着消失。运行时 /memory_switch 改;持久化 MEMORY_ENABLED。
+   * 默认 false:新用户零侵入,想用记忆功能显式打开。
+   */
+  memoryEnabled: boolean;
   /** 每 N 个轮次触发一次后台反思 pass(与 agent 并发,不阻塞)。默认 5。 */
   reflectEveryN: number;
   /** 每轮 agent 循环最大步数(防无限循环)。默认 25。 */
@@ -132,7 +139,61 @@ const PLATFORM_NOTE = (() => {
 - Still prefer the dedicated tools (read_file/glob/grep) over hand-rolled shell where they fit — they avoid quoting pitfalls and are already wired in.`;
 })();
 
-const SYSTEM_PROMPT = `You are mocode, a terminal coding agent. You complete programming tasks through a "think → call tool → observe result → think again" loop until the problem is solved. Reply to the user in Chinese.
+/**
+ * 基础系统提示的"记忆段落":开 isMemoryEnabled() 时才拼。
+ * 默认关(新用户零侵入):这段 + 工具表里的 5 个 memory_* + 系统提示尾部的 Memory Index
+ * 都不出现;打开 /memory_switch 后下一次新建 system message 才注入。
+ */
+const SYSTEM_PROMPT_MEMORY_SECTION = `
+## Memory (cross-session long-term facts)
+- A "memory index" (id/title/summary only) is injected into the system prompt. Retrieve full body via memory_search (pass id or keyword); use memory_list to see the entire index.
+- Store non-obvious, cross-session-useful facts/decisions/pitfalls (architecture conventions, gotchas, user preferences, decisions made) with memory_save — only long-term stable items, not current bugs / temp files / undecided TODOs.
+- If an existing memory is outdated or contradicts new facts, correct it in-place with memory_update(id, …) (don't create a duplicate); archive clearly-stale ones with memory_forget(id).
+- Before saving, memory_search to check for an existing similar entry to avoid duplicates. Better to store less than to store trivially correct information.
+- A background reflection pass periodically mines and organizes memories from the session (no manual action needed), but key facts you proactively save are more reliable.`;
+
+/**
+ * plan 模式追加到系统提示末尾的指令(切到 plan 模式时由 repl 拼进 history[0])。
+ * 与 SYSTEM_PROMPT 同语种(英文),指示:只读探查、产出步骤化计划、不执行、审批后回 auto。
+ *
+ * memoryEnabled=false 时:memory_save/update/forget 三个写工具名字 + "memory-write tools" 这
+ * 句都不出现,且 read-only 列表里的 memory_search/memory_list 也移除——避免提示词里出现
+ * 根本不存在的工具名引起 LLM 调不到。
+ */
+function buildPlanModeSuffix(): string {
+  if (!isMemoryEnabled()) {
+    return `
+
+## ⛯ PLAN MODE (active now)
+You are in PLAN mode: investigate and design only — do NOT execute or change anything.
+- Your editing / command tools (write_file, edit_file, run_command) have been REMOVED from your tool list. Use only the read-only tools available to you (read_file, glob, grep, codegraph, web_search, web_fetch, use_skill, ask_human) to investigate.
+- Research thoroughly: locate the relevant code, trace call paths, and understand existing patterns and conventions before designing. Your FIRST action for code exploration should be the codegraph tool (explore/node) when a .codegraph/ index exists — not read_file/grep. Use read_file/grep only to fill gaps codegraph leaves.
+- Then produce a clear, actionable implementation plan: files to change (with paths), what to change in each and why, the ordered steps, edge cases to handle, and how to verify (typecheck / tests / build). Be specific enough to execute against.
+- Present the plan as your final reply and STOP, unless the user explicitly asked you to "plan first then execute" / "先 plan 再 auto" / autonomous execution: in that case, after presenting the plan, call the switch_mode tool with mode="auto" to switch back to auto mode WITHIN THE SAME TURN and continue implementing the plan yourself (your write/edit/command tools become available again immediately). The user will see no approval prompt because you self-switched.
+- If the user entered plan mode manually (via /plan or Shift+Tab) for a safety review and did NOT ask for autonomous execution, do NOT call switch_mode — present the plan and STOP. Do NOT ask the user for confirmation or approval in your text reply (e.g. "is this plan OK?", "shall I proceed?", "需要你确认") — the REPL automatically shows an approval prompt after you STOP, so asking in text is redundant and forces the user to answer twice. Just present the plan and end your reply.`;
+  }
+  return `
+
+## ⛯ PLAN MODE (active now)
+You are in PLAN mode: investigate and design only — do NOT execute or change anything.
+- Your editing / command / memory-write tools (write_file, edit_file, run_command, memory_save, memory_update, memory_forget) have been REMOVED from your tool list. Use only the read-only tools available to you (read_file, glob, grep, codegraph, web_search, web_fetch, use_skill, ask_human, memory_search, memory_list) to investigate.
+- Research thoroughly: locate the relevant code, trace call paths, and understand existing patterns and conventions before designing. Your FIRST action for code exploration should be the codegraph tool (explore/node) when a .codegraph/ index exists — not read_file/grep. Use read_file/grep only to fill gaps codegraph leaves.
+- Then produce a clear, actionable implementation plan: files to change (with paths), what to change in each and why, the ordered steps, edge cases to handle, and how to verify (typecheck / tests / build). Be specific enough to execute against.
+- Present the plan as your final reply and STOP, unless the user explicitly asked you to "plan first then execute" / "先 plan 再 auto" / autonomous execution: in that case, after presenting the plan, call the switch_mode tool with mode="auto" to switch back to auto mode WITHIN THE SAME TURN and continue implementing the plan yourself (your write/edit/command/memory-write tools become available again immediately). The user will see no approval prompt because you self-switched.
+- If the user entered plan mode manually (via /plan or Shift+Tab) for a safety review and did NOT ask for autonomous execution, do NOT call switch_mode — present the plan and STOP. Do NOT ask the user for confirmation or approval in your text reply (e.g. "is this plan OK?", "shall I proceed?", "需要你确认") — the REPL automatically shows an approval prompt after you STOP, so asking in text is redundant and forces the user to answer twice. Just present the plan and end your reply.`;
+}
+
+/** 兼容旧名字:repl 的 buildSystemMessage 仍引 PLAN_MODE_SUFFIX(变量)。运行时按需现拼。 */
+export function buildBasePrompt(): string {
+  const autoAllToolsLine = isMemoryEnabled()
+    ? '- Default is AUTO mode: you research and execute with all tools (read/edit/run_command/memory/web/skills).'
+    : '- Default is AUTO mode: you research and execute with all tools (read/edit/run_command/web/skills).';
+  const memorySection = isMemoryEnabled() ? SYSTEM_PROMPT_MEMORY_SECTION : '';
+  const planLine = isMemoryEnabled()
+    ? '- For complex or multi-step tasks, the user may switch to PLAN mode (Shift+Tab): your editing/command/memory-write tools are then removed from your tool list, and you must research with read-only tools only and produce a step-by-step plan (no execution). On approval the session returns to auto mode to execute the plan.'
+    : '- For complex or multi-step tasks, the user may switch to PLAN mode (Shift+Tab): your editing/command tools are then removed from your tool list, and you must research with read-only tools only and produce a step-by-step plan (no execution). On approval the session returns to auto mode to execute the plan.';
+
+  return `You are mocode, a terminal coding agent. You complete programming tasks through a "think → call tool → observe result → think again" loop until the problem is solved. Reply to the user in Chinese.
 
 ${PLATFORM_NOTE}
 
@@ -177,16 +238,9 @@ ${PLATFORM_NOTE}
 - Confirm with the user before irreversible or outward-facing operations (delete, overwrite existing files, push, request external services), unless explicitly authorized.
 - Operate only within authorized scope; when unsure, ask — don't guess.
 
-## Memory (cross-session long-term facts)
-- A "memory index" (id/title/summary only) is injected into the system prompt. Retrieve full body via memory_search (pass id or keyword); use memory_list to see the entire index.
-- Store non-obvious, cross-session-useful facts/decisions/pitfalls (architecture conventions, gotchas, user preferences, decisions made) with memory_save — only long-term stable items, not current bugs / temp files / undecided TODOs.
-- If an existing memory is outdated or contradicts new facts, correct it in-place with memory_update(id, …) (don't create a duplicate); archive clearly-stale ones with memory_forget(id).
-- Before saving, memory_search to check for an existing similar entry to avoid duplicates. Better to store less than to store trivially correct information.
-- A background reflection pass periodically mines and organizes memories from the session (no manual action needed), but key facts you proactively save are more reliable.
-
-## Plan vs Auto modes
-- Default is AUTO mode: you research and execute with all tools (read/edit/run_command/memory/web/skills).
-- For complex or multi-step tasks, the user may switch to PLAN mode (Shift+Tab): your editing/command/memory-write tools are then removed from your tool list, and you must research with read-only tools only and produce a step-by-step plan (no execution). On approval the session returns to auto mode to execute the plan.
+${memorySection}
+${autoAllToolsLine}
+${planLine}
 
 ## Working notepad (todolist) — checklist for complex tasks
 - For **complex multi-step tasks** (≥3 file changes OR ≥5 tool calls expected OR user says "先计划再执行" / "plan then do" / "按步骤来"), call the \`todolist\` tool FIRST to write a plan to \`.mocode/plans/<id>.md\`, then execute step by step, calling \`todolist update\` to mark progress. For trivial single-step tasks, skip it and just execute.
@@ -198,27 +252,32 @@ ${PLATFORM_NOTE}
 ## Termination & Reporting
 - Stop immediately when no more tools are needed; give conclusions directly.
 - Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.`;
+}
 
 /**
- * plan 模式追加到系统提示末尾的指令(切到 plan 模式时由 repl 拼进 history[0])。
- * 与 SYSTEM_PROMPT 同语种(英文),指示:只读探查、产出步骤化计划、不执行、审批后回 auto。
+ * plan 模式追加到系统提示末尾的指令。
+ * 历史曾是 `export const PLAN_MODE_SUFFIX`(顶层字面量);现改为按 isMemoryEnabled()
+ * 动态拼:false 时不出现 memory_* 工具名,避免 LLM 想调不存在的工具。
+ *
+ * 注意:已改为 getter(每次访问现拼),让运行时切 /memory_switch 后立即生效。
+ * 旧 import `PLAN_MODE_SUFFIX` 路径不变;repl 推荐改用 getPlanModeSuffix()(语义更清晰)。
+ * 不能直接 `export const PLAN_MODE_SUFFIX = buildPlanModeSuffix()`:
+ * 该表达式在模块初始化时立即求值,而 buildPlanModeSuffix 内部读 config,config 还未求值 → TDZ。
  */
-export const PLAN_MODE_SUFFIX = `
-
-## ⛯ PLAN MODE (active now)
-You are in PLAN mode: investigate and design only — do NOT execute or change anything.
-- Your editing / command / memory-write tools (write_file, edit_file, run_command, memory_save, memory_update, memory_forget) have been REMOVED from your tool list. Use only the read-only tools available to you (read_file, glob, grep, codegraph, web_search, web_fetch, use_skill, ask_human, memory_search, memory_list) to investigate.
-- Research thoroughly: locate the relevant code, trace call paths, and understand existing patterns and conventions before designing. Your FIRST action for code exploration should be the codegraph tool (explore/node) when a .codegraph/ index exists — not read_file/grep. Use read_file/grep only to fill gaps codegraph leaves.
-- Then produce a clear, actionable implementation plan: files to change (with paths), what to change in each and why, the ordered steps, edge cases to handle, and how to verify (typecheck / tests / build). Be specific enough to execute against.
-- Present the plan as your final reply and STOP, unless the user explicitly asked you to "plan first then execute" / "先 plan 再 auto" / autonomous execution: in that case, after presenting the plan, call the switch_mode tool with mode="auto" to switch back to auto mode WITHIN THE SAME TURN and continue implementing the plan yourself (your write/edit/command/memory-write tools become available again immediately). The user will see no approval prompt because you self-switched.
-- If the user entered plan mode manually (via /plan or Shift+Tab) for a safety review and did NOT ask for autonomous execution, do NOT call switch_mode — present the plan and STOP. Do NOT ask the user for confirmation or approval in your text reply (e.g. "is this plan OK?", "shall I proceed?", "需要你确认") — the REPL automatically shows an approval prompt after you STOP, so asking in text is redundant and forces the user to answer twice. Just present the plan and end your reply.`;
+export function getPlanModeSuffix(): string {
+  return buildPlanModeSuffix();
+}
 
 export const config: Config = {
   baseURL: requireEnv('LLM_BASE_URL'),
   apiKey: requireEnv('LLM_API_KEY'),
   model: process.env.LLM_MODEL || 'gpt-4o-mini',
   maxTokens: process.env.MAX_TOKENS ? Number(process.env.MAX_TOKENS) : undefined,
-  systemPrompt: SYSTEM_PROMPT,
+  // 用 getter 而非 buildBasePrompt() 立即求值:因为本对象字面量求值时 buildBasePrompt 读 config.memoryEnabled,
+  // 而 config 还没完成初始化(TDZ)。Getter 让每次访问都现拼,运行时 /memory_switch 立即生效。
+  get systemPrompt(): string {
+    return buildBasePrompt();
+  },
   contextWindowTokens: Number(process.env.CONTEXT_WINDOW_TOKENS) || 128000,
   compactThreshold: Number(process.env.COMPACT_THRESHOLD) || 0.85,
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
@@ -228,6 +287,7 @@ export const config: Config = {
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',
   contextBudget: process.env.MOCODE_BUDGET_SCHEDULER !== 'false',
   autoReflect: process.env.AUTO_REFLECT !== 'false',
+  memoryEnabled: process.env.MEMORY_ENABLED === 'true',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   maxSteps: Number(process.env.MAX_STEPS) || 200,
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || 50,
@@ -273,4 +333,29 @@ export function updateModelConfig(opts: {
     config.contextWindowTokens = opts.contextWindowTokens;
     process.env.CONTEXT_WINDOW_TOKENS = String(opts.contextWindowTokens);
   }
+}
+
+/**
+ * 记忆子系统总开关:单一来源。/memory_switch、/memory_status、buildSystemPrompt、
+ * tools/builtins/index.ts、tools/constants.ts 的 plan-mode 列表都从这里查。
+ * 默认 false(新用户零侵入)。
+ */
+export function isMemoryEnabled(): boolean {
+  return config.memoryEnabled;
+}
+
+/**
+ * 切换记忆子系统开关(/memory_switch on|off 调)。
+ * - 更新 config 单例字段(其它模块下次调 isMemoryEnabled() 即拿新值)。
+ * - 同步 process.env.MEMORY_ENABLED(下次启动 loadEnvFiles 不被文件回填)。
+ * 持久化(写 ~/.mocode/config 的 MEMORY_ENABLED 键)由调用方走 writeConfigKeys。
+ *
+ * 注:开关切换对当前会话的 tool list / 已拼好的 systemPrompt 不会自动重算 —
+ * 工具表在 REPL 启动时构建,systemPrompt 在每轮 chat() 拼时按 isMemoryEnabled()
+ * 现查现拼(关掉时该轮拼出来的 prompt 即不带 memory_* 段)。所以切换在「下一轮
+ * agent 调用」起即时生效,本轮已发出的请求不会回滚。
+ */
+export function updateMemoryConfig(enabled: boolean): void {
+  config.memoryEnabled = enabled;
+  process.env.MEMORY_ENABLED = enabled ? 'true' : 'false';
 }

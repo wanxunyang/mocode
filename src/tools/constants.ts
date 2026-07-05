@@ -1,4 +1,6 @@
 /** 工具共享的截断 / 上限 / 忽略规则。 */
+import { isMemoryEnabled } from '../config/index.js';
+
 export const MAX_FILE_LINES = 2000;
 export const MAX_OUTPUT = 20000;
 export const MAX_RESULTS = 100;
@@ -59,3 +61,18 @@ export const PLAN_DISABLED_TOOLS = new Set([
   'memory_forget',
   'task',
 ]);
+
+/**
+ * 按当前 isMemoryEnabled() 现算 plan 模式应屏蔽的工具。
+ * memoryEnabled=false 时记忆工具整体不在 builtinTools 里,plan 屏蔽集里也无须再列 ——
+ * 反之留着只是死名字。统一过滤,避免 Set 里残留与已下架工具不一致的概念性冗余。
+ * 调用方(agent/core 串行分支、llm/planChatTools)每次 chat 时调本函数拿当前值。
+ */
+export function getPlanDisabledTools(): Set<string> {
+  if (isMemoryEnabled()) return PLAN_DISABLED_TOOLS;
+  const next = new Set<string>(PLAN_DISABLED_TOOLS);
+  next.delete('memory_save');
+  next.delete('memory_update');
+  next.delete('memory_forget');
+  return next;
+}

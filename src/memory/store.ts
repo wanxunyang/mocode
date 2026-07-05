@@ -380,8 +380,14 @@ export function gcMemories(): GcResult {
 /**
  * active 条目按 updatedAt 降序,封顶 MAX_INDEX_ENTRIES,只注 id/name/summary/type。
  * 无 active 返空串(零行为变化)。body 不注入——按需 memory_search 取。
+ *
+ * memoryEnabled=false 时(记忆子系统总开关关闭)直接返空串:Memory Index 段
+ * 不进系统提示,LLM 看不到工具使用提示;配合 tools/builtins 屏蔽 memory_* 工具,
+ * 实现「关闭时零侵入」(默认行为)。传参由 repl 的 buildSystemMessage 在拼装前调
+ * isMemoryEnabled() 注入(本文件是叶子,避免直接引 config 起环)。
  */
-export function buildMemoryIndexSection(): string {
+export function buildMemoryIndexSection(memoryEnabled: boolean = true): string {
+  if (!memoryEnabled) return '';
   const active = loadAll()
     .filter((e) => e.status === 'active')
     .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));

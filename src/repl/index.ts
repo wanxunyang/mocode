@@ -1,7 +1,15 @@
 import readline from 'node:readline/promises';
 import { emitKeypressEvents, type Key } from 'node:readline';
 import { stdin, stdout } from 'node:process';
-import { config, PLAN_MODE_SUFFIX, updateModelConfig, isModelConfigured } from '../config/index.js';
+import {
+  config,
+  updateModelConfig,
+  isModelConfigured,
+  updateMemoryConfig,
+  isMemoryEnabled,
+  buildBasePrompt,
+  getPlanModeSuffix,
+} from '../config/index.js';
 import { updateConfigKey, writeConfigKeys, CONFIG_PATH } from '../config/file.js';
 import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
@@ -89,9 +97,11 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/compact', desc: '压缩历史(可带焦点 /compact …)' },
   { name: '/resume', desc: '续接已保存的会话' },
   { name: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
-  { name: '/memory', desc: '记忆库:条目计数与近期索引' },
-  { name: '/reflect', desc: '手动触发后台记忆反思 pass' },
-  { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆' },
+  { name: '/memory', desc: '记忆库:条目计数与近期索引(关闭时提示先开 /memory_switch)' },
+  { name: '/memory_switch', desc: '切换记忆子系统开关(无参=切换;/on 或 /off 显式;持久化 MEMORY_ENABLED)' },
+  { name: '/memory_status', desc: '查看记忆子系统当前开关与原理' },
+  { name: '/reflect', desc: '手动触发后台记忆反思 pass(需先开启记忆)' },
+  { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆(需先开启记忆)' },
   { name: '/theme', desc: '切换颜色主题(↑↓·Enter)' },
   { name: '/model', desc: '配置大模型(baseURL/key/model/窗口)' },
   { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
@@ -236,6 +246,10 @@ function runningStateFor(
       return { status: '配模型', placeholder: '配置中…' };
     case '/pet':
       return { status: '桌宠', placeholder: '处理中…' };
+    case '/memory_switch':
+      return { status: '切记忆开关', placeholder: '切换中…' };
+    case '/memory_status':
+      return { status: '查记忆状态', placeholder: '…' };
     default:
       // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由内联 spinner 承载(思考中/执行…),
       // 状态行只显走时——故常态 status 留空,不塞「处理」这种与内联重复的泛标签。
@@ -494,15 +508,19 @@ export async function startRepl(
   // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
   // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
-  // 构造系统提示:auto 用 base;plan 在 config.systemPrompt 后追加 PLAN_MODE_SUFFIX。
+  // 构造系统提示:auto 用 base;plan 在 base 后追加按当前开关现拼的 plan suffix。
   // 切模式时 applyMode 重算 history[0](history[0] 恒 system,compaction 保它,不破坏)。
   // 活跃 plan 摘要拼在 memory 段后(systemPrompt 的尾段),todo 工具变更后 listener 重写 history[0]。
+  //
+  // 与开关联动:① base 用 buildBasePrompt() 取代 config.systemPrompt(后者是启动时一次性
+  // 求值的常量,运行时 /memory_switch 不会刷新);② plan suffix 走 getPlanModeSuffix() 现拼;
+  // ③ buildMemorySection 内已自决 ;④ buildMemoryIndexSection 显式传 isMemoryEnabled() 关闭段。
   const buildSystemMessage = (planMode: boolean): string =>
     effectiveSystemPrompt(
-      config.systemPrompt +
-        (planMode ? PLAN_MODE_SUFFIX : '') +
+      buildBasePrompt() +
+        (planMode ? getPlanModeSuffix() : '') +
         buildMemorySection() +
-        buildMemoryIndexSection() +
+        buildMemoryIndexSection(isMemoryEnabled()) +
         buildActivePlanSection(),
     );
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
@@ -1295,6 +1313,89 @@ export async function startRepl(
       // /rollback:打开轮次菜单(↑/↓ 选,Enter 回滚到该轮并预填其输入,再 Enter 重新跑)。
       // 忽略任何数字参数(原「输数字选回滚」已删,统一走菜单)。无快照的旧轮次(/resume 重建)文件改动不可撤销。
       await rollbackFlow();
+      continue;
+    }
+    if (
+      line === '/memory_switch' ||
+      line.startsWith('/memory_switch ') ||
+      line === '/memory_status' ||
+      line.startsWith('/memory_status ')
+    ) {
+      // /memory_switch — 记忆子系统总开关。无参切换 on/off;/memory_switch on 或 /off 显式;
+      // /memory_switch true|false|1|0|yes|no 等同义。/memory_status 只读查询(不写盘)。
+      //
+      // 设计原则:
+      //  - 单一来源 isMemoryEnabled():工具表(builtins)、系统提示词(Memory Index 段 + 工具使用说明)、
+      //    plan-mode 提示(tools/constants.ts)三处都从这里查。
+      //  - 当前会话的 tool list 是模块初始化时的快照(/memory_switch 不重算 builtinTools)——已发出
+      //    请求的工具列表不会被回滚。要"完全生效"需要重启 REPL。但 buildSystemMessage 每次 chat 现拼,
+      //    所以系统提示词和 plan suffix 会在「下一轮 chat」即时反映新值。
+      //  - 持久化字段 MEMORY_ENABLED,默认值 false(新用户零侵入)。
+      try {
+        if (line === '/memory_status' || line.startsWith('/memory_status ')) {
+          const on = isMemoryEnabled();
+          layout.contentWrite(`${ui.cyan}记忆子系统:${ui.reset} ${on ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`);
+          layout.contentWrite(
+            `${ui.dim}  单一来源 isMemoryEnabled()(${config.memoryEnabled});` +
+              `持久化 ${ui.cyan}MEMORY_ENABLED${ui.dim};` +
+              `配置文件 ${CONFIG_PATH}${ui.reset}\n`
+          );
+          layout.contentWrite(
+            `${ui.dim}  关闭时:memory_*_save/_search/_list/_update/_forget 五个工具整体不进工具表;` +
+              `buildBasePrompt() 不含「## Memory」段;` +
+              `plan-mode 提示词里也不出现 memory_* 工具名。${ui.reset}\n`
+          );
+          layout.contentWrite(
+            `${ui.dim}  切换后下次新建 system message 即时反映;当前会话工具表需重启 REPL 才完整重算。${ui.reset}\n`
+          );
+          continue;
+        }
+        // /memory_switch(无参=on/off 切换;有参=按值设)
+        const arg = line.startsWith('/memory_switch ')
+          ? line.slice('/memory_switch '.length).trim().toLowerCase()
+          : '';
+        let nextEnabled: boolean;
+        if (arg === '') {
+          nextEnabled = !isMemoryEnabled();
+        } else if (['on', 'true', '1', 'yes', 'y', 'enable', 'enabled'].includes(arg)) {
+          nextEnabled = true;
+        } else if (['off', 'false', '0', 'no', 'n', 'disable', 'disabled'].includes(arg)) {
+          nextEnabled = false;
+        } else {
+          layout.contentWrite(
+            `${ui.yellow}/memory_switch 用法:${ui.reset}\n` +
+              `  /memory_switch             切换(开↔关)\n` +
+              `  /memory_switch on|off      显式设值\n` +
+              `  /memory_switch status      等同 /memory_status\n`
+          );
+          continue;
+        }
+        const prev = isMemoryEnabled();
+        if (nextEnabled === prev) {
+          layout.contentWrite(
+            `${ui.dim}(已是 ${nextEnabled ? '开启' : '关闭'},未变更 — 持久化字段未写入)${ui.reset}\n`
+          );
+          continue;
+        }
+        updateMemoryConfig(nextEnabled);
+        // 写盘:mode 文件 values,/~/.mocode/config;writeConfigKeys 不会动其它键(主题 / 模型等)
+        updateConfigKey('MEMORY_ENABLED', nextEnabled ? 'true' : 'false');
+        const note =
+          nextEnabled
+            ? `${ui.green}已开启记忆子系统${ui.reset} — memory_save/search/list/update/forget 进入工具表;` +
+              `Memory Index 段会在下次拼 system message 时注入。工具表本身的快照需要重启 REPL 才完整刷新。`
+            : `${ui.yellow}已关闭记忆子系统${ui.reset} — 五个 memory_* 工具将在下次拼 system message 时从工具表过滤;` +
+              `Memory Index 段不再出现;plan-mode 提示词里的 memory_* 字样消失。重启 REPL 后工具表完全不出现。`;
+        layout.contentWrite(`${note}\n`);
+        layout.contentWrite(
+          `${ui.dim}(写入 ${CONFIG_PATH}:MEMORY_ENABLED=${nextEnabled ? 'true' : 'false'};${ui.reset}` +
+            (process.env.MEMORY_ENABLED
+              ? `${ui.dim}同 session shell 未 export,文件写入即时生效)${ui.reset}\n`
+              : `${ui.dim}下次启动仍生效)${ui.reset}\n`)
+        );
+      } catch (e) {
+        layout.contentWrite(`${ui.red}/memory_switch 失败:${ui.reset} ${(e as Error).message}\n`);
+      }
       continue;
     }
 

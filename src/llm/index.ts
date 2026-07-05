@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { config } from '../config/index.js';
 import { tools } from '../tools/registry.js';
-import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
+import { getPlanDisabledTools } from '../tools/constants.js';
 
 /**
  * LLM 调用重试策略:
@@ -176,11 +176,14 @@ export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = tools.map
 );
 
 /**
- * plan 模式用的受限工具 schema:剔除写盘 / 命令 / 记忆写入类(PLAN_DISABLED_TOOLS),
+ * plan 模式用的受限工具 schema:剔除写盘 / 命令 / 记忆写入类(getPlanDisabledTools())。
  * 模型在 plan 模式下只看得到只读工具 → 调不到会改文件的工具。runAgent 在 plan 模式传给 chat()。
+ *
+ * 注意:planChatTools 是顶层 const(模块初始化时一次性求值);若运行时 /memory_switch 关闭
+ * 记忆,这里仍是按当前 isMemoryEnabled() 算出的快照——重启 REPL 才完全生效。
  */
 export const planChatTools: OpenAI.Chat.Completions.ChatCompletionTool[] =
-  chatTools.filter((t) => !PLAN_DISABLED_TOOLS.has(t.function.name));
+  chatTools.filter((t) => !getPlanDisabledTools().has(t.function.name));
 
 export interface ToolCallRef {
   id: string;

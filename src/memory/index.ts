@@ -3,6 +3,7 @@
 // 被 repl 依赖(注入 systemPrompt + 轮末触发反思 + 退出 drain)。Tier-1 仅依赖 discover.ts。
 
 import { loadMemoryFiles } from './discover.js';
+import { isMemoryEnabled } from '../config/index.js';
 
 export {
   buildMemoryIndexSection,
@@ -53,8 +54,13 @@ export function loadMemory(): string {
   return cache;
 }
 
-/** 拼进系统提示的 memory 段;无 memory 返空串(零行为变化)。 */
+/**
+ * 拼进系统提示的 memory 段(Tier-1 MOCODE.md);无 memory 返空串(零行为变化)。
+ * 记忆子系统总开关关闭(isMemoryEnabled()==false)直接返空串:
+ * 提示词、Memory Index 段都不进 — 配合 tools/builtins 把 memory_* 工具屏蔽。
+ */
 export function buildMemorySection(): string {
+  if (!isMemoryEnabled()) return '';
   const mem = loadMemory();
   if (!mem) return '';
   return [

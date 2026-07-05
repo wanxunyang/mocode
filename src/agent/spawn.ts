@@ -17,7 +17,7 @@
 
 import type OpenAI from 'openai';
 import { chatTools, type ChatMessage } from '../llm/index.js';
-import { config } from '../config/index.js';
+import { config, isMemoryEnabled } from '../config/index.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { buildMemorySection, buildMemoryIndexSection } from '../memory/index.js';
 import { ui } from '../ui/theme.js';
@@ -74,10 +74,14 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const maxSteps = opts.maxSteps ?? config.subAgentMaxSteps ?? 50;
 
   // 构造子 agent 系统提示:复用主 agent 组装链 + 子 agent 角色后缀 + 自定义后缀。
+  // config.systemPrompt 是 getter(每次访问现拼 buildBasePrompt,反映 isMemoryEnabled),
+  // 所以这里直接读 config.systemPrompt 即可;buildMemoryIndexSection 显式按 isMemoryEnabled() 传参,
+  // 关闭时该段不进。注意:不能从 spawn.ts 直接 import buildBasePrompt —— 这会
+  // 拉起 config → llm → registry → builtins → task → spawn 形成循环求值死锁。
   const systemPrompt = effectiveSystemPrompt(
     config.systemPrompt +
       buildMemorySection() +
-      buildMemoryIndexSection() +
+      buildMemoryIndexSection(isMemoryEnabled()) +
       SUBAGENT_SUFFIX +
       (opts.systemPromptSuffix ? `\n\n${opts.systemPromptSuffix}` : ''),
   );

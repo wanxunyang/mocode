@@ -15,7 +15,7 @@ import {
   type ToolCallRef,
 } from '../llm/index.js';
 import { executeTool } from '../tools/registry.js';
-import { PLAN_DISABLED_TOOLS } from '../tools/constants.js';
+import { getPlanDisabledTools } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import { maybeCompact, runScheduler, contextState, dropContextFromHistory } from '../session/index.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
@@ -410,7 +410,7 @@ export async function runAgentCore(
             const tc = calls[i];
             // plan 模式防御 backstop:schema 已剔除这些工具,正常不会进这里;防后端幻觉调用——
             // 不执行,直接返错回灌(让模型看到「plan 模式禁用」并停止),绝不写盘 / 跑命令。
-            if (getAgentMode() === 'plan' && PLAN_DISABLED_TOOLS.has(tc.name)) {
+            if (getAgentMode() === 'plan' && getPlanDisabledTools().has(tc.name)) {
               hooks.onToolHeader?.(tc);
               const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
               hooks.onToolResult?.(tc, err, null, null, 1);
