@@ -2,6 +2,39 @@ import type { Tool } from '../types.js';
 import { promptIntervention } from '../../ui/intervention.js';
 import { sendState } from '../../pet/bridge.js';
 
+/** 将单个选项元素安全地转为可读字符串。
+ *  LLM 有时会传对象(如 {name/label/title:"xxx", desc/description:"yyy"})而不是纯字符串,
+ *  直接 String(obj) 会变成 "[object Object]"——这里智能提取可读字段。 */
+function optionToString(o: unknown): string {
+  if (o === null || o === undefined) return '';
+  if (typeof o === 'string') return o;
+  if (typeof o === 'number' || typeof o === 'boolean') return String(o);
+  if (typeof o === 'object') {
+    const obj = o as Record<string, unknown>;
+    // 优先取常见的标签字段
+    const labelKeys = ['label', 'name', 'title', 'text', 'option', 'choice', 'value', 'key'];
+    for (const k of labelKeys) {
+      const v = obj[k];
+      if (typeof v === 'string' && v.trim()) return v;
+    }
+    // 其次尝试 "label + description" 组合
+    const label = obj.label ?? obj.name ?? obj.title;
+    const desc = obj.description ?? obj.desc ?? obj.detail;
+    if (typeof label === 'string' && typeof desc === 'string') {
+      return `${label}: ${desc}`;
+    }
+    // 兜底:JSON 序列化(去掉大括号让它看起来不像代码)
+    try {
+      const s = JSON.stringify(obj);
+      // 如果是简单对象尝试美化
+      return s;
+    } catch {
+      return String(o);
+    }
+  }
+  return String(o);
+}
+
 /** 公开以便 check-ask-human-options.ts 单元测试。 */
 export function coerceOptions(raw: unknown): string[] {
   // 路径 1:本身就是数组,map 成字符串。
@@ -12,13 +45,13 @@ export function coerceOptions(raw: unknown): string[] {
       if (t.startsWith('[') && t.endsWith(']')) {
         try {
           const parsed = JSON.parse(t);
-          if (Array.isArray(parsed)) return parsed.map((o) => String(o));
+          if (Array.isArray(parsed)) return parsed.map(optionToString);
         } catch {
           // 不是合法 JSON 数组,降级原值
         }
       }
     }
-    return raw.map((o) => (typeof o === 'string' ? o : String(o)));
+    return raw.map(optionToString);
   }
   // 路径 2:LLM 直接把整个数组 stringify 成单字符串塞 options 字段(JSON.parse 出来是字符串)
   // 例如 GLM 系经常这么做,arg h['options']='["A","B"]' → args.options='["A","B"]'
@@ -28,7 +61,7 @@ export function coerceOptions(raw: unknown): string[] {
     if (t.startsWith('[') && t.endsWith(']')) {
       try {
         const parsed = JSON.parse(t);
-        if (Array.isArray(parsed)) return parsed.map((o) => String(o));
+        if (Array.isArray(parsed)) return parsed.map(optionToString);
       } catch {
         // 不是合法 JSON,保留为单元素数组(对应 input 模式)
       }

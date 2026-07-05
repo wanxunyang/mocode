@@ -143,8 +143,12 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     onNoReply: () => writeBuf(`${ui.dim}(无回复)${ui.reset}\n`),
     onMaxSteps: () =>
       writeBuf(`  ● 达到最大步数(${maxSteps}),子 agent 停止。\n`),
-    onDone: (elapsedMs) =>
-      writeBuf(`  ✻ 子 agent 耗时 ${(elapsedMs / 1000).toFixed(1)}s\n`),
+    onDone: (elapsedMs, usage) => {
+      const tok = usage && usage.totalTokens
+        ? `  · ${usage.totalTokens} tokens`
+        : '';
+      writeBuf(`  ✻ 子 agent 耗时 ${(elapsedMs / 1000).toFixed(1)}s${tok}\n`);
+    },
     // onStepStart / onChatDone / onToolStart / onToolDone / onAbort:子 agent 静默,无需 spinner / 中断渲染。
     // abort 还原(history 还原 + 模式还原)由 core 的 abortRestore 处理,hooks 只管展示。
   };

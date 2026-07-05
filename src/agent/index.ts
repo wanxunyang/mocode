@@ -22,6 +22,7 @@ import {
   readDiffContext,
   isMutationTool,
   type AgentHooks,
+  type AgentRunResult,
   type ContentPart,
 } from './core.js';
 import { createPetHooks } from '../pet/state.js';
@@ -92,7 +93,7 @@ export async function runAgent(
   signal?: AbortSignal,
   /** 每步 chat() 返回后回调:repl 据此重算并重画状态行 context 用量条(运行中实时刷新,不冻结在轮首)。 */
   onContextUpdate?: () => void,
-): Promise<void> {
+): Promise<AgentRunResult> {
   // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
   beginTurn(truncateDisplay(firstLineOf(userInput), 40));
   layout.contentMode(); // 防御性:运行态光标归输入框光标位供 IME 锚定(enterRunningMode 已置,这里兜底)
@@ -148,10 +149,12 @@ export async function runAgent(
       if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
       layout.contentWrite(`${ui.dim}(已中断)${ui.reset}\n`);
     },
-    onDone: (elapsedMs) =>
+    onDone: (elapsedMs, usage) => {
+      const tok = formatTurnTokens(usage);
       layout.contentWrite(
-        `  ${ui.dim}✻ Worked for ${fmtElapsed(elapsedMs)}${ui.reset}\n`
-      ),
+        `  ${ui.dim}✻ Worked for ${fmtElapsed(elapsedMs)}${tok}${ui.reset}\n`
+      );
+    },
   };
 
   // 桌宠状态广播:与 TUI hooks 并列注入,互不干扰(petHooks 只调 bridge.sendState,不写屏;
@@ -160,8 +163,9 @@ export async function runAgent(
   const petHooks = createPetHooks();
   const combinedHooks: AgentHooks = mergeHooks(hooks, petHooks);
 
+  let result: AgentRunResult | undefined;
   try {
-    await runAgentCore({
+    result = await runAgentCore({
       history,
       userInput,
       signal,
@@ -171,6 +175,7 @@ export async function runAgent(
   } finally {
     spinner.stop();
   }
+  return result;
 }
 
 /** 把两组 AgentHooks 合并为一组:每个方法依次调用两侧已定义的实现(顺序不保证跨方法一致,
@@ -187,4 +192,14 @@ function mergeHooks(a: AgentHooks, b: AgentHooks): AgentHooks {
     };
   }
   return merged;
+}
+
+/** 摘要行后追加的本轮 token 文本。例:`  · 1.5k tokens (↑ 1.2k ↓ 0.3k)`。
+ *  关闭 include_usage / 全失败 → usage=undefined → 不输出(保持原摘要行长度,不留空白)。 */
+function formatTurnTokens(usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined): string {
+  if (!usage) return '';
+  const total = usage.totalTokens;
+  if (!total) return '';
+  const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(total >= 10000 ? 0 : 1)}k`);
+  return `  ·  ${fmt(total)} tokens (↑ ${fmt(usage.promptTokens)} ↓ ${fmt(usage.completionTokens)})`;
 }

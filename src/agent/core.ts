@@ -12,6 +12,7 @@ import {
   planChatTools,
   type ChatMessage,
   type ChatResult,
+  type ChatUsage,
   type ToolCallRef,
 } from '../llm/index.js';
 import { executeTool } from '../tools/registry.js';
@@ -165,8 +166,9 @@ export interface AgentHooks {
   onMaxSteps?: () => void;
   /** 中断还原:停 spinner + 补换行 + (已中断)提示 + history 还原 + 模式还原。 */
   onAbort?: () => void;
-  /** 跑完(正常/达上限)在回复末尾打耗时摘要行;中断不调。 */
-  onDone?: (elapsedMs: number) => void;
+  /** 跑完(正常/达上限)在回复末尾打耗时摘要行;中断不调。
+   *  usage 是本轮 chat 调用累计的 token 用量(未开启 include_usage 或全失败时为 undefined)。 */
+  onDone?: (elapsedMs: number, usage?: ChatUsage) => void;
 }
 
 /** runAgentCore 的运行选项。 */
@@ -199,6 +201,8 @@ export interface AgentRunResult {
   completed: boolean;
   /** 最终 assistant 文本回复(content);无回复或中断为 null。 */
   finalText: string | null;
+  /** 本轮累计 token 用量(各 chat 步 prompt+completion 之和);后端不开 include_usage 或全失败则 undefined。 */
+  usage?: ChatUsage;
 }
 
 /**
@@ -229,6 +233,19 @@ export async function runAgentCore(
   // 本轮计时:从入口到完毕(正常 return / 达上限),供 finally 打 ✻ Worked for 摘要行。
   const t0 = Date.now();
   let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
+  // 本轮 token 累计:每步 chat() 返回后把 result.usage 累加,供 onDone 摘要行 + AgentRunResult.usage
+  // 透传给 repl(显示在底栏模式 chip 右边)。未开启 include_usage 或全失败时为 undefined。
+  let turnUsage: ChatUsage | undefined;
+  const addUsage = (u: ChatUsage | undefined): void => {
+    if (!u) return;
+    turnUsage = turnUsage
+      ? {
+          promptTokens: turnUsage.promptTokens + u.promptTokens,
+          completionTokens: turnUsage.completionTokens + u.completionTokens,
+          totalTokens: turnUsage.totalTokens + u.totalTokens,
+        }
+      : u;
+  };
   history.push({ role: 'user', content: userInput });
   // drop_context 工具的上下文剔除回调:闭包捕获 history,原地剔除无关旧 tool 结果。
   // 保护由 dropContextFromHistory 内部保证:history[0](system)+ 当前轮(最后 user 及其后)永不剔除。
@@ -322,6 +339,7 @@ export async function runAgentCore(
         throw e;
       }
       contextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
+      addUsage(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
       hooks.onChatDone?.(); // 主 agent:spinner.stop()
       // lastUsage 已更新:触发状态行 context 用量条重算+重画,运行中不再冻结在轮首。
       onContextUpdate?.();
@@ -454,16 +472,16 @@ export async function runAgentCore(
       if (!gotText) hooks.onNoReply?.();
       history.push({ role: 'assistant', content: result.content });
       done = true;
-      return { completed: true, finalText: result.content };
+      return { completed: true, finalText: result.content, usage: turnUsage };
     }
 
     hooks.onMaxSteps?.();
     done = true;
-    return { completed: true, finalText: null };
+    return { completed: true, finalText: null, usage: turnUsage };
   } finally {
     // 跑完(正常 / 达上限)在回复末尾打耗时摘要行(仿 Claude Code);中断 done=false 不打。
     if (done) {
-      hooks.onDone?.(Date.now() - t0);
+      hooks.onDone?.(Date.now() - t0, turnUsage);
     }
   }
 }

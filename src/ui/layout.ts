@@ -57,6 +57,8 @@ export interface StatusBarData {
   modeTag?: string; // 模式标识:repl 传 'auto' / 'plan'(两段式布局左段显示)
   /** 活跃 plan 短摘要(无 plan=undefined,空串=有 plan 但 chip 不显)。repl 透传 getActivePlanSummary()。 */
   planSummary?: string;
+  /** 本轮最后一条 token 用量(modeTag chip 右边显示)。后端不开 include_usage 时 undefined。 */
+  lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }
 
 export interface InputView {
@@ -84,7 +86,7 @@ let segmentStartRow = 1; // 当前 md 段起始屏行(供 contentWriteMd 定位�
 let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
 let scrollLockUntil = 0; // 发消息轮首滚动锁(绝对时间戳 ms,0=未锁):吸收 stdin 残留滚轮事件,防 resetScroll 回尾后被重新滚上去
 const SCROLL_LOCK_MS = 400; // 锁时长:覆盖 OS 缓冲残留 + 常规滚轮惯性;LLM TTFB 多 >200ms,不影响轮中后段滚动
-let base: { model: string; contextBar: string; cwd: string; modeTag?: string; planSummary?: string } | null = null;
+let base: { model: string; contextBar: string; cwd: string; modeTag?: string; planSummary?: string; lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number } } | null = null;
 let statusText = '';
 let spinnerFrame: string | undefined;
 let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
@@ -824,28 +826,45 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
   return twoColumn(lead, leadW, rightStr, tailW, cols);
 }
 
-/** 下线之下那行(model 行):左 = 模式标识;右 = context + cwd,右端对齐。
+/** 下线之下那行(model 行):左 = 模式标识 + 本轮 token chip;右 = context + cwd,右端对齐。
  *  活跃 plan chip 不再放这里,改放 spinner 行上方的「虚拟空行」(contentBottom+1,见 drawStatusBar),
  *  既不挤 model 行,又给输入区上方留出可视分隔带。 */
 function composeModelLine(status: StatusBarData, cols: number): string {
   const ctx = status.contextBar; // 已带色
   const ctxW = ansiDisplayWidth(ctx);
-  // 左段:仅模式标识
+  // 左段:模式标识 + 本轮 token chip。token chip 仅展示总量,用 mid 灰,不抢主色。
   const modeTag = status.modeTag ?? '';
   const modeColor = modeTag === 'plan' ? ui.yellow : ui.brightCyan;
-  const modePart = modeTag
-    ? `${modeColor}${modeTag}${ui.reset}`
-    : '';
-  const leftStr = modePart;
-  const leftW = modeTag ? displayWidth(modeTag) : 0;
+  const modePart = modeTag ? `${modeColor}${modeTag}${ui.reset}` : '';
+  const modeW = modeTag ? displayWidth(modeTag) : 0;
+  const tokChip = formatTurnTokenChip(status.lastTurnUsage);
+  const tokW = displayWidth(stripAnsi(tokChip));
+  // 合并左段:chip 前留 2 空格分隔,无 modeTag 也允许仅显示 chip(兜底边角)。
+  const sep = modePart && tokChip ? '  ' : '';
+  const leftStr = `${modePart}${sep}${tokChip}`;
+  const leftW = modeW + (modePart && tokChip ? sep.length : 0) + tokW;
   // 右段:ctx + sep + cwd,右端对齐。cwd 按预算截断,极窄(<6)隐藏。
+  // 任一 chip 极宽时收紧 cwd(toolbar 列挤压场景),先从 cwd 砍、再隐藏 cwd、再隐藏 token chip。
   const minGap = 2;
-  const cwdBudget = cols - leftW - minGap - ctxW - STATUS_SEP_W - 1;
-  const cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
-  const cwdW = displayWidth(cwd);
-  const rightStr = `${ctx}${STATUS_SEP}${ui.dim}${cwd}${ui.reset}`;
-  const rightW = ctxW + STATUS_SEP_W + cwdW;
+  let cwdBudget = cols - leftW - minGap - ctxW - STATUS_SEP_W - 1;
+  let cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
+  let cwdW = displayWidth(cwd);
+  let rightStr = `${ctx}${STATUS_SEP}${ui.dim}${cwd}${ui.reset}`;
+  let rightW = ctxW + STATUS_SEP_W + cwdW;
+  // 极窄(<24 列含 ctx):藏 token chip
+  if (modePart && tokChip && rightW + minGap + leftW > cols) {
+    return twoColumn(modePart, modeW, rightStr, rightW, cols);
+  }
   return twoColumn(leftStr, leftW, rightStr, rightW, cols);
+}
+
+/** 把本轮 token 总量格式化成 chip 文本(纯字符串,带 ANSI 色)。无 usage 返空串。 */
+function formatTurnTokenChip(usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined): string {
+  if (!usage || !usage.totalTokens) return '';
+  const n = usage.totalTokens;
+  const text = n < 1000 ? `${n}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  // 单段:量足够稳定时不显分项,避免无谓视觉负担。chip 用 mid 灰(降优先级)— 模式仍是主色。
+  return `${ui.dim}${text} tokens${ui.reset}`;
 }
 
 /** spinner 行上方的「虚拟空行」(contentBottom+1)。
@@ -1012,13 +1031,14 @@ export function clearLiveAtCursor(): void {
   frameCol = 0;
 }
 
-/** 更新状态行基线(模型 / context / cwd / 模式标识 / 活跃 plan chip)。repl 在轮次边界与切模式时调。 */
+/** 更新状态行基线(模型 / context / cwd / 模式标识 / 活跃 plan chip / 本轮 token chip)。repl 在轮次边界与切模式时调。 */
 export function setStatusBase(b: {
   model: string;
   contextBar: string;
   cwd: string;
   modeTag?: string;
   planSummary?: string;
+  lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }): void {
   base = b;
 }

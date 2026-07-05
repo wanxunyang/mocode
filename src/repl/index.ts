@@ -34,6 +34,7 @@ import {
   estimateToolSchemaTokens,
   reconfigureClient,
   type ChatMessage,
+  type ChatUsage,
 } from '../llm/index.js';
 import {
   loadImageAttachment,
@@ -210,14 +211,15 @@ function renderContextBarInline(history: ChatMessage[]): string {
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
 }
 
-/** 状态行基线:模型 / context / cwd / 模式标识 / 活跃 plan chip。repl 在轮次边界、切模式、plan 变更时调。 */
-function refreshStatusBase(history: ChatMessage[]): void {
+/** 状态行基线:模型 / context / cwd / 模式标识 / 活跃 plan chip / 本轮 token。repl 在轮次边界、切模式、plan 变更时调。 */
+function refreshStatusBase(history: ChatMessage[], lastTurnUsage?: ChatUsage): void {
   layout.setStatusBase({
     model: config.model,
     contextBar: renderContextBarInline(history),
     cwd: process.cwd(),
     modeTag: getAgentMode() === 'plan' ? 'plan' : 'auto',
     planSummary: hasActivePlan() ? getActivePlanSummary(process.stdout.columns ?? 80) : '',
+    lastTurnUsage,
   });
 }
 
@@ -543,6 +545,9 @@ export async function startRepl(
   let currentSessionId: string | undefined = sessionId;
   // 反思 cadence 计数:每 reflectEveryN 轮 fire-and-forget 一次后台反思 pass。
   let turnCount = 0;
+  // 本轮 token 累计:runAgent 返回后写入,供底栏模式 chip 右边显示。undefined=无实测
+  // (后端不开 include_usage / 后端失败时)。
+  let lastTurnUsage: ChatUsage | undefined;
 
   const toolsLine = tools.map((t) => t.name).join(' · ');
   const banner = () => ({
@@ -712,7 +717,7 @@ export async function startRepl(
       setAgentMode(planMode ? 'plan' : 'auto');
       // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
       // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
-      await runAgent(
+      const result = await runAgent(
         history,
         userInput,
         signal,
@@ -721,6 +726,10 @@ export async function startRepl(
           layout.drawStatusBar();
         },
       );
+      // 本轮 token 累计(底栏模式 chip 右边显示)。undefined = 后端不开 include_usage。
+      lastTurnUsage = result.usage;
+      refreshStatusBase(history, lastTurnUsage); // 即时刷状态行显示本轮 token chip
+      layout.drawStatusBar();
       ok = !signal.aborted; // 中断(Ctrl+C)→ runAgent 已还原 history,ok=false 不弹审批
       // 成功轮次自动落盘(崩溃也保住上一轮);新会话首轮分配 id
       if (!currentSessionId) currentSessionId = newSessionId();
@@ -889,6 +898,7 @@ export async function startRepl(
       currentSessionId = undefined; // 下轮起新会话文件
       turnCount = 0; // 反思 cadence 重新计数
       contextState.lastUsage = undefined;
+      lastTurnUsage = undefined; // 清空旧轮的 token 累计
       pendingAttachments = []; // 一并清空待发图片
       layout.clearContent();
       layout.contentWrite(bannerString(banner()));
@@ -1086,6 +1096,7 @@ export async function startRepl(
       // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
       if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
       contextState.lastUsage = undefined;
+      lastTurnUsage = undefined; // /resume:旧会话的 token 累计已无意义,清空等下轮覆写
       layout.clearContent();
       renderHistory(history);
       layout.contentWrite(`${ui.dim}(已续接会话 ${loaded.id})${ui.reset}\n`);
