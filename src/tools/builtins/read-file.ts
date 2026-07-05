@@ -1,27 +1,38 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { MAX_FILE_LINES } from '../constants.js';
+
+/** 默认单次 read_file 拉取的行数。刻意压低,逼 LLM 分块读大文件,
+ * 配合 description 中的 PAGINATION IS MANDATORY 引导。
+ * 300 行 ≈ 一个屏幕的源码量,够定位一段逻辑而不至于吃光上下文。 */
+const DEFAULT_READ_LIMIT = 300;
 import type { Tool } from '../types.js';
 
 // ---------- read_file ----------
 export const readFileTool: Tool = {
   name: 'read_file',
   description:
-    'Read file content with line numbers. Read before editing. offset (1-based, default 1), limit (default 2000).' +
-    ' For architecture/call chains, prefer codegraph over reading files one at a time.',
+    'Read file content with line numbers. Read before editing.\n' +
+    'For files >500 lines: grep first to locate regions, then call read_file multiple times ' +
+    'with offset+limit (e.g. offset=350, limit=120). Do NOT read an entire large file in one call.\n' +
+    'Prefer codegraph over reading files one at a time for architecture/call-chain questions.',
   parameters: {
     type: 'object',
     properties: {
       path: { type: 'string', description: 'File path, relative to the working directory' },
-      offset: { type: 'integer', description: 'Start line (1-based), default 1' },
-      limit: { type: 'integer', description: 'Max number of lines to read, default 2000' },
+      offset: { type: 'integer', description: 'Start line, 1-based (default 1).' },
+      limit: {
+        type: 'integer',
+        description: 'Max lines to read (default 300, hard cap 2000). Keep ranges ~80-200.',
+      },
     },
     required: ['path'],
   },
   async execute(args) {
     const path = String(args.path);
     const offset = Number(args.offset ?? 1);
-    const limit = Number(args.limit ?? MAX_FILE_LINES);
+    // 无论 LLM 传多大,单次硬钳到 MAX_FILE_LINES,杜绝「绕过分页引导一把全拿」。
+    const limit = Math.min(Number(args.limit ?? DEFAULT_READ_LIMIT), MAX_FILE_LINES);
     const data = await readFile(resolve(path), 'utf8');
     const lines = data.split(/\r?\n/);
     const start = Math.max(0, offset - 1);
