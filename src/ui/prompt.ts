@@ -156,9 +156,14 @@ export async function promptWithSlashMenu(
     return displayWidth(lines[cl].slice(0, cc));
   }
 
-  /** chip 预览前缀:整段扁平化(行界→空格,避免框内折行)取前 ~20 列,超长 truncateDisplay 自带 …;末尾空格与 suffix 分隔。 */
+  /** chip 预览前缀:行数 + 字符数(字符 <1K 直出,≥1K 缩为 X.XK)。比"前 20 字符截断"对 CJK 更友好
+   * ——后者在中文里 20 列只够 10 个汉字就截没,几乎看不到内容;元信息密度更高、长度可预测。 */
   function chipPrefix(): string {
-    return chip ? `[${truncateDisplay(chip.split('\n').join(' '), 20)}] ` : '';
+    if (!chip) return '';
+    const lines = chip.split('\n').length;
+    const chars = chip.length;
+    const charStr = chars < 1000 ? `${chars} 字符` : `${(chars / 1000).toFixed(1)}K 字符`;
+    return `[📋 ${lines} 行 · ${charStr}] `;
   }
   /** chipPre 按行拆分(粘贴发生前光标之前已有的文本,可能多行,原样保留在 chip 之前)。 */
   function chipPreLines(): string[] {
@@ -202,7 +207,7 @@ export async function promptWithSlashMenu(
    * 光标后的文本留在 suffix(lines)——即"前段文字 [长文本…] 后段文字"而非清空覆盖。 */
   function applyPastedText(buf: string): void {
     if (!buf) return;
-    const isLong = buf.split('\n').length > 8 || buf.length > 400;
+    const isLong = buf.split('\n').length > 8 || buf.length > 200;
     if (isLong) {
       const before = lines[cl].slice(0, cc);
       const after = lines[cl].slice(cc);
@@ -224,7 +229,7 @@ export async function promptWithSlashMenu(
     computeFiltered();
     redraw();
   }
-  /** 粘贴结束:长粘贴(>8 行或 >400 字符)落/并进 chip(原子,整段封预览),短粘贴落为可编辑文本。 */
+  /** 粘贴结束:长粘贴(>8 行或 >200 字符)落/并进 chip(原子,整段封预览),短粘贴落为可编辑文本。 */
   function finalizePaste(): void {
     if (resolved) {
       pasteParts = [];
@@ -441,10 +446,14 @@ export async function promptWithSlashMenu(
 
     const isReturn = key.name === 'return' || key.name === 'enter';
 
-    // 换行:Ctrl+J / Alt+Enter(meta)/ Shift+Enter(终端区分时)/ lone LF
+    // 换行:Ctrl+J / Ctrl+Enter / Alt+Enter(meta)/ Shift+Enter(终端区分时)/ lone LF
     // (粘贴的 CR/LF 已在上方 pasting 分支累积进 pasteParts,不会到此)
+    // Ctrl+Enter:readline 解析得到 key.ctrl=true && isReturn 走这条路;少数老 xterm 把
+    // Ctrl+Enter 当裸 \r 发(没 ctrl flag)→ 落到下方「提交」分支做 Enter 处理,
+    // 此时用 Ctrl+J 兜底。
     const wantNewline =
       (key.ctrl && key.name === 'j') ||
+      (key.ctrl && isReturn) ||
       (key.meta && isReturn) ||
       (key.shift && isReturn) ||
       (key.sequence === '\n' && !key.ctrl);
