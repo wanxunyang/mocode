@@ -150,6 +150,8 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `memory_update` | 原地改一条记忆(id 不变;纠正过时事实 / 改摘要 / 改 pin)                      |
 | `memory_forget` | 遗忘记忆:默认归档(可复活),`mode=delete` 硬删(pinned 拒删)               |
 
+5 个 `memory_*` 工具受启动时 `MEMORY_ENABLED=true` 总开关控制;运行时切换用 `/memory_switch`(需重启 REPL,刻意为之,见下「项目记忆」小节区分 Tier-1 / Tier-2)。
+
 ## 斜杠命令
 
 | 命令              | 作用                                                 |
@@ -162,6 +164,7 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `/resume`       | 续接已保存的会话                                           |
 | `/rollback`     | 菜单选轮次回滚(↑↓ · Enter)                                |
 | `/memory`       | 看记忆库:条目数 + 近期索引                                    |
+| `/memory_switch` | 切换 Tier-2 记忆开关(需重启 REPL,刻意为之)                  |
 | `/reflect`      | 手动触发一次后台记忆反思 pass                                   |
 | `/model`        | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
 | `/init`         | 扫描项目生成 `MOCODE.md` 项目记忆(发给 agent 执行)               |
@@ -197,6 +200,13 @@ mocode 自动扫描以下目录的 skill(每个 skill 是 `<name>/SKILL.md`,带 
 - `<cwd>/.mocode/skills/`
 
 skill 的 `description` 注入系统提示(渐进式披露第①层),模型只在任务相关时调 `use_skill` 加载完整正文(第②层)。用 `/skills` 查看已发现的 skill。
+
+## 项目记忆(MOCODE.md)
+
+mocode 的**双层记忆**模型,跟 Skills 是两件事:
+
+- **Tier-1 — `MOCODE.md`(每轮自动加载):** Markdown 项目记忆,每轮拼进 system prompt。发现路径:`~/.mocode/MOCODE.md` → 从 cwd 往上逐级 `MOCODE.md`(远→近拼接,近的覆盖更突出);超长截断并标注原始文件。运行 `/init` 生成或刷新,纯 Markdown,可手写,无 schema。agent 自己推得的「下次要记住的事实」(架构/约定/坑位)也写在这里。
+- **Tier-2 — `memory_*` 工具库(agent 主导,需启用):** 离散带标签条目(`decision` / `fact` / `pitfall` / `reference` / `feedback`),按召回计数衰减(30 天 → archived,90 天 → 硬删 GC)。agent 用工具存 / 搜 / 改 / 删;索引(标题)进系统提示(≤50 条),正文按需 `memory_search` 取。默认关,启动 `MEMORY_ENABLED=true` 或 REPL 内 `/memory_switch`(需重启 REPL,刻意为之)。
 
 ## 类型检查
 

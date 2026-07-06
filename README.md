@@ -150,6 +150,8 @@ The agent operates in **the working directory it was launched from** — to have
 | `memory_update`     | Edit a memory in place (id unchanged; correct stale facts / update summary / toggle pin) |
 | `memory_forget`     | Forget a memory: archived by default (recoverable), `mode=delete` for a hard delete (pinned memories can't be deleted) |
 
+The five `memory_*` tools are gated on `MEMORY_ENABLED=true` at startup; toggle at runtime with `/memory_switch` (REPL restart required, by design — see Skills section for the difference between Tier-1 `MOCODE.md` and Tier-2 memory).
+
 ## Slash commands
 
 | Command           | Purpose                                                              |
@@ -162,6 +164,7 @@ The agent operates in **the working directory it was launched from** — to have
 | `/resume`           | Resume a saved session                                                |
 | `/rollback`         | Menu to pick a turn to roll back to (↑↓ · Enter)                     |
 | `/memory`           | Show memory library: entry count + recent index                       |
+| `/memory_switch`   | Toggle Tier-2 memory on/off (REPL restart required — by design)       |
 | `/reflect`          | Manually trigger a background memory reflection pass                  |
 | `/model`            | Configure the LLM (baseURL / apiKey / model / context window), applied immediately + persisted |
 | `/init`             | Scan the project and generate `MOCODE.md` project memory (dispatched to the agent) |
@@ -197,6 +200,13 @@ MoCode automatically scans the following directories for skills (each skill is a
 - `<cwd>/.mocode/skills/`
 
 A skill's `description` is injected into the system prompt (progressive disclosure, tier 1); the model calls `use_skill` to load the full body (tier 2) only when the task is relevant. Use `/skills` to see discovered skills.
+
+## Project memory (MOCODE.md)
+
+MoCode has a **two-tier memory** model distinct from skills:
+
+- **Tier-1 — `MOCODE.md` (auto-loaded every session):** Markdown project memory that gets concatenated into the system prompt on every turn. Discovery walks `~/.mocode/MOCODE.md` → every `MOCODE.md` from the cwd up to the filesystem root (far→near, near wins). On overflow the body is truncated with a marker pointing back at the files. Generate or refresh one with `/init`, or write it by hand — it's plain Markdown, no schema. `MOCODE.md` is also where the agent itself persists "next-session facts" it deduces (architecture, conventions, pitfalls).
+- **Tier-2 — `memory_*` tool library (agent-driven, opt-in):** Discrete tagged records (`decision` / `fact` / `pitfall` / `reference` / `feedback`) with recall-count-based decay (30-day → archived; 90-day → GC). The agent saves / searches / updates / forgets via tools; titles go in the system-prompt index (≤50), bodies fetched on demand via `memory_search`. Off by default; toggle with `MEMORY_ENABLED=true` at startup or `/memory_switch` (REPL restart required).
 
 ## Type checking
 
