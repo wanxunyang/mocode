@@ -479,6 +479,30 @@ export function clearContent(): void {
   stdout.write(esc.home);
 }
 
+/**
+ * 撤销(rewind)内容区末尾 n 物理行 —— 供 "刚 echoInput 写下用户气泡、用户撤回"
+ * 把气泡从可视区与 buffer 一起拿掉。content.rewind 弹出 buffer 末 n 行;layout 这边
+ * 同步上溯 contentRow(contentTop 钳位,防下溢)、scrollOffset 钳到新 totalRows、
+ * 最后 repaintViewport 重画可视区(running 态回 runningCaretPos,input 态回续写位)。
+ *
+ * 与 clearContent 不同:只擦最近一段、保留更早内容与 buffer;光标归内容区底,
+ * 不是 (1,1)。常发生在 RUNNING 态的 pending 窗口内 recall —— recall 后调用方
+ * 通常再 enterInputMode 切回 INPUT 视觉,光标由后续 paintInput 重画。
+ */
+export function rewindContent(rowsToRewind: number): void {
+  if (!active || rowsToRewind <= 0) return;
+  content.rewind(rowsToRewind);
+  const g = getGeo();
+  contentRow = Math.max(g.contentTop, contentRow - rowsToRewind);
+  contentCol = 1;
+  // 钳 scrollOffset:不能让 viewport 视点超出新 totalRows
+  const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
+  scrollOffset = Math.min(scrollOffset, maxOff);
+  // 末段 frameRow/frameCol 是 spinner 的画位,撤回若跨过 frame 行也不必清——
+  // repaintViewport 会按新 buffer 重画整片,旧 frame 自然被覆盖。
+  repaintViewport();
+}
+
 
 // ── viewport 滚动回看(Phase 2)──
 

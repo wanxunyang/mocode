@@ -64,6 +64,33 @@ export function breakRow(): void {
   hasCurrent = true; // 新空行即当前行
 }
 
+/**
+ * 弹出 buffer 末尾 n 物理行(供 layout.rewindContent 撤回刚写入段用)。
+ * 当前行先 commit 再裁剪(消除 hasCurrent 边界);n ≥ totalRows 则全清,
+ * 但**不动 segMark** —— recall 走普通 contentWrite、不撞 md 段;
+ * segMark 由 reset() / commitSegment() 清,recall 不掺和。
+ */
+export function rewind(n: number): void {
+  if (n <= 0) return;
+  const cur = totalRows();
+  if (n >= cur) {
+    rows = [];
+    curSgr = '';
+    rowStartSgr = '';
+    curRaw = '';
+    hasCurrent = false;
+    return;
+  }
+  // 当前行先 commit 再裁剪(否则 hasCurrent 边界会被打穿)
+  if (hasCurrent) {
+    rows.push(rowStartSgr + curRaw + '\x1B[0m');
+    curRaw = '';
+    rowStartSgr = curSgr;
+    hasCurrent = false;
+  }
+  rows.splice(rows.length - n);
+}
+
 /** 标记段起点:快照当前缓冲状态,供 setLines 截断定位段头(md 流式渲染每 chunk 截断重渲)。 */
 export function beginSegment(): void {
   segMark = { rowIdx: rows.length, rowStartSgr, curSgr, curRaw, hasCurrent };

@@ -273,6 +273,18 @@ let runningInput = ''; // 运行中已打字缓冲(单行;agent 结束后预填�
 let runningPlaceholder = '';
 let currentAbort: AbortController | null = null;
 let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user 输入(下轮 INPUT 态消费)
+
+// ── pending send 撤回窗口(用户按 Enter 后、agent 真发请求前)──
+// 500ms 内 Ctrl+C / Esc → 整条用户气泡从内容区擦掉 + 原行 prefilled 回输入框(可改可再发);
+// 期间再按 Enter 立即推进 / 时间到自然推进 → 走原流程 enterRunningMode + runTurn。
+// attachmentsCount 记 pendingAttachments 当时长度——撤回时 attachments 保留(用户意图未变,只是改字)。
+const PENDING_RECALL_MS = 500;
+let pendingRecall: {
+  lines: string[];
+  attachmentsCount: number;
+  placeholder: string;
+} | null = null;
+let pendingTimer: NodeJS.Timeout | null = null;
 // agent 模式状态已提到 src/agent/mode.ts(共享叶子:switch_mode 工具可写、agent 每步读、repl 注册 onModeChange 监听器)。
 
 /** 多模态 user 输入的附件状态。pending = 本轮尚未提交的待发图片;messageAttachments = 已 push 进 history 的图片元数据
@@ -406,6 +418,80 @@ function echoInput(lines: string[]): void {
   for (const a of pendingAttachments) {
     layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
   }
+}
+
+/**
+ * 等待 pending 撤回窗口(用户 Enter 后、agent 真发请求前的 500ms 兜底)。
+ * 返 true=应 commit(走原 enterRunningMode + runTurn);false=应 recall(主循环 rewindContent 擦气泡 + prefill 回输入框)。
+ *
+ * 监听:
+ *   - Esc / Ctrl+C → recall(shouldCommit=false)
+ *   - Enter / Return → 立即 commit(shouldCommit=true)
+ *   - 其它键忽略(不进 paste 路径、不挂 timer)
+ *   - 500ms 定时器到 → 自动 commit(shouldCommit=true)
+ *
+ * 视觉:状态行 spinner 位临时改 '发送中…  (Esc / Ctrl+C 撤回)';commit 后
+ * runAgent.onStepStart 会 setStatus('思考中') 接管,无需手动还原。
+ *
+ * 降级:非 TTY(setRawMode 抛错)直接 commit,window=0 —— CI / 管道回放路径不退化。
+ */
+function awaitPendingRecall(
+  input: string[],
+  attachmentsCount: number,
+  placeholder: string,
+): Promise<boolean> {
+  pendingRecall = { lines: input, attachmentsCount, placeholder };
+  layout.setStatus('发送中…  (Esc / Ctrl+C 撤回)', '●');
+
+  // 非 TTY:setRawMode 抛错 → window=0 直返 true(向后退化,不走 raw + 不挂监听)。
+  let ttyReady = false;
+  try {
+    stdin.setRawMode(true);
+    ttyReady = true;
+  } catch {
+    ttyReady = false;
+  }
+  if (!ttyReady) {
+    pendingRecall = null;
+    return Promise.resolve(true);
+  }
+
+  stdin.resume();
+  emitKeypressEvents(stdin);
+
+  return new Promise<boolean>((resolve) => {
+    let done = false;
+    const finalize = (shouldCommit: boolean): void => {
+      if (done) return;
+      done = true;
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
+      emitter.off('keypress', onPendingKey);
+      pendingRecall = null;
+      resolve(shouldCommit);
+    };
+    const onPendingKey = (_str: string, key?: Key): void => {
+      if (!key || done) return;
+      // 鼠标报表:吞(与 prompt.ts / onRunningKey 风格一致)
+      if (mouse.swallow(key.sequence ?? '')) return;
+      // 撤回
+      if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+        finalize(false);
+        return;
+      }
+      // 立即 commit
+      if (key.name === 'enter' || key.name === 'return') {
+        finalize(true);
+        return;
+      }
+      // 其他键忽略
+    };
+    emitter.on('keypress', onPendingKey);
+    pendingTimer = setTimeout(() => finalize(true), PENDING_RECALL_MS);
+    pendingTimer.unref?.();
+  });
 }
 
 /** 把任意消息 content 拍平成字符串(OpenAI 可能 string / null / 多模态数组)。 */
@@ -1410,6 +1496,17 @@ export async function startRepl(
       continue;
     }
 
+    const bubbleRows = input.length + 2 + pendingAttachments.length; // N 行 message + 2 行尾随空(含 \n\n 留下的 open current 行) + 每附件 1 行
+    const shouldCommit = await awaitPendingRecall(input, pendingAttachments.length, placeholder);
+    if (!shouldCommit) {
+      // 撤回:气泡从内容区擦掉 + 行放回输入框(下轮 promptWithSlashMenu 经 initialLines 消费)+ 切回 INPUT 视觉。
+      // pendingAttachments **保留** —— 撤回的是输入文本不是意图,再发时随消息一起带走
+      // (runTurn 入口的 pendingAttachments.flush 仍按现有逻辑把附件塞进 userInput)。
+      layout.rewindContent(bubbleRows);
+      pendingPrefill = input;
+      layout.enterInputMode('空闲');
+      continue;
+    }
     const initialPlan = getAgentMode() === 'plan'; // 轮首模式(在 runTurn 之前读)
     const ok = await runTurn(joined, initialPlan, placeholder);
     // plan 轮正常结束(未中断 / 未抛错)→ 看轮末模式决定:
