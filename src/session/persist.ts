@@ -107,12 +107,23 @@ export function loadSession(id: string): SessionRecord | null {
   }
 }
 
-/** 列出所有会话,按 createdAt 降序。损坏文件跳过。 */
-export function listSessions(): SessionMeta[] {
+/** 列出最近会话,按 createdAt 降序。损坏文件跳过。
+ *  - limit?: 仅返回前 N 条。会话文件名是 YYYYMMDD-HHmmss.json,字典序=时间序;
+ *    先按文件名降序取前 N,再只解析这 N 个文件(history 大字段全部跳过不读),避免
+ *    /resume 在 sessions 目录堆了几百个文件时 readdirSync + 全量 JSON.parse 慢。
+ *  - 不传 limit 时读全部(向后兼容,供裸 --resume 列全表用)。
+ */
+export function listSessions(limit?: number): SessionMeta[] {
   if (!existsSync(config.sessionDir)) return [];
+  // 过滤掉 .snapshots.json:ASCII 排序里 's'(115) > 'j'(106),后者排在前面,会让
+  // slice(0, limit) 取到一堆快照文件(JSON.parse 后 rec.id=undefined 被吞),真会话被挤掉。
+  const all = readdirSync(config.sessionDir)
+    .filter((f) => f.endsWith('.json') && !f.endsWith('.snapshots.json'))
+    .sort() // YYYYMMDD-HHmmss.json 字典序 ≡ 时间序(同 createdAt 升序)
+    .reverse(); // 降序:最新在前
+  const toRead = typeof limit === 'number' ? all.slice(0, Math.max(0, limit)) : all;
   const out: SessionMeta[] = [];
-  for (const f of readdirSync(config.sessionDir)) {
-    if (!f.endsWith('.json')) continue;
+  for (const f of toRead) {
     try {
       const rec = JSON.parse(
         readFileSync(path.join(config.sessionDir, f), 'utf8')
@@ -129,6 +140,5 @@ export function listSessions(): SessionMeta[] {
       // 跳过损坏文件
     }
   }
-  out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   return out;
 }

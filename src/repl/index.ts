@@ -96,7 +96,8 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/context', desc: '显示上下文用量条' },
   { name: '/skills', desc: '列出已发现的 skill' },
   { name: '/compact', desc: '压缩历史(可带焦点 /compact …)' },
-  { name: '/resume', desc: '续接已保存的会话' },
+  { name: '/resume', desc: '续接最近 10 个已保存会话(快速)' },
+  { name: '/sessions', desc: '浏览全部已保存会话(慢,翻历史用)' },
   { name: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
   { name: '/memory', desc: '记忆库:条目计数与近期索引(关闭时提示先开 /memory_switch)' },
   { name: '/memory_switch', desc: '切换记忆子系统开关(无参=切换;/on 或 /off 显式;持久化 MEMORY_ENABLED)' },
@@ -858,6 +859,30 @@ export async function startRepl(
     return ok;
   };
 
+  /** 把 picker 选中的会话加载进 REPL(刷 history + 重建 snapshots + 重画)。/resume / /sessions 共用。 */
+  async function resumeFromPick(pick: SessionPickerItem | null): Promise<void> {
+    if (!pick) return; // Esc / Ctrl+D 取消
+    const loaded = loadSession(pick.id);
+    if (!loaded || !loaded.history.length) {
+      layout.contentWrite(`${ui.yellow}(加载失败)${ui.reset}\n`);
+      return;
+    }
+    if (loaded.history[0]?.role === 'system') {
+      loaded.history[0] = { role: 'system', content: buildSystemMessage(false) };
+    }
+    history.length = 0;
+    history.push(...loaded.history);
+    setAgentMode('auto'); // 续接重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
+    currentSessionId = loaded.id;
+    // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
+    if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
+    contextState.lastUsage = undefined;
+    lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
+    layout.clearContent();
+    renderHistory(history);
+    layout.contentWrite(`${ui.dim}(已续接会话 ${loaded.id})${ui.reset}\n`);
+  }
+
   while (true) {
     // INPUT 态:画底栏输入框 + 状态行,光标入输入框
     refreshStatusBase(history);
@@ -1147,10 +1172,35 @@ export async function startRepl(
       }
       continue;
     }
+    if (line === '/sessions') {
+      // /sessions:浏览全部已保存会话(慢路径,readdir+全量 JSON.parse,目录 N 大时会有可感知卡顿)。
+      // 默认走 /resume(仅最近 10 条,瞬开);要翻历史续接更早的会话才用这条。
+      // picker 走全显(cap=items.length,无 a 展开提示),靠 picker 自身开窗(以选中为中心分屏)。
+      const sessions = listSessions(); // 不传 limit = 全量
+      if (sessions.length === 0) {
+        layout.contentWrite(`${ui.dim}(没有已保存的会话)${ui.reset}\n`);
+        continue;
+      }
+      const items: SessionPickerItem[] = sessions.map((s) => ({
+        id: s.id,
+        title: s.firstUser || '(无)',
+        subtitle: `${s.id}  ${s.model}`,
+      }));
+      let pick: SessionPickerItem | null;
+      try {
+        pick = await promptSessionPicker(items, items.length);
+      } catch {
+        continue; // Ctrl+C(SIGINT)→ 取消
+      }
+      await resumeFromPick(pick);
+      continue;
+    }
     if (line === '/resume') {
-      // /resume:打开会话菜单(↑/↓ 选,Enter 续接,Esc 取消)。默认仅最近 10 条,按 a 展开全部。
+      // /resume:打开会话菜单(↑/↓ 选,Enter 续接,Esc 取消)。只加载最近 10 条,
+      // 避免 sessions 目录堆了几百个会话时 readdir+全量 JSON.parse 卡顿。
       // 仿 /rollback 菜单化(promptSessionPicker);选中项 cyan+bold + ▸ 高亮。
-      const sessions = listSessions();
+      // 要续接更早的会话请用 /sessions 翻全表,或 CLI `mocode --resume <id>`。
+      const sessions = listSessions(10);
       if (sessions.length === 0) {
         layout.contentWrite(`${ui.dim}(没有已保存的会话)${ui.reset}\n`);
         continue;
@@ -1166,26 +1216,7 @@ export async function startRepl(
       } catch {
         continue; // Ctrl+C(SIGINT)→ 取消
       }
-      if (!pick) continue; // Esc / Ctrl+D 取消
-      const loaded = loadSession(pick.id);
-      if (!loaded || !loaded.history.length) {
-        layout.contentWrite(`${ui.yellow}(加载失败)${ui.reset}\n`);
-        continue;
-      }
-      if (loaded.history[0]?.role === 'system') {
-        loaded.history[0] = { role: 'system', content: buildSystemMessage(false) };
-      }
-      history.length = 0;
-      history.push(...loaded.history);
-      setAgentMode('auto'); // /resume 重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
-      currentSessionId = loaded.id;
-      // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
-      if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
-      contextState.lastUsage = undefined;
-      lastTurnUsage = undefined; // /resume:旧会话的 token 累计已无意义,清空等下轮覆写
-      layout.clearContent();
-      renderHistory(history);
-      layout.contentWrite(`${ui.dim}(已续接会话 ${loaded.id})${ui.reset}\n`);
+      await resumeFromPick(pick);
       continue;
     }
     if (line === '/theme' || line.startsWith('/theme ')) {
