@@ -145,7 +145,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       writeBuf(`  ● 达到最大步数(${maxSteps}),子 agent 停止。\n`),
     onDone: (elapsedMs, usage) => {
       const tok = usage && usage.totalTokens
-        ? `  · ${usage.totalTokens} tokens`
+        ? `  · ${usage.totalTokens} tokens${usage.cachedTokens ? ` ↻${usage.cachedTokens} cached` : ''}`
         : '';
       writeBuf(`  ✻ 子 agent 耗时 ${(elapsedMs / 1000).toFixed(1)}s${tok}\n`);
     },

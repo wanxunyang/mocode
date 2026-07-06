@@ -57,8 +57,9 @@ export interface StatusBarData {
   modeTag?: string; // 模式标识:repl 传 'auto' / 'plan'(两段式布局左段显示)
   /** 活跃 plan 短摘要(无 plan=undefined,空串=有 plan 但 chip 不显)。repl 透传 getActivePlanSummary()。 */
   planSummary?: string;
-  /** 本轮最后一条 token 用量(modeTag chip 右边显示)。后端不开 include_usage 时 undefined。 */
-  lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
+  /** 本轮最后一条 token 用量(modeTag chip 右边显示)。后端不开 include_usage 时 undefined。
+   *  cachedTokens 可选 —— 后端未报或老 ChatUsage 字面量不带此字段时 UI 不会显示缓存标记。 */
+  lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number };
 }
 
 export interface InputView {
@@ -86,7 +87,7 @@ let segmentStartRow = 1; // 当前 md 段起始屏行(供 contentWriteMd 定位�
 let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
 let scrollLockUntil = 0; // 发消息轮首滚动锁(绝对时间戳 ms,0=未锁):吸收 stdin 残留滚轮事件,防 resetScroll 回尾后被重新滚上去
 const SCROLL_LOCK_MS = 400; // 锁时长:覆盖 OS 缓冲残留 + 常规滚轮惯性;LLM TTFB 多 >200ms,不影响轮中后段滚动
-let base: { model: string; contextBar: string; cwd: string; modeTag?: string; planSummary?: string; lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number } } | null = null;
+let base: { model: string; contextBar: string; cwd: string; modeTag?: string; planSummary?: string; lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } } | null = null;
 let statusText = '';
 let spinnerFrame: string | undefined;
 let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
@@ -858,13 +859,19 @@ function composeModelLine(status: StatusBarData, cols: number): string {
   return twoColumn(leftStr, leftW, rightStr, rightW, cols);
 }
 
-/** 把本轮 token 总量格式化成 chip 文本(纯字符串,带 ANSI 色)。无 usage 返空串。 */
-function formatTurnTokenChip(usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined): string {
+/** 把本轮 token 总量格式化成 chip 文本(纯字符串,带 ANSI 色)。无 usage 返空串。
+ *  显示策略:chip 信息密度有限,只显示总量 + 一个 ↻ 标记表示有 cache 命中。
+ *  详细分项(↑↓ 计费/↻ 缓存/reasoning)在 turn 末 summary 行展示,不在此处展开。 */
+function formatTurnTokenChip(usage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined): string {
   if (!usage || !usage.totalTokens) return '';
   const n = usage.totalTokens;
   const text = n < 1000 ? `${n}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
-  // 单段:量足够稳定时不显分项,避免无谓视觉负担。chip 用 mid 灰(降优先级)— 模式仍是主色。
-  return `${ui.dim}${text} tokens${ui.reset}`;
+  const cached = usage.cachedTokens ?? 0;
+  const cacheTag = cached > 0
+    ? ` ↻${cached < 1000 ? cached : `${(cached / 1000).toFixed(cached >= 10000 ? 0 : 1)}k`}`
+    : '';
+  // chip 用 mid 灰(降优先级)— 模式仍是主色
+  return `${ui.dim}${text} tokens${cacheTag}${ui.reset}`;
 }
 
 /** spinner 行上方的「虚拟空行」(contentBottom+1)。

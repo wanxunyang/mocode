@@ -196,6 +196,79 @@ export interface ChatUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** prompt 中命中 cache 的 token 数(后端未报则为 0)。
+   *  计费时这部分按折扣价(DeepSeek 命中 $0.014/M vs 未命中 $0.14/M,差 10×)或免费
+   *  ——成本监控要从 promptTokens 中剔除,否则高估一个数量级。
+   *  多 provider 字段名不一致,见 extractUsageExtras。 */
+  cachedTokens: number;
+  /** completion 中"思考"消耗的 token(CoT 模型:OpenAI o1 / DeepSeek R1 / GLM-Z1)。
+   *  仍按 completion 全价计费,但对调试 thinking 长度有用。 */
+  reasoningTokens: number;
+}
+
+/**
+ * 多 provider 兼容的 cache / reasoning 字段提取。
+ * 不同后端报 cached 字段名差异巨大,这里按"最常见的几种"顺序 probe,
+ * 首个合法非负数字即用(0 也算合法 —— cache miss 是合法状态,不是"无数据")。
+ * 字段全缺 → 0,UI 不会显示任何额外标注(零行为变化)。
+ *
+ * 已实测 / 字段名已知:
+ *   - OpenAI / Azure / 多数 OpenAI 兼容中转:
+ *       prompt_tokens_details.cached_tokens
+ *   - DeepSeek(含 R1):
+ *       prompt_cache_hit_tokens(扁平,顶层)
+ *   - Anthropic Claude:
+ *       cache_read_input_tokens
+ *   - Moonshot Kimi / GLM-4.6 / Qwen:同 OpenAI 标准
+ *   - Ollama / 本地 vLLM / 其它:无 usage details → 0(零行为变化)
+ *
+ * reasoning 字段(CoT 模型):
+ *   - OpenAI o1 / DeepSeek R1 / GLM-Z1:
+ *       completion_tokens_details.reasoning_tokens
+ *   - 其它(个别):reasoning_tokens(顶层)
+ */
+export function extractUsageExtras(usage: unknown): {
+  cachedTokens: number;
+  reasoningTokens: number;
+} {
+  if (!usage || typeof usage !== 'object') return { cachedTokens: 0, reasoningTokens: 0 };
+  const u = usage as Record<string, unknown>;
+  // cached probe 顺序:OpenAI 标准 → DeepSeek 扁平 → Anthropic → 杂项兜底
+  const cachedCandidates: unknown[] = [
+    readPath(u, ['prompt_tokens_details', 'cached_tokens']),
+    u.prompt_cache_hit_tokens,
+    u.cache_read_input_tokens,
+    u.cached_tokens,
+    u.prompt_tokens_cached,
+  ];
+  // reasoning probe 顺序:OpenAI 标准 → 扁平兜底
+  const reasoningCandidates: unknown[] = [
+    readPath(u, ['completion_tokens_details', 'reasoning_tokens']),
+    u.reasoning_tokens,
+  ];
+  return {
+    cachedTokens: firstNumber(cachedCandidates) ?? 0,
+    reasoningTokens: firstNumber(reasoningCandidates) ?? 0,
+  };
+}
+
+/** 从对象按路径读嵌套字段(每段都做 null/undefined 检查,任一断即返 undefined)。 */
+function readPath(obj: Record<string, unknown>, path: string[]): unknown {
+  let cur: unknown = obj;
+  for (const k of path) {
+    if (cur == null || typeof cur !== 'object') return undefined;
+    cur = (cur as Record<string, unknown>)[k];
+  }
+  return cur;
+}
+
+/** 从候选数组里取第一个合法非负有限数字(0 算合法 —— cache miss 不是"无数据")。
+ * 顺序敏感:数组里前面的 provider 优先(如 OpenAI 标准报 0 时,不会 fallback 到 DeepSeek 字段)。 */
+function firstNumber(arr: readonly unknown[]): number | undefined {
+  for (const v of arr) {
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
+  }
+  return undefined;
 }
 
 export interface ChatResult {
@@ -294,6 +367,9 @@ async function chatOnce(
       prompt_tokens: number;
       completion_tokens: number;
       total_tokens: number;
+      // 字段名因 provider 而异(cached_tokens / cache_read_input_tokens / ...),
+      // 用 extractUsageExtras 容错读,这里类型放宽到 unknown 让 indexed access 不报错。
+      [k: string]: unknown;
     };
     choices?: Array<{
       delta?: {
@@ -308,10 +384,13 @@ async function chatOnce(
   }>) {
     // usage:末尾 chunk(choices 可能为空)在 include_usage 时携带;先读再 continue。
     if (chunk.usage) {
+      const extras = extractUsageExtras(chunk.usage);
       usage = {
         promptTokens: chunk.usage.prompt_tokens,
         completionTokens: chunk.usage.completion_tokens,
         totalTokens: chunk.usage.total_tokens,
+        cachedTokens: extras.cachedTokens,
+        reasoningTokens: extras.reasoningTokens,
       };
     }
     const delta = chunk.choices?.[0]?.delta;

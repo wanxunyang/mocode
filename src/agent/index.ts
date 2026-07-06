@@ -3,7 +3,7 @@
 // 本文件只负责把展示副作用(layout.contentWrite / Spinner / diff / 回滚轮次)注入为 AgentHooks。
 // 行为与重构前的单文件 runAgent 完全一致——这是安全重构,实跑回归验证。
 
-import type { ChatMessage, ToolCallRef } from '../llm/index.js';
+import type { ChatMessage, ChatUsage, ToolCallRef } from '../llm/index.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
 import {
@@ -194,12 +194,32 @@ function mergeHooks(a: AgentHooks, b: AgentHooks): AgentHooks {
   return merged;
 }
 
-/** 摘要行后追加的本轮 token 文本。例:`  · 1.5k tokens (↑ 1.2k ↓ 0.3k)`。
- *  关闭 include_usage / 全失败 → usage=undefined → 不输出(保持原摘要行长度,不留空白)。 */
-function formatTurnTokens(usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined): string {
+/** 摘要行后追加的本轮 token 文本。
+ *  例(无 cache):
+ *    `  ·  1.5k tokens (↑ 1.2k ↓ 0.3k)`
+ *  例(命中 cache,DeepSeek 类折扣计费):
+ *    `  ·  72k tokens (↑ 8k ↓ 3k) · ↻ 61k cached`
+ *  例(CoT 模型 + cache):
+ *    `  ·  72k tokens (↑ 8k ↓ 3k) · ↻ 61k cached · reasoning 1.2k`
+ *
+ *  设计要点:
+ *  - 括号里 ↑ 显示**计费 prompt**(= 全量 - cached),不是后端报的 raw prompt,
+ *    否则用户看到 69k 会按全价估成本,实际只花了 5-9k 的 $。
+ *  - ↻ 显示 cache 命中(白嫖部分),让用户一眼看到优化效果(系统 prompt 越长、对话越长越显著)。
+ *  - reasoning 是 completion 的子集(已含在 ↓ 里),仅作信息;不二次计入成本。
+ *  - 总数 total 不变 —— 是数学意义上的"流过的 token",反映 LLM 实际工作量。
+ *  关闭 include_usage / 全失败 → usage=undefined → 不输出(保持原摘要行长度)。 */
+function formatTurnTokens(usage: ChatUsage | undefined): string {
   if (!usage) return '';
   const total = usage.totalTokens;
   if (!total) return '';
   const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(total >= 10000 ? 0 : 1)}k`);
-  return `  ·  ${fmt(total)} tokens (↑ ${fmt(usage.promptTokens)} ↓ ${fmt(usage.completionTokens)})`;
+  const cached = usage.cachedTokens;
+  const reasoning = usage.reasoningTokens;
+  const billablePrompt = usage.promptTokens - cached;
+  const extras: string[] = [];
+  if (cached > 0) extras.push(`↻ ${fmt(cached)} cached`);
+  if (reasoning > 0) extras.push(`reasoning ${fmt(reasoning)}`);
+  const extrasStr = extras.length > 0 ? ` · ${extras.join(' · ')}` : '';
+  return `  ·  ${fmt(total)} tokens (↑ ${fmt(billablePrompt)} ↓ ${fmt(usage.completionTokens)})${extrasStr}`;
 }

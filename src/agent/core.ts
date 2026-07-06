@@ -263,6 +263,8 @@ export async function runAgentCore(
           promptTokens: turnUsage.promptTokens + u.promptTokens,
           completionTokens: turnUsage.completionTokens + u.completionTokens,
           totalTokens: turnUsage.totalTokens + u.totalTokens,
+          cachedTokens: turnUsage.cachedTokens + u.cachedTokens,
+          reasoningTokens: turnUsage.reasoningTokens + u.reasoningTokens,
         }
       : u;
   };
