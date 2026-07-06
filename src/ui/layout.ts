@@ -1,6 +1,4 @@
 import { stdin, stdout } from 'node:process';
-import { appendFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   charWidth,
@@ -985,19 +983,6 @@ function stopTurnTimer(): void {
   }
 }
 
-// ── 临时诊断:spinner frame 泄漏追踪(定位 557e678 后的间歇性泄漏后删除)──
-// 记 paintLiveAtCursor/clearLiveAtCursor 的可疑时序:续写位漂移、clear 被守卫跳过、清错行。
-// 同步追加到 ~/.mocode/spinner-debug.log,全 try/catch 不抛、不阻塞、不抢屏。
-let _dbgSpinnerPath = '';
-function dbgSpinner(msg: string): void {
-  try {
-    if (!_dbgSpinnerPath) _dbgSpinnerPath = join(homedir(), '.mocode', 'spinner-debug.log');
-    appendFileSync(_dbgSpinnerPath, `[${new Date().toISOString()}] ${msg}\n`);
-  } catch {
-    // 诊断日志失败不影响渲染
-  }
-}
-
 /**
  * 在续写位画一行瞬时活动文本(spinner 帧):不进缓冲、不推进续写位,逐行 clearLine 重画。
  * 仅 TTY + offset=0(实时尾)+ 非打字暂停态时物理写屏;滚动态跳过(由状态行 spinner 兜底,且避免覆盖 viewport 历史行)。
@@ -1037,10 +1022,6 @@ export function paintLiveAtCursor(text: string): void {
   if (contentRow > g.contentBottom) contentRow = g.contentBottom;
   if (scrollOffset === 0 && contentRow < g.contentBottom) {
     contentRow = Math.min(total, g.contentBottom);
-  }
-  // 临时诊断:续写位 != 上次画帧位置 = spinner 运行期间续写位漂移(泄漏根因嫌疑)
-  if (frameRow && (frameRow !== contentRow || frameCol !== contentCol)) {
-    dbgSpinner(`DRIFT-PAINT old=(${frameRow},${frameCol}) cur=(${contentRow},${contentCol}) mode=${mode} off=${scrollOffset}`);
   }
   let out = '';
   if (frameRow && (frameRow !== contentRow || frameCol !== contentCol)) {
