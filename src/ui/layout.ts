@@ -651,7 +651,7 @@ export function setPasteHandler(fn: ((text: string) => void) | null): void {
   pasteHandler = fn;
 }
 
-/** picker / 介入面板期间禁用鼠标选区与滚轮(避免 viewport 重画覆盖菜单);面板退出后恢复。 */
+/** picker / 介入面板期间禁用鼠标选区与拖拽(避免 viewport 重画覆盖菜单);滚轮仍可用。面板退出后恢复。 */
 export function setMouseEnabled(v: boolean): void {
   mouseEnabled = v;
   if (!v) {
@@ -711,7 +711,9 @@ function pasteIntoInput(): void {
 function handleMouseEvent(e: mouse.MouseEvent): void {
   if (!active) return;
   if (e.type === 'wheel') {
-    if (mouseEnabled) scrollBy(e.dir * WHEEL_LINES);
+    // 滚轮始终可用:面板/picker 期间也允许上下查看 agent 输出,
+    // 与 onRunningKey 的 PgUp/PgDn 行为一致;mouseEnabled 仅管选区/拖拽。
+    scrollBy(e.dir * WHEEL_LINES);
     return;
   }
   if (!mouseEnabled) return;
