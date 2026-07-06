@@ -38,6 +38,26 @@ function parseArgs(raw: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Thrashing 检测:同一工具 + 完全相同 arguments 在本轮重复 ≥ THRASH_THRESHOLD 次,
+ * 返一段提示(注入到工具结果尾部),引导模型换思路而不是再试一次。
+ * 阈值 3 = "试过两次同样的调用还没好,该停了"。指纹 = `${name}\\x00${args}`
+ * (直接拼,不哈希——避免热路径开销;args 长度本身有限,内存压力可忽略)。
+ * null 表示未触发,不污染输出。
+ */
+const THRASH_THRESHOLD = 3;
+function thrashHint(name: string, args: string, count: number): string | null {
+  if (count < THRASH_THRESHOLD) return null;
+  return (
+    `\n\n[hint] This is call #${count} of \`${name}\` with identical arguments — ` +
+    'either failing or returning the same content. STOP retrying and switch strategy:\n' +
+    '- read_file / glob → path likely wrong; call `glob` to discover paths, or `ask_human`\n' +
+    '- run_command → Windows path-escaping issue; use `read_file` / `glob` with absolute paths instead\n' +
+    '- edit_file → old_string mismatch; re-read the file to find the exact text\n' +
+    '- otherwise → re-read the tool description; the argument shape may be wrong'
+  );
+}
+
 /** 只读工具集:一轮多个时,连续的只读工具成组 Promise.all 并行(无副作用、互不依赖)。 */
 const READ_TOOL_NAMES = new Set([
   'read_file',
@@ -246,6 +266,15 @@ export async function runAgentCore(
         }
       : u;
   };
+  // Thrashing 检测:本轮内同 (name, args) 累计次数。≥3 在工具结果尾部追加 hint(见 thrashHint)。
+  // 只在 runAgentCore 内,turn 结束自然 GC;不跨 turn 持久(下一轮重新计数,避免误把历史判为 thrashing)。
+  const recentToolCalls = new Map<string, number>();
+  const recordAndHint = (name: string, args: string): string | null => {
+    const fp = `${name}\x00${args}`;
+    const c = (recentToolCalls.get(fp) ?? 0) + 1;
+    recentToolCalls.set(fp, c);
+    return thrashHint(name, args, c);
+  };
   history.push({ role: 'user', content: userInput });
   // drop_context 工具的上下文剔除回调:闭包捕获 history,原地剔除无关旧 tool 结果。
   // 保护由 dropContextFromHistory 内部保证:history[0](system)+ 当前轮(最后 user 及其后)永不剔除。
@@ -382,7 +411,9 @@ export async function runAgentCore(
               const output = await started[k];
               hooks.onToolDone?.();
               hooks.onToolResult?.(tc, output, null, null, 1); // 只读工具无 diff
-              pushToolResult(history, tc, output, relprune, lifecycle, scheduler);
+              // Thrashing:history 里附 hint(UI 已用干净 output 渲染,避免屏幕噪声)
+              const hint = recordAndHint(tc.name, tc.arguments);
+              pushToolResult(history, tc, hint ? `${output}${hint}` : output, relprune, lifecycle, scheduler);
             }
             i = j;
           } else if (calls[i].name === 'task') {
@@ -401,7 +432,9 @@ export async function runAgentCore(
               hooks.onToolHeader?.(tc);
               const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
               hooks.onToolResult?.(tc, err, null, null, 1);
-              pushToolResult(history, tc, err, relprune, lifecycle, scheduler);
+              // Thrashing:同上
+              const hint = recordAndHint(tc.name, tc.arguments);
+              pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
               i++;
               continue;
             }
@@ -419,7 +452,9 @@ export async function runAgentCore(
               const tc = batch[k];
               const output = await started[k];
               hooks.onToolResult?.(tc, output, null, null, 1); // task 结果是摘要,无 diff
-              pushToolResult(history, tc, output, relprune, lifecycle, scheduler);
+              // Thrashing:同上
+              const hint = recordAndHint(tc.name, tc.arguments);
+              pushToolResult(history, tc, hint ? `${output}${hint}` : output, relprune, lifecycle, scheduler);
             }
             hooks.onToolDone?.();
             i = j;
@@ -432,7 +467,9 @@ export async function runAgentCore(
               hooks.onToolHeader?.(tc);
               const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
               hooks.onToolResult?.(tc, err, null, null, 1);
-              pushToolResult(history, tc, err, relprune, lifecycle, scheduler);
+              // Thrashing:同上
+              const hint = recordAndHint(tc.name, tc.arguments);
+              pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
               i++;
               continue;
             }
@@ -445,7 +482,9 @@ export async function runAgentCore(
             const output = await executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext });
             hooks.onToolDone?.();
             hooks.onToolResult?.(tc, output, parsed, preWriteOld, editStartLine);
-            pushToolResult(history, tc, output, relprune, lifecycle, scheduler);
+            // Thrashing:同上(history 附 hint,UI 干净)
+            const hint = recordAndHint(tc.name, tc.arguments);
+            pushToolResult(history, tc, hint ? `${output}${hint}` : output, relprune, lifecycle, scheduler);
             // 相关性裁剪 mutation 通知:edit_file/write_file 后,该 path 之前的所有 read_file
             // 结果已失效(已不再是文件当前状态)→ stub 为存根。pruner 内部 try/catch + 幂等。
             // 非 mutation 工具(run_command/use_skill/memory_* 等)此处 path="" 不触发。

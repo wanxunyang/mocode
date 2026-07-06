@@ -381,6 +381,14 @@ export function gcMemories(): GcResult {
  * active 条目按 updatedAt 降序,封顶 MAX_INDEX_ENTRIES,只注 id/name/summary/type。
  * 无 active 返空串(零行为变化)。body 不注入——按需 memory_search 取。
  *
+ * 索引策略(省 token):不全量塞进每轮 systemPrompt。
+ *  - pinned 永远包含(pinned = 用户明确想长期保留)
+ *  - recallCount ≥ 1 包含(被引用过,价值已验证)
+ *  - 否则仅当 (lastRecalledAt|createdAt) 近 RECENT_MS(=DECAY_DAYS×2) 内
+ * 排序:pinned 先 → recallCount 降 → updatedAt 降。
+ * 封顶 MAX_INDEX_ENTRIES;尾部标 hidden 数量,引导用 memory_list/memory_search 兜底。
+ * 真正「陈旧」被滤掉时也明示(让 LLM 知道有内容存在但被策略隐藏,而不是误以为空)。
+ *
  * memoryEnabled=false 时(记忆子系统总开关关闭)直接返空串:Memory Index 段
  * 不进系统提示,LLM 看不到工具使用提示;配合 tools/builtins 屏蔽 memory_* 工具,
  * 实现「关闭时零侵入」(默认行为)。传参由 repl 的 buildSystemMessage 在拼装前调
@@ -388,22 +396,42 @@ export function gcMemories(): GcResult {
  */
 export function buildMemoryIndexSection(memoryEnabled: boolean = true): string {
   if (!memoryEnabled) return '';
-  const active = loadAll()
-    .filter((e) => e.status === 'active')
-    .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+  const all = loadAll();
+  const active = all.filter((e) => e.status === 'active');
   if (active.length === 0) return '';
-  const shown = active.slice(0, MAX_INDEX_ENTRIES);
+  const now = Date.now();
+  // DECAY_DAYS×2 = 60 天(常量在下方定义,同模块作用域内可见)
+  const recentCutoff = now - DECAY_DAYS * 2 * DAY_MS;
+  const refTs = (e: MemoryEntry): number => {
+    const r = e.lastRecalledAt ? Date.parse(e.lastRecalledAt) : Date.parse(e.createdAt);
+    return Number.isFinite(r) ? r : now;
+  };
+  // 过滤:只保留"近 60 天有动静 / 有 recall / pinned"的三类。其它 active 视为陈旧。
+  const eligible = active.filter((e) => {
+    if (e.pinned) return true;
+    if (e.recallCount >= 1) return true;
+    return refTs(e) >= recentCutoff;
+  });
+  eligible.sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    if (a.recallCount !== b.recallCount) return b.recallCount - a.recallCount;
+    return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+  });
+  const staleCount = active.length - eligible.length;
+  const shown = eligible.slice(0, MAX_INDEX_ENTRIES);
   const lines = shown.map((e) => `- ${e.id}: ${e.name} — ${e.summary} (${e.type})`);
-  const tail =
-    active.length > MAX_INDEX_ENTRIES
-      ? `\n\n…(${active.length} total, showing first ${MAX_INDEX_ENTRIES}; use memory_search <id or keyword> for more)`
-      : '';
+  const capOmitted = Math.max(0, eligible.length - shown.length);
+  const tailParts: string[] = [];
+  if (capOmitted > 0) tailParts.push(`${capOmitted} additional active entries omitted by cap (${shown.length}/${eligible.length} shown)`);
+  if (staleCount > 0) tailParts.push(`${staleCount} stale active entries hidden by index policy (no recall + older than ${DECAY_DAYS * 2}d; use memory_list to see all)`);
+  const tail = tailParts.length > 0 ? `\n\n…(${tailParts.join('; ')})` : '';
   return [
     '',
     '',
     '## Memory Index (retrieve full body via memory_search)',
     'The following are saved memory entries (title/summary only). Retrieve full body via memory_search (pass id or keyword); use memory_list to see all,'
-      + ' memory_update to modify, memory_forget to archive. This list is a startup snapshot; entries added during the session are not listed here — use memory_list/memory_search to find them.',
+      + ' memory_update to modify, memory_forget to archive. This list is a startup snapshot; entries added during the session are not listed here — use memory_list/memory_search to find them.'
+      + ' Index policy: pinned + recently-recalled always shown; long-untouched active entries are hidden to keep this section lean.',
     ...lines,
     tail,
   ].join('\n');

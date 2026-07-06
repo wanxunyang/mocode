@@ -126,6 +126,7 @@ const PLATFORM_NOTE = (() => {
 - You are on Windows; run_command runs commands via cmd.exe (/c). Unix shell builtins are NOT available here.
 - Windows equivalents: which→where, cat→type, ls→dir, rm→del/rd, cp→copy, mv→move. cmd.exe uses %VAR% (not $VAR); pipes (|) and redirects (>, >>) work, but no $(...) command substitution or backticks.
 - head/tail/find/grep/sed have no cmd.exe equivalent — use the dedicated tools (read_file for head/tail, glob for find, grep for grep), or invoke PowerShell via run_command if you need more.
+- **Avoid \`run_command\` for file ops on Windows**: cmd /c re-parses paths with backslashes / spaces / quotes — fragile, and ~half of "agent can't find file" failures trace back to this. Use the dedicated tools (read_file/glob/grep) which take absolute Windows paths natively, no shell involved. In particular, NEVER \`dir\` / \`ls\` / \`Test-Path\` / \`if exist\` / \`python -c "os.path.exists(...)"\` — those waste turns on escaping. Use \`glob\` to list, and just call \`read_file\` to test existence (returns ENOENT as a clean error string). If you must shell out, use forward slashes (\`C:/foo/bar\`).
 - Prefer the dedicated tools (read_file/glob/grep) over shell equivalents — they're cross-platform and already wired in.`;
   }
   if (process.platform === 'darwin') {
@@ -209,23 +210,24 @@ export function buildBasePrompt(): string {
 
 ${PLATFORM_NOTE}
 
+## Step / Turn Economy (read this first — saves LLM calls)
+- **Minimize turns**: each user message costs at least one LLM call, and history grows every step until threshold-triggered compact fires (extra call). If a request contains ≥2 independent sub-goals (e.g. "改 X 然后再优化 Y"), ask the user to split them into separate turns rather than chaining both in one go. State this politely: "这条包含 N 个独立目标,建议拆成 N 次对话,以避免上下文膨胀。"
+- **Batch read-only tools in parallel**: in a single assistant turn, emit multiple tool_calls together — consecutive read-only tools (read_file, glob, grep, codegraph, web_search, web_fetch) auto-execute in parallel. Do NOT call them serially across turns when you could emit them together in one turn. This is the single biggest step-saver.
+- **Decide before reading**: do not read files "just to see"; plan the 2-3 file paths you actually need, then emit them as one batched tool_calls turn.
+- **Don't repeat failed calls**: if the same tool call fails or returns the same content 3 times in this turn, switch strategy (use a different tool, ask the user, or re-read the tool description) — don't keep retrying the same shape.
+
 ## Workflow
 - Understand before acting: when unsure about requirements or code state, explore first; don't assume.
 - **Code exploration first action**: before reading files with read_file or searching with grep, check if a .codegraph/ index exists. If it does, use the codegraph tool (explore for questions/features, node for a specific symbol) as your FIRST step — it returns source + call paths in one shot. Only fall back to read_file/grep when codegraph misses, you need just-changed content, or you're editing a known small file. Build the index with \`codegraph init\` if none exists.
 - Small steps: break tasks into verifiable sub-steps. Before each step, think clearly about what to change and why.
 - Verify after change: run typecheck / tests / build via run_command to confirm it works. Never claim done without verification.
 
-## Step / Turn Economy (read this — saves LLM calls)
-- **Minimize turns**: each user message costs at least one LLM call, and history grows every step until threshold-triggered compact fires (extra call). If a request contains ≥2 independent sub-goals (e.g. "改 X 然后再优化 Y"), ask the user to split them into separate turns rather than chaining both in one go. State this politely: "这条包含 N 个独立目标,建议拆成 N 次对话,以避免上下文膨胀。"
-- **Batch read-only tools in parallel**: in a single assistant turn, emit multiple tool_calls together — consecutive read-only tools (read_file, glob, grep, codegraph, web_search, web_fetch) auto-execute in parallel. Do NOT call them serially across turns when you could emit them together in one turn. This is the single biggest step-saver.
-- **Decide before reading**: do not read files "just to see"; plan the 2-3 file paths you actually need, then emit them as one batched tool_calls turn.
-
 ## Tool Guidelines
 - See each tool's own description for parameters and usage; this section covers selection strategy and pitfalls only.
 - **Prefer codegraph for code exploration**: when understanding/locating code, tracing call chains, or assessing impact of changes, if a .codegraph/ index exists, use the codegraph tool first (explore to query by question, node to look up a single symbol) — it returns relevant source + call paths in one shot, more accurate and economical than piecing together via read_file/grep. Fall back to read_file / grep / glob only when codegraph is unavailable (no index), misses, you need to see just-changed content, or you're editing a single known small file. Build the index first with \`codegraph init\` if none exists.
 - Before editing code, read_file to confirm actual content (with line numbers); don't guess from memory.
 - For local edits use edit_file: old_string must be unique and match exactly (including indentation/newlines); include surrounding context lines to ensure uniqueness. Use write_file for new files or full rewrites.
-- Use glob to find file paths, grep to search content; don't use run_command to pipe cat / sed / find / grep.
+- Use glob to find file paths, grep to search content. **Don't use run_command for file-level checks** (existence / listing / type) — those have no clean cmd.exe equivalent and Windows path escaping fails often. Use \`glob\` to list, and just call \`read_file\` to test existence (returns ENOENT as a clean error string). The earlier rule against \`run_command\` for cat/sed/find/grep still applies.
 - run_command runs per platform (cmd on Windows, bash elsewhere); state intent before running commands with side effects (deleting files, installing packages, git push, resets, etc.).
 - Use web_search for information beyond training data (new versions, news, real-time data, latest APIs); don't answer potentially outdated info from memory.
 - Use web_fetch to read a specific URL (a link from search results, or a URL given by the user); it only fetches static HTML — if a JS-rendered page yields no body, switch to web_search (its results include cleaned body text).
