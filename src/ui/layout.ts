@@ -511,7 +511,17 @@ function normalizeSelection(): { startLine: number; startCol: number; endLine: n
     : { startLine: b.line, startCol: b.col, endLine: a.line, endCol: a.col };
 }
 
-/** 给自洽带色行的显示列区间 [colStart,colEnd) 套反白(\x1B[7m...\x1B[27m),SGR 码原样穿过不受影响。 */
+/** 给自洽带色行的显示列区间 [colStart,colEnd) 套「统一亮黄底 + 黑字」。
+ *  强制重设前/背景,无视原 SGR:md 字符常带 ui.dim / ui.cyan / ui.gray 等,
+ *  仅靠 SGR 7 反转对比度极弱;改用显式「亮黄底 SGR 103 + 黑前景 SGR 30」,
+ *  跨终端一致。退反白用 0 清 SGR,行末 active SGR 自然续接。
+ *  关键:反白 active 期间**吃掉所有行内 SGR**(不让前景色干扰)——否则
+ *  行内首个 \x1B[2m(dim)/\x1B[36m(cyan)/\x1B[1m(bold) 进选区后仍生效,
+ *  前景被压回原色,整片亮黄底被切割、看着「花」;直穿则带 dim 等,对比不足。
+ *  反白外 SGR 直穿,保留原色。 */
+const SEL_OPEN = '\x1B[30;103m'; // 30:黑前景 | 103:亮黄背景
+const SEL_OFF = '\x1B[0m';       // 全清 SGR,行末 active 状态续接
+
 function highlightRange(line: string, colStart: number, colEnd: number): string {
   if (colEnd <= colStart) return line;
   const parts = line.split(/(\x1b\[[0-9;]*m)/);
@@ -520,24 +530,26 @@ function highlightRange(line: string, colStart: number, colEnd: number): string 
   let opened = false;
   for (let i = 0; i < parts.length; i++) {
     if (i % 2 === 1) {
-      out += parts[i]; // SGR 码原样穿过
+      // SGR 段:反白内直接吃,不让行内前景色进选区;反白外直穿,保留原色。
+      if (opened) continue;
+      out += parts[i];
       continue;
     }
     for (const ch of parts[i]) {
       const cw = charWidth(ch.codePointAt(0) ?? 0);
       if (!opened && w >= colStart && w < colEnd) {
-        out += '\x1B[7m';
+        out += SEL_OPEN;
         opened = true;
       }
       if (opened && w >= colEnd) {
-        out += '\x1B[27m';
+        out += SEL_OFF;
         opened = false;
       }
       out += ch;
       w += cw;
     }
   }
-  if (opened) out += '\x1B[27m';
+  if (opened) out += SEL_OFF;
   return out;
 }
 
