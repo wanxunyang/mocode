@@ -10,6 +10,7 @@ import {
   fmtElapsed,
   stripAnsi,
   sliceByDisplayCol,
+  visColToCharCol,
 } from './render.js';
 import { ui } from './theme.js';
 import * as content from './content.js';
@@ -68,7 +69,6 @@ export interface InputView {
   menu: { lines: string[] } | null; // 预渲染菜单行(带色),向上展开进内容区底
   dim?: boolean; // true=运行态占位(整行 dim)
   placeholder?: string; // dim 态专用:无打字时的 ghost 占位文本(画在光标右侧)
-  caret?: boolean; // true=在光标处画块状光标(反白光标右侧字符,行末反白空格),示"现在在哪输入";默认 true。picker 等非文本输入传 false
 }
 
 // ── 内部状态 ──
@@ -129,6 +129,10 @@ const WHEEL_LINES = 3; // 滚轮每格滚动行数
 // 点击输入框粘贴:当前文本输入方(prompt.ts / repl 运行态 typeahead)注册回调,接收剪贴板文本贴入。
 // 只在输入区(底栏输入行)内右键单击(未拖动)时触发——与内容区选区互不干扰(内容区左键=框选,右键=复制)。
 let pasteHandler: ((text: string) => void) | null = null;
+/** 鼠标点击输入框 → prompt.ts(文本 source of truth)提供的光标应用回调;
+ *  layout 只做"点击 → 算新位置"的映射,实际改 cl/cc 归 prompt(同 pasteHandler 套路)。
+ *  若未注册(非输入态/未进 prompt):仅做视觉反馈,cl/cc 不变。 */
+let cursorChangeHandler: ((line: number, col: number) => void) | null = null;
 
 const esc = {
   altOn: '\x1B[?1049h',
@@ -649,6 +653,14 @@ export function setPasteHandler(fn: ((text: string) => void) | null): void {
   pasteHandler = fn;
 }
 
+/** 注册"点击输入框 → 改光标"回调:prompt.ts 等文本所有者挂此回调后,
+ *  鼠标左键落输入行算出的新 (line, col) 会在 prompt 下次 redraw 前喂入此回调
+ *  (prompt 用它写自己的 cl / cc,真正改 source of truth)。
+ *  传 null 注销(在 cleanup / 退出输入态时调,防下个 prompt 实例被旧回调污染)。 */
+export function setCursorChangeHandler(fn: ((line: number, col: number) => void) | null): void {
+  cursorChangeHandler = fn;
+}
+
 /** picker / 介入面板期间禁用鼠标选区与拖拽(避免 viewport 重画覆盖菜单);滚轮仍可用。面板退出后恢复。 */
 export function setMouseEnabled(v: boolean): void {
   mouseEnabled = v;
@@ -695,11 +707,127 @@ function pasteIntoInput(): void {
     .catch(() => {});
 }
 
+/** 鼠标左键落输入行:进输入态(若是 running)→ 把"目标光标位"算出来 → paintInput 用新光标重画(末步 cup
+ *  把终端真光标移到点击位,默认即竖线/闪烁块——不做反白装饰),并同步调 cursorChangeHandler 让
+ *  prompt.ts 改自己的 cl/cc(source of truth),下次按键按新位写字。
+ *  只算光标位、不动 lines——文本所有权归 prompt.ts。点击可视列按 charWidth 计列(中文/Emoji 全角占 2),
+ *  落在宽字符中段归到其左边界。沿用 windowInputVis 的硬折规则做逆解,点击坐标与 paintInput 渲染坐标天然一致。 */
+function setInputCursorFromClick(screenRow: number, screenCol: number): void {
+  if (!active || !base || !lastView) return;
+
+  // running 态:先收归输入态(enterInputMode 会 paintInput([]) 整帧重画;之后我们再按新光标重画一次覆盖即可)
+  if (mode !== 'input') {
+    enterInputMode(statusText);
+  }
+
+  const g = getGeo();
+  const promptW = displayWidth(lastView.prompt);
+  const firstInputRow = g.contentBottom + 4;
+  const inputRowsAvail = Math.max(0, g.footerH - 5);
+  // 输入框可视区 row 范围(firstInputRow .. firstInputRow + inputRowsAvail - 1)
+  // 点到可视区末行之下(空白区) → 落到最末可视行的末尾(光标归最后一段);
+  // 点到可视区之上(理论上 isInputRow 已挡)同 lastView 边界情况也收敛到最后一段。
+  const visRow = Math.max(0, Math.min(screenRow - firstInputRow, Math.max(0, inputRowsAvail - 1)));
+  // 屏幕列 (1-based SGR) → 显示列 (0-based),再扣 prompt 宽;容许越界(尾点)clip 到 >=0
+  const visColDisplay = Math.max(0, screenCol - 1 - promptW);
+
+  // 复刻 windowInputVis 的折行 + 滚动窗(输入态, lines 全量参与)
+  const cols = Math.max(1, g.cols - promptW);
+  const lineVis: string[][] = lastView.lines.map((l) => wrapByDisplayWidth(l, cols));
+  const flat: string[] = [];
+  for (const lv of lineVis) for (const r of lv) flat.push(r);
+  const totalVis = flat.length;
+  const maxInputRows = Math.max(1, Math.floor(g.rows * 0.4));
+  const showCount = Math.min(maxInputRows, totalVis);
+
+  // 起窗偏移:用 lastView 当前光标位置作为锚(与 paintInput 同算法)
+  let curVisLine = 0;
+  let curVisCol = lastView.cursorCol;
+  {
+    const clRows = lineVis[lastView.cursorLine] ?? [''];
+    let acc = 0;
+    for (let i = 0; i < clRows.length; i++) {
+      const rw = displayWidth(clRows[i]);
+      if (lastView.cursorCol <= acc + rw) {
+        curVisLine = i;
+        curVisCol = lastView.cursorCol - acc;
+        break;
+      }
+      acc += rw;
+      curVisLine = i;
+      curVisCol = lastView.cursorCol - acc;
+    }
+  }
+  let curAbs = curVisLine;
+  for (let i = 0; i < lastView.cursorLine; i++) curAbs += lineVis[i].length;
+  const startVis = totalVis > maxInputRows
+    ? Math.max(0, Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows))
+    : 0;
+
+  // 点击的"绝对"可视行号(在 flat 里);visRow 是相对当前窗的偏移
+  const visIdx = startVis + visRow;
+
+  let targetLine: number;
+  let targetCol: number;
+  if (visIdx >= showCount) {
+    // 点到可视区末行之下(空白行)→ 等价"光标在最末逻辑行的字符串末尾"
+    targetLine = lastView.lines.length - 1;
+    const segs = lineVis[targetLine];
+    const lastSeg = segs[segs.length - 1] ?? '';
+    targetCol = (() => {
+      let i = 0;
+      for (const ch of lastSeg) i += ch.length;
+      return i; // 行末尾偏移 = 字符串长度
+    })();
+  } else {
+    // 把 flat 位置反推到 (逻辑行, 行内段号)
+    let line = 0;
+    let segInLine = visIdx;
+    while (line < lineVis.length && segInLine >= lineVis[line].length) {
+      segInLine -= lineVis[line].length;
+      line++;
+    }
+    if (line >= lineVis.length) {
+      // 极端:startVis 把可视窗拉到超出了 lines(不应发生,兜底)
+      line = lineVis.length - 1;
+      segInLine = lineVis[line].length - 1;
+    }
+    const lineStr = lastView.lines[line] ?? '';
+    // 该行内段 0..segInLine-1 的字符长度累加 = 该逻辑行的"折点前"字符数;
+    // segInLine=0(整行没折或就是首段)→ prefixLen=0
+    let prefixLen = 0;
+    for (let k = 0; k < segInLine; k++) prefixLen += lineVis[line][k]?.length ?? 0;
+    const seg = lineVis[line][segInLine] ?? '';
+    const segWidth = displayWidth(seg);
+    // 段内可视列限定在 [0, segWidth];超过段宽视为"点段尾"(容许点击段末之后的空白区)
+    if (visColDisplay <= segWidth) {
+      const offsInSeg = visColToCharCol(seg, Math.min(visColDisplay, segWidth));
+      targetLine = line;
+      targetCol = prefixLen + offsInSeg;
+    } else {
+      // 超过段宽:targetCol = 该段末尾
+      targetLine = line;
+      targetCol = prefixLen + seg.length;
+    }
+    // 防御:行内段长度累加可能因 wrapByDisplayWidth 切到一半宽字符而略 > lineStr.length,
+    // clamp 到 [0, lineStr.length]
+    if (targetCol > lineStr.length) targetCol = lineStr.length;
+  }
+
+  // 同步更新 lastView(让下次 paintInput 用新光标)+ paintInput 重画(末步 cup 把真光标移到位)
+  // + cursorChangeHandler 改 prompt 的 source of truth。三步必须原子:删任一步都会回退到
+  // "光标看着跳过去了但按下还是回到旧位"的旧 bug。
+  // 未注册 handler(非输入态)→ 仅视觉真光标可见;cl/cc 不变。
+  lastView = { ...lastView, cursorLine: targetLine, cursorCol: targetCol };
+  paintInput(lastView);
+  if (cursorChangeHandler) cursorChangeHandler(targetLine, targetCol);
+}
+
 /**
  * 鼠标事件分发(mouse.setHandler 注册)。
  *  - 左键(button 0):内容区按下开选区、拖动扩展(触边自动翻页)、释放只更新高亮**不复制**;
- *    纯点击(未拖动)清空旧选区(点别处的常见预期);落在输入行不做任何特殊处理(不选区、不粘贴——
- *    留给终端 / 正常打字焦点行为,避免误触发)。
+ *    纯点击(未拖动)清空旧选区(点别处的常见预期);落在输入行 → 自动进入输入态 + 光标定位到点击位
+ *    (沿用 windowInputVis 的软折规则做逆解,支持多行 / 中文宽字符;右键 release 落输入行仍贴入)。
  *  - 右键(button 2,单击 = press→release 未拖动):落在输入行 → 读剪贴板贴入(仿常见终端"右键粘贴");
  *    落在内容区 → 复制当前选区(若有)到剪贴板后立即清空高亮(视觉确认"已复制",不留旧选区误导),
  *    静默不弹提示;都无对应状态则 no-op。
@@ -737,7 +865,12 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
   if (e.button !== 0) return; // 其余中/右键 press/drag 不处理(终端原生右键菜单等不受影响)
 
   if (e.type === 'press') {
-    if (isInputRow(e.row)) return; // 输入行左键不做选区(不干扰正常打字/焦点)
+    if (isInputRow(e.row)) {
+      // 左键落输入行:进输入态 + 光标定位到点击位 + 重画。
+      // 输入框内不再做选区(避免和"在该处开始打字"的直觉冲突;右键 release 仍调 pasteIntoInput)。
+      setInputCursorFromClick(e.row, e.col);
+      return;
+    }
     selecting = true;
     const rowInContent = Math.max(1, Math.min(e.row, g.contentBottom));
     const absLine = screenRowToAbsLine(rowInContent);
@@ -1146,35 +1279,6 @@ function windowInputVis(
 }
 
 /**
- * 把一行纯可见文本(无 ANSI / 零宽)在光标显示列处切成 before/cur/after:
- * cur = 光标右侧那个字符(块状光标"压"在它上面);光标在行末(列 == 行宽)则 cur=''。
- * 供 paintInput 画块状光标——反白 cur(行末反白一个空格),让用户看清"现在在哪输入"。
- *
- * 光标列恒落在字符边界:cursorCol = 显示宽度(slice 整字累加),不进字符内部,故按 acc===col 取字符即可。
- * 宽字符(CJK=2)在行尾放不下时整字折下行,光标列仍在边界,acc 逐字累加 displayWidth 与终端光标一致。
- */
-function splitAtVisCol(
-  line: string,
-  col: number
-): { before: string; cur: string; after: string } {
-  let acc = 0;
-  let i = 0;
-  for (const ch of line) {
-    const cw = charWidth(ch.codePointAt(0) ?? 0);
-    if (cw <= 0) {
-      i += ch.length;
-      continue; // 零宽(组合符等):不计列,跳过(输入文本一般无,稳妥)
-    }
-    if (acc === col) {
-      return { before: line.slice(0, i), cur: ch, after: line.slice(i + ch.length) };
-    }
-    acc += cw;
-    i += ch.length;
-  }
-  return { before: line, cur: '', after: '' }; // 光标在行末:无字符可反白
-}
-
-/**
  * 画输入区:擦旧菜单 → (必要时)setRegion → 画状态行 + 输入行 + 向上菜单,光标留输入框(dim 时回续写位)。
  * prompt.ts 每次按键调;enterInputMode / enterRunningMode 也调(空 / dim)。
  */
@@ -1255,21 +1359,16 @@ export function paintInput(view: InputView): void {
   const firstInputRow = g.contentBottom + 4;
   const inputRowsAvail = g.footerH - 5; // 去掉虚拟空/spinner行/上线/下线/model行,留输入行
   const indent = ' '.repeat(promptW);
-  const showCaret = view.caret !== false; // 默认 true;picker 等非文本输入传 false 关闭块状光标
+  // 光标:不画反白块/假光标——输入框走终端真光标(WT / VSCode 终端默认竖线/闪烁块,
+  // 各终端表现略不同但都贴合 IME 候选气泡且不再"挡住字符")。真光标位置由下方第 6 步 cup 写。
+  // 保留 view.caret=false 路径给 picker 等非文本输入:把真光标定位到 hint 末尾。
   for (let i = 0; i < inputRowsAvail; i++) {
     const line = vis.visRows[i] ?? '';
     const r = firstInputRow + i;
     const prefix = vis.startVis === 0 && i === 0 ? view.prompt : indent;
-    let text: string;
-    if (view.dim) {
-      text = renderDimInputRow(view.prompt, line, view.placeholder ?? '', g.cols);
-    } else if (showCaret && i === vis.visLine) {
-      // 块状光标:反白光标右侧字符(cur),行末(无字符)反白一个空格——示"现在在哪输入"
-      const { before, cur, after } = splitAtVisCol(line, vis.cursorVisCol);
-      text = `${prefix}${before}${ui.reverse}${cur || ' '}${ui.reset}${after}`;
-    } else {
-      text = `${prefix}${line}`;
-    }
+    const text = view.dim
+      ? renderDimInputRow(view.prompt, line, view.placeholder ?? '', g.cols)
+      : `${prefix}${line}`;
     buf += cup(r, 1) + esc.clearLine + text;
   }
 
@@ -1316,16 +1415,17 @@ function renderDimInputRow(
   cols: number
 ): string {
   const promptW = displayWidth(prompt);
-  const caret = `${ui.reverse} ${ui.reset}`; // 反白块状光标(1 cell,与 INPUT 态同款)
-  const contentW = Math.max(0, cols - promptW - 1);
+  // dim 态(运行中打字):不画反白块——反白块视觉占位是 INPUT 态真光标的旧版,这里真光标本
+  // 就被隐起来(IME 锚定需要,见 contentMode),在 dim 文本后硬塞个反白空格会"白块闪烁"。
+  // 用户读 dim 文本本身就能定位打字边界;真光标在 INPUT 态显形(竖线/闪烁块,跟终端默认一致)。
+  const contentW = Math.max(0, cols - promptW);
   if (text.length > 0) {
-    // 有打字:❯ dim + 文本(dim,超长时从头部截断保留尾部——光标恒在末尾,须始终看到刚打的字,
-    // 而非 truncateDisplay 那样保留开头、把刚打的内容截没,显示成卡在开头不动的假象) + 反白光标(末尾)
-    return `${ui.dim}${prompt}${truncateDisplayHead(text, contentW)}${ui.reset}${caret}`;
+    // 有打字:❯ dim + 文本(dim,超长从头部截断保留尾部——光标恒在末尾,须始终看到刚打的字)
+    return `${ui.dim}${prompt}${truncateDisplayHead(text, contentW)}${ui.reset}`;
   }
-  // 空:❯ dim + 反白光标(打字起点) + dim 占位 ghost
+  // 空:❯ dim + dim 占位 ghost(taking the full row)
   const p = placeholder ? truncateDisplay(placeholder, contentW) : '';
-  return `${ui.dim}${prompt}${ui.reset}${caret}${ui.dim}${p}${ui.reset}`;
+  return `${ui.dim}${prompt}${p}${ui.reset}`;
 }
 
 /**

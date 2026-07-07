@@ -2,7 +2,7 @@ import readline from 'node:readline';
 import { stdin, stdout } from 'node:process';
 import type { Key } from 'node:readline';
 import { ui } from './theme.js';
-import { displayWidth, padEndDisplay, truncateDisplay } from './render.js';
+import { displayWidth, padEndDisplay, truncateDisplay, visColToCharCol } from './render.js';
 import * as layout from './layout.js';
 import * as mouse from './mouse.js';
 
@@ -271,8 +271,57 @@ export async function promptWithSlashMenu(
     });
   }
 
+  /** 鼠标点击输入框:把 layout 算出的(dispLine, dispCol——与 paintInput 同坐标系)
+   *  写回 prompt 的 source of truth(cl, cc)→ redraw。
+   *  - 无 chip 时 dispLine 即 cl、dispCol 是 lines[cl] 内显示列;
+   *  - 有 chip 时 dispLine 多了 chipPre 的行偏移、dispCol 多了 chipPre + chipPrefix 的列偏移,分别扣回。
+   *  点击落在 chipPre / chip 区域(行 < chipPre.length - 1,或合并行行首)→ 收敛到 suffix 第 0 行起点,
+   *  把光标"走出 chip"到最自然位置(用户的直觉就是"点 chip 区域 = 回 suffix 起点")。 */
+  function applyExternalCursor(dispLine: number, dispCol: number): void {
+    const pre = chip ? chipPreLines() : [];
+    const preLastW = chip ? displayWidth(pre[pre.length - 1] ?? '') : 0;
+    const chipPrefW = chip ? displayWidth(chipPrefix()) : 0;
+    // 反推 cl
+    let newCl: number;
+    if (chip) {
+      if (dispLine < pre.length - 1) {
+        // 落在 chipPre 行(非末行)→ 走出 chip,光标归 suffix 第 0 行起点
+        newCl = 0;
+      } else if (dispLine === pre.length - 1) {
+        // 合并行(cl=0),扣掉 pre 行数
+        newCl = 0;
+      } else {
+        // chipPre 行数之后 = dispLines 的 cl + (pre.length - 1)
+        newCl = dispLine - (pre.length - 1);
+        if (newCl >= lines.length) newCl = lines.length - 1;
+        if (newCl < 0) newCl = 0;
+      }
+    } else {
+      newCl = Math.max(0, Math.min(dispLine, lines.length - 1));
+    }
+    // 反推 cc:扣掉 chipPre 末行宽 + chipPrefix 宽,得到 lines[newCl] 内的显示列,再 visColToCharCol
+    const lineText = lines[newCl] ?? '';
+    let inLineVis = dispCol;
+    if (chip && newCl === 0) inLineVis = Math.max(0, dispCol - preLastW - chipPrefW);
+    if (inLineVis < 0) inLineVis = 0;
+    const newCc = Math.min(visColToCharCol(lineText, inLineVis), lineText.length);
+    cl = newCl;
+    cc = newCc;
+    // 收起菜单/过滤态(若点击位置不在菜单区):菜单行数被点击冲掉就关菜单,回到纯文本编辑
+    if (menuOpen) {
+      menuOpen = false;
+      filtered = [];
+      selected = 0;
+      menuTop = 0;
+    }
+    justSawCR = false;
+    computeFiltered();
+    redraw();
+  }
+
   function cleanup(): void {
     layout.setPasteHandler(null);
+    layout.setCursorChangeHandler(null);
     try {
       stdin.setRawMode(false);
     } catch {
@@ -595,6 +644,7 @@ export async function promptWithSlashMenu(
       return;
     }
     layout.setPasteHandler(onMousePaste); // 鼠标右键单击输入框(未拖动)→ 读剪贴板贴入;cleanup 时注销
+    layout.setCursorChangeHandler(applyExternalCursor); // 鼠标左键单击输入框(未拖动)→ 改 cl/cc 到点击位;cleanup 时注销
     stdin.resume();
     emitter.on('keypress', onKey);
     computeFiltered();
@@ -651,7 +701,6 @@ export async function promptTurnPicker(
       cursorLine: 0,
       cursorCol: displayWidth(hint),
       menu: { lines: menuLines() },
-      caret: false, // 纯导航菜单(非文本输入):不画输入框块状光标,聚焦由菜单 ▸ 标记
     });
   }
 
@@ -811,7 +860,6 @@ export async function promptSessionPicker(
       cursorLine: 0,
       cursorCol: displayWidth(h),
       menu: { lines: menuLines() },
-      caret: false, // 纯导航菜单(非文本输入):不画输入框块状光标,聚焦由菜单 ▸ 标记
     });
   }
 
@@ -954,7 +1002,6 @@ export async function promptThemePicker(
       cursorLine: 0,
       cursorCol: displayWidth(hint),
       menu: { lines: menuLines() },
-      caret: false, // 纯导航菜单:不画输入框块状光标,聚焦由菜单 ▸ 标记
     });
   }
 
@@ -1068,7 +1115,6 @@ export async function promptRevertChoice(fileCount: number): Promise<boolean | n
       cursorLine: 0,
       cursorCol: displayWidth(hint),
       menu: { lines: menuLines() },
-      caret: false, // 纯导航菜单:不画输入框块状光标,聚焦由菜单 ▸ 标记
     });
   }
 

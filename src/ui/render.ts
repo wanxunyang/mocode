@@ -81,6 +81,24 @@ export function sliceByDisplayCol(str: string, start: number, end: number): stri
   return out;
 }
 
+/** 把可视列(0-based)反推为 str 内的字符偏移(JS 字符串下标,UTF-16 code unit)。
+ *  点击落在宽字符的"列中段"时归到该字符之前的偏移(停在它左侧边界)——与终端光标行为一致。
+ *  visCol 大于串的显示宽度时返回 str.length(点行末的"右边")。
+ *  输入框点击定位专用;与 sliceByDisplayCol 互为逆,但语义只关心单点、不关心区间。 */
+export function visColToCharCol(str: string, visCol: number): number {
+  if (visCol <= 0) return 0;
+  let w = 0;
+  let i = 0;
+  for (const ch of str) {
+    const cw = charWidth(ch.codePointAt(0) ?? 0);
+    if (cw <= 0) { i += ch.length; continue; } // 零宽(组合符):不占列
+    if (w + cw > visCol) break; // 落在该字符显示区间内 → 停在其左侧
+    w += cw;
+    i += ch.length;
+  }
+  return i;
+}
+
 /** 带色串的可见显示宽度(先去 ANSI 再按 displayWidth 度量)。 */
 export function ansiDisplayWidth(s: string): number {
   return displayWidth(stripAnsi(s));

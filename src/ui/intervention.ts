@@ -171,7 +171,6 @@ export async function promptIntervention(
         cursorLine: 0,
         cursorCol: displayWidth(hint),
         menu: { lines: menuLinesChoice() },
-        caret: false, // 纯导航(非文本输入):不画输入框块状光标,聚焦由选项 ▸ 标记
       });
     } else {
       layout.paintInput({
