@@ -60,7 +60,7 @@ export const codegraphTool: Tool = {
     'FIRST CHOICE for understanding/locating code, tracing call chains, or assessing the impact of changes — use this before read_file/grep when a .codegraph/ index exists.' +
     ' Returns symbol source + call paths in one shot — more accurate and economical than piecing together read_file/grep.' +
     ' When to use: starting any code exploration; locating a symbol; understanding how a feature works; seeing what calls a function or what a change affects.' +
-    ' When NOT to use: no .codegraph/ index (build it first with `codegraph init`); reading a file you just edited; editing a single known small file — in those cases go straight to read_file/edit_file.' +
+    ' When NOT to use: no .codegraph/ index (build it first with `codegraph init`); reading a file you just edited; editing a single known small file — in those cases go straight to read_file/edit_file; or the symbol/area was already retrieved earlier in this session — reuse that result instead of calling again.' +
     ' Fallback: if codegraph misses or the result is incomplete, then use read_file/grep/glob to fill the gaps.',
   parameters: {
     type: 'object',
