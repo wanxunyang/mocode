@@ -128,6 +128,9 @@ const MODEL_PRESETS: { label: string; baseURL: string; model: string; window: nu
   { label: 'GLM(智谱)', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', window: 128000 },
   { label: 'DeepSeek', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', window: 64000 },
   { label: 'Qwen(阿里)', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', window: 128000 },
+  // MiniMax OpenAI 兼容端点(https://platform.minimax.io/docs/api-reference/text-openai-api)。
+  // MiniMax-M3 为唯一支持图片/视频输入的模型;M2 系列纯文本(见 llm/capabilities.ts KNOWN_TEXT_ONLY_PREFIXES)。
+  { label: 'MiniMax', baseURL: 'https://api.minimax.io/v1', model: 'MiniMax-M3', window: 1000000 },
   { label: '本地 Ollama', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', window: 32768 },
   { label: '本地 vLLM', baseURL: 'http://localhost:8000/v1', model: 'default', window: 32768 },
   { label: '自定义 base_url', baseURL: '', model: '', window: 128000 },
@@ -789,9 +792,13 @@ export async function startRepl(
         ? input
         : [
             { type: 'text' as const, text: input },
+            // detail 故意不设(留 undefined,JSON.stringify 时被丢弃):OpenAI 认 'auto'/'low'/'high',
+            // 但 MiniMax 只认 'low'/'default'/'high'——'auto' 不是合法枚举值,某些后端会 400。
+            // 不传 detail 让各 provider 用自己的默认值(OpenAI 默认视为 auto,MiniMax 默认 default),
+            // 是唯一在两边都不出错的写法。
             ...imgs.map((a) => ({
               type: 'image_url' as const,
-              image_url: { url: a.dataUrl, detail: 'auto' as const },
+              image_url: { url: a.dataUrl },
             })),
           ];
     const msgIndex = history.length; // runAgent push 后 = 这个 index
@@ -1055,6 +1062,13 @@ export async function startRepl(
         pendingAttachments.push(r.att);
       }
       layout.contentWrite(`  ${ui.dim}${renderChip(r.att)} — will attach to next message${ui.reset}\n`);
+      // 提前警告(不阻断附加):当前模型已知不支持视觉(如 MiniMax M2.x / gpt-3.5 等)时,
+      // 附加时就提示,而不是等发送后才在 catch 块里翻译 API 报错——减少一轮无意义请求。
+      if (!modelSupportsVision(config.model)) {
+        layout.contentWrite(
+          `  ${ui.yellow}⚠ 当前模型 ${config.model} 已知不支持视觉输入,发送图片可能会失败。可用 /model 切换。${ui.reset}\n`
+        );
+      }
       continue;
     }
     if (line === '/context') {

@@ -27,6 +27,9 @@ const KNOWN_TEXT_ONLY_PREFIXES: string[] = [
   'babbage-',
   'davinci-',
   'gpt-4o-mini-search', // 搜索专用,无视觉入口
+  // MiniMax M2 系列(M2 / M2.1 / M2.5 / M2.7,含各自 -highspeed 变体):纯文本,无视觉输入。
+  // 官方文档明确仅 MiniMax-M3 支持 image/video content parts;M2.x 传 image_url 会被拒。
+  'minimax-m2',
 ];
 
 const KNOWN_VISION_FAMILIES: string[] = [
@@ -56,6 +59,7 @@ const KNOWN_VISION_FAMILIES: string[] = [
   'minicpm-v',
   'glm-4v',
   'yi-vl',
+  'minimax-m3', // 官方文档:仅 M3 支持 image_url/video_url content parts
 ];
 
 /** 归一化:小写、去空白;用于前缀比较。 */
