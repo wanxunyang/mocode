@@ -331,25 +331,24 @@ export async function promptWithSlashMenu(
       newCl = Math.max(0, Math.min(newCl, lines.length - 1));
       const lineText = lines[newCl] ?? '';
 
-      // inChar 是 seg 内的字符索引,seg 是 dispLs[dispLine] 的某折行段。
-      // 当 newCl=0(chip 模式 + 合并行)时,seg 对应"mergedRow = chipPreLast + chipPrefix + lines[0]"的某段,
-      // 要得到 lines[0] 内的字符索引,扣掉 mergedRow 起始到 lines[0] 起始的字符数
-      // + segInLine 之前各折行段的字符长度(seg 内偏移是相对 seg 自身的,真实 mergedRow 内偏移 = 前段累加 + inChar)。
-      let ccInLine = inChar;
+      // cc 必须在 lines[newCl] 内。flat 中 seg 是 dispLs[dispLine] 的某折行段,
+      // seg 内 inChar 是段内字符偏移,但 lines[newCl] 的字符是按 (dispLs 前段累加) + (本段 inChar) 算的。
+      // ——非 chip 模式下:dispLine = newCl, segStartChars = sum(lineVis[dispLine][0..segInLine-1].length)
+      //   ccInLine = segStartChars + inChar
+      // ——chip 模式下 newCl=0(合并行):dispLine 是合并行 dispLine,segStartChars 同上,
+      //   但 lines[0] 在合并行中"起始处"在 (mergedRow.length - lines[0].length) 字符处,
+      //   故 ccInLine = segStartChars + inChar - chipOverheadChars。
+      let segStartChars = 0;
+      const segs = lineVis[dispLine];
+      for (let s = 0; s < segInLine; s++) segStartChars += segs[s]?.length ?? 0;
+      let ccInLine = segStartChars + inChar;
       if (chip && newCl === 0) {
         const pre = chipPreLines();
         const mergedRow = pre[pre.length - 1] ?? '';
         const prefix = chipPrefix();
-        // seg 起始在 mergedRow 内的字符数
-        let segStartChars = 0;
-        const segs = lineVis[dispLine];
-        for (let s = 0; s < segInLine; s++) segStartChars += segs[s]?.length ?? 0;
-        // mergedRow 起始到 lines[0] 起始的字符数:
-        //   mergedRow 字符数 - lines[0] 字符数 = (chipPreLast + chipPrefix) 字符数
+        // mergedRow 起始到 lines[0] 起始的字符数 = (chipPreLast + chipPrefix) 字符数
         const chipOverheadChars = mergedRow.length + prefix.length - lineText.length;
-        // lines[0] 内字符索引 = (mergedRow 内字符索引) - chipOverheadChars
-        // mergedRow 内字符索引 = segStartChars + inChar
-        ccInLine = segStartChars + inChar - chipOverheadChars;
+        ccInLine = ccInLine - chipOverheadChars;
       }
       newCc = Math.max(0, Math.min(ccInLine, lineText.length));
     }

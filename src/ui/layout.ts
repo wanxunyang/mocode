@@ -852,17 +852,29 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
   // 点到可视区末行之下(空行)→ 等价"光标在最末可视行的字符串末尾"。
   if (startVis + visRow >= totalVis) {
     const lastFlatIdx = totalVis - 1;
-    const lastSeg = flat[lastFlatIdx];
-    let visAcc = 0;
-    for (let i = 0; i < lastFlatIdx; i++) visAcc += displayWidth(flat[i]);
-    targetLine = lastView.lines.length - 1; // 这里实际上是 lines 的最后一行号
-    targetDisplayCol = visAcc + displayWidth(lastSeg); // 段末之后 = 整行 display_w
+    // 把 lastFlatIdx 反推到 (line, segInLine)
+    let lastLine = 0;
+    let lastSegInLine = lastFlatIdx;
+    while (lastLine < lineVis.length && lastSegInLine >= lineVis[lastLine].length) {
+      lastSegInLine -= lineVis[lastLine].length;
+      lastLine++;
+    }
+    if (lastLine >= lineVis.length) {
+      lastLine = lineVis.length - 1;
+      lastSegInLine = lineVis[lastLine].length - 1;
+    }
+    // view.cursorCol 单位 = lines[lastLine] 内 display_col
+    let inLineDisplayCol = 0;
+    for (let s = 0; s <= lastSegInLine; s++) inLineDisplayCol += displayWidth(lineVis[lastLine][s] ?? '');
+    targetLine = lastLine;
+    targetDisplayCol = inLineDisplayCol; // 含末段段末 = 整 lines[lastLine] 的 display_w
     dispatchFlatIdx = lastFlatIdx;
-    dispatchInSegVis = displayWidth(lastSeg); // 段末
+    dispatchInSegVis = displayWidth(flat[lastFlatIdx]); // 段末
   } else {
     // flatIdx = 点击可视段在 flat 中的绝对索引(startVis + visRow)
     const flatIdx = startVis + visRow;
-    // 把 flatIdx 反推到 (line, segInLine) 供 paintInput 用 line
+    // 把 flatIdx 反推到 (line, segInLine) — line 给 paintInput 用(同 lines[cursorLine] 行号),
+    // segInLine 给 prompt 做 cl/cc 反推用。
     let line = 0;
     let segInLine = flatIdx;
     while (line < lineVis.length && segInLine >= lineVis[line].length) {
@@ -873,14 +885,15 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
       line = lineVis.length - 1;
       segInLine = lineVis[line].length - 1;
     }
-    // 累加 flat[0..flatIdx-1] 的 display_w,然后在 flat[flatIdx] 内取段内偏移
-    let visAcc = 0;
-    for (let i = 0; i < flatIdx; i++) visAcc += displayWidth(flat[i]);
+    // view.cursorCol 单位 = lines[line] 内 display_col(windowInputVis 只在该行累加,跨行不算)。
+    // 即 lineVis[line] 前 segInLine 段 display_w 累加 + 段内显示列。
+    let inLineDisplayCol = 0;
+    for (let s = 0; s < segInLine; s++) inLineDisplayCol += displayWidth(lineVis[line][s] ?? '');
     const seg = flat[flatIdx];
     const segW = displayWidth(seg);
     const inSeg = Math.min(visCol, segW); // 段尾点击容许越界 clip 到段末
     targetLine = line;
-    targetDisplayCol = visAcc + inSeg;
+    targetDisplayCol = inLineDisplayCol + inSeg;
     dispatchFlatIdx = flatIdx;
     dispatchInSegVis = inSeg;
   }
