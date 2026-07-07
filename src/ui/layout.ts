@@ -817,7 +817,7 @@ function twoColumn(leftStr: string, leftW: number, rightStr: string, rightW: num
  *    INPUT:     ◆ 空闲
  *    思考中:    ⠹ 思考中… 0.5s
  *    运行心跳:  ♥ 0.5s
- *    滚动回看:  ◆                        历史 ↑3 (PgDn 回底)  */
+ *    滚动回看:  ◆ 空闲                  历史 ↑3 (PgDn 回底)  */
 function composeSpinnerLine(status: StatusBarData, cols: number): string {
   const spinning = mode === 'running' && runningFrame >= 0;
   const hasSpinner = !!status.spinnerFrame;
@@ -833,9 +833,13 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
   let leadW: number;
 
   if (scrolled) {
-    // 滚动回看:左段仅显 ◆(或心跳帧),右段显历史指示
-    lead = `${spinning ? ui.brightMagenta : ui.brightCyan}${spinning ? RUNNING_FRAMES[runningFrame] : '◆'}${ui.reset}`;
-    leadW = 1;
+    // 滚动回看:左段 = 符号(◆ 或 心跳帧) + 状态名(灰,无走时);右段 = 历史指示。
+    // 跟非回看的 INPUT/RUNNING 态保持一致——避免「◆ 留下、状态字蒸发」的视觉错觉。
+    const symbol = spinning
+      ? `${ui.brightMagenta}${RUNNING_FRAMES[runningFrame]}${ui.reset}`
+      : `${ui.brightCyan}◆${ui.reset}`;
+    lead = `${symbol} ${ui.dim}${status.status}${ui.reset}`;
+    leadW = 1 + 1 + displayWidth(status.status);
   } else if (hasSpinner) {
     // spinner 激活(思考中/执行工具…):帧 + 状态 + 走时
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
