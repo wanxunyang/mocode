@@ -74,11 +74,12 @@ export function coerceOptions(raw: unknown): string[] {
 export const askHumanTool: Tool = {
   name: 'ask_human',
   description: [
-    'Ask the user for input at a decision point (blocks until they respond).',
-    ' Use when: multiple approaches need a user decision, intent is unclear, or extra info is needed.',
-    ' Don\'t call when the task is clear and you can decide — it interrupts the user.',
-    ' Options (2-6) let the user pick; omit/empty for free-text input. Their answer is returned as the result.',
-  ].join(''),
+    'Present the user with a menu of choices to pick from — not a generic "ask" tool.',
+    ' DEFAULT: pass 2–6 concrete options via `options`; the user picks one and the pick comes back.',
+    ' FREE-TEXT (omit `options`): only when the answer truly cannot be reduced to a few choices',
+    ' (e.g. "paste the error message", "enter the exact URL") — this blocks with a text input.',
+    ' DO NOT call when the task is clear and you can pick a sensible default — decide and proceed.',
+  ].join(' '),
   parameters: {
     type: 'object',
     properties: {
@@ -89,7 +90,7 @@ export const askHumanTool: Tool = {
       options: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Options for the user to choose from (2~6). May be omitted — when omitted or empty, it becomes free-text input instead',
+        description: '2–6 concrete choices the user can pick with one click. Required in most cases; omit only when free-form text is genuinely needed.',
       },
       context: {
         type: 'string',

@@ -148,3 +148,52 @@ export function lineAt(abs: number): string | null {
   const all = snapshot();
   return abs >= 0 && abs < all.length ? all[abs] : null;
 }
+
+/**
+ * 在绝对行索引 after(0-based,已 commit)之后插入 N 条自洽行。
+ * 用于「折叠摘要行下展开明细」——把详情行在已写入摘要行后面塞入缓冲,
+ * 不重写尾部已有内容;且不影响更早的 buffer 行(hasCurrent 先 commit 再 splice)。
+ *
+ * 行须自洽(每行带行末 \x1B[0m),不经 feedChar/feedSgr,直接入 rows。
+ * after < 0 视为在所有已 commit 行之前插入;after ≥ 已 commit 行数则追加到末尾。
+ * 不动 segMark——此函数用于非 md 路径(BatchRenderer 展开/折叠);
+ * md 段切回 layout.contentWriteMd 时 setLines 仍按 segMark 截断。
+ *
+ * 后置条件:插入后 hasCurrent=false(新空行不由本函数建立);调用方须自行决定续写位
+ * (BatchRenderer 在插入后调 layout.contentWrite 续写,新 \n 自然在详情块后建新行)。
+ */
+export function insertAfter(after: number, lines: string[]): void {
+  if (lines.length === 0) return;
+  if (hasCurrent) {
+    rows.push(rowStartSgr + curRaw + '\x1B[0m');
+    curRaw = '';
+    rowStartSgr = curSgr;
+    hasCurrent = false;
+  }
+  const committed = rows.length;
+  // after 是绝对行索引;若超过 committed(例如快照时 hasCurrent=true),钳到末尾
+  const target = after < 0 ? 0 : Math.min(after + 1, committed);
+  rows.splice(target, 0, ...lines);
+  if (rows.length > MAX_ROWS + 512) rows.splice(0, rows.length - MAX_ROWS);
+}
+
+/**
+ * 从绝对行索引 startIdx(0-based,已 commit)起删 n 行。
+ * 用于「已展开明细折回摘要」——把详情行从中段裁掉,保留摘要行和后续内容。
+ * startIdx 越界或 n <= 0 直接 no-op。hasCurrent 时先 commit(同 insertAfter)。
+ *
+ * 后置条件:删除后 hasCurrent=false。后续 layout.contentWrite 自然续写。
+ */
+export function deleteFrom(startIdx: number, n: number): void {
+  if (n <= 0) return;
+  if (hasCurrent) {
+    rows.push(rowStartSgr + curRaw + '\x1B[0m');
+    curRaw = '';
+    rowStartSgr = curSgr;
+    hasCurrent = false;
+  }
+  const committed = rows.length;
+  if (startIdx >= committed) return;
+  const end = Math.min(startIdx + n, committed);
+  rows.splice(startIdx, end - startIdx);
+}

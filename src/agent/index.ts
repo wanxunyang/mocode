@@ -14,6 +14,7 @@ import {
 } from '../ui/render.js';
 import { renderFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
+import * as batch from '../ui/batch.js';
 import { beginTurn } from '../rollback/index.js';
 import { config } from '../config/index.js';
 import {
@@ -27,6 +28,9 @@ import {
 } from './core.js';
 import { createPetHooks } from '../pet/state.js';
 
+/** 当前 turn 的 batch id(runAgent 内闭包变量;一条 turn 一轮 tool batch 结束即清空)。 */
+let currentBatchId: string | null = null;
+
 /** 取 userInput 的首行:字符串直接 split;多模态 parts 找首个 text part 再 split。 */
 function firstLineOf(ui: string | ContentPart[]): string {
   if (typeof ui === 'string') return ui.split('\n')[0] ?? '';
@@ -34,15 +38,16 @@ function firstLineOf(ui: string | ContentPart[]): string {
   return first?.text.split('\n')[0] ?? '';
 }
 
-/** 工具调用 ● 头:工具名 + 参数摘要(按 tool_calls 原顺序打印,让用户看到本轮跑哪些工具)。 */
+/** 工具调用 ● 头:工具名 + 参数摘要(按 tool_calls 原顺序打印,让用户看到本轮跑哪些工具)。
+ *  重构后改为累积到 BatchRenderer,onToolBatchEnd 时统一打摘要行;
+ *  展开/折叠由 BatchRenderer + 鼠标 release 决定,本函数不再直接写屏。 */
 function writeToolHeader(tc: ToolCallRef): void {
-  const summary = summarizeToolCall(tc.name, tc.arguments);
-  layout.contentWrite(
-    `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}${tc.name}${ui.reset}  ${ui.dim}${summary}${ui.reset}\n`
-  );
+  if (!currentBatchId) currentBatchId = batch.beginBatch();
+  batch.recordCall(currentBatchId, tc.name, summarizeToolCall(tc.name, tc.arguments));
 }
 
-/** 渲染工具结果:mutation 成功走 diff 块(行号 + 语法高亮,仿 Claude Code);其余走一行 preview。 */
+/** 渲染工具结果:mutation 成功走 diff 块(行号 + 语法高亮,仿 Claude Code);其余走一行 preview。
+ *  同 writeToolHeader,改为累积到 BatchRenderer(只缓存字符串,不写屏)。 */
 function writeToolResult(
   tc: ToolCallRef,
   output: string,
@@ -50,27 +55,24 @@ function writeToolResult(
   preWriteOld: string | null,
   editStartLine: number,
 ): void {
+  if (!currentBatchId) return;
+  let diff: string | null = null;
   if (isMutationTool(tc.name) && parsed && !output.startsWith('错误')) {
-    layout.contentWrite(
-      renderFileChange({
-        path: String(parsed.path ?? ''),
-        kind: tc.name === 'edit_file' ? 'edit' : 'write',
-        oldStr:
-          tc.name === 'edit_file'
-            ? String(parsed.old_string ?? '')
-            : preWriteOld,
-        newStr: String(
-          (tc.name === 'edit_file' ? parsed.new_string : parsed.content) ?? '',
-        ),
-        startLine: tc.name === 'edit_file' ? editStartLine : 1,
-      }),
-    );
-  } else {
-    const preview = summarizeToolResult(tc.name, output);
-    if (preview) {
-      layout.contentWrite(`  ${ui.gray}↳ ${preview}${ui.reset}\n`);
-    }
+    diff = renderFileChange({
+      path: String(parsed.path ?? ''),
+      kind: tc.name === 'edit_file' ? 'edit' : 'write',
+      oldStr:
+        tc.name === 'edit_file'
+          ? String(parsed.old_string ?? '')
+          : preWriteOld,
+      newStr: String(
+        (tc.name === 'edit_file' ? parsed.new_string : parsed.content) ?? '',
+      ),
+      startLine: tc.name === 'edit_file' ? editStartLine : 1,
+    });
   }
+  const preview = diff ? '' : summarizeToolResult(tc.name, output);
+  batch.recordResult(currentBatchId, tc.name, preview, diff);
 }
 
 /**
@@ -97,6 +99,7 @@ export async function runAgent(
   // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
   beginTurn(truncateDisplay(firstLineOf(userInput), 40));
   layout.contentMode(); // 防御性:运行态光标归输入框光标位供 IME 锚定(enterRunningMode 已置,这里兜底)
+  currentBatchId = null; // 新 turn 清旧 batch id(防上 turn 残留)
 
   // spinner:状态行最前面转圈(思考中 / 生成 / 执行 工具时,状态栏 lead 位显帧 + 文字)。
   // 经 setStatus 注入状态行(spinnerFrame + statusText),composeStatus 把帧 + 文字放 lead 位;
@@ -137,7 +140,16 @@ export async function runAgent(
     onToolDone: () => spinner.stop(),
     onToolResult: (tc, output, parsed, preWriteOld, editStartLine) =>
       writeToolResult(tc, output, parsed, preWriteOld, editStartLine),
-    onToolBatchEnd: () => layout.contentWrite('\n'),
+    onToolBatchEnd: () => {
+      // 收尾:把累积的 batch 渲染成单行摘要(批内 N 个 tool 调用共用一行,
+      // 鼠标点击该行可展开完整明细——见 ui/batch.ts)。无 batch(模型未调工具)则补空行保持间距。
+      if (currentBatchId) {
+        const id = currentBatchId;
+        currentBatchId = null;
+        batch.endBatch(id, layout);
+      }
+      layout.contentWrite('\n');
+    },
     onNoReply: () =>
       layout.contentWrite(`${ui.dim}(无回复)${ui.reset}\n`),
     onMaxSteps: () =>
@@ -148,6 +160,7 @@ export async function runAgent(
       spinner.stop();
       if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
       layout.contentWrite(`${ui.dim}(已中断)${ui.reset}\n`);
+      currentBatchId = null; // 丢弃未收尾 batch
     },
     onDone: (elapsedMs, usage) => {
       const tok = formatTurnTokens(usage);

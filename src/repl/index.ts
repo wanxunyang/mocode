@@ -19,6 +19,7 @@ import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js'
 import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
+import * as batch from '../ui/batch.js';
 import {
   promptWithSlashMenu,
   promptTurnPicker,
@@ -514,18 +515,31 @@ function textOf(c: unknown): string {
 
 /**
  * 把会话历史渲染成静态文本进内容区(回滚 / 续接 / --resume 后复显上下文,仿 Claude Code):
- * user→❯ 回显、assistant→正文(+ tool_calls 作 ● 行)、tool→↳ 结果预览;system 跳过。
+ * user→❯ 回显、assistant→正文(+ tool_calls 折叠成 ● 摘要行)、tool→↳ 结果预览;system 跳过。
  * 思考段不持久(history 只存正文),故无思考折叠。渲染后续写位在末尾,紧接 enterInputMode 画输入框。
  * 内容长于屏时 viewport 显尾(最近轮次),PgUp 可看更早——与流式态一致。
  * user 多模态:用 textOf 取 text parts;若侧 channel messageAttachments 有原文件名则追加 chip 行
  * (避免 base64 解码不可逆,旧 session 没侧 channel 时只显文本,文件名 fallback 到 image/* mime)。
+ *
+ * 折叠策略:遇到 assistant + tool_calls 不立即打 ● 行,而是累积到 batchEntries;
+ * 跟随的连续 tool 消息按 tool_call_id 反查填 resultSummary;遇下一个非 tool 消息(或末尾)时,
+ * 用 batch.writeSummaryOnly 出单行摘要(与实时 runAgent 同一渲染器,UI 一致)。
+ * 回放默认全折叠;用户可鼠标点击摘要行展开(由 BatchRenderer 接管,见 ui/batch.ts)。
  */
 export function renderHistory(history: ChatMessage[]): void {
   const idToName = new Map<string, string>();
+  // 当前累积的 batch(assistant.tool_calls + 后续 tool 消息);一旦遇到非 tool 消息即收尾出摘要
+  let pendingBatch: batch.BatchEntry[] = [];
+  const flushBatch = (): void => {
+    if (pendingBatch.length === 0) return;
+    batch.writeSummaryOnly(pendingBatch, layout);
+    pendingBatch = [];
+  };
   for (let idx = 0; idx < history.length; idx++) {
     const m = history[idx];
     if (m.role === 'system') continue;
     if (m.role === 'user') {
+      flushBatch(); // 上一轮 batch(若有)收尾
       const lines = textOf((m as { content?: unknown }).content).split('\n');
       layout.contentWrite(formatUserMessage(lines));
       const atts = messageAttachments.get(idx);
@@ -549,6 +563,7 @@ export function renderHistory(history: ChatMessage[]): void {
     if (m.role === 'assistant') {
       const text = textOf((m as { content?: unknown }).content);
       if (text) {
+        flushBatch(); // 文本前若有累积 batch 先收尾(罕见:连续两个 assistant tool_calls 文本间)
         layout.contentWriteMdOnce(text);
         if (!text.endsWith('\n')) layout.contentWrite('\n');
       }
@@ -558,29 +573,45 @@ export function renderHistory(history: ChatMessage[]): void {
           function?: { name?: string; arguments?: string };
         }[];
       }).tool_calls;
-      if (Array.isArray(tcs)) {
+      if (Array.isArray(tcs) && tcs.length > 0) {
+        // 累积到 pendingBatch,顺序 = tool_calls 序
         for (const tc of tcs) {
           const name = tc?.function?.name ?? '';
           const args = tc?.function?.arguments ?? '';
           if (tc?.id && name) idToName.set(tc.id, name);
-          layout.contentWrite(
-            `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}${name}${ui.reset}  ${ui.dim}${summarizeToolCall(name, args)}${ui.reset}\n`
-          );
+          pendingBatch.push({
+            name,
+            callSummary: summarizeToolCall(name, args),
+            resultSummary: '',
+            diffBlock: null,
+          });
         }
+        continue; // 跳过后续 tool 消息处理循环(由下一分支填 result)
       }
+      // 无 tool_calls:若有 pending batch(文本+无 tool_calls 的 assistant),不常见,先收尾
+      flushBatch();
       continue;
     }
     if (m.role === 'tool') {
       const id = (m as { tool_call_id?: string }).tool_call_id ?? '';
       const name = idToName.get(id) ?? '';
-      const preview = summarizeToolResult(
-        name,
-        textOf((m as { content?: unknown }).content)
-      );
-      if (preview) layout.contentWrite(`  ${ui.gray}↳ ${preview}${ui.reset}\n`);
+      const output = textOf((m as { content?: unknown }).content);
+      const preview = summarizeToolResult(name, output);
+      // 匹配 pendingBatch 中尚未填 result 的同名 entry;同名前缀 tool 较罕见(并行工具同 id 不同名)
+      let target: batch.BatchEntry | undefined;
+      for (let i = pendingBatch.length - 1; i >= 0; i--) {
+        const e = pendingBatch[i];
+        if (e.name === name && !e.resultSummary) {
+          target = e;
+          break;
+        }
+      }
+      if (target) target.resultSummary = preview;
+      // 不直接写屏——等 flushBatch 时出单行摘要
       continue;
     }
   }
+  flushBatch(); // 末尾兜底
 }
 
 /**

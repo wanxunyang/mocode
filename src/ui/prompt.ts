@@ -2,7 +2,7 @@ import readline from 'node:readline';
 import { stdin, stdout } from 'node:process';
 import type { Key } from 'node:readline';
 import { ui } from './theme.js';
-import { displayWidth, padEndDisplay, truncateDisplay, visColToCharCol } from './render.js';
+import { displayWidth, padEndDisplay, truncateDisplay, visColToCharCol, wrapByDisplayWidth } from './render.js';
 import * as layout from './layout.js';
 import * as mouse from './mouse.js';
 
@@ -271,43 +271,92 @@ export async function promptWithSlashMenu(
     });
   }
 
-  /** 鼠标点击输入框:把 layout 算出的(dispLine, dispCol——与 paintInput 同坐标系)
-   *  写回 prompt 的 source of truth(cl, cc)→ redraw。
-   *  - 无 chip 时 dispLine 即 cl、dispCol 是 lines[cl] 内显示列;
-   *  - 有 chip 时 dispLine 多了 chipPre 的行偏移、dispCol 多了 chipPre + chipPrefix 的列偏移,分别扣回。
-   *  点击落在 chipPre / chip 区域(行 < chipPre.length - 1,或合并行行首)→ 收敛到 suffix 第 0 行起点,
-   *  把光标"走出 chip"到最自然位置(用户的直觉就是"点 chip 区域 = 回 suffix 起点")。 */
-  function applyExternalCursor(dispLine: number, dispCol: number): void {
-    const pre = chip ? chipPreLines() : [];
-    const preLastW = chip ? displayWidth(pre[pre.length - 1] ?? '') : 0;
-    const chipPrefW = chip ? displayWidth(chipPrefix()) : 0;
-    // 反推 cl
+  /** 鼠标点击输入框:layout 已把"屏 tap 位置"以 (flatIdx, inSegVis) 形式传进来
+   *  (flatIdx = flat 中的绝对段号;inSegVis = 段内显示列)。
+   *  本函数在 prompt 自己的 (lines + chip) 上复刻 wrap/flat 还原 (cl, cc)→ redraw。
+   *  chip 模式自动扣 chip prefix:
+   *  - dispLines() 把 chipPre 末行 + chipPrefix + suffix[0] 拼成一行 "mergedRow"
+   *  - flat 中对应的"合并行段"是 mergedRow 的折行段,段内 inChar 累加从 mergedRow 起
+   *  - 要得到 lines[cl=0] 内的字符索引,扣掉 mergedRow 起始到 lines[0] 起始的字符数
+   *    = chipPre 末行字符数 + chipPrefix 字符数。 */
+  function applyExternalCursor(flatIdx: number, inSegVis: number): void {
+    const g = layout.getGeo();
+    const promptW = displayWidth(opts.prompt);
+    const W = Math.max(1, g.cols - promptW);
+    const dispLs = dispLines();
+    const lineVis: string[][] = dispLs.map((l) => wrapByDisplayWidth(l, W));
+    const flat: string[] = [];
+    for (const lv of lineVis) for (const r of lv) flat.push(r);
+
     let newCl: number;
-    if (chip) {
-      if (dispLine < pre.length - 1) {
-        // 落在 chipPre 行(非末行)→ 走出 chip,光标归 suffix 第 0 行起点
-        newCl = 0;
-      } else if (dispLine === pre.length - 1) {
-        // 合并行(cl=0),扣掉 pre 行数
-        newCl = 0;
-      } else {
-        // chipPre 行数之后 = dispLines 的 cl + (pre.length - 1)
-        newCl = dispLine - (pre.length - 1);
-        if (newCl >= lines.length) newCl = lines.length - 1;
-        if (newCl < 0) newCl = 0;
-      }
+    let newCc: number;
+
+    if (flat.length === 0) {
+      newCl = 0;
+      newCc = 0;
     } else {
-      newCl = Math.max(0, Math.min(dispLine, lines.length - 1));
+      const safeIdx = Math.max(0, Math.min(flatIdx, flat.length - 1));
+      const seg = flat[safeIdx];
+      const segW = displayWidth(seg);
+      const safeInSeg = Math.max(0, Math.min(inSegVis, segW));
+      const inChar = visColToCharCol(seg, safeInSeg);
+
+      // safeIdx → (dispLine, segInLine)
+      let dispLine = 0;
+      let segInLine = safeIdx;
+      while (dispLine < lineVis.length && segInLine >= lineVis[dispLine].length) {
+        segInLine -= lineVis[dispLine].length;
+        dispLine++;
+      }
+      if (dispLine >= lineVis.length) {
+        dispLine = lineVis.length - 1;
+        segInLine = lineVis[dispLine].length - 1;
+      }
+
+      // dispLine → cl(chip-aware)
+      if (chip) {
+        const preLen = chipPreLines().length;
+        if (dispLine < preLen - 1) {
+          // 落在 chipPre 内(非末行)→ 走出 chip 到 suffix 起点
+          newCl = 0;
+        } else if (dispLine === preLen - 1) {
+          // 合并行 = suffix 第 0 行(cl=0)
+          newCl = 0;
+        } else {
+          newCl = dispLine - (preLen - 1);
+        }
+      } else {
+        newCl = dispLine;
+      }
+      newCl = Math.max(0, Math.min(newCl, lines.length - 1));
+      const lineText = lines[newCl] ?? '';
+
+      // inChar 是 seg 内的字符索引,seg 是 dispLs[dispLine] 的某折行段。
+      // 当 newCl=0(chip 模式 + 合并行)时,seg 对应"mergedRow = chipPreLast + chipPrefix + lines[0]"的某段,
+      // 要得到 lines[0] 内的字符索引,扣掉 mergedRow 起始到 lines[0] 起始的字符数
+      // + segInLine 之前各折行段的字符长度(seg 内偏移是相对 seg 自身的,真实 mergedRow 内偏移 = 前段累加 + inChar)。
+      let ccInLine = inChar;
+      if (chip && newCl === 0) {
+        const pre = chipPreLines();
+        const mergedRow = pre[pre.length - 1] ?? '';
+        const prefix = chipPrefix();
+        // seg 起始在 mergedRow 内的字符数
+        let segStartChars = 0;
+        const segs = lineVis[dispLine];
+        for (let s = 0; s < segInLine; s++) segStartChars += segs[s]?.length ?? 0;
+        // mergedRow 起始到 lines[0] 起始的字符数:
+        //   mergedRow 字符数 - lines[0] 字符数 = (chipPreLast + chipPrefix) 字符数
+        const chipOverheadChars = mergedRow.length + prefix.length - lineText.length;
+        // lines[0] 内字符索引 = (mergedRow 内字符索引) - chipOverheadChars
+        // mergedRow 内字符索引 = segStartChars + inChar
+        ccInLine = segStartChars + inChar - chipOverheadChars;
+      }
+      newCc = Math.max(0, Math.min(ccInLine, lineText.length));
     }
-    // 反推 cc:扣掉 chipPre 末行宽 + chipPrefix 宽,得到 lines[newCl] 内的显示列,再 visColToCharCol
-    const lineText = lines[newCl] ?? '';
-    let inLineVis = dispCol;
-    if (chip && newCl === 0) inLineVis = Math.max(0, dispCol - preLastW - chipPrefW);
-    if (inLineVis < 0) inLineVis = 0;
-    const newCc = Math.min(visColToCharCol(lineText, inLineVis), lineText.length);
+
     cl = newCl;
     cc = newCc;
-    // 收起菜单/过滤态(若点击位置不在菜单区):菜单行数被点击冲掉就关菜单,回到纯文本编辑
+    // 收起菜单/过滤态:点击输入框关闭菜单,回到纯文本编辑。
     if (menuOpen) {
       menuOpen = false;
       filtered = [];

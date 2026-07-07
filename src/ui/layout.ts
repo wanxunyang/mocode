@@ -478,6 +478,7 @@ export function clearContent(): void {
   mdActive = false;
   mdBuf = '';
   content.reset();
+  notifyContentReset(); // batch 渲染器同步重置(batch 摘要行索引全部失效)
   stdout.write(esc.home);
 }
 
@@ -503,6 +504,72 @@ export function rewindContent(rowsToRewind: number): void {
   // 末段 frameRow/frameCol 是 spinner 的画位,撤回若跨过 frame 行也不必清——
   // repaintViewport 会按新 buffer 重画整片,旧 frame 自然被覆盖。
   repaintViewport();
+}
+
+/**
+ * 在绝对行索引 after 后插入自洽行(详情展开用)。
+ * 滚动回看冻结:scrollOffset>0 时 offset += delta 把窗口冻在原绝对行,
+ * 与 contentWrite/contentWriteMd 同模式。插入后 repaintViewport 重画 viewport。
+ *
+ * 续写位(contentRow):若原写头在插入点之后,前移 lines.length,保持相对位置;
+ * 若原写头 ≤ after,不变(新行在写头之后)。非 TTY 直接调 content.insertAfter。
+ */
+export function contentInsertAfter(after: number, lines: string[]): void {
+  if (!active || lines.length === 0) return;
+  const g = getGeo();
+  const totalBefore = content.totalRows();
+  const scrolled = scrollOffset > 0;
+  content.insertAfter(after, lines);
+  const delta = content.totalRows() - totalBefore;
+  if (delta === 0) return;
+  // 续写位:原写头绝对行 = viewport 起点 + (contentRow-1) [offset=0];偏移后才一致
+  if (scrollOffset === 0 && contentRow > after + 1) {
+    contentRow = Math.min(contentRow + delta, g.contentBottom);
+  }
+  // 滚动回看冻结(同 contentWrite)
+  if (scrolled) {
+    scrollOffset = Math.max(
+      0,
+      Math.min(scrollOffset + delta, Math.max(0, content.totalRows() - g.contentBottom)),
+    );
+  }
+  // batch 摘要行索引平移
+  void import('./batch.js').then((m) => m.shiftBatchesAfter(after, delta));
+  repaintViewport();
+}
+
+/**
+ * 从绝对行索引 startIdx 起删 n 行(折叠回退用)。
+ * 滚动回看冻结同 insertAfter:offset -= delta,钳 ≥ 0。续写位若在删区后前移 delta。
+ */
+export function contentDeleteFrom(startIdx: number, n: number): void {
+  if (!active || n <= 0) return;
+  const g = getGeo();
+  const totalBefore = content.totalRows();
+  const scrolled = scrollOffset > 0;
+  content.deleteFrom(startIdx, n);
+  const delta = totalBefore - content.totalRows();
+  if (delta === 0) return;
+  if (scrollOffset === 0 && contentRow > startIdx + 1) {
+    contentRow = Math.max(1, contentRow - delta);
+  }
+  if (scrolled) {
+    scrollOffset = Math.max(0, scrollOffset - delta);
+  }
+  // batch 摘要行索引平移(用 -delta 表示后段索引前移)
+  void import('./batch.js').then((m) => m.shiftBatchesAfter(startIdx, -delta));
+  repaintViewport();
+}
+
+/** 当前内容物理行总数(含当前未提交行)。供 batch 渲染器在 endBatch 时定位摘要行索引。 */
+export function totalRows(): number {
+  return content.totalRows();
+}
+
+/** 清空内容区时通知 batch 渲染器重置(摘要行映射与展开态)。 */
+export function notifyContentReset(): void {
+  // 动态 import 避免循环;模块级 reset() 只清映射,不动 batch 内部数据(id 与 entries 仍可重用)
+  void import('./batch.js').then((m) => m.reset());
 }
 
 
@@ -707,15 +774,25 @@ function pasteIntoInput(): void {
     .catch(() => {});
 }
 
-/** 鼠标左键落输入行:进输入态(若是 running)→ 把"目标光标位"算出来 → paintInput 用新光标重画(末步 cup
- *  把终端真光标移到点击位,默认即竖线/闪烁块——不做反白装饰),并同步调 cursorChangeHandler 让
- *  prompt.ts 改自己的 cl/cc(source of truth),下次按键按新位写字。
- *  只算光标位、不动 lines——文本所有权归 prompt.ts。点击可视列按 charWidth 计列(中文/Emoji 全角占 2),
- *  落在宽字符中段归到其左边界。沿用 windowInputVis 的硬折规则做逆解,点击坐标与 paintInput 渲染坐标天然一致。 */
+/** 鼠标左键落输入行:进输入态(若是 running)→ 用统一的 display_col 单位算出"目标光标位"
+ *  → paintInput 用新光标重画(末步 cup 把终端真光标移到点击位,默认即竖线/闪烁块),
+ *  并同步调 cursorChangeHandler 让 prompt.ts 改自己的 cl/cc(source of truth),下次按键按新位写字。
+ *
+ *  单位说明:
+ *  - paintInput 的 view.cursorCol 单位 = display_col(同 paintInput 的 dispCursorCol,见 prompt.ts:186)
+ *  - prompt 的 cc 单位 = char_idx(字符索引)
+ *  本函数同时给出 targetLine、targetDisplayCol(paintInput 用)、targetCharCol(prompt 用),
+ *  故 visitColToCharCol 那一套反推只是用于把 click 屏幕列换成字符偏移,与 paintInput 的视协议完全对齐。
+ *
+ *  点击行为:
+ *  - 屏幕 visRow/visCol 用 charWidth 计列(中文/Emoji 全角占 2);落在宽字符中段归到字符左边界。
+ *  - 累加 flat[0..flatIdx-1] 的 display_w + 字符长度 → targetDisplayCol/targetCharCol,与 paintInput 渲染一致。
+ *  - 段接缝点击因 paintInput 协议限制(<= 还是 <),会落到前段末;这是 paintInput 全局行为,不归本函数。
+ *  - 未注册 handler(非输入态)→ 仅视觉真光标可见;cl/cc 不变。 */
 function setInputCursorFromClick(screenRow: number, screenCol: number): void {
   if (!active || !base || !lastView) return;
 
-  // running 态:先收归输入态(enterInputMode 会 paintInput([]) 整帧重画;之后我们再按新光标重画一次覆盖即可)
+  // running 态:先收归输入态(enterInputMode 会 paintInput 整帧重画;之后我们再按新光标重画一次覆盖即可)
   if (mode !== 'input') {
     enterInputMode(statusText);
   }
@@ -724,14 +801,19 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
   const promptW = displayWidth(lastView.prompt);
   const firstInputRow = g.contentBottom + 4;
   const inputRowsAvail = Math.max(0, g.footerH - 5);
-  // 输入框可视区 row 范围(firstInputRow .. firstInputRow + inputRowsAvail - 1)
-  // 点到可视区末行之下(空白区) → 落到最末可视行的末尾(光标归最后一段);
-  // 点到可视区之上(理论上 isInputRow 已挡)同 lastView 边界情况也收敛到最后一段。
-  const visRow = Math.max(0, Math.min(screenRow - firstInputRow, Math.max(0, inputRowsAvail - 1)));
-  // 屏幕列 (1-based SGR) → 显示列 (0-based),再扣 prompt 宽;容许越界(尾点)clip 到 >=0
-  const visColDisplay = Math.max(0, screenCol - 1 - promptW);
 
-  // 复刻 windowInputVis 的折行 + 滚动窗(输入态, lines 全量参与)
+  // 输入框可视区的 (visRow, visCol) 屏幕坐标 → 0-based。
+  // 点到可视区末行之下(空白区)→ 落到最末可视行(光标归最后一段);isInputRow 已挡可视区之上的点击。
+  const visRow = Math.max(
+    0,
+    Math.min(screenRow - firstInputRow, Math.max(0, inputRowsAvail - 1))
+  );
+  // 屏幕列 (1-based SGR) → 显示列 (0-based),再扣 prompt 宽;尾点容许越界 clip 到 >=0。
+  const visCol = Math.max(0, screenCol - 1 - promptW);
+
+  // 复刻 windowInputVis 的折行 + 滚动窗(输入态, lines 全量参与)。
+  // lastView.lines 在 prompt 的 redraw() 中为 dispLines()(含 chip pre 行 / chip prefix 列);
+  // chip 模式下点击 chip 区域也走同一算法,targetCharCol 与 paintInput 的视协议(段接缝除外)一致。
   const cols = Math.max(1, g.cols - promptW);
   const lineVis: string[][] = lastView.lines.map((l) => wrapByDisplayWidth(l, cols));
   const flat: string[] = [];
@@ -740,9 +822,8 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
   const maxInputRows = Math.max(1, Math.floor(g.rows * 0.4));
   const showCount = Math.min(maxInputRows, totalVis);
 
-  // 起窗偏移:用 lastView 当前光标位置作为锚(与 paintInput 同算法)
+  // 起窗偏移:用 lastView 当前光标位置作为锚(与 paintInput 同算法)。
   let curVisLine = 0;
-  let curVisCol = lastView.cursorCol;
   {
     const clRows = lineVis[lastView.cursorLine] ?? [''];
     let acc = 0;
@@ -750,77 +831,71 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
       const rw = displayWidth(clRows[i]);
       if (lastView.cursorCol <= acc + rw) {
         curVisLine = i;
-        curVisCol = lastView.cursorCol - acc;
         break;
       }
       acc += rw;
       curVisLine = i;
-      curVisCol = lastView.cursorCol - acc;
     }
   }
   let curAbs = curVisLine;
   for (let i = 0; i < lastView.cursorLine; i++) curAbs += lineVis[i].length;
-  const startVis = totalVis > maxInputRows
-    ? Math.max(0, Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows))
-    : 0;
-
-  // 点击的"绝对"可视行号(在 flat 里);visRow 是相对当前窗的偏移
-  const visIdx = startVis + visRow;
+  const startVis =
+    totalVis > maxInputRows
+      ? Math.max(0, Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows))
+      : 0;
 
   let targetLine: number;
-  let targetCol: number;
-  if (visIdx >= showCount) {
-    // 点到可视区末行之下(空白行)→ 等价"光标在最末逻辑行的字符串末尾"
-    targetLine = lastView.lines.length - 1;
-    const segs = lineVis[targetLine];
-    const lastSeg = segs[segs.length - 1] ?? '';
-    targetCol = (() => {
-      let i = 0;
-      for (const ch of lastSeg) i += ch.length;
-      return i; // 行末尾偏移 = 字符串长度
-    })();
+  let targetDisplayCol: number;
+  let dispatchFlatIdx: number; // 传给 prompt 的屏 tap 原坐标(flat 中段号);超尾点边界用 totalVis - 1
+  let dispatchInSegVis: number; // 段内显示列
+
+  // 点到可视区末行之下(空行)→ 等价"光标在最末可视行的字符串末尾"。
+  if (startVis + visRow >= totalVis) {
+    const lastFlatIdx = totalVis - 1;
+    const lastSeg = flat[lastFlatIdx];
+    let visAcc = 0;
+    for (let i = 0; i < lastFlatIdx; i++) visAcc += displayWidth(flat[i]);
+    targetLine = lastView.lines.length - 1; // 这里实际上是 lines 的最后一行号
+    targetDisplayCol = visAcc + displayWidth(lastSeg); // 段末之后 = 整行 display_w
+    dispatchFlatIdx = lastFlatIdx;
+    dispatchInSegVis = displayWidth(lastSeg); // 段末
   } else {
-    // 把 flat 位置反推到 (逻辑行, 行内段号)
+    // flatIdx = 点击可视段在 flat 中的绝对索引(startVis + visRow)
+    const flatIdx = startVis + visRow;
+    // 把 flatIdx 反推到 (line, segInLine) 供 paintInput 用 line
     let line = 0;
-    let segInLine = visIdx;
+    let segInLine = flatIdx;
     while (line < lineVis.length && segInLine >= lineVis[line].length) {
       segInLine -= lineVis[line].length;
       line++;
     }
     if (line >= lineVis.length) {
-      // 极端:startVis 把可视窗拉到超出了 lines(不应发生,兜底)
       line = lineVis.length - 1;
       segInLine = lineVis[line].length - 1;
     }
-    const lineStr = lastView.lines[line] ?? '';
-    // 该行内段 0..segInLine-1 的字符长度累加 = 该逻辑行的"折点前"字符数;
-    // segInLine=0(整行没折或就是首段)→ prefixLen=0
-    let prefixLen = 0;
-    for (let k = 0; k < segInLine; k++) prefixLen += lineVis[line][k]?.length ?? 0;
-    const seg = lineVis[line][segInLine] ?? '';
-    const segWidth = displayWidth(seg);
-    // 段内可视列限定在 [0, segWidth];超过段宽视为"点段尾"(容许点击段末之后的空白区)
-    if (visColDisplay <= segWidth) {
-      const offsInSeg = visColToCharCol(seg, Math.min(visColDisplay, segWidth));
-      targetLine = line;
-      targetCol = prefixLen + offsInSeg;
-    } else {
-      // 超过段宽:targetCol = 该段末尾
-      targetLine = line;
-      targetCol = prefixLen + seg.length;
-    }
-    // 防御:行内段长度累加可能因 wrapByDisplayWidth 切到一半宽字符而略 > lineStr.length,
-    // clamp 到 [0, lineStr.length]
-    if (targetCol > lineStr.length) targetCol = lineStr.length;
+    // 累加 flat[0..flatIdx-1] 的 display_w,然后在 flat[flatIdx] 内取段内偏移
+    let visAcc = 0;
+    for (let i = 0; i < flatIdx; i++) visAcc += displayWidth(flat[i]);
+    const seg = flat[flatIdx];
+    const segW = displayWidth(seg);
+    const inSeg = Math.min(visCol, segW); // 段尾点击容许越界 clip 到段末
+    targetLine = line;
+    targetDisplayCol = visAcc + inSeg;
+    dispatchFlatIdx = flatIdx;
+    dispatchInSegVis = inSeg;
   }
 
-  // 同步更新 lastView(让下次 paintInput 用新光标)+ paintInput 重画(末步 cup 把真光标移到位)
-  // + cursorChangeHandler 改 prompt 的 source of truth。三步必须原子:删任一步都会回退到
-  // "光标看着跳过去了但按下还是回到旧位"的旧 bug。
-  // 未注册 handler(非输入态)→ 仅视觉真光标可见;cl/cc 不变。
-  lastView = { ...lastView, cursorLine: targetLine, cursorCol: targetCol };
+  // 三步原子:
+  // 1) lastView.cursorLine = targetLine — view.cursorLine 单位 = lines 行号 in dispLines(供 paintInput)
+  // 2) lastView.cursorCol = targetDisplayCol — view.cursorCol 单位 = display_col(供 paintInput,
+  //    paintInput 内部 wrap/flat 后用 cursorCol 算 visLine + cursorVisCol)
+  // 3) paintInput 重画——末步 cup 把真光标移到点击位的可视位置
+  // 4) cursorChangeHandler(dispatchFlatIdx, dispatchInSegVis) — 给 prompt 的"屏 tap 原坐标",
+  //    prompt 自己重做 flat 算 cl/cc(扣 chip prefix,与 layout 端的 stamp 时 dispLines 一致即可)。
+  // 未注册 handler(非输入态)→ 仅步骤 3 可见真光标移动;步骤 4 不动 prompt 的 cl/cc。
+  lastView = { ...lastView, cursorLine: targetLine, cursorCol: targetDisplayCol };
   paintInput(lastView);
-  if (cursorChangeHandler) cursorChangeHandler(targetLine, targetCol);
+  if (cursorChangeHandler) cursorChangeHandler(dispatchFlatIdx, dispatchInSegVis);
 }
 
 /**
@@ -897,10 +972,30 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
   selecting = false;
   if (!selection) return;
   if (!selection.dragged) {
-    // 内容区纯点击(未拖动):只清选区,不复制(复制交给右键)。
-    selection = null;
-    repaintViewport();
-    repaint(); // 同上:把真光标带回输入框
+    // 内容区纯点击(未拖动):若落在工具 batch 摘要行上 → 切换展开/折叠(仿 Claude Code);
+    // 否则原行为:清选区。batch 反查通过 content lineAt + dynamic import(避免 layout↔batch 循环依赖)。
+    const absClick = selection.anchorLine; // 起止同行同列,取任一;未拖动时 line = anchor = end
+    void (async (): Promise<void> => {
+      try {
+        const m = await import('./batch.js');
+        const id = m.findBatchByAbsLine(absClick);
+        if (id) {
+          m.toggleBatch(id, {
+            contentInsertAfter: (after, lines) => contentInsertAfter(after, lines),
+            contentDeleteFrom: (start, n) => contentDeleteFrom(start, n),
+          });
+          selection = null;
+          repaintViewport();
+          repaint();
+          return;
+        }
+      } catch {
+        // batch 不可用(非 TTY 等)→ 走默认清选区路径
+      }
+      selection = null;
+      repaintViewport();
+      repaint();
+    })();
     return;
   }
   // 拖动过:保留高亮选区供右键复制(不在此处复制,复制交给右键释放分支)。
