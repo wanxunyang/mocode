@@ -124,11 +124,11 @@ function buildSummaryLine(entries: BatchEntry[]): string {
 /** 把 batch 的详情行展开成自洽行数组(供 layout.contentInsertAfter 走 mid-buffer 插入)。
  *  每行末尾必须以 \x1B[0m 收尾(SGR 自洽模型),行内允许含 SGR(行末 reset 不影响行内样式),
  *  但**绝不**带 \n——rows[] 是行数组,不是流输出。 */
-function buildExpandedLines(entries: BatchEntry[]): string[] {
+function buildExpandedLines(entries: BatchEntry[], indent = '    '): string[] {
   const lines: string[] = [];
   for (const e of entries) {
     lines.push(
-      `    ${ui.brightMagenta}●${ui.reset} ${ui.cyan}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}\x1B[0m`,
+      `${indent}${ui.brightMagenta}●${ui.reset} ${ui.cyan}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}\x1B[0m`,
     );
     if (e.diffBlock) {
       // diff 块多行文本(由 renderFileChange 渲染);按 \n 拆成物理行,
@@ -140,7 +140,7 @@ function buildExpandedLines(entries: BatchEntry[]): string[] {
         lines.push(line.endsWith('\x1B[0m') ? line : line + '\x1B[0m');
       }
     } else if (e.resultSummary) {
-      lines.push(`    ${ui.gray}↳ ${e.resultSummary}${ui.reset}\x1B[0m`);
+      lines.push(`${indent}${ui.gray}↳ ${e.resultSummary}${ui.reset}\x1B[0m`);
     }
   }
   return lines;
@@ -159,6 +159,17 @@ export function endBatch(
   if (!b || b.summaryAbsIdx >= 0) return; // 幂等
   // 含 mutation(write_file/edit_file)时强制展开——写盘操作必须让用户看到 diff
   b.forceExpanded = b.entries.some((e) => isMutationTool(e.name));
+  // 单条 mutation 调用:摘要行("● edit_file path")与展开详情头逐字重复,跳过摘要行、只写详情
+  // (N>1 时摘要行是聚合信息 "Ran N tools · ...",与详情不重复,两者照常都写)。
+  if (b.forceExpanded && b.entries.length === 1) {
+    // 无摘要行可当父行,详情头改用顶层 2 空格缩进(与 buildSummaryLine/diff head 对齐,而非嵌套的 4 空格)
+    const lines = buildExpandedLines(b.entries, '  ');
+    layout.contentWrite(lines.join('\n') + '\n');
+    b.summaryAbsIdx = Math.max(0, layout.totalRows() - 1 - lines.length);
+    absLineToBatchId.set(b.summaryAbsIdx, b.id);
+    expandedBatches.add(b.id); // 已展开;防止 toggleBatch 再次 expand() 造成重复插入
+    return;
+  }
   const summary = buildSummaryLine(b.entries);
   // 写摘要行(以 \n 收尾;contentWrite 会 breakRow 让其成为完整物理行)
   layout.contentWrite(summary + '\n');
@@ -269,8 +280,14 @@ export function writeSummaryOnly(
     totalRows(): number;
   },
 ): void {
-  layout.contentWrite(buildSummaryLine(entries) + '\n');
   const hasMutation = entries.some((e) => isMutationTool(e.name));
+  // 单条 mutation:同 endBatch,摘要行与展开详情头重复,跳过摘要行只写详情
+  if (hasMutation && entries.length === 1) {
+    const lines = buildExpandedLines(entries, '  ');
+    layout.contentWrite(lines.join('\n') + '\n');
+    return;
+  }
+  layout.contentWrite(buildSummaryLine(entries) + '\n');
   if (hasMutation) {
     // 回放时同步展开:重新调 expand 路径需要 BatchRecord,此处直接拼 line 插入
     const summaryIdx = Math.max(0, layout.totalRows() - 2);
