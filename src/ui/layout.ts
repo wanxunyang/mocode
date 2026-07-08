@@ -126,6 +126,21 @@ let selection: Selection | null = null;
 let selecting = false; // 左键按下中(press→release 之间)
 let mouseEnabled = true; // 导航菜单(picker)期间置 false:只吞报表不做选区/滚动,防菜单被 viewport 重画覆盖
 const WHEEL_LINES = 3; // 滚轮每格滚动行数
+
+/**
+ * 输入框反白选区:与内容区 selection 平行存在,坐标基于 lastView.lines(逻辑行 + display_col)。
+ * - dragged=false 时是纯点击,松开后立即清掉(光标已定好,选区不必要)
+ * - dragged=true 时保留高亮,等右键 release 复制;文本改动后由 paintInput 入口签名检测清空
+ * 不参与内容区选区:两套选区互不污染,各自接自己的右键复制 / paste。
+ */
+interface InputSelection {
+  anchor: { line: number; col: number };
+  end: { line: number; col: number };
+  dragged: boolean;
+}
+let inputSelection: InputSelection | null = null;
+/** 上次画过输入框的 lastView 签名(lines 数 + 每行 display_w 累加);变了说明 prompt.ts 改了文本 → 选区锚点失效,清掉。 */
+let lastInputSig = '';
 // 点击输入框粘贴:当前文本输入方(prompt.ts / repl 运行态 typeahead)注册回调,接收剪贴板文本贴入。
 // 只在输入区(底栏输入行)内右键单击(未拖动)时触发——与内容区选区互不干扰(内容区左键=框选,右键=复制)。
 let pasteHandler: ((text: string) => void) | null = null;
@@ -706,8 +721,13 @@ export function scrollBy(delta: number): void {
 
 /** 清活跃选区(不复制),若原有选区则重画去掉反白。供 ESC / 点击别处 / 退出滚动态等场景调。 */
 export function clearSelection(): void {
-  if (!selection) return;
+  if (!selection && !inputSelection) return;
   selection = null;
+  if (inputSelection) {
+    inputSelection = null;
+    if (active && base && lastView) paintInput(lastView);
+    return;
+  }
   if (scrollOffset >= 0) repaintViewport();
 }
 
@@ -737,6 +757,10 @@ export function setMouseEnabled(v: boolean): void {
       selection = null;
       repaintViewport();
     }
+    if (inputSelection) {
+      inputSelection = null;
+      if (active && base && lastView) paintInput(lastView);
+    }
   }
 }
 
@@ -753,6 +777,45 @@ function extractSelectionText(sel: { startLine: number; startCol: number; endLin
     out.push(sliceByDisplayCol(plain, colStart, colEnd));
   }
   return out.join('\n');
+}
+
+/** 输入框选区归一化:按 (line, col) 字典序排成 start/end。无选区返 null。 */
+function normalizeInputSelection(): { startLine: number; startCol: number; endLine: number; endCol: number } | null {
+  if (!inputSelection) return null;
+  const a = inputSelection.anchor;
+  const b = inputSelection.end;
+  const aFirst = a.line < b.line || (a.line === b.line && a.col <= b.col);
+  return aFirst
+    ? { startLine: a.line, startCol: a.col, endLine: b.line, endCol: b.col }
+    : { startLine: b.line, startCol: b.col, endLine: a.line, endCol: a.col };
+}
+
+/** 从归一化输入框选区抠出纯文本(lines 上不带 ANSI,直接按 display_col 切)。越界行跳到该行末尾。 */
+function extractInputSelectionText(sel: { startLine: number; startCol: number; endLine: number; endCol: number }): string {
+  if (!lastView) return '';
+  const out: string[] = [];
+  for (let l = sel.startLine; l <= sel.endLine; l++) {
+    const raw = lastView.lines[l];
+    if (raw == null) continue;
+    const lineW = displayWidth(raw);
+    const colStart = l === sel.startLine ? sel.startCol : 0;
+    const colEnd = l === sel.endLine ? sel.endCol : lineW;
+    out.push(sliceByDisplayCol(raw, colStart, colEnd));
+  }
+  return out.join('\n');
+}
+
+/** 输入框 lastView 签名:lines 数 + 每行 display_w 累加;任何键改动 lines 即变化,用作 inputSelection 失效判据。 */
+function inputViewSig(view: InputView | null | undefined): string {
+  if (!view) return '';
+  return view.lines.length + '|' + view.lines.map((l) => displayWidth(l).toString()).join(',');
+}
+
+/** 清输入框反白选区并重画(若 active)。不复制,仅清。供 clearSelection / setMouseEnabled 复用。 */
+function clearInputSelection(): void {
+  if (!inputSelection) return;
+  inputSelection = null;
+  if (active && base && lastView) paintInput(lastView);
 }
 
 /** 屏行是否落在底栏输入行范围内(paintInput 的 firstInputRow..firstInputRow+inputRowsAvail-1)。 */
@@ -797,6 +860,36 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
     enterInputMode(statusText);
   }
 
+  const pos = inputScreenToInputPos(screenRow, screenCol);
+  if (!pos) {
+    paintInput(lastView);
+    return;
+  }
+
+  // 三步原子:
+  // 1) lastView.cursorLine = targetLine — view.cursorLine 单位 = lines 行号 in dispLines(供 paintInput)
+  // 2) lastView.cursorCol = targetDisplayCol — view.cursorCol 单位 = display_col(供 paintInput,
+  //    paintInput 内部 wrap/flat 后用 cursorCol 算 visLine + cursorVisCol)
+  // 3) paintInput 重画——末步 cup 把真光标移到点击位的可视位置
+  // 4) cursorChangeHandler(dispatchFlatIdx, dispatchInSegVis) — 给 prompt 的"屏 tap 原坐标",
+  //    prompt 自己重做 flat 算 cl/cc(扣 chip prefix,与 layout 端的 stamp 时 dispLines 一致即可)。
+  // 未注册 handler(非输入态)→ 仅步骤 3 可见真光标移动;步骤 4 不动 prompt 的 cl/cc。
+  lastView = { ...lastView, cursorLine: pos.line, cursorCol: pos.displayCol };
+  paintInput(lastView);
+  if (cursorChangeHandler) cursorChangeHandler(pos.flatIdx, pos.inSegVis);
+}
+
+/**
+ * 把屏(行,列)反推到 (lines 行号, 行内 display_col, flatIdx, 段内显示列),
+ * 算法与 setInputCursorFromClick 抽出前等价——基于 lastView 的"折行 + 滚动窗"几何,
+ * 与 paintInput 的 windowInputVis 同源(startVis 同锚),保证 press/drag 落点 = 画上高亮位置。
+ * 越界点(空行)→ 落末行末段末。
+ */
+function inputScreenToInputPos(
+  screenRow: number,
+  screenCol: number
+): { line: number; displayCol: number; flatIdx: number; inSegVis: number } | null {
+  if (!lastView) return null;
   const g = getGeo();
   const promptW = displayWidth(lastView.prompt);
   const firstInputRow = g.contentBottom + 4;
@@ -813,14 +906,13 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
 
   // 复刻 windowInputVis 的折行 + 滚动窗(输入态, lines 全量参与)。
   // lastView.lines 在 prompt 的 redraw() 中为 dispLines()(含 chip pre 行 / chip prefix 列);
-  // chip 模式下点击 chip 区域也走同一算法,targetCharCol 与 paintInput 的视协议(段接缝除外)一致。
+  // chip 模式下点击 chip 区域也走同一算法,与 paintInput 的视协议(段接缝除外)一致。
   const cols = Math.max(1, g.cols - promptW);
   const lineVis: string[][] = lastView.lines.map((l) => wrapByDisplayWidth(l, cols));
   const flat: string[] = [];
   for (const lv of lineVis) for (const r of lv) flat.push(r);
   const totalVis = flat.length;
   const maxInputRows = Math.max(1, Math.floor(g.rows * 0.4));
-  const showCount = Math.min(maxInputRows, totalVis);
 
   // 起窗偏移:用 lastView 当前光标位置作为锚(与 paintInput 同算法)。
   let curVisLine = 0;
@@ -844,11 +936,6 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
       ? Math.max(0, Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows))
       : 0;
 
-  let targetLine: number;
-  let targetDisplayCol: number;
-  let dispatchFlatIdx: number; // 传给 prompt 的屏 tap 原坐标(flat 中段号);超尾点边界用 totalVis - 1
-  let dispatchInSegVis: number; // 段内显示列
-
   // 点到可视区末行之下(空行)→ 等价"光标在最末可视行的字符串末尾"。
   if (startVis + visRow >= totalVis) {
     const lastFlatIdx = totalVis - 1;
@@ -863,52 +950,43 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
       lastLine = lineVis.length - 1;
       lastSegInLine = lineVis[lastLine].length - 1;
     }
-    // view.cursorCol 单位 = lines[lastLine] 内 display_col
+    // lines[lastLine] 内 display_col = 前 segInLine 段 display_w + 末段 display_w
     let inLineDisplayCol = 0;
     for (let s = 0; s <= lastSegInLine; s++) inLineDisplayCol += displayWidth(lineVis[lastLine][s] ?? '');
-    targetLine = lastLine;
-    targetDisplayCol = inLineDisplayCol; // 含末段段末 = 整 lines[lastLine] 的 display_w
-    dispatchFlatIdx = lastFlatIdx;
-    dispatchInSegVis = displayWidth(flat[lastFlatIdx]); // 段末
-  } else {
-    // flatIdx = 点击可视段在 flat 中的绝对索引(startVis + visRow)
-    const flatIdx = startVis + visRow;
-    // 把 flatIdx 反推到 (line, segInLine) — line 给 paintInput 用(同 lines[cursorLine] 行号),
-    // segInLine 给 prompt 做 cl/cc 反推用。
-    let line = 0;
-    let segInLine = flatIdx;
-    while (line < lineVis.length && segInLine >= lineVis[line].length) {
-      segInLine -= lineVis[line].length;
-      line++;
-    }
-    if (line >= lineVis.length) {
-      line = lineVis.length - 1;
-      segInLine = lineVis[line].length - 1;
-    }
-    // view.cursorCol 单位 = lines[line] 内 display_col(windowInputVis 只在该行累加,跨行不算)。
-    // 即 lineVis[line] 前 segInLine 段 display_w 累加 + 段内显示列。
-    let inLineDisplayCol = 0;
-    for (let s = 0; s < segInLine; s++) inLineDisplayCol += displayWidth(lineVis[line][s] ?? '');
-    const seg = flat[flatIdx];
-    const segW = displayWidth(seg);
-    const inSeg = Math.min(visCol, segW); // 段尾点击容许越界 clip 到段末
-    targetLine = line;
-    targetDisplayCol = inLineDisplayCol + inSeg;
-    dispatchFlatIdx = flatIdx;
-    dispatchInSegVis = inSeg;
+    return {
+      line: lastLine,
+      displayCol: inLineDisplayCol,
+      flatIdx: lastFlatIdx,
+      inSegVis: displayWidth(flat[lastFlatIdx]), // 段末
+    };
   }
 
-  // 三步原子:
-  // 1) lastView.cursorLine = targetLine — view.cursorLine 单位 = lines 行号 in dispLines(供 paintInput)
-  // 2) lastView.cursorCol = targetDisplayCol — view.cursorCol 单位 = display_col(供 paintInput,
-  //    paintInput 内部 wrap/flat 后用 cursorCol 算 visLine + cursorVisCol)
-  // 3) paintInput 重画——末步 cup 把真光标移到点击位的可视位置
-  // 4) cursorChangeHandler(dispatchFlatIdx, dispatchInSegVis) — 给 prompt 的"屏 tap 原坐标",
-  //    prompt 自己重做 flat 算 cl/cc(扣 chip prefix,与 layout 端的 stamp 时 dispLines 一致即可)。
-  // 未注册 handler(非输入态)→ 仅步骤 3 可见真光标移动;步骤 4 不动 prompt 的 cl/cc。
-  lastView = { ...lastView, cursorLine: targetLine, cursorCol: targetDisplayCol };
-  paintInput(lastView);
-  if (cursorChangeHandler) cursorChangeHandler(dispatchFlatIdx, dispatchInSegVis);
+  // flatIdx = 点击可视段在 flat 中的绝对索引(startVis + visRow)
+  const flatIdx = startVis + visRow;
+  // 把 flatIdx 反推到 (line, segInLine) — line 给 paintInput 用(同 lines[cursorLine] 行号),
+  // segInLine 给 prompt 做 cl/cc 反推用。
+  let line = 0;
+  let segInLine = flatIdx;
+  while (line < lineVis.length && segInLine >= lineVis[line].length) {
+    segInLine -= lineVis[line].length;
+    line++;
+  }
+  if (line >= lineVis.length) {
+    line = lineVis.length - 1;
+    segInLine = lineVis[line].length - 1;
+  }
+  // lines[line] 内 display_col = 前 segInLine 段 display_w 累加 + 段内显示列。
+  let inLineDisplayCol = 0;
+  for (let s = 0; s < segInLine; s++) inLineDisplayCol += displayWidth(lineVis[line][s] ?? '');
+  const seg = flat[flatIdx];
+  const segW = displayWidth(seg);
+  const inSeg = Math.min(visCol, segW); // 段尾点击容许越界 clip 到段末
+  return {
+    line,
+    displayCol: inLineDisplayCol + inSeg,
+    flatIdx,
+    inSegVis: inSeg,
+  };
 }
 
 /**
@@ -934,9 +1012,18 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
   const g = getGeo();
   const col = Math.max(0, e.col - 1); // SGR 报表列 1-based → 显示列 0-based
 
-  // 右键释放:落输入行 → 贴入;落内容区 → 复制当前选区后清空(去掉高亮),不可重复右键复制同一选区。
+  // 右键释放:落输入行 → 优先复制当前输入框选区(若有),退化为贴入;落内容区 → 复制选区后清高亮。
   if (e.type === 'release' && e.button === 2) {
     if (isInputRow(e.row)) {
+      // 输入框选区存在且真拖动过:复制(不动 text 光标,不改 cl/cc),与内容区"copy 后清高亮"对齐
+      const inpSel = normalizeInputSelection();
+      if (inpSel) {
+        const text = extractInputSelectionText(inpSel);
+        inputSelection = null;
+        if (lastView) paintInput(lastView); // 立刻擦反白,视觉反馈
+        if (text) copyToClipboard(text);
+        return;
+      }
       pasteIntoInput();
       return;
     }
@@ -954,20 +1041,48 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
 
   if (e.type === 'press') {
     if (isInputRow(e.row)) {
-      // 左键落输入行:进输入态 + 光标定位到点击位 + 重画。
-      // 输入框内不再做选区(避免和"在该处开始打字"的直觉冲突;右键 release 仍调 pasteIntoInput)。
+      // 左键落输入行:进输入态 + 光标定位到点击位 + 开输入框反白选区(起点 = 终点 = 点击位)。
+      // 不再 return——后续 drag/release 分支也要知道选区在输入框。点击未拖动时 release 端会清掉选区,
+      // 与"点一下就定位光标、起手打字"的习惯一致。
       setInputCursorFromClick(e.row, e.col);
+      const pos = inputScreenToInputPos(e.row, e.col);
+      if (pos) {
+        // 清掉内容区旧选区(若有):按一下输入框不应同时保留内容区反白,视觉混淆。
+        if (selection) {
+          selection = null;
+        }
+        inputSelection = {
+          anchor: { line: pos.line, col: pos.displayCol },
+          end: { line: pos.line, col: pos.displayCol },
+          dragged: false,
+        };
+        paintInput(lastView!);
+      }
       return;
     }
     selecting = true;
     const rowInContent = Math.max(1, Math.min(e.row, g.contentBottom));
     const absLine = screenRowToAbsLine(rowInContent);
     selection = { anchorLine: absLine, anchorCol: col, endLine: absLine, endCol: col, dragged: false };
+    // 切内容区选区时清掉输入框旧选区(若有)。
+    inputSelection = null;
     repaintViewport();
     repaint(); // 补一次输入区重画:INPUT 态 repaintViewport 把真光标留在内容区续写位,须靠 repaint 把它带回输入框(否则点内容区会现假闪烁光标,见 issue)
     return;
   }
   if (e.type === 'drag') {
+    if (inputSelection) {
+      // 输入框拖动选区:更新 end,触边不动 scroll(输入框行数有限,无外滚概念);重画底栏。
+      const pos = inputScreenToInputPos(e.row, e.col);
+      if (pos) {
+        if (pos.line !== inputSelection.end.line || pos.displayCol !== inputSelection.end.col) {
+          inputSelection.dragged = true;
+          inputSelection.end = { line: pos.line, col: pos.displayCol };
+        }
+        paintInput(lastView!);
+      }
+      return;
+    }
     if (!selecting || !selection) return;
     // 触边自动翻页:motion 事件持续到达时靠此逐步滚动,把选区扩展到滚出去的历史行。
     if (e.row <= 1) scrollBy(WHEEL_LINES);
@@ -983,6 +1098,15 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
   }
   // release(左键)
   selecting = false;
+  // 输入框 release 优先:未拖动 → 清选区(光标已定好);拖动过 → 留高亮等右键复制
+  if (inputSelection) {
+    if (!inputSelection.dragged) {
+      inputSelection = null;
+      if (lastView) paintInput(lastView);
+    }
+    // 拖动过:不操作,留高亮
+    return;
+  }
   if (!selection) return;
   if (!selection.dragged) {
     // 内容区纯点击(未拖动):若落在工具 batch 摘要行上 → 切换展开/折叠(仿 Claude Code);
@@ -1386,6 +1510,38 @@ function windowInputVis(
   };
 }
 
+/** 把 lines 按 W 做软折,返回 lineVis;供 paintInput 高亮预算用。与 windowInputVis 复用 wrap 算法。 */
+function visInputLines(lines: string[], W: number): string[][] {
+  return lines.map((l) => wrapByDisplayWidth(l, W));
+}
+
+/**
+ * 给纯文本(无 ANSI,来自 wrap 后的可视段)做"显示列区间"高亮,返回插入 SEL_OPEN/SEL_OFF 后的字符串。
+ * 输入字段 vis 段宽 = displayWidth(seg),clipStart/clipEnd 单位 = display_col。
+ * 与 highlightRange 等价语义但省去 ANSI split(纯文本无 SGR),更省。
+ */
+function highlightWithinRow(seg: string, clipStart: number, clipEnd: number): string {
+  if (clipEnd <= clipStart) return seg;
+  let out = '';
+  let w = 0;
+  let opened = false;
+  for (const ch of seg) {
+    const cw = charWidth(ch.codePointAt(0) ?? 0);
+    if (!opened && w >= clipStart && w < clipEnd) {
+      out += SEL_OPEN;
+      opened = true;
+    }
+    if (opened && w >= clipEnd) {
+      out += SEL_OFF;
+      opened = false;
+    }
+    out += ch;
+    w += cw;
+  }
+  if (opened) out += SEL_OFF;
+  return out;
+}
+
 /**
  * 画输入区:擦旧菜单 → (必要时)setRegion → 画状态行 + 输入行 + 向上菜单,光标留输入框(dim 时回续写位)。
  * prompt.ts 每次按键调;enterInputMode / enterRunningMode 也调(空 / dim)。
@@ -1393,6 +1549,17 @@ function windowInputVis(
 export function paintInput(view: InputView): void {
   if (!active || !base) return;
   lastView = view;
+  // 失效检测:lastView 文本若有变化(键输入/AI 续写)→ 选区锚点不再有效,清掉避免「错位反白」。
+  // 内容区选区用 content 自己的锚,与 lastView 无关,不动。
+  if (inputSelection) {
+    const sig = inputViewSig(view);
+    if (sig !== lastInputSig) {
+      inputSelection = null;
+    }
+    lastInputSig = sig;
+  } else {
+    lastInputSig = inputViewSig(view);
+  }
   const preGeo = getGeo();
   // 累积本帧所有 cup/clearLine/文本,末尾一次写出——避免「擦旧菜单」与「重画」分多次 write 时,
   // 终端把中间空白渲染出来 → 菜单/面板切换时闪烁(↑↓ 导航每次 redraw 都全帧擦后重画)。
@@ -1470,13 +1637,49 @@ export function paintInput(view: InputView): void {
   // 光标:不画反白块/假光标——输入框走终端真光标(WT / VSCode 终端默认竖线/闪烁块,
   // 各终端表现略不同但都贴合 IME 候选气泡且不再"挡住字符")。真光标位置由下方第 6 步 cup 写。
   // 保留 view.caret=false 路径给 picker 等非文本输入:把真光标定位到 hint 末尾。
+  const inpSel = normalizeInputSelection(); // 已签名检测失效,这里看到的要么有效要么 null
+  // 预算 (visRow -> line) 用于高亮:与 inputScreenToInputPos 的反推同源(flat → line + segInLine)
+  const colW = Math.max(1, preGeo.cols - promptW);
+  const lineVisArr: string[][] = visInputLines(view.lines, colW);
+  const flatInput: string[] = [];
+  for (const lv of lineVisArr) for (const r of lv) flatInput.push(r);
+  let cumLine = 0;
+  const flatToLine: { line: number; segInLine: number; inLineDisplayCol: number }[] = [];
+  for (let li = 0; li < lineVisArr.length; li++) {
+    const segs = lineVisArr[li];
+    let acc = 0;
+    for (let s = 0; s < segs.length; s++) {
+      flatToLine.push({ line: li, segInLine: s, inLineDisplayCol: acc });
+      acc += displayWidth(segs[s]);
+    }
+    if (segs.length === 0) flatToLine.push({ line: li, segInLine: 0, inLineDisplayCol: 0 });
+  }
   for (let i = 0; i < inputRowsAvail; i++) {
     const line = vis.visRows[i] ?? '';
     const r = firstInputRow + i;
     const prefix = vis.startVis === 0 && i === 0 ? view.prompt : indent;
-    const text = view.dim
-      ? renderDimInputRow(view.prompt, line, view.placeholder ?? '', g.cols)
-      : `${prefix}${line}`;
+    let text: string;
+    if (view.dim) {
+      text = renderDimInputRow(view.prompt, line, view.placeholder ?? '', g.cols);
+    } else {
+      text = `${prefix}${line}`;
+      // 输入框反白叠层:仅当 paintInput 不是 dim(运行态 typeahead 不参与选区,避免干扰 IME 气泡),
+      // 且该可视段所属的逻辑行落在 inpSel 区间内 → 高亮行内 [colStart,colEnd) 段。
+      if (inpSel) {
+        const flatIdx = vis.startVis + i;
+        const m = flatIdx < flatToLine.length ? flatToLine[flatIdx] : flatToLine[flatToLine.length - 1];
+        if (m.line >= inpSel.startLine && m.line <= inpSel.endLine) {
+          const seg = flatInput[flatIdx] ?? '';
+          const segW = displayWidth(seg);
+          const colStart = m.line === inpSel.startLine ? inpSel.startCol - m.inLineDisplayCol : 0;
+          const colEnd = m.line === inpSel.endLine ? inpSel.endCol - m.inLineDisplayCol : segW;
+          if (colStart < segW && colEnd > colStart) {
+            // 对 seg(纯文本无 ANSI)做行内高亮:在 [clipStart, clipEnd) 之间插 SEL_OPEN/SEL_OFF。
+            text = `${prefix}${highlightWithinRow(seg, Math.max(0, colStart), Math.min(segW, colEnd))}`;
+          }
+        }
+      }
+    }
     buf += cup(r, 1) + esc.clearLine + text;
   }
 
