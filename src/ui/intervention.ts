@@ -2,7 +2,7 @@ import readline from 'node:readline';
 import { stdin, stderr } from 'node:process';
 import type { Key } from 'node:readline';
 import { ui } from './theme.js';
-import { displayWidth, truncateDisplay } from './render.js';
+import { displayWidth, truncateDisplay, wrapByDisplayWidth } from './render.js';
 import * as layout from './layout.js';
 import * as mouse from './mouse.js';
 import { Spinner } from './spinner.js';
@@ -29,7 +29,7 @@ import { Spinner } from './spinner.js';
 
 export type InterventionType = 'choice' | 'input';
 
-/** choice 单个选项:label 是选项本身(选中后回传的值),detail 是选它意味着什么/取舍(可选,渲染在 label 下一行)。 */
+/** choice 单个选项:label 是选项本身(选中后回传的值),detail 是选它意味着什么/取舍(可选,渲染时与 label 同行、用全角括号()包裹)。 */
 export interface ChoiceOption {
   label: string;
   detail?: string;
@@ -114,16 +114,20 @@ export async function promptIntervention(
   // 挂自己监听前快照的现有 keypress 监听(运行态即 onRunningKey),退出时按原序恢复。
   let savedListeners: Array<(str: string, key: Key) => void> = [];
 
-  /** choice 菜单行:标题(bold)+ detail(dim,行数上限保选项可见)+ 空行 + 选项(▸ label,选中/dim;
-   *  有 detail 的选项额外缩进一行灰字说明——仿 Claude Code AskUserQuestion 的 label+description 双行)。 */
+  /** choice 菜单行:标题(bold)+ 背景 detail(dim,行数上限保选项可见)+ 空行 + 选项(▸ label,有 detail 的项用全角括号()拼到 label 同行)。 */
   function menuLinesChoice(): string[] {
     const g = layout.getGeo();
     const cols = g.cols;
     const allowCustom = req.allowCustom !== false;
     const items: ChoiceOption[] = allowCustom ? [...options, { label: CUSTOM_LABEL }] : [...options];
     const optionCount = items.length;
-    // 每项占用行数:有 detail 占 2 行(label + 缩进说明),否则占 1 行。
-    const rowsFor = (o: ChoiceOption) => (o.detail ? 2 : 1);
+    // 每项占行数 = label + （detail）整体 wrap 到可用宽度后的实际行数(超长换行,不再省略)。
+    // 短 label 仍只占 1 行;长 detail 自然占用多行,菜单总高度随之动态增长。
+    const rowsFor = (o: ChoiceOption): number => {
+      const prefixWidth = 2 + (optionCount <= 9 ? 3 : 4); // 保守:覆盖 1. 与 10. 两种前缀
+      const text = o.label + (o.detail ? `（${o.detail}）` : '');
+      return Math.max(1, wrapByDisplayWidth(text, Math.max(1, cols - prefixWidth)).length);
+    };
     const totalOptionRows = items.reduce((n, o) => n + rowsFor(o), 0);
     // detail 上限:title(1)+detail(D)+空行(1)+options(totalOptionRows) ≤ contentBottom
     const detailCap = Math.max(0, g.contentBottom - 2 - totalOptionRows);
@@ -164,12 +168,16 @@ export async function promptIntervention(
       // 数字前缀:只标真实选项(1-9,与 onKeyChoice 的数字直选对应);"自定义"项不占号。
       const numStr = idx < options.length ? `${idx + 1}. ` : '';
       const prefixWidth = 2 + numStr.length; // marker(1)+空格(1)+numStr
-      const body = truncateDisplay(o.label, cols - prefixWidth);
-      lines.push(`${marker} ${color}${numStr}${body}${ui.reset}`);
-      if (o.detail) {
-        // detail 缩进对齐到 label 文字起始位置(而非 marker),避免看起来像独立的第二个选项。
-        const pad = ' '.repeat(prefixWidth);
-        lines.push(`${pad}${ui.dim}${truncateDisplay(o.detail, cols - prefixWidth)}${ui.reset}`);
+      // 有 detail 的项:把说明拼到 label 后面、用全角括号()包裹;按可用宽度 wrap 多行(超长换行不再省略)。
+      // 第 1 行画 marker+numStr,后续行只画占位空白(prefixWidth)使 label 视觉上悬挂缩进、保持对齐。
+      // 颜色随 label 走(选中 cyan+bold、未选 dim),保持多行视觉整体性。
+      const detailSuffix = o.detail ? `（${o.detail}）` : '';
+      const fullText = o.label + detailSuffix;
+      const wrapped = wrapByDisplayWidth(fullText, Math.max(1, cols - prefixWidth));
+      const pad = ' '.repeat(prefixWidth);
+      for (let li = 0; li < wrapped.length; li++) {
+        const prefix = li === 0 ? `${marker} ${numStr}` : pad;
+        lines.push(`${prefix}${color}${wrapped[li]}${ui.reset}`);
       }
       used += rows;
       idx++;

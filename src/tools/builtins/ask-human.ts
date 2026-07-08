@@ -46,7 +46,12 @@ function optionToChoice(o: unknown): ChoiceOption {
     }
 
     try {
-      return { label: JSON.stringify(obj) };
+      // 兜底:仍 stringify 原值,以便上游能看到真实内容做调试/日志;但若得到字面"{}"或"[]"
+      // (说明 obj 本身就是个空对象),返回空 label 让 coerceOptions 的 length>0 filter 自然过滤掉,
+      // 避免终端上显示「1. {}」这种对用户无意义的内容。
+      const s = JSON.stringify(obj);
+      if (s === '{}' || s === '[]') return { label: '' };
+      return { label: s };
     } catch {
       return { label: String(o) };
     }
@@ -88,14 +93,11 @@ export function coerceOptions(raw: unknown): ChoiceOption[] {
 export const askHumanTool: Tool = {
   name: 'ask_human',
   description: [
-    'Present the user with a menu of choices to pick from — not a generic "ask" tool.',
-    ' DEFAULT: pass 2-6 concrete options via `options`; the user picks one and the pick comes back.',
-    ' Each option may be a plain string, or an object { label, description } when the choice',
-    ' involves a non-obvious tradeoff. description explains what picking that option means or',
-    ' implies, so the user does not have to guess. Use plain strings when labels are self-explanatory.',
-    ' FREE-TEXT (omit `options`): only when the answer truly cannot be reduced to a few choices',
-    ' (e.g. "paste the error message", "enter the exact URL") — this blocks with a text input.',
-    ' DO NOT call when the task is clear and you can pick a sensible default — decide and proceed.',
+    'Present the user with a menu of choices to pick from.',
+    ' DEFAULT: pass 2-4 concrete options via `options`; each is a string, or { label, description } when the choice has a non-obvious tradeoff.',
+    ' STRICT: object form requires a non-empty `label` — never emit {} or omit label (renders as a literal "{}" menu item). Only `label` and `description` are recognized — no extra fields.',
+    ' FREE-TEXT (omit `options`): only when the answer truly cannot be reduced to a few choices (e.g. "paste the error message").',
+    ' DO NOT call when the task is clear and you can pick a sensible default.',
   ].join(' '),
   parameters: {
     type: 'object',
@@ -114,22 +116,23 @@ export const askHumanTool: Tool = {
               properties: {
                 label: {
                   type: 'string',
-                  description: 'Short option title (1-5 words), shown as the choice itself',
+                  minLength: 1,
+                  description: 'Short option title (1-5 words), shown as the choice itself.',
                 },
                 description: {
                   type: 'string',
-                  description: 'What picking this option means or implies; explain the tradeoff. Fill this in whenever the label alone would leave the user unsure what they are choosing.',
+                  description: 'What picking this option means or implies; explain the tradeoff when the label alone leaves the user unsure.',
                 },
               },
               required: ['label'],
             },
           ],
         },
-        description: '2-6 concrete choices the user can pick with one click. Required in most cases; omit only when free-form text is genuinely needed. Prefer { label, description } objects over plain strings when the tradeoff between options is not obvious from the label alone.',
+        description: '2-4 concrete choices. Each is a plain string, or { label, description } when the tradeoff is non-obvious. Required in most cases; omit only for free-form input.',
       },
       context: {
         type: 'string',
-        description: 'Background explanation for the question (optional; helps the user understand why their decision is needed; shown under the title, may be multiline)',
+        description: 'Background explanation shown under the title; may be multiline.',
       },
     },
     required: ['question'],
