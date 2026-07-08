@@ -11,23 +11,44 @@ function optionToString(o: unknown): string {
   if (typeof o === 'number' || typeof o === 'boolean') return String(o);
   if (typeof o === 'object') {
     const obj = o as Record<string, unknown>;
-    // 优先取常见的标签字段
+    const pickString = (source: Record<string, unknown>, keys: string[]): string | undefined => {
+      for (const k of keys) {
+        const v = source[k];
+        if (typeof v === 'string' && v.trim()) return v.trim();
+      }
+      return undefined;
+    };
+
+    // 优先取顶层常见的标签字段。
     const labelKeys = ['label', 'name', 'title', 'text', 'option', 'choice', 'value', 'key'];
-    for (const k of labelKeys) {
-      const v = obj[k];
-      if (typeof v === 'string' && v.trim()) return v;
+    let label = pickString(obj, labelKeys);
+
+    // 兼容部分 LLM 误传的形状:
+    // { description: '...', options: { key: '...', label: '...' } }
+    // 这种情况下真正给用户看的短标题藏在 options.label 里。
+    const nestedOptions = obj.options;
+    if (!label && nestedOptions && typeof nestedOptions === 'object' && !Array.isArray(nestedOptions)) {
+      label = pickString(nestedOptions as Record<string, unknown>, labelKeys);
     }
-    // 其次尝试 "label + description" 组合
-    const label = obj.label ?? obj.name ?? obj.title;
-    const desc = obj.description ?? obj.desc ?? obj.detail;
-    if (typeof label === 'string' && typeof desc === 'string') {
-      return `${label}: ${desc}`;
+
+    const desc = pickString(obj, ['description', 'desc', 'detail', 'details', 'reason']);
+    if (label && desc && label !== desc) return `${label}: ${desc}`;
+    if (label) return label;
+    if (desc) return desc;
+
+    // 最后再递归看一层常见容器,避免把完整 JSON 渲染进菜单。
+    const nestedKeys = ['options', 'option', 'choice', 'value'];
+    for (const k of nestedKeys) {
+      const nested = obj[k];
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        const s = optionToString(nested);
+        if (s && !s.startsWith('{')) return s;
+      }
     }
-    // 兜底:JSON 序列化(去掉大括号让它看起来不像代码)
+
+    // 兜底:JSON 序列化,至少不要出现 [object Object]。
     try {
-      const s = JSON.stringify(obj);
-      // 如果是简单对象尝试美化
-      return s;
+      return JSON.stringify(obj);
     } catch {
       return String(o);
     }
