@@ -139,13 +139,15 @@ export interface UpdateDecision {
   refresh: boolean; // 是否应后台刷新缓存
 }
 
-/** 纯决策:据当前版本 / 缓存 / 时间,算是否提示 / spawn / 后台刷新。无副作用,可离线测。 */
+/** 纯决策:据当前版本 / 缓存 / 时间,算是否提示 / spawn / 后台刷新。无副作用,可离线测。
+ *  notice 同时携带当前版本(`current`)与最新版本(`latest`),让 REPL 提示能向用户
+ *  清晰展示"你正在用的 mocode 是 X,最新是 Y",不只是单调的"有新版本"。 */
 export function evaluateUpdate(current: string, cache: UpdateCache, now: number): UpdateDecision {
   const refresh = !cache.latest || now - (cache.lastCheck ?? 0) > CHECK_INTERVAL_MS;
   let notice: string | null = null;
   let spawn = false;
   if (cache.latest && compareSemver(cache.latest, current) > 0) {
-    notice = `检测到新版本 ${cache.latest},后台更新中,下次启动生效。`;
+    notice = `当前 mocode v${current} 已是较旧版本,最新为 v${cache.latest},后台更新中,下次启动生效。`;
     spawn = now - (cache.lastSpawn ?? 0) > SPAWN_INTERVAL_MS;
   }
   return { notice, spawn, refresh };

@@ -701,10 +701,6 @@ export async function startRepl(
   } else {
     layout.contentWrite(bannerString(banner()));
   }
-  if (updateNotice) {
-    // 自更新提示:开场静态段(进 INPUT 态前),dim 一行,不与流式 / 输入争用。
-    layout.contentWrite(`  ${ui.gray}↳ ${updateNotice}${ui.reset}\n`);
-  }
   if (!isModelConfigured()) {
     // 未配置 baseURL/apiKey:醒目提示引导 /model(不退出,REPL 仍可用;发消息会失败但不崩)。
     layout.contentWrite(
@@ -734,6 +730,11 @@ export async function startRepl(
   layout.contentWrite(
     `${ui.dim}  /plan · /auto · Shift+Tab 切换模式(plan:只读探查 + 产出计划,审批后切 auto 执行)${ui.reset}\n`,
   );
+  if (updateNotice) {
+    // 自更新提示:放 /plan · /auto 行下方,黄色(警示色)突出"你正在用的版本较旧",与 dim 提示区分。
+    // 开场静态段(进 INPUT 态前),一行,纯文本不与流式 / 输入争用。
+    layout.contentWrite(`  ${ui.yellow}⚠ ${updateNotice}${ui.reset}\n`);
+  }
 
   /**
    * 切换 agent 模式(Shift+Tab 触发,经 prompt.ts 的 onCycleMode 回调)。
