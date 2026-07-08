@@ -1166,6 +1166,13 @@ export async function startRepl(
       continue;
     }
     if (line === '/reflect') {
+      // 记忆子系统总开关关闭时反思无意义(kickoffReflection 内部也会短路),直接提示,不误导用户"已触发"。
+      if (!isMemoryEnabled()) {
+        layout.contentWrite(
+          `${ui.dim}(记忆子系统已关闭,/reflect 无效。用 /memory_switch 打开后再试)${ui.reset}\n`,
+        );
+        continue;
+      }
       // 手动触发后台反思 pass(不等;完成后下次 INPUT 态显摘要)。
       kickoffReflection(snapshotTranscript(history, 20));
       layout.contentWrite(

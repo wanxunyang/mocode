@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { chat, type ChatMessage } from '../llm/index.js';
-import { config } from '../config/index.js';
+import { config, isMemoryEnabled } from '../config/index.js';
 import {
   saveEntry,
   updateEntry,
@@ -249,12 +249,14 @@ export function formatReflectResult(r: ReflectResult): string {
 }
 
 /**
- * fire-and-forget 触发反思。已有在飞任务 / autoReflect 关闭 → 跳过。
+ * fire-and-forget 触发反思。已有在飞任务 / autoReflect 关闭 / 记忆子系统总开关关闭 → 跳过。
+ * 记忆关闭时反思毫无意义(没有可存的地方),且会误打日志、误弹摘要,故一并短路。
  * repl 轮末调:与下一轮 agent 并发跑,不阻塞。
  */
 export function kickoffReflection(transcript: string): void {
   if (inflight) return;
   if (!config.autoReflect) return;
+  if (!isMemoryEnabled()) return;
   inflight = (async () => {
     try {
       const r = await runReflection(transcript);

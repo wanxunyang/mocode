@@ -337,12 +337,16 @@ async function chatOnce(
           body as unknown as Parameters<typeof client.chat.completions.create>[0],
           opts as unknown as Parameters<typeof client.chat.completions.create>[1]
         );
+  const activeTools = toolsOverride ?? chatTools;
   const stream = await create(
     {
       model: config.model,
       messages,
-      tools: toolsOverride ?? chatTools,
+      tools: activeTools,
       stream: true,
+      // 显式声明允许一次响应携带多个 tool_call(OpenAI 兼容协议标准字段)。
+      // 不设置时依赖各家后端的默认值,某些第三方网关/模型在缺省时会退化为串行单步调用。
+      ...(activeTools.length > 0 ? { parallel_tool_calls: true } : {}),
       ...(config.maxTokens ? { max_tokens: config.maxTokens } : {}),
       ...(config.includeUsage ? { stream_options: { include_usage: true } } : {}),
     },
