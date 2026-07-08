@@ -11,6 +11,14 @@ import {
   getPlanModeSuffix,
 } from '../config/index.js';
 import { updateConfigKey, writeConfigKeys, CONFIG_PATH } from '../config/file.js';
+import {
+  deletePreset,
+  getPreset,
+  isValidPresetName,
+  listPresets,
+  migrateCurrentToPreset,
+  savePreset,
+} from '../config/presets.js';
 import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { togglePet, killPetProcess, listSkins, setSkin, sendState } from '../pet/bridge.js';
@@ -106,7 +114,10 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/reflect', desc: '手动触发后台记忆反思 pass(需先开启记忆)' },
   { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆(需先开启记忆)' },
   { name: '/theme', desc: '切换颜色主题(↑↓·Enter)' },
-  { name: '/model', desc: '配置大模型(baseURL/key/model/窗口)' },
+  { name: '/model', desc: '配置新模型(向导);/model switch·list·delete 管理已配置预设' },
+  { name: '/model switch', desc: '↑↓·Enter 在已配置预设间切换' },
+  { name: '/model list', desc: '列出已经配置的模型' },
+  { name: '/model delete <name>', desc: '删除已配置的模型' },
   { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
   { name: '/auto', desc: '切回 auto 模式(全工具执行)' },
   { name: '/pet', desc: '开关桌宠(独立悬浮窗,展示 agent 状态动画)' },
@@ -699,6 +710,26 @@ export async function startRepl(
     layout.contentWrite(
       `${ui.yellow}  ⚠ 未配置大模型。输入 ${ui.cyan}/model${ui.yellow} 配置 baseURL / apiKey / model(即时生效),或退出后运行 ${ui.cyan}mocode config${ui.yellow} 走向导。${ui.reset}\n`,
     );
+  } else {
+    // 老用户兜底:若 ~/.mocode/models/ 空,自动把 ~/.mocode/config 的当前 LLM 四键迁成 'default' 预设。
+    // 这样 /model list / switch 立即可见,无需手动 /model 重存一遍。幂等:重启只生效一次。
+    if (listPresets().length === 0) {
+      try {
+        const migrated = migrateCurrentToPreset({
+          baseURL: config.baseURL,
+          apiKey: config.apiKey,
+          model: config.model,
+          contextWindow: config.contextWindowTokens,
+        });
+        if (migrated) {
+          layout.contentWrite(
+            `${ui.dim}  ↳ 检测到老配置,已自动迁为预设 “${migrated}”(${ui.cyan}/model list${ui.dim} 查看 · /model switch 切换)${ui.reset}\n`,
+          );
+        }
+      } catch {
+        // 迁移失败不阻塞启动;用户后续 /model 时仍能手动配。
+      }
+    }
   }
   layout.contentWrite(
     `${ui.dim}  /plan · /auto · Shift+Tab 切换模式(plan:只读探查 + 产出计划,审批后切 auto 执行)${ui.reset}\n`,
@@ -1322,8 +1353,126 @@ export async function startRepl(
       // 仿 /theme:promptIntervention 弹菜单/输入 → 改 config → refreshStatusBase 刷底栏 → clearContent+banner 重显横幅 → dim 警告(shell env 覆盖)。
       const arg = line.startsWith('/model ') ? line.slice('/model '.length).trim() : '';
 
-      // /model list:显示当前四项配置(apiKey 脱敏)。
-      if (arg === 'list' || arg === 'show') {
+      // ── /model 子命令(use/save/list/delete/rename)优先派发,免得被无参向导路径吞掉。
+
+      // 共用:apply 一个预设到 config + 持久化 + 重建 client + 重显横幅。无参 /model 选菜单和 /model use 都走这里。
+      const applyPresetAndPersist = (target: { name: string; baseURL: string; apiKey: string; model: string; contextWindow: number }): void => {
+        updateModelConfig({
+          model: target.model,
+          baseURL: target.baseURL,
+          apiKey: target.apiKey,
+          contextWindowTokens: target.contextWindow,
+        });
+        writeConfigKeys({
+          LLM_BASE_URL: target.baseURL,
+          LLM_API_KEY: target.apiKey,
+          LLM_MODEL: target.model,
+          CONTEXT_WINDOW_TOKENS: String(target.contextWindow),
+        });
+        reconfigureClient();
+        refreshStatusBase(history);
+        layout.clearContent();
+        if (history.some((m) => m.role === 'user')) {
+          renderHistory(history);
+        } else {
+          layout.contentWrite(bannerString(banner()));
+        }
+        layout.contentWrite(`${ui.dim}(已切换到预设 “${target.name}” → ${target.model} @ ${target.baseURL})${ui.reset}\n`);
+        if (config.llmKeysFromShell.length > 0) {
+          layout.contentWrite(
+            `${ui.dim}(shell 环境变量已设 ${config.llmKeysFromShell.join(' / ')},文件写入下次启动被其覆盖)${ui.reset}\n`,
+          );
+        }
+      };
+
+      // 决定自动存的预设名:用 desired(model 字段),若与已有预设四元组完全相同则不重复存(返 null);
+      // 否则若 desired 已存在则追加 -2/-3/...。desired 含非法字符(如 glm-4.6 的 '.')时先 sanitize(. → -),
+// sanitize 后仍空才退化到 'preset'。
+      const uniquePresetName = (
+        desired: string,
+        baseURL: string,
+        apiKey: string,
+        model: string,
+        contextWindow: number,
+      ): string | null => {
+        const existing = listPresets();
+        const sameEntry = existing.find(
+          (p) => p.baseURL === baseURL && p.apiKey === apiKey && p.model === model && p.contextWindow === contextWindow,
+        );
+        if (sameEntry) return null; // 完全相同,不重复存
+        // sanitize:把非 [a-zA-Z0-9_-] 字符(如 glm-4.6 的 '.')替换为 -,压缩两端 -,裁 1-32。
+        const sanitized = desired
+          .replace(/[^a-zA-Z0-9_-]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 32) || 'preset';
+        const base = isValidPresetName(sanitized) ? sanitized : 'preset';
+        if (!existing.some((p) => p.name === base)) return base;
+        for (let i = 2; i < 1000; i++) {
+          const candidate = `${base}-${i}`;
+          if (candidate.length > 32) return `${base.slice(0, 32 - String(i).length - 1)}-${i}`;
+          if (!existing.some((p) => p.name === candidate)) return candidate;
+        }
+        return `${base}-${Date.now()}`;
+      };
+
+      // /model switch:弹 ↑↓·Enter 菜单挑预设切换。无预设时给一行引导。
+      if (arg === 'switch') {
+        const presets = listPresets();
+        if (presets.length === 0) {
+          layout.contentWrite(`${ui.dim}(还没有预设;先跑 /model 添加一个)${ui.reset}\n`);
+          continue;
+        }
+        const isCurrent = (p: typeof presets[number]): boolean =>
+          p.baseURL === config.baseURL &&
+          p.apiKey === config.apiKey &&
+          p.model === config.model &&
+          p.contextWindow === config.contextWindowTokens;
+        const cols = layout.getGeo().cols;
+        const labelFor = (p: typeof presets[number]): string => {
+          const tag = isCurrent(p) ? ' ★current' : '';
+          const right = `${p.model} @ ${p.baseURL}`;
+          const left = `${p.name}${tag}`;
+          const sep = left.length + 1 + right.length;
+          if (sep <= cols - 2) return `${left} ${ui.dim}${right}${ui.reset}`;
+          return left;
+        };
+        const choice = await promptIntervention({
+          type: 'choice',
+          title: '切换模型预设',
+          detail: `当前: ${config.model} @ ${config.baseURL}(★ = 已匹配)`,
+          options: presets.map(labelFor),
+          allowCustom: false, // 纯切换,不需要「其他」干扰
+        });
+        if (choice.action === 'selected' && choice.value) {
+          // value 含 ANSI 序列(labelFor 用了 ui.dim);按 preset.name 前缀匹配。
+          const idx = presets.findIndex((p) => choice.value!.startsWith(p.name));
+          const target = idx >= 0 ? presets[idx] : presets[0];
+          applyPresetAndPersist(target);
+        }
+        continue;
+      }
+
+      // /model list:列已配置的预设(★ 标当前);无预设给一行引导。
+      // /model presets 是同义别名(老用户习惯)。
+      if (arg === 'list' || arg === 'presets') {
+        const ps = listPresets();
+        if (ps.length === 0) {
+          layout.contentWrite(`${ui.dim}(还没有预设;先跑 /model 添加一个)${ui.reset}\n`);
+          continue;
+        }
+        layout.contentWrite(`${ui.dim}已配置 ${ps.length} 个预设:${ui.reset}\n`);
+        for (const p of ps) {
+          const star = p.baseURL === config.baseURL && p.apiKey === config.apiKey && p.model === config.model ? ' ★' : '';
+          layout.contentWrite(
+            `  ${ui.cyan}${p.name}${ui.reset}${star}  ${ui.dim}${p.model} @ ${p.baseURL}${ui.reset}\n`,
+          );
+        }
+        layout.contentWrite(`${ui.dim}(★ = 与当前一致;切换用 /model switch)${ui.reset}\n`);
+        continue;
+      }
+
+      // /model show:显示当前四项配置(apiKey 脱敏)。
+      if (arg === 'show') {
         layout.contentWrite(`${ui.dim}当前模型配置:${ui.reset}\n`);
         layout.contentWrite(`  ${ui.cyan}baseURL${ui.reset}  ${config.baseURL}\n`);
         layout.contentWrite(`  ${ui.cyan}apiKey ${ui.reset}  ${maskKey(config.apiKey)}\n`);
@@ -1332,6 +1481,64 @@ export async function startRepl(
         layout.contentWrite(`${ui.dim}(配置文件: ${CONFIG_PATH})${ui.reset}\n`);
         continue;
       }
+
+      // /model use <name>:一键把预设应用到 config + 持久化 + 重建 client。
+      if (arg.startsWith('use ')) {
+        const name = arg.slice(4).trim();
+        if (!name) {
+          layout.contentWrite(`${ui.yellow}用法: /model use <name>${ui.reset}\n`);
+          continue;
+        }
+        if (!isValidPresetName(name)) {
+          layout.contentWrite(`${ui.yellow}非法名字: ${name}(仅允许 [a-zA-Z0-9_-]{1,32})${ui.reset}\n`);
+          continue;
+        }
+        let preset;
+        try {
+          preset = getPreset(name);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+            layout.contentWrite(`${ui.yellow}没有预设 “${name}”;先 /model save ${name}${ui.reset}\n`);
+          } else {
+            layout.contentWrite(`${ui.red}/model use 失败: ${(e as Error).message}${ui.reset}\n`);
+          }
+          continue;
+        }
+        applyPresetAndPersist(preset);
+        continue;
+      }
+
+      // /model delete <name>:删一个预设。无参 / 重名 / 非法名字分别给不同提示。
+      if (arg.startsWith('delete ')) {
+        const name = arg.slice(7).trim();
+        if (!name) {
+          layout.contentWrite(`${ui.yellow}用法: /model delete <name>${ui.reset}\n`);
+          continue;
+        }
+        if (!isValidPresetName(name)) {
+          layout.contentWrite(`${ui.yellow}非法名字: ${name}(仅允许 [a-zA-Z0-9_-]{1,32})${ui.reset}\n`);
+          continue;
+        }
+        if (deletePreset(name)) {
+          layout.contentWrite(`${ui.dim}已删除预设 “${name}”${ui.reset}\n`);
+        } else {
+          layout.contentWrite(`${ui.yellow}没有预设 “${name}”${ui.reset}\n`);
+        }
+        continue;
+      }
+
+      // /model 后跟了未知子命令 → 给一行简短用法提示,免得静默吞用户输入。
+      // arg === '' → 直接进向导(下方 4 步链);这里只兜底非法子命令。
+      if (arg !== '') {
+        layout.contentWrite(
+          `${ui.yellow}未知子命令: ${arg}${ui.reset}\n` +
+            `${ui.dim}用法: /model(配置新模型向导) · /model switch · /model list · /model delete <name>${ui.reset}\n`,
+        );
+        continue;
+      }
+
+      // /model 无参 → 直接进入「配置新模型」4 步向导(不弹动作菜单)。
+      //   切换 / 查看 / 删除已配置预设改用显式子命令:/model switch · /model list · /model delete <name>。
 
       // 1) 选 provider 预设(预填 baseURL,后续仍可逐项改)。
       let preset: typeof MODEL_PRESETS[number];
@@ -1362,6 +1569,7 @@ export async function startRepl(
             title: `应用 ${preset.label}?`,
             detail: `model   ${preset.model}\nbaseURL ${preset.baseURL}\napiKey  ${maskKey(config.apiKey)}(直接应用=保留当前)\n窗口    ${preset.window}`,
             options: ['直接应用', '逐项修改'],
+            allowCustom: false,
           });
           if (res.action === 'cancelled') { continue; }
           if (res.action === 'selected' && res.value === '直接应用') {
@@ -1464,6 +1672,20 @@ export async function startRepl(
       });
       reconfigureClient();
 
+      // 3.5) 自动存为命名预设:用 model 字段,重名追加 -2/-3,完全相同的四元组不重复存。
+      //     让 /model 跑一次就多一份可切换的预设,/model switch 切回去。
+      let savedName: string | null = null;
+      try {
+        const finalName = uniquePresetName(model, baseURL, apiKey, model, window);
+        if (finalName) {
+          savePreset({ name: finalName, baseURL, apiKey, model, contextWindow: window });
+          savedName = finalName;
+        }
+        // finalName === null 表示与某个已存在预设完全一致,不再重复保存。
+      } catch (e) {
+        layout.contentWrite(`${ui.red}保存预设失败: ${(e as Error).message}${ui.reset}\n`);
+      }
+
       // 4) 刷新 UI:底栏模型名 + 重显横幅(banner() 闭包实时读 config,自动反映新值)。
       refreshStatusBase(history);
       layout.clearContent();
@@ -1473,6 +1695,9 @@ export async function startRepl(
         layout.contentWrite(bannerString(banner()));
       }
       layout.contentWrite(`${ui.dim}(已切换模型 → ${model} @ ${baseURL})${ui.reset}\n`);
+      if (savedName) {
+        layout.contentWrite(`${ui.dim}(已保存为预设 “${savedName}”,下次 /model use ${savedName} 一键切回)${ui.reset}\n`);
+      }
 
       // 5) dim 警告:shell export 的 LLM 键下次启动会覆盖文件值。
       if (config.llmKeysFromShell.length > 0) {
@@ -1482,6 +1707,7 @@ export async function startRepl(
       }
       continue;
     }
+
     if (line === '/rollback' || line.startsWith('/rollback ')) {
       // /rollback:打开轮次菜单(↑/↓ 选,Enter 回滚到该轮并预填其输入,再 Enter 重新跑)。
       // 忽略任何数字参数(原「输数字选回滚」已删,统一走菜单)。无快照的旧轮次(/resume 重建)文件改动不可撤销。

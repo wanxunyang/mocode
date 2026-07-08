@@ -39,6 +39,8 @@ export interface InterventionRequest {
   detail?: string;
   /** input 模式预填文本。 */
   seed?: string;
+  /** choice 末尾是否追加「其他(自定义输入)」项。默认 true;只有调用方确实想关掉才传 false。 */
+  allowCustom?: boolean;
 }
 
 export interface InterventionResult {
@@ -104,7 +106,8 @@ export async function promptIntervention(
   function menuLinesChoice(): string[] {
     const g = layout.getGeo();
     const cols = g.cols;
-    const items = [...options, CUSTOM_LABEL];
+    const allowCustom = req.allowCustom !== false;
+    const items = allowCustom ? [...options, CUSTOM_LABEL] : [...options];
     const optionCount = items.length;
     // detail 上限:title(1)+detail(D)+空行(1)+options(O) ≤ contentBottom → D ≤ contentBottom-2-O
     const detailCap = Math.max(0, g.contentBottom - 2 - optionCount);
@@ -246,7 +249,8 @@ export async function promptIntervention(
   }
 
   function onKeyChoice(key: Key): void {
-    const itemCount = options.length + 1; // +自定义项
+    const allowCustom = req.allowCustom !== false;
+    const itemCount = allowCustom ? options.length + 1 : options.length;
     switch (key.name) {
       case 'up':
         selected = (selected - 1 + itemCount) % itemCount;
@@ -258,7 +262,7 @@ export async function promptIntervention(
         return;
       case 'return':
       case 'enter':
-        if (selected === options.length) {
+        if (allowCustom && selected === options.length) {
           // 自定义项 → 切 input 子态(空文本起)
           mode = 'input';
           cameFromChoice = true;
