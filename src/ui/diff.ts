@@ -213,9 +213,12 @@ function compactCtx(ops: DiffLine[]): Item[] {
   return items;
 }
 
-function gutterOf(op: DiffOp): string {
-  if (op === 'del') return `${ui.red}-${ui.reset}`;
-  if (op === 'add') return `${ui.green}+${ui.reset}`;
+function gutterOf(op: DiffOp, restoreBg: string = ''): string {
+  // restoreBg:add/del 行在 pushBody 处已铺底色,gutter 的 `${ui.reset}` 会清掉底色,所以
+  // reset 后必须重发 bg SGR,让该行后续字符继续带底色(否则 gutter 后一小段会变无色)。
+  const rb = restoreBg;
+  if (op === 'del') return `${ui.red}-${ui.reset}${rb}`;
+  if (op === 'add') return `${ui.green}+${ui.reset}${rb}`;
   return `${ui.dim} ${ui.reset}`;
 }
 
@@ -291,7 +294,41 @@ function renderBody(head: string, counts: string, items: Item[], padW: number, s
 
   const pushBody = (num: number, op: DiffOp, text: string): void => {
     const numStr = String(num).padStart(padW);
-    lines.push(`${BODY_INDENT}${ui.gray}${numStr}${ui.reset} ${gutterOf(op)} ${codeText(text, lang)}`);
+    // 行级底色:add/del 整行包裹主题底色(addBg/delBg),行末由 codeText 内置 reset 闭合 →
+    // bg 不污染下一行。ctx 行不加底色(避免整个 diff 块被背景化,符合 GitHub / VSCode 视觉)。
+    // 注意 gutterOf 与 numStr 的 `${ui.reset}` 会清除之前累加的 bg,所以要紧跟一个 bg 恢复 SGR
+    // 才能让该行后续字符(代码区)继续带底色。
+    //   同时,代码区由 cli-highlight 渲染,内部会反复 ${fg}tok${reset}tok${fg}tok${reset}…
+    //   每个 reset 都会清掉外层 bg → 后面的 token 变无色。所以要在每个 reset 后重发 bg SGR
+    //   (行末那枚 reset 是收尾的,后面紧跟换行而非字符,不需补 bg)。用行末 reset 之外的 reset
+    //   计数 = 内部重发点。
+    const bg = op === 'add' ? ui.addBg : op === 'del' ? ui.delBg : '';
+    if (bg === '') {
+      lines.push(`${BODY_INDENT}${ui.gray}${numStr}${ui.reset} ${gutterOf(op)} ${codeText(text, lang)}`);
+      return;
+    }
+    const raw = `${bg}${BODY_INDENT}${ui.gray}${numStr}${ui.reset}${bg} ${gutterOf(op, bg)} ${codeText(text, lang)}${ui.reset}`;
+    // 在每个非行末的 ${ui.reset} 后重发 bg。行末 reset 紧跟行尾或换行,无需补。
+    // 简单做法:把除最后一个 reset 外的所有 reset 后都补 bg——但要注意 cli-highlight
+    // 输出的代码区段内部还有"省略号截断"${ui.dim}…${ui.reset},它的 reset 也需补 bg。
+    // 用 split 走一遍:找出所有 reset 位置(除最后那个),在其后插入 bg。
+    const resetStr = ui.reset;
+    const lastResetIdx = raw.lastIndexOf(resetStr);
+    if (lastResetIdx < 0) {
+      lines.push(raw);
+      return;
+    }
+    // 把 raw 切成 [prefix + 末 reset] + (中间所有 reset 替换为 reset+bg)
+    const prefix = raw.slice(0, lastResetIdx);
+    const tail = raw.slice(lastResetIdx);
+    // 头部所有 reset 之后插 bg(注:用 split 重建)
+    const parts = prefix.split(resetStr);
+    // parts[i] 是第 i 段,紧跟一段 reset(最后一段后无 reset,故少一个元素)
+    let rebuilt = parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      rebuilt += resetStr + bg + parts[i];
+    }
+    lines.push(rebuilt + tail);
   };
 
   for (const it of items) {

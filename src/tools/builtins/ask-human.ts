@@ -2,13 +2,17 @@ import type { Tool } from '../types.js';
 import { promptIntervention } from '../../ui/intervention.js';
 import { sendState } from '../../pet/bridge.js';
 
-/** 将单个选项元素安全地转为可读字符串。
- *  LLM 有时会传对象(如 {name/label/title:"xxx", desc/description:"yyy"})而不是纯字符串,
- *  直接 String(obj) 会变成 "[object Object]"——这里智能提取可读字段。 */
-function optionToString(o: unknown): string {
-  if (o === null || o === undefined) return '';
-  if (typeof o === 'string') return o;
-  if (typeof o === 'number' || typeof o === 'boolean') return String(o);
+/** 单个选项:label 是选项本身,detail 是选它意味着什么/取舍(可选)。 */
+export interface ChoiceOption {
+  label: string;
+  detail?: string;
+}
+
+/** 把单个选项元素安全地转成 {label, detail}。LLM 有时传对象而不是字符串,这里提取可读字段。 */
+function optionToChoice(o: unknown): ChoiceOption {
+  if (o === null || o === undefined) return { label: '' };
+  if (typeof o === 'string') return { label: o };
+  if (typeof o === 'number' || typeof o === 'boolean') return { label: String(o) };
   if (typeof o === 'object') {
     const obj = o as Record<string, unknown>;
     const pickString = (source: Record<string, unknown>, keys: string[]): string | undefined => {
@@ -19,70 +23,59 @@ function optionToString(o: unknown): string {
       return undefined;
     };
 
-    // 优先取顶层常见的标签字段。
     const labelKeys = ['label', 'name', 'title', 'text', 'option', 'choice', 'value', 'key'];
     let label = pickString(obj, labelKeys);
 
-    // 兼容部分 LLM 误传的形状:
-    // { description: '...', options: { key: '...', label: '...' } }
-    // 这种情况下真正给用户看的短标题藏在 options.label 里。
     const nestedOptions = obj.options;
     if (!label && nestedOptions && typeof nestedOptions === 'object' && !Array.isArray(nestedOptions)) {
       label = pickString(nestedOptions as Record<string, unknown>, labelKeys);
     }
 
     const desc = pickString(obj, ['description', 'desc', 'detail', 'details', 'reason']);
-    if (label && desc && label !== desc) return `${label}: ${desc}`;
-    if (label) return label;
-    if (desc) return desc;
+    if (label && desc && label !== desc) return { label, detail: desc };
+    if (label) return { label };
+    if (desc) return { label: desc };
 
-    // 最后再递归看一层常见容器,避免把完整 JSON 渲染进菜单。
     const nestedKeys = ['options', 'option', 'choice', 'value'];
     for (const k of nestedKeys) {
       const nested = obj[k];
       if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
-        const s = optionToString(nested);
-        if (s && !s.startsWith('{')) return s;
+        const c = optionToChoice(nested);
+        if (c.label && !c.label.startsWith('{')) return c;
       }
     }
 
-    // 兜底:JSON 序列化,至少不要出现 [object Object]。
     try {
-      return JSON.stringify(obj);
+      return { label: JSON.stringify(obj) };
     } catch {
-      return String(o);
+      return { label: String(o) };
     }
   }
-  return String(o);
+  return { label: String(o) };
 }
 
 /** 公开以便 check-ask-human-options.ts 单元测试。 */
-export function coerceOptions(raw: unknown): string[] {
-  // 路径 1:本身就是数组,map 成字符串。
+export function coerceOptions(raw: unknown): ChoiceOption[] {
   if (Array.isArray(raw)) {
-    // 子路径 1a:LLM 把真数组包成字符串塞在单元素里(本次 bug 现场)
     if (raw.length === 1 && typeof raw[0] === 'string') {
       const t = raw[0].trim();
       if (t.startsWith('[') && t.endsWith(']')) {
         try {
           const parsed = JSON.parse(t);
-          if (Array.isArray(parsed)) return parsed.map(optionToString);
+          if (Array.isArray(parsed)) return parsed.map(optionToChoice).filter((o) => o.label.length > 0);
         } catch {
           // 不是合法 JSON 数组,降级原值
         }
       }
     }
-    return raw.map(optionToString);
+    return raw.map(optionToChoice).filter((o) => o.label.length > 0);
   }
-  // 路径 2:LLM 直接把整个数组 stringify 成单字符串塞 options 字段(JSON.parse 出来是字符串)
-  // 例如 GLM 系经常这么做,arg h['options']='["A","B"]' → args.options='["A","B"]'
-  // 这里解开成真数组再转。
   if (typeof raw === 'string') {
     const t = raw.trim();
     if (t.startsWith('[') && t.endsWith(']')) {
       try {
         const parsed = JSON.parse(t);
-        if (Array.isArray(parsed)) return parsed.map(optionToString);
+        if (Array.isArray(parsed)) return parsed.map(optionToChoice).filter((o) => o.label.length > 0);
       } catch {
         // 不是合法 JSON,保留为单元素数组(对应 input 模式)
       }
@@ -96,7 +89,10 @@ export const askHumanTool: Tool = {
   name: 'ask_human',
   description: [
     'Present the user with a menu of choices to pick from — not a generic "ask" tool.',
-    ' DEFAULT: pass 2–6 concrete options via `options`; the user picks one and the pick comes back.',
+    ' DEFAULT: pass 2-6 concrete options via `options`; the user picks one and the pick comes back.',
+    ' Each option may be a plain string, or an object { label, description } when the choice',
+    ' involves a non-obvious tradeoff. description explains what picking that option means or',
+    ' implies, so the user does not have to guess. Use plain strings when labels are self-explanatory.',
     ' FREE-TEXT (omit `options`): only when the answer truly cannot be reduced to a few choices',
     ' (e.g. "paste the error message", "enter the exact URL") — this blocks with a text input.',
     ' DO NOT call when the task is clear and you can pick a sensible default — decide and proceed.',
@@ -110,8 +106,26 @@ export const askHumanTool: Tool = {
       },
       options: {
         type: 'array',
-        items: { type: 'string' },
-        description: '2–6 concrete choices the user can pick with one click. Required in most cases; omit only when free-form text is genuinely needed.',
+        items: {
+          anyOf: [
+            { type: 'string' },
+            {
+              type: 'object',
+              properties: {
+                label: {
+                  type: 'string',
+                  description: 'Short option title (1-5 words), shown as the choice itself',
+                },
+                description: {
+                  type: 'string',
+                  description: 'What picking this option means or implies; explain the tradeoff. Fill this in whenever the label alone would leave the user unsure what they are choosing.',
+                },
+              },
+              required: ['label'],
+            },
+          ],
+        },
+        description: '2-6 concrete choices the user can pick with one click. Required in most cases; omit only when free-form text is genuinely needed. Prefer { label, description } objects over plain strings when the tradeoff between options is not obvious from the label alone.',
       },
       context: {
         type: 'string',
@@ -122,14 +136,9 @@ export const askHumanTool: Tool = {
   },
   async execute(args) {
     const question = String(args.question ?? '');
-    // 容错:部分 LLM(尤其 GLM 系)把数组/对象 stringify 后塞进来,这里识别「长得很像 JSON
-    // 数组的单字符串元素」并解开,避免菜单只剩一行 [object Object]、逼用户手动输入。
-    // 任何一步失败 / 解出非数组:降级 input,与原代码语义一致。
     const options = coerceOptions(args.options);
     const context = args.context ? String(args.context) : undefined;
 
-    // 桌宠:面板弹出期间广播 waiting_human(红灯闪烁,提示需要人工介入);拿到响应后 sendState 会被
-    // 下一个 hook 事件(如 onToolDone→tool_call)覆盖,这里不用手动切回——与其它工具状态转移逻辑一致。
     sendState('waiting_human');
     const result = await promptIntervention({
       type: options.length > 0 ? 'choice' : 'input',

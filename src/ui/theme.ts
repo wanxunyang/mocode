@@ -32,6 +32,10 @@ export interface Palette {
   brightMagenta: string;
   /** 用户消息满宽背景色(上滑时易辨认)。 */
   userBg: string;
+  /** diff 新增行整行底色——浅深主题下都柔和可辨,跟绿字 fg 配对;SGR 自洽,每行 reset 闭合。 */
+  addBg: string;
+  /** diff 删除行整行底色——同 addBg,跟红字 fg 配对。 */
+  delBg: string;
 }
 
 export type ColorKey = keyof Palette;
@@ -48,6 +52,9 @@ const DEFAULT: Palette = {
   brightCyan: '\x1B[38;2;86;182;194m',
   brightMagenta: '\x1B[38;2;198;120;221m',
   userBg: '\x1B[48;2;44;49;60m', // One Dark current-line bg,深色终端上微妙可辨
+  // diff 行底色:One Dark bg #282c34 上加 ~14% 亮度的对应色,够辨识但不刺眼
+  addBg: '\x1B[48;2;44;62;42m', // 偏暗绿(One Dark green(152,195,121)暗化)
+  delBg: '\x1B[48;2;62;38;42m', // 偏暗红(One Dark red(224,108,117)暗化)
 };
 
 /**
@@ -69,6 +76,10 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;42;161;152m',
     brightMagenta: '\x1B[38;2;108;113;196m',
     userBg: '\x1B[48;2;238;232;213m',
+    // diff 行底色:Solarized Light base2(238,232,213)上贴同色族浅 tint,
+    // 比直接用 base1 更柔,跟深 fg(red/green)对比充足
+    addBg: '\x1B[48;2;220;235;205m',
+    delBg: '\x1B[48;2;245;218;215m',
   },
   solarized: {
     red: '\x1B[38;2;220;50;47m',
@@ -81,6 +92,9 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;147;161;161m',
     brightMagenta: '\x1B[38;2;108;113;196m',
     userBg: '\x1B[48;2;7;54;66m',
+    // diff 行底色:Solarized Dark base03(0,43,54)上加对应色族暗 tint
+    addBg: '\x1B[48;2;20;50;38m',
+    delBg: '\x1B[48;2;55;30;30m',
   },
   gruvbox: {
     red: '\x1B[38;2;251;73;52m',
@@ -93,6 +107,9 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;142;192;124m',
     brightMagenta: '\x1B[38;2;211;134;155m',
     userBg: '\x1B[48;2;40;40;40m',
+    // diff 行底色:Gruvbox dark bg(40,40,40)上贴暗 bg0_a 风格
+    addBg: '\x1B[48;2;40;55;30m',
+    delBg: '\x1B[48;2;70;35;30m',
   },
   nord: {
     red: '\x1B[38;2;191;97;106m',
@@ -105,6 +122,9 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;136;192;208m',
     brightMagenta: '\x1B[38;2;180;142;173m',
     userBg: '\x1B[48;2;67;76;94m',
+    // diff 行底色:Nord polar night(46,52,64)上贴对应色族暗 tint
+    addBg: '\x1B[48;2;46;66;52m',
+    delBg: '\x1B[48;2;72;46;52m',
   },
 };
 
@@ -183,5 +203,11 @@ export const ui = {
   },
   get userBg() {
     return color('userBg');
+  },
+  get addBg() {
+    return color('addBg');
+  },
+  get delBg() {
+    return color('delBg');
   },
 };

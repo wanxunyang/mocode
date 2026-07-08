@@ -29,12 +29,18 @@ import { Spinner } from './spinner.js';
 
 export type InterventionType = 'choice' | 'input';
 
+/** choice 单个选项:label 是选项本身(选中后回传的值),detail 是选它意味着什么/取舍(可选,渲染在 label 下一行)。 */
+export interface ChoiceOption {
+  label: string;
+  detail?: string;
+}
+
 export interface InterventionRequest {
   type: InterventionType;
   /** 问题/标题,显示在面板顶部。 */
   title: string;
-  /** choice 的选项列表(2~6 个);为空则降级 input。 */
-  options?: string[];
+  /** choice 的选项列表(2~6 个);为空则降级 input。纯字符串 = 无说明,等价 {label}。 */
+  options?: Array<string | ChoiceOption>;
   /** 背景说明,显示在标题下(可多行)。 */
   detail?: string;
   /** input 模式预填文本。 */
@@ -75,14 +81,20 @@ export async function promptIntervention(
       req.type === 'choice' ? '自动选默认项' : '自动返回空输入';
     stderr.write(`[介入] ${req.title}(非交互环境,${kind})\n`);
     if (req.type === 'choice') {
-      return { action: 'selected', value: req.options?.[0] ?? '' };
+      const first = req.options?.[0];
+      const value = typeof first === 'string' ? first : first?.label ?? '';
+      return { action: 'selected', value };
     }
     return { action: 'submitted', value: req.seed ?? '' };
   }
 
-  const options: string[] =
+  const options: ChoiceOption[] =
     req.type === 'choice' && Array.isArray(req.options)
-      ? req.options.map((o) => String(o)).filter((s) => s.length > 0)
+      ? req.options
+          .map((o): ChoiceOption =>
+            typeof o === 'string' ? { label: o } : { label: String(o.label ?? ''), detail: o.detail }
+          )
+          .filter((o) => o.label.length > 0)
       : [];
   // choice 但选项被滤空 → 降级 input(对齐设计文档 §8:ask_human 选项为空数组→input)。
   const startMode: InterventionType =
@@ -102,15 +114,19 @@ export async function promptIntervention(
   // 挂自己监听前快照的现有 keypress 监听(运行态即 onRunningKey),退出时按原序恢复。
   let savedListeners: Array<(str: string, key: Key) => void> = [];
 
-  /** choice 菜单行:标题(bold)+ detail(dim,行数上限保选项可见)+ 空行 + 选项(▸ 选中/dim)。 */
+  /** choice 菜单行:标题(bold)+ detail(dim,行数上限保选项可见)+ 空行 + 选项(▸ label,选中/dim;
+   *  有 detail 的选项额外缩进一行灰字说明——仿 Claude Code AskUserQuestion 的 label+description 双行)。 */
   function menuLinesChoice(): string[] {
     const g = layout.getGeo();
     const cols = g.cols;
     const allowCustom = req.allowCustom !== false;
-    const items = allowCustom ? [...options, CUSTOM_LABEL] : [...options];
+    const items: ChoiceOption[] = allowCustom ? [...options, { label: CUSTOM_LABEL }] : [...options];
     const optionCount = items.length;
-    // detail 上限:title(1)+detail(D)+空行(1)+options(O) ≤ contentBottom → D ≤ contentBottom-2-O
-    const detailCap = Math.max(0, g.contentBottom - 2 - optionCount);
+    // 每项占用行数:有 detail 占 2 行(label + 缩进说明),否则占 1 行。
+    const rowsFor = (o: ChoiceOption) => (o.detail ? 2 : 1);
+    const totalOptionRows = items.reduce((n, o) => n + rowsFor(o), 0);
+    // detail 上限:title(1)+detail(D)+空行(1)+options(totalOptionRows) ≤ contentBottom
+    const detailCap = Math.max(0, g.contentBottom - 2 - totalOptionRows);
     const lines: string[] = [];
     lines.push(`${ui.bold}${truncateDisplay(req.title, cols)}${ui.reset}`);
     if (req.detail) {
@@ -122,24 +138,41 @@ export async function promptIntervention(
       if (dl.length > detailCap) lines.push(`${ui.dim}…${ui.reset}`);
     }
     lines.push(''); // 分隔空行
-    // 选项开窗:超屏高时以 selected 为中心取窗,保选中项可见。
+    // 选项开窗:超屏高时以 selected 为中心收选中项可见。
     const maxOptRows = Math.max(1, g.contentBottom - lines.length);
     let start = 0;
-    if (optionCount > maxOptRows) {
-      start = Math.max(
-        0,
-        Math.min(selected - Math.floor(maxOptRows / 2), optionCount - maxOptRows)
-      );
+    {
+      let acc = 0;
+      let s = 0;
+      for (let i = 0; i <= selected && i < optionCount; i++) acc += rowsFor(items[i]);
+      while (acc > maxOptRows && s < selected) {
+        acc -= rowsFor(items[s]);
+        s++;
+      }
+      start = s;
     }
-    const count = Math.min(maxOptRows, optionCount);
-    for (let i = 0; i < count; i++) {
-      const idx = start + i;
+    let used = 0;
+    let idx = start;
+    while (idx < optionCount) {
+      const o = items[idx];
+      const rows = rowsFor(o);
+      if (used + rows > maxOptRows && idx > start) break;
       // 选中项:▸ 与正文均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
       const isSel = idx === selected;
       const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
       const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
-      const body = truncateDisplay(items[idx], cols - 2);
-      lines.push(`${marker} ${color}${body}${ui.reset}`);
+      // 数字前缀:只标真实选项(1-9,与 onKeyChoice 的数字直选对应);"自定义"项不占号。
+      const numStr = idx < options.length ? `${idx + 1}. ` : '';
+      const prefixWidth = 2 + numStr.length; // marker(1)+空格(1)+numStr
+      const body = truncateDisplay(o.label, cols - prefixWidth);
+      lines.push(`${marker} ${color}${numStr}${body}${ui.reset}`);
+      if (o.detail) {
+        // detail 缩进对齐到 label 文字起始位置(而非 marker),避免看起来像独立的第二个选项。
+        const pad = ' '.repeat(prefixWidth);
+        lines.push(`${pad}${ui.dim}${truncateDisplay(o.detail, cols - prefixWidth)}${ui.reset}`);
+      }
+      used += rows;
+      idx++;
     }
     return lines;
   }
@@ -270,7 +303,7 @@ export async function promptIntervention(
           cursor = 0;
           redraw();
         } else {
-          finish({ action: 'selected', value: options[selected] });
+          finish({ action: 'selected', value: options[selected]?.label });
         }
         return;
     }
@@ -279,7 +312,7 @@ export async function promptIntervention(
     if (s >= '1' && s <= '9') {
       const n = Number(s) - 1;
       if (n < options.length) {
-        finish({ action: 'selected', value: options[n] });
+        finish({ action: 'selected', value: options[n].label });
       }
     }
   }
