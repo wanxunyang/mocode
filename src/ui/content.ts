@@ -156,8 +156,8 @@ export function lineAt(abs: number): string | null {
  *
  * 行须自洽(每行带行末 \x1B[0m),不经 feedChar/feedSgr,直接入 rows。
  * after < 0 视为在所有已 commit 行之前插入;after ≥ 已 commit 行数则追加到末尾。
- * 不动 segMark——此函数用于非 md 路径(BatchRenderer 展开/折叠);
- * md 段切回 layout.contentWriteMd 时 setLines 仍按 segMark 截断。
+ * 若 segMark 活跃且插入点在 segMark.rowIdx 之前,则 segMark.rowIdx 跟着平移(否则
+ * 流式 md 段活跃期间展开/折叠 batch 后,下一个 md chunk 的 setLines 截断到错误位置)。
  *
  * 后置条件:插入后 hasCurrent=false(新空行不由本函数建立);调用方须自行决定续写位
  * (BatchRenderer 在插入后调 layout.contentWrite 续写,新 \n 自然在详情块后建新行)。
@@ -174,6 +174,11 @@ export function insertAfter(after: number, lines: string[]): void {
   // after 是绝对行索引;若超过 committed(例如快照时 hasCurrent=true),钳到末尾
   const target = after < 0 ? 0 : Math.min(after + 1, committed);
   rows.splice(target, 0, ...lines);
+  // 流式 md 段活跃期间:插入点在段起点之前 → segMark.rowIdx 平移,
+  // 否则下一个 md chunk 的 setLines 截断到旧位置,展开行被砍掉。
+  if (segMark && target <= segMark.rowIdx) {
+    segMark.rowIdx += lines.length;
+  }
   if (rows.length > MAX_ROWS + 512) rows.splice(0, rows.length - MAX_ROWS);
 }
 
@@ -195,5 +200,11 @@ export function deleteFrom(startIdx: number, n: number): void {
   const committed = rows.length;
   if (startIdx >= committed) return;
   const end = Math.min(startIdx + n, committed);
-  rows.splice(startIdx, end - startIdx);
+  const actual = end - startIdx;
+  rows.splice(startIdx, actual);
+  // 流式 md 段活跃期间:删除区间全部在段起点之前 → segMark.rowIdx 回退,
+  // 否则下一个 md chunk 的 setLines 截断到旧位置,段内容错位。
+  if (segMark && startIdx + actual <= segMark.rowIdx) {
+    segMark.rowIdx -= actual;
+  }
 }

@@ -19,6 +19,7 @@ import { memoryUpdateTool } from './memory-update.js';
 import { memoryForgetTool } from './memory-forget.js';
 import { taskTool } from './task.js';
 import { todolistTool } from './todolist.js';
+import { projectSkillUpdateTool } from './project-skill-update.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
@@ -44,6 +45,12 @@ const _memoryTools = _memoryEnabledAtBoot
     ]
   : [];
 
+/** 项目专属 Skill 工具:仅在 MOCODE_PROJECT_SKILL=true 时注册,与 memory 同模式。 */
+const _projectSkillEnabledAtBoot = process.env.MOCODE_PROJECT_SKILL === 'true';
+const _projectSkillTools = _projectSkillEnabledAtBoot
+  ? [projectSkillUpdateTool]
+  : [];
+
 export const builtinTools: Tool[] = [
   readFileTool,
   writeFileTool,
@@ -59,6 +66,7 @@ export const builtinTools: Tool[] = [
   switchModeTool, // plan↔auto 自切(两模式都可见,不进 PLAN_DISABLED_TOOLS;副作用控制工具→串行分支)
   dropContextTool, // 运行中剔除无关 tool 结果(上下文管理,无副作用;两模式都可见,串行分支)
   ..._memoryTools,
+  ..._projectSkillTools,
   taskTool, // 派生子 agent(独立 history + 可受限工具集);plan 模式禁用(见 PLAN_DISABLED_TOOLS)
   todolistTool, // 工作记事本(plan 文件:复杂任务 checklist,落盘抗压缩);plan 模式可用(便于「先 plan 再 auto」时落地执行清单)
 ];

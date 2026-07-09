@@ -537,6 +537,11 @@ export function contentInsertAfter(after: number, lines: string[]): void {
   content.insertAfter(after, lines);
   const delta = content.totalRows() - totalBefore;
   if (delta === 0) return;
+  // 流式 md 段活跃期间:插入点在段起点之前 → segmentStartRow 平移,
+  // 否则 contentWriteMd 的续写位算错,展开行被下一个 setLines 砍掉。
+  if (mdActive && after + 1 < segmentStartRow) {
+    segmentStartRow += delta;
+  }
   // 续写位:原写头绝对行 = viewport 起点 + (contentRow-1) [offset=0];偏移后才一致
   if (scrollOffset === 0 && contentRow > after + 1) {
     contentRow = Math.min(contentRow + delta, g.contentBottom);
@@ -565,6 +570,11 @@ export function contentDeleteFrom(startIdx: number, n: number): void {
   content.deleteFrom(startIdx, n);
   const delta = totalBefore - content.totalRows();
   if (delta === 0) return;
+  // 流式 md 段活跃期间:删除区间全部在段起点之前 → segmentStartRow 回退,
+  // 否则 contentWriteMd 的续写位算错,段内容错位。
+  if (mdActive && startIdx + delta <= segmentStartRow) {
+    segmentStartRow = Math.max(1, segmentStartRow - delta);
+  }
   if (scrollOffset === 0 && contentRow > startIdx + 1) {
     contentRow = Math.max(1, contentRow - delta);
   }

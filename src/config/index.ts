@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import { loadSnapshot } from '../project-snapshot/index.js';
+import { buildProjectSkillSection } from '../project-skill/index.js';
 
 /**
  * 按优先级加载配置文件并回填 process.env:
@@ -110,6 +111,10 @@ export interface Config {
    *  关闭则所有工具直接放行(零交互,向后兼容旧行为)。默认 true。
    *  设 MOCODE_PERMISSION=false 全局回退。 */
   permissionEnabled: boolean;
+  /** 项目专属 Skill 总开关:跨 session 持久化项目开发知识(约定/架构/坑点)。
+   *  开启后 .mocode/project-skill.md 内容注入系统提示词，Agent 可通过 project_skill_update 工具动态更新。
+   *  默认 false(零侵入);设 MOCODE_PROJECT_SKILL=true 启用。 */
+  projectSkillEnabled: boolean;
 }
 
 /**
@@ -165,7 +170,7 @@ function buildSnapshotSection(): string {
     if (!snap) return '';
     const fileList = Object.keys(snap.files).join(', ');
     const modules = snap.structure.modules.length ? snap.structure.modules.join(', ') : '(none)';
-    return `\n## Project Snapshot (cross-session cache)\n- A project snapshot is available with cached static files: [${fileList}]. read_file for these files will hit the snapshot cache (mtime-verified) — no disk read needed.\n- Project structure — top-level modules: [${modules}].\n- You already know the project skeleton; don't read_file these cached files just to "get an overview".\n`;
+    return `\n## Project Snapshot (cross-session cache)\n- A project snapshot is available with cached static files: [${fileList}]. read_file for these files will hit the snapshot cache (mtime-verified) — no disk read needed.\n- Project structure — top-level modules: [${modules}].\n- You already know the project skeleton; don't read_file these cached files just to "get an overview".\n- Use cached content directly: when a question can be answered from the cached files above (e.g. dependencies → package.json, compiler options → tsconfig.json, env vars → .env.example, project intro → README.md), answer from the snapshot without calling read_file.\n- The module list above is a navigation aid: when locating files, prefer targeted \`glob\` into the relevant module (e.g. \`src/**/*.ts\`) over broad top-level scans.\n`;
   } catch {
     return '';
   }
@@ -297,7 +302,7 @@ ${PLATFORM_NOTE}
 - Confirm with the user before irreversible or outward-facing operations (delete, overwrite existing files, push, request external services), unless explicitly authorized.
 - Operate only within authorized scope; when unsure, ask — don't guess.
 
-${buildSnapshotSection()}${memorySection}
+${buildSnapshotSection()}${config.projectSkillEnabled ? buildProjectSkillSection() : ''}${memorySection}
 
 ## Working notepad (todolist) — for multi-step tasks
 - For tasks spanning **≥2 independent modules** OR when the user asks for stepwise progress ("先计划再执行" / "plan then do" / "按步骤来"), call \`todolist create\` first; update as you go. Skip for single-file edits or quick lookups.
@@ -358,6 +363,7 @@ export const config: Config = {
   llmKeysFromShell,
   projectSnapshotEnabled: process.env.MOCODE_PROJECT_SNAPSHOT !== 'false',
   permissionEnabled: process.env.MOCODE_PERMISSION !== 'false',
+  projectSkillEnabled: process.env.MOCODE_PROJECT_SKILL === 'true',
 };
 
 /**
@@ -415,4 +421,23 @@ export function isMemoryEnabled(): boolean {
 export function updateMemoryConfig(enabled: boolean): void {
   config.memoryEnabled = enabled;
   process.env.MEMORY_ENABLED = enabled ? 'true' : 'false';
+}
+
+/**
+ * 项目专属 Skill 总开关:单一来源。/project_skill、buildBasePrompt、
+ * tools/builtins/index.ts 都从这里查。默认 false(零侵入)。
+ */
+export function isProjectSkillEnabled(): boolean {
+  return config.projectSkillEnabled;
+}
+
+/**
+ * 切换项目专属 Skill 开关(/project_skill on|off 调)。
+ * - 更新 config 单例字段(其它模块下次调 isProjectSkillEnabled() 即拿新值)。
+ * - 同步 process.env.MOCODE_PROJECT_SKILL(下次启动 loadEnvFiles 不被文件回填)。
+ * 持久化(写 ~/.mocode/config 的 MOCODE_PROJECT_SKILL 键)由调用方走 writeConfigKeys。
+ */
+export function updateProjectSkillConfig(enabled: boolean): void {
+  config.projectSkillEnabled = enabled;
+  process.env.MOCODE_PROJECT_SKILL = enabled ? 'true' : 'false';
 }

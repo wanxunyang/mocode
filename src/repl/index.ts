@@ -7,6 +7,8 @@ import {
   isModelConfigured,
   updateMemoryConfig,
   isMemoryEnabled,
+  isProjectSkillEnabled,
+  updateProjectSkillConfig,
   buildBasePrompt,
   getPlanModeSuffix,
 } from '../config/index.js';
@@ -111,6 +113,7 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
   { name: '/memory', desc: '记忆库:条目计数与近期索引(关闭时提示先开 /memory_switch)' },
   { name: '/memory_switch', desc: '切换记忆子系统开关(无参=切换;/on 或 /off 显式;持久化 MEMORY_ENABLED)' },
+  { name: '/project_skill', desc: '项目专属 Skill 开关 + 查看/初始化(无参=切换;/on·/off·/view·/init)' },
   { name: '/memory_status', desc: '查看记忆子系统当前开关与原理' },
   { name: '/reflect', desc: '手动触发后台记忆反思 pass(需先开启记忆)' },
   { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆(需先开启记忆)' },
@@ -272,6 +275,8 @@ function runningStateFor(
       return { status: '切记忆开关', placeholder: '切换中…' };
     case '/memory_status':
       return { status: '查记忆状态', placeholder: '…' };
+    case '/project_skill':
+      return { status: '项目 Skill', placeholder: '处理中…' };
     default:
       // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由内联 spinner 承载(思考中/执行…),
       // 状态行只显走时——故常态 status 留空,不塞「处理」这种与内联重复的泛标签。
@@ -1841,6 +1846,135 @@ export async function startRepl(
         );
       } catch (e) {
         layout.contentWrite(`${ui.red}/memory_switch 失败:${ui.reset} ${(e as Error).message}\n`);
+      }
+      continue;
+    }
+
+    if (
+      line === '/project_skill' ||
+      line.startsWith('/project_skill ')
+    ) {
+      // /project_skill — 项目专属 Skill 总开关 + 查看/编辑。
+      // 用法:
+      //   /project_skill              切换 on/off
+      //   /project_skill on|off       显式开关
+      //   /project_skill view         查看当前内容
+      //   /project_skill edit         打开编辑器修改
+      try {
+        const arg = line.startsWith('/project_skill ')
+          ? line.slice('/project_skill '.length).trim().toLowerCase()
+          : '';
+
+        // /project_skill view — 查看当前内容
+        if (arg === 'view') {
+          const enabled = isProjectSkillEnabled();
+          layout.contentWrite(`${ui.cyan}项目专属 Skill:${ui.reset} ${enabled ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`);
+          if (enabled) {
+            const { readProjectSkill } = await import('../project-skill/index.js');
+            const content = readProjectSkill();
+            if (content) {
+              layout.contentWrite(`${ui.dim}--- 内容 ---${ui.reset}\n${content}\n${ui.dim}--- 结束 ---${ui.reset}\n`);
+            } else {
+              layout.contentWrite(`${ui.dim}(尚未创建,可用 /project_skill init 生成初始内容)${ui.reset}\n`);
+            }
+          } else {
+            layout.contentWrite(`${ui.dim}(功能已关闭,用 /project_skill on 开启)${ui.reset}\n`);
+          }
+          continue;
+        }
+
+        // /project_skill init — 扫描项目并生成/优化 skill
+        if (arg === 'init') {
+          if (!isProjectSkillEnabled()) {
+            layout.contentWrite(`${ui.yellow}⚠ 项目专属 Skill 尚未开启${ui.reset}，请先运行 ${ui.cyan}/project_skill on${ui.reset}\n`);
+            continue;
+          }
+
+          const { readProjectSkill, writeProjectSkill } = await import('../project-skill/index.js');
+          const existing = readProjectSkill();
+
+          if (existing) {
+            layout.contentWrite(`${ui.cyan}⏳ 正在深度探索项目并优化现有 skill...${ui.reset}\n`);
+          } else {
+            layout.contentWrite(`${ui.cyan}⏳ 正在深度探索项目（子 agent 将使用工具扫描代码、架构、配置等）...${ui.reset}\n`);
+          }
+          layout.contentWrite(`${ui.dim}提示: 按 Ctrl+C 可中断${ui.reset}\n\n`);
+
+          // 派生子 agent 深度探索项目
+          const { generateInitialSkill } = await import('../project-skill/initializer.js');
+          const result = await generateInitialSkill(existing ?? undefined, currentAbort?.signal);
+
+          // 显示探索过程日志
+          if (result.transcript) {
+            layout.contentWrite(`${ui.dim}--- 探索过程 ---${ui.reset}\n`);
+            layout.contentWrite(result.transcript);
+            layout.contentWrite(`${ui.dim}--- 探索结束 ---${ui.reset}\n\n`);
+          }
+
+          if (result.ok && result.content) {
+            const writeResult = writeProjectSkill(result.content);
+            if (writeResult.ok) {
+              layout.contentWrite(`${ui.green}✓ 项目 Skill 已生成${ui.reset}\n`);
+              layout.contentWrite(`${ui.dim}内容预览:${ui.reset}\n${result.content.slice(0, 500)}${result.content.length > 500 ? '...' : ''}\n`);
+              layout.contentWrite(`\n${ui.dim}文件: ${ui.cyan}.mocode/project-skill.md${ui.reset} (${result.content.length} 字符)\n`);
+              layout.contentWrite(`${ui.dim}下次启动时会自动注入到系统提示词。Agent 也会在开发过程中持续更新。${ui.reset}\n`);
+              layout.contentWrite(`${ui.dim}提示: 可用 ${ui.cyan}/project_skill view${ui.reset} 查看完整内容，或手动编辑文件完善。${ui.dim}${ui.reset}\n`);
+            } else {
+              layout.contentWrite(`${ui.red}✗ 写入失败:${ui.reset} ${writeResult.error}\n`);
+            }
+          } else {
+            layout.contentWrite(`${ui.red}✗ 探索失败:${ui.reset} ${result.error}\n`);
+            if (result.transcript) {
+              layout.contentWrite(`${ui.dim}子 agent 输出了部分内容（见上方），但未能生成完整的 skill 文档。${ui.reset}\n`);
+            }
+          }
+          continue;
+        }
+
+        // 开关切换
+        let nextEnabled: boolean;
+        if (arg === '') {
+          nextEnabled = !isProjectSkillEnabled();
+        } else if (['on', 'true', '1', 'yes', 'y', 'enable', 'enabled'].includes(arg)) {
+          nextEnabled = true;
+        } else if (['off', 'false', '0', 'no', 'n', 'disable', 'disabled'].includes(arg)) {
+          nextEnabled = false;
+        } else {
+          layout.contentWrite(
+            `${ui.yellow}/project_skill 用法:${ui.reset}\n` +
+              `  /project_skill             切换(开↔关)\n` +
+              `  /project_skill on|off      显式设值\n` +
+              `  /project_skill view        查看当前内容\n` +
+              `  /project_skill init        扫描项目生成/优化 skill（可重复运行）\n`
+          );
+          continue;
+        }
+
+        const prev = isProjectSkillEnabled();
+        if (nextEnabled === prev) {
+          layout.contentWrite(
+            `${ui.dim}(已是 ${nextEnabled ? '开启' : '关闭'},未变更 — 持久化字段未写入)${ui.reset}\n`
+          );
+          continue;
+        }
+
+        updateProjectSkillConfig(nextEnabled);
+        updateConfigKey('MOCODE_PROJECT_SKILL', nextEnabled ? 'true' : 'false');
+        const note =
+          nextEnabled
+            ? `${ui.green}已开启项目专属 Skill${ui.reset} — project_skill_update 工具进入工具表;` +
+              `项目 Skill 内容会在下次拼 system message 时注入。工具表快照需重启 REPL 才完整刷新。`
+            : `${ui.yellow}已关闭项目专属 Skill${ui.reset} — project_skill_update 工具将在下次拼 system message 时从工具表过滤;` +
+              `项目 Skill 内容不再注入。重启 REPL 后工具表完全不出现。`;
+        layout.contentWrite(`${note}\n`);
+        layout.contentWrite(
+          `${ui.dim}(写入 ${CONFIG_PATH}:MOCODE_PROJECT_SKILL=${nextEnabled ? 'true' : 'false'};${ui.reset}` +
+            (process.env.MOCODE_PROJECT_SKILL
+              ? `${ui.dim}同 session shell 未 export,文件写入即时生效)${ui.reset}\n`
+              : `${ui.dim}下次启动仍生效)${ui.reset}\n`)
+        );
+      } catch (e) {
+        layout.contentWrite(`${ui.red}/project_skill 失败:${ui.reset} ${(e as Error).message}\n`);
       }
       continue;
     }
