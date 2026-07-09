@@ -101,6 +101,10 @@ export interface Config {
   themeFromShell: boolean;
   /** 由 shell 环境变量设置的 LLM 键名列表(非文件回填)。若含某键,/model 写该键下次启动仍被 shell 盖。 */
   llmKeysFromShell: string[];
+  /** 项目快照缓存总开关：跨 session 持久化静态项目文件 + 项目结构摘要。
+   *  关闭时 read_file 不走 snapshot cache，system prompt 不注入 snapshot 提示段。
+   *  默认 true；设 MOCODE_PROJECT_SNAPSHOT=false 全局回退。 */
+  projectSnapshotEnabled: boolean;
 }
 
 /**
@@ -145,6 +149,30 @@ const PLATFORM_NOTE = (() => {
  * 默认关(新用户零侵入):这段 + 工具表里的 5 个 memory_* + 系统提示尾部的 Memory Index
  * 都不出现;打开 /memory_switch 后下一次新建 system message 才注入。
  */
+/**
+ * 项目快照段落：开 isProjectSnapshotEnabled() 且有快照时才拼。
+ * 告诉 LLM 项目已有哪些静态文件可 cache hit，减少无谓 read_file。
+ */
+function buildSnapshotSection(): string {
+  if (!config.projectSnapshotEnabled) return '';
+  try {
+    const snap = loadSnapshot();
+    if (!snap) return '';
+    const fileList = Object.keys(snap.files).join(', ');
+    const modules = snap.structure.modules.length ? snap.structure.modules.join(', ') : '(none)';
+    return `\n## Project Snapshot (cross-session cache)\n- A project snapshot is available with cached static files: [${fileList}]. read_file for these files will hit the snapshot cache (mtime-verified) — no disk read needed.\n- Project structure — top-level modules: [${modules}].\n- You already know the project skeleton; don't read_file these cached files just to "get an overview".\n`;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 项目快照总开关查询器（read-file 工具用）。
+ */
+export function isProjectSnapshotEnabled(): boolean {
+  return config.projectSnapshotEnabled;
+}
+
 const SYSTEM_PROMPT_MEMORY_SECTION = `
 ## Memory (cross-session long-term facts)
 - A "memory index" (id/title/summary only) is injected into the system prompt. Retrieve full body via memory_search (pass id or keyword); use memory_list to see the entire index.
@@ -264,7 +292,7 @@ ${PLATFORM_NOTE}
 - Confirm with the user before irreversible or outward-facing operations (delete, overwrite existing files, push, request external services), unless explicitly authorized.
 - Operate only within authorized scope; when unsure, ask — don't guess.
 
-${memorySection}
+${buildSnapshotSection()}${memorySection}
 
 ## Working notepad (todolist) — for multi-step tasks
 - For tasks spanning **≥2 independent modules** OR when the user asks for stepwise progress ("先计划再执行" / "plan then do" / "按步骤来"), call \`todolist create\` first; update as you go. Skip for single-file edits or quick lookups.
@@ -323,6 +351,7 @@ export const config: Config = {
   theme: process.env.MOCODE_THEME || 'default',
   themeFromShell,
   llmKeysFromShell,
+  projectSnapshotEnabled: process.env.MOCODE_PROJECT_SNAPSHOT !== 'false',
 };
 
 /**

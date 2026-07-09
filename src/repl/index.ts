@@ -91,6 +91,7 @@ import {
   hasActivePlan,
   getActivePlanSummary,
 } from '../plan/index.js';
+import { buildSnapshot as buildProjectSnapshot } from '../project-snapshot/index.js';
 
 /**
  * readline 的 prompt 必须是纯文本(无 ANSI):readline 按字符数算光标位置,
@@ -118,6 +119,7 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/model switch', desc: '↑↓·Enter 在已配置预设间切换' },
   { name: '/model list', desc: '列出已经配置的模型' },
   { name: '/model delete <name>', desc: '删除已配置的模型' },
+  { name: '/refresh_snapshot', desc: '刷新项目快照(重新扫描静态文件,更新缓存)' },
   { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
   { name: '/auto', desc: '切回 auto 模式(全工具执行)' },
   { name: '/pet', desc: '开关桌宠(独立悬浮窗,展示 agent 状态动画)' },
@@ -252,6 +254,8 @@ function runningStateFor(
       return { status: '回滚', placeholder: '选择轮次…' };
     case '/init':
       return { status: '初始化', placeholder: '生成 MOCODE.md…' };
+    case '/refresh_snapshot':
+      return { status: '刷新快照', placeholder: '扫描项目文件中…' };
     case '/plan':
       return { status: '切 plan', placeholder: '…' };
     case '/auto':
@@ -642,6 +646,11 @@ export async function startRepl(
   // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
   // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
+  // 项目快照：sandboxRoot 设定后立即构建/加载（同步，小文件几十 ms）。
+  // 构建失败不阻断 REPL：snapshot 内部 catch 所有异常，此处再兜一层。
+  if (config.projectSnapshotEnabled) {
+    try { buildProjectSnapshot(); } catch { /* ignore */ }
+  }
   // 构造系统提示:auto 用 base;plan 在 base 后追加按当前开关现拼的 plan suffix。
   // 切模式时 applyMode 重算 history[0](history[0] 恒 system,compaction 保它,不破坏)。
   // 活跃 plan 摘要拼在 memory 段后(systemPrompt 的尾段),todo 工具变更后 listener 重写 history[0]。
@@ -1253,6 +1262,36 @@ export async function startRepl(
         layout.contentWrite(`${ui.dim}(无需压缩:没有可压缩的旧消息,且不在手动触发)${ui.reset}\n`);
       } else {
         layout.contentWrite(`${ui.dim}(reason=${reason},${before} → ${after} tokens)${ui.reset}\n`);
+      }
+      continue;
+    }
+    if (line === '/refresh_snapshot') {
+      if (!config.projectSnapshotEnabled) {
+        layout.contentWrite(`${ui.dim}(项目快照功能已关闭,MOCODE_PROJECT_SNAPSHOT=false)${ui.reset}\n`);
+        continue;
+      }
+      // buildProjectSnapshot 是同步操作(扫顶层小文件,几十 ms),不需要 spinner
+      try {
+        const snap = buildProjectSnapshot();
+        const fileCount = Object.keys(snap.files).length;
+        const moduleCount = snap.structure.modules.length;
+        const configCount = snap.structure.configFiles.length;
+        layout.contentWrite(
+          `${ui.cyan}✓ 项目快照已刷新${ui.reset}: ${fileCount} 个静态文件 · ${moduleCount} 个模块 · ${configCount} 个配置文件\n`
+        );
+        layout.contentWrite(
+          `${ui.dim}文件: ${Object.keys(snap.files).join(', ')}${ui.reset}\n`
+        );
+        layout.contentWrite(
+          `${ui.dim}模块: ${snap.structure.modules.join(', ')}${ui.reset}\n`
+        );
+        // 刷新 history[0]：buildSnapshotSection 内部 loadSnapshot() 会拿到新快照，
+        // buildSystemMessage 重新拼 system prompt，快照段落就更新了。
+        history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
+        layout.contentWrite(`${ui.dim}(system prompt 已同步刷新)${ui.reset}\n`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        layout.contentWrite(`${ui.red}[错误]${ui.reset} 刷新快照失败: ${msg}\n`);
       }
       continue;
     }
