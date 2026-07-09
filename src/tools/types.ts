@@ -32,11 +32,22 @@ export interface DropContextResult {
   items: { toolName: string; toolCallId: string }[];
 }
 
+/**
+ * 工具风险等级(权限系统用):
+ *  safe      — 只读 / 无副作用,直接放行(read_file, glob, grep, web_search, ...)
+ *  confirm   — 有副作用,需用户确认一次(同工具同会话缓存)(edit_file, write_file, memory_*)
+ *  dangerous — 高风险,每次执行都需显式确认(run_command, task)
+ * 缺省 = 'safe':只读工具无需标注,零侵入。
+ */
+export type ToolRisk = 'safe' | 'confirm' | 'dangerous';
+
 /** 工具统一接口。每个工具是一个 name + JSON Schema + execute。 */
 export interface Tool {
   name: string;
   description: string;
   parameters: Record<string, unknown>; // JSON Schema
+  /** 风险等级。缺省 = 'safe'(只读工具无需标注)。confirm/dangerous 在执行前弹确认面板。 */
+  risk?: ToolRisk;
   /** ctx 可选:不关心的工具签名写 execute(args) 即可(TS 允许少参赋多参类型,向后兼容)。 */
   execute: (args: Record<string, unknown>, ctx?: ToolContext) => Promise<string>;
 }

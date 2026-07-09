@@ -7,6 +7,7 @@ export const editFileTool: Tool = {
   name: 'edit_file',
   description:
     'Replace a string in a file. old_string must occur exactly once and match exactly (including indentation/newlines). Use write_file for new files.',
+  risk: 'confirm',
   parameters: {
     type: 'object',
     properties: {

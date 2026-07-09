@@ -7,6 +7,7 @@ export const memoryUpdateTool: Tool = {
   name: 'memory_update',
   description:
     'Update a memory entry in place (id unchanged). Use when facts changed / correcting outdated info / toggling pinned. Get id from memory_list or memory_search.',
+  risk: 'confirm',
   parameters: {
     type: 'object',
     properties: {

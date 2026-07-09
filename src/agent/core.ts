@@ -15,7 +15,8 @@ import {
   type ChatUsage,
   type ToolCallRef,
 } from '../llm/index.js';
-import { executeTool } from '../tools/registry.js';
+import { executeTool, tools } from '../tools/registry.js';
+import { checkPermission } from '../permissions/index.js';
 import { getPlanDisabledTools } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import { maybeCompact, runScheduler, contextState, dropContextFromHistory } from '../session/index.js';
@@ -443,15 +444,38 @@ export async function runAgentCore(
             let j = i;
             while (j < calls.length && calls[j].name === 'task') j++;
             const batch = calls.slice(i, j);
-            const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext }));
-            // 先批量打印所有头 + 启 spinner(多 task 并发,spinner 只显一个,但 ● 头都打出来)
+            // 权限预检查:逐个 task 弹确认面板(在启动子 agent 之前,体验:先问再执行)。
+            // 拒绝的 task 直接跳过,不启动子 agent;放行的收集到 allowedBatch。
+            const allowedBatch: typeof batch = [];
             for (const tc of batch) {
+              const parsed = parseArgs(tc.arguments);
+              const tool = tools.find((t) => t.name === tc.name);
+              if (tool) {
+                const perm = await checkPermission(tool, parsed ?? {}, signal);
+                if (perm === 'deny') {
+                  hooks.onToolHeader?.(tc);
+                  const err = `错误:用户拒绝了工具 ${tc.name} 的执行。`;
+                  hooks.onToolResult?.(tc, err, null, null, 1);
+                  const hint = recordAndHint(tc.name, tc.arguments);
+                  pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
+                  continue;
+                }
+              }
+              allowedBatch.push(tc);
+            }
+            if (allowedBatch.length === 0) {
+              i = j;
+              continue; // 全部被拒绝,跳过执行
+            }
+            const started = allowedBatch.map((tc) => executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext }));
+            // 先批量打印所有头 + 启 spinner(多 task 并发,spinner 只显一个,但 ● 头都打出来)
+            for (const tc of allowedBatch) {
               hooks.onToolHeader?.(tc);
             }
-            hooks.onToolStart?.(batch[0].name); // spinner:多 task 共用一个「执行 task…」
+            hooks.onToolStart?.(allowedBatch[0].name); // spinner:多 task 共用一个「执行 task…」
             // 逐个 await 出结果(按 tool_calls 原序,保 tool_call_id 配对);结果到即渲染 ↳
-            for (let k = 0; k < batch.length; k++) {
-              const tc = batch[k];
+            for (let k = 0; k < allowedBatch.length; k++) {
+              const tc = allowedBatch[k];
               const output = await started[k];
               hooks.onToolResult?.(tc, output, null, null, 1); // task 结果是摘要,无 diff
               // Thrashing:同上
@@ -475,15 +499,31 @@ export async function runAgentCore(
               i++;
               continue;
             }
+            // 权限预检查:在渲染 ● 头之前弹确认面板(体验:先问再执行,而非执行完再问)。
+            // 拒绝时只渲染拒绝结果,不渲染执行头;放行则继续走 header → start → executeTool 流程。
+            const parsed = parseArgs(tc.arguments);
+            const tool = tools.find((t) => t.name === tc.name);
+            if (tool) {
+              const perm = await checkPermission(tool, parsed ?? {}, signal);
+              if (perm === 'deny') {
+                hooks.onToolHeader?.(tc);
+                const err = `错误:用户拒绝了工具 ${tc.name} 的执行。`;
+                hooks.onToolResult?.(tc, err, null, null, 1);
+                const hint = recordAndHint(tc.name, tc.arguments);
+                pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
+                i++;
+                continue;
+              }
+            }
             hooks.onToolHeader?.(tc);
-            const parsed = isMutationTool(tc.name)
-              ? parseArgs(tc.arguments)
+            const mutationParsed = isMutationTool(tc.name)
+              ? parsed
               : null;
-            const { preWriteOld, editStartLine } = readDiffContext(tc, parsed);
+            const { preWriteOld, editStartLine } = readDiffContext(tc, mutationParsed);
             hooks.onToolStart?.(tc.name);
             const output = await executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext });
             hooks.onToolDone?.();
-            hooks.onToolResult?.(tc, output, parsed, preWriteOld, editStartLine);
+            hooks.onToolResult?.(tc, output, mutationParsed, preWriteOld, editStartLine);
             // Thrashing:同上(history 附 hint,UI 干净)
             const hint = recordAndHint(tc.name, tc.arguments);
             pushToolResult(history, tc, hint ? `${output}${hint}` : output, relprune, lifecycle, scheduler);
@@ -492,7 +532,7 @@ export async function runAgentCore(
             // 非 mutation 工具(run_command/use_skill/memory_* 等)此处 path="" 不触发。
             // 观察者生命周期:mutation push 后通知 lifecycle 把同 path 的旧 read 标 REFERENCED。
             if (relprune && isMutationTool(tc.name)) {
-              const mp = parsed?.path;
+              const mp = mutationParsed?.path;
               if (typeof mp === 'string' && mp) {
                 relprune.observeMutation(history, mp);
                 if (lifecycle) lifecycle.pushMutation(history, history.length - 1, mp);

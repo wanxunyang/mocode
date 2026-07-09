@@ -28,7 +28,7 @@ export const webSearchTool: Tool = {
     },
     required: ['query'],
   },
-  async execute(args) {
+  async execute(args, ctx) {
     const query = String(args.query ?? '').trim();
     if (!query) return '错误:query 不能为空。';
 
@@ -59,6 +59,13 @@ export const webSearchTool: Tool = {
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), SEARCH_TIMEOUT_MS);
+    // 外部 abort signal(用户 Ctrl+C,经 executeTool ctx.signal 透传)→ 合并到 ctrl,fetch 即时取消(不等 30s 超时)
+    const onExternalAbort = (): void => ctrl.abort();
+    const externalSignal = ctx?.signal;
+    if (externalSignal) {
+      if (externalSignal.aborted) ctrl.abort();
+      else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
 
     try {
       const resp = await fetch(url, {
@@ -138,6 +145,7 @@ export const webSearchTool: Tool = {
       return `错误:联网搜索请求失败: ${msg}`;
     } finally {
       clearTimeout(timer);
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
     }
   },
 };

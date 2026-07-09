@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import { loadSnapshot } from '../project-snapshot/index.js';
 
 /**
  * 按优先级加载配置文件并回填 process.env:
@@ -105,6 +106,10 @@ export interface Config {
    *  关闭时 read_file 不走 snapshot cache，system prompt 不注入 snapshot 提示段。
    *  默认 true；设 MOCODE_PROJECT_SNAPSHOT=false 全局回退。 */
   projectSnapshotEnabled: boolean;
+  /** 工具权限系统总开关:基于 Tool.risk 字段(safe/confirm/dangerous)在执行前弹确认面板。
+   *  关闭则所有工具直接放行(零交互,向后兼容旧行为)。默认 true。
+   *  设 MOCODE_PERMISSION=false 全局回退。 */
+  permissionEnabled: boolean;
 }
 
 /**
@@ -352,6 +357,7 @@ export const config: Config = {
   themeFromShell,
   llmKeysFromShell,
   projectSnapshotEnabled: process.env.MOCODE_PROJECT_SNAPSHOT !== 'false',
+  permissionEnabled: process.env.MOCODE_PERMISSION !== 'false',
 };
 
 /**

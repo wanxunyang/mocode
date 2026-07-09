@@ -6,6 +6,7 @@ import type { Tool } from '../types.js';
 export const writeFileTool: Tool = {
   name: 'write_file',
   description: 'Create or overwrite a file; parent dirs created.',
+  risk: 'confirm',
   parameters: {
     type: 'object',
     properties: {

@@ -8,6 +8,7 @@ export const runCommandTool: Tool = {
   name: 'run_command',
   description:
     'Run a shell command, merging stdout+stderr. Default timeout 120s. For tests, builds, git, etc.',
+  risk: 'dangerous',
   parameters: {
     type: 'object',
     properties: {

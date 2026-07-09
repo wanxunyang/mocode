@@ -10,6 +10,7 @@ import { MAX_OUTPUT } from '../constants.js';
 // 子 agent 中间过程不写主屏,只返回最终摘要;主 agent 据摘要决定下一步。
 export const taskTool: Tool = {
   name: 'task',
+  risk: 'dangerous',
   description: [
     'Spawn a sub-agent for an isolated sub-task (independent history; only its final summary returns to you).',
     'Use when a task splits into independent parts or its many tool calls would bloat your context.',

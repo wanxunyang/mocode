@@ -14,8 +14,9 @@ function hasCodegraphIndex(): boolean {
   return existsSync(path.join(process.cwd(), '.codegraph'));
 }
 
-/** 跑 codegraph CLI 子进程,返回合并 stdout+stderr(带退出码),超时 60s。 */
-function runCodegraph(args: string[]): Promise<string> {
+/** 跑 codegraph CLI 子进程,返回合并 stdout+stderr(带退出码),超时 60s。
+ *  signal 透传(用户 Ctrl+C)→ 即时杀子进程,不等 60s 超时。 */
+function runCodegraph(args: string[], signal?: AbortSignal): Promise<string> {
   return new Promise((done) => {
     const isWin = process.platform === 'win32';
     // win32 必须走 cmd.exe /c:Node 自 CVE-2024-27980 修复后,shell:false 直接 spawn
@@ -29,6 +30,7 @@ function runCodegraph(args: string[]): Promise<string> {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       done(s);
     };
     const onChunk = (chunk: Buffer) => {
@@ -51,6 +53,15 @@ function runCodegraph(args: string[]): Promise<string> {
       child.kill();
       finish(`[超时,已终止]\n${out.trim()}`);
     }, 60000);
+    // abort(用户 Ctrl+C,经 executeTool ctx.signal 透传)→ 杀子进程 + 返[已中断]
+    const onAbort = (): void => {
+      child.kill();
+      finish(`[已中断]\n${out.trim()}`);
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
   });
 }
 
@@ -93,7 +104,7 @@ export const codegraphTool: Tool = {
     },
     required: ['action', 'query'],
   },
-  async execute(args) {
+  async execute(args, ctx) {
     if (!hasCodegraphIndex()) {
       return (
         '当前目录无 .codegraph/ 索引。codegraph 工具不可用。\n' +
@@ -116,6 +127,6 @@ export const codegraphTool: Tool = {
     } else {
       return `错误:未知 action "${action}",可选 explore 或 node。`;
     }
-    return runCodegraph(cliArgs);
+    return runCodegraph(cliArgs, ctx?.signal);
   },
 };

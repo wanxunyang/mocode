@@ -8,6 +8,7 @@ export const memorySaveTool: Tool = {
   name: 'memory_save',
   description:
     'Save a cross-session long-term memory entry. Store only non-obvious, useful facts/decisions/pitfalls. Title enters the startup index; retrieve body via memory_search.',
+  risk: 'confirm',
   parameters: {
     type: 'object',
     properties: {
