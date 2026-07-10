@@ -288,10 +288,12 @@ export function contentWrite(s: string): void {
   const bottom = g.contentBottom;
   // resize 后 contentRow 可能过时(拖终端框):
   //  - 缩小:contentRow > 新 bottom → 钳到新 bottom
-  //  - 放大:contentRow < 新 bottom 且回尾 → 推进到 min(total, bottom)
+  //  - 放大:contentRow < 新 bottom 且回尾 → 推进到 min(total+1, bottom)
+  // total+1 是合法「待写位」(所有行已 breakRow 提交、光标在新空行);用 total 会把续写位拉回到
+  // 最后一行 banner/content 上,首次 contentWrite 覆盖 banner(首条消息「插到 logo 下面」bug)。
   if (contentRow > bottom) contentRow = bottom;
   else if (scrollOffset === 0 && contentRow < bottom) {
-    contentRow = Math.min(content.totalRows(), bottom);
+    contentRow = Math.min(content.totalRows() + 1, bottom);
   }
   const startRow = contentRow;
   const startCol = contentCol;
@@ -450,6 +452,11 @@ export function writeBanner(lines: string[]): void {
     content.setLines(lines);
     bannerH = lines.length;
     bannerRows = lines;
+    // 续写位推进到 banner 之后:clearContent 把 contentRow 归到 1,writeBanner 灌入 bannerH 行
+    // 但不动 contentRow → 首次 contentWrite 会从屏行 1 写出(覆盖 banner)。这里同步修正,
+    // 让首条用户消息从 banner 下方开始(与 buffer 尾部对齐)。仅首次走这条,后续 rewriteBanner 不动续写位。
+    contentRow = Math.min(bannerH + 1, getGeo().contentBottom);
+    contentCol = 1;
     if (scrollOffset === 0) repaintViewport();
     return;
   }
