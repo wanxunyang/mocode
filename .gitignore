@@ -17,3 +17,4 @@ scripts/
 .kiro/
 tmp/
 prompt_image/
+.claude/
