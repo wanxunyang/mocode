@@ -2,7 +2,7 @@ import readline from 'node:readline';
 import { stdin, stderr } from 'node:process';
 import type { Key } from 'node:readline';
 import { ui } from './theme.js';
-import { displayWidth, truncateDisplay, wrapByDisplayWidth } from './render.js';
+import { displayWidth, truncateDisplay, visColToCharCol, wrapByDisplayWidth } from './render.js';
 import * as layout from './layout.js';
 import * as mouse from './mouse.js';
 import { Spinner } from './spinner.js';
@@ -206,6 +206,27 @@ export async function promptIntervention(
     return lines;
   }
 
+  /** 鼠标左键点击输入框 → 把 cursor 移到点击位置(与 prompt.ts 的 applyExternalCursor 同源逻辑)。
+   *  intervention 的 input 只有一行 text(无 chip / 多行),算法简化:flatIdx=0,段内 visCol → charCol。 */
+  function applyExternalCursor(_flatIdx: number, inSegVis: number): void {
+    if (mode !== 'input') return; // choice 模式下点击输入框不移动光标(无文本可定位)
+    // 把屏幕 visCol 映射到 text 的字符偏移:wrapByDisplayWidth 复刻 paintInput 的折行,
+    // visColToCharCol 把显示列反推到字符索引(处理 CJK 全角字符)。
+    const g = layout.getGeo();
+    const promptW = displayWidth('❯ ');
+    const W = Math.max(1, g.cols - promptW);
+    const segs = wrapByDisplayWidth(text, W);
+    // _flatIdx 由 layout 端算出(点击落在哪段),这里用它定位段;越界兜底末段。
+    const seg = segs[Math.min(_flatIdx, segs.length - 1)] ?? '';
+    const inChar = visColToCharCol(seg, inSegVis);
+    // 累加前面段的字符数 → text 中的绝对偏移。
+    let offset = 0;
+    for (let i = 0; i < Math.min(_flatIdx, segs.length); i++) offset += segs[i].length;
+    offset += inChar;
+    cursor = Math.max(0, Math.min(offset, text.length));
+    redraw();
+  }
+
   function redraw(): void {
     if (mode === 'choice') {
       const hint = '↑↓ 选择 · Enter 确认 · 数字键直选 · Esc 取消';
@@ -237,6 +258,7 @@ export async function promptIntervention(
   /** 退出:摘自己的监听 + 恢复快照监听 + 擦菜单恢复内容区。不 setRawMode(false)/pause stdin(运行态由 repl 接管)。 */
   function cleanup(): void {
     layout.setMouseEnabled(true); // 恢复鼠标框选(面板期间禁,防拖拽覆盖菜单)
+    layout.setCursorChangeHandler(null); // 注销光标变更处理器
     emitter.removeListener('keypress', onKey);
     for (const l of savedListeners) emitter.on('keypress', l);
     savedListeners = [];
@@ -401,6 +423,7 @@ export async function promptIntervention(
       }
       stdin.resume();
       emitter.on('keypress', onKey);
+      layout.setCursorChangeHandler(applyExternalCursor); // 鼠标左键单击输入框 → 移光标到点击位
       redraw();
     } catch (e) {
       // 进入失败:必须恢复运行态监听,否则 onRunningKey 残留摘除 → 本 turns 的 Ctrl+C/滚动/typeahead 全废

@@ -1041,6 +1041,24 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     scrollBy(e.dir * WHEEL_LINES);
     return;
   }
+  // 输入行左键点击:即使 mouseEnabled=false(如 intervention 面板期间)也允许定位光标,
+  // 提升用户体验(点哪插哪)。拖拽/右键/内容区点击仍受 mouseEnabled 限制。
+  if (e.button === 0 && e.type === 'press' && isInputRow(e.row)) {
+    setInputCursorFromClick(e.row, e.col);
+    const pos = inputScreenToInputPos(e.row, e.col);
+    if (pos) {
+      if (selection) {
+        selection = null;
+      }
+      inputSelection = {
+        anchor: { line: pos.line, col: pos.displayCol },
+        end: { line: pos.line, col: pos.displayCol },
+        dragged: false,
+      };
+      paintInput(lastView!);
+    }
+    return;
+  }
   if (!mouseEnabled) return;
   const g = getGeo();
   const col = Math.max(0, e.col - 1); // SGR 报表列 1-based → 显示列 0-based
@@ -1073,26 +1091,8 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
   if (e.button !== 0) return; // 其余中/右键 press/drag 不处理(终端原生右键菜单等不受影响)
 
   if (e.type === 'press') {
-    if (isInputRow(e.row)) {
-      // 左键落输入行:进输入态 + 光标定位到点击位 + 开输入框反白选区(起点 = 终点 = 点击位)。
-      // 不再 return——后续 drag/release 分支也要知道选区在输入框。点击未拖动时 release 端会清掉选区,
-      // 与"点一下就定位光标、起手打字"的习惯一致。
-      setInputCursorFromClick(e.row, e.col);
-      const pos = inputScreenToInputPos(e.row, e.col);
-      if (pos) {
-        // 清掉内容区旧选区(若有):按一下输入框不应同时保留内容区反白,视觉混淆。
-        if (selection) {
-          selection = null;
-        }
-        inputSelection = {
-          anchor: { line: pos.line, col: pos.displayCol },
-          end: { line: pos.line, col: pos.displayCol },
-          dragged: false,
-        };
-        paintInput(lastView!);
-      }
-      return;
-    }
+    // 输入行左键已在上方 mouseEnabled 检查之前处理(支持 intervention 面板期间点击定位光标)。
+    // 此处只处理内容区选区。
     selecting = true;
     const rowInContent = Math.max(1, Math.min(e.row, g.contentBottom));
     const absLine = screenRowToAbsLine(rowInContent);
