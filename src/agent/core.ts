@@ -98,10 +98,13 @@ function readDiffContext(
     }
   }
   if (tc.name === 'edit_file') {
-    const oldStr = String(parsed.old_string ?? '');
+    // 行尾归一化:LLM 生成的 old_string 用 LF(\n),但 Windows 文件可能是 CRLF(\r\n),
+    // 不统一则 indexOf 必败、editStartLine 恒为 1。与 edit-file.ts 保持一致归一化为 LF。
+    const oldStr = String(parsed.old_string ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     try {
       // jailResolve:同上,沙箱越界抛错 → catch 兜底,不泄露牢外内容
-      const data = readFileSync(jailResolve(p), 'utf8');
+      const raw = readFileSync(jailResolve(p), 'utf8');
+      const data = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
       const idx = oldStr ? data.indexOf(oldStr) : -1;
       return {
         preWriteOld: null,
