@@ -39,18 +39,38 @@ export const todolistTool: Tool = {
   name: 'todolist',
   description: [
     'Maintain a working "notepad" plan in .mocode/plans/<id>.md (file-based, survives context compression).',
-    'For complex multi-step tasks (≥3 file changes or ≥5 tool calls expected, OR user says "先计划再执行" / "plan then do"), CALL THIS FIRST to write the plan, then update each step as you go.',
-    'For simple single-step tasks, skip it and just execute.',
+    '',
+    '## PREREQUISITES (before create)',
+    'Research first: explore codebase (read-only tools) → clarify with user (ask_human) → have concrete steps.',
+    'Do NOT create prematurely — if you haven\'t done research and confirmation, stop and do that first.',
+    '',
+    '## WHEN TO USE / NOT USE',
+    'ONLY for genuinely complex tasks: ≥3 file changes, ≥5 tool calls across phases, multi-phase features,',
+    'or user explicitly requests ("先计划再执行" / "plan then do").',
+    'Skip for: single-file edits, bug fixes, quick lookups, ≤3 focused tool calls. If in doubt, just execute.',
+    '',
+    '## STEP GRANULARITY (4-5 steps max)',
+    'Each step = one meaningful execution unit (a phase, not a single tool call).',
+    'GOOD: "调研现有架构 → 设计新接口 → 实现核心逻辑 → 编写测试 → 集成验证"',
+    'BAD: "打开文件A → 修改函数X → 保存文件A → 运行测试" (too fine-grained, just do it)',
+    '',
+    '## UPDATE WORKFLOW',
+    'Update in real-time after completing each step (one step = one update, or batch_update for 2-3 at once).',
+    'Do NOT batch all updates at the end — update as you go so the chip reflects real progress.',
+    'All steps done/skipped → plan auto-finishes, archives, and chip disappears.',
+    '',
+    '## LIFECYCLE',
     'Single plan per session: create refuses if an in-progress plan already exists — finish or abandon it first.',
-    'Lifecycle: finish AUTO-ARCHIVES the plan to .mocode/plans/archive/ (history preserved, active dir stays clean). To revisit, call list with scope=archived or unarchive. Use delete to permanently remove a plan (any location).',
-  ].join(''),
+    'finish(plan_status="finished") auto-archives to .mocode/plans/archive/; use plan_status="abandoned" to abandon.',
+    'To revisit: list with scope=archived, or unarchive to bring back to active. delete permanently removes.',
+  ].join('\n'),
   parameters: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['create', 'read', 'update', 'add_step', 'finish', 'list', 'delete', 'unarchive'],
-        description: 'create=新计划;read=读当前活跃;update=改步骤状态;add_step=追加步骤;finish=收尾(自动归档);list=列计划;delete=永久删除;unarchive=从归档还原到活跃',
+        enum: ['create', 'read', 'update', 'batch_update', 'add_step', 'finish', 'list', 'delete', 'unarchive'],
+        description: 'create=新计划;read=读当前活跃;update=改步骤状态;batch_update=批量改多个步骤状态;add_step=追加步骤;finish=收尾(自动归档);list=列计划;delete=永久删除;unarchive=从归档还原到活跃',
       },
       title: { type: 'string', description: 'create 必填:计划标题' },
       goal: { type: 'string', description: 'create 可选:目标描述(写进「目标」段)' },
@@ -68,9 +88,21 @@ export const todolistTool: Tool = {
         enum: ['pending', 'in_progress', 'done', 'skipped', 'failed'],
         description: 'update 必填:目标状态',
       },
+      updates: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            step_id: { type: 'number', description: '步骤编号' },
+            status: { type: 'string', enum: ['pending', 'in_progress', 'done', 'skipped', 'failed'], description: '目标状态' },
+          },
+          required: ['step_id', 'status'],
+        },
+        description: 'batch_update 必填:批量更新数组,每项含 step_id 和 status',
+      },
       note: {
         type: 'string',
-        description: 'update / finish 可选:追加到进度日志的一行说明(可空)',
+        description: 'update / batch_update / finish 可选:追加到进度日志的一行说明(可空)',
       },
       plan_status: {
         type: 'string',
@@ -93,16 +125,17 @@ export const todolistTool: Tool = {
     const action = String(args.action ?? '');
     try {
       switch (action) {
-        case 'create':     return doCreate(args);
-        case 'read':       return doRead();
-        case 'update':     return doUpdate(args);
-        case 'add_step':   return doAddStep(args);
-        case 'finish':     return doFinish(args);
-        case 'list':       return doList(args);
-        case 'delete':     return doDelete(args);
-        case 'unarchive':  return doUnarchive(args);
+        case 'create':       return doCreate(args);
+        case 'read':         return doRead();
+        case 'update':       return doUpdate(args);
+        case 'batch_update': return doBatchUpdate(args);
+        case 'add_step':     return doAddStep(args);
+        case 'finish':       return doFinish(args);
+        case 'list':         return doList(args);
+        case 'delete':       return doDelete(args);
+        case 'unarchive':    return doUnarchive(args);
         default:
-          return `错误:未知 action「${action}」,合法值:create / read / update / add_step / finish / list / delete / unarchive。`;
+          return `错误:未知 action「${action}」,合法值:create / read / update / batch_update / add_step / finish / list / delete / unarchive。`;
       }
     } catch (e) {
       // 兜底:工具内部不抛,但防御性 catch 一道(契约对齐「永不抛」)。
@@ -193,8 +226,93 @@ function doUpdate(args: Record<string, unknown>): string {
   if (!updated.steps.some((s) => s.id === stepId)) {
     return `错误:找不到 step_id=${stepId}(plan 共 ${updated.steps.length} 步)。`;
   }
+  // 自动完成:所有步骤都 done/skipped 时自动 finish + 归档 + 清 chip(LLM 常漏调 finish)
+  const allDone = updated.steps.length > 0
+    && updated.steps.every((s) => s.status === 'done' || s.status === 'skipped');
+  if (allDone && updated.status === 'in_progress') {
+    updated.status = 'finished';
+    updated.log.push({ at: localIsoTimestamp(), text: '自动完成:所有步骤已完成' });
+    if (!writePlan(updated)) {
+      setActivePlan(updated);
+      return renderSuccess('update', updated) + '\n⚠ 自动 finish 写盘失败';
+    }
+    const archived = archivePlan(updated.id);
+    clearActivePlan();
+    const archivedNote = archived
+      ? '(已自动归档到 plans/archive/)'
+      : '(⚠ 归档失败,plan 仍留在 plans/)';
+    return renderSuccess('update', updated) + `\n✓ 自动完成:所有步骤已完成 ${archivedNote}`;
+  }
   setActivePlan(updated);
   return renderSuccess('update', updated);
+}
+
+function doBatchUpdate(args: Record<string, unknown>): string {
+  const cur = getActivePlan();
+  if (!cur) return '错误:无活跃 plan 可 batch_update。先 create。';
+  const updates = args.updates;
+  if (!Array.isArray(updates) || updates.length === 0) {
+    return '错误:batch_update 必填 updates(非空数组,每项含 step_id 和 status)。';
+  }
+
+  // 验证所有更新项
+  for (const u of updates) {
+    const sid = Number((u as { step_id?: unknown }).step_id);
+    const st = String((u as { status?: unknown }).status ?? '');
+    if (!Number.isFinite(sid) || sid < 1) {
+      return `错误:updates 中某项 step_id 非法「${(u as { step_id?: unknown }).step_id}」,需 >=1 整数。`;
+    }
+    if (!VALID_STATUS.has(st as StepStatus)) {
+      return `错误:updates 中某项 status 非法「${st}」,合法:pending / in_progress / done / skipped / failed。`;
+    }
+  }
+
+  const note = String(args.note ?? '').trim();
+  const updated = updatePlan(cur.id, (p) => {
+    for (const u of updates) {
+      const sid = Number((u as { step_id: number }).step_id);
+      const st = String((u as { status: string }).status) as StepStatus;
+      const step = p.steps.find((s) => s.id === sid);
+      if (step) {
+        step.status = st;
+        p.log.push({ at: new Date().toISOString(), text: `step ${sid} → ${st}` });
+      }
+    }
+    if (note) p.log.push({ at: new Date().toISOString(), text: note });
+    return p;
+  });
+  if (!updated) return '错误:batch_update 写盘失败。';
+
+  // 检查所有 step_id 是否存在
+  const missingIds: number[] = [];
+  for (const u of updates) {
+    const sid = Number((u as { step_id: number }).step_id);
+    if (!updated.steps.some((s) => s.id === sid)) missingIds.push(sid);
+  }
+  if (missingIds.length > 0) {
+    return `错误:batch_update 找不到 step_id=${missingIds.join(', ')}(plan 共 ${updated.steps.length} 步)。`;
+  }
+
+  // 自动完成:所有步骤都 done/skipped 时自动 finish + 归档 + 清 chip(LLM 常漏调 finish)
+  const allDone = updated.steps.length > 0
+    && updated.steps.every((s) => s.status === 'done' || s.status === 'skipped');
+  if (allDone && updated.status === 'in_progress') {
+    updated.status = 'finished';
+    updated.log.push({ at: localIsoTimestamp(), text: '自动完成:所有步骤已完成' });
+    if (!writePlan(updated)) {
+      setActivePlan(updated);
+      return renderSuccess('batch_update', updated) + '\n⚠ 自动 finish 写盘失败';
+    }
+    const archived = archivePlan(updated.id);
+    clearActivePlan();
+    const archivedNote = archived
+      ? '(已自动归档到 plans/archive/)'
+      : '(⚠ 归档失败,plan 仍留在 plans/)';
+    return renderSuccess('batch_update', updated) + `\n✓ 自动完成:所有步骤已完成 ${archivedNote}`;
+  }
+
+  setActivePlan(updated);
+  return renderSuccess('batch_update', updated);
 }
 
 function doAddStep(args: Record<string, unknown>): string {

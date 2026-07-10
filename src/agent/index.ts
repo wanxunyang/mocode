@@ -72,7 +72,7 @@ function writeToolResult(
     });
   }
   const preview = diff ? '' : summarizeToolResult(tc.name, output);
-  batch.recordResult(currentBatchId, tc.name, preview, diff);
+  batch.recordResult(currentBatchId, tc.name, preview, diff, output);
 }
 
 /**

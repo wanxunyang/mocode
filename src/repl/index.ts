@@ -631,7 +631,10 @@ export function renderHistory(history: ChatMessage[]): void {
           break;
         }
       }
-      if (target) target.resultSummary = preview;
+      if (target) {
+        target.resultSummary = preview;
+        target.fullOutput = output;
+      }
       // 不直接写屏——等 flushBatch 时出单行摘要
       continue;
     }

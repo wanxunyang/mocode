@@ -24,6 +24,8 @@ export interface BatchEntry {
   /** mutation 工具的成功 diff 块全文(由 renderFileChange 渲染出的多行 ANSI);非 mutation 为 null。
    *  错误或非 mutation 走 resultSummary 的灰字 preview 行。 */
   diffBlock: string | null;
+  /** 工具完整原始输出(纯文本,无 ANSI)。展开时显示完整内容;缺省时退化为 resultSummary 单行。 */
+  fullOutput?: string;
 }
 
 /** 一个 LLM 步的工具调用 batch 记录。 */
@@ -54,6 +56,9 @@ function isMutationTool(name: string): boolean {
   return MUTATION_TOOLS.has(name);
 }
 
+/** 展开时完整输出的最大行数;超出截断,避免巨型输出撑爆 viewport。 */
+const MAX_EXPAND_LINES = 200;
+
 /** 通知 buffer 整体清空(clearContent / exitAltScreen / 新一轮 turn)——本模块状态同步归零。 */
 export function reset(): void {
   batches.clear();
@@ -75,12 +80,14 @@ export function recordCall(id: string, name: string, callSummary: string): void 
   b.entries.push({ name, callSummary, resultSummary: '', diffBlock: null });
 }
 
-/** 记一条工具结果(diff 块或单行 preview);agent 在 onToolResult 时调,匹配最后一条未填的 entry。 */
+/** 记一条工具结果(diff 块或单行 preview);agent 在 onToolResult 时调,匹配最后一条未填的 entry。
+ *  fullOutput:工具原始完整输出(纯文本),展开时显示;mutation 工具的 diff 块已自含无需传。 */
 export function recordResult(
   id: string,
   name: string,
   resultSummary: string,
   diffBlock: string | null,
+  fullOutput?: string,
 ): void {
   const b = batches.get(id);
   if (!b || b.entries.length === 0) return;
@@ -89,6 +96,7 @@ export function recordResult(
     if (b.entries[i].name === name && !b.entries[i].resultSummary) {
       b.entries[i].resultSummary = resultSummary;
       b.entries[i].diffBlock = diffBlock;
+      b.entries[i].fullOutput = fullOutput;
       return;
     }
   }
@@ -97,6 +105,7 @@ export function recordResult(
   if (!last.resultSummary) {
     last.resultSummary = resultSummary;
     last.diffBlock = diffBlock;
+    last.fullOutput = fullOutput;
   }
 }
 
@@ -138,6 +147,17 @@ function buildExpandedLines(entries: BatchEntry[], indent = '    '): string[] {
         if (line === '' && lines.length > 0 && lines[lines.length - 1] === '') continue; // 折叠连续空行
         if (line === '' && lines.length > 0) continue; // 跳过首尾空行(diff 头/尾换行)
         lines.push(line.endsWith('\x1B[0m') ? line : line + '\x1B[0m');
+      }
+    } else if (e.fullOutput) {
+      // 完整工具输出(纯文本):按行展开,每行缩进 + dim 样式;长输出截断到 MAX_EXPAND_LINES 行
+      const rawLines = e.fullOutput.split('\n');
+      const truncated = rawLines.length > MAX_EXPAND_LINES;
+      const displayLines = truncated ? rawLines.slice(0, MAX_EXPAND_LINES) : rawLines;
+      for (const line of displayLines) {
+        lines.push(`${indent}${ui.gray}${line}${ui.reset}\x1B[0m`);
+      }
+      if (truncated) {
+        lines.push(`${indent}${ui.dim}… (${rawLines.length - MAX_EXPAND_LINES} more lines)${ui.reset}\x1B[0m`);
       }
     } else if (e.resultSummary) {
       lines.push(`${indent}${ui.gray}↳ ${e.resultSummary}${ui.reset}\x1B[0m`);
