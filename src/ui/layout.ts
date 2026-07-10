@@ -100,6 +100,8 @@ let runningFrame = -1;
 let userActiveUntil = 0; // 打字活跃截止时刻(Date.now()+PAUSE);0=未活跃
 let flushTimer: NodeJS.Timeout | null = null; // 用户停手后 flush 缓冲内容(repaintViewport)
 const USER_ACTIVE_PAUSE_MS = 1500;
+/** Sticky banner 的 ❯ 前缀(同 repl 的 PROMPT;常量统一视觉)。 */
+const BANNER_PROMPT = '❯ ';
 let lastView: InputView | null = null;
 let lastMenuStartRow = 0; // 上次菜单起始屏行(供擦除)
 let lastMenuRows = 0;
@@ -675,6 +677,12 @@ function highlightRange(line: string, colStart: number, colEnd: number): string 
  * 重画内容区 viewport:按 scrollOffset 取缓冲尾窗,逐行 cup+clearline+rowtext 映射到屏 1..contentBottom。
  * offset=0 即尾窗(== 实时屏,resize / 回尾时用)。清行含 contentBottom——顺带擦 WT 边距漏影(状态行重复)。
  * 有活跃选区(鼠标拖拽中)时,对选中范围套反白——纯视觉,不影响缓冲内容。
+ *
+ * **滚动回看 sticky banner(输入框上方固定标题的姊妹需求)**:
+ * 仅在 scrollOffset > 0 时,在 viewport 第 1 行顶部叠一行横幅,显示「当前 viewport 顶上
+ * 那条用户消息」的预览。用户上滑翻历史时,横幅内容随滚动到的 user→agent 对应关系变化;
+ * 滑到底(offset===0)自动消失(实时屏可见,无需 banner)。满宽 padding + 底色对比反色
+ * 提示「↑ 这是上方滚走的内容」,不与内容区行内 SGR 冲突。
  */
 export function repaintViewport(): void {
   if (!active) return;
@@ -682,11 +690,26 @@ export function repaintViewport(): void {
   const h = g.contentBottom;
   const slice = content.sliceFromEnd(scrollOffset, h);
   const sel = normalizeSelection();
-  const absStart = sel ? viewportAbsStart() : 0;
+  // viewportAbsStart() 无选区时也用:sticky banner 必须按真实窗口头算,不能降级 0(否则 banner 永不出现)。
+  const absStart = viewportAbsStart();
+  // sticky banner:仅 scrollOffset>0 时显示;offset=0 即实时屏,user 气泡本来就在视口内,无需 banner。
+  const bannerText = scrollOffset > 0
+    ? content.lastUserMessageBefore(absStart)
+    : null;
+  const BANNER_ROW = 1; // 横幅占 viewport 第 1 行(会把原第 1 行内容遮住 —— 1 行换"我在看啥"的可读性,可接受)
   let p = '';
   for (let r = 1; r <= h; r++) {
     let line = slice[r - 1] ?? '';
-    if (sel) {
+    if (bannerText && r === BANNER_ROW) {
+      // banner 行:满宽 userBg + ❯ + 单行截断(多行 ⏎ 折叠)+ userBg 补到底 + 底线分隔短横
+      const cols = g.cols;
+      const oneLine = bannerText.replace(/\s*\n\s*/g, ' ⏎ ');
+      const promptW = displayWidth(BANNER_PROMPT);
+      const avail = Math.max(1, cols - promptW);
+      const truncated = truncateDisplayHead(oneLine, avail);
+      const padCount = Math.max(0, cols - promptW - displayWidth(truncated));
+      line = `${ui.userBg}${BANNER_PROMPT}${truncated}${' '.repeat(padCount)}${ui.reset}`;
+    } else if (sel) {
       const absLine = absStart + r - 1;
       if (absLine >= sel.startLine && absLine <= sel.endLine) {
         const lineW = ansiDisplayWidth(line);

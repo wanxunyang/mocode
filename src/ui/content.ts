@@ -150,6 +150,58 @@ export function lineAt(abs: number): string | null {
 }
 
 /**
+ * 找「绝对行索引 < absStart 的最近一条用户消息」的文本(用于滚动回看时的「我刚发的
+ * 请求」sticky banner)。算法:从 absStart - 1 往上扫,识别「用户气泡行」(由 repl
+ * formatUserMessage 写入,剥 SGR 后首字符 = ❯);再从此行往下吞连续的同类行
+ * 收集多行消息,join('\n')。
+ *
+ * 检测 user-bubble 行靠「剥 SGR 后以 ❯ 开头」而非 userBg SGR 前缀:rowStartSgr 继承自
+ * 上一行末(可能残留 dim/cyan),且 bubble 起手有 userBg 包裹,直接 startsWith(userBg)
+ * 在残留 rowStartSgr 场景会漏判。剥光所有 SGR 后 → 首字符稳定为 ❯ (repl.PROMPT)。
+ *
+ * 返回的文本已经剥离 ANSI + 提示符,可直接给 banner 渲染(再做截断 / 折叠)。
+ * absStart ≤ 0 返 null(没东西在视口上方)。
+ */
+export function lastUserMessageBefore(absStart: number): string | null {
+  if (absStart <= 0) return null;
+  const all = snapshot();
+  const SGR = /\x1B\[[0-9;]*m/g;
+  const isUserBubbleRow = (row: string): boolean => {
+    // 剥光 SGR 后首字符 = ❯(repl.PROMPT 首字)→ 是 user bubble;
+    // agent 行首字符可能是 ● / ╭ / │ / 数字 / 字母,绝不会撞 ❯。
+    const visible = row.replace(SGR, '');
+    return visible.startsWith('❯');
+  };
+  // 1) 从 absStart - 1 往上扫,找第一条 user bubble 行(最近的 user-bubble 的最后一行)
+  let bubbleEnd = -1;
+  for (let i = Math.min(absStart, all.length) - 1; i >= 0; i--) {
+    if (isUserBubbleRow(all[i])) {
+      bubbleEnd = i;
+      break;
+    }
+  }
+  if (bubbleEnd < 0) return null;
+  // 2) 往上找气泡起点(连续 user-bubble 行块 = 同一条 user 消息)
+  let bubbleStart = bubbleEnd;
+  while (bubbleStart - 1 >= 0 && isUserBubbleRow(all[bubbleStart - 1])) {
+    bubbleStart--;
+  }
+  // 3) 收文本:按显示字符剥 SGR + 续行/末填充空格 + 首行 prompt
+  //    首行剥前导 '❯ ' 序列 → banner 自己再加回 [banner_prompt] + <text>;
+  //    一次剥光所有重复的 ❯(防止用户手敲 prompt / 多重回显 → 出现 '❯ ❯ ...' 双提示符)。
+  const joinedText = all
+    .slice(bubbleStart, bubbleEnd + 1)
+    .map((raw, idx) => {
+      let stripped = raw.replace(SGR, '');
+      if (idx === 0) stripped = stripped.replace(/^(?:❯\s*)+/, ''); // 剥光所有前导 ❯(含每个后面的可选空格)
+      return stripped.trimEnd();
+    })
+    .join('\n')
+    .replace(/\n+$/, '');
+  return joinedText || null;
+}
+
+/**
  * 在绝对行索引 after(0-based,已 commit)之后插入 N 条自洽行。
  * 用于「折叠摘要行下展开明细」——把详情行在已写入摘要行后面塞入缓冲,
  * 不重写尾部已有内容;且不影响更早的 buffer 行(hasCurrent 先 commit 再 splice)。
