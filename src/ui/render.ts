@@ -252,7 +252,7 @@ function memoryValue(on: boolean): string {
 }
 
 /** 横幅纯文本(带 ANSI 颜色,不写出)——供 TUI 经 contentWrite 写入内容区以跟踪续写位。
- *  布局:大字 logo(4 行,块字符)左对齐,右侧并排放标题/信息(neofetch 风),末尾空行 + 提示。 */
+ *  布局:大字 logo(4 行,块字符)左对齐,右侧并排放标题/信息(neofetch 风)。 */
 export function bannerString(info: BannerInfo): string {
   const title = `${ui.bold}${ui.accent}◆  MoCode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
   // 信息行 = 标题 + 模型 + 目录 + 记忆(共 4 行,与 4 行 logo 对齐)
@@ -262,14 +262,10 @@ export function bannerString(info: BannerInfo): string {
     logoLine(2) + labelContent('目录', truncateDisplay(info.cwd, 48)),
     logoLine(3) + labelContent('记忆', memoryValue(info.memoryEnabled)),
   ];
-  return (
-    rows.map((r) => MARGIN + r).join('\n') +
-    '\n\n' +
-    `${MARGIN}${ui.dim}直接描述任务,agent 会自动读写文件与执行命令。${ui.reset}\n`
-  );
+  return rows.map((r) => MARGIN + r).join('\n') + '\n\n';
 }
 
-/** 启动横幅:大字 logo + 标题/信息 + 一行提示。纯渲染,不依赖 config / 业务。 */
+/** 启动横幅:大字 logo + 标题/信息。纯渲染,不依赖 config / 业务。 */
 export function printBanner(info: BannerInfo): void {
   stdout.write(bannerString(info));
 }
@@ -278,7 +274,7 @@ export function printBanner(info: BannerInfo): void {
  * 与 bannerString 等价但返**自洽 ANSI 行数组**(每行均以 \x1B[0m 收尾),供 layout.writeBanner
  * 直接灌入 content 缓冲,免去 contentWrite 走字符流再 breakRow 的列宽折行问题。
  *
- * 行集合 = bannerString 解析后的所有物理行(含末尾空与提示行)。layout 记录此长度作
+ * 行集合 = bannerString 解析后的所有物理行。layout 记录此长度作
  * bannerH,rewriteBanner 必须按等长替换(否则 layout 抛错)。
  *
  * 返回前会 normalize:每行若未以 \x1B[0m 收尾则补,统一自洽,避免 setLines / replaceHead
@@ -286,9 +282,9 @@ export function printBanner(info: BannerInfo): void {
  */
 export function bannerLines(info: BannerInfo): string[] {
   const raw = bannerString(info);
-  // bannerString 形如 "行1\n行2\n行3\n行4\n\n  直接描述任务...\n",split('\n') 长度 = 7(末尾 \n 后空串)
-  // 行集合真实包含 6 行:4 行 logo + 1 空行 + 1 提示行;filter(Boolean?) 不可 — 空行也要算
-  // 用切分后非末尾空过滤:保留空字符串(就是那 5 个空行之一),仅过滤最后那个 \n 切出的尾空
+  // bannerString 形如 "行1\n行2\n行3\n行4\n",split('\n') 长度 = 5(末尾 \n 后空串)
+  // 行集合真实包含 4 行(4 行 logo+info);filter(Boolean?) 不可 — 空行也要算
+  // 仅过滤最后那个 \n 切出的尾空
   const split = raw.split('\n');
   const lines = split.length > 0 && split[split.length - 1] === '' ? split.slice(0, -1) : split;
   return lines.map((s) => (s.endsWith('\x1B[0m') ? s : `${s}\x1B[0m`));

@@ -423,7 +423,7 @@ function commitMd(): void {
 // 应让 buffer 顶部始终是「最新的一份 banner」,而不是堆 5 份。
 // rewriteBanner 在 banner 已建好时原地等长替换顶部 bannerH 行,viewport 自动从 rows[] 头读新版。
 //
-// bannerH = bannerLines(banner()) 的行数(目前 6:4 行 logo + 1 空 + 1 提示行)。如未来
+// bannerH = bannerLines(banner()) 的行数(目前 5:4 行 logo+info + 1 空行分隔)。如未来
 // bannerString 变化,调用方需重调 writeBanner 重设 bannerH。
 let bannerH = 0;
 let bannerRows: string[] = []; // 最新写入的 banner 行(供 rewriteBanner 复用 / 调试)
