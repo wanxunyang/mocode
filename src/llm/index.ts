@@ -462,7 +462,12 @@ async function chatOnce(
       // 防御性保留 !inThink 判断。
       if (buf && !inThink) {
         visibleContent += buf;
-        handlers.onText?.(buf);
+        // 给 onText 渲染时剥掉尾部 \n:md 渲染器(contentWriteMd)把尾部 \n 当段落分隔 → 产空行;
+        // 随后 onToolCall 检测到 lastChar !== '\n' 会经 contentWrite('\n') 补一个原始换行
+        // (不走 md,只是普通行分隔,无空行)—— 与改造前 onToolCall 补 \n 的行为一致。
+        // visibleContent 保留原 buf(含 \n),history 完整不受影响。
+        const tail = buf.replace(/\n+$/, '');
+        if (tail) handlers.onText?.(tail);
         consumedAny = true;
         buf = '';
       }
