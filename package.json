@@ -11,6 +11,9 @@
     "bin",
     "README.md"
   ],
+  "workspaces": [
+    "packages/*"
+  ],
   "engines": {
     "node": ">=18"
   },
@@ -27,9 +30,7 @@
     "openai": "^4.0.0",
     "ws": "8.21.0"
   },
-  "optionalDependencies": {
-    "mocode-pet-app": "0.1.0"
-  },
+  "optionalDependencies": {},
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "8.5.13",

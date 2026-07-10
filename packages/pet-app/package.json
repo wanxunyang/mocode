@@ -22,11 +22,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "electron": "43.0.0",
     "ws": "8.21.0"
+  },
+  "optionalDependencies": {
+    "electron": "43.0.0"
   },
   "devDependencies": {
     "@types/ws": "8.5.13",
+    "electron": "43.0.0",
     "typescript": "5.7.2"
   },
   "author": "wxy",
