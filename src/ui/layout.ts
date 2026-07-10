@@ -555,6 +555,19 @@ export function contentInsertAfter(after: number, lines: string[]): void {
       Math.min(scrollOffset + delta, Math.max(0, content.totalRows() - g.contentBottom)),
     );
   }
+  // 展开工具信息时保持视口位置:当 scrollOffset===0(未滚动)且插入点在视口内时,
+  // 计算 scrollOffset 让视口锚定在插入前的绝对行位置,展开内容在下面自然展开,
+  // 而不是自动跳到展开内容底部(用户体验:点击摘要行,视口不动,详情在下方展开)。
+  // 关键:插入点绝对行 = after;插入前视口尾行绝对行 = totalBefore - 1;
+  // 插入后要让原视口尾行仍在屏底 → scrollOffset = 插入后新增的、在原视口尾行之后的行数。
+  if (!scrolled && after < totalBefore) {
+    // 插入点在原缓冲内(非追加到末尾),计算需要滚动的偏移量
+    const insertedAfterViewport = after >= (totalBefore - g.contentBottom);
+    if (insertedAfterViewport) {
+      // 插入点在视口内:保持视口位置,scrollOffset = 插入行数(展开内容在视口下方)
+      scrollOffset = Math.min(delta, Math.max(0, content.totalRows() - g.contentBottom));
+    }
+  }
   // batch 摘要行索引平移
   void import('./batch.js').then((m) => m.shiftBatchesAfter(after, delta));
   repaintViewport();
