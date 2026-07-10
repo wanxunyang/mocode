@@ -288,12 +288,14 @@ export function contentWrite(s: string): void {
   const bottom = g.contentBottom;
   // resize 后 contentRow 可能过时(拖终端框):
   //  - 缩小:contentRow > 新 bottom → 钳到新 bottom
-  //  - 放大:contentRow < 新 bottom 且回尾 → 推进到 min(total+1, bottom)
-  // total+1 是合法「待写位」(所有行已 breakRow 提交、光标在新空行);用 total 会把续写位拉回到
+  //  - 放大:contentRow < 新 bottom 且回尾 → 推进到 min(committed+1, bottom)
+  // committed+1 是合法「待写位」(所有行已 breakRow 提交、光标在新空行);用 committed 会把续写位拉回到
   // 最后一行 banner/content 上,首次 contentWrite 覆盖 banner(首条消息「插到 logo 下面」bug)。
+  // 注意:不能用 totalRows()+1——breakRow 后 hasCurrent=true,totalRows 已含当前空行,再 +1 会多跳一行,
+  // 导致 onDone 摘要行等写 \n 后的 contentWrite 入口多跳 1 行(2 空行 bug)。
   if (contentRow > bottom) contentRow = bottom;
   else if (scrollOffset === 0 && contentRow < bottom) {
-    contentRow = Math.min(content.totalRows() + 1, bottom);
+    contentRow = Math.min(content.committedRows() + 1, bottom);
   }
   const startRow = contentRow;
   const startCol = contentCol;
@@ -1534,10 +1536,12 @@ export function paintLiveAtCursor(text: string): void {
   //    首次 contentWrite 覆盖 banner(首条消息「插到 logo 下面」bug)。
   // 否则 cup 到旧行号→帧画在屏幕中间(旧 bottom 位置),而非内容末尾/最底部。
   const g = getGeo();
-  const total = content.totalRows();
+  const committed = content.committedRows();
   if (contentRow > g.contentBottom) contentRow = g.contentBottom;
   if (scrollOffset === 0 && contentRow < g.contentBottom) {
-    contentRow = Math.min(total + 1, g.contentBottom);
+    // 用 committed+1 而非 total+1:breakRow 后 hasCurrent=true,totalRows 已含当前空行,+1 会多跳一行
+    // (contentWrite 入口的同类逻辑已同步修正,见上方注释)。
+    contentRow = Math.min(committed + 1, g.contentBottom);
   }
   let out = '';
   if (frameRow && (frameRow !== contentRow || frameCol !== contentCol)) {
@@ -2012,12 +2016,13 @@ export function enterAltScreen(): void {
     // 重画 repaintViewport 防抖(下面 timer),避免连续拖动闪烁;但行号/区域必须立即正确。
     const g = getGeo(footerH);
     const total = content.totalRows();
+    const committed = content.committedRows();
     // 缩小:contentRow > 新 bottom → 钳到新 bottom
     if (contentRow > g.contentBottom) contentRow = g.contentBottom;
-    // 放大:contentRow < 新 bottom 且回尾(offset=0)→ 推进到 min(total+1, bottom)
-    //    total+1 是合法「待写位」;用 total 会把续写位拉回最后一行,首次 contentWrite 覆盖 banner
+    // 放大:contentRow < 新 bottom 且回尾(offset=0)→ 推进到 min(committed+1, bottom)
+    //    committed+1 是合法「待写位」;用 total+1 在 hasCurrent=true(breakRow 后)时会多跳一行。
     if (scrollOffset === 0 && contentRow < g.contentBottom) {
-      contentRow = Math.min(total + 1, g.contentBottom);
+      contentRow = Math.min(committed + 1, g.contentBottom);
     }
     if (frameRow && frameRow > g.contentBottom) frameRow = g.contentBottom;
     const maxOff = Math.max(0, total - g.contentBottom);

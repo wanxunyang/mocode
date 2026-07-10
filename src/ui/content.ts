@@ -143,6 +143,12 @@ export function totalRows(): number {
   return rows.length + (hasCurrent ? 1 : 0);
 }
 
+/** 已提交行数(不含 hasCurrent 空行)。供续写位校正:breakRow 后 hasCurrent=true 时光标已在
+ *  rows.length+1 位,若用 totalRows()+1 会多跳 1 行(2 空行 bug)。 */
+export function committedRows(): number {
+  return rows.length;
+}
+
 /** 取绝对行索引(0-based,含当前行)的原始自洽行;越界返 null。供鼠标选区文本提取。 */
 export function lineAt(abs: number): string | null {
   const all = snapshot();
