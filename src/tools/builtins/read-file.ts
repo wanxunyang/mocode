@@ -1,8 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { MAX_FILE_LINES } from '../constants.js';
-import { lookupSnapshotFile } from '../../project-snapshot/index.js';
-import { config } from '../../config/index.js';
 
 /** 默认单次 read_file 拉取的行数。刻意压低,逼 LLM 分块读大文件,
  * 配合 description 中的 PAGINATION IS MANDATORY 引导。
@@ -36,19 +34,7 @@ export const readFileTool: Tool = {
     // 无论 LLM 传多大,单次硬钳到 MAX_FILE_LINES,杜绝「绕过分页引导一把全拿」。
     const limit = Math.min(Number(args.limit ?? DEFAULT_READ_LIMIT), MAX_FILE_LINES);
 
-    // 项目快照 cache hit：mtime 校验通过则直接返回，省磁盘读
-    let data: string;
-    if (config.projectSnapshotEnabled) {
-      const absPath = resolve(path);
-      const cached = lookupSnapshotFile(absPath);
-      if (cached) {
-        data = cached.content;
-      } else {
-        data = await readFile(absPath, 'utf8');
-      }
-    } else {
-      data = await readFile(resolve(path), 'utf8');
-    }
+    const data = await readFile(resolve(path), 'utf8');
     const lines = data.split(/\r?\n/);
     const start = Math.max(0, offset - 1);
     const end = Math.min(lines.length, start + limit);

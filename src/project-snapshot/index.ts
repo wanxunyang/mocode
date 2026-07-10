@@ -1,36 +1,24 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { getSandboxRoot } from '../sandbox/root.js';
-import { scanStaticFiles, type StaticFileEntry } from './static-files.js';
 
 /**
- * 项目快照缓存：跨 session 持久化静态项目文件 + 项目结构摘要。
- * 与 session 内 LRU cache (任务 29) 不冲突：
- *   - 29: session 内任意 tool output，key = tool+args
- *   - 36: 跨 session 静态文件，key = path+mtime
+ * 项目快照：完全由 LLM 生成的项目上下文。
+ * 与 Skill 互补：快照 = 事实(what/where)，Skill = 洞察(why/how)。
  *
- * 存储位置：<cwd>/.mocode/projects/<hash(sandboxRoot)>/snapshot.json
+ * 存储位置：<cwd>/.mocode/projects/<hash(sandboxRoot)>/snapshot.md
  */
 
 export interface ProjectSnapshot {
-  /** 快照版本号，便于未来升级格式 */
+  /** 快照版本号 */
   version: 1;
   /** sandbox 根目录（绝对路径） */
   root: string;
   /** 构建时间（ISO 8601） */
   builtAt: string;
-  /** 静态文件缓存：key = 相对路径，val = { mtime, content } */
-  files: Record<string, StaticFileEntry>;
-  /** 项目结构摘要：模块/入口/配置文件列表 */
-  structure: {
-    /** 顶层目录（模块） */
-    modules: string[];
-    /** 入口文件（package.json 的 main/bin 等） */
-    entries: string[];
-    /** 配置文件（tsconfig.json, .eslintrc 等） */
-    configFiles: string[];
-  };
+  /** LLM 生成的完整快照（markdown 格式） */
+  content: string;
 }
 
 /** 内存缓存：当前 session 的快照（避免重复 IO） */
@@ -49,7 +37,7 @@ function snapshotDir(): string {
 
 /** 快照文件路径 */
 function snapshotPath(): string {
-  return path.join(snapshotDir(), 'snapshot.json');
+  return path.join(snapshotDir(), 'snapshot.md');
 }
 
 /** 从磁盘加载快照（不存在/损坏返 null） */
@@ -58,9 +46,17 @@ export function loadSnapshot(): ProjectSnapshot | null {
   const p = snapshotPath();
   if (!existsSync(p)) return null;
   try {
-    const raw = readFileSync(p, 'utf8');
-    const snap = JSON.parse(raw) as ProjectSnapshot;
-    if (!snap || snap.version !== 1 || !snap.files) return null;
+    const content = readFileSync(p, 'utf8');
+    // 从 markdown 文件头部的 YAML front matter 提取元数据
+    const match = content.match(/^---\nroot: (.+)\nbuiltAt: (.+)\nversion: (\d+)\n---\n\n([\s\S]+)$/);
+    if (!match) return null;
+    
+    const snap: ProjectSnapshot = {
+      version: parseInt(match[3]) as 1,
+      root: match[1],
+      builtAt: match[2],
+      content: match[4],
+    };
     currentSnapshot = snap;
     return snap;
   } catch {
@@ -68,147 +64,62 @@ export function loadSnapshot(): ProjectSnapshot | null {
   }
 }
 
-/** 构建/刷新快照：扫描静态文件 + 提取结构摘要 */
-export function buildSnapshot(): ProjectSnapshot {
+/** 获取当前快照（内存缓存优先，然后磁盘） */
+export function getSnapshot(): ProjectSnapshot | null {
+  return currentSnapshot ?? loadSnapshot();
+}
+
+/**
+ * 构建/刷新快照：完全由 LLM 生成
+ * @param signal AbortSignal
+ * @param force 强制重新生成（忽略缓存）
+ * @returns 生成的快照和错误信息
+ */
+export interface BuildSnapshotResult {
+  snapshot: ProjectSnapshot | null;
+  error?: string;
+  transcript?: string;
+}
+
+export async function buildSnapshot(signal?: AbortSignal, force: boolean = false): Promise<BuildSnapshotResult> {
+  // 检查缓存：已有快照且不强制刷新，直接返回
+  if (!force) {
+    const cached = getSnapshot();
+    if (cached) return { snapshot: cached };
+  }
+
   const root = getSandboxRoot() ?? process.cwd();
-  const files = scanStaticFiles(root);
-  const structure = extractStructure(root, files);
+
+  // 动态导入避免循环依赖
+  const { generateLLMSnapshot } = await import('./llm-snapshot.js');
+  const result = await generateLLMSnapshot(root, signal);
+
+  if (!result.ok || !result.content) {
+    return {
+      snapshot: null,
+      error: result.error || 'LLM 未返回有效结果',
+      transcript: result.transcript,
+    };
+  }
 
   const snap: ProjectSnapshot = {
     version: 1,
     root,
     builtAt: new Date().toISOString(),
-    files,
-    structure,
+    content: result.content!,
   };
 
-  // 落盘
+  // 落盘为 markdown 格式，带 YAML front matter
   const dir = snapshotDir();
   mkdirSync(dir, { recursive: true });
-  writeFileSync(snapshotPath(), JSON.stringify(snap, null, 2), 'utf8');
+  const mdContent = `---\nroot: ${snap.root}\nbuiltAt: ${snap.builtAt}\nversion: ${snap.version}\n---\n\n${snap.content}`;
+  writeFileSync(snapshotPath(), mdContent, 'utf8');
 
   currentSnapshot = snap;
-  return snap;
+  return { snapshot: snap };
 }
 
-/** 获取当前快照（优先内存 → 磁盘 → 构建） */
-export function getSnapshot(): ProjectSnapshot {
-  return loadSnapshot() ?? buildSnapshot();
-}
-
-/** 清空内存缓存（调试/测试用） */
+/** 清除内存缓存（强制下次重新加载） */
 export function clearSnapshotCache(): void {
   currentSnapshot = null;
-}
-
-/**
- * 从快照中查找文件（带 mtime 校验）。
- * 返回 null 表示：文件不在快照中 / mtime 已变 / 快照不存在。
- * 调用方应 fallback 到真实 readFile。
- */
-export function lookupSnapshotFile(
-  absPath: string,
-): { content: string; mtime: number } | null {
-  const snap = loadSnapshot();
-  if (!snap) return null;
-
-  // 转成相对路径（快照 key 是相对路径）
-  const root = snap.root;
-  if (!absPath.startsWith(root)) return null;
-  const relPath = path.relative(root, absPath).replace(/\\/g, '/');
-
-  const entry = snap.files[relPath];
-  if (!entry) return null;
-
-  // mtime 校验：磁盘上的 mtime 必须与快照一致
-  try {
-    const st = statSync(absPath);
-    if (st.mtimeMs !== entry.mtime) return null;
-  } catch {
-    return null;
-  }
-
-  return { content: entry.content, mtime: entry.mtime };
-}
-
-/** 提取项目结构摘要（从静态文件 + 目录扫描） */
-function extractStructure(
-  root: string,
-  files: Record<string, StaticFileEntry>,
-): ProjectSnapshot['structure'] {
-  const modules: string[] = [];
-  const entries: string[] = [];
-  const configFiles: string[] = [];
-
-  // 配置文件：直接看 files keys
-  for (const relPath of Object.keys(files)) {
-    if (isConfigFile(relPath)) {
-      configFiles.push(relPath);
-    }
-  }
-
-  // 入口文件：从 package.json 提取
-  const pkgEntry = files['package.json'];
-  if (pkgEntry) {
-    try {
-      const pkg = JSON.parse(pkgEntry.content);
-      if (typeof pkg.main === 'string') entries.push(pkg.main);
-      if (typeof pkg.module === 'string') entries.push(pkg.module);
-      if (pkg.bin) {
-        if (typeof pkg.bin === 'string') entries.push(pkg.bin);
-        else if (typeof pkg.bin === 'object') {
-          for (const v of Object.values(pkg.bin)) {
-            if (typeof v === 'string') entries.push(v);
-          }
-        }
-      }
-    } catch {
-      // package.json 解析失败，跳过
-    }
-  }
-
-  // 模块：扫描顶层目录（排除 node_modules, .git 等）
-  try {
-    const items = readdirSync(root, { withFileTypes: true });
-    for (const item of items) {
-      if (!item.isDirectory()) continue;
-      if (item.name.startsWith('.')) continue;
-      if (item.name === 'node_modules') continue;
-      if (item.name === 'dist' || item.name === 'build') continue;
-      modules.push(item.name);
-    }
-  } catch {
-    // 目录扫描失败，留空
-  }
-
-  return { modules, entries, configFiles };
-}
-
-/** 判断是否为配置文件 */
-function isConfigFile(relPath: string): boolean {
-  const configPatterns = [
-    'tsconfig.json',
-    'jsconfig.json',
-    '.eslintrc',
-    '.eslintrc.js',
-    '.eslintrc.json',
-    '.eslintrc.yml',
-    '.prettierrc',
-    '.prettierrc.js',
-    '.prettierrc.json',
-    '.env.example',
-    'jest.config.js',
-    'jest.config.ts',
-    'vitest.config.ts',
-    'vite.config.ts',
-    'next.config.js',
-    'next.config.ts',
-    'webpack.config.js',
-    'rollup.config.js',
-    'pyproject.toml',
-    'setup.py',
-    'go.mod',
-    'Cargo.toml',
-  ];
-  return configPatterns.some((p) => relPath === p || relPath.endsWith('/' + p));
 }

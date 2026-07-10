@@ -168,9 +168,9 @@ function buildSnapshotSection(): string {
   try {
     const snap = loadSnapshot();
     if (!snap) return '';
-    const fileList = Object.keys(snap.files).join(', ');
-    const modules = snap.structure.modules.length ? snap.structure.modules.join(', ') : '(none)';
-    return `\n## Project Snapshot (cross-session cache)\n- A project snapshot is available with cached static files: [${fileList}]. read_file for these files will hit the snapshot cache (mtime-verified) — no disk read needed.\n- Project structure — top-level modules: [${modules}].\n- You already know the project skeleton; don't read_file these cached files just to "get an overview".\n- Use cached content directly: when a question can be answered from the cached files above (e.g. dependencies → package.json, compiler options → tsconfig.json, env vars → .env.example, project intro → README.md), answer from the snapshot without calling read_file.\n- The module list above is a navigation aid: when locating files, prefer targeted \`glob\` into the relevant module (e.g. \`src/**/*.ts\`) over broad top-level scans.\n`;
+    
+    // 快照内容已经是完整的 markdown，直接返回
+    return `\n${snap.content}\n`;
   } catch {
     return '';
   }

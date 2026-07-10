@@ -95,7 +95,7 @@ import {
   hasActivePlan,
   getActivePlanSummary,
 } from '../plan/index.js';
-import { buildSnapshot as buildProjectSnapshot } from '../project-snapshot/index.js';
+import { buildSnapshot, loadSnapshot, clearSnapshotCache } from '../project-snapshot/index.js';
 
 /**
  * readline 的 prompt 必须是纯文本(无 ANSI):readline 按字符数算光标位置,
@@ -125,7 +125,7 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/model switch', desc: '↑↓·Enter 在已配置预设间切换' },
   { name: '/model list', desc: '列出已经配置的模型' },
   { name: '/model delete <name>', desc: '删除已配置的模型' },
-  { name: '/refresh_snapshot', desc: '刷新项目快照(重新扫描静态文件,更新缓存)' },
+  { name: '/snapshot_refresh', desc: '刷新项目快照(重新扫描静态文件,重新生成 LLM 摘要)' },
   { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
   { name: '/auto', desc: '切回 auto 模式(全工具执行)' },
   { name: '/pet', desc: '开关桌宠(独立悬浮窗,展示 agent 状态动画)' },
@@ -260,7 +260,7 @@ function runningStateFor(
       return { status: '回滚', placeholder: '选择轮次…' };
     case '/init':
       return { status: '初始化', placeholder: '生成 MOCODE.md…' };
-    case '/refresh_snapshot':
+    case '/snapshot_refresh':
       return { status: '刷新快照', placeholder: '扫描项目文件中…' };
     case '/plan':
       return { status: '切 plan', placeholder: '…' };
@@ -656,10 +656,11 @@ export async function startRepl(
   // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
   // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
-  // 项目快照：sandboxRoot 设定后立即构建/加载（同步，小文件几十 ms）。
-  // 构建失败不阻断 REPL：snapshot 内部 catch 所有异常，此处再兜一层。
+  // 项目快照：sandboxRoot 设定后异步构建（完全由 LLM 生成）。
+  // 构建失败不阻断 REPL：snapshot 内部 catch 所有异常。
   if (config.projectSnapshotEnabled) {
-    try { buildProjectSnapshot(); } catch { /* ignore */ }
+    // 异步触发 LLM 快照生成（不阻塞 REPL 启动）
+    buildSnapshot().catch(() => {/* LLM 生成失败不阻断 */});
   }
   // 构造系统提示:auto 用 base;plan 在 base 后追加按当前开关现拼的 plan suffix。
   // 切模式时 applyMode 重算 history[0](history[0] 恒 system,compaction 保它,不破坏)。
@@ -1275,30 +1276,36 @@ export async function startRepl(
       }
       continue;
     }
-    if (line === '/refresh_snapshot') {
+    if (line === '/snapshot_refresh') {
       if (!config.projectSnapshotEnabled) {
         layout.contentWrite(`${ui.dim}(项目快照功能已关闭,MOCODE_PROJECT_SNAPSHOT=false)${ui.reset}\n`);
         continue;
       }
-      // buildProjectSnapshot 是同步操作(扫顶层小文件,几十 ms),不需要 spinner
+      // buildSnapshot 是异步操作(完全由 LLM 生成)，显示进度提示
+      layout.contentWrite(`${ui.dim}正在重新生成项目快照 (LLM 分析中)...${ui.reset}\n`);
       try {
-        const snap = buildProjectSnapshot();
-        const fileCount = Object.keys(snap.files).length;
-        const moduleCount = snap.structure.modules.length;
-        const configCount = snap.structure.configFiles.length;
-        layout.contentWrite(
-          `${ui.cyan}✓ 项目快照已刷新${ui.reset}: ${fileCount} 个静态文件 · ${moduleCount} 个模块 · ${configCount} 个配置文件\n`
-        );
-        layout.contentWrite(
-          `${ui.dim}文件: ${Object.keys(snap.files).join(', ')}${ui.reset}\n`
-        );
-        layout.contentWrite(
-          `${ui.dim}模块: ${snap.structure.modules.join(', ')}${ui.reset}\n`
-        );
-        // 刷新 history[0]：buildSnapshotSection 内部 loadSnapshot() 会拿到新快照，
-        // buildSystemMessage 重新拼 system prompt，快照段落就更新了。
-        history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
-        layout.contentWrite(`${ui.dim}(system prompt 已同步刷新)${ui.reset}\n`);
+        // 清除缓存，强制重新生成
+        clearSnapshotCache();
+        const result = await buildSnapshot(undefined, true);
+        if (result.snapshot) {
+          layout.contentWrite(
+            `${ui.cyan}✓ 项目快照已刷新${ui.reset} (${result.snapshot.builtAt})\n`
+          );
+          layout.contentWrite(
+            `${ui.dim}已生成 markdown 快照，注入到系统提示词中${ui.reset}\n`
+          );
+          // 刷新 history[0]：buildSnapshotSection 内部 loadSnapshot() 会拿到新快照，
+          // buildSystemMessage 重新拼 system prompt，快照段落就更新了。
+          history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
+          layout.contentWrite(`${ui.dim}(system prompt 已同步刷新)${ui.reset}\n`);
+        } else {
+          layout.contentWrite(`${ui.red}✗ 快照生成失败${ui.reset}: ${result.error || '未知错误'}\n`);
+          if (result.transcript) {
+            layout.contentWrite(`${ui.dim}--- 子 agent 日志 ---${ui.reset}\n`);
+            layout.contentWrite(`${ui.dim}${result.transcript}${ui.reset}\n`);
+            layout.contentWrite(`${ui.dim}--- 日志结束 ---${ui.reset}\n`);
+          }
+        }
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         layout.contentWrite(`${ui.red}[错误]${ui.reset} 刷新快照失败: ${msg}\n`);
@@ -2053,20 +2060,29 @@ export async function startRepl(
         updateSnapshotConfig(nextEnabled);
         updateConfigKey('MOCODE_PROJECT_SNAPSHOT', nextEnabled ? 'true' : 'false');
 
-        // 开启时主动 build 一次,避免 buildSnapshotSection 因 loadSnapshot=null 返空串。
-        let built: ReturnType<typeof buildProjectSnapshot> | null = null;
+        // 开启时异步 build 一次,避免 buildSnapshotSection 因 loadSnapshot=null 返空串。
+        let built = false;
         if (nextEnabled) {
           try {
-            built = buildProjectSnapshot();
+            clearSnapshotCache();
+            const result = await buildSnapshot();
+            if (result.snapshot) {
+              built = true;
+            } else {
+              layout.contentWrite(
+                `${ui.yellow}⚠ 快照构建失败:${ui.reset} ${result.error || '未知错误'} ` +
+                  `${ui.dim}(开关已切换,系统提示词中的快照段将为空,稍后可用 /snapshot_refresh 重试)${ui.reset}\n`
+              );
+            }
           } catch (e) {
             layout.contentWrite(
               `${ui.yellow}⚠ 快照构建失败:${ui.reset} ${(e as Error).message} ` +
-                `${ui.dim}(开关已切换,系统提示词中的快照段将为空,稍后可用 /refresh_snapshot 重试)${ui.reset}\n`
+                `${ui.dim}(开关已切换,系统提示词中的快照段将为空,稍后可用 /snapshot_refresh 重试)${ui.reset}\n`
             );
           }
         }
 
-        // 刷新 history[0] 使 system prompt 立即反映新值(仿 /refresh_snapshot 1293-1296)。
+        // 刷新 history[0] 使 system prompt 立即反映新值(仿 /snapshot_refresh)。
         history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
 
         const note = nextEnabled
@@ -2079,10 +2095,7 @@ export async function startRepl(
 
         let extra = '';
         if (nextEnabled && built) {
-          const fileCount = Object.keys(built.files).length;
-          const moduleCount = built.structure.modules.length;
-          extra = `${ui.dim}(已构建快照: ${fileCount} 个静态文件 · ${moduleCount} 个模块;` +
-            `如需刷新用 /refresh_snapshot)${ui.reset}\n`;
+          extra = `${ui.dim}(已构建快照;如需刷新用 /snapshot_refresh)${ui.reset}\n`;
         }
 
         layout.contentWrite(`${note}\n${extra}`);

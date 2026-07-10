@@ -15,64 +15,63 @@ export interface InitResult {
 /**
  * 子 agent 的系统提示后缀：角色与输出格式约束
  */
-const SKILL_INIT_SUFFIX = `You are a project exploration agent. Your task is to deeply understand this project and generate a concise, actionable "Project Skill" document.
+const SKILL_INIT_SUFFIX = `You are a project exploration agent. Your task is to deeply understand this project and generate a concise "Project Skill" document.
 
-## Your Mission
-Explore the project thoroughly using available tools, then produce a structured skill document that will help future AI agents work efficiently on this project.
+## ⚠️ Complementary to Snapshot — CRITICAL
+The following information is ALREADY provided by Project Snapshot — **do NOT repeat**:
+- ✗ Project one-liner description (快照已有)
+- ✗ Module names and file locations (快照 srcTree 已有)
+- ✗ Tech stack names and versions (快照 techStack 已有)
+- ✗ Build/test commands (快照 keyCommands 已有)
+- ✗ File lists and directory structure (快照 srcTree 已有)
+
+**Your job is to capture INSIGHTS only:**
+- **WHY** — design decisions, trade-offs, reasons for choosing X over Y
+- **HOW** — module behaviors, data flows, call chains, non-obvious interactions
+- **GOTCHAS** — pitfalls, edge cases, non-intuitive behaviors
+- **CONVENTIONS** — naming patterns, code style, unwritten rules
 
 ## Exploration Strategy
-1. **Start broad**: Use \`glob\` to understand the project structure
-2. **Read key files**: package.json, README.md, tsconfig.json, any config files
-3. **Understand architecture**: Use \`codegraph\` or \`grep\` to find main entry points, core modules, key interfaces
-4. **Identify patterns**: Look for naming conventions, directory structure patterns, common abstractions
-5. **Find pitfalls**: Check for complex configs, unusual dependencies, build quirks
+1. Use \`codegraph\` to trace call chains and understand module interactions
+2. Read core modules to understand **behaviors** (not just names)
+3. Look for complex logic, error handling patterns, unusual configs
+4. Identify naming conventions, common abstractions
 
 ## Output Format
-When you're done exploring, output the skill document between these exact delimiters:
+Output the skill document between these exact delimiters:
 
 \`\`\`skill-start
-(your skill content here)
-\`\`\`skill-end
-
-The skill content should follow this structure (use Chinese for headings, adapt sections based on what you find):
-
-## 项目概述
-- 一句话描述项目是什么、做什么
-- 核心目标用户/场景
-
-## 技术栈
-- 主要语言、框架、工具（附版本号）
-- 关键技术选型理由（如果能从文档/代码推断）
-
 ## 架构要点
-- 核心模块及其职责（用 path/to/module 格式）
-- 数据流向或调用链（如果有明显模式）
-- 设计模式或架构模式（如果有）
+### 核心模块及职责
+- **\`path/to/module\`** — 行为描述（做什么 + 怎么做）
+...
 
-## 项目结构
-- 关键目录及其用途
-- 重要文件的位置
-
-## 开发流程
-- 构建、测试、lint、部署命令
-- 开发环境配置要点
+### 关键设计决策
+- 决策：原因
+...
 
 ## 项目约定
-- 命名规范（如果有明显模式）
-- 代码风格（如果有 .eslintrc, .prettierrc 等）
-- 测试策略（如果有测试）
+- 约定（具体的，有例子的）
+...
+
+## 开发流程
+- 命令 + 注意事项/坑点（命令本身快照已有，这里只写注意什么）
+...
 
 ## 常见坑点
-- 复杂的配置或构建步骤
-- 容易踩坑的 API 或行为
-- 需要特别注意的依赖版本问题
+- 坑：解法
+...
+\`\`\`skill-end
 
-## Guidelines
-- 保持精简，总长度控制在 4000-5000 字符（硬上限 6000）
-- 写可操作的内容，避免空泛描述（不要写"代码质量高"这种废话）
-- 用具体路径和例子（不要写"有多个模块"，要写"src/agent 负责 agent 循环"）
-- 如果某个 section 没有明显内容，可以省略或写"待补充"
-- 重点是：让未来的 agent 能立即理解项目并开始有效工作
+## Rules — MUST FOLLOW
+1. 禁止列出文件名清单或目录结构
+2. 禁止列出依赖名和版本
+3. 禁止写项目概述/一句话描述
+4. 禁止只写命令本身（快照已有），只写注意事项
+5. 每个模块描述必须包含行为（做什么 + 怎么协作），不只是名称
+6. **总长度目标 3000-4000 字符，硬上限 4000**
+7. 写可操作的内容，用具体路径和例子
+8. 如果某个 section 没有实质内容，省略它
 `;
 
 /**

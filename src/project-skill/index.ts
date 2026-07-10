@@ -18,6 +18,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs';
 import path from 'node:path';
+import type { ChatMessage } from '../llm/index.js';
 
 /** 项目 skill 文件路径 */
 function skillPath(): string {
@@ -41,8 +42,8 @@ export function readProjectSkill(): string | null {
   }
 }
 
-/** 内容硬上限(字符数)。超限拒绝写入，防止系统提示词膨胀 */
-const MAX_SKILL_CHARS = 6000;
+/** 内容硬上限(字符数)。超限拒绝写入，防止系统提示词膨胀。从 6000 降至 4000，与快照互补后内容更精简。 */
+const MAX_SKILL_CHARS = 4000;
 
 /**
  * 写入/更新项目 skill。先备份旧内容再写新内容。
@@ -89,8 +90,108 @@ export function appendProjectSkill(addition: string): { ok: boolean; error?: str
 }
 
 /**
+ * 调用 LLM 压缩内容。超限时自动精简，保留关键信息。
+ * 返回压缩后的内容，失败返回 null。
+ */
+export async function compressContent(
+  content: string,
+  signal?: AbortSignal
+): Promise<string | null> {
+  try {
+    // 动态导入避免循环依赖
+    const { chat } = await import('../llm/index.js');
+    
+    const messages: ChatMessage[] = [
+      {
+        role: 'system',
+        content:
+          'You are a technical writer. Compress the following project skill content to fit within ' +
+          `${MAX_SKILL_CHARS} characters while preserving the most important information. ` +
+          'Keep concrete examples, paths, and actionable insights. Remove redundancy and verbose explanations. ' +
+          'Output ONLY the compressed content, no explanations.',
+      },
+      { role: 'user', content },
+    ];
+
+    const result = await chat(messages, {}, signal);
+    const compressed = result.content?.trim();
+    if (!compressed) return null;
+    return compressed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 写入时自动压缩：超限则调用 LLM 压缩，最多尝试 maxAttempts 次。
+ * 返回 { ok, error?, compressed? }，compressed 标记是否经过压缩。
+ */
+export async function writeProjectSkillWithCompression(
+  content: string,
+  maxAttempts = 3,
+  signal?: AbortSignal
+): Promise<{ ok: boolean; error?: string; compressed?: boolean }> {
+  let current = content;
+  let compressed = false;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const result = writeProjectSkill(current);
+    if (result.ok) {
+      return { ok: true, compressed };
+    }
+
+    // 非超限错误直接返回
+    if (!result.error?.includes('内容超过上限')) {
+      return result;
+    }
+
+    // 超限时调用 LLM 压缩
+    const compressedContent = await compressContent(current, signal);
+    if (!compressedContent) {
+      return {
+        ok: false,
+        error: `压缩失败: ${result.error}`,
+      };
+    }
+
+    current = compressedContent;
+    compressed = true;
+  }
+
+  // 多次压缩后仍超限
+  const finalCheck = writeProjectSkill(current);
+  if (finalCheck.ok) {
+    return { ok: true, compressed: true };
+  }
+
+  return {
+    ok: false,
+    error: `经过 ${maxAttempts} 次压缩仍超限: ${finalCheck.error}`,
+  };
+}
+
+/**
+ * 追加时自动压缩：合并后超限则调用 LLM 压缩，最多尝试 maxAttempts 次。
+ */
+export async function appendProjectSkillWithCompression(
+  addition: string,
+  maxAttempts = 3,
+  signal?: AbortSignal
+): Promise<{ ok: boolean; error?: string; compressed?: boolean }> {
+  const existing = readProjectSkill() ?? '';
+  const trimmed = addition.trim();
+  if (!trimmed) return { ok: false, error: '追加内容为空' };
+
+  const separator = existing ? '\n\n' : '';
+  const merged = existing + separator + trimmed;
+  return writeProjectSkillWithCompression(merged, maxAttempts, signal);
+}
+
+/**
  * 生成系统提示词注入段。
  * 开关关闭或文件不存在 → 空串(零行为变化)。
+ * 
+ * 精简版：只注入 skill 内容本身，维护指南移到 project_skill_update 工具描述中。
  */
 export function buildProjectSkillSection(): string {
   const content = readProjectSkill();
@@ -105,33 +206,5 @@ export function buildProjectSkillSection(): string {
     '<project-skill>',
     content,
     '</project-skill>',
-    '',
-    '### Project Skill 维护指南',
-    '你可以（也应该）在开发过程中持续更新这个 skill，让它越来越了解项目：',
-    '',
-    '**何时更新**：',
-    '- 发现项目特有的架构模式、设计决策或数据流',
-    '- 踩坑后总结出避坑指南（命名冲突、API 行为、构建陷阱等）',
-    '- 学到新的命名约定、测试规范、代码风格',
-    '- 完成重要重构或引入新模块后',
-    '- 用户纠正了你对项目的错误理解',
-    '',
-    '**更新什么**：',
-    '- 项目概述、技术栈、核心模块职责',
-    '- 常见坑点和解决方案',
-    '- 开发流程（构建、测试、部署命令）',
-    '- 关键 API 的使用方式和限制',
-    '- 设计决策的 why（不只是 what）',
-    '',
-    '**如何更新**：',
-    '- `project_skill_update(action="read")` — 查看当前内容',
-    '- `project_skill_update(action="update", content="...")` — 全量替换（适合大改）',
-    '- `project_skill_update(action="append", content="...")` — 追加到末尾（适合加新发现）',
-    '',
-    '**注意事项**：',
-    '- 保持精简，硬上限 6000 字符（约 1500 token）',
-    '- 写可操作的内容，避免空泛描述',
-    '- 定期整理，删除过时信息',
-    '- 更新前建议先 `read` 看一下现有内容，避免重复',
   ].join('\n');
 }

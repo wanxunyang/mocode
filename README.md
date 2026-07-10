@@ -18,6 +18,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Plan / Auto dual mode** — In `plan` mode the agent is read-only (reads code, queries indexes, searches — never writes to disk, runs commands, or spawns sub-agents) and produces a plan; `auto` mode unlocks the full toolset. The agent can switch between the two on its own — scope out an unfamiliar codebase first, then start making changes.
 - **Automatic context compression** — As the context window fills up, a three-tier compression kicks in (trim individual results → compact older tool results in place → summarize older turns), so long sessions never overflow. `/context` shows live token usage; `/compact` triggers manual compression (optionally with a focus hint to preserve what matters).
 - **Cross-session long-term memory** — The agent can save project architecture, conventions, and lessons learned as long-term memory, auto-loaded in future sessions. A background process periodically reflects on conversations to mine things worth remembering. Memories can be created, searched, updated, and forgotten, with recall-based decay.
+- **Project context (Snapshot + Skill)** — Two complementary systems help the agent understand your project: **Project Snapshot** automatically scans files and generates LLM-enhanced summaries (project description, tech stack, commands, module responsibilities, directory tree); **Project Skill** is a manually maintained knowledge base capturing design decisions, architectural insights, pitfalls, and conventions. Snapshot provides *what/where* (facts), Skill provides *why/how* (insights) — no duplication, ~46% token savings. See [docs/USAGE_SNAPSHOT_SKILL.md](./docs/USAGE_SNAPSHOT_SKILL.md) for details.
 - **Working notepad (todolist)** — For complex multi-step tasks (≥3 file changes / ≥5 tool calls), the agent first writes a plan to `.mocode/plans/<id>.md` (file-based, survives context compression), then ticks each step as it goes. A live progress chip in the TUI status bar shows `plan: [title] (3/7) ▸ [current step]`. `finish` auto-archives completed plans to `plans/archive/`, with explicit `list / delete / unarchive` actions.
 - **Interruptible and reversible** — Ctrl+C interrupts the current turn at any time (kills child processes recursively, rolls history back to before the turn started, leaves no half-finished tool calls). `/rollback` restores file changes from per-turn snapshots, with a per-file keep/undo choice — no git dependency required.
 - **Sandbox protection** — File reads/writes go through a sandbox that blocks out-of-bounds paths (`../../`, absolute paths outside the root, symlink escapes, etc.), so the agent never touches files outside your working directory.
@@ -174,6 +175,8 @@ The five `memory_*` tools are gated on `MEMORY_ENABLED=true` at startup; toggle 
 | `/pet`              | Toggle the optional desktop pet (floating window mirroring agent state) |
 | `/pet skin`         | Pick a pet skin (↑↓ · Enter)                                          |
 | `/pet quit`         | Fully shut down the pet process (not just disconnect)                 |
+| `/snapshot_refresh` | Refresh project snapshot (re-scan files + regenerate LLM summary)     |
+| `/snapshot`         | Toggle project snapshot on/off                                        |
 
 Type `/` to trigger the dropdown menu, keep typing to filter; Esc to cancel.
 
@@ -200,6 +203,21 @@ MoCode automatically scans the following directories for skills (each skill is a
 - `<cwd>/.mocode/skills/`
 
 A skill's `description` is injected into the system prompt (progressive disclosure, tier 1); the model calls `use_skill` to load the full body (tier 2) only when the task is relevant. Use `/skills` to see discovered skills.
+
+## Project Context (Snapshot + Skill)
+
+MoCode uses two complementary systems to help the agent understand your project:
+
+- **Project Snapshot** (automatic + LLM-enhanced): Scans your project files and generates a structured summary including project description, tech stack, key commands, module responsibilities, and directory tree. Built automatically on startup (Phase 1: sync scan ~100ms, Phase 2: async LLM summary ~5s). Stored in `.mocode/snapshot.json`, reused across sessions. Refresh manually with `/snapshot_refresh` after major changes.
+- **Project Skill** (manual + AI-assisted): A knowledge base you maintain capturing insights the agent can't auto-discover — design decisions, architectural patterns, pitfalls, conventions, and development workflow notes. Initialize with `/init` (AI explores your project and drafts the initial content), then edit `.mocode/project-skill.md` to refine. Update via the `project_skill_update` tool during conversations.
+
+**Complementary principle**: Snapshot provides *what/where* (facts: files, structure, commands), Skill provides *why/how* (insights: decisions, behaviors, gotchas). No duplication, ~46% token savings compared to the previous approach.
+
+Both are enabled by default. Control via environment variables:
+- `MOCODE_PROJECT_SNAPSHOT=false` — disable snapshot
+- `MOCODE_PROJECT_SKILL=false` — disable skill
+
+See [docs/USAGE_SNAPSHOT_SKILL.md](./docs/USAGE_SNAPSHOT_SKILL.md) for detailed usage.
 
 ## Project memory (MOCODE.md)
 
