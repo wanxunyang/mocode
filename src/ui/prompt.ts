@@ -136,8 +136,8 @@ export async function promptWithSlashMenu(
       const globalIdx = menuTop + i;
       // 选中项:▸ 与文字均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
       const isSel = globalIdx === selected;
-      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
-      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const color = isSel ? `${ui.accent}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.accent}${ui.bold}▸${ui.reset}` : ' ';
       const name = padEndDisplay(c.name, maxName);
       // 首/末附加滚动指示(▲/▼)而非替换整行
       let desc = c.desc;
@@ -734,8 +734,8 @@ export async function promptTurnPicker(
       const idx = start + i;
       // 选中项:▸/序号/正文均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
       const isSel = idx === selected;
-      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
-      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const color = isSel ? `${ui.accent}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.accent}${ui.bold}▸${ui.reset}` : ' ';
       const num = `${color}${idx + 1}${ui.reset}`;
       const text = truncateDisplay(items[idx].firstLine, cols - 6);
       return `${marker} ${num} ${color}${text}${ui.reset}`;
@@ -880,8 +880,8 @@ export async function promptSessionPicker(
       const idx = start + i;
       // 选中项:▸/序号/正文/副标题均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
       const isSel = idx === selected;
-      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
-      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const color = isSel ? `${ui.accent}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.accent}${ui.bold}▸${ui.reset}` : ' ';
       const num = String(idx + 1);
       const it = vis[idx];
       const title = it.title || '(无)';
@@ -1024,8 +1024,8 @@ export async function promptThemePicker(
     return Array.from({ length: count }, (_, i) => {
       const idx = start + i;
       const isSel = idx === selected;
-      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
-      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const color = isSel ? `${ui.accent}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.accent}${ui.bold}▸${ui.reset}` : ' ';
       const num = String(idx + 1);
       const it = items[idx];
       const title = it.title || '(无)';
@@ -1148,8 +1148,8 @@ export async function promptRevertChoice(fileCount: number): Promise<boolean | n
     const cols = layout.getGeo().cols;
     return items.map((text, idx) => {
       const isSel = idx === selected;
-      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
-      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const color = isSel ? `${ui.accent}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.accent}${ui.bold}▸${ui.reset}` : ' ';
       const num = `${color}${idx + 1}${ui.reset}`;
       const t = truncateDisplay(text, cols - 6);
       return `${marker} ${num} ${color}${t}${ui.reset}`;

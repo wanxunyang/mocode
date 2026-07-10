@@ -114,18 +114,18 @@ export function recordResult(
 /** 把 entry 列表压缩成一行摘要(Claude Code 风格)。 */
 function buildSummaryLine(entries: BatchEntry[]): string {
   if (entries.length === 0) {
-    return `  ${ui.brightMagenta}●${ui.reset} ${ui.dim}No tools${ui.reset}`;
+    return `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.dim}No tools${ui.reset}`;
   }
   if (entries.length === 1) {
     const e = entries[0];
-    return `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}`;
+    return `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}`;
   }
   // N>1:同类合并 "read_file 3, glob 1, grep 1"
   const counts = new Map<string, number>();
   for (const e of entries) counts.set(e.name, (counts.get(e.name) ?? 0) + 1);
   const parts: string[] = [];
   for (const [n, c] of counts) parts.push(`${n} ${c}`);
-  return `  ${ui.brightMagenta}●${ui.reset} ${ui.dim}Ran ${entries.length} tools · ${parts.join(', ')}${ui.reset}`;
+  return `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.dim}Ran ${entries.length} tools · ${parts.join(', ')}${ui.reset}`;
 }
 
 // ── 展开/折叠 ──
@@ -137,7 +137,7 @@ function buildExpandedLines(entries: BatchEntry[], indent = '    '): string[] {
   const lines: string[] = [];
   for (const e of entries) {
     lines.push(
-      `${indent}${ui.brightMagenta}●${ui.reset} ${ui.cyan}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}\x1B[0m`,
+      `${indent}${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}\x1B[0m`,
     );
     if (e.diffBlock) {
       // diff 块多行文本(由 renderFileChange 渲染);按 \n 拆成物理行,

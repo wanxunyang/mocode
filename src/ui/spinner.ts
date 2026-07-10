@@ -59,7 +59,7 @@ export class Spinner {
   private render(): void {
     const f = FRAMES[this.frame];
     stdout.write(
-      `\r${ui.brightMagenta}${f}${ui.reset} ${ui.dim}${this.msg}${ui.reset}\x1B[K`
+      `\r${ui.bold}${ui.accent}${f}${ui.reset} ${ui.dim}${this.msg}${ui.reset}\x1B[K`
     );
   }
 

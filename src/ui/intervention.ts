@@ -163,8 +163,8 @@ export async function promptIntervention(
       if (used + rows > maxOptRows && idx > start) break;
       // 选中项:▸ 与正文均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
       const isSel = idx === selected;
-      const color = isSel ? `${ui.cyan}${ui.bold}` : ui.dim;
-      const marker = isSel ? `${ui.cyan}${ui.bold}▸${ui.reset}` : ' ';
+      const color = isSel ? `${ui.accent}${ui.bold}` : ui.dim;
+      const marker = isSel ? `${ui.accent}${ui.bold}▸${ui.reset}` : ' ';
       // 数字前缀:只标真实选项(1-9,与 onKeyChoice 的数字直选对应);"自定义"项不占号。
       const numStr = idx < options.length ? `${idx + 1}. ` : '';
       const prefixWidth = 2 + numStr.length; // marker(1)+空格(1)+numStr

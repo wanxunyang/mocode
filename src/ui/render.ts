@@ -218,22 +218,21 @@ export interface BannerInfo {
 const BOX_W = 60; // 内容区显示宽度(logo 区 + 信息区)
 const MARGIN = '  '; // 盒外左缩进
 
-// ── 坐姿 logo(乌龟风,加双手)──
-const LOGO_W = 11; // logo 区显示宽度
-const LOGO_GAP = 4; // logo 与信息区之间的间隔
-const LOGO_PAD = ' '.repeat(LOGO_W + LOGO_GAP); // 无 logo 行的缩进(对齐信息区)
+// ── MoCode 块字符 logo(3 行 x 30 字符,neofetch 风)──
+const LOGO_W = 30; // logo 区显示宽度 = art 真宽,无补宽(让 LOGO_GAP 精确生效)
+const LOGO_GAP = 2; // logo 与信息区之间的间隔
 
-// 坐着的小人:[●ᴗ●] 头 / |　| 身 / ╲|　|╱ 双手外撑 / |　| 身 / ＯＯ 脚
+// ASCII 字符画 6 字母(M/o/C/o/d/e)压缩一半高度:每对原 ASCII 行用 ▀▄█ 块字符合并
+// 偶行 `█` 进奇行同一列 → █(满块)/▀(上块)/▄(下块);无前导缩进,让 logo 紧贴 MARGIN 左缘
 const LOGO_LINES = [
-  '  [◕ᴗ◕]  ',
-  ' ●|   |●  ',
-  '  ＯＯ   ',
+  '▄▄▄▄▄ ▄▄▄▄ ▄▄▄▄ ▄▄▄▄    ▄ ▄▄▄▄',
+  '█ █ █ █  █ █    █  █ █▀▀█ █▀▀▀',
+  '▀ ▀ ▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀',
 ];
 
-/** 取第 idx 行 logo(着色 + 补宽);越界返空格(logo 下方行仍缩进对齐)。 */
+/** 取第 idx 行 logo(着色 + 补宽 + LOGO_GAP 间隔),与 info 行直接拼接(neofetch 风)。 */
 function logoLine(idx: number): string {
-  if (idx >= LOGO_LINES.length) return LOGO_PAD;
-  return `${ui.brightCyan}${padEndDisplay(LOGO_LINES[idx], LOGO_W)}${ui.reset}${' '.repeat(LOGO_GAP)}`;
+  return `${ui.accent}${padEndDisplay(LOGO_LINES[idx], LOGO_W)}${ui.reset}${' '.repeat(LOGO_GAP)}`;
 }
 
 function labelContent(label: string, value: string): string {
@@ -241,9 +240,9 @@ function labelContent(label: string, value: string): string {
 }
 
 /** 横幅纯文本(带 ANSI 颜色,不写出)——供 TUI 经 contentWrite 写入内容区以跟踪续写位。
- *  无边框:左侧实心小熊 + 右侧标题/信息(模型/目录),末尾一行提示。 */
+ *  布局:大字 logo(3 行,块字符)左对齐,右侧并排放标题/信息(neofetch 风),末尾空行 + 提示。 */
 export function bannerString(info: BannerInfo): string {
-  const title = `${ui.bold}${ui.brightCyan}◆  MoCode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
+  const title = `${ui.bold}${ui.accent}◆  MoCode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
   const rows = [
     logoLine(0) + title,
     logoLine(1) + labelContent('模型', info.model),
@@ -256,7 +255,7 @@ export function bannerString(info: BannerInfo): string {
   );
 }
 
-/** 启动横幅:小熊 logo + 标题/信息 + 一行提示。纯渲染,不依赖 config / 业务。 */
+/** 启动横幅:大字 logo + 标题/信息 + 一行提示。纯渲染,不依赖 config / 业务。 */
 export function printBanner(info: BannerInfo): void {
   stdout.write(bannerString(info));
 }

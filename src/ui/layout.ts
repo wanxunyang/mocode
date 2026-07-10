@@ -1247,23 +1247,23 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
     // 滚动回看:左段 = 符号(◆ 或 心跳帧) + 状态名(灰,无走时);右段 = 历史指示。
     // 跟非回看的 INPUT/RUNNING 态保持一致——避免「◆ 留下、状态字蒸发」的视觉错觉。
     const symbol = spinning
-      ? `${ui.brightMagenta}${RUNNING_FRAMES[runningFrame]}${ui.reset}`
-      : `${ui.brightCyan}◆${ui.reset}`;
+      ? `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset}`
+      : `${ui.accent}◆${ui.reset}`;
     lead = `${symbol} ${ui.dim}${status.status}${ui.reset}`;
     leadW = 1 + 1 + displayWidth(status.status);
   } else if (hasSpinner) {
     // spinner 激活(思考中/执行工具…):帧 + 状态 + 走时
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
-    lead = `${ui.brightMagenta}${status.spinnerFrame}${ui.reset} ${ui.dim}${status.status}${ui.reset}${ePart}`;
+    lead = `${ui.bold}${ui.accent}${status.spinnerFrame}${ui.reset} ${ui.dim}${status.status}${ui.reset}${ePart}`;
     leadW = 1 + 1 + displayWidth(status.status) + (elapsed ? 1 + displayWidth(elapsed) : 0);
   } else if (spinning) {
     // 运行态心跳帧(流式输出中):帧 + 走时
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
-    lead = `${ui.brightMagenta}${RUNNING_FRAMES[runningFrame]}${ui.reset}${ePart}`;
+    lead = `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset}${ePart}`;
     leadW = 1 + (elapsed ? 1 + displayWidth(elapsed) : 0);
   } else {
     // INPUT 态:◆ + 状态文字(无走时)
-    lead = `${ui.brightCyan}◆${ui.reset} ${ui.dim}${status.status}${ui.reset}`;
+    lead = `${ui.accent}◆${ui.reset} ${ui.dim}${status.status}${ui.reset}`;
     leadW = 1 + 1 + displayWidth(status.status);
   }
 
@@ -1286,7 +1286,7 @@ function composeModelLine(status: StatusBarData, cols: number): string {
   const ctxW = ansiDisplayWidth(ctx);
   // 左段:模式标识 + 切换提示(灰)+ 本轮 token chip。token chip 仅展示总量,用 mid 灰,不抢主色。
   const modeTag = status.modeTag ?? '';
-  const modeColor = modeTag === 'plan' ? ui.yellow : ui.brightCyan;
+  const modeColor = modeTag === 'plan' ? ui.yellow : ui.accent;
   const modePart = modeTag ? `${modeColor}${modeTag}${ui.reset}` : '';
   const modeW = modeTag ? displayWidth(modeTag) : 0;
   // 切换提示:告诉用户怎么切模式。灰(dim)降优先级,不与 modeTag 抢色;只在有 modeTag 时出现。
@@ -1701,7 +1701,7 @@ export function paintInput(view: InputView): void {
   buf += cup(modelRow, 1) + esc.clearLine + composeModelLine(status, g.cols);
 
   // 3b. 上线(输入框顶):满屏宽细线 ─(cyan),框住输入区上边界
-  buf += cup(g.contentBottom + 3, 1) + esc.clearLine + ui.cyan + '─'.repeat(g.cols) + ui.reset;
+  buf += cup(g.contentBottom + 3, 1) + esc.clearLine + ui.accent + '─'.repeat(g.cols) + ui.reset;
 
   // 4. 输入行(g.contentBottom+4 .. rows-1)——按可视行画,首行带 prompt、其余缩进 promptW
   const firstInputRow = g.contentBottom + 4;
@@ -1757,7 +1757,7 @@ export function paintInput(view: InputView): void {
   }
 
   // 4b. 下线(输入框底):满屏宽细线 ─(cyan),在 model 行上一行(model 行占屏底 rows)
-  buf += cup(g.rows - 1, 1) + esc.clearLine + ui.cyan + '─'.repeat(g.cols) + ui.reset;
+  buf += cup(g.rows - 1, 1) + esc.clearLine + ui.accent + '─'.repeat(g.cols) + ui.reset;
 
   // 5. 向上菜单(画在内容区底,底栏正上方)
   if (view.menu && view.menu.lines.length > 0) {

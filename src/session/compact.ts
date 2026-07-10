@@ -397,7 +397,7 @@ export async function compactHistory(
       contextState.lastEstimate = estimateAfter;
       contextState.lastUsage = undefined;
       layout.contentWrite(
-        `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}强制压缩(focus on early history)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
+        `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}强制压缩(focus on early history)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
       );
       return {
         compacted: true,
@@ -488,7 +488,7 @@ export async function compactHistory(
     contextState.lastEstimate = estimateAfter;
     contextState.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用估算
     layout.contentWrite(
-      `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
+      `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
     );
     // 抖动保护:压缩后仍超阈 → 提示 /clear,不死循环
     if (estimateAfter >= opts.threshold * opts.window) {
@@ -511,7 +511,7 @@ export async function compactHistory(
   contextState.lastUsage = undefined; // 结构虽未变,但 token 数已变,旧 usage 失效
   if (microcompactDone) {
     layout.contentWrite(
-      `  ${ui.brightMagenta}●${ui.reset} ${ui.cyan}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
+      `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
     );
     return {
       compacted: true,

@@ -244,7 +244,7 @@ export function renderFileChange(opts: {
   const verb = oldStr === null ? 'Create' : 'Update';
 
   // 头行:Update(path) / Create(path)
-  const head = `${HEAD_INDENT}${ui.brightMagenta}${verb}${ui.reset}${ui.gray}(${ui.reset}${ui.cyan}${pathDisp}${ui.reset}${ui.gray})${ui.reset}`;
+  const head = `${HEAD_INDENT}${ui.bold}${ui.accent}${verb}${ui.reset}${ui.gray}(${ui.reset}${ui.accent}${pathDisp}${ui.reset}${ui.gray})${ui.reset}`;
 
   // 新建:整文件作 + 行,行号从 1
   if (oldStr === null) {

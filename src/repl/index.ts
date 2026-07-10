@@ -141,6 +141,12 @@ const THEME_DESCRIPTIONS: Record<string, string> = {
   solarized: 'Solarized 强调色',
   gruvbox: 'Gruvbox 暖色',
   nord: 'Nord 冷色',
+  orange: '南瓜橙(暖)',
+  rose: '玫红(暖紫)',
+  emerald: '翡翠绿(冷)',
+  amber: '琥珀金黄(暖)',
+  lavender: '薰衣草淡紫(冷)',
+  sunset: '日落珊瑚红(暖)',
 };
 
 /** /model 预设后端:选一个预填 baseURL,仍可逐项改。base_url 取自 README 常见表。 */
@@ -215,7 +221,7 @@ function renderContextBar(history: ChatMessage[]): string {
   const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
   const src = contextState.lastUsage ? '实测' : '估算';
   const k = (n: number) => `${Math.round(n / 1000)}k`;
-  const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.cyan;
+  const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.accent;
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${history.length} 条消息 (${src})${ui.reset}`;
 }
 
@@ -231,7 +237,7 @@ function renderContextBarInline(history: ChatMessage[]): string {
   const filled = Math.round(pct * W);
   const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
   const k = (n: number) => `${Math.round(n / 1000)}k`;
-  const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.cyan;
+  const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.accent;
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
 }
 
@@ -934,7 +940,7 @@ export async function startRepl(
         (/图片|图像|视觉|多模态/.test(msg) && /不支持|invalid|reject|fail/i.test(lower));
       if (looksLikeImageError) {
         layout.contentWrite(
-          `${ui.red}[错误]${ui.reset} 当前模型 ${ui.cyan}${config.model}${ui.reset} 不支持视觉输入。${ui.dim}原始:${msg}${ui.reset}\n`
+          `${ui.red}[错误]${ui.reset} 当前模型 ${ui.accent}${config.model}${ui.reset} 不支持视觉输入。${ui.dim}原始:${msg}${ui.reset}\n`
         );
         layout.contentWrite(
           `${ui.dim}提示:运行 /model 切换到支持视觉的模型(如 gpt-4o / claude-3.5-sonnet / gemini-1.5-pro)。${ui.reset}\n`
@@ -1178,7 +1184,7 @@ export async function startRepl(
         .slice(0, 10);
       for (const e of recent) {
         layout.contentWrite(
-          `  ${ui.cyan}${e.id}${ui.reset}  ${ui.dim}${e.name} — ${e.summary}${ui.reset}\n`,
+          `  ${ui.accent}${e.id}${ui.reset}  ${ui.dim}${e.name} — ${e.summary}${ui.reset}\n`,
         );
       }
       if (active.length === 0)
@@ -1211,7 +1217,7 @@ export async function startRepl(
         );
         for (const s of skills) {
           layout.contentWrite(
-            `  ${ui.cyan}${s.name}${ui.reset}  ${ui.dim}${s.description}${ui.reset}\n`
+            `  ${ui.accent}${s.name}${ui.reset}  ${ui.dim}${s.description}${ui.reset}\n`
           );
         }
         layout.contentWrite(
@@ -1381,7 +1387,7 @@ export async function startRepl(
         layout.contentWrite(`${ui.dim}可用主题:${ui.reset}\n`);
         for (const t of listThemes()) {
           layout.contentWrite(
-            `  ${ui.cyan}${t}${ui.reset}  ${ui.dim}${THEME_DESCRIPTIONS[t] ?? ''}${ui.reset}\n`
+            `  ${ui.accent}${t}${ui.reset}  ${ui.dim}${THEME_DESCRIPTIONS[t] ?? ''}${ui.reset}\n`
           );
         }
         layout.contentWrite(
@@ -1528,7 +1534,7 @@ export async function startRepl(
         for (const p of ps) {
           const star = p.baseURL === config.baseURL && p.apiKey === config.apiKey && p.model === config.model ? ' ★' : '';
           layout.contentWrite(
-            `  ${ui.cyan}${p.name}${ui.reset}${star}  ${ui.dim}${p.model} @ ${p.baseURL}${ui.reset}\n`,
+            `  ${ui.accent}${p.name}${ui.reset}${star}  ${ui.dim}${p.model} @ ${p.baseURL}${ui.reset}\n`,
           );
         }
         layout.contentWrite(`${ui.dim}(★ = 与当前一致;切换用 /model switch)${ui.reset}\n`);
@@ -1538,10 +1544,10 @@ export async function startRepl(
       // /model show:显示当前四项配置(apiKey 脱敏)。
       if (arg === 'show') {
         layout.contentWrite(`${ui.dim}当前模型配置:${ui.reset}\n`);
-        layout.contentWrite(`  ${ui.cyan}baseURL${ui.reset}  ${config.baseURL}\n`);
-        layout.contentWrite(`  ${ui.cyan}apiKey ${ui.reset}  ${maskKey(config.apiKey)}\n`);
-        layout.contentWrite(`  ${ui.cyan}model  ${ui.reset}  ${config.model}\n`);
-        layout.contentWrite(`  ${ui.cyan}窗口   ${ui.reset}  ${config.contextWindowTokens} tokens\n`);
+        layout.contentWrite(`  ${ui.accent}baseURL${ui.reset}  ${config.baseURL}\n`);
+        layout.contentWrite(`  ${ui.accent}apiKey ${ui.reset}  ${maskKey(config.apiKey)}\n`);
+        layout.contentWrite(`  ${ui.accent}model  ${ui.reset}  ${config.model}\n`);
+        layout.contentWrite(`  ${ui.accent}窗口   ${ui.reset}  ${config.contextWindowTokens} tokens\n`);
         layout.contentWrite(`${ui.dim}(配置文件: ${CONFIG_PATH})${ui.reset}\n`);
         continue;
       }
@@ -1797,10 +1803,10 @@ export async function startRepl(
       try {
         if (line === '/memory_status' || line.startsWith('/memory_status ')) {
           const on = isMemoryEnabled();
-          layout.contentWrite(`${ui.cyan}记忆子系统:${ui.reset} ${on ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`);
+          layout.contentWrite(`${ui.accent}记忆子系统:${ui.reset} ${on ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`);
           layout.contentWrite(
             `${ui.dim}  单一来源 isMemoryEnabled()(${config.memoryEnabled});` +
-              `持久化 ${ui.cyan}MEMORY_ENABLED${ui.dim};` +
+              `持久化 ${ui.accent}MEMORY_ENABLED${ui.dim};` +
               `配置文件 ${CONFIG_PATH}${ui.reset}\n`
           );
           layout.contentWrite(
@@ -1880,7 +1886,7 @@ export async function startRepl(
         // /project_skill view — 查看当前内容
         if (arg === 'view') {
           const enabled = isProjectSkillEnabled();
-          layout.contentWrite(`${ui.cyan}项目专属 Skill:${ui.reset} ${enabled ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`);
+          layout.contentWrite(`${ui.accent}项目专属 Skill:${ui.reset} ${enabled ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`);
           if (enabled) {
             const { readProjectSkill } = await import('../project-skill/index.js');
             const content = readProjectSkill();
@@ -1928,7 +1934,7 @@ export async function startRepl(
             if (writeResult.ok) {
               layout.contentWrite(`${ui.green}✓ 项目 Skill 已生成${ui.reset}\n`);
               layout.contentWrite(`${ui.dim}内容预览:${ui.reset}\n${result.content.slice(0, 500)}${result.content.length > 500 ? '...' : ''}\n`);
-              layout.contentWrite(`\n${ui.dim}文件: ${ui.cyan}.mocode/project-skill.md${ui.reset} (${result.content.length} 字符)\n`);
+              layout.contentWrite(`\n${ui.dim}文件: ${ui.accent}.mocode/project-skill.md${ui.reset} (${result.content.length} 字符)\n`);
               layout.contentWrite(`${ui.dim}下次启动时会自动注入到系统提示词。Agent 也会在开发过程中持续更新。${ui.reset}\n`);
               layout.contentWrite(`${ui.dim}提示: 可用 ${ui.cyan}/project_skill view${ui.reset} 查看完整内容，或手动编辑文件完善。${ui.dim}${ui.reset}\n`);
             } else {
@@ -2014,11 +2020,11 @@ export async function startRepl(
         if (arg === 'status') {
           const on = isProjectSnapshotEnabled();
           layout.contentWrite(
-            `${ui.cyan}项目快照:${ui.reset} ${on ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`
+            `${ui.accent}项目快照:${ui.reset} ${on ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`
           );
           layout.contentWrite(
             `${ui.dim}  单一来源 config.projectSnapshotEnabled(${on ? 'true' : 'false'});` +
-              `持久化 ${ui.cyan}MOCODE_PROJECT_SNAPSHOT${ui.dim};` +
+              `持久化 ${ui.accent}MOCODE_PROJECT_SNAPSHOT${ui.dim};` +
               `配置文件 ${CONFIG_PATH}${ui.reset}\n`
           );
           layout.contentWrite(
