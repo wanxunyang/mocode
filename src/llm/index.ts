@@ -454,6 +454,19 @@ async function chatOnce(
     }
 
     if (delta.tool_calls) {
+      // 文本→工具转折点:若 buf 还残留普通文本的安全尾(为防跨 chunk 切分留的
+      // THINK_OPEN.length - 1 字符),立即 flush 到屏幕。否则这段尾巴会一直搁置到
+      // 流结束才由尾部防御输出,而那时 onToolCall 早已触发、TUI 已补换行+生成中
+      // spinner,用户看到「话没说完就去调工具」——history 完整但屏幕渲染顺序错位。
+      // inThink 段照旧丢弃(思考中模型不会同时吐 tool_call,理论上 buf 不会有思考段);
+      // 防御性保留 !inThink 判断。
+      if (buf && !inThink) {
+        visibleContent += buf;
+        handlers.onText?.(buf);
+        consumedAny = true;
+        buf = '';
+      }
+
       for (const tc of delta.tool_calls) {
         const idx = tc.index ?? 0;
         let entry = toolAcc.get(idx);
@@ -473,11 +486,14 @@ async function chatOnce(
   }
 
   // 防御:循环内 buf.slice 已把可确认部分消费;此处覆盖流末尾的"安全尾":
-  //  - 普通段(stream 已结束,标签不会再出现):作为可见内容追加到 visibleContent(不再调 onText)
+  //  - 普通段(stream 已结束,标签不会再出现):作为可见内容追加到 visibleContent + 调 onText
+  //    (之前注释说"不再调 onText"是 bug——安全尾里的真实文本会被屏幕吞掉,用户看到模型
+  //     话没说完就去调工具 / 直接结束;history 有但显示缺。现在补上 onText 让屏幕与 history 一致。)
   //  - 思考段未闭合:丢弃,防 thinking 文本泄漏到 history
   if (buf) {
     if (!inThink) {
       visibleContent += buf;
+      handlers.onText?.(buf);
       consumedAny = true;
     }
     buf = '';
