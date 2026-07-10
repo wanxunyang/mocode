@@ -750,9 +750,6 @@ export async function startRepl(
       }
     }
   }
-  layout.contentWrite(
-    `${ui.dim}  /plan · /auto · Shift+Tab 切换模式(plan:只读探查 + 产出计划,审批后切 auto 执行)${ui.reset}\n`,
-  );
   if (updateNotice) {
     // 自更新提示:放 /plan · /auto 行下方,黄色(警示色)突出"你正在用的版本较旧",与 dim 提示区分。
     // 开场静态段(进 INPUT 态前),一行,纯文本不与流式 / 输入争用。
