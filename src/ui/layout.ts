@@ -1248,28 +1248,50 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
 function composeModelLine(status: StatusBarData, cols: number): string {
   const ctx = status.contextBar; // 已带色
   const ctxW = ansiDisplayWidth(ctx);
-  // 左段:模式标识 + 本轮 token chip。token chip 仅展示总量,用 mid 灰,不抢主色。
+  // 左段:模式标识 + 切换提示(灰)+ 本轮 token chip。token chip 仅展示总量,用 mid 灰,不抢主色。
   const modeTag = status.modeTag ?? '';
   const modeColor = modeTag === 'plan' ? ui.yellow : ui.brightCyan;
   const modePart = modeTag ? `${modeColor}${modeTag}${ui.reset}` : '';
   const modeW = modeTag ? displayWidth(modeTag) : 0;
+  // 切换提示:告诉用户怎么切模式。灰(dim)降优先级,不与 modeTag 抢色;只在有 modeTag 时出现。
+  const HINT = 'Shift+Tab 切换模式';
+  const hintW = modeTag ? displayWidth(HINT) : 0;
+  const hintPart = modeTag ? `${ui.dim}${HINT}${ui.reset}` : '';
   const tokChip = formatTurnTokenChip(status.lastTurnUsage);
   const tokW = displayWidth(stripAnsi(tokChip));
-  // 合并左段:chip 前留 2 空格分隔,无 modeTag 也允许仅显示 chip(兜底边角)。
-  const sep = modePart && tokChip ? '  ' : '';
-  const leftStr = `${modePart}${sep}${tokChip}`;
-  const leftW = modeW + (modePart && tokChip ? sep.length : 0) + tokW;
+  // 合并左段:段间留 2 空格分隔。极窄时 hint 与 chip 都可能藏掉。
+  // 优先级:modeTag(必) > chip(提示累计 token,有信息量)> hint(纯说明性,窄时最先省)。
+  const sepMH = modePart && (hintPart || tokChip) ? '  ' : '';
+  const sepHT = (hintPart && tokChip) ? '  ' : '';
+  const leftStr = `${modePart}${sepMH}${hintPart}${sepHT}${tokChip}`;
+  const leftW = modeW
+    + (modePart && (hintPart || tokChip) ? sepMH.length : 0)
+    + hintW
+    + ((hintPart && tokChip) ? sepHT.length : 0)
+    + tokW;
   // 右段:ctx + sep + cwd,右端对齐。cwd 按预算截断,极窄(<6)隐藏。
-  // 任一 chip 极宽时收紧 cwd(toolbar 列挤压场景),先从 cwd 砍、再隐藏 cwd、再隐藏 token chip。
+  // 任一 chip 极宽时收紧 cwd(toolbar 列挤压场景),先从 cwd 砍、再隐藏 cwd、再按 hint→chip 顺序省。
   const minGap = 2;
   let cwdBudget = cols - leftW - minGap - ctxW - STATUS_SEP_W - 1;
   let cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
   let cwdW = displayWidth(cwd);
   let rightStr = `${ctx}${STATUS_SEP}${ui.dim}${cwd}${ui.reset}`;
   let rightW = ctxW + STATUS_SEP_W + cwdW;
-  // 极窄(<24 列含 ctx):藏 token chip
-  if (modePart && tokChip && rightW + minGap + leftW > cols) {
-    return twoColumn(modePart, modeW, rightStr, rightW, cols);
+  // 极窄:逐步降级——先藏 hint,再藏 token chip,只剩 modeTag 与右段挤。
+  // 这样 80 列宽终端下 hint 和 chip 都能稳住,只 <50 列才退化到只剩 modeTag。
+  if (leftW + minGap + rightW > cols) {
+    // 优先藏 hint(纯说明,信息密度最低):仅留 modePart + sep + tokChip
+    if (modePart && tokChip && hintPart) {
+      const leftStr2 = `${modePart}${sepMH}${tokChip}`;
+      const leftW2 = modeW + sepMH.length + tokW;
+      if (leftW2 + minGap + rightW <= cols) {
+        return twoColumn(leftStr2, leftW2, rightStr, rightW, cols);
+      }
+    }
+    // 再藏 token chip:仅留 modePart
+    if (modePart && tokChip) {
+      return twoColumn(modePart, modeW, rightStr, rightW, cols);
+    }
   }
   return twoColumn(leftStr, leftW, rightStr, rightW, cols);
 }
