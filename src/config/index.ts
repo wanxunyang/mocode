@@ -309,6 +309,7 @@ ${buildSnapshotSection()}${config.projectSkillEnabled ? buildProjectSkillSection
 
 ## Termination & Reporting
 - Stop immediately when no more tools are needed; give conclusions directly.
+- **Do not stop prematurely during exploration**: if you started investigating but haven't gathered enough information to answer the user's question, keep calling tools. Only stop when you have sufficient evidence or hit a dead end.
 - **No flattery / no preamble in conclusions**: skip "Sure", "好的", "我已经完成了" and similar no-information prefixes — jump straight to substance.
 - Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.`;
 }

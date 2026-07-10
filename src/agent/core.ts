@@ -303,6 +303,10 @@ export async function runAgentCore(
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
   let lastChar = '';
+  // 早退重探:本 turn 已执行过工具但模型突然返回无工具调用 + 极短/空文本 → 推一条提示让模型继续,
+  // 而非直接退出。每 turn 最多触发 1 次,防死循环。弱模型在探索中途偶尔"说完"即此兜底。
+  let nudgeCount = 0;
+  let hadToolsThisTurn = false;
 
   const onText = (s: string) => {
     hooks.onText?.(s); // 主 agent:走 markdown 渲染写内容区
@@ -380,6 +384,7 @@ export async function runAgentCore(
       onContextUpdate?.();
 
       if (result.toolCalls.length > 0) {
+        hadToolsThisTurn = true;
         // 流式正文末尾补换行(若 onToolCall 已补则 lastChar='\n',此处 no-op);防 ● 行黏在正文行尾
         if (mode !== 'idle' && lastChar !== '\n') hooks.onTextEnd?.();
         // 带工具调用的 assistant 消息原样回灌(OpenAI 格式要求)
@@ -551,6 +556,20 @@ export async function runAgentCore(
       }
 
       if (mode !== 'idle' && lastChar !== '\n') hooks.onTextEnd?.(); // 流式末尾补换行
+
+      // 早退保护:本 turn 已执行过工具调用,但模型突然返回无工具 + 极短/空文本 → 很可能是在探索中途
+      // 提前"说完了"。此时推一条 user 提示消息让模型继续探索,而非直接退出。每 turn 最多 1 次,防死循环。
+      // 判定标准:无 gotText(完全没输出)或正文极短(< 80 字符,通常是一句"我需要更多信息"级别的截断)。
+      const textLen = result.content?.trim().length ?? 0;
+      if (hadToolsThisTurn && nudgeCount < 1 && (!gotText || textLen < 80)) {
+        nudgeCount++;
+        history.push({ role: 'assistant', content: result.content });
+        history.push({
+          role: 'user',
+          content: 'You stopped before completing the task. Please continue investigating — call more tools if needed, or provide a complete answer based on what you have gathered so far.',
+        });
+        continue; // 带着提示再调一次 LLM
+      }
 
       // 没有工具调用:流式正文即最终回复(已实时打印)
       if (!gotText) hooks.onNoReply?.();
