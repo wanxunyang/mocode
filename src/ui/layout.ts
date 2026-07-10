@@ -1399,12 +1399,17 @@ function startTurnTimer(): void {
   turnTimer.unref();
 }
 
-/** 停走时计时器。enterInputMode / exitAltScreen 调。 */
-function stopTurnTimer(): void {
+/** 停走时计时器。enterInputMode / exitAltScreen 调;intervention 面板进入时也调(防 drawStatusBar 200ms 心跳把光标拉到 runningCaretPos,覆盖 paintInput 的正确光标位)。 */
+export function stopTurnTimer(): void {
   if (turnTimer) {
     clearInterval(turnTimer);
     turnTimer = null;
   }
+}
+
+/** 恢复走时计时器(若 RUNNING 态)。intervention 面板退出时调,恢复状态行走时心跳。 */
+export function startTurnTimerIfRunning(): void {
+  if (active && mode === 'running') startTurnTimer();
 }
 
 /**

@@ -254,6 +254,8 @@ export async function promptIntervention(
     });
     if (layout.isScrolled()) layout.resetScroll();
     else layout.repaintViewport();
+    // 恢复走时计时器(RUNNING 态):面板期间 stopTurnTimer 停了心跳,退出后恢复状态行 200ms 刷新。
+    layout.startTurnTimerIfRunning();
   }
 
   function onKey(_str: string, key?: Key): void {
@@ -381,8 +383,10 @@ export async function promptIntervention(
   return new Promise<InterventionResult>((res, rej) => {
     resolve = res;
     try {
-      // 进入面板:停 spinner(避免 onFrame 覆盖)+ 禁鼠标框选(防拖拽 viewport 重画覆盖菜单)+ 回尾(若用户正滚动回看)
+      // 进入面板:停 spinner(避免 onFrame 覆盖)+ 停走时计时器(避免 drawStatusBar 200ms 心跳
+      // 把真光标拉到 runningCaretPos 覆盖 paintInput 的正确光标位)+ 禁鼠标框选(防拖拽 viewport 重画覆盖菜单)+ 回尾(若用户正滚动回看)
       Spinner.pauseCurrent();
+      layout.stopTurnTimer();
       layout.setMouseEnabled(false);
       layout.resetScroll();
       // 快照现有 keypress 监听(运行态的 onRunningKey)并摘掉,挂自己的 onKey
