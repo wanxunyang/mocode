@@ -213,21 +213,22 @@ export interface BannerInfo {
   baseURL: string;
   cwd: string;
   tools: string;
+  /** 记忆子系统开关:由 config.isMemoryEnabled() 喂入,关闭时 banner 显示「关闭」 */
+  memoryEnabled: boolean;
 }
 
 const BOX_W = 60; // 内容区显示宽度(logo 区 + 信息区)
 const MARGIN = '  '; // 盒外左缩进
 
-// ── MoCode 块字符 logo(3 行 x 30 字符,neofetch 风)──
-const LOGO_W = 30; // logo 区显示宽度 = art 真宽,无补宽(让 LOGO_GAP 精确生效)
-const LOGO_GAP = 2; // logo 与信息区之间的间隔
-
-// ASCII 字符画 6 字母(M/o/C/o/d/e)压缩一半高度:每对原 ASCII 行用 ▀▄█ 块字符合并
-// 偶行 `█` 进奇行同一列 → █(满块)/▀(上块)/▄(下块);无前导缩进,让 logo 紧贴 MARGIN 左缘
-const LOGO_LINES = [
-  '▄▄▄▄▄ ▄▄▄▄ ▄▄▄▄ ▄▄▄▄    ▄ ▄▄▄▄',
-  '█ █ █ █  █ █    █  █ █▀▀█ █▀▀▀',
-  '▀ ▀ ▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀',
+// ── MoCode 块字符 logo(4 行,neofetch 风)──
+const LOGO_W = 35; // logo 区显示宽度
+const LOGO_GAP = 0; // logo 与信息区之间的间隔
+// 块字符画 4 行:M / o / C / o / d / e,块字符上半/下半合并两个 ASCII 行
+const LOGO_LINES: string[] = [
+  '█▀█▀█      █▀▀▀█         █   ',
+  '█ █ █ █▀▀█ █     █▀▀█ █▀▀█ █▀▀█',
+  '█ █ █ █  █ █   ▄ █  █ █  █ █▀▀▀',
+  '▀   ▀ ▀▀▀▀ ▀▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀',
 ];
 
 /** 取第 idx 行 logo(着色 + 补宽 + LOGO_GAP 间隔),与 info 行直接拼接(neofetch 风)。 */
@@ -239,14 +240,27 @@ function labelContent(label: string, value: string): string {
   return `${ui.dim}${padEndDisplay(label, 6)}${ui.reset}${value}`;
 }
 
+/** 把布尔转成显式中文:banner 上避免「是/否」歧义,用「开/关」。 */
+function memoryLabel(on: boolean): string {
+  return on ? '开启' : '关闭';
+}
+
+/** 记忆状态染色:开启用 ui.accent(亮),关闭用 ui.dim(弱),让远观有差别。
+ *  banner 里整体仍走 ui.reset 兜底——染色只贴在值那一列。 */
+function memoryValue(on: boolean): string {
+  return on ? `${ui.accent}${memoryLabel(on)}${ui.reset}` : `${ui.dim}${memoryLabel(on)}${ui.reset}`;
+}
+
 /** 横幅纯文本(带 ANSI 颜色,不写出)——供 TUI 经 contentWrite 写入内容区以跟踪续写位。
- *  布局:大字 logo(3 行,块字符)左对齐,右侧并排放标题/信息(neofetch 风),末尾空行 + 提示。 */
+ *  布局:大字 logo(4 行,块字符)左对齐,右侧并排放标题/信息(neofetch 风),末尾空行 + 提示。 */
 export function bannerString(info: BannerInfo): string {
   const title = `${ui.bold}${ui.accent}◆  MoCode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
+  // 信息行 = 标题 + 模型 + 目录 + 记忆(共 4 行,与 4 行 logo 对齐)
   const rows = [
     logoLine(0) + title,
     logoLine(1) + labelContent('模型', info.model),
     logoLine(2) + labelContent('目录', truncateDisplay(info.cwd, 48)),
+    logoLine(3) + labelContent('记忆', memoryValue(info.memoryEnabled)),
   ];
   return (
     rows.map((r) => MARGIN + r).join('\n') +
@@ -258,6 +272,26 @@ export function bannerString(info: BannerInfo): string {
 /** 启动横幅:大字 logo + 标题/信息 + 一行提示。纯渲染,不依赖 config / 业务。 */
 export function printBanner(info: BannerInfo): void {
   stdout.write(bannerString(info));
+}
+
+/**
+ * 与 bannerString 等价但返**自洽 ANSI 行数组**(每行均以 \x1B[0m 收尾),供 layout.writeBanner
+ * 直接灌入 content 缓冲,免去 contentWrite 走字符流再 breakRow 的列宽折行问题。
+ *
+ * 行集合 = bannerString 解析后的所有物理行(含末尾空与提示行)。layout 记录此长度作
+ * bannerH,rewriteBanner 必须按等长替换(否则 layout 抛错)。
+ *
+ * 返回前会 normalize:每行若未以 \x1B[0m 收尾则补,统一自洽,避免 setLines / replaceHead
+ * 内部 ANSI 状态机把后续 SGR 当 curSgr 残留继承下去。
+ */
+export function bannerLines(info: BannerInfo): string[] {
+  const raw = bannerString(info);
+  // bannerString 形如 "行1\n行2\n行3\n行4\n\n  直接描述任务...\n",split('\n') 长度 = 7(末尾 \n 后空串)
+  // 行集合真实包含 6 行:4 行 logo + 1 空行 + 1 提示行;filter(Boolean?) 不可 — 空行也要算
+  // 用切分后非末尾空过滤:保留空字符串(就是那 5 个空行之一),仅过滤最后那个 \n 切出的尾空
+  const split = raw.split('\n');
+  const lines = split.length > 0 && split[split.length - 1] === '' ? split.slice(0, -1) : split;
+  return lines.map((s) => (s.endsWith('\x1B[0m') ? s : `${s}\x1B[0m`));
 }
 
 // ── 工具调用 / 结果 摘要 ──

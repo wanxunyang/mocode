@@ -114,7 +114,7 @@ export async function promptWithSlashMenu(
   let menuOpen = false;
   let selected = 0;
   let filtered: SlashCommand[] = [];
-  const MENU_MAX_VISIBLE = 5;
+  const MENU_MAX_VISIBLE = 7;
   let menuTop = 0; // 窗口首项在 filtered 中的索引,菜单最多显示 MENU_MAX_VISIBLE 条
   let resolved = false;
   let resolve!: (v: string[] | null) => void;

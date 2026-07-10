@@ -417,6 +417,72 @@ function commitMd(): void {
   content.commitSegment();
 }
 
+// ── Banner(启动横幅/模式切换横幅)固定顶部行 ──
+// 与 contentWrite 的「续写式追加」不同:banner 自带模式行集合(MoCode logo + 信息行),
+// 反复 writeBanner(同一启动会话内同一份 banner 反复画 — 启动后、换 model 后、刷新 snapshot 后)
+// 应让 buffer 顶部始终是「最新的一份 banner」,而不是堆 5 份。
+// rewriteBanner 在 banner 已建好时原地等长替换顶部 bannerH 行,viewport 自动从 rows[] 头读新版。
+//
+// bannerH = bannerLines(banner()) 的行数(目前 6:4 行 logo + 1 空 + 1 提示行)。如未来
+// bannerString 变化,调用方需重调 writeBanner 重设 bannerH。
+let bannerH = 0;
+let bannerRows: string[] = []; // 最新写入的 banner 行(供 rewriteBanner 复用 / 调试)
+
+/**
+ * 在 content 缓冲顶部建一份 banner;**首次**调用建好(bannerH = lines.length),**重复**调用
+ * 等价 rewriteBanner(lines)(覆盖式刷新,供启动后再写 banner 也安全)。
+ *
+ * lines 必须与首次写入等长(否则 content.replaceHead 抛错)— 调用方应统一传 bannerLines(banner())。
+ * 滚动回看冻结(scrollOffset+=delta / 改 offset 不变):行数不变 offset 不动 → 视图冻结,无须 repaint 风暴。
+ * 仅当 scrollOffset === 0 时 repaintViewport 让新版 banner 立刻进 viewport 顶部。
+ */
+export function writeBanner(lines: string[]): void {
+  if (bannerH === 0) {
+    // 首次:buffer 通常空(启动最早时),用 setLines 灌入;若 buffer 非空(如 reseed)说明 banner
+    // 已被前置写过,throw 阻止静默错位 — 调用方应先 reset banner 然后 writeBanner。
+    if (mdActive) commitMd();
+    const existed = content.totalRows();
+    if (existed !== 0) {
+      throw new Error(
+        `writeBanner: 首次调用时 buffer 已有 ${existed} 行,需先 clearContent 再 writeBanner(否则会覆盖已有内容)`
+      );
+    }
+    content.setLines(lines);
+    bannerH = lines.length;
+    bannerRows = lines;
+    if (scrollOffset === 0) repaintViewport();
+    return;
+  }
+  // 后续:等价 rewriteBanner
+  rewriteBanner(lines);
+}
+
+/**
+ * 把 banner 顶部 bannerH 行**等长替换**为新行;banner 后的内容(对话历史)位置不动。
+ * 行数与首次 writeBanner 不一致 → 抛错(避免 banner 区错位);如必须改,先清空 content 后再 writeBanner。
+ * 滚动回看冻结:行数不变,offset 不动。等 scrollOffset 回到 0 时 viewport 自动显新版 banner。
+ */
+export function rewriteBanner(lines: string[]): void {
+  if (bannerH === 0) {
+    // 没建过 banner:等价首次 writeBanner(允许首次调用直接进 rewriteBanner 的别名入口)
+    writeBanner(lines);
+    return;
+  }
+  if (lines.length !== bannerH) {
+    throw new Error(
+      `rewriteBanner: 行数 ${lines.length} ≠ 已建 bannerH ${bannerH}(调用方需统一行数)`
+    );
+  }
+  content.replaceHead(0, lines);
+  bannerRows = lines;
+  if (scrollOffset === 0) repaintViewport();
+}
+
+/** 测试 / 调试用:当前 banner 占多少行;0 表示未启用。 */
+export function bannerHeight(): number {
+  return bannerH;
+}
+
 /**
  * markdown 正文写(替代 contentWrite 用于 agent onText):累积 chunk 到 mdBuf,每 chunk 把整段
  * mdBuf 经 renderMarkdown 渲成自洽 ANSI 行,replace 缓冲段(content.setLines 截旧 + 写新),

@@ -260,3 +260,49 @@ export function deleteFrom(startIdx: number, n: number): void {
     segMark.rowIdx -= actual;
   }
 }
+
+/**
+ * 在绝对行索引 startIdx(0-based,已 commit)起**等长替换**为新行(lines.length 必须等于
+ * 原区间行数;调用方负责等长,以维持 banner 等「顶部固定行」语义不变)。
+ *
+ * 用途:layout.writeBanner / rewriteBanner 把 buffer [0, bannerH) 替换为新的自洽行,
+ * repaintViewport 自然从 rows[] 头部读出新版 banner,无需 layout 介入。
+ *
+ * 不动 hasCurrent(行已 commit);若 segMark 在替换区间内,segMark.rowIdx 减至 startIdx
+ * (段起点被覆盖)。segMark 在区间前方不动(不在此类用法出现)。
+ *
+ * 长度不一致直接报错并 no-op(避免静默错位):允许调用方传不同长度时改用 insertAfter + deleteFrom。
+ */
+export function replaceHead(startIdx: number, lines: string[]): void {
+  if (!Number.isInteger(startIdx) || startIdx < 0) {
+    throw new Error(`replaceHead: startIdx 必须 ≥ 0 整数,实得 ${startIdx}`);
+  }
+  if (lines.length === 0) return; // 空替换 = no-op(0 行删 0 行)
+  if (hasCurrent) {
+    rows.push(rowStartSgr + curRaw + '\x1B[0m');
+    curRaw = '';
+    rowStartSgr = curSgr;
+    hasCurrent = false;
+  }
+  const committed = rows.length;
+  if (startIdx >= committed) {
+    throw new Error(
+      `replaceHead: startIdx=${startIdx} 超出已 commit 行数 ${committed}(调用方必须保证等长替换且 startIdx 在 buffer 内)`
+    );
+  }
+  const end = Math.min(startIdx + lines.length, committed);
+  const actualOld = end - startIdx;
+  if (actualOld !== lines.length) {
+    throw new Error(
+      `replaceHead: 行数不匹配(startIdx=${startIdx},新区间 ${actualOld} 行 ≠ 新行 ${lines.length} 行)`
+    );
+  }
+  // splice 等长替换:rows.length 不变,segMark 若在区间前方不受影响,区间内被覆盖时平移到 startIdx
+  rows.splice(startIdx, lines.length, ...lines);
+  if (segMark) {
+    const m = segMark.rowIdx;
+    if (m >= startIdx && m < end) {
+      segMark.rowIdx = startIdx; // 段起点被覆盖 → 重锚到区间头
+    }
+  }
+}

@@ -28,7 +28,7 @@ import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { togglePet, killPetProcess, listSkins, setSkin, sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
 import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
-import { bannerString, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
+import { bannerString, bannerLines, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
 import * as batch from '../ui/batch.js';
@@ -716,6 +716,7 @@ export async function startRepl(
     baseURL: config.baseURL,
     cwd: process.cwd(),
     tools: toolsLine,
+    memoryEnabled: isMemoryEnabled(),
   });
 
   // 开场:按 config.theme 切主题(横幅 / 状态行 / 后续渲染皆用新色),再进 alt screen + 状态基线 + 清内容区。
@@ -728,7 +729,7 @@ export async function startRepl(
   if (history.some((m) => m.role === 'user')) {
     renderHistory(history);
   } else {
-    layout.contentWrite(bannerString(banner()));
+    layout.writeBanner(bannerLines(banner()));
   }
   if (!isModelConfigured()) {
     // 未配置 baseURL/apiKey:醒目提示引导 /model(不退出,REPL 仍可用;发消息会失败但不崩)。
@@ -1108,7 +1109,7 @@ export async function startRepl(
       lastTurnUsage = undefined; // 清空旧轮的 token 累计
       pendingAttachments = []; // 一并清空待发图片
       layout.clearContent();
-      layout.contentWrite(bannerString(banner()));
+      layout.writeBanner(bannerLines(banner()));
       layout.contentWrite(`${ui.dim}(历史已清空,保留系统提示)${ui.reset}\n`);
       continue;
     }
@@ -1406,7 +1407,7 @@ export async function startRepl(
       if (history.some((m) => m.role === 'user')) {
         renderHistory(history);
       } else {
-        layout.contentWrite(bannerString(banner()));
+        layout.writeBanner(bannerLines(banner()));
       }
       layout.contentWrite(`${ui.dim}(已切换主题 ${name})${ui.reset}\n`);
       updateConfigKey('MOCODE_THEME', name);
@@ -1445,7 +1446,7 @@ export async function startRepl(
         if (history.some((m) => m.role === 'user')) {
           renderHistory(history);
         } else {
-          layout.contentWrite(bannerString(banner()));
+          layout.writeBanner(bannerLines(banner()));
         }
         layout.contentWrite(`${ui.dim}(已切换到预设 “${target.name}” → ${target.model} @ ${target.baseURL})${ui.reset}\n`);
         if (config.llmKeysFromShell.length > 0) {
@@ -1762,7 +1763,7 @@ export async function startRepl(
       if (history.some((m) => m.role === 'user')) {
         renderHistory(history);
       } else {
-        layout.contentWrite(bannerString(banner()));
+        layout.writeBanner(bannerLines(banner()));
       }
       layout.contentWrite(`${ui.dim}(已切换模型 → ${model} @ ${baseURL})${ui.reset}\n`);
       if (savedName) {
@@ -1862,6 +1863,9 @@ export async function startRepl(
               ? `${ui.dim}同 session shell 未 export,文件写入即时生效)${ui.reset}\n`
               : `${ui.dim}下次启动仍生效)${ui.reset}\n`)
         );
+        // 即时刷 banner(原地替换顶部 bannerH 行,不留副本):banner() 闭包实时读
+        // isMemoryEnabled(),无需重启 REPL。buffer 中 bannerH 之下的对话历史位置不动。
+        layout.rewriteBanner(bannerLines(banner()));
       } catch (e) {
         layout.contentWrite(`${ui.red}/memory_switch 失败:${ui.reset} ${(e as Error).message}\n`);
       }
