@@ -1529,14 +1529,15 @@ export function paintLiveAtCursor(text: string): void {
   }
   // resize 后 contentRow 可能过时(拖终端框):
   //  - 缩小:contentRow > 新 bottom → 钳到新 bottom
-  //  - 放大:contentRow < 新 bottom 且回尾 → 推进到 min(total, bottom)(内容末尾或新区底)
-  //    内容够填满:推进到 bottom(最底部);内容不够:推进到 total(紧跟内容尾)
+  //  - 放大:contentRow < 新 bottom 且回尾 → 推进到 min(total+1, bottom)(内容末尾或新区底)
+  //    total+1 是合法「待写位」(breakRow 后光标在新空行);用 total 会把续写位拉回最后一行,
+  //    首次 contentWrite 覆盖 banner(首条消息「插到 logo 下面」bug)。
   // 否则 cup 到旧行号→帧画在屏幕中间(旧 bottom 位置),而非内容末尾/最底部。
   const g = getGeo();
   const total = content.totalRows();
   if (contentRow > g.contentBottom) contentRow = g.contentBottom;
   if (scrollOffset === 0 && contentRow < g.contentBottom) {
-    contentRow = Math.min(total, g.contentBottom);
+    contentRow = Math.min(total + 1, g.contentBottom);
   }
   let out = '';
   if (frameRow && (frameRow !== contentRow || frameCol !== contentCol)) {
@@ -2013,9 +2014,10 @@ export function enterAltScreen(): void {
     const total = content.totalRows();
     // 缩小:contentRow > 新 bottom → 钳到新 bottom
     if (contentRow > g.contentBottom) contentRow = g.contentBottom;
-    // 放大:contentRow < 新 bottom 且回尾(offset=0)→ 推进到 min(total, bottom)
+    // 放大:contentRow < 新 bottom 且回尾(offset=0)→ 推进到 min(total+1, bottom)
+    //    total+1 是合法「待写位」;用 total 会把续写位拉回最后一行,首次 contentWrite 覆盖 banner
     if (scrollOffset === 0 && contentRow < g.contentBottom) {
-      contentRow = Math.min(total, g.contentBottom);
+      contentRow = Math.min(total + 1, g.contentBottom);
     }
     if (frameRow && frameRow > g.contentBottom) frameRow = g.contentBottom;
     const maxOff = Math.max(0, total - g.contentBottom);
