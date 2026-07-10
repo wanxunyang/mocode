@@ -441,3 +441,15 @@ export function updateProjectSkillConfig(enabled: boolean): void {
   config.projectSkillEnabled = enabled;
   process.env.MOCODE_PROJECT_SKILL = enabled ? 'true' : 'false';
 }
+
+/**
+ * 切换项目快照开关(/snapshot on|off 调)。
+ * - 更新 config 单例字段(其它模块下次读 config.projectSnapshotEnabled 即拿新值:
+ *   buildSnapshotSection 现拼现读、read-file 每次 execute 现读)。
+ * - 同步 process.env.MOCODE_PROJECT_SNAPSHOT(下次启动 loadEnvFiles 不会被文件回填)。
+ * 持久化(写 ~/.mocode/config 的 MOCODE_PROJECT_SNAPSHOT 键)由调用方走 updateConfigKey。
+ */
+export function updateSnapshotConfig(enabled: boolean): void {
+  config.projectSnapshotEnabled = enabled;
+  process.env.MOCODE_PROJECT_SNAPSHOT = enabled ? 'true' : 'false';
+}

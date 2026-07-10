@@ -8,7 +8,9 @@ import {
   updateMemoryConfig,
   isMemoryEnabled,
   isProjectSkillEnabled,
+  isProjectSnapshotEnabled,
   updateProjectSkillConfig,
+  updateSnapshotConfig,
   buildBasePrompt,
   getPlanModeSuffix,
 } from '../config/index.js';
@@ -114,6 +116,7 @@ const SLASH_COMMANDS: { name: string; desc: string }[] = [
   { name: '/memory', desc: '记忆库:条目计数与近期索引(关闭时提示先开 /memory_switch)' },
   { name: '/memory_switch', desc: '切换记忆子系统开关(无参=切换;/on 或 /off 显式;持久化 MEMORY_ENABLED)' },
   { name: '/project_skill', desc: '项目专属 Skill 开关 + 查看/初始化(无参=切换;/on·/off·/view·/init)' },
+  { name: '/snapshot', desc: '切换项目快照开关(无参=切换;/on·/off·/status;持久化 MOCODE_PROJECT_SNAPSHOT)' },
   { name: '/memory_status', desc: '查看记忆子系统当前开关与原理' },
   { name: '/reflect', desc: '手动触发后台记忆反思 pass(需先开启记忆)' },
   { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆(需先开启记忆)' },
@@ -277,6 +280,8 @@ function runningStateFor(
       return { status: '查记忆状态', placeholder: '…' };
     case '/project_skill':
       return { status: '项目 Skill', placeholder: '处理中…' };
+    case '/snapshot':
+      return { status: '切快照开关', placeholder: '切换中…' };
     default:
       // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由内联 spinner 承载(思考中/执行…),
       // 状态行只显走时——故常态 status 留空,不塞「处理」这种与内联重复的泛标签。
@@ -1975,6 +1980,120 @@ export async function startRepl(
         );
       } catch (e) {
         layout.contentWrite(`${ui.red}/project_skill 失败:${ui.reset} ${(e as Error).message}\n`);
+      }
+      continue;
+    }
+
+    if (
+      line === '/snapshot' ||
+      line.startsWith('/snapshot ')
+    ) {
+      // /snapshot — 项目快照总开关。无参切换 on/off;/on 或 /off 显式;/status 只读。
+      //
+      // 设计原则(与 /project_skill / /memory_switch 对齐):
+      //  - 单一来源 config.projectSnapshotEnabled(被 buildSnapshotSection() 现拼 +
+      //    read_file 工具每次 execute 现读);改完下一轮 chat 的 system prompt 即时反映。
+      //  - 持久化字段 MOCODE_PROJECT_SNAPSHOT,默认值 true(默认开启,启动 lazy build)。
+      //  - 关闭时:system prompt 不注入快照段,read_file 不查 cache 直接走真实 readFile。
+      //  - 开启时:若还没有 snapshot.json,主动 buildProjectSnapshot() 一次(仿 startRepl
+      //    655-658 的 lazy build 模式),否则 buildSnapshotSection() 会因 loadSnapshot=null
+      //    返空串,用户感知不到自己刚打开的开关已经生效。
+      try {
+        const arg = line.startsWith('/snapshot ')
+          ? line.slice('/snapshot '.length).trim().toLowerCase()
+          : '';
+
+        // /snapshot status — 只读查询
+        if (arg === 'status') {
+          const on = isProjectSnapshotEnabled();
+          layout.contentWrite(
+            `${ui.cyan}项目快照:${ui.reset} ${on ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`
+          );
+          layout.contentWrite(
+            `${ui.dim}  单一来源 config.projectSnapshotEnabled(${on ? 'true' : 'false'});` +
+              `持久化 ${ui.cyan}MOCODE_PROJECT_SNAPSHOT${ui.dim};` +
+              `配置文件 ${CONFIG_PATH}${ui.reset}\n`
+          );
+          layout.contentWrite(
+            `${ui.dim}  关闭时:buildBasePrompt() 不含「## Project Snapshot」段;` +
+              `read_file 工具直接走真实 readFile,不走 snapshot cache。${ui.reset}\n`
+          );
+          layout.contentWrite(
+            `${ui.dim}  切换后下次 chat 即时反映(本轮已发出的请求不会回滚)。${ui.reset}\n`
+          );
+          continue;
+        }
+
+        // /snapshot(无参=切换;有参=按值设)
+        let nextEnabled: boolean;
+        if (arg === '') {
+          nextEnabled = !isProjectSnapshotEnabled();
+        } else if (['on', 'true', '1', 'yes', 'y', 'enable', 'enabled'].includes(arg)) {
+          nextEnabled = true;
+        } else if (['off', 'false', '0', 'no', 'n', 'disable', 'disabled'].includes(arg)) {
+          nextEnabled = false;
+        } else {
+          layout.contentWrite(
+            `${ui.yellow}/snapshot 用法:${ui.reset}\n` +
+              `  /snapshot                  切换(开↔关)\n` +
+              `  /snapshot on|off           显式设值\n` +
+              `  /snapshot status           查看当前状态\n`
+          );
+          continue;
+        }
+
+        const prev = isProjectSnapshotEnabled();
+        if (nextEnabled === prev) {
+          layout.contentWrite(
+            `${ui.dim}(已是 ${nextEnabled ? '开启' : '关闭'},未变更 — 持久化字段未写入)${ui.reset}\n`
+          );
+          continue;
+        }
+
+        updateSnapshotConfig(nextEnabled);
+        updateConfigKey('MOCODE_PROJECT_SNAPSHOT', nextEnabled ? 'true' : 'false');
+
+        // 开启时主动 build 一次,避免 buildSnapshotSection 因 loadSnapshot=null 返空串。
+        let built: ReturnType<typeof buildProjectSnapshot> | null = null;
+        if (nextEnabled) {
+          try {
+            built = buildProjectSnapshot();
+          } catch (e) {
+            layout.contentWrite(
+              `${ui.yellow}⚠ 快照构建失败:${ui.reset} ${(e as Error).message} ` +
+                `${ui.dim}(开关已切换,系统提示词中的快照段将为空,稍后可用 /refresh_snapshot 重试)${ui.reset}\n`
+            );
+          }
+        }
+
+        // 刷新 history[0] 使 system prompt 立即反映新值(仿 /refresh_snapshot 1293-1296)。
+        history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
+
+        const note = nextEnabled
+          ? `${ui.green}已开启项目快照${ui.reset} — ` +
+              `system prompt 将在下次 chat 注入「## Project Snapshot」段;` +
+              `read_file 工具优先走 snapshot cache(mtime 校验失败时回退真实 readFile)。`
+          : `${ui.yellow}已关闭项目快照${ui.reset} — ` +
+              `system prompt 不再注入「## Project Snapshot」段;` +
+              `read_file 工具直接走真实 readFile,不再查 cache。`;
+
+        let extra = '';
+        if (nextEnabled && built) {
+          const fileCount = Object.keys(built.files).length;
+          const moduleCount = built.structure.modules.length;
+          extra = `${ui.dim}(已构建快照: ${fileCount} 个静态文件 · ${moduleCount} 个模块;` +
+            `如需刷新用 /refresh_snapshot)${ui.reset}\n`;
+        }
+
+        layout.contentWrite(`${note}\n${extra}`);
+        layout.contentWrite(
+          `${ui.dim}(写入 ${CONFIG_PATH}:MOCODE_PROJECT_SNAPSHOT=${nextEnabled ? 'true' : 'false'};` +
+            (process.env.MOCODE_PROJECT_SNAPSHOT
+              ? `${ui.dim}同 session shell 已 export MOCODE_PROJECT_SNAPSHOT,文件写入下次启动仍以 shell 值为准;取消 shell 设置后生效)${ui.reset}\n`
+              : `${ui.dim}下次启动仍生效)${ui.reset}\n`)
+        );
+      } catch (e) {
+        layout.contentWrite(`${ui.red}/snapshot 失败:${ui.reset} ${(e as Error).message}\n`);
       }
       continue;
     }
