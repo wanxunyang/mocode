@@ -42,6 +42,8 @@ function firstLineOf(ui: string | ContentPart[]): string {
  *  重构后改为累积到 BatchRenderer,onToolBatchEnd 时统一打摘要行;
  *  展开/折叠由 BatchRenderer + 鼠标 release 决定,本函数不再直接写屏。 */
 function writeToolHeader(tc: ToolCallRef): void {
+  // 改文件工具是 batch 屏障：先收尾之前的普通工具，确保 mutation 永远独占一批。
+  if (isMutationTool(tc.name)) flushToolBatch();
   if (!currentBatchId) currentBatchId = batch.beginBatch();
   batch.recordCall(currentBatchId, tc.name, summarizeToolCall(tc.name, tc.arguments));
   // 第一条工具开始时立即落摘要；后续调用加入同一 batch，并原地刷新计数。
@@ -75,14 +77,17 @@ function writeToolResult(
   }
   const preview = diff ? '' : summarizeToolResult(tc.name, output);
   batch.recordResult(currentBatchId, tc.name, preview, diff, output);
+  // mutation 结果（成功 diff 或错误输出）立即可见，并阻止后续普通工具并入这一批。
+  if (isMutationTool(tc.name)) flushToolBatch(true);
 }
 
 /** 将跨 LLM 工具轮次累计的调用写入内容区；正文开始或整个 turn 收尾时才切批。 */
-function flushToolBatch(): void {
+function flushToolBatch(expandSingleEntry = false): void {
   if (!currentBatchId) return;
   const id = currentBatchId;
   currentBatchId = null;
   batch.endBatch(id, layout);
+  if (expandSingleEntry) batch.expandSingleEntryFully(id, layout);
   // 摘要本身已有行尾；再补一行，保持工具与后续正文/状态摘要之间的原有间距。
   layout.contentWrite('\n');
 }

@@ -85,7 +85,7 @@ export function createBudgetScheduler(): BudgetScheduler {
       // 占位:push-time 三闸(cap / pruner / lifecycle)已自动跑;此接缝供将来演进。
     },
     async runStep(history, step) {
-      const report = evaluateBudget(history, config.contextWindowTokens, step);
+      const report = evaluateBudget(history, config.contextWindowTokens, step, contextState.correction);
       const actions = scheduleActions(report);
       let compactHistoryCalled = false;
 
@@ -155,7 +155,7 @@ export async function manualCompact(
     );
     return {
       step: -1,
-      report: evaluateBudget(history, config.contextWindowTokens, -1),
+      report: evaluateBudget(history, config.contextWindowTokens, -1, contextState.correction),
       actions: [{ kind: 'compact_history', focus }],
       compactHistoryCalled: true,
       ts: Date.now(),
@@ -170,7 +170,7 @@ export async function manualCompact(
     };
   }
 
-  const report = evaluateBudget(history, config.contextWindowTokens, -1);
+  const report = evaluateBudget(history, config.contextWindowTokens, -1, contextState.correction);
   let actions = scheduleActions(report);
   // 用户显式说「要压」:即使 report 不含 history 触发,仍追加 compact_history
   const hasCompact = actions.some(a => a.kind === 'compact_history');

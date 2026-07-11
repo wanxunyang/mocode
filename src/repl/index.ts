@@ -558,13 +558,14 @@ function textOf(c: unknown): string {
  * 回放默认全折叠;用户可鼠标点击摘要行展开(由 BatchRenderer 接管,见 ui/batch.ts)。
  */
 export function renderHistory(history: ChatMessage[]): void {
-  const idToName = new Map<string, string>();
-  // 当前累积的 batch(assistant.tool_calls + 后续 tool 消息);一旦遇到非 tool 消息即收尾出摘要
-  let pendingBatch: batch.BatchEntry[] = [];
+  const idToEntry = new Map<string, batch.BatchEntry>();
+  // 普通工具可跨 assistant 步聚合；mutation 各自占一个 group，并切断前后普通工具。
+  let pendingBatches: batch.BatchEntry[][] = [];
+  let normalBatch: batch.BatchEntry[] | null = null;
   const flushBatch = (): void => {
-    if (pendingBatch.length === 0) return;
-    batch.writeSummaryOnly(pendingBatch, layout);
-    pendingBatch = [];
+    for (const entries of pendingBatches) batch.writeSummaryOnly(entries, layout);
+    pendingBatches = [];
+    normalBatch = null;
   };
   for (let idx = 0; idx < history.length; idx++) {
     const m = history[idx];
@@ -609,13 +610,23 @@ export function renderHistory(history: ChatMessage[]): void {
         for (const tc of tcs) {
           const name = tc?.function?.name ?? '';
           const args = tc?.function?.arguments ?? '';
-          if (tc?.id && name) idToName.set(tc.id, name);
-          pendingBatch.push({
+          const entry: batch.BatchEntry = {
             name,
             callSummary: summarizeToolCall(name, args),
             resultSummary: '',
             diffBlock: null,
-          });
+          };
+          if (batch.isMutationToolName(name)) {
+            normalBatch = null;
+            pendingBatches.push([entry]);
+          } else {
+            if (!normalBatch) {
+              normalBatch = [];
+              pendingBatches.push(normalBatch);
+            }
+            normalBatch.push(entry);
+          }
+          if (tc?.id) idToEntry.set(tc.id, entry);
         }
         continue; // 跳过后续 tool 消息处理循环(由下一分支填 result)
       }
@@ -625,18 +636,10 @@ export function renderHistory(history: ChatMessage[]): void {
     }
     if (m.role === 'tool') {
       const id = (m as { tool_call_id?: string }).tool_call_id ?? '';
-      const name = idToName.get(id) ?? '';
+      const target = idToEntry.get(id);
+      const name = target?.name ?? '';
       const output = textOf((m as { content?: unknown }).content);
       const preview = summarizeToolResult(name, output);
-      // 匹配 pendingBatch 中尚未填 result 的同名 entry;同名前缀 tool 较罕见(并行工具同 id 不同名)
-      let target: batch.BatchEntry | undefined;
-      for (let i = pendingBatch.length - 1; i >= 0; i--) {
-        const e = pendingBatch[i];
-        if (e.name === name && !e.resultSummary) {
-          target = e;
-          break;
-        }
-      }
       if (target) {
         target.resultSummary = preview;
         target.fullOutput = output;
@@ -974,6 +977,7 @@ export async function startRepl(
     // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
     if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
     contextState.lastUsage = undefined;
+    contextState.correction = 1;
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
     renderHistory(history);
@@ -1106,6 +1110,7 @@ export async function startRepl(
       currentSessionId = undefined; // 下轮起新会话文件
       turnCount = 0; // 反思 cadence 重新计数
       contextState.lastUsage = undefined;
+      contextState.correction = 1;
       lastTurnUsage = undefined; // 清空旧轮的 token 累计
       pendingAttachments = []; // 一并清空待发图片
       layout.clearContent();

@@ -115,24 +115,28 @@ export interface LayerBudget {
 /** 一次评估的完整报告(供 agent/core.ts 决策)。 */
 export interface BudgetReport {
   step: number;
-  total: number; // 各区 actual 之和
+  total: number; // 各区 actual 之和(已经过 correction 校正)
   window: number;
   layers: Record<BudgetLayer, LayerBudget>;
   /** 实际超预算的层(按 overRatio 降序,排前面先处理)。 */
   triggers: BudgetLayer[];
-  /** 总占用超总阈(0.85*window)的兜底触发 — 单独字段,与 layers.triggers 分开。 */
+  /** 总占用超总阈(0.82*window)的兜底触发 — 单独字段,与 layers.triggers 分开。 */
   totalOver: boolean;
   /** Hot/Cold 边界:Cold 区 = [1, hotBoundary);Hot 区 = [hotBoundary, length)。
    * agent/core.ts 拿到后可对 Cold 区做就地 stub,Hot 区只 cap。 */
   hotBoundary: number;
+  /** 本次评估使用的校正系数(API 实测/估算;1 = 未校准)。 */
+  correction: number;
 }
 
 /** 评估当前 history 的五区预算(纯函数,改不动 history)。
- * 传入 step 是当前所在 step 编号(agent 循环 step 变量),用于日志/调试。 */
+ * 传入 step 是当前所在 step 编号(agent 循环 step 变量),用于日志/调试。
+ * correction:API 实测 / 估算的校正系数(默认 1);>1 表示粗估偏低,乘以系数后 actual 更接近真实值。 */
 export function evaluateBudget(
   history: ChatMessage[],
   window: number,
   step: number = 0,
+  correction: number = 1,
 ): BudgetReport {
   const layers: Record<BudgetLayer, LayerBudget> = {} as Record<BudgetLayer, LayerBudget>;
   for (const k of BUDGET_LAYERS) {
@@ -140,8 +144,11 @@ export function evaluateBudget(
     layers[k] = { actual: 0, budget, overBudget: false, overRatio: 0 };
   }
 
+  // 校正后的 token 数:raw * correction,最小 1(raw > 0 时)。
+  const adj = (raw: number): number => (raw > 0 ? Math.max(1, Math.round(raw * correction)) : 0);
+
   const sysMsg = history[0];
-  if (sysMsg) layers.system.actual = msgTokens(sysMsg);
+  if (sysMsg) layers.system.actual = adj(msgTokens(sysMsg));
 
   // Summary 检测:role:'system' 且不是 history[0] 的,视为摘要(compact.ts 摘要插 index 1)。
   // 简单启发:若 history[1]?.role === 'system' 且 content 含「# 会话摘要」特征串,计入 summary。
@@ -150,7 +157,7 @@ export function evaluateBudget(
   if (history.length > 1 && history[1].role === 'system') {
     const c1 = toText(history[1].content);
     if (c1.startsWith('# 会话摘要') || c1.includes('会话摘要')) {
-      layers.summary.actual = msgTokens(history[1]);
+      layers.summary.actual = adj(msgTokens(history[1]));
       summaryHit = true;
     }
   }
@@ -162,12 +169,12 @@ export function evaluateBudget(
     const m = history[i];
     if (i === 1 && summaryHit) continue; // summary 已单独算过
     if (m.role === 'tool') {
-      const t = msgTokens(m);
+      const t = adj(msgTokens(m));
       if (i >= hotStart) layers.toolRecent.actual += t;
       else layers.toolOld.actual += t;
     } else if (m.role !== 'system') {
       // user / assistant 全部计入 history(对话轨迹)
-      layers.history.actual += msgTokens(m);
+      layers.history.actual += adj(msgTokens(m));
     }
     // 其它 system(几乎不存在)跳过
   }
@@ -186,7 +193,8 @@ export function evaluateBudget(
   triggers.sort((a, b) => layers[b].overRatio - layers[a].overRatio);
 
   const total = BUDGET_LAYERS.reduce((s, k) => s + (k === 'reserve' ? 0 : layers[k].actual), 0);
-  const totalOver = total >= 0.85 * window;
+  // 安全裕量:用 0.82 而非 0.85,预留 3% 给 correction 波动与新消息增量。
+  const totalOver = total >= 0.82 * window;
 
   return {
     step,
@@ -196,6 +204,7 @@ export function evaluateBudget(
     triggers,
     totalOver,
     hotBoundary: hotStart,
+    correction,
   };
 }
 
@@ -223,17 +232,21 @@ export type ScheduleAction =
       focus?: string;
     };
 
-/** 根据 BudgetReport 生成调度动作(从轻到重,直至总占用回落到 0.85 以下)。
+/** 根据 BudgetReport 生成调度动作(从轻到重,直至总占用回落到阈值以下)。
  * 规则:
  *   - system 超 → warn(不压,配置问题不是内容问题)
  *   - toolOld 超 → 先 L1(中截超大)→ L2(same-path 已有 relevance)→ L3(age stub,新增)
  *   - toolRecent 超 → cap(只降低单条上限,不 stub)
  *   - history 超 或 totalOver → compact_history(调 maybeCompact / compactHistory)
- *   - summary 超 → 不动(摘要本身就压缩产物,删它等于丢历史,只能放任或扩 Recent 预算) */
+ *   - summary 超 → 不动(摘要本身就压缩产物,删它等于丢历史,只能放任或扩 Recent 预算)
+ *
+ * 安全裕量:headroom 按 0.80 * window - total * 1.05 计算(预留 5% 应对 correction 误差
+ * 与新消息增量),避免估算偏差导致被 API 硬截断。 */
 export function scheduleActions(report: BudgetReport): ScheduleAction[] {
   const actions: ScheduleAction[] = [];
   const { layers, totalOver, total } = report;
-  const headroom = 0.85 * report.window - total;
+  // 收紧:0.80 阈值(原 0.85)+ total * 1.05 放大(估算不确定性缓冲)
+  const headroom = 0.80 * report.window - total * 1.05;
 
   // system 超 → warn,不是 schedule 目标
   if (layers.system.overBudget) {
@@ -260,8 +273,8 @@ export function scheduleActions(report: BudgetReport): ScheduleAction[] {
     actions.push({ kind: 'cap_hot_tools', aggressive: layers.toolRecent.overRatio > 0.5 });
   }
 
-  // History / total 超 → 摘要(最贵);headroom < -2K 真正触发,让 cold tools 先动
-  if ((layers.history.overBudget || totalOver) && headroom < -2000) {
+  // History / total 超 → 摘要(最贵);headroom < -1500 真正触发(原 -2000,裕量收紧后同步调低),让 cold tools 先动
+  if ((layers.history.overBudget || totalOver) && headroom < -1500) {
     actions.push({ kind: 'compact_history' });
   }
 

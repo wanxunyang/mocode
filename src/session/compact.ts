@@ -61,13 +61,18 @@ export interface CompactResult {
 }
 
 /** 跨模块共享的上下文状态:agent 写 lastUsage,compact 写 lastEstimate,repl 的 /context 读。
- *  scheduler.ts 写最近一次调度日志(可选,repl 可读不到时 no-op)。 */
+ *  scheduler.ts 写最近一次调度日志(可选,repl 可读不到时 no-op)。
+ *  correction:API 实测 token / 估算 token 的校正系数(1.0 = 无偏差;>1 = 低估;<1 = 高估)。
+ *  由 agent/core.ts 在每次 chat 响应后更新;compact/repl 在 usage 失效时同步重置。 */
 export const contextState: {
   lastUsage?: ChatUsage;
   lastEstimate: number;
+  /** API 实测 / 估算 的校正系数,默认 1(未校准时等价于原估算)。 */
+  correction: number;
   schedulerLog?: import('./scheduler.js').SchedulerRunLog;
 } = {
   lastEstimate: 0,
+  correction: 1,
 };
 
 /** 中截:text 太长时保 head + 标记 + tail,总长 ≤ max。 */
@@ -396,6 +401,7 @@ export async function compactHistory(
       const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
       contextState.lastEstimate = estimateAfter;
       contextState.lastUsage = undefined;
+      contextState.correction = 1;
       layout.contentWrite(
         `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}强制压缩(focus on early history)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
       );
@@ -487,6 +493,7 @@ export async function compactHistory(
     const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
     contextState.lastEstimate = estimateAfter;
     contextState.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用估算
+    contextState.correction = 1;
     layout.contentWrite(
       `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
     );
@@ -509,6 +516,7 @@ export async function compactHistory(
   const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
   contextState.lastEstimate = estimateAfter;
   contextState.lastUsage = undefined; // 结构虽未变,但 token 数已变,旧 usage 失效
+  contextState.correction = 1;
   if (microcompactDone) {
     layout.contentWrite(
       `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`

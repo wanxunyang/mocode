@@ -9,6 +9,8 @@ import { readFileSync } from 'node:fs';
 import type OpenAI from 'openai';
 import {
   chat,
+  estimateMessagesTokens,
+  estimateToolSchemaTokens,
   planChatTools,
   type ChatMessage,
   type ChatResult,
@@ -379,6 +381,16 @@ export async function runAgentCore(
       }
       contextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
       addUsage(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
+      // 校正系数:API 实测 prompt_tokens / 估算 token。
+      // 每次 chat 响应后刷新,让下次 evaluateBudget 用更接近真实的 actual。
+      // 钳位 [0.5, 2.0]:防单次异常值(极短回复 / 空 history)导致系数跳变。
+      if (result.usage?.promptTokens && result.usage.promptTokens > 100) {
+        const estimated = estimateMessagesTokens(history) + estimateToolSchemaTokens();
+        if (estimated > 100) {
+          const raw = result.usage.promptTokens / estimated;
+          contextState.correction = Math.max(0.5, Math.min(2.0, raw));
+        }
+      }
       hooks.onChatDone?.(); // 主 agent:spinner.stop()
       // lastUsage 已更新:触发状态行 context 用量条重算+重画,运行中不再冻结在轮首。
       onContextUpdate?.();

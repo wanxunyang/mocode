@@ -50,6 +50,10 @@ const expandedBatches = new Set<string>();
 /** 展开时完整输出的最大行数;超出截断,避免巨型输出撑爆 viewport。 */
 const MAX_EXPAND_LINES = 200;
 
+export function isMutationToolName(name: string): boolean {
+  return name === 'write_file' || name === 'edit_file';
+}
+
 /** 通知 buffer 整体清空(clearContent / exitAltScreen / 新一轮 turn)——本模块状态同步归零。 */
 export function reset(): void {
   batches.clear();
@@ -258,6 +262,23 @@ function expand(
   }
 }
 
+/** mutation 独占 batch 收尾后立即展示其调用概要和 diff。 */
+export function expandSingleEntryFully(
+  id: string,
+  layout: { contentInsertAfter(after: number, lines: string[]): void },
+): void {
+  const b = batches.get(id);
+  if (!b || b.entries.length !== 1 || expandedBatches.has(id)) return;
+  const lines = [
+    ...buildExpandedLines(b.entries),
+    ...buildEntryDetailLines(b.entries[0]),
+  ];
+  layout.contentInsertAfter(b.summaryAbsIdx, lines);
+  expandedBatches.add(id);
+  b.expandedEntries.add(0);
+  absLineToEntry.set(b.summaryAbsIdx + 1, { batchId: id, entryIndex: 0 });
+}
+
 function collapse(
   b: BatchRecord,
   layout: {
@@ -361,6 +382,9 @@ export function writeSummaryOnly(
   if (!b) return;
   b.entries = entries;
   endBatch(id, layout);
+  if (entries.length === 1 && isMutationToolName(entries[0].name)) {
+    expandSingleEntryFully(id, layout);
+  }
 }
 
 let _idCounter = 0;
