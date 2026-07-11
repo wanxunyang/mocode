@@ -12,6 +12,7 @@ import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
 import * as layout from '../ui/layout.js';
 import { pruneAfterCompaction } from '../rollback/index.js';
+import { toText } from '../context/utils.js';
 
 /**
  * 上下文压缩子系统(参考 Claude Code 的 auto-compact):
@@ -153,17 +154,7 @@ export function capToolResultForHistory(name: string, output: string): string {
   return truncateMid(output, MAX_HISTORY_RESULT);
 }
 
-// ── 内部:消息内容拍平 / group 划分 ──────────────────────────────────────
-
-function toText(content: unknown): string {
-  if (content == null) return '';
-  if (typeof content === 'string') return content;
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return String(content);
-  }
-}
+// ── 内部:group 划分(toText 已移至 context/utils.ts 统一维护) ────────────
 
 /**
  * 把多模态 content 拍平成纯文本(供摘要 transcript 用):text parts 拼接;image_url parts

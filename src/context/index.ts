@@ -29,7 +29,6 @@ export {
   formatReport,
   quickEstimate,
   userTurnBoundary,
-  lastUserIndex,
   BUDGET_LAYERS,
   BUDGET_RATIO,
   HOT_TURN_WINDOW,

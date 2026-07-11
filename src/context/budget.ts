@@ -27,6 +27,7 @@
 
 import type { ChatMessage } from '../llm/index.js';
 import { estimateMessagesTokens, estimateTokens } from '../llm/index.js';
+import { lastUserIndex, toText } from './utils.js';
 
 /** 五区分账(占比对齐 CONTEXT_WINDOW)。顺序固定,便于遍历。 */
 export const BUDGET_LAYERS = [
@@ -60,17 +61,6 @@ export const HOT_TURN_WINDOW = 4;
  * 默认 2 = 跨过 2 个消费者 push 仍未被消费,等同 lifecycle 的 DEFAULT_AGE_THRESHOLD。 */
 export const TOOL_OLD_AGE = 2;
 
-/** 把每条 token 拍平成字符串(只估 token,不深解析工具调用)。 */
-function toText(content: unknown): string {
-  if (content == null) return '';
-  if (typeof content === 'string') return content;
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return String(content);
-  }
-}
-
 function msgTokens(m: ChatMessage): number {
   const c = (m as { content?: unknown }).content;
   const tcs = (m as { tool_calls?: { function?: { arguments?: string } }[] }).tool_calls;
@@ -78,14 +68,6 @@ function msgTokens(m: ChatMessage): number {
   if (tcs) for (const tc of tcs) extra += tc?.function?.arguments ?? '';
   // 与 llm.estimateTokens 同公式(CJK 1/字,ASCII 1/4字);保证调度器评估与系统估算口径一致。
   return 4 + estimateTokens(extra);
-}
-
-/** 从 history 末尾向前找最后一个 user 消息的索引;无 user 返 -1。 */
-export function lastUserIndex(history: ChatMessage[]): number {
-  for (let i = history.length - 1; i >= 1; i--) {
-    if (history[i].role === 'user') return i;
-  }
-  return -1;
 }
 
 /** 从 idx 处向前数第 N 个 user turn 的边界 index(含该 user 之后的内容)。

@@ -17,44 +17,7 @@ import {
   estimateTokens,
 } from '../llm/index.js';
 import type { DropContextFilter, DropContextResult } from '../tools/types.js';
-
-/** 把消息 content 拍平成字符串(OpenAI 可能 string / null / 多模态数组)。 */
-function toText(content: unknown): string {
-  if (content == null) return '';
-  if (typeof content === 'string') return content;
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return String(content);
-  }
-}
-
-/**
- * 从 history 末尾向前找最后一个 user 消息的索引;无 user 返 -1。
- * 用于划定"当前轮保护区"——该 user 及其之后的消息一律不剔除。
- */
-function lastUserIndex(history: ChatMessage[]): number {
-  for (let i = history.length - 1; i >= 1; i--) {
-    if (history[i].role === 'user') return i;
-  }
-  return -1;
-}
-
-/** 取 tool 消息对应的工具名(从紧邻的前导 assistant.tool_calls 按 tool_call_id 配对找)。 */
-function toolNameOf(history: ChatMessage[], idx: number): string | null {
-  const tcId = (history[idx] as { tool_call_id?: string }).tool_call_id;
-  if (!tcId) return null;
-  for (let j = idx - 1; j >= 1; j--) {
-    const m = history[j];
-    if (m.role !== 'assistant') continue;
-    const tcs = (m as { tool_calls?: { id?: string; function?: { name?: string } }[] })
-      .tool_calls;
-    if (!tcs) continue;
-    const hit = tcs.find((tc) => tc?.id === tcId);
-    if (hit) return hit.function?.name ?? null;
-  }
-  return null;
-}
+import { lastUserIndex, toText, toolNameOf } from '../context/utils.js';
 
 /**
  * 剔除历史里命中的旧 tool 结果(原地修改 history)。

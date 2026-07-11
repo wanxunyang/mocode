@@ -28,6 +28,7 @@
 // 开关:`config.contextLifecycle`(默认 true;MOCODE_LIFECYCLE=false 回退)。
 
 import type { ChatMessage } from '../llm/index.js';
+import { extractPath, lastUserIndex, toText, toolNameOf } from './utils.js';
 
 type AnyMessage = ChatMessage & { content?: unknown; tool_call_id?: string };
 
@@ -57,54 +58,6 @@ const STUB_PREFIX_NO_CONSUMER = '⌦[无消费者:观察结果已无引用价值
  *  ≥ 这个值且仍为 LIVE 且非观察类 → 视为 OBSOLETE → STUB。
  *  默认 2:等价于「跨过两个消费者 push 仍无人引用」= 跨过整轮最末尾的工具调用。 */
 const DEFAULT_AGE_THRESHOLD = 2;
-
-/** 复用 drop.ts 的取 path 思路,但本层要支持更多字段名(read_file/edit_file/write_file 都有 path;
- *  edit_file 还可能有 file_path,但这里只看 path,保持单一)。 */
-function extractPath(argsRaw: string | undefined): string | null {
-  if (!argsRaw) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(argsRaw);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== 'object') return null;
-  const p = (parsed as Record<string, unknown>).path;
-  return typeof p === 'string' && p ? p : null;
-}
-
-/** 从 tool 消息往前找匹配的 assistant.tool_calls 拿 tool 名。找不到返 null(保守跳过)。 */
-function toolNameOf(history: ChatMessage[], idx: number): string | null {
-  const tcId = (history[idx] as { tool_call_id?: string }).tool_call_id;
-  if (!tcId) return null;
-  for (let j = idx - 1; j >= 1; j--) {
-    const m = history[j];
-    if (m.role !== 'assistant') continue;
-    const tcs = (m as { tool_calls?: { id?: string; function?: { name?: string } }[] }).tool_calls;
-    if (!tcs) continue;
-    const hit = tcs.find((tc) => tc?.id === tcId);
-    if (hit) return hit.function?.name ?? null;
-  }
-  return null;
-}
-
-/** 找最后一个 user 消息索引;无 user 返 -1。 */
-function lastUserIndex(history: ChatMessage[]): number {
-  for (let i = history.length - 1; i >= 1; i--) {
-    if (history[i].role === 'user') return i;
-  }
-  return -1;
-}
-
-function toText(content: unknown): string {
-  if (content == null) return '';
-  if (typeof content === 'string') return content;
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return String(content);
-  }
-}
 
 /** 从 tool 结果的 content 中提取「生产者命中过的 path 列表」。
  *  - read_file:没有 path 列表(本身就是单 path 消费者,无需再追生产者)。

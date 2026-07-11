@@ -24,6 +24,7 @@
 // 零行为变化兜底:开关 `config.contextRelprune` 关闭时,pipeline 路径完全不调本模块。
 
 import type { ChatMessage } from '../llm/index.js';
+import { extractPath, lastUserIndex, toText, toolNameOf } from './utils.js';
 
 /** 仅依赖一个最小 chat-message 形状接口,避免反向 import llm 全量。 */
 type AnyMessage = ChatMessage & { content?: unknown; tool_call_id?: string };
@@ -31,60 +32,6 @@ type AnyMessage = ChatMessage & { content?: unknown; tool_call_id?: string };
 /** stub 标记前缀(供幂等判定)。drop_context 用的是「⌦[已剔除:与当前任务无关]」,
  *  本层用「⌦[已过时:同 path 已有新 read / 已被 mutation 覆写]」,区分两类剔除来源。 */
 const STUB_PREFIX = '⌦[已过时:同 path 已有新 read / 已被 mutation 覆写]';
-
-/** 解析工具 arguments(只关心 path);非法返 null。 */
-function extractPath(argsRaw: string | undefined): string | null {
-  if (!argsRaw) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(argsRaw);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== 'object') return null;
-  const p = (parsed as Record<string, unknown>).path;
-  if (typeof p !== 'string' || !p) return null;
-  return p;
-}
-
-/** 从 history 末尾向前找最后一个 user 消息的索引;无 user 返 -1。
- *  复用 drop.ts 的思路:user 及其之后的 tool 结果视为当前轮保护区。
- *  在本层里,read_file tool 消息若落在 user 之后,本轮还在用,不能 stub。
- *  注:history[0] 是 system,user 不会落在 0;若 user 就在末尾(即 0 user 之后),
- *  protectedFrom=0 时整段历史都不可 stub(实际不会发生:pushToolResult 必在 user 之后)。 */
-function lastUserIndex(history: ChatMessage[]): number {
-  for (let i = history.length - 1; i >= 1; i--) {
-    if (history[i].role === 'user') return i;
-  }
-  return -1;
-}
-
-/** 取 tool 消息对应的工具名(从紧邻的前导 assistant.tool_calls 按 tool_call_id 配对找)。
- *  返回 null 表示找不到(孤儿 tool,极少见),本层保守不动。 */
-function toolNameOf(history: ChatMessage[], idx: number): string | null {
-  const tcId = (history[idx] as { tool_call_id?: string }).tool_call_id;
-  if (!tcId) return null;
-  for (let j = idx - 1; j >= 1; j--) {
-    const m = history[j];
-    if (m.role !== 'assistant') continue;
-    const tcs = (m as { tool_calls?: { id?: string; function?: { name?: string } }[] }).tool_calls;
-    if (!tcs) continue;
-    const hit = tcs.find((tc) => tc?.id === tcId);
-    if (hit) return hit.function?.name ?? null;
-  }
-  return null;
-}
-
-/** 把 content 拍平成字符串(对齐 drop.ts)。 */
-function toText(content: unknown): string {
-  if (content == null) return '';
-  if (typeof content === 'string') return content;
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return String(content);
-  }
-}
 
 /**
  * 维护「path → 该 path 所有 read_file tool 消息的 history index」映射。

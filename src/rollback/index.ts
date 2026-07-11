@@ -9,6 +9,7 @@ import path from 'node:path';
 import { config } from '../config/index.js';
 import { truncateDisplay } from '../ui/render.js';
 import type { ChatMessage } from '../llm/index.js';
+import { toText } from '../context/utils.js';
 
 /**
  * 回滚子系统:`/rollback` 菜单(↑/↓)选轮次 → 选中第 X 轮 = 删该轮及之后 + 预填该轮 user 输入(仿 Claude Code
@@ -61,17 +62,6 @@ let turns: Turn[] = [];
 let snapshots: Snapshot[] = [];
 
 const MUTATION_TOOLS = new Set(['write_file', 'edit_file']);
-
-/** 把任意 content 拍平成字符串(OpenAI 可能是 string / 多模态数组)。 */
-function toText(content: unknown): string {
-  if (content == null) return '';
-  if (typeof content === 'string') return content;
-  try {
-    return JSON.stringify(content);
-  } catch {
-    return String(content);
-  }
-}
 
 /** 规整成 cwd 相对路径(快照存相对,跨 /resume 同项目可识别;resolve 已归一 ./ 和 ..)。 */
 function toRel(p: string): string {
