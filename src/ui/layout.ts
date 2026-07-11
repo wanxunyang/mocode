@@ -684,6 +684,25 @@ export function totalRows(): number {
   return content.totalRows();
 }
 
+/** 正文→mutation 首摘要前，把尾部间距强制归一为一条视觉空行。 */
+export function normalizeMutationBoundary(): void {
+  if (!active || !ui.isTTY) return;
+  if (mdActive) commitMd();
+  const totalBefore = content.totalRows();
+  content.normalizeTrailingBlankRows(1);
+  const g = getGeo();
+  const delta = content.totalRows() - totalBefore;
+  if (scrollOffset > 0 && delta !== 0) {
+    scrollOffset = Math.max(
+      0,
+      Math.min(scrollOffset + delta, Math.max(0, content.totalRows() - g.contentBottom)),
+    );
+  }
+  contentRow = Math.min(content.committedRows() + 1, g.contentBottom);
+  contentCol = 1;
+  if (scrollOffset === 0) repaintViewport();
+}
+
 /** 原地刷新一条内容行（行数不变），用于运行中的工具 batch 更新计数。 */
 export function contentReplaceLine(absIdx: number, line: string): void {
   if (!active) return;

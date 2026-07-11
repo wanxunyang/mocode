@@ -135,6 +135,7 @@ export async function runAgent(
   // 不能按普通字符串的“两个换行才有一个空行”来计算。
   let textBoundaryNewlines = 0;
   let hasPendingTextBoundary = false;
+  let toolBatchFollowsText = false;
 
   const hooks: AgentHooks = {
     onText: (s) => {
@@ -160,6 +161,7 @@ export async function runAgent(
       // 文本/思考已流完,模型转而生成 tool_call 参数(可能很长,如 write_file 整篇内容):
       // 补换行(让随后的 ● 行与 diff 不黏在正文末尾)+ 启「生成中」内联 spinner,内容区不再干等。
       if (hasPendingTextBoundary) {
+        toolBatchFollowsText = true;
         if (textBoundaryNewlines < 1) {
           layout.contentWrite('\n');
         }
@@ -178,7 +180,15 @@ export async function runAgent(
         if (hasPendingTextBoundary) textBoundaryNewlines = 1;
       }
     },
-    onToolHeader: (tc) => writeToolHeader(tc),
+    onToolHeader: (tc) => {
+      // mutation 的自动展开会把 current/committed 空行状态互相转换；在首摘要真正
+      // 落屏前按视觉行归一，避免同样的文本→edit 边界偶发 1 行或 2 行。
+      if (toolBatchFollowsText && isMutationTool(tc.name)) {
+        layout.normalizeMutationBoundary();
+      }
+      toolBatchFollowsText = false;
+      writeToolHeader(tc);
+    },
     onToolStart: (name) => spinner.start(`执行 ${name}`),
     onToolDone: () => spinner.stop(),
     onToolResult: (tc, output, parsed, preWriteOld, editStartLine) =>

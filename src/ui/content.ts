@@ -149,6 +149,22 @@ export function committedRows(): number {
   return rows.length;
 }
 
+/** 把缓冲尾部的视觉空白行归一化为恰好 count 条，并结束在“无当前行”状态。
+ * 供 markdown→mutation 边界使用；ANSI reset/颜色码和空格均按视觉空白处理。 */
+export function normalizeTrailingBlankRows(count: number): void {
+  if (hasCurrent) {
+    rows.push(rowStartSgr + curRaw + '\x1B[0m');
+  }
+  const isBlank = (line: string): boolean =>
+    line.replace(/\x1b\[[0-9;]*m/g, '').trim().length === 0;
+  while (rows.length > 0 && isBlank(rows[rows.length - 1])) rows.pop();
+  for (let i = 0; i < Math.max(0, count); i++) rows.push('\x1B[0m');
+  curSgr = '';
+  rowStartSgr = '';
+  curRaw = '';
+  hasCurrent = false;
+}
+
 /** 取绝对行索引(0-based,含当前行)的原始自洽行;越界返 null。供鼠标选区文本提取。 */
 export function lineAt(abs: number): string | null {
   const all = snapshot();
