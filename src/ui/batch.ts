@@ -33,11 +33,8 @@ interface BatchRecord {
   id: string;
   summaryAbsIdx: number; // 摘要行在 content buffer 中的绝对索引
   entries: BatchEntry[];
-  /**
-   * 强制展开:batch 含 write_file/edit_file 时为 true(用户改盘动作必须看到 diff,不能折叠)。
-   * true 时收尾自动展开详情行,toggleBatch 拒绝折叠(写盘操作保留可视)。
-   */
-  forceExpanded: boolean;
+  /** 第二层中已展开完整输出的 entry 下标。 */
+  expandedEntries: Set<number>;
 }
 
 const batches = new Map<string, BatchRecord>();
@@ -45,16 +42,10 @@ const batches = new Map<string, BatchRecord>();
  *  buffer 行数变化时本表可能漂移——但只在 insertAfter/deleteFrom 后由本模块同步更新,
  *  并保持 buffer 当前状态对应。 */
 const absLineToBatchId = new Map<number, string>();
-/** 已展开的 batch id;默认空(全折叠);layout.mouse release 点击摘要行时切。
- *  含 mutation 的 batch 不在此 set——它们走 forceExpanded 永远展开,与 toggle 隔离。 */
+/** 第一层展开后，工具概要行的绝对索引 → 对应 entry。 */
+const absLineToEntry = new Map<number, { batchId: string; entryIndex: number }>();
+/** 已展开第一层工具列表的 batch id。 */
 const expandedBatches = new Set<string>();
-
-/** mutation 工具名集合(写盘操作);与 src/agent/core.ts 的 isMutationTool 同步,本模块独立持有
- *  避免 ui → agent 反向依赖。 */
-const MUTATION_TOOLS = new Set(['write_file', 'edit_file']);
-function isMutationTool(name: string): boolean {
-  return MUTATION_TOOLS.has(name);
-}
 
 /** 展开时完整输出的最大行数;超出截断,避免巨型输出撑爆 viewport。 */
 const MAX_EXPAND_LINES = 200;
@@ -63,13 +54,14 @@ const MAX_EXPAND_LINES = 200;
 export function reset(): void {
   batches.clear();
   absLineToBatchId.clear();
+  absLineToEntry.clear();
   expandedBatches.clear();
 }
 
 /** 新建一个 batch(在 agent 拿到第一条 onToolHeader 时调)。返回 id。 */
 export function beginBatch(): string {
   const id = `b${++_idCounter}`;
-  batches.set(id, { id, summaryAbsIdx: -1, entries: [], forceExpanded: false });
+  batches.set(id, { id, summaryAbsIdx: -1, entries: [], expandedEntries: new Set() });
   return id;
 }
 
@@ -118,7 +110,9 @@ function buildSummaryLine(entries: BatchEntry[]): string {
   }
   if (entries.length === 1) {
     const e = entries[0];
-    return `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}`;
+    // 实时摘要必须稳定保持单行；完整参数放在第一层工具概要中，避免长 JSON 自动折行后
+    // 原地刷新只能覆盖最后一条物理行、残留旧摘要前半段。
+    return `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.dim}Ran 1 tool · ${e.name} 1${ui.reset}`;
   }
   // N>1:同类合并 "read_file 3, glob 1, grep 1"
   const counts = new Map<string, number>();
@@ -133,13 +127,9 @@ function buildSummaryLine(entries: BatchEntry[]): string {
 /** 把 batch 的详情行展开成自洽行数组(供 layout.contentInsertAfter 走 mid-buffer 插入)。
  *  每行末尾必须以 \x1B[0m 收尾(SGR 自洽模型),行内允许含 SGR(行末 reset 不影响行内样式),
  *  但**绝不**带 \n——rows[] 是行数组,不是流输出。 */
-function buildExpandedLines(entries: BatchEntry[], indent = '    '): string[] {
+function buildEntryDetailLines(e: BatchEntry, indent = '      '): string[] {
   const lines: string[] = [];
-  for (const e of entries) {
-    lines.push(
-      `${indent}${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}\x1B[0m`,
-    );
-    if (e.diffBlock) {
+  if (e.diffBlock) {
       // diff 块多行文本(由 renderFileChange 渲染);按 \n 拆成物理行,
       // 每行单独入 rows[]。行末 reset 由本函数统一追加(若原行已带 reset,终端合并即可)。
       const block = e.diffBlock.endsWith('\n') ? e.diffBlock : e.diffBlock + '\n';
@@ -148,7 +138,7 @@ function buildExpandedLines(entries: BatchEntry[], indent = '    '): string[] {
         if (line === '' && lines.length > 0) continue; // 跳过首尾空行(diff 头/尾换行)
         lines.push(line.endsWith('\x1B[0m') ? line : line + '\x1B[0m');
       }
-    } else if (e.fullOutput) {
+  } else if (e.fullOutput) {
       // 完整工具输出(纯文本):按行展开,每行缩进 + dim 样式;长输出截断到 MAX_EXPAND_LINES 行
       const rawLines = e.fullOutput.split('\n');
       const truncated = rawLines.length > MAX_EXPAND_LINES;
@@ -159,11 +149,18 @@ function buildExpandedLines(entries: BatchEntry[], indent = '    '): string[] {
       if (truncated) {
         lines.push(`${indent}${ui.dim}… (${rawLines.length - MAX_EXPAND_LINES} more lines)${ui.reset}\x1B[0m`);
       }
-    } else if (e.resultSummary) {
-      lines.push(`${indent}${ui.gray}↳ ${e.resultSummary}${ui.reset}\x1B[0m`);
-    }
+  } else if (e.resultSummary) {
+    lines.push(`${indent}${ui.gray}↳ ${e.resultSummary}${ui.reset}\x1B[0m`);
   }
   return lines;
+}
+
+/** 第一层只展示有哪些调用及其简短结果，不展开完整输出。 */
+function buildExpandedLines(entries: BatchEntry[], indent = '    '): string[] {
+  return entries.map((e) => {
+    const result = e.resultSummary ? `  ${ui.gray}↳ ${e.resultSummary}${ui.reset}` : '';
+    return `${indent}${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}\x1B[0m`;
+  });
 }
 
 /** 在 batch 收尾时(onToolBatchEnd):写摘要行 + 登记 summaryAbsIdx;若已展开(回放场景)立即插详情。 */
@@ -171,23 +168,17 @@ export function endBatch(
   id: string,
   layout: {
     contentWrite(s: string): void;
+    contentReplaceLine?(absIdx: number, line: string): void;
     contentInsertAfter(after: number, lines: string[]): void;
     totalRows(): number;
   },
 ): void {
   const b = batches.get(id);
-  if (!b || b.summaryAbsIdx >= 0) return; // 幂等
-  // 含 mutation(write_file/edit_file)时强制展开——写盘操作必须让用户看到 diff
-  b.forceExpanded = b.entries.some((e) => isMutationTool(e.name));
-  // 单条 mutation 调用:摘要行("● edit_file path")与展开详情头逐字重复,跳过摘要行、只写详情
-  // (N>1 时摘要行是聚合信息 "Ran N tools · ...",与详情不重复,两者照常都写)。
-  if (b.forceExpanded && b.entries.length === 1) {
-    // 无摘要行可当父行,详情头改用顶层 2 空格缩进(与 buildSummaryLine/diff head 对齐,而非嵌套的 4 空格)
-    const lines = buildExpandedLines(b.entries, '  ');
-    layout.contentWrite(lines.join('\n') + '\n');
-    b.summaryAbsIdx = Math.max(0, layout.totalRows() - 1 - lines.length);
+  if (!b) return;
+  if (b.summaryAbsIdx >= 0) {
+    layout.contentReplaceLine?.(b.summaryAbsIdx, buildSummaryLine(b.entries));
+    // 执行阶段只展示实时摘要；到 endBatch 才开放点击，避免未完成 batch 的第一层列表失步。
     absLineToBatchId.set(b.summaryAbsIdx, b.id);
-    expandedBatches.add(b.id); // 已展开;防止 toggleBatch 再次 expand() 造成重复插入
     return;
   }
   const summary = buildSummaryLine(b.entries);
@@ -196,9 +187,27 @@ export function endBatch(
   // 摘要行绝对索引 = totalRows - 2(hasCurrent 那行是新空行)
   b.summaryAbsIdx = Math.max(0, layout.totalRows() - 2);
   absLineToBatchId.set(b.summaryAbsIdx, b.id);
-  // forceExpanded 时立刻展开(让 diff 在收尾后立即可见,无需点击)
-  if (b.forceExpanded) {
-    expand(b, layout);
+}
+
+/**
+ * 工具执行中立即显示/刷新摘要，但暂不登记点击命中；endBatch 收尾后才开放两层展开。
+ */
+export function showLiveBatch(
+  id: string,
+  layout: {
+    contentWrite(s: string): void;
+    contentReplaceLine(absIdx: number, line: string): void;
+    totalRows(): number;
+  },
+): void {
+  const b = batches.get(id);
+  if (!b) return;
+  const summary = buildSummaryLine(b.entries);
+  if (b.summaryAbsIdx < 0) {
+    layout.contentWrite(summary + '\n');
+    b.summaryAbsIdx = Math.max(0, layout.totalRows() - 2);
+  } else {
+    layout.contentReplaceLine(b.summaryAbsIdx, summary);
   }
 }
 
@@ -218,7 +227,6 @@ export function isExpanded(id: string): boolean {
  * 展开:把详情行插入摘要行下方(mid-buffer insert)。
  * 同步更新 absLineToBatchId 中所有受影响的索引:
  *   - 删除/插入点之后的 batch 摘要行索引相应平移。
- * 含 mutation(write_file/edit_file)的 batch 强制展开——不允许折叠(写盘操作必须始终可见)。
  */
 export function toggleBatch(
   id: string,
@@ -229,11 +237,6 @@ export function toggleBatch(
 ): void {
   const b = batches.get(id);
   if (!b) return;
-  if (b.forceExpanded) {
-    // 写盘操作的 batch 强制展开,toggle 拒绝折叠(用户能看到完整 diff 即用)
-    if (!expandedBatches.has(id)) expand(b, layout);
-    return;
-  }
   if (expandedBatches.has(id)) {
     collapse(b, layout);
   } else {
@@ -250,6 +253,9 @@ function expand(
   const lines = buildExpandedLines(b.entries);
   layout.contentInsertAfter(b.summaryAbsIdx, lines);
   expandedBatches.add(b.id);
+  for (let i = 0; i < b.entries.length; i++) {
+    absLineToEntry.set(b.summaryAbsIdx + 1 + i, { batchId: b.id, entryIndex: i });
+  }
 }
 
 function collapse(
@@ -258,9 +264,46 @@ function collapse(
     contentDeleteFrom(startIdx: number, n: number): void;
   },
 ): void {
-  const lines = buildExpandedLines(b.entries);
-  layout.contentDeleteFrom(b.summaryAbsIdx + 1, lines.length);
+  let lineCount = b.entries.length;
+  for (const i of b.expandedEntries) lineCount += buildEntryDetailLines(b.entries[i]).length;
+  layout.contentDeleteFrom(b.summaryAbsIdx + 1, lineCount);
   expandedBatches.delete(b.id);
+  b.expandedEntries.clear();
+  for (const [idx, target] of absLineToEntry) {
+    if (target.batchId === b.id) absLineToEntry.delete(idx);
+  }
+}
+
+/** 绝对行索引 → 第一层中的具体工具调用。 */
+export function findEntryByAbsLine(absLine: number): { batchId: string; entryIndex: number } | null {
+  return absLineToEntry.get(absLine) ?? null;
+}
+
+/** 第二层：只展开/折叠某一个工具的完整输出。 */
+export function toggleEntry(
+  batchId: string,
+  entryIndex: number,
+  layout: {
+    contentInsertAfter(after: number, lines: string[]): void;
+    contentDeleteFrom(startIdx: number, n: number): void;
+  },
+): void {
+  const b = batches.get(batchId);
+  if (!b || !expandedBatches.has(batchId)) return;
+  let headerIdx = -1;
+  for (const [idx, target] of absLineToEntry) {
+    if (target.batchId === batchId && target.entryIndex === entryIndex) headerIdx = idx;
+  }
+  if (headerIdx < 0) return;
+  const details = buildEntryDetailLines(b.entries[entryIndex]);
+  if (details.length === 0) return;
+  if (b.expandedEntries.has(entryIndex)) {
+    layout.contentDeleteFrom(headerIdx + 1, details.length);
+    b.expandedEntries.delete(entryIndex);
+  } else {
+    layout.contentInsertAfter(headerIdx, details);
+    b.expandedEntries.add(entryIndex);
+  }
 }
 
 /**
@@ -282,6 +325,19 @@ export function shiftBatchesAfter(absIdx: number, delta: number): void {
   }
   absLineToBatchId.clear();
   for (const [k, v] of next) absLineToBatchId.set(k, v);
+  const nextEntries = new Map<number, { batchId: string; entryIndex: number }>();
+  // expand() 先插入整组概要行、再登记其命中位置；layout 随后的异步 shift 通知不应把
+  // 这批“刚插入”的概要行再次平移。插入单个工具详情时 absIdx 不是 summary，仍正常平移。
+  const insertedOverviewBatch = delta > 0
+    ? [...batches.values()].find((b) => b.summaryAbsIdx === absIdx && expandedBatches.has(b.id))?.id
+    : undefined;
+  for (const [idx, target] of absLineToEntry) {
+    const isNewOverviewLine = target.batchId === insertedOverviewBatch;
+    const newIdx = idx > absIdx && !isNewOverviewLine ? idx + delta : idx;
+    if (newIdx >= 0) nextEntries.set(newIdx, target);
+  }
+  absLineToEntry.clear();
+  for (const [k, v] of nextEntries) absLineToEntry.set(k, v);
   // 同步每个 batch 的 summaryAbsIdx
   for (const b of batches.values()) {
     if (b.summaryAbsIdx > absIdx) b.summaryAbsIdx = Math.max(0, b.summaryAbsIdx + delta);
@@ -300,22 +356,11 @@ export function writeSummaryOnly(
     totalRows(): number;
   },
 ): void {
-  const hasMutation = entries.some((e) => isMutationTool(e.name));
-  // 单条 mutation:同 endBatch,摘要行与展开详情头重复,跳过摘要行只写详情
-  if (hasMutation && entries.length === 1) {
-    const lines = buildExpandedLines(entries, '  ');
-    layout.contentWrite(lines.join('\n') + '\n');
-    return;
-  }
-  layout.contentWrite(buildSummaryLine(entries) + '\n');
-  if (hasMutation) {
-    // 回放时同步展开:重新调 expand 路径需要 BatchRecord,此处直接拼 line 插入
-    const summaryIdx = Math.max(0, layout.totalRows() - 2);
-    const lines = buildExpandedLines(entries);
-    layout.contentInsertAfter(summaryIdx, lines);
-    // 不入 batches/absLineToBatchId/expandedBatches——回放行不支持点击 toggle(设计取舍:
-    // 简化模型;若需要支持回放也可展开/折叠,可在 alt-screen 启动时建一张临时映射)
-  }
+  const id = beginBatch();
+  const b = batches.get(id);
+  if (!b) return;
+  b.entries = entries;
+  endBatch(id, layout);
 }
 
 let _idCounter = 0;

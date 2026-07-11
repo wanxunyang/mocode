@@ -681,6 +681,13 @@ export function totalRows(): number {
   return content.totalRows();
 }
 
+/** 原地刷新一条内容行（行数不变），用于运行中的工具 batch 更新计数。 */
+export function contentReplaceLine(absIdx: number, line: string): void {
+  if (!active) return;
+  content.replaceLine(absIdx, line);
+  repaintViewport();
+}
+
 /** 清空内容区时通知 batch 渲染器重置(摘要行映射与展开态)。 */
 export function notifyContentReset(): void {
   // 动态 import 避免循环;模块级 reset() 只清映射,不动 batch 内部数据(id 与 entries 仍可重用)
@@ -1236,6 +1243,17 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     void (async (): Promise<void> => {
       try {
         const m = await import('./batch.js');
+        const entry = m.findEntryByAbsLine(absClick);
+        if (entry) {
+          m.toggleEntry(entry.batchId, entry.entryIndex, {
+            contentInsertAfter: (after, lines) => contentInsertAfter(after, lines),
+            contentDeleteFrom: (start, n) => contentDeleteFrom(start, n),
+          });
+          selection = null;
+          repaintViewport();
+          repaint();
+          return;
+        }
         const id = m.findBatchByAbsLine(absClick);
         if (id) {
           m.toggleBatch(id, {

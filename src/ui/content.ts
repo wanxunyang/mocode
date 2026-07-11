@@ -155,6 +155,12 @@ export function lineAt(abs: number): string | null {
   return abs >= 0 && abs < all.length ? all[abs] : null;
 }
 
+/** 等长替换一条已提交物理行，供运行中的工具 batch 原地刷新摘要。 */
+export function replaceLine(abs: number, line: string): void {
+  if (abs < 0 || abs >= rows.length) return;
+  rows[abs] = line.endsWith('\x1B[0m') ? line : line + '\x1B[0m';
+}
+
 /**
  * 找「绝对行索引 < absStart 的最近一条用户消息」的文本(用于滚动回看时的「我刚发的
  * 请求」sticky banner)。算法:从 absStart - 1 往上扫,识别「用户气泡行」(由 repl

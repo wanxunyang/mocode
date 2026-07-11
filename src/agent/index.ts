@@ -44,6 +44,8 @@ function firstLineOf(ui: string | ContentPart[]): string {
 function writeToolHeader(tc: ToolCallRef): void {
   if (!currentBatchId) currentBatchId = batch.beginBatch();
   batch.recordCall(currentBatchId, tc.name, summarizeToolCall(tc.name, tc.arguments));
+  // 第一条工具开始时立即落摘要；后续调用加入同一 batch，并原地刷新计数。
+  batch.showLiveBatch(currentBatchId, layout);
 }
 
 /** 渲染工具结果:mutation 成功走 diff 块(行号 + 语法高亮,仿 Claude Code);其余走一行 preview。
@@ -73,6 +75,16 @@ function writeToolResult(
   }
   const preview = diff ? '' : summarizeToolResult(tc.name, output);
   batch.recordResult(currentBatchId, tc.name, preview, diff, output);
+}
+
+/** 将跨 LLM 工具轮次累计的调用写入内容区；正文开始或整个 turn 收尾时才切批。 */
+function flushToolBatch(): void {
+  if (!currentBatchId) return;
+  const id = currentBatchId;
+  currentBatchId = null;
+  batch.endBatch(id, layout);
+  // 摘要本身已有行尾；再补一行，保持工具与后续正文/状态摘要之间的原有间距。
+  layout.contentWrite('\n');
 }
 
 /**
@@ -114,6 +126,10 @@ export async function runAgent(
 
   const hooks: AgentHooks = {
     onText: (s) => {
+      // 纯空白 chunk 在视觉上不是正文：既不切 batch，也不写入 markdown 缓冲。
+      // 部分兼容后端会在连续工具轮次间流出 " " / "\n"，若据此切批会漏掉首个工具。
+      if (currentBatchId && s.trim().length === 0) return;
+      if (s) flushToolBatch();
       spinner.stop(); // 任何正文 token 都停 spinner(首 token 停「思考中」;onToolCall 重启后若又来文本则停「生成中」)。未旋转时 stop 为 no-op。
       layout.contentWriteMd(s); // 正文走 markdown 渲染(代码块高亮 / 标题 / 列表 / 行内 …),见 ui/markdown.ts
       if (s) lastChar = s[s.length - 1];
@@ -141,28 +157,26 @@ export async function runAgent(
     onToolResult: (tc, output, parsed, preWriteOld, editStartLine) =>
       writeToolResult(tc, output, parsed, preWriteOld, editStartLine),
     onToolBatchEnd: () => {
-      // 收尾:把累积的 batch 渲染成单行摘要(批内 N 个 tool 调用共用一行,
-      // 鼠标点击该行可展开完整明细——见 ui/batch.ts)。无 batch(模型未调工具)则补空行保持间距。
-      if (currentBatchId) {
-        const id = currentBatchId;
-        currentBatchId = null;
-        batch.endBatch(id, layout);
-      }
-      layout.contentWrite('\n');
+      // 一次工具轮次结束不再切 UI batch；下一轮若仍无正文，继续复用 currentBatchId。
     },
-    onNoReply: () =>
-      layout.contentWrite(`${ui.dim}(无回复)${ui.reset}\n`),
-    onMaxSteps: () =>
+    onNoReply: () => {
+      flushToolBatch();
+      layout.contentWrite(`${ui.dim}(无回复)${ui.reset}\n`);
+    },
+    onMaxSteps: () => {
+      flushToolBatch();
       layout.contentWrite(
         `  ${ui.yellow}●${ui.reset} ${ui.yellow}达到最大步数(${config.maxSteps}),本轮停止。${ui.reset}\n`
-      ),
+      );
+    },
     onAbort: () => {
       spinner.stop();
       if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
+      flushToolBatch();
       layout.contentWrite(`${ui.dim}(已中断)${ui.reset}\n`);
-      currentBatchId = null; // 丢弃未收尾 batch
     },
     onDone: (elapsedMs, usage) => {
+      flushToolBatch();
       const tok = formatTurnTokens(usage);
       layout.contentWrite(
         `  ${ui.dim}✻ Worked for ${fmtElapsed(elapsedMs)}${tok}${ui.reset}\n`
