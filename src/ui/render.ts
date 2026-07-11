@@ -46,7 +46,7 @@ export function displayWidth(str: string): number {
 }
 
 /**
- * 毫秒 → Claude Code 式耗时串:运行中状态行走时与轮次结束摘要行共用。
+ * 毫秒 → 耗时串:运行中状态行走时与轮次结束摘要行共用。
  * <10s 显 1 位小数(3.2s);10-59s 整数(12s);≥60s m+s(3m 3s);≥1h h+m(1h 2m)。
  */
 export function fmtElapsed(ms: number): string {

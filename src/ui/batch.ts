@@ -1,5 +1,5 @@
 /**
- * 工具调用批量折叠渲染(仿 Claude Code):
+ * 工具调用批量折叠渲染:
  *   agent 一轮返回 N 个 tool_calls 时,不逐个打印 `● name ↳ result`,
  *   改输出一行摘要 `● Ran N tools · read 3, grep 1, glob 1`;
  *   鼠标点击该摘要行 → 展开完整明细(● 头 + ↳ preview / diff 块),再点折回。
@@ -107,7 +107,7 @@ export function recordResult(
 
 // ── 摘要行文本生成 ──
 
-/** 把 entry 列表压缩成一行摘要(Claude Code 风格)。 */
+/** 把 entry 列表压缩成一行摘要。 */
 function buildSummaryLine(entries: BatchEntry[]): string {
   if (entries.length === 0) {
     return `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.dim}No tools${ui.reset}`;

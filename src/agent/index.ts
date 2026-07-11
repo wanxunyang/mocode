@@ -50,7 +50,7 @@ function writeToolHeader(tc: ToolCallRef): void {
   batch.showLiveBatch(currentBatchId, layout);
 }
 
-/** 渲染工具结果:mutation 成功走 diff 块(行号 + 语法高亮,仿 Claude Code);其余走一行 preview。
+/** 渲染工具结果:mutation 成功走 diff 块(行号 + 语法高亮);其余走一行 preview。
  *  同 writeToolHeader,改为累积到 BatchRenderer(只缓存字符串,不写屏)。 */
 function writeToolResult(
   tc: ToolCallRef,

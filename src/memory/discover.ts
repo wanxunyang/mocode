@@ -1,8 +1,7 @@
 // memory 发现子系统:加载项目记忆 MOCODE.md(对标 skills/discover.ts 的叶子模式)。
 // 仅依赖 node 标准库,是叶子模块:不依赖 config/agent/llm/tools/skills,避免环。
 //
-// 约定:纯 MOCODE.md(不读 CLAUDE.md——mocode 是独立工具,接非 Claude 后端,
-// 有自己的工具集与约定,叫 CLAUDE.md 名不副实且可能读到 Claude 专属内容)。
+// 约定:纯 MOCODE.md(mocode 是独立工具,有自己的工具集与约定)。
 // 项目级从 cwd 向上逐级找,全局 ~/.mocode/MOCODE.md。全量注入 systemPrompt(超长截断);
 
 import { existsSync, readFileSync } from 'node:fs';

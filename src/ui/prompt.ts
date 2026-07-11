@@ -443,7 +443,7 @@ export async function promptWithSlashMenu(
     redraw();
   }
 
-  /** Ctrl+C:有内容(已打字 / 多行 / chip / 菜单草稿 / 粘贴缓冲 / 粘贴中)则清空,再按一次(空)才退出(仿 fish / Claude Code)。 */
+  /** Ctrl+C:有内容(已打字 / 多行 / chip / 菜单草稿 / 粘贴缓冲 / 粘贴中)则清空,再按一次(空)才退出(仿 fish)。 */
   function onCtrlC(): void {
     const hasContent =
       chip != null ||

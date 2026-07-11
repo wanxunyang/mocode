@@ -1,6 +1,6 @@
 // Context Optimization Pipeline 的类型契约。
 //
-// 设计原则(见 CLAUDE.md context/ 子系统):
+// 设计原则:
 //  - Tool Calling 的 JSON schema 与 executeTool 不动;本层只接管"工具结果进 LLM 前"的表示。
 //  - 不设计统一 DSL,针对不同数据类型各做最优 encoder。
 //  - 所有 encoder 是纯函数(无 LLM 调用 / 无 IO / 无副作用),永不抛错(pipeline 层 try/catch,

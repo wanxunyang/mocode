@@ -21,7 +21,7 @@ import { copyToClipboard, readClipboard } from './clipboard.js';
 import { renderMarkdown } from './markdown.js';
 
 /**
- * 全屏 TUI 布局(参考 Claude Code):alt screen + 单滚动区域(内容区)+ 区域外固定底栏(状态行 + 输入框)。
+ * 全屏 TUI 布局:alt screen + 单滚动区域(内容区)+ 区域外固定底栏(状态行 + 输入框)。
  *
  * 只依赖最成熟、Windows(WT / conhost)最稳的 ANSI 子集:
  *  - alt screen        \x1B[?1049h / \x1B[?1049l
@@ -116,7 +116,7 @@ let sigwinchHandler: (() => void) | null = null;
 let mdActive = false;
 let mdBuf = '';
 
-// ── 鼠标选区(应用层框选复制,仿 Claude Code)──
+// ── 鼠标选区(应用层框选复制)──
 // 选区以「绝对缓冲行索引 + 显示列」存(不用屏坐标)——滚动/追加新内容后 abs 索引仍稳定指向同段文字,
 // 故拖过多屏、触边自动翻页也能连续扩展。松开时从 content 缓冲抠纯文本(去 ANSI)写剪贴板。
 interface Selection {
@@ -156,7 +156,7 @@ let cursorChangeHandler: ((line: number, col: number) => void) | null = null;
 const esc = {
   altOn: '\x1B[?1049h',
   altOff: '\x1B[?1049l',
-  // 完整鼠标追踪(仿 Claude Code 全屏渲染):1000=按键(按下/释放)+ 1002=拖动 motion + 1006=SGR 编码。
+  // 完整鼠标追踪:1000=按键(按下/释放)+ 1002=拖动 motion + 1006=SGR 编码。
   // 拿到按下/拖动/释放的坐标后,由 layout 在应用层维护选区(mouse.ts 重组报表 → handleMouseEvent):
   //  - 左键:内容区按下开选区、拖动扩展(触边自动翻页跨屏)、释放只留高亮,不自动复制;输入框不响应
   //    (不干扰正常打字/焦点)。
@@ -1262,7 +1262,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
   }
   if (!selection) return;
   if (!selection.dragged) {
-    // 内容区纯点击(未拖动):若落在工具 batch 摘要行上 → 切换展开/折叠(仿 Claude Code);
+    // 内容区纯点击(未拖动):若落在工具 batch 摘要行上 → 切换展开/折叠;
     // 否则原行为:清选区。batch 反查通过 content lineAt + dynamic import(避免 layout↔batch 循环依赖)。
     const absClick = selection.anchorLine; // 起止同行同列,取任一;未拖动时 line = anchor = end
     void (async (): Promise<void> => {

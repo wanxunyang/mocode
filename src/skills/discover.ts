@@ -1,4 +1,4 @@
-// skills 发现子系统(对标 Claude Code 的 skill 自动发现)。
+// skills 发现子系统。
 // 仅依赖 node 标准库,是叶子模块:不依赖 config/agent/llm/tools,避免环。
 //
 // 约定:每个 skill 是一个目录 <skill-name>/SKILL.md,顶部 YAML frontmatter

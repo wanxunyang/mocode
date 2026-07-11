@@ -4,7 +4,7 @@
 
 **状态**:已落地(v1 基础加载 + 全量注入;相关性筛选留 TODO)。
 
-**命名**:纯 MOCODE.md(不读 CLAUDE.md——mocode 是独立工具,接非 Claude 后端,有自己的工具集与约定,叫 CLAUDE.md 名不副实且可能读到 Claude 专属内容)。
+**命名**:纯 MOCODE.md(mocode 是独立工具,有自己的工具集与约定)。
 
 **查找顺序**(远→近,合并时近的在后更突出):
 - 全局:`~/.mocode/MOCODE.md`

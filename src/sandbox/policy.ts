@@ -4,7 +4,7 @@ import { jailResolve, jailGlobPattern } from './jail.js';
 
 /**
  * 豁免 cwd 牢笼的工具:
- *  - memory_*:操作 ~/.mocode 与 <cwd>/.mocode(CLAUDE.md 明确不进回滚、在外圈),本就该在外圈
+ *  - memory_*:操作 ~/.mocode 与 <cwd>/.mocode,本就该在外圈
  *  - use_skill:读 ~/.claude/skills、~/.mocode/skills、<cwd>/.mocode/skills,部分在外圈
  *  - web_*:跨网络,非文件路径
  *  - ask_human / switch_mode:无文件路径

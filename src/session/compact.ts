@@ -15,7 +15,7 @@ import { pruneAfterCompaction } from '../rollback/index.js';
 import { toText } from '../context/utils.js';
 
 /**
- * 上下文压缩子系统(参考 Claude Code 的 auto-compact):
+ * 上下文压缩子系统:
  *  三层 —— ① push-time 单条上限(见 capToolResultForHistory,在 agent push 时调用)
  *          ② 微压缩:旧工具结果原地截短(保 tool_call_id,无 LLM 调用)
  *          ③ 摘要:旧的非工具消息由一次 chat() 压成一条 role:'system' 摘要(index 1)

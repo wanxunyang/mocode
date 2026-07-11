@@ -601,7 +601,7 @@ export async function runAgentCore(
     done = true;
     return { completed: true, finalText: null, usage: turnUsage };
   } finally {
-    // 跑完(正常 / 达上限)在回复末尾打耗时摘要行(仿 Claude Code);中断 done=false 不打。
+    // 跑完(正常 / 达上限)在回复末尾打耗时摘要行;中断 done=false 不打。
     if (done) {
       hooks.onDone?.(Date.now() - t0, turnUsage);
     }

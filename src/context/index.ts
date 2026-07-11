@@ -4,8 +4,6 @@
 // 单一入口 runScheduler(agent/core.ts 步前调)接管"何时调用哪一闸"的调度。
 // 不调 LLM、不碰 Tool Calling schema / executeTool / tool_call_id 配对 / TUI 渲染
 // (叶子级:仅 stdlib + tools/constants + session/compact 的 capToolResultForHistory 兜底 + config 开关)。
-//
-// 见 CLAUDE.md「Context Optimization Pipeline」节 +「Context Budget Scheduler」节。
 
 export { optimizeToolResult } from './pipeline.js';
 export type {

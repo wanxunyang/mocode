@@ -3,7 +3,7 @@ import { ui, type ColorKey } from './theme.js';
 import { charWidth, displayWidth } from './render.js';
 
 /**
- * 文件改动 diff 渲染(仿 Claude Code):
+ * 文件改动 diff 渲染:
  *   Update(path) / Create(path) + Added N lines, removed M lines
  *   正文带文件行号 + `-` 红 / `+` 绿 gutter + 代码经 cli-highlight 语法高亮。
  *

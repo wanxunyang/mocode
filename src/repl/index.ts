@@ -170,8 +170,7 @@ function maskKey(k: string): string {
 }
 
 /**
- * /init 指令:发给 agent 扫描项目并生成 MOCODE.md(对标 Claude Code /init 生成 CLAUDE.md,
- * 但 mocode 读 MOCODE.md)。已存在则让 agent 读后更新(不丢失事实)。写完供 memory 子系统下轮加载。
+ * /init 指令:发给 agent 扫描项目并生成 MOCODE.md。已存在则让 agent 读后更新(不丢失事实)。写完供 memory 子系统下轮加载。
  */
 const INIT_PROMPT = `分析当前项目(process.cwd()),生成 MOCODE.md 项目记忆文件,供 mocode 后续会话自动加载——目标是让后续会话无需重新摸索就能上手。
 
@@ -427,7 +426,7 @@ function stopRunningListener(): void {
  * 把用户消息格式化为带满宽背景色的文本(上滑时易辨认用户消息)。
  * 每行用 padEndDisplay 填充到终端宽度(含 ❯ / 缩进),背景色 SGR 包裹整行 + 行末 reset。
  * 满宽 pad 使终端背景色覆盖整行(含行尾空单元格),上滑滚动时用户消息呈连续色块、与 assistant 正文区分。
- * 末尾多留一空行(\n\n 收尾):用户消息与后续(agent 流式输出 / 下条消息)之间空一行,仿 Claude Code。
+ * 末尾多留一空行(\n\n 收尾):用户消息与后续(agent 流式输出 / 下条消息)之间空一行。
  */
 function formatUserMessage(lines: string[]): string {
   const cols = layout.getGeo().cols;
@@ -545,7 +544,7 @@ function textOf(c: unknown): string {
 }
 
 /**
- * 把会话历史渲染成静态文本进内容区(回滚 / 续接 / --resume 后复显上下文,仿 Claude Code):
+ * 把会话历史渲染成静态文本进内容区(回滚 / 续接 / --resume 后复显上下文):
  * user→❯ 回显、assistant→正文(+ tool_calls 折叠成 ● 摘要行)、tool→↳ 结果预览;system 跳过。
  * 思考段不持久(history 只存正文),故无思考折叠。渲染后续写位在末尾,紧接 enterInputMode 画输入框。
  * 内容长于屏时 viewport 显尾(最近轮次),PgUp 可看更早——与流式态一致。
@@ -723,7 +722,7 @@ export async function startRepl(
   });
 
   // 开场:按 config.theme 切主题(横幅 / 状态行 / 后续渲染皆用新色),再进 alt screen + 状态基线 + 清内容区。
-  // --resume 有历史则渲染对话(仿 Claude Code),否则横幅。
+  // --resume 有历史则渲染对话,否则横幅。
   setTheme(config.theme);
   layout.enterAltScreen();
   refreshStatusBase(history);
@@ -797,7 +796,7 @@ export async function startRepl(
 
   /**
    * 回滚子流程(由 /rollback 触发):菜单(↑/↓)选轮次 → 选中第 X 轮 = 删第 X 轮及之后 + 预填第 X 轮 user 输入
-   * (仿 Claude Code rewind,Enter 重新跑该轮);被删轮次的文件改动走二选一菜单(promptRevertChoice:
+   * (Enter 重新跑该轮);被删轮次的文件改动走二选一菜单(promptRevertChoice:
    * 撤销文件 / 只撤销消息)。选轮 + 方式菜单均走 raw mode。预填经 pendingPrefill 注入下轮 INPUT。
    */
   const rollbackFlow = async (): Promise<void> => {

@@ -5,7 +5,7 @@
 // 整段(text 可能停在未闭合 ``` fence 中段,状态机扫到 EOF 仍 inFence 时把已累积代码行
 // 当「进行中代码块」照常 emit,边生成边显)。
 //
-// 样式:代码块 Flat(Claude Code 风)——语言标签 dim 置顶 + 2 空格 gutter + cli-highlight
+// 样式:代码块 Flat——语言标签 dim 置顶 + 2 空格 gutter + cli-highlight
 // 语法高亮 + 软折行,无边框。其余:标题/列表(嵌套)/行内代码/粗体/斜体/删除线/链接/引用块/分隔线。
 //
 // 硬约束:每行 ansiDisplayWidth ≤ cols(layout.repaintViewport 直出行,超宽会让终端 auto-wrap

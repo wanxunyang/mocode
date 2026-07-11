@@ -12,8 +12,7 @@ import type { ChatMessage } from '../llm/index.js';
 import { toText } from '../context/utils.js';
 
 /**
- * 回滚子系统:`/rollback` 菜单(↑/↓)选轮次 → 选中第 X 轮 = 删该轮及之后 + 预填该轮 user 输入(仿 Claude Code
- * rewind,Enter 重新跑);撤销被删轮次的文件改动(逐个「保留/撤销」询问)。
+ * 回滚子系统:`/rollback` 菜单(↑/↓)选轮次 → 选中第 X 轮 = 删该轮及之后 + 预填该轮 user 输入(Enter 重新跑);撤销被删轮次的文件改动(逐个「保留/撤销」询问)。
  *
  * 语义:选中下标 picked(0-based,= 第 picked+1 轮)→ `planRollback(picked)` 保 1..picked(删 picked+1 轮及之后),
  * 预填 userTexts[picked](= 第 picked+1 轮 user 输入)。**不是**保 1..picked+1——选中第 X 轮即"从第 X 轮重跑"。

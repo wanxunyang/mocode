@@ -9,7 +9,7 @@ import { Spinner } from './spinner.js';
 
 /**
  * 介入面板:agent 执行中遇到需要用户决策的岔路时,弹问题 + 选项让用户选择(ask_human 工具调用)。
- * 仿 Claude Code 的 ask / AskUserQuestion:用户可挑预设选项,也可选"自定义输入"自由作答。
+ * 用户可挑预设选项,也可选"自定义输入"自由作答。
  *
  * 渲染复用 promptTurnPicker 的模式(layout.paintInput:菜单向上展开进内容区底、提示/输入放底栏),
  * 不碰固定边框、不用 DECSC/DECRC、逐行 \x1B[2K 擦除(符合 TUI 不变量)。
