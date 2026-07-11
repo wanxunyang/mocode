@@ -54,7 +54,7 @@ export interface StatusBarData {
   cwd: string;
   status: string; // '空闲' | '思考中' | '执行 read_file' …
   spinnerFrame?: string; // 可选 spinner 帧(运行态)
-  modeTag?: string; // 模式标识:repl 传 'auto' / 'plan'(两段式布局左段显示)
+  modeTag?: string; // 模式标识:repl 传 'Auto' / 'Plan'(两段式布局左段显示)
   /** 活跃 plan 短摘要(无 plan=undefined,空串=有 plan 但 chip 不显)。repl 透传 getActivePlanSummary()。 */
   planSummary?: string;
   /** 本轮最后一条 token 用量(modeTag chip 右边显示)。后端不开 include_usage 时 undefined。
@@ -1383,11 +1383,11 @@ function composeModelLine(status: StatusBarData, cols: number): string {
   const ctxW = ansiDisplayWidth(ctx);
   // 左段:模式标识 + 切换提示(灰)+ 本轮 token chip。token chip 仅展示总量,用 mid 灰,不抢主色。
   const modeTag = status.modeTag ?? '';
-  const modeColor = modeTag === 'plan' ? ui.yellow : ui.accent;
+  const modeColor = modeTag === 'Plan' ? ui.yellow : ui.accent;
   const modePart = modeTag ? `${modeColor}${modeTag}${ui.reset}` : '';
   const modeW = modeTag ? displayWidth(modeTag) : 0;
   // 切换提示:告诉用户怎么切模式。灰(dim)降优先级,不与 modeTag 抢色;只在有 modeTag 时出现。
-  const HINT = 'Shift+Tab 切换模式';
+  const HINT = 'Shift+Tab 切换';
   const hintW = modeTag ? displayWidth(HINT) : 0;
   const hintPart = modeTag ? `${ui.dim}${HINT}${ui.reset}` : '';
   const tokChip = formatTurnTokenChip(status.lastTurnUsage);

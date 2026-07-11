@@ -247,7 +247,7 @@ function refreshStatusBase(history: ChatMessage[], lastTurnUsage?: ChatUsage): v
     model: config.model,
     contextBar: renderContextBarInline(history),
     cwd: process.cwd(),
-    modeTag: getAgentMode() === 'plan' ? 'plan' : 'auto',
+    modeTag: getAgentMode() === 'plan' ? 'Plan' : 'Auto',
     planSummary: hasActivePlan() ? getActivePlanSummary(process.stdout.columns ?? 80) : '',
     lastTurnUsage,
   });
