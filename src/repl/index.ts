@@ -981,7 +981,8 @@ export async function startRepl(
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
     renderHistory(history);
-    layout.contentWrite(`${ui.dim}(已续接会话 ${loaded.id})${ui.reset}\n`);
+    // 末尾 \n\n:与后续用户消息(❯ bubble)之间空一行,仿 Claude Code 的 bubble 间距。
+    layout.contentWrite(`${ui.dim}(已续接会话 ${loaded.id})${ui.reset}\n\n`);
   }
 
   while (true) {
