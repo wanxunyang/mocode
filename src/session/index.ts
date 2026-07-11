@@ -10,8 +10,9 @@ export {
   capToolResultForHistory,
   truncateMid,
   contextState,
+  createContextState,
 } from './compact.js';
-export type { CompactOptions, CompactResult } from './compact.js';
+export type { CompactOptions, CompactResult, ContextState } from './compact.js';
 
 // ── Context Budget Scheduler 接缝 ────────────────────────────────────────
 // agent/core.ts 步前调 runScheduler(history, step):评估五区预算 → 按 ROI 调度

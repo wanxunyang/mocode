@@ -88,8 +88,10 @@ function flushToolBatch(expandSingleEntry = false): void {
   currentBatchId = null;
   batch.endBatch(id, layout);
   if (expandSingleEntry) batch.expandSingleEntryFully(id, layout);
-  // 摘要本身已有行尾；再补一行，保持工具与后续正文/状态摘要之间的原有间距。
-  layout.contentWrite('\n');
+  // 普通摘要只有一个“当前空行”，再 break 一次把它提交为分隔空行。
+  // mutation 自动展开时 content.insertAfter 已先把该当前空行提交到 rows；若这里仍补 \n，
+  // diff 后就会固定出现两条空白行。
+  if (!expandSingleEntry) layout.contentWrite('\n');
 }
 
 /**

@@ -40,7 +40,7 @@ import {
 } from '../context/budget.js';
 import type { ChatMessage } from '../llm/index.js';
 import { config } from '../config/index.js';
-import { maybeCompact, contextState } from './compact.js';
+import { maybeCompact, contextState, type ContextState } from './compact.js';
 import * as layout from '../ui/layout.js';
 import { ui } from '../ui/theme.js';
 
@@ -78,14 +78,14 @@ export interface CompactHistoryDetail {
 /** 创建 runAgentCore 闭包持有的 scheduler(每次 agent 启动一个新实例)。
  *  observePush 当前只是占位:真正 L1/L2/L3 已由 cap / pruner / lifecycle 在 push 时跑;
  *  保留接口为后续「调度器注入 hotBoundary 给 lifecycle」演进留接缝。 */
-export function createBudgetScheduler(): BudgetScheduler {
+export function createBudgetScheduler(state: ContextState = contextState): BudgetScheduler {
   const obs: BudgetScheduler = {
     lastRunLog: null,
     observePush(_history, _idx) {
       // 占位:push-time 三闸(cap / pruner / lifecycle)已自动跑;此接缝供将来演进。
     },
     async runStep(history, step) {
-      const report = evaluateBudget(history, config.contextWindowTokens, step, contextState.correction);
+      const report = evaluateBudget(history, config.contextWindowTokens, step, state.correction);
       const actions = scheduleActions(report);
       let compactHistoryCalled = false;
 
@@ -97,7 +97,7 @@ export function createBudgetScheduler(): BudgetScheduler {
           );
         } else if (a.kind === 'compact_history') {
           // 路由到 maybeCompact(history, report)——按 ROI 调度(只有 history 超 / totalOver 才真压)
-          await maybeCompact(history, report);
+          await maybeCompact(history, report, undefined, state);
           compactHistoryCalled = true;
         }
         // shrink_cold_tools L1/L2/L3 与 cap_hot_tools:已由 push-time 闸在每次 push 自动跑
@@ -114,15 +114,19 @@ export function createBudgetScheduler(): BudgetScheduler {
       };
       obs.lastRunLog = log;
       // 暴露给 /context 共享读(repl / context 命令)
-      contextState.schedulerLog = log;
+      state.schedulerLog = log;
     },
   };
   return obs;
 }
 
 /** 便捷:agent/core.ts 不需要每次 createBudgetScheduler,直接 runScheduler(history, step)。 */
-export async function runScheduler(history: ChatMessage[], step: number): Promise<void> {
-  const s = createBudgetScheduler();
+export async function runScheduler(
+  history: ChatMessage[],
+  step: number,
+  state: ContextState = contextState,
+): Promise<void> {
+  const s = createBudgetScheduler(state);
   await s.runStep(history, step);
 }
 

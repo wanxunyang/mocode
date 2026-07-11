@@ -22,6 +22,7 @@ import { checkPermission } from '../permissions/index.js';
 import { getPlanDisabledTools } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import { maybeCompact, runScheduler, contextState, dropContextFromHistory } from '../session/index.js';
+import type { ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
 import { optimizeToolResult } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
@@ -214,6 +215,8 @@ export interface AgentRunOptions {
   /** 跳过回滚快照记录(子 agent 逻辑隔离用)。true = 本 agent 的 write_file/edit_file 改动
    *  不进主回滚链,主 /rollback 不撤销。透传给 executeTool。 */
   skipRollback?: boolean;
+  /** 本 agent 独享的上下文统计状态；缺省为主 agent 全局 contextState。 */
+  contextState?: ContextState;
 }
 
 /** OpenAI content array 的子集(text + image_url);repl 构造 user 多模态消息用。 */
@@ -250,6 +253,7 @@ export async function runAgentCore(
   opts: AgentRunOptions,
 ): Promise<AgentRunResult> {
   const { history, userInput, signal, onContextUpdate, hooks, skipRollback } = opts;
+  const runtimeContextState = opts.contextState ?? contextState;
   const maxSteps = opts.maxSteps ?? config.maxSteps;
   // 中断回滚快照:入口(本 turn push 任何消息前)整段浅拷贝。abort 时 length=0;push(...saved) 还原。
   // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
@@ -299,7 +303,7 @@ export async function runAgentCore(
   // 预算调度器:每个 runAgentCore 实例一个,步前 evaluateBudget + scheduleActions。
   // 决策按 ROI 分发(cold tools 优先 / history 摘要最后);contextBudget 开关关闭时为 null。
   const scheduler: BudgetScheduler | null = config.contextBudget !== false
-    ? createBudgetScheduler() // 在 step 循环之外实例化一次,跨步持有 lastRunLog
+    ? createBudgetScheduler(runtimeContextState) // 在 step 循环之外实例化一次,跨步持有 lastRunLog
     : null;
   // 本轮流式状态:首个正文 token 到达即停 spinner(思考期间 spinner 持续转「思考中…」,不写思考内容)。
   let mode: 'idle' | 'text' = 'idle';
@@ -348,7 +352,7 @@ export async function runAgentCore(
       if (scheduler) {
         await scheduler.runStep(history, step);
       } else {
-        await maybeCompact(history);
+        await maybeCompact(history, undefined, undefined, runtimeContextState);
       }
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')
       mode = 'idle';
@@ -379,7 +383,7 @@ export async function runAgentCore(
         }
         throw e;
       }
-      contextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
+      runtimeContextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
       addUsage(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
       // 校正系数:API 实测 prompt_tokens / 估算 token。
       // 每次 chat 响应后刷新,让下次 evaluateBudget 用更接近真实的 actual。
@@ -388,7 +392,7 @@ export async function runAgentCore(
         const estimated = estimateMessagesTokens(history) + estimateToolSchemaTokens();
         if (estimated > 100) {
           const raw = result.usage.promptTokens / estimated;
-          contextState.correction = Math.max(0.5, Math.min(2.0, raw));
+          runtimeContextState.correction = Math.max(0.5, Math.min(2.0, raw));
         }
       }
       hooks.onChatDone?.(); // 主 agent:spinner.stop()

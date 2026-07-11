@@ -7,8 +7,8 @@
 //  - 独立 history:不共享主对话,避免子任务的工具噪声污染主上下文。
 //  - 系统提示复用主 agent 组装链(config.systemPrompt + memory 段 + skills 段)+ 子 agent 角色后缀。
 //  - 工具子集:按白名单从 chatTools 过滤;无白名单 = 全量(但 task 工具调用方通常会限定只读)。
-//  - 不调 beginTurn(不进主回滚链);但文件 mutation 仍经 executeTool→recordMutation,
-//    归入当前主轮次(语义:子 agent 的改动属于当前主轮,可随 /rollback 一起撤销)。
+//  - 不调 beginTurn(不进主回滚链);skipRollback=true 使文件 mutation 跳过 recordMutation,
+//    子 agent 的改动不进主回滚快照链(靠 git 兜底,见下方 skipRollback 注释)。
 //  - 步数上限默认更低(config.subAgentMaxSteps ?? 50),防子任务失控耗尽配额。
 //  - 中断透传:opts.signal(主 agent 的 abort signal)透传给 runAgentCore → chat/executeTool,
 //    主 Ctrl+C 树杀子 agent(chat 流式 abort + run_command/web_fetch 即时取消)。
@@ -23,6 +23,7 @@ import { buildMemorySection, buildMemoryIndexSection } from '../memory/index.js'
 import { ui } from '../ui/theme.js';
 import { runAgentCore, type AgentHooks } from './core.js';
 import { summarizeToolCall, summarizeToolResult, truncateDisplay } from '../ui/render.js';
+import { createContextState } from '../session/compact.js';
 
 /** 子 agent 系统提示后缀:角色与约束。 */
 const SUBAGENT_SUFFIX = `
@@ -153,6 +154,9 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     // abort 还原(history 还原 + 模式还原)由 core 的 abortRestore 处理,hooks 只管展示。
   };
 
+  // 每个子 agent 独享统计/预算状态。不能保存再恢复模块级单例：多个 task 并发时
+  // save/restore 会竞态，且 lastEstimate / schedulerLog 仍会污染主 agent。
+  const localContextState = createContextState();
   const result = await runAgentCore({
     history,
     userInput: opts.prompt,
@@ -161,6 +165,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     maxSteps,
     toolsOverride,
     skipRollback: true, // 逻辑隔离:子 agent 文件改动不进主回滚快照链,主 /rollback 不撤销(靠 git 兜底)
+    contextState: localContextState,
   });
 
   return {

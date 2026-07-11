@@ -16,6 +16,7 @@ import {
 import { ui } from './theme.js';
 import * as content from './content.js';
 import * as mouse from './mouse.js';
+import { shiftBatchesAfter } from './batch.js';
 import { copyToClipboard, readClipboard } from './clipboard.js';
 import { renderMarkdown } from './markdown.js';
 
@@ -644,8 +645,9 @@ export function contentInsertAfter(after: number, lines: string[]): void {
       scrollOffset = Math.min(delta, Math.max(0, content.totalRows() - g.contentBottom));
     }
   }
-  // batch 摘要行索引平移
-  void import('./batch.js').then((m) => m.shiftBatchesAfter(after, delta));
+  // 必须同步平移 batch 索引。若延迟到 dynamic import.then，下一条 mutation 可能已经
+  // 按插入后的 buffer 创建；旧回调会再平移它一次，导致详情插到空行之后。
+  shiftBatchesAfter(after, delta);
   repaintViewport();
 }
 
@@ -672,8 +674,8 @@ export function contentDeleteFrom(startIdx: number, n: number): void {
   if (scrolled) {
     scrollOffset = Math.max(0, scrollOffset - delta);
   }
-  // batch 摘要行索引平移(用 -delta 表示后段索引前移)
-  void import('./batch.js').then((m) => m.shiftBatchesAfter(startIdx, -delta));
+  // batch 摘要行索引平移(用 -delta 表示后段索引前移)，同插入路径必须同步。
+  shiftBatchesAfter(startIdx, -delta);
   repaintViewport();
 }
 

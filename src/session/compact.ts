@@ -40,6 +40,8 @@ export interface CompactOptions {
    *  默认 manual=false / force=false(自动路径行为完全不变)。 */
   manual?: boolean;
   force?: boolean;
+  /** 本次 agent 运行独享的上下文统计状态；缺省使用主 agent 全局状态。 */
+  contextState?: ContextState;
 }
 
 export interface CompactResult {
@@ -65,13 +67,19 @@ export interface CompactResult {
  *  scheduler.ts 写最近一次调度日志(可选,repl 可读不到时 no-op)。
  *  correction:API 实测 token / 估算 token 的校正系数(1.0 = 无偏差;>1 = 低估;<1 = 高估)。
  *  由 agent/core.ts 在每次 chat 响应后更新;compact/repl 在 usage 失效时同步重置。 */
-export const contextState: {
+export interface ContextState {
   lastUsage?: ChatUsage;
   lastEstimate: number;
   /** API 实测 / 估算 的校正系数,默认 1(未校准时等价于原估算)。 */
   correction: number;
   schedulerLog?: import('./scheduler.js').SchedulerRunLog;
-} = {
+}
+
+export function createContextState(): ContextState {
+  return { lastEstimate: 0, correction: 1 };
+}
+
+export const contextState: ContextState = {
   lastEstimate: 0,
   correction: 1,
 };
@@ -315,9 +323,10 @@ export async function compactHistory(
   history: ChatMessage[],
   opts: CompactOptions
 ): Promise<CompactResult> {
+  const state = opts.contextState ?? contextState;
   const schemaTokens = estimateToolSchemaTokens();
   const estimateBefore = estimateMessagesTokens(history) + schemaTokens;
-  contextState.lastEstimate = estimateBefore;
+  state.lastEstimate = estimateBefore;
 
   const groups = groupFromEnd(history);
 
@@ -390,9 +399,9 @@ export async function compactHistory(
       history.push(...rebuilt);
       pruneAfterCompaction(history);
       const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
-      contextState.lastEstimate = estimateAfter;
-      contextState.lastUsage = undefined;
-      contextState.correction = 1;
+      state.lastEstimate = estimateAfter;
+      state.lastUsage = undefined;
+      state.correction = 1;
       layout.contentWrite(
         `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}强制压缩(focus on early history)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
       );
@@ -482,9 +491,9 @@ export async function compactHistory(
     history.push(...rebuilt);
     pruneAfterCompaction(history); // 摘要删了旧轮次 → 按存活轮次裁剪回滚日志
     const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
-    contextState.lastEstimate = estimateAfter;
-    contextState.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用估算
-    contextState.correction = 1;
+    state.lastEstimate = estimateAfter;
+    state.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用估算
+    state.correction = 1;
     layout.contentWrite(
       `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
     );
@@ -505,9 +514,9 @@ export async function compactHistory(
 
   // 摘要失败:回退仅微压缩(tool content 已原地改),结构不动
   const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
-  contextState.lastEstimate = estimateAfter;
-  contextState.lastUsage = undefined; // 结构虽未变,但 token 数已变,旧 usage 失效
-  contextState.correction = 1;
+  state.lastEstimate = estimateAfter;
+  state.lastUsage = undefined; // 结构虽未变,但 token 数已变,旧 usage 失效
+  state.correction = 1;
   if (microcompactDone) {
     layout.contentWrite(
       `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
@@ -555,10 +564,11 @@ export async function maybeCompact(
     totalOver: boolean;
   },
   manualOpts?: { manual?: boolean; force?: boolean; focus?: string },
+  state: ContextState = contextState,
 ): Promise<CompactResult | void> {
   const schemaTokens = estimateToolSchemaTokens();
   const est = estimateMessagesTokens(history) + schemaTokens;
-  contextState.lastEstimate = est;
+  state.lastEstimate = est;
   const isManual = manualOpts?.manual === true;
 
   // 手动路径:旁路 autoCompact / report / 总阈三重门
@@ -580,6 +590,7 @@ export async function maybeCompact(
     focus: manualOpts?.focus,
     manual: isManual,
     force: manualOpts?.force,
+    contextState: state,
   });
   if (isManual) return r;
 }
