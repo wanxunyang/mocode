@@ -128,23 +128,42 @@ export async function runAgent(
   // lastChar 镜像:core 跟踪流式末字符决定补换行,但 TUI hooks 需读它决定 layout.contentWrite('\n')。
   // core 的 onTextEnd hook 只在 lastChar !== '\n' 时才调,调后置 '\n';镜像与此同步。
   let lastChar = '';
+  // 正文 -> 工具的边界由 core.onTextEnd 与本层 onToolCall 分两段完成。
+  // markdown 段末已经是完整物理行，因此再写 1 个 \n 就代表 1 条空白行；
+  // 不能按普通字符串的“两个换行才有一个空行”来计算。
+  let textBoundaryNewlines = 0;
+  let hasPendingTextBoundary = false;
 
   const hooks: AgentHooks = {
     onText: (s) => {
       // 纯空白 chunk 在视觉上不是正文：既不切 batch，也不写入 markdown 缓冲。
       // 部分兼容后端会在连续工具轮次间流出 " " / "\n"，若据此切批会漏掉首个工具。
       if (currentBatchId && s.trim().length === 0) return;
+      const followsToolBatch = currentBatchId !== null;
+      // batch 收尾已经统一留了一条空白行。部分后端会把下一段正文以 \n / \n\n
+      // 开头发来；去掉这些“边界换行”，避免与 UI 分隔叠成两条空白行。
+      const visible = followsToolBatch ? s.replace(/^(?:[ \t]*\r?\n)+/, '') : s;
       if (s) flushToolBatch();
       spinner.stop(); // 任何正文 token 都停 spinner(首 token 停「思考中」;onToolCall 重启后若又来文本则停「生成中」)。未旋转时 stop 为 no-op。
-      layout.contentWriteMd(s); // 正文走 markdown 渲染(代码块高亮 / 标题 / 列表 / 行内 …),见 ui/markdown.ts
-      if (s) lastChar = s[s.length - 1];
+      layout.contentWriteMd(visible); // 正文走 markdown 渲染(代码块高亮 / 标题 / 列表 / 行内 …),见 ui/markdown.ts
+      if (visible) {
+        lastChar = visible[visible.length - 1];
+        if (visible.trim().length > 0) {
+          hasPendingTextBoundary = true;
+          textBoundaryNewlines = 0;
+        }
+      }
     },
     onToolCall: (name) => {
       // 文本/思考已流完,模型转而生成 tool_call 参数(可能很长,如 write_file 整篇内容):
       // 补换行(让随后的 ● 行与 diff 不黏在正文末尾)+ 启「生成中」内联 spinner,内容区不再干等。
-      if (lastChar && lastChar !== '\n') {
-        layout.contentWrite('\n');
+      if (hasPendingTextBoundary) {
+        if (textBoundaryNewlines < 1) {
+          layout.contentWrite('\n');
+        }
         lastChar = '\n';
+        textBoundaryNewlines = 1;
+        hasPendingTextBoundary = false;
       }
       if (name) spinner.start(`生成 ${name}`);
     },
@@ -154,6 +173,7 @@ export async function runAgent(
       if (lastChar && lastChar !== '\n') {
         layout.contentWrite('\n');
         lastChar = '\n';
+        if (hasPendingTextBoundary) textBoundaryNewlines = 1;
       }
     },
     onToolHeader: (tc) => writeToolHeader(tc),
@@ -186,6 +206,10 @@ export async function runAgent(
       layout.contentWrite(
         `  ${ui.dim}✻ Worked for ${fmtElapsed(elapsedMs)}${tok}${ui.reset}\n`
       );
+      // 内容区触底时，DECSTBM 增量滚屏可能只推进物理终端，未把 Worked 前已在
+      // buffer 中的空行完整画出来；用户滚动/点击触发 repaint 后才“突然”出现。
+      // 轮次收尾立即按 buffer 原子重画，使未满屏与触底滚屏的布局一致。
+      layout.repaintViewport();
     },
   };
 

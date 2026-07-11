@@ -410,8 +410,9 @@ export async function runAgentCore(
           })),
         } as ChatMessage);
 
-        // 工具分组执行(保 tool_calls 原顺序):连续的只读工具(READ_TOOL_NAMES)成组并发——一次性启动全部
-        // executeTool(调用即开始 I/O),再按原顺序逐个 await + 渲染(● 头与 ↳ 结果紧邻,修并行时"全 ● 后全 ↳"分离)。
+        // 工具分组执行(保 tool_calls 原顺序):连续的只读工具(READ_TOOL_NAMES)成组并发——先一次性
+        // 渲染全部 header，让摘要在任何同步工具真正执行前立即可见；随后启动全部 executeTool，
+        // 再按原顺序逐个 await + 回灌结果。
         // mutation(write_file/edit_file)及 run_command/use_skill 各为单步串行屏障——mutation 串行保
         // recordMutation 调用序 = 回滚快照序(executeTool 内写前记 before 快照,同文件多次写需按序)。
         // 渲染与 history 回灌一律按原顺序;并发只影响执行时序,tool_call_id 仍按序配对。
@@ -420,24 +421,26 @@ export async function runAgentCore(
         let i = 0;
         while (i < calls.length) {
           if (READ_TOOL_NAMES.has(calls[i].name)) {
-            // 收集连续只读组(≥1),并发执行:先一次性启动所有(executeTool 调用即开始 I/O),
-            // 再按原顺序逐个 await + 渲染——● 头与 ↳ 结果紧邻、顺序 = tool_calls 序(修"全 ● 后全 ↳"分离 bug)。
+            // 收集连续只读组(≥1),并发执行:先渲染所有 header，再一次性启动所有
+            // (executeTool 调用即开始 I/O)，最后按原顺序逐个 await + 回灌。
+            // 必须先 header 后 execute：todolist/grep 等同步快速工具会在 executeTool 返回 Promise 前
+            // 已经完成；若先 started.map，用户只能在工具完成后才看到摘要与其前面的换行。
             // 异步工具(web_fetch 等)并发跑、总耗时 ≈ 最慢一个;同步工具(glob/grep)map 时已顺序跑完,await 即返。
             let j = i;
             while (j < calls.length && READ_TOOL_NAMES.has(calls[j].name)) j++;
             const batch = calls.slice(i, j);
+            for (const tc of batch) hooks.onToolHeader?.(tc);
+            hooks.onToolStart?.(batch[0].name);
             const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext }));
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
-              hooks.onToolHeader?.(tc);
-              hooks.onToolStart?.(tc.name);
               const output = await started[k];
-              hooks.onToolDone?.();
               hooks.onToolResult?.(tc, output, null, null, 1); // 只读工具无 diff
               // Thrashing:history 里附 hint(UI 已用干净 output 渲染,避免屏幕噪声)
               const hint = recordAndHint(tc.name, tc.arguments);
               pushToolResult(history, tc, hint ? `${output}${hint}` : output, relprune, lifecycle, scheduler);
             }
+            hooks.onToolDone?.();
             i = j;
           } else if (calls[i].name === 'task') {
             // task 并发组:连续的 task 调用成组并发(子 agent 并行跑,各自独立 history)。

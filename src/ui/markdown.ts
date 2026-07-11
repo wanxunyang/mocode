@@ -590,6 +590,10 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
   }
   flushPara();
   if (inFence) flushCode(); // EOF 仍 inFence:流式中未闭合 fence → 照常 emit 进行中代码块
+  // 独立 markdown 段的外部间距由 agent/batch 边界统一管理。流式后端可能把
+  // "\n\n" 与首段正文拆成不同 chunk；仅清洗首个正文 chunk 不够，因为 mdBuf
+  // 累积重渲染时这些换行仍会变成段首空行。这里最终兜底，正文段永不自带前导空行。
+  while (out.length > 0 && out[0] === '') out.shift();
   // 末尾不留空行:agent onText 后接 onToolCall 的 contentWrite('\n') 会补 1 空行分隔正文与 ● 行;
   // 若 md 末尾自带空行(段落/代码块后)则叠成 2 空行。裁掉末尾连续空行,让 onToolCall / 轮末
   // contentWrite('\n') 恰好补 1 行(与改造前 raw 文本行为一致)。块间空行(flushPara/flushCode 中段

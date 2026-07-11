@@ -5,6 +5,7 @@ import {
   displayWidth,
   truncateDisplay,
   truncateDisplayHead,
+  truncateAnsi,
   ansiDisplayWidth,
   wrapByDisplayWidth,
   fmtElapsed,
@@ -684,7 +685,10 @@ export function totalRows(): number {
 /** 原地刷新一条内容行（行数不变），用于运行中的工具 batch 更新计数。 */
 export function contentReplaceLine(absIdx: number, line: string): void {
   if (!active) return;
-  content.replaceLine(absIdx, line);
+  // 原地更新的 batch 摘要可能随追加工具而变长。缓冲区仍把它当作一行，但若直接
+  // 交给终端超过 cols，终端会自动折行，造成视觉上多出空行且续写位与缓冲失步。
+  // 在写回缓冲前按 ANSI 可见宽度截断，确保“一条逻辑行 = 一条物理行”。
+  content.replaceLine(absIdx, truncateAnsi(line, getGeo().cols));
   repaintViewport();
 }
 

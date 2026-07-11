@@ -202,6 +202,7 @@ export function showLiveBatch(
     contentWrite(s: string): void;
     contentReplaceLine(absIdx: number, line: string): void;
     totalRows(): number;
+    repaintViewport?(): void;
   },
 ): void {
   const b = batches.get(id);
@@ -210,6 +211,10 @@ export function showLiveBatch(
   if (b.summaryAbsIdx < 0) {
     layout.contentWrite(summary + '\n');
     b.summaryAbsIdx = Math.max(0, layout.totalRows() - 2);
+    // 首条摘要通过增量 contentWrite 落屏时，markdown→普通内容的边界可能只更新了
+    // buffer/续写位；直到第二个 header 的 contentReplaceLine 或后续正文重绘才完全可见。
+    // 立即按 buffer 原子重画，确保慢工具执行期间摘要前的空行已经显示。
+    layout.repaintViewport?.();
   } else {
     layout.contentReplaceLine(b.summaryAbsIdx, summary);
   }
