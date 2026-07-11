@@ -1245,23 +1245,23 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
         const m = await import('./batch.js');
         const entry = m.findEntryByAbsLine(absClick);
         if (entry) {
+          // 先清选区再改 buffer：contentInsert/Delete 内会立即 repaintViewport；若此时仍保留
+          // 旧绝对行选区，会短暂画出一帧错位高亮，随后二次重画，视觉上就是抖动。
+          selection = null;
           m.toggleEntry(entry.batchId, entry.entryIndex, {
             contentInsertAfter: (after, lines) => contentInsertAfter(after, lines),
             contentDeleteFrom: (start, n) => contentDeleteFrom(start, n),
           });
-          selection = null;
-          repaintViewport();
           repaint();
           return;
         }
         const id = m.findBatchByAbsLine(absClick);
         if (id) {
+          selection = null;
           m.toggleBatch(id, {
             contentInsertAfter: (after, lines) => contentInsertAfter(after, lines),
             contentDeleteFrom: (start, n) => contentDeleteFrom(start, n),
           });
-          selection = null;
-          repaintViewport();
           repaint();
           return;
         }
