@@ -42,9 +42,12 @@ export interface Palette {
   addBg: string;
   /** diff 删除行整行底色——同 addBg,跟红字 fg 配对。 */
   delBg: string;
+  /** 终端窗口本身背景色(OSC 11):`rgb:RR/GG/BB` 格式,进 alt screen 时同步终端,退出时 OSC 111 重置。 */
+  terminalBg: string;
 }
 
-export type ColorKey = keyof Palette;
+// terminalBg is an OSC payload, not an SGR color that can be wrapped around text.
+export type ColorKey = Exclude<keyof Palette, 'terminalBg'>;
 
 /** default = One Dark(truecolor):平衡柔和的深色调色板,跨终端一致(不再依赖终端 16 色板)。 */
 const DEFAULT: Palette = {
@@ -62,6 +65,7 @@ const DEFAULT: Palette = {
   // diff 行底色:One Dark bg #282c34 上加 ~14% 亮度的对应色,够辨识但不刺眼
   addBg: '\x1B[48;2;44;62;42m', // 偏暗绿(One Dark green(152,195,121)暗化)
   delBg: '\x1B[48;2;62;38;42m', // 偏暗红(One Dark red(224,108,117)暗化)
+  terminalBg: 'rgb:28/2c/34', // One Dark 经典深底,偏蓝灰的黑
 };
 
 /**
@@ -88,6 +92,7 @@ const THEMES: Record<string, Palette> = {
     // 比直接用 base1 更柔,跟深 fg(red/green)对比充足
     addBg: '\x1B[48;2;220;235;205m',
     delBg: '\x1B[48;2;245;218;215m',
+    terminalBg: 'rgb:1a/1e/24', // 深黑底带微蓝,与 light 主题文字反差大
   },
   solarized: {
     red: '\x1B[38;2;220;50;47m',
@@ -104,6 +109,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:Solarized Dark base03(0,43,54)上加对应色族暗 tint
     addBg: '\x1B[48;2;20;50;38m',
     delBg: '\x1B[48;2;55;30;30m',
+    terminalBg: 'rgb:00/2b/36', // Solarized Dark base03,深青黑
   },
   gruvbox: {
     red: '\x1B[38;2;251;73;52m',
@@ -120,6 +126,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:Gruvbox dark bg(40,40,40)上贴暗 bg0_a 风格
     addBg: '\x1B[48;2;40;55;30m',
     delBg: '\x1B[48;2;70;35;30m',
+    terminalBg: 'rgb:28/28/28', // Gruvbox 深黑底,带微暖色调
   },
   nord: {
     red: '\x1B[38;2;191;97;106m',
@@ -136,6 +143,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:Nord polar night(46,52,64)上贴对应色族暗 tint
     addBg: '\x1B[48;2;46;66;52m',
     delBg: '\x1B[48;2;72;46;52m',
+    terminalBg: 'rgb:2e/34/40', // Nord Polar Night 深灰蓝
   },
   orange: {
     // 秋季/南瓜橙:深暖底(#231c16 系)+ accent 主强调走橙色;yellow 槽也偏橙
@@ -155,6 +163,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:暖深棕底上贴对应色族暗 tint,跟 fg 配对柔和可辨
     addBg: '\x1B[48;2;55;70;35m',
     delBg: '\x1B[48;2;78;42;32m',
+    terminalBg: 'rgb:23/1c/16', // 深暖棕黑,带橙色调
   },
   rose: {
     // 玫红:深紫底 + accent 玫粉作主强调;magenta 槽与 accent 同源(主题色),
@@ -173,6 +182,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深紫底贴对应色族暗 tint,绿暗化偏橄榄、红暗化偏紫红
     addBg: '\x1B[48;2;50;60;42m',
     delBg: '\x1B[48;2;75;40;52m',
+    terminalBg: 'rgb:1e/14/1c', // 深紫黑底,带玫红暖调
   },
   emerald: {
     // 翡翠绿:深绿底 + accent 翡翠绿作主强调;green 槽与 accent 同源(主题色),
@@ -191,6 +201,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深绿底贴对应色族暗 tint,绿暗化偏深绿、红暗化偏暗红
     addBg: '\x1B[48;2;30;55;40m',
     delBg: '\x1B[48;2;60;40;40m',
+    terminalBg: 'rgb:10/1e/18', // 深绿黑底,翡翠色调
   },
   amber: {
     // 琥珀金黄:深棕底 + accent 琥珀金黄作主强调;yellow 槽与 accent 同源(主题色),
@@ -209,6 +220,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深棕底贴对应色族暗 tint,绿暗化偏橄榄、红暗化偏暗棕红
     addBg: '\x1B[48;2;50;55;25m',
     delBg: '\x1B[48;2;70;40;28m',
+    terminalBg: 'rgb:1e/18/0e', // 深棕黑底,琥珀金黄调
   },
   lavender: {
     // 薰衣草淡紫:深紫底 + accent 淡紫作主强调;magenta 槽与 accent 同源(主题色),
@@ -227,6 +239,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深紫底贴对应色族暗 tint,绿暗化偏冷绿、红暗化偏冷紫红
     addBg: '\x1B[48;2;38;46;42m',
     delBg: '\x1B[48;2;60;40;55m',
+    terminalBg: 'rgb:18/14/24', // 深紫黑底,薰衣草冷调
   },
   sunset: {
     // 日落珊瑚:深棕红底 + accent 珊瑚红作主强调;red 槽与 accent 同源(主题色);
@@ -245,6 +258,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深棕红底贴对应色族暗 tint,绿暗化偏橄榄、红暗化偏暗棕红
     addBg: '\x1B[48;2;50;55;30m',
     delBg: '\x1B[48;2;75;32;30m',
+    terminalBg: 'rgb:20/12/10', // 深棕红黑底,珊瑚暖调
   },
 };
 
@@ -253,6 +267,18 @@ let version = 0;
 
 function currentPalette(): Palette {
   return THEMES[currentName] ?? DEFAULT;
+}
+
+/** Apply the active theme's dark background to the terminal window (OSC 11). */
+export function applyTerminalBackground(): void {
+  if (!isTTY) return;
+  stdout.write(`\x1B]11;${currentPalette().terminalBg}\x07`);
+}
+
+/** Ask the terminal to restore its default background color. */
+export function resetTerminalBackground(): void {
+  if (!isTTY) return;
+  stdout.write('\x1B]111\x07');
 }
 
 /** 取某颜色字段的当前 ANSI 码(经 isTTY 门控)。 */

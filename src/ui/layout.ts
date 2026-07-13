@@ -13,7 +13,7 @@ import {
   sliceByDisplayCol,
   visColToCharCol,
 } from './render.js';
-import { ui } from './theme.js';
+import { ui, applyTerminalBackground, resetTerminalBackground } from './theme.js';
 import * as content from './content.js';
 import * as mouse from './mouse.js';
 import { shiftBatchesAfter } from './batch.js';
@@ -2040,6 +2040,7 @@ export function enterAltScreen(): void {
   if (active || !ui.isTTY) return;
   active = true;
   stdout.write(esc.altOn);
+  applyTerminalBackground();
   stdout.write(esc.mouseOn); // 完整鼠标追踪(按下/拖动/释放/滚轮)→ mouse.swallow 重组 → handleMouseEvent
   mouse.setHandler(handleMouseEvent);
   setRegion(6); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行(两行式底栏)
@@ -2093,6 +2094,7 @@ export function enterAltScreen(): void {
 export function exitAltScreen(): void {
   if (!active) return;
   active = false;
+  resetTerminalBackground();
   stopTurnTimer(); // 兜底清走时计时器(防异常退出泄漏)
   turnStart = null;
   scrollLockUntil = 0; // 清轮首滚动锁(防状态泄漏到下次进 alt 屏)

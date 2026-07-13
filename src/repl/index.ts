@@ -27,7 +27,7 @@ import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { togglePet, killPetProcess, listSkins, setSkin, sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
-import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
+import { ui, setTheme, getTheme, listThemes, themeExists, applyTerminalBackground } from '../ui/theme.js';
 import { bannerString, bannerLines, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
@@ -1428,6 +1428,7 @@ export async function startRepl(
       // 切:setTheme → 重算状态行(新色)→ 清内容重绘(历史 / 横幅,镜像启动 + /resume)→ 确认 → 持久化。
       // markdown MEMO 按 themeVersion 自动失效,故 renderHistory 取新色;状态栏 / 输入框由 continue 回 INPUT 态时读 getter 刷。
       setTheme(name);
+      applyTerminalBackground();
       refreshStatusBase(history);
       layout.clearContent();
       if (history.some((m) => m.role === 'user')) {
