@@ -69,7 +69,7 @@ function firstUserOf(history: ChatMessage[]): string {
 }
 
 function sessionPath(id: string): string {
-  return path.join(config.sessionDir, `${id}.json`);
+  return path.join(config.sessionDir, id, 'session.json');
 }
 
 /** 保存会话到磁盘(history.length<=1 时跳过写盘,只返 meta)。 */
@@ -81,15 +81,20 @@ export function saveSession(history: ChatMessage[], id: string): SessionMeta {
     firstUser: history.length > 1 ? firstUserOf(history) : '',
   };
   if (history.length <= 1) return meta; // 仅 system,不落盘
-  sessionDir();
+  const dir = path.join(config.sessionDir, id);
+  mkdirSync(dir, { recursive: true });
   const record: SessionRecord = { ...meta, history };
   writeFileSync(sessionPath(id), JSON.stringify(record), 'utf8');
   return meta;
 }
 
-/** 加载会话;不存在 / 损坏返 null(不抛)。 */
+/** 加载会话;不存在 / 损坏返 null(不抛)。优先新式目录,回退旧式文件。 */
 export function loadSession(id: string): SessionRecord | null {
-  const p = sessionPath(id);
+  // 新式: .mocode/sessions/<id>/session.json
+  const newPath = path.join(config.sessionDir, id, 'session.json');
+  // 旧式: .mocode/sessions/<id>.json
+  const oldPath = path.join(config.sessionDir, `${id}.json`);
+  const p = existsSync(newPath) ? newPath : oldPath;
   if (!existsSync(p)) return null;
   try {
     const raw = readFileSync(p, 'utf8');
@@ -108,26 +113,34 @@ export function loadSession(id: string): SessionRecord | null {
 }
 
 /** 列出最近会话,按 createdAt 降序。损坏文件跳过。
- *  - limit?: 仅返回前 N 条。会话文件名是 YYYYMMDD-HHmmss.json,字典序=时间序;
- *    先按文件名降序取前 N,再只解析这 N 个文件(history 大字段全部跳过不读),避免
- *    /resume 在 sessions 目录堆了几百个文件时 readdirSync + 全量 JSON.parse 慢。
+ *  - limit?: 仅返回前 N 条。会话目录名是 YYYYMMDD-HHmmss,字典序=时间序;
+ *    先按目录名降序取前 N,再解析 session.json,避免
+ *    /resume 在 sessions 目录堆了几百个子目录时 readdirSync + 全量 JSON.parse 慢。
  *  - 不传 limit 时读全部(向后兼容,供裸 --resume 列全表用)。
+ *  - 向后兼容:同时扫描旧式 <id>.json 文件(扁平结构),优先读新式目录。
  */
 export function listSessions(limit?: number): SessionMeta[] {
   if (!existsSync(config.sessionDir)) return [];
-  // 过滤掉 .snapshots.json:ASCII 排序里 's'(115) > 'j'(106),后者排在前面,会让
-  // slice(0, limit) 取到一堆快照文件(JSON.parse 后 rec.id=undefined 被吞),真会话被挤掉。
-  const all = readdirSync(config.sessionDir)
-    .filter((f) => f.endsWith('.json') && !f.endsWith('.snapshots.json'))
-    .sort() // YYYYMMDD-HHmmss.json 字典序 ≡ 时间序(同 createdAt 升序)
-    .reverse(); // 降序:最新在前
+  const entries = readdirSync(config.sessionDir, { withFileTypes: true });
+  const ids: string[] = [];
+  for (const e of entries) {
+    if (e.isDirectory() && /^\d{8}-\d{6}$/.test(e.name)) {
+      ids.push(e.name);
+    } else if (e.isFile() && e.name.endsWith('.json') && !e.name.endsWith('.snapshots.json')) {
+      // 旧式扁平文件:兼容读取
+      ids.push(e.name.replace(/\.json$/, ''));
+    }
+  }
+  const all = ids.sort().reverse(); // 降序:最新在前
   const toRead = typeof limit === 'number' ? all.slice(0, Math.max(0, limit)) : all;
   const out: SessionMeta[] = [];
-  for (const f of toRead) {
+  for (const id of toRead) {
     try {
-      const rec = JSON.parse(
-        readFileSync(path.join(config.sessionDir, f), 'utf8')
-      ) as Partial<SessionRecord>;
+      // 优先新式目录,回退旧式文件
+      const newPath = path.join(config.sessionDir, id, 'session.json');
+      const oldPath = path.join(config.sessionDir, `${id}.json`);
+      const p = existsSync(newPath) ? newPath : oldPath;
+      const rec = JSON.parse(readFileSync(p, 'utf8')) as Partial<SessionRecord>;
       if (rec && typeof rec.id === 'string') {
         out.push({
           id: rec.id,

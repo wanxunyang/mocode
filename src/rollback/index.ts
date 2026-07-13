@@ -226,6 +226,9 @@ export function rebuildFromHistory(history: ChatMessage[]): void {
 }
 
 function snapshotsPath(id: string): string {
+  // 新式目录,回退旧式文件
+  const newPath = path.join(config.sessionDir, id, 'snapshots.json');
+  if (existsSync(newPath)) return newPath;
   return path.join(config.sessionDir, `${id}.snapshots.json`);
 }
 
@@ -233,9 +236,10 @@ function snapshotsPath(id: string): string {
 export function persistSnapshots(id: string): void {
   if (turns.length === 0) return;
   try {
-    mkdirSync(config.sessionDir, { recursive: true });
+    const dir = path.join(config.sessionDir, id);
+    mkdirSync(dir, { recursive: true });
     writeFileSync(
-      snapshotsPath(id),
+      path.join(dir, 'snapshots.json'),
       JSON.stringify({ version: 1, turns, snapshots }),
       'utf8'
     );

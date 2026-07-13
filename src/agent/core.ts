@@ -427,7 +427,7 @@ export async function runAgentCore(
           if (READ_TOOL_NAMES.has(calls[i].name)) {
             // 收集连续只读组(≥1),并发执行:先渲染所有 header，再一次性启动所有
             // (executeTool 调用即开始 I/O)，最后按原顺序逐个 await + 回灌。
-            // 必须先 header 后 execute：todolist/grep 等同步快速工具会在 executeTool 返回 Promise 前
+            // 必须先 header 后 execute：grep 等同步快速工具会在 executeTool 返回 Promise 前
             // 已经完成；若先 started.map，用户只能在工具完成后才看到摘要与其前面的换行。
             // 异步工具(web_fetch 等)并发跑、总耗时 ≈ 最慢一个;同步工具(glob/grep)map 时已顺序跑完,await 即返。
             let j = i;

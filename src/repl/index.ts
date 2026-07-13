@@ -89,13 +89,12 @@ import {
   formatReflectResult,
   loadAll,
 } from '../memory/index.js';
-import {
-  buildActivePlanSection,
-  onActivePlanChange,
-  hasActivePlan,
-  getActivePlanSummary,
-} from '../plan/index.js';
 import { buildSnapshot, loadSnapshot, clearSnapshotCache } from '../project-snapshot/index.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { getSandboxRoot } from '../sandbox/root.js';
+
+import { setCurrentSessionId, getCurrentSessionId } from '../session/state.js';
 
 /**
  * readline 的 prompt 必须是纯文本(无 ANSI):readline 按字符数算光标位置,
@@ -240,6 +239,27 @@ function renderContextBarInline(history: ChatMessage[]): string {
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
 }
 
+/** 从 .mocode/sessions/<sessionId>/notes.md 读取活跃 plan 摘要(## Plan: 段)。每次状态栏刷新时同步读,文件小开销可忽略。 */
+function readPlanFromNotes(): string {
+  const sessionId = getCurrentSessionId();
+  if (!sessionId) return '';
+  
+  const root = getSandboxRoot() ?? process.cwd();
+  const p = path.join(root, '.mocode', 'sessions', sessionId, 'notes.md');
+  try {
+    const c = fs.readFileSync(p, 'utf8');
+    const title = c.match(/^## Plan:\s*(.+)$/m)?.[1].trim();
+    if (!title) return '';
+    const total = (c.match(/^\s*-\s*\[[ xX]\]\s*\d+\./gm) || []).length;
+    const done  = (c.match(/^\s*-\s*\[[xX]\]\s*\d+\./gm) || []).length;
+    const current = c.match(/^\s*-\s*\[ \]\s*\d+\.\s*(.+)$/m)?.[1].trim();
+    const summary = `plan: ${title} (${done}/${total})`;
+    return current ? `${summary} ▸ ${current}` : summary;
+  } catch {
+    return '';
+  }
+}
+
 /** 状态行基线:模型 / context / cwd / 模式标识 / 活跃 plan chip / 本轮 token。repl 在轮次边界、切模式、plan 变更时调。 */
 function refreshStatusBase(history: ChatMessage[], lastTurnUsage?: ChatUsage): void {
   layout.setStatusBase({
@@ -247,7 +267,7 @@ function refreshStatusBase(history: ChatMessage[], lastTurnUsage?: ChatUsage): v
     contextBar: renderContextBarInline(history),
     cwd: process.cwd(),
     modeTag: getAgentMode() === 'plan' ? 'Plan' : 'Auto',
-    planSummary: hasActivePlan() ? getActivePlanSummary(process.stdout.columns ?? 80) : '',
+    planSummary: readPlanFromNotes(),
     lastTurnUsage,
   });
 }
@@ -673,6 +693,11 @@ export async function startRepl(
     // 异步触发 LLM 快照生成（不阻塞 REPL 启动）
     buildSnapshot().catch(() => {/* LLM 生成失败不阻断 */});
   }
+  // --resume:读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
+  let currentSessionId: string | undefined = sessionId;
+  if (!currentSessionId) currentSessionId = newSessionId(); // 新会话立即分配 ID,确保 prompt 里有正确路径
+  setCurrentSessionId(currentSessionId, process.cwd()); // 必须在 buildBasePrompt() 之前,让 prompt 能读到 sessionId
+
   // 构造系统提示:auto 用 base;plan 在 base 后追加按当前开关现拼的 plan suffix。
   // 切模式时 applyMode 重算 history[0](history[0] 恒 system,compaction 保它,不破坏)。
   // 活跃 plan 摘要拼在 memory 段后(systemPrompt 的尾段),todo 工具变更后 listener 重写 history[0]。
@@ -685,8 +710,7 @@ export async function startRepl(
       buildBasePrompt() +
         (planMode ? getPlanModeSuffix() : '') +
         buildMemorySection() +
-        buildMemoryIndexSection(isMemoryEnabled()) +
-        buildActivePlanSection(),
+        buildMemoryIndexSection(isMemoryEnabled()),
     );
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
   // 否则新会话只塞 system 提示(默认 auto)。
@@ -701,11 +725,9 @@ export async function startRepl(
   ) {
     history[0] = { role: 'system', content: buildSystemMessage(false) };
   }
-  // --resume:读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
   if (sessionId && initialHistory && initialHistory.length) {
     if (!loadSnapshots(sessionId)) rebuildFromHistory(history);
   }
-  let currentSessionId: string | undefined = sessionId;
   // 反思 cadence 计数:每 reflectEveryN 轮 fire-and-forget 一次后台反思 pass。
   let turnCount = 0;
   // 本轮 token 累计:runAgent 返回后写入,供底栏模式 chip 右边显示。undefined=无实测
@@ -783,16 +805,6 @@ export async function startRepl(
     applyMode(m === 'plan');
     refreshStatusBase(history);
   });
-  // 注册活跃 plan 变更监听器:todolist 工具每次 create/update/add_step/finish 后调 setActivePlan,
-  // 触发本 listener 重写 history[0](plan 摘要段刷新)+ 刷状态行 plan chip。
-  // 不调 drawStatusBar:INPUT 态靠 prompt.ts redraw;RUNNING 态靠 200ms turnTimer 兜底。
-  // listener 内访问 history 是闭包捕获,保持同一引用(repl 持有)。
-  onActivePlanChange(() => {
-    if (history[0]?.role === 'system') {
-      history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
-    }
-    refreshStatusBase(history);
-  });
 
   /**
    * 回滚子流程(由 /rollback 触发):菜单(↑/↓)选轮次 → 选中第 X 轮 = 删第 X 轮及之后 + 预填第 X 轮 user 输入
@@ -851,6 +863,7 @@ export async function startRepl(
     }
     applyRollback(plan, history, revertPaths);
     if (!currentSessionId) currentSessionId = newSessionId();
+    setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
     try {
       saveSession(history, currentSessionId);
     } catch {
@@ -860,6 +873,11 @@ export async function startRepl(
     // 复显剩余对话(无提示行),输入框预填该轮 user 输入 → 下轮 Enter 重新跑
     layout.clearContent();
     renderHistory(history);
+    // 末尾补空行:与后续用户消息(❯ bubble)之间分隔。runTurn 在每个 agent 轮结束后
+    // contentWrite('\n') 做轮次分隔,/resume 后接 \n\n,/theme·/model 后接 \n;
+    // rollbackFlow 原本漏了这一行,renderHistory 末尾的 batch 摘要行 / assistant 文本
+    // 收口后,续写位未稳到新空行,下一次 echoInput 的 ❯ 气泡会黏在最后一条输出后面。
+    layout.contentWrite('\n');
     pendingPrefill = prefillText.split('\n');
   };
 
@@ -919,6 +937,7 @@ export async function startRepl(
       ok = !signal.aborted; // 中断(Ctrl+C)→ runAgent 已还原 history,ok=false 不弹审批
       // 成功轮次自动落盘(崩溃也保住上一轮);新会话首轮分配 id
       if (!currentSessionId) currentSessionId = newSessionId();
+      setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
       try {
         saveSession(history, currentSessionId);
       } catch {
@@ -973,6 +992,7 @@ export async function startRepl(
     history.push(...loaded.history);
     setAgentMode('auto'); // 续接重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
     currentSessionId = loaded.id;
+    setCurrentSessionId(loaded.id, process.cwd()); // 切换会话:确保该会话的 notes.md 存在
     // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
     if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
     contextState.lastUsage = undefined;
@@ -1108,6 +1128,7 @@ export async function startRepl(
       history.length = 1; // 保留 system 提示
       resetState(); // 同步清空回滚轮次/快照
       currentSessionId = undefined; // 下轮起新会话文件
+      setCurrentSessionId(undefined, process.cwd()); // 同步清空 session/state
       turnCount = 0; // 反思 cadence 重新计数
       contextState.lastUsage = undefined;
       contextState.correction = 1;

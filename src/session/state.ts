@@ -1,0 +1,35 @@
+// session/state.ts - 会话状态跟踪模块
+// 提供当前活跃会话 ID 的全局访问点，供 config/buildNotepadSection 等读取会话级 notes.md。
+// 避免 repl/index.ts ↔ config/index.ts 循环依赖。
+
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+
+let currentSessionId: string | undefined;
+
+/** 获取当前活跃会话 ID(供 buildNotepadSection 等使用)。 */
+export function getCurrentSessionId(): string | undefined {
+  return currentSessionId;
+}
+
+/**
+ * 设置当前活跃会话 ID，并确保该会话的 notes.md 文件存在（不存在则创建空文件）。
+ * 由 repl/index.ts 在会话启动 / /resume 切换时调用。
+ */
+export function setCurrentSessionId(id: string | undefined, cwd: string): void {
+  currentSessionId = id;
+  if (id) ensureSessionNotes(id, cwd);
+}
+
+/** 确保 .mocode/sessions/<id>/notes.md 存在，不存在则创建空文件。 */
+function ensureSessionNotes(id: string, cwd: string): void {
+  const dir = path.join(cwd, '.mocode', 'sessions', id);
+  const file = path.join(dir, 'notes.md');
+  if (existsSync(file)) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, '', 'utf8');
+  } catch {
+    // 创建失败不影响 REPL 主流程
+  }
+}

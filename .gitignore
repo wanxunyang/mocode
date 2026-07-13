@@ -1,20 +1,21 @@
 node_modules/
+prompt_image/
+tmp/
+docs/
+task_management/
+scripts/
 .env
 *.log
 
 # 构建产物(npm publish 经 files 字段打包,不入库)
 dist/
 
+# agent产物
 CLAUDE.md
 MOCODE.md
 .codegraph/
 .trae/
 .mocode/
-
-docs/
-task_management/
-scripts/
 .kiro/
-tmp/
-prompt_image/
 .claude/
+.agents/
