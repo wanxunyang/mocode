@@ -571,6 +571,11 @@ export function clearContent(): void {
   scrollLockUntil = 0;
   mdActive = false;
   mdBuf = '';
+  // 清内容缓冲时必须同步重置 banner 状态:否则后续 writeBanner() 会走 rewriteBanner 路径,
+  // 在已空的 content 上调 replaceHead(0, lines) → startIdx(0) >= committed(0) → 抛错 → REPL 退出。
+  // /theme、/clear、/resume 等命令 clearContent 后紧接 writeBanner 的场景均依赖此重置。
+  bannerH = 0;
+  bannerRows = [];
   content.reset();
   notifyContentReset(); // batch 渲染器同步重置(batch 摘要行索引全部失效)
   stdout.write(esc.home);
