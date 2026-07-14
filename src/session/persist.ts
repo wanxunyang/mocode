@@ -114,8 +114,9 @@ export function loadSession(id: string): SessionRecord | null {
 
 /** 列出最近会话,按 createdAt 降序。损坏文件跳过。
  *  - limit?: 仅返回前 N 条。会话目录名是 YYYYMMDD-HHmmss,字典序=时间序;
- *    先按目录名降序取前 N,再解析 session.json,避免
- *    /resume 在 sessions 目录堆了几百个子目录时 readdirSync + 全量 JSON.parse 慢。
+ *    按目录名降序逐个解析，收集到 N 个有效会话就停止，避免 /resume 在
+ *    sessions 目录堆了几百个子目录时全量 JSON.parse；同时不让只有笔记或
+ *    快照、没有 session.json 的目录占掉最近 N 条的名额。
  *  - 不传 limit 时读全部(向后兼容,供裸 --resume 列全表用)。
  *  - 向后兼容:同时扫描旧式 <id>.json 文件(扁平结构),优先读新式目录。
  */
@@ -132,9 +133,10 @@ export function listSessions(limit?: number): SessionMeta[] {
     }
   }
   const all = ids.sort().reverse(); // 降序:最新在前
-  const toRead = typeof limit === 'number' ? all.slice(0, Math.max(0, limit)) : all;
+  const maxResults = typeof limit === 'number' ? Math.max(0, limit) : Infinity;
   const out: SessionMeta[] = [];
-  for (const id of toRead) {
+  for (const id of all) {
+    if (out.length >= maxResults) break;
     try {
       // 优先新式目录,回退旧式文件
       const newPath = path.join(config.sessionDir, id, 'session.json');
