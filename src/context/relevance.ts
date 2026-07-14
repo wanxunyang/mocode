@@ -204,7 +204,10 @@ export function computePruneStats(history: ChatMessage[]): {
   for (const m of history) {
     if (m.role !== 'tool') continue;
     const c = toText((m as { content?: unknown }).content);
-    if (!c.startsWith(STUB_PREFIX)) continue;
+    // Relevance Pruner 的 stub(⌦[已过时:...) 和 Lifecycle Engine 的 DIGEST(⌦[摘要:...) 都统计。
+    const isPruneStub = c.startsWith(STUB_PREFIX);
+    const isDigest = c.startsWith('⌦[摘要:');
+    if (!isPruneStub && !isDigest) continue;
     stubbed++;
     stubChars += c.length;
     const orig = parseStubOriginalLen(c);

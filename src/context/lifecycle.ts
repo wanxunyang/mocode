@@ -9,9 +9,11 @@
 //   - OBSOLETE:无任何消费者引用,且距离当前 push 已老化 N 步(默认 2)。
 //   - STUB:已被替换为存根(物理上 content 变成「⌦[无消费者:...]」)。
 //
-// 用户拍板的激进风险护栏(避免误伤):
-//   - grep/glob/codegraph/web_search/web_fetch 等「观察/检索类」工具,**永远只到 REFERENCED**,
-//     不参与自动 STUB。理由:返回多个候选(grep 10 文件但你只读 1 个),剩余候选可能后续被消费。
+// 观察类工具两阶段衰减(避免误伤):
+//   - grep/glob/codegraph/web_search/web_fetch 等「观察/检索类」工具两阶段衰减:
+//     Phase 1(8 步):LIVE → REFERENCED,保留完整内容(返回多个候选,剩余候选可能后续被消费)。
+//     Phase 2(+5 步):REFERENCED → DIGEST,替换为摘要存根(保留文件列表+命中数+参数,丢弃详情),
+//     释放 ~90% token。states 仍为 REFERENCED,不引入新状态。
 //   - 当前轮保护区(最后一个 user 之后的工具结果)完全不动。
 //   - 已 STUB(含「⌦[已过时:...]」或「⌦[已剔除:...]」或本层的「⌦[无消费者:...]」)不重复处理。
 //   - 永不抛错(对齐上下文管道的「调度器永不抛错」契约)。
@@ -35,7 +37,7 @@ type AnyMessage = ChatMessage & { content?: unknown; tool_call_id?: string };
 /** 工具消息的观察者生命周期状态。 */
 export type LifeState = 'LIVE' | 'REFERENCED' | 'OBSOLETE' | 'STUB';
 
-/** 观察类工具(永远只到 REFERENCED,不参与自动 STUB)。 */
+/** 观察类工具(LIVE → REFERENCED → DIGEST 两阶段衰减,永不自动 STUB)。 */
 const OBSERVER_TOOLS = new Set<string>([
   'grep',
   'glob',
@@ -54,10 +56,22 @@ const MUTATION_TOOLS = new Set<string>(['edit_file', 'write_file']);
 /** 存根前缀(区分 Relevance Pruner 与 drop_context)。 */
 const STUB_PREFIX_NO_CONSUMER = '⌦[无消费者:观察结果已无引用价值]';
 
+/** 观察类工具摘要前缀(DIGEST 状态标记)。 */
+const DIGEST_PREFIX = '⌦[摘要:';
+
 /** 老化阈值:某条工具消息自 push 以来经历的「消费者 push」次数。
  *  ≥ 这个值且仍为 LIVE 且非观察类 → 视为 OBSOLETE → STUB。
  *  默认 2:等价于「跨过两个消费者 push 仍无人引用」= 跨过整轮最末尾的工具调用。 */
 const DEFAULT_AGE_THRESHOLD = 2;
+
+/** 观察类工具 Phase 1:LIVE → REFERENCED 的老化阈值(普通工具用 DEFAULT_AGE_THRESHOLD=2)。
+ *  10 步后才降为 REFERENCED,保留完整内容;理由:返回多个候选(grep 10 文件但只读 1 个),
+ *  剩余候选可能后续被消费,给足够时间窗口。 */
+const OBSERVER_REFERENCED_AGE = 10;
+
+/** 观察类工具 Phase 2:REFERENCED → DIGEST 的老化阈值(从 REFERENCED 起再累积)。
+ *  +5 步后替换为摘要存根,保留文件列表+命中数+参数,丢弃详情;释放 ~90% token。 */
+const OBSERVER_DIGEST_AGE = 5;
 
 /** 从 tool 结果的 content 中提取「生产者命中过的 path 列表」。
  *  - read_file:没有 path 列表(本身就是单 path 消费者,无需再追生产者)。
@@ -117,12 +131,100 @@ export class LifecycleEngine {
   /** producer 路径 → 生产者工具消息 idx 列表(逆查用:某个 path 被消费时,反查上游 producer)。
    * 注意:不存 read_file,因为 read 自身就是消费者不充当 producer。 */
   private readonly producersByPath = new Map<string, number[]>();
+  /** 已被 DIGEST 的 tool 消息 idx 集合(避免重复检查;states 保持 REFERENCED)。 */
+  private readonly digestedIdxs = new Set<number>();
+  /** 摘要不比原文短而保留原文的 idx；仅抑制当前 run 内的重复计算。 */
+  private readonly digestRetainedIdxs = new Set<number>();
   /** 当前步序号(用于 age 老化:每次 pushTool 自增,对比 age 阈值)。 */
   private step = 0;
   /** 最后 user 索引缓存(pushTool 时重算;pushMutation 时也重算,因为 mutation 可能跟 user 同行)。 */
   private lastUser = -1;
 
-  constructor(private readonly ageThreshold: number = DEFAULT_AGE_THRESHOLD) {}
+  constructor(private readonly ageThreshold: number = DEFAULT_AGE_THRESHOLD, history?: ChatMessage[]) {
+    if (history) this.rehydrate(history);
+  }
+
+  /**
+   * 从会话历史恢复观察者状态。
+   *
+   * LifecycleEngine 是每次 runAgentCore 新建的，但 history 是会话级的；若不回放，
+   * 跨轮的 observer 不在 states 中，后续工具调用也就无法使它老化。这里按原始
+   * pushTool 的顺序重放登记、消费关系和 age，并使用当时的 user 保护边界推进阶段。
+   * 只纳入 observer：非 observer 的短期 orphan 处理刻意保持原有「本轮」语义。
+   */
+  private rehydrate(history: ChatMessage[]): void {
+    try {
+      let replayLastUser = -1;
+      const pendingDigests = new Set<number>();
+
+      for (let idx = 1; idx < history.length; idx++) {
+        const m = history[idx] as AnyMessage;
+        if (m.role === 'user') {
+          replayLastUser = idx;
+          continue;
+        }
+        if (m.role !== 'tool') continue;
+        const toolName = toolNameOf(history, idx);
+        if (!toolName) continue;
+
+        const content = toText(m.content);
+        const isDigest = content.startsWith(DIGEST_PREFIX);
+        if (OBSERVER_TOOLS.has(toolName) && !content.startsWith('⌦[')) {
+          this.states.set(idx, 'LIVE');
+          this.consumerCount.set(idx, 0);
+          this.age.set(idx, 0);
+          for (const path of extractProducerPaths(toolName, content)) {
+            const producers = this.producersByPath.get(path) ?? [];
+            producers.push(idx);
+            this.producersByPath.set(path, producers);
+          }
+        } else if (OBSERVER_TOOLS.has(toolName) && isDigest) {
+          this.states.set(idx, 'REFERENCED');
+          this.consumerCount.set(idx, 0);
+          this.age.set(idx, 0);
+          this.digestedIdxs.add(idx);
+        }
+
+        if (CONSUMER_TOOLS.has(toolName)) {
+          const path = extractPath(this.findToolArgs(history, idx));
+          if (path) {
+            for (const producerIdx of this.producersByPath.get(path) ?? []) {
+              if (this.states.get(producerIdx) === 'LIVE') {
+                this.states.set(producerIdx, 'REFERENCED');
+              }
+              this.consumerCount.set(producerIdx, (this.consumerCount.get(producerIdx) ?? 0) + 1);
+            }
+          }
+        }
+
+        for (const key of this.states.keys()) this.age.set(key, (this.age.get(key) ?? 0) + 1);
+        this.step++;
+
+        // 和 pushTool 一致：本轮 user 及之后的结果不处理；旧轮结果可以推进。
+        for (const [observerIdx, state] of this.states) {
+          if (observerIdx >= replayLastUser || this.isDigestFinalized(observerIdx)) continue;
+          const observerName = toolNameOf(history, observerIdx);
+          if (!observerName || !OBSERVER_TOOLS.has(observerName)) continue;
+          const age = this.age.get(observerIdx) ?? 0;
+          if (state === 'LIVE' && age >= OBSERVER_REFERENCED_AGE) {
+            this.states.set(observerIdx, 'REFERENCED');
+          } else if (state === 'REFERENCED'
+            && age >= OBSERVER_REFERENCED_AGE + OBSERVER_DIGEST_AGE) {
+            pendingDigests.add(observerIdx);
+          }
+        }
+      }
+
+      this.lastUser = lastUserIndex(history);
+      // 回放期间只计算状态；最后统一落盘，避免迭代时破坏 path 提取。
+      for (const idx of pendingDigests) {
+        const toolName = toolNameOf(history, idx);
+        if (toolName && idx < Math.max(0, this.lastUser)) this.digestOne(history, idx, toolName);
+      }
+    } catch {
+      // 历史中出现非标准消息时降级为本轮行为，不能影响 agent 主循环。
+    }
+  }
 
   /** 新工具结果 push 进 history 时调;idx = history.length - 1。
    *  mutation 工具(edit_file/write_file)的 push 跳过本轮的 autoStubOrphans(由调用方在
@@ -232,23 +334,42 @@ export class LifecycleEngine {
     }
   }
 
-  /** 老化自动 STUB:扫描所有 LIVE(且非观察类)且 age ≥ 阈值且不在保护区的工具消息 → OBSOLETE → STUB。 */
+  /** 老化自动处理:
+   *  - 非观察类 LIVE 且 age ≥ 阈值 → OBSOLETE → STUB(完全丢弃)。
+   *  - 观察类工具两阶段衰减:
+   *    Phase 1: LIVE → REFERENCED(age ≥ OBSERVER_REFERENCED_AGE,保留完整内容)。
+   *    Phase 2: REFERENCED → DIGEST(增量 age ≥ OBSERVER_DIGEST_AGE,替换为摘要存根)。
+   *  - 当前轮保护区(最后一个 user 之后)完全不动。
+   */
   private autoStubOrphans(history: ChatMessage[]): void {
     try {
       const protectedFrom = Math.max(0, this.lastUser);
       for (const [idx, state] of this.states) {
-        if (state !== 'LIVE') continue;
         if (idx >= protectedFrom) continue; // 当前轮保护区
         const age = this.age.get(idx) ?? 0;
-        if (age < this.ageThreshold) continue;
         const tn = toolNameOf(history, idx);
         if (!tn) continue;
-        // 观察类工具永远只到 REFERENCED,不自动 STUB(用户拍板)。
+
         if (OBSERVER_TOOLS.has(tn)) {
-          this.states.set(idx, 'REFERENCED');
+          // Phase 1: LIVE → REFERENCED(保留完整内容)。
+          if (state === 'LIVE' && age >= OBSERVER_REFERENCED_AGE) {
+            this.states.set(idx, 'REFERENCED');
+            continue;
+          }
+          // Phase 2: REFERENCED → DIGEST(替换为摘要存根,状态不变)。
+          if (state === 'REFERENCED' && !this.isDigestFinalized(idx)) {
+            // read_file 可能在很早时就把 producer 标成 REFERENCED；不能因此跳过
+            // Phase 1 的保留窗口。摘要始终以 observer 自身的总 age 为准。
+            if (age >= OBSERVER_REFERENCED_AGE + OBSERVER_DIGEST_AGE) {
+              this.digestOne(history, idx, tn);
+            }
+          }
           continue;
         }
-        // 执行 STUB。
+
+        // 非观察类:只在 LIVE 状态下老化 STUB。
+        if (state !== 'LIVE') continue;
+        if (age < this.ageThreshold) continue;
         this.stubOne(history, idx, tn);
       }
     } catch {
@@ -270,6 +391,83 @@ export class LifecycleEngine {
     } catch {
       // 永不抛错。
     }
+  }
+
+  /** 观察类工具 Phase 2:替换为摘要存根,保留文件列表+命中数+参数,丢弃详情。
+   *  幂等:已是 ⌦[ 前缀的跳过。states 保持 REFERENCED,只替换 content。 */
+  private digestOne(history: ChatMessage[], idx: number, toolName: string): void {
+    try {
+      const m = history[idx] as AnyMessage;
+      if (!m) return;
+      const c = toText(m.content);
+      if (c.startsWith('⌦[')) return; // 幂等(已 STUB/DIGEST)
+      const origLen = c.length;
+      const argsRaw = this.findToolArgs(history, idx);
+      const summary = this.buildDigestSummary(toolName, c, argsRaw, origLen, extractProducerPaths(toolName, c));
+      // 摘要的唯一目标是降低上下文成本。短结果（如“未命中”）不能被固定文案放大。
+      if (summary.length >= origLen) {
+        this.digestRetainedIdxs.add(idx);
+        return;
+      }
+      (m as { content: string }).content = summary;
+      // states 保持 REFERENCED;digestedIdxs 由 stats() 扣除显示。
+      this.digestedIdxs.add(idx);
+    } catch {
+      // 永不抛错。
+    }
+  }
+
+  /** 为各观察类工具生成摘要字符串。只保留统计 + 参数,不保留详情(文件列表/URL/正文),
+   *  明确标注"这是历史摘要,需要最新信息请重新调用"。 */
+  private buildDigestSummary(toolName: string, content: string, argsRaw: string, origLen: number, paths: string[]): string {
+    const files = this.formatDigestPaths(paths);
+    switch (toolName) {
+      case 'grep': {
+        // 命中行数:content 里形如 `file:line:` 的行数
+        let lineCount = 0;
+        const re = /^[^\s:][^:]*?\.[A-Za-z0-9]+:\d+:/gm;
+        while (re.exec(content)) lineCount++;
+        const args = (() => { try { const a = JSON.parse(argsRaw); let s = `"${a.pattern ?? ''}"`; if (a.glob) s += `, glob="${a.glob}"`; return s; } catch { return '...'; } })();
+        return `${DIGEST_PREFIX}grep(${args}) — 历史结果 ${lineCount} 行命中，文件 ${files}，${origLen}→摘要]\n如需完整详情或最新信息请重新调用 grep`;
+      }
+      case 'glob': {
+        const args = (() => { try { return `"${JSON.parse(argsRaw).pattern ?? ''}"`; } catch { return '...'; } })();
+        return `${DIGEST_PREFIX}glob(${args}) — 历史结果文件 ${files}，${origLen}→摘要]\n如需完整列表或最新信息请重新调用 glob`;
+      }
+      case 'codegraph': {
+        const args = (() => { try { const a = JSON.parse(argsRaw); return `"${a.query ?? ''}"`; } catch { return '...'; } })();
+        return `${DIGEST_PREFIX}codegraph(${args}) — 历史结果文件 ${files}，${origLen}→摘要]\n如需完整详情或最新信息请重新调用 codegraph`;
+      }
+      case 'web_search': {
+        // 统计结果数
+        let resultCount = 0;
+        const lines = content.split(/\r?\n/);
+        for (const line of lines) {
+          if (/^\[\d+\]\s*.+/.test(line)) resultCount++;
+        }
+        const query = (() => { try { return JSON.parse(argsRaw).query ?? ''; } catch { return ''; } })();
+        return `${DIGEST_PREFIX}web_search("${query}") — 历史结果 ${resultCount} 条, ${origLen}→摘要]\n如需最新信息请重新调用 web_search`;
+      }
+      case 'web_fetch': {
+        const url = (() => { try { return JSON.parse(argsRaw).url ?? ''; } catch { return ''; } })();
+        return `${DIGEST_PREFIX}web_fetch(${url}) — 历史结果已归档, ${origLen}→摘要]\n如需最新信息请重新调用 web_fetch`;
+      }
+      default:
+        return `${DIGEST_PREFIX}${toolName} — 历史结果已归档, ${origLen}→摘要]\n如需最新信息请重新调用 ${toolName}`;
+    }
+  }
+
+  private isDigestFinalized(idx: number): boolean {
+    return this.digestedIdxs.has(idx) || this.digestRetainedIdxs.has(idx);
+  }
+
+  /** 文件候选是摘要的关键可用信息；限量且去重，避免摘要本身重新膨胀。 */
+  private formatDigestPaths(paths: string[]): string {
+    const unique = [...new Set(paths)];
+    if (unique.length === 0) return '0 个（未能从输出解析路径）';
+    const limit = 12;
+    const shown = unique.slice(0, limit).join(', ');
+    return unique.length > limit ? `${unique.length} 个 [${shown}, …]` : `${unique.length} 个 [${shown}]`;
   }
 
   /** 找某条 tool 消息对应的 assistant.tool_calls.arguments。 */
@@ -297,8 +495,9 @@ export class LifecycleEngine {
     return this.states.get(idx) ?? null;
   }
 
-  /** 拿当前各状态计数。供 /context 显示「live=N, referenced=M, obsolete=K, stubbed=S」。 */
-  stats(): { live: number; referenced: number; obsolete: number; stubbed: number } {
+  /** 拿当前各状态计数。供 /context 显示「live=N, referenced=M, digest=K, obsolete=J, stubbed=S」。
+   *  digested:已被摘要的观察类工具(states 仍为 REFERENCED,但 content 已替换为摘要)。 */
+  stats(): { live: number; referenced: number; digested: number; obsolete: number; stubbed: number } {
     let live = 0;
     let referenced = 0;
     let obsolete = 0;
@@ -309,11 +508,17 @@ export class LifecycleEngine {
       else if (s === 'OBSOLETE') obsolete++;
       else if (s === 'STUB') stubbed++;
     }
-    return { live, referenced, obsolete, stubbed };
+    // digested 的 states 仍为 REFERENCED,从总 referenced 中扣除得到纯 REFERENCED 数。
+    return { live, referenced: referenced - this.digestedIdxs.size, digested: this.digestedIdxs.size, obsolete, stubbed };
   }
 }
 
 /** 默认单例工厂。runAgentCore 入口 new 一个,后续 pushTool / pushMutation 共享。 */
-export function createLifecycleEngine(ageThreshold?: number): LifecycleEngine {
-  return new LifecycleEngine(ageThreshold);
+export function createLifecycleEngine(history?: ChatMessage[], ageThreshold?: number): LifecycleEngine;
+/** 向后兼容旧的 createLifecycleEngine(ageThreshold) 调用。 */
+export function createLifecycleEngine(ageThreshold?: number): LifecycleEngine;
+export function createLifecycleEngine(historyOrThreshold?: ChatMessage[] | number, ageThreshold?: number): LifecycleEngine {
+  const history = Array.isArray(historyOrThreshold) ? historyOrThreshold : undefined;
+  const threshold = typeof historyOrThreshold === 'number' ? historyOrThreshold : ageThreshold;
+  return new LifecycleEngine(threshold, history);
 }

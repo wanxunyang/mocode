@@ -301,7 +301,9 @@ export async function runAgentCore(
   // 观察者生命周期引擎:每个 runAgentCore 实例一个,纯静态、自动维护 grep/glob/codegraph 等
   // producer 与 read/edit/write 的 consumer 引用关系;孤立+老化的非观察类工具自动 STUB。
   // 开关关闭时为 null,所有 pushToolResult / mutation 调用走无 lifecycle 路径(零行为变化)。
-  const lifecycle = config.contextLifecycle ? createLifecycleEngine() : null;
+  // 引擎需要从已有会话 history 恢复观察结果的年龄和 path 索引；不能只追踪本次
+  // runAgentCore，否则跨用户轮次的 grep/glob 永远不会衰减。
+  const lifecycle = config.contextLifecycle ? createLifecycleEngine(history) : null;
   // 预算调度器:每个 runAgentCore 实例一个,步前 evaluateBudget + scheduleActions。
   // 决策按 ROI 分发(cold tools 优先 / history 摘要最后);contextBudget 开关关闭时为 null。
   const scheduler: BudgetScheduler | null = config.contextBudget !== false
