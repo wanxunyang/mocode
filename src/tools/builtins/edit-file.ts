@@ -6,7 +6,7 @@ import type { Tool } from '../types.js';
 export const editFileTool: Tool = {
   name: 'edit_file',
   description:
-    'Replace a string in a file. old_string must occur exactly once and match exactly (including indentation/newlines). Use write_file for new files.',
+    'Replace a string in a file. old_string must occur exactly once and match exactly (including indentation/newlines). Copy old_string verbatim from a fresh read_file result for this path; do not reconstruct it from memory or summaries. Use write_file for new files.',
   risk: 'confirm',
   parameters: {
     type: 'object',
@@ -34,7 +34,7 @@ export const editFileTool: Tool = {
 
     const count = norm.split(normOld).length - 1;
     if (count === 0) {
-      return `错误:在 ${path} 中未找到 old_string。请先 read_file 确认实际内容。`;
+      return `错误:在 ${path} 中未找到 old_string。不要重试相同参数；请先 read_file 读取目标区域，再从返回内容逐字复制新的 old_string 后重试。`;
     }
     if (count > 1) {
       return `错误:old_string 在 ${path} 中出现 ${count} 次,不唯一。请加入更多上下文使其唯一。`;
