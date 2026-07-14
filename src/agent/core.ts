@@ -255,9 +255,6 @@ export async function runAgentCore(
   const { history, userInput, signal, onContextUpdate, hooks, skipRollback } = opts;
   const runtimeContextState = opts.contextState ?? contextState;
   const maxSteps = opts.maxSteps ?? config.maxSteps;
-  // 中断回滚快照:入口(本 turn push 任何消息前)整段浅拷贝。abort 时 length=0;push(...saved) 还原。
-  // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
-  const savedHistory = history.slice();
   // 中断还原:LLM 中途可能调 switch_mode 切了模式,abort 时连同模式一起还原回轮首。
   const savedMode = getAgentMode();
   // 本轮计时:从入口到完毕(正常 return / 达上限),供 finally 打 ✻ Worked for 摘要行。
@@ -288,6 +285,11 @@ export async function runAgentCore(
     return thrashHint(name, args, c);
   };
   history.push({ role: 'user', content: userInput });
+  // 中断回滚快照:push 用户消息后整段浅拷贝。abort 时 length=0;push(...saved) 还原。
+  // 这样中断时至少保留用户消息(及之前的历史);每步工具全部执行完毕后刷新快照,
+  // 保留已完成的 assistant+tool_calls+tool 结果,只丢弃当前未完成步骤的消息。
+  // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
+  let savedHistory = history.slice();
   // drop_context 工具的上下文剔除回调:闭包捕获 history,原地剔除无关旧 tool 结果。
   // 保护由 dropContextFromHistory 内部保证:history[0](system)+ 当前轮(最后 user 及其后)永不剔除。
   // 子 agent 也在自己的 history 上操作(子 agent 独立 history);skipRollback 不影响此行为。
@@ -571,6 +573,9 @@ export async function runAgentCore(
         // 工具步末尾补一空行:与下一轮的思考 / 正文分隔(否则 ↳ 后紧接 ▎ 思考,无空行不好看;
         // 与正文→● 的 1 空行对称)。工具结果已以 \n 收尾,此处再补 \n 恰好 1 空行。
         hooks.onToolBatchEnd?.();
+        // 刷新中断快照:工具全部执行完毕后,history 处于一致状态(assistant+tool_calls+tool 结果完整),
+        // 此时中断可安全保留这些已完成的消息,只丢弃下一轮未完成的 chat() 响应。
+        savedHistory = history.slice();
         continue; // 带着工具结果再调一次 LLM
       }
 
