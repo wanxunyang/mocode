@@ -56,6 +56,7 @@ import {
   type ImageAttachment,
 } from '../attachments/image.js';
 import { modelSupportsVision } from '../llm/capabilities.js';
+import { computePruneStats } from '../context/relevance.js';
 import type { ContentPart } from '../agent/core.js';
 import {
   manualCompact,
@@ -220,7 +221,13 @@ function renderContextBar(history: ChatMessage[]): string {
   const src = contextState.lastUsage ? '实测' : '估算';
   const k = (n: number) => `${Math.round(n / 1000)}k`;
   const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.accent;
-  return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${history.length} 条消息 (${src})${ui.reset}`;
+  const lifecycle = contextState.lifecycleStats;
+  const archived = computePruneStats(history);
+  const lifecycleLine = lifecycle
+    ? `\n  lifecycle · live ${lifecycle.live} · referenced ${lifecycle.referenced} · digested ${lifecycle.digested} · stubbed ${lifecycle.stubbed}`
+    : '\n  lifecycle · no active snapshot (run a tool-enabled turn first)';
+  const archiveLine = `\n  archived tool results · ${archived.stubbed}`;
+  return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${history.length} 条消息 (${src})${ui.reset}${lifecycleLine}${archiveLine}`;
 }
 
 /** 状态行用量条(精简版,进底栏):[bar] pct% k/k。
@@ -997,6 +1004,7 @@ export async function startRepl(
     if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
     contextState.lastUsage = undefined;
     contextState.correction = 1;
+    contextState.lifecycleStats = undefined;
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
     renderHistory(history);
@@ -1132,6 +1140,7 @@ export async function startRepl(
       turnCount = 0; // 反思 cadence 重新计数
       contextState.lastUsage = undefined;
       contextState.correction = 1;
+      contextState.lifecycleStats = undefined;
       lastTurnUsage = undefined; // 清空旧轮的 token 累计
       pendingAttachments = []; // 一并清空待发图片
       layout.clearContent();

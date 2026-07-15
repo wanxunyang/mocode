@@ -7,7 +7,25 @@
 //  - 永不抛错(对齐「调度器永不抛错」契约)。
 //  - 仅依赖 `ChatMessage` 的最小形状,不反向 import agent / session / tools。
 
+import path from 'node:path';
 import type { ChatMessage } from '../llm/index.js';
+
+/** 将文件路径统一成可用于跨工具关联的绝对 key。
+ * Windows 路径不区分大小写，并统一使用 `/`，避免相对/绝对路径及分隔符差异导致漏配。 */
+export function canonicalizePath(input: string | null | undefined): string | null {
+  if (!input?.trim()) return null;
+  try {
+    const normalized = path.resolve(input.trim()).replace(/\\/g, '/');
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  } catch {
+    return null;
+  }
+}
+
+/** 工具层以 `错误:` 作为统一失败前缀；失败结果不得消费或淘汰已有观察数据。 */
+export function isToolResultSuccess(output: string): boolean {
+  return !output.trimStart().startsWith('错误:');
+}
 
 /** 把消息 content 拍平成字符串(OpenAI 可能 string / null / 多模态数组)。
  *  用于估算 token、内容匹配、stub 拼接等场景。 */

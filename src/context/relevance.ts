@@ -24,7 +24,7 @@
 // 零行为变化兜底:开关 `config.contextRelprune` 关闭时,pipeline 路径完全不调本模块。
 
 import type { ChatMessage } from '../llm/index.js';
-import { extractPath, lastUserIndex, toText, toolNameOf } from './utils.js';
+import { canonicalizePath, extractPath, lastUserIndex, toText, toolNameOf } from './utils.js';
 
 /** 仅依赖一个最小 chat-message 形状接口,避免反向 import llm 全量。 */
 type AnyMessage = ChatMessage & { content?: unknown; tool_call_id?: string };
@@ -48,44 +48,24 @@ export class RelevancePruner {
   private readonly readByPath = new Map<string, number[]>();
 
   /** 把刚 push 的消息通知 pruner。
-   *  - 只处理 tool 消息(role==='tool')。
-   *  - 只关心 read_file:登记 + 反向 stub 同 path 旧 read。
-   *  - 非 read_file 的 tool 消息:无操作(本层只管 read_file)。
-   *  - 非 tool 消息(assistant / user / system):无操作。
+   *  - 只处理成功的 read_file tool 消息；失败读取不能淘汰旧的有效结果。
+   *  - 登记当前 canonical path，并反向 stub 同 path 旧 read。
    */
-  observePush(history: ChatMessage[], msg: ChatMessage): void {
+  observePush(history: ChatMessage[], msg: ChatMessage, succeeded = true): void {
     try {
-      if (msg.role !== 'tool') return;
+      if (!succeeded || msg.role !== 'tool') return;
       const m = msg as AnyMessage;
-      const tcId = m.tool_call_id;
-      if (!tcId) return;
       const idx = history.length - 1;
       if (idx < 1 || history[idx] !== msg) return; // 防御:必须刚 push 到末尾
-      const name = toolNameOf(history, idx);
-      if (name !== 'read_file') return;
+      if (toolNameOf(history, idx) !== 'read_file') return;
       const content = toText((msg as { content?: unknown }).content);
       if (content.startsWith(STUB_PREFIX)) return; // 已是存根(防御)
 
-      // 从前导 assistant.tool_calls 找对应 tc.arguments(精确 path 来源)。
-      // 退化方案:从消息内容首行解析路径(read_file 输出形如 `\n     1\t...`,无 path;
-      // 故必须从 args 取)。找不到则保守不动。
-      let path: string | null = null;
-      for (let j = idx - 1; j >= 1; j--) {
-        const mm = history[j];
-        if (mm.role !== 'assistant') continue;
-        const tcs = (mm as { tool_calls?: { id?: string; function?: { arguments?: string } }[] }).tool_calls;
-        if (!tcs) continue;
-        const hit = tcs.find((tc) => tc?.id === tcId);
-        if (hit) {
-          path = extractPath(hit.function?.arguments);
-          break;
-        }
-      }
+      const path = this.pathAt(history, idx);
       if (!path) return;
 
-      // 先 stub 旧 read(同 path,idx 之前),再登记新 idx。
+      // 先 stub 旧 read(同 canonical path,idx 之前),再登记新 idx。
       this.stubPriorReads(history, path, idx);
-      // 登记新 idx
       const list = this.readByPath.get(path);
       if (list) list.push(idx);
       else this.readByPath.set(path, [idx]);
@@ -94,45 +74,42 @@ export class RelevancePruner {
     }
   }
 
-  /**
-   * 把该 mutation path 的"在 mutation 之前的" read 全部 stub。
-   * 通常用于 edit_file / write_file 工具:mutation 之后,之前的 read_file(p) 内容
-   * 已失效(已不再是文件当前状态),模型后续若依赖旧 read 来 edit_file 会失败,但 edit_file
-   * 的 old_string 来自模型记忆/后读,不依赖旧 read 结果文本。
-   *
-   * 调用时机:agent/core.ts 在 mutation 工具调用的 pushToolResult 之后立即调;
-   * 此时 history 末尾就是 mutation 的 tool 消息,prior reads 指 < idx。
-   */
+  /** 从 tool_call arguments 取得并规范化某条 read_file 的路径。 */
+  private pathAt(history: ChatMessage[], idx: number): string | null {
+    const tcId = (history[idx] as AnyMessage)?.tool_call_id;
+    if (!tcId) return null;
+    for (let j = idx - 1; j >= 1; j--) {
+      const mm = history[j];
+      if (mm.role !== 'assistant') continue;
+      const tcs = (mm as { tool_calls?: { id?: string; function?: { arguments?: string } }[] }).tool_calls;
+      const hit = tcs?.find((tc) => tc?.id === tcId);
+      if (hit) return canonicalizePath(extractPath(hit.function?.arguments));
+    }
+    return null;
+  }
+
+  /** 成功 mutation 后，把该 canonical path 在 mutation 之前的 read 全部 stub。 */
   observeMutation(history: ChatMessage[], path: string): void {
     try {
-      if (!path) return;
+      const canonicalPath = canonicalizePath(path);
+      if (!canonicalPath) return;
       const idx = history.length - 1;
       if (idx < 1) return;
-      // mutation 之前的所有同 path read → stub
-      this.stubPriorReads(history, path, idx);
-      // 该 path 的 read 索引全部作废(mutation 之后再 read 会重新登记)
-      this.readByPath.delete(path);
+      this.stubPriorReads(history, canonicalPath, idx);
+      this.readByPath.delete(canonicalPath);
     } catch {
       /* 永不抛错 */
     }
   }
 
   /**
-   * 把 history 里 "path 同 + index < beforeIdx + 不在当前轮保护区" 的所有 read_file
-   * tool 消息替换为存根(只改 .content,不动 id / 数组结构)。
-   *
-   * 实现:
-   *  - 用 readByPath[path] 直接拿到所有 index(已登记过),筛 < beforeIdx 的 stub。
-   *  - 同时扫一遍 [1, beforeIdx) 区间找未登记的(防御:索引可能漏登;不依赖索引也能 stub,
-   *    保证正确性。索引只用于"避免重复扫全表"的优化)。
-   *  - protectedFrom = lastUserIndex(history):user 之后一律不动。
-   *  - 幂等:已是 STUB_PREFIX 的跳过。
+   * 把 history 里 "canonical path 同 + index < beforeIdx + 不在当前轮保护区" 的 read_file
+   * tool 消息替换为存根。索引是快路径，全表扫描用于恢复 resume 历史；两条路径都重新校验 path。
    */
   private stubPriorReads(history: ChatMessage[], path: string, beforeIdx: number): void {
-    const STUB_PREFIX_LOCAL = STUB_PREFIX;
+    const targetPath = canonicalizePath(path);
+    if (!targetPath) return;
     const guard = lastUserIndex(history);
-    // protectedFrom = 最后一个 user index(若 >0);user 之后(>= guard)的 read 永不动。
-    // protectedFrom=0 表示无 user(history 只有 system),整段都可 stub。
     const protectedFrom = guard > 0 ? guard : 0;
 
     const stubOne = (i: number): void => {
@@ -141,27 +118,21 @@ export class RelevancePruner {
       const m = history[i] as AnyMessage;
       if (!m || m.role !== 'tool') return;
       const content = toText((m as { content?: unknown }).content);
-      if (content.startsWith(STUB_PREFIX_LOCAL)) return; // 幂等
-      const name = toolNameOf(history, i);
-      if (name !== 'read_file') return;
-      // 校验 tool_call_id 配对(防御:孤儿子消息不动)
+      if (content.startsWith(STUB_PREFIX)) return; // 幂等
+      if (toolNameOf(history, i) !== 'read_file') return;
+      if (this.pathAt(history, i) !== targetPath) return; // 防止 fallback 扫描误裁其他文件
       const tcId = m.tool_call_id;
       if (!tcId) return;
-      const stub = `${STUB_PREFIX_LOCAL} read_file(${path}) ${content.length} 字符 → 已被新 read / mutation 替代 · id …${tcId.slice(-6)}⌫`;
+      const stub = `${STUB_PREFIX} read_file(${targetPath}) ${content.length} 字符 → 已被新 read / mutation 替代 · id …${tcId.slice(-6)}⌫`;
       (m as { content?: string }).content = stub;
     };
 
-    // 1) 用 Map 索引(快路径)
-    const indexed = this.readByPath.get(path);
+    const indexed = this.readByPath.get(targetPath);
     if (indexed) {
       for (const i of indexed) stubOne(i);
     }
-    // 2) 全表扫一遍(防御:索引可能漏登 / 历史来自 resume)
-    //    仅扫 [1, beforeIdx) 且不在保护区内的 range,成本可控。
     const scanEnd = Math.min(beforeIdx, protectedFrom > 0 ? protectedFrom : beforeIdx);
-    for (let i = 1; i < scanEnd; i++) {
-      stubOne(i);
-    }
+    for (let i = 1; i < scanEnd; i++) stubOne(i);
   }
 }
 

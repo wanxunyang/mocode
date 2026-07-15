@@ -26,6 +26,7 @@ import type { ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
 import { optimizeToolResult } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
+import { isToolResultSuccess } from '../context/utils.js';
 import { config } from '../config/index.js';
 import { jailResolve } from '../sandbox/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
@@ -137,6 +138,7 @@ function pushToolResult(
   pruner: ReturnType<typeof createRelevancePruner> | null,
   lifecycle: LifecycleEngine | null,
   scheduler: BudgetScheduler | null,
+  runtimeContextState: ContextState = contextState,
 ): void {
   const msg = {
     role: 'tool' as const,
@@ -146,12 +148,11 @@ function pushToolResult(
     content: optimizeToolResult(tc.name, output, tc.arguments),
   } as ChatMessage;
   history.push(msg);
-  // 相关性裁剪:只动 read_file / edit_file / write_file 三类(其它 tool 与本层无关)。
-  // pruner 内部 try/catch + 幂等,永不抛错;开关关闭时 pruner=null 完全跳过。
-  if (pruner) pruner.observePush(history, msg);
-  // 观察者生命周期:新 push 一律先登记 LIVE;内部自动维护 producer/consumer 图 + 老化 STUB。
-  // lifecycle 内部 try/catch + 幂等;开关关闭时 lifecycle=null 完全跳过。
-  if (lifecycle) lifecycle.pushTool(history, history.length - 1);
+  const succeeded = isToolResultSuccess(output);
+  // 失败 read 不得淘汰旧 read；失败 consumer 也不能改变 lifecycle 上游状态。
+  if (pruner) pruner.observePush(history, msg, succeeded);
+  if (lifecycle) lifecycle.pushTool(history, history.length - 1, succeeded);
+  runtimeContextState.lifecycleStats = lifecycle?.stats();
 }
 
 // ── hooks:把 runAgent 的展示副作用参数化 ──────────────────────────────────
@@ -304,6 +305,7 @@ export async function runAgentCore(
   // 引擎需要从已有会话 history 恢复观察结果的年龄和 path 索引；不能只追踪本次
   // runAgentCore，否则跨用户轮次的 grep/glob 永远不会衰减。
   const lifecycle = config.contextLifecycle ? createLifecycleEngine(history) : null;
+  runtimeContextState.lifecycleStats = lifecycle?.stats();
   // 预算调度器:每个 runAgentCore 实例一个,步前 evaluateBudget + scheduleActions。
   // 决策按 ROI 分发(cold tools 优先 / history 摘要最后);contextBudget 开关关闭时为 null。
   const scheduler: BudgetScheduler | null = config.contextBudget !== false
@@ -558,15 +560,13 @@ export async function runAgentCore(
             // Thrashing:同上(history 附 hint,UI 干净)
             const hint = recordAndHint(tc.name, tc.arguments);
             pushToolResult(history, tc, hint ? `${output}${hint}` : output, relprune, lifecycle, scheduler);
-            // 相关性裁剪 mutation 通知:edit_file/write_file 后,该 path 之前的所有 read_file
-            // 结果已失效(已不再是文件当前状态)→ stub 为存根。pruner 内部 try/catch + 幂等。
-            // 非 mutation 工具(run_command/use_skill/memory_* 等)此处 path="" 不触发。
-            // 观察者生命周期:mutation push 后通知 lifecycle 把同 path 的旧 read 标 REFERENCED。
-            if (relprune && isMutationTool(tc.name)) {
+            // 只有成功 mutation 才会使旧 read 失效；pruner 与 lifecycle 独立启停。
+            if (isMutationTool(tc.name) && isToolResultSuccess(output)) {
               const mp = mutationParsed?.path;
               if (typeof mp === 'string' && mp) {
-                relprune.observeMutation(history, mp);
-                if (lifecycle) lifecycle.pushMutation(history, history.length - 1, mp);
+                relprune?.observeMutation(history, mp);
+                lifecycle?.pushMutation(history, history.length - 1, mp);
+                runtimeContextState.lifecycleStats = lifecycle?.stats();
               }
             }
             i++;

@@ -73,6 +73,14 @@ export interface ContextState {
   /** API 实测 / 估算 的校正系数,默认 1(未校准时等价于原估算)。 */
   correction: number;
   schedulerLog?: import('./scheduler.js').SchedulerRunLog;
+  /** 最近一次 agent 生命周期图快照；/context 用于展示 observation 衰减状态。 */
+  lifecycleStats?: {
+    live: number;
+    referenced: number;
+    digested: number;
+    obsolete: number;
+    stubbed: number;
+  };
 }
 
 export function createContextState(): ContextState {

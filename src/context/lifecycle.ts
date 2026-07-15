@@ -30,7 +30,14 @@
 // 开关:`config.contextLifecycle`(默认 true;MOCODE_LIFECYCLE=false 回退)。
 
 import type { ChatMessage } from '../llm/index.js';
-import { extractPath, lastUserIndex, toText, toolNameOf } from './utils.js';
+import {
+  canonicalizePath,
+  extractPath,
+  isToolResultSuccess,
+  lastUserIndex,
+  toText,
+  toolNameOf,
+} from './utils.js';
 
 type AnyMessage = ChatMessage & { content?: unknown; tool_call_id?: string };
 
@@ -84,13 +91,19 @@ const OBSERVER_DIGEST_AGE = 5;
 function extractProducerPaths(toolName: string, content: string): string[] {
   if (!content) return [];
   const out = new Set<string>();
+  const addPath = (raw: string): void => {
+    const canonical = canonicalizePath(raw);
+    if (canonical) out.add(canonical);
+  };
   try {
     if (toolName === 'grep') {
-      // 典型行:`src/foo.ts:42: hello world` 或 `path\to\file.ts:42: ...`
-      // 取冒号前段(冒号必须跟在数字前面避免切到路径里的冒号)。
-      const re = /^([^\s:][^:]*?\.[A-Za-z0-9]+):(\d+):/gm;
+      // grep 内置工具的结构化输出是 `path: N 处匹配,行号 [...]`；旧格式也可能是
+      // `path:line: content`。两者都必须建立 producer 索引，供后续 read_file 关联。
+      const rawLine = /^(.+?\.[A-Za-z0-9]+):\d+:/gm;
+      const summaryHeader = /^(.+?\.[A-Za-z0-9]+):\s*\d+\s*(?:处匹配|matches?)[,，]/gmi;
       let m: RegExpExecArray | null;
-      while ((m = re.exec(content))) out.add(m[1]);
+      while ((m = rawLine.exec(content))) addPath(m[1]);
+      while ((m = summaryHeader.exec(content))) addPath(m[1]);
     } else if (toolName === 'glob') {
       // glob 输出一般是「paths:」+ 换行 + 多路径;每行一个绝对或相对路径。
       // 简化:按行切,跳过含空格的(避免命中 prose),取看起来像路径的行。
@@ -98,13 +111,13 @@ function extractProducerPaths(toolName: string, content: string): string[] {
         const t = line.trim();
         if (!t || t.includes(' ')) continue;
         // 含扩展名或含路径分隔符
-        if (/\.[A-Za-z0-9]+$/.test(t) || t.includes('/') || t.includes('\\')) out.add(t);
+        if (/\.[A-Za-z0-9]+$/.test(t) || t.includes('/') || t.includes('\\')) addPath(t);
       }
     } else if (toolName === 'codegraph') {
       // codegraph 输出通常 `path\to\file.ts:line:col  symbol` 或类似;按行 + 冒号分隔。
       for (const line of content.split(/\r?\n/)) {
         const m = /^([^\s:][^:]*?\.[A-Za-z0-9]+):(\d+):/.exec(line);
-        if (m) out.add(m[1]);
+        if (m) addPath(m[1]);
       }
     } else if (toolName === 'web_search' || toolName === 'web_fetch') {
       // 网络结果不在文件系统路径范畴;不参与 producer 路径索引(避免误匹配)。
@@ -185,8 +198,8 @@ export class LifecycleEngine {
           this.digestedIdxs.add(idx);
         }
 
-        if (CONSUMER_TOOLS.has(toolName)) {
-          const path = extractPath(this.findToolArgs(history, idx));
+        if (isToolResultSuccess(content) && CONSUMER_TOOLS.has(toolName)) {
+          const path = canonicalizePath(extractPath(this.findToolArgs(history, idx)));
           if (path) {
             for (const producerIdx of this.producersByPath.get(path) ?? []) {
               if (this.states.get(producerIdx) === 'LIVE') {
@@ -229,12 +242,14 @@ export class LifecycleEngine {
   /** 新工具结果 push 进 history 时调;idx = history.length - 1。
    *  mutation 工具(edit_file/write_file)的 push 跳过本轮的 autoStubOrphans(由调用方在
    *  pushMutation 标完 read REFERENCED 之后再触发),避免刚被 mutation 消费的 read 被提前 STUB。 */
-  pushTool(history: ChatMessage[], idx: number): void {
+  pushTool(history: ChatMessage[], idx: number, succeeded = true): void {
     try {
       const m = history[idx] as AnyMessage;
       if (!m || m.role !== 'tool') return;
       const toolName = toolNameOf(history, idx);
       if (!toolName) return;
+      // 失败工具结果只保留给模型诊断，不登记为 observation、不会推动老化或污染统计。
+      if (!succeeded) return;
 
       // 已 stub 的不重复登记(幂等)。
       const c = toText(m.content);
@@ -245,8 +260,8 @@ export class LifecycleEngine {
       this.consumerCount.set(idx, 0);
       this.age.set(idx, 0);
 
-      // 如果是 producer 类工具(grep/glob/codegraph),登记其命中的路径。
-      if (OBSERVER_TOOLS.has(toolName)) {
+      // 成功的 producer 才建立路径索引；失败结果仍可进入生命周期，但不能成为证据来源。
+      if (succeeded && OBSERVER_TOOLS.has(toolName)) {
         const paths = extractProducerPaths(toolName, c);
         for (const p of paths) {
           const arr = this.producersByPath.get(p) ?? [];
@@ -255,8 +270,8 @@ export class LifecycleEngine {
         }
       }
 
-      // 如果是 consumer 类工具(read/edit/write),找出上游「被消费的 producer」,标 REFERENCED。
-      if (CONSUMER_TOOLS.has(toolName)) {
+      // 只有成功 consumer 才能消费上游；失败 read/edit/write 不改变旧数据状态。
+      if (succeeded && CONSUMER_TOOLS.has(toolName)) {
         const argsRaw = (() => {
           // tool 消息本身没有 args;args 在前导 assistant.tool_calls 里;直接走同 idx 前的 assistant。
           const tcId = m.tool_call_id;
@@ -269,7 +284,7 @@ export class LifecycleEngine {
           }
           return '';
         })();
-        const path = extractPath(argsRaw);
+        const path = canonicalizePath(extractPath(argsRaw));
         if (path) {
           // 1) 找该 path 的所有上游 producer(grep/glob/codegraph)→ 标 REFERENCED。
           const producers = this.producersByPath.get(path);
@@ -293,8 +308,7 @@ export class LifecycleEngine {
       this.step++;
       this.lastUser = lastUserIndex(history);
 
-      // mutation 工具跳过本轮 autoStubOrphans:调用方会调 pushMutation 标完 read REFERENCED 后,
-      // 再调 flushAutoStub 触发老化检查,避免 read 在被标 REFERENCED 之前被提前 STUB。
+      // 成功 mutation 跳过本轮 autoStubOrphans；调用方会在 pushMutation 标完旧 read 后统一检查。
       if (MUTATION_TOOLS.has(toolName)) return;
 
       // 老化检查:本次 push 完,扫描 LIVE(且非观察类)的工具消息,age ≥ 阈值 → 标 OBSOLETE → STUB。
@@ -309,6 +323,11 @@ export class LifecycleEngine {
    *  注意:puhToolResult 出口已经登记过 mutation 本身,这里不再调 pushTool(避免 age 翻倍)。 */
   pushMutation(history: ChatMessage[], mutationIdx: number, path: string): void {
     try {
+      const mutationPath = canonicalizePath(path);
+      if (!mutationPath) {
+        this.autoStubOrphans(history);
+        return;
+      }
       // mutation 自身已在 pushToolResult 出口登记(若 lifecycle 存在);此处仅做「mutation 是
       // path 的消费者」语义:把该 path 在 mutation 之前的所有 read_file(未被 stub 的 LIVE/REFERENCED)
       // 标 REFERENCED。
@@ -322,7 +341,7 @@ export class LifecycleEngine {
         const c = toText(m.content);
         if (c.startsWith('⌦[')) continue;
         const argsRaw = this.findToolArgs(history, i);
-        if (extractPath(argsRaw) === path) {
+        if (canonicalizePath(extractPath(argsRaw)) === mutationPath) {
           if (this.states.get(i) === 'LIVE') this.states.set(i, 'REFERENCED');
           this.consumerCount.set(i, (this.consumerCount.get(i) ?? 0) + 1);
         }
