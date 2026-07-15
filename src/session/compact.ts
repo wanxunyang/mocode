@@ -57,6 +57,8 @@ export interface CompactResult {
     | 'noop-noold-noop' // 既不在 manual 又不在 force + 无 ROI 触发(自动 noop)
     | 'microcompact' // 只跑了 C1 中截超大
     | 'summarize'; // 跑了 LLM 摘要
+  /** 是否用新消息数组原地重建了 history；持有 history index 的调用方必须据此 rehydrate。 */
+  historyRebuilt?: boolean;
   /** 调试字段:保护区占比(0-1),供 /compact 显示"为什么没压"。force 时降 keepBudget 后可能更小。 */
   protectedRatio?: number;
   /** 调试字段:旧区可压组数,供 UI 显示。 */
@@ -416,6 +418,7 @@ export async function compactHistory(
       return {
         compacted: true,
         summarized: false,
+        historyRebuilt: true,
         estimateBefore,
         estimateAfter,
         reason: microcompactDone2 ? 'microcompact' : 'summarize',
@@ -514,6 +517,7 @@ export async function compactHistory(
     return {
       compacted: true,
       summarized: true,
+      historyRebuilt: true,
       estimateBefore,
       estimateAfter,
       reason: 'summarize',
@@ -600,5 +604,5 @@ export async function maybeCompact(
     force: manualOpts?.force,
     contextState: state,
   });
-  if (isManual) return r;
+  return r;
 }

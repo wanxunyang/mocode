@@ -304,7 +304,9 @@ export async function runAgentCore(
   // 开关关闭时为 null,所有 pushToolResult / mutation 调用走无 lifecycle 路径(零行为变化)。
   // 引擎需要从已有会话 history 恢复观察结果的年龄和 path 索引；不能只追踪本次
   // runAgentCore，否则跨用户轮次的 grep/glob 永远不会衰减。
-  const lifecycle = config.contextLifecycle ? createLifecycleEngine(history) : null;
+  let lifecycle: LifecycleEngine | null = config.contextLifecycle
+    ? createLifecycleEngine(history)
+    : null;
   runtimeContextState.lifecycleStats = lifecycle?.stats();
   // 预算调度器:每个 runAgentCore 实例一个,步前 evaluateBudget + scheduleActions。
   // 决策按 ROI 分发(cold tools 优先 / history 摘要最后);contextBudget 开关关闭时为 null。
@@ -355,10 +357,18 @@ export async function runAgentCore(
       // 步前:五区 Budget Scheduler 决策——按 ROI 调度(冷工具优先 / history 摘要最后)。
       // 开关关闭(scheduler=null)时退化回原 maybeCompact 路径,零行为变化。
       // 此时 spinner 已停,通知行干净。
+      let historyRebuilt = false;
       if (scheduler) {
-        await scheduler.runStep(history, step);
+        historyRebuilt = await scheduler.runStep(history, step);
       } else {
-        await maybeCompact(history, undefined, undefined, runtimeContextState);
+        const compactResult = await maybeCompact(history, undefined, undefined, runtimeContextState);
+        historyRebuilt = compactResult?.historyRebuilt === true;
+      }
+      // compact 用新消息数组原地重建 history 后，旧 lifecycle 的数字 index 已全部失效。
+      // 立即从新 history 恢复状态和 producer 索引，再允许后续 pushTool/pushMutation 使用。
+      if (historyRebuilt && lifecycle) {
+        lifecycle = createLifecycleEngine(history);
+        runtimeContextState.lifecycleStats = lifecycle.stats();
       }
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')
       mode = 'idle';

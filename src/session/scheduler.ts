@@ -57,7 +57,8 @@ export interface SchedulerRunLog {
 /** Scheduler 实例状态:压一份最近日志,方便 /context 看到上一次决策。 */
 export interface BudgetScheduler {
   observePush: (history: ChatMessage[], idx: number) => void;
-  runStep: (history: ChatMessage[], step: number) => Promise<void>;
+  /** 执行本步调度；history 被结构性重建时返回 true。 */
+  runStep: (history: ChatMessage[], step: number) => Promise<boolean>;
   /** 暴露最近一次决策(供 /context)。 */
   lastRunLog: SchedulerRunLog | null;
 }
@@ -88,6 +89,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
       const report = evaluateBudget(history, config.contextWindowTokens, step, state.correction);
       const actions = scheduleActions(report);
       let compactHistoryCalled = false;
+      let historyRebuilt = false;
 
       for (const a of actions) {
         if (a.kind === 'warn') {
@@ -96,9 +98,10 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
             `  ${ui.yellow}●${ui.reset} ${ui.yellow}调度器警告:${a.layer} ${a.reason}${ui.reset}\n`,
           );
         } else if (a.kind === 'compact_history') {
-          // 路由到 maybeCompact(history, report)——按 ROI 调度(只有 history 超 / totalOver 才真压)
-          await maybeCompact(history, report, undefined, state);
+          // 路由到 maybeCompact；把结构重建信号传回 core，使 lifecycle 按新 index 恢复。
+          const result = await maybeCompact(history, report, undefined, state);
           compactHistoryCalled = true;
+          historyRebuilt ||= result?.historyRebuilt === true;
         }
         // shrink_cold_tools L1/L2/L3 与 cap_hot_tools:已由 push-time 闸在每次 push 自动跑
         // (cap = MAX_HISTORY_RESULT;pruner = same-path 新旧替换;lifecycle = age stub)。
@@ -115,6 +118,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
       obs.lastRunLog = log;
       // 暴露给 /context 共享读(repl / context 命令)
       state.schedulerLog = log;
+      return historyRebuilt;
     },
   };
   return obs;
@@ -125,9 +129,9 @@ export async function runScheduler(
   history: ChatMessage[],
   step: number,
   state: ContextState = contextState,
-): Promise<void> {
+): Promise<boolean> {
   const s = createBudgetScheduler(state);
-  await s.runStep(history, step);
+  return s.runStep(history, step);
 }
 
 /** 手动 /compact 入口(repl):与自动路径完全一致——五区 ROI 调度,但 history 摘要强制执行。
