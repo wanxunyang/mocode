@@ -158,15 +158,14 @@ export class LifecycleEngine {
   }
 
   /**
-   * 从会话历史恢复观察者状态。
+   * 从会话历史恢复生命周期状态。
    *
-   * LifecycleEngine 是每次 runAgentCore 新建的，但 history 是会话级的；若不回放，
-   * 跨轮的 observer 不在 states 中，后续工具调用也就无法使它老化。这里按原始
-   * pushTool 的顺序重放登记、消费关系和 age，并使用当时的 user 保护边界推进阶段。
-   * 只纳入 observer：非 observer 的短期 orphan 处理刻意保持原有「本轮」语义。
+   * 旧轮只恢复 observer，使检索结果能跨轮继续老化；最后一个 user 之后则恢复全部成功、
+   * 未归档的工具结果，保证同一 runAgentCore 内 compact 重建 history 后不丢当前轮状态。
    */
   private rehydrate(history: ChatMessage[]): void {
     try {
+      const currentTurnStart = lastUserIndex(history);
       let replayLastUser = -1;
       const pendingDigests = new Set<number>();
 
@@ -181,17 +180,27 @@ export class LifecycleEngine {
         if (!toolName) continue;
 
         const content = toText(m.content);
+        const isObserver = OBSERVER_TOOLS.has(toolName);
         const isDigest = content.startsWith(DIGEST_PREFIX);
-        if (OBSERVER_TOOLS.has(toolName) && !content.startsWith('⌦[')) {
+        const isCurrentTurnTool = currentTurnStart >= 0 && idx > currentTurnStart;
+        const shouldRestoreLive =
+          isToolResultSuccess(content) &&
+          !content.startsWith('⌦[') &&
+          (isObserver || isCurrentTurnTool);
+
+        if (shouldRestoreLive) {
           this.states.set(idx, 'LIVE');
           this.consumerCount.set(idx, 0);
           this.age.set(idx, 0);
-          for (const path of extractProducerPaths(toolName, content)) {
-            const producers = this.producersByPath.get(path) ?? [];
-            producers.push(idx);
-            this.producersByPath.set(path, producers);
+          // 只有 observer 是 producer；当前轮普通工具只恢复自身状态。
+          if (isObserver) {
+            for (const path of extractProducerPaths(toolName, content)) {
+              const producers = this.producersByPath.get(path) ?? [];
+              producers.push(idx);
+              this.producersByPath.set(path, producers);
+            }
           }
-        } else if (OBSERVER_TOOLS.has(toolName) && isDigest) {
+        } else if (isObserver && isDigest) {
           this.states.set(idx, 'REFERENCED');
           this.consumerCount.set(idx, 0);
           this.age.set(idx, 0);
