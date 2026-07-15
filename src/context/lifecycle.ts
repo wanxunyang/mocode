@@ -11,7 +11,7 @@
 //
 // 观察类工具两阶段衰减(避免误伤):
 //   - grep/glob/codegraph/web_search/web_fetch 等「观察/检索类」工具两阶段衰减:
-//     Phase 1(8 步):LIVE → REFERENCED,保留完整内容(返回多个候选,剩余候选可能后续被消费)。
+//     Phase 1(10 步):LIVE → REFERENCED,保留完整内容(返回多个候选,剩余候选可能后续被消费)。
 //     Phase 2(+5 步):REFERENCED → DIGEST,替换为摘要存根(保留文件列表+命中数+参数,丢弃详情),
 //     释放 ~90% token。states 仍为 REFERENCED,不引入新状态。
 //   - 当前轮保护区(最后一个 user 之后的工具结果)完全不动。
@@ -21,7 +21,8 @@
 //
 // 与 Relevance Pruner 的分工(不重复):
 //   - Relevance Pruner:管 read_file 同 path 旧 read + mutation 覆写 → 直接 STUB。
-//   - 本层:管「无消费者的观察类工具老化后 → STUB」 + 「被消费的工具 → REFERENCED 标记(可视)」。
+//   - 本层:管「观察类工具老化后 → DIGEST、普通孤立工具老化后 → STUB」+
+//     「被消费的工具 → REFERENCED 标记(可视)」。
 //
 // 触发点(agent/core.ts):
 //   - pushToolResult 出口,新 message idx = history.length - 1。
