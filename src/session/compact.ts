@@ -1,9 +1,11 @@
 import {
   chat,
+  chatTools,
   type ChatMessage,
+  type ChatTool,
   type ChatUsage,
-  estimateMessagesTokens,
-  estimateToolSchemaTokens,
+  correctTokenEstimate,
+  estimatePromptTokens,
   estimateTokens,
 } from '../llm/index.js';
 import { config } from '../config/index.js';
@@ -40,6 +42,8 @@ export interface CompactOptions {
    *  默认 manual=false / force=false(自动路径行为完全不变)。 */
   manual?: boolean;
   force?: boolean;
+  /** 本次主请求实际发送的工具集合；缺省为全量工具。 */
+  tools?: readonly ChatTool[];
   /** 本次 agent 运行独享的上下文统计状态；缺省使用主 agent 全局状态。 */
   contextState?: ContextState;
 }
@@ -66,14 +70,15 @@ export interface CompactResult {
 }
 
 /** 跨模块共享的上下文状态:agent 写 lastUsage,compact 写 lastEstimate,repl 的 /context 读。
- *  scheduler.ts 写最近一次调度日志(可选,repl 可读不到时 no-op)。
- *  correction:API 实测 token / 估算 token 的校正系数(1.0 = 无偏差;>1 = 低估;<1 = 高估)。
- *  由 agent/core.ts 在每次 chat 响应后更新;compact/repl 在 usage 失效时同步重置。 */
+ * scheduler.ts 写最近一次调度日志(可选,repl 可读不到时 no-op)。
+ * correction 是按 provider/model/tool-set 持久化的 EWMA；压缩或清空 history 不应重置。 */
 export interface ContextState {
   lastUsage?: ChatUsage;
   lastEstimate: number;
-  /** API 实测 / 估算 的校正系数,默认 1(未校准时等价于原估算)。 */
+  /** API 实测 / 估算 的 EWMA 校正系数；1 表示尚未校准。 */
   correction: number;
+  /** 当前校准 profile 已吸收的真实 usage 样本数。 */
+  calibrationSamples: number;
   schedulerLog?: import('./scheduler.js').SchedulerRunLog;
   /** 最近一次 agent 生命周期图快照；/context 用于展示 observation 衰减状态。 */
   lifecycleStats?: {
@@ -86,13 +91,10 @@ export interface ContextState {
 }
 
 export function createContextState(): ContextState {
-  return { lastEstimate: 0, correction: 1 };
+  return { lastEstimate: 0, correction: 1, calibrationSamples: 0 };
 }
 
-export const contextState: ContextState = {
-  lastEstimate: 0,
-  correction: 1,
-};
+export const contextState: ContextState = createContextState();
 
 /** 中截:text 太长时保 head + 标记 + tail,总长 ≤ max。 */
 export function truncateMid(text: string, max: number): string {
@@ -334,21 +336,25 @@ export async function compactHistory(
   opts: CompactOptions
 ): Promise<CompactResult> {
   const state = opts.contextState ?? contextState;
-  const schemaTokens = estimateToolSchemaTokens();
-  const estimateBefore = estimateMessagesTokens(history) + schemaTokens;
+  const activeTools = opts.tools ?? chatTools;
+  const estimateBefore = estimatePromptTokens(history, activeTools, state.correction);
   state.lastEstimate = estimateBefore;
 
   const groups = groupFromEnd(history);
 
-  // 保近期:从尾向前累积直到预算花完(至少保 1 组),永不劈开 group。
+  // 保近期:按校正后的 token 累积到 40% window(至少保 1 组),永不劈开 group。
   const keepBudget = Math.floor(opts.window * 0.4);
   const kept: Group[] = [];
   let keptTokens = 0;
   for (let k = groups.length - 1; k >= 0; k--) {
     const g = groups[k];
-    if (kept.length >= 1 && keptTokens + groupTokens(g) > keepBudget) break;
+    const nextTokens = keptTokens + groupTokens(g);
+    if (
+      kept.length >= 1
+      && correctTokenEstimate(nextTokens, state.correction) > keepBudget
+    ) break;
     kept.unshift(g);
-    keptTokens += groupTokens(g);
+    keptTokens = nextTokens;
   }
   const oldGroups = groups.slice(0, groups.length - kept.length);
 
@@ -408,10 +414,9 @@ export async function compactHistory(
       history.length = 0;
       history.push(...rebuilt);
       pruneAfterCompaction(history);
-      const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
+      const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
       state.lastEstimate = estimateAfter;
       state.lastUsage = undefined;
-      state.correction = 1;
       layout.contentWrite(
         `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}强制压缩(focus on early history)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
       );
@@ -501,10 +506,9 @@ export async function compactHistory(
     history.length = 0;
     history.push(...rebuilt);
     pruneAfterCompaction(history); // 摘要删了旧轮次 → 按存活轮次裁剪回滚日志
-    const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
+    const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
     state.lastEstimate = estimateAfter;
-    state.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用估算
-    state.correction = 1;
+    state.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用校正估算
     layout.contentWrite(
       `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
     );
@@ -525,10 +529,9 @@ export async function compactHistory(
   }
 
   // 摘要失败:回退仅微压缩(tool content 已原地改),结构不动
-  const estimateAfter = estimateMessagesTokens(history) + schemaTokens;
+  const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
   state.lastEstimate = estimateAfter;
-  state.lastUsage = undefined; // 结构虽未变,但 token 数已变,旧 usage 失效
-  state.correction = 1;
+  state.lastUsage = undefined; // token 数已变,旧 usage 失效
   if (microcompactDone) {
     layout.contentWrite(
       `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
@@ -577,9 +580,9 @@ export async function maybeCompact(
   },
   manualOpts?: { manual?: boolean; force?: boolean; focus?: string },
   state: ContextState = contextState,
+  activeTools: readonly ChatTool[] = chatTools,
 ): Promise<CompactResult | void> {
-  const schemaTokens = estimateToolSchemaTokens();
-  const est = estimateMessagesTokens(history) + schemaTokens;
+  const est = estimatePromptTokens(history, activeTools, state.correction);
   state.lastEstimate = est;
   const isManual = manualOpts?.manual === true;
 
@@ -602,6 +605,7 @@ export async function maybeCompact(
     focus: manualOpts?.focus,
     manual: isManual,
     force: manualOpts?.force,
+    tools: activeTools,
     contextState: state,
   });
   return r;

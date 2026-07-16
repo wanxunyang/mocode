@@ -9,9 +9,9 @@ import { readFileSync } from 'node:fs';
 import type OpenAI from 'openai';
 import {
   chat,
-  estimateMessagesTokens,
-  estimateToolSchemaTokens,
+  estimatePromptTokens,
   planChatTools,
+  chatTools,
   type ChatMessage,
   type ChatResult,
   type ChatUsage,
@@ -33,6 +33,10 @@ import { createLifecycleEngine } from '../context/lifecycle.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
 import type { DropContextFilter, DropContextResult } from '../tools/types.js';
+import {
+  getTokenCalibration,
+  updateTokenCalibration,
+} from '../context/token-calibration.js';
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
 function parseArgs(raw: string): Record<string, unknown> | null {
@@ -354,14 +358,33 @@ export async function runAgentCore(
         abortRestore();
         return { completed: false, finalText: null };
       }
+      // 本步只计算一次实际工具集合，调度、请求和 usage 校准必须使用完全相同的 schema。
+      const activeTools = opts.toolsOverride
+        ?? (getAgentMode() === 'plan' ? planChatTools : chatTools);
+      const requestBaseURL = config.baseURL;
+      const requestModel = config.model;
+      const storedCalibration = getTokenCalibration(
+        requestBaseURL,
+        requestModel,
+        activeTools,
+      );
+      runtimeContextState.correction = storedCalibration.correction;
+      runtimeContextState.calibrationSamples = storedCalibration.samples;
+
       // 步前:五区 Budget Scheduler 决策——按 ROI 调度(冷工具优先 / history 摘要最后)。
       // 开关关闭(scheduler=null)时退化回原 maybeCompact 路径,零行为变化。
       // 此时 spinner 已停,通知行干净。
       let historyRebuilt = false;
       if (scheduler) {
-        historyRebuilt = await scheduler.runStep(history, step);
+        historyRebuilt = await scheduler.runStep(history, step, activeTools);
       } else {
-        const compactResult = await maybeCompact(history, undefined, undefined, runtimeContextState);
+        const compactResult = await maybeCompact(
+          history,
+          undefined,
+          undefined,
+          runtimeContextState,
+          activeTools,
+        );
         historyRebuilt = compactResult?.historyRebuilt === true;
       }
       // compact 用新消息数组原地重建 history 后，旧 lifecycle 的数字 index 已全部失效。
@@ -376,15 +399,11 @@ export async function runAgentCore(
       lastChar = '';
       let result: ChatResult;
       try {
-        // 每步读实时模式:LLM 可能在上一步调 switch_mode 切了模式,这里立即用对应工具集
-        // (auto=chatTools 全量;plan=planChatTools 只读子集)。模式由 src/agent/mode.ts 单一持有。
-        // 调用方可传 toolsOverride 覆盖(子 agent 受限工具子集)。
         result = await chat(
           history,
           { onText, onToolCall },
           signal,
-          opts.toolsOverride ??
-            (getAgentMode() === 'plan' ? planChatTools : undefined),
+          activeTools,
         );
       } catch (e) {
         // 中断(用户运行中 Ctrl+C):chat() 抛 AbortError(signal.aborted)→ 还原 history + 模式 + return(不抛)。
@@ -401,15 +420,19 @@ export async function runAgentCore(
       }
       runtimeContextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
       addUsage(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
-      // 校正系数:API 实测 prompt_tokens / 估算 token。
-      // 每次 chat 响应后刷新,让下次 evaluateBudget 用更接近真实的 actual。
-      // 钳位 [0.5, 2.0]:防单次异常值(极短回复 / 空 history)导致系数跳变。
+      // 用本次实际发送的 tools 计算分母，再以 EWMA 更新 provider/model/tool-set 校准。
+      // 只持久化比例与样本数；无 usage 或短 prompt 时保持既有值。
       if (result.usage?.promptTokens && result.usage.promptTokens > 100) {
-        const estimated = estimateMessagesTokens(history) + estimateToolSchemaTokens();
-        if (estimated > 100) {
-          const raw = result.usage.promptTokens / estimated;
-          runtimeContextState.correction = Math.max(0.5, Math.min(2.0, raw));
-        }
+        const estimated = estimatePromptTokens(history, activeTools);
+        const updated = updateTokenCalibration(
+          requestBaseURL,
+          requestModel,
+          activeTools,
+          estimated,
+          result.usage.promptTokens,
+        );
+        runtimeContextState.correction = updated.correction;
+        runtimeContextState.calibrationSamples = updated.samples;
       }
       hooks.onChatDone?.(); // 主 agent:spinner.stop()
       // lastUsage 已更新:触发状态行 context 用量条重算+重画,运行中不再冻结在轮首。

@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { config } from '../config/index.js';
 import { tools } from '../tools/registry.js';
 import { getPlanDisabledTools } from '../tools/constants.js';
+import { ThinkTagFilter } from './think-filter.js';
 
 /**
  * LLM 调用重试策略:
@@ -24,10 +25,6 @@ const RETRY_JITTER = 0.2;
  * 与 OpenAI 兼容协议的独立 `reasoning_content` 字段不同,这些模型把 thinking 直接嵌进 content
  * 字符串,期间不调 onText(spinner 持续转 ⠹ 思考中…),也不写入可见 content(history 不被思考段污染)。
  */
-// 用 \u003c 表示 <,绕开本工具对 < 的处理(直接写 '<\u003cthink\u003e' 里 < 会被吃掉)。
-const THINK_OPEN = '<think>';
-const THINK_CLOSE = '</think>';
-
 let client = new OpenAI({
   baseURL: config.baseURL,
   apiKey: config.apiKey,
@@ -161,6 +158,7 @@ export function __setChatCreateImpl(impl: CreateImpl | null): void {
 }
 
 export type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+export type ChatTool = OpenAI.Chat.Completions.ChatCompletionTool;
 
 /** 把内部工具定义转成 OpenAI 的 tool 格式 */
 export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = tools.map(
@@ -353,18 +351,23 @@ async function chatOnce(
     signal ? { signal } : undefined
   );
 
-  // 流式  start end 标签过滤(见模块顶部 THINK_OPEN/CLOSE)。
-  // 跨 chunk 切分防御:buf 累积跨 chunk 边界,indexOf 扫描;为避免把跨 chunk 标签误判为
-  // 普通字符,buf 末尾为当前态保留 (label.length - 1) 个字符给下一 chunk 看。
+  // content 内嵌 think 标签由独立增量状态机过滤。它只暂存“可能组成标签”的后缀，
+  // 因而既能覆盖标签任意位置跨 chunk，也不会让普通正文固定延迟数个字符。
   let visibleContent = '';
   let consumedAny = false;
-  let inThink = false;
-  let buf = '';
+  const thinkFilter = new ThinkTagFilter();
   let usage: ChatUsage | undefined;
   const toolAcc = new Map<
     number,
     { id?: string; name: string; arguments: string }
   >();
+
+  const emitVisible = (text: string): void => {
+    if (!text) return;
+    visibleContent += text;
+    handlers.onText?.(text);
+    consumedAny = true;
+  };
 
   for await (const chunk of stream as AsyncIterable<{
     usage?: {
@@ -400,78 +403,12 @@ async function chatOnce(
     const delta = chunk.choices?.[0]?.delta;
     if (!delta) continue; // 末尾 usage-only chunk 等无 delta
 
-    if (delta.content) {
-      // 状态机切分 delta.content:inThink 外输出到 visibleContent + onText;
-      // inThink 内丢弃;标签起始/闭合用 indexOf 在 buf 里扫描。
-      // 末尾预留 (label.length - 1) 字符给下一 chunk 防切分误判。
-      buf += delta.content;
-      let i = 0;
-      while (true) {
-        if (inThink) {
-          // 思考段内,扫描 THINK_CLOSE;末尾预留 THINK_CLOSE.length - 1 防跨 chunk 切分
-          const endIdx = buf.indexOf(THINK_CLOSE, i);
-          if (endIdx === -1) {
-            // 思考段内未找到闭合;buf 短到不可能包含 </think> 时全丢(都是思考段内容),
-            // 否则留 (THINK_CLOSE.length - 1) 给下一 chunk 防跨边界切分。
-            const safeLen = buf.length >= THINK_CLOSE.length
-              ? buf.length - (THINK_CLOSE.length - 1)
-              : buf.length;
-            i = safeLen;
-            break;
-          }
-          inThink = false;
-          i = endIdx + THINK_CLOSE.length;
-        } else {
-          // 普通段,扫描 THINK_OPEN;末尾预留 THINK_OPEN.length - 1 防跨 chunk 切分
-          const startIdx = buf.indexOf(THINK_OPEN, i);
-          if (startIdx === -1) {
-            // buf 短到不可能包含 <think> 时全输出(无 think 标签的普通模型不受影响);
-            // 否则留 (THINK_OPEN.length - 1) 给下一 chunk 防跨边界切分误判。
-            const safeLen = buf.length >= THINK_OPEN.length
-              ? buf.length - (THINK_OPEN.length - 1)
-              : buf.length;
-            const seg = buf.slice(i, safeLen);
-            if (seg) {
-              visibleContent += seg;
-              handlers.onText?.(seg);
-              consumedAny = true;
-            }
-            i = safeLen;
-            break;
-          }
-          // THINK_OPEN 之前的普通段:输出
-          if (startIdx > i) {
-            const seg = buf.slice(i, startIdx);
-            visibleContent += seg;
-            handlers.onText?.(seg);
-            consumedAny = true;
-          }
-          inThink = true;
-          i = startIdx + THINK_OPEN.length;
-        }
-      }
-      buf = buf.slice(i);
-    }
+    if (delta.content) emitVisible(thinkFilter.push(delta.content));
 
     if (delta.tool_calls) {
-      // 文本→工具转折点:若 buf 还残留普通文本的安全尾(为防跨 chunk 切分留的
-      // THINK_OPEN.length - 1 字符),立即 flush 到屏幕。否则这段尾巴会一直搁置到
-      // 流结束才由尾部防御输出,而那时 onToolCall 早已触发、TUI 已补换行+生成中
-      // spinner,用户看到「话没说完就去调工具」——history 完整但屏幕渲染顺序错位。
-      // inThink 段照旧丢弃(思考中模型不会同时吐 tool_call,理论上 buf 不会有思考段);
-      // 防御性保留 !inThink 判断。
-      if (buf && !inThink) {
-        visibleContent += buf;
-        // 给 onText 渲染时剥掉尾部 \n:md 渲染器(contentWriteMd)把尾部 \n 当段落分隔 → 产空行;
-        // 随后 onToolCall 检测到 lastChar !== '\n' 会经 contentWrite('\n') 补一个原始换行
-        // (不走 md,只是普通行分隔,无空行)—— 与改造前 onToolCall 补 \n 的行为一致。
-        // visibleContent 保留原 buf(含 \n),history 完整不受影响。
-        const tail = buf.replace(/\n+$/, '');
-        if (tail) handlers.onText?.(tail);
-        consumedAny = true;
-        buf = '';
-      }
-
+      // 不在这里 flush thinkFilter：其内部若有残留，只可能是 `<th` / `</thi` 一类
+      // 潜在标签前缀。旧实现把这段在工具转折点强制送进 onText，正是 `k>` 等残片
+      // 偶发混到工具摘要附近的来源。普通文本不会被状态机滞留。
       for (const tc of delta.tool_calls) {
         const idx = tc.index ?? 0;
         let entry = toolAcc.get(idx);
@@ -490,19 +427,8 @@ async function chatOnce(
     }
   }
 
-  // 防御:循环内 buf.slice 已把可确认部分消费;此处覆盖流末尾的"安全尾":
-  //  - 普通段(stream 已结束,标签不会再出现):作为可见内容追加到 visibleContent + 调 onText
-  //    (之前注释说"不再调 onText"是 bug——安全尾里的真实文本会被屏幕吞掉,用户看到模型
-  //     话没说完就去调工具 / 直接结束;history 有但显示缺。现在补上 onText 让屏幕与 history 一致。)
-  //  - 思考段未闭合:丢弃,防 thinking 文本泄漏到 history
-  if (buf) {
-    if (!inThink) {
-      visibleContent += buf;
-      handlers.onText?.(buf);
-      consumedAny = true;
-    }
-    buf = '';
-  }
+  // 流结束后只释放普通态下真实的文本尾；未闭合思考段继续丢弃。
+  emitVisible(thinkFilter.finish());
 
   const toolCalls: ToolCallRef[] = [...toolAcc.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -605,12 +531,35 @@ export function estimateMessagesTokens(messages: ChatMessage[]): number {
   return sum;
 }
 
-let schemaTokensCache: number | undefined;
+const schemaTokensCache = new WeakMap<object, number>();
 
-/** 估算 chatTools(工具 schema)占用的一次性 token,带缓存。 */
-export function estimateToolSchemaTokens(): number {
-  if (schemaTokensCache === undefined) {
-    schemaTokensCache = estimateTokens(JSON.stringify(chatTools)) + 16;
-  }
-  return schemaTokensCache;
+/** 估算本次实际发送的工具 schema token；按工具数组实例缓存。 */
+export function estimateToolSchemaTokens(
+  activeTools: readonly ChatTool[] = chatTools,
+): number {
+  if (activeTools.length === 0) return 0;
+  const key = activeTools as object;
+  const cached = schemaTokensCache.get(key);
+  if (cached !== undefined) return cached;
+  const estimated = estimateTokens(JSON.stringify(activeTools)) + 16;
+  schemaTokensCache.set(key, estimated);
+  return estimated;
+}
+
+/** 把模型级校正系数统一应用到原始估算。 */
+export function correctTokenEstimate(estimate: number, correction: number = 1): number {
+  const safeCorrection = Number.isFinite(correction)
+    ? Math.max(0.5, Math.min(2, correction))
+    : 1;
+  return estimate > 0 ? Math.max(1, Math.ceil(estimate * safeCorrection)) : 0;
+}
+
+/** 估算一次完整请求的 prompt token（messages + 本次实际工具 schema）。 */
+export function estimatePromptTokens(
+  messages: ChatMessage[],
+  activeTools: readonly ChatTool[] = chatTools,
+  correction: number = 1,
+): number {
+  const raw = estimateMessagesTokens(messages) + estimateToolSchemaTokens(activeTools);
+  return correctTokenEstimate(raw, correction);
 }

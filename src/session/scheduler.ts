@@ -38,7 +38,7 @@ import {
   type BudgetReport,
   type ScheduleAction,
 } from '../context/budget.js';
-import type { ChatMessage } from '../llm/index.js';
+import { chatTools, type ChatMessage, type ChatTool } from '../llm/index.js';
 import { config } from '../config/index.js';
 import { maybeCompact, contextState, type ContextState } from './compact.js';
 import * as layout from '../ui/layout.js';
@@ -58,7 +58,11 @@ export interface SchedulerRunLog {
 export interface BudgetScheduler {
   observePush: (history: ChatMessage[], idx: number) => void;
   /** 执行本步调度；history 被结构性重建时返回 true。 */
-  runStep: (history: ChatMessage[], step: number) => Promise<boolean>;
+  runStep: (
+    history: ChatMessage[],
+    step: number,
+    activeTools?: readonly ChatTool[],
+  ) => Promise<boolean>;
   /** 暴露最近一次决策(供 /context)。 */
   lastRunLog: SchedulerRunLog | null;
 }
@@ -85,8 +89,14 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
     observePush(_history, _idx) {
       // 占位:push-time 三闸(cap / pruner / lifecycle)已自动跑;此接缝供将来演进。
     },
-    async runStep(history, step) {
-      const report = evaluateBudget(history, config.contextWindowTokens, step, state.correction);
+    async runStep(history, step, activeTools = chatTools) {
+      const report = evaluateBudget(
+        history,
+        config.contextWindowTokens,
+        step,
+        state.correction,
+        activeTools,
+      );
       const actions = scheduleActions(report);
       let compactHistoryCalled = false;
       let historyRebuilt = false;
@@ -99,7 +109,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
           );
         } else if (a.kind === 'compact_history') {
           // 路由到 maybeCompact；把结构重建信号传回 core，使 lifecycle 按新 index 恢复。
-          const result = await maybeCompact(history, report, undefined, state);
+          const result = await maybeCompact(history, report, undefined, state, activeTools);
           compactHistoryCalled = true;
           historyRebuilt ||= result?.historyRebuilt === true;
         }
@@ -129,9 +139,10 @@ export async function runScheduler(
   history: ChatMessage[],
   step: number,
   state: ContextState = contextState,
+  activeTools: readonly ChatTool[] = chatTools,
 ): Promise<boolean> {
   const s = createBudgetScheduler(state);
-  return s.runStep(history, step);
+  return s.runStep(history, step, activeTools);
 }
 
 /** 手动 /compact 入口(repl):与自动路径完全一致——五区 ROI 调度,但 history 摘要强制执行。

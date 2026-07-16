@@ -44,7 +44,6 @@ import { promptIntervention } from '../ui/intervention.js';
 import { tools } from '../tools/registry.js';
 import {
   estimateMessagesTokens,
-  estimateToolSchemaTokens,
   reconfigureClient,
   type ChatMessage,
   type ChatUsage,
@@ -1003,7 +1002,6 @@ export async function startRepl(
     // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
     if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
     contextState.lastUsage = undefined;
-    contextState.correction = 1;
     contextState.lifecycleStats = undefined;
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
@@ -1139,7 +1137,6 @@ export async function startRepl(
       setCurrentSessionId(undefined, process.cwd()); // 同步清空 session/state
       turnCount = 0; // 反思 cadence 重新计数
       contextState.lastUsage = undefined;
-      contextState.correction = 1;
       contextState.lifecycleStats = undefined;
       lastTurnUsage = undefined; // 清空旧轮的 token 累计
       pendingAttachments = []; // 一并清空待发图片

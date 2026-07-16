@@ -25,8 +25,13 @@
 // 开关(MOCODE_BUDGET_SCHEDULER):默认 true。false 时 agent/core.ts 走老路径
 //      (直接 maybeCompact),完全跳过本模块,零行为变化。
 
-import type { ChatMessage } from '../llm/index.js';
-import { estimateMessagesTokens, estimateTokens } from '../llm/index.js';
+import type { ChatMessage, ChatTool } from '../llm/index.js';
+import {
+  chatTools,
+  estimateMessagesTokens,
+  estimateToolSchemaTokens,
+  messageTokens,
+} from '../llm/index.js';
 import { lastUserIndex, toText } from './utils.js';
 
 /** 五区分账(占比对齐 CONTEXT_WINDOW)。顺序固定,便于遍历。 */
@@ -62,12 +67,8 @@ export const HOT_TURN_WINDOW = 4;
 export const TOOL_OLD_AGE = 2;
 
 function msgTokens(m: ChatMessage): number {
-  const c = (m as { content?: unknown }).content;
-  const tcs = (m as { tool_calls?: { function?: { arguments?: string } }[] }).tool_calls;
-  let extra = toText(c);
-  if (tcs) for (const tc of tcs) extra += tc?.function?.arguments ?? '';
-  // 与 llm.estimateTokens 同公式(CJK 1/字,ASCII 1/4字);保证调度器评估与系统估算口径一致。
-  return 4 + estimateTokens(extra);
+  // 与请求预估复用同一实现，避免角色结构开销、多模态和 tool_calls 在两个预算路径中漂移。
+  return messageTokens(m);
 }
 
 /** 从 idx 处向前数第 N 个 user turn 的边界 index(含该 user 之后的内容)。
@@ -113,12 +114,14 @@ export interface BudgetReport {
 
 /** 评估当前 history 的五区预算(纯函数,改不动 history)。
  * 传入 step 是当前所在 step 编号(agent 循环 step 变量),用于日志/调试。
- * correction:API 实测 / 估算的校正系数(默认 1);>1 表示粗估偏低,乘以系数后 actual 更接近真实值。 */
+ * correction:API 实测 / 估算的校正系数(默认 1);>1 表示粗估偏低,乘以系数后 actual 更接近真实值。
+ * activeTools 必须与下一次 chat() 实际发送的工具集合一致，避免 plan/子 agent 误算 schema。 */
 export function evaluateBudget(
   history: ChatMessage[],
   window: number,
   step: number = 0,
   correction: number = 1,
+  activeTools: readonly ChatTool[] = chatTools,
 ): BudgetReport {
   const layers: Record<BudgetLayer, LayerBudget> = {} as Record<BudgetLayer, LayerBudget>;
   for (const k of BUDGET_LAYERS) {
@@ -130,7 +133,10 @@ export function evaluateBudget(
   const adj = (raw: number): number => (raw > 0 ? Math.max(1, Math.round(raw * correction)) : 0);
 
   const sysMsg = history[0];
-  if (sysMsg) layers.system.actual = adj(msgTokens(sysMsg));
+  // 工具 schema 与 system prompt 同属请求固定开销；必须计入总量才能可靠触发压缩。
+  layers.system.actual = adj(
+    (sysMsg ? msgTokens(sysMsg) : 0) + estimateToolSchemaTokens(activeTools),
+  );
 
   // Summary 检测:role:'system' 且不是 history[0] 的,视为摘要(compact.ts 摘要插 index 1)。
   // 简单启发:若 history[1]?.role === 'system' 且 content 含「# 会话摘要」特征串,计入 summary。
