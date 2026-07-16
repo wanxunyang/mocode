@@ -236,9 +236,8 @@ export function scheduleActions(report: BudgetReport): ScheduleAction[] {
       kind: 'warn',
       layer: 'system',
       reason:
-        `固定请求开销 ${actual}/${budget} tokens (+${excess}, ${percent}%)；`
-        + `系统提示 ${prompt} + 工具 schema ${toolSchemas}，校正 ×${report.correction.toFixed(2)}。`
-        + '系统提示偏高时检查 MOCODE.md；工具 schema 偏高时减少可用工具；CONTEXT_WINDOW_TOKENS 应匹配模型真实窗口。',
+        `固定开销 ${actual}/${budget} (+${excess}, ${percent}%)；`
+        + `提示 ${prompt} + 工具 ${toolSchemas}，×${report.correction.toFixed(2)}。`,
     });
   }
 
