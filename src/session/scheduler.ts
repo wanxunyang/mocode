@@ -1,30 +1,17 @@
-// Context Budget Scheduler(执行层):把 scheduleActions() 产生的动作落到既有闸上。
-//
-// 关系图:
+// Context Budget Scheduler(执行层):评估五区预算并执行可落地的动作。
 //
 //   agent/core.ts (步前)              repl /compact 命令(手动)
 //     ↓ runScheduler(history, step)    ↓ manualCompact(history, focus?)
 //   session/scheduler.ts(本文件)
 //     ├─ evaluateBudget(history, window, step) → BudgetReport
-//     │     ↓
-//     ├─ scheduleActions(report) → ScheduleAction[]
-//     │     ↓
+//     ├─ scheduleActions(report) → warn | compact_history
 //     └─ 执行 actions:
-//          - warn:                  仅写日志
-//          - shrink_cold_tools L1:  由 push-time cap.ts(MAX_HISTORY_RESULT)自动处理;此处 no-op
-//          - shrink_cold_tools L2:  由 pruner.observePush(relevance.ts)自动处理;此处 no-op
-//          - shrink_cold_tools L3:  由 lifecycle.pushTool(lifecycle.ts)自动处理;此处 no-op
-//          - cap_hot_tools:         Hot 区只 cap,实际仍由 push-time cap 走;此处 no-op + 记日志
-//          - compact_history:       调 maybeCompact(history, report)── report 路由到 ROI 调度
+//          - warn:            仅写日志
+//          - compact_history: 调 maybeCompact(history, report)
 //
-// 设计意图:
-//   - **L1/L2/L3 不重复实现**——push-time 已经自动跑过这三级。再在调度器做一遍是 Double-Action
-//     且破坏「调度器永不抛错 + 幂等」契约。调度器只负责"决策时点",push-time 闸负责"执行"。
-//   - **hotBoundary** 仍由调度器算出来供 lifecycle 内部用(将来可演进成「仅 Cold 区跑 age stub」)——
-//     现版本先全面暴露给 report,暂不传参给 lifecycle。
-//   - **actionLog**:每次执行的决策落进 contextState.schedulerLog,供 /context 命令与调试用。
-//   - **manualCompact**:手动入口(用户敲 /compact),与 runScheduler 共享决策路径;唯一差别是
-//     即使 history 不超预算也强制产 compact_history(focus 透传)。对齐用户拍板的方案 A。
+// push-time cap / relevance / lifecycle / age-aware sweep 在进入 scheduler 前独立完成，
+// scheduler 不再生成无法执行的 Cold/Hot tool action。每次决策写入 actionLog，供 /context 调试。
+// manualCompact 与自动路径共享 scheduleActions，但用户显式触发时强制追加 compact_history。
 //
 // 开关:
 //   - config.contextBudget !== false(默认 true):agent 调 runScheduler
@@ -49,14 +36,13 @@ export interface SchedulerRunLog {
   step: number;
   report: BudgetReport;
   actions: ScheduleAction[];
-  /** 实际触发的闸('compact_history' 调过 maybeCompact → true;其它已在 push-time 自动跑)。 */
+  /** compact_history 是否实际调用过 maybeCompact。 */
   compactHistoryCalled: boolean;
   ts: number;
 }
 
 /** Scheduler 实例状态:压一份最近日志,方便 /context 看到上一次决策。 */
 export interface BudgetScheduler {
-  observePush: (history: ChatMessage[], idx: number) => void;
   /** 执行本步调度；history 被结构性重建时返回 true。 */
   runStep: (
     history: ChatMessage[],
@@ -80,15 +66,10 @@ export interface CompactHistoryDetail {
   focus?: string;
 }
 
-/** 创建 runAgentCore 闭包持有的 scheduler(每次 agent 启动一个新实例)。
- *  observePush 当前只是占位:真正 L1/L2/L3 已由 cap / pruner / lifecycle 在 push 时跑;
- *  保留接口为后续「调度器注入 hotBoundary 给 lifecycle」演进留接缝。 */
+/** 创建 runAgentCore 闭包持有的 scheduler(每次 agent 启动一个新实例)。 */
 export function createBudgetScheduler(state: ContextState = contextState): BudgetScheduler {
   const obs: BudgetScheduler = {
     lastRunLog: null,
-    observePush(_history, _idx) {
-      // 占位:push-time 三闸(cap / pruner / lifecycle)已自动跑;此接缝供将来演进。
-    },
     async runStep(history, step, activeTools = chatTools) {
       const report = evaluateBudget(
         history,
@@ -105,7 +86,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
         if (a.kind === 'warn') {
           // system 超:写一行提示(配置漂移应由用户处理,不是调度器压)
           layout.contentWrite(
-            `  ${ui.yellow}●${ui.reset} ${ui.yellow}调度器警告:${a.layer} ${a.reason}${ui.reset}\n`,
+            `  ${ui.yellow}●${ui.reset} ${ui.yellow}调度器警告 [${a.layer}] ${a.reason}${ui.reset}\n`,
           );
         } else if (a.kind === 'compact_history') {
           // 路由到 maybeCompact；把结构重建信号传回 core，使 lifecycle 按新 index 恢复。
@@ -113,9 +94,6 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
           compactHistoryCalled = true;
           historyRebuilt ||= result?.historyRebuilt === true;
         }
-        // shrink_cold_tools L1/L2/L3 与 cap_hot_tools:已由 push-time 闸在每次 push 自动跑
-        // (cap = MAX_HISTORY_RESULT;pruner = same-path 新旧替换;lifecycle = age stub)。
-        // 调度器不重复,只把决策记录下来供调试。
       }
 
       const log: SchedulerRunLog = {
@@ -145,9 +123,9 @@ export async function runScheduler(
   return s.runStep(history, step, activeTools);
 }
 
-/** 手动 /compact 入口(repl):与自动路径完全一致——五区 ROI 调度,但 history 摘要强制执行。
- *  即便 layers.history.overBudget=false 或 totalOver=false,manual 仍产 compact_history action
- *  把 focus 透传给 LLM 摘要 prompt。其它 ROI 决策(cold tools / cap hot / warn)按 scheduleActions 走。
+/** 手动 /compact 入口(repl):与自动路径共享预算评估和可执行 action，但强制执行 history 摘要。
+ *  即便 layers.history.overBudget=false 或 totalOver=false，manual 仍追加 compact_history，
+ * 并把 focus 透传给 LLM 摘要 prompt。
  *
  *  关系:runScheduler 是「自动触发」,manualCompact 是「用户显式触发」,二者共享 scheduleActions。
  *

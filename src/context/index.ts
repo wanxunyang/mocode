@@ -29,12 +29,15 @@ export {
   quickEstimate,
   userTurnBoundary,
   BUDGET_LAYERS,
+  DEFAULT_BUDGET_POLICY,
   BUDGET_RATIO,
   HOT_TURN_WINDOW,
   TOOL_OLD_AGE,
 } from './budget.js';
 export type {
   BudgetLayer,
+  BudgetPolicy,
+  SystemCostBreakdown,
   LayerBudget,
   BudgetReport,
   ScheduleAction,

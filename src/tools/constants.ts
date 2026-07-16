@@ -28,23 +28,6 @@ export const MAX_MEMORY_RESULT = 64000;
 
 export const IGNORE = ['**/node_modules/**', '**/.git/**'];
 
-// ── Context Budget Scheduler(五区分账)────────────────────────────────────
-/** Hot/Cold 划分:当前 step 起往前 N 个 user turn 之内的工具结果视为 Hot(绝对不压),
- * 之外的视为 Cold(可调度器压)。默认 4 = 跨过 4 个用户问题仍生效。 */
-export const HOT_TURN_WINDOW = 4;
-/** Cold 区内可被就地 stub 的 tool 消息最低 age(经过的消费者 push 数)。默认 2,
- * 与 lifecycle.ts DEFAULT_AGE_THRESHOLD 对齐。 */
-export const TOOL_OLD_AGE = 2;
-/** 五区预算占比(总和 0.95,留 5% 给 Reserve)。对齐 user 修正版:
- * System 15 / History 20 / Hot Tool 25 / Cold Tool 25 / Summary 10。 */
-export const BUDGET_RATIO = {
-  system: 0.15,
-  history: 0.20,
-  toolRecent: 0.25,
-  toolOld: 0.25,
-  summary: 0.10,
-  reserve: 0.05,
-} as const;
 // ── plan 模式(只读规划,不执行)──────────────────────────────────────────────
 /**
  * plan 模式下从工具 schema 里剔除的工具(模型根本看不到 → 调不到):

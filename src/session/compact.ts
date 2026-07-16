@@ -15,6 +15,7 @@ import { Spinner } from '../ui/spinner.js';
 import * as layout from '../ui/layout.js';
 import { pruneAfterCompaction } from '../rollback/index.js';
 import { toText } from '../context/utils.js';
+import { DEFAULT_BUDGET_POLICY } from '../context/budget.js';
 
 /**
  * 上下文压缩子系统:
@@ -342,8 +343,10 @@ export async function compactHistory(
 
   const groups = groupFromEnd(history);
 
-  // 保近期:按校正后的 token 累积到 40% window(至少保 1 组),永不劈开 group。
-  const keepBudget = Math.floor(opts.window * 0.4);
+  // 保近期:按策略中的 token 比例累积(至少保 1 组),永不劈开 group。
+  const keepBudget = Math.floor(
+    opts.window * DEFAULT_BUDGET_POLICY.compactKeepRatio,
+  );
   const kept: Group[] = [];
   let keptTokens = 0;
   for (let k = groups.length - 1; k >= 0; k--) {

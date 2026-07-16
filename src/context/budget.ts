@@ -1,29 +1,12 @@
 // 五区 Context Budget Scheduler。
 //
-// 目的:把当前四道独立闸(cap / pipeline / relevance / maybeCompact)统一为
-//       「先看预算报告,再按 ROI 排序调度」的单一入口。
+// 目的:把当前请求拆成 System / History / Tool-Recent / Tool-Old / Summary + Reserve，
+//      统一报告各区占用，并只调度执行层能够真正落地的 warn / compact_history。
 //
-// 设计原则(对应用户拍板的设计方案):
-//   1. 五区分账:不是把 history 当一个黑盒,而是把上下文切成 5 区逐区配预算
-//      (System / History / Tool-Recent / Tool-Old / Summary) + 1 个 Reserve。
-//      Tool 内部再分 Hot/Cold:
-//        - Cold Tool(老化区,scheduler 优先压缩——ROI 最低,LLM 复述成本最低)
-//        - Hot Tool(当前±N 步内,scheduler **不主动 stub**——避免干扰 agent 当前步)
-//      注:**Hot 区「scheduler 不主动」≠ 「绝对不动」**。lifecycle age stub、pruner
-//      same-path 替代、agent 的 drop_context 工具仍可动 Hot 区;它们语义更精细(知道
-//      哪条已无关),不会盲目 stub。Scheduler 只在更粗的层面决策,粗判断不踩精细判断。
-//      Hot 区超预算时 scheduler 仅 cap(降单条上限,不丢内容)。
-//   2. ROI 排序:History > Summary > Hot Tool > Cold Tool。压缩时先动 Cold Tool
-//      (LLM 复述成本最低),再动 History(摘要成本高);Hot Tool 与 System 雷打不动(指 scheduler 层面)。
-//   3. 零行为变化兜底:调度器不是闸,而是「报告 + 决策」——执行仍复用现有
-//      cap / pipeline / relevance / compact / lifecycle / drop_context 实现,只是触发条件更精准。
-//
-// 依赖:本文件是叶子级,只依赖 ChatMessage / estimateTokens,绝不反向依赖
-//      agent / session / compact(避免循环与耦合)。具体执行动作由 agent/core.ts
-//      拿 ScheduleAction[] 去调现有闸。
-//
-// 开关(MOCODE_BUDGET_SCHEDULER):默认 true。false 时 agent/core.ts 走老路径
-//      (直接 maybeCompact),完全跳过本模块,零行为变化。
+// push-time cap、pipeline、relevance、lifecycle 与 age-aware sweep 负责工具结果优化；
+// scheduler 在这些处理完成后评估，不重复生成 Cold/Hot tool 压缩动作。
+// 本文件保持叶子级，只依赖 ChatMessage / token estimate，具体执行由 session/scheduler.ts 完成。
+// contextBudget 开关关闭时，agent/core.ts 退化为直接调用 maybeCompact。
 
 import type { ChatMessage, ChatTool } from '../llm/index.js';
 import {
@@ -45,26 +28,40 @@ export const BUDGET_LAYERS = [
 ] as const;
 export type BudgetLayer = (typeof BUDGET_LAYERS)[number];
 
-/** 占比(总和 = 0.95,留 5% 给 Reserve)。对齐用户修正版:
- *  Recent Tool 25%(原 40% 偏大,因 Hot 区不该被压)+ Old Tool 25% 同等 +
- *  History 20% + System 15% + Summary 10%(平时 0 占用,触发后才用) */
-export const BUDGET_RATIO: Record<BudgetLayer, number> = {
-  system: 0.15,
-  history: 0.20,
-  toolRecent: 0.25,
-  toolOld: 0.25,
-  summary: 0.10,
-  reserve: 0.05,
+/** Context Budget Scheduler 的单一策略源。 */
+export interface BudgetPolicy {
+  ratios: Readonly<Record<BudgetLayer, number>>;
+  hotTurnWindow: number;
+  toolOldAge: number;
+  compactKeepRatio: number;
+  totalTriggerRatio: number;
+  schedulerTargetRatio: number;
+  estimateSafetyFactor: number;
+  compactHeadroomTokens: number;
+}
+
+export const DEFAULT_BUDGET_POLICY: BudgetPolicy = {
+  ratios: {
+    system: 0.15,
+    history: 0.20,
+    toolRecent: 0.25,
+    toolOld: 0.25,
+    summary: 0.10,
+    reserve: 0.05,
+  },
+  hotTurnWindow: 4,
+  toolOldAge: 2,
+  compactKeepRatio: 0.40,
+  totalTriggerRatio: 0.82,
+  schedulerTargetRatio: 0.80,
+  estimateSafetyFactor: 1.05,
+  compactHeadroomTokens: 1500,
 };
 
-/** Hot/Cold 划分:当前 step 起往前 HOT_TURN_WINDOW 个 user turn 之内的工具结果视为 Hot,
- * 之外的视为 Cold。0 = 全 Cold(等同老路径);越短 Hot 越小,压缩越激进。 */
-export const HOT_TURN_WINDOW = 4;
-
-/** 工具消息推入历史后,经过的「消费者 push 次数」即 age。
- * Cold 区内:age ≥ TOOL_OLD_AGE 的非观察类工具结果可被调度器就地 stub。
- * 默认 2 = 跨过 2 个消费者 push 仍未被消费,等同 lifecycle 的 DEFAULT_AGE_THRESHOLD。 */
-export const TOOL_OLD_AGE = 2;
+/** 兼容既有调用方的只读别名；配置只在 DEFAULT_BUDGET_POLICY 中维护。 */
+export const BUDGET_RATIO = DEFAULT_BUDGET_POLICY.ratios;
+export const HOT_TURN_WINDOW = DEFAULT_BUDGET_POLICY.hotTurnWindow;
+export const TOOL_OLD_AGE = DEFAULT_BUDGET_POLICY.toolOldAge;
 
 function msgTokens(m: ChatMessage): number {
   // 与请求预估复用同一实现，避免角色结构开销、多模态和 tool_calls 在两个预算路径中漂移。
@@ -96,11 +93,20 @@ export interface LayerBudget {
 }
 
 /** 一次评估的完整报告(供 agent/core.ts 决策)。 */
+export interface SystemCostBreakdown {
+  /** 校正前的 system prompt token 估算。 */
+  prompt: number;
+  /** 校正前的本次 active tool schema token 估算。 */
+  toolSchemas: number;
+}
+
 export interface BudgetReport {
   step: number;
   total: number; // 各区 actual 之和(已经过 correction 校正)
   window: number;
   layers: Record<BudgetLayer, LayerBudget>;
+  /** system 层固定请求开销的校正前拆分，供告警定位具体来源。 */
+  systemCosts: SystemCostBreakdown;
   /** 实际超预算的层(按 overRatio 降序,排前面先处理)。 */
   triggers: BudgetLayer[];
   /** 总占用超总阈(0.82*window)的兜底触发 — 单独字段,与 layers.triggers 分开。 */
@@ -133,10 +139,12 @@ export function evaluateBudget(
   const adj = (raw: number): number => (raw > 0 ? Math.max(1, Math.round(raw * correction)) : 0);
 
   const sysMsg = history[0];
+  const systemCosts: SystemCostBreakdown = {
+    prompt: sysMsg ? msgTokens(sysMsg) : 0,
+    toolSchemas: estimateToolSchemaTokens(activeTools),
+  };
   // 工具 schema 与 system prompt 同属请求固定开销；必须计入总量才能可靠触发压缩。
-  layers.system.actual = adj(
-    (sysMsg ? msgTokens(sysMsg) : 0) + estimateToolSchemaTokens(activeTools),
-  );
+  layers.system.actual = adj(systemCosts.prompt + systemCosts.toolSchemas);
 
   // Summary 检测:role:'system' 且不是 history[0] 的,视为摘要(compact.ts 摘要插 index 1)。
   // 简单启发:若 history[1]?.role === 'system' 且 content 含「# 会话摘要」特征串,计入 summary。
@@ -181,14 +189,14 @@ export function evaluateBudget(
   triggers.sort((a, b) => layers[b].overRatio - layers[a].overRatio);
 
   const total = BUDGET_LAYERS.reduce((s, k) => s + (k === 'reserve' ? 0 : layers[k].actual), 0);
-  // 安全裕量:用 0.82 而非 0.85,预留 3% 给 correction 波动与新消息增量。
-  const totalOver = total >= 0.82 * window;
+  const totalOver = total >= DEFAULT_BUDGET_POLICY.totalTriggerRatio * window;
 
   return {
     step,
     total,
     window,
     layers,
+    systemCosts,
     triggers,
     totalOver,
     hotBoundary: hotStart,
@@ -196,7 +204,7 @@ export function evaluateBudget(
   };
 }
 
-/** 调度器决策动作(纯数据,不动 history)。agent/core.ts 据此调用既有闸。 */
+/** 调度器只生成执行层能够真正落地的动作。 */
 export type ScheduleAction =
   | {
       kind: 'warn';
@@ -204,69 +212,43 @@ export type ScheduleAction =
       reason: string;
     }
   | {
-      /** 对 Cold 区(hotBoundary 之前)的 tool 消息按 ROI 做 L1→L2→L3 渐进压缩。
-       *  注意:Hot 区永不发此 action——精细剔除由 lifecycle/pruner/drop_context 负责。 */
-      kind: 'shrink_cold_tools';
-      level: 1 | 2 | 3;
-    }
-  | {
-      /** Hot 区只 cap(降单条上限),不 stub;aggressive = true 时调低阈值走更严的 cap。
-       * 精细剔除(cap 不够时)由 lifecycle age stub 与 drop_context 工具兜底。 */
-      kind: 'cap_hot_tools';
-      aggressive: boolean;
-    }
-  | {
       kind: 'compact_history';
       focus?: string;
     };
 
-/** 根据 BudgetReport 生成调度动作(从轻到重,直至总占用回落到阈值以下)。
- * 规则:
- *   - system 超 → warn(不压,配置问题不是内容问题)
- *   - toolOld 超 → 先 L1(中截超大)→ L2(same-path 已有 relevance)→ L3(age stub,新增)
- *   - toolRecent 超 → cap(只降低单条上限,不 stub)
- *   - history 超 或 totalOver → compact_history(调 maybeCompact / compactHistory)
- *   - summary 超 → 不动(摘要本身就压缩产物,删它等于丢历史,只能放任或扩 Recent 预算)
- *
- * 安全裕量:headroom 按 0.80 * window - total * 1.05 计算(预留 5% 应对 correction 误差
- * 与新消息增量),避免估算偏差导致被 API 硬截断。 */
+/** 根据 BudgetReport 生成可执行动作。
+ * push-time cap、relevance、lifecycle 与 age-aware sweep 已在评估前完成，
+ * 因此这里不再生成无法执行的 Cold/Hot tool action。
+ * History 或总量超预算时才考虑昂贵的 LLM 摘要。 */
 export function scheduleActions(report: BudgetReport): ScheduleAction[] {
   const actions: ScheduleAction[] = [];
   const { layers, totalOver, total } = report;
-  // 收紧:0.80 阈值(原 0.85)+ total * 1.05 放大(估算不确定性缓冲)
-  const headroom = 0.80 * report.window - total * 1.05;
+  const policy = DEFAULT_BUDGET_POLICY;
+  const headroom = policy.schedulerTargetRatio * report.window
+    - total * policy.estimateSafetyFactor;
 
-  // system 超 → warn,不是 schedule 目标
   if (layers.system.overBudget) {
+    const { prompt, toolSchemas } = report.systemCosts;
+    const { actual, budget } = layers.system;
+    const excess = actual - budget;
+    const percent = ((actual / Math.max(budget, 1)) * 100).toFixed(0);
     actions.push({
       kind: 'warn',
       layer: 'system',
-      reason: `System prompt 超预算(${layers.system.actual} > ${layers.system.budget}),请检查配置/MOCODE.md`,
+      reason:
+        `固定请求开销 ${actual}/${budget} tokens (+${excess}, ${percent}%)；`
+        + `系统提示 ${prompt} + 工具 schema ${toolSchemas}，校正 ×${report.correction.toFixed(2)}。`
+        + '系统提示偏高时检查 MOCODE.md；工具 schema 偏高时减少可用工具；CONTEXT_WINDOW_TOKENS 应匹配模型真实窗口。',
     });
   }
 
-  // 渐进:toolOld(轻→重)
-  if (layers.toolOld.overBudget && layers.toolOld.overRatio > 0.1) {
-    actions.push({ kind: 'shrink_cold_tools', level: 1 });
-  }
-  if (layers.toolOld.overBudget && layers.toolOld.overRatio > 0.3) {
-    actions.push({ kind: 'shrink_cold_tools', level: 2 });
-  }
-  if (layers.toolOld.overBudget && layers.toolOld.overRatio > 0.6) {
-    actions.push({ kind: 'shrink_cold_tools', level: 3 });
-  }
-
-  // Hot 区只 cap
-  if (layers.toolRecent.overBudget && layers.toolRecent.overRatio > 0.15) {
-    actions.push({ kind: 'cap_hot_tools', aggressive: layers.toolRecent.overRatio > 0.5 });
-  }
-
-  // History / total 超 → 摘要(最贵);headroom < -1500 真正触发(原 -2000,裕量收紧后同步调低),让 cold tools 先动
-  if ((layers.history.overBudget || totalOver) && headroom < -1500) {
+  if (
+    (layers.history.overBudget || totalOver)
+    && headroom < -policy.compactHeadroomTokens
+  ) {
     actions.push({ kind: 'compact_history' });
   }
 
-  // 排序(同 kind 已在上面排好):warn → cold L1→L2→L3 → cap_hot → compact_history
   return actions;
 }
 

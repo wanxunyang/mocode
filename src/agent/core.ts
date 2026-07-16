@@ -21,7 +21,7 @@ import { executeTool, tools } from '../tools/registry.js';
 import { checkPermission } from '../permissions/index.js';
 import { getPlanDisabledTools } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
-import { maybeCompact, runScheduler, contextState, dropContextFromHistory } from '../session/index.js';
+import { maybeCompact, contextState, dropContextFromHistory } from '../session/index.js';
 import type { ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
 import { optimizeToolResult, HOT_TURN_WINDOW, userTurnBoundary } from '../context/index.js';
@@ -156,7 +156,7 @@ function pushToolResult(
   output: string,
   pruner: ReturnType<typeof createRelevancePruner> | null,
   lifecycle: LifecycleEngine | null,
-  scheduler: BudgetScheduler | null,
+  _scheduler: BudgetScheduler | null,
   runtimeContextState: ContextState = contextState,
 ): void {
   const succeeded = isToolResultSuccess(output);
@@ -169,7 +169,6 @@ function pushToolResult(
     content: optimizeToolResult(tc.name, output, tc.arguments, encodingContext),
   } as ChatMessage;
   history.push(msg);
-  scheduler?.observePush(history, history.length - 1);
   // 失败 read 不得淘汰旧 read；失败 consumer 也不能改变 lifecycle 上游状态。
   if (pruner) pruner.observePush(history, msg, succeeded);
   if (lifecycle) lifecycle.pushTool(history, history.length - 1, succeeded);
@@ -329,8 +328,8 @@ export async function runAgentCore(
     ? createLifecycleEngine(history)
     : null;
   runtimeContextState.lifecycleStats = lifecycle?.stats();
-  // 预算调度器:每个 runAgentCore 实例一个,步前 evaluateBudget + scheduleActions。
-  // 决策按 ROI 分发(cold tools 优先 / history 摘要最后);contextBudget 开关关闭时为 null。
+  // 预算调度器:每个 runAgentCore 实例一个，在 age-aware sweep 后评估并执行 warn / compact。
+  // contextBudget 开关关闭时为 null。
   const scheduler: BudgetScheduler | null = config.contextBudget !== false
     ? createBudgetScheduler(runtimeContextState) // 在 step 循环之外实例化一次,跨步持有 lastRunLog
     : null;
@@ -392,8 +391,11 @@ export async function runAgentCore(
       runtimeContextState.correction = storedCalibration.correction;
       runtimeContextState.calibrationSamples = storedCalibration.samples;
 
-      // 步前:五区 Budget Scheduler 决策——按 ROI 调度(冷工具优先 / history 摘要最后)。
-      // 开关关闭(scheduler=null)时退化回原 maybeCompact 路径,零行为变化。
+      // 初次 tool push 只做保守编码；预算评估前先对 Cold 且 age 达阈值的旧结果降级，
+      // 避免 scheduler 根据马上会被 sweep 的陈旧占用误触发 history compact。
+      ageAware?.sweep(history, userTurnBoundary(history, HOT_TURN_WINDOW));
+
+      // 步前:五区 Budget Scheduler 在优化后的 history 上决策；开关关闭时退化回原 maybeCompact 路径。
       // 此时 spinner 已停,通知行干净。
       let historyRebuilt = false;
       if (scheduler) {
@@ -416,8 +418,6 @@ export async function runAgentCore(
         }
         ageAware?.rehydrate(history);
       }
-      // 初次 tool push 只做保守编码；发送前仅对 Cold 且 age 达阈值的旧结果降级。
-      ageAware?.sweep(history, userTurnBoundary(history, HOT_TURN_WINDOW));
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')
       mode = 'idle';
       gotText = false;
