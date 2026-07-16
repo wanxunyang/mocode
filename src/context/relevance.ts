@@ -1,94 +1,147 @@
-// Relevance Pruner:read_file 相关性裁剪(纯静态分析,零 LLM 调用)。
-//
-// 场景(用户描述):
-//   1) read foo.ts → 后来又 read foo.ts → 旧结果无价值 → 替换为存根
-//   2) read foo.ts → edit foo.ts → read foo.ts → 中间那次 read 之前的所有旧 read
-//      在 mutation 之后已失效 → 替换为存根
-//
-// 与现有子系统的关系:
-//   - Context Optimization Pipeline(`pipeline.ts`):单条上限 + 类型化编码。本层在其外,
-//     在 pushToolResult 出口再做一次"跨条"裁剪。
-//   - drop_context(`session/drop.ts`):agent 主动剔除已知无关的旧 tool 结果。本层是被动自动,
-//     不需要 agent 调;两者并存不冲突。
-//   - compact(`session/compact.ts`):阈值触发的整体微压缩+摘要。本层只裁"明确失效"的旧 read,
-//     不触发摘要;门槛更低、零成本。
-//
-// 不变量(对齐 drop_context / compact):
-//   - 只改 .content,不删消息、不动 tool_call_id、不动 tool_calls 数组结构。
-//   - 当前轮保护区:不剔除"最后一个 user 消息及其之后"的 read_file 结果(agent 本轮还在用,
-//     剔除会破坏正在进行的推理)。实现复用 drop.ts 的 lastUserIndex 思路。
-//   - 幂等:已 stub(含「已过时」标记)不重复 stub,避免反复重写同一条消息。
-//   - 永不抛错(对齐「调度器永不抛错」契约);无匹配 / 解析失败 / 异常 → 静默 no-op。
-//   - TUI 渲染(hooks.onToolResult)用原始 output,与本层解耦——屏上看全量,LLM 看裁剪后版。
-//
-// 零行为变化兜底:开关 `config.contextRelprune` 关闭时,pipeline 路径完全不调本模块。
+// Relevance Pruner: statically removes tool results that a newer observation supersedes.
+// It never deletes messages or changes tool_call_id pairing; only tool content is stubbed.
 
 import type { ChatMessage } from '../llm/index.js';
-import { canonicalizePath, extractPath, lastUserIndex, toText, toolNameOf } from './utils.js';
+import {
+  canonicalizePath,
+  extractPath,
+  isToolResultSuccess,
+  lastUserIndex,
+  toText,
+} from './utils.js';
 
-/** 仅依赖一个最小 chat-message 形状接口,避免反向 import llm 全量。 */
 type AnyMessage = ChatMessage & { content?: unknown; tool_call_id?: string };
 
-/** stub 标记前缀(供幂等判定)。drop_context 用的是「⌦[已剔除:与当前任务无关]」,
- *  本层用「⌦[已过时:同 path 已有新 read / 已被 mutation 覆写]」,区分两类剔除来源。 */
-const STUB_PREFIX = '⌦[已过时:同 path 已有新 read / 已被 mutation 覆写]';
+interface ToolCallInfo {
+  name: string;
+  argsRaw: string;
+  args: Record<string, unknown> | null;
+}
+
+interface ToolCallShape {
+  id?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+/** Shared prefix lets /context count read and observation supersession together. */
+const STUB_PREFIX = '⌦[已过时:';
+const READ_STUB_REASON = '同 path 已有新 read / 已被 mutation 覆写';
+
+function parseArgs(raw: string): Record<string, unknown> | null {
+  try {
+    const parsed = raw.trim() ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object'
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizedInteger(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+/** Only complete semantic-query equality is safe for whole-message replacement. */
+function observationKey(call: ToolCallInfo): string | null {
+  const args = call.args;
+  if (!args) return null;
+  if (call.name === 'grep') {
+    if (typeof args.pattern !== 'string') return null;
+    const rawMax = normalizedInteger(args.max_per_file, 15);
+    return JSON.stringify({
+      tool: 'grep',
+      pattern: args.pattern,
+      glob: typeof args.glob === 'string' ? args.glob : '**/*',
+      maxPerFile: Math.min(Math.max(rawMax, 1), 50),
+    });
+  }
+  if (call.name === 'codegraph') {
+    if (typeof args.action !== 'string' || typeof args.query !== 'string') return null;
+    const query = args.action === 'explore'
+      ? args.query.trim().replace(/\s+/g, ' ')
+      : args.query.trim();
+    return JSON.stringify({
+      tool: 'codegraph',
+      action: args.action,
+      query,
+      file: typeof args.file === 'string' ? args.file.trim().replace(/\\/g, '/') : '',
+      offset: args.offset === undefined ? null : normalizedInteger(args.offset, 0),
+      limit: args.limit === undefined ? null : normalizedInteger(args.limit, 0),
+    });
+  }
+  return null;
+}
+
+function observationLabel(call: ToolCallInfo): string {
+  const args = call.args ?? {};
+  if (call.name === 'grep') {
+    const pattern = JSON.stringify(String(args.pattern ?? '')).slice(0, 80);
+    const glob = JSON.stringify(String(args.glob ?? '**/*')).slice(0, 80);
+    return `grep(pattern=${pattern}, glob=${glob})`;
+  }
+  const action = String(args.action ?? '');
+  const query = JSON.stringify(String(args.query ?? '')).slice(0, 100);
+  return `codegraph(action=${action}, query=${query})`;
+}
 
 /**
- * 维护「path → 该 path 所有 read_file tool 消息的 history index」映射。
- *  - observePush:把刚 push 的 read_file tool 消息登记,并把同 path 的"更早" read 全部 stub。
- *  - observeMutation:把该 mutation path 的"在 mutation 之前的" read 全部 stub。
- *
- * 设计:每个 agent 会话(每个 runAgentCore 实例)持有一个 pruner。会话结束/换 plan 时
- * 可新建;不持久化(history 重建时索引自然过期)。
- *
- * 零依赖:仅依赖 ChatMessage 形状;不 import llm / tools / agent。
+ * Cross-message relevance pruning:
+ * - read_file: a newer successful read of the same canonical path supersedes old reads.
+ * - grep/codegraph: a newer successful call with the exact same semantic arguments
+ *   supersedes old results. Partial file overlap is intentionally not enough.
  */
 export class RelevancePruner {
-  /** path → [history index, ...]  按插入序;最新在末尾。 */
   private readonly readByPath = new Map<string, number[]>();
+  private readonly observationByKey = new Map<string, number[]>();
 
-  /** 把刚 push 的消息通知 pruner。
-   *  - 只处理成功的 read_file tool 消息；失败读取不能淘汰旧的有效结果。
-   *  - 登记当前 canonical path，并反向 stub 同 path 旧 read。
-   */
   observePush(history: ChatMessage[], msg: ChatMessage, succeeded = true): void {
     try {
       if (!succeeded || msg.role !== 'tool') return;
-      const m = msg as AnyMessage;
       const idx = history.length - 1;
-      if (idx < 1 || history[idx] !== msg) return; // 防御:必须刚 push 到末尾
-      if (toolNameOf(history, idx) !== 'read_file') return;
+      if (idx < 1 || history[idx] !== msg) return;
       const content = toText((msg as { content?: unknown }).content);
-      if (content.startsWith(STUB_PREFIX)) return; // 已是存根(防御)
+      if (content.startsWith(STUB_PREFIX)) return;
 
-      const path = this.pathAt(history, idx);
-      if (!path) return;
+      const call = this.callAt(history, idx);
+      if (!call) return;
 
-      // 先 stub 旧 read(同 canonical path,idx 之前),再登记新 idx。
-      this.stubPriorReads(history, path, idx);
-      const list = this.readByPath.get(path);
-      if (list) list.push(idx);
-      else this.readByPath.set(path, [idx]);
+      if (call.name === 'read_file') {
+        const path = canonicalizePath(extractPath(call.argsRaw));
+        if (!path) return;
+        this.stubPriorReads(history, path, idx);
+        const list = this.readByPath.get(path) ?? [];
+        list.push(idx);
+        this.readByPath.set(path, list);
+        return;
+      }
+
+      const key = observationKey(call);
+      if (!key) return;
+      this.stubPriorObservations(history, call.name, key, idx);
+      const list = this.observationByKey.get(key) ?? [];
+      list.push(idx);
+      this.observationByKey.set(key, list);
     } catch {
-      /* 永不抛错 */
+      // Relevance pruning must never block tool-result insertion.
     }
   }
-
-  /** 从 tool_call arguments 取得并规范化某条 read_file 的路径。 */
-  private pathAt(history: ChatMessage[], idx: number): string | null {
+  private callAt(history: ChatMessage[], idx: number): ToolCallInfo | null {
     const tcId = (history[idx] as AnyMessage)?.tool_call_id;
     if (!tcId) return null;
     for (let j = idx - 1; j >= 1; j--) {
-      const mm = history[j];
-      if (mm.role !== 'assistant') continue;
-      const tcs = (mm as { tool_calls?: { id?: string; function?: { arguments?: string } }[] }).tool_calls;
-      const hit = tcs?.find((tc) => tc?.id === tcId);
-      if (hit) return canonicalizePath(extractPath(hit.function?.arguments));
+      const message = history[j];
+      if (message.role !== 'assistant') continue;
+      const calls = (message as { tool_calls?: ToolCallShape[] }).tool_calls;
+      const hit = calls?.find((tc) => tc?.id === tcId);
+      if (!hit?.function?.name) continue;
+      const argsRaw = hit.function.arguments ?? '';
+      return { name: hit.function.name, argsRaw, args: parseArgs(argsRaw) };
     }
     return null;
   }
 
-  /** 成功 mutation 后，把该 canonical path 在 mutation 之前的 read 全部 stub。 */
   observeMutation(history: ChatMessage[], path: string): void {
     try {
       const canonicalPath = canonicalizePath(path);
@@ -98,95 +151,101 @@ export class RelevancePruner {
       this.stubPriorReads(history, canonicalPath, idx);
       this.readByPath.delete(canonicalPath);
     } catch {
-      /* 永不抛错 */
+      // Never throw from mutation cleanup.
     }
   }
 
-  /**
-   * 把 history 里 "canonical path 同 + index < beforeIdx + 不在当前轮保护区" 的 read_file
-   * tool 消息替换为存根。索引是快路径，全表扫描用于恢复 resume 历史；两条路径都重新校验 path。
-   */
   private stubPriorReads(history: ChatMessage[], path: string, beforeIdx: number): void {
     const targetPath = canonicalizePath(path);
     if (!targetPath) return;
-    const guard = lastUserIndex(history);
-    const protectedFrom = guard > 0 ? guard : 0;
+    const protectedFrom = Math.max(0, lastUserIndex(history));
 
-    const stubOne = (i: number): void => {
-      if (i >= beforeIdx) return;
-      if (i >= protectedFrom && protectedFrom > 0) return; // 当前轮保护区
-      const m = history[i] as AnyMessage;
-      if (!m || m.role !== 'tool') return;
-      const content = toText((m as { content?: unknown }).content);
-      if (content.startsWith(STUB_PREFIX)) return; // 幂等
-      if (toolNameOf(history, i) !== 'read_file') return;
-      if (this.pathAt(history, i) !== targetPath) return; // 防止 fallback 扫描误裁其他文件
-      const tcId = m.tool_call_id;
-      if (!tcId) return;
-      const stub = `${STUB_PREFIX} read_file(${targetPath}) ${content.length} 字符 → 已被新 read / mutation 替代 · id …${tcId.slice(-6)}⌫`;
-      (m as { content?: string }).content = stub;
+    const stubOne = (idx: number): void => {
+      if (idx >= beforeIdx || (protectedFrom > 0 && idx >= protectedFrom)) return;
+      const message = history[idx] as AnyMessage;
+      if (!message || message.role !== 'tool') return;
+      const content = toText(message.content);
+      if (content.startsWith(STUB_PREFIX)) return;
+      const call = this.callAt(history, idx);
+      if (call?.name !== 'read_file') return;
+      if (canonicalizePath(extractPath(call.argsRaw)) !== targetPath) return;
+      if (!message.tool_call_id) return;
+      message.content =
+        `${STUB_PREFIX}${READ_STUB_REASON}] read_file(${targetPath}) ${content.length} 字符 ` +
+        `→ 已被新 read / mutation 替代 · id …${message.tool_call_id.slice(-6)}⌫`;
     };
 
-    const indexed = this.readByPath.get(targetPath);
-    if (indexed) {
-      for (const i of indexed) stubOne(i);
-    }
+    for (const idx of this.readByPath.get(targetPath) ?? []) stubOne(idx);
     const scanEnd = Math.min(beforeIdx, protectedFrom > 0 ? protectedFrom : beforeIdx);
-    for (let i = 1; i < scanEnd; i++) stubOne(i);
+    for (let idx = 1; idx < scanEnd; idx++) stubOne(idx);
+  }
+  private stubPriorObservations(
+    history: ChatMessage[],
+    toolName: string,
+    key: string,
+    beforeIdx: number,
+  ): void {
+    const protectedFrom = Math.max(0, lastUserIndex(history));
+
+    const stubOne = (idx: number): void => {
+      if (idx >= beforeIdx || (protectedFrom > 0 && idx >= protectedFrom)) return;
+      const message = history[idx] as AnyMessage;
+      if (!message || message.role !== 'tool') return;
+      const content = toText(message.content);
+      if (content.startsWith(STUB_PREFIX) || !isToolResultSuccess(content)) return;
+      const call = this.callAt(history, idx);
+      if (!call || call.name !== toolName || observationKey(call) !== key) return;
+      if (!message.tool_call_id) return;
+      const reason = toolName === 'grep'
+        ? '相同 grep 查询已有更新结果'
+        : '相同 codegraph 查询已有更新结果';
+      message.content =
+        `${STUB_PREFIX}${reason}] ${observationLabel(call)} ${content.length} 字符 ` +
+        `→ 已被更新查询替代 · id …${message.tool_call_id.slice(-6)}⌫`;
+    };
+
+    for (const idx of this.observationByKey.get(key) ?? []) stubOne(idx);
+    // The fallback scan restores correctness after resume/compact when this instance
+    // has no index for older messages.
+    const scanEnd = Math.min(beforeIdx, protectedFrom > 0 ? protectedFrom : beforeIdx);
+    for (let idx = 1; idx < scanEnd; idx++) stubOne(idx);
   }
 }
 
-/** 默认单例:每个 agent 循环一个。runAgentCore 入口 new 一个,后续 observe 共享。 */
 export function createRelevancePruner(): RelevancePruner {
   return new RelevancePruner();
 }
 
-/** 解析一条 stub 字符串,提取原 content 长度(若可解析)。失败返 null。 */
+/** Parse the original content length recorded by any relevance stub. */
 function parseStubOriginalLen(stub: string): number | null {
-  // 格式:⌦[已过时:同 path 已有新 read / 已被 mutation 覆写] read_file(<path>) <N> 字符 → ...
-  const m = / read_file\([^)]+\) (\d+) 字符 /.exec(stub);
-  if (!m) return null;
-  const n = Number(m[1]);
-  return Number.isFinite(n) && n >= 0 ? n : null;
+  const match = /\) (\d+) 字符 →/.exec(stub);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-/**
- * 扫 history,统计被相关性裁剪 stub 的 read_file tool 消息(条数 + 原字节数)。
- * 供 /context 渲染统计行用(让用户直观看到「prune 帮了多少」)。
- * 永不抛错(对齐本模块契约);history 为空 / 无 stub 时返零值。
- *
- * 注意:stub 后只剩 stub 字符串(原 content 已丢失),故只能从 stub 字符串里 parse
- * 原字节数,误差 = stub 时记录的 content.length(精确);token 估算走 estimateTokens。
- */
+/** Aggregate relevance/lifecycle compression for the /context panel. */
 export function computePruneStats(history: ChatMessage[]): {
   stubbed: number;
-  /** 原 content 总字节数(仅 stubbed 的)。 */
   originalChars: number;
-  /** 反推原 token 数(粗略:estimateTokens(originalChars 字符))。 */
   originalTokens: number;
-  /** 当前 stub 字符串总字节数。 */
   stubChars: number;
-  /** 估算释放的 token 数(originalTokens - 当前 stub 占的 token)。 */
   freedTokens: number;
 } {
   let stubbed = 0;
   let originalChars = 0;
   let stubChars = 0;
-  for (const m of history) {
-    if (m.role !== 'tool') continue;
-    const c = toText((m as { content?: unknown }).content);
-    // Relevance Pruner 的 stub(⌦[已过时:...) 和 Lifecycle Engine 的 DIGEST(⌦[摘要:...) 都统计。
-    const isPruneStub = c.startsWith(STUB_PREFIX);
-    const isDigest = c.startsWith('⌦[摘要:');
+  for (const message of history) {
+    if (message.role !== 'tool') continue;
+    const content = toText((message as { content?: unknown }).content);
+    const isPruneStub = content.startsWith(STUB_PREFIX);
+    const isDigest = content.startsWith('⌦[摘要:');
     if (!isPruneStub && !isDigest) continue;
     stubbed++;
-    stubChars += c.length;
-    const orig = parseStubOriginalLen(c);
-    if (orig != null) originalChars += orig;
+    stubChars += content.length;
+    const original = parseStubOriginalLen(content);
+    if (original != null) originalChars += original;
   }
-  // token 估算:用 estimateTokens(懒导入,避免循环依赖 llm)
-  // 这里偷懒:走粗略 chars/4(中文混合下会过估,安全侧)
-  // 准确应调 estimateTokens,但 /context 已经是粗算,误差可接受
   const originalTokens = Math.ceil(originalChars / 4);
   const stubTokens = Math.ceil(stubChars / 4);
   return {
