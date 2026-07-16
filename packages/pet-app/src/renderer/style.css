@@ -31,16 +31,16 @@ html, body {
 /* ── mood 气泡:展示 pickQuip 选出的文案,淡入/淡出不影响 mood-<kind> class(见 renderer.ts showQuip)。 ── */
 #pet-bubble {
   position: absolute;
-  top: 4px;
+  top: 2px;
   left: 50%;
   transform: translateX(-50%);
-  max-width: 90%;
-  padding: 4px 10px;
-  border-radius: 10px;
+  max-width: 60%;
+  padding: 2px 5px;
+  border-radius: 5px;
   background: #0d1b2a;
   color: #2afadf;
   font-family: sans-serif;
-  font-size: 12px;
+  font-size: 6px;
   line-height: 1.4;
   text-align: center;
   white-space: nowrap;
@@ -82,14 +82,14 @@ html, body {
   /* signal-light.svg viewBox 由 90x220 改为 90x456(灯杆加长到与宠物脚部同一地平线),
    * 高度与 #pet-container svg 保持一致的 90% 比例,两者又都用 flex-end 贴底对齐,
    * 这样杆的底端和宠物脚部的落地线基本重合。 */
-  width: 30px;
+  width: 22px;
   height: 90%;
 }
 
 /* ── idle:轻微上下浮动呼吸,机身静止 ── */
 @keyframes pet-float {
   0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-6px); }
+  50% { transform: translateY(-3px); }
 }
 .pet-idle #pet-body-group {
   animation: pet-float 3s ease-in-out infinite;
@@ -155,7 +155,7 @@ html, body {
   transform-origin: 128px 125px;
 }
 .pet-done #pet-antenna {
-  filter: drop-shadow(0 0 6px #4ade80);
+  filter: drop-shadow(0 0 3px #4ade80);
 }
 
 /* ── aborted:头部短暂低垂 + 天线灯熄灭 ── */
@@ -177,8 +177,8 @@ html, body {
  *   闪烁区分开:闪烁只留给"需要人工介入"这类必须响应的时刻) ── */
 @keyframes pet-error-shake {
   0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-6px); }
-  75% { transform: translateX(6px); }
+  25% { transform: translateX(-3px); }
+  75% { transform: translateX(3px); }
 }
 .pet-error #pet-body-group {
   animation: pet-error-shake 0.3s ease-in-out 1;
@@ -270,7 +270,7 @@ html, body {
 /* ── mood-tired:机身缓慢下沉,浮动曲线比 idle 更慢更沉,模拟疲惫感 ── */
 @keyframes pet-mood-tired-sink {
   0%, 100% { transform: translateY(0); opacity: 1; }
-  50% { transform: translateY(4px); opacity: 0.85; }
+  50% { transform: translateY(2px); opacity: 0.85; }
 }
 .mood-tired #pet-body-group {
   animation: pet-mood-tired-sink 4s ease-in-out infinite;
@@ -299,8 +299,8 @@ html, body {
 /* ── mood-frustrated:比 error 更强烈的抖动 ── */
 @keyframes pet-mood-frustrated-shake {
   0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-10px); }
-  75% { transform: translateX(10px); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
 }
 .mood-frustrated #pet-body-group {
   animation: pet-mood-frustrated-shake 0.15s ease-in-out infinite;
@@ -337,7 +337,7 @@ html, body {
 /* ── .pet-asleep:闲置超时后,整机慢呼吸 + 眼睛变细线(模拟闭眼),motion CSS 可追加打鼾/Z 字等角色动作 ── */
 @keyframes pet-asleep-breath {
   0%, 100% { transform: scale(1) translateY(0); }
-  50% { transform: scale(1.015) translateY(-2px); }
+  50% { transform: scale(1.015) translateY(-1px); }
 }
 @keyframes pet-asleep-eye-squint {
   0%, 100% { transform: scaleY(1); }
@@ -357,7 +357,7 @@ html, body {
 /* ── .pet-hover:鼠标悬停时,整体轻微上抬 + 信号灯同步进入"可点击"提示姿态
  *   (信号灯 #pet-lamp-* 留给通用规则外的可选覆写,这里只动 body)。 ── */
 .pet-hover #pet-body-group {
-  transform: translateY(-4px);
+  transform: translateY(-2px);
   transition: transform 0.18s ease-out;
 }
 
@@ -366,8 +366,8 @@ html, body {
  *   因为是用户主动交互,需要更强的视觉反馈。 ── */
 @keyframes pet-petted-bounce {
   0% { transform: scale(1); }
-  30% { transform: scale(1.18) translateY(-6px); }
-  60% { transform: scale(0.94) translateY(1px); }
+  30% { transform: scale(1.18) translateY(-3px); }
+  60% { transform: scale(0.94) translateY(0.5px); }
   100% { transform: scale(1); }
 }
 .pet-petted #pet-body-group {

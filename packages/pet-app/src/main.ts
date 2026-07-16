@@ -368,8 +368,8 @@ function probeIsPetServer(port: number): Promise<boolean> {
   });
 }
 
-const WIN_WIDTH = 260;
-const WIN_HEIGHT = 220;
+const WIN_WIDTH = 170;
+const WIN_HEIGHT = 170;
 
 /** 跨平台悬浮窗配置(design.md 跨平台 BrowserWindow 配置差异表)。
  *  位置:优先用持久化配置里的 x/y(拖拽放置后记住的位置);无记忆位置时回退默认右下角。 */
