@@ -38,7 +38,21 @@ export interface EncoderInput {
   /** 软目标字符数(来自 tools/constants.ts 的 cap 常量,按工具名取)。encoder 应尽量压到 budget 内,
    *  但最终长度裁剪仍由 pipeline 末尾的 capToolResultForHistory 兜底(保 head+标记+tail)。 */
   budget?: number;
+  /** 当前结果之后发生的 tool-result push 数;初次 push 为 0。 */
+  age?: number;
+  /** 是否已进入 Hot/Cold 划分的 Cold 区。与 age 分开,避免把两种语义混为一谈。 */
+  isCold?: boolean;
+  /** 是否为 canonical path 的首次成功 read_file;非 read 工具为 undefined。 */
+  isFirstRead?: boolean;
+  /** push=初次保守编码;sweep=发送给模型前对旧 Cold 内容二次编码。 */
+  phase?: 'push' | 'sweep';
 }
+
+/** pipeline 调用方可注入的运行时老化上下文。 */
+export type EncoderRuntimeContext = Pick<
+  EncoderInput,
+  'age' | 'isCold' | 'isFirstRead' | 'phase'
+>;
 
 /** encoder 的输出。 */
 export interface EncoderOutput {

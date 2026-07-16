@@ -24,7 +24,11 @@ import { getAgentMode, setAgentMode } from './mode.js';
 import { maybeCompact, runScheduler, contextState, dropContextFromHistory } from '../session/index.js';
 import type { ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
-import { optimizeToolResult } from '../context/index.js';
+import { optimizeToolResult, HOT_TURN_WINDOW, userTurnBoundary } from '../context/index.js';
+import {
+  createAgeAwareEncodingState,
+  type AgeAwareEncodingState,
+} from '../context/age-aware.js';
 import { createRelevancePruner } from '../context/relevance.js';
 import { isToolResultSuccess } from '../context/utils.js';
 import { config } from '../config/index.js';
@@ -37,6 +41,17 @@ import {
   getTokenCalibration,
   updateTokenCalibration,
 } from '../context/token-calibration.js';
+
+/** Stable per-history age state survives user turns; WeakMap avoids retaining closed sessions. */
+const ageAwareStateByHistory = new WeakMap<ChatMessage[], AgeAwareEncodingState>();
+
+function ageAwareStateFor(history: ChatMessage[]): AgeAwareEncodingState {
+  const existing = ageAwareStateByHistory.get(history);
+  if (existing) return existing;
+  const created = createAgeAwareEncodingState(history);
+  ageAwareStateByHistory.set(history, created);
+  return created;
+}
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
 function parseArgs(raw: string): Record<string, unknown> | null {
@@ -144,15 +159,17 @@ function pushToolResult(
   scheduler: BudgetScheduler | null,
   runtimeContextState: ContextState = contextState,
 ): void {
+  const succeeded = isToolResultSuccess(output);
+  const ageAware = config.contextOptimize ? ageAwareStateFor(history) : null;
+  const encodingContext = ageAware?.preparePush(tc, succeeded);
   const msg = {
     role: 'tool' as const,
     tool_call_id: tc.id,
-    // optimizeToolResult:classifier 选 encoder → encode(保不变量压缩)→ capToolResultForHistory 兜底。
-    // tc.arguments 透传给 encoder(上下文感知编码,如 read_file 的 offset/limit)。永不抛错。
-    content: optimizeToolResult(tc.name, output, tc.arguments),
+    // 初次 push 始终保守(age=0);旧 Cold 结果在下一 step 的 sweep 中按类型降级。
+    content: optimizeToolResult(tc.name, output, tc.arguments, encodingContext),
   } as ChatMessage;
   history.push(msg);
-  const succeeded = isToolResultSuccess(output);
+  scheduler?.observePush(history, history.length - 1);
   // 失败 read 不得淘汰旧 read；失败 consumer 也不能改变 lifecycle 上游状态。
   if (pruner) pruner.observePush(history, msg, succeeded);
   if (lifecycle) lifecycle.pushTool(history, history.length - 1, succeeded);
@@ -317,6 +334,9 @@ export async function runAgentCore(
   const scheduler: BudgetScheduler | null = config.contextBudget !== false
     ? createBudgetScheduler(runtimeContextState) // 在 step 循环之外实例化一次,跨步持有 lastRunLog
     : null;
+  // age-aware encoder 与 history 数组同寿命；每轮重建一次以覆盖外部 /compact 等原地修改。
+  const ageAware = config.contextOptimize ? ageAwareStateFor(history) : null;
+  ageAware?.rehydrate(history);
   // 本轮流式状态:首个正文 token 到达即停 spinner(思考期间 spinner 持续转「思考中…」,不写思考内容)。
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
@@ -349,6 +369,7 @@ export async function runAgentCore(
     hooks.onAbort?.();
     history.length = 0;
     history.push(...savedHistory);
+    ageAware?.rehydrate(history);
     setAgentMode(savedMode);
   };
   try {
@@ -387,12 +408,16 @@ export async function runAgentCore(
         );
         historyRebuilt = compactResult?.historyRebuilt === true;
       }
-      // compact 用新消息数组原地重建 history 后，旧 lifecycle 的数字 index 已全部失效。
-      // 立即从新 history 恢复状态和 producer 索引，再允许后续 pushTool/pushMutation 使用。
-      if (historyRebuilt && lifecycle) {
-        lifecycle = createLifecycleEngine(history);
-        runtimeContextState.lifecycleStats = lifecycle.stats();
+      // compact 用新消息数组原地重建 history 后，所有按消息位置恢复的状态都需重建。
+      if (historyRebuilt) {
+        if (lifecycle) {
+          lifecycle = createLifecycleEngine(history);
+          runtimeContextState.lifecycleStats = lifecycle.stats();
+        }
+        ageAware?.rehydrate(history);
       }
+      // 初次 tool push 只做保守编码；发送前仅对 Cold 且 age 达阈值的旧结果降级。
+      ageAware?.sweep(history, userTurnBoundary(history, HOT_TURN_WINDOW));
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')
       mode = 'idle';
       gotText = false;

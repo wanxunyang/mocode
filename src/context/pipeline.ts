@@ -15,7 +15,7 @@
 //
 // 依赖方向:context → {tools/constants, session/compact 的 cap, config};叶子,不反向依赖 llm/agent/tools。
 
-import type { ContextEncoder } from './types.js';
+import type { ContextEncoder, EncoderRuntimeContext } from './types.js';
 import { classify } from './classifier.js';
 import { getEncoder, registerAll } from './registry.js';
 import { builtinEncoders } from './encoders/index.js';
@@ -68,6 +68,7 @@ export function optimizeToolResult(
   name: string,
   output: string,
   argsRaw?: string,
+  context: EncoderRuntimeContext = {},
 ): string {
   boot();
   // 总开关关闭:完全走老路径,零行为变化(Phase 1 默认 true,但保留紧急回退开关)。
@@ -83,6 +84,10 @@ export function optimizeToolResult(
       output,
       args,
       budget: budgetFor(name),
+      age: context.age ?? 0,
+      isCold: context.isCold ?? false,
+      isFirstRead: context.isFirstRead,
+      phase: context.phase ?? 'push',
     });
     // 末尾长度裁剪兜底(同改造前):encoder 已更短则 no-op;use_skill/memory_search 的放宽 cap 由此保留。
     return capToolResultForHistory(name, text);

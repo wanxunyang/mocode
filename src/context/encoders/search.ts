@@ -1,84 +1,144 @@
-import type { ContextEncoder } from '../types.js';
+import type { ContextEncoder, EncoderInput } from '../types.js';
 
-/**
- * Search Encoder(grep):`file:line: content` 流 → 按文件分组,顶部计数。
- *
- * 输入:grep 返回的 `file:line: content` 行,可能带尾部 `...(结果达到 N 条上限)` 或 `无匹配(...)`。
- * 输出:每个文件一个 `file:` 头 + 其下 2 空格缩进的 `  line: content`,顶部 `# N matches · M files`。
- *
- * 不变量(离线脚本断言):file:line 对集合保真——每个原行 `file:line: content` 可从
- *  `file:` + `  line: content` 还原(content 含前导空格,还原逐字节一致)。
- * 非 grep 格式(web_search 的 `[i] title/...` 已格式化块)→ 无 file:line 匹配 → passthrough(不动)。
- * 正则用非贪婪 `.*?` 匹配文件名,容忍 Windows 盘符冒号(`C:\...`)与 content 含 `:digit:`。
- */
 interface GrepMatch {
   file: string;
   line: string;
   content: string;
 }
-const GREP_RE = /^(.*?):(\d+):(.*)$/;
+
+const LEGACY_GREP_RE = /^(.*?):(\d+):(.*)$/;
+const STRUCTURED_HEADER_RE = /^(.*): (\d+) 处匹配,行号 \[([0-9,\s]+)\]$/;
+const STRUCTURED_BODY_RE = /^\s{2}L\d+:/;
+const STRUCTURED_FOLDED_RE = /^\s{2}\(body 已折叠/;
+
+function isAgedCold(input: EncoderInput): boolean {
+  return input.phase === 'sweep' && input.isCold === true && (input.age ?? 0) >= 2;
+}
+
+/** Current grep output already has lossless file headers; Cold drops body previews only. */
+function collapseStructuredGrep(output: string): { text: string; files: number } | null {
+  const lines = output.split('\n');
+  const out: string[] = [];
+  let files = 0;
+  let inFile = false;
+  for (const line of lines) {
+    if (STRUCTURED_HEADER_RE.test(line)) {
+      files++;
+      inFile = true;
+      out.push(line);
+      continue;
+    }
+    if (inFile && (STRUCTURED_BODY_RE.test(line) || STRUCTURED_FOLDED_RE.test(line))) {
+      continue;
+    }
+    inFile = false;
+    out.push(line);
+  }
+  return files > 0 ? { text: out.join('\n'), files } : null;
+}
+
+function encodeLegacyGrep(output: string): { text: string; matches: number; files: number } | null {
+  const lines = output.split('\n');
+  const matches: GrepMatch[] = [];
+  const tail: string[] = [];
+  let inTail = false;
+  for (const line of lines) {
+    if (!line) continue;
+    if (inTail) {
+      tail.push(line);
+      continue;
+    }
+    const match = LEGACY_GREP_RE.exec(line);
+    if (match) {
+      matches.push({ file: match[1], line: match[2], content: match[3] });
+    } else {
+      inTail = true;
+      tail.push(line);
+    }
+  }
+  if (matches.length === 0) return null;
+
+  const groups = new Map<string, { line: string; content: string }[]>();
+  const order: string[] = [];
+  for (const match of matches) {
+    if (!groups.has(match.file)) {
+      groups.set(match.file, []);
+      order.push(match.file);
+    }
+    groups.get(match.file)!.push({ line: match.line, content: match.content });
+  }
+  const out = [`# ${matches.length} matches · ${order.length} files · search-encoded`];
+  for (const file of order) {
+    out.push(`${file}:`);
+    for (const item of groups.get(file)!) out.push(`  ${item.line}:${item.content}`);
+  }
+  if (tail.length) out.push(...tail);
+  return { text: out.join('\n'), matches: matches.length, files: order.length };
+}
+function collapseLegacyBodies(text: string): string {
+  if (!text.startsWith('# ') || !text.includes('search-encoded')) return text;
+  return text
+    .split('\n')
+    .filter((line) => !/^\s{2}\d+:/.test(line))
+    .join('\n');
+}
 
 export const searchEncoder: ContextEncoder = {
   kind: 'search',
-  encode({ output }) {
-    const lines = output.split('\n');
-    const matches: GrepMatch[] = [];
-    const tail: string[] = [];
-    let inTail = false;
-    for (const l of lines) {
-      if (!l) continue;
-      if (inTail) {
-        tail.push(l);
-        continue;
-      }
-      const m = GREP_RE.exec(l);
-      if (m) {
-        matches.push({ file: m[1], line: m[2], content: m[3] });
-      } else {
-        // 首个非 grep 行起视作 tail(grep 上限标记 / 无匹配串 / web_search 非 grep 结构)
-        inTail = true;
-        tail.push(l);
-      }
-    }
-    if (matches.length === 0) {
-      // 非 grep 格式(web_search 等)→ 不动其已格式化结构
+  encode(input) {
+    const structured = collapseStructuredGrep(input.output);
+    if (structured) {
+      const text = isAgedCold(input) ? structured.text : input.output;
       return {
-        text: output,
+        text,
         meta: {
           kind: 'search',
-          originalLen: output.length,
-          encodedLen: output.length,
-          note: 'no file:line matches → passthrough',
+          originalLen: input.output.length,
+          encodedLen: text.length,
+          note: isAgedCold(input)
+            ? `${structured.files} files · Cold body previews removed`
+            : `${structured.files} structured grep files · passthrough`,
         },
       };
     }
-    const groups = new Map<string, { line: string; content: string }[]>();
-    const order: string[] = [];
-    for (const m of matches) {
-      if (!groups.has(m.file)) {
-        groups.set(m.file, []);
-        order.push(m.file);
-      }
-      groups.get(m.file)!.push({ line: m.line, content: m.content });
+
+    // A previous pass may already have transformed legacy file:line output.
+    if (input.output.startsWith('# ') && input.output.includes('search-encoded')) {
+      const text = isAgedCold(input) ? collapseLegacyBodies(input.output) : input.output;
+      return {
+        text,
+        meta: {
+          kind: 'search',
+          originalLen: input.output.length,
+          encodedLen: text.length,
+          note: isAgedCold(input) ? 'Cold legacy bodies removed' : 'already encoded',
+        },
+      };
     }
-    const out: string[] = [
-      `# ${matches.length} matches · ${order.length} files · search-encoded`,
-    ];
-    for (const file of order) {
-      out.push(`${file}:`);
-      for (const { line, content } of groups.get(file)!) {
-        out.push(`  ${line}:${content}`);
-      }
+
+    const legacy = encodeLegacyGrep(input.output);
+    if (!legacy) {
+      return {
+        text: input.output,
+        meta: {
+          kind: 'search',
+          originalLen: input.output.length,
+          encodedLen: input.output.length,
+          note: 'no recognized grep structure → passthrough',
+        },
+      };
     }
-    if (tail.length) out.push(...tail);
-    const text = out.join('\n');
+
+    const text = isAgedCold(input)
+      ? collapseLegacyBodies(legacy.text)
+      : legacy.text;
     return {
       text,
       meta: {
         kind: 'search',
-        originalLen: output.length,
+        originalLen: input.output.length,
         encodedLen: text.length,
-        note: `${matches.length} matches / ${order.length} files`,
+        note: `${legacy.matches} matches / ${legacy.files} files${isAgedCold(input) ? ' · Cold bodies removed' : ''}`,
       },
     };
   },

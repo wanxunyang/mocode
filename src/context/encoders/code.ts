@@ -1,76 +1,217 @@
 import type { ContextEncoder } from '../types.js';
 
-/**
- * Code Encoder(read_file):折叠连续空行(≥3 → 1,保留首空行行号前缀)。
- *
- * 输入:read_file 返回的 `     N\t<content>` 行(6 宽右对齐行号 + tab + 内容),可能带尾部
- *  `... (N 行未显示,共 M 行)`。
- * 输出:连续 ≥3 个空行(行号前缀 + 空 content)折叠为 1 个(保留首行前缀,丢后续空行);其余逐字保留。
- *
- * 不变量(离线脚本断言):
- *  - 所有非空 content 行逐字保留(前缀 + 内容不变)→ edit_file 的 old_string 按内容匹配仍可用。
- *  - content 行的行号前缀不变 → LLM 看到的行号与文件一致。
- *  - 仅空行(前缀 + tab + 空 content)被折叠,且仅 ≥3 连续时;≤2 空行原样(常见,不动)。
- *  - 尾部标记 `... (...)` 不匹配行号前缀,原样保留。
- *
- * ⚠️ 残余风险(可接受、可恢复):若 LLM 编辑一个含 ≥3 连续空行的区域,它看到的空行数比文件实际少,
- *   old_string 的空行数可能不匹配 → edit_file 返"未找到" → LLM 重读重试(系统提示已要求编辑前 read_file)。
- *   真实代码极少 ≥3 连续空行(linter 通常强制 ≤2),故实际几乎不触发。出问题可设
- *   MOCODE_CONTEXT_OPTIMIZE=false 全局回退,或调高阈值。
- *
- * 不做长度裁剪(cap 兜底);不动行号前缀;不删 content 行;不改内容(含尾随空白)。
- * 空行判定用前缀感知(前缀 + tab + 空 content),不能用 trim——read_file 空行 `     2\t` trim 后剩 `2`。
- */
+/** read_file line: right-aligned source line number + tab + exact content. */
 const LINE_RE = /^(\s*\d+)\t(.*)$/;
+const JS_LIKE_PATH_RE = /\.(?:[cm]?js|jsx|ts|tsx)$/i;
 
-function isBlankCodeLine(l: string): boolean {
-  const m = LINE_RE.exec(l);
-  return m ? m[2] === '' : false;
+interface NumberedLine {
+  raw: string;
+  line: number;
+  content: string;
+}
+
+function parseLine(raw: string): NumberedLine | null {
+  const match = LINE_RE.exec(raw);
+  if (!match) return null;
+  return { raw, line: Number(match[1].trim()), content: match[2] };
+}
+
+function collapseBlankCodeRuns(output: string): {
+  text: string;
+  collapsed: number;
+} {
+  const lines = output.split('\n');
+  const out: string[] = [];
+  let collapsed = 0;
+  let i = 0;
+  while (i < lines.length) {
+    if (parseLine(lines[i])?.content === '') {
+      let j = i;
+      while (j < lines.length && parseLine(lines[j])?.content === '') j++;
+      if (j - i >= 3) {
+        out.push(lines[i]);
+        collapsed++;
+      } else {
+        for (let k = i; k < j; k++) out.push(lines[k]);
+      }
+      i = j;
+      continue;
+    }
+    out.push(lines[i++]);
+  }
+  return { text: out.join('\n'), collapsed };
+}
+
+function isJsLikePath(args: Record<string, unknown> | null): boolean {
+  return typeof args?.path === 'string' && JS_LIKE_PATH_RE.test(args.path);
+}
+
+function isSingleLineImport(content: string): boolean {
+  const line = content.trim();
+  return /^import\b/.test(line) && /(?:['"][^'"]+['"]\s*;?|;)$/.test(line);
+}
+function collapseImportBlocks(text: string): { text: string; collapsed: number } {
+  const lines = text.split('\n');
+  const out: string[] = [];
+  let collapsed = 0;
+  let i = 0;
+  while (i < lines.length) {
+    const first = parseLine(lines[i]);
+    if (!first || !isSingleLineImport(first.content)) {
+      out.push(lines[i++]);
+      continue;
+    }
+    let j = i + 1;
+    while (j < lines.length) {
+      const next = parseLine(lines[j]);
+      if (!next || !isSingleLineImport(next.content)) break;
+      j++;
+    }
+    const run = j - i;
+    if (run >= 4) {
+      const last = parseLine(lines[j - 1])!;
+      out.push(lines[i]);
+      out.push(`… ${run - 2} import lines folded (source lines ${first.line + 1}–${last.line - 1}; cold read)`);
+      out.push(lines[j - 1]);
+      collapsed++;
+    } else {
+      for (let k = i; k < j; k++) out.push(lines[k]);
+    }
+    i = j;
+  }
+  const result = out.join('\n');
+  return result.length < text.length
+    ? { text: result, collapsed }
+    : { text, collapsed: 0 };
+}
+
+interface LexState {
+  quote: "'" | '"' | '`' | null;
+  escaped: boolean;
+  blockComment: boolean;
+}
+
+function braceDelta(line: string, state: LexState): number {
+  let delta = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    const next = line[i + 1];
+    if (state.blockComment) {
+      if (ch === '*' && next === '/') {
+        state.blockComment = false;
+        i++;
+      }
+      continue;
+    }
+    if (state.quote) {
+      if (state.escaped) {
+        state.escaped = false;
+      } else if (ch === '\\') {
+        state.escaped = true;
+      } else if (ch === state.quote) {
+        state.quote = null;
+      }
+      continue;
+    }
+    if (ch === '/' && next === '/') break;
+    if (ch === '/' && next === '*') {
+      state.blockComment = true;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      state.quote = ch;
+      state.escaped = false;
+      continue;
+    }
+    if (ch === '{') delta++;
+    else if (ch === '}') delta--;
+  }
+  state.escaped = false;
+  return delta;
+}
+function isFunctionStart(content: string): boolean {
+  return (
+    /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function(?:\s+[\w$]+)?\s*\(/.test(content) ||
+    /^\s*(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*=.*=>\s*\{\s*$/.test(content) ||
+    /^\s*(?:(?:public|private|protected|static|abstract|override|async|get|set)\s+)*(?:constructor|[\w$]+)\s*\([^;]*\)\s*(?::[^={]+)?\s*\{\s*$/.test(content)
+  );
+}
+
+function collapseFunctionBodies(text: string): { text: string; collapsed: number } {
+  const lines = text.split('\n');
+  const out: string[] = [];
+  let collapsed = 0;
+  let i = 0;
+  while (i < lines.length) {
+    const start = parseLine(lines[i]);
+    if (!start || !isFunctionStart(start.content)) {
+      out.push(lines[i++]);
+      continue;
+    }
+
+    const state: LexState = { quote: null, escaped: false, blockComment: false };
+    let depth = braceDelta(start.content, state);
+    if (depth <= 0) {
+      out.push(lines[i++]);
+      continue;
+    }
+
+    let j = i + 1;
+    for (; j < lines.length && depth > 0; j++) {
+      const current = parseLine(lines[j]);
+      if (!current) break;
+      depth += braceDelta(current.content, state);
+    }
+    const endIndex = j - 1;
+    const end = parseLine(lines[endIndex] ?? '');
+    const bodyLines = endIndex - i - 1;
+    if (depth === 0 && end && bodyLines >= 8) {
+      out.push(lines[i]);
+      out.push(`… ${bodyLines} function-body lines folded (source lines ${start.line + 1}–${end.line - 1}; cold read)`);
+      out.push(lines[endIndex]);
+      collapsed++;
+      i = j;
+    } else {
+      out.push(lines[i++]);
+    }
+  }
+  const result = out.join('\n');
+  return result.length < text.length
+    ? { text: result, collapsed }
+    : { text, collapsed: 0 };
 }
 
 export const codeEncoder: ContextEncoder = {
   kind: 'code',
-  encode({ output }) {
-    const lines = output.split('\n');
-    const out: string[] = [];
-    let i = 0;
-    let collapsedRuns = 0;
-    while (i < lines.length) {
-      if (isBlankCodeLine(lines[i])) {
-        let j = i;
-        while (j < lines.length && isBlankCodeLine(lines[j])) j++;
-        const run = j - i;
-        if (run >= 3) {
-          out.push(lines[i]); // 保留首空行(含其行号前缀)
-          collapsedRuns++;
-        } else {
-          for (let k = 0; k < run; k++) out.push(lines[i]);
-        }
-        i = j;
-      } else {
-        out.push(lines[i]);
-        i++;
-      }
+  encode(input) {
+    const blankResult = collapseBlankCodeRuns(input.output);
+    let text = blankResult.text;
+    const notes: string[] = [];
+    if (blankResult.collapsed) notes.push(`collapsed ${blankResult.collapsed} blank runs`);
+
+    if (
+      input.phase === 'sweep' &&
+      input.isCold === true &&
+      (input.age ?? 0) >= 2 &&
+      input.isFirstRead === false &&
+      isJsLikePath(input.args)
+    ) {
+      const imports = collapseImportBlocks(text);
+      text = imports.text;
+      if (imports.collapsed) notes.push(`folded ${imports.collapsed} import blocks`);
+      const functions = collapseFunctionBodies(text);
+      text = functions.text;
+      if (functions.collapsed) notes.push(`folded ${functions.collapsed} function bodies`);
     }
-    if (collapsedRuns === 0) {
-      return {
-        text: output,
-        meta: {
-          kind: 'code',
-          originalLen: output.length,
-          encodedLen: output.length,
-          note: 'no ≥3 blank runs → passthrough',
-        },
-      };
-    }
-    const text = out.join('\n');
+
     return {
       text,
       meta: {
         kind: 'code',
-        originalLen: output.length,
+        originalLen: input.output.length,
         encodedLen: text.length,
-        note: `collapsed ${collapsedRuns} blank runs (≥3 → 1)`,
+        note: notes.join(', ') || 'no change',
       },
     };
   },

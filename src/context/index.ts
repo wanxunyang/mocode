@@ -11,6 +11,7 @@ export type {
   ContextEncoder,
   EncoderInput,
   EncoderOutput,
+  EncoderRuntimeContext,
 } from './types.js';
 export { classify, knownToolKinds } from './classifier.js';
 export {

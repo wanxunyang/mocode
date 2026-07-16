@@ -1,33 +1,88 @@
-import type { ContextEncoder } from '../types.js';
+import type { ContextEncoder, EncoderInput } from '../types.js';
 import { stripAnsi, collapseBlankRuns } from './_util.js';
 
-/**
- * Graph Encoder(codegraph):去 ANSI + 折叠连续空行(≥3 → 1)。
- *
- * 输入:codegraph CLI 返回的 `[退出码 N]\n<源码 + 调用路径>`(可能含 ANSI 颜色、多余空行)。
- * 输出:去 ANSI + 空行折叠;结构(调用路径块、源码段)不动。
- *
- * 不变量:退出码行保留;源码与调用路径文本逐字保留(仅去颜色码 + 折叠空行);不删内容行。
- * 保守:不重构调用路径 / 不去重源码(codegraph CLI 输出格式未稳定,需先采样真实输出定不变量,留后续)。
- */
+function isAgedCold(input: EncoderInput): boolean {
+  return input.phase === 'sweep' && input.isCold === true && (input.age ?? 0) >= 2;
+}
+
+function normalizeBlock(block: string): string {
+  return block
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .join('\n')
+    .trim();
+}
+
+function dedupeFencedBlocks(text: string): { text: string; removed: number } {
+  const seen = new Set<string>();
+  let removed = 0;
+  const result = text.replace(/```[^\n]*\n[\s\S]*?\n```/g, (block) => {
+    const key = normalizeBlock(block);
+    if (key.length < 120 || !seen.has(key)) {
+      seen.add(key);
+      return block;
+    }
+    removed++;
+    return '… duplicate source block omitted (cold graph)';
+  });
+  return { text: result, removed };
+}
+
+function looksLikeSourceBlock(block: string): boolean {
+  const lines = block.split('\n');
+  const sourceLines = lines.filter((line) =>
+    /^\s*\d+\t/.test(line) ||
+    /^\s*(?:L)?\d+[:|]\s/.test(line) ||
+    /^.*:\d+(?::\d+)?:\s/.test(line),
+  ).length;
+  return block.length >= 120 && sourceLines >= 3;
+}
+
+function dedupeParagraphSourceBlocks(text: string): { text: string; removed: number } {
+  const parts = text.split(/(\n{2,})/);
+  const seen = new Set<string>();
+  let removed = 0;
+  for (let i = 0; i < parts.length; i += 2) {
+    const block = parts[i];
+    if (!looksLikeSourceBlock(block)) continue;
+    const key = normalizeBlock(block);
+    if (seen.has(key)) {
+      parts[i] = '… duplicate source block omitted (cold graph)';
+      removed++;
+    } else {
+      seen.add(key);
+    }
+  }
+  return { text: parts.join(''), removed };
+}
+
 export const graphEncoder: ContextEncoder = {
   kind: 'graph',
-  encode({ output }) {
-    const stripped = stripAnsi(output);
-    const text = collapseBlankRuns(stripped, 3);
-    const hadAnsi = /\x1b/.test(output);
-    const hadBlanks = text !== stripped;
-    const note =
-      [hadAnsi ? 'ANSI stripped' : '', hadBlanks ? 'blank runs collapsed' : '']
-        .filter(Boolean)
-        .join(', ') || 'no change';
+  encode(input) {
+    const stripped = stripAnsi(input.output);
+    let text = stripped;
+    let duplicates = 0;
+    if (isAgedCold(input)) {
+      const fenced = dedupeFencedBlocks(text);
+      const paragraphs = dedupeParagraphSourceBlocks(fenced.text);
+      text = paragraphs.text;
+      duplicates = fenced.removed + paragraphs.removed;
+    }
+    text = collapseBlankRuns(text, 3);
+
+    const notes = [
+      /\x1b/.test(input.output) ? 'ANSI stripped' : '',
+      text !== stripped && duplicates === 0 ? 'blank runs collapsed' : '',
+      duplicates > 0 ? `${duplicates} duplicate source blocks omitted` : '',
+    ].filter(Boolean);
     return {
       text,
       meta: {
         kind: 'graph',
-        originalLen: output.length,
+        originalLen: input.output.length,
         encodedLen: text.length,
-        note,
+        note: notes.join(', ') || 'no change',
       },
     };
   },
