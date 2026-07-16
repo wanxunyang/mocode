@@ -13,7 +13,7 @@ import type { ContextEncoder } from '../types.js';
 import { passthroughEncoder } from './passthrough.js';
 import { treeEncoder } from './tree.js';
 import { searchEncoder } from './search.js';
-import { logEncoder } from './log.js';
+import { commandEncoder } from './command.js';
 import { tableEncoder } from './table.js';
 import { memoryEncoder } from './memory.js';
 import { codeEncoder } from './code.js';
@@ -25,7 +25,7 @@ export const builtinEncoders: ContextEncoder[] = [
   passthroughEncoder,
   treeEncoder,
   searchEncoder,
-  logEncoder,
+  commandEncoder,
   tableEncoder,
   memoryEncoder,
   codeEncoder,

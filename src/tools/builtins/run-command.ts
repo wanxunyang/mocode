@@ -3,6 +3,31 @@ import { MAX_OUTPUT } from '../constants.js';
 import { getSandboxRoot, filterEnv, isCommandDenied } from '../../sandbox/index.js';
 import type { Tool } from '../types.js';
 
+const OUTPUT_HEAD_LIMIT = Math.floor(MAX_OUTPUT * 0.4);
+const OUTPUT_TAIL_LIMIT = MAX_OUTPUT - OUTPUT_HEAD_LIMIT;
+
+/** 有界采集：短输出逐字保留；超限后保留 head+tail，避免构建/测试错误只出现在尾部时被丢弃。 */
+class BoundedCommandOutput {
+  private head = '';
+  private tail = '';
+  private total = 0;
+
+  append(text: string): void {
+    this.total += text.length;
+    const headRoom = OUTPUT_HEAD_LIMIT - this.head.length;
+    const headPart = headRoom > 0 ? text.slice(0, headRoom) : '';
+    this.head += headPart;
+    const rest = text.slice(headPart.length);
+    if (rest) this.tail = (this.tail + rest).slice(-OUTPUT_TAIL_LIMIT);
+  }
+
+  render(): string {
+    if (this.total <= MAX_OUTPUT) return this.head + this.tail;
+    const removed = this.total - MAX_OUTPUT;
+    return `${this.head}\n...(输出已截断 ${removed} 字符,保留开头与结尾)...\n${this.tail}`;
+  }
+}
+
 // ---------- run_command ----------
 export const runCommandTool: Tool = {
   name: 'run_command',
@@ -31,7 +56,7 @@ export const runCommandTool: Tool = {
         isWin ? ['/c', command] : ['-c', command],
         { cwd: getSandboxRoot() ?? process.cwd(), env: filterEnv(process.env) }
       );
-      let out = '';
+      const output = new BoundedCommandOutput();
       let finished = false;
       let timer: ReturnType<typeof setTimeout>;
       // 杀整棵进程树。child.kill() 在 Windows 只杀 cmd.exe、npm 等子进程会孤儿继续跑(占锁、污染下一步),
@@ -54,7 +79,7 @@ export const runCommandTool: Tool = {
       // abort(用户 Ctrl+C,经 executeTool ctx.signal 透传)→ 杀子进程树 + 返[已中断]
       const onAbort = (): void => {
         killTree();
-        finish(`[已中断]\n${out.trim()}`);
+        finish(`[已中断]\n${output.render().trim()}`);
       };
       const finish = (s: string): void => {
         if (finished) return;
@@ -64,19 +89,18 @@ export const runCommandTool: Tool = {
         done(s);
       };
       const onChunk = (chunk: Buffer): void => {
-        if (out.length < MAX_OUTPUT) out += chunk.toString('utf8');
+        output.append(chunk.toString('utf8'));
       };
       child.stdout.on('data', onChunk);
       child.stderr.on('data', onChunk);
       child.on('error', (e) => finish(`执行失败: ${e.message}`));
       child.on('close', (code) => {
-        let r = out.trim();
-        if (out.length >= MAX_OUTPUT) r += '\n...(输出已截断)';
-        finish(`[退出码 ${code}]\n${r || '(无输出)'}`);
+        const result = output.render().trim();
+        finish(`[退出码 ${code}]\n${result || '(无输出)'}`);
       });
       timer = setTimeout(() => {
         killTree();
-        finish(`[超时,已终止]\n${out.trim()}`);
+        finish(`[超时,已终止]\n${output.render().trim()}`);
       }, timeout);
       // 外部 abort signal:已 aborted 即时杀(防御;agent 循环顶检查通常会先拦),否则挂监听
       if (ctx?.signal) {
