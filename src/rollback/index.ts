@@ -9,6 +9,7 @@ import {
   rmdirSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -463,15 +464,24 @@ function snapshotsPath(id: string): string {
 }
 
 export function persistSnapshots(id: string): void {
-  if (turns.length === 0) return;
+  const dir = path.join(config.sessionDir, id);
+  const current = path.join(dir, 'snapshots.json');
+  const legacy = path.join(config.sessionDir, `${id}.snapshots.json`);
   try {
-    const dir = path.join(config.sessionDir, id);
+    if (turns.length === 0) {
+      // 全量回滚后不能保留旧快照，否则 /resume 可能重新加载已删除轮次。
+      if (existsSync(current)) unlinkSync(current);
+      if (existsSync(legacy)) unlinkSync(legacy);
+      return;
+    }
     mkdirSync(dir, { recursive: true });
     writeFileSync(
-      path.join(dir, 'snapshots.json'),
+      current,
       JSON.stringify({ version: 2, turns, snapshots }),
       'utf8',
     );
+    // 迁移后的旧式扁平快照不再需要，避免磁盘上残留已回滚内容。
+    if (existsSync(legacy)) unlinkSync(legacy);
   } catch {
     // 落盘失败不阻断会话；只失去跨重启回滚能力。
   }

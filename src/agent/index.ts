@@ -27,6 +27,8 @@ import {
   type ContentPart,
 } from './core.js';
 import { createPetHooks } from '../pet/state.js';
+import { t } from '../i18n/index.js';
+import { isToolErrorOutput } from '../tools/result.js';
 
 /** 当前 turn 的 batch id(runAgent 内闭包变量;一条 turn 一轮 tool batch 结束即清空)。 */
 let currentBatchId: string | null = null;
@@ -61,7 +63,7 @@ function writeToolResult(
 ): void {
   if (!currentBatchId) return;
   let diff: string | null = null;
-  if (isMutationTool(tc.name) && parsed && !output.startsWith('错误')) {
+  if (isMutationTool(tc.name) && parsed && !isToolErrorOutput(output)) {
     diff = renderFileChange({
       path: String(parsed.path ?? ''),
       kind: tc.name === 'edit_file' ? 'edit' : 'write',
@@ -169,9 +171,9 @@ export async function runAgent(
         textBoundaryNewlines = 1;
         hasPendingTextBoundary = false;
       }
-      if (name) spinner.start(`生成 ${name}`);
+      if (name) spinner.start(t('agent.generating', { tool: name }));
     },
-    onStepStart: () => spinner.start('思考中'),
+    onStepStart: () => spinner.start(t('agent.thinking')),
     onChatDone: () => spinner.stop(),
     onTextEnd: () => {
       if (lastChar && lastChar !== '\n') {
@@ -189,7 +191,7 @@ export async function runAgent(
       toolBatchFollowsText = false;
       writeToolHeader(tc);
     },
-    onToolStart: (name) => spinner.start(`执行 ${name}`),
+    onToolStart: (name) => spinner.start(t('agent.executing', { tool: name })),
     onToolDone: () => spinner.stop(),
     onToolResult: (tc, output, parsed, preWriteOld, editStartLine) =>
       writeToolResult(tc, output, parsed, preWriteOld, editStartLine),
@@ -198,25 +200,25 @@ export async function runAgent(
     },
     onNoReply: () => {
       flushToolBatch();
-      layout.contentWrite(`${ui.dim}(无回复)${ui.reset}\n`);
+      layout.contentWrite(`${ui.dim}${t('agent.noReply')}${ui.reset}\n`);
     },
     onMaxSteps: () => {
       flushToolBatch();
       layout.contentWrite(
-        `  ${ui.yellow}●${ui.reset} ${ui.yellow}达到最大步数(${config.maxSteps}),本轮停止。${ui.reset}\n`
+        `  ${ui.yellow}●${ui.reset} ${ui.yellow}${t('agent.maxSteps', { count: config.maxSteps })}${ui.reset}\n`
       );
     },
     onAbort: () => {
       spinner.stop();
       if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
       flushToolBatch();
-      layout.contentWrite(`${ui.dim}(已中断)${ui.reset}\n`);
+      layout.contentWrite(`${ui.dim}${t('agent.aborted')}${ui.reset}\n`);
     },
     onDone: (elapsedMs, usage) => {
       flushToolBatch();
       const tok = formatTurnTokens(usage);
       layout.contentWrite(
-        `  ${ui.dim}✻ Worked for ${fmtElapsed(elapsedMs)}${tok}${ui.reset}\n`
+        `  ${ui.dim}✻ ${t('agent.workedFor', { elapsed: fmtElapsed(elapsedMs) })}${tok}${ui.reset}\n`
       );
       // 内容区触底时，DECSTBM 增量滚屏可能只推进物理终端，未把 Worked 前已在
       // buffer 中的空行完整画出来；用户滚动/点击触发 repaint 后才“突然”出现。

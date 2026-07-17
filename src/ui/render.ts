@@ -333,13 +333,13 @@ export function summarizeToolResult(name: string, output: string): string {
   const nonEmpty = output.split('\n').filter((l) => l.trim().length > 0);
   switch (name) {
     case 'read_file':
-      return nonEmpty.length ? `${nonEmpty.length} 行` : '(空文件)';
+      return nonEmpty.length ? t('toolSummary.lines', { count: nonEmpty.length }) : t('toolSummary.emptyFile');
     case 'glob':
-      return nonEmpty.length ? `${nonEmpty.length} 个文件` : '(无匹配)';
+      return nonEmpty.length ? t('toolSummary.files', { count: nonEmpty.length }) : t('toolSummary.noMatches');
     case 'grep':
-      return nonEmpty.length ? `${nonEmpty.length} 处匹配` : '(无匹配)';
+      return nonEmpty.length ? t('toolSummary.matches', { count: nonEmpty.length }) : t('toolSummary.noMatches');
     case 'run_command':
-      return truncateDisplay(nonEmpty[0] ?? '', 100) || '(无输出)';
+      return truncateDisplay(nonEmpty[0] ?? '', 100) || t('toolSummary.noOutput');
     default:
       return truncateDisplay(nonEmpty[0] ?? '', 100);
   }

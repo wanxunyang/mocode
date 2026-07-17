@@ -7,6 +7,7 @@ import {
   endWorkspaceMutation,
 } from '../rollback/index.js';
 import { enforceSandbox } from '../sandbox/index.js';
+import { t } from '../i18n/index.js';
 
 /**
  * 可扩展工具注册表。数组实例始终稳定，使已经持有 tools 引用的 agent/LLM 能看到运行时新增工具。
@@ -57,12 +58,12 @@ export async function executeTool(
   opts?: { dropContext?: (filter: DropContextFilter) => DropContextResult }
 ): Promise<string> {
   const tool = tools.find((t) => t.name === name);
-  if (!tool) return `错误:未知工具 "${name}"`;
+  if (!tool) return t('toolError.unknown', { name });
   let args: Record<string, unknown>;
   try {
     args = argsRaw.trim() ? JSON.parse(argsRaw) : {};
   } catch {
-    return `错误:工具 ${name} 的 arguments 不是合法 JSON: ${argsRaw}`;
+    return t('toolError.invalidJson', { name, arguments: argsRaw });
   }
   try {
     // 沙箱先重写/校验路径，保证快照与实际执行目标完全一致。
@@ -92,7 +93,10 @@ export async function executeTool(
       if (workspaceCapture) endWorkspaceMutation(workspaceCapture, name);
     }
   } catch (e) {
-    return `错误:工具 ${name} 执行失败: ${e instanceof Error ? e.message : String(e)}`;
+    return t('toolError.execution', {
+      name,
+      message: e instanceof Error ? e.message : String(e),
+    });
   }
 }
 

@@ -2,6 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { MAX_OUTPUT } from '../constants.js';
 import { getSandboxRoot, filterEnv, isCommandDenied } from '../../sandbox/index.js';
 import type { Tool } from '../types.js';
+import { t } from '../../i18n/index.js';
 
 const OUTPUT_HEAD_LIMIT = Math.floor(MAX_OUTPUT * 0.4);
 const OUTPUT_TAIL_LIMIT = MAX_OUTPUT - OUTPUT_HEAD_LIMIT;
@@ -24,7 +25,7 @@ class BoundedCommandOutput {
   render(): string {
     if (this.total <= MAX_OUTPUT) return this.head + this.tail;
     const removed = this.total - MAX_OUTPUT;
-    return `${this.head}\n...(输出已截断 ${removed} 字符,保留开头与结尾)...\n${this.tail}`;
+    return `${this.head}\n${t('command.outputTruncated', { count: removed })}\n${this.tail}`;
   }
 }
 
@@ -79,7 +80,7 @@ export const runCommandTool: Tool = {
       // abort(用户 Ctrl+C,经 executeTool ctx.signal 透传)→ 杀子进程树 + 返[已中断]
       const onAbort = (): void => {
         killTree();
-        finish(`[已中断]\n${output.render().trim()}`);
+        finish(`${t('command.interrupted')}\n${output.render().trim()}`);
       };
       const finish = (s: string): void => {
         if (finished) return;
@@ -93,14 +94,14 @@ export const runCommandTool: Tool = {
       };
       child.stdout.on('data', onChunk);
       child.stderr.on('data', onChunk);
-      child.on('error', (e) => finish(`执行失败: ${e.message}`));
+      child.on('error', (e) => finish(t('command.executionFailed', { message: e.message })));
       child.on('close', (code) => {
         const result = output.render().trim();
-        finish(`[退出码 ${code}]\n${result || '(无输出)'}`);
+        finish(`${t('command.exitCode', { code: code ?? 'null' })}\n${result || t('toolSummary.noOutput')}`);
       });
       timer = setTimeout(() => {
         killTree();
-        finish(`[超时,已终止]\n${output.render().trim()}`);
+        finish(`${t('command.timedOut')}\n${output.render().trim()}`);
       }, timeout);
       // 外部 abort signal:已 aborted 即时杀(防御;agent 循环顶检查通常会先拦),否则挂监听
       if (ctx?.signal) {

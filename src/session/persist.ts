@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -72,7 +73,7 @@ function sessionPath(id: string): string {
   return path.join(config.sessionDir, id, 'session.json');
 }
 
-/** 保存会话到磁盘(history.length<=1 时跳过写盘,只返 meta)。 */
+/** 保存会话到磁盘。全新且只有 system 的会话不创建文件；已有会话即使回滚为空也必须覆盖旧记录。 */
 export function saveSession(history: ChatMessage[], id: string): SessionMeta {
   const meta: SessionMeta = {
     id,
@@ -80,11 +81,17 @@ export function saveSession(history: ChatMessage[], id: string): SessionMeta {
     model: config.model,
     firstUser: history.length > 1 ? firstUserOf(history) : '',
   };
-  if (history.length <= 1) return meta; // 仅 system,不落盘
+  const currentPath = sessionPath(id);
+  const legacyPath = path.join(config.sessionDir, `${id}.json`);
+  if (history.length <= 1 && !existsSync(currentPath) && !existsSync(legacyPath)) {
+    return meta;
+  }
   const dir = path.join(config.sessionDir, id);
   mkdirSync(dir, { recursive: true });
   const record: SessionRecord = { ...meta, history };
-  writeFileSync(sessionPath(id), JSON.stringify(record), 'utf8');
+  writeFileSync(currentPath, JSON.stringify(record), 'utf8');
+  // 一旦写入新式目录，删除旧式扁平副本，避免已回滚消息仍残留在磁盘。
+  if (existsSync(legacyPath)) unlinkSync(legacyPath);
   return meta;
 }
 

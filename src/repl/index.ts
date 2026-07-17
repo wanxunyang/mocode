@@ -297,7 +297,7 @@ function renderContextBar(history: ChatMessage[]): string {
   const W = 10;
   const filled = Math.round(pct * W);
   const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
-  const src = contextState.lastUsage ? '实测' : '估算';
+  const src = contextState.lastUsage ? t('status.measured') : t('status.estimated');
   const k = (n: number) => `${Math.round(n / 1000)}k`;
   const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.accent;
   const lifecycle = contextState.lifecycleStats;
@@ -306,7 +306,7 @@ function renderContextBar(history: ChatMessage[]): string {
     ? `\n  lifecycle · live ${lifecycle.live} · referenced ${lifecycle.referenced} · digested ${lifecycle.digested} · stubbed ${lifecycle.stubbed}`
     : '\n  lifecycle · no active snapshot (run a tool-enabled turn first)';
   const archiveLine = `\n  archived tool results · ${archived.stubbed}`;
-  return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${history.length} 条消息 (${src})${ui.reset}${lifecycleLine}${archiveLine}`;
+  return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${t('status.messages', { count: history.length })} (${src})${ui.reset}${lifecycleLine}${archiveLine}`;
 }
 
 /** 状态行用量条(精简版,进底栏):[bar] pct% k/k。
@@ -581,7 +581,7 @@ function awaitPendingRecall(
   placeholder: string,
 ): Promise<boolean> {
   pendingRecall = { lines: input, attachmentsCount, placeholder };
-  layout.setStatus('发送中…  (Esc / Ctrl+C 撤回)', '●');
+  layout.setStatus(t('agent.sending'), '●');
 
   // 非 TTY:setRawMode 抛错 → window=0 直返 true(向后退化,不走 raw + 不挂监听)。
   let ttyReady = false;
@@ -1057,13 +1057,13 @@ export async function startRepl(
         (/图片|图像|视觉|多模态/.test(msg) && /不支持|invalid|reject|fail/i.test(lower));
       if (looksLikeImageError) {
         layout.contentWrite(
-          `${ui.red}[错误]${ui.reset} 当前模型 ${ui.accent}${config.model}${ui.reset} 不支持视觉输入。${ui.dim}原始:${msg}${ui.reset}\n`
+          `${ui.red}${t('repl.errorLabel')}${ui.reset} ${t('repl.visionUnsupported', { model: `${ui.accent}${config.model}${ui.reset}` })}${ui.dim}${t('repl.originalError', { message: msg })}${ui.reset}\n`
         );
         layout.contentWrite(
-          `${ui.dim}提示:运行 /model 切换到支持视觉的模型(如 gpt-4o / claude-3.5-sonnet / gemini-1.5-pro)。${ui.reset}\n`
+          `${ui.dim}${t('repl.visionHint')}${ui.reset}\n`
         );
       } else {
-        layout.contentWrite(`${ui.red}[错误]${ui.reset} ${msg}\n`);
+        layout.contentWrite(`${ui.red}${t('repl.errorLabel')}${ui.reset} ${msg}\n`);
       }
     } finally {
       stopRunningListener();
@@ -2281,7 +2281,7 @@ export async function startRepl(
       // (runTurn 入口的 pendingAttachments.flush 仍按现有逻辑把附件塞进 userInput)。
       layout.rewindContent(bubbleRows);
       pendingPrefill = input;
-      layout.enterInputMode('空闲');
+      layout.enterInputMode(t('repl.idle'));
       continue;
     }
     const initialPlan = getAgentMode() === 'plan'; // 轮首模式(在 runTurn 之前读)
@@ -2293,17 +2293,18 @@ export async function startRepl(
       // 桌宠:计划审批面板弹出期间广播 waiting_human(红灯闪烁);面板不在 runAgent/hooks 体系内,
       // 需在此单独广播——用户响应后由下一次 /pet 状态事件(或 idle 兜底)覆盖。
       sendState('waiting_human');
+      const executePlanOption = t('plan.execute');
       const res = await promptIntervention({
         type: 'choice',
-        title: '计划已就绪',
-        detail: '切换到 auto 模式按上述计划执行?(plan 模式只读探查,执行需切 auto)',
-        options: ['切 auto 执行', '留 plan 细化'],
+        title: t('plan.ready'),
+        detail: t('plan.approvalDetail'),
+        options: [executePlanOption, t('plan.refine')],
       });
       sendState('idle');
-      if (res.action === 'selected' && res.value === '切 auto 执行') {
+      if (res.action === 'selected' && res.value === executePlanOption) {
         // setAgentMode('auto') 由 runTurn 入口做(listener 重写 history[0] 回 auto);这里只切运行态 + 合成执行轮。
-        layout.enterRunningMode('执行', '按计划执行…');
-        await runTurn('请按上述计划执行。', false, '按计划执行…');
+        layout.enterRunningMode(t('plan.running'), t('plan.executing'));
+        await runTurn(t('plan.executePrompt'), false, t('plan.executing'));
       }
     }
   }

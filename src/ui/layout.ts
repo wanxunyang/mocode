@@ -1979,7 +1979,7 @@ export function repaint(): void {
 }
 
 /** 进入输入态:画空输入框 + 状态行,光标入输入框。 */
-export function enterInputMode(status: string = '空闲'): void {
+export function enterInputMode(status: string = t('repl.idle')): void {
   mode = 'input';
   statusText = status;
   spinnerFrame = undefined;

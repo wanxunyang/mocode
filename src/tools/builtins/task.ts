@@ -1,6 +1,7 @@
 import type { Tool } from '../types.js';
 import { spawnAgent } from '../../agent/spawn.js';
 import { MAX_OUTPUT } from '../constants.js';
+import { t } from '../../i18n/index.js';
 
 // ---------- task ----------
 // 派生子 agent 执行独立子任务。子 agent 有独立 history(不污染主对话),
@@ -40,7 +41,7 @@ export const taskTool: Tool = {
   },
   async execute(args, ctx) {
     const prompt = String(args.prompt ?? '');
-    if (!prompt) return '错误:缺少 prompt(子任务指令)。';
+    if (!prompt) return t('task.missingPrompt');
 
     const tools = Array.isArray(args.tools)
       ? args.tools.map((t) => String(t))
@@ -54,17 +55,17 @@ export const taskTool: Tool = {
     const result = await spawnAgent({ prompt, tools, maxSteps, signal: ctx?.signal });
 
     if (!result.completed) {
-      return '子 agent 被中断,未完成。';
+      return t('task.interrupted');
     }
     if (!result.summary) {
-      return '子 agent 完成但未返回文本摘要(可能只调了工具或达到步数上限)。';
+      return t('task.noSummary');
     }
     // 摘要可能很长,截到 MAX_OUTPUT 保主 history 不爆。
     const summary = result.summary;
     if (summary.length > MAX_OUTPUT) {
       return (
         summary.slice(0, MAX_OUTPUT) +
-        `\n\n…(子 agent 摘要已截断 ${summary.length - MAX_OUTPUT} 字符)`
+        `\n\n${t('task.summaryTruncated', { count: summary.length - MAX_OUTPUT })}`
       );
     }
     return summary;

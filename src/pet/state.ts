@@ -7,6 +7,7 @@ import type { ToolCallRef } from '../llm/index.js';
 import type { AgentHooks } from '../agent/core.js';
 import type { PetState } from './protocol.js';
 import * as bridge from './bridge.js';
+import { isToolErrorOutput } from '../tools/result.js';
 
 /** AgentHooks 方法名(供 deriveState 的 event 参数类型与穷举测试)。 */
 export type AgentHookEventName =
@@ -46,7 +47,7 @@ export function deriveState(event: AgentHookEventName, args?: DeriveStateArgs): 
     case 'onToolStart':
       return 'tool_call';
     case 'onToolResult':
-      if (args?.toolOutput && args.toolOutput.startsWith('错误')) return 'error';
+      if (args?.toolOutput && isToolErrorOutput(args.toolOutput)) return 'error';
       return 'tool_call';
     case 'onDone':
       return 'done';

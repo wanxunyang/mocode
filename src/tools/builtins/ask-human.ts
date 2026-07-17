@@ -1,6 +1,7 @@
 import type { Tool } from '../types.js';
 import { promptIntervention } from '../../ui/intervention.js';
 import { sendState } from '../../pet/bridge.js';
+import { t } from '../../i18n/index.js';
 
 /** 单个选项:label 是选项本身,detail 是选它意味着什么/取舍(可选)。 */
 export interface ChoiceOption {
@@ -151,11 +152,11 @@ export const askHumanTool: Tool = {
     });
 
     if (result.action === 'cancelled') {
-      return '用户取消了选择。请考虑是否有不依赖用户输入的替代方案,或换个角度重新提问。';
+      return t('askHuman.cancelled');
     }
     if (result.action === 'submitted') {
-      return `用户回答:${result.value ?? ''}`;
+      return t('askHuman.submitted', { value: result.value ?? '' });
     }
-    return `用户选择:${result.value ?? ''}`;
+    return t('askHuman.selected', { value: result.value ?? '' });
   },
 };

@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { Tool, ToolRisk } from '../tools/types.js';
 import { promptIntervention } from '../ui/intervention.js';
 import { config } from '../config/index.js';
+import { t } from '../i18n/index.js';
 
 /**
  * 工具权限系统:基于 risk 字段在执行前拦截确认。
@@ -69,13 +70,13 @@ export function getToolRisk(tool: Tool): ToolRisk {
 /** 参数摘要:提取关键参数供确认面板展示(path / command 等)。 */
 function summarizeArgs(tool: Tool, args: Record<string, unknown>): string {
   const lines: string[] = [];
-  if (typeof args.path === 'string') lines.push(`路径: ${args.path}`);
-  if (typeof args.command === 'string') lines.push(`命令: ${args.command}`);
+  if (typeof args.path === 'string') lines.push(t('permission.path', { value: args.path }));
+  if (typeof args.command === 'string') lines.push(t('permission.command', { value: args.command }));
   if (typeof args.prompt === 'string') {
     const preview = String(args.prompt).slice(0, 100);
-    lines.push(`任务: ${preview}${String(args.prompt).length > 100 ? '…' : ''}`);
+    lines.push(t('permission.task', { value: `${preview}${String(args.prompt).length > 100 ? '…' : ''}` }));
   }
-  return lines.length > 0 ? lines.join('\n') : '(无参数)';
+  return lines.length > 0 ? lines.join('\n') : t('permission.noArgs');
 }
 
 /**
@@ -103,14 +104,17 @@ export async function checkPermission(
 
   // 构建确认面板
   const isDangerous = risk === 'dangerous';
+  const denyOption = t('permission.deny');
+  const foreverOption = t('permission.allowForever');
+  const sessionOption = t('permission.allowSession');
   const title = isDangerous
-    ? `⚠ 高风险操作: ${tool.name}`
-    : `确认执行: ${tool.name}`;
-  const detail = summarizeArgs(tool, args) + (isDangerous ? '\n\n⚠ 此操作可能产生不可逆副作用,请谨慎确认。' : '');
+    ? t('permission.dangerTitle', { tool: tool.name })
+    : t('permission.confirmTitle', { tool: tool.name });
+  const detail = summarizeArgs(tool, args) + (isDangerous ? `\n\n${t('permission.dangerWarning')}` : '');
   // 选项统一结构:dangerous 也提供"以后不再询问"(用户明确授权即尊重,即使 run_command)
   const options = isDangerous
-    ? ['确认执行', '以后不再询问此工具', '拒绝']
-    : ['允许', '本次会话始终允许此工具', '以后不再询问此工具', '拒绝'];
+    ? [t('permission.confirmExecute'), foreverOption, denyOption]
+    : [t('permission.allow'), sessionOption, foreverOption, denyOption];
 
   // 弹面板(阻塞直到用户选择;signal 中断时 promptIntervention 内部处理)
   const result = await promptIntervention({
@@ -126,17 +130,17 @@ export async function checkPermission(
 
   // 解析选择
   const value = result.value ?? '';
-  if (value === '拒绝') return 'deny';
+  if (value === denyOption) return 'deny';
 
   // 永久允许:写入磁盘 + 加入内存集合(跨会话生效)
-  if (value === '以后不再询问此工具') {
+  if (value === foreverOption) {
     permanentAllow.add(tool.name);
     savePermanent();
     return 'allow';
   }
 
   // 会话允许(confirm 级):加入内存缓存,本次进程内不再弹
-  if (!isDangerous && value === '本次会话始终允许此工具') {
+  if (!isDangerous && value === sessionOption) {
     approvedTools.add(tool.name);
   }
 
