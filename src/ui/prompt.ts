@@ -7,8 +7,21 @@ import * as layout from './layout.js';
 import * as mouse from './mouse.js';
 
 export interface SlashCommand {
+  /** 当前菜单层显示的名称。根节点通常以 / 开头，子节点使用相对名称。 */
   name: string;
   desc: string;
+  /** 叶子节点实际写入输入框的命令；默认使用从根节点拼出的路径。 */
+  value?: string;
+  /** false 表示选择后只补全、不立即提交，供需要继续输入参数的命令使用。 */
+  submit?: boolean;
+  /** 子菜单；存在时 Enter/Tab 进入下一层，而不是提交当前节点。 */
+  children?: SlashCommand[];
+}
+
+interface SlashMenuItem {
+  node: SlashCommand;
+  /** 从根节点拼出的菜单路径，例如 /model switch。 */
+  input: string;
 }
 
 export interface PromptOpts {
@@ -113,7 +126,7 @@ export async function promptWithSlashMenu(
   let chipPre = ''; // chip 之前已存在的文本(粘贴发生时光标前的原文,原样多行保留,不截断);随 chip 一起提交/删除
   let menuOpen = false;
   let selected = 0;
-  let filtered: SlashCommand[] = [];
+  let filtered: SlashMenuItem[] = [];
   const MENU_MAX_VISIBLE = 7;
   let menuTop = 0; // 窗口首项在 filtered 中的索引,菜单最多显示 MENU_MAX_VISIBLE 条
   let resolved = false;
@@ -129,18 +142,22 @@ export async function promptWithSlashMenu(
     if (selected < menuTop) menuTop = selected;
     else if (selected >= menuTop + visibleCount) menuTop = selected - visibleCount + 1;
     const windowItems = filtered.slice(menuTop, menuTop + visibleCount);
-    const maxName = Math.max(...windowItems.map((c) => displayWidth(c.name)));
+    const maxName = Math.max(
+      ...windowItems.map((item) => displayWidth(item.node.name + (item.node.children?.length ? ' ›' : ''))),
+    );
     const hasMoreAbove = menuTop > 0;
     const hasMoreBelow = menuTop + visibleCount < filtered.length;
-    return windowItems.map((c, i) => {
+    return windowItems.map((item, i) => {
+      const c = item.node;
       const globalIdx = menuTop + i;
       // 选中项:▸ 与文字均 cyan+bold(去 dim),未选中项保持 dim——选中行整体高亮。
       const isSel = globalIdx === selected;
       const color = isSel ? `${ui.accent}${ui.bold}` : ui.dim;
       const marker = isSel ? `${ui.accent}${ui.bold}▸${ui.reset}` : ' ';
-      const name = padEndDisplay(c.name, maxName);
+      const branchSuffix = c.children?.length ? ' ›' : '';
+      const name = padEndDisplay(c.name + branchSuffix, maxName);
       // 首/末附加滚动指示(▲/▼)而非替换整行
-      let desc = c.desc;
+      const desc = c.desc;
       let scrollHint = '';
       if (i === 0 && hasMoreAbove) scrollHint = ' ▲';
       if (i === windowItems.length - 1 && hasMoreBelow) scrollHint = ' ▼';
@@ -246,9 +263,26 @@ export async function promptWithSlashMenu(
     applyPastedText(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
   }
 
+  /** 根据输入文本找到当前层。prefix 始终包含已进入分支及末尾空格。 */
+  function menuContext(input: string): { nodes: SlashCommand[]; prefix: string } {
+    let nodes = opts.commands;
+    let prefix = '';
+    while (true) {
+      const branch = nodes.find(
+        (node) => node.children?.length && input.startsWith(`${prefix}${node.name} `),
+      );
+      if (!branch?.children) return { nodes, prefix };
+      prefix = `${prefix}${branch.name} `;
+      nodes = branch.children;
+    }
+  }
+
   function computeFiltered(): void {
     if (cl === 0 && lines[0].startsWith('/')) {
-      filtered = opts.commands.filter((c) => c.name.startsWith(lines[0]));
+      const { nodes, prefix } = menuContext(lines[0]);
+      filtered = nodes
+        .map((node): SlashMenuItem => ({ node, input: `${prefix}${node.name}` }))
+        .filter((item) => item.input.startsWith(lines[0]));
       menuOpen = filtered.length > 0;
       if (selected >= filtered.length) {
         selected = 0;
@@ -393,13 +427,39 @@ export async function promptWithSlashMenu(
     resolve(value);
   }
 
-  /** 提交:菜单打开时先补全选中项到第 0 行。chipPre + chip + suffix 依次拼回全文(保留粘贴前后原有文字)。 */
-  function submit(): void {
-    if (menuOpen && filtered[selected]) {
-      lines = [filtered[selected].name];
+  /**
+   * 应用当前菜单项。分支节点只进入下一层；叶子节点补全 value/input。
+   * 返回 true 表示调用方应立即提交，false 表示仍留在输入态。
+   */
+  function applySelected(submitLeaf: boolean): boolean {
+    const item = filtered[selected];
+    if (!menuOpen || !item) return submitLeaf;
+
+    if (item.node.children?.length) {
+      lines = [`${item.input} `];
       cl = 0;
       cc = lines[0].length;
+      selected = 0;
+      menuTop = 0;
+      computeFiltered();
+      redraw();
+      return false;
     }
+
+    lines = [item.node.value ?? item.input];
+    cl = 0;
+    cc = lines[0].length;
+    computeFiltered();
+    if (!submitLeaf || item.node.submit === false) {
+      redraw();
+      return false;
+    }
+    return true;
+  }
+
+  /** 提交:菜单打开时先应用选中项；分支进入子菜单，需要参数的叶子只补全。 */
+  function submit(): void {
+    if (menuOpen && !applySelected(true)) return;
     const suffix = lines.join('\n');
     let content = suffix;
     if (chip) {
@@ -616,21 +676,27 @@ export async function promptWithSlashMenu(
         }
         return;
       case 'tab':
-        if (menuOpen && filtered[selected]) {
-          lines[0] = filtered[selected].name;
+        if (menuOpen && filtered[selected]) applySelected(false);
+        return;
+      case 'escape': {
+        const { prefix } = menuContext(lines[0]);
+        if (prefix) {
+          // 子层 Esc 回到父节点；例如 /model sw → /model。
+          lines = [prefix.trimEnd()];
           cl = 0;
           cc = lines[0].length;
+          selected = 0;
+          menuTop = 0;
           computeFiltered();
-          redraw();
+        } else {
+          menuOpen = false;
+          filtered = [];
+          selected = 0;
+          menuTop = 0;
         }
-        return;
-      case 'escape':
-        menuOpen = false;
-        filtered = [];
-        selected = 0;
-        menuTop = 0;
         redraw();
         return;
+      }
       case 'left':
         if (cc > 0) {
           cc--;

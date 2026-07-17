@@ -160,9 +160,15 @@ export function __setChatCreateImpl(impl: CreateImpl | null): void {
 export type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 export type ChatTool = OpenAI.Chat.Completions.ChatCompletionTool;
 
-/** 把内部工具定义转成 OpenAI 的 tool 格式 */
-export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = tools.map(
-  (t) => ({
+/**
+ * 工具 schema 保持稳定数组引用，再在 MCP 发现或扩展变动后原地刷新；
+ * 这样 chat()/预算模块的默认参数不会继续指向陈旧的顶层快照。
+ */
+export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
+export const planChatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
+
+export function refreshChatTools(): void {
+  const next = tools.map((t) => ({
     type: 'function' as const,
     function: {
       name: t.name,
@@ -170,18 +176,15 @@ export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = tools.map
       // 不同版本 SDK 的 FunctionParameters 宽严不一,用 any 兜底
       parameters: t.parameters as any,
     },
-  })
-);
+  }));
+  chatTools.splice(0, chatTools.length, ...next);
+  // MCP 协议没有可靠的副作用注解；plan 模式绝不暴露外部工具，保留只读探查保证。
+  planChatTools.splice(0, planChatTools.length, ...next.filter(
+    (t) => !t.function.name.startsWith('mcp__') && !getPlanDisabledTools().has(t.function.name),
+  ));
+}
 
-/**
- * plan 模式用的受限工具 schema:剔除写盘 / 命令 / 记忆写入类(getPlanDisabledTools())。
- * 模型在 plan 模式下只看得到只读工具 → 调不到会改文件的工具。runAgent 在 plan 模式传给 chat()。
- *
- * 注意:planChatTools 是顶层 const(模块初始化时一次性求值);若运行时 /memory_switch 关闭
- * 记忆,这里仍是按当前 isMemoryEnabled() 算出的快照——重启 REPL 才完全生效。
- */
-export const planChatTools: OpenAI.Chat.Completions.ChatCompletionTool[] =
-  chatTools.filter((t) => !getPlanDisabledTools().has(t.function.name));
+refreshChatTools();
 
 export interface ToolCallRef {
   id: string;

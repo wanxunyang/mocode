@@ -4,10 +4,40 @@ import { recordMutation } from '../rollback/index.js';
 import { enforceSandbox } from '../sandbox/index.js';
 
 /**
- * 工具注册表。当前 = 内置工具;
- * 未来可在此合并 MCP 工具、用户自定义工具等(见 src/mcp/)。
+ * 可扩展工具注册表。数组实例始终稳定，使已经持有 tools 引用的 agent/LLM 能看到运行时新增工具。
+ * 扩展按 source 替换，MCP 重连或配置刷新不会累积旧工具。
  */
-export const tools: Tool[] = builtinTools;
+const extensions = new Map<string, Tool[]>();
+export const tools: Tool[] = [...builtinTools];
+
+export function registerToolsExtension(source: string, additions: Tool[]): string[];
+/** 向后兼容：未命名扩展使用 external 槽位。 */
+export function registerToolsExtension(additions: Tool[]): string[];
+export function registerToolsExtension(sourceOrAdditions: string | Tool[], maybeAdditions?: Tool[]): string[] {
+  const source = typeof sourceOrAdditions === 'string' ? sourceOrAdditions : 'external';
+  const additions = typeof sourceOrAdditions === 'string' ? (maybeAdditions ?? []) : sourceOrAdditions;
+  extensions.set(source, additions);
+  const rejected = additions
+    .filter((tool) => builtinTools.some((builtin) => builtin.name === tool.name))
+    .map((tool) => tool.name);
+  rebuildTools();
+  return rejected;
+}
+
+export function clearToolsExtension(source: string): void {
+  if (extensions.delete(source)) rebuildTools();
+}
+
+function rebuildTools(): void {
+  const names = new Set<string>();
+  const next: Tool[] = [];
+  for (const tool of [...builtinTools, ...Array.from(extensions.values()).flat()]) {
+    if (names.has(tool.name)) continue;
+    names.add(tool.name);
+    next.push(tool);
+  }
+  tools.splice(0, tools.length, ...next);
+}
 
 /**
  * 按名调度工具,统一 try/catch + JSON 解析,返回字符串而非抛错。

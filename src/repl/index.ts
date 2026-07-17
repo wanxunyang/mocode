@@ -39,12 +39,15 @@ import {
   promptThemePicker,
   promptRevertChoice,
   type SessionPickerItem,
+  type SlashCommand,
 } from '../ui/prompt.js';
 import { promptIntervention } from '../ui/intervention.js';
-import { tools } from '../tools/registry.js';
+import { tools, registerToolsExtension } from '../tools/registry.js';
+import { initializeAllMcp, getMcpTools, closeAllMcp } from '../mcp/index.js';
 import {
   estimateMessagesTokens,
   reconfigureClient,
+  refreshChatTools,
   type ChatMessage,
   type ChatUsage,
 } from '../llm/index.js';
@@ -102,35 +105,99 @@ import { setCurrentSessionId, getCurrentSessionId } from '../session/state.js';
  */
 const PROMPT = '❯ ';
 
-/** 斜杠命令菜单(仅用于输入时下拉显示与过滤;分发仍走下方 if 链)。 */
-const SLASH_COMMANDS: { name: string; desc: string }[] = [
+/**
+ * 斜杠命令树(仅用于输入菜单；分发仍走下方 if 链)。
+ * 分支节点只负责导航，叶子的 value 保持现有命令文本，因此不破坏命令兼容性。
+ */
+const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/exit', desc: '退出 mocode(同 /quit)' },
   { name: '/clear', desc: '清空历史(保留系统提示)' },
   { name: '/context', desc: '显示上下文用量条' },
   { name: '/skills', desc: '列出已发现的 skill' },
   { name: '/compact', desc: '压缩历史(可带焦点 /compact …)' },
-  { name: '/resume', desc: '续接最近 10 个已保存会话(快速)' },
-  { name: '/sessions', desc: '浏览全部已保存会话(慢,翻历史用)' },
-  { name: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
-  { name: '/memory', desc: '记忆库:条目计数与近期索引(关闭时提示先开 /memory_switch)' },
-  { name: '/memory_switch', desc: '切换记忆子系统开关(无参=切换;/on 或 /off 显式;持久化 MEMORY_ENABLED)' },
-  { name: '/project_skill', desc: '项目专属 Skill 开关 + 查看/初始化(无参=切换;/on·/off·/view·/init)' },
-  { name: '/snapshot', desc: '切换项目快照开关(无参=切换;/on·/off·/status;持久化 MOCODE_PROJECT_SNAPSHOT)' },
-  { name: '/memory_status', desc: '查看记忆子系统当前开关与原理' },
-  { name: '/reflect', desc: '手动触发后台记忆反思 pass(需先开启记忆)' },
-  { name: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆(需先开启记忆)' },
+  {
+    name: '/session',
+    desc: '会话恢复与回滚',
+    children: [
+      { name: 'resume', value: '/resume', desc: '续接最近 10 个已保存会话(快速)' },
+      { name: 'browse', value: '/sessions', desc: '浏览全部已保存会话' },
+      { name: 'rollback', value: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
+    ],
+  },
+  {
+    name: '/memory',
+    desc: '记忆库、开关与反思',
+    children: [
+      { name: 'overview', value: '/memory', desc: '条目计数与近期索引' },
+      { name: 'toggle', value: '/memory_switch', desc: '切换记忆子系统开关' },
+      { name: 'on', value: '/memory_switch on', desc: '开启记忆子系统' },
+      { name: 'off', value: '/memory_switch off', desc: '关闭记忆子系统' },
+      { name: 'status', value: '/memory_status', desc: '查看当前开关与原理' },
+      { name: 'reflect', value: '/reflect', desc: '手动触发后台记忆反思' },
+      { name: 'init', value: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆' },
+    ],
+  },
+  {
+    name: '/project_skill',
+    desc: '项目专属 Skill 管理',
+    children: [
+      { name: 'toggle', value: '/project_skill', desc: '切换开关' },
+      { name: 'on', value: '/project_skill on', desc: '开启项目 Skill' },
+      { name: 'off', value: '/project_skill off', desc: '关闭项目 Skill' },
+      { name: 'view', value: '/project_skill view', desc: '查看当前内容' },
+      { name: 'init', value: '/project_skill init', desc: '扫描项目生成或优化 Skill' },
+    ],
+  },
+  {
+    name: '/snapshot',
+    desc: '项目快照管理',
+    children: [
+      { name: 'toggle', value: '/snapshot', desc: '切换快照开关' },
+      { name: 'on', value: '/snapshot on', desc: '开启项目快照' },
+      { name: 'off', value: '/snapshot off', desc: '关闭项目快照' },
+      { name: 'status', value: '/snapshot status', desc: '查看当前状态' },
+      { name: 'refresh', value: '/snapshot_refresh', desc: '重新扫描并生成快照摘要' },
+    ],
+  },
   { name: '/theme', desc: '切换颜色主题(↑↓·Enter)' },
-  { name: '/model', desc: '配置新模型(向导);/model switch·list·delete 管理已配置预设' },
-  { name: '/model switch', desc: '↑↓·Enter 在已配置预设间切换' },
-  { name: '/model list', desc: '列出已经配置的模型' },
-  { name: '/model delete <name>', desc: '删除已配置的模型' },
-  { name: '/snapshot_refresh', desc: '刷新项目快照(重新扫描静态文件,重新生成 LLM 摘要)' },
-  { name: '/plan', desc: '切到 plan 模式(只读探查+产出计划)' },
-  { name: '/auto', desc: '切回 auto 模式(全工具执行)' },
-  { name: '/pet', desc: '开关桌宠(独立悬浮窗,展示 agent 状态动画)' },
-  { name: '/pet skin', desc: '选择桌宠皮肤(↑↓·Enter)' },
-  { name: '/pet quit', desc: '完全关闭桌宠进程(而非仅断开本连接)' },
-  { name: '/image', desc: '附加本地图片到下一条消息(/image <path> · list · clear)' },
+  {
+    name: '/model',
+    desc: '模型配置与预设管理',
+    children: [
+      { name: 'configure', value: '/model', desc: '配置新模型(向导)' },
+      { name: 'switch', value: '/model switch', desc: '切换已配置预设' },
+      { name: 'list', value: '/model list', desc: '列出已配置模型' },
+      { name: 'show', value: '/model show', desc: '显示当前模型配置' },
+      { name: 'use <name>', value: '/model use ', submit: false, desc: '按名称应用预设' },
+      { name: 'delete <name>', value: '/model delete ', submit: false, desc: '删除指定预设' },
+    ],
+  },
+  {
+    name: '/mode',
+    desc: '切换 Agent 工作模式',
+    children: [
+      { name: 'plan', value: '/plan', desc: '只读探查并产出计划' },
+      { name: 'auto', value: '/auto', desc: '全工具自动执行' },
+    ],
+  },
+  {
+    name: '/pet',
+    desc: '桌宠控制',
+    children: [
+      { name: 'toggle', value: '/pet', desc: '显示或隐藏桌宠' },
+      { name: 'skin', value: '/pet skin', desc: '选择桌宠皮肤' },
+      { name: 'quit', value: '/pet quit', desc: '完全关闭桌宠进程' },
+    ],
+  },
+  {
+    name: '/image',
+    desc: '管理下一条消息的图片',
+    children: [
+      { name: 'attach <path>', value: '/image ', submit: false, desc: '附加本地图片' },
+      { name: 'list', value: '/image list', desc: '列出待发送图片' },
+      { name: 'clear', value: '/image clear', desc: '清空待发送图片' },
+    ],
+  },
 ];
 
 /** 主题名 → 一句描述(供 /theme 菜单 / 列表显示)。新增主题时在 src/ui/theme.ts THEMES 加键后于此补一句。 */
@@ -693,6 +760,10 @@ export async function startRepl(
   // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
   // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
+  // MCP 在工具表和 LLM schema 创建前连接；失败的单个 server 只给提示，不阻断 REPL。
+  const mcpReport = await initializeAllMcp();
+  registerToolsExtension('mcp', getMcpTools());
+  refreshChatTools();
   // 项目快照：sandboxRoot 设定后异步构建（完全由 LLM 生成）。
   // 构建失败不阻断 REPL：snapshot 内部 catch 所有异常。
   if (config.projectSnapshotEnabled) {
@@ -760,6 +831,12 @@ export async function startRepl(
     renderHistory(history);
   } else {
     layout.writeBanner(bannerLines(banner()));
+  }
+  if (mcpReport.connected.length > 0) {
+    layout.contentWrite(`${ui.dim}  ↳ 已连接 MCP: ${mcpReport.connected.join(', ')} (${getMcpTools().length} 个工具;外部工具每次均需授权)${ui.reset}\n`);
+  }
+  for (const warning of mcpReport.warnings) {
+    layout.contentWrite(`${ui.yellow}  ⚠ ${warning}${ui.reset}\n`);
   }
   if (!isModelConfigured()) {
     // 未配置 baseURL/apiKey:醒目提示引导 /model(不退出,REPL 仍可用;发消息会失败但不崩)。
@@ -2191,5 +2268,6 @@ export async function startRepl(
 
   // 退出前等在飞反思收尾(Ctrl+C 走 SIGINT 直退不等;fire-and-forget 不承诺中断时完成)。
   await drainMemoryBackground();
+  await closeAllMcp();
   layout.exitAltScreen();
 }
