@@ -1,6 +1,7 @@
 export type BenchmarkGroup =
   | 'single-file' | 'multi-file' | 'types' | 'tests' | 'resilience'
   | 'context' | 'monorepo' | 'no-tests';
+export type BenchmarkDifficulty = 'basic' | 'hard' | 'advanced';
 
 export interface FileFixture {
   path: string;
@@ -12,6 +13,7 @@ export interface CodingTaskFixture {
   id: string;
   title: string;
   group: BenchmarkGroup;
+  difficulty: BenchmarkDifficulty;
   goal: string;
   files: FileFixture[];
   verificationCommand: string;
@@ -24,6 +26,7 @@ export interface BenchmarkTaskResult {
   id: string;
   title: string;
   group: BenchmarkGroup;
+  difficulty: BenchmarkDifficulty;
   status: 'passed' | 'failed' | 'timeout' | 'aborted' | 'error';
   finalVerifiedSuccess: boolean;
   firstPatchPass: boolean;
@@ -38,7 +41,7 @@ export interface BenchmarkTaskResult {
 }
 
 export interface BenchmarkReport {
-  schemaVersion: 1;
+  schemaVersion: 2;
   runId: string;
   generatedAt: string;
   model: string;

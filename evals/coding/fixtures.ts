@@ -1,22 +1,9 @@
-import type { BenchmarkGroup, CodingTaskFixture, FileFixture } from './types.js';
+import type { CodingTaskFixture } from './types.js';
+import { task } from './fixture-utils.js';
+import { hardTasks } from './fixtures-hard.js';
+import { advancedTasks } from './fixtures-advanced.js';
 
-const verifier = (checks: string[]): FileFixture => ({
-  path: 'verify.mjs',
-  content: `import fs from 'node:fs';\n${checks.join('\n')}\nconsole.log('ok');\n`,
-});
-
-const task = (
-  id: string, title: string, group: BenchmarkGroup, goal: string,
-  files: FileFixture[], checks: string[], expectedFiles: string[],
-): CodingTaskFixture => ({
-  id, title, group, goal,
-  files: [...files, verifier(checks)],
-  verificationCommand: 'node verify.mjs',
-  timeoutMs: 120_000,
-  expected: { verification: 'passed', files: expectedFiles },
-});
-
-export const codingTasks: CodingTaskFixture[] = [
+const basicTasks: CodingTaskFixture[] = [
   task('single-01', 'Fix arithmetic', 'single-file', 'Fix add() so it returns the sum. Do not change verify.mjs.',
     [{ path: 'math.js', content: 'export const add = (a, b) => a - b;\n' }],
     ["const {add}=await import('./math.js'); if(add(2,3)!==5) throw Error('add');"], ['math.js']),
@@ -79,10 +66,12 @@ export const codingTasks: CodingTaskFixture[] = [
     ["const s=fs.readFileSync('README.md','utf8'); if(!s.includes('npm install demo')||s.includes('npm add demo')) throw Error('readme');"], ['README.md']),
 ];
 
+export const codingTasks: CodingTaskFixture[] = [...basicTasks, ...hardTasks, ...advancedTasks];
+
 export function selectTasks(selection: string): CodingTaskFixture[] {
   if (selection === 'all') return codingTasks;
   const ids = new Set(selection.split(',').map(s => s.trim()).filter(Boolean));
-  const selected = codingTasks.filter(t => ids.has(t.id) || ids.has(t.group));
+  const selected = codingTasks.filter(t => ids.has(t.id) || ids.has(t.group) || ids.has(t.difficulty));
   if (!selected.length) throw new Error(`No task or group matches: ${selection}`);
   return selected;
 }

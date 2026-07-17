@@ -56,6 +56,7 @@ function promptHash(): string {
 async function runTask(fixture: CodingTaskFixture, keep: boolean): Promise<BenchmarkTaskResult> {
   const root = mkdtempSync(path.join(tmpdir(), `mocode-eval-${fixture.id}-`));
   materialize(root, fixture);
+  const verifierHash = createHash('sha256').update(readFileSync(path.join(root, 'verify.mjs'))).digest('hex');
   const previousCwd = process.cwd();
   const previousRoot = setSandboxRoot(root);
   const previousPermission = config.permissionEnabled;
@@ -101,9 +102,10 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean): Promise<Bench
     const expectedChanged = fixture.expected.files ?? [];
     const changed = result.changedFiles ?? traces.at(-1)?.changedFiles ?? [];
     const expectedFilesTouched = expectedChanged.every(f => changed.some(c => c.replace(/\\/g, '/').endsWith(f)));
-    const verified = finalVerified && expectedFilesTouched;
+    const verifierUnchanged = createHash('sha256').update(readFileSync(path.join(root, 'verify.mjs'))).digest('hex') === verifierHash;
+    const verified = finalVerified && expectedFilesTouched && verifierUnchanged;
     return {
-      id: fixture.id, title: fixture.title, group: fixture.group,
+      id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
       status: controller.signal.aborted ? 'timeout' : verified ? 'passed' : 'failed',
       finalVerifiedSuccess: verified,
       firstPatchPass: firstValidationPassed,
@@ -117,7 +119,7 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean): Promise<Bench
     };
   } catch (error) {
     return {
-      id: fixture.id, title: fixture.title, group: fixture.group,
+      id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
       status: controller.signal.aborted ? 'timeout' : 'error', finalVerifiedSuccess: false,
       firstPatchPass: false, regression: false, toolRecovery: recovered, toolCalls,
       tokens: null, durationMs: Date.now() - started, unverifiedCompletion: false,
@@ -136,7 +138,7 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean): Promise<Bench
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const opts = parseBenchmarkArgs(args);
   if (opts.list || !opts.selection) {
-    for (const task of codingTasks) console.log(`${task.id}\t${task.group}\t${task.title}`);
+    for (const task of codingTasks) console.log(`${task.id}\t${task.difficulty}\t${task.group}\t${task.title}`);
     if (!opts.list) console.log('\nChoose a task/group explicitly; use --task all for the full paid run.');
     return;
   }
@@ -149,7 +151,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     console.log(result.status);
   }
   const report = createReport({
-    schemaVersion: 1, runId: randomUUID(), generatedAt: new Date().toISOString(),
+    schemaVersion: 2, runId: randomUUID(), generatedAt: new Date().toISOString(),
     model: config.model, promptHash: promptHash(), selection: opts.selection,
   }, results);
   mkdirSync(opts.outDir, { recursive: true });

@@ -1,5 +1,6 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "status": "not-recorded",
-  "description": "Run npm run eval:coding -- --task all --update-baseline to record the current model and prompt baseline."
+  "suiteSize": 60,
+  "description": "Run npm run eval:coding -- -- --task all --update-baseline to record the current 60-task model and prompt baseline."
 }

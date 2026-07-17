@@ -39,9 +39,9 @@ export function renderSummary(r: BenchmarkReport): string {
     `- Unverified completion: ${pct(r.summary.unverifiedCompletionRate)}`,
     `- Tool calls / tokens / elapsed: ${r.summary.toolCalls} / ${r.summary.tokens} / ${(r.summary.durationMs / 1000).toFixed(1)}s`,
     '',
-    '| Task | Group | Result | First patch | Recovery | Calls | Tokens | Time |',
-    '|---|---|---:|---:|---:|---:|---:|---:|',
-    ...r.tasks.map(t => `| ${t.id} | ${t.group} | ${t.status} | ${t.firstPatchPass ? 'yes' : 'no'} | ${t.toolRecovery ? 'yes' : 'no'} | ${t.toolCalls} | ${t.tokens ?? '-'} | ${(t.durationMs / 1000).toFixed(1)}s |`),
+    '| Task | Difficulty | Group | Result | First patch | Recovery | Calls | Tokens | Time |',
+    '|---|---|---|---:|---:|---:|---:|---:|---:|',
+    ...r.tasks.map(t => `| ${t.id} | ${t.difficulty} | ${t.group} | ${t.status} | ${t.firstPatchPass ? 'yes' : 'no'} | ${t.toolRecovery ? 'yes' : 'no'} | ${t.toolCalls} | ${t.tokens ?? '-'} | ${(t.durationMs / 1000).toFixed(1)}s |`),
     '',
   ];
   return lines.join('\n');

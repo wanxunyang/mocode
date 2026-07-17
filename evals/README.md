@@ -2,7 +2,13 @@
 
 EVAL-01 会让 Mocode 在一次性临时仓库中执行完整的编码任务，实际经过“模型分析 → 调用工具 → 修改文件 → 自动验证”的完整链路。它不是普通的函数单元测试。
 
-固定测试集包含 20 个任务，覆盖：
+固定测试集包含 60 个任务，分为三个难度层级：
+
+- `basic`：原有 20 道基础题，验证常见编辑和工具链能力。
+- `hard`：20 道困难题，验证并发、事务、安全、缓存、流式处理和跨文件修复。
+- `advanced`：20 道高级题，验证状态机、原子性、协议解析、调度、增量构建和隔离语义。
+
+题目覆盖：
 
 - 单文件修复和多文件功能开发
 - TypeScript 类型错误和测试失败
@@ -63,6 +69,28 @@ npm run eval:coding -- -- --group monorepo
 - `monorepo`
 - `no-tests`
 
+## 按难度运行
+
+运行原有 20 道基础题：
+
+```powershell
+npm run eval:coding -- -- --group basic
+```
+
+运行新增的 20 道困难题：
+
+```powershell
+npm run eval:coding -- -- --group hard
+```
+
+运行新增的 20 道高级题：
+
+```powershell
+npm run eval:coding -- -- --group advanced
+```
+
+建议分开运行三个难度，避免一次评测消耗过多 token，也便于分别比较各难度成功率。
+
 ## 一次运行多个指定任务
 
 任务 ID 使用英文逗号分隔：
@@ -71,17 +99,17 @@ npm run eval:coding -- -- --group monorepo
 npm run eval:coding -- -- --task single-01,multi-01,types-01
 ```
 
-## 运行全部 20 个任务
+## 运行全部 60 个任务
 
 ```powershell
 npm run eval:coding -- -- --task all
 ```
 
-全量运行会连续调用当前模型 20 次或更多次，耗时和 token 消耗取决于模型表现。
+全量运行会执行 60 个真实 Agent 任务，可能产生较高的耗时和 token 消耗。建议先分别运行 `basic`、`hard` 和 `advanced`。
 
 ## 运行快速回归测试
 
-下面的 smoke 只检查 benchmark runner、fixture 和指标汇总等基础逻辑，不会执行 20 个真实 Agent 任务：
+下面的 smoke 会检查 runner、指标汇总、60 个 verifier 的语法以及所有初始仓库是否确实无法通过，但不会调用模型执行真实 Agent 任务：
 
 ```powershell
 npm run eval:smoke
@@ -149,4 +177,4 @@ npm run eval:coding -- -- --task single-01
 npm run eval:coding -- -- --group types
 ```
 
-确认单题和小组结果正常后，再决定是否运行全部 20 题并更新 baseline。
+确认单题和各难度结果正常后，再决定是否运行全部 60 题并更新 baseline。
