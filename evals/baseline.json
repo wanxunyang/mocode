@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 1,
+  "status": "not-recorded",
+  "description": "Run npm run eval:coding -- --task all --update-baseline to record the current model and prompt baseline."
+}

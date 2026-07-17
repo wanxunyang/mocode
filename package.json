@@ -20,8 +20,10 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
-    "eval:smoke": "tsx evals/smoke.ts",
+    "typecheck": "tsc --noEmit && tsc -p evals/tsconfig.json",
+    "eval:smoke": "tsx evals/smoke.ts && tsx evals/coding/smoke.ts",
+    "eval:coding": "tsx evals/coding/runner.ts",
+    "eval:coding:list": "tsx evals/coding/runner.ts --list",
     "prepare": "npm run build"
   },
   "dependencies": {

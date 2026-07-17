@@ -8,6 +8,7 @@ task_management/
 scripts/
 .env
 *.log
+evals/results/
 
 # 构建产物(npm publish 经 files 字段打包,不入库)
 dist/
