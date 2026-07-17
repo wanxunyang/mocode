@@ -20,7 +20,9 @@ export type {
   ValidationResult,
   ValidationStatus,
 } from './types.js';
+export type { PackageProfile, ProjectPackageManager, ProjectProfile } from './profile.js';
 export { discoverValidationCommand } from './discovery.js';
+export { clearProjectProfileCache, discoverProjectProfile } from './profile.js';
 
 const NON_CODE_EXTENSIONS = new Set([
   '.md', '.mdx', '.txt', '.rst', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp',
