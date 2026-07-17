@@ -110,6 +110,7 @@ const PROMPT = '❯ ';
  * 分支节点只负责导航，叶子的 value 保持现有命令文本，因此不破坏命令兼容性。
  */
 const SLASH_COMMANDS: SlashCommand[] = [
+  { name: '/help', desc: '查看所有命令' },
   { name: '/exit', desc: '退出 mocode(同 /quit)' },
   { name: '/clear', desc: '清空历史(保留系统提示)' },
   { name: '/context', desc: '显示上下文用量条' },
@@ -199,6 +200,27 @@ const SLASH_COMMANDS: SlashCommand[] = [
     ],
   },
 ];
+
+/** 从菜单树递归生成 /help 内容；叶子 value 与菜单路径不同则同时展示真实命令。 */
+function slashHelpLines(
+  nodes: SlashCommand[] = SLASH_COMMANDS,
+  parentPath = '',
+  depth = 0,
+): string[] {
+  const lines: string[] = [];
+  for (const node of nodes) {
+    const menuPath = parentPath ? `${parentPath} ${node.name}` : node.name;
+    const isBranch = Boolean(node.children?.length);
+    const actual = node.value?.trimEnd();
+    const mapping = actual && actual !== menuPath ? ` ${ui.dim}→ ${actual}${ui.reset}` : '';
+    const marker = isBranch ? ` ${ui.dim}›${ui.reset}` : '';
+    lines.push(
+      `${'  '.repeat(depth)}${ui.accent}${menuPath}${ui.reset}${marker}${mapping}  ${ui.dim}${node.desc}${ui.reset}`,
+    );
+    if (node.children?.length) lines.push(...slashHelpLines(node.children, menuPath, depth + 1));
+  }
+  return lines;
+}
 
 /** 主题名 → 一句描述(供 /theme 菜单 / 列表显示)。新增主题时在 src/ui/theme.ts THEMES 加键后于此补一句。 */
 const THEME_DESCRIPTIONS: Record<string, string> = {
@@ -1131,6 +1153,12 @@ export async function startRepl(
     refreshStatusBase(history);
     layout.enterRunningMode(status, placeholder);
 
+    if (line === '/help') {
+      layout.contentWrite(`${ui.bold}可用斜杠命令${ui.reset}\n`);
+      layout.contentWrite(`${ui.dim}(› 表示可进入子菜单；→ 后为实际执行命令)${ui.reset}\n`);
+      layout.contentWrite(`${slashHelpLines().join('\n')}\n`);
+      continue;
+    }
     if (line === '/init') {
       // /init:把 init 指令当 user 输入发给 agent(扫描项目 + 生成 MOCODE.md),fall through 走 runAgent
       joined = INIT_PROMPT;
