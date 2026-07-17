@@ -14,7 +14,7 @@
 
 import type OpenAI from 'openai';
 import { chatTools, type ChatMessage } from '../llm/index.js';
-import { config, isMemoryEnabled } from '../config/index.js';
+import { config, isMemoryEnabled, isSubAgentEnabled } from '../config/index.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { buildMemorySection, buildMemoryIndexSection } from '../memory/index.js';
 import { ui } from '../ui/theme.js';
@@ -69,6 +69,13 @@ export interface SpawnResult {
  * 子 agent 跑在主 signal 下,主 abort 即子 abort;子 agent 的 abortRestore 还原子 history + 模式。
  */
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
+  if (!isSubAgentEnabled()) {
+    return {
+      summary: null,
+      completed: false,
+      transcript: 'Sub-agent execution is disabled. Enable it with /subagent on.',
+    };
+  }
   const maxSteps = opts.maxSteps ?? config.subAgentMaxSteps ?? 50;
 
   // 构造子 agent 系统提示:复用主 agent 组装链 + 子 agent 角色后缀 + 自定义后缀。

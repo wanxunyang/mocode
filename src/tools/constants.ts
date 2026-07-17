@@ -1,5 +1,5 @@
 /** 工具共享的截断 / 上限 / 忽略规则。 */
-import { isMemoryEnabled } from '../config/index.js';
+import { isMemoryEnabled, isSubAgentEnabled } from '../config/index.js';
 
 export const MAX_FILE_LINES = 2000;
 export const MAX_OUTPUT = 20000;
@@ -58,4 +58,9 @@ export function getPlanDisabledTools(): Set<string> {
   next.delete('memory_update');
   next.delete('memory_forget');
   return next;
+}
+
+/** auto/plan 共用的运行时功能开关防线；关闭时即使模型幻觉调用也不得执行。 */
+export function getRuntimeDisabledTools(): Set<string> {
+  return isSubAgentEnabled() ? new Set<string>() : new Set<string>(['task']);
 }

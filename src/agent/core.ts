@@ -25,7 +25,7 @@ import {
   type ToolOutcome,
 } from '../tools/registry.js';
 import { checkPermission } from '../permissions/index.js';
-import { getPlanDisabledTools } from '../tools/constants.js';
+import { getPlanDisabledTools, getRuntimeDisabledTools } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import { maybeCompact, contextState, dropContextFromHistory } from '../session/index.js';
 import type { ContextState } from '../session/compact.js';
@@ -38,6 +38,7 @@ import {
 import { createRelevancePruner } from '../context/relevance.js';
 import { isToolResultSuccess } from '../context/utils.js';
 import { config } from '../config/index.js';
+import { t } from '../i18n/index.js';
 import { jailResolve } from '../sandbox/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
@@ -540,7 +541,26 @@ export async function runAgentCore(
         const calls = result.toolCalls;
         let i = 0;
         while (i < calls.length) {
-          if (isParallelTool(calls[i].name)) {
+          const currentCall = calls[i];
+          if (getRuntimeDisabledTools().has(currentCall.name)) {
+            hooks.onToolHeader?.(currentCall);
+            const error = t('task.disabled');
+            hooks.onToolResult?.(currentCall, error, null, null, 1);
+            const hint = recordAndHint(currentCall.name, currentCall.arguments);
+            pushToolResult(
+              history,
+              currentCall,
+              hint ? `${error}${hint}` : error,
+              relprune,
+              lifecycle,
+              scheduler,
+              runtimeContextState,
+              false,
+            );
+            i++;
+            continue;
+          }
+          if (isParallelTool(currentCall.name)) {
             // 收集连续只读组(≥1),并发执行:先渲染所有 header，再一次性启动所有
             // (executeTool 调用即开始 I/O)，最后按原顺序逐个 await + 回灌。
             // 必须先 header 后 execute：grep 等同步快速工具会在 executeTool 返回 Promise 前

@@ -97,6 +97,8 @@ export interface Config {
   reflectEveryN: number;
   /** 每轮 agent 循环最大步数(防无限循环)。默认 25。 */
   maxSteps: number;
+  /** 子 Agent 总开关。默认关闭；/subagent on|off 运行时切换并刷新模型工具表。 */
+  subAgentEnabled: boolean;
   /** 子 agent(task 工具派生)默认步数上限。防子任务失控耗尽配额。默认 50。 */
   subAgentMaxSteps: number;
   /** 会话落盘目录(cwd 下)。 */
@@ -462,6 +464,7 @@ export const config: Config = {
   memoryEnabled: process.env.MEMORY_ENABLED === 'true',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   maxSteps: Number(process.env.MAX_STEPS) || 200,
+  subAgentEnabled: process.env.MOCODE_SUBAGENT_ENABLED === 'true',
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || 50,
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
@@ -508,6 +511,17 @@ export function updateModelConfig(opts: {
     config.contextWindowTokens = opts.contextWindowTokens;
     process.env.CONTEXT_WINDOW_TOKENS = String(opts.contextWindowTokens);
   }
+}
+
+/** 子 Agent 总开关；默认 false，关闭时 task 不进入模型工具表。 */
+export function isSubAgentEnabled(): boolean {
+  return config.subAgentEnabled;
+}
+
+/** 运行时切换子 Agent；工具 schema 刷新与持久化由 REPL 调用方完成。 */
+export function updateSubAgentConfig(enabled: boolean): void {
+  config.subAgentEnabled = enabled;
+  process.env.MOCODE_SUBAGENT_ENABLED = enabled ? 'true' : 'false';
 }
 
 /**

@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { config } from '../config/index.js';
+import { config, isSubAgentEnabled } from '../config/index.js';
 import { tools } from '../tools/registry.js';
 import { getPlanDisabledTools } from '../tools/constants.js';
 import { ThinkTagFilter } from './think-filter.js';
@@ -168,7 +168,11 @@ export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 export const planChatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 
 export function refreshChatTools(): void {
-  const next = tools.map((t) => ({
+  // task 常驻内部 registry，运行时开关只控制模型可见 schema，因而 on/off 可即时生效。
+  const visibleTools = isSubAgentEnabled()
+    ? tools
+    : tools.filter((tool) => tool.name !== 'task');
+  const next = visibleTools.map((t) => ({
     type: 'function' as const,
     function: {
       name: t.name,

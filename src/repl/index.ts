@@ -7,6 +7,8 @@ import {
   isModelConfigured,
   updateMemoryConfig,
   isMemoryEnabled,
+  isSubAgentEnabled,
+  updateSubAgentConfig,
   isProjectSkillEnabled,
   isProjectSnapshotEnabled,
   updateProjectSkillConfig,
@@ -50,12 +52,13 @@ import {
   type SlashCommand,
 } from '../ui/prompt.js';
 import { promptIntervention } from '../ui/intervention.js';
-import { tools, registerToolsExtension } from '../tools/registry.js';
+import { registerToolsExtension } from '../tools/registry.js';
 import { initializeAllMcp, getMcpTools, closeAllMcp } from '../mcp/index.js';
 import {
   estimateMessagesTokens,
   reconfigureClient,
   refreshChatTools,
+  chatTools,
   type ChatMessage,
   type ChatUsage,
 } from '../llm/index.js';
@@ -138,6 +141,13 @@ function buildSlashCommands(): SlashCommand[] {
         { name: 'status', value: '/memory_status', desc: d('commands.memoryStatus') },
         { name: 'reflect', value: '/reflect', desc: d('commands.memoryReflect') },
         { name: 'init', value: '/init', desc: d('commands.memoryInit') },
+      ],
+    },
+    {
+      name: '/subagent', desc: d('commands.subagent'), children: [
+        { name: 'on', value: '/subagent on', desc: d('commands.subagentOn') },
+        { name: 'off', value: '/subagent off', desc: d('commands.subagentOff') },
+        { name: 'status', value: '/subagent status', desc: d('commands.subagentStatus') },
       ],
     },
     {
@@ -419,6 +429,8 @@ function runningStateFor(
       return { status: t('running.memory'), placeholder: t('running.switching') };
     case '/memory_status':
       return { status: t('running.memoryStatus'), placeholder: '…' };
+    case '/subagent':
+      return { status: t('running.subagent'), placeholder: t('running.switching') };
     case '/project_skill':
       return { status: t('running.skill'), placeholder: t('running.processing') };
     case '/snapshot':
@@ -866,12 +878,11 @@ export async function startRepl(
   // (后端不开 include_usage / 后端失败时)。
   let lastTurnUsage: ChatUsage | undefined;
 
-  const toolsLine = tools.map((t) => t.name).join(' · ');
   const banner = () => ({
     model: config.model,
     baseURL: config.baseURL,
     cwd: process.cwd(),
-    tools: toolsLine,
+    tools: chatTools.map((tool) => tool.function.name).join(' · '),
     memoryEnabled: isMemoryEnabled(),
   });
 
@@ -2004,6 +2015,39 @@ export async function startRepl(
       await rollbackFlow();
       continue;
     }
+
+    if (line === '/subagent' || line.startsWith('/subagent ')) {
+      const arg = line.startsWith('/subagent ')
+        ? line.slice('/subagent '.length).trim().toLowerCase()
+        : 'status';
+      if (arg === '' || arg === 'status') {
+        const enabled = isSubAgentEnabled();
+        const state = t(enabled ? 'subagent.stateOn' : 'subagent.stateOff');
+        layout.contentWrite(
+          `${ui.accent}${t('subagent.status', { state })}${ui.reset}\n` +
+          `${ui.dim}MOCODE_SUBAGENT_ENABLED=${enabled ? 'true' : 'false'} · ${CONFIG_PATH}${ui.reset}\n`,
+        );
+        continue;
+      }
+      if (arg !== 'on' && arg !== 'off') {
+        layout.contentWrite(`${ui.yellow}${t('subagent.usage')}${ui.reset}\n`);
+        continue;
+      }
+
+      const enabled = arg === 'on';
+      if (enabled !== isSubAgentEnabled()) {
+        updateSubAgentConfig(enabled);
+        updateConfigKey('MOCODE_SUBAGENT_ENABLED', enabled ? 'true' : 'false');
+        refreshChatTools();
+        history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
+        layout.rewriteBanner(bannerLines(banner()));
+      }
+      layout.contentWrite(
+        `${enabled ? ui.green : ui.yellow}${t(enabled ? 'subagent.changedOn' : 'subagent.changedOff')}${ui.reset}\n`,
+      );
+      continue;
+    }
+
     if (
       line === '/memory_switch' ||
       line.startsWith('/memory_switch ') ||
