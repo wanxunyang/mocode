@@ -1140,9 +1140,13 @@ export async function startRepl(
     const cmd = line.split(/\s+/)[0];
     // 语言命令把视觉分隔放在确认文案之后；避免回显后先空一行、下一条命令却紧贴确认。
     echoInput(input, cmd !== '/language');
-    const { status, placeholder } = runningStateFor(cmd);
+    const state = runningStateFor(cmd);
+    const placeholder =
+      line === '/snapshot_refresh' || line === '/project_skill init'
+        ? ''
+        : state.placeholder;
     refreshStatusBase(history);
-    layout.enterRunningMode(status, placeholder);
+    layout.enterRunningMode(state.status, placeholder);
 
     if (line === '/help') {
       layout.contentWrite(`${ui.bold}${t('help.title')}${ui.reset}\n`);
@@ -1441,10 +1445,11 @@ export async function startRepl(
       }
       // buildSnapshot 是异步操作(完全由 LLM 生成)，显示进度提示
       layout.contentWrite(`${ui.dim}正在重新生成项目快照 (LLM 分析中)...${ui.reset}\n`);
+      const signal = startRunningListener('');
       try {
         // 清除缓存，强制重新生成
         clearSnapshotCache();
-        const result = await buildSnapshot(undefined, true);
+        const result = await buildSnapshot(signal, true);
         if (result.snapshot) {
           layout.contentWrite(
             `${ui.cyan}✓ 项目快照已刷新${ui.reset} (${result.snapshot.builtAt})\n`
@@ -1467,6 +1472,8 @@ export async function startRepl(
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         layout.contentWrite(`${ui.red}[错误]${ui.reset} 刷新快照失败: ${msg}\n`);
+      } finally {
+        stopRunningListener();
       }
       continue;
     }
@@ -2057,50 +2064,29 @@ export async function startRepl(
           continue;
         }
 
-        // /project_skill init — 扫描项目并生成/优化 skill
+        // /project_skill init — 作为一条普通主 Agent 请求生成/优化 skill，不再派生高消耗子 agent。
         if (arg === 'init') {
           if (!isProjectSkillEnabled()) {
             layout.contentWrite(`${ui.yellow}⚠ 项目专属 Skill 尚未开启${ui.reset}，请先运行 ${ui.cyan}/project_skill on${ui.reset}\n`);
             continue;
           }
 
-          const { readProjectSkill, writeProjectSkill } = await import('../project-skill/index.js');
-          const existing = readProjectSkill();
+          const initPrompt = `请直接初始化或优化当前项目的 Project Skill，并完成写入。
 
-          if (existing) {
-            layout.contentWrite(`${ui.cyan}⏳ 正在深度探索项目并优化现有 skill...${ui.reset}\n`);
-          } else {
-            layout.contentWrite(`${ui.cyan}⏳ 正在深度探索项目（子 agent 将使用工具扫描代码、架构、配置等）...${ui.reset}\n`);
-          }
-          layout.contentWrite(`${ui.dim}提示: 按 Ctrl+C 可中断${ui.reset}\n\n`);
+要求：
+1. 直接由你完成，禁止调用 task 工具或派生任何子 agent。
+2. 优先利用系统提示中已有的 Project Snapshot 和 Project Skill；不要重复扫描其中已有的目录、依赖、命令和模块清单。
+3. 最多进行 1 次 codegraph 探索；只有缺少关键依据时，才额外进行少量定点 read_file/grep。禁止全仓 glob 和逐文件扫描。
+4. Skill 只记录 Snapshot 无法提供的 WHY/HOW/GOTCHAS/CONVENTIONS：设计取舍、关键调用链、非直觉边界、项目约定和可操作坑点。使用具体路径和例子，删除重复或过时内容。
+5. 最终内容应完整、结构清晰。调用 project_skill_update，使用 action=write 一次性写入完整内容。
+6. 写入成功后只简短说明更新了哪些关键洞察，不要输出完整 Skill。`;
 
-          // 派生子 agent 深度探索项目
-          const { generateInitialSkill } = await import('../project-skill/initializer.js');
-          const result = await generateInitialSkill(existing ?? undefined, currentAbort?.signal);
-
-          // 显示探索过程日志
-          if (result.transcript) {
-            layout.contentWrite(`${ui.dim}--- 探索过程 ---${ui.reset}\n`);
-            layout.contentWrite(result.transcript);
-            layout.contentWrite(`${ui.dim}--- 探索结束 ---${ui.reset}\n\n`);
-          }
-
-          if (result.ok && result.content) {
-            const writeResult = writeProjectSkill(result.content);
-            if (writeResult.ok) {
-              layout.contentWrite(`${ui.green}✓ 项目 Skill 已生成${ui.reset}\n`);
-              layout.contentWrite(`${ui.dim}内容预览:${ui.reset}\n${result.content.slice(0, 500)}${result.content.length > 500 ? '...' : ''}\n`);
-              layout.contentWrite(`\n${ui.dim}文件: ${ui.accent}.mocode/project-skill.md${ui.reset} (${result.content.length} 字符)\n`);
-              layout.contentWrite(`${ui.dim}下次启动时会自动注入到系统提示词。Agent 也会在开发过程中持续更新。${ui.reset}\n`);
-              layout.contentWrite(`${ui.dim}提示: 可用 ${ui.cyan}/project_skill view${ui.reset} 查看完整内容，或手动编辑文件完善。${ui.dim}${ui.reset}\n`);
-            } else {
-              layout.contentWrite(`${ui.red}✗ 写入失败:${ui.reset} ${writeResult.error}\n`);
-            }
-          } else {
-            layout.contentWrite(`${ui.red}✗ 探索失败:${ui.reset} ${result.error}\n`);
-            if (result.transcript) {
-              layout.contentWrite(`${ui.dim}子 agent 输出了部分内容（见上方），但未能生成完整的 skill 文档。${ui.reset}\n`);
-            }
+          const previousMode = getAgentMode();
+          try {
+            await runTurn(initPrompt, false, '');
+          } finally {
+            // init 是一次明确写操作，临时使用 auto；完成后恢复用户原来的模式。
+            if (previousMode === 'plan') setAgentMode('plan');
           }
           continue;
         }

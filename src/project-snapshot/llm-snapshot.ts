@@ -20,9 +20,9 @@ Do NOT explain WHY or HOW (that's Project Skill's job).
 5. Identify tech stack from dependencies
 
 ## Output Format
-Output a markdown document between these exact delimiters:
+Output only a markdown document between these exact delimiter lines. The delimiters are not Markdown fences and must each appear on their own line:
 
-\`\`\`snapshot-md
+<snapshot-md>
 # Project Snapshot
 
 ## Description
@@ -50,7 +50,7 @@ src/
   tools/
   ui/
 \`\`\`
-\`\`\`snapshot-md
+</snapshot-md>
 
 ## Rules
 1. **Description**: ≤80字，中文，从 README 和 package.json description 提炼。不要"一个..."开头。
@@ -61,6 +61,7 @@ src/
 6. 不要包含：设计决策、注意事项、坑点、约定 → 这些是 Skill 的职责。
 7. 总 markdown ≤ 2500 字符。
 8. 使用中文。
+9. 不要在 <snapshot-md> 和 </snapshot-md> 之外输出任何内容。
 `;
 
 export interface LLMGenerateResult {
@@ -68,6 +69,35 @@ export interface LLMGenerateResult {
   content?: string;
   error?: string;
   transcript?: string;
+}
+
+/**
+ * 提取子 agent 输出中的 markdown。
+ * 优先使用无歧义标签，同时兼容历史自定义围栏和标准 Markdown 围栏。
+ */
+function extractSnapshotMarkdown(summary: string): string | undefined {
+  const tagged = summary.match(/<snapshot-md>[ \t]*\r?\n?([\s\S]*?)\r?\n?[ \t]*<\/snapshot-md>/i);
+  if (tagged?.[1]?.trim()) return tagged[1].trim();
+
+  const legacy = summary.match(
+    /```snapshot-md[ \t]*\r?\n([\s\S]*?)\r?\n```snapshot-md[ \t]*(?:\r?\n|$)/i,
+  );
+  if (legacy?.[1]?.trim()) return legacy[1].trim();
+
+  const opening = summary.match(/^```(?:snapshot-md|markdown)[ \t]*\r?$/im);
+  if (opening?.index === undefined) return undefined;
+
+  let bodyStart = opening.index + opening[0].length;
+  if (summary[bodyStart] === '\n') bodyStart += 1;
+  const body = summary.slice(bodyStart);
+  const closings = [...body.matchAll(/^`{3,}[ \t]*\r?$/gm)];
+  const closing = closings.at(-1);
+  if (closing?.index === undefined) return undefined;
+
+  let content = body.slice(0, closing.index).trim();
+  // 有些模型会把内层和外层的结束围栏连成六个反引号。
+  if (closing[0].trim().length >= 6) content = `${content}\n\`\`\``;
+  return content || undefined;
 }
 
 /**
@@ -117,22 +147,16 @@ export async function generateLLMSnapshot(
       };
     }
 
-    // 从 summary 中提取 markdown
-    const mdMatch = result.summary.match(/```snapshot-md\n([\s\S]*?)\n```snapshot-md/);
-    if (!mdMatch || !mdMatch[1]) {
-      // fallback: 尝试普通 markdown 代码块
-      const fallbackMatch = result.summary.match(/```markdown\n([\s\S]*?)\n```/);
-      if (!fallbackMatch || !fallbackMatch[1]) {
-        return {
-          ok: false,
-          error: '无法从子 agent 输出中提取 markdown',
-          transcript: result.transcript,
-        };
-      }
-      return { ok: true, content: fallbackMatch[1].trim(), transcript: result.transcript };
+    const content = extractSnapshotMarkdown(result.summary);
+    if (!content) {
+      return {
+        ok: false,
+        error: '无法从子 agent 输出中提取 markdown',
+        transcript: result.transcript,
+      };
     }
 
-    return { ok: true, content: mdMatch[1].trim(), transcript: result.transcript };
+    return { ok: true, content, transcript: result.transcript };
   } catch (e) {
     return {
       ok: false,
