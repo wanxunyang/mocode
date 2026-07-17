@@ -1,4 +1,4 @@
-import type { Tool } from '../tools/types.js';
+import type { Tool, ToolOutcome } from '../tools/types.js';
 import { readMcpServers } from './config.js';
 import { McpClient } from './client.js';
 
@@ -49,9 +49,22 @@ export function getMcpTools(): Tool[] {
         parameters: remote.inputSchema && typeof remote.inputSchema === 'object'
           ? remote.inputSchema
           : { type: 'object', properties: {} },
-        // 远程/本地 server 均可能读写系统或网络；协议没有副作用声明，必须保守处理。
+        // MCP 协议没有可靠副作用声明：未知能力、workspace 串行、每次确认。
         risk: 'dangerous',
-        execute: async (args, ctx) => formatToolResult(await client.callTool(remote.name, args, ctx?.signal)),
+        capabilities: {
+          effect: 'unknown',
+          concurrency: 'serial',
+          retry: 'never',
+          resources: () => ['workspace'],
+          supportsAbort: true,
+        },
+        execute: async (args, ctx): Promise<ToolOutcome> => {
+          const result = await client.callTool(remote.name, args, ctx?.signal);
+          const output = formatToolResult(result);
+          return result.isError
+            ? { status: 'error', code: 'MCP_ERROR', retryable: false, output }
+            : { status: 'success', code: 'OK', retryable: false, output };
+        },
       });
     }
   }

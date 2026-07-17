@@ -29,22 +29,58 @@ export interface DropContextResult {
   items: { toolName: string; toolCallId: string }[];
 }
 
-/**
- * 工具风险等级(权限系统用):
- *  safe      — 只读 / 无副作用,直接放行(read_file, glob, grep, web_search, ...)
- *  confirm   — 有副作用,需用户确认一次(同工具同会话缓存)(edit_file, write_file, memory_*)
- *  dangerous — 高风险,每次执行都需显式确认(run_command, task)
- * 缺省 = 'safe':只读工具无需标注,零侵入。
- */
+/** 工具风险等级(权限系统用)。 */
 export type ToolRisk = 'safe' | 'confirm' | 'dangerous';
 
-/** 工具统一接口。每个工具是一个 name + JSON Schema + execute。 */
+/** 工具对外部状态的主要影响；unknown 必须按最保守策略调度。 */
+export type ToolEffect = 'read' | 'write' | 'process' | 'network' | 'unknown';
+export type ToolConcurrency = 'parallel' | 'serial' | 'resource-locked';
+export type ToolRetry = 'never' | 'safe' | 'idempotent';
+
+/** Agent 调度、回滚捕获和后续重试策略使用的工具能力声明。 */
+export interface ToolCapabilities {
+  effect: ToolEffect;
+  concurrency: ToolConcurrency;
+  retry: ToolRetry;
+  /** 返回该调用会访问的逻辑资源键；用于后续细粒度锁与冲突诊断。 */
+  resources?: (args: Record<string, unknown>) => string[];
+  supportsAbort?: boolean;
+}
+
+export type ToolOutcomeStatus = 'success' | 'error' | 'denied' | 'aborted';
+export type ToolOutcomeCode =
+  | 'OK'
+  | 'UNKNOWN_TOOL'
+  | 'INVALID_JSON'
+  | 'SANDBOX_DENIED'
+  | 'PERMISSION_DENIED'
+  | 'ABORTED'
+  | 'TIMEOUT'
+  | 'PROCESS_FAILED'
+  | 'EXECUTION_ERROR'
+  | 'EDIT_CONFLICT'
+  | 'MCP_ERROR'
+  | (string & {});
+
+/** 框架内部的结构化工具结果；LLM/TUI 边界仍使用 output 文本。 */
+export interface ToolOutcome {
+  status: ToolOutcomeStatus;
+  code: ToolOutcomeCode;
+  retryable: boolean;
+  output: string;
+  changedFiles?: string[];
+  durationMs?: number;
+}
+
+export type ToolExecuteResult = string | ToolOutcome;
+
+/** 工具统一接口。旧工具可继续返回字符串，由 registry 兼容包装。 */
 export interface Tool {
   name: string;
   description: string;
-  parameters: Record<string, unknown>; // JSON Schema
-  /** 风险等级。缺省 = 'safe'(只读工具无需标注)。confirm/dangerous 在执行前弹确认面板。 */
+  parameters: Record<string, unknown>;
   risk?: ToolRisk;
-  /** ctx 可选:不关心的工具签名写 execute(args) 即可(TS 允许少参赋多参类型,向后兼容)。 */
-  execute: (args: Record<string, unknown>, ctx?: ToolContext) => Promise<string>;
+  /** 缺省时按 unknown + serial + never 保守处理。 */
+  capabilities?: ToolCapabilities;
+  execute: (args: Record<string, unknown>, ctx?: ToolContext) => Promise<ToolExecuteResult>;
 }

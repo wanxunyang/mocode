@@ -17,7 +17,13 @@ import {
   type ChatUsage,
   type ToolCallRef,
 } from '../llm/index.js';
-import { executeTool, tools } from '../tools/registry.js';
+import {
+  executeToolOutcome,
+  getToolCapabilities,
+  isFileMutationTool,
+  tools,
+  type ToolOutcome,
+} from '../tools/registry.js';
 import { checkPermission } from '../permissions/index.js';
 import { getPlanDisabledTools } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
@@ -89,18 +95,24 @@ function thrashHint(name: string, args: string, count: number): string | null {
   );
 }
 
-/** 只读工具集:一轮多个时,连续的只读工具成组 Promise.all 并行(无副作用、互不依赖)。 */
-const READ_TOOL_NAMES = new Set([
-  'read_file',
-  'glob',
-  'grep',
-  'codegraph',
-  'web_search',
-  'web_fetch',
-]);
-/** mutation 工具:写盘 + 在 executeTool 内记回滚 before 快照,必须串行保快照序。 */
-const isMutationTool = (name: string): boolean =>
-  name === 'edit_file' || name === 'write_file';
+/** 只有显式声明 parallel 且无需权限确认的工具才可并发；未知扩展保守串行。 */
+function isParallelTool(name: string): boolean {
+  const tool = tools.find((candidate) => candidate.name === name);
+  return !!tool && (tool.risk ?? 'safe') === 'safe' &&
+    getToolCapabilities(tool).concurrency === 'parallel';
+}
+
+/** 文件 mutation 由 capability metadata 判定，供 diff、回滚与上下文失效共用。 */
+const isMutationTool = (name: string): boolean => isFileMutationTool(name);
+
+function deniedOutcome(name: string): ToolOutcome {
+  return {
+    status: 'denied',
+    code: 'PERMISSION_DENIED',
+    retryable: false,
+    output: `错误:用户拒绝了工具 ${name} 的执行。`,
+  };
+}
 
 /** 工具调用 ● 头所需信息(交给 hooks 渲染;core 不直接写屏)。 */
 export interface ToolCallView {
@@ -165,8 +177,9 @@ function pushToolResult(
   lifecycle: LifecycleEngine | null,
   _scheduler: BudgetScheduler | null,
   runtimeContextState: ContextState = contextState,
+  succeededOverride?: boolean,
 ): void {
-  const succeeded = isToolResultSuccess(output);
+  const succeeded = succeededOverride ?? isToolResultSuccess(output);
   const ageAware = config.contextOptimize ? ageAwareStateFor(history) : null;
   const encodingContext = ageAware?.preparePush(tc, succeeded);
   const msg = {
@@ -518,100 +531,44 @@ export async function runAgentCore(
           })),
         } as ChatMessage);
 
-        // 工具分组执行(保 tool_calls 原顺序):连续的只读工具(READ_TOOL_NAMES)成组并发——先一次性
-        // 渲染全部 header，让摘要在任何同步工具真正执行前立即可见；随后启动全部 executeTool，
-        // 再按原顺序逐个 await + 回灌结果。
-        // mutation(write_file/edit_file)及 run_command/use_skill 各为单步串行屏障——mutation 串行保
-        // recordMutation 调用序 = 回滚快照序(executeTool 内写前记 before 快照,同文件多次写需按序)。
-        // 渲染与 history 回灌一律按原顺序;并发只影响执行时序,tool_call_id 仍按序配对。
-        // executeTool 永不抛错(调度器 try/catch 返字符串),故 await 单个 promise 不会抛(永远 resolve 为字符串)。
+        // 工具分组执行(保 tool_calls 原顺序):连续且显式声明 parallel 的 safe 工具成组并发——先一次性
+        // 渲染全部 header，让摘要在任何同步工具真正执行前立即可见；随后启动全部 executeToolOutcome，
+        // 再按原顺序逐个 await + 回灌结果。其余工具均为串行屏障；resource-locked write 保证
+        // rollback 快照顺序，未知扩展与共享工作区 task 也默认串行。
+        // 渲染与 history 回灌一律按原顺序；并发只影响执行时序，tool_call_id 仍按序配对。
+        // executeToolOutcome 永不抛错，失败通过结构化 status/code 返回。
         const calls = result.toolCalls;
         let i = 0;
         while (i < calls.length) {
-          if (READ_TOOL_NAMES.has(calls[i].name)) {
+          if (isParallelTool(calls[i].name)) {
             // 收集连续只读组(≥1),并发执行:先渲染所有 header，再一次性启动所有
             // (executeTool 调用即开始 I/O)，最后按原顺序逐个 await + 回灌。
             // 必须先 header 后 execute：grep 等同步快速工具会在 executeTool 返回 Promise 前
             // 已经完成；若先 started.map，用户只能在工具完成后才看到摘要与其前面的换行。
             // 异步工具(web_fetch 等)并发跑、总耗时 ≈ 最慢一个;同步工具(glob/grep)map 时已顺序跑完,await 即返。
             let j = i;
-            while (j < calls.length && READ_TOOL_NAMES.has(calls[j].name)) j++;
+            while (j < calls.length && isParallelTool(calls[j].name)) j++;
             const batch = calls.slice(i, j);
             for (const tc of batch) hooks.onToolHeader?.(tc);
             hooks.onToolStart?.(batch[0].name);
-            const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal, { dropContext }));
+            const started = batch.map((tc) => executeToolOutcome(tc.name, tc.arguments, signal, { dropContext }));
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
-              const output = await started[k];
-              hooks.onToolResult?.(tc, output, null, null, 1); // 只读工具无 diff
+              const outcome = await started[k];
+              const output = outcome.output;
+              hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
               // Thrashing:history 里附 hint(UI 已用干净 output 渲染,避免屏幕噪声)
               const hint = recordAndHint(tc.name, tc.arguments);
-              pushToolResult(history, tc, hint ? `${output}${hint}` : output, relprune, lifecycle, scheduler);
-            }
-            hooks.onToolDone?.();
-            i = j;
-          } else if (calls[i].name === 'task') {
-            // task 并发组:连续的 task 调用成组并发(子 agent 并行跑,各自独立 history)。
-            // 一次性启动全部(executeTool 即 spawnAgent,子 agent 开始跑),再并发 await + 渲染。
-            // task 是长任务,并发 fan-out 总耗时 ≈ 最慢一个子 agent。
-            // task 与 mutation/run_command 之间串行屏障(task 子 agent 可能有文件改动,不能和 write_file 乱序)。
-            // 渲染:先批量打印所有 ● 头 + 启 spinner(让用户看到多个 task 同时在跑),再逐个 await 出结果。
-            // (若像只读组那样「header → await → result」串行,长 task 的第二个 header 要等第一个跑完才出现,
-            //  视觉上只有一个在跑——与并发事实不符。)
-            //
-            // plan 模式防御 backstop(与单步串行分支同语义):schema 已剔除 task,正常不会进这里;
-            // 防后端幻觉调用——不执行(绝不派生子 agent,子 agent 可能有 mutation,违反只读),直接返错回灌。
-            if (getAgentMode() === 'plan') {
-              const tc = calls[i];
-              hooks.onToolHeader?.(tc);
-              const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
-              hooks.onToolResult?.(tc, err, null, null, 1);
-              // Thrashing:同上
-              const hint = recordAndHint(tc.name, tc.arguments);
-              pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
-              i++;
-              continue;
-            }
-            let j = i;
-            while (j < calls.length && calls[j].name === 'task') j++;
-            const batch = calls.slice(i, j);
-            // 权限预检查:逐个 task 弹确认面板(在启动子 agent 之前,体验:先问再执行)。
-            // 拒绝的 task 直接跳过,不启动子 agent;放行的收集到 allowedBatch。
-            const allowedBatch: typeof batch = [];
-            for (const tc of batch) {
-              const parsed = parseArgs(tc.arguments);
-              const tool = tools.find((t) => t.name === tc.name);
-              if (tool) {
-                const perm = await checkPermission(tool, parsed ?? {}, signal);
-                if (perm === 'deny') {
-                  hooks.onToolHeader?.(tc);
-                  const err = `错误:用户拒绝了工具 ${tc.name} 的执行。`;
-                  hooks.onToolResult?.(tc, err, null, null, 1);
-                  const hint = recordAndHint(tc.name, tc.arguments);
-                  pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
-                  continue;
-                }
-              }
-              allowedBatch.push(tc);
-            }
-            if (allowedBatch.length === 0) {
-              i = j;
-              continue; // 全部被拒绝,跳过执行
-            }
-            const started = allowedBatch.map((tc) => executeTool(tc.name, tc.arguments, signal, { dropContext }));
-            // 先批量打印所有头 + 启 spinner(多 task 并发,spinner 只显一个,但 ● 头都打出来)
-            for (const tc of allowedBatch) {
-              hooks.onToolHeader?.(tc);
-            }
-            hooks.onToolStart?.(allowedBatch[0].name); // spinner:多 task 共用一个「执行 task…」
-            // 逐个 await 出结果(按 tool_calls 原序,保 tool_call_id 配对);结果到即渲染 ↳
-            for (let k = 0; k < allowedBatch.length; k++) {
-              const tc = allowedBatch[k];
-              const output = await started[k];
-              hooks.onToolResult?.(tc, output, null, null, 1); // task 结果是摘要,无 diff
-              // Thrashing:同上
-              const hint = recordAndHint(tc.name, tc.arguments);
-              pushToolResult(history, tc, hint ? `${output}${hint}` : output, relprune, lifecycle, scheduler);
+              pushToolResult(
+                history,
+                tc,
+                hint ? `${output}${hint}` : output,
+                relprune,
+                lifecycle,
+                scheduler,
+                runtimeContextState,
+                outcome.status === 'success',
+              );
             }
             hooks.onToolDone?.();
             i = j;
@@ -638,10 +595,19 @@ export async function runAgentCore(
               const perm = await checkPermission(tool, parsed ?? {}, signal);
               if (perm === 'deny') {
                 hooks.onToolHeader?.(tc);
-                const err = `错误:用户拒绝了工具 ${tc.name} 的执行。`;
-                hooks.onToolResult?.(tc, err, null, null, 1);
+                const outcome = deniedOutcome(tc.name);
+                hooks.onToolResult?.(tc, outcome.output, null, null, 1);
                 const hint = recordAndHint(tc.name, tc.arguments);
-                pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
+                pushToolResult(
+                  history,
+                  tc,
+                  hint ? `${outcome.output}${hint}` : outcome.output,
+                  relprune,
+                  lifecycle,
+                  scheduler,
+                  runtimeContextState,
+                  false,
+                );
                 i++;
                 continue;
               }
@@ -652,14 +618,24 @@ export async function runAgentCore(
               : null;
             const { preWriteOld, editStartLine } = readDiffContext(tc, mutationParsed);
             hooks.onToolStart?.(tc.name);
-            const output = await executeTool(tc.name, tc.arguments, signal, { dropContext });
+            const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, { dropContext });
+            const output = outcome.output;
             hooks.onToolDone?.();
             hooks.onToolResult?.(tc, output, mutationParsed, preWriteOld, editStartLine);
             // Thrashing:同上(history 附 hint,UI 干净)
             const hint = recordAndHint(tc.name, tc.arguments);
-            pushToolResult(history, tc, hint ? `${output}${hint}` : output, relprune, lifecycle, scheduler);
+            pushToolResult(
+              history,
+              tc,
+              hint ? `${output}${hint}` : output,
+              relprune,
+              lifecycle,
+              scheduler,
+              runtimeContextState,
+              outcome.status === 'success',
+            );
             // 只有成功 mutation 才会使旧 read 失效；pruner 与 lifecycle 独立启停。
-            if (isMutationTool(tc.name) && isToolResultSuccess(output)) {
+            if (isMutationTool(tc.name) && outcome.status === 'success') {
               const mp = mutationParsed?.path;
               if (typeof mp === 'string' && mp) {
                 relprune?.observeMutation(history, mp);
@@ -799,4 +775,4 @@ export async function runAgentCore(
 }
 
 // ── 导出共享辅助(主 agent 的 TUI hooks 实现要用)──────────────────────────
-export { parseArgs, readDiffContext, isMutationTool, READ_TOOL_NAMES };
+export { parseArgs, readDiffContext, isMutationTool, isParallelTool };

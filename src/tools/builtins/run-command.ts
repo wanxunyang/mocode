@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { MAX_OUTPUT } from '../constants.js';
 import { getSandboxRoot, filterEnv, isCommandDenied } from '../../sandbox/index.js';
-import type { Tool } from '../types.js';
+import type { Tool, ToolOutcome } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 const OUTPUT_HEAD_LIMIT = Math.floor(MAX_OUTPUT * 0.4);
@@ -124,6 +124,25 @@ export function formatCommandResult(result: RawCommandResult): string {
   return `${t('command.exitCode', { code: result.exitCode ?? 'null' })}\n${output || t('toolSummary.noOutput')}`;
 }
 
+/** Convert the raw process status into the common structured tool contract. */
+function commandOutcome(result: RawCommandResult): ToolOutcome {
+  const output = formatCommandResult(result);
+  switch (result.status) {
+    case 'passed':
+      return { status: 'success', code: 'OK', retryable: false, output, durationMs: result.durationMs };
+    case 'aborted':
+      return { status: 'aborted', code: 'ABORTED', retryable: false, output, durationMs: result.durationMs };
+    case 'denied':
+      return { status: 'denied', code: 'SANDBOX_DENIED', retryable: false, output, durationMs: result.durationMs };
+    case 'timed_out':
+      return { status: 'error', code: 'TIMEOUT', retryable: false, output, durationMs: result.durationMs };
+    case 'failed':
+      return { status: 'error', code: 'PROCESS_FAILED', retryable: false, output, durationMs: result.durationMs };
+    case 'spawn_error':
+      return { status: 'error', code: 'EXECUTION_ERROR', retryable: false, output, durationMs: result.durationMs };
+  }
+}
+
 // ---------- run_command ----------
 export const runCommandTool: Tool = {
   name: 'run_command',
@@ -141,6 +160,6 @@ export const runCommandTool: Tool = {
   async execute(args, ctx) {
     const command = String(args.command);
     const timeout = Number(args.timeout ?? 120000);
-    return formatCommandResult(await runCommandRaw(command, timeout, ctx?.signal));
+    return commandOutcome(await runCommandRaw(command, timeout, ctx?.signal));
   },
 };

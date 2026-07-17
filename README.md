@@ -14,7 +14,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 
 - **Autonomous multi-step execution** — In a single conversation, the agent chains multiple steps on its own: read code, edit code, run tests, fix based on errors, and so on. It decides the next step without you nagging it. When it hits a decision point, it calls `ask_human` to pop up a panel and ask you (blocking until you respond).
 - **Parallel read-only tools** — Consecutive read-only operations in a turn (reading files, grep, glob, codegraph, web search/fetch) run concurrently, so total time is roughly the slowest single call instead of the sum of all of them. Operations with side effects (writing/editing files) stay sequential to preserve snapshot ordering and data safety.
-- **Sub-agents divide and conquer** — Complex tasks can spawn independent sub-agents, each with its own conversation history (isolated from the main thread), an optional restricted toolset, and a step cap. They can explore multiple code areas or directions in parallel and report back only a summary, which the main thread uses to decide what's next.
+- **Sub-agents divide and conquer** — Complex tasks can spawn independent sub-agents, each with its own conversation history (isolated from the main thread), an optional restricted toolset, and a step cap. Sub-agent calls execute serially while they share the main workspace, preventing concurrent writes from racing; each returns only a summary to the main thread.
 - **Plan / Auto dual mode** — In `plan` mode the agent is read-only (reads code, queries indexes, searches — never writes to disk, runs commands, or spawns sub-agents) and produces a plan; `auto` mode unlocks the full toolset. The agent can switch between the two on its own — scope out an unfamiliar codebase first, then start making changes.
 - **Automatic context compression** — As the context window fills up, a three-tier compression kicks in (trim individual results → compact older tool results in place → summarize older turns), so long sessions never overflow. `/context` shows live token usage; `/compact` triggers manual compression (optionally with a focus hint to preserve what matters).
 - **Cross-session long-term memory** — The agent can save project architecture, conventions, and lessons learned as long-term memory, auto-loaded in future sessions. A background process periodically reflects on conversations to mine things worth remembering. Memories can be created, searched, updated, and forgotten, with recall-based decay.
@@ -149,7 +149,7 @@ The agent operates in **the working directory it was launched from** — to have
 | `ask_human`        | Pop up a Q&A panel at decision points; user picks a preset or types freely (blocks until answered) |
 | `switch_mode`      | Switch between `plan` (read-only planning) and `auto` (full execution); the agent can call this itself to explore before acting |
 | `drop_context`     | Replace irrelevant old tool results in history with stubs to free up context (preserves tool_call_id pairing, leaves system prompt and current turn untouched, idempotent) |
-| `task`             | Spawn a sub-agent for an independent subtask (isolated history, optional restricted toolset, optional step cap); consecutive calls run in parallel automatically, returning only a summary |
+| `task`             | Spawn a sub-agent for an independent subtask (isolated history, optional restricted toolset, optional step cap); calls run serially while sharing the workspace and return only a summary |
 
 | `memory_save`      | Save a piece of cross-session long-term memory (title indexed, body fetched on demand) |
 | `memory_search`    | Search memory bodies by keyword; hits boost the recall count (affects forgetting decay) |
@@ -240,4 +240,4 @@ npm run typecheck   # tsc --noEmit
 
 ## Future extensions
 
-MCP tool integration, a permission confirmation UI, and a real worktree-isolated sub-agent mode. The current version is a streaming, reasoning-visible, rollback-capable terminal coding agent with 20 tools, working-notepad planning, cross-session memory, parallel sub-agents, and an optional desktop pet.
+MCP tool integration, finer-grained capability locks, and a real worktree-isolated sub-agent mode. The current version is a streaming, reasoning-visible, rollback-capable terminal coding agent with 20 tools, working-notepad planning, cross-session memory, capability-aware tool scheduling, serial workspace-sharing sub-agents, and an optional desktop pet.

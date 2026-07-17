@@ -1,4 +1,4 @@
-import type { Tool } from '../types.js';
+import type { Tool, ToolCapabilities } from '../types.js';
 import { readFileTool } from './read-file.js';
 import { writeFileTool } from './write-file.js';
 import { editFileTool } from './edit-file.js';
@@ -50,7 +50,36 @@ const _projectSkillTools = _projectSkillEnabledAtBoot
   ? [projectSkillUpdateTool]
   : [];
 
-export const builtinTools: Tool[] = [
+const pathResource = (args: Record<string, unknown>): string[] =>
+  typeof args.path === 'string' && args.path ? [`file:${args.path}`] : ['workspace'];
+const workspaceResource = (): string[] => ['workspace'];
+const memoryResource = (): string[] => ['memory-store'];
+
+const CAPABILITIES: Record<string, ToolCapabilities> = {
+  read_file: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: pathResource },
+  write_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource },
+  edit_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource },
+  run_command: { effect: 'process', concurrency: 'serial', retry: 'never', resources: workspaceResource, supportsAbort: true },
+  glob: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
+  grep: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
+  codegraph: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource, supportsAbort: true },
+  web_search: { effect: 'network', concurrency: 'parallel', retry: 'safe', supportsAbort: true },
+  web_fetch: { effect: 'network', concurrency: 'parallel', retry: 'safe', supportsAbort: true },
+  use_skill: { effect: 'read', concurrency: 'serial', retry: 'safe' },
+  ask_human: { effect: 'read', concurrency: 'serial', retry: 'never' },
+  switch_mode: { effect: 'write', concurrency: 'serial', retry: 'never', resources: () => ['agent-mode'] },
+  drop_context: { effect: 'write', concurrency: 'serial', retry: 'never', resources: () => ['conversation-context'] },
+  memory_save: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
+  memory_search: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
+  memory_list: { effect: 'read', concurrency: 'serial', retry: 'safe', resources: memoryResource },
+  memory_update: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
+  memory_forget: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
+  project_skill_update: { effect: 'write', concurrency: 'serial', retry: 'never', resources: workspaceResource },
+  // 子 Agent 共享主工作区；在隔离 workspace / write-set 锁实现前必须串行。
+  task: { effect: 'write', concurrency: 'serial', retry: 'never', resources: workspaceResource, supportsAbort: true },
+};
+
+const rawBuiltinTools: Tool[] = [
   readFileTool,
   writeFileTool,
   editFileTool,
@@ -62,9 +91,15 @@ export const builtinTools: Tool[] = [
   webFetchTool,
   useSkillTool,
   askHumanTool,
-  switchModeTool, // plan↔auto 自切(两模式都可见,不进 PLAN_DISABLED_TOOLS;副作用控制工具→串行分支)
-  dropContextTool, // 运行中剔除无关 tool 结果(上下文管理,无副作用;两模式都可见,串行分支)
+  switchModeTool,
+  dropContextTool,
   ..._memoryTools,
   ..._projectSkillTools,
-  taskTool, // 派生子 agent(独立 history + 可受限工具集);plan 模式禁用(见 PLAN_DISABLED_TOOLS)
+  taskTool,
 ];
+
+/** 所有内置工具均携带显式能力；新增工具遗漏声明时 registry 会保守串行。 */
+export const builtinTools: Tool[] = rawBuiltinTools.map((tool) => ({
+  ...tool,
+  capabilities: CAPABILITIES[tool.name],
+}));

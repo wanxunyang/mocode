@@ -7,8 +7,8 @@ import { t } from '../../i18n/index.js';
 // 派生子 agent 执行独立子任务。子 agent 有独立 history(不污染主对话),
 // 可受限工具子集 + 低步数上限,最终摘要回灌主 history 供主 agent 继续。
 //
-// 适用:并行探查多个文件 / 分而治之的复杂任务 / 隔离上下文避免子任务工具噪声撑爆主窗口。
-// 子 agent 中间过程不写主屏,只返回最终摘要;主 agent 据摘要决定下一步。
+// 适用:分而治之的复杂任务 / 隔离上下文避免子任务工具噪声撑爆主窗口。
+// 多个 task 在共享工作区期间由 capability scheduler 串行执行；隔离 workspace 落地后再开放并行写。
 export const taskTool: Tool = {
   name: 'task',
   risk: 'dangerous',
