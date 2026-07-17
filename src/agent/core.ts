@@ -41,6 +41,13 @@ import {
   getTokenCalibration,
   updateTokenCalibration,
 } from '../context/token-calibration.js';
+import { getCurrentTurnMutationState } from '../rollback/index.js';
+import {
+  runAutomaticValidation,
+  type ValidationCallbacks,
+  type ValidationResult,
+} from '../verification/index.js';
+import type { AgentTurnTrace } from '../session/trace.js';
 
 /** Stable per-history age state survives user turns; WeakMap avoids retaining closed sessions. */
 const ageAwareStateByHistory = new WeakMap<ChatMessage[], AgeAwareEncodingState>();
@@ -214,6 +221,9 @@ export interface AgentHooks {
   onMaxSteps?: () => void;
   /** 中断还原:停 spinner + 补换行 + (已中断)提示 + history 还原 + 模式还原。 */
   onAbort?: () => void;
+  /** 自动验证开始/结束；验证不是模型 tool_call，不写入 tool role history。 */
+  onValidationStart?: (command: string) => void;
+  onValidationResult?: (result: ValidationResult) => void;
   /** 跑完(正常/达上限)在回复末尾打耗时摘要行;中断不调。
    *  usage 是本轮 chat 调用累计的 token 用量(未开启 include_usage 或全失败时为 undefined)。 */
   onDone?: (elapsedMs: number, usage?: ChatUsage) => void;
@@ -235,6 +245,15 @@ export interface AgentRunOptions {
   toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[];
   /** 本 agent 独享的上下文统计状态；缺省为主 agent 全局 contextState。 */
   contextState?: ContextState;
+  /** 主 Agent 收尾自动验证；子 Agent 必须保持 false，由主 Agent 统一验证共享工作区。 */
+  autoValidate?: boolean;
+  /** 验证器注入点；缺省使用项目脚本发现与 run_command 同源执行器。 */
+  validator?: (
+    signal?: AbortSignal,
+    callbacks?: ValidationCallbacks,
+  ) => Promise<ValidationResult>;
+  /** 每轮结束的结构化 trace sink；写入失败不得影响 Agent。 */
+  onTrace?: (trace: AgentTurnTrace) => void;
 }
 
 /** OpenAI content array 的子集(text + image_url);repl 构造 user 多模态消息用。 */
@@ -250,6 +269,10 @@ export interface AgentRunResult {
   finalText: string | null;
   /** 本轮累计 token 用量(各 chat 步 prompt+completion 之和);后端不开 include_usage 或全失败则 undefined。 */
   usage?: ChatUsage;
+  /** 本轮最终自动验证状态；无代码变更或未启用时为空。 */
+  validation?: ValidationResult;
+  /** rollback 事务观察到的本轮实际磁盘变化。 */
+  changedFiles?: string[];
 }
 
 /**
@@ -278,6 +301,11 @@ export async function runAgentCore(
   // 本轮计时:从入口到完毕(正常 return / 达上限),供 finally 打 ✻ Worked for 摘要行。
   const t0 = Date.now();
   let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
+  let traceStatus: AgentTurnTrace['status'] = 'error';
+  let toolCallCount = 0;
+  let latestValidation: ValidationResult | undefined;
+  let validatedMutationVersion = getCurrentTurnMutationState().version;
+  const validator = opts.validator ?? runAutomaticValidation;
   // 本轮 token 累计:每步 chat() 返回后把 result.usage 累加,供 onDone 摘要行 + AgentRunResult.usage
   // 透传给 repl(显示在底栏模式 chip 右边)。未开启 include_usage 或全失败时为 undefined。
   let turnUsage: ChatUsage | undefined;
@@ -373,7 +401,14 @@ export async function runAgentCore(
       // 上一步工具被 abort 杀(run_command/web_fetch 等)→ signal.aborted,直接还原退出,不等 maybeCompact + chat()
       if (signal?.aborted) {
         abortRestore();
-        return { completed: false, finalText: null };
+        traceStatus = 'aborted';
+        const mutation = getCurrentTurnMutationState();
+        return {
+          completed: false,
+          finalText: null,
+          validation: latestValidation,
+          changedFiles: mutation.changedFiles.map((item) => item.path),
+        };
       }
       // 本步只计算一次实际工具集合，调度、请求和 usage 校准必须使用完全相同的 schema。
       const activeTools = opts.toolsOverride
@@ -436,7 +471,14 @@ export async function runAgentCore(
             (e.name === 'AbortError' || e.name === 'APIUserAbortError'))
         ) {
           abortRestore();
-          return { completed: false, finalText: null };
+          traceStatus = 'aborted';
+          const mutation = getCurrentTurnMutationState();
+          return {
+            completed: false,
+            finalText: null,
+            validation: latestValidation,
+            changedFiles: mutation.changedFiles.map((item) => item.path),
+          };
         }
         throw e;
       }
@@ -461,6 +503,7 @@ export async function runAgentCore(
       onContextUpdate?.();
 
       if (result.toolCalls.length > 0) {
+        toolCallCount += result.toolCalls.length;
         hadToolsThisTurn = true;
         // 流式正文末尾补换行(若 onToolCall 已补则 lastChar='\n',此处 no-op);防 ● 行黏在正文行尾
         if (mode !== 'idle' && lastChar !== '\n') hooks.onTextEnd?.();
@@ -652,17 +695,102 @@ export async function runAgentCore(
         continue; // 带着提示再调一次 LLM
       }
 
-      // 没有工具调用:流式正文即最终回复(已实时打印)
+      // 没有工具调用:候选正文已流式打印。若本轮有新的代码变更，先通过框架验证门；
+      // failed 作为 system observation 风格的 user 消息回灌，不能伪造无配对的 tool 消息。
       if (!gotText) hooks.onNoReply?.();
-      history.push({ role: 'assistant', content: result.content });
+      const candidate = { role: 'assistant' as const, content: result.content } as ChatMessage;
+      const mutationBeforeValidation = getCurrentTurnMutationState();
+      const shouldValidate =
+        opts.autoValidate === true &&
+        getAgentMode() !== 'plan' &&
+        mutationBeforeValidation.version > validatedMutationVersion;
+
+      if (shouldValidate) {
+        history.push(candidate);
+        try {
+          latestValidation = await validator(signal, {
+            onCommandStart: (command) => hooks.onValidationStart?.(command),
+          });
+        } catch (error) {
+          const mutation = getCurrentTurnMutationState();
+          latestValidation = {
+            status: signal?.aborted ? 'aborted' : 'failed',
+            output: `Automatic validation failed to run: ${error instanceof Error ? error.message : String(error)}`,
+            durationMs: 0,
+            changedFiles: mutation.changedFiles.map((item) => item.path),
+            mutationVersion: mutation.version,
+          };
+        }
+        hooks.onValidationResult?.(latestValidation);
+        validatedMutationVersion = latestValidation.mutationVersion;
+
+        if (signal?.aborted || latestValidation.status === 'aborted') {
+          abortRestore();
+          traceStatus = 'aborted';
+          const mutation = getCurrentTurnMutationState();
+          return {
+            completed: false,
+            finalText: null,
+            validation: latestValidation,
+            changedFiles: mutation.changedFiles.map((item) => item.path),
+          };
+        }
+
+        if (latestValidation.status === 'failed') {
+          history.push({
+            role: 'user',
+            content:
+              '[System observation: automatic validation failed]\n' +
+              `Command: ${latestValidation.command ?? '(internal verifier)'}\n` +
+              `${latestValidation.output}\n\n` +
+              'Fix the reported problem, then finish the task. Do not claim success until validation passes.',
+          });
+          // 验证及其失败观察均已完整落入 history；下一步中断时可安全保留。
+          savedHistory = history.slice();
+          continue;
+        }
+      } else {
+        history.push(candidate);
+      }
+
+      const finalMutation = getCurrentTurnMutationState();
       done = true;
-      return { completed: true, finalText: result.content, usage: turnUsage };
+      traceStatus = 'completed';
+      return {
+        completed: true,
+        finalText: result.content,
+        usage: turnUsage,
+        validation: latestValidation,
+        changedFiles: finalMutation.changedFiles.map((item) => item.path),
+      };
     }
 
     hooks.onMaxSteps?.();
     done = true;
-    return { completed: true, finalText: null, usage: turnUsage };
+    traceStatus = 'max_steps';
+    const finalMutation = getCurrentTurnMutationState();
+    return {
+      completed: true,
+      finalText: null,
+      usage: turnUsage,
+      validation: latestValidation,
+      changedFiles: finalMutation.changedFiles.map((item) => item.path),
+    };
   } finally {
+    const finalMutation = getCurrentTurnMutationState();
+    try {
+      opts.onTrace?.({
+        ts: new Date().toISOString(),
+        status: traceStatus,
+        durationMs: Date.now() - t0,
+        toolCalls: toolCallCount,
+        changedFiles: finalMutation.changedFiles.map((item) => item.path),
+        usage: turnUsage,
+        validation: latestValidation,
+      });
+    } catch {
+      // Trace is best-effort and must not change the turn result.
+    }
     // 跑完(正常 / 达上限)在回复末尾打耗时摘要行;中断 done=false 不打。
     if (done) {
       hooks.onDone?.(Date.now() - t0, turnUsage);

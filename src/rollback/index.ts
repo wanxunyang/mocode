@@ -74,9 +74,16 @@ export interface WorkspaceMutationCapture {
   entries: Map<string, StoredState>;
 }
 
+export interface CurrentTurnMutationState {
+  version: number;
+  changedFiles: FileChange[];
+}
+
 let turnIdCounter = 0;
 let currentTurnId = 0;
 let sequenceCounter = 0;
+/** Monotonic process-local generation; repeated writes to one path still invalidate validation. */
+let mutationVersion = 0;
 let turns: Turn[] = [];
 let snapshots: Snapshot[] = [];
 
@@ -212,8 +219,10 @@ export function beginPathMutation(p: string): PathMutationCapture {
 export function endPathMutation(capture: PathMutationCapture, op: string): void {
   const full = safeFullPath(capture.path);
   if (!full) return;
+  let changed = false;
   const after = readState(full);
   if (!sameState(capture.before, after)) {
+    changed = true;
     addSnapshot(
       snapshotFromState(
         capture.path,
@@ -228,11 +237,13 @@ export function endPathMutation(capture: PathMutationCapture, op: string): void 
   for (const parentRel of capture.createdParents) {
     const parent = safeFullPath(parentRel);
     if (parent && readState(parent).kind !== 'missing') {
+      changed = true;
       addSnapshot(
         snapshotFromState(parentRel, { kind: 'missing' }, capture.sequence, op),
       );
     }
   }
+  if (changed) mutationVersion += 1;
 }
 
 function isWorkspaceExcluded(full: string): boolean {
@@ -279,12 +290,34 @@ export function endWorkspaceMutation(
 ): void {
   const after = scanWorkspace();
   const paths = new Set([...capture.entries.keys(), ...after.keys()]);
+  let changed = false;
   for (const rel of paths) {
     const beforeState = capture.entries.get(rel) ?? { kind: 'missing' as const };
     const afterState = after.get(rel) ?? { kind: 'missing' as const };
     if (sameState(beforeState, afterState)) continue;
+    changed = true;
     addSnapshot(snapshotFromState(rel, beforeState, capture.sequence, op));
   }
+  if (changed) mutationVersion += 1;
+}
+
+/** Current main turn changes, deduplicated by path, plus a generation for validation invalidation. */
+export function getCurrentTurnMutationState(): CurrentTurnMutationState {
+  const order: string[] = [];
+  const byPath = new Map<string, FileChange>();
+  for (const snapshot of snapshots) {
+    if (snapshot.turnId !== currentTurnId) continue;
+    let change = byPath.get(snapshot.path);
+    if (!change) {
+      change = { path: snapshot.path, ops: [], snapshotAvailable: true };
+      byPath.set(snapshot.path, change);
+      order.push(snapshot.path);
+    }
+    for (const op of snapshot.ops ?? ['file_change']) {
+      if (!change.ops.includes(op)) change.ops.push(op);
+    }
+  }
+  return { version: mutationVersion, changedFiles: order.map((item) => byPath.get(item)!) };
 }
 
 export function listTurns(): Turn[] {

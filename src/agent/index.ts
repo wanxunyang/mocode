@@ -29,6 +29,7 @@ import {
 import { createPetHooks } from '../pet/state.js';
 import { t } from '../i18n/index.js';
 import { isToolErrorOutput } from '../tools/result.js';
+import { appendCurrentSessionTrace } from '../session/index.js';
 
 /** 当前 turn 的 batch id(runAgent 内闭包变量;一条 turn 一轮 tool batch 结束即清空)。 */
 let currentBatchId: string | null = null;
@@ -214,6 +215,25 @@ export async function runAgent(
       flushToolBatch();
       layout.contentWrite(`${ui.dim}${t('agent.aborted')}${ui.reset}\n`);
     },
+    onValidationStart: (command) => {
+      flushToolBatch();
+      spinner.start(t('agent.validating', { command }));
+    },
+    onValidationResult: (validation) => {
+      spinner.stop();
+      const color = validation.status === 'passed'
+        ? ui.green
+        : validation.status === 'failed'
+          ? ui.red
+          : ui.yellow;
+      const command = validation.command ?? t('agent.validationNoCommand');
+      const detail = validation.status === 'skipped' && validation.skipReason
+        ? `${validation.status}: ${validation.skipReason}`
+        : validation.status;
+      layout.contentWrite(
+        `  ${color}●${ui.reset} ${t('agent.validationResult', { command, status: detail })}\n`,
+      );
+    },
     onDone: (elapsedMs, usage) => {
       flushToolBatch();
       const tok = formatTurnTokens(usage);
@@ -241,6 +261,8 @@ export async function runAgent(
       signal,
       onContextUpdate,
       hooks: combinedHooks,
+      autoValidate: config.autoValidate,
+      onTrace: appendCurrentSessionTrace,
     });
   } finally {
     spinner.stop();

@@ -162,6 +162,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     maxSteps,
     toolsOverride,
     contextState: localContextState,
+    autoValidate: false, // 子 Agent 共享主轮工作区，由主 Agent 收尾统一验证
   });
 
   return {

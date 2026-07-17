@@ -29,6 +29,101 @@ class BoundedCommandOutput {
   }
 }
 
+export interface RawCommandResult {
+  status: 'passed' | 'failed' | 'timed_out' | 'aborted' | 'spawn_error' | 'denied';
+  exitCode: number | null;
+  output: string;
+  durationMs: number;
+}
+
+/** Execute a command with the same sandbox, output cap and cancellation semantics as run_command. */
+export async function runCommandRaw(
+  command: string,
+  timeout = 120000,
+  signal?: AbortSignal,
+): Promise<RawCommandResult> {
+  const startedAt = Date.now();
+  const deny = isCommandDenied(command);
+  if (deny) {
+    return { status: 'denied', exitCode: null, output: `错误:${deny}`, durationMs: 0 };
+  }
+
+  return new Promise<RawCommandResult>((done) => {
+    const isWin = process.platform === 'win32';
+    const child = spawn(
+      isWin ? 'cmd.exe' : 'bash',
+      isWin ? ['/d', '/s', '/c', command] : ['-c', command],
+      {
+        cwd: getSandboxRoot() ?? process.cwd(),
+        env: filterEnv(process.env),
+        // Without this, Node re-quotes cmd.exe arguments and `node -e "..."` can become
+        // a string literal that exits 0, causing false-positive validation on Windows.
+        windowsVerbatimArguments: isWin,
+      },
+    );
+    const output = new BoundedCommandOutput();
+    let finished = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const killTree = (): void => {
+      try {
+        if (isWin) {
+          if (child.pid != null) {
+            spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+          }
+        } else {
+          child.kill('SIGTERM');
+        }
+      } catch {
+        // Process already exited or best-effort termination failed.
+      }
+    };
+    const finish = (result: Omit<RawCommandResult, 'durationMs'>): void => {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      done({ ...result, durationMs: Date.now() - startedAt });
+    };
+    const onAbort = (): void => {
+      killTree();
+      finish({ status: 'aborted', exitCode: null, output: output.render().trim() });
+    };
+    const onChunk = (chunk: Buffer): void => output.append(chunk.toString('utf8'));
+
+    child.stdout.on('data', onChunk);
+    child.stderr.on('data', onChunk);
+    child.on('error', (error) => {
+      finish({ status: 'spawn_error', exitCode: null, output: error.message });
+    });
+    child.on('close', (code) => {
+      finish({
+        status: code === 0 ? 'passed' : 'failed',
+        exitCode: code,
+        output: output.render().trim(),
+      });
+    });
+    timer = setTimeout(() => {
+      killTree();
+      finish({ status: 'timed_out', exitCode: null, output: output.render().trim() });
+    }, timeout);
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+}
+
+/** Preserve the public run_command text protocol while exposing structured status internally. */
+export function formatCommandResult(result: RawCommandResult): string {
+  const output = result.output.trim();
+  if (result.status === 'denied') return result.output;
+  if (result.status === 'aborted') return `${t('command.interrupted')}\n${output}`;
+  if (result.status === 'timed_out') return `${t('command.timedOut')}\n${output}`;
+  if (result.status === 'spawn_error') return t('command.executionFailed', { message: result.output });
+  return `${t('command.exitCode', { code: result.exitCode ?? 'null' })}\n${output || t('toolSummary.noOutput')}`;
+}
+
 // ---------- run_command ----------
 export const runCommandTool: Tool = {
   name: 'run_command',
@@ -46,68 +141,6 @@ export const runCommandTool: Tool = {
   async execute(args, ctx) {
     const command = String(args.command);
     const timeout = Number(args.timeout ?? 120000);
-    // 沙箱 best-effort:灾难性文件操作 denylist(非安全边界,只挡误操作;真隔离需 OS jailer)。
-    const deny = isCommandDenied(command);
-    if (deny) return `错误:${deny}`;
-    return new Promise<string>((done) => {
-      const isWin = process.platform === 'win32';
-      // 沙箱 best-effort:cwd 钉死 sandbox root(相对路径写落在牢内)+ env 脱敏(剥 *KEY/*TOKEN 等,防 LLM_API_KEY 泄子进程)
-      const child = spawn(
-        isWin ? 'cmd.exe' : 'bash',
-        isWin ? ['/c', command] : ['-c', command],
-        { cwd: getSandboxRoot() ?? process.cwd(), env: filterEnv(process.env) }
-      );
-      const output = new BoundedCommandOutput();
-      let finished = false;
-      let timer: ReturnType<typeof setTimeout>;
-      // 杀整棵进程树。child.kill() 在 Windows 只杀 cmd.exe、npm 等子进程会孤儿继续跑(占锁、污染下一步),
-      // 故 Win 用 taskkill /T /F 树杀;Unix child.kill('SIGTERM')(bash -c 通常转发给前台子进程,best-effort)。
-      const killTree = (): void => {
-        try {
-          if (isWin) {
-            if (child.pid != null) {
-              spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-                stdio: 'ignore',
-              });
-            }
-          } else {
-            child.kill('SIGTERM');
-          }
-        } catch {
-          // 进程已退出 / kill 失败:忽略(close 事件会兜底 finish)
-        }
-      };
-      // abort(用户 Ctrl+C,经 executeTool ctx.signal 透传)→ 杀子进程树 + 返[已中断]
-      const onAbort = (): void => {
-        killTree();
-        finish(`${t('command.interrupted')}\n${output.render().trim()}`);
-      };
-      const finish = (s: string): void => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        ctx?.signal?.removeEventListener('abort', onAbort);
-        done(s);
-      };
-      const onChunk = (chunk: Buffer): void => {
-        output.append(chunk.toString('utf8'));
-      };
-      child.stdout.on('data', onChunk);
-      child.stderr.on('data', onChunk);
-      child.on('error', (e) => finish(t('command.executionFailed', { message: e.message })));
-      child.on('close', (code) => {
-        const result = output.render().trim();
-        finish(`${t('command.exitCode', { code: code ?? 'null' })}\n${result || t('toolSummary.noOutput')}`);
-      });
-      timer = setTimeout(() => {
-        killTree();
-        finish(`${t('command.timedOut')}\n${output.render().trim()}`);
-      }, timeout);
-      // 外部 abort signal:已 aborted 即时杀(防御;agent 循环顶检查通常会先拦),否则挂监听
-      if (ctx?.signal) {
-        if (ctx.signal.aborted) onAbort();
-        else ctx.signal.addEventListener('abort', onAbort, { once: true });
-      }
-    });
+    return formatCommandResult(await runCommandRaw(command, timeout, ctx?.signal));
   },
 };

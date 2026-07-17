@@ -105,6 +105,7 @@ Common backend `base_url` values:
 | `COMPACT_THRESHOLD`         | Auto-compaction trigger threshold (fraction of window)                | `0.85`                      |
 | `LLM_STREAM_USAGE`          | Include `stream_options.include_usage` on streaming requests for real usage | `true`                |
 | `AUTO_COMPACT`               | Auto-compaction master switch                                          | `true`                       |
+| `MOCODE_AUTO_VALIDATE`       | Auto-run the lowest-cost discovered validation command after code changes; feed failures back to the agent | `true` |
 | `AUTO_REFLECT`               | Background reflection pass master switch (periodically mines memories from conversations) | `true`   |
 | `REFLECT_EVERY_N`            | Trigger a background reflection every N turns (runs alongside the agent, non-blocking) | `5`      |
 | `ANYSEARCH_API_KEY`         | Web search API key (falls back to anonymous free quota if unset)      | none                         |

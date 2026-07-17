@@ -38,3 +38,6 @@ export {
   sessionDir,
 } from './persist.js';
 export type { SessionMeta, SessionRecord } from './persist.js';
+
+export { appendCurrentSessionTrace } from './trace.js';
+export type { AgentTurnTrace } from './trace.js';

@@ -21,6 +21,7 @@
     "start": "tsx src/index.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "eval:smoke": "tsx evals/smoke.ts",
     "prepare": "npm run build"
   },
   "dependencies": {
