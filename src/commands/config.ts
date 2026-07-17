@@ -1,5 +1,6 @@
 import * as readline from 'node:readline';
 import { CONFIG_PATH, readConfigFile, writeConfigKeys } from '../config/file.js';
+import { detectLanguage, setLanguage, t } from '../i18n/index.js';
 
 function ask(rl: readline.Interface, q: string): Promise<string> {
   return new Promise((resolve) => {
@@ -16,35 +17,36 @@ function ask(rl: readline.Interface, q: string): Promise<string> {
  */
 export async function runConfigWizard(): Promise<void> {
   const cur = readConfigFile();
+  setLanguage(detectLanguage(process.env.MOCODE_LANGUAGE ?? cur.MOCODE_LANGUAGE));
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-  console.log(`mocode 配置向导 — 写入 ${CONFIG_PATH}(Ctrl+C 取消)\n`);
+  console.log(`${t('config.title', { path: CONFIG_PATH })}\n`);
 
   const baseURLIn = await ask(
     rl,
-    `LLM_BASE_URL${cur.LLM_BASE_URL ? ` [${cur.LLM_BASE_URL}]` : ''}(如 https://open.bigmodel.cn/api/v3): `,
+    `LLM_BASE_URL${cur.LLM_BASE_URL ? ` [${cur.LLM_BASE_URL}]` : ''}${t('config.example')}: `,
   );
   const baseURL = baseURLIn || cur.LLM_BASE_URL || '';
   if (!baseURL) {
-    console.error('\n[config] LLM_BASE_URL 不能为空,已取消。');
+    console.error(t('config.required', { key: 'LLM_BASE_URL' }));
     rl.close();
     process.exit(1);
   }
 
   const apiKeyIn = await ask(
     rl,
-    `LLM_API_KEY${cur.LLM_API_KEY ? ' [已设置,回车保留]' : ''}: `,
+    `LLM_API_KEY${cur.LLM_API_KEY ? t('config.keySet') : ''}: `,
   );
   const apiKey = apiKeyIn || cur.LLM_API_KEY || '';
   if (!apiKey) {
-    console.error('\n[config] LLM_API_KEY 不能为空,已取消。');
+    console.error(t('config.required', { key: 'LLM_API_KEY' }));
     rl.close();
     process.exit(1);
   }
 
   const modelIn = await ask(
     rl,
-    `LLM_MODEL${cur.LLM_MODEL ? ` [${cur.LLM_MODEL}]` : ''}(回车默认 gpt-4o-mini): `,
+    `LLM_MODEL${cur.LLM_MODEL ? ` [${cur.LLM_MODEL}]` : ''}${t('config.modelDefault')}: `,
   );
   const model = modelIn || cur.LLM_MODEL || 'gpt-4o-mini';
 
@@ -57,5 +59,5 @@ export async function runConfigWizard(): Promise<void> {
     LLM_MODEL: model,
   });
 
-  console.log(`\n已写入 ${CONFIG_PATH}。现在运行 \`mocode\` 即可启动(任意目录、任意终端)。`);
+  console.log(t('config.done', { path: CONFIG_PATH }));
 }

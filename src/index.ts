@@ -1,5 +1,7 @@
 import { exitAltScreen } from './ui/layout.js';
 import { checkAndMaybeUpdate } from './updater/index.js';
+import { readConfigFile } from './config/file.js';
+import { detectLanguage, setLanguage, t } from './i18n/index.js';
 
 // 终端恢复兜底:任一退出 / 中断 / 未捕获异常路径都要恢复 alt screen,避免残留备用屏 + 滚动区域。
 // exitAltScreen 幂等(未激活时空操作),故全局注册安全——进 alt screen 前的路径(如 --resume 列表、缺环境变量、`mocode config`)调用它无副作用。
@@ -36,6 +38,8 @@ process.on('unhandledRejection', (e) => {
  * 显式 process.exit(0)——OpenAI 客户端的 keep-alive 会卡住事件循环。
  */
 async function main(): Promise<void> {
+  const savedLanguage = readConfigFile().MOCODE_LANGUAGE;
+  setLanguage(detectLanguage(process.env.MOCODE_LANGUAGE ?? savedLanguage));
   const args = process.argv.slice(2);
 
   // --sandbox-root <path>:覆盖沙箱根(文件操作边界)。缺值或以 -- 开头报错退出。
@@ -44,7 +48,7 @@ async function main(): Promise<void> {
   if (sr !== -1) {
     sandboxRootOverride = args[sr + 1];
     if (!sandboxRootOverride || sandboxRootOverride.startsWith('--')) {
-      console.error('[cli] --sandbox-root 需要一个路径参数');
+      console.error(t('cli.sandboxPath'));
       process.exit(1);
     }
   }
@@ -64,17 +68,17 @@ async function main(): Promise<void> {
       // 裸 --resume:列出会话后退出
       const sessions = listSessions();
       if (sessions.length === 0) {
-        console.log('(没有已保存的会话)');
+        console.log(t('cli.noSessions'));
       } else {
         for (const s of sessions) {
-          console.log(`${s.id}  ${s.firstUser || '(无)'}  ${s.model}`);
+          console.log(`${s.id}  ${s.firstUser || t('cli.noValue')}  ${s.model}`);
         }
       }
       process.exit(0);
     }
     const loaded = loadSession(id);
     if (!loaded || !loaded.history.length) {
-      console.error(`[session] 找不到会话 ${id}(用 --resume 查看列表)`);
+      console.error(t('cli.sessionMissing', { id }));
       process.exit(1);
     }
     const updateNotice = checkAndMaybeUpdate();

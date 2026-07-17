@@ -5,6 +5,7 @@ import { ui } from './theme.js';
 import { displayWidth, padEndDisplay, truncateDisplay, visColToCharCol, wrapByDisplayWidth } from './render.js';
 import * as layout from './layout.js';
 import * as mouse from './mouse.js';
+import { t } from '../i18n/index.js';
 
 export interface SlashCommand {
   /** 当前菜单层显示的名称。根节点通常以 / 开头，子节点使用相对名称。 */
@@ -179,8 +180,11 @@ export async function promptWithSlashMenu(
     if (!chip) return '';
     const lines = chip.split('\n').length;
     const chars = chip.length;
-    const charStr = chars < 1000 ? `${chars} 字符` : `${(chars / 1000).toFixed(1)}K 字符`;
-    return `[📋 ${lines} 行 · ${charStr}] `;
+    const lineText = t('prompt.lines', { count: lines });
+    const charText = t('prompt.chars', {
+      count: chars < 1000 ? chars : `${(chars / 1000).toFixed(1)}K`,
+    });
+    return `[📋 ${lineText} · ${charText}] `;
   }
   /** chipPre 按行拆分(粘贴发生前光标之前已有的文本,可能多行,原样保留在 chip 之前)。 */
   function chipPreLines(): string[] {
@@ -777,7 +781,7 @@ export async function promptTurnPicker(
 ): Promise<number | null> {
   if (!layout.isActive() || items.length === 0) return null;
   const emitter = stdin as unknown as KeypressEmitter;
-  const hint = '↑↓ 选择 · Enter 回滚到该轮 · Esc 取消';
+  const hint = t('prompt.chooseRollback');
   let selected = items.length - 1; // 默认聚焦最新(末项,菜单底、靠近输入框)
   let resolved = false;
   let resolve!: (v: number | null) => void;
@@ -921,11 +925,11 @@ export async function promptSessionPicker(
   }
   /** 输入框行的操作提示;折叠态显「a 全部(N)」,展开态显「a 仅最近N」。不超 cap 时无 a 项。 */
   function hint(): string {
-    const base = '↑↓ 选择 · Enter 续接 · Esc 取消';
+    const base = t('prompt.chooseResume');
     if (!canToggle) return base;
     return showAll
-      ? `↑↓ 选择 · Enter 续接 · a 仅最近${cap} · Esc 取消`
-      : `↑↓ 选择 · Enter 续接 · a 全部(${items.length}) · Esc 取消`;
+      ? t('prompt.recent', { count: cap })
+      : t('prompt.all', { count: items.length });
   }
 
   /** 菜单行(带开窗):超屏高时以 selected 为中心取窗,保光标可见。行格式:▸ N  title  subtitle。 */
@@ -1072,7 +1076,7 @@ export async function promptThemePicker(
   let resolve!: (v: SessionPickerItem | null) => void;
   let reject!: (e: Error) => void;
 
-  const hint = '↑↓ 选择 · Enter 切换 · Esc 取消';
+  const hint = t('prompt.chooseSwitch');
 
   /** 菜单行(带开窗):超屏高时以 selected 为中心取窗,保光标可见。行格式:▸ N  title  subtitle。 */
   function menuLines(): string[] {
@@ -1200,10 +1204,11 @@ export async function promptThemePicker(
 export async function promptRevertChoice(fileCount: number): Promise<boolean | null> {
   if (!layout.isActive()) return null;
   const emitter = stdin as unknown as KeypressEmitter;
-  const hint = '↑↓ 选择 · Enter 确认 · Esc 保留文件';
+  const hint = t('prompt.keepFiles');
+  const detail = fileCount > 0 ? t('prompt.revertDetail', { count: fileCount }) : '';
   const items = [
-    `撤销文件改动${fileCount > 0 ? `(${fileCount} 个文件恢复到回滚前)` : ''}`,
-    '只撤销消息,保留文件改动',
+    t('prompt.revertFiles', { detail }),
+    t('prompt.messagesOnly'),
   ];
   let selected = 0; // 默认聚焦首项(撤销文件)
   let resolved = false;

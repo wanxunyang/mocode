@@ -19,6 +19,7 @@ import * as mouse from './mouse.js';
 import { shiftBatchesAfter } from './batch.js';
 import { copyToClipboard, readClipboard } from './clipboard.js';
 import { renderMarkdown } from './markdown.js';
+import { t } from '../i18n/index.js';
 
 /**
  * 全屏 TUI 布局:alt screen + 单滚动区域(内容区)+ 区域外固定底栏(状态行 + 输入框)。
@@ -1394,7 +1395,7 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
   let tail = '';
   let tailW = 0;
   if (scrolled) {
-    tail = `历史 ↑${scrollOffset} (PgDn 回底)`;
+    tail = t('status.history', { count: scrollOffset });
     tailW = displayWidth(tail);
   }
   const rightStr = tail ? `${ui.yellow}${tail}${ui.reset}` : '';
@@ -1413,7 +1414,7 @@ function composeModelLine(status: StatusBarData, cols: number): string {
   const modePart = modeTag ? `${modeColor}${modeTag}${ui.reset}` : '';
   const modeW = modeTag ? displayWidth(modeTag) : 0;
   // 切换提示:告诉用户怎么切模式。灰(dim)降优先级,不与 modeTag 抢色;只在有 modeTag 时出现。
-  const HINT = 'Shift+Tab 切换';
+  const HINT = t('status.modeSwitch');
   const hintW = modeTag ? displayWidth(HINT) : 0;
   const hintPart = modeTag ? `${ui.dim}${HINT}${ui.reset}` : '';
   const tokChip = formatTurnTokenChip(status.lastTurnUsage);

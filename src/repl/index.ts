@@ -11,9 +11,17 @@ import {
   isProjectSnapshotEnabled,
   updateProjectSkillConfig,
   updateSnapshotConfig,
+  updateLanguageConfig,
+  languageFromShell,
   buildBasePrompt,
   getPlanModeSuffix,
 } from '../config/index.js';
+import {
+  getLanguage,
+  normalizeLanguage,
+  t,
+  type TranslationKey,
+} from '../i18n/index.js';
 import { updateConfigKey, writeConfigKeys, CONFIG_PATH } from '../config/file.js';
 import {
   deletePreset,
@@ -109,101 +117,94 @@ const PROMPT = '❯ ';
  * 斜杠命令树(仅用于输入菜单；分发仍走下方 if 链)。
  * 分支节点只负责导航，叶子的 value 保持现有命令文本，因此不破坏命令兼容性。
  */
-const SLASH_COMMANDS: SlashCommand[] = [
-  { name: '/help', desc: '查看所有命令' },
-  { name: '/exit', desc: '退出 mocode(同 /quit)' },
-  { name: '/clear', desc: '清空历史(保留系统提示)' },
-  { name: '/context', desc: '显示上下文用量条' },
-  { name: '/skills', desc: '列出已发现的 skill' },
-  { name: '/compact', desc: '压缩历史(可带焦点 /compact …)' },
-  {
-    name: '/session',
-    desc: '会话恢复与回滚',
-    children: [
-      { name: 'resume', value: '/resume', desc: '续接最近 10 个已保存会话(快速)' },
-      { name: 'browse', value: '/sessions', desc: '浏览全部已保存会话' },
-      { name: 'rollback', value: '/rollback', desc: '菜单选轮次回滚(↑↓·Enter)' },
-    ],
-  },
-  {
-    name: '/memory',
-    desc: '记忆库、开关与反思',
-    children: [
-      { name: 'overview', value: '/memory', desc: '条目计数与近期索引' },
-      { name: 'toggle', value: '/memory_switch', desc: '切换记忆子系统开关' },
-      { name: 'on', value: '/memory_switch on', desc: '开启记忆子系统' },
-      { name: 'off', value: '/memory_switch off', desc: '关闭记忆子系统' },
-      { name: 'status', value: '/memory_status', desc: '查看当前开关与原理' },
-      { name: 'reflect', value: '/reflect', desc: '手动触发后台记忆反思' },
-      { name: 'init', value: '/init', desc: '扫描项目生成 MOCODE.md 项目记忆' },
-    ],
-  },
-  {
-    name: '/project_skill',
-    desc: '项目专属 Skill 管理',
-    children: [
-      { name: 'toggle', value: '/project_skill', desc: '切换开关' },
-      { name: 'on', value: '/project_skill on', desc: '开启项目 Skill' },
-      { name: 'off', value: '/project_skill off', desc: '关闭项目 Skill' },
-      { name: 'view', value: '/project_skill view', desc: '查看当前内容' },
-      { name: 'init', value: '/project_skill init', desc: '扫描项目生成或优化 Skill' },
-    ],
-  },
-  {
-    name: '/snapshot',
-    desc: '项目快照管理',
-    children: [
-      { name: 'toggle', value: '/snapshot', desc: '切换快照开关' },
-      { name: 'on', value: '/snapshot on', desc: '开启项目快照' },
-      { name: 'off', value: '/snapshot off', desc: '关闭项目快照' },
-      { name: 'status', value: '/snapshot status', desc: '查看当前状态' },
-      { name: 'refresh', value: '/snapshot_refresh', desc: '重新扫描并生成快照摘要' },
-    ],
-  },
-  { name: '/theme', desc: '切换颜色主题(↑↓·Enter)' },
-  {
-    name: '/model',
-    desc: '模型配置与预设管理',
-    children: [
-      { name: 'configure', value: '/model', desc: '配置新模型(向导)' },
-      { name: 'switch', value: '/model switch', desc: '切换已配置预设' },
-      { name: 'list', value: '/model list', desc: '列出已配置模型' },
-      { name: 'show', value: '/model show', desc: '显示当前模型配置' },
-      { name: 'use <name>', value: '/model use ', submit: false, desc: '按名称应用预设' },
-      { name: 'delete <name>', value: '/model delete ', submit: false, desc: '删除指定预设' },
-    ],
-  },
-  {
-    name: '/mode',
-    desc: '切换 Agent 工作模式',
-    children: [
-      { name: 'plan', value: '/plan', desc: '只读探查并产出计划' },
-      { name: 'auto', value: '/auto', desc: '全工具自动执行' },
-    ],
-  },
-  {
-    name: '/pet',
-    desc: '桌宠控制',
-    children: [
-      { name: 'toggle', value: '/pet', desc: '显示或隐藏桌宠' },
-      { name: 'skin', value: '/pet skin', desc: '选择桌宠皮肤' },
-      { name: 'quit', value: '/pet quit', desc: '完全关闭桌宠进程' },
-    ],
-  },
-  {
-    name: '/image',
-    desc: '管理下一条消息的图片',
-    children: [
-      { name: 'attach <path>', value: '/image ', submit: false, desc: '附加本地图片' },
-      { name: 'list', value: '/image list', desc: '列出待发送图片' },
-      { name: 'clear', value: '/image clear', desc: '清空待发送图片' },
-    ],
-  },
-];
+function buildSlashCommands(): SlashCommand[] {
+  const d = (key: TranslationKey): string => t(key);
+  return [
+    { name: '/help', desc: d('commands.help') },
+    { name: '/exit', desc: d('commands.exit') },
+    { name: '/clear', desc: d('commands.clear') },
+    { name: '/context', desc: d('commands.context') },
+    { name: '/skills', desc: d('commands.skills') },
+    { name: '/compact', desc: d('commands.compact') },
+    {
+      name: '/session', desc: d('commands.session'), children: [
+        { name: 'resume', value: '/resume', desc: d('commands.sessionResume') },
+        { name: 'browse', value: '/sessions', desc: d('commands.sessionBrowse') },
+        { name: 'rollback', value: '/rollback', desc: d('commands.sessionRollback') },
+      ],
+    },
+    {
+      name: '/memory', desc: d('commands.memory'), children: [
+        { name: 'overview', value: '/memory', desc: d('commands.memoryOverview') },
+        { name: 'toggle', value: '/memory_switch', desc: d('commands.memoryToggle') },
+        { name: 'on', value: '/memory_switch on', desc: d('commands.memoryOn') },
+        { name: 'off', value: '/memory_switch off', desc: d('commands.memoryOff') },
+        { name: 'status', value: '/memory_status', desc: d('commands.memoryStatus') },
+        { name: 'reflect', value: '/reflect', desc: d('commands.memoryReflect') },
+        { name: 'init', value: '/init', desc: d('commands.memoryInit') },
+      ],
+    },
+    {
+      name: '/project_skill', desc: d('commands.skill'), children: [
+        { name: 'toggle', value: '/project_skill', desc: d('commands.toggle') },
+        { name: 'on', value: '/project_skill on', desc: d('commands.skillOn') },
+        { name: 'off', value: '/project_skill off', desc: d('commands.skillOff') },
+        { name: 'view', value: '/project_skill view', desc: d('commands.skillView') },
+        { name: 'init', value: '/project_skill init', desc: d('commands.skillInit') },
+      ],
+    },
+    {
+      name: '/snapshot', desc: d('commands.snapshot'), children: [
+        { name: 'toggle', value: '/snapshot', desc: d('commands.snapshotToggle') },
+        { name: 'on', value: '/snapshot on', desc: d('commands.snapshotOn') },
+        { name: 'off', value: '/snapshot off', desc: d('commands.snapshotOff') },
+        { name: 'status', value: '/snapshot status', desc: d('commands.snapshotStatus') },
+        { name: 'refresh', value: '/snapshot_refresh', desc: d('commands.snapshotRefresh') },
+      ],
+    },
+    { name: '/theme', desc: d('commands.theme') },
+    {
+      name: '/model', desc: d('commands.model'), children: [
+        { name: 'configure', value: '/model', desc: d('commands.modelConfigure') },
+        { name: 'switch', value: '/model switch', desc: d('commands.modelSwitch') },
+        { name: 'list', value: '/model list', desc: d('commands.modelList') },
+        { name: 'show', value: '/model show', desc: d('commands.modelShow') },
+        { name: 'use <name>', value: '/model use ', submit: false, desc: d('commands.modelUse') },
+        { name: 'delete <name>', value: '/model delete ', submit: false, desc: d('commands.modelDelete') },
+      ],
+    },
+    {
+      name: '/mode', desc: d('commands.mode'), children: [
+        { name: 'plan', value: '/plan', desc: d('commands.modePlan') },
+        { name: 'auto', value: '/auto', desc: d('commands.modeAuto') },
+      ],
+    },
+    {
+      name: '/pet', desc: d('commands.pet'), children: [
+        { name: 'toggle', value: '/pet', desc: d('commands.petToggle') },
+        { name: 'skin', value: '/pet skin', desc: d('commands.petSkin') },
+        { name: 'quit', value: '/pet quit', desc: d('commands.petQuit') },
+      ],
+    },
+    {
+      name: '/image', desc: d('commands.image'), children: [
+        { name: 'attach <path>', value: '/image ', submit: false, desc: d('commands.imageAttach') },
+        { name: 'list', value: '/image list', desc: d('commands.imageList') },
+        { name: 'clear', value: '/image clear', desc: d('commands.imageClear') },
+      ],
+    },
+    {
+      name: '/language', desc: d('commands.language'), children: [
+        { name: 'zh-CN', value: '/language zh-CN', desc: d('commands.languageZh') },
+        { name: 'en', value: '/language en', desc: d('commands.languageEn') },
+      ],
+    },
+  ];
+}
 
 /** 从菜单树递归生成 /help 内容；叶子 value 与菜单路径不同则同时展示真实命令。 */
 function slashHelpLines(
-  nodes: SlashCommand[] = SLASH_COMMANDS,
+  nodes: SlashCommand[] = buildSlashCommands(),
   parentPath = '',
   depth = 0,
 ): string[] {
@@ -222,20 +223,14 @@ function slashHelpLines(
   return lines;
 }
 
-/** 主题名 → 一句描述(供 /theme 菜单 / 列表显示)。新增主题时在 src/ui/theme.ts THEMES 加键后于此补一句。 */
-const THEME_DESCRIPTIONS: Record<string, string> = {
-  default: '16 色原版(深底)',
-  light: '浅底终端',
-  solarized: 'Solarized 强调色',
-  gruvbox: 'Gruvbox 暖色',
-  nord: 'Nord 冷色',
-  orange: '南瓜橙(暖)',
-  rose: '玫红(暖紫)',
-  emerald: '翡翠绿(冷)',
-  amber: '琥珀金黄(暖)',
-  lavender: '薰衣草淡紫(冷)',
-  sunset: '日落珊瑚红(暖)',
-};
+/** 主题名 → 本地化描述。 */
+function themeDescription(name: string): string {
+  const key = `theme.${name}` as TranslationKey;
+  return name in {
+    default: 1, light: 1, solarized: 1, gruvbox: 1, nord: 1, orange: 1,
+    rose: 1, emerald: 1, amber: 1, lavender: 1, sunset: 1,
+  } ? t(key) : '';
+}
 
 /** /model 预设后端:选一个预填 baseURL,仍可逐项改。base_url 取自 README 常见表。 */
 const MODEL_PRESETS: { label: string; baseURL: string; model: string; window: number }[] = [
@@ -373,39 +368,38 @@ function runningStateFor(
 ): { status: string; placeholder: string } {
   switch (cmd) {
     case '/compact':
-      return { status: '压缩', placeholder: '压缩中…' };
+      return { status: t('running.compact'), placeholder: t('running.compacting') };
     case '/resume':
-      return { status: '续接', placeholder: '选择会话…' };
+      return { status: t('running.resume'), placeholder: t('running.chooseSession') };
     case '/rollback':
-      return { status: '回滚', placeholder: '选择轮次…' };
+      return { status: t('running.rollback'), placeholder: t('running.chooseTurn') };
     case '/init':
-      return { status: '初始化', placeholder: '生成 MOCODE.md…' };
+      return { status: t('running.init'), placeholder: t('running.generateMemory') };
     case '/snapshot_refresh':
-      return { status: '刷新快照', placeholder: '扫描项目文件中…' };
+      return { status: t('running.snapshot'), placeholder: t('running.scanning') };
     case '/plan':
-      return { status: '切 plan', placeholder: '…' };
+      return { status: t('running.plan'), placeholder: '…' };
     case '/auto':
-      return { status: '切 auto', placeholder: '…' };
+      return { status: t('running.auto'), placeholder: '…' };
     case '/clear':
-      return { status: '清空', placeholder: '…' };
+      return { status: t('running.clear'), placeholder: '…' };
     case '/theme':
-      return { status: '切主题', placeholder: '选择主题…' };
+      return { status: t('running.theme'), placeholder: t('running.chooseTheme') };
     case '/model':
-      return { status: '配模型', placeholder: '配置中…' };
+      return { status: t('running.model'), placeholder: t('running.configuring') };
     case '/pet':
-      return { status: '桌宠', placeholder: '处理中…' };
+      return { status: t('running.pet'), placeholder: t('running.processing') };
     case '/memory_switch':
-      return { status: '切记忆开关', placeholder: '切换中…' };
+      return { status: t('running.memory'), placeholder: t('running.switching') };
     case '/memory_status':
-      return { status: '查记忆状态', placeholder: '…' };
+      return { status: t('running.memoryStatus'), placeholder: '…' };
     case '/project_skill':
-      return { status: '项目 Skill', placeholder: '处理中…' };
+      return { status: t('running.skill'), placeholder: t('running.processing') };
     case '/snapshot':
-      return { status: '切快照开关', placeholder: '切换中…' };
+      return { status: t('running.snapshot'), placeholder: t('running.switching') };
+    case '/language':
+      return { status: t('running.language'), placeholder: t('running.chooseLanguage') };
     default:
-      // 输入框留空(运行中可 typeahead 打字,dim 回显);运行状态由内联 spinner 承载(思考中/执行…),
-      // 状态行只显走时——故常态 status 留空,不塞「处理」这种与内联重复的泛标签。
-      // 不把「思考中… Ctrl+C 中断」塞进输入框占位——避免看起来像已有输入、妨碍正常输入。
       return { status: '', placeholder: '' };
   }
 }
@@ -543,7 +537,7 @@ function stopRunningListener(): void {
  * 满宽 pad 使终端背景色覆盖整行(含行尾空单元格),上滑滚动时用户消息呈连续色块、与 assistant 正文区分。
  * 末尾多留一空行(\n\n 收尾):用户消息与后续(agent 流式输出 / 下条消息)之间空一行。
  */
-function formatUserMessage(lines: string[]): string {
+function formatUserMessage(lines: string[], trailingBlank = true): string {
   const cols = layout.getGeo().cols;
   const promptW = displayWidth(PROMPT);
   const indent = ' '.repeat(promptW);
@@ -556,14 +550,14 @@ function formatUserMessage(lines: string[]): string {
         const padded = padEndDisplay(full, cols);
         return `${userBg}${padded}${reset}`;
       })
-      .join('\n') + '\n\n'
+      .join('\n') + (trailingBlank ? '\n\n' : '\n')
   );
 }
 
 /** 把多行提交输入回显进内容区(❯ 首行,续行按 prompt 宽度缩进)。仅 TUI 态回显(非 TTY 由 readline 自带回显)。 */
-function echoInput(lines: string[]): void {
+function echoInput(lines: string[], trailingBlank = true): void {
   if (!layout.isActive()) return;
-  layout.contentWrite(formatUserMessage(lines));
+  layout.contentWrite(formatUserMessage(lines, trailingBlank));
   // 多模态附件:每张一行 chip 跟在 user bubble 后(原 /rollback /resume 复显一致)
   for (const a of pendingAttachments) {
     layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
@@ -1087,7 +1081,7 @@ export async function startRepl(
     if (!pick) return; // Esc / Ctrl+D 取消
     const loaded = loadSession(pick.id);
     if (!loaded || !loaded.history.length) {
-      layout.contentWrite(`${ui.yellow}(加载失败)${ui.reset}\n`);
+      layout.contentWrite(`${ui.yellow}${t('repl.loadFailed')}${ui.reset}\n`);
       return;
     }
     if (loaded.history[0]?.role === 'system') {
@@ -1106,7 +1100,7 @@ export async function startRepl(
     layout.clearContent();
     renderHistory(history);
     // 末尾 \n\n:与后续用户消息(❯ bubble)之间空一行。
-    layout.contentWrite(`${ui.dim}(已续接会话 ${loaded.id})${ui.reset}\n\n`);
+    layout.contentWrite(`${ui.dim}${t('repl.resumed', { id: loaded.id })}${ui.reset}\n\n`);
   }
 
   while (true) {
@@ -1119,13 +1113,13 @@ export async function startRepl(
       layout.contentWrite(`  ${ui.gray}↳ ${formatReflectResult(reflectRes)}${ui.reset}\n`);
       clearLastReflectResult();
     }
-    layout.enterInputMode('空闲');
+    layout.enterInputMode(t('repl.idle'));
 
     let input: string[] | null = null;
     try {
       input = await promptWithSlashMenu({
         prompt: PROMPT,
-        commands: SLASH_COMMANDS,
+        commands: buildSlashCommands(),
         onCycleMode: cycleMode,
         // /rollback 预填优先;否则上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
         ...(pendingPrefill
@@ -1147,16 +1141,43 @@ export async function startRepl(
     if (line === '/exit' || line === '/quit') break;
 
     // RUNNING 态:回显输入 → 底栏改 dim 占位、光标回内容续写位
-    echoInput(input);
     const cmd = line.split(/\s+/)[0];
+    // 语言命令把视觉分隔放在确认文案之后；避免回显后先空一行、下一条命令却紧贴确认。
+    echoInput(input, cmd !== '/language');
     const { status, placeholder } = runningStateFor(cmd);
     refreshStatusBase(history);
     layout.enterRunningMode(status, placeholder);
 
     if (line === '/help') {
-      layout.contentWrite(`${ui.bold}可用斜杠命令${ui.reset}\n`);
-      layout.contentWrite(`${ui.dim}(› 表示可进入子菜单；→ 后为实际执行命令)${ui.reset}\n`);
+      layout.contentWrite(`${ui.bold}${t('help.title')}${ui.reset}\n`);
+      layout.contentWrite(`${ui.dim}${t('help.hint')}${ui.reset}\n`);
       layout.contentWrite(`${slashHelpLines().join('\n')}\n`);
+      continue;
+    }
+    if (line === '/language' || line.startsWith('/language ')) {
+      const arg = line === '/language' ? '' : line.slice('/language '.length).trim();
+      if (!arg) {
+        const currentName = getLanguage() === 'zh-CN' ? t('language.zh') : t('language.en');
+        layout.contentWrite(`${ui.dim}${t('language.current', { language: currentName })}${ui.reset}\n`);
+        layout.contentWrite(`${ui.dim}${t('language.usage')}${ui.reset}\n\n`);
+        continue;
+      }
+      const next = normalizeLanguage(arg);
+      if (!next) {
+        layout.contentWrite(`${ui.yellow}${t('language.invalid', { value: arg })}${ui.reset}\n\n`);
+        continue;
+      }
+      updateLanguageConfig(next);
+      updateConfigKey('MOCODE_LANGUAGE', next);
+      history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
+      refreshStatusBase(history);
+      // 横幅是内容缓冲顶部的固定区域；语言切换后等长原地替换，不移动后续对话。
+      layout.rewriteBanner(bannerLines(banner()));
+      layout.contentWrite(`${ui.cyan}${t('language.changed')}${ui.reset}\n`);
+      if (languageFromShell) {
+        layout.contentWrite(`${ui.dim}${t('language.shellOverride')}${ui.reset}\n`);
+      }
+      layout.contentWrite('\n');
       continue;
     }
     if (line === '/init') {
@@ -1164,24 +1185,21 @@ export async function startRepl(
       joined = INIT_PROMPT;
     }
     if (line === '/plan') {
-      // /plan:切到 plan 模式(只读探查 + 产出计划)。Shift+Tab 的可靠后备——
-      // 中文 IME(微软拼音用 Shift 切中英)与部分终端会吞掉 Shift+Tab 的 \x1b[Z,命令不受影响。
+      // /plan:切到 plan 模式(只读探查 + 产出计划)。
       if (getAgentMode() === 'plan') {
-        layout.contentWrite(`${ui.dim}(已在 plan 模式)${ui.reset}\n`);
+        layout.contentWrite(`${ui.dim}${t('repl.planAlready')}${ui.reset}\n`);
       } else {
-        setAgentMode('plan'); // listener 接手 applyMode + refreshStatusBase
-        layout.contentWrite(
-          `${ui.dim}(已切到 plan 模式:只读探查 + 产出计划,审批后切 auto 执行。/auto 或 Shift+Tab 切回)${ui.reset}\n`,
-        );
+        setAgentMode('plan');
+        layout.contentWrite(`${ui.dim}${t('repl.planChanged')}${ui.reset}\n`);
       }
       continue;
     }
     if (line === '/auto') {
       if (getAgentMode() === 'auto') {
-        layout.contentWrite(`${ui.dim}(已在 auto 模式)${ui.reset}\n`);
+        layout.contentWrite(`${ui.dim}${t('repl.autoAlready')}${ui.reset}\n`);
       } else {
-        setAgentMode('auto'); // listener 接手 applyMode + refreshStatusBase
-        layout.contentWrite(`${ui.dim}(已切回 auto 模式:全工具执行)${ui.reset}\n`);
+        setAgentMode('auto');
+        layout.contentWrite(`${ui.dim}${t('repl.autoChanged')}${ui.reset}\n`);
       }
       continue;
     }
@@ -1247,7 +1265,7 @@ export async function startRepl(
       pendingAttachments = []; // 一并清空待发图片
       layout.clearContent();
       layout.writeBanner(bannerLines(banner()));
-      layout.contentWrite(`${ui.dim}(历史已清空,保留系统提示)${ui.reset}\n`);
+      layout.contentWrite(`${ui.dim}${t('repl.historyCleared')}${ui.reset}\n`);
       continue;
     }
     // /image:附加本地图片到下一条 user 消息(支持 /image <path> · /image list · /image clear)。
@@ -1512,7 +1530,7 @@ export async function startRepl(
         const items: SessionPickerItem[] = listThemes().map((t) => ({
           id: t,
           title: t,
-          subtitle: THEME_DESCRIPTIONS[t] ?? '',
+          subtitle: themeDescription(t),
         }));
         let pick: SessionPickerItem | null;
         try {
@@ -1522,14 +1540,14 @@ export async function startRepl(
         }
         name = pick?.id ?? null;
       } else if (arg === 'list' || !themeExists(arg)) {
-        layout.contentWrite(`${ui.dim}可用主题:${ui.reset}\n`);
-        for (const t of listThemes()) {
+        layout.contentWrite(`${ui.dim}${t('repl.themeList')}${ui.reset}\n`);
+        for (const theme of listThemes()) {
           layout.contentWrite(
-            `  ${ui.accent}${t}${ui.reset}  ${ui.dim}${THEME_DESCRIPTIONS[t] ?? ''}${ui.reset}\n`
+            `  ${ui.accent}${theme}${ui.reset}  ${ui.dim}${themeDescription(theme)}${ui.reset}\n`
           );
         }
         layout.contentWrite(
-          `${ui.dim}(当前:${getTheme()};用 /theme <名称> 切换)${ui.reset}\n`
+          `${ui.dim}${t('repl.themeCurrent', { theme: getTheme() })}${ui.reset}\n`
         );
         continue;
       } else {
@@ -1547,7 +1565,7 @@ export async function startRepl(
       } else {
         layout.writeBanner(bannerLines(banner()));
       }
-      layout.contentWrite(`${ui.dim}(已切换主题 ${name})${ui.reset}\n`);
+      layout.contentWrite(`${ui.dim}${t('repl.themeChanged', { theme: name })}${ui.reset}\n`);
       updateConfigKey('MOCODE_THEME', name);
       if (config.themeFromShell) {
         layout.contentWrite(

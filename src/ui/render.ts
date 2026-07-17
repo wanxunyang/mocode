@@ -1,6 +1,7 @@
 import { stdout } from 'node:process';
 import { createRequire } from 'node:module';
 import { ui } from './theme.js';
+import { t } from '../i18n/index.js';
 
 const VERSION = createRequire(import.meta.url)('../../package.json').version as string;
 
@@ -236,13 +237,13 @@ function logoLine(idx: number): string {
   return `${ui.accent}${padEndDisplay(LOGO_LINES[idx], LOGO_W)}${ui.reset}${' '.repeat(LOGO_GAP)}`;
 }
 
-function labelContent(label: string, value: string): string {
-  return `${ui.dim}${padEndDisplay(label, 6)}${ui.reset}${value}`;
+function labelContent(label: string, value: string, width: number): string {
+  return `${ui.dim}${padEndDisplay(label, width)}${ui.reset}${value}`;
 }
 
-/** 把布尔转成显式中文:banner 上避免「是/否」歧义,用「开/关」。 */
+/** 把记忆开关转成本地化标签。 */
 function memoryLabel(on: boolean): string {
-  return on ? '开启' : '关闭';
+  return on ? t('banner.enabled') : t('banner.disabled');
 }
 
 /** 记忆状态染色:开启用 ui.accent(亮),关闭用 ui.dim(弱),让远观有差别。
@@ -255,12 +256,14 @@ function memoryValue(on: boolean): string {
  *  布局:大字 logo(4 行,块字符)左对齐,右侧并排放标题/信息(neofetch 风)。 */
 export function bannerString(info: BannerInfo): string {
   const title = `${ui.bold}${ui.accent}◆  MoCode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
-  // 信息行 = 标题 + 模型 + 目录 + 记忆(共 4 行,与 4 行 logo 对齐)
+  const labels = [t('banner.model'), t('banner.directory'), t('banner.memory')];
+  // 标签列按当前语言最长文本动态定宽，并至少留两个空格；中文保持原 6 列，英文扩至 11 列。
+  const labelWidth = Math.max(...labels.map(displayWidth)) + 2;
   const rows = [
     logoLine(0) + title,
-    logoLine(1) + labelContent('模型', info.model),
-    logoLine(2) + labelContent('目录', truncateDisplay(info.cwd, 48)),
-    logoLine(3) + labelContent('记忆', memoryValue(info.memoryEnabled)),
+    logoLine(1) + labelContent(labels[0], info.model, labelWidth),
+    logoLine(2) + labelContent(labels[1], truncateDisplay(info.cwd, 48), labelWidth),
+    logoLine(3) + labelContent(labels[2], memoryValue(info.memoryEnabled), labelWidth),
   ];
   return rows.map((r) => MARGIN + r).join('\n') + '\n\n';
 }

@@ -6,6 +6,12 @@ import { loadSnapshot } from '../project-snapshot/index.js';
 import { buildProjectSkillSection } from '../project-skill/index.js';
 import { getSandboxRoot } from '../sandbox/root.js';
 import { getCurrentSessionId } from '../session/state.js';
+import {
+  detectLanguage,
+  setLanguage,
+  t,
+  type Language,
+} from '../i18n/index.js';
 
 /**
  * 按优先级加载配置文件并回填 process.env:
@@ -34,14 +40,16 @@ function loadEnvFiles(): void {
   }
 }
 
-// 在 loadEnvFiles 回填前捕获:MOCODE_THEME 是否由 shell 设置(决定 /theme 写文件是否下次启动生效)。
+// 在 loadEnvFiles 回填前捕获:MOCODE_THEME / MOCODE_LANGUAGE 是否由 shell 设置。
 const themeFromShell = process.env.MOCODE_THEME !== undefined;
+export const languageFromShell = process.env.MOCODE_LANGUAGE !== undefined;
 // 在 loadEnvFiles 回填前捕获:哪些 LLM 键由 shell 设置(决定 /model 写文件是否下次启动生效)。
 // 仿 themeFromShell 模式:shell export 的环境变量在 loadEnvFiles 中不被回填(优先级最高),
 // 故 /model 写入 ~/.mocode/config 的同名键下次启动会被 shell 值覆盖——据此给 dim 警告。
 const LLM_ENV_KEYS = ['LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS'] as const;
 const llmKeysFromShell = LLM_ENV_KEYS.filter((k) => process.env[k] !== undefined);
 loadEnvFiles();
+setLanguage(detectLanguage(process.env.MOCODE_LANGUAGE));
 
 export interface Config {
   baseURL: string;
@@ -285,7 +293,7 @@ export function buildBasePrompt(): string {
     : '- For complex or multi-step tasks, the user may switch to PLAN mode (Shift+Tab): your editing/command tools are then removed from your tool list, and you must research with read-only tools only and produce a step-by-step plan (no execution). On approval the session returns to auto mode to execute the plan.';
 
   return `## Core behavior
-You are mocode, a terminal coding agent. Complete programming tasks through a "think → call tool → observe result → think again" loop until solved. Reply to the user in Chinese.
+You are mocode, a terminal coding agent. Complete programming tasks through a "think → call tool → observe result → think again" loop until solved. ${t('assistant.languageInstruction')}
 
 ## 模式 (Modes)
 ${autoAllToolsLine}
@@ -543,4 +551,10 @@ export function updateProjectSkillConfig(enabled: boolean): void {
 export function updateSnapshotConfig(enabled: boolean): void {
   config.projectSnapshotEnabled = enabled;
   process.env.MOCODE_PROJECT_SNAPSHOT = enabled ? 'true' : 'false';
+}
+
+/** 切换界面与模型回复语言；持久化由 REPL 调用 config/file.ts 完成。 */
+export function updateLanguageConfig(language: Language): void {
+  setLanguage(language);
+  process.env.MOCODE_LANGUAGE = language;
 }

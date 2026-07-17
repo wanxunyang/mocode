@@ -6,6 +6,7 @@ import { displayWidth, truncateDisplay, visColToCharCol, wrapByDisplayWidth } fr
 import * as layout from './layout.js';
 import * as mouse from './mouse.js';
 import { Spinner } from './spinner.js';
+import { t } from '../i18n/index.js';
 
 /**
  * 介入面板:agent 执行中遇到需要用户决策的岔路时,弹问题 + 选项让用户选择(ask_human 工具调用)。
@@ -68,8 +69,8 @@ interface KeypressEmitter {
 
 const emitter = stdin as unknown as KeypressEmitter;
 
-/** choice 末尾的"自定义输入"项标签(纯 ASCII,宽度安全)。选中后切到 input 子态。 */
-const CUSTOM_LABEL = '其他(自定义输入)';
+/** choice 末尾的本地化“自定义输入”项标签。 */
+const customLabel = (): string => t('intervention.custom');
 
 /** 弹出介入面板,阻塞直到用户完成选择。 */
 export async function promptIntervention(
@@ -77,9 +78,10 @@ export async function promptIntervention(
 ): Promise<InterventionResult> {
   // 非 TTY 降级:不阻塞,自动选默认。日志走 stderr(不污染 stdout 内容流)。
   if (!layout.isActive()) {
-    const kind =
-      req.type === 'choice' ? '自动选默认项' : '自动返回空输入';
-    stderr.write(`[介入] ${req.title}(非交互环境,${kind})\n`);
+    const kind = req.type === 'choice'
+      ? t('intervention.defaultChoice')
+      : t('intervention.emptyInput');
+    stderr.write(`${t('intervention.nonInteractive', { title: req.title, kind })}\n`);
     if (req.type === 'choice') {
       const first = req.options?.[0];
       const value = typeof first === 'string' ? first : first?.label ?? '';
@@ -119,7 +121,7 @@ export async function promptIntervention(
     const g = layout.getGeo();
     const cols = g.cols;
     const allowCustom = req.allowCustom !== false;
-    const items: ChoiceOption[] = allowCustom ? [...options, { label: CUSTOM_LABEL }] : [...options];
+    const items: ChoiceOption[] = allowCustom ? [...options, { label: customLabel() }] : [...options];
     const optionCount = items.length;
     // 每项占行数 = label + （detail）整体 wrap 到可用宽度后的实际行数(超长换行,不再省略)。
     // 短 label 仍只占 1 行;长 detail 自然占用多行,菜单总高度随之动态增长。
@@ -201,7 +203,9 @@ export async function promptIntervention(
       if (dl.length > detailCap) lines.push(`${ui.dim}…${ui.reset}`);
     }
     lines.push(
-      `${ui.dim}Enter 提交 · Esc ${cameFromChoice ? '返回选项' : '取消'} · Ctrl+C 取消${ui.reset}`
+      `${ui.dim}${t('prompt.submit', {
+        escape: cameFromChoice ? t('prompt.back') : t('prompt.cancel'),
+      })}${ui.reset}`
     );
     return lines;
   }
@@ -229,7 +233,7 @@ export async function promptIntervention(
 
   function redraw(): void {
     if (mode === 'choice') {
-      const hint = '↑↓ 选择 · Enter 确认 · 数字键直选 · Esc 取消';
+      const hint = t('prompt.chooseConfirm');
       layout.paintInput({
         prompt: '❯ ',
         lines: [hint],
