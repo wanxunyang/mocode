@@ -83,7 +83,13 @@ async function main(): Promise<void> {
     }
     const updateNotice = checkAndMaybeUpdate();
     const { startRepl } = await import('./repl/index.js');
-    await startRepl(loaded.history, loaded.id, updateNotice, sandboxRootOverride);
+    await startRepl(
+      loaded.history,
+      loaded.id,
+      updateNotice,
+      sandboxRootOverride,
+      loaded.queryHistory,
+    );
   } else {
     const updateNotice = checkAndMaybeUpdate();
     const { startRepl } = await import('./repl/index.js');

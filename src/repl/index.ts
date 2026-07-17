@@ -678,6 +678,14 @@ function textOf(c: unknown): string {
   return String(c);
 }
 
+/** 从旧 session 的消息历史回填输入历史；新 session 使用独立 queryHistory，避免混入合成 user 消息。 */
+function queryHistoryFromMessages(messages: ChatMessage[]): string[] {
+  return messages
+    .filter((message) => message.role === 'user')
+    .map((message) => textOf((message as { content?: unknown }).content))
+    .filter((query) => query.trim().length > 0);
+}
+
 /**
  * 把会话历史渲染成静态文本进内容区(回滚 / 续接 / --resume 后复显上下文):
  * user→❯ 回显、assistant→正文(+ tool_calls 折叠成 ● 摘要行)、tool→↳ 结果预览;system 跳过。
@@ -795,7 +803,8 @@ export async function startRepl(
   initialHistory?: ChatMessage[],
   sessionId?: string,
   updateNotice: string | null = null,
-  sandboxRootOverride?: string
+  sandboxRootOverride?: string,
+  initialQueryHistory?: readonly string[],
 ): Promise<void> {
   // 模式重置:agentMode 不落盘,每个 REPL 会话从 auto 开始(/resume / --resume 亦重置)。
   setAgentMode('auto');
@@ -837,6 +846,10 @@ export async function startRepl(
     initialHistory && initialHistory.length
       ? initialHistory
       : [{ role: 'system', content: buildSystemMessage(false) }];
+  // 新 session 使用独立输入历史；旧 session 没有该字段时从 user 消息兼容回填一次。
+  let queryHistory: string[] = initialQueryHistory
+    ? [...initialQueryHistory]
+    : queryHistoryFromMessages(history);
   if (
     initialHistory &&
     initialHistory.length &&
@@ -990,7 +1003,7 @@ export async function startRepl(
     if (!currentSessionId) currentSessionId = newSessionId();
     setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
     try {
-      saveSession(history, currentSessionId);
+      saveSession(history, currentSessionId, queryHistory);
     } catch {
       // 落盘失败不阻断
     }
@@ -1063,7 +1076,7 @@ export async function startRepl(
       if (!currentSessionId) currentSessionId = newSessionId();
       setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
       try {
-        saveSession(history, currentSessionId);
+        saveSession(history, currentSessionId, queryHistory);
       } catch {
         // 落盘失败不阻断 REPL
       }
@@ -1076,6 +1089,14 @@ export async function startRepl(
       }
     } catch (e) {
       ok = false;
+      // 请求失败也保存已确认提交的 query，确保立即退出后仍可通过 ↑ 或 resume 找回。
+      if (!currentSessionId) currentSessionId = newSessionId();
+      setCurrentSessionId(currentSessionId, process.cwd());
+      try {
+        saveSession(history, currentSessionId, queryHistory);
+      } catch {
+        // 落盘失败不覆盖原始请求错误
+      }
       // 多模态相关错误友好提示:OpenAI/Anthropic 等会报 "does not support image" / "vision" / "multimodal" 等关键词,
       // 直接给原文对中文用户不友好。这里翻译成中文 + 提示 /model 换视觉模型。
       const msg = e instanceof Error ? e.message : String(e);
@@ -1120,6 +1141,9 @@ export async function startRepl(
     }
     history.length = 0;
     history.push(...loaded.history);
+    queryHistory = loaded.queryHistory
+      ? [...loaded.queryHistory]
+      : queryHistoryFromMessages(loaded.history);
     setAgentMode('auto'); // 续接重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
     currentSessionId = loaded.id;
     setCurrentSessionId(loaded.id, process.cwd()); // 切换会话:确保该会话的 notes.md 存在
@@ -1151,6 +1175,7 @@ export async function startRepl(
       input = await promptWithSlashMenu({
         prompt: PROMPT,
         commands: buildSlashCommands(),
+        queryHistory,
         onCycleMode: cycleMode,
         // /rollback 预填优先;否则上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
         ...(pendingPrefill
@@ -2305,6 +2330,8 @@ export async function startRepl(
       layout.enterInputMode(t('repl.idle'));
       continue;
     }
+    // 只记录已过撤回窗口的真实用户 query；slash 命令和合成执行轮不会走到这里。
+    queryHistory.push(joined);
     const initialPlan = getAgentMode() === 'plan'; // 轮首模式(在 runTurn 之前读)
     const ok = await runTurn(joined, initialPlan, placeholder);
     // plan 轮正常结束(未中断 / 未抛错)→ 看轮末模式决定:

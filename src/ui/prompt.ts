@@ -30,6 +30,8 @@ export interface PromptOpts {
   prompt: string;
   /** 斜杠命令列表,仅用于菜单显示与过滤。 */
   commands: SlashCommand[];
+  /** 已确认提交的用户 query；↑/↓ 在输入边界间浏览，不由 prompt 修改。 */
+  queryHistory?: readonly string[];
   /** 预填初始行(运行中 typeahead 缓冲 → 下一轮 INPUT 态预填);光标置末行末尾。 */
   initialLines?: string[];
   /** Shift+Tab 循环切换 agent 模式(auto ↔ plan)的回调;repl 注入(翻 agentMode + 重写 history[0] + 设状态行 modeTag)。回调后 prompt 自调 redraw() 刷新底栏。 */
@@ -133,6 +135,67 @@ export async function promptWithSlashMenu(
   let resolved = false;
   let resolve!: (v: string[] | null) => void;
   let reject!: (e: Error) => void;
+  const queryHistory = opts.queryHistory ?? [];
+  let historyIndex = queryHistory.length; // length = 草稿哨兵；0..length-1 = 历史项
+  let historyDraft: {
+    lines: string[];
+    cl: number;
+    cc: number;
+    chip: string | null;
+    chipPre: string;
+  } | null = null;
+
+  /** 用历史 query 替换编辑缓冲；历史内容恢复为普通可编辑文本。 */
+  function loadHistoryEntry(value: string): void {
+    lines = value.split('\n');
+    cl = lines.length - 1;
+    cc = lines[cl].length;
+    chip = null;
+    chipPre = '';
+    selected = 0;
+    menuTop = 0;
+    justSawCR = false;
+    computeFiltered();
+    redraw();
+  }
+
+  /** 在首次离开最新位置时保存完整草稿，然后向更旧的 query 移动。 */
+  function recallPrevious(): void {
+    if (queryHistory.length === 0 || historyIndex <= 0) return;
+    if (historyIndex === queryHistory.length) {
+      historyDraft = {
+        lines: [...lines],
+        cl,
+        cc,
+        chip,
+        chipPre,
+      };
+    }
+    historyIndex--;
+    loadHistoryEntry(queryHistory[historyIndex]);
+  }
+
+  /** 向更新的 query 移动；越过最新历史时恢复进入历史前的草稿。 */
+  function recallNext(): void {
+    if (historyIndex >= queryHistory.length) return;
+    historyIndex++;
+    if (historyIndex < queryHistory.length) {
+      loadHistoryEntry(queryHistory[historyIndex]);
+      return;
+    }
+
+    const draft = historyDraft;
+    lines = draft ? [...draft.lines] : [''];
+    cl = draft?.cl ?? 0;
+    cc = draft?.cc ?? 0;
+    chip = draft?.chip ?? null;
+    chipPre = draft?.chipPre ?? '';
+    selected = 0;
+    menuTop = 0;
+    justSawCR = false;
+    computeFiltered();
+    redraw();
+  }
 
   /** 菜单行(预渲染,带色)——向上展开进内容区底,由 layout 贴入。最多显示 MENU_MAX_VISIBLE 条,支持上下滚动。 */
   function menuLines(): string[] {
@@ -496,6 +559,8 @@ export async function promptWithSlashMenu(
     filtered = [];
     selected = 0;
     menuTop = 0;
+    historyIndex = queryHistory.length;
+    historyDraft = null;
     if (pasteTimer) {
       clearTimeout(pasteTimer);
       pasteTimer = null;
@@ -563,21 +628,12 @@ export async function promptWithSlashMenu(
       return;
     }
 
-    // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,Ctrl+↑↓ 与 plain ↑/↓ 每次 5 行。
-    // plain ↑/↓ 仅在单行输入且菜单关闭时作滚动(多行编辑留给光标移动,菜单打开留给选项);
-    // 兼鼠标滚轮——alt 屏内(经 \x1B[?1007h)滚轮转发 ↑/↓,1 行/格太慢故放大到 5。
-    const plainArrowScroll =
-      (key.name === 'up' || key.name === 'down') &&
-      !key.ctrl &&
-      !key.meta &&
-      !key.shift &&
-      lines.length <= 1 &&
-      !(menuOpen && filtered.length > 0);
+    // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页，Ctrl+↑/↓ 每次 5 行。
+    // 裸 ↑/↓ 留给斜杠菜单、多行光标和 query 历史导航；鼠标滚轮由 SGR mouse 事件处理。
     if (
       key.name === 'pageup' ||
       key.name === 'pagedown' ||
-      (key.ctrl && (key.name === 'up' || key.name === 'down')) ||
-      plainArrowScroll
+      (key.ctrl && (key.name === 'up' || key.name === 'down'))
     ) {
       const pageH = layout.getGeo().contentBottom;
       if (key.name === 'pageup') layout.scrollBy(pageH);
@@ -667,6 +723,8 @@ export async function promptWithSlashMenu(
           cl--;
           cc = Math.min(cc, lines[cl].length);
           redraw();
+        } else {
+          recallPrevious();
         }
         return;
       case 'down':
@@ -677,6 +735,8 @@ export async function promptWithSlashMenu(
           cl++;
           cc = Math.min(cc, lines[cl].length);
           redraw();
+        } else {
+          recallNext();
         }
         return;
       case 'tab':
