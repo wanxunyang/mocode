@@ -1,8 +1,14 @@
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
-  unlinkSync,
+  readdirSync,
+  readlinkSync,
+  rmdirSync,
+  rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -12,91 +18,278 @@ import type { ChatMessage } from '../llm/index.js';
 import { toText } from '../context/utils.js';
 
 /**
- * 回滚子系统:`/rollback` 菜单(↑/↓)选轮次 → 选中第 X 轮 = 删该轮及之后 + 预填该轮 user 输入(Enter 重新跑);撤销被删轮次的文件改动(逐个「保留/撤销」询问)。
- *
- * 语义:选中下标 picked(0-based,= 第 picked+1 轮)→ `planRollback(picked)` 保 1..picked(删 picked+1 轮及之后),
- * 预填 userTexts[picked](= 第 picked+1 轮 user 输入)。**不是**保 1..picked+1——选中第 X 轮即"从第 X 轮重跑"。
- *
- * 撤销方案 = 落盘快照(不用 git):write_file/edit_file 执行前由 executeTool 调
- * recordMutation,把 before 内容存入快照(按轮次 turnId 打标)。回滚到第 n 轮时,
- * 对每条选「撤销」的路径,恢复 turnId > cutoffTurnId 的最小 turnId 快照的 before
- * (= 所选轮末状态;before===null = 当时不存在 → 删文件)。同文件多轮改动也能
- * 精确回到所选轮边界,不误伤更早轮次。
- *
- * 快照 + 轮次日志随 saveSession 落盘到 <sessionDir>/<id>.snapshots.json,/resume 读回
- * → 重启后仍可撤销。叶子模块:运行时只依赖 config(+ node:fs/path);ChatMessage
- * 用 import type 擦除,不拉 llm 运行时;不反向依赖任何业务。
- *
- * v1 偏离 / 局限:
- * - 撤销粒度 = 路径(非逐条 tool_call)——快照只能整路径回到轮末,无法只撤一条 edit。
- * - run_command 不撤销(shell 可任意改文件,无法跟踪)。
- * - 跨 /resume 后若文件被外部改过,恢复会用 before 覆盖(边缘情况,不处理)。
- * - 快照文件随大文件多次改动膨胀;/clear 重置;日后可按「turn 已不可回滚」裁剪。
+ * 回滚子系统：以工作区文件快照记录每轮模型造成的实际变化，完全不读写 Git。
+ * write_file/edit_file 使用单路径前后快照；run_command/MCP 等不透明工具使用工作区
+ * 前后快照。回滚只恢复工作树，始终排除 .git，因此不会改变 index/暂存区。
  */
 
 export interface Turn {
   turnId: number;
   firstLine: string;
 }
+
+type SnapshotKind = 'missing' | 'file' | 'directory' | 'symlink';
+type StoredState = {
+  kind: SnapshotKind;
+  data?: string;
+  mode?: number;
+};
+
 export interface Snapshot {
   turnId: number;
-  path: string; // cwd 相对路径(跨 /resume 同项目可识别)
-  before: string | null; // null = 快照时文件不存在(新建)
+  path: string;
+  /** v1: UTF-8 原文/null；v2: file=base64，symlink=target，其余 null。 */
+  before: string | null;
+  kind?: SnapshotKind;
+  encoding?: 'base64';
+  mode?: number;
+  sequence?: number;
+  ops?: string[];
+  createdParents?: string[];
 }
+
 export interface FileChange {
-  path: string; // cwd 相对
-  ops: string[]; // 涉及的工具名(write_file/edit_file),按出现顺序
-  snapshotAvailable: boolean; // 是否存在 turnId > cutoff 的该路径快照(决定能否撤销)
+  path: string;
+  ops: string[];
+  snapshotAvailable: boolean;
 }
+
 export interface RollbackPlan {
   n: number;
-  cutoffIndex: number; // history 截断点:保留 [0, cutoffIndex)
+  cutoffIndex: number;
   cutoffTurnId: number;
   changes: FileChange[];
 }
 
+export interface PathMutationCapture {
+  path: string;
+  before: StoredState;
+  sequence: number;
+  createdParents: string[];
+}
+
+export interface WorkspaceMutationCapture {
+  sequence: number;
+  entries: Map<string, StoredState>;
+}
+
 let turnIdCounter = 0;
 let currentTurnId = 0;
+let sequenceCounter = 0;
 let turns: Turn[] = [];
 let snapshots: Snapshot[] = [];
 
-const MUTATION_TOOLS = new Set(['write_file', 'edit_file']);
+const rootDir = (): string => path.resolve(process.cwd());
 
-/** 规整成 cwd 相对路径(快照存相对,跨 /resume 同项目可识别;resolve 已归一 ./ 和 ..)。 */
+function isInside(parent: string, child: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/** 规整成 cwd 相对路径；所有持久化快照均使用此格式。 */
 function toRel(p: string): string {
   try {
-    const rel = path.relative(process.cwd(), path.resolve(p));
-    return rel === '' ? p : rel;
+    const rel = path.relative(rootDir(), path.resolve(p));
+    return rel === '' ? '.' : rel;
   } catch {
     return p;
   }
 }
 
-/** agent:runAgent 入口调——开新轮次。firstLine 已由调用方截断到 40。 */
+/** 防止损坏/篡改的 snapshots.json 在恢复时写出工作区。 */
+function safeFullPath(rel: string): string | null {
+  const root = rootDir();
+  const full = path.resolve(root, rel);
+  return full !== root && isInside(root, full) ? full : null;
+}
+
+function readState(full: string): StoredState {
+  try {
+    const stat = lstatSync(full);
+    const mode = stat.mode & 0o777;
+    if (stat.isSymbolicLink()) {
+      return { kind: 'symlink', data: readlinkSync(full), mode };
+    }
+    if (stat.isDirectory()) return { kind: 'directory', mode };
+    if (stat.isFile()) {
+      return { kind: 'file', data: readFileSync(full).toString('base64'), mode };
+    }
+  } catch {
+    // 不存在或不可读均按 missing；工具若最终也不可读，不会产生伪变化。
+  }
+  return { kind: 'missing' };
+}
+
+function sameState(a: StoredState, b: StoredState): boolean {
+  return a.kind === b.kind && a.data === b.data && a.mode === b.mode;
+}
+
+function stateFromSnapshot(snapshot: Snapshot): StoredState {
+  if (snapshot.kind) {
+    return { kind: snapshot.kind, data: snapshot.before ?? undefined, mode: snapshot.mode };
+  }
+  // v1 向后兼容：before 是 UTF-8 文本，null 表示原文件不存在。
+  if (snapshot.before === null) return { kind: 'missing' };
+  return {
+    kind: 'file',
+    data: Buffer.from(snapshot.before, 'utf8').toString('base64'),
+  };
+}
+
+function snapshotFromState(
+  rel: string,
+  state: StoredState,
+  sequence: number,
+  op: string,
+  createdParents: string[] = [],
+): Snapshot {
+  return {
+    turnId: currentTurnId,
+    path: rel,
+    before: state.data ?? null,
+    kind: state.kind,
+    encoding: state.kind === 'file' ? 'base64' : undefined,
+    mode: state.mode,
+    sequence,
+    ops: [op],
+    createdParents: createdParents.length > 0 ? createdParents : undefined,
+  };
+}
+
+/** 同轮同路径只保留最早的 before；后续实际改动仅合并工具名。 */
+function addSnapshot(next: Snapshot): void {
+  if (next.turnId <= 0) return;
+  const existingIndex = snapshots.findIndex(
+    (item) => item.turnId === next.turnId && item.path === next.path,
+  );
+  if (existingIndex < 0) {
+    snapshots.push(next);
+    return;
+  }
+  const existing = snapshots[existingIndex];
+  const existingSequence = existing.sequence ?? Number.MAX_SAFE_INTEGER;
+  const nextSequence = next.sequence ?? Number.MAX_SAFE_INTEGER;
+  const ops = new Set([...(existing.ops ?? []), ...(next.ops ?? [])]);
+  if (nextSequence < existingSequence) {
+    snapshots[existingIndex] = { ...next, ops: [...ops] };
+  } else {
+    existing.ops = [...ops];
+  }
+}
+
+function missingParents(full: string): string[] {
+  const root = rootDir();
+  const result: string[] = [];
+  let current = path.dirname(full);
+  while (current !== root && isInside(root, current)) {
+    if (existsSync(current)) break;
+    result.push(toRel(current));
+    current = path.dirname(current);
+  }
+  return result;
+}
+
+/** agent 主轮入口调用；子 agent 共享当前 turnId，不另开轮次。 */
 export function beginTurn(firstLine: string): void {
   turnIdCounter += 1;
   currentTurnId = turnIdCounter;
   turns.push({ turnId: currentTurnId, firstLine });
 }
 
-/** tools/registry:write_file/edit_file 执行前调——记 before 快照(在 tool.execute 之前读)。 */
-export function recordMutation(p: string): void {
-  const rel = toRel(p);
-  let before: string | null;
-  try {
-    before = readFileSync(path.resolve(p), 'utf8');
-  } catch {
-    before = null; // 文件不存在(新建)
-  }
-  snapshots.push({ turnId: currentTurnId, path: rel, before });
+/** 单路径工具执行前捕获，不立即记账；失败/no-op 不应出现在 rollback 中。 */
+export function beginPathMutation(p: string): PathMutationCapture {
+  const full = path.resolve(p);
+  return {
+    path: toRel(full),
+    before: readState(full),
+    sequence: ++sequenceCounter,
+    createdParents: missingParents(full),
+  };
 }
 
-/** 列出当前可回滚的轮次(1-based 序号由调用方显示)。 */
+/** 单路径工具执行后提交，仅当磁盘状态确实变化时写入事务日志。 */
+export function endPathMutation(capture: PathMutationCapture, op: string): void {
+  const full = safeFullPath(capture.path);
+  if (!full) return;
+  const after = readState(full);
+  if (!sameState(capture.before, after)) {
+    addSnapshot(
+      snapshotFromState(
+        capture.path,
+        capture.before,
+        capture.sequence,
+        op,
+        capture.createdParents,
+      ),
+    );
+  }
+  // write_file 会递归创建父目录；即使最终写文件失败，这些目录也是本轮真实副作用。
+  for (const parentRel of capture.createdParents) {
+    const parent = safeFullPath(parentRel);
+    if (parent && readState(parent).kind !== 'missing') {
+      addSnapshot(
+        snapshotFromState(parentRel, { kind: 'missing' }, capture.sequence, op),
+      );
+    }
+  }
+}
+
+function isWorkspaceExcluded(full: string): boolean {
+  const base = path.basename(full).toLowerCase();
+  // Git 元数据必须永久排除以保护 index；依赖树/代码索引是可再生运行时状态，
+  // 扫描它们既昂贵，也可能把后台 daemon 的写入误判成模型改动。
+  if (base === '.git' || base === '.codegraph' || base === 'node_modules') return true;
+  const sessionDir = path.resolve(config.sessionDir);
+  return isInside(sessionDir, full);
+}
+
+function scanWorkspace(): Map<string, StoredState> {
+  const entries = new Map<string, StoredState>();
+  const walk = (dir: string): void => {
+    let children;
+    try {
+      children = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const child of children) {
+      const full = path.join(dir, child.name);
+      if (isWorkspaceExcluded(full)) continue;
+      const state = readState(full);
+      if (state.kind === 'missing') continue;
+      const rel = toRel(full);
+      entries.set(rel, state);
+      if (state.kind === 'directory') walk(full);
+    }
+  };
+  walk(rootDir());
+  return entries;
+}
+
+/** run_command/MCP 前调用。不跟随 symlink，并排除 .git、会话快照、依赖树与代码索引。 */
+export function beginWorkspaceMutation(): WorkspaceMutationCapture {
+  return { sequence: ++sequenceCounter, entries: scanWorkspace() };
+}
+
+/** 不透明工具执行后比较整个工作区，把实际变化压入当前轮事务日志。 */
+export function endWorkspaceMutation(
+  capture: WorkspaceMutationCapture,
+  op: string,
+): void {
+  const after = scanWorkspace();
+  const paths = new Set([...capture.entries.keys(), ...after.keys()]);
+  for (const rel of paths) {
+    const beforeState = capture.entries.get(rel) ?? { kind: 'missing' as const };
+    const afterState = after.get(rel) ?? { kind: 'missing' as const };
+    if (sameState(beforeState, afterState)) continue;
+    addSnapshot(snapshotFromState(rel, beforeState, capture.sequence, op));
+  }
+}
+
 export function listTurns(): Turn[] {
   return turns.slice();
 }
 
-/** history 里第 (n+1) 条 user 消息的下标(= 截断点);无则 history.length。 */
 function findCutoffIndex(n: number, history: ChatMessage[]): number {
   let seen = 0;
   for (let i = 0; i < history.length; i++) {
@@ -109,130 +302,166 @@ function findCutoffIndex(n: number, history: ChatMessage[]): number {
 }
 
 /**
- * 规划回滚到第 n 轮(1-based):算截断点 + 被删轮次里涉及的文件改动(按 path 去重)。
- * 调用方据 changes 逐 path 问保留 / 撤销;snapshotAvailable=false 的项无法撤销。
+ * 规划回滚到第 n 轮。changes 只来自已确认发生磁盘差异的事务快照，
+ * 因此失败/no-op 工具不会被误报；子 agent、run_command、MCP 变化同样可见。
  */
 export function planRollback(n: number, history: ChatMessage[]): RollbackPlan {
   const cutoffTurnId = turns[n - 1]?.turnId ?? 0;
   const cutoffIndex = findCutoffIndex(n, history);
   const order: string[] = [];
   const map = new Map<string, FileChange>();
-  for (let i = cutoffIndex; i < history.length; i++) {
-    const tcs = (history[i] as { tool_calls?: unknown }).tool_calls;
-    if (!Array.isArray(tcs)) continue;
-    for (const tc of tcs as Array<{ function?: { name?: string; arguments?: string } }>) {
-      const name = tc?.function?.name ?? '';
-      if (!MUTATION_TOOLS.has(name)) continue;
-      const argRaw = tc?.function?.arguments ?? '';
-      let p = '';
-      try {
-        p = String((JSON.parse(argRaw) as { path?: unknown }).path ?? '');
-      } catch {
-        p = '';
-      }
-      if (!p) continue;
-      const rel = toRel(p);
-      let fc = map.get(rel);
-      if (!fc) {
-        fc = { path: rel, ops: [], snapshotAvailable: false };
-        map.set(rel, fc);
-        order.push(rel);
-      }
-      fc.ops.push(name);
+  const ensure = (rel: string): FileChange => {
+    let change = map.get(rel);
+    if (!change) {
+      change = { path: rel, ops: [], snapshotAvailable: true };
+      map.set(rel, change);
+      order.push(rel);
+    }
+    return change;
+  };
+
+  for (const snapshot of snapshots) {
+    if (snapshot.turnId <= cutoffTurnId) continue;
+    const change = ensure(snapshot.path);
+    for (const op of snapshot.ops ?? ['file_change']) {
+      if (!change.ops.includes(op)) change.ops.push(op);
     }
   }
-  const changes: FileChange[] = order.map((rel) => {
-    const fc = map.get(rel)!;
-    fc.snapshotAvailable = snapshots.some(
-      (s) => s.turnId > cutoffTurnId && s.path === rel
-    );
-    return fc;
-  });
-  return { n, cutoffIndex, cutoffTurnId, changes };
+
+  return {
+    n,
+    cutoffIndex,
+    cutoffTurnId,
+    changes: order.map((rel) => map.get(rel)!),
+  };
 }
 
-/**
- * 执行回滚:原地截断 history 到 cutoffIndex + 按选择恢复文件 + 裁剪 turns/snapshots。
- * revertPaths 为选「撤销」的相对路径集合。返回删除消息数 + 撤销文件列表。
- */
+function depth(rel: string): number {
+  return rel.split(/[\\/]+/).length;
+}
+
+function restoreSnapshot(snapshot: Snapshot): boolean {
+  const full = safeFullPath(snapshot.path);
+  if (!full) return false;
+  const state = stateFromSnapshot(snapshot);
+  try {
+    if (state.kind === 'missing') {
+      rmSync(full, { recursive: true, force: true });
+      for (const parentRel of snapshot.createdParents ?? []) {
+        const parent = safeFullPath(parentRel);
+        if (!parent) continue;
+        try {
+          rmdirSync(parent);
+        } catch {
+          // 仅删除本轮创建且当前为空的父目录；非空/已不存在均保持。
+        }
+      }
+      return true;
+    }
+
+    if (state.kind === 'directory') {
+      const current = readState(full);
+      if (current.kind !== 'missing' && current.kind !== 'directory') {
+        rmSync(full, { recursive: true, force: true });
+      }
+      mkdirSync(full, { recursive: true });
+    } else {
+      mkdirSync(path.dirname(full), { recursive: true });
+      rmSync(full, { recursive: true, force: true });
+      if (state.kind === 'file') {
+        writeFileSync(full, Buffer.from(state.data ?? '', 'base64'));
+      } else {
+        symlinkSync(state.data ?? '', full);
+      }
+    }
+    if (state.mode !== undefined && state.kind !== 'symlink') chmodSync(full, state.mode);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 执行回滚：恢复工作树快照并截断对话/事务；从不调用 Git。 */
 export function applyRollback(
   plan: RollbackPlan,
   history: ChatMessage[],
-  revertPaths: Set<string>
+  revertPaths: Set<string>,
 ): { deletedMsgs: number; revertedFiles: string[] } {
   const deletedMsgs = history.length - plan.cutoffIndex;
-  history.length = plan.cutoffIndex; // 原地截断(保 history[0] system + 可能的 index-1 摘要)
+  history.length = plan.cutoffIndex;
 
-  const revertedFiles: string[] = [];
-  for (const rel of revertPaths) {
-    // turnId > cutoff 的最小 turnId 快照 = 所选轮末状态
-    let pick: Snapshot | null = null;
-    for (const s of snapshots) {
-      if (s.path !== rel) continue;
-      if (s.turnId <= plan.cutoffTurnId) continue;
-      if (!pick || s.turnId < pick.turnId) pick = s;
-    }
-    if (!pick) continue; // 无快照(不应发生:repl 已据 snapshotAvailable 过滤)
-    const full = path.resolve(rel);
-    try {
-      if (pick.before === null) {
-        unlinkSync(full);
-      } else {
-        writeFileSync(full, pick.before, 'utf8');
-      }
-      revertedFiles.push(rel);
-    } catch {
-      // 恢复失败不阻断回滚(文件可能被外部删 / 锁)
+  const picks = new Map<string, Snapshot>();
+  for (const snapshot of snapshots) {
+    if (snapshot.turnId <= plan.cutoffTurnId || !revertPaths.has(snapshot.path)) continue;
+    const existing = picks.get(snapshot.path);
+    if (
+      !existing ||
+      snapshot.turnId < existing.turnId ||
+      (snapshot.turnId === existing.turnId &&
+        (snapshot.sequence ?? Number.MAX_SAFE_INTEGER) <
+          (existing.sequence ?? Number.MAX_SAFE_INTEGER))
+    ) {
+      picks.set(snapshot.path, snapshot);
     }
   }
 
-  // 裁剪:保 turnId ≤ cutoff(删掉被回滚掉的轮次及其快照)
-  turns = turns.filter((t) => t.turnId <= plan.cutoffTurnId);
-  snapshots = snapshots.filter((s) => s.turnId <= plan.cutoffTurnId);
+  const selected = [...picks.values()];
+  // 先深到浅删除本轮新建项，再浅到深恢复原目录/文件。
+  const removals = selected
+    .filter((item) => stateFromSnapshot(item).kind === 'missing')
+    .sort((a, b) => depth(b.path) - depth(a.path));
+  const restores = selected
+    .filter((item) => stateFromSnapshot(item).kind !== 'missing')
+    .sort((a, b) => depth(a.path) - depth(b.path));
+  const revertedFiles: string[] = [];
+  for (const snapshot of [...removals, ...restores]) {
+    if (restoreSnapshot(snapshot)) revertedFiles.push(snapshot.path);
+  }
+
+  turns = turns.filter((turn) => turn.turnId <= plan.cutoffTurnId);
+  snapshots = snapshots.filter((snapshot) => snapshot.turnId <= plan.cutoffTurnId);
+  currentTurnId = turns.at(-1)?.turnId ?? 0;
   return { deletedMsgs, revertedFiles };
 }
 
-/** compact 摘要成功后调:按存活轮次数裁剪(M = 新 history 里 user 消息数)。 */
 export function pruneAfterCompaction(history: ChatMessage[]): void {
-  const m = history.filter((msg) => msg.role === 'user').length;
-  turns = m >= turns.length ? turns : turns.slice(-m);
-  const alive = new Set(turns.map((t) => t.turnId));
-  snapshots = snapshots.filter((s) => alive.has(s.turnId));
+  const count = history.filter((message) => message.role === 'user').length;
+  turns = count >= turns.length ? turns : turns.slice(-count);
+  const alive = new Set(turns.map((turn) => turn.turnId));
+  snapshots = snapshots.filter((snapshot) => alive.has(snapshot.turnId));
 }
 
-/** /clear 调:清空全部状态。 */
 export function resetState(): void {
   turns = [];
   snapshots = [];
   turnIdCounter = 0;
   currentTurnId = 0;
+  sequenceCounter = 0;
 }
 
-/**
- * 无 snapshots 文件时(/resume 旧会话)从 history 重建 turns(扫 user 消息,1..M,
- * 无快照 → 那些轮次的文件改动不可撤销)。turnIdCounter = M,后续新轮次从 M+1 续。
- */
 export function rebuildFromHistory(history: ChatMessage[]): void {
-  const out: Turn[] = [];
-  for (let i = 0; i < history.length; i++) {
-    if (history[i].role !== 'user') continue;
-    const first = toText((history[i] as { content?: unknown }).content).split('\n')[0] ?? '';
-    out.push({ turnId: out.length + 1, firstLine: truncateDisplay(first, 40) });
+  const rebuilt: Turn[] = [];
+  for (const message of history) {
+    if (message.role !== 'user') continue;
+    const first = toText((message as { content?: unknown }).content).split('\n')[0] ?? '';
+    rebuilt.push({
+      turnId: rebuilt.length + 1,
+      firstLine: truncateDisplay(first, 40),
+    });
   }
-  turns = out;
+  turns = rebuilt;
   snapshots = [];
-  turnIdCounter = out.length;
+  turnIdCounter = rebuilt.length;
   currentTurnId = 0;
+  sequenceCounter = 0;
 }
 
 function snapshotsPath(id: string): string {
-  // 新式目录,回退旧式文件
-  const newPath = path.join(config.sessionDir, id, 'snapshots.json');
-  if (existsSync(newPath)) return newPath;
+  const current = path.join(config.sessionDir, id, 'snapshots.json');
+  if (existsSync(current)) return current;
   return path.join(config.sessionDir, `${id}.snapshots.json`);
 }
 
-/** 随 saveSession 调:把 turns + snapshots 落盘(turns 为空则跳过,不写空文件)。 */
 export function persistSnapshots(id: string): void {
   if (turns.length === 0) return;
   try {
@@ -240,33 +469,32 @@ export function persistSnapshots(id: string): void {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       path.join(dir, 'snapshots.json'),
-      JSON.stringify({ version: 1, turns, snapshots }),
-      'utf8'
+      JSON.stringify({ version: 2, turns, snapshots }),
+      'utf8',
     );
   } catch {
-    // 落盘失败不阻断(回滚仅失去跨重启能力)
+    // 落盘失败不阻断会话；只失去跨重启回滚能力。
   }
 }
 
-/**
- * /resume / --resume 加载会话后调:读回 turns + snapshots。成功返 true(状态已覆盖);
- * 失败 / 无文件返 false,调用方应改调 rebuildFromHistory(history) 兜底。
- */
 export function loadSnapshots(id: string): boolean {
-  const p = snapshotsPath(id);
-  if (!existsSync(p)) return false;
+  const snapshotFile = snapshotsPath(id);
+  if (!existsSync(snapshotFile)) return false;
   try {
-    const rec = JSON.parse(readFileSync(p, 'utf8')) as {
-      version?: number;
+    const record = JSON.parse(readFileSync(snapshotFile, 'utf8')) as {
       turns?: Turn[];
       snapshots?: Snapshot[];
     };
-    if (!rec || !Array.isArray(rec.turns) || !Array.isArray(rec.snapshots)) {
+    if (!record || !Array.isArray(record.turns) || !Array.isArray(record.snapshots)) {
       return false;
     }
-    turns = rec.turns;
-    snapshots = rec.snapshots;
-    turnIdCounter = turns.reduce((mx, t) => Math.max(mx, t.turnId), 0);
+    turns = record.turns;
+    snapshots = record.snapshots;
+    turnIdCounter = turns.reduce((max, turn) => Math.max(max, turn.turnId), 0);
+    sequenceCounter = snapshots.reduce(
+      (max, snapshot) => Math.max(max, snapshot.sequence ?? 0),
+      0,
+    );
     currentTurnId = 0;
     return true;
   } catch {

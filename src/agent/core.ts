@@ -233,9 +233,6 @@ export interface AgentRunOptions {
   /** 工具 schema 覆盖;plan 模式传 planChatTools(只读子集)。子 agent 可传受限子集。
    *  缺省 = 按 getAgentMode() 自动选(auto=全量 / plan=只读)。 */
   toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[];
-  /** 跳过回滚快照记录(子 agent 逻辑隔离用)。true = 本 agent 的 write_file/edit_file 改动
-   *  不进主回滚链,主 /rollback 不撤销。透传给 executeTool。 */
-  skipRollback?: boolean;
   /** 本 agent 独享的上下文统计状态；缺省为主 agent 全局 contextState。 */
   contextState?: ContextState;
 }
@@ -273,7 +270,7 @@ export interface AgentRunResult {
 export async function runAgentCore(
   opts: AgentRunOptions,
 ): Promise<AgentRunResult> {
-  const { history, userInput, signal, onContextUpdate, hooks, skipRollback } = opts;
+  const { history, userInput, signal, onContextUpdate, hooks } = opts;
   const runtimeContextState = opts.contextState ?? contextState;
   const maxSteps = opts.maxSteps ?? config.maxSteps;
   // 中断还原:LLM 中途可能调 switch_mode 切了模式,abort 时连同模式一起还原回轮首。
@@ -313,7 +310,7 @@ export async function runAgentCore(
   let savedHistory = history.slice();
   // drop_context 工具的上下文剔除回调:闭包捕获 history,原地剔除无关旧 tool 结果。
   // 保护由 dropContextFromHistory 内部保证:history[0](system)+ 当前轮(最后 user 及其后)永不剔除。
-  // 子 agent 也在自己的 history 上操作(子 agent 独立 history);skipRollback 不影响此行为。
+  // 子 agent 也在自己的 history 上操作(子 agent 独立 history)，文件回滚事务则与主轮共享。
   const dropContext = (filter: DropContextFilter): DropContextResult =>
     dropContextFromHistory(history, filter);
   // 相关性裁剪 pruner:每个 runAgentCore 实例一个,纯静态、不调 LLM、自动判定 read_file 失效。
@@ -499,7 +496,7 @@ export async function runAgentCore(
             const batch = calls.slice(i, j);
             for (const tc of batch) hooks.onToolHeader?.(tc);
             hooks.onToolStart?.(batch[0].name);
-            const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext }));
+            const started = batch.map((tc) => executeTool(tc.name, tc.arguments, signal, { dropContext }));
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
               const output = await started[k];
@@ -558,7 +555,7 @@ export async function runAgentCore(
               i = j;
               continue; // 全部被拒绝,跳过执行
             }
-            const started = allowedBatch.map((tc) => executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext }));
+            const started = allowedBatch.map((tc) => executeTool(tc.name, tc.arguments, signal, { dropContext }));
             // 先批量打印所有头 + 启 spinner(多 task 并发,spinner 只显一个,但 ● 头都打出来)
             for (const tc of allowedBatch) {
               hooks.onToolHeader?.(tc);
@@ -612,7 +609,7 @@ export async function runAgentCore(
               : null;
             const { preWriteOld, editStartLine } = readDiffContext(tc, mutationParsed);
             hooks.onToolStart?.(tc.name);
-            const output = await executeTool(tc.name, tc.arguments, signal, { skipRollback, dropContext });
+            const output = await executeTool(tc.name, tc.arguments, signal, { dropContext });
             hooks.onToolDone?.();
             hooks.onToolResult?.(tc, output, mutationParsed, preWriteOld, editStartLine);
             // Thrashing:同上(history 附 hint,UI 干净)

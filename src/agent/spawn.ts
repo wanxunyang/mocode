@@ -7,13 +7,10 @@
 //  - 独立 history:不共享主对话,避免子任务的工具噪声污染主上下文。
 //  - 系统提示复用主 agent 组装链(config.systemPrompt + memory 段 + skills 段)+ 子 agent 角色后缀。
 //  - 工具子集:按白名单从 chatTools 过滤;无白名单 = 全量(但 task 工具调用方通常会限定只读)。
-//  - 不调 beginTurn(不进主回滚链);skipRollback=true 使文件 mutation 跳过 recordMutation,
-//    子 agent 的改动不进主回滚快照链(靠 git 兜底,见下方 skipRollback 注释)。
+//  - 不调 beginTurn：子 agent 共享主 agent 当前轮次；其文件修改进入同一回滚事务。
 //  - 步数上限默认更低(config.subAgentMaxSteps ?? 50),防子任务失控耗尽配额。
 //  - 中断透传:opts.signal(主 agent 的 abort signal)透传给 runAgentCore → chat/executeTool,
 //    主 Ctrl+C 树杀子 agent(chat 流式 abort + run_command/web_fetch 即时取消)。
-//  - 逻辑隔离(回滚):skipRollback=true,子 agent 的 write_file/edit_file 改动不进主回滚快照链,
-//    主 /rollback 不撤销子 agent 改动(靠 git 兜底)。子 agent 与主 agent 共享 cwd(文件改动可见)。
 
 import type OpenAI from 'openai';
 import { chatTools, type ChatMessage } from '../llm/index.js';
@@ -164,7 +161,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     hooks,
     maxSteps,
     toolsOverride,
-    skipRollback: true, // 逻辑隔离:子 agent 文件改动不进主回滚快照链,主 /rollback 不撤销(靠 git 兜底)
     contextState: localContextState,
   });
 

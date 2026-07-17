@@ -1,6 +1,11 @@
 import type { Tool, ToolContext, DropContextFilter, DropContextResult } from './types.js';
 import { builtinTools } from './builtins/index.js';
-import { recordMutation } from '../rollback/index.js';
+import {
+  beginPathMutation,
+  beginWorkspaceMutation,
+  endPathMutation,
+  endWorkspaceMutation,
+} from '../rollback/index.js';
 import { enforceSandbox } from '../sandbox/index.js';
 
 /**
@@ -43,14 +48,13 @@ function rebuildTools(): void {
  * 按名调度工具,统一 try/catch + JSON 解析,返回字符串而非抛错。
  * signal 透传给 tool.execute(经 ctx):长任务工具(run_command/web_fetch)abort 即时取消,
  * 让用户 Ctrl+C 能跟手中断工具执行(而非等命令跑完 / 超时)。
- * opts.skipRollback:子 agent 逻辑隔离用——跳过 recordMutation,子 agent 改动不进主回滚快照链。
  * opts.dropContext:上下文剔除回调(drop_context 工具用),透传给 tool.execute 经 ctx。
  */
 export async function executeTool(
   name: string,
   argsRaw: string,
   signal?: AbortSignal,
-  opts?: { skipRollback?: boolean; dropContext?: (filter: DropContextFilter) => DropContextResult }
+  opts?: { dropContext?: (filter: DropContextFilter) => DropContextResult }
 ): Promise<string> {
   const tool = tools.find((t) => t.name === name);
   if (!tool) return `错误:未知工具 "${name}"`;
@@ -61,26 +65,32 @@ export async function executeTool(
     return `错误:工具 ${name} 的 arguments 不是合法 JSON: ${argsRaw}`;
   }
   try {
-    // 沙箱:路径类工具(读/写/改)越界拒绝 + args.path 重写为牢内绝对;glob/grep pattern 校验。
-    // 返 string = 拒绝(直接喂 LLM,不执行);返 null = 放行(可能已重写 args.path)。
-    // 须在 recordMutation 前:让快照路径 = 牢内绝对路径,与回滚一致。不抛(契约:调度器永不抛错)。
+    // 沙箱先重写/校验路径，保证快照与实际执行目标完全一致。
     const sbErr = enforceSandbox(name, args);
     if (sbErr) return sbErr;
-    // 撤销回滚用:write_file/edit_file 改动前记 before 快照(回滚时恢复到轮末状态)。
-    // 子 agent(skipRollback)跳过:其改动不进主回滚链,主 /rollback 不撤销(靠 git 兜底)。
-    if (
-      !opts?.skipRollback &&
+
+    const pathCapture =
       (name === 'write_file' || name === 'edit_file') &&
       typeof args.path === 'string' &&
       args.path
-    ) {
-      recordMutation(args.path);
+        ? beginPathMutation(args.path)
+        : null;
+    // shell 与 MCP 的副作用无法从参数可靠推断：以工作区前后状态识别实际改动。
+    // task 本身不扫描；其子 agent 共享当前轮，并在各自真实写工具处记账。
+    const workspaceCapture =
+      name === 'run_command' || name.startsWith('mcp__')
+        ? beginWorkspaceMutation()
+        : null;
+
+    try {
+      return await tool.execute(args, {
+        signal,
+        dropContext: opts?.dropContext,
+      });
+    } finally {
+      if (pathCapture) endPathMutation(pathCapture, name);
+      if (workspaceCapture) endWorkspaceMutation(workspaceCapture, name);
     }
-    return await tool.execute(args, {
-      signal,
-      skipRollback: opts?.skipRollback,
-      dropContext: opts?.dropContext,
-    });
   } catch (e) {
     return `错误:工具 ${name} 执行失败: ${e instanceof Error ? e.message : String(e)}`;
   }

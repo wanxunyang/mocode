@@ -4,9 +4,6 @@ export interface ToolContext {
    * 挂监听:abort 即取消(杀子进程 / 取消 fetch),让中断跟手而非等命令跑完或超时。
    * 子 agent 透传主 signal:主 Ctrl+C 树杀子 agent(经 task→spawnAgent→runAgentCore→executeTool)。 */
   signal?: AbortSignal;
-  /** 跳过回滚快照记录。子 agent(logical-isolation 模式)的 write_file/edit_file 改动不进主回滚链——
-   * 主 /rollback 不撤销子 agent 改动(靠 git 兜底)。主 agent 永远不设此 flag。 */
-  skipRollback?: boolean;
   /** 上下文剔除回调(drop_context 工具用):把历史里命中的无关 tool 结果替换为存根(保
    * tool_call_id 配对不变量,只改 content),原地修改 history。由 runAgentCore 闭包注入。
    * 永不动 history[0](system)与当前轮(最后一个 user 消息及之后)的 tool 结果——agent 还在用。
