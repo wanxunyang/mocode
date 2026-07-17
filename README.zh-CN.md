@@ -31,6 +31,11 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **可选桌宠** — 独立悬浮窗(`/pet`)显示一个小角色,镜像 agent 活动(空闲 / 思考 / 跑工具 / 等人工),独立进程走 WebSocket,`/pet quit` 完全关闭。挂在终端外,绝不挡终端。
 - **斜杠命令** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`,输入时下拉过滤
 
+## 使用文档
+
+- [菜单式使用指南](./docs/usage.md) — 快速上手、命令速查、模式、会话、项目上下文与排障。
+- [项目上下文：Snapshot 与 Project Skill](./docs/USAGE_SNAPSHOT_SKILL.md)
+
 ## 安装
 
 要求 Node.js ≥ 18。

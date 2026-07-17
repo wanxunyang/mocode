@@ -1,7 +1,9 @@
 node_modules/
 prompt_image/
 tmp/
-docs/
+docs/*
+!docs/usage.md
+!docs/USAGE_SNAPSHOT_SKILL.md
 task_management/
 scripts/
 .env

@@ -32,6 +32,11 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Optional desktop pet** — A small floating window (`/pet`) shows a stateful character that mirrors agent activity (idle / thinking / tool running / waiting for human). Works as a separate process over WebSocket; quit it with `/pet quit`. Sits beside the terminal, never blocks it.
 - **Slash commands** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`, with dropdown filtering as you type.
 
+## Documentation
+
+- [中文使用指南](./docs/usage.md) — 菜单式快速上手、命令速查、模式、会话、项目上下文与排障。
+- [Project context](./docs/USAGE_SNAPSHOT_SKILL.md) — Snapshot and Project Skill reference.
+
 ## Installation
 
 Requires Node.js ≥ 18.
@@ -208,14 +213,14 @@ A skill's `description` is injected into the system prompt (progressive disclosu
 
 MoCode uses two complementary systems to help the agent understand your project:
 
-- **Project Snapshot** (automatic + LLM-enhanced): Scans your project files and generates a structured summary including project description, tech stack, key commands, module responsibilities, and directory tree. Built automatically on startup (Phase 1: sync scan ~100ms, Phase 2: async LLM summary ~5s). Stored in `.mocode/snapshot.json`, reused across sessions. Refresh manually with `/snapshot_refresh` after major changes.
-- **Project Skill** (manual + AI-assisted): A knowledge base you maintain capturing insights the agent can't auto-discover — design decisions, architectural patterns, pitfalls, conventions, and development workflow notes. Initialize with `/init` (AI explores your project and drafts the initial content), then edit `.mocode/project-skill.md` to refine. Update via the `project_skill_update` tool during conversations.
+- **Project Snapshot** (automatic + LLM-enhanced, enabled by default): Scans your project files and generates a structured summary including project description, tech stack, key commands, module responsibilities, and directory tree. Stored in `.mocode/snapshot.json` and reused across sessions. Use `/snapshot` to toggle it and `/snapshot_refresh` after major changes.
+- **Project Skill** (manual + AI-assisted, disabled by default): A knowledge base for design decisions, architectural patterns, pitfalls, conventions, and workflow notes. Enable it with `/project_skill on` (or `MOCODE_PROJECT_SKILL=true`), generate an initial draft with `/project_skill init`, then refine `.mocode/project-skill.md`. The agent can update it through `project_skill_update` during conversations.
 
 **Complementary principle**: Snapshot provides *what/where* (facts: files, structure, commands), Skill provides *why/how* (insights: decisions, behaviors, gotchas). No duplication, ~46% token savings compared to the previous approach.
 
-Both are enabled by default. Control via environment variables:
+Control via environment variables:
 - `MOCODE_PROJECT_SNAPSHOT=false` — disable snapshot
-- `MOCODE_PROJECT_SKILL=false` — disable skill
+- `MOCODE_PROJECT_SKILL=true` — enable Project Skill
 
 See [docs/USAGE_SNAPSHOT_SKILL.md](./docs/USAGE_SNAPSHOT_SKILL.md) for detailed usage.
 
