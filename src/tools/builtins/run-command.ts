@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { MAX_OUTPUT } from '../constants.js';
-import { getSandboxRoot, filterEnv, isCommandDenied } from '../../sandbox/index.js';
+import { getSandboxRoot, filterEnv, isCommandDenied, jailResolve } from '../../sandbox/index.js';
 import type { Tool, ToolOutcome } from '../types.js';
 import { t } from '../../i18n/index.js';
 
@@ -41,11 +41,22 @@ export async function runCommandRaw(
   command: string,
   timeout = 120000,
   signal?: AbortSignal,
+  cwd?: string,
 ): Promise<RawCommandResult> {
   const startedAt = Date.now();
   const deny = isCommandDenied(command);
   if (deny) {
     return { status: 'denied', exitCode: null, output: `错误:${deny}`, durationMs: 0 };
+  }
+
+  let executionCwd = getSandboxRoot() ?? process.cwd();
+  if (cwd) {
+    try {
+      executionCwd = jailResolve(cwd);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { status: 'denied', exitCode: null, output: `错误:${message}`, durationMs: 0 };
+    }
   }
 
   return new Promise<RawCommandResult>((done) => {
@@ -54,7 +65,7 @@ export async function runCommandRaw(
       isWin ? 'cmd.exe' : 'bash',
       isWin ? ['/d', '/s', '/c', command] : ['-c', command],
       {
-        cwd: getSandboxRoot() ?? process.cwd(),
+        cwd: executionCwd,
         env: filterEnv(process.env),
         // Without this, Node re-quotes cmd.exe arguments and `node -e "..."` can become
         // a string literal that exits 0, causing false-positive validation on Windows.

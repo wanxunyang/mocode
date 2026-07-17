@@ -1,161 +1,190 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Tool, ToolRisk } from '../tools/types.js';
-import { promptIntervention } from '../ui/intervention.js';
+import { promptIntervention, type InterventionResult } from '../ui/intervention.js';
 import { config } from '../config/index.js';
+import { getSandboxRoot } from '../sandbox/index.js';
 import { t } from '../i18n/index.js';
 
-/**
- * 工具权限系统:基于 risk 字段在执行前拦截确认。
- * 
- * 设计:
- *  - safe      → 直接放行(只读工具,零交互)
- *  - confirm   → 弹面板确认,同工具同会话缓存(避免重复打断)
- *  - dangerous → 每次都弹(高风险,命令内容不可预测)
- * 
- * 三层允许(优先级从高到低):
- *  1. 永久允许(permanentAllow,跨会话持久化到 ~/.mocode/permissions.json)
- *  2. 会话允许(approvedTools,本次进程内缓存)
- *  3. 面板询问(promptIntervention,复用 ask_human UI)
- * 
- * 复用 promptIntervention:统一 UI 面板,非 TTY 自动降级(第一项 = 允许)。
- */
+export type PermissionScope = 'once' | 'session' | 'project';
 
-/** 跨会话持久化允许列表路径 */
-const PERMISSIONS_PATH = path.join(os.homedir(), '.mocode', 'permissions.json');
-
-/** 永久允许:跨会话持久化(用户选了"以后不再询问此工具") */
-let permanentAllow: Set<string> = new Set();
-let permanentLoaded = false;
-
-/** 会话级缓存:confirm 级工具批准后,后续调用不再弹 */
-const approvedTools = new Set<string>();
-
-/** 从磁盘加载永久允许列表(首调时触发,之后用内存缓存;文件不存在/解析失败返空集合) */
-function loadPermanent(): Set<string> {
-  if (permanentLoaded) return permanentAllow;
-  permanentLoaded = true;
-  try {
-    const raw = fs.readFileSync(PERMISSIONS_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (parsed && Array.isArray(parsed.allowForever)) {
-      permanentAllow = new Set(parsed.allowForever.filter((x: unknown) => typeof x === 'string'));
-    }
-  } catch {
-    // 文件不存在 / 解析失败 → 空集合(不阻断,用户首次使用或配置损坏均安全降级)
-  }
-  return permanentAllow;
+export interface PermissionGrant {
+  tool: string;
+  fingerprint: string;
+  scope: PermissionScope;
+  projectRoot?: string;
 }
 
-/** 写入永久允许列表(覆盖写;失败静默,下次启动丢失但不阻断当前会话) */
+export interface PermissionCheckOptions {
+  projectRoot?: string;
+  /** Test seam; production uses the normal intervention panel. */
+  prompt?: (request: Parameters<typeof promptIntervention>[0]) => Promise<InterventionResult>;
+  /** Tests may keep project grants in memory instead of touching the user profile. */
+  persistProjectGrant?: boolean;
+}
+
+const PERMISSIONS_PATH = path.join(os.homedir(), '.mocode', 'permissions.json');
+let permanentGrants: PermissionGrant[] = [];
+let permanentLoaded = false;
+const sessionGrants: PermissionGrant[] = [];
+
+function stable(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, item]) => [key, stable(item)])
+    );
+  }
+  return value;
+}
+
+function canonicalProjectRoot(root: string): string {
+  const resolved = path.resolve(root);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/** A grant is bound to the actual command or logical resources, never merely a tool name. */
+export function permissionFingerprint(tool: Tool, args: Record<string, unknown>): string {
+  let subject: unknown;
+  if (tool.name === 'run_command' && typeof args.command === 'string') {
+    subject = { command: args.command.trim() };
+  } else {
+    const resources = tool.capabilities?.resources?.(args).filter(Boolean).sort();
+    // File mutations may be granted by their concrete resource. Coarse resources such as
+    // "workspace" must retain arguments so task/process-like calls cannot become tool-wide.
+    subject = resources?.length && typeof args.path === 'string'
+      ? { resources }
+      : stable(args);
+  }
+  return crypto.createHash('sha256').update(JSON.stringify(subject)).digest('hex');
+}
+
+function validGrant(value: unknown): value is PermissionGrant {
+  if (!value || typeof value !== 'object') return false;
+  const grant = value as PermissionGrant;
+  return typeof grant.tool === 'string'
+    && typeof grant.fingerprint === 'string'
+    && grant.fingerprint.length > 0
+    && (grant.scope === 'project' || grant.scope === 'session' || grant.scope === 'once');
+}
+
+function loadPermanent(): PermissionGrant[] {
+  if (permanentLoaded) return permanentGrants;
+  permanentLoaded = true;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(PERMISSIONS_PATH, 'utf8')) as { grants?: unknown[] };
+    permanentGrants = Array.isArray(parsed.grants)
+      ? parsed.grants.filter(validGrant).filter((grant) => grant.scope === 'project')
+      : [];
+  } catch {
+    permanentGrants = [];
+  }
+  return permanentGrants;
+}
+
 function savePermanent(): void {
   try {
     fs.mkdirSync(path.dirname(PERMISSIONS_PATH), { recursive: true });
-    fs.writeFileSync(
-      PERMISSIONS_PATH,
-      JSON.stringify({ allowForever: Array.from(permanentAllow) }, null, 2) + '\n',
-      'utf8'
-    );
+    fs.writeFileSync(PERMISSIONS_PATH, `${JSON.stringify({ version: 2, grants: permanentGrants }, null, 2)}\n`, 'utf8');
   } catch {
-    // 写失败静默(与 updateConfigKey 一致:UI 偏好路径,不阻断 REPL)
+    // A failed persistence write must never turn into broader authorization.
   }
 }
 
-/** 从 Tool 解析 risk,缺省返 'safe'(只读工具无需标注)。 */
 export function getToolRisk(tool: Tool): ToolRisk {
   return tool.risk ?? 'safe';
 }
 
-/** 参数摘要:提取关键参数供确认面板展示(path / command 等)。 */
-function summarizeArgs(tool: Tool, args: Record<string, unknown>): string {
+function summarizeArgs(args: Record<string, unknown>): string {
   const lines: string[] = [];
   if (typeof args.path === 'string') lines.push(t('permission.path', { value: args.path }));
   if (typeof args.command === 'string') lines.push(t('permission.command', { value: args.command }));
   if (typeof args.prompt === 'string') {
-    const preview = String(args.prompt).slice(0, 100);
-    lines.push(t('permission.task', { value: `${preview}${String(args.prompt).length > 100 ? '…' : ''}` }));
+    const preview = args.prompt.slice(0, 100);
+    lines.push(t('permission.task', { value: `${preview}${args.prompt.length > 100 ? '…' : ''}` }));
   }
-  return lines.length > 0 ? lines.join('\n') : t('permission.noArgs');
+  return lines.length ? lines.join('\n') : t('permission.noArgs');
 }
 
-/**
- * 检查权限:safe 直接放行;confirm/dangerous 弹面板让用户确认。
- * 
- * 返回 'allow' = 放行, 'deny' = 拒绝(不执行,也不记回滚快照)。
- * 非 TTY 环境(promptIntervention 内部处理):自动选第一项(允许)并打 stderr 日志,不阻塞。
- */
+function matches(grant: PermissionGrant, tool: string, fingerprint: string, projectRoot: string): boolean {
+  return grant.tool === tool
+    && grant.fingerprint === fingerprint
+    && (grant.scope !== 'project' || grant.projectRoot === projectRoot);
+}
+
 export async function checkPermission(
   tool: Tool,
   args: Record<string, unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: PermissionCheckOptions = {}
 ): Promise<'allow' | 'deny'> {
-  // 总开关关闭 → 全部放行(零行为变化,向后兼容)
-  if (!config.permissionEnabled) return 'allow';
+  if (!config.permissionEnabled || getToolRisk(tool) === 'safe') return 'allow';
+  if (signal?.aborted) return 'deny';
 
-  const risk = getToolRisk(tool);
-  if (risk === 'safe') return 'allow';
+  const fingerprint = permissionFingerprint(tool, args);
+  const projectRoot = canonicalProjectRoot(options.projectRoot ?? getSandboxRoot() ?? process.cwd());
+  if (sessionGrants.some((grant) => matches(grant, tool.name, fingerprint, projectRoot))) return 'allow';
+  if (loadPermanent().some((grant) => matches(grant, tool.name, fingerprint, projectRoot))) return 'allow';
 
-  // 永久允许(跨会话):命中则放行,不弹面板
-  if (loadPermanent().has(tool.name)) return 'allow';
+  // CI/pipes must fail closed. Operators can deliberately restore unattended behavior.
+  if (!process.stdin.isTTY && !config.permissionNonInteractiveAllow && !options.prompt) return 'deny';
+  if (signal?.aborted) return 'deny';
 
-  // 会话允许(confirm 级):同进程内缓存,命中则放行
-  if (risk === 'confirm' && approvedTools.has(tool.name)) return 'allow';
-
-  // 构建确认面板
-  const isDangerous = risk === 'dangerous';
+  const onceOption = t('permission.allow');
+  const sessionOption = t('permission.allowSessionResource');
+  const projectOption = t('permission.allowProjectResource');
   const denyOption = t('permission.deny');
-  const foreverOption = t('permission.allowForever');
-  const sessionOption = t('permission.allowSession');
-  const title = isDangerous
-    ? t('permission.dangerTitle', { tool: tool.name })
-    : t('permission.confirmTitle', { tool: tool.name });
-  const detail = summarizeArgs(tool, args) + (isDangerous ? `\n\n${t('permission.dangerWarning')}` : '');
-  // 选项统一结构:dangerous 也提供"以后不再询问"(用户明确授权即尊重,即使 run_command)
-  const options = isDangerous
-    ? [t('permission.confirmExecute'), foreverOption, denyOption]
-    : [t('permission.allow'), sessionOption, foreverOption, denyOption];
+  const dangerous = getToolRisk(tool) === 'dangerous';
+  const choices = [onceOption, sessionOption, projectOption, denyOption];
 
-  // 弹面板(阻塞直到用户选择;signal 中断时 promptIntervention 内部处理)
-  const result = await promptIntervention({
+  const result = await (options.prompt ?? promptIntervention)({
     type: 'choice',
-    title,
-    detail,
-    options,
+    title: dangerous
+      ? t('permission.dangerTitle', { tool: tool.name })
+      : t('permission.confirmTitle', { tool: tool.name }),
+    detail: summarizeArgs(args) + (dangerous ? `\n\n${t('permission.dangerWarning')}` : ''),
+    options: choices,
     allowCustom: false,
   });
+  if (signal?.aborted || result.action === 'cancelled' || result.value === denyOption) return 'deny';
 
-  // 用户取消(Esc / Ctrl+C)→ 拒绝
-  if (result.action === 'cancelled') return 'deny';
-
-  // 解析选择
-  const value = result.value ?? '';
-  if (value === denyOption) return 'deny';
-
-  // 永久允许:写入磁盘 + 加入内存集合(跨会话生效)
-  if (value === foreverOption) {
-    permanentAllow.add(tool.name);
-    savePermanent();
-    return 'allow';
+  if (result.value === sessionOption) {
+    sessionGrants.push({ tool: tool.name, fingerprint, scope: 'session' });
+  } else if (result.value === projectOption) {
+    const grant: PermissionGrant = { tool: tool.name, fingerprint, scope: 'project', projectRoot };
+    permanentGrants = loadPermanent().filter((item) => !matches(item, tool.name, fingerprint, projectRoot));
+    permanentGrants.push(grant);
+    if (options.persistProjectGrant !== false) savePermanent();
   }
-
-  // 会话允许(confirm 级):加入内存缓存,本次进程内不再弹
-  if (!isDangerous && value === sessionOption) {
-    approvedTools.add(tool.name);
-  }
-
   return 'allow';
 }
 
-/** 移除工具的永久允许(撤销"以后不再询问"授权)。供未来 `/permissions` 管理命令使用。 */
-export function revokePermanentAllow(toolName: string): void {
-  if (permanentAllow.has(toolName)) {
-    permanentAllow.delete(toolName);
-    savePermanent();
-  }
+export function revokePermanentAllow(toolName: string, fingerprint?: string): void {
+  permanentGrants = loadPermanent().filter((grant) =>
+    grant.tool !== toolName || (fingerprint !== undefined && grant.fingerprint !== fingerprint)
+  );
+  savePermanent();
 }
 
-/** 列出所有永久允许的工具名(供未来 `/permissions` 管理命令使用)。 */
+export function listPermanentGrants(): PermissionGrant[] {
+  return loadPermanent().map((grant) => ({ ...grant }));
+}
+
+/** Compatibility API: returns tools having at least one project-scoped grant. */
 export function listPermanentAllow(): string[] {
-  return Array.from(loadPermanent());
+  return [...new Set(loadPermanent().map((grant) => grant.tool))];
+}
+
+export function clearSessionPermissionGrants(): void {
+  sessionGrants.length = 0;
+}
+
+export function resetPermissionGrantsForTests(): void {
+  sessionGrants.length = 0;
+  permanentGrants = [];
+  permanentLoaded = true;
 }

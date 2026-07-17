@@ -125,6 +125,8 @@ export interface Config {
    *  关闭则所有工具直接放行(零交互,向后兼容旧行为)。默认 true。
    *  设 MOCODE_PERMISSION=false 全局回退。 */
   permissionEnabled: boolean;
+  /** Allow confirmation-requiring tools without a TTY. Defaults false (fail closed). */
+  permissionNonInteractiveAllow: boolean;
   /** 项目专属 Skill 总开关:跨 session 持久化项目开发知识(约定/架构/坑点)。
    *  开启后 .mocode/project-skill.md 内容注入系统提示词，Agent 可通过 project_skill_update 工具动态更新。
    *  默认 false(零侵入);设 MOCODE_PROJECT_SKILL=true 启用。 */
@@ -478,6 +480,7 @@ export const config: Config = {
   llmKeysFromShell,
   projectSnapshotEnabled: process.env.MOCODE_PROJECT_SNAPSHOT !== 'false',
   permissionEnabled: process.env.MOCODE_PERMISSION !== 'false',
+  permissionNonInteractiveAllow: process.env.MOCODE_PERMISSION_NON_INTERACTIVE_ALLOW === 'true',
   projectSkillEnabled: process.env.MOCODE_PROJECT_SKILL === 'true',
 };
 

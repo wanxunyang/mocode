@@ -9,7 +9,16 @@ import {
   discoverProjectProfile,
   type ProjectPackageManager,
 } from '../src/verification/profile.js';
-import { runCommandRaw } from '../src/tools/builtins/run-command.js';
+import { resolveAffectedPackages } from '../src/verification/affected.js';
+import { runCommandRaw, runCommandTool } from '../src/tools/builtins/run-command.js';
+import { setSandboxRoot } from '../src/sandbox/index.js';
+import {
+  checkPermission,
+  clearSessionPermissionGrants,
+  permissionFingerprint,
+  resetPermissionGrantsForTests,
+} from '../src/permissions/index.js';
+import { t } from '../src/i18n/index.js';
 
 interface SmokeCase {
   name: string;
@@ -54,7 +63,93 @@ function assertWorkspaceProfile(
   }
 }
 
+function affectedWorkspaceFixture(): { root: string; packageA: string; packageB: string } {
+  const root = fixture({
+    name: 'root',
+    workspaces: ['packages/*'],
+    scripts: { typecheck: 'root-check' },
+  });
+  const packageA = writePackage(root, 'packages/a', { name: 'a', scripts: { test: 'a-test' } });
+  const packageB = writePackage(root, 'packages/b', { name: 'b', scripts: { build: 'b-build' } });
+  mkdirSync(path.join(packageA, 'src'), { recursive: true });
+  mkdirSync(path.join(packageA, 'tests', 'fixtures'), { recursive: true });
+  mkdirSync(path.join(packageB, 'src'), { recursive: true });
+  writeFileSync(path.join(root, 'tsconfig.json'), '{}', 'utf8');
+  return { root, packageA, packageB };
+}
+
 const cases: SmokeCase[] = [
+  {
+    name: 'binds session command grants to the exact command fingerprint',
+    async run() {
+      resetPermissionGrantsForTests();
+      let prompts = 0;
+      const prompt = async () => {
+        prompts += 1;
+        return { action: 'selected' as const, value: t('permission.allowSessionResource') };
+      };
+      assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, { prompt }), 'allow');
+      assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, { prompt }), 'allow');
+      assert.equal(prompts, 1);
+      assert.equal(await checkPermission(runCommandTool, { command: 'npm publish' }, undefined, {
+        prompt: async () => ({ action: 'selected', value: t('permission.deny') }),
+      }), 'deny');
+      assert.notEqual(
+        permissionFingerprint(runCommandTool, { command: 'npm test' }),
+        permissionFingerprint(runCommandTool, { command: 'npm publish' }),
+      );
+      clearSessionPermissionGrants();
+    },
+  },
+  {
+    name: 'denies cancelled and aborted permission requests',
+    async run() {
+      resetPermissionGrantsForTests();
+      assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, {
+        prompt: async () => ({ action: 'cancelled' }),
+      }), 'deny');
+      const controller = new AbortController();
+      controller.abort();
+      assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, controller.signal, {
+        prompt: async () => ({ action: 'selected', value: t('permission.allow') }),
+      }), 'deny');
+    },
+  },
+  {
+    name: 'scopes permanent grants to command/resource and project',
+    async run() {
+      resetPermissionGrantsForTests();
+      const root = fixture({ scripts: { test: 'x' } });
+      let prompts = 0;
+      const projectPrompt = async () => {
+        prompts += 1;
+        return { action: 'selected' as const, value: t('permission.allowProjectResource') };
+      };
+      try {
+        const options = { projectRoot: root, prompt: projectPrompt, persistProjectGrant: false };
+        assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, options), 'allow');
+        assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, options), 'allow');
+        assert.equal(prompts, 1);
+        assert.equal(await checkPermission(runCommandTool, { command: 'npm run build' }, undefined, {
+          ...options,
+          prompt: async () => ({ action: 'selected', value: t('permission.deny') }),
+        }), 'deny');
+        const otherRoot = fixture({ scripts: { test: 'x' } });
+        try {
+          assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, {
+            ...options,
+            projectRoot: otherRoot,
+            prompt: async () => ({ action: 'selected', value: t('permission.deny') }),
+          }), 'deny');
+        } finally {
+          removeFixture(otherRoot);
+        }
+      } finally {
+        removeFixture(root);
+        resetPermissionGrantsForTests();
+      }
+    },
+  },
   {
     name: 'prefers typecheck over test and build',
     run() {
@@ -139,6 +234,105 @@ const cases: SmokeCase[] = [
       const profile = discoverProjectProfile(REPOSITORY_ROOT);
       assert.equal(profile.packages[0]?.name, 'mocode-ai');
       assert.ok(profile.packages.some((item) => item.name === 'mocode-pet-app'));
+    },
+  },
+  {
+    name: 'maps normalized Windows-style paths to the longest package root',
+    run() {
+      const { root } = affectedWorkspaceFixture();
+      try {
+        const profile = discoverProjectProfile(root);
+        const changed = process.platform === 'win32'
+          ? 'PACKAGES\\A\\src\\..\\src\\x.ts'
+          : 'packages/a/src/../src/x.ts';
+        const result = resolveAffectedPackages(
+          profile,
+          [changed, 'packages/a/src/x.ts'],
+          { changedFilesBase: root },
+        );
+        assert.deepEqual(result.packages.map((item) => item.package.name), ['a']);
+        assert.equal(result.canonicalChangedFiles.length, 1);
+        assert.equal(result.packages[0]?.reasons[0]?.classification, 'source');
+        assert.equal(result.rejected.length, 0);
+      } finally {
+        removeFixture(root);
+      }
+    },
+  },
+  {
+    name: 'expands root config changes to every package with reasons',
+    run() {
+      const { root } = affectedWorkspaceFixture();
+      try {
+        const profile = discoverProjectProfile(root);
+        const result = resolveAffectedPackages(
+          profile,
+          ['tsconfig.json', 'package.json'],
+          { changedFilesBase: root },
+        );
+        assert.equal(result.affectsAll, true);
+        assert.deepEqual(result.packages.map((item) => item.package.name), ['root', 'a', 'b']);
+        assert.ok(result.packages.every((item) =>
+          item.reasons.some((reason) => reason.kind === 'root_config_change')
+          && item.reasons.some((reason) => reason.kind === 'workspace_config_change')));
+      } finally {
+        removeFixture(root);
+      }
+    },
+  },
+  {
+    name: 'rejects project escapes and exposes a dependent expansion hook',
+    run() {
+      const { root } = affectedWorkspaceFixture();
+      try {
+        const profile = discoverProjectProfile(root);
+        const escaped = resolveAffectedPackages(
+          profile,
+          ['../outside.ts'],
+          { changedFilesBase: root },
+        );
+        assert.equal(escaped.rejected[0]?.reason, 'outside_project');
+        assert.equal(escaped.packages.length, 0);
+
+        const expanded = resolveAffectedPackages(
+          profile,
+          ['packages/a/tests/fixtures/case.ts'],
+          {
+            changedFilesBase: root,
+            expandDependents: (_direct, project) =>
+              project.packages.filter((item) => item.name === 'b'),
+          },
+        );
+        assert.deepEqual(expanded.packages.map((item) => item.package.name), ['a', 'b']);
+        assert.equal(expanded.packages[0]?.reasons[0]?.classification, 'fixture');
+        assert.equal(expanded.packages[1]?.reasons[0]?.kind, 'dependent_change');
+      } finally {
+        removeFixture(root);
+      }
+    },
+  },
+  {
+    name: 'runs internal validation commands in the selected package cwd',
+    async run() {
+      const { root, packageA } = affectedWorkspaceFixture();
+      const previousRoot = setSandboxRoot(root);
+      try {
+        const result = await runCommandRaw(
+          'node -e "console.log(process.cwd())"',
+          5000,
+          undefined,
+          packageA,
+        );
+        assert.equal(result.status, 'passed');
+        const actual = path.resolve(result.output.trim());
+        assert.equal(
+          process.platform === 'win32' ? actual.toLowerCase() : actual,
+          process.platform === 'win32' ? packageA.toLowerCase() : packageA,
+        );
+      } finally {
+        setSandboxRoot(previousRoot);
+        removeFixture(root);
+      }
     },
   },
   {
