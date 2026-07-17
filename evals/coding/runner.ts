@@ -15,19 +15,25 @@ import type { BenchmarkTaskResult, CodingTaskFixture } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
-interface CliOptions { selection: string; outDir: string; updateBaseline: boolean; list: boolean; keep: boolean }
+interface CliOptions { selection: string; outDir: string; updateBaseline: boolean; list: boolean; keep: boolean; timeoutMs?: number }
 
 export function parseBenchmarkArgs(args: string[]): CliOptions {
   const value = (name: string, fallback: string) => {
     const i = args.indexOf(name);
     return i >= 0 ? (args[i + 1] ?? fallback) : fallback;
   };
+  const timeoutRaw = value('--timeout', '');
+  const timeoutMs = timeoutRaw ? Number(timeoutRaw) : undefined;
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+    throw new Error('--timeout must be a positive number of milliseconds');
+  }
   return {
     selection: value('--task', value('--group', '')),
     outDir: path.resolve(value('--out', 'evals/results')),
     updateBaseline: args.includes('--update-baseline'),
     list: args.includes('--list'),
     keep: args.includes('--keep-workspaces'),
+    timeoutMs,
   };
 }
 
@@ -53,7 +59,7 @@ function promptHash(): string {
   return createHash('sha256').update(config.systemPrompt).digest('hex').slice(0, 16);
 }
 
-async function runTask(fixture: CodingTaskFixture, keep: boolean): Promise<BenchmarkTaskResult> {
+async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverride?: number): Promise<BenchmarkTaskResult> {
   const root = mkdtempSync(path.join(tmpdir(), `mocode-eval-${fixture.id}-`));
   materialize(root, fixture);
   const verifierHash = createHash('sha256').update(readFileSync(path.join(root, 'verify.mjs'))).digest('hex');
@@ -71,7 +77,7 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean): Promise<Bench
   let firstValidationPassed = false;
   const started = Date.now();
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), fixture.timeoutMs ?? 120_000);
+  const timer = setTimeout(() => controller.abort(), timeoutOverride ?? fixture.timeoutMs ?? 120_000);
   try {
     process.chdir(root);
     const result = await runAgentCore({
@@ -103,16 +109,17 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean): Promise<Bench
     const changed = result.changedFiles ?? traces.at(-1)?.changedFiles ?? [];
     const expectedFilesTouched = expectedChanged.every(f => changed.some(c => c.replace(/\\/g, '/').endsWith(f)));
     const verifierUnchanged = createHash('sha256').update(readFileSync(path.join(root, 'verify.mjs'))).digest('hex') === verifierHash;
-    const verified = finalVerified && expectedFilesTouched && verifierUnchanged;
+    const timedOut = controller.signal.aborted;
+    const verified = finalVerified && expectedFilesTouched && verifierUnchanged && !timedOut;
     return {
       id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
-      status: controller.signal.aborted ? 'timeout' : verified ? 'passed' : 'failed',
+      status: timedOut ? 'timeout' : verified ? 'passed' : 'failed',
       finalVerifiedSuccess: verified,
       firstPatchPass: firstValidationPassed,
       regression,
       toolRecovery: recovered,
       toolCalls: traces.at(-1)?.toolCalls ?? toolCalls,
-      tokens: result.usage?.totalTokens ?? null,
+      tokens: result.usage?.totalTokens ?? traces.at(-1)?.usage?.totalTokens ?? null,
       durationMs: Date.now() - started,
       unverifiedCompletion: result.completed && !finalVerified,
       changedFiles: changed,
@@ -146,7 +153,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const results: BenchmarkTaskResult[] = [];
   for (const fixture of selected) {
     process.stdout.write(`[eval] ${fixture.id} ${fixture.title} ... `);
-    const result = await runTask(fixture, opts.keep);
+    const result = await runTask(fixture, opts.keep, opts.timeoutMs);
     results.push(result);
     console.log(result.status);
   }

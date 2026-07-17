@@ -91,6 +91,14 @@ npm run eval:coding -- -- --group advanced
 
 建议分开运行三个难度，避免一次评测消耗过多 token，也便于分别比较各难度成功率。
 
+复杂题默认单题超时为 120 秒。需要给困难题更多时间时，可以覆盖为 300 秒（单位是毫秒）：
+
+```powershell
+npm run eval:coding -- -- --group hard --timeout 300000
+```
+
+超时任务即使留下的代码能够通过 verifier，也仍按超时失败计算，因为它没有在规定预算内完成 Agent 回合。
+
 ## 一次运行多个指定任务
 
 任务 ID 使用英文逗号分隔：

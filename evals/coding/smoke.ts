@@ -16,6 +16,8 @@ assert.equal(selectTasks('advanced').length, 20);
 assert.deepEqual(selectTasks('single-01,multi-01').map(t => t.id), ['single-01', 'multi-01']);
 assert.equal(parseBenchmarkArgs(['--group', 'types']).selection, 'types');
 assert.equal(parseBenchmarkArgs([]).selection, '');
+assert.equal(parseBenchmarkArgs(['--timeout', '300000']).timeoutMs, 300000);
+assert.throws(() => parseBenchmarkArgs(['--timeout', '0']), /positive/);
 
 const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'mocode-fixture-smoke-'));
 try {
@@ -43,4 +45,10 @@ const report = createReport({ schemaVersion: 2, runId: 'test', generatedAt: 'now
 }]);
 assert.equal(report.summary.finalVerifiedSuccessRate, 1);
 assert.match(renderSummary(report), /1\/1 passed/);
-console.log('coding benchmark smoke: 12/12 passed (60 fixtures checked)');
+const timeoutReport = createReport({ schemaVersion: 2, runId: 'timeout', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'hard' }, [{
+  id: 'late', title: 'late', group: 'resilience', difficulty: 'hard', status: 'timeout',
+  finalVerifiedSuccess: false, firstPatchPass: false, regression: false, toolRecovery: false,
+  toolCalls: 1, tokens: 1, durationMs: 10, unverifiedCompletion: false, changedFiles: [],
+}]);
+assert.equal(timeoutReport.summary.passed, 0);
+console.log('coding benchmark smoke: 15/15 passed (60 fixtures checked)');

@@ -4,14 +4,15 @@ import type { BenchmarkReport, BenchmarkTaskResult } from './types.js';
 const rate = (n: number, d: number): number => d ? Number((n / d).toFixed(4)) : 0;
 
 export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, tasks: BenchmarkTaskResult[]): BenchmarkReport {
-  const passed = tasks.filter(t => t.finalVerifiedSuccess).length;
+  const passed = tasks.filter(t => t.status === 'passed').length;
+  const verified = tasks.filter(t => t.finalVerifiedSuccess).length;
   const recovered = tasks.filter(t => t.toolRecovery).length;
   return {
     ...meta,
     summary: {
       tasks: tasks.length,
       passed,
-      finalVerifiedSuccessRate: rate(passed, tasks.length),
+      finalVerifiedSuccessRate: rate(verified, tasks.length),
       firstPatchPassRate: rate(tasks.filter(t => t.firstPatchPass).length, tasks.length),
       regressionRate: rate(tasks.filter(t => t.regression).length, tasks.length),
       toolRecoveryRate: rate(recovered, tasks.length),
