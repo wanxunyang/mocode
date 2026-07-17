@@ -126,13 +126,9 @@ function buildSlashCommands(): SlashCommand[] {
     { name: '/context', desc: d('commands.context') },
     { name: '/skills', desc: d('commands.skills') },
     { name: '/compact', desc: d('commands.compact') },
-    {
-      name: '/session', desc: d('commands.session'), children: [
-        { name: 'resume', value: '/resume', desc: d('commands.sessionResume') },
-        { name: 'browse', value: '/sessions', desc: d('commands.sessionBrowse') },
-        { name: 'rollback', value: '/rollback', desc: d('commands.sessionRollback') },
-      ],
-    },
+    { name: '/resume', desc: d('commands.sessionResume') },
+    { name: '/sessions', desc: d('commands.sessionBrowse') },
+    { name: '/rollback', desc: d('commands.sessionRollback') },
     {
       name: '/memory', desc: d('commands.memory'), children: [
         { name: 'overview', value: '/memory', desc: d('commands.memoryOverview') },
