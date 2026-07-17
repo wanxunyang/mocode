@@ -325,25 +325,55 @@ function renderContextBarInline(history: ChatMessage[]): string {
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
 }
 
-/** 从 .mocode/sessions/<sessionId>/notes.md 读取活跃 plan 摘要(## Plan: 段)。每次状态栏刷新时同步读,文件小开销可忽略。 */
-function readPlanFromNotes(): string {
+interface NotesPlanStatus {
+  fingerprint: string;
+  summary: string;
+}
+
+// 宿主侧记录已结束轮次最后看到的 plan。notes.md 仍完整保留，只抑制未变化的旧 plan 状态栏，
+// 避免 agent 忘记把 `## Plan:` 改成 `## Done:` 时输入框上方永久悬挂。
+let settledPlanFingerprint: string | undefined;
+
+/** 读取 notes.md 中唯一活跃的 `## Plan:` 段。进度只统计该段，避免其他笔记 checkbox 污染计数。 */
+function readPlanStatusFromNotes(): NotesPlanStatus | null {
   const sessionId = getCurrentSessionId();
-  if (!sessionId) return '';
-  
+  if (!sessionId) return null;
+
   const root = getSandboxRoot() ?? process.cwd();
   const p = path.join(root, '.mocode', 'sessions', sessionId, 'notes.md');
   try {
-    const c = fs.readFileSync(p, 'utf8');
-    const title = c.match(/^## Plan:\s*(.+)$/m)?.[1].trim();
-    if (!title) return '';
-    const total = (c.match(/^\s*-\s*\[[ xX]\]\s*\d+\./gm) || []).length;
-    const done  = (c.match(/^\s*-\s*\[[xX]\]\s*\d+\./gm) || []).length;
-    const current = c.match(/^\s*-\s*\[ \]\s*\d+\.\s*(.+)$/m)?.[1].trim();
+    const normalized = fs.readFileSync(p, 'utf8').replace(/\r\n?/g, '\n');
+    const lines = normalized.split('\n');
+    const start = lines.findIndex((line) => /^## Plan:\s*.+$/.test(line));
+    if (start < 0) return null;
+    const endOffset = lines.slice(start + 1).findIndex((line) => /^##\s/.test(line));
+    const end = endOffset < 0 ? lines.length : start + 1 + endOffset;
+    const section = lines.slice(start, end).join('\n').trimEnd();
+    const title = lines[start].match(/^## Plan:\s*(.+)$/)?.[1].trim();
+    if (!title) return null;
+
+    const total = (section.match(/^\s*-\s*\[[ xX]\]\s*\d+\./gm) || []).length;
+    const done = (section.match(/^\s*-\s*\[[xX]\]\s*\d+\./gm) || []).length;
+    const current = section.match(/^\s*-\s*\[ \]\s*\d+\.\s*(.+)$/m)?.[1].trim();
     const summary = `plan: ${title} (${done}/${total})`;
-    return current ? `${summary} ▸ ${current}` : summary;
+    // mtime 让“相同内容被重写为一项新计划”也能重新出现，而不被旧轮次误抑制。
+    const fingerprint = `${sessionId}\0${fs.statSync(p).mtimeMs}\0${section}`;
+    return { fingerprint, summary: current ? `${summary} ▸ ${current}` : summary };
   } catch {
-    return '';
+    return null;
   }
+}
+
+/** 将当前 plan 标记为已结算。只影响状态栏，不修改 agent 的工作笔记。 */
+function settlePlanStatus(): void {
+  settledPlanFingerprint = readPlanStatusFromNotes()?.fingerprint;
+}
+
+/** 从 notes.md 读取活跃 plan 摘要；已结算且未变化的旧 plan 不再显示。 */
+function readPlanFromNotes(): string {
+  const plan = readPlanStatusFromNotes();
+  if (!plan || plan.fingerprint === settledPlanFingerprint) return '';
+  return plan.summary;
 }
 
 /** 状态行基线:模型 / context / cwd / 模式标识 / 活跃 plan chip / 本轮 token。repl 在轮次边界、切模式、plan 变更时调。 */
@@ -1026,9 +1056,8 @@ export async function startRepl(
         },
       );
       // 本轮 token 累计(底栏模式 chip 右边显示)。undefined = 后端不开 include_usage。
+      // 状态栏统一在 finally 刷新，确保正常、中断、异常都经过同一 plan 收尾路径。
       lastTurnUsage = result.usage;
-      refreshStatusBase(history, lastTurnUsage); // 即时刷状态行显示本轮 token chip
-      layout.drawStatusBar();
       ok = !signal.aborted; // 中断(Ctrl+C)→ runAgent 已还原 history,ok=false 不弹审批
       // 成功轮次自动落盘(崩溃也保住上一轮);新会话首轮分配 id
       if (!currentSessionId) currentSessionId = newSessionId();
@@ -1067,6 +1096,12 @@ export async function startRepl(
       }
     } finally {
       stopRunningListener();
+      // 纯 plan 轮正常结束后仍需等待审批/细化，继续展示；其余终态统一结算。
+      // 结算只隐藏当前 fingerprint，不修改 notes；后续内容或 mtime 变化会自动重新显示。
+      const waitingForPlanApproval = ok && planMode && getAgentMode() === 'plan';
+      if (!waitingForPlanApproval) settlePlanStatus();
+      refreshStatusBase(history, lastTurnUsage);
+      layout.drawStatusBar();
     }
     layout.contentWrite('\n'); // 轮次之间空行
     return ok;

@@ -353,11 +353,20 @@ This is your private working surface — write intermediate findings, decisions,
 and anything you might need to recall later. The file survives context compaction.
 
 ### WHEN TO WRITE
+The notepad is opt-in for complex work, not a routine task log. Use it only when the task has at least 3 meaningful steps, spans multiple investigation/implementation phases, or contains details that are genuinely at risk of being lost to context compaction.
+
+Do NOT create, read, or update the notepad for simple tasks, including:
+- Questions that can be answered directly
+- One-step commands or lookups
+- Small, localized edits that can be completed without intermediate notes
+- Work that only needs a few tool calls and fits comfortably in the current context
+
+For qualifying complex work:
 - After exploring code and discovering key constraints → add a section
-- Before making a design decision → record reasoning and alternatives considered
-- When accumulating data across tool calls → store intermediates
-- When you realize something you might forget after compaction → write it down
-- After completing a phase → summarize what you learned
+- Before making a consequential design decision → record reasoning and alternatives considered
+- When accumulating data across many tool calls → store concise intermediates
+- When you realize important information may be lost after compaction → write it down
+- After completing a substantial phase → summarize what you learned
 
 ### FORMAT (markdown, section-based)
 Use \`## <topic>\` headers to organize. Each section is self-contained.
@@ -404,7 +413,8 @@ Write the plan as a top-level \`## Plan:\` section. The system extracts this for
 Rules:
 - Only ONE active \`## Plan:\` section at a time.
 - Mark steps \`[x]\` as you complete them; append a line to \`### Progress\` after each phase.
-- When the plan is done, either delete the section or rename it to \`## Done: <title>\` so the status bar chip clears automatically.
+- Before your final response, reconcile every step with the work actually completed, then delete the plan section or rename it to \`## Done: <title>\`.
+- The host hides an unchanged active plan when an agent turn ends as a safety fallback; this does not edit the notepad. Keep updating the plan during execution so live progress remains accurate.
 
 ## Termination & Reporting
 - Stop immediately when no more tools are needed; give conclusions directly.
