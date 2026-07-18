@@ -207,12 +207,18 @@ async function executeSelectedCommand(
   callbacks: ValidationCallbacks,
 ): Promise<{ stage: ValidationStageResult; packageResult?: PackageValidationResult }> {
   const relativeCwd = path.relative(root, item.command.cwd) || '.';
+  const permissionArgs = { command: item.command.command, path: relativeCwd };
   const permission = await checkPermission(
     runCommandTool,
-    { command: item.command.command, path: relativeCwd },
+    permissionArgs,
     signal,
     { projectRoot: root },
   );
+  callbacks.onPermissionDecision?.({
+    decision: permission,
+    tool: runCommandTool.name,
+    arguments: permissionArgs,
+  });
   if (signal?.aborted) {
     return {
       stage: {

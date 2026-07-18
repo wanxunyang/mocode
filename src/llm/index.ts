@@ -282,11 +282,27 @@ export interface ChatResult {
   usage?: ChatUsage;
 }
 
-/** 流式回调:文本增量 / 首个 tool_call 工具名。 */
+export interface ChatRetryInfo {
+  attempt: number;
+  nextAttempt: number;
+  waitMs: number;
+  code: string;
+}
+
+/** 流式回调:文本增量 / 首个 tool_call 工具名 / 内部请求重试。 */
 export interface StreamHandlers {
   onText?: (delta: string) => void;
   /** 首次得知某个 tool_call 的工具名时回调——模型开始生成工具调用参数(可能很长,如 write_file 大段内容),调用方可据此启「生成中」spinner,避免内容区干等。 */
   onToolCall?: (name: string) => void;
+  /** Retry telemetry contains only a status/code, never provider error text or request data. */
+  onRetry?: (info: ChatRetryInfo) => void;
+}
+
+function retryErrorCode(error: unknown): string {
+  if (!error || typeof error !== 'object') return 'RETRYABLE_ERROR';
+  const value = error as { status?: number; code?: string; name?: string };
+  if (typeof value.status === 'number') return `HTTP_${value.status}`;
+  return value.code ?? value.name ?? 'RETRYABLE_ERROR';
 }
 
 /**
@@ -317,6 +333,12 @@ export async function chat(
         throw err;
       }
       const wait = computeBackoff(attempt, getRetryAfterMs(err));
+      handlers.onRetry?.({
+        attempt,
+        nextAttempt: attempt + 1,
+        waitMs: wait,
+        code: retryErrorCode(err),
+      });
       logRetry(attempt, err, wait);
       // sleep 自己会在 signal abort 时抛 AbortError——透传,让 runAgentCore 的 catch 按中断处理。
       await sleep(wait, signal);

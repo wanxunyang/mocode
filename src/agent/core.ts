@@ -27,7 +27,14 @@ import {
 import { checkPermission } from '../permissions/index.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
-import { maybeCompact, contextState, dropContextFromHistory } from '../session/index.js';
+import {
+  maybeCompact,
+  contextState,
+  dropContextFromHistory,
+  createTraceEvent,
+  summarizeToolArguments,
+  safeProviderId,
+} from '../session/index.js';
 import type { ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
 import { optimizeToolResult, HOT_TURN_WINDOW, userTurnBoundary } from '../context/index.js';
@@ -48,13 +55,14 @@ import {
   getTokenCalibration,
   updateTokenCalibration,
 } from '../context/token-calibration.js';
-import { getCurrentTurnMutationState } from '../rollback/index.js';
+import { getCurrentTurnId, getCurrentTurnMutationState } from '../rollback/index.js';
 import {
   createAutomaticValidator,
   type ValidationCallbacks,
   type ValidationResult,
 } from '../verification/index.js';
-import type { AgentTurnTrace } from '../session/trace.js';
+import type { AgentTraceEvent, AgentTurnTrace, TraceEventType } from '../session/trace.js';
+import { getCurrentSessionId } from '../session/state.js';
 
 /** Stable per-history age state survives user turns; WeakMap avoids retaining closed sessions. */
 const ageAwareStateByHistory = new WeakMap<ChatMessage[], AgeAwareEncodingState>();
@@ -266,8 +274,12 @@ export interface AgentRunOptions {
     signal?: AbortSignal,
     callbacks?: ValidationCallbacks,
   ) => Promise<ValidationResult>;
-  /** 每轮结束的结构化 trace sink；写入失败不得影响 Agent。 */
+  /** 每轮结束的兼容汇总 sink。 */
   onTrace?: (trace: AgentTurnTrace) => void;
+  /** 逐事件黑匣子 sink；写入失败不得影响 Agent。 */
+  onTraceEvent?: (event: AgentTraceEvent) => void;
+  /** EVAL/嵌入方可提供稳定 ID；主进程默认读取当前 session/rollback turn。 */
+  traceContext?: { sessionId?: string; turnId?: number };
 }
 
 /** OpenAI content array 的子集(text + image_url);repl 构造 user 多模态消息用。 */
@@ -323,6 +335,32 @@ export async function runAgentCore(
   const savedMode = getAgentMode();
   // 本轮计时:从入口到完毕(正常 return / 达上限),供 finally 打 ✻ Worked for 摘要行。
   const t0 = Date.now();
+  const traceSessionId = opts.traceContext?.sessionId ?? getCurrentSessionId() ?? `ephemeral-${process.pid}`;
+  const traceTurnId = opts.traceContext?.turnId ?? getCurrentTurnId();
+  let currentTraceStep: number | undefined;
+  let abortTraced = false;
+  const emitTrace = (
+    type: TraceEventType,
+    data: Record<string, unknown> = {},
+    ids: Partial<Pick<AgentTraceEvent, 'step' | 'stepId' | 'toolCallId' | 'providerToolCallId'>> = {},
+  ): void => {
+    try {
+      opts.onTraceEvent?.(createTraceEvent({
+        sessionId: traceSessionId,
+        turnId: traceTurnId,
+        type,
+        ...(currentTraceStep === undefined ? {} : {
+          step: currentTraceStep,
+          stepId: `${traceTurnId}:step:${currentTraceStep}`,
+        }),
+        ...ids,
+        data,
+      }));
+    } catch {
+      // Trace is best-effort and must never alter execution.
+    }
+  };
+  emitTrace('turn_start', { mode: getAgentMode() });
   let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
   let traceStatus: AgentTurnTrace['status'] = 'error';
   let toolCallCount = 0;
@@ -390,8 +428,8 @@ export async function runAgentCore(
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
   let lastChar = '';
-  // 早退重探:本 turn 已执行过工具但模型突然返回无工具调用 + 极短/空文本 → 推一条提示让模型继续,
-  // 而非直接退出。每 turn 最多触发 1 次,防死循环。弱模型在探索中途偶尔"说完"即此兜底。
+  // 早退重探:本 turn 已执行过工具但模型突然返回无工具调用 + 空文本 → 推一条提示让模型继续。
+  // 短回复也可能是合法完成结果，不再按字符数误判；每 turn 最多触发 1 次以防死循环。
   let nudgeCount = 0;
   let hadToolsThisTurn = false;
 
@@ -415,6 +453,10 @@ export async function runAgentCore(
   // 中断还原:停 spinner + 补换行 + (已中断)提示 + history 还原到本 turn 前 + 模式还原。
   // 两处共用:① await chat() 抛 AbortError 的 catch;② 工具被 abort 杀后循环顶检查。
   const abortRestore = (): void => {
+    if (!abortTraced) {
+      emitTrace('abort', { phase: 'observed', reason: 'signal' });
+      abortTraced = true;
+    }
     hooks.onAbort?.();
     history.length = 0;
     history.push(...savedHistory);
@@ -423,6 +465,10 @@ export async function runAgentCore(
   };
   try {
     for (let step = 0; step < maxSteps; step++) {
+      currentTraceStep = step;
+      const stepStartedAt = Date.now();
+      emitTrace('step_start', { ordinal: step });
+      try {
       // 上一步工具被 abort 杀(run_command/web_fetch 等)→ signal.aborted,直接还原退出,不等 maybeCompact + chat()
       if (signal?.aborted) {
         abortRestore();
@@ -456,8 +502,17 @@ export async function runAgentCore(
       // 步前:五区 Budget Scheduler 在优化后的 history 上决策；开关关闭时退化回原 maybeCompact 路径。
       // 此时 spinner 已停,通知行干净。
       let historyRebuilt = false;
+      const compactStartedAt = Date.now();
       if (scheduler) {
         historyRebuilt = await scheduler.runStep(history, step, activeTools);
+        if (scheduler.lastRunLog?.compactHistoryCalled) {
+          emitTrace('compact', {
+            source: 'automatic',
+            reason: 'scheduled',
+            historyRebuilt,
+            durationMs: Date.now() - compactStartedAt,
+          });
+        }
       } else {
         const compactResult = await maybeCompact(
           history,
@@ -467,6 +522,17 @@ export async function runAgentCore(
           activeTools,
         );
         historyRebuilt = compactResult?.historyRebuilt === true;
+        if (compactResult) {
+          emitTrace('compact', {
+            source: 'automatic_fallback',
+            reason: compactResult.reason,
+            compacted: compactResult.compacted,
+            historyRebuilt,
+            estimateBefore: compactResult.estimateBefore,
+            estimateAfter: compactResult.estimateAfter,
+            durationMs: Date.now() - compactStartedAt,
+          });
+        }
       }
       // compact 用新消息数组原地重建 history 后，所有按消息位置恢复的状态都需重建。
       if (historyRebuilt) {
@@ -481,14 +547,40 @@ export async function runAgentCore(
       gotText = false;
       lastChar = '';
       let result: ChatResult;
+      const modelStartedAt = Date.now();
+      const provider = safeProviderId(requestBaseURL);
+      emitTrace('model_start', { model: requestModel, provider });
       try {
         result = await chat(
           history,
-          { onText, onToolCall },
+          {
+            onText,
+            onToolCall,
+            onRetry: (retry) => emitTrace('model_retry', {
+              model: requestModel,
+              provider,
+              attempt: retry.attempt,
+              nextAttempt: retry.nextAttempt,
+              waitMs: retry.waitMs,
+              code: retry.code,
+            }),
+          },
           signal,
           activeTools,
         );
       } catch (e) {
+        const errorValue = e && typeof e === 'object'
+          ? e as { status?: number; code?: string; name?: string }
+          : undefined;
+        emitTrace('model_end', {
+          model: requestModel,
+          provider,
+          status: signal?.aborted ? 'aborted' : 'error',
+          code: typeof errorValue?.status === 'number'
+            ? `HTTP_${errorValue.status}`
+            : errorValue?.code ?? errorValue?.name ?? 'MODEL_ERROR',
+          durationMs: Date.now() - modelStartedAt,
+        });
         // 中断(用户运行中 Ctrl+C):chat() 抛 AbortError(signal.aborted)→ 还原 history + 模式 + return(不抛)。
         // 工具执行现已串 signal:run_command/web_fetch 被 abort 即时杀,循环顶检查兜底(不会留未配对 tool_call_id)。
         if (
@@ -509,6 +601,17 @@ export async function runAgentCore(
         }
         throw e;
       }
+      emitTrace('model_end', {
+        model: requestModel,
+        provider,
+        status: 'success',
+        durationMs: Date.now() - modelStartedAt,
+        promptTokens: result.usage?.promptTokens,
+        completionTokens: result.usage?.completionTokens,
+        totalTokens: result.usage?.totalTokens,
+        cachedTokens: result.usage?.cachedTokens,
+        reasoningTokens: result.usage?.reasoningTokens,
+      });
       runtimeContextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
       addUsage(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
       // 用本次实际发送的 tools 计算分母，再以 EWMA 更新 provider/model/tool-set 校准。
@@ -552,12 +655,54 @@ export async function runAgentCore(
         // 渲染与 history 回灌一律按原顺序；并发只影响执行时序，tool_call_id 仍按序配对。
         // executeToolOutcome 永不抛错，失败通过结构化 status/code 返回。
         const calls = result.toolCalls;
+        const tracedCalls = calls.map((tc, index) => ({
+          toolCallId: `${traceTurnId}:step:${step}:tool:${index}`,
+          args: summarizeToolArguments(tc.arguments),
+        }));
+        for (let index = 0; index < calls.length; index++) {
+          const tc = calls[index];
+          const traceCall = tracedCalls[index];
+          emitTrace('tool_call_start', {
+            tool: tc.name,
+            argumentHash: traceCall.args.sha256,
+            arguments: traceCall.args,
+            attempt: 1,
+            retry: 0,
+          }, {
+            toolCallId: traceCall.toolCallId,
+            ...(tc.id ? { providerToolCallId: tc.id } : {}),
+          });
+        }
+        const traceToolEnd = (tc: ToolCallRef, index: number, outcome: ToolOutcome): void => {
+          const traceCall = tracedCalls[index];
+          emitTrace('tool_call_end', {
+            tool: tc.name,
+            argumentHash: traceCall.args.sha256,
+            status: outcome.status,
+            code: outcome.code,
+            retryable: outcome.retryable,
+            durationMs: outcome.durationMs ?? 0,
+            retry: 0,
+            changedFiles: outcome.changedFiles ?? [],
+          }, {
+            toolCallId: traceCall.toolCallId,
+            ...(tc.id ? { providerToolCallId: tc.id } : {}),
+          });
+        };
         let i = 0;
         while (i < calls.length) {
           const currentCall = calls[i];
           if (getRuntimeDisabledTools().has(currentCall.name)) {
             hooks.onToolHeader?.(currentCall);
             const error = t('task.disabled');
+            const outcome: ToolOutcome = {
+              status: 'denied',
+              code: 'TOOL_DISABLED',
+              retryable: false,
+              output: error,
+              changedFiles: [],
+              durationMs: 0,
+            };
             hooks.onToolResult?.(currentCall, error, null, null, 1);
             const hint = recordAndHint(currentCall.name, currentCall.arguments);
             pushToolResult(
@@ -570,6 +715,7 @@ export async function runAgentCore(
               runtimeContextState,
               false,
             );
+            traceToolEnd(currentCall, i, outcome);
             i++;
             continue;
           }
@@ -588,6 +734,7 @@ export async function runAgentCore(
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
               const outcome = await started[k];
+              traceToolEnd(tc, i + k, outcome);
               const output = outcome.output;
               hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
               // Thrashing:history 里附 hint(UI 已用干净 output 渲染,避免屏幕噪声)
@@ -613,10 +760,19 @@ export async function runAgentCore(
             if (getAgentMode() === 'plan' && getPlanDisabledTools().has(tc.name)) {
               hooks.onToolHeader?.(tc);
               const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
+              const outcome: ToolOutcome = {
+                status: 'denied',
+                code: 'MODE_DENIED',
+                retryable: false,
+                output: err,
+                changedFiles: [],
+                durationMs: 0,
+              };
               hooks.onToolResult?.(tc, err, null, null, 1);
               // Thrashing:同上
               const hint = recordAndHint(tc.name, tc.arguments);
               pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
+              traceToolEnd(tc, i, outcome);
               i++;
               continue;
             }
@@ -626,6 +782,15 @@ export async function runAgentCore(
             const tool = tools.find((t) => t.name === tc.name);
             if (tool) {
               const perm = await checkPermission(tool, parsed ?? {}, signal);
+              emitTrace('permission', {
+                source: 'agent_tool',
+                tool: tc.name,
+                decision: perm,
+                argumentHash: tracedCalls[i].args.sha256,
+              }, {
+                toolCallId: tracedCalls[i].toolCallId,
+                ...(tc.id ? { providerToolCallId: tc.id } : {}),
+              });
               if (perm === 'deny') {
                 hooks.onToolHeader?.(tc);
                 const outcome = deniedOutcome(tc.name);
@@ -641,6 +806,7 @@ export async function runAgentCore(
                   runtimeContextState,
                   false,
                 );
+                traceToolEnd(tc, i, outcome);
                 i++;
                 continue;
               }
@@ -652,6 +818,7 @@ export async function runAgentCore(
             const { preWriteOld, editStartLine } = readDiffContext(tc, mutationParsed);
             hooks.onToolStart?.(tc.name);
             const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, { dropContext });
+            traceToolEnd(tc, i, outcome);
             const output = outcome.output;
             hooks.onToolDone?.();
             hooks.onToolResult?.(tc, output, mutationParsed, preWriteOld, editStartLine);
@@ -692,9 +859,10 @@ export async function runAgentCore(
 
       // 早退保护:本 turn 已执行过工具调用,但模型突然返回无工具 + 极短/空文本 → 很可能是在探索中途
       // 提前"说完了"。此时推一条 user 提示消息让模型继续探索,而非直接退出。每 turn 最多 1 次,防死循环。
-      // 判定标准:无 gotText(完全没输出)或正文极短(< 80 字符,通常是一句"我需要更多信息"级别的截断)。
-      const textLen = result.content?.trim().length ?? 0;
-      if (hadToolsThisTurn && nudgeCount < 1 && (!gotText || textLen < 80)) {
+      // 早退重探只处理真正的空回复。短回复可能是合法完成结果（例如精确状态标记）；
+      // 仅凭字符数继续调用会重复输出，并产生一次完整的额外模型请求。
+      const replyIsEmpty = (result.content?.trim().length ?? 0) === 0;
+      if (hadToolsThisTurn && nudgeCount < 1 && replyIsEmpty) {
         nudgeCount++;
         history.push({ role: 'assistant', content: result.content });
         history.push({
@@ -716,9 +884,22 @@ export async function runAgentCore(
 
       if (shouldValidate) {
         history.push(candidate);
+        emitTrace('validation_start', {
+          mutationVersion: mutationBeforeValidation.version,
+          changedFiles: mutationBeforeValidation.changedFiles.map((item) => item.path),
+        });
         try {
           latestValidation = await validator(signal, {
             onCommandStart: (command) => hooks.onValidationStart?.(command),
+            onPermissionDecision: (permission) => {
+              const summary = summarizeToolArguments(JSON.stringify(permission.arguments));
+              emitTrace('permission', {
+                source: 'automatic_validation',
+                tool: permission.tool,
+                decision: permission.decision,
+                argumentHash: summary.sha256,
+              });
+            },
           });
         } catch (error) {
           const mutation = getCurrentTurnMutationState();
@@ -742,6 +923,23 @@ export async function runAgentCore(
             mutationVersion: mutation.version,
           };
         }
+        emitTrace('validation_end', {
+          status: latestValidation.status,
+          level: latestValidation.level,
+          durationMs: latestValidation.durationMs,
+          verificationComplete: latestValidation.verificationComplete,
+          skipReason: latestValidation.skipReason,
+          fingerprint: latestValidation.fingerprint,
+          mutationVersion: latestValidation.mutationVersion,
+          stages: latestValidation.stages.map((stage) => ({
+            level: stage.level,
+            status: stage.status,
+            adapter: stage.adapter,
+            code: stage.diagnostics[0]?.code,
+            durationMs: stage.durationMs,
+            cached: stage.cached === true,
+          })),
+        });
         hooks.onValidationResult?.(latestValidation);
         validatedMutationVersion = latestValidation.mutationVersion;
         if (latestValidation.status === 'passed' && latestValidation.verificationComplete) {
@@ -790,6 +988,12 @@ export async function runAgentCore(
         validation: latestValidation,
         changedFiles: finalMutation.changedFiles.map((item) => item.path),
       };
+      } finally {
+        emitTrace('step_end', {
+          durationMs: Date.now() - stepStartedAt,
+          aborted: signal?.aborted === true,
+        });
+      }
     }
 
     hooks.onMaxSteps?.();
@@ -807,9 +1011,20 @@ export async function runAgentCore(
     };
   } finally {
     const finalMutation = getCurrentTurnMutationState();
+    currentTraceStep = undefined;
+    emitTrace('turn_end', {
+      status: traceStatus,
+      durationMs: Date.now() - t0,
+      toolCalls: toolCallCount,
+      changedFiles: finalMutation.changedFiles.map((item) => item.path),
+      totalTokens: turnUsage?.totalTokens,
+      validationStatus: latestValidation?.status,
+    });
     try {
       opts.onTrace?.({
         ts: new Date().toISOString(),
+        sessionId: traceSessionId,
+        turnId: traceTurnId,
         status: traceStatus,
         durationMs: Date.now() - t0,
         toolCalls: toolCallCount,

@@ -78,6 +78,8 @@ import {
   saveSession,
   loadSession,
   listSessions,
+  appendCurrentSessionRuntimeEvent,
+  hashTraceValue,
 } from '../session/index.js';
 import {
   listTurns,
@@ -87,6 +89,7 @@ import {
   loadSnapshots,
   rebuildFromHistory,
   resetState,
+  getCurrentTurnId,
 } from '../rollback/index.js';
 import {
   listSkills,
@@ -505,8 +508,9 @@ function onRunningKey(_str: string, key?: Key): void {
     if (runningInput.length > 0) {
       runningInput = '';
       layout.paintRunningInputEcho(runningInput, runningPlaceholder);
-    } else {
-      currentAbort?.abort();
+    } else if (currentAbort && !currentAbort.signal.aborted) {
+      appendCurrentSessionRuntimeEvent('abort', { phase: 'requested', source: 'keyboard' });
+      currentAbort.abort();
     }
     return;
   }
@@ -1010,9 +1014,21 @@ export async function startRepl(
     if (revertFiles) {
       for (const c of revertable) revertPaths.add(c.path);
     }
-    applyRollback(plan, history, revertPaths);
+    const rolledBackFromTurnId = getCurrentTurnId();
+    const turnCountBeforeRollback = listTurns().length;
+    const rollbackResult = applyRollback(plan, history, revertPaths);
     if (!currentSessionId) currentSessionId = newSessionId();
     setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
+    appendCurrentSessionRuntimeEvent('rollback', {
+      status: 'applied',
+      rolledBackFromTurnId,
+      cutoffTurnId: plan.cutoffTurnId,
+      retainedTurns: plan.n,
+      rolledBackTurns: Math.max(0, turnCountBeforeRollback - plan.n),
+      deletedMessages: rollbackResult.deletedMsgs,
+      revertedFiles: rollbackResult.revertedFiles,
+      requestedFileCount: revertPaths.size,
+    }, plan.cutoffTurnId);
     try {
       saveSession(history, currentSessionId, queryHistory);
     } catch {
@@ -1469,6 +1485,15 @@ export async function startRepl(
       // 返回 SchedulerRunLog 给 UI 显示决策;退化路径(开关关时)在 manualCompact 内部走 compactHistory。
       const log = await manualCompact(history, focus, { force });
       const d = log.compactDetail;
+      appendCurrentSessionRuntimeEvent('compact', {
+        source: 'manual',
+        force,
+        called: log.compactHistoryCalled,
+        reason: d?.reason ?? 'unknown',
+        estimateBefore: d?.estimateBefore,
+        estimateAfter: d?.estimateAfter,
+        focusHash: focus ? hashTraceValue(focus) : undefined,
+      });
       if (!d) {
         // 兜底(旧调用):只显示 old 文案
         if (!log.compactHistoryCalled) {

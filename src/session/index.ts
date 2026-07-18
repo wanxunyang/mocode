@@ -39,5 +39,19 @@ export {
 } from './persist.js';
 export type { SessionMeta, SessionRecord } from './persist.js';
 
-export { appendCurrentSessionTrace } from './trace.js';
-export type { AgentTurnTrace } from './trace.js';
+export {
+  appendCurrentSessionTrace,
+  appendCurrentSessionTraceEvent,
+  appendCurrentSessionRuntimeEvent,
+  createTraceEvent,
+} from './trace.js';
+export type {
+  AgentTurnTrace,
+  AgentTraceEvent,
+  TraceEventInput,
+  TraceEventType,
+} from './trace.js';
+export { reduceTraceMetrics, readTraceEvents, readTraceMetrics } from './trace-metrics.js';
+export type { TraceMetrics } from './trace-metrics.js';
+export { summarizeToolArguments, hashTraceValue, safeProviderId } from './trace-sanitize.js';
+export type { SafeArgumentSummary } from './trace-sanitize.js';

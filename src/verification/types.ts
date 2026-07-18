@@ -40,6 +40,12 @@ export interface ValidationCommand {
 }
 
 export interface ValidationCallbacks {
+  /** Called for every validation command permission decision, before possible execution. */
+  onPermissionDecision?: (event: {
+    decision: 'allow' | 'deny';
+    tool: string;
+    arguments: Record<string, unknown>;
+  }) => void;
   /** Called after permission approval, immediately before each command execution. */
   onCommandStart?: (command: string) => void;
 }

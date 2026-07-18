@@ -198,10 +198,16 @@ function missingParents(full: string): string[] {
 }
 
 /** agent 主轮入口调用；子 agent 共享当前 turnId，不另开轮次。 */
-export function beginTurn(firstLine: string): void {
+export function beginTurn(firstLine: string): number {
   turnIdCounter += 1;
   currentTurnId = turnIdCounter;
   turns.push({ turnId: currentTurnId, firstLine });
+  return currentTurnId;
+}
+
+/** Stable identity shared by tracing, validation, and rollback for the active main turn. */
+export function getCurrentTurnId(): number {
+  return currentTurnId;
 }
 
 /** 单路径工具执行前捕获，不立即记账；失败/no-op 不应出现在 rollback 中。 */

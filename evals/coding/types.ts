@@ -33,6 +33,10 @@ export interface BenchmarkTaskResult {
   regression: boolean;
   toolRecovery: boolean;
   toolCalls: number;
+  /** Trace-derived model + tool retry count. */
+  retries?: number;
+  /** Fraction of completed tool calls that succeeded on their first recorded attempt. */
+  firstSuccessRate?: number;
   tokens: number | null;
   durationMs: number;
   unverifiedCompletion: boolean;
@@ -56,6 +60,8 @@ export interface BenchmarkReport {
     toolRecoveryRate: number;
     unverifiedCompletionRate: number;
     toolCalls: number;
+    retries: number;
+    firstSuccessRate: number;
     tokens: number;
     durationMs: number;
   };

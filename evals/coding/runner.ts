@@ -8,7 +8,8 @@ import { runAgentCore } from '../../src/agent/core.js';
 import { config } from '../../src/config/index.js';
 import { beginTurn, getCurrentTurnMutationState, resetState } from '../../src/rollback/index.js';
 import { setSandboxRoot } from '../../src/sandbox/root.js';
-import type { AgentTurnTrace } from '../../src/session/trace.js';
+import type { AgentTraceEvent } from '../../src/session/trace.js';
+import { reduceTraceMetrics } from '../../src/session/trace-metrics.js';
 import { codingTasks, selectTasks } from './fixtures.js';
 import { createReport, renderSummary, writeReport } from './report.js';
 import type { BenchmarkTaskResult, CodingTaskFixture } from './types.js';
@@ -68,33 +69,21 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
   const previousPermission = config.permissionEnabled;
   config.permissionEnabled = false; // isolated disposable fixture only
   resetState();
-  beginTurn(fixture.goal);
-  const traces: AgentTurnTrace[] = [];
-  let toolCalls = 0;
-  let hadToolFailure = false;
-  let recovered = false;
+  const turnId = beginTurn(fixture.goal);
+  const traceEvents: AgentTraceEvent[] = [];
   let validationRuns = 0;
-  let firstValidationPassed = false;
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutOverride ?? fixture.timeoutMs ?? 120_000);
   try {
     process.chdir(root);
     const result = await runAgentCore({
-      history: [], userInput: fixture.goal, signal: controller.signal, hooks: {
-        onToolHeader: () => { toolCalls += 1; },
-        onToolResult: (_tc, output) => {
-          const failed = /^error[:\s]|\[error\]|失败|错误/i.test(output);
-          if (failed) hadToolFailure = true;
-          else if (hadToolFailure) recovered = true;
-        },
-      },
+      history: [], userInput: fixture.goal, signal: controller.signal, hooks: {},
       autoValidate: true,
       validator: async () => {
         const validationStarted = Date.now();
         const passed = await verify(root, fixture.verificationCommand);
         validationRuns += 1;
-        if (validationRuns === 1) firstValidationPassed = passed;
         const status = passed ? 'passed' : 'failed';
         const output = passed ? 'ok' : 'verification failed';
         const fingerprint = `fixture-${status}-${validationRuns}`;
@@ -121,12 +110,14 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
           mutationVersion: mutation.version,
         };
       },
-      onTrace: t => traces.push(t),
+      onTraceEvent: event => traceEvents.push(event),
+      traceContext: { sessionId: `eval-${fixture.id}`, turnId },
     });
     const finalVerified = await verify(root, fixture.verificationCommand);
     const regression = fixture.regressionCommand ? !(await verify(root, fixture.regressionCommand)) : false;
     const expectedChanged = fixture.expected.files ?? [];
-    const changed = result.changedFiles ?? traces.at(-1)?.changedFiles ?? [];
+    const changed = result.changedFiles ?? [];
+    const traceMetrics = reduceTraceMetrics(traceEvents);
     const expectedFilesTouched = expectedChanged.every(f => changed.some(c => c.replace(/\\/g, '/').endsWith(f)));
     const verifierUnchanged = createHash('sha256').update(readFileSync(path.join(root, 'verify.mjs'))).digest('hex') === verifierHash;
     const timedOut = controller.signal.aborted;
@@ -135,21 +126,31 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
       status: timedOut ? 'timeout' : verified ? 'passed' : 'failed',
       finalVerifiedSuccess: verified,
-      firstPatchPass: firstValidationPassed,
+      firstPatchPass: traceMetrics.firstValidationPassed,
       regression,
-      toolRecovery: recovered,
-      toolCalls: traces.at(-1)?.toolCalls ?? toolCalls,
-      tokens: result.usage?.totalTokens ?? traces.at(-1)?.usage?.totalTokens ?? null,
-      durationMs: Date.now() - started,
+      toolRecovery: traceMetrics.toolRecovery,
+      toolCalls: traceMetrics.toolCalls,
+      retries: traceMetrics.retries,
+      firstSuccessRate: traceMetrics.firstSuccessRate,
+      tokens: traceMetrics.tokens,
+      durationMs: traceMetrics.durationMs,
       unverifiedCompletion: result.completed && result.validation?.verificationComplete !== true,
       changedFiles: changed,
     };
   } catch (error) {
+    const traceMetrics = reduceTraceMetrics(traceEvents);
     return {
       id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
       status: controller.signal.aborted ? 'timeout' : 'error', finalVerifiedSuccess: false,
-      firstPatchPass: false, regression: false, toolRecovery: recovered, toolCalls,
-      tokens: null, durationMs: Date.now() - started, unverifiedCompletion: false,
+      firstPatchPass: traceMetrics.firstValidationPassed,
+      regression: false,
+      toolRecovery: traceMetrics.toolRecovery,
+      toolCalls: traceMetrics.toolCalls,
+      retries: traceMetrics.retries,
+      firstSuccessRate: traceMetrics.firstSuccessRate,
+      tokens: traceMetrics.tokens,
+      durationMs: traceMetrics.durationMs || Date.now() - started,
+      unverifiedCompletion: false,
       changedFiles: [], error: error instanceof Error ? error.message : String(error),
     };
   } finally {

@@ -18,6 +18,10 @@ export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, t
       toolRecoveryRate: rate(recovered, tasks.length),
       unverifiedCompletionRate: rate(tasks.filter(t => t.unverifiedCompletion).length, tasks.length),
       toolCalls: tasks.reduce((n, t) => n + t.toolCalls, 0),
+      retries: tasks.reduce((n, t) => n + (t.retries ?? 0), 0),
+      firstSuccessRate: tasks.length
+        ? tasks.reduce((n, t) => n + (t.firstSuccessRate ?? 1), 0) / tasks.length
+        : 0,
       tokens: tasks.reduce((n, t) => n + (t.tokens ?? 0), 0),
       durationMs: tasks.reduce((n, t) => n + t.durationMs, 0),
     },
@@ -38,7 +42,8 @@ export function renderSummary(r: BenchmarkReport): string {
     `- Regression: ${pct(r.summary.regressionRate)}`,
     `- Tool recovery: ${pct(r.summary.toolRecoveryRate)}`,
     `- Unverified completion: ${pct(r.summary.unverifiedCompletionRate)}`,
-    `- Tool calls / tokens / elapsed: ${r.summary.toolCalls} / ${r.summary.tokens} / ${(r.summary.durationMs / 1000).toFixed(1)}s`,
+    `- Tool first-success rate: ${pct(r.summary.firstSuccessRate)}`,
+    `- Tool calls / retries / tokens / elapsed: ${r.summary.toolCalls} / ${r.summary.retries} / ${r.summary.tokens} / ${(r.summary.durationMs / 1000).toFixed(1)}s`,
     '',
     '| Task | Difficulty | Group | Result | First patch | Recovery | Calls | Tokens | Time |',
     '|---|---|---|---:|---:|---:|---:|---:|---:|',
