@@ -6,7 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { runAgentCore } from '../../src/agent/core.js';
 import { config } from '../../src/config/index.js';
-import { beginTurn, resetState } from '../../src/rollback/index.js';
+import { beginTurn, getCurrentTurnMutationState, resetState } from '../../src/rollback/index.js';
 import { setSandboxRoot } from '../../src/sandbox/root.js';
 import type { AgentTurnTrace } from '../../src/session/trace.js';
 import { codingTasks, selectTasks } from './fixtures.js';
@@ -95,10 +95,30 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
         const passed = await verify(root, fixture.verificationCommand);
         validationRuns += 1;
         if (validationRuns === 1) firstValidationPassed = passed;
+        const status = passed ? 'passed' : 'failed';
+        const output = passed ? 'ok' : 'verification failed';
+        const fingerprint = `fixture-${status}-${validationRuns}`;
+        const mutation = getCurrentTurnMutationState();
         return {
-          status: passed ? 'passed' : 'failed', command: fixture.verificationCommand,
-          output: passed ? 'ok' : 'verification failed', durationMs: Date.now() - validationStarted,
-          changedFiles: [], mutationVersion: validationRuns,
+          status,
+          level: 'V3' as const,
+          command: fixture.verificationCommand,
+          output,
+          durationMs: Date.now() - validationStarted,
+          diagnostics: passed ? [] : [{
+            level: 'V3' as const,
+            source: 'test' as const,
+            severity: 'error' as const,
+            message: output,
+          }],
+          stages: [],
+          verificationComplete: passed,
+          fingerprint,
+          inputFingerprint: `fixture-input-${validationRuns}`,
+          inputMutationVersion: mutation.version,
+          affectedPackages: [],
+          changedFiles: mutation.changedFiles.map((item) => item.path),
+          mutationVersion: mutation.version,
         };
       },
       onTrace: t => traces.push(t),
@@ -121,7 +141,7 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       toolCalls: traces.at(-1)?.toolCalls ?? toolCalls,
       tokens: result.usage?.totalTokens ?? traces.at(-1)?.usage?.totalTokens ?? null,
       durationMs: Date.now() - started,
-      unverifiedCompletion: result.completed && !finalVerified,
+      unverifiedCompletion: result.completed && result.validation?.verificationComplete !== true,
       changedFiles: changed,
     };
   } catch (error) {

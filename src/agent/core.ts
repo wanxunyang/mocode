@@ -50,7 +50,7 @@ import {
 } from '../context/token-calibration.js';
 import { getCurrentTurnMutationState } from '../rollback/index.js';
 import {
-  runAutomaticValidation,
+  createAutomaticValidator,
   type ValidationCallbacks,
   type ValidationResult,
 } from '../verification/index.js';
@@ -275,10 +275,19 @@ export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
 
+/** Why the agent loop stopped; max_steps and unverified changes are never normal completion. */
+export type AgentTerminationReason =
+  | 'completed'
+  | 'completed_unverified'
+  | 'aborted'
+  | 'max_steps'
+  | 'unverified_changes';
+
 /** runAgentCore 的运行结果。 */
 export interface AgentRunResult {
-  /** 正常完毕 / 达上限 true;中断 false。 */
+  /** 只有生成最终回复时为 true；达到步数上限始终为 false。 */
   completed: boolean;
+  terminationReason: AgentTerminationReason;
   /** 最终 assistant 文本回复(content);无回复或中断为 null。 */
   finalText: string | null;
   /** 本轮累计 token 用量(各 chat 步 prompt+completion 之和);后端不开 include_usage 或全失败则 undefined。 */
@@ -318,8 +327,10 @@ export async function runAgentCore(
   let traceStatus: AgentTurnTrace['status'] = 'error';
   let toolCallCount = 0;
   let latestValidation: ValidationResult | undefined;
-  let validatedMutationVersion = getCurrentTurnMutationState().version;
-  const validator = opts.validator ?? runAutomaticValidation;
+  const initialMutationVersion = getCurrentTurnMutationState().version;
+  let validatedMutationVersion = initialMutationVersion;
+  let fullyValidatedMutationVersion = initialMutationVersion;
+  const validator = opts.validator ?? createAutomaticValidator();
   // 本轮 token 累计:每步 chat() 返回后把 result.usage 累加,供 onDone 摘要行 + AgentRunResult.usage
   // 透传给 repl(显示在底栏模式 chip 右边)。未开启 include_usage 或全失败时为 undefined。
   let turnUsage: ChatUsage | undefined;
@@ -419,6 +430,7 @@ export async function runAgentCore(
         const mutation = getCurrentTurnMutationState();
         return {
           completed: false,
+          terminationReason: 'aborted',
           finalText: null,
           validation: latestValidation,
           changedFiles: mutation.changedFiles.map((item) => item.path),
@@ -489,6 +501,7 @@ export async function runAgentCore(
           const mutation = getCurrentTurnMutationState();
           return {
             completed: false,
+            terminationReason: 'aborted',
             finalText: null,
             validation: latestValidation,
             changedFiles: mutation.changedFiles.map((item) => item.path),
@@ -699,7 +712,7 @@ export async function runAgentCore(
       const shouldValidate =
         opts.autoValidate === true &&
         getAgentMode() !== 'plan' &&
-        mutationBeforeValidation.version > validatedMutationVersion;
+        (mutationBeforeValidation.version > validatedMutationVersion || latestValidation?.status === 'failed');
 
       if (shouldValidate) {
         history.push(candidate);
@@ -709,16 +722,31 @@ export async function runAgentCore(
           });
         } catch (error) {
           const mutation = getCurrentTurnMutationState();
+          const message = `Automatic validation failed to run: ${error instanceof Error ? error.message : String(error)}`;
+          const status = signal?.aborted ? 'aborted' : 'failed';
           latestValidation = {
-            status: signal?.aborted ? 'aborted' : 'failed',
-            output: `Automatic validation failed to run: ${error instanceof Error ? error.message : String(error)}`,
+            status,
+            level: 'V0',
+            output: message,
             durationMs: 0,
+            diagnostics: [{
+              level: 'V0', source: 'verifier', severity: 'error', code: 'VERIFIER_ERROR', message,
+            }],
+            stages: [],
+            verificationComplete: false,
+            fingerprint: `verifier-error-${mutation.version}`,
+            inputFingerprint: `mutation-${mutation.version}`,
+            inputMutationVersion: mutation.version,
+            affectedPackages: [],
             changedFiles: mutation.changedFiles.map((item) => item.path),
             mutationVersion: mutation.version,
           };
         }
         hooks.onValidationResult?.(latestValidation);
         validatedMutationVersion = latestValidation.mutationVersion;
+        if (latestValidation.status === 'passed' && latestValidation.verificationComplete) {
+          fullyValidatedMutationVersion = latestValidation.mutationVersion;
+        }
 
         if (signal?.aborted || latestValidation.status === 'aborted') {
           abortRestore();
@@ -726,6 +754,7 @@ export async function runAgentCore(
           const mutation = getCurrentTurnMutationState();
           return {
             completed: false,
+            terminationReason: 'aborted',
             finalText: null,
             validation: latestValidation,
             changedFiles: mutation.changedFiles.map((item) => item.path),
@@ -752,8 +781,10 @@ export async function runAgentCore(
       const finalMutation = getCurrentTurnMutationState();
       done = true;
       traceStatus = 'completed';
+      const verified = finalMutation.version <= fullyValidatedMutationVersion;
       return {
         completed: true,
+        terminationReason: verified ? 'completed' : 'completed_unverified',
         finalText: result.content,
         usage: turnUsage,
         validation: latestValidation,
@@ -765,8 +796,10 @@ export async function runAgentCore(
     done = true;
     traceStatus = 'max_steps';
     const finalMutation = getCurrentTurnMutationState();
+    const hasUnverifiedChanges = finalMutation.version > fullyValidatedMutationVersion;
     return {
-      completed: true,
+      completed: false,
+      terminationReason: hasUnverifiedChanges ? 'unverified_changes' : 'max_steps',
       finalText: null,
       usage: turnUsage,
       validation: latestValidation,

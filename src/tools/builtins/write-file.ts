@@ -1,5 +1,6 @@
 import { writeFile, mkdir } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
+import { verifyWrittenFile } from '../../verification/postconditions.js';
 import type { Tool } from '../types.js';
 
 // ---------- write_file ----------
@@ -21,6 +22,17 @@ export const writeFileTool: Tool = {
     const full = resolve(path);
     await mkdir(dirname(full), { recursive: true });
     await writeFile(full, content, 'utf8');
-    return `已写入 ${path} (${content.length} 字符)`;
+    const postcondition = await verifyWrittenFile(full, content);
+    if (postcondition.status === 'failed') {
+      return {
+        status: 'error',
+        code: 'POSTCONDITION_FAILED',
+        retryable: true,
+        output: postcondition.diagnostics
+          .map((item) => `[${item.code ?? 'V0_FAILED'}] ${item.file ?? path}: ${item.message}`)
+          .join('\n'),
+      };
+    }
+    return `已写入 ${path} (${content.length} 字符, sha256=${postcondition.actualHash})`;
   },
 };

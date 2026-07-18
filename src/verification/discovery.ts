@@ -4,7 +4,8 @@ import { discoverProjectProfile } from './profile.js';
 import type { PackageProfile, ProjectProfile } from './profile.js';
 import type { ValidationCommand } from './types.js';
 
-const SCRIPT_PRIORITY = ['typecheck', 'test', 'build'] as const;
+const COMPATIBILITY_PRIORITY = ['typecheck', 'test', 'build'] as const;
+const LAYERED_ORDER = ['typecheck', 'build', 'test'] as const;
 const isWindows = process.platform === 'win32';
 
 function samePath(left: string, right: string): boolean {
@@ -15,19 +16,36 @@ function samePath(left: string, right: string): boolean {
     : normalizedLeft === normalizedRight;
 }
 
-/** Discover one lowest-cost validation command for a package in a project profile. */
-export function discoverPackageValidationCommand(
+function commandFor(
   profile: ProjectProfile,
   packageProfile: PackageProfile,
-): ValidationCommand | null {
-  const script = SCRIPT_PRIORITY.find((name) => typeof packageProfile.scripts[name] === 'string');
-  if (!script) return null;
+  script: ValidationCommand['script'],
+): ValidationCommand {
   return {
     script,
     command: `${profile.packageManager} run ${script}`,
     packageManager: profile.packageManager,
     cwd: packageProfile.root,
   };
+}
+
+/** Discover every available V3 command in increasing-cost order. */
+export function discoverPackageValidationCommands(
+  profile: ProjectProfile,
+  packageProfile: PackageProfile,
+): ValidationCommand[] {
+  return LAYERED_ORDER
+    .filter((script) => typeof packageProfile.scripts[script] === 'string')
+    .map((script) => commandFor(profile, packageProfile, script));
+}
+
+/** Compatibility API retained for callers that intentionally want one command. */
+export function discoverPackageValidationCommand(
+  profile: ProjectProfile,
+  packageProfile: PackageProfile,
+): ValidationCommand | null {
+  const script = COMPATIBILITY_PRIORITY.find((name) => typeof packageProfile.scripts[name] === 'string');
+  return script ? commandFor(profile, packageProfile, script) : null;
 }
 
 /** Compatibility wrapper that discovers the root package validation command. */

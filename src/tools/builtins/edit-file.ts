@@ -1,5 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { verifyWrittenFile } from '../../verification/postconditions.js';
 import type { Tool } from '../types.js';
 
 // ---------- edit_file ----------
@@ -45,6 +46,17 @@ export const editFileTool: Tool = {
     // 检测原始行尾风格,写回时还原(存在 \r\n 即视为 CRLF 文件;纯 LF 文件保持 LF)
     const out = data.includes('\r\n') ? updated.replace(/\n/g, '\r\n') : updated;
     await writeFile(full, out, 'utf8');
-    return `已在 ${path} 中完成 1 处替换。`;
+    const postcondition = await verifyWrittenFile(full, out);
+    if (postcondition.status === 'failed') {
+      return {
+        status: 'error',
+        code: 'POSTCONDITION_FAILED',
+        retryable: true,
+        output: postcondition.diagnostics
+          .map((item) => `[${item.code ?? 'V0_FAILED'}] ${item.file ?? path}: ${item.message}`)
+          .join('\n'),
+      };
+    }
+    return `已在 ${path} 中完成 1 处替换 (sha256=${postcondition.actualHash})。`;
   },
 };

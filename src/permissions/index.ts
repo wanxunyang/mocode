@@ -26,7 +26,9 @@ export interface PermissionCheckOptions {
 }
 
 const PERMISSIONS_PATH = path.join(os.homedir(), '.mocode', 'permissions.json');
+const PERMISSIONS_VERSION = 3;
 let permanentGrants: PermissionGrant[] = [];
+let permanentToolAllows = new Set<string>();
 let permanentLoaded = false;
 const sessionGrants: PermissionGrant[] = [];
 
@@ -76,12 +78,24 @@ function loadPermanent(): PermissionGrant[] {
   if (permanentLoaded) return permanentGrants;
   permanentLoaded = true;
   try {
-    const parsed = JSON.parse(fs.readFileSync(PERMISSIONS_PATH, 'utf8')) as { grants?: unknown[] };
+    const parsed = JSON.parse(fs.readFileSync(PERMISSIONS_PATH, 'utf8')) as {
+      version?: unknown;
+      grants?: unknown[];
+      alwaysAllowTools?: unknown[];
+    };
     permanentGrants = Array.isArray(parsed.grants)
       ? parsed.grants.filter(validGrant).filter((grant) => grant.scope === 'project')
       : [];
+    // Only the explicit v3 field enables broad grants. The retired legacy allowForever
+    // field remains ignored so upgrades cannot silently restore old authorization.
+    permanentToolAllows = parsed.version === PERMISSIONS_VERSION && Array.isArray(parsed.alwaysAllowTools)
+      ? new Set(parsed.alwaysAllowTools.filter(
+        (tool): tool is string => typeof tool === 'string' && tool.length > 0
+      ))
+      : new Set();
   } catch {
     permanentGrants = [];
+    permanentToolAllows = new Set();
   }
   return permanentGrants;
 }
@@ -89,7 +103,12 @@ function loadPermanent(): PermissionGrant[] {
 function savePermanent(): void {
   try {
     fs.mkdirSync(path.dirname(PERMISSIONS_PATH), { recursive: true });
-    fs.writeFileSync(PERMISSIONS_PATH, `${JSON.stringify({ version: 2, grants: permanentGrants }, null, 2)}\n`, 'utf8');
+    const data = {
+      version: PERMISSIONS_VERSION,
+      grants: permanentGrants,
+      alwaysAllowTools: [...permanentToolAllows].sort(),
+    };
+    fs.writeFileSync(PERMISSIONS_PATH, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
   } catch {
     // A failed persistence write must never turn into broader authorization.
   }
@@ -125,10 +144,13 @@ export async function checkPermission(
   if (!config.permissionEnabled || getToolRisk(tool) === 'safe') return 'allow';
   if (signal?.aborted) return 'deny';
 
+  loadPermanent();
+  if (permanentToolAllows.has(tool.name)) return 'allow';
+
   const fingerprint = permissionFingerprint(tool, args);
   const projectRoot = canonicalProjectRoot(options.projectRoot ?? getSandboxRoot() ?? process.cwd());
   if (sessionGrants.some((grant) => matches(grant, tool.name, fingerprint, projectRoot))) return 'allow';
-  if (loadPermanent().some((grant) => matches(grant, tool.name, fingerprint, projectRoot))) return 'allow';
+  if (permanentGrants.some((grant) => matches(grant, tool.name, fingerprint, projectRoot))) return 'allow';
 
   // CI/pipes must fail closed. Operators can deliberately restore unattended behavior.
   if (!process.stdin.isTTY && !config.permissionNonInteractiveAllow && !options.prompt) return 'deny';
@@ -137,9 +159,10 @@ export async function checkPermission(
   const onceOption = t('permission.allow');
   const sessionOption = t('permission.allowSessionResource');
   const projectOption = t('permission.allowProjectResource');
+  const alwaysOption = t('permission.allowForever');
   const denyOption = t('permission.deny');
   const dangerous = getToolRisk(tool) === 'dangerous';
-  const choices = [onceOption, sessionOption, projectOption, denyOption];
+  const choices = [onceOption, sessionOption, projectOption, alwaysOption, denyOption];
 
   const result = await (options.prompt ?? promptIntervention)({
     type: 'choice',
@@ -156,17 +179,28 @@ export async function checkPermission(
     sessionGrants.push({ tool: tool.name, fingerprint, scope: 'session' });
   } else if (result.value === projectOption) {
     const grant: PermissionGrant = { tool: tool.name, fingerprint, scope: 'project', projectRoot };
-    permanentGrants = loadPermanent().filter((item) => !matches(item, tool.name, fingerprint, projectRoot));
+    permanentGrants = permanentGrants.filter((item) => !matches(item, tool.name, fingerprint, projectRoot));
     permanentGrants.push(grant);
+    if (options.persistProjectGrant !== false) savePermanent();
+  } else if (result.value === alwaysOption) {
+    permanentToolAllows.add(tool.name);
     if (options.persistProjectGrant !== false) savePermanent();
   }
   return 'allow';
 }
 
 export function revokePermanentAllow(toolName: string, fingerprint?: string): void {
-  permanentGrants = loadPermanent().filter((grant) =>
+  loadPermanent();
+  permanentGrants = permanentGrants.filter((grant) =>
     grant.tool !== toolName || (fingerprint !== undefined && grant.fingerprint !== fingerprint)
   );
+  if (fingerprint === undefined) permanentToolAllows.delete(toolName);
+  savePermanent();
+}
+
+export function revokePermanentToolAllow(toolName: string): void {
+  loadPermanent();
+  permanentToolAllows.delete(toolName);
   savePermanent();
 }
 
@@ -174,9 +208,18 @@ export function listPermanentGrants(): PermissionGrant[] {
   return loadPermanent().map((grant) => ({ ...grant }));
 }
 
-/** Compatibility API: returns tools having at least one project-scoped grant. */
+export function listPermanentToolAllows(): string[] {
+  loadPermanent();
+  return [...permanentToolAllows].sort();
+}
+
+/** Compatibility API: returns tools having any persistent resource or tool-wide grant. */
 export function listPermanentAllow(): string[] {
-  return [...new Set(loadPermanent().map((grant) => grant.tool))];
+  loadPermanent();
+  return [...new Set([
+    ...permanentGrants.map((grant) => grant.tool),
+    ...permanentToolAllows,
+  ])].sort();
 }
 
 export function clearSessionPermissionGrants(): void {
@@ -186,5 +229,6 @@ export function clearSessionPermissionGrants(): void {
 export function resetPermissionGrantsForTests(): void {
   sessionGrants.length = 0;
   permanentGrants = [];
+  permanentToolAllows = new Set();
   permanentLoaded = true;
 }
