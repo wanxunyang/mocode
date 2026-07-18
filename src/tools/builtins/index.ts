@@ -75,8 +75,15 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   memory_update: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
   memory_forget: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
   project_skill_update: { effect: 'write', concurrency: 'serial', retry: 'never', resources: workspaceResource },
-  // 子 Agent 共享主工作区；在隔离 workspace / write-set 锁实现前必须串行。
-  task: { effect: 'write', concurrency: 'serial', retry: 'never', resources: workspaceResource, supportsAbort: true },
+  // task 只编排子 Agent；真实读写由子调用自行持锁，父调用不得包 workspace 锁。
+  task: {
+    effect: 'write',
+    concurrency: 'serial',
+    retry: 'never',
+    resources: workspaceResource,
+    delegatesResourceLocks: true,
+    supportsAbort: true,
+  },
 };
 
 const rawBuiltinTools: Tool[] = [

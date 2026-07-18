@@ -104,11 +104,17 @@ function thrashHint(name: string, args: string, count: number): string | null {
   );
 }
 
-/** 只有显式声明 parallel 且无需权限确认的工具才可并发；未知扩展保守串行。 */
+/** 只有显式声明 parallel 且无需权限确认的工具才进入普通并发组。 */
 function isParallelTool(name: string): boolean {
   const tool = tools.find((candidate) => candidate.name === name);
   return !!tool && (tool.risk ?? 'safe') === 'safe' &&
     getToolCapabilities(tool).concurrency === 'parallel';
+}
+
+/** resource-locked 工具先顺序完成权限预检，再依赖 canonical resource lock 并发执行。 */
+function isResourceLockedTool(name: string): boolean {
+  const tool = tools.find((candidate) => candidate.name === name);
+  return !!tool && getToolCapabilities(tool).concurrency === 'resource-locked';
 }
 
 /** 文件 mutation 由 capability metadata 判定，供 diff、回滚与上下文失效共用。 */
@@ -648,11 +654,10 @@ export async function runAgentCore(
           })),
         } as ChatMessage);
 
-        // 工具分组执行(保 tool_calls 原顺序):连续且显式声明 parallel 的 safe 工具成组并发——先一次性
-        // 渲染全部 header，让摘要在任何同步工具真正执行前立即可见；随后启动全部 executeToolOutcome，
-        // 再按原顺序逐个 await + 回灌结果。其余工具均为串行屏障；resource-locked write 保证
-        // rollback 快照顺序，未知扩展与共享工作区 task 也默认串行。
-        // 渲染与 history 回灌一律按原顺序；并发只影响执行时序，tool_call_id 仍按序配对。
+        // 工具分组执行(保 tool_calls 原顺序)：safe parallel 工具照常并发；连续
+        // resource-locked mutation 先按序完成权限预检，再按 canonical resource lock 启动。
+        // registry 对所有真实资源访问统一持锁，所以不同 Agent 间的 read/write/process 也不会竞态。
+        // 串行工具仍是本调用列表内的屏障；渲染/history 回灌始终按原 tool_calls 顺序。
         // executeToolOutcome 永不抛错，失败通过结构化 status/code 返回。
         const calls = result.toolCalls;
         const tracedCalls = calls.map((tc, index) => ({
@@ -752,6 +757,98 @@ export async function runAgentCore(
             }
             hooks.onToolDone?.();
             i = j;
+          } else if (
+            isResourceLockedTool(currentCall.name) &&
+            !(getAgentMode() === 'plan' && getPlanDisabledTools().has(currentCall.name))
+          ) {
+            // 连续文件 mutation：权限确认仍严格按原序进行；全部 preflight 完成后再启动。
+            // 每个执行在 registry 内按 canonical path 获取锁，不同文件可并发，同文件别名会排队。
+            let j = i;
+            while (
+              j < calls.length &&
+              isResourceLockedTool(calls[j].name) &&
+              !getRuntimeDisabledTools().has(calls[j].name) &&
+              !(getAgentMode() === 'plan' && getPlanDisabledTools().has(calls[j].name))
+            ) j++;
+            const batch = calls.slice(i, j);
+            const entries: Array<{
+              tc: ToolCallRef;
+              parsed: Record<string, unknown> | null;
+              diff: { preWriteOld: string | null; editStartLine: number };
+              denied?: ToolOutcome;
+            }> = [];
+
+            for (let k = 0; k < batch.length; k++) {
+              const tc = batch[k];
+              const parsed = parseArgs(tc.arguments);
+              const tool = tools.find((candidate) => candidate.name === tc.name);
+              let denied: ToolOutcome | undefined;
+              if (tool) {
+                const perm = await checkPermission(tool, parsed ?? {}, signal);
+                emitTrace('permission', {
+                  source: 'agent_tool',
+                  tool: tc.name,
+                  decision: perm,
+                  argumentHash: tracedCalls[i + k].args.sha256,
+                }, {
+                  toolCallId: tracedCalls[i + k].toolCallId,
+                  ...(tc.id ? { providerToolCallId: tc.id } : {}),
+                });
+                if (perm === 'deny') denied = deniedOutcome(tc.name);
+              }
+              entries.push({
+                tc,
+                parsed,
+                diff: { preWriteOld: null, editStartLine: 1 },
+                ...(denied ? { denied } : {}),
+              });
+            }
+
+            for (const entry of entries) hooks.onToolHeader?.(entry.tc);
+            const firstAllowed = entries.find((entry) => !entry.denied);
+            if (firstAllowed) hooks.onToolStart?.(firstAllowed.tc.name);
+            const started = entries.map((entry) => entry.denied
+              ? Promise.resolve(entry.denied)
+              : executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
+                  dropContext,
+                  onLockAcquired: (lockedArgs) => {
+                    entry.diff = readDiffContext(entry.tc, lockedArgs);
+                  },
+                }));
+
+            for (let k = 0; k < entries.length; k++) {
+              const entry = entries[k];
+              const outcome = await started[k];
+              traceToolEnd(entry.tc, i + k, outcome);
+              hooks.onToolResult?.(
+                entry.tc,
+                outcome.output,
+                entry.denied ? null : entry.parsed,
+                entry.diff.preWriteOld,
+                entry.diff.editStartLine,
+              );
+              const hint = recordAndHint(entry.tc.name, entry.tc.arguments);
+              pushToolResult(
+                history,
+                entry.tc,
+                hint ? `${outcome.output}${hint}` : outcome.output,
+                relprune,
+                lifecycle,
+                scheduler,
+                runtimeContextState,
+                outcome.status === 'success',
+              );
+              if (isMutationTool(entry.tc.name) && outcome.status === 'success') {
+                const mutationPath = entry.parsed?.path;
+                if (typeof mutationPath === 'string' && mutationPath) {
+                  relprune?.observeMutation(history, mutationPath);
+                  lifecycle?.pushMutation(history, history.length - 1, mutationPath);
+                  runtimeContextState.lifecycleStats = lifecycle?.stats();
+                }
+              }
+            }
+            if (firstAllowed) hooks.onToolDone?.();
+            i = j;
           } else {
             // 单步串行(mutation / run_command / use_skill)——逐个执行,保快照序
             const tc = calls[i];
@@ -815,13 +912,18 @@ export async function runAgentCore(
             const mutationParsed = isMutationTool(tc.name)
               ? parsed
               : null;
-            const { preWriteOld, editStartLine } = readDiffContext(tc, mutationParsed);
+            let diff = readDiffContext(tc, mutationParsed);
             hooks.onToolStart?.(tc.name);
-            const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, { dropContext });
+            const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, {
+              dropContext,
+              onLockAcquired: (lockedArgs) => {
+                if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
+              },
+            });
             traceToolEnd(tc, i, outcome);
             const output = outcome.output;
             hooks.onToolDone?.();
-            hooks.onToolResult?.(tc, output, mutationParsed, preWriteOld, editStartLine);
+            hooks.onToolResult?.(tc, output, mutationParsed, diff.preWriteOld, diff.editStartLine);
             // Thrashing:同上(history 附 hint,UI 干净)
             const hint = recordAndHint(tc.name, tc.arguments);
             pushToolResult(

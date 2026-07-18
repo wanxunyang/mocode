@@ -16,6 +16,7 @@ import {
   getCurrentTurnMutationState,
 } from '../rollback/index.js';
 import { enforceSandbox } from '../sandbox/index.js';
+import { resolveResourceLockRequests, toolResourceLockManager } from './resource-lock.js';
 import { t } from '../i18n/index.js';
 import { isToolErrorOutput } from './result.js';
 
@@ -144,7 +145,10 @@ export async function executeToolOutcome(
   name: string,
   argsRaw: string,
   signal?: AbortSignal,
-  opts?: { dropContext?: (filter: DropContextFilter) => DropContextResult },
+  opts?: {
+    dropContext?: (filter: DropContextFilter) => DropContextResult;
+    onLockAcquired?: (args: Record<string, unknown>) => void;
+  },
 ): Promise<ToolOutcome> {
   const startedAt = Date.now();
   if (signal?.aborted) {
@@ -169,46 +173,70 @@ export async function executeToolOutcome(
   }
 
   const capabilities = getToolCapabilities(tool);
-  const mutationBefore = getCurrentTurnMutationState();
+  let mutationVersionBefore: number | undefined;
+  let capturedPath: string | undefined;
   try {
     const sandboxError = enforceSandbox(name, args);
     if (sandboxError) {
       return terminalOutcome('denied', 'SANDBOX_DENIED', sandboxError, startedAt);
     }
 
-    const pathCapture =
-      isFileMutationTool(name) && typeof args.path === 'string' && args.path
-        ? beginPathMutation(args.path)
-        : null;
-    // 进程和未知扩展可能间接改动任意文件；已声明 write 的非文件工具自行管理其状态。
-    const workspaceCapture =
-      capabilities.effect === 'process' || capabilities.effect === 'unknown'
-        ? beginWorkspaceMutation()
-        : null;
+    const requests = resolveResourceLockRequests(capabilities, args);
+    return await toolResourceLockManager.withLocks(requests, signal, async () => {
+      // Diff 等执行前观察必须发生在真正持锁之后；同路径排队调用才能看到前序写入结果。
+      opts?.onLockAcquired?.(args);
+      const mutationBefore = getCurrentTurnMutationState();
+      mutationVersionBefore = mutationBefore.version;
+      const pathCapture =
+        isFileMutationTool(name) && typeof args.path === 'string' && args.path
+          ? beginPathMutation(args.path)
+          : null;
+      capturedPath = pathCapture?.path;
+      // 进程和未知扩展可能间接改动任意文件；其 workspace lock 同时隔离全盘捕获。
+      const workspaceCapture =
+        capabilities.effect === 'process' || capabilities.effect === 'unknown'
+          ? beginWorkspaceMutation()
+          : null;
 
-    let raw: ToolExecuteResult;
-    try {
-      raw = await tool.execute(args, {
-        signal,
-        dropContext: opts?.dropContext,
-      });
-    } finally {
-      if (pathCapture) endPathMutation(pathCapture, name);
-      if (workspaceCapture) endWorkspaceMutation(workspaceCapture, name);
-    }
+      let raw: ToolExecuteResult;
+      try {
+        raw = await tool.execute(args, {
+          signal,
+          dropContext: opts?.dropContext,
+        });
+      } finally {
+        if (pathCapture) endPathMutation(pathCapture, name);
+        if (workspaceCapture) endWorkspaceMutation(workspaceCapture, name);
+      }
 
-    const mutationAfter = getCurrentTurnMutationState();
-    const changedFiles = mutationAfter.version !== mutationBefore.version
-      ? mutationAfter.changedFiles.map((item) => item.path)
-      : [];
-    if (signal?.aborted) {
-      return terminalOutcome('aborted', 'ABORTED', String(isStructuredOutcome(raw) ? raw.output : raw), startedAt, changedFiles);
-    }
-    return normalizeOutcome(raw, capabilities, Date.now() - startedAt, changedFiles);
+      const mutationAfter = getCurrentTurnMutationState();
+      const changedFiles = mutationAfter.version !== mutationBefore.version
+        ? pathCapture
+          ? mutationAfter.changedFiles
+              .filter((item) => item.path === pathCapture.path)
+              .map((item) => item.path)
+          : mutationAfter.changedFiles.map((item) => item.path)
+        : [];
+      if (signal?.aborted) {
+        return terminalOutcome(
+          'aborted',
+          'ABORTED',
+          String(isStructuredOutcome(raw) ? raw.output : raw),
+          startedAt,
+          changedFiles,
+        );
+      }
+      return normalizeOutcome(raw, capabilities, Date.now() - startedAt, changedFiles);
+    });
   } catch (error) {
     const mutationAfter = getCurrentTurnMutationState();
-    const changedFiles = mutationAfter.version !== mutationBefore.version
-      ? mutationAfter.changedFiles.map((item) => item.path)
+    const changedFiles = mutationVersionBefore !== undefined &&
+      mutationAfter.version !== mutationVersionBefore
+      ? capturedPath
+        ? mutationAfter.changedFiles
+            .filter((item) => item.path === capturedPath)
+            .map((item) => item.path)
+        : mutationAfter.changedFiles.map((item) => item.path)
       : [];
     if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
       return terminalOutcome('aborted', 'ABORTED', t('command.interrupted'), startedAt, changedFiles);
@@ -231,7 +259,10 @@ export async function executeTool(
   name: string,
   argsRaw: string,
   signal?: AbortSignal,
-  opts?: { dropContext?: (filter: DropContextFilter) => DropContextResult },
+  opts?: {
+    dropContext?: (filter: DropContextFilter) => DropContextResult;
+    onLockAcquired?: (args: Record<string, unknown>) => void;
+  },
 ): Promise<string> {
   return (await executeToolOutcome(name, argsRaw, signal, opts)).output;
 }

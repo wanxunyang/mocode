@@ -42,8 +42,10 @@ export interface ToolCapabilities {
   effect: ToolEffect;
   concurrency: ToolConcurrency;
   retry: ToolRetry;
-  /** 返回该调用会访问的逻辑资源键；用于后续细粒度锁与冲突诊断。 */
+  /** 返回该调用会访问的逻辑资源键；用于细粒度锁与冲突诊断。 */
   resources?: (args: Record<string, unknown>) => string[];
+  /** 编排器本身不持锁；其嵌套工具调用负责获取真实资源锁，避免父子自锁。 */
+  delegatesResourceLocks?: boolean;
   supportsAbort?: boolean;
 }
 
