@@ -80,7 +80,12 @@ export const webSearchTool: Tool = {
       try {
         data = JSON.parse(text);
       } catch {
-        return `错误:搜索返回非 JSON(HTTP ${resp.status}): ${text.slice(0, 500)}`;
+        return {
+          status: 'error',
+          code: 'HTTP_ERROR',
+          retryable: resp.status === 408 || resp.status === 429 || resp.status >= 500,
+          output: `错误:搜索返回非 JSON(HTTP ${resp.status}): ${text.slice(0, 500)}`,
+        };
       }
 
       // AnySearch 成功返回 code===0;否则把 message/request_id 喂回 LLM。
@@ -96,7 +101,13 @@ export const webSearchTool: Tool = {
         } else if (resp.status === 429) {
           hint = ' 触发限流,请稍后重试。';
         }
-        return `错误:搜索失败 [${code}] ${message}${rid}${hint}`;
+        return {
+          status: 'error',
+          code: !resp.ok || Number(code) === 429 ? 'HTTP_ERROR' : 'EXECUTION_ERROR',
+          retryable: resp.status === 408 || resp.status === 429 ||
+            resp.status >= 500 || Number(code) === 429,
+          output: `错误:搜索失败 [${code}] ${message}${rid}${hint}`,
+        };
       }
 
       const results = data?.data?.results;
@@ -139,10 +150,23 @@ export const webSearchTool: Tool = {
       return out;
     } catch (e) {
       if (ctrl.signal.aborted) {
-        return `错误:搜索超时(${SEARCH_TIMEOUT_MS}ms)。`;
+        if (externalSignal?.aborted) {
+          return { status: 'aborted', code: 'ABORTED', retryable: false, output: '错误:搜索已中断。' };
+        }
+        return {
+          status: 'error',
+          code: 'TIMEOUT',
+          retryable: true,
+          output: `错误:搜索超时(${SEARCH_TIMEOUT_MS}ms)。`,
+        };
       }
       const msg = e instanceof Error ? e.message : String(e);
-      return `错误:联网搜索请求失败: ${msg}`;
+      return {
+        status: 'error',
+        code: 'NETWORK_ERROR',
+        retryable: true,
+        output: `错误:联网搜索请求失败: ${msg}`,
+      };
     } finally {
       clearTimeout(timer);
       if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);

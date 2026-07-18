@@ -27,6 +27,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
+    "ajv": "8.20.0",
     "cli-highlight": "^2.1.11",
     "dotenv": "^16.0.0",
     "fast-glob": "^3.0.0",

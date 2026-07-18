@@ -35,10 +35,20 @@ export const editFileTool: Tool = {
 
     const count = norm.split(normOld).length - 1;
     if (count === 0) {
-      return `错误:在 ${path} 中未找到 old_string。不要重试相同参数；请先 read_file 读取目标区域，再从返回内容逐字复制新的 old_string 后重试。`;
+      return {
+        status: 'error',
+        code: 'EDIT_CONFLICT',
+        retryable: false,
+        output: `错误:在 ${path} 中未找到 old_string。不要重试相同参数；请先 read_file 读取目标区域，再从返回内容逐字复制新的 old_string 后重试。`,
+      };
     }
     if (count > 1) {
-      return `错误:old_string 在 ${path} 中出现 ${count} 次,不唯一。请加入更多上下文使其唯一。`;
+      return {
+        status: 'error',
+        code: 'EDIT_CONFLICT',
+        retryable: false,
+        output: `错误:old_string 在 ${path} 中出现 ${count} 次,不唯一。请加入更多上下文使其唯一。`,
+      };
     }
     // 用函数形式替换,避免 new_string 里的 $ 被当特殊模式
     const updated = norm.replace(normOld, () => normNew);
@@ -51,7 +61,7 @@ export const editFileTool: Tool = {
       return {
         status: 'error',
         code: 'POSTCONDITION_FAILED',
-        retryable: true,
+        retryable: false,
         output: postcondition.diagnostics
           .map((item) => `[${item.code ?? 'V0_FAILED'}] ${item.file ?? path}: ${item.message}`)
           .join('\n'),

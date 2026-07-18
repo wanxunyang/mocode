@@ -17,6 +17,8 @@ import {
 } from '../rollback/index.js';
 import { enforceSandbox } from '../sandbox/index.js';
 import { resolveResourceLockRequests, toolResourceLockManager } from './resource-lock.js';
+import { executeWithToolRetry, type ToolRetryInfo } from './retry.js';
+import { validateToolArguments } from './validation.js';
 import { t } from '../i18n/index.js';
 import { isToolErrorOutput } from './result.js';
 
@@ -98,7 +100,6 @@ function isStructuredOutcome(value: ToolExecuteResult): value is ToolOutcome {
 
 function normalizeOutcome(
   value: ToolExecuteResult,
-  capabilities: ToolCapabilities,
   durationMs: number,
   changedFiles: string[],
 ): ToolOutcome {
@@ -113,7 +114,8 @@ function normalizeOutcome(
   return {
     status: failed ? 'error' : 'success',
     code: failed ? 'EXECUTION_ERROR' : 'OK',
-    retryable: failed && capabilities.retry !== 'never',
+    // Legacy string errors carry no transient classification and are never retried blindly.
+    retryable: false,
     output: value,
     changedFiles,
     durationMs,
@@ -137,6 +139,119 @@ function terminalOutcome(
   };
 }
 
+export interface ToolExecutionOptions {
+  dropContext?: (filter: DropContextFilter) => DropContextResult;
+  onLockAcquired?: (args: Record<string, unknown>) => void;
+  onRetry?: (info: ToolRetryInfo) => void;
+}
+
+function isTransientExecutionError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const value = error as { status?: number; code?: string; name?: string; message?: string };
+  if (value.name === 'AbortError' || value.name === 'APIUserAbortError') return false;
+  if (value.status === 408 || value.status === 429 ||
+    (typeof value.status === 'number' && value.status >= 500)) return true;
+  if (['ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE']
+    .includes(value.code ?? '')) return true;
+  return value.name === 'APIConnectionError' ||
+    value.name === 'APIConnectionTimeoutError' ||
+    (typeof value.message === 'string' && /\btime(?:d)?\s*out\b|ETIMEDOUT/i.test(value.message));
+}
+
+function executionErrorOutcome(
+  name: string,
+  error: unknown,
+  startedAt: number,
+  changedFiles: string[],
+): ToolOutcome {
+  const transient = isTransientExecutionError(error);
+  const value = error as { code?: string; name?: string } | undefined;
+  const timeout = transient && (value?.code === 'ETIMEDOUT' ||
+    value?.name === 'APIConnectionTimeoutError' ||
+    (error instanceof Error && /\btime(?:d)?\s*out\b|ETIMEDOUT/i.test(error.message)));
+  return {
+    status: 'error',
+    code: timeout ? 'TIMEOUT' : transient ? 'NETWORK_ERROR' : 'EXECUTION_ERROR',
+    retryable: transient,
+    output: t('toolError.execution', {
+      name,
+      message: error instanceof Error ? error.message : String(error),
+    }),
+    changedFiles,
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+/** One complete attempt: acquire/release locks and capture rollback independently. */
+async function executeToolAttempt(
+  tool: Tool,
+  args: Record<string, unknown>,
+  signal: AbortSignal | undefined,
+  opts: ToolExecutionOptions | undefined,
+  notifyLockAcquired: boolean,
+): Promise<ToolOutcome> {
+  const startedAt = Date.now();
+  const capabilities = getToolCapabilities(tool);
+  let mutationVersionBefore: number | undefined;
+  let capturedPath: string | undefined;
+  try {
+    const requests = resolveResourceLockRequests(capabilities, args);
+    return await toolResourceLockManager.withLocks(requests, signal, async () => {
+      if (notifyLockAcquired) opts?.onLockAcquired?.(args);
+      const mutationBefore = getCurrentTurnMutationState();
+      mutationVersionBefore = mutationBefore.version;
+      const pathCapture = isFileMutationTool(tool.name) && typeof args.path === 'string' && args.path
+        ? beginPathMutation(args.path)
+        : null;
+      capturedPath = pathCapture?.path;
+      const workspaceCapture = capabilities.effect === 'process' || capabilities.effect === 'unknown'
+        ? beginWorkspaceMutation()
+        : null;
+
+      let raw: ToolExecuteResult;
+      try {
+        raw = await tool.execute(args, { signal, dropContext: opts?.dropContext });
+      } finally {
+        if (pathCapture) endPathMutation(pathCapture, tool.name);
+        if (workspaceCapture) endWorkspaceMutation(workspaceCapture, tool.name);
+      }
+
+      const mutationAfter = getCurrentTurnMutationState();
+      const changedFiles = mutationAfter.version !== mutationBefore.version
+        ? pathCapture
+          ? mutationAfter.changedFiles.filter((item) => item.path === pathCapture.path).map((item) => item.path)
+          : mutationAfter.changedFiles.map((item) => item.path)
+        : [];
+      if (signal?.aborted) {
+        return terminalOutcome('aborted', 'ABORTED', String(isStructuredOutcome(raw) ? raw.output : raw), startedAt, changedFiles);
+      }
+      return normalizeOutcome(raw, Date.now() - startedAt, changedFiles);
+    });
+  } catch (error) {
+    const mutationAfter = getCurrentTurnMutationState();
+    const changedFiles = mutationVersionBefore !== undefined && mutationAfter.version !== mutationVersionBefore
+      ? capturedPath
+        ? mutationAfter.changedFiles.filter((item) => item.path === capturedPath).map((item) => item.path)
+        : mutationAfter.changedFiles.map((item) => item.path)
+      : [];
+    if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
+      return terminalOutcome('aborted', 'ABORTED', t('command.interrupted'), startedAt, changedFiles);
+    }
+    return executionErrorOutcome(tool.name, error, startedAt, changedFiles);
+  }
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
 /**
  * 结构化工具调度入口。永不抛错；旧字符串工具在此归一化为 ToolOutcome。
  * 权限仍由 Agent 在展示工具头之前预检，保持现有交互时序。
@@ -145,10 +260,7 @@ export async function executeToolOutcome(
   name: string,
   argsRaw: string,
   signal?: AbortSignal,
-  opts?: {
-    dropContext?: (filter: DropContextFilter) => DropContextResult;
-    onLockAcquired?: (args: Record<string, unknown>) => void;
-  },
+  opts?: ToolExecutionOptions,
 ): Promise<ToolOutcome> {
   const startedAt = Date.now();
   if (signal?.aborted) {
@@ -160,9 +272,9 @@ export async function executeToolOutcome(
     return terminalOutcome('error', 'UNKNOWN_TOOL', t('toolError.unknown', { name }), startedAt);
   }
 
-  let args: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    args = argsRaw.trim() ? JSON.parse(argsRaw) : {};
+    parsed = argsRaw.trim() ? JSON.parse(argsRaw) : {};
   } catch {
     return terminalOutcome(
       'error',
@@ -172,85 +284,36 @@ export async function executeToolOutcome(
     );
   }
 
-  const capabilities = getToolCapabilities(tool);
-  let mutationVersionBefore: number | undefined;
-  let capturedPath: string | undefined;
-  try {
-    const sandboxError = enforceSandbox(name, args);
-    if (sandboxError) {
-      return terminalOutcome('denied', 'SANDBOX_DENIED', sandboxError, startedAt);
-    }
-
-    const requests = resolveResourceLockRequests(capabilities, args);
-    return await toolResourceLockManager.withLocks(requests, signal, async () => {
-      // Diff 等执行前观察必须发生在真正持锁之后；同路径排队调用才能看到前序写入结果。
-      opts?.onLockAcquired?.(args);
-      const mutationBefore = getCurrentTurnMutationState();
-      mutationVersionBefore = mutationBefore.version;
-      const pathCapture =
-        isFileMutationTool(name) && typeof args.path === 'string' && args.path
-          ? beginPathMutation(args.path)
-          : null;
-      capturedPath = pathCapture?.path;
-      // 进程和未知扩展可能间接改动任意文件；其 workspace lock 同时隔离全盘捕获。
-      const workspaceCapture =
-        capabilities.effect === 'process' || capabilities.effect === 'unknown'
-          ? beginWorkspaceMutation()
-          : null;
-
-      let raw: ToolExecuteResult;
-      try {
-        raw = await tool.execute(args, {
-          signal,
-          dropContext: opts?.dropContext,
-        });
-      } finally {
-        if (pathCapture) endPathMutation(pathCapture, name);
-        if (workspaceCapture) endWorkspaceMutation(workspaceCapture, name);
-      }
-
-      const mutationAfter = getCurrentTurnMutationState();
-      const changedFiles = mutationAfter.version !== mutationBefore.version
-        ? pathCapture
-          ? mutationAfter.changedFiles
-              .filter((item) => item.path === pathCapture.path)
-              .map((item) => item.path)
-          : mutationAfter.changedFiles.map((item) => item.path)
-        : [];
-      if (signal?.aborted) {
-        return terminalOutcome(
-          'aborted',
-          'ABORTED',
-          String(isStructuredOutcome(raw) ? raw.output : raw),
-          startedAt,
-          changedFiles,
-        );
-      }
-      return normalizeOutcome(raw, capabilities, Date.now() - startedAt, changedFiles);
-    });
-  } catch (error) {
-    const mutationAfter = getCurrentTurnMutationState();
-    const changedFiles = mutationVersionBefore !== undefined &&
-      mutationAfter.version !== mutationVersionBefore
-      ? capturedPath
-        ? mutationAfter.changedFiles
-            .filter((item) => item.path === capturedPath)
-            .map((item) => item.path)
-        : mutationAfter.changedFiles.map((item) => item.path)
-      : [];
-    if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
-      return terminalOutcome('aborted', 'ABORTED', t('command.interrupted'), startedAt, changedFiles);
-    }
+  const validation = validateToolArguments(tool, parsed);
+  if (!validation.valid) {
     return terminalOutcome(
       'error',
-      'EXECUTION_ERROR',
-      t('toolError.execution', {
-        name,
-        message: error instanceof Error ? error.message : String(error),
-      }),
+      validation.code,
+      `错误:工具 ${name} 参数无效: ${validation.message}`,
       startedAt,
-      changedFiles,
     );
+  }
+  const args = parsed as Record<string, unknown>;
+  const fingerprint = `${name}\x00${stableJson(args)}`;
+  const sandboxError = enforceSandbox(name, args);
+  if (sandboxError) {
+    return terminalOutcome('denied', 'SANDBOX_DENIED', sandboxError, startedAt);
+  }
+
+  const capabilities = getToolCapabilities(tool);
+  try {
+    return await executeWithToolRetry(
+      capabilities,
+      fingerprint,
+      signal,
+      (attempt) => executeToolAttempt(tool, args, signal, opts, attempt === 1),
+      opts?.onRetry,
+    );
+  } catch (error) {
+    if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
+      return terminalOutcome('aborted', 'ABORTED', t('command.interrupted'), startedAt);
+    }
+    return executionErrorOutcome(name, error, startedAt, []);
   }
 }
 
@@ -259,10 +322,7 @@ export async function executeTool(
   name: string,
   argsRaw: string,
   signal?: AbortSignal,
-  opts?: {
-    dropContext?: (filter: DropContextFilter) => DropContextResult;
-    onLockAcquired?: (args: Record<string, unknown>) => void;
-  },
+  opts?: ToolExecutionOptions,
 ): Promise<string> {
   return (await executeToolOutcome(name, argsRaw, signal, opts)).output;
 }
@@ -276,3 +336,4 @@ export type {
   DropContextFilter,
   DropContextResult,
 } from './types.js';
+export type { ToolRetryInfo } from './retry.js';

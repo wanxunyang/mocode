@@ -10,7 +10,7 @@ import { getCurrentSessionId } from './state.js';
 export type TraceEventType =
   | 'turn_start' | 'turn_end' | 'step_start' | 'step_end'
   | 'model_start' | 'model_retry' | 'model_end'
-  | 'tool_call_start' | 'tool_call_end' | 'permission'
+  | 'tool_call_start' | 'tool_retry' | 'tool_call_end' | 'permission'
   | 'validation_start' | 'validation_end' | 'compact' | 'abort' | 'rollback';
 
 export interface AgentTraceEvent {

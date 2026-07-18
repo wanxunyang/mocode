@@ -27,7 +27,7 @@ export const writeFileTool: Tool = {
       return {
         status: 'error',
         code: 'POSTCONDITION_FAILED',
-        retryable: true,
+        retryable: false,
         output: postcondition.diagnostics
           .map((item) => `[${item.code ?? 'V0_FAILED'}] ${item.file ?? path}: ${item.message}`)
           .join('\n'),

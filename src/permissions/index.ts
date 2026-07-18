@@ -55,7 +55,12 @@ export function permissionFingerprint(tool: Tool, args: Record<string, unknown>)
   if (tool.name === 'run_command' && typeof args.command === 'string') {
     subject = { command: args.command.trim() };
   } else {
-    const resources = tool.capabilities?.resources?.(args).filter(Boolean).sort();
+    let resources: string[] | undefined;
+    try {
+      resources = tool.capabilities?.resources?.(args).filter(Boolean).sort();
+    } catch {
+      resources = undefined;
+    }
     // File mutations may be granted by their concrete resource. Coarse resources such as
     // "workspace" must retain arguments so task/process-like calls cannot become tool-wide.
     subject = resources?.length && typeof args.path === 'string'

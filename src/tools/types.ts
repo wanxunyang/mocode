@@ -54,15 +54,21 @@ export type ToolOutcomeCode =
   | 'OK'
   | 'UNKNOWN_TOOL'
   | 'INVALID_JSON'
+  | 'INVALID_ARGUMENTS'
+  | 'INVALID_TOOL_SCHEMA'
   | 'SANDBOX_DENIED'
   | 'PERMISSION_DENIED'
+  | 'TOOL_DISABLED'
+  | 'MODE_DENIED'
   | 'ABORTED'
   | 'TIMEOUT'
+  | 'HTTP_ERROR'
+  | 'NETWORK_ERROR'
   | 'PROCESS_FAILED'
   | 'EXECUTION_ERROR'
   | 'EDIT_CONFLICT'
-  | 'MCP_ERROR'
-  | (string & {});
+  | 'POSTCONDITION_FAILED'
+  | 'MCP_ERROR';
 
 /** 框架内部的结构化工具结果；LLM/TUI 边界仍使用 output 文本。 */
 export interface ToolOutcome {
@@ -72,6 +78,10 @@ export interface ToolOutcome {
   output: string;
   changedFiles?: string[];
   durationMs?: number;
+  /** Total executions for this provider tool call, including automatic retries. */
+  attempts?: number;
+  /** Aggregate backoff time spent between attempts. */
+  retryDelayMs?: number;
 }
 
 export type ToolExecuteResult = string | ToolOutcome;

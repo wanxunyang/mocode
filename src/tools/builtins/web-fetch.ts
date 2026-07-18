@@ -54,7 +54,12 @@ export const webFetchTool: Tool = {
       const text = await resp.text();
 
       if (!resp.ok) {
-        return `错误:抓取失败 HTTP ${resp.status} ${resp.statusText}\n${text.slice(0, 500)}`;
+        return {
+          status: 'error',
+          code: 'HTTP_ERROR',
+          retryable: resp.status === 408 || resp.status === 429 || resp.status >= 500,
+          output: `错误:抓取失败 HTTP ${resp.status} ${resp.statusText}\n${text.slice(0, 500)}`,
+        };
       }
 
       const isHtml =
@@ -72,11 +77,23 @@ export const webFetchTool: Tool = {
       return out;
     } catch (e) {
       if (ctrl.signal.aborted) {
-        if (externalSignal?.aborted) return `错误:已中断: ${url.href}`;
-        return `错误:抓取超时(${FETCH_TIMEOUT_MS}ms): ${url.href}`;
+        if (externalSignal?.aborted) {
+          return { status: 'aborted', code: 'ABORTED', retryable: false, output: `错误:已中断: ${url.href}` };
+        }
+        return {
+          status: 'error',
+          code: 'TIMEOUT',
+          retryable: true,
+          output: `错误:抓取超时(${FETCH_TIMEOUT_MS}ms): ${url.href}`,
+        };
       }
       const msg = e instanceof Error ? e.message : String(e);
-      return `错误:抓取失败: ${msg}`;
+      return {
+        status: 'error',
+        code: 'NETWORK_ERROR',
+        retryable: true,
+        output: `错误:抓取失败: ${msg}`,
+      };
     } finally {
       clearTimeout(timer);
       if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);

@@ -23,8 +23,10 @@ import {
   isFileMutationTool,
   tools,
   type ToolOutcome,
+  type ToolRetryInfo,
 } from '../tools/registry.js';
 import { checkPermission } from '../permissions/index.js';
+import { validateToolArguments } from '../tools/validation.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools } from '../tools/constants.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import {
@@ -678,6 +680,20 @@ export async function runAgentCore(
             ...(tc.id ? { providerToolCallId: tc.id } : {}),
           });
         }
+        const traceToolRetry = (tc: ToolCallRef, index: number, retry: ToolRetryInfo): void => {
+          const traceCall = tracedCalls[index];
+          emitTrace('tool_retry', {
+            tool: tc.name,
+            argumentHash: traceCall.args.sha256,
+            attempt: retry.attempt,
+            nextAttempt: retry.nextAttempt,
+            waitMs: retry.waitMs,
+            code: retry.code,
+          }, {
+            toolCallId: traceCall.toolCallId,
+            ...(tc.id ? { providerToolCallId: tc.id } : {}),
+          });
+        };
         const traceToolEnd = (tc: ToolCallRef, index: number, outcome: ToolOutcome): void => {
           const traceCall = tracedCalls[index];
           emitTrace('tool_call_end', {
@@ -687,7 +703,9 @@ export async function runAgentCore(
             code: outcome.code,
             retryable: outcome.retryable,
             durationMs: outcome.durationMs ?? 0,
-            retry: 0,
+            attempt: outcome.attempts ?? 1,
+            retry: Math.max(0, (outcome.attempts ?? 1) - 1),
+            retryDelayMs: outcome.retryDelayMs ?? 0,
             changedFiles: outcome.changedFiles ?? [],
           }, {
             toolCallId: traceCall.toolCallId,
@@ -735,7 +753,15 @@ export async function runAgentCore(
             const batch = calls.slice(i, j);
             for (const tc of batch) hooks.onToolHeader?.(tc);
             hooks.onToolStart?.(batch[0].name);
-            const started = batch.map((tc) => executeToolOutcome(tc.name, tc.arguments, signal, { dropContext }));
+            const started = batch.map((tc, offset) => executeToolOutcome(
+              tc.name,
+              tc.arguments,
+              signal,
+              {
+                dropContext,
+                onRetry: (retry) => traceToolRetry(tc, i + offset, retry),
+              },
+            ));
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
               const outcome = await started[k];
@@ -782,8 +808,11 @@ export async function runAgentCore(
               const tc = batch[k];
               const parsed = parseArgs(tc.arguments);
               const tool = tools.find((candidate) => candidate.name === tc.name);
+              const argumentsValid = tool && parsed !== null
+                ? validateToolArguments(tool, parsed).valid
+                : false;
               let denied: ToolOutcome | undefined;
-              if (tool) {
+              if (tool && argumentsValid) {
                 const perm = await checkPermission(tool, parsed ?? {}, signal);
                 emitTrace('permission', {
                   source: 'agent_tool',
@@ -807,13 +836,14 @@ export async function runAgentCore(
             for (const entry of entries) hooks.onToolHeader?.(entry.tc);
             const firstAllowed = entries.find((entry) => !entry.denied);
             if (firstAllowed) hooks.onToolStart?.(firstAllowed.tc.name);
-            const started = entries.map((entry) => entry.denied
+            const started = entries.map((entry, offset) => entry.denied
               ? Promise.resolve(entry.denied)
               : executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
                   dropContext,
                   onLockAcquired: (lockedArgs) => {
                     entry.diff = readDiffContext(entry.tc, lockedArgs);
                   },
+                  onRetry: (retry) => traceToolRetry(entry.tc, i + offset, retry),
                 }));
 
             for (let k = 0; k < entries.length; k++) {
@@ -877,7 +907,10 @@ export async function runAgentCore(
             // 拒绝时只渲染拒绝结果,不渲染执行头;放行则继续走 header → start → executeTool 流程。
             const parsed = parseArgs(tc.arguments);
             const tool = tools.find((t) => t.name === tc.name);
-            if (tool) {
+            const argumentsValid = tool && parsed !== null
+              ? validateToolArguments(tool, parsed).valid
+              : false;
+            if (tool && argumentsValid) {
               const perm = await checkPermission(tool, parsed ?? {}, signal);
               emitTrace('permission', {
                 source: 'agent_tool',
@@ -919,6 +952,7 @@ export async function runAgentCore(
               onLockAcquired: (lockedArgs) => {
                 if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
               },
+              onRetry: (retry) => traceToolRetry(tc, i, retry),
             });
             traceToolEnd(tc, i, outcome);
             const output = outcome.output;
