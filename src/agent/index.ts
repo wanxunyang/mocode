@@ -81,6 +81,7 @@ function writeChangeOverview(): void {
       `  ${ui.dim}│   ${change.kind}${ui.reset}  ${change.path}  ${ui.green}+${change.added}${ui.reset} ${ui.red}−${change.removed}${ui.reset}\n`,
     );
   }
+  layout.contentWrite('\n');
 }
 
 /** 取 userInput 的首行:字符串直接 split;多模态 parts 找首个 text part 再 split。 */

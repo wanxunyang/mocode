@@ -12,7 +12,7 @@ export interface ChoiceOption {
 /** 把单个选项元素安全地转成 {label, detail}。LLM 有时传对象而不是字符串,这里提取可读字段。 */
 function optionToChoice(o: unknown): ChoiceOption {
   if (o === null || o === undefined) return { label: '' };
-  if (typeof o === 'string') return { label: o };
+  if (typeof o === 'string') return { label: o.trim() };
   if (typeof o === 'number' || typeof o === 'boolean') return { label: String(o) };
   if (typeof o === 'object') {
     const obj = o as Record<string, unknown>;
@@ -90,14 +90,32 @@ export function coerceOptions(raw: unknown): ChoiceOption[] {
   return [];
 }
 
+/**
+ * 在通用 JSON Schema 校验前统一模型的常见错参。
+ * - 兼容历史字符串选项和 description/detail 等别名；
+ * - 丢弃 `{}` 等无可读内容的项；
+ * - 少于两个有效选项时统一为 `options: []`，明确表示自由文本面板。
+ */
+export function normalizeAskHumanArguments(args: Record<string, unknown>): void {
+  const options = coerceOptions(args.options);
+  if (options.length < 2) {
+    args.options = [];
+    return;
+  }
+  args.options = options.slice(0, 4).map((option) => ({
+    label: option.label,
+    ...(option.detail ? { description: option.detail } : {}),
+  }));
+}
+
 // ---------- ask_human ----------
 export const askHumanTool: Tool = {
   name: 'ask_human',
   description: [
-    'Present the user with a menu of choices to pick from.',
-    ' DEFAULT: pass 2-4 concrete options via `options`; each is a string, or { label, description } when the choice has a non-obvious tradeoff.',
-    ' STRICT: object form requires a non-empty `label` — never emit {} or omit label (renders as a literal "{}" menu item). Only `label` and `description` are recognized — no extra fields.',
-    ' FREE-TEXT (omit `options`): only when the answer truly cannot be reduced to a few choices (e.g. "paste the error message").',
+    'Ask the user a question and wait for their response.',
+    ' CHOICES: pass 2-4 concrete options via `options`, each as { label, description? }.',
+    ' FREE-TEXT: pass `options: []` when the answer cannot be reduced to choices (e.g. "paste the error message").',
+    ' Every non-empty option requires a non-empty `label`; never emit [{}], omit label, or omit `options`.',
     ' DO NOT call when the task is clear and you can pick a sensible default.',
   ].join(' '),
   parameters: {
@@ -105,39 +123,39 @@ export const askHumanTool: Tool = {
     properties: {
       question: {
         type: 'string',
+        minLength: 1,
         description: 'The question to ask the user; keep it concise (shown as the panel title)',
       },
       options: {
         type: 'array',
+        minItems: 0,
+        maxItems: 4,
         items: {
-          anyOf: [
-            { type: 'string' },
-            {
-              type: 'object',
-              properties: {
-                label: {
-                  type: 'string',
-                  minLength: 1,
-                  description: 'Short option title (1-5 words), shown as the choice itself.',
-                },
-                description: {
-                  type: 'string',
-                  description: 'What picking this option means or implies; explain the tradeoff when the label alone leaves the user unsure.',
-                },
-              },
-              required: ['label'],
+          type: 'object',
+          properties: {
+            label: {
+              type: 'string',
+              minLength: 1,
+              description: 'Short option title (1-5 words), shown as the choice itself.',
             },
-          ],
+            description: {
+              type: 'string',
+              description: 'What picking this option means or implies; explain the tradeoff when the label alone leaves the user unsure.',
+            },
+          },
+          required: ['label'],
+          additionalProperties: false,
         },
-        description: '2-4 concrete choices. Each is a plain string, or { label, description } when the tradeoff is non-obvious. Required in most cases; omit only for free-form input.',
+        description: 'Pass [] for free-text input, or 2-4 concrete choices with non-empty labels.',
       },
       context: {
         type: 'string',
         description: 'Background explanation shown under the title; may be multiline.',
       },
     },
-    required: ['question'],
+    required: ['question', 'options'],
   },
+  normalizeArguments: normalizeAskHumanArguments,
   async execute(args) {
     const question = String(args.question ?? '');
     const options = coerceOptions(args.options);

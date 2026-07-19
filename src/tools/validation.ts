@@ -63,7 +63,7 @@ function formatErrors(errors: ErrorObject[] | null | undefined): string {
   }).join('; ');
 }
 
-/** Validate without coercing, defaulting, removing, or otherwise mutating model arguments. */
+/** Validate after tool-local normalization; AJV itself never coerces or mutates arguments. */
 export function validateToolArguments(
   tool: Tool,
   args: unknown,
@@ -73,6 +73,16 @@ export function validateToolArguments(
       valid: false,
       code: 'INVALID_ARGUMENTS',
       message: '参数根节点必须是 JSON object',
+    };
+  }
+
+  try {
+    tool.normalizeArguments?.(args as Record<string, unknown>);
+  } catch (error) {
+    return {
+      valid: false,
+      code: 'INVALID_ARGUMENTS',
+      message: `参数规范化失败: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 

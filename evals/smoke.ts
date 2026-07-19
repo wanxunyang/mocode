@@ -12,6 +12,8 @@ import {
 } from '../src/verification/profile.js';
 import { resolveAffectedPackages } from '../src/verification/affected.js';
 import { runCommandRaw, runCommandTool } from '../src/tools/builtins/run-command.js';
+import { askHumanTool } from '../src/tools/builtins/ask-human.js';
+import { validateToolArguments } from '../src/tools/validation.js';
 import { getSandboxRoot, setSandboxRoot } from '../src/sandbox/index.js';
 import { inOverlay, mergeSubAgentChangeSet } from '../src/agents/coordinator.js';
 import {
@@ -403,6 +405,51 @@ const cases: SmokeCase[] = [
       } finally {
         removeFixture(root);
       }
+    },
+  },
+  {
+    name: 'normalizes malformed ask_human options before schema validation',
+    run() {
+      const malformed: Record<string, unknown> = {
+        question: '实现计划的落盘方式',
+        options: [{}],
+      };
+      assert.equal(validateToolArguments(askHumanTool, malformed).valid, true);
+      assert.deepEqual(
+        malformed,
+        { question: '实现计划的落盘方式', options: [] },
+        'empty options should become the explicit free-text protocol instead of failing validation',
+      );
+
+      const explicitFreeText: Record<string, unknown> = {
+        question: '请粘贴错误日志',
+        options: [],
+      };
+      assert.equal(validateToolArguments(askHumanTool, explicitFreeText).valid, true);
+      assert.deepEqual(explicitFreeText.options, []);
+
+      const omittedLegacyFreeText: Record<string, unknown> = {
+        question: '请粘贴错误日志',
+      };
+      assert.equal(validateToolArguments(askHumanTool, omittedLegacyFreeText).valid, true);
+      assert.deepEqual(omittedLegacyFreeText.options, []);
+
+      const legacyStrings: Record<string, unknown> = {
+        question: '选择方式',
+        options: ['  现有文档  ', '新建文件'],
+      };
+      assert.equal(validateToolArguments(askHumanTool, legacyStrings).valid, true);
+      assert.deepEqual(legacyStrings.options, [
+        { label: '现有文档' },
+        { label: '新建文件' },
+      ]);
+      const askSchema = askHumanTool.parameters as {
+        required?: string[];
+        properties?: { options?: { minItems?: number } };
+      };
+      assert.equal(JSON.stringify(askSchema).includes('anyOf'), false);
+      assert.equal(askSchema.required?.includes('options'), true);
+      assert.equal(askSchema.properties?.options?.minItems, 0);
     },
   },
   {

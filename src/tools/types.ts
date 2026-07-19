@@ -100,6 +100,11 @@ export interface Tool {
   description: string;
   parameters: Record<string, unknown>;
   risk?: ToolRisk;
+  /**
+   * 在 JSON Schema 校验前就地规范化模型参数。仅用于无损兼容已知的模型输出偏差；
+   * 不应补造业务值或放宽必填参数。
+   */
+  normalizeArguments?: (args: Record<string, unknown>) => void;
   /** 缺省时按 unknown + serial + never 保守处理。 */
   capabilities?: ToolCapabilities;
   execute: (args: Record<string, unknown>, ctx?: ToolContext) => Promise<ToolExecuteResult>;
