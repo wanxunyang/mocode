@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="780" viewBox="0 0 1440 780" role="img" aria-labelledby="t d"><title id="t">MoCode verification cascade</title><desc id="d">After every mutated call, V0 to V3 run in cost order; failure becomes the next observation.</desc><defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0d1b2a"/><stop offset="1" stop-color="#1b263b"/></linearGradient><linearGradient id="bar" x2="1"><stop stop-color="#22d3ee"/><stop offset=".5" stop-color="#8b5cf6"/><stop offset="1" stop-color="#f43f5e"/></linearGradient><filter id="gl"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter><style>text{font-family:Inter,Segoe UI,Arial,sans-serif}.k{fill:#7f8aa8;font-size:13px;letter-spacing:2px}.h{fill:#f8fafc;font-size:25px;font-weight:700}.n{fill:#16192c;stroke:#343b58;stroke-width:1.3}.t{fill:#f6f7ff;font-size:18px;font-weight:650}.s{fill:#929dbb;font-size:12px}.w{fill:none;stroke:#59627e;stroke-width:2}.ok{fill:#0f2a1f;stroke:#10b981}.warn{fill:#2a2014;stroke:#f59e0b}.err{fill:#2a1620;stroke:#f43f5e}</style></defs>
+<rect width="1440" height="780" rx="28" fill="url(#bg)"/><rect x="1" y="1" width="1438" height="778" rx="27" fill="none" stroke="#2afadf" stroke-opacity=".18" stroke-width="2"/>
+<text x="70" y="68" class="k">VERIFICATION CASCADE</text><text x="70" y="108" class="h">Cheap checks first. Expensive checks only on demand.</text><text x="70" y="135" class="s">runs after every mutated tool call · file fingerprint cache stops repeat work</text>
+
+<!-- engine trigger -->
+<g transform="translate(70 180)"><rect class="n" width="320" height="74" rx="14"/><text x="20" y="28" class="k">TRIGGER</text><text x="20" y="56" class="t">mutating tool produced changedFiles</text></g>
+<path d="M390 218h70" class="w"/><circle cx="460" cy="218" r="4" fill="#9b5cff" filter="url(#gl)"/>
+
+<!-- hash gate -->
+<g transform="translate(460 184)"><rect class="n" width="200" height="66" rx="12"/><text x="14" y="22" class="k">SHA-256 cache</text><text x="14" y="48" class="s">skip if files unchanged</text></g>
+<path d="M660 218h70" class="w"/><circle cx="730" cy="218" r="4" fill="#22d3ee" filter="url(#gl)"/>
+
+<!-- V0..V3 stages -->
+<g transform="translate(730 160)">
+  <rect class="n" width="600" height="124" rx="16"/>
+  <rect width="6" height="124" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">V0 · post-conditions on the files themselves</text>
+  <text x="22" y="52" class="t">non-empty · parseable · declared export exists</text>
+  <text x="22" y="76" class="s">cost: filesystem read · &lt; 50 ms · always runs first</text>
+  <text x="22" y="100" fill="#67e8f9" font-size="12">fail → feed back as observation · skip V1..V3</text>
+  <g transform="translate(440 18)"><rect class="ok" width="140" height="26" rx="13"/><text x="16" y="18" fill="#6ee7b7" font-size="12">cheapest</text></g>
+</g>
+<path d="M1330 222l60 0 0 110 -820 0" class="w"/><circle cx="730" cy="332" r="4" fill="#c084fc" filter="url(#gl)"/>
+
+<g transform="translate(730 320)">
+  <rect class="n" width="600" height="124" rx="16"/>
+  <rect width="6" height="124" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">V1 · static diagnostics on changed files</text>
+  <text x="22" y="52" class="t">tsc --noEmit (scoped) · eslint · language server markers</text>
+  <text x="22" y="76" class="s">cost: per-file syntax + type check · seconds</text>
+  <text x="22" y="100" fill="#fde68a" font-size="12">fail → actionable → skip V2</text>
+</g>
+<path d="M1330 382l60 0 0 110 -820 0" class="w"/><circle cx="730" cy="492" r="4" fill="#fbbf24" filter="url(#gl)"/>
+
+<g transform="translate(730 480)">
+  <rect class="n" width="600" height="124" rx="16"/>
+  <rect width="6" height="124" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">V2 · targeted unit tests for affected symbols</text>
+  <text x="22" y="52" class="t">vitest/jest --filter · only the symbols touched</text>
+  <text x="22" y="76" class="s">cost: medium · seconds · excludes network tests</text>
+  <text x="22" y="100" fill="#fde68a" font-size="12">fail → actionable → skip V3</text>
+</g>
+<path d="M1330 542l60 0 0 110 -820 0" class="w"/><circle cx="730" cy="652" r="4" fill="#f43f5e" filter="url(#gl)"/>
+
+<g transform="translate(730 640)">
+  <rect class="n" width="600" height="104" rx="16"/>
+  <rect width="6" height="104" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">V3 · affected package scripts</text>
+  <text x="22" y="52" class="t">typecheck · build · test for the package(s) that own the file</text>
+  <text x="22" y="76" fill="#f9a8d4" font-size="12">most expensive · runs only when V0..V2 pass</text>
+</g>
+
+<!-- failure feedback -->
+<g transform="translate(70 470)"><rect class="err" width="600" height="270" rx="16"/><text x="20" y="28" class="k">FAILURE PATH</text>
+<text x="20" y="58" class="t">first actionable failure wins</text>
+<text x="20" y="86" class="s">the model sees only the cheapest actionable failure</text>
+<text x="20" y="110" class="s">V0: "package.json missing 'main'"</text>
+<text x="20" y="132" class="s">V1: "src/x.ts(42): Property 'a' does not exist on type 'B'"</text>
+<text x="20" y="154" class="s">V2: "FAIL testname … expected 2 got 4"</text>
+<text x="20" y="176" class="s">V3: "tsc: 17 errors in 4 packages"</text>
+<g transform="translate(20 198)"><rect class="warn" width="560" height="56" rx="10"/><text x="14" y="22" class="t">merge into a single tool-result, push to history, agent loops again</text><text x="14" y="44" class="s">abort-safe · partial progress is preserved by rollback snapshot</text></g></g>
+
+<!-- skip & cache key -->
+<g transform="translate(70 760)"><text x="0" y="0" class="s">skip semantics: each level is gated by the previous · cache key = hash(sorted changed files) + per-stage outputs</text></g>
+
+<g transform="translate(730 138)"><text x="0" y="0" class="k">RUN ORDER</text></g></svg>

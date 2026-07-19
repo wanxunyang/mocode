@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="700" viewBox="0 0 1440 700" role="img" aria-labelledby="t d"><title id="t">MoCode pet bridge</title><desc id="d">A WebSocket bridge pushes agent state from the Node CLI into the Electron floating pet.</desc><defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0d1b2a"/><stop offset="1" stop-color="#1b263b"/></linearGradient><linearGradient id="cool" x2="1"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#3b82f6"/></linearGradient><linearGradient id="hot" x2="1"><stop stop-color="#ff4d8d"/><stop offset="1" stop-color="#f43f5e"/></linearGradient><filter id="gl"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter><style>text{font-family:Inter,Segoe UI,Arial,sans-serif}.k{fill:#7f8aa8;font-size:13px;letter-spacing:2px}.h{fill:#f8fafc;font-size:25px;font-weight:700}.n{fill:#16192c;stroke:#343b58;stroke-width:1.3}.t{fill:#f6f7ff;font-size:17px;font-weight:650}.s{fill:#929dbb;font-size:12px}.w{fill:none;stroke:#59627e;stroke-width:2}</style></defs>
+<rect width="1440" height="700" rx="28" fill="url(#bg)"/><rect x="1" y="1" width="1438" height="698" rx="27" fill="none" stroke="#2afadf" stroke-opacity=".18" stroke-width="2"/>
+<text x="70" y="68" class="k">MOCODE / PET BRIDGE</text><text x="70" y="108" class="h">A passive desktop mirror of agent state.</text><text x="70" y="135" class="s">optional sub-package · never blocks the Node CLI · agent loop is unchanged</text>
+
+<g transform="translate(70 195)"><rect class="n" width="420" height="430" rx="18"/><rect width="6" height="430" rx="3" fill="url(#cool)" filter="url(#gl)"/><text x="22" y="28" class="k">MOCODE-AI (Node CLI)</text>
+<g transform="translate(22 56)"><rect width="378" height="80" rx="12" fill="#101b29" stroke="#245069"/><text x="14" y="26" class="t">Agent Core Loop</text><text x="14" y="50" class="s">emits hooks: onText · onToolStart · onToolDone · onToolResult</text></g>
+<g transform="translate(22 156)"><rect width="378" height="80" rx="12" fill="#1c152d" stroke="#a84e9b"/><text x="14" y="26" class="t">src/pet/state.ts</text><text x="14" y="50" class="s">subscribes to hooks · normalizes to mood + quip + activity</text></g>
+<g transform="translate(22 256)"><rect width="378" height="80" rx="12" fill="#0f1524" stroke="#34405f"/><text x="14" y="26" class="t">WebSocket server · ws@8</text><text x="14" y="50" class="s">loopback 127.0.0.1 · random port · JSON frames</text></g>
+<g transform="translate(22 356)"><rect width="378" height="60" rx="12" fill="#101b29" stroke="#245069"/><text x="14" y="26" class="t">/pet slash command</text><text x="14" y="48" class="s">toggles bridge · port printed to status bar</text></g>
+</g>
+
+<g transform="translate(540 195)"><rect class="n" width="360" height="430" rx="18"/><rect width="6" height="430" rx="3" fill="url(#hot)" filter="url(#gl)"/><text x="22" y="28" class="k">EVENT FRAMES</text>
+<text x="22" y="62" class="t">typed messages, ordered</text>
+<g transform="translate(22 86)"><rect width="316" height="60" rx="10" fill="#0f1524" stroke="#34405f"/><text x="14" y="22" class="t">thinking</text><text x="14" y="44" class="s">delta tokens · &quot;...mull...&quot; quip</text></g>
+<g transform="translate(22 156)"><rect width="316" height="60" rx="10" fill="#0f1524" stroke="#34405f"/><text x="14" y="22" class="t">tool:start · tool:done · tool:result</text><text x="14" y="44" class="s">tool name · duration · status</text></g>
+<g transform="translate(22 226)"><rect width="316" height="60" rx="10" fill="#0f1524" stroke="#34405f"/><text x="14" y="22" class="t">mood</text><text x="14" y="44" class="s">idle · curious · focused · confused · proud · tired</text></g>
+<g transform="translate(22 296)"><rect width="316" height="60" rx="10" fill="#0f1524" stroke="#34405f"/><text x="14" y="22" class="t">quip</text><text x="14" y="44" class="s">short contextual line per state transition</text></g>
+<g transform="translate(22 366)"><rect width="316" height="44" rx="10" fill="#0f1524" stroke="#34405f"/><text x="14" y="28" class="s">non-blocking · dropped frames are fine · back-pressure is dropped</text></g>
+</g>
+
+<g transform="translate(950 195)"><rect class="n" width="420" height="430" rx="18"/><rect width="6" height="430" rx="3" fill="url(#cool)" filter="url(#gl)"/><text x="22" y="28" class="k">packages/pet-app (Electron)</text>
+<g transform="translate(22 56)"><rect width="378" height="80" rx="12" fill="#101b29" stroke="#245069"/><text x="14" y="26" class="t">main process</text><text x="14" y="50" class="s">opens a frameless always-on-top window · hidden tray</text></g>
+<g transform="translate(22 156)"><rect width="378" height="80" rx="12" fill="#1c152d" stroke="#a84e9b"/><text x="14" y="26" class="t">renderer</text><text x="14" y="50" class="s">sprite animations · mood blend tree · quip bubble</text></g>
+<g transform="translate(22 256)"><rect width="378" height="80" rx="12" fill="#0f1524" stroke="#34405f"/><text x="14" y="26" class="t">ws client</text><text x="14" y="50" class="s">reconnects on close · never imports Node CLI source</text></g>
+<g transform="translate(22 356)"><rect width="378" height="60" rx="12" fill="#101b29" stroke="#245069"/><text x="14" y="26" class="t">install</text><text x="14" y="48" class="s">npm run build --workspace packages/pet-app · optional</text></g>
+</g>
+
+<path d="M490 311h50" class="w"/><path d="M900 311h50" class="w"/>
+<g transform="translate(495 295)"><text x="0" y="0" class="s">push frames</text></g>
+<g transform="translate(905 295)"><text x="0" y="0" class="s">reconnect</text></g>
+
+<g transform="translate(70 650)">
+  <rect class="n" width="1300" height="36" rx="12" fill="#0f1524" stroke="#34405f"/>
+  <text x="20" y="22" class="s">contract: renderer owns no business logic · all state flows one-way from MoCode AI to Electron · pet-app has zero authority over the agent loop</text>
+</g></svg>

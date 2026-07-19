@@ -32,6 +32,36 @@ MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，
 
 <p align="center"><img src="./assets/architecture/multi-agent-zh-CN.svg" alt="MoCode 多 Agent overlay 与 ChangeSet 协调" width="100%"></p>
 
+### 受控执行:权限门 + 能力调度
+
+每个写入工具在执行前都会经过权限层。工具分为 `safe` / `confirm` / `dangerous` 三档,授权粒度支持 `once` / `session` / `project` / 全局工具四档,指纹使用稳定哈希(命令、路径或参数),持久化记录落在 `~/.mocode/permissions.json`(v3 格式,会自动加载 v2 资源授权)。管道/CI 环境默认拒绝所有需确认的操作,除非显式开启。
+
+<p align="center"><img src="./assets/architecture/permission-model-zh-CN.svg" alt="MoCode 权限模型:工具分级、四档授权、指纹、持久化" width="100%"></p>
+
+### 验证瀑布:便宜检查先做,贵检查按需上场
+
+代码改动按 V0(文件级后置条件)→ V1(限范围的 tsc/eslint)→ V2(定向单元测试)→ V3(受影响 package 的脚本)由低到高执行。首个可操作失败立即停止,作为新的观察反馈给 Agent;SHA-256 文件指纹缓存避免对未改动文件重复劳动。
+
+<p align="center"><img src="./assets/architecture/verification-cascade-zh-CN.svg" alt="MoCode 自动验证瀑布 V0 到 V3,带文件指纹缓存" width="100%"></p>
+
+### 回滚时间线:每次写入都留干净撤销点
+
+每次写入工具执行前先存一份 undo 快照。`/rollback <turnId>` 按时间逆序在 canonical 资源锁下恢复文件缓冲,然后重跑 V0+V1 验证状态干净——完全不重跑模型。读取类工具、网络副作用、二进制改动明确不在截图范围,契约里写死。
+
+<p align="center"><img src="./assets/architecture/rollback-flow-zh-CN.svg" alt="MoCode 回滚时间线和每轮快照流" width="100%"></p>
+
+### 上下文控制:五个独立开关,不是一锅端
+
+`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget` 各自把控一个旋钮(push 压缩、编码器、被取代读取的剪裁、观察生命周期、五区调度器)。每个都能用 `MOCODE_*=false` 单独关;即使五个全关,观察结果仍按生命周期老化。token 估算带 EWMA 自动校准真实 provider 用量。
+
+<p align="center"><img src="./assets/architecture/context-controls-zh-CN.svg" alt="MoCode 上下文控制:五个独立开关、观察生命周期、token 自校准" width="100%"></p>
+
+### 桌宠:WebSocket 上的被动镜像
+
+可选 Electron 子包(`packages/pet-app`)用一个悬浮小角色镜像 agent 状态:单向 WebSocket 推送事件帧,`/pet quit` 完全关闭。渲染层零业务逻辑,无论桌宠是否在跑,主 agent 循环一字不改。
+
+<p align="center"><img src="./assets/architecture/pet-bridge-zh-CN.svg" alt="MoCode 桌宠桥:hooks、事件帧、Electron 客户端" width="100%"></p>
+
 ## 为什么用 mocode
 
 mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:

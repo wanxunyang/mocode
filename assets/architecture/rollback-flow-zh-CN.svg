@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="t d"><title id="t">MoCode 回滚时间线</title><desc id="d">每个 turn 保存纯本地撤销点;按 turn id 还原,不会重跑模型。</desc><defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0d1b2a"/><stop offset="1" stop-color="#1b263b"/></linearGradient><linearGradient id="bar" x2="1"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#f43f5e"/></linearGradient><linearGradient id="cool" x2="1"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#3b82f6"/></linearGradient><filter id="gl"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter><style>text{font-family:Inter,Segoe UI,Microsoft YaHei,sans-serif}.k{fill:#7f8aa8;font-size:13px;letter-spacing:2px}.h{fill:#f8fafc;font-size:25px;font-weight:700}.n{fill:#16192c;stroke:#343b58;stroke-width:1.3}.t{fill:#f6f7ff;font-size:17px;font-weight:650}.s{fill:#929dbb;font-size:12px}.w{fill:none;stroke:#59627e;stroke-width:2}.turn{fill:#101828;stroke:#245069}.rol{fill:#1a1320;stroke:#7c3aed}.file{fill:#0f1524;stroke:#34405f}</style></defs>
+<rect width="1440" height="760" rx="28" fill="url(#bg)"/><rect x="1" y="1" width="1438" height="758" rx="27" fill="none" stroke="#2afadf" stroke-opacity=".18" stroke-width="2"/>
+<text x="70" y="68" class="k">回滚时间线</text><text x="70" y="108" class="h">每个 turn 都留下干净的撤销点。</text><text x="70" y="135" class="s">按"写入工具"粒度截图 · 恢复只替换文件,不重跑模型</text>
+
+<g transform="translate(70 200)">
+  <rect class="turn" width="1100" height="180" rx="16"/>
+  <rect width="6" height="180" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">一轮 turn 的生命周期</text>
+  <text x="22" y="56" class="t">beginTurn → 写入工具 → 验证 → 提交</text>
+
+  <g transform="translate(40 90)">
+    <line x1="0" y1="40" x2="980" y2="40" stroke="#59627e" stroke-width="2"/>
+    <circle cx="0" cy="40" r="6" fill="#22d3ee" filter="url(#gl)"/>
+    <text x="-8" y="76" fill="#aeb8d2" font-size="11">开始</text>
+
+    <rect x="40" y="14" width="160" height="52" rx="10" fill="#1c152d" stroke="#a84e9b"/>
+    <text x="50" y="32" class="t">edit_file A</text>
+    <text x="50" y="50" class="s">snapshot A0</text>
+    <line x1="120" y1="14" x2="120" y2="-6" stroke="#a84e9b" stroke-width="2"/>
+    <rect x="120" y="-36" width="160" height="30" rx="6" fill="#0f1524" stroke="#34405f"/>
+    <text x="130" y="-17" fill="#aeb8d2" font-size="10">.mocode/snapshots/t12/A0</text>
+
+    <rect x="220" y="14" width="180" height="52" rx="10" fill="#1c152d" stroke="#a84e9b"/>
+    <text x="230" y="32" class="t">write_file B</text>
+    <text x="230" y="50" class="s">snapshot B0</text>
+    <line x1="310" y1="14" x2="310" y2="-6" stroke="#a84e9b" stroke-width="2"/>
+    <rect x="310" y="-36" width="160" height="30" rx="6" fill="#0f1524" stroke="#34405f"/>
+    <text x="320" y="-17" fill="#aeb8d2" font-size="10">.mocode/snapshots/t12/B0</text>
+
+    <rect x="420" y="14" width="160" height="52" rx="10" fill="#1c152d" stroke="#a84e9b"/>
+    <text x="430" y="32" class="t">edit_file A</text>
+    <text x="430" y="50" class="s">snapshot A1(覆盖前)</text>
+
+    <rect x="620" y="14" width="160" height="52" rx="10" fill="#101b29" stroke="#245069"/>
+    <text x="630" y="32" class="t">read_file A</text>
+    <text x="630" y="50" class="s">不截图</text>
+
+    <rect x="800" y="14" width="160" height="52" rx="10" fill="#1c152d" stroke="#7c3aed"/>
+    <text x="810" y="32" class="t">commit</text>
+    <text x="810" y="50" class="s">turn 12 完成</text>
+
+    <circle cx="980" cy="40" r="6" fill="#f472b6" filter="url(#gl)"/>
+    <text x="934" y="76" fill="#aeb8d2" font-size="11">已验证</text>
+  </g>
+</g>
+
+<g transform="translate(70 410)">
+  <rect class="rol" width="650" height="280" rx="16"/>
+  <rect width="6" height="280" rx="3" fill="url(#cool)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">/rollback &lt;turnId|all&gt;</text>
+  <text x="22" y="56" class="t">把文件还原到该 turn 时刻的快照</text>
+
+  <g transform="translate(28 88)"><rect class="file" width="600" height="56" rx="10"/>
+    <text x="16" y="22" class="t">1 · 从会话日志定位目标 turn</text>
+    <text x="16" y="44" class="s">完全不重跑 LLM · 纯本地恢复</text>
+  </g>
+  <g transform="translate(28 156)"><rect class="file" width="600" height="56" rx="10"/>
+    <text x="16" y="22" class="t">2 · canonical 资源锁 · 按时间逆序</text>
+    <text x="16" y="44" class="s">后拍的快照先还原 · 避免互相覆盖</text>
+  </g>
+  <g transform="translate(28 224)"><rect class="file" width="600" height="44" rx="10"/>
+    <text x="16" y="28" class="s">3 · 重跑 V0 + V1 确认状态干净 · 再交给用户继续下一轮</text>
+  </g>
+</g>
+
+<g transform="translate(740 410)">
+  <rect class="n" width="430" height="280" rx="16"/>
+  <text x="22" y="28" class="k">截图边界</text>
+  <text x="22" y="58" class="t">只有被改动的文件会被截图</text>
+  <text x="22" y="86" class="s">• edit_file / write_file → 写入前的文件缓冲</text>
+  <text x="22" y="106" class="s">• run_command → 不截图(自带 cwd / env 沙箱)</text>
+  <text x="22" y="126" class="s">• 新建文件 → 标记为 rollback 时删除</text>
+  <text x="22" y="146" class="s">• 二进制变更 → 截图前直接拒绝</text>
+  <text x="22" y="176" class="t">不覆盖的范围</text>
+  <text x="22" y="204" class="s">• npm install 的副作用(缓存 · lockfile · 二进制包)</text>
+  <text x="22" y="224" class="s">• 外部服务(数据库行 · 已部署端点)</text>
+  <text x="22" y="244" class="s">• canonical 项目根目录以外的文件</text>
+</g>
+
+<g transform="translate(70 720)"><text x="0" y="0" class="s">与权限面板是配对的:被拒绝的改动永远不会进截图器。</text></g></svg>

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="780" viewBox="0 0 1440 780" role="img" aria-labelledby="t d"><title id="t">MoCode context controls</title><desc id="d">Five independent toggles, observation lifecycle, and token-budget self-calibration.</desc><defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0d1b2a"/><stop offset="1" stop-color="#1b263b"/></linearGradient><linearGradient id="bar" x2="1"><stop stop-color="#22d3ee"/><stop offset=".5" stop-color="#8b5cf6"/><stop offset="1" stop-color="#f43f5e"/></linearGradient><linearGradient id="cool" x2="1"><stop stop-color="#22d3ee"/><stop offset="1" stop-color="#3b82f6"/></linearGradient><filter id="gl"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter><style>text{font-family:Inter,Segoe UI,Arial,sans-serif}.k{fill:#7f8aa8;font-size:13px;letter-spacing:2px}.h{fill:#f8fafc;font-size:25px;font-weight:700}.n{fill:#16192c;stroke:#343b58;stroke-width:1.3}.t{fill:#f6f7ff;font-size:17px;font-weight:650}.s{fill:#929dbb;font-size:12px}.w{fill:none;stroke:#59627e;stroke-width:2}.state{fill:#111827;stroke:#3e4969}.chip{fill:#111827;stroke:#34405f}</style></defs>
+<rect width="1440" height="780" rx="28" fill="url(#bg)"/><rect x="1" y="1" width="1438" height="778" rx="27" fill="none" stroke="#2afadf" stroke-opacity=".18" stroke-width="2"/>
+<text x="70" y="68" class="k">CONTEXT CONTROLS</text><text x="70" y="108" class="h">Five switches. Each one a deliberate dial.</text><text x="70" y="135" class="s">independent toggles · one-liner runtime knobs · lifecycle states apply regardless of toggles</text>
+
+<g transform="translate(70 180)">
+  <rect class="n" width="1300" height="180" rx="16"/>
+  <rect width="6" height="180" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="30" class="k">FIVE INDEPENDENT TOGGLES</text>
+
+  <g transform="translate(22 50)"><rect class="n" width="244" height="110" rx="12"/><rect width="6" height="110" rx="3" fill="#10b981" filter="url(#gl)"/><text x="16" y="22" class="t">autoCompact</text><text x="16" y="44" class="s">push events trigger compression</text><text x="16" y="64" class="s">threshold = 0.85 x context window</text><text x="16" y="84" fill="#aeb8d2" font-size="11">MOCODE_AUTO_COMPACT=false</text><g transform="translate(170 84)"><rect width="56" height="18" rx="9" fill="#10b981"/><text x="8" y="13" fill="#062a18" font-size="11" font-weight="700">ON</text></g></g>
+
+  <g transform="translate(286 50)"><rect class="n" width="244" height="110" rx="12"/><rect width="6" height="110" rx="3" fill="#10b981" filter="url(#gl)"/><text x="16" y="22" class="t">contextOptimize</text><text x="16" y="44" class="s">tree / search / log / code encoders</text><text x="16" y="64" class="s">caps per-push tool result length</text><text x="16" y="84" fill="#aeb8d2" font-size="11">MOCODE_CONTEXT_OPTIMIZE=false</text><g transform="translate(170 84)"><rect width="56" height="18" rx="9" fill="#10b981"/><text x="8" y="13" fill="#062a18" font-size="11" font-weight="700">ON</text></g></g>
+
+  <g transform="translate(550 50)"><rect class="n" width="244" height="110" rx="12"/><rect width="6" height="110" rx="3" fill="#10b981" filter="url(#gl)"/><text x="16" y="22" class="t">contextRelprune</text><text x="16" y="44" class="s">superseded reads STUB</text><text x="16" y="64" class="s">preserves file path + provenance</text><text x="16" y="84" fill="#aeb8d2" font-size="11">MOCODE_CONTEXT_RELPRUNE=false</text><g transform="translate(170 84)"><rect width="56" height="18" rx="9" fill="#10b981"/><text x="8" y="13" fill="#062a18" font-size="11" font-weight="700">ON</text></g></g>
+
+  <g transform="translate(814 50)"><rect class="n" width="244" height="110" rx="12"/><rect width="6" height="110" rx="3" fill="#10b981" filter="url(#gl)"/><text x="16" y="22" class="t">contextLifecycle</text><text x="16" y="44" class="s">producer to consumer graph</text><text x="16" y="64" class="s">orphan + aging detection</text><text x="16" y="84" fill="#aeb8d2" font-size="11">MOCODE_CONTEXT_LIFECYCLE=false</text><g transform="translate(170 84)"><rect width="56" height="18" rx="9" fill="#10b981"/><text x="8" y="13" fill="#062a18" font-size="11" font-weight="700">ON</text></g></g>
+
+  <g transform="translate(1078 50)"><rect class="n" width="200" height="110" rx="12"/><rect width="6" height="110" rx="3" fill="#10b981" filter="url(#gl)"/><text x="16" y="22" class="t">contextBudget</text><text x="16" y="44" class="s">5-zone scheduler</text><text x="16" y="64" class="s">warn to sweep to compact</text><text x="16" y="84" fill="#aeb8d2" font-size="11">MOCODE_CONTEXT_BUDGET=false</text><g transform="translate(126 84)"><rect width="56" height="18" rx="9" fill="#10b981"/><text x="8" y="13" fill="#062a18" font-size="11" font-weight="700">ON</text></g></g>
+</g>
+
+<g transform="translate(70 395)"><rect class="n" width="820" height="200" rx="16"/><rect width="6" height="200" rx="3" fill="url(#cool)" filter="url(#gl)"/><text x="22" y="30" class="k">OBSERVATION LIFECYCLE - runs even if all toggles are OFF</text>
+
+  <g transform="translate(22 80)"><rect class="state" width="170" height="58" rx="29"/><circle cx="29" cy="29" r="8" fill="#22d3ee"/><text x="50" y="35" class="t">LIVE</text></g>
+  <path d="M192 109h60" class="w"/><text x="200" y="100" class="s">referenced by next turn</text>
+
+  <g transform="translate(252 80)"><rect class="state" width="200" height="58" rx="29"/><circle cx="29" cy="29" r="8" fill="#818cf8"/><text x="50" y="35" class="t">REFERENCED</text></g>
+  <path d="M452 109h60" class="w"/><text x="460" y="100" class="s">no producer points to it</text>
+
+  <g transform="translate(512 80)"><rect class="state" width="200" height="58" rx="29"/><circle cx="29" cy="29" r="8" fill="#c084fc"/><text x="50" y="35" class="t">OBSOLETE</text></g>
+  <g transform="translate(772 80)"><rect class="state" width="180" height="58" rx="29"/><circle cx="29" cy="29" r="8" fill="#f472b6"/><text x="50" y="35" class="t">STUB</text></g>
+  <text x="540" y="58" class="s">over budget to STUB</text>
+  <path d="M712 80l60 0" class="w"/>
+</g>
+
+<g transform="translate(910 395)"><rect class="n" width="460" height="200" rx="16"/><text x="22" y="30" class="k">TOKEN SELF-CALIBRATION</text>
+<text x="22" y="56" class="t">avoid quiet drift in estimation</text>
+<g transform="translate(22 80)"><rect class="chip" width="416" height="40" rx="10"/><text x="14" y="22" class="s">estimatePromptTokens(prompt) to estimated_n</text></g>
+<g transform="translate(22 128)"><rect class="chip" width="416" height="40" rx="10"/><text x="14" y="22" class="s">provider returns usage.tokens (ground truth)</text></g>
+<g transform="translate(22 176)"><rect class="chip" width="416" height="40" rx="10"/><text x="14" y="22" class="s">EWMA over error - next estimator scales to ground truth</text></g></g>
+
+<g transform="translate(70 620)"><rect class="n" width="1300" height="120" rx="16"/>
+<rect width="6" height="120" rx="3" fill="#f43f5e" filter="url(#gl)"/><text x="22" y="30" class="k">WARNING - toggles interact</text>
+<text x="22" y="58" class="s">autoCompact WITHOUT contextBudget = compaction can still let a single turn balloon (no per-step guard).</text>
+<text x="22" y="80" class="s">contextRelprune WITH contextLifecycle OFF = pruned observations never get reaped.</text>
+<text x="22" y="102" class="s">default state is ON for all five. only override one at a time and re-benchmark.</text></g>
+
+<g transform="translate(70 760)"><text x="0" y="0" class="s">pair-safe with the agent loop: switching a toggle takes effect on the NEXT chat() call, the current turn is not rolled back</text></g></svg>

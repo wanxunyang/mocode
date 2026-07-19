@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="780" viewBox="0 0 1440 780" role="img" aria-labelledby="t d"><title id="t">MoCode 自动验证瀑布</title><desc id="d">每次写入后按 V0 到 V3 由低到高执行;首个可操作失败回灌 Agent。</desc><defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0d1b2a"/><stop offset="1" stop-color="#1b263b"/></linearGradient><linearGradient id="bar" x2="1"><stop stop-color="#22d3ee"/><stop offset=".5" stop-color="#8b5cf6"/><stop offset="1" stop-color="#f43f5e"/></linearGradient><filter id="gl"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter><style>text{font-family:Inter,Segoe UI,Microsoft YaHei,sans-serif}.k{fill:#7f8aa8;font-size:13px;letter-spacing:2px}.h{fill:#f8fafc;font-size:25px;font-weight:700}.n{fill:#16192c;stroke:#343b58;stroke-width:1.3}.t{fill:#f6f7ff;font-size:18px;font-weight:650}.s{fill:#929dbb;font-size:12px}.w{fill:none;stroke:#59627e;stroke-width:2}.ok{fill:#0f2a1f;stroke:#10b981}.warn{fill:#2a2014;stroke:#f59e0b}.err{fill:#2a1620;stroke:#f43f5e}</style></defs>
+<rect width="1440" height="780" rx="28" fill="url(#bg)"/><rect x="1" y="1" width="1438" height="778" rx="27" fill="none" stroke="#2afadf" stroke-opacity=".18" stroke-width="2"/>
+<text x="70" y="68" class="k">自动验证瀑布</text><text x="70" y="108" class="h">从最便宜的检查开始,贵的只在需要时上场。</text><text x="70" y="135" class="s">每个写入工具结束后触发 · 文件指纹缓存避免重复劳动</text>
+
+<g transform="translate(70 180)"><rect class="n" width="320" height="74" rx="14"/><text x="20" y="28" class="k">触发</text><text x="20" y="56" class="t">写入工具产生 changedFiles</text></g>
+<path d="M390 218h70" class="w"/><circle cx="460" cy="218" r="4" fill="#9b5cff" filter="url(#gl)"/>
+
+<g transform="translate(460 184)"><rect class="n" width="200" height="66" rx="12"/><text x="14" y="22" class="k">SHA-256 缓存</text><text x="14" y="48" class="s">文件未变 · 直接跳过</text></g>
+<path d="M660 218h70" class="w"/><circle cx="730" cy="218" r="4" fill="#22d3ee" filter="url(#gl)"/>
+
+<g transform="translate(730 160)">
+  <rect class="n" width="600" height="124" rx="16"/>
+  <rect width="6" height="124" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">V0 · 文件级后置条件</text>
+  <text x="22" y="52" class="t">非空 · 可解析 · 声明的 export 存在</text>
+  <text x="22" y="76" class="s">开销:文件系统读取 · &lt; 50 ms · 永远先跑</text>
+  <text x="22" y="100" fill="#67e8f9" font-size="12">失败 → 回灌观察 · 跳过 V1..V3</text>
+  <g transform="translate(440 18)"><rect class="ok" width="140" height="26" rx="13"/><text x="16" y="18" fill="#6ee7b7" font-size="12">成本最低</text></g>
+</g>
+<path d="M1330 222l60 0 0 110 -820 0" class="w"/><circle cx="730" cy="332" r="4" fill="#c084fc" filter="url(#gl)"/>
+
+<g transform="translate(730 320)">
+  <rect class="n" width="600" height="124" rx="16"/>
+  <rect width="6" height="124" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">V1 · 改动文件静态诊断</text>
+  <text x="22" y="52" class="t">tsc --noEmit(限定目录) · eslint · LSP markers</text>
+  <text x="22" y="76" class="s">开销:按文件的语法 + 类型检查 · 秒级</text>
+  <text x="22" y="100" fill="#fde68a" font-size="12">失败 → 可操作 → 跳过 V2</text>
+</g>
+<path d="M1330 382l60 0 0 110 -820 0" class="w"/><circle cx="730" cy="492" r="4" fill="#fbbf24" filter="url(#gl)"/>
+
+<g transform="translate(730 480)">
+  <rect class="n" width="600" height="124" rx="16"/>
+  <rect width="6" height="124" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">V2 · 受影响符号的定向单测</text>
+  <text x="22" y="52" class="t">vitest/jest --filter · 只跑触碰过的符号</text>
+  <text x="22" y="76" class="s">开销:中等 · 秒级 · 不含网络相关用例</text>
+  <text x="22" y="100" fill="#fde68a" font-size="12">失败 → 可操作 → 跳过 V3</text>
+</g>
+<path d="M1330 542l60 0 0 110 -820 0" class="w"/><circle cx="730" cy="652" r="4" fill="#f43f5e" filter="url(#gl)"/>
+
+<g transform="translate(730 640)">
+  <rect class="n" width="600" height="104" rx="16"/>
+  <rect width="6" height="104" rx="3" fill="url(#bar)" filter="url(#gl)"/>
+  <text x="22" y="28" class="k">V3 · 受影响 package 的脚本</text>
+  <text x="22" y="52" class="t">typecheck · build · test(文件所在 package)</text>
+  <text x="22" y="76" fill="#f9a8d4" font-size="12">成本最高 · 仅当 V0..V2 都通过才执行</text>
+</g>
+
+<g transform="translate(70 470)"><rect class="err" width="600" height="270" rx="16"/><text x="20" y="28" class="k">失败路径</text>
+<text x="20" y="58" class="t">首个可操作失败胜出</text>
+<text x="20" y="86" class="s">模型只看到最便宜的那个可操作失败</text>
+<text x="20" y="110" class="s">V0:"package.json 缺少 'main'"</text>
+<text x="20" y="132" class="s">V1:"src/x.ts(42):属性 'a' 不在类型 'B' 上"</text>
+<text x="20" y="154" class="s">V2:"FAIL 用例名 ... 期望 2 实际 4"</text>
+<text x="20" y="176" class="s">V3:"tsc:4 个 package 共 17 个错误"</text>
+<g transform="translate(20 198)"><rect class="warn" width="560" height="56" rx="10"/><text x="14" y="22" class="t">合并为单条 tool-result,推回 history,Agent 循环继续</text><text x="14" y="44" class="s">可中断 · 回滚快照保留部分进度</text></g></g>
+
+<g transform="translate(70 760)"><text x="0" y="0" class="s">跳过语义:每级由前一级 gate · 缓存键 = hash(sorted changedFiles) + 每级输出</text></g>
+
+<g transform="translate(730 138)"><text x="0" y="0" class="k">执行顺序</text></g></svg>

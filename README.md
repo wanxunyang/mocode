@@ -32,6 +32,36 @@ Read-only sub-agents fan out concurrently. Writer agents work inside private fil
 
 <p align="center"><img src="./assets/architecture/multi-agent.svg" alt="MoCode multi-agent overlay and ChangeSet coordination" width="100%"></p>
 
+### Controlled execution: permission gates and capability scheduling
+
+Every mutating tool calls into a permission layer before it runs. Tools are classified `safe` / `confirm` / `dangerous`, scopes can be `once` / `session` / `project` / global-tool, fingerprints are stable hashes (command, path, or args), and the persistent record lives in `~/.mocode/permissions.json` (v3 schema, with v2 resource grants still loaded). Piped or CI environments default to deny until you opt in.
+
+<p align="center"><img src="./assets/architecture/permission-model.svg" alt="MoCode permission model: tool classes, four-tier grants, fingerprinting, durable storage" width="100%"></p>
+
+### Verification cascade: cheap checks first, expensive checks only on demand
+
+Code changes go through V0 (file post-conditions) → V1 (scoped tsc/eslint markers) → V2 (targeted unit tests) → V3 (affected package scripts). The first actionable failure stops the cascade and is fed back to the agent as a fresh observation; a SHA-256 content cache skips repeated work on unchanged files.
+
+<p align="center"><img src="./assets/architecture/verification-cascade.svg" alt="MoCode verification cascade V0 to V3 with content fingerprint cache" width="100%"></p>
+
+### Rollback timeline: per-mutation snapshots, restore by turn
+
+A clean undo point is saved before every mutating tool. `/rollback <turnId>` restores file buffers in reverse-chronological order under canonical resource locks, then reruns V0+V1 to confirm a clean state — never re-runs the model. Read tools, network effects, and binary changes are explicitly out of scope, kept honest in the contract.
+
+<p align="center"><img src="./assets/architecture/rollback-flow.svg" alt="MoCode rollback timeline and per-turn snapshot flow" width="100%"></p>
+
+### Context controls: five independent dials, not one big toggle
+
+`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget` each gate a different knob (push-time compression, encoders, superseded-read pruning, observation lifecycle, five-zone scheduler). Each is independently killable via a `MOCODE_*=false` env var; the observation lifecycle runs even with all toggles off, so context still ages instead of exploding. An EWMA self-calibrates the token estimator against real provider usage.
+
+<p align="center"><img src="./assets/architecture/context-controls.svg" alt="MoCode context controls: five independent toggles, observation lifecycle, token self-calibration" width="100%"></p>
+
+### Desktop pet: a passive mirror over WebSocket
+
+The optional Electron sub-package (`packages/pet-app`) shows a stateful floating character that mirrors agent activity via a one-way WebSocket stream. Quit with `/pet quit`. The renderer owns no business logic; the agent loop is unchanged regardless of whether the pet is running.
+
+<p align="center"><img src="./assets/architecture/pet-bridge.svg" alt="MoCode desktop pet bridge: hooks, frames, Electron client" width="100%"></p>
+
 ## Why MoCode
 
 MoCode isn't a chat box with a coat of paint — it's an agent that actually gets things done:
