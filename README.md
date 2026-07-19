@@ -8,13 +8,37 @@ A terminal coding agent: give it a goal, and it **completes it autonomously** �
 
 MoCode explores your code, reads/writes/edits files, runs shell commands, and searches the web on its own, driving the task forward through a loop of "think → call a tool → observe the result → think again." It works with any OpenAI-compatible endpoint (GLM, DeepSeek, Qwen, local Ollama / vLLM, etc.), runs as a full-screen TUI with streaming output and visible reasoning.
 
+## Architecture
+
+MoCode is organized as a layered runtime: the terminal experience drives an autonomous core, the core reaches capabilities through a guarded execution plane, and a persistent intelligence layer keeps long-running work coherent.
+
+<p align="center"><img src="./assets/architecture/system-overview.svg" alt="MoCode layered system architecture" width="100%"></p>
+
+### Autonomous execution loop
+
+Each model response is one step in a closed loop. Tool calls are classified by declared capabilities, safe reads can run in parallel, writes acquire canonical resource locks, observations are encoded before returning to context, and code changes pass through automatic validation.
+
+<p align="center"><img src="./assets/architecture/agent-loop.svg" alt="MoCode autonomous agent execution loop" width="100%"></p>
+
+### Context that ages instead of exploding
+
+Tool output does not accumulate as an undifferentiated transcript. Typed encoders, relevance pruning, an observation lifecycle, age-aware compression, and a five-zone budget scheduler continuously reshape the active working set while sessions, snapshots, skills, notes, and memory retain durable knowledge.
+
+<p align="center"><img src="./assets/architecture/context-engine.svg" alt="MoCode context engineering and durable memory architecture" width="100%"></p>
+
+### Multi-agent work without unsafe shared writes
+
+Read-only sub-agents fan out concurrently. Writer agents work inside private filesystem overlays and return structured ChangeSets; the coordinator checks expected hashes, acquires canonical locks, performs conflict-safe merges, and runs one unified verification gate in the main workspace.
+
+<p align="center"><img src="./assets/architecture/multi-agent.svg" alt="MoCode multi-agent overlay and ChangeSet coordination" width="100%"></p>
+
 ## Why MoCode
 
 MoCode isn't a chat box with a coat of paint — it's an agent that actually gets things done:
 
 - **Autonomous multi-step execution** — In a single conversation, the agent chains multiple steps on its own: read code, edit code, run tests, fix based on errors, and so on. It decides the next step without you nagging it. When it hits a decision point, it calls `ask_human` to pop up a panel and ask you (blocking until you respond).
 - **Parallel read-only tools** — Consecutive read-only operations in a turn (reading files, grep, glob, codegraph, web search/fetch) run concurrently, so total time is roughly the slowest single call instead of the sum of all of them. Operations with side effects (writing/editing files) stay sequential to preserve snapshot ordering and data safety.
-- **Sub-agents divide and conquer** — Complex tasks can spawn independent sub-agents, each with its own conversation history (isolated from the main thread), an optional restricted toolset, and a step cap. Sub-agent calls execute serially while they share the main workspace, preventing concurrent writes from racing; each returns only a summary to the main thread.
+- **Sub-agents divide and conquer** — Complex tasks can spawn independent sub-agents with isolated histories and scoped toolsets. Read-only workers can fan out concurrently; writer workers run in private filesystem overlays and return ChangeSets that are merged under expected-hash checks and canonical resource locks. Only structured findings return to the main thread.
 - **Plan / Auto dual mode** — In `plan` mode the agent is read-only (reads code, queries indexes, searches — never writes to disk, runs commands, or spawns sub-agents) and produces a plan; `auto` mode unlocks the full toolset. The agent can switch between the two on its own — scope out an unfamiliar codebase first, then start making changes.
 - **Automatic context compression** — As the context window fills up, a three-tier compression kicks in (trim individual results → compact older tool results in place → summarize older turns), so long sessions never overflow. `/context` shows live token usage; `/compact` triggers manual compression (optionally with a focus hint to preserve what matters).
 - **Cross-session long-term memory** — The agent can save project architecture, conventions, and lessons learned as long-term memory, auto-loaded in future sessions. A background process periodically reflects on conversations to mine things worth remembering. Memories can be created, searched, updated, and forgotten, with recall-based decay.

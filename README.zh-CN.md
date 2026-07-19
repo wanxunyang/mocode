@@ -8,13 +8,37 @@
 
 mocode 自己探索代码、读写改文件、执行命令、联网查资料,以「思考 → 调用工具 → 观察结果 → 再思考」的循环一步步把任务推进到完成。接任意 OpenAI 兼容接口(GLM、DeepSeek、Qwen、本地 Ollama / vLLM 等),全屏 TUI 交互,流式输出、思考过程可见。
 
+## 架构
+
+MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，内核通过受控能力平面执行真实操作，持久化认知层则让长任务和跨会话工作保持连贯。
+
+<p align="center"><img src="./assets/architecture/system-overview-zh-CN.svg" alt="MoCode 分层系统架构" width="100%"></p>
+
+### 自治执行循环
+
+每次模型响应都是闭环中的一步。工具调用按能力声明分类，安全读取可以并行，写操作获取规范化资源锁，观察结果编码后才回到上下文，代码改动最终经过自动验证门。
+
+<p align="center"><img src="./assets/architecture/agent-loop-zh-CN.svg" alt="MoCode 自治 Agent 执行循环" width="100%"></p>
+
+### 会衰减、不会膨胀的上下文
+
+工具输出不会作为无差别日志无限堆积。类型化编码、相关性裁剪、观察生命周期、年龄感知压缩和五区预算调度持续重塑活跃工作集；会话、Snapshot、Skill、notes.md 与长期记忆负责保留耐久知识。
+
+<p align="center"><img src="./assets/architecture/context-engine-zh-CN.svg" alt="MoCode 上下文工程与持久化记忆架构" width="100%"></p>
+
+### 多 Agent 并行，但不冒险共享写入
+
+只读子 Agent 可以并行扇出；写任务在私有文件系统 overlay 中完成并返回结构化 ChangeSet。协调器校验 expected hash、获取规范化资源锁、安全合并冲突，最后由主工作区统一执行验证。
+
+<p align="center"><img src="./assets/architecture/multi-agent-zh-CN.svg" alt="MoCode 多 Agent overlay 与 ChangeSet 协调" width="100%"></p>
+
 ## 为什么用 mocode
 
 mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 
 - **自主多步推进** — 一次对话里连续多步:读代码、改代码、跑测试、根据报错再改……agent 自己决定下一步,中途不用你反复催。遇到卡点会调 `ask_human` 弹面板问你(阻塞到回应)。
 - **只读工具并行执行** — 一轮里连续的只读操作(读文件、grep、glob、codegraph、联网搜索/抓取)自动并发跑,总耗时 ≈ 最慢一个,而不是逐个排队。写文件 / 改文件这类有副作用的操作仍串行,保快照顺序与数据安全。
-- **子 agent 分而治之** — 复杂任务可派生独立子 agent:各自有自己的对话历史(不污染主线),可限定工具集和步数上限。共享主工作区期间多个 task 串行执行,避免并发写冲突;每个子任务最后只把摘要回灌主线。
+- **子 agent 分而治之** — 复杂任务可派生拥有独立历史与受限工具集的子 agent。只读 worker 可并行扇出；写 worker 在私有文件系统 overlay 中运行，返回的 ChangeSet 经过 expected hash 校验与规范化资源锁后才合并。主线只接收结构化发现，不接收过程噪声。
 - **计划 / 执行双模式** — `plan` 模式下只读探查(读代码、查索引、搜索,绝不写盘、不跑命令、不派生子 agent),产出计划;`auto` 模式全量工具放开。agent 还能在两者间自切换——先把陌生代码库摸清,再动手改。
 - **上下文自动压缩** — 接近窗口上限时三层压缩(单条结果裁剪 → 旧工具结果原地微压缩 → 旧对话摘要),长会话也不爆窗口;`/context` 实时显示 token 用量,`/compact` 可手动压缩(能带焦点指令聚焦保留)。
 - **跨会话长期记忆** — agent 能把项目架构、约定、踩过的坑存成长期记忆,下次会话自动加载;后台还会定期从对话里反思挖掘值得记住的事。记忆可增删改、带召回衰减。
