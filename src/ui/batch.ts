@@ -187,8 +187,8 @@ function buildExpandedLines(entries: BatchEntry[]): string[] {
   return entries.map((e, index) => {
     const result = e.resultSummary ? `  ${ui.gray}↳ ${e.resultSummary}${ui.reset}` : '';
     const branch = index === entries.length - 1 ? '└─' : '├─';
-    const symbol = e.failed ? `${ui.red}×${ui.reset}` : `${ui.green}•${ui.reset}`;
-    return `    ${ui.dim}${branch}${ui.reset} ${symbol} ${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}\x1B[0m`;
+    const failure = e.failed ? `${ui.red}×${ui.reset} ` : '';
+    return `    ${ui.dim}${branch}${ui.reset} ${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}\x1B[0m`;
   });
 }
 
