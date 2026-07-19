@@ -609,6 +609,10 @@ function echoInput(lines: string[], trailingBlank = true): void {
   for (const a of pendingAttachments) {
     layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
   }
+  // 用户气泡会填满终端整列宽；Windows Terminal 在末列进入 pending-wrap 后，紧随的 LF
+  // 偶尔只更新内部滚屏状态，导致上一轮耗时行与新气泡暂时黏连。缓冲中的物理行始终正确，
+  // 提交后立即按缓冲重绘，避免必须等滚动或 Agent 结束时的 repaint 才显示正确边界。
+  layout.repaintViewport();
 }
 
 /**
