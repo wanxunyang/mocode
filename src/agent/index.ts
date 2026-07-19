@@ -74,11 +74,12 @@ function writeChangeOverview(): void {
   const added = changes.reduce((n, c) => n + c.added, 0);
   const removed = changes.reduce((n, c) => n + c.removed, 0);
   layout.contentWrite(
-    `  ${ui.dim}├─${ui.reset} ${ui.bold}${ui.green}◆${ui.reset} ${t('agent.changes')}  ${t('agent.files', { count: changes.length })}  ${ui.green}+${added}${ui.reset} ${ui.red}−${removed}${ui.reset}\n`,
+    `  ${ui.bold}${ui.green}◆${ui.reset} ${t('agent.changes')}  ${t('agent.files', { count: changes.length })}  ${ui.green}+${added}${ui.reset} ${ui.red}−${removed}${ui.reset}\n`,
   );
   for (const change of changes) {
+    const kindLabel = change.kind === 'A' ? t('agent.changeAdded') : t('agent.changeModified');
     layout.contentWrite(
-      `  ${ui.dim}│   ${change.kind}${ui.reset}  ${change.path}  ${ui.green}+${change.added}${ui.reset} ${ui.red}−${change.removed}${ui.reset}\n`,
+      `  ${kindLabel}  ${change.path}  ${ui.green}+${change.added}${ui.reset} ${ui.red}−${change.removed}${ui.reset}\n`,
     );
   }
   layout.contentWrite('\n');
@@ -293,7 +294,7 @@ export async function runAgent(
         : validation.status;
       const symbol = validation.status === 'passed' ? '◆' : validation.status === 'failed' ? '×' : '!';
       layout.contentWrite(
-        `  ${ui.dim}├─${ui.reset} ${color}${symbol}${ui.reset} ${t('agent.validationResult', { command, status: detail })}\n\n`,
+        `  ${color}${symbol}${ui.reset} ${t('agent.validationResult', { command, status: detail })}\n\n`,
       );
     },
     onDone: (elapsedMs, usage) => {
