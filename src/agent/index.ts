@@ -34,6 +34,55 @@ import { appendCurrentSessionTraceEvent } from '../session/index.js';
 /** 当前 turn 的 batch id(runAgent 内闭包变量;一条 turn 一轮 tool batch 结束即清空)。 */
 let currentBatchId: string | null = null;
 
+interface TurnFileChange {
+  path: string;
+  kind: 'A' | 'M';
+  added: number;
+  removed: number;
+}
+
+let turnFileChanges: TurnFileChange[] = [];
+
+function lineDelta(oldText: string | null, newText: string): { added: number; removed: number } {
+  const before = oldText ? oldText.split('\n') : [];
+  const after = newText ? newText.split('\n') : [];
+  let head = 0;
+  while (head < before.length && head < after.length && before[head] === after[head]) head++;
+  let tail = 0;
+  while (
+    tail < before.length - head
+    && tail < after.length - head
+    && before[before.length - 1 - tail] === after[after.length - 1 - tail]
+  ) tail++;
+  return { added: after.length - head - tail, removed: before.length - head - tail };
+}
+
+function writeChangeOverview(): void {
+  if (turnFileChanges.length === 0) return;
+  const merged = new Map<string, TurnFileChange>();
+  for (const change of turnFileChanges) {
+    const current = merged.get(change.path);
+    if (current) {
+      current.added += change.added;
+      current.removed += change.removed;
+      if (change.kind === 'A') current.kind = 'A';
+    } else {
+      merged.set(change.path, { ...change });
+    }
+  }
+  const changes = [...merged.values()];
+  const added = changes.reduce((n, c) => n + c.added, 0);
+  const removed = changes.reduce((n, c) => n + c.removed, 0);
+  layout.contentWrite(
+    `  ${ui.dim}├─${ui.reset} ${ui.bold}${ui.green}◆${ui.reset} ${t('agent.changes')}  ${t('agent.files', { count: changes.length })}  ${ui.green}+${added}${ui.reset} ${ui.red}−${removed}${ui.reset}\n`,
+  );
+  for (const change of changes) {
+    layout.contentWrite(
+      `  ${ui.dim}│   ${change.kind}${ui.reset}  ${change.path}  ${ui.green}+${change.added}${ui.reset} ${ui.red}−${change.removed}${ui.reset}\n`,
+    );
+  }
+}
+
 /** 取 userInput 的首行:字符串直接 split;多模态 parts 找首个 text part 再 split。 */
 function firstLineOf(ui: string | ContentPart[]): string {
   if (typeof ui === 'string') return ui.split('\n')[0] ?? '';
@@ -65,6 +114,8 @@ function writeToolResult(
   if (!currentBatchId) return;
   let diff: string | null = null;
   if ((tc.name === 'edit_file' || tc.name === 'write_file') && parsed && !isToolErrorOutput(output)) {
+    const oldText = tc.name === 'edit_file' ? String(parsed.old_string ?? '') : preWriteOld;
+    const newText = String((tc.name === 'edit_file' ? parsed.new_string : parsed.content) ?? '');
     diff = renderFileChange({
       path: String(parsed.path ?? ''),
       kind: tc.name === 'edit_file' ? 'edit' : 'write',
@@ -77,9 +128,15 @@ function writeToolResult(
       ),
       startLine: tc.name === 'edit_file' ? editStartLine : 1,
     });
+    turnFileChanges.push({
+      path: String(parsed.path ?? ''),
+      kind: tc.name === 'write_file' && preWriteOld == null ? 'A' : 'M',
+      ...lineDelta(oldText, newText),
+    });
   }
   const preview = diff ? '' : summarizeToolResult(tc.name, output);
-  batch.recordResult(currentBatchId, tc.name, preview, diff, output);
+  batch.recordResult(currentBatchId, tc.name, preview, diff, output, isToolErrorOutput(output));
+  batch.showLiveBatch(currentBatchId, layout);
   // mutation 结果（成功 diff 或错误输出）立即可见，并阻止后续普通工具并入这一批。
   if (isMutationTool(tc.name)) flushToolBatch(true);
 }
@@ -122,6 +179,7 @@ export async function runAgent(
   beginTurn(truncateDisplay(firstLineOf(userInput), 40));
   layout.contentMode(); // 防御性:运行态光标归输入框光标位供 IME 锚定(enterRunningMode 已置,这里兜底)
   currentBatchId = null; // 新 turn 清旧 batch id(防上 turn 残留)
+  turnFileChanges = [];
 
   // spinner:状态行最前面转圈(思考中 / 生成 / 执行 工具时,状态栏 lead 位显帧 + 文字)。
   // 经 setStatus 注入状态行(spinnerFrame + statusText),composeStatus 把帧 + 文字放 lead 位;
@@ -149,6 +207,8 @@ export async function runAgent(
       // batch 收尾已经统一留了一条空白行。部分后端会把下一段正文以 \n / \n\n
       // 开头发来；去掉这些“边界换行”，避免与 UI 分隔叠成两条空白行。
       const visible = followsToolBatch ? s.replace(/^(?:[ \t]*\r?\n)+/, '') : s;
+      // 正文是工具批次边界：只有“连续且中间没有正文”的工具调用才合并。
+      // 一旦模型开始解释阶段结果，立即收尾当前摘要；后续工具重新建立批次。
       if (s) flushToolBatch();
       spinner.stop(); // 任何正文 token 都停 spinner(首 token 停「思考中」;onToolCall 重启后若又来文本则停「生成中」)。未旋转时 stop 为 no-op。
       layout.contentWriteMd(visible); // 正文走 markdown 渲染(代码块高亮 / 标题 / 列表 / 行内 …),见 ui/markdown.ts
@@ -230,15 +290,17 @@ export async function runAgent(
       const detail = validation.status === 'skipped' && validation.skipReason
         ? `${validation.status}: ${validation.skipReason}`
         : validation.status;
+      const symbol = validation.status === 'passed' ? '◆' : validation.status === 'failed' ? '×' : '!';
       layout.contentWrite(
-        `  ${color}●${ui.reset} ${t('agent.validationResult', { command, status: detail })}\n\n`,
+        `  ${ui.dim}├─${ui.reset} ${color}${symbol}${ui.reset} ${t('agent.validationResult', { command, status: detail })}\n\n`,
       );
     },
     onDone: (elapsedMs, usage) => {
       flushToolBatch();
+      writeChangeOverview();
       const tok = formatTurnTokens(usage);
       layout.contentWrite(
-        `  ${ui.dim}✻ ${t('agent.workedFor', { elapsed: fmtElapsed(elapsedMs) })}${tok}${ui.reset}\n`
+        `  ${ui.bold}${ui.green}◆${ui.reset} ${t('agent.complete')}  ${fmtElapsed(elapsedMs)}${tok}\n`
       );
       // 内容区触底时，DECSTBM 增量滚屏可能只推进物理终端，未把 Worked 前已在
       // buffer 中的空行完整画出来；用户滚动/点击触发 repaint 后才“突然”出现。
@@ -310,8 +372,8 @@ function formatTurnTokens(usage: ChatUsage | undefined): string {
   const reasoning = usage.reasoningTokens;
   const billablePrompt = usage.promptTokens - cached;
   const extras: string[] = [];
-  if (cached > 0) extras.push(`↻ ${fmt(cached)} cached`);
+  if (cached > 0) extras.push(`${Math.round((cached / Math.max(1, usage.promptTokens)) * 100)}% cached`);
   if (reasoning > 0) extras.push(`reasoning ${fmt(reasoning)}`);
   const extrasStr = extras.length > 0 ? ` · ${extras.join(' · ')}` : '';
-  return `  ·  ${fmt(total)} tokens (↑ ${fmt(billablePrompt)} ↓ ${fmt(usage.completionTokens)})${extrasStr}`;
+  return `  ${fmt(total)} tokens${extrasStr}  ${ui.dim}(↑ ${fmt(billablePrompt)} ↓ ${fmt(usage.completionTokens)})${ui.reset}`;
 }

@@ -13,6 +13,7 @@
  */
 
 import { ui } from './theme.js';
+import { t } from '../i18n/index.js';
 
 /** 一条工具调用在批内的展示数据(由 agent 的 hooks 累积,endBatch 时收尾)。 */
 export interface BatchEntry {
@@ -26,6 +27,7 @@ export interface BatchEntry {
   diffBlock: string | null;
   /** 工具完整原始输出(纯文本,无 ANSI)。展开时显示完整内容;缺省时退化为 resultSummary 单行。 */
   fullOutput?: string;
+  failed?: boolean;
 }
 
 /** 一个 LLM 步的工具调用 batch 记录。 */
@@ -35,6 +37,8 @@ interface BatchRecord {
   entries: BatchEntry[];
   /** 第二层中已展开完整输出的 entry 下标。 */
   expandedEntries: Set<number>;
+  startedAt: number;
+  finishedAt?: number;
 }
 
 const batches = new Map<string, BatchRecord>();
@@ -65,7 +69,7 @@ export function reset(): void {
 /** 新建一个 batch(在 agent 拿到第一条 onToolHeader 时调)。返回 id。 */
 export function beginBatch(): string {
   const id = `b${++_idCounter}`;
-  batches.set(id, { id, summaryAbsIdx: -1, entries: [], expandedEntries: new Set() });
+  batches.set(id, { id, summaryAbsIdx: -1, entries: [], expandedEntries: new Set(), startedAt: Date.now() });
   return id;
 }
 
@@ -73,6 +77,8 @@ export function beginBatch(): string {
 export function recordCall(id: string, name: string, callSummary: string): void {
   const b = batches.get(id);
   if (!b) return;
+  // 已完成的累计探索后又追加工具：恢复进行中，待新结果返回再完成。
+  b.finishedAt = undefined;
   b.entries.push({ name, callSummary, resultSummary: '', diffBlock: null });
 }
 
@@ -84,6 +90,7 @@ export function recordResult(
   resultSummary: string,
   diffBlock: string | null,
   fullOutput?: string,
+  failed = false,
 ): void {
   const b = batches.get(id);
   if (!b || b.entries.length === 0) return;
@@ -93,6 +100,8 @@ export function recordResult(
       b.entries[i].resultSummary = resultSummary;
       b.entries[i].diffBlock = diffBlock;
       b.entries[i].fullOutput = fullOutput;
+      b.entries[i].failed = failed;
+      if (b.entries.every((e) => e.resultSummary || e.diffBlock || e.failed)) b.finishedAt = Date.now();
       return;
     }
   }
@@ -102,28 +111,41 @@ export function recordResult(
     last.resultSummary = resultSummary;
     last.diffBlock = diffBlock;
     last.fullOutput = fullOutput;
+    last.failed = failed;
+    if (b.entries.every((e) => e.resultSummary || e.diffBlock || e.failed)) b.finishedAt = Date.now();
   }
 }
 
 // ── 摘要行文本生成 ──
 
 /** 把 entry 列表压缩成一行摘要。 */
-function buildSummaryLine(entries: BatchEntry[]): string {
+function buildSummaryLine(record: BatchRecord, live = false): string {
+  const entries = record.entries;
   if (entries.length === 0) {
-    return `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.dim}No tools${ui.reset}`;
-  }
-  if (entries.length === 1) {
-    const e = entries[0];
-    // 实时摘要必须稳定保持单行；完整参数放在第一层工具概要中，避免长 JSON 自动折行后
-    // 原地刷新只能覆盖最后一条物理行、残留旧摘要前半段。
-    return `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.dim}Ran 1 tool · ${e.name} 1${ui.reset}`;
+    return `  ${ui.dim}│${ui.reset} ${ui.bold}${ui.accent}◇${ui.reset} ${ui.dim}No tools${ui.reset}`;
   }
   // N>1:同类合并 "read_file 3, glob 1, grep 1"
   const counts = new Map<string, number>();
   for (const e of entries) counts.set(e.name, (counts.get(e.name) ?? 0) + 1);
   const parts: string[] = [];
   for (const [n, c] of counts) parts.push(`${n} ${c}`);
-  return `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.dim}Ran ${entries.length} tools · ${parts.join(', ')}${ui.reset}`;
+  const completed = entries.filter((e) => e.resultSummary || e.diffBlock || e.failed).length;
+  const failed = entries.some((e) => e.failed);
+  // 工具本身完成就立即显示完成态，不等待整轮正文流完/onDone。
+  const finished = completed >= entries.length;
+  const symbol = failed ? '×' : finished ? '◆' : '◇';
+  const color = failed ? ui.red : finished ? ui.green : ui.accent;
+  const label = failed
+    ? t('agent.toolsFailed')
+    : finished
+      ? t('agent.toolsComplete')
+      : t('agent.toolsRunning');
+  const progress = live && !finished ? `  ${completed}/${entries.length}` : `  ${entries.length}`;
+  const elapsedMs = record.finishedAt ? record.finishedAt - record.startedAt : 0;
+  const elapsed = record.finishedAt
+    ? `  ${elapsedMs < 100 ? '<0.1s' : `${(elapsedMs / 1000).toFixed(1)}s`}`
+    : '';
+  return `  ${ui.bold}${color}${symbol}${ui.reset} ${label}${progress}${elapsed}  ${ui.dim}${parts.join('  ')}${ui.reset}`;
 }
 
 // ── 展开/折叠 ──
@@ -140,7 +162,8 @@ function buildEntryDetailLines(e: BatchEntry, indent = '      '): string[] {
       for (const line of block.split('\n')) {
         if (line === '' && lines.length > 0 && lines[lines.length - 1] === '') continue; // 折叠连续空行
         if (line === '' && lines.length > 0) continue; // 跳过首尾空行(diff 头/尾换行)
-        lines.push(line.endsWith('\x1B[0m') ? line : line + '\x1B[0m');
+        const prefixed = `${ui.dim}${indent}${ui.reset}${line}`;
+        lines.push(prefixed.endsWith('\x1B[0m') ? prefixed : prefixed + '\x1B[0m');
       }
   } else if (e.fullOutput) {
       // 完整工具输出(纯文本):按行展开,每行缩进 + dim 样式;长输出截断到 MAX_EXPAND_LINES 行
@@ -160,11 +183,17 @@ function buildEntryDetailLines(e: BatchEntry, indent = '      '): string[] {
 }
 
 /** 第一层只展示有哪些调用及其简短结果，不展开完整输出。 */
-function buildExpandedLines(entries: BatchEntry[], indent = '    '): string[] {
-  return entries.map((e) => {
+function buildExpandedLines(entries: BatchEntry[]): string[] {
+  return entries.map((e, index) => {
     const result = e.resultSummary ? `  ${ui.gray}↳ ${e.resultSummary}${ui.reset}` : '';
-    return `${indent}${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}\x1B[0m`;
+    const branch = index === entries.length - 1 ? '└─' : '├─';
+    const symbol = e.failed ? `${ui.red}×${ui.reset}` : `${ui.green}•${ui.reset}`;
+    return `    ${ui.dim}${branch}${ui.reset} ${symbol} ${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}\x1B[0m`;
   });
+}
+
+function entryDetailIndent(entries: BatchEntry[], index: number): string {
+  return index < entries.length - 1 ? '    │  ' : '       ';
 }
 
 /** 在 batch 收尾时(onToolBatchEnd):写摘要行 + 登记 summaryAbsIdx;若已展开(回放场景)立即插详情。 */
@@ -179,13 +208,14 @@ export function endBatch(
 ): void {
   const b = batches.get(id);
   if (!b) return;
+  b.finishedAt ??= Date.now();
   if (b.summaryAbsIdx >= 0) {
-    layout.contentReplaceLine?.(b.summaryAbsIdx, buildSummaryLine(b.entries));
+    layout.contentReplaceLine?.(b.summaryAbsIdx, buildSummaryLine(b));
     // 执行阶段只展示实时摘要；到 endBatch 才开放点击，避免未完成 batch 的第一层列表失步。
     absLineToBatchId.set(b.summaryAbsIdx, b.id);
     return;
   }
-  const summary = buildSummaryLine(b.entries);
+  const summary = buildSummaryLine(b);
   // 写摘要行(以 \n 收尾;contentWrite 会 breakRow 让其成为完整物理行)
   layout.contentWrite(summary + '\n');
   // 摘要行绝对索引 = totalRows - 2(hasCurrent 那行是新空行)
@@ -207,7 +237,7 @@ export function showLiveBatch(
 ): void {
   const b = batches.get(id);
   if (!b) return;
-  const summary = buildSummaryLine(b.entries);
+  const summary = buildSummaryLine(b, true);
   if (b.summaryAbsIdx < 0) {
     layout.contentWrite(summary + '\n');
     b.summaryAbsIdx = Math.max(0, layout.totalRows() - 2);
@@ -276,7 +306,7 @@ export function expandSingleEntryFully(
   if (!b || b.entries.length !== 1 || expandedBatches.has(id)) return;
   const lines = [
     ...buildExpandedLines(b.entries),
-    ...buildEntryDetailLines(b.entries[0]),
+    ...buildEntryDetailLines(b.entries[0], entryDetailIndent(b.entries, 0)),
   ];
   layout.contentInsertAfter(b.summaryAbsIdx, lines);
   expandedBatches.add(id);
@@ -291,7 +321,9 @@ function collapse(
   },
 ): void {
   let lineCount = b.entries.length;
-  for (const i of b.expandedEntries) lineCount += buildEntryDetailLines(b.entries[i]).length;
+  for (const i of b.expandedEntries) {
+    lineCount += buildEntryDetailLines(b.entries[i], entryDetailIndent(b.entries, i)).length;
+  }
   layout.contentDeleteFrom(b.summaryAbsIdx + 1, lineCount);
   expandedBatches.delete(b.id);
   b.expandedEntries.clear();
@@ -321,7 +353,10 @@ export function toggleEntry(
     if (target.batchId === batchId && target.entryIndex === entryIndex) headerIdx = idx;
   }
   if (headerIdx < 0) return;
-  const details = buildEntryDetailLines(b.entries[entryIndex]);
+  const details = buildEntryDetailLines(
+    b.entries[entryIndex],
+    entryDetailIndent(b.entries, entryIndex),
+  );
   if (details.length === 0) return;
   if (b.expandedEntries.has(entryIndex)) {
     layout.contentDeleteFrom(headerIdx + 1, details.length);
