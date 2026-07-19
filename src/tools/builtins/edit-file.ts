@@ -1,72 +1,89 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
-import { verifyWrittenFile } from '../../verification/postconditions.js';
-import type { Tool } from '../types.js';
+import { readFile } from 'node:fs/promises';
+import { jailResolve } from '../../sandbox/index.js';
+import {
+  commitChangeSet,
+  createChangeSet,
+  normalizeContentHash,
+  summarizeChangeSet,
+} from '../../changeset/index.js';
+import type { Tool, ToolOutcome } from '../types.js';
 
-// ---------- edit_file ----------
+function conflict(path: string, details: string): ToolOutcome {
+  return {
+    status: 'error',
+    code: 'CHANGE_CONFLICT',
+    retryable: false,
+    changedFiles: [],
+    staleFiles: [path],
+    output: `错误:编辑冲突 ${path}，磁盘未发生变化。${details}`,
+  };
+}
+
 export const editFileTool: Tool = {
   name: 'edit_file',
   description:
-    'Replace a string in a file. old_string must occur exactly once and match exactly (including indentation/newlines). Copy old_string verbatim from a fresh read_file result for this path; do not reconstruct it from memory or summaries. Use write_file for new files.',
+    'Replace one exact string in a file transactionally. expected_hash is required and must be copied from a fresh read_file artifact header. If the file changes after that read, the edit is rejected without writing.',
   risk: 'confirm',
   parameters: {
     type: 'object',
     properties: {
       path: { type: 'string' },
-      old_string: { type: 'string', description: 'The original text to be replaced; must match exactly' },
-      new_string: { type: 'string', description: 'The new text to replace it with' },
+      old_string: { type: 'string', description: 'The original text; must occur exactly once.' },
+      new_string: { type: 'string', description: 'Replacement text.' },
+      expected_hash: { type: 'string', description: 'sha256 hash from the latest read_file artifact header.' },
     },
-    required: ['path', 'old_string', 'new_string'],
+    required: ['path', 'old_string', 'new_string', 'expected_hash'],
   },
-  async execute(args) {
-    const path = String(args.path);
-    const oldStr = String(args.old_string);
-    const newStr = String(args.new_string);
-    const full = resolve(path);
-    const data = await readFile(full, 'utf8');
+  async execute(args, ctx) {
+    const file = String(args.path);
+    const oldString = String(args.old_string);
+    const newString = String(args.new_string);
+    const expectedHash = normalizeContentHash(String(args.expected_hash));
+    if (!expectedHash) return conflict(file, 'expected_hash 必须是 sha256:<64 hex>。');
 
-    // 行尾归一化:read_file 用 split(/\r?\n/) 输出纯 LF,LLM 据此构造的 old_string/new_string
-    // 也是 LF;但本工具原样读文件(CRLF 保留),直接精确匹配会在 CRLF 文件上必败(文件 \r\n 对不上
-    // old_string 的 \n)。故匹配/计数在归一化(LF)文本上做,写回时按文件原始行尾风格还原,
-    // 不把 CRLF 文件悄悄换成 LF(只含 LF 的纯 LF 文件 norm===data,行为完全不变)。
-    const norm = data.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    const normOld = oldStr.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-    const normNew = newStr.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const data = await readFile(jailResolve(file), 'utf8');
+    const normalized = data.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const oldNormalized = oldString.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const newNormalized = newString.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const count = normalized.split(oldNormalized).length - 1;
 
-    const count = norm.split(normOld).length - 1;
     if (count === 0) {
-      return {
-        status: 'error',
-        code: 'EDIT_CONFLICT',
-        retryable: false,
-        output: `错误:在 ${path} 中未找到 old_string。不要重试相同参数；请先 read_file 读取目标区域，再从返回内容逐字复制新的 old_string 后重试。`,
-      };
+      return conflict(file, 'old_string 未找到；请重新 read_file 并复制最新内容。');
     }
     if (count > 1) {
+      return conflict(file, `old_string 出现 ${count} 次；请增加上下文使其唯一。`);
+    }
+    const updated = normalized.replace(oldNormalized, () => newNormalized);
+    const replacement = data.includes('\r\n') ? updated.replace(/\n/g, '\r\n') : updated;
+    const result = await commitChangeSet(createChangeSet([{
+      path: file,
+      operation: 'update',
+      expectedHash,
+      replacement,
+    }]), ctx?.signal);
+    if (result.status === 'conflict') {
+      const item = result.conflicts[0];
+      return conflict(file, `expected=${item?.expectedHash ?? 'missing'}, actual=${item?.actualHash ?? 'missing'}。请重新读取后再编辑。`);
+    }
+    if (result.status === 'failed') {
       return {
         status: 'error',
-        code: 'EDIT_CONFLICT',
+        code: 'EXECUTION_ERROR',
         retryable: false,
-        output: `错误:old_string 在 ${path} 中出现 ${count} 次,不唯一。请加入更多上下文使其唯一。`,
+        changedFiles: [],
+        output: `错误:ChangeSet 提交失败并已执行恢复: ${result.error}`,
       };
     }
-    // 用函数形式替换,避免 new_string 里的 $ 被当特殊模式
-    const updated = norm.replace(normOld, () => normNew);
-
-    // 检测原始行尾风格,写回时还原(存在 \r\n 即视为 CRLF 文件;纯 LF 文件保持 LF)
-    const out = data.includes('\r\n') ? updated.replace(/\n/g, '\r\n') : updated;
-    await writeFile(full, out, 'utf8');
-    const postcondition = await verifyWrittenFile(full, out);
-    if (postcondition.status === 'failed') {
-      return {
-        status: 'error',
-        code: 'POSTCONDITION_FAILED',
-        retryable: false,
-        output: postcondition.diagnostics
-          .map((item) => `[${item.code ?? 'V0_FAILED'}] ${item.file ?? path}: ${item.message}`)
-          .join('\n'),
-      };
-    }
-    return `已在 ${path} 中完成 1 处替换 (sha256=${postcondition.actualHash})。`;
+    const summary = summarizeChangeSet(result.changeSet);
+    return {
+      status: 'success',
+      code: 'OK',
+      retryable: false,
+      changedFiles: result.changedFiles,
+      changeSet: summary,
+      output: result.changedFiles.length === 0
+        ? `文件 ${file} 内容未变化 (ChangeSet ${summary.id})。`
+        : `已事务化编辑 ${file} (ChangeSet ${summary.id}, sha256=${summary.changes[0]?.afterHash})。`,
+    };
   },
 };

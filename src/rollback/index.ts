@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -47,6 +48,8 @@ export interface Snapshot {
   sequence?: number;
   ops?: string[];
   createdParents?: string[];
+  /** Fingerprint immediately after the latest Agent mutation; rollback refuses newer user edits. */
+  afterFingerprint?: string;
 }
 
 export interface FileChange {
@@ -132,6 +135,12 @@ function sameState(a: StoredState, b: StoredState): boolean {
   return a.kind === b.kind && a.data === b.data && a.mode === b.mode;
 }
 
+function stateFingerprint(state: StoredState): string {
+  return createHash('sha256')
+    .update(JSON.stringify([state.kind, state.data ?? null, state.mode ?? null]))
+    .digest('hex');
+}
+
 function stateFromSnapshot(snapshot: Snapshot): StoredState {
   if (snapshot.kind) {
     return { kind: snapshot.kind, data: snapshot.before ?? undefined, mode: snapshot.mode };
@@ -150,6 +159,7 @@ function snapshotFromState(
   sequence: number,
   op: string,
   createdParents: string[] = [],
+  after?: StoredState,
 ): Snapshot {
   return {
     turnId: currentTurnId,
@@ -161,6 +171,7 @@ function snapshotFromState(
     sequence,
     ops: [op],
     createdParents: createdParents.length > 0 ? createdParents : undefined,
+    afterFingerprint: after ? stateFingerprint(after) : undefined,
   };
 }
 
@@ -178,10 +189,14 @@ function addSnapshot(next: Snapshot): void {
   const existingSequence = existing.sequence ?? Number.MAX_SAFE_INTEGER;
   const nextSequence = next.sequence ?? Number.MAX_SAFE_INTEGER;
   const ops = new Set([...(existing.ops ?? []), ...(next.ops ?? [])]);
+  const latestAfterFingerprint = nextSequence >= existingSequence
+    ? next.afterFingerprint
+    : existing.afterFingerprint;
   if (nextSequence < existingSequence) {
-    snapshots[existingIndex] = { ...next, ops: [...ops] };
+    snapshots[existingIndex] = { ...next, ops: [...ops], afterFingerprint: latestAfterFingerprint };
   } else {
     existing.ops = [...ops];
+    existing.afterFingerprint = latestAfterFingerprint;
   }
 }
 
@@ -236,6 +251,7 @@ export function endPathMutation(capture: PathMutationCapture, op: string): void 
         capture.sequence,
         op,
         capture.createdParents,
+        after,
       ),
     );
   }
@@ -245,7 +261,14 @@ export function endPathMutation(capture: PathMutationCapture, op: string): void 
     if (parent && readState(parent).kind !== 'missing') {
       changed = true;
       addSnapshot(
-        snapshotFromState(parentRel, { kind: 'missing' }, capture.sequence, op),
+        snapshotFromState(
+          parentRel,
+          { kind: 'missing' },
+          capture.sequence,
+          op,
+          [],
+          readState(parent),
+        ),
       );
     }
   }
@@ -302,7 +325,7 @@ export function endWorkspaceMutation(
     const afterState = after.get(rel) ?? { kind: 'missing' as const };
     if (sameState(beforeState, afterState)) continue;
     changed = true;
-    addSnapshot(snapshotFromState(rel, beforeState, capture.sequence, op));
+    addSnapshot(snapshotFromState(rel, beforeState, capture.sequence, op, [], afterState));
   }
   if (changed) mutationVersion += 1;
 }
@@ -386,7 +409,9 @@ function restoreSnapshot(snapshot: Snapshot): boolean {
   const state = stateFromSnapshot(snapshot);
   try {
     if (state.kind === 'missing') {
-      rmSync(full, { recursive: true, force: true });
+      const current = readState(full);
+      if (current.kind === 'directory') rmdirSync(full);
+      else rmSync(full, { recursive: false, force: true });
       for (const parentRel of snapshot.createdParents ?? []) {
         const parent = safeFullPath(parentRel);
         if (!parent) continue;
@@ -426,13 +451,20 @@ export function applyRollback(
   plan: RollbackPlan,
   history: ChatMessage[],
   revertPaths: Set<string>,
-): { deletedMsgs: number; revertedFiles: string[] } {
+): { deletedMsgs: number; revertedFiles: string[]; conflictedFiles: string[] } {
   const deletedMsgs = history.length - plan.cutoffIndex;
   history.length = plan.cutoffIndex;
 
   const picks = new Map<string, Snapshot>();
+  const latest = new Map<string, Snapshot>();
   for (const snapshot of snapshots) {
     if (snapshot.turnId <= plan.cutoffTurnId || !revertPaths.has(snapshot.path)) continue;
+    const latestSnapshot = latest.get(snapshot.path);
+    if (!latestSnapshot || snapshot.turnId > latestSnapshot.turnId ||
+      (snapshot.turnId === latestSnapshot.turnId &&
+        (snapshot.sequence ?? -1) > (latestSnapshot.sequence ?? -1))) {
+      latest.set(snapshot.path, snapshot);
+    }
     const existing = picks.get(snapshot.path);
     if (
       !existing ||
@@ -445,7 +477,17 @@ export function applyRollback(
     }
   }
 
-  const selected = [...picks.values()];
+  const selected: Snapshot[] = [];
+  const conflictedFiles: string[] = [];
+  for (const snapshot of picks.values()) {
+    const expected = latest.get(snapshot.path)?.afterFingerprint;
+    const full = safeFullPath(snapshot.path);
+    if (expected && (!full || stateFingerprint(readState(full)) !== expected)) {
+      conflictedFiles.push(snapshot.path);
+    } else {
+      selected.push(snapshot);
+    }
+  }
   // 先深到浅删除本轮新建项，再浅到深恢复原目录/文件。
   const removals = selected
     .filter((item) => stateFromSnapshot(item).kind === 'missing')
@@ -456,12 +498,13 @@ export function applyRollback(
   const revertedFiles: string[] = [];
   for (const snapshot of [...removals, ...restores]) {
     if (restoreSnapshot(snapshot)) revertedFiles.push(snapshot.path);
+    else if (!conflictedFiles.includes(snapshot.path)) conflictedFiles.push(snapshot.path);
   }
 
   turns = turns.filter((turn) => turn.turnId <= plan.cutoffTurnId);
   snapshots = snapshots.filter((snapshot) => snapshot.turnId <= plan.cutoffTurnId);
   currentTurnId = turns.at(-1)?.turnId ?? 0;
-  return { deletedMsgs, revertedFiles };
+  return { deletedMsgs, revertedFiles, conflictedFiles };
 }
 
 export function pruneAfterCompaction(history: ChatMessage[]): void {

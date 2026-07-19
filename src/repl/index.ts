@@ -70,6 +70,7 @@ import {
 } from '../attachments/image.js';
 import { modelSupportsVision } from '../llm/capabilities.js';
 import { computePruneStats } from '../context/relevance.js';
+import { formatArtifactTokenSources } from '../context/artifacts.js';
 import type { ContentPart } from '../agent/core.js';
 import {
   manualCompact,
@@ -315,11 +316,15 @@ function renderContextBar(history: ChatMessage[]): string {
   const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.accent;
   const lifecycle = contextState.lifecycleStats;
   const archived = computePruneStats(history);
+  const artifactStats = contextState.artifactStats;
+  const artifactLine = artifactStats
+    ? `\n  artifacts · fresh ${artifactStats.fresh} · stale ${artifactStats.stale} · stubbed ${archived.stubbed} · tokens ${formatArtifactTokenSources(artifactStats)}`
+    : '\n  artifacts · no file-backed facts recorded';
   const lifecycleLine = lifecycle
     ? `\n  lifecycle · live ${lifecycle.live} · referenced ${lifecycle.referenced} · digested ${lifecycle.digested} · stubbed ${lifecycle.stubbed}`
     : '\n  lifecycle · no active snapshot (run a tool-enabled turn first)';
   const archiveLine = `\n  archived tool results · ${archived.stubbed}`;
-  return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${t('status.messages', { count: history.length })} (${src})${ui.reset}${lifecycleLine}${archiveLine}`;
+  return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${t('status.messages', { count: history.length })} (${src})${ui.reset}${artifactLine}${lifecycleLine}${archiveLine}`;
 }
 
 /** 状态行用量条(精简版,进底栏):[bar] pct% k/k。
@@ -1027,6 +1032,7 @@ export async function startRepl(
       rolledBackTurns: Math.max(0, turnCountBeforeRollback - plan.n),
       deletedMessages: rollbackResult.deletedMsgs,
       revertedFiles: rollbackResult.revertedFiles,
+      conflictedFiles: rollbackResult.conflictedFiles,
       requestedFileCount: revertPaths.size,
     }, plan.cutoffTurnId);
     try {
@@ -1038,6 +1044,11 @@ export async function startRepl(
     // 复显剩余对话(无提示行),输入框预填该轮 user 输入 → 下轮 Enter 重新跑
     layout.clearContent();
     renderHistory(history);
+    if (rollbackResult.conflictedFiles.length > 0) {
+      layout.contentWrite(
+        `${ui.yellow}  ⚠ rollback conflict: ${rollbackResult.conflictedFiles.join(', ')} 已在 Agent 提交后变化，未覆盖。${ui.reset}\n`,
+      );
+    }
     // 末尾补空行:与后续用户消息(❯ bubble)之间分隔。runTurn 在每个 agent 轮结束后
     // contentWrite('\n') 做轮次分隔,/resume 后接 \n\n,/theme·/model 后接 \n;
     // rollbackFlow 原本漏了这一行,renderHistory 末尾的 batch 摘要行 / assistant 文本

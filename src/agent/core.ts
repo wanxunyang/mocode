@@ -39,7 +39,14 @@ import {
 } from '../session/index.js';
 import type { ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
-import { optimizeToolResult, HOT_TURN_WINDOW, userTurnBoundary } from '../context/index.js';
+import {
+  optimizeToolResult,
+  HOT_TURN_WINDOW,
+  userTurnBoundary,
+  recordArtifact,
+  invalidateArtifacts,
+  rehydrateArtifacts,
+} from '../context/index.js';
 import {
   createAgeAwareEncodingState,
   type AgeAwareEncodingState,
@@ -206,9 +213,11 @@ function pushToolResult(
     content: optimizeToolResult(tc.name, output, tc.arguments, encodingContext),
   } as ChatMessage;
   history.push(msg);
+  const messageIndex = history.length - 1;
+  recordArtifact(runtimeContextState, history, messageIndex, output, succeeded);
   // 失败 read 不得淘汰旧 read；失败 consumer 也不能改变 lifecycle 上游状态。
   if (pruner) pruner.observePush(history, msg, succeeded);
-  if (lifecycle) lifecycle.pushTool(history, history.length - 1, succeeded);
+  if (lifecycle) lifecycle.pushTool(history, messageIndex, succeeded);
   runtimeContextState.lifecycleStats = lifecycle?.stats();
 }
 
@@ -424,6 +433,7 @@ export async function runAgentCore(
     ? createLifecycleEngine(history)
     : null;
   runtimeContextState.lifecycleStats = lifecycle?.stats();
+  rehydrateArtifacts(runtimeContextState, history);
   // 预算调度器:每个 runAgentCore 实例一个，在 age-aware sweep 后评估并执行 warn / compact。
   // contextBudget 开关关闭时为 null。
   const scheduler: BudgetScheduler | null = config.contextBudget !== false
@@ -549,6 +559,7 @@ export async function runAgentCore(
           runtimeContextState.lifecycleStats = lifecycle.stats();
         }
         ageAware?.rehydrate(history);
+        rehydrateArtifacts(runtimeContextState, history);
       }
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')
       mode = 'idle';
@@ -707,6 +718,8 @@ export async function runAgentCore(
             retry: Math.max(0, (outcome.attempts ?? 1) - 1),
             retryDelayMs: outcome.retryDelayMs ?? 0,
             changedFiles: outcome.changedFiles ?? [],
+            staleFiles: outcome.staleFiles ?? [],
+            ...(outcome.changeSet ? { changeSet: outcome.changeSet } : {}),
           }, {
             toolCallId: traceCall.toolCallId,
             ...(tc.id ? { providerToolCallId: tc.id } : {}),
@@ -868,13 +881,17 @@ export async function runAgentCore(
                 runtimeContextState,
                 outcome.status === 'success',
               );
-              if (isMutationTool(entry.tc.name) && outcome.status === 'success') {
-                const mutationPath = entry.parsed?.path;
-                if (typeof mutationPath === 'string' && mutationPath) {
-                  relprune?.observeMutation(history, mutationPath);
-                  lifecycle?.pushMutation(history, history.length - 1, mutationPath);
-                  runtimeContextState.lifecycleStats = lifecycle?.stats();
+              const invalidatedFiles = [...new Set([
+                ...(outcome.changedFiles ?? []),
+                ...(outcome.staleFiles ?? []),
+              ])];
+              if (invalidatedFiles.length > 0) {
+                for (const changedFile of invalidatedFiles) {
+                  relprune?.observeMutation(history, changedFile);
+                  lifecycle?.pushMutation(history, history.length - 1, changedFile);
                 }
+                invalidateArtifacts(runtimeContextState, history, invalidatedFiles);
+                runtimeContextState.lifecycleStats = lifecycle?.stats();
               }
             }
             if (firstAllowed) hooks.onToolDone?.();
@@ -970,14 +987,17 @@ export async function runAgentCore(
               runtimeContextState,
               outcome.status === 'success',
             );
-            // 只有成功 mutation 才会使旧 read 失效；pruner 与 lifecycle 独立启停。
-            if (isMutationTool(tc.name) && outcome.status === 'success') {
-              const mp = mutationParsed?.path;
-              if (typeof mp === 'string' && mp) {
-                relprune?.observeMutation(history, mp);
-                lifecycle?.pushMutation(history, history.length - 1, mp);
-                runtimeContextState.lifecycleStats = lifecycle?.stats();
+            const invalidatedFiles = [...new Set([
+              ...(outcome.changedFiles ?? []),
+              ...(outcome.staleFiles ?? []),
+            ])];
+            if (invalidatedFiles.length > 0) {
+              for (const changedFile of invalidatedFiles) {
+                relprune?.observeMutation(history, changedFile);
+                lifecycle?.pushMutation(history, history.length - 1, changedFile);
               }
+              invalidateArtifacts(runtimeContextState, history, invalidatedFiles);
+              runtimeContextState.lifecycleStats = lifecycle?.stats();
             }
             i++;
           }

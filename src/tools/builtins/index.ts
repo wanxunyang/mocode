@@ -19,6 +19,7 @@ import { memoryUpdateTool } from './memory-update.js';
 import { memoryForgetTool } from './memory-forget.js';
 import { taskTool } from './task.js';
 import { projectSkillUpdateTool } from './project-skill-update.js';
+import { applyPatchTool } from './apply-patch.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
@@ -57,8 +58,9 @@ const memoryResource = (): string[] => ['memory-store'];
 
 const CAPABILITIES: Record<string, ToolCapabilities> = {
   read_file: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: pathResource },
-  write_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource },
-  edit_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource },
+  write_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource, delegatesResourceLocks: true },
+  edit_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource, delegatesResourceLocks: true },
+  apply_patch: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: workspaceResource, delegatesResourceLocks: true },
   run_command: { effect: 'process', concurrency: 'serial', retry: 'never', resources: workspaceResource, supportsAbort: true },
   glob: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
   grep: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
@@ -90,6 +92,7 @@ const rawBuiltinTools: Tool[] = [
   readFileTool,
   writeFileTool,
   editFileTool,
+  applyPatchTool,
   runCommandTool,
   globTool,
   grepTool,

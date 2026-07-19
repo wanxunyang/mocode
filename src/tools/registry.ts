@@ -200,7 +200,9 @@ async function executeToolAttempt(
       if (notifyLockAcquired) opts?.onLockAcquired?.(args);
       const mutationBefore = getCurrentTurnMutationState();
       mutationVersionBefore = mutationBefore.version;
-      const pathCapture = isFileMutationTool(tool.name) && typeof args.path === 'string' && args.path
+      // Transactional tools own their full write-set capture inside ChangeSet commit.
+      const pathCapture = !capabilities.delegatesResourceLocks &&
+        isFileMutationTool(tool.name) && typeof args.path === 'string' && args.path
         ? beginPathMutation(args.path)
         : null;
       capturedPath = pathCapture?.path;

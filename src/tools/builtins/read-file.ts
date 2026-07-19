@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { contentHash } from '../../changeset/index.js';
 import { MAX_FILE_LINES } from '../constants.js';
 
 /** 默认单次 read_file 拉取的行数。刻意压低,逼 LLM 分块读大文件,
@@ -35,6 +36,7 @@ export const readFileTool: Tool = {
     const limit = Math.min(Number(args.limit ?? DEFAULT_READ_LIMIT), MAX_FILE_LINES);
 
     const data = await readFile(resolve(path), 'utf8');
+    const artifactHeader = `[artifact source=read_file path=${path} hash=${contentHash(data)}]`;
     const lines = data.split(/\r?\n/);
     const start = Math.max(0, offset - 1);
     const end = Math.min(lines.length, start + limit);
@@ -43,8 +45,8 @@ export const readFileTool: Tool = {
       .map((l, i) => `${String(start + i + 1).padStart(6, ' ')}\t${l}`)
       .join('\n');
     if (end < lines.length) {
-      return body + `\n\n... (${lines.length - end} 行未显示,共 ${lines.length} 行)`;
+      return artifactHeader + '\n' + body + `\n\n... (${lines.length - end} 行未显示,共 ${lines.length} 行)`;
     }
-    return body || '(空文件)';
+    return artifactHeader + '\n' + (body || '(空文件)');
   },
 };

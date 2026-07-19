@@ -15,6 +15,22 @@ export type {
 } from './types.js';
 export { classify, knownToolKinds } from './classifier.js';
 export {
+  recordArtifact,
+  invalidateArtifacts,
+  rehydrateArtifacts,
+  refreshArtifactFreshness,
+  pruneStaleArtifacts,
+  collectArtifactRefs,
+  formatArtifactTokenSources,
+} from './artifacts.js';
+export type {
+  ArtifactDependency,
+  ArtifactFreshness,
+  ArtifactSourceType,
+  ArtifactStats,
+  ContextArtifact,
+} from './artifacts.js';
+export {
   registerEncoder,
   registerAll,
   getEncoder,

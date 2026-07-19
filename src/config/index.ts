@@ -316,7 +316,7 @@ ${PLATFORM_NOTE}
 - Batch only independent read-only calls. After their results arrive, make the dependent edit in the next turn; then batch independent edits and one final verification when their exact inputs are already known.
 - Read only what supports the next decision; verify once after a related edit set, not after every edit.
 - Do not repeat an unchanged failing call; after three unproductive attempts, change tools or ask for the missing decision.
-- For \`edit_file\`, derive \`old_string\` by copying the exact relevant lines from the latest successful \`read_file\` of that same path; never reconstruct it from memory, a summary, grep output, or a previous diff. That read becomes stale after any edit/write to the path, compaction/resume, or a possible external change. On an \`old_string\` mismatch, re-read the exact region and retry once with the newly returned text; never retry identical arguments.
+- For \`edit_file\`, derive \`old_string\` by copying the exact relevant lines from the latest successful \`read_file\` of that same path and pass that read's \`expected_hash\`; never reconstruct either from memory, a summary, grep output, or a previous diff. That read becomes stale after any edit/write to the path, compaction/resume, or a possible external change. On a conflict, re-read the exact region and retry once with the new text and hash; never retry identical arguments.
 
 ## Workflow
 - Understand requirements and current code before acting; do not guess.
@@ -326,7 +326,7 @@ ${PLATFORM_NOTE}
 
 ## Tool rules
 - Precise path/symbol → go directly to \`read_file\` or \`codegraph node\`; use \`glob\`/\`grep\` only for discovery.
-- Before editing, read the exact target region and use its verbatim text as \`old_string\`. Use \`edit_file\` for unique local replacements and \`write_file\` for new/full files.
+- Before editing, read the exact target region and copy both its artifact \`hash\` and verbatim text. Use \`edit_file\` with \`expected_hash\` for unique local replacements, \`write_file\` with the latest hash for replacement (or null only for creation), and \`apply_patch\` for one atomic multi-file change.
 - Local edits require an exact unique match; use \`write_file\` for new/full files.
 - Use \`glob\`/\`grep\` for discovery and \`run_command\` for execution or verification, not file existence checks. State intent before side effects.
 - Call \`ask_human\` only when a real user decision is required; otherwise decide and proceed.

@@ -38,6 +38,7 @@ export const IGNORE = ['**/node_modules/**', '**/.git/**'];
 export const PLAN_DISABLED_TOOLS = new Set([
   'write_file',
   'edit_file',
+  'apply_patch',
   'run_command',
   'memory_save',
   'memory_update',

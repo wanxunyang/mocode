@@ -16,6 +16,7 @@ import * as layout from '../ui/layout.js';
 import { pruneAfterCompaction } from '../rollback/index.js';
 import { toText } from '../context/utils.js';
 import { DEFAULT_BUDGET_POLICY } from '../context/budget.js';
+import { collectArtifactRefs } from '../context/artifacts.js';
 
 /**
  * 上下文压缩子系统:
@@ -88,6 +89,13 @@ export interface ContextState {
     digested: number;
     obsolete: number;
     stubbed: number;
+  };
+  /** File-backed facts and their token provenance for /context. */
+  artifactStats?: {
+    fresh: number;
+    stale: number;
+    stubbed: number;
+    tokensBySource: Partial<Record<'read' | 'search' | 'diagnostic' | 'summary', number>>;
   };
 }
 
@@ -303,7 +311,7 @@ async function defaultSummarize(
   const sysMsg = {
     role: 'system' as const,
     content:
-      'You are a session summarizer. Output only the summary body, max 300 words, preserving: the user\'s core request; files read/written/modified and key changes; key commands run and their result highlights; decisions made; current task progress and next step; open questions. Do not recap every detail.',
+      'You are a session summarizer. Output only the summary body, max 300 words, preserving: the user\'s core request; files read/written/modified and key changes; source artifact IDs/hashes; key commands run and their result highlights; decisions made; current task progress and next step; open questions. Do not recap every detail.',
   } as ChatMessage;
   const userMsg = {
     role: 'user' as const,
@@ -407,10 +415,11 @@ export async function compactHistory(
           }
         }
       }
+      const refs = collectArtifactRefs(older);
       const summaryMsg: ChatMessage = {
         role: 'system',
         content: older.length > 0
-          ? `# 会话摘要(force)\n被跳过的早期对话 ${older.length} 条已微压缩(token 数减少)。`
+          ? `# 会话摘要(force)\n被跳过的早期对话 ${older.length} 条已微压缩(token 数减少)。${refs.length > 0 ? `\n[artifact refs: ${refs.join(', ')}]` : ''}`
           : `# 会话摘要(force)\n无内容。`,
       } as ChatMessage;
       const rebuilt = [history[0], summaryMsg, ...keptAfter];
@@ -499,9 +508,13 @@ export async function compactHistory(
   }
 
   if (summary) {
+    const artifactRefs = collectArtifactRefs(older);
+    const provenance = artifactRefs.length > 0
+      ? `\n\n[artifact refs: ${artifactRefs.join(', ')}]`
+      : '';
     const summaryMsg = {
       role: 'system' as const,
-      content: `# 会话摘要\n${summary}`,
+      content: `# 会话摘要\n${summary}${provenance}`,
     } as ChatMessage;
     // 原地重建:[systemPrompt, summaryMsg, ...kept]
     const systemMsg = history[0];

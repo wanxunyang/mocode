@@ -64,7 +64,7 @@ function writeToolResult(
 ): void {
   if (!currentBatchId) return;
   let diff: string | null = null;
-  if (isMutationTool(tc.name) && parsed && !isToolErrorOutput(output)) {
+  if ((tc.name === 'edit_file' || tc.name === 'write_file') && parsed && !isToolErrorOutput(output)) {
     diff = renderFileChange({
       path: String(parsed.path ?? ''),
       kind: tc.name === 'edit_file' ? 'edit' : 'write',

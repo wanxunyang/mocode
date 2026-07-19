@@ -30,6 +30,7 @@ import { config } from '../config/index.js';
 import { maybeCompact, contextState, type ContextState } from './compact.js';
 import * as layout from '../ui/layout.js';
 import { ui } from '../ui/theme.js';
+import { pruneStaleArtifacts, refreshArtifactFreshness } from '../context/artifacts.js';
 
 /** 一次调度的执行日志(供 /context 命令显示与调试)。 */
 export interface SchedulerRunLog {
@@ -71,6 +72,9 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
   const obs: BudgetScheduler = {
     lastRunLog: null,
     async runStep(history, step, activeTools = chatTools) {
+      // Re-check file-backed hashes first, then discard stale/rebuildable facts before budgeting.
+      refreshArtifactFreshness(state, history);
+      pruneStaleArtifacts(state, history);
       const report = evaluateBudget(
         history,
         config.contextWindowTokens,

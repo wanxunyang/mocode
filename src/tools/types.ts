@@ -67,6 +67,8 @@ export type ToolOutcomeCode =
   | 'PROCESS_FAILED'
   | 'EXECUTION_ERROR'
   | 'EDIT_CONFLICT'
+  | 'CHANGE_CONFLICT'
+  | 'PATCH_INVALID'
   | 'POSTCONDITION_FAILED'
   | 'MCP_ERROR';
 
@@ -77,6 +79,10 @@ export interface ToolOutcome {
   retryable: boolean;
   output: string;
   changedFiles?: string[];
+  /** Paths whose previously observed content is known stale after a conflict. */
+  staleFiles?: string[];
+  /** The committed transaction; diff, rollback, tracing and freshness share this identity. */
+  changeSet?: import('../changeset/types.js').ChangeSetSummary;
   durationMs?: number;
   /** Total executions for this provider tool call, including automatic retries. */
   attempts?: number;
