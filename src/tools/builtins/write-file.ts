@@ -21,7 +21,7 @@ function conflict(path: string, details: string): ToolOutcome {
 export const writeFileTool: Tool = {
   name: 'write_file',
   description:
-    'Create or replace one file transactionally. Pass expected_hash=null only for a new path; overwriting requires the hash from a fresh read_file artifact header.',
+    'Create or replace one file transactionally. expected_hash may be omitted (or null) only for create-only writes to a path that must not exist; overwriting requires the hash from a fresh read_file artifact header.',
   risk: 'confirm',
   parameters: {
     type: 'object',
@@ -30,16 +30,18 @@ export const writeFileTool: Tool = {
       content: { type: 'string', description: 'Full file content' },
       expected_hash: {
         type: ['string', 'null'],
-        description: 'sha256 hash from read_file, or null when the path must not exist.',
+        description: 'Optional sha256 hash from read_file. Omit or pass null only when the path must not exist.',
       },
     },
-    required: ['path', 'content', 'expected_hash'],
+    required: ['path', 'content'],
   },
   async execute(args, ctx) {
     const file = String(args.path);
     const content = String(args.content);
     let expectedHash: ContentHash | null = null;
-    if (args.expected_hash !== null) {
+    // Missing and explicit null are both safe create-only requests. They never
+    // overwrite: ChangeSet compares expectedHash=null against the current path.
+    if (args.expected_hash != null) {
       expectedHash = normalizeContentHash(String(args.expected_hash));
       if (!expectedHash) return conflict(file, 'expected_hash 必须是 null 或 sha256:<64 hex>。');
     }

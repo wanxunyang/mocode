@@ -114,6 +114,34 @@ function thrashHint(name: string, args: string, count: number): string | null {
   );
 }
 
+/**
+ * Detect only a strict streak of identical failures. Successful calls, or a
+ * different tool/argument pair, end the streak. This keeps intentional phased
+ * read_file/glob calls from being mislabeled after the underlying files change.
+ */
+export function createThrashTracker(): (
+  name: string,
+  args: string,
+  succeeded: boolean,
+) => string | null {
+  let lastFailedFingerprint: string | null = null;
+  let consecutiveFailures = 0;
+  return (name, args, succeeded) => {
+    if (succeeded) {
+      lastFailedFingerprint = null;
+      consecutiveFailures = 0;
+      return null;
+    }
+    const fingerprint = `${name}\x00${args}`;
+    if (fingerprint === lastFailedFingerprint) consecutiveFailures += 1;
+    else {
+      lastFailedFingerprint = fingerprint;
+      consecutiveFailures = 1;
+    }
+    return thrashHint(name, args, consecutiveFailures);
+  };
+}
+
 /** 只有显式声明 parallel 且无需权限确认的工具才进入普通并发组。 */
 function isParallelTool(name: string): boolean {
   const tool = tools.find((candidate) => candidate.name === name);
@@ -413,15 +441,9 @@ export async function runAgentCore(
       : u;
   };
   const addToolUsage = (outcome: ToolOutcome): void => addUsage(outcome.usage);
-  // Thrashing 检测:本轮内同 (name, args) 累计次数。≥3 在工具结果尾部追加 hint(见 thrashHint)。
-  // 只在 runAgentCore 内,turn 结束自然 GC;不跨 turn 持久(下一轮重新计数,避免误把历史判为 thrashing)。
-  const recentToolCalls = new Map<string, number>();
-  const recordAndHint = (name: string, args: string): string | null => {
-    const fp = `${name}\x00${args}`;
-    const c = (recentToolCalls.get(fp) ?? 0) + 1;
-    recentToolCalls.set(fp, c);
-    return thrashHint(name, args, c);
-  };
+  // Only consecutive identical failures are thrashing. Any success (including
+  // a mutation between two reads) or different call resets the streak.
+  const recordAndHint = createThrashTracker();
   history.push({ role: 'user', content: userInput });
   // 中断回滚快照:push 用户消息后整段浅拷贝。abort 时 length=0;push(...saved) 还原。
   // 这样中断时至少保留用户消息(及之前的历史);每步工具全部执行完毕后刷新快照,
@@ -755,7 +777,7 @@ export async function runAgentCore(
               durationMs: 0,
             };
             hooks.onToolResult?.(currentCall, error, null, null, 1);
-            const hint = recordAndHint(currentCall.name, currentCall.arguments);
+            const hint = recordAndHint(currentCall.name, currentCall.arguments, false);
             pushToolResult(
               history,
               currentCall,
@@ -799,7 +821,7 @@ export async function runAgentCore(
               const output = outcome.output;
               hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
               // Thrashing:history 里附 hint(UI 已用干净 output 渲染,避免屏幕噪声)
-              const hint = recordAndHint(tc.name, tc.arguments);
+              const hint = recordAndHint(tc.name, tc.arguments, outcome.status === 'success');
               pushToolResult(
                 history,
                 tc,
@@ -889,7 +911,7 @@ export async function runAgentCore(
                 entry.diff.preWriteOld,
                 entry.diff.editStartLine,
               );
-              const hint = recordAndHint(entry.tc.name, entry.tc.arguments);
+              const hint = recordAndHint(entry.tc.name, entry.tc.arguments, outcome.status === 'success');
               pushToolResult(
                 history,
                 entry.tc,
@@ -933,7 +955,7 @@ export async function runAgentCore(
               };
               hooks.onToolResult?.(tc, err, null, null, 1);
               // Thrashing:同上
-              const hint = recordAndHint(tc.name, tc.arguments);
+              const hint = recordAndHint(tc.name, tc.arguments, false);
               pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
               traceToolEnd(tc, i, outcome);
               i++;
@@ -961,7 +983,7 @@ export async function runAgentCore(
                 hooks.onToolHeader?.(tc);
                 const outcome = deniedOutcome(tc.name);
                 hooks.onToolResult?.(tc, outcome.output, null, null, 1);
-                const hint = recordAndHint(tc.name, tc.arguments);
+                const hint = recordAndHint(tc.name, tc.arguments, false);
                 pushToolResult(
                   history,
                   tc,
@@ -997,7 +1019,7 @@ export async function runAgentCore(
             hooks.onToolDone?.();
             hooks.onToolResult?.(tc, output, mutationParsed, diff.preWriteOld, diff.editStartLine);
             // Thrashing:同上(history 附 hint,UI 干净)
-            const hint = recordAndHint(tc.name, tc.arguments);
+            const hint = recordAndHint(tc.name, tc.arguments, outcome.status === 'success');
             pushToolResult(
               history,
               tc,

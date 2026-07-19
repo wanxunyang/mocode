@@ -10,7 +10,8 @@ export function getCurrentSessionId(): string | undefined {
 }
 
 /**
- * 设置当前活跃会话 ID，并确保该会话的 notes.md 文件存在（不存在则创建空文件）。
+ * 设置当前活跃会话 ID。notes.md 由 agent 按需创建；这里不能预建空文件，
+ * 否则 write_file(expected_hash=null) 的首次创建会必然冲突。
  * 由 repl/index.ts 在会话启动 / /resume 切换时调用。
  */
 export function setCurrentSessionId(id: string | undefined, cwd: string): void {
