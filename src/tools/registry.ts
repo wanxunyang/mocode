@@ -225,7 +225,8 @@ async function executeToolAttempt(
           : mutationAfter.changedFiles.map((item) => item.path)
         : [];
       if (signal?.aborted) {
-        return terminalOutcome('aborted', 'ABORTED', String(isStructuredOutcome(raw) ? raw.output : raw), startedAt, changedFiles);
+        const aborted = terminalOutcome('aborted', 'ABORTED', String(isStructuredOutcome(raw) ? raw.output : raw), startedAt, changedFiles);
+        return isStructuredOutcome(raw) ? { ...aborted, usage: raw.usage } : aborted;
       }
       return normalizeOutcome(raw, Date.now() - startedAt, changedFiles);
     });

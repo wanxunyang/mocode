@@ -59,7 +59,7 @@ const OBSERVER_TOOLS = new Set<string>([
 const CONSUMER_TOOLS = new Set<string>(['read_file', 'edit_file', 'write_file']);
 
 /** mutation 工具:pushTool 跳过 autoStubOrphans(让 pushMutation 标完 read REFERENCED 再统一老化)。 */
-const MUTATION_TOOLS = new Set<string>(['edit_file', 'write_file', 'apply_patch']);
+const MUTATION_TOOLS = new Set<string>(['edit_file', 'write_file']);
 
 /** 存根前缀(区分 Relevance Pruner 与 drop_context)。 */
 const STUB_PREFIX_NO_CONSUMER = '⌦[无消费者:观察结果已无引用价值]';

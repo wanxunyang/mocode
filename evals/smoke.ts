@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +12,8 @@ import {
 } from '../src/verification/profile.js';
 import { resolveAffectedPackages } from '../src/verification/affected.js';
 import { runCommandRaw, runCommandTool } from '../src/tools/builtins/run-command.js';
-import { setSandboxRoot } from '../src/sandbox/index.js';
+import { getSandboxRoot, setSandboxRoot } from '../src/sandbox/index.js';
+import { inOverlay, mergeSubAgentChangeSet } from '../src/agents/coordinator.js';
 import {
   checkPermission,
   clearSessionPermissionGrants,
@@ -19,6 +21,7 @@ import {
   resetPermissionGrantsForTests,
 } from '../src/permissions/index.js';
 import { t } from '../src/i18n/index.js';
+import { buildMocodeCorePrompt } from '../src/config/index.js';
 
 interface SmokeCase {
   name: string;
@@ -398,6 +401,56 @@ const cases: SmokeCase[] = [
       try {
         assert.equal(discoverValidationCommand(root).reason, 'no_validation_script');
       } finally {
+        removeFixture(root);
+      }
+    },
+  },
+  {
+    name: 'shares mocode core behavior with sub-agents without session payload',
+    run() {
+      const prompt = buildMocodeCorePrompt();
+      assert.match(prompt, /## Tool details/);
+      assert.match(prompt, /## Workflow/);
+      assert.match(prompt, /## Failure Handling/);
+      assert.match(prompt, /## Termination & Reporting/);
+      assert.doesNotMatch(prompt, /## Project context \(dynamic reference\)/);
+      assert.doesNotMatch(prompt, /## Session Notepad/);
+    },
+  },
+  {
+    name: 'merges an isolated sub-agent ChangeSet without writing through the overlay',
+    async run() {
+      const root = fixture();
+      const previous = setSandboxRoot(root);
+      try {
+        writeFileSync(path.join(root, 'a.txt'), 'before', 'utf8');
+        const isolated = await inOverlay(async () => {
+          await writeFile(path.join(getSandboxRoot()!, 'a.txt'), 'after', 'utf8');
+        });
+        assert.equal(readFileSync(path.join(root, 'a.txt'), 'utf8'), 'before');
+        assert.equal(await mergeSubAgentChangeSet(isolated.changeSet), 'committed');
+        assert.equal(readFileSync(path.join(root, 'a.txt'), 'utf8'), 'after');
+      } finally {
+        setSandboxRoot(previous);
+        removeFixture(root);
+      }
+    },
+  },
+  {
+    name: 'rejects a stale sub-agent ChangeSet instead of overwriting external edits',
+    async run() {
+      const root = fixture();
+      const previous = setSandboxRoot(root);
+      try {
+        writeFileSync(path.join(root, 'a.txt'), 'before', 'utf8');
+        const isolated = await inOverlay(async () => {
+          await writeFile(path.join(getSandboxRoot()!, 'a.txt'), 'agent', 'utf8');
+        });
+        writeFileSync(path.join(root, 'a.txt'), 'user', 'utf8');
+        assert.equal(await mergeSubAgentChangeSet(isolated.changeSet), 'conflict');
+        assert.equal(readFileSync(path.join(root, 'a.txt'), 'utf8'), 'user');
+      } finally {
+        setSandboxRoot(previous);
         removeFixture(root);
       }
     },

@@ -2,7 +2,7 @@
 
 子 Agent 使用独立 history、可受限工具集和较低步数上限执行子任务，最终只把摘要回灌主 history。
 
-**状态**：已实现独立上下文、中断透传、共享回滚与 capability-aware 串行调度。
+**状态**：已实现结构化结果、只读并发、overlay 写隔离、ChangeSet coordinator 合并与主 Agent 统一验证。
 
 ## 结构
 
@@ -14,18 +14,16 @@
 ## 设计要点
 
 - **独立 history**：子任务工具噪声不会进入主对话。
-- **工具子集**：`SpawnOptions.tools` 可限制白名单；始终移除 `task`，禁止递归派生。
-- **步数上限**：默认 `config.subAgentMaxSteps`，避免子任务失控。
+- **工具子集**：`SpawnOptions.tools` 可限制白名单；始终移除 `sub-agent`，禁止递归派生。
+- **紧凑提示**：不复制主 Agent 的完整 system prompt、memory、skills；只发送窄 worker 约束和最多 4K 的主 Agent 事实摘要。
+- **能力不截断**：写任务默认继承主 Agent 的完整工具能力，仅禁止递归创建 `sub-agent`；不设置硬 token/completion 上限。
+- **成本可见**：每个结果返回 prompt/completion/cached/total token，用真实数据衡量优化，不靠提前杀死任务制造低消耗。
 - **中断透传**：主 AbortSignal 贯穿子 Agent 的 LLM、命令和网络工具。
-- **共享工作区与回滚**：子 Agent 与主 Agent 使用同一沙箱和当前 turn mutation transaction，实际文件写入可被主轮观察与回滚。
-- **串行安全**：`task` 声明为 write + serial；多个 task 不再并行写共享工作区。
-- **PLAN 防线**：plan 模式不会向模型暴露 `task`，core 仍保留防幻觉调用检查。
+- **只读并发**：框架强制裁剪为只读工具集，不能仅靠 prompt 承诺；多个只读 task 可同批并发。
+- **写隔离**：写 task 在临时 overlay 中运行，不直接触碰主工作区；二进制变更会被保守拒绝。
+- **安全合并**：coordinator 把 overlay diff 转为带 expected hash 的 ChangeSet；提交使用 canonical resource lock，冲突不覆盖。
+- **调度**：未知 write set 保持串行；已知 write set 的任务可并发生成 ChangeSet，并在真实写路径上持锁合并。
+- **统一验证**：子 Agent 不单独验证；主 Agent 在一批 ChangeSet 全部合并后使用既有自动验证门统一验证。
+- **PLAN 防线**：plan 模式不会向模型暴露 `sub-agent`，core 仍保留防幻觉调用检查。
 
-## 后续扩展
-
-只有在满足以下任一条件后才重新开放子 Agent 并行：
-
-1. task 能可靠声明 read/write set，并由 scheduler 获取资源锁；
-2. 每个写子任务运行在独立 worktree、overlay filesystem 或虚拟工作区，最终由 coordinator 合并 ChangeSet。
-
-只读 task 的动态并行可作为中间阶段，但必须由框架验证其工具白名单全部为只读，不能只依赖 Prompt 承诺。
+`SubAgentResult` 暴露 `status/findings/readSet/changeSet/verification`；其中 verification 在子任务返回时为 null，明确表示由主 Agent 的统一验证门填补，而不是伪报已验证。

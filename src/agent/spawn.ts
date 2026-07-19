@@ -5,31 +5,38 @@
 //  - 不写主屏(layout.contentWrite):中间过程(流式正文 / 工具头 / diff)缓冲到内部字符串,
 //    结束返回给 task 工具(task 把它当 tool 结果回灌主 history,主 agent 据此继续)。
 //  - 独立 history:不共享主对话,避免子任务的工具噪声污染主上下文。
-//  - 系统提示复用主 agent 组装链(config.systemPrompt + memory 段 + skills 段)+ 子 agent 角色后缀。
-//  - 工具子集:按白名单从 chatTools 过滤;无白名单 = 全量(但 task 工具调用方通常会限定只读)。
+//  - 紧凑系统提示:不复制主 agent 的 memory/skills/项目快照；由 context 传入已知事实。
+//  - 工具子集:写任务默认继承主 Agent 工具（仅禁止递归 task）；只读模式按安全语义移除写工具。
 //  - 不调 beginTurn：子 agent 共享主 agent 当前轮次；其文件修改进入同一回滚事务。
-//  - 步数上限默认更低(config.subAgentMaxSteps ?? 50),防子任务失控耗尽配额。
+//  - 步数默认与主 Agent 相同，只作为无限循环保险，不以 token 配额提前终止有效任务。
 //  - 中断透传:opts.signal(主 agent 的 abort signal)透传给 runAgentCore → chat/executeTool,
 //    主 Ctrl+C 树杀子 agent(chat 流式 abort + run_command/web_fetch 即时取消)。
 
 import type OpenAI from 'openai';
 import { chatTools, type ChatMessage } from '../llm/index.js';
-import { config, isMemoryEnabled, isSubAgentEnabled } from '../config/index.js';
+import { buildMocodeCorePrompt, config, isSubAgentEnabled } from '../config/index.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
-import { buildMemorySection, buildMemoryIndexSection } from '../memory/index.js';
 import { ui } from '../ui/theme.js';
 import { runAgentCore, type AgentHooks } from './core.js';
 import { summarizeToolCall, summarizeToolResult, truncateDisplay } from '../ui/render.js';
 import { createContextState } from '../session/compact.js';
+import { inOverlay, mergeSubAgentChangeSet, type SubAgentResult } from '../agents/coordinator.js';
 
 /** 子 agent 系统提示后缀:角色与约束。 */
 const SUBAGENT_SUFFIX = `
 
 ## ⛯ SUB-AGENT MODE (you are a sub-agent)
 You are a sub-agent spawned by the main agent to handle an isolated sub-task. You have your own conversation history (independent of the main thread).
-- Focus solely on the assigned sub-task. Do NOT attempt to call the "task" tool (no recursive spawning).
+- Focus solely on the assigned sub-task. Do NOT attempt to call the "sub-agent" tool (no recursive spawning).
 - Use the tools available to you to complete the sub-task.
 - When done, your final text reply will be returned to the main agent as a summary — make it concise and actionable: what you did, key findings, files changed, and any issues. The main agent will decide the next step based on your summary.`;
+
+const SUBAGENT_ROLE = `## Sub-agent execution
+You are executing one delegated sub-task with the same engineering standards and capabilities as mocode.
+- Treat Task context as authoritative facts already established by the main agent; do not rediscover them without evidence they are stale.
+- Focus on the delegated scope, but continue until it is genuinely complete. Do not stop to save tokens.
+- Do not recursively call sub-agent. A write task runs in an isolated overlay; the coordinator merges and performs final unified verification.
+- Return concise findings, changes, verification evidence, and blockers to the coordinator.`;
 
 /** 子 agent 运行选项。 */
 export interface SpawnOptions {
@@ -39,15 +46,21 @@ export interface SpawnOptions {
   systemPromptSuffix?: string;
   /** 允许的工具名白名单(可选)。无 = 全量工具;给则从 chatTools 过滤。 */
   tools?: string[];
-  /** 步数上限(可选,默认 config.subAgentMaxSteps ?? 50)。 */
+  /** 步数上限；仍受 fast/standard profile cap 限制。 */
   maxSteps?: number;
   /** 主 agent 的 abort signal(可选)。透传给子 runAgentCore → chat/executeTool,
    *  主 Ctrl+C 树杀子 agent(chat 流式 abort + run_command/web_fetch 即时取消)。 */
   signal?: AbortSignal;
+  /** Read tasks share the workspace; write tasks execute in an isolated overlay. */
+  mode?: 'read' | 'write';
+  /** Declared write set, used for provenance and resource scheduling by the task tool. */
+  writeSet?: string[];
+  /** Small coordinator-produced facts to reuse instead of rediscovering main-agent context. */
+  context?: string;
 }
 
 /** 子 agent 运行结果。 */
-export interface SpawnResult {
+export interface SpawnResult extends SubAgentResult {
   /** 子 agent 最终文本回复;中断或无回复为 null。 */
   summary: string | null;
   /** 正常完毕 true;中断 false。 */
@@ -74,33 +87,31 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       summary: null,
       completed: false,
       transcript: 'Sub-agent execution is disabled. Enable it with /subagent on.',
+      status: 'failed', findings: [], readSet: [], changeSet: null, verification: null,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0 },
     };
   }
-  const maxSteps = opts.maxSteps ?? config.subAgentMaxSteps ?? 50;
+  const maxSteps = opts.maxSteps ?? config.subAgentMaxSteps;
 
-  // 构造子 agent 系统提示:复用主 agent 组装链 + 子 agent 角色后缀 + 自定义后缀。
-  // config.systemPrompt 是 getter(每次访问现拼 buildBasePrompt,反映 isMemoryEnabled),
-  // 所以这里直接读 config.systemPrompt 即可;buildMemoryIndexSection 显式按 isMemoryEnabled() 传参,
-  // 关闭时该段不进。注意:不能从 spawn.ts 直接 import buildBasePrompt —— 这会
-  // 拉起 config → llm → registry → builtins → task → spawn 形成循环求值死锁。
+  // 构造窄 worker prompt；主 Agent 已知事实只通过有界 context 注入，避免重复探索与重复计费。
   const systemPrompt = effectiveSystemPrompt(
-    config.systemPrompt +
-      buildMemorySection() +
-      buildMemoryIndexSection(isMemoryEnabled()) +
-      SUBAGENT_SUFFIX +
+    buildMocodeCorePrompt() + '\n\n' + SUBAGENT_ROLE + SUBAGENT_SUFFIX +
       (opts.systemPromptSuffix ? `\n\n${opts.systemPromptSuffix}` : ''),
   );
+  const taskPrompt = opts.context?.trim()
+    ? `Task context (authoritative; do not rediscover):\n${opts.context.slice(0, 4000)}\n\nSub-task:\n${opts.prompt}`
+    : opts.prompt;
 
-  // 工具子集:白名单过滤。无白名单 = 全量 chatTools,但始终剔除 task(防递归派生)。
+  // 写 worker 保留主 Agent 的完整能力；只读 mode 仅按调用契约移除副作用工具。
   let toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined;
-  if (opts.tools && opts.tools.length > 0) {
-    const allow = new Set(opts.tools);
-    toolsOverride = chatTools.filter(
-      (t) => allow.has(t.function.name) && t.function.name !== 'task',
-    );
-  } else {
-    toolsOverride = chatTools.filter((t) => t.function.name !== 'task');
-  }
+  const mode = opts.mode ?? 'read';
+  const requested = opts.tools?.length ? new Set(opts.tools) : null;
+  const readOnly = new Set(['read_file', 'glob', 'grep', 'codegraph', 'web_search', 'web_fetch', 'use_skill', 'memory_search', 'memory_list']);
+  toolsOverride = chatTools.filter((tool) =>
+    tool.function.name !== 'sub-agent' &&
+    (!requested || requested.has(tool.function.name)) &&
+    (mode === 'write' || readOnly.has(tool.function.name)),
+  );
 
   // 独立 history(子 agent 自己持有,不共享主对话)。
   // 只塞 system;user 消息由 runAgentCore 的 userInput 参数 push(与主 agent 一致)。
@@ -161,20 +172,59 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // 每个子 agent 独享统计/预算状态。不能保存再恢复模块级单例：多个 task 并发时
   // save/restore 会竞态，且 lastEstimate / schedulerLog 仍会污染主 agent。
   const localContextState = createContextState();
-  const result = await runAgentCore({
-    history,
-    userInput: opts.prompt,
-    signal: opts.signal, // 主 Ctrl+C 树杀子 agent(chat abort + 工具 abort)
-    hooks,
-    maxSteps,
-    toolsOverride,
-    contextState: localContextState,
-    autoValidate: false, // 子 Agent 共享主轮工作区，由主 Agent 收尾统一验证
-  });
+  const readSet = new Set<string>();
+  const run = () => runAgentCore({
+      history,
+      userInput: taskPrompt,
+      signal: opts.signal,
+      hooks,
+      maxSteps,
+      toolsOverride,
+      contextState: localContextState,
+      autoValidate: false,
+      onToolOutcome: (tool, args) => {
+        if (tool === 'read_file' && typeof args.path === 'string') readSet.add(args.path);
+        else if (['glob', 'grep', 'codegraph'].includes(tool)) readSet.add('workspace');
+      },
+    });
+  let result;
+  let changeSet = null;
+  let mergeStatus: 'committed' | 'conflict' | 'failed' = 'committed';
+  if (opts.mode === 'write') {
+    const isolated = await inOverlay(run);
+    result = isolated.value;
+    changeSet = isolated.changeSet;
+    const declared = new Set((opts.writeSet ?? []).map((item) => item.replaceAll('\\', '/').toLowerCase()));
+    const outsideDeclaration = declared.size > 0 && changeSet?.changes.some(
+      (change) => !declared.has(change.path.replaceAll('\\', '/').toLowerCase()),
+    );
+    if (!result.completed || outsideDeclaration) mergeStatus = 'failed';
+    else mergeStatus = await mergeSubAgentChangeSet(changeSet, opts.signal);
+  } else {
+    result = await run();
+  }
+
+  const status = opts.signal?.aborted || result.terminationReason === 'aborted'
+    ? 'aborted'
+    : mergeStatus === 'conflict' ? 'conflict'
+    : mergeStatus === 'failed' || !result.completed ? 'failed'
+    : 'completed';
 
   return {
     summary: result.finalText,
-    completed: result.completed,
+    completed: result.completed && status === 'completed',
     transcript: truncateDisplay(transcript, 20000), // 防过大;调试用,回灌主 history 的是 summary 不是 transcript
+    status,
+    findings: result.finalText ? [result.finalText] : [],
+    readSet: [...readSet].sort(),
+    changeSet,
+    verification: null, // 主 Agent 在所有 coordinator merge 完成后统一验证
+    usage: {
+      promptTokens: result.usage?.promptTokens ?? 0,
+      completionTokens: result.usage?.completionTokens ?? 0,
+      totalTokens: result.usage?.totalTokens ?? 0,
+      cachedTokens: result.usage?.cachedTokens ?? 0,
+      reasoningTokens: result.usage?.reasoningTokens ?? 0,
+    },
   };
 }

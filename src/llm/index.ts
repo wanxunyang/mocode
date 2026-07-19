@@ -168,10 +168,10 @@ export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 export const planChatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 
 export function refreshChatTools(): void {
-  // task 常驻内部 registry，运行时开关只控制模型可见 schema，因而 on/off 可即时生效。
+  // sub-agent 常驻内部 registry，运行时开关只控制模型可见 schema，因而 on/off 可即时生效。
   const visibleTools = isSubAgentEnabled()
     ? tools
-    : tools.filter((tool) => tool.name !== 'task');
+    : tools.filter((tool) => tool.name !== 'sub-agent');
   const next = visibleTools.map((t) => ({
     type: 'function' as const,
     function: {

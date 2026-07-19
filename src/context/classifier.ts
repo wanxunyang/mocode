@@ -40,7 +40,7 @@ const BY_NAME: Record<string, ContextKind> = {
   memory_update: 'status',
   memory_forget: 'status',
   // summary:子 agent 摘要(轻量)
-  task: 'summary',
+  'sub-agent': 'summary',
 };
 
 /**

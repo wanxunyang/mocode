@@ -112,8 +112,8 @@ Common backend `base_url` values:
 | `ANYSEARCH_BASE_URL`        | Search API endpoint                                                    | `https://api.anysearch.com` |
 | `SKILLS_DIRS`               | Override the default skill scan directories (platform path separator) | three default directories   |
 | `MOCODE_CONTEXT_OPTIMIZE`   | Typed encoding of tool results before they reach the LLM (tree/search/log…); disable for raw passthrough (length trimming only) | `true` |
-| `MAX_STEPS`                 | Max agent loop steps per turn (prevents infinite loops)               | `200`                        |
-| `SUB_AGENT_MAX_STEPS`       | Default step cap for sub-agents (spawned via the `task` tool)         | `50`                         |
+| `MAX_STEPS`                 | Max agent loop steps per turn (infinite-loop safety only)             | `1000`                       |
+| `SUB_AGENT_MAX_STEPS`       | Sub-agent loop safety ceiling; defaults to the main-agent value       | `1000`                       |
 | `SANDBOX_ROOT`               | Sandbox root directory (file operation boundary; falls back to cwd if unset) | none                  |
 | `MOCODE_THEME`               | Color theme (default/dark/light…; shell env takes precedence over file) | `default`                   |
 
@@ -149,7 +149,7 @@ The agent operates in **the working directory it was launched from** — to have
 | `ask_human`        | Pop up a Q&A panel at decision points; user picks a preset or types freely (blocks until answered) |
 | `switch_mode`      | Switch between `plan` (read-only planning) and `auto` (full execution); the agent can call this itself to explore before acting |
 | `drop_context`     | Replace irrelevant old tool results in history with stubs to free up context (preserves tool_call_id pairing, leaves system prompt and current turn untouched, idempotent) |
-| `task`             | Spawn a sub-agent for an independent subtask (isolated history, optional restricted toolset, optional step cap); calls run serially while sharing the workspace and return only a summary |
+| `sub-agent`        | Spawn a capable isolated worker; read tasks can run concurrently and writes use overlay + ChangeSet safe merge |
 
 | `memory_save`      | Save a piece of cross-session long-term memory (title indexed, body fetched on demand) |
 | `memory_search`    | Search memory bodies by keyword; hits boost the recall count (affects forgetting decay) |

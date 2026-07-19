@@ -9,7 +9,7 @@ import { jailResolve, jailGlobPattern } from './jail.js';
  *  - web_*:跨网络,非文件路径
  *  - ask_human / switch_mode:无文件路径
  *  - codegraph:只读 cwd 下 .codegraph/ 索引(只读、不写盘)
- *  - task:派生子 agent,继承全局 root(子 agent 同进程天然共享 getSandboxRoot)
+ *  - sub-agent:派生子 agent，通过 scoped sandbox root 使用隔离 overlay
  */
 export const SANDBOX_EXEMPT_TOOLS = new Set([
   'memory_save', 'memory_update', 'memory_forget', 'memory_search', 'memory_list',
@@ -17,7 +17,7 @@ export const SANDBOX_EXEMPT_TOOLS = new Set([
   'web_search', 'web_fetch',
   'ask_human', 'switch_mode',
   'codegraph',
-  'task',
+  'sub-agent',
 ]);
 
 /**

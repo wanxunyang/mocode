@@ -88,6 +88,8 @@ export interface ToolOutcome {
   attempts?: number;
   /** Aggregate backoff time spent between attempts. */
   retryDelayMs?: number;
+  /** LLM usage incurred inside an orchestrating tool (for example sub-agent). */
+  usage?: import('../llm/index.js').ChatUsage;
 }
 
 export type ToolExecuteResult = string | ToolOutcome;

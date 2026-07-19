@@ -126,6 +126,14 @@ function isResourceLockedTool(name: string): boolean {
   return !!tool && getToolCapabilities(tool).concurrency === 'resource-locked';
 }
 
+function isResourceLockedCall(call: ToolCallRef): boolean {
+  if (!isResourceLockedTool(call.name)) return false;
+  if (call.name !== 'sub-agent') return true;
+  const args = parseArgs(call.arguments);
+  // Unknown write sets stay on the serial path. Read tasks and known disjoint write sets may batch.
+  return args?.mode !== 'write' || (Array.isArray(args.writeSet) && args.writeSet.length > 0);
+}
+
 /** 文件 mutation 由 capability metadata 判定，供 diff、回滚与上下文失效共用。 */
 const isMutationTool = (name: string): boolean => isFileMutationTool(name);
 
@@ -297,6 +305,8 @@ export interface AgentRunOptions {
   onTraceEvent?: (event: AgentTraceEvent) => void;
   /** EVAL/嵌入方可提供稳定 ID；主进程默认读取当前 session/rollback turn。 */
   traceContext?: { sessionId?: string; turnId?: number };
+  /** Structured observer used by sub-agent coordinators to build read/write provenance. */
+  onToolOutcome?: (tool: string, args: Record<string, unknown>, outcome: ToolOutcome) => void;
 }
 
 /** OpenAI content array 的子集(text + image_url);repl 构造 user 多模态消息用。 */
@@ -401,6 +411,7 @@ export async function runAgentCore(
         }
       : u;
   };
+  const addToolUsage = (outcome: ToolOutcome): void => addUsage(outcome.usage);
   // Thrashing 检测:本轮内同 (name, args) 累计次数。≥3 在工具结果尾部追加 hint(见 thrashHint)。
   // 只在 runAgentCore 内,turn 结束自然 GC;不跨 turn 持久(下一轮重新计数,避免误把历史判为 thrashing)。
   const recentToolCalls = new Map<string, number>();
@@ -496,6 +507,7 @@ export async function runAgentCore(
           completed: false,
           terminationReason: 'aborted',
           finalText: null,
+          usage: turnUsage,
           validation: latestValidation,
           changedFiles: mutation.changedFiles.map((item) => item.path),
         };
@@ -614,6 +626,7 @@ export async function runAgentCore(
             completed: false,
             terminationReason: 'aborted',
             finalText: null,
+            usage: turnUsage,
             validation: latestValidation,
             changedFiles: mutation.changedFiles.map((item) => item.path),
           };
@@ -720,6 +733,7 @@ export async function runAgentCore(
             changedFiles: outcome.changedFiles ?? [],
             staleFiles: outcome.staleFiles ?? [],
             ...(outcome.changeSet ? { changeSet: outcome.changeSet } : {}),
+            ...(outcome.usage ? { nestedUsage: outcome.usage } : {}),
           }, {
             toolCallId: traceCall.toolCallId,
             ...(tc.id ? { providerToolCallId: tc.id } : {}),
@@ -778,6 +792,8 @@ export async function runAgentCore(
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
               const outcome = await started[k];
+              addToolUsage(outcome);
+              opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
               traceToolEnd(tc, i + k, outcome);
               const output = outcome.output;
               hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
@@ -797,7 +813,7 @@ export async function runAgentCore(
             hooks.onToolDone?.();
             i = j;
           } else if (
-            isResourceLockedTool(currentCall.name) &&
+            isResourceLockedCall(currentCall) &&
             !(getAgentMode() === 'plan' && getPlanDisabledTools().has(currentCall.name))
           ) {
             // 连续文件 mutation：权限确认仍严格按原序进行；全部 preflight 完成后再启动。
@@ -805,7 +821,7 @@ export async function runAgentCore(
             let j = i;
             while (
               j < calls.length &&
-              isResourceLockedTool(calls[j].name) &&
+              isResourceLockedCall(calls[j]) &&
               !getRuntimeDisabledTools().has(calls[j].name) &&
               !(getAgentMode() === 'plan' && getPlanDisabledTools().has(calls[j].name))
             ) j++;
@@ -862,6 +878,8 @@ export async function runAgentCore(
             for (let k = 0; k < entries.length; k++) {
               const entry = entries[k];
               const outcome = await started[k];
+              addToolUsage(outcome);
+              opts.onToolOutcome?.(entry.tc.name, entry.parsed ?? {}, outcome);
               traceToolEnd(entry.tc, i + k, outcome);
               hooks.onToolResult?.(
                 entry.tc,
@@ -971,6 +989,8 @@ export async function runAgentCore(
               },
               onRetry: (retry) => traceToolRetry(tc, i, retry),
             });
+            addToolUsage(outcome);
+            opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
             traceToolEnd(tc, i, outcome);
             const output = outcome.output;
             hooks.onToolDone?.();
@@ -1110,6 +1130,7 @@ export async function runAgentCore(
             completed: false,
             terminationReason: 'aborted',
             finalText: null,
+            usage: turnUsage,
             validation: latestValidation,
             changedFiles: mutation.changedFiles.map((item) => item.path),
           };

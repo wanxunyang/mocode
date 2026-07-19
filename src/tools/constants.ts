@@ -31,19 +31,18 @@ export const IGNORE = ['**/node_modules/**', '**/.git/**'];
 // ── plan 模式(只读规划,不执行)──────────────────────────────────────────────
 /**
  * plan 模式下从工具 schema 里剔除的工具(模型根本看不到 → 调不到):
- * 写盘 / 命令 / 记忆写入类 + task(派生子 agent,plan 模式只读不可有副作用)。单一事实源,
+ * 写盘 / 命令 / 记忆写入类 + sub-agent（派生子 agent，plan 模式只读不可有副作用）。单一事实源,
  * 被 llm(planChatTools)与 agent(防御 backstop)共用。
  * 只读工具(read_file/glob/grep/codegraph/web_search/web_fetch/use_skill/ask_human/memory_search/memory_list)保留。
  */
 export const PLAN_DISABLED_TOOLS = new Set([
   'write_file',
   'edit_file',
-  'apply_patch',
   'run_command',
   'memory_save',
   'memory_update',
   'memory_forget',
-  'task',
+  'sub-agent',
 ]);
 
 /**
@@ -63,5 +62,5 @@ export function getPlanDisabledTools(): Set<string> {
 
 /** auto/plan 共用的运行时功能开关防线；关闭时即使模型幻觉调用也不得执行。 */
 export function getRuntimeDisabledTools(): Set<string> {
-  return isSubAgentEnabled() ? new Set<string>() : new Set<string>(['task']);
+  return isSubAgentEnabled() ? new Set<string>() : new Set<string>(['sub-agent']);
 }

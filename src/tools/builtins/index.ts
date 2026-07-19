@@ -17,9 +17,8 @@ import { memorySearchTool } from './memory-search.js';
 import { memoryListTool } from './memory-list.js';
 import { memoryUpdateTool } from './memory-update.js';
 import { memoryForgetTool } from './memory-forget.js';
-import { taskTool } from './task.js';
+import { subAgentTool } from './task.js';
 import { projectSkillUpdateTool } from './project-skill-update.js';
-import { applyPatchTool } from './apply-patch.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
@@ -60,7 +59,6 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   read_file: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: pathResource },
   write_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource, delegatesResourceLocks: true },
   edit_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource, delegatesResourceLocks: true },
-  apply_patch: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: workspaceResource, delegatesResourceLocks: true },
   run_command: { effect: 'process', concurrency: 'serial', retry: 'never', resources: workspaceResource, supportsAbort: true },
   glob: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
   grep: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
@@ -77,12 +75,14 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   memory_update: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
   memory_forget: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
   project_skill_update: { effect: 'write', concurrency: 'serial', retry: 'never', resources: workspaceResource },
-  // task 只编排子 Agent；真实读写由子调用自行持锁，父调用不得包 workspace 锁。
-  task: {
+  // sub-agent 动态协调：只读任务无锁并行；写任务在 overlay 中执行，merge 时由 ChangeSet 持 canonical lock。
+  'sub-agent': {
     effect: 'write',
-    concurrency: 'serial',
+    concurrency: 'resource-locked',
     retry: 'never',
-    resources: workspaceResource,
+    resources: (args) => args.mode === 'write' && Array.isArray(args.writeSet) && args.writeSet.length
+      ? args.writeSet.map((item) => `file:${String(item)}`)
+      : args.mode === 'write' ? ['workspace'] : [],
     delegatesResourceLocks: true,
     supportsAbort: true,
   },
@@ -92,7 +92,6 @@ const rawBuiltinTools: Tool[] = [
   readFileTool,
   writeFileTool,
   editFileTool,
-  applyPatchTool,
   runCommandTool,
   globTool,
   grepTool,
@@ -105,7 +104,7 @@ const rawBuiltinTools: Tool[] = [
   dropContextTool,
   ..._memoryTools,
   ..._projectSkillTools,
-  taskTool,
+  subAgentTool,
 ];
 
 /** 所有内置工具均携带显式能力；新增工具遗漏声明时 registry 会保守串行。 */

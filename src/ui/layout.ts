@@ -709,6 +709,11 @@ export function normalizeMutationBoundary(): void {
   if (scrollOffset === 0) repaintViewport();
 }
 
+/** 命令/Agent 输出→下一条输入气泡前，统一保留恰好一条视觉空行。 */
+export function normalizeInputBoundary(): void {
+  normalizeMutationBoundary();
+}
+
 /** 原地刷新一条内容行（行数不变），用于运行中的工具 batch 更新计数。 */
 export function contentReplaceLine(absIdx: number, line: string): void {
   if (!active) return;

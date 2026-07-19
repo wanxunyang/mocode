@@ -1196,6 +1196,7 @@ export async function startRepl(
     layout.contentWrite(`${ui.dim}${t('repl.resumed', { id: loaded.id })}${ui.reset}\n\n`);
   }
 
+  let hasSubmittedInput = false;
   while (true) {
     // INPUT 态:画底栏输入框 + 状态行,光标入输入框
     refreshStatusBase(history);
@@ -1206,6 +1207,9 @@ export async function startRepl(
       layout.contentWrite(`  ${ui.gray}↳ ${formatReflectResult(reflectRes)}${ui.reset}\n`);
       clearLastReflectResult();
     }
+    // 所有斜杠命令和 Agent 轮次共用同一个输出→输入边界，避免某条命令漏写第二个 \n
+    // 后下一条 ❯ 气泡紧贴确认文案；已有多余空行也会收敛为恰好一行。
+    if (hasSubmittedInput) layout.normalizeInputBoundary();
     layout.enterInputMode(t('repl.idle'));
 
     let input: string[] | null = null;
@@ -1232,6 +1236,7 @@ export async function startRepl(
     let joined = input.join('\n');
     const line = joined.trim();
     if (!line) continue;
+    hasSubmittedInput = true;
     if (line === '/exit' || line === '/quit') break;
 
     // RUNNING 态:回显输入 → 底栏改 dim 占位、光标回内容续写位
@@ -2214,7 +2219,7 @@ export async function startRepl(
           const initPrompt = `请直接初始化或优化当前项目的 Project Skill，并完成写入。
 
 要求：
-1. 直接由你完成，禁止调用 task 工具或派生任何子 agent。
+1. 直接由你完成，禁止调用 sub-agent 工具或派生任何子 agent。
 2. 优先利用系统提示中已有的 Project Snapshot 和 Project Skill；不要重复扫描其中已有的目录、依赖、命令和模块清单。
 3. 最多进行 1 次 codegraph 探索；只有缺少关键依据时，才额外进行少量定点 read_file/grep。禁止全仓 glob 和逐文件扫描。
 4. Skill 只记录 Snapshot 无法提供的 WHY/HOW/GOTCHAS/CONVENTIONS：设计取舍、关键调用链、非直觉边界、项目约定和可操作坑点。使用具体路径和例子，删除重复或过时内容。

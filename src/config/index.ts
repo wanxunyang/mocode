@@ -99,7 +99,7 @@ export interface Config {
   maxSteps: number;
   /** 子 Agent 总开关。默认关闭；/subagent on|off 运行时切换并刷新模型工具表。 */
   subAgentEnabled: boolean;
-  /** 子 agent(task 工具派生)默认步数上限。防子任务失控耗尽配额。默认 50。 */
+  /** 子 Agent 默认步数上限，只防止无限循环；调用方可按任务提高。 */
   subAgentMaxSteps: number;
   /** 会话落盘目录(cwd 下)。 */
   sessionDir: string;
@@ -326,7 +326,7 @@ ${PLATFORM_NOTE}
 
 ## Tool rules
 - Precise path/symbol → go directly to \`read_file\` or \`codegraph node\`; use \`glob\`/\`grep\` only for discovery.
-- Before editing, read the exact target region and copy both its artifact \`hash\` and verbatim text. Use \`edit_file\` with \`expected_hash\` for unique local replacements, \`write_file\` with the latest hash for replacement (or null only for creation), and \`apply_patch\` for one atomic multi-file change.
+- Before editing, read the exact target region and copy both its artifact \`hash\` and verbatim text. Use \`edit_file\` with \`expected_hash\` for unique local replacements, and \`write_file\` with the latest hash for replacement (or null only for creation).
 - Local edits require an exact unique match; use \`write_file\` for new/full files.
 - Use \`glob\`/\`grep\` for discovery and \`run_command\` for execution or verification, not file existence checks. State intent before side effects.
 - Call \`ask_human\` only when a real user decision is required; otherwise decide and proceed.
@@ -430,6 +430,19 @@ Rules:
 }
 
 /**
+ * Stable, production-grade behavior shared by main and sub agents.
+ * It intentionally excludes session/project payload (snapshot, memory index, notepad), while
+ * retaining the exact editing, verification, recovery, safety, and reporting rules.
+ */
+export function buildMocodeCorePrompt(): string {
+  const full = buildBasePrompt();
+  const dynamicStart = full.indexOf('## Project context (dynamic reference)');
+  const reportingStart = full.indexOf('## Termination & Reporting');
+  if (dynamicStart < 0 || reportingStart < dynamicStart) return full;
+  return `${full.slice(0, dynamicStart).trimEnd()}\n\n${full.slice(reportingStart)}`;
+}
+
+/**
  * plan 模式追加到系统提示末尾的指令。
  * 历史曾是 `export const PLAN_MODE_SUFFIX`(顶层字面量);现改为按 isMemoryEnabled()
  * 动态拼:false 时不出现 memory_* 工具名,避免 LLM 想调不存在的工具。
@@ -465,9 +478,9 @@ export const config: Config = {
   autoReflect: process.env.AUTO_REFLECT !== 'false',
   memoryEnabled: process.env.MEMORY_ENABLED === 'true',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
-  maxSteps: Number(process.env.MAX_STEPS) || 200,
+  maxSteps: Number(process.env.MAX_STEPS) || 1000,
   subAgentEnabled: process.env.MOCODE_SUBAGENT_ENABLED === 'true',
-  subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || 50,
+  subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || Number(process.env.MAX_STEPS) || 1000,
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
   sandboxRoot: process.env.SANDBOX_ROOT || undefined,
@@ -516,7 +529,7 @@ export function updateModelConfig(opts: {
   }
 }
 
-/** 子 Agent 总开关；默认 false，关闭时 task 不进入模型工具表。 */
+/** 子 Agent 总开关；默认 false，关闭时 sub-agent 不进入模型工具表。 */
 export function isSubAgentEnabled(): boolean {
   return config.subAgentEnabled;
 }
