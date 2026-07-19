@@ -773,6 +773,12 @@ export function renderHistory(history: ChatMessage[]): void {
         }[];
       }).tool_calls;
       if (Array.isArray(tcs) && tcs.length > 0) {
+        if (text) {
+          // contentWriteMdOnce 会裁掉 markdown 尾部空行，而 history 中的原始 text 是否以 \n
+          // 结尾并不能代表当前物理布局。按缓冲中的视觉行归一化，和实时“正文 → 工具”
+          // 边界一致地保留一条空行，避免 /resume 回放时工具摘要紧贴正文。
+          layout.normalizeMutationBoundary();
+        }
         // 累积到 pendingBatch,顺序 = tool_calls 序
         for (const tc of tcs) {
           const name = tc?.function?.name ?? '';
