@@ -231,7 +231,7 @@ export async function runAgent(
         ? `${validation.status}: ${validation.skipReason}`
         : validation.status;
       layout.contentWrite(
-        `  ${color}●${ui.reset} ${t('agent.validationResult', { command, status: detail })}\n`,
+        `  ${color}●${ui.reset} ${t('agent.validationResult', { command, status: detail })}\n\n`,
       );
     },
     onDone: (elapsedMs, usage) => {
