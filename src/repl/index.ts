@@ -866,7 +866,7 @@ export async function startRepl(
   // ③ buildMemorySection 内已自决 ;④ buildMemoryIndexSection 显式传 isMemoryEnabled() 关闭段。
   const buildSystemMessage = (planMode: boolean): string =>
     effectiveSystemPrompt(
-      buildBasePrompt() +
+      buildBasePrompt(currentSessionId) +
         (planMode ? getPlanModeSuffix() : '') +
         buildMemorySection() +
         buildMemoryIndexSection(isMemoryEnabled()),
@@ -1184,6 +1184,9 @@ export async function startRepl(
       layout.contentWrite(`${ui.yellow}${t('repl.loadFailed')}${ui.reset}\n`);
       return;
     }
+    // Bind before rebuilding the prompt, or it can retain the previous session's notes path.
+    currentSessionId = loaded.id;
+    setCurrentSessionId(loaded.id, process.cwd());
     if (loaded.history[0]?.role === 'system') {
       loaded.history[0] = { role: 'system', content: buildSystemMessage(false) };
     }
@@ -1193,8 +1196,6 @@ export async function startRepl(
       ? [...loaded.queryHistory]
       : queryHistoryFromMessages(loaded.history);
     setAgentMode('auto'); // 续接重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
-    currentSessionId = loaded.id;
-    setCurrentSessionId(loaded.id, process.cwd()); // 切换会话:确保该会话的 notes.md 存在
     // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
     if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
     contextState.lastUsage = undefined;

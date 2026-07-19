@@ -100,7 +100,7 @@ function parseArgs(raw: string): Record<string, unknown> | null {
  * (直接拼,不哈希——避免热路径开销;args 长度本身有限,内存压力可忽略)。
  * null 表示未触发,不污染输出。
  */
-const THRASH_THRESHOLD = 3;
+const THRASH_THRESHOLD = 2;
 function thrashHint(name: string, args: string, count: number): string | null {
   if (count < THRASH_THRESHOLD) return null;
   return (
@@ -108,7 +108,8 @@ function thrashHint(name: string, args: string, count: number): string | null {
     'either failing or returning the same content. STOP retrying and switch strategy:\n' +
     '- read_file / glob → path likely wrong; call `glob` to discover paths, or `ask_human`\n' +
     '- run_command → Windows path-escaping issue; use `read_file` / `glob` with absolute paths instead\n' +
-    '- edit_file → old_string mismatch; re-read the file to find the exact text\n' +
+    '- write_file / edit_file CHANGE_CONFLICT → do not resend; read_file the same path and use its latest hash (use null only when read_file says the path is missing)\n' +
+    '- edit_file old_string mismatch → re-read the exact region and copy it verbatim\n' +
     '- otherwise → re-read the tool description; the argument shape may be wrong'
   );
 }

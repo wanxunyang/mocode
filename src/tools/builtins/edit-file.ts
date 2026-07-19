@@ -15,7 +15,7 @@ function conflict(path: string, details: string): ToolOutcome {
     retryable: false,
     changedFiles: [],
     staleFiles: [path],
-    output: `错误:编辑冲突 ${path}，磁盘未发生变化。${details}`,
+    output: `CHANGE_CONFLICT: ${path} was not changed. ${details} Do not retry these arguments. Call read_file on this exact path and copy both its latest hash and exact target text before editing again.`,
   };
 }
 

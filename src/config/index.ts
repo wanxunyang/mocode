@@ -206,8 +206,7 @@ import { setCurrentSessionId } from '../session/state.js';
  * Agent 用 write_file/edit_file/read_file 维护此文件，抗 compact（在 context window 之外）。
  * 文件不存在或为空时返空串（零开销）。
  */
-function buildNotepadSection(): string {
-  const sessionId = getCurrentSessionId();
+function buildNotepadSection(sessionId = getCurrentSessionId()): string {
   if (!sessionId) return '';
   
   const root = getSandboxRoot() ?? process.cwd();
@@ -289,7 +288,7 @@ ${PLAN_RESEARCH_RULES}`;
 }
 
 /** 兼容旧名字:repl 的 buildSystemMessage 仍引 PLAN_MODE_SUFFIX(变量)。运行时按需现拼。 */
-export function buildBasePrompt(): string {
+export function buildBasePrompt(sessionId = getCurrentSessionId()): string {
   const autoAllToolsLine = isMemoryEnabled()
     ? '- Default is AUTO mode: you research and execute with all tools (read/edit/run_command/memory/web/skills).'
     : '- Default is AUTO mode: you research and execute with all tools (read/edit/run_command/web/skills).';
@@ -349,11 +348,11 @@ ${PLATFORM_NOTE}
 - Operate only within authorized scope; when unsure, ask — don't guess.
 
 ## Project context (dynamic reference)
-${buildSnapshotSection()}${config.projectSkillEnabled ? buildProjectSkillSection() : ''}${memorySection}${buildNotepadSection()}
+${buildSnapshotSection()}${config.projectSkillEnabled ? buildProjectSkillSection() : ''}${memorySection}${buildNotepadSection(sessionId)}
 
 ## Session Notepad — working notes file
-${getCurrentSessionId() 
-  ? `You maintain a working notepad at \`.mocode/sessions/${getCurrentSessionId()}/notes.md\` using write_file / edit_file / read_file.`
+${sessionId
+  ? `You maintain a working notepad at \`.mocode/sessions/${sessionId}/notes.md\` using write_file / edit_file / read_file.`
   : 'You maintain a working notepad (path will be shown after the session starts).'}
 This is your private working surface — write intermediate findings, decisions, open questions,
 and anything you might need to recall later. The file survives context compaction.
@@ -393,8 +392,8 @@ Example:
     - [ ] Check if rate limiter interacts with auth middleware
 
 ### RULES
-${getCurrentSessionId() 
-  ? `- Your notepad file path is: \`.mocode/sessions/${getCurrentSessionId()}/notes.md\`. Use this exact path for all read_file/write_file/edit_file operations on your notes.`
+${sessionId
+  ? `- Your notepad file path is: \`.mocode/sessions/${sessionId}/notes.md\`. Use this exact path for all read_file/write_file/edit_file operations on your notes.`
   : '- Your notepad file path will be available after the session starts.'}
 - Use write_file to create/overwrite; use edit_file to append or modify sections
 - Keep the file concise — summarize, don't dump raw tool output

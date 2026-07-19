@@ -14,7 +14,7 @@ function conflict(path: string, details: string): ToolOutcome {
     retryable: false,
     changedFiles: [],
     staleFiles: [path],
-    output: `错误:写入冲突 ${path}，磁盘未发生变化。${details}`,
+    output: `CHANGE_CONFLICT: ${path} was not changed. ${details} Do not retry these arguments. Call read_file on this exact path, then use the returned hash; use expected_hash=null only if read_file reports that the path is missing.`,
   };
 }
 
