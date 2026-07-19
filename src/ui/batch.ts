@@ -372,8 +372,8 @@ export function shiftBatchesAfter(absIdx: number, delta: number): void {
 
 // ── history 回放支持 ──
 
-/** 把已构造好的 BatchEntry[] 直接落成摘要行(用于 renderHistory 回放;不记录 id 也不需可切换)。
- *  含 mutation(write_file/edit_file)时整批展开——与实时 endBatch 行为一致。 */
+/** 把已构造好的 BatchEntry[] 落成可切换摘要行(用于 renderHistory 回放)。
+ *  含 mutation(write_file/edit_file)时整批展开；普通批次保留与实时 flushToolBatch 相同的空行边界。 */
 export function writeSummaryOnly(
   entries: BatchEntry[],
   layout: {
@@ -389,6 +389,9 @@ export function writeSummaryOnly(
   endBatch(id, layout);
   if (entries.length === 1 && isMutationToolName(entries[0].name)) {
     expandSingleEntryFully(id, layout);
+  } else {
+    // endBatch 已用一个换行结束摘要；再提交当前空行，避免下一段 assistant 正文紧贴工具结果。
+    layout.contentWrite('\n');
   }
 }
 

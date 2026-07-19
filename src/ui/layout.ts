@@ -16,7 +16,7 @@ import {
 import { ui, applyTerminalBackground, resetTerminalBackground } from './theme.js';
 import * as content from './content.js';
 import * as mouse from './mouse.js';
-import { shiftBatchesAfter } from './batch.js';
+import { reset as resetBatches, shiftBatchesAfter } from './batch.js';
 import { copyToClipboard, readClipboard } from './clipboard.js';
 import { renderMarkdown } from './markdown.js';
 import { t } from '../i18n/index.js';
@@ -726,8 +726,9 @@ export function contentReplaceLine(absIdx: number, line: string): void {
 
 /** 清空内容区时通知 batch 渲染器重置(摘要行映射与展开态)。 */
 export function notifyContentReset(): void {
-  // 动态 import 避免循环;模块级 reset() 只清映射,不动 batch 内部数据(id 与 entries 仍可重用)
-  void import('./batch.js').then((m) => m.reset());
+  // 必须同步清理：clearContent() 后调用方会立即 renderHistory() 重建 batch。
+  // 若异步 reset，旧清理会在回放完成后反过来抹掉新摘要的点击映射。
+  resetBatches();
 }
 
 
