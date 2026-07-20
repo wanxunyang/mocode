@@ -1,5 +1,4 @@
 import { exitAltScreen } from './ui/layout.js';
-import { checkAndMaybeUpdate } from './updater/index.js';
 import { readConfigFile } from './config/file.js';
 import { detectLanguage, setLanguage, t } from './i18n/index.js';
 
@@ -81,19 +80,16 @@ async function main(): Promise<void> {
       console.error(t('cli.sessionMissing', { id }));
       process.exit(1);
     }
-    const updateNotice = checkAndMaybeUpdate();
     const { startRepl } = await import('./repl/index.js');
     await startRepl(
       loaded.history,
       loaded.id,
-      updateNotice,
       sandboxRootOverride,
       loaded.queryHistory,
     );
   } else {
-    const updateNotice = checkAndMaybeUpdate();
     const { startRepl } = await import('./repl/index.js');
-    await startRepl(undefined, undefined, updateNotice, sandboxRootOverride);
+    await startRepl(undefined, undefined, sandboxRootOverride);
   }
   process.exit(0);
 }

@@ -113,6 +113,13 @@ import path from 'node:path';
 import { getSandboxRoot } from '../sandbox/root.js';
 
 import { setCurrentSessionId, getCurrentSessionId } from '../session/state.js';
+import {
+  checkVersion,
+  fetchLatestVersion,
+  getCurrentVersion,
+  isDevRun,
+  spawnUpgrade,
+} from '../commands/upgrade.js';
 
 /**
  * readline 的 prompt 必须是纯文本(无 ANSI):readline 按字符数算光标位置,
@@ -207,6 +214,13 @@ function buildSlashCommands(): SlashCommand[] {
       name: '/language', desc: d('commands.language'), children: [
         { name: 'zh-CN', value: '/language zh-CN', desc: d('commands.languageZh') },
         { name: 'en', value: '/language en', desc: d('commands.languageEn') },
+      ],
+    },
+    {
+      name: '/upgrade', desc: d('commands.upgrade'), children: [
+        { name: 'now', value: '/upgrade', desc: d('commands.upgradeNow') },
+        { name: 'check', value: '/upgrade check', desc: d('commands.upgradeCheck') },
+        { name: 'status', value: '/upgrade status', desc: d('commands.upgradeStatus') },
       ],
     },
   ];
@@ -445,6 +459,8 @@ function runningStateFor(
       return { status: t('running.snapshot'), placeholder: t('running.switching') };
     case '/language':
       return { status: t('running.language'), placeholder: t('running.chooseLanguage') };
+    case '/upgrade':
+      return { status: t('running.upgrade'), placeholder: t('running.upgrading') };
     default:
       return { status: '', placeholder: '' };
   }
@@ -833,7 +849,6 @@ export function renderHistory(history: ChatMessage[]): void {
 export async function startRepl(
   initialHistory?: ChatMessage[],
   sessionId?: string,
-  updateNotice: string | null = null,
   sandboxRootOverride?: string,
   initialQueryHistory?: readonly string[],
 ): Promise<void> {
@@ -949,12 +964,6 @@ export async function startRepl(
       }
     }
   }
-  if (updateNotice) {
-    // 自更新提示:放 /plan · /auto 行下方,黄色(警示色)突出"你正在用的版本较旧",与 dim 提示区分。
-    // 开场静态段(进 INPUT 态前),一行,纯文本不与流式 / 输入争用。
-    layout.contentWrite(`  ${ui.yellow}⚠ ${updateNotice}${ui.reset}\n`);
-  }
-
   /**
    * 切换 agent 模式(Shift+Tab 触发,经 prompt.ts 的 onCycleMode 回调)。
    * cycleMode 翻 agentMode + applyMode 重写 history[0] + refreshStatusBase 设状态行 modeTag;
@@ -1297,6 +1306,70 @@ export async function startRepl(
     if (line === '/init') {
       // /init:把 init 指令当 user 输入发给 agent(扫描项目 + 生成 MOCODE.md),fall through 走 runAgent
       joined = INIT_PROMPT;
+    }
+    if (line === '/upgrade' || line.startsWith('/upgrade ')) {
+      const arg = line === '/upgrade' ? '' : line.slice('/upgrade '.length).trim().toLowerCase();
+
+      // /upgrade check — 联网检查当前版本与最新版本差异
+      if (arg === 'check') {
+        const signal = startRunningListener(t('running.upgrading'));
+        try {
+          const info = await checkVersion();
+          if (!info.latest) {
+            layout.contentWrite(`${ui.yellow}⚠ ${t('upgrade.fetchFailed')}${ui.reset}\n`);
+          } else if (info.hasUpdate) {
+            layout.contentWrite(`${ui.cyan}● ${t('upgrade.hasUpdate', { current: info.current, latest: info.latest })}${ui.reset}\n`);
+            layout.contentWrite(`${ui.dim}${t('upgrade.upgradeStarted', { version: `v${info.latest}` })}${ui.reset}\n`);
+          } else {
+            layout.contentWrite(`${ui.green}✓ ${t('upgrade.noUpdate', { version: info.current })}${ui.reset}\n`);
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          layout.contentWrite(`${ui.red}${t('upgrade.failed', { message: msg })}${ui.reset}\n`);
+        } finally {
+          stopRunningListener();
+        }
+        continue;
+      }
+
+      // /upgrade status — 只显示本地当前版本(不联网)
+      if (arg === 'status') {
+        const current = getCurrentVersion();
+        layout.contentWrite(`${ui.dim}${t('upgrade.currentVersion', { version: `v${current}` })}${ui.reset}\n`);
+        layout.contentWrite(`${ui.dim}${t('upgrade.pkgName')}${ui.reset}\n`);
+        continue;
+      }
+
+      // /upgrade 或 /upgrade now — 直接执行升级
+      if (arg === '' || arg === 'now') {
+        const signal = startRunningListener(t('running.upgrading'));
+        try {
+          // 先快速拉一次最新版本,给出一个明确的升级目标提示
+          const latest = await fetchLatestVersion();
+          const current = getCurrentVersion();
+          if (latest && latest === current) {
+            layout.contentWrite(`${ui.green}✓ ${t('upgrade.noUpdate', { version: current })}${ui.reset}\n`);
+            continue;
+          }
+          spawnUpgrade();
+          const target = latest ? `v${latest}` : t('upgrade.latestVersion', { version: '?' });
+          layout.contentWrite(`${ui.cyan}● ${t('upgrade.upgradeStarted', { version: target })}${ui.reset}\n`);
+          layout.contentWrite(`${ui.dim}${t('upgrade.upgradeHint')}${ui.reset}\n`);
+          if (isDevRun()) {
+            layout.contentWrite(`${ui.yellow}⚠ ${t('upgrade.devSkip')}${ui.reset}\n`);
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          layout.contentWrite(`${ui.red}${t('upgrade.failed', { message: msg })}${ui.reset}\n`);
+        } finally {
+          stopRunningListener();
+        }
+        continue;
+      }
+
+      // 未知子命令
+      layout.contentWrite(`${ui.yellow}${t('upgrade.usage')}${ui.reset}\n`);
+      continue;
     }
     if (line === '/plan') {
       // /plan:切到 plan 模式(只读探查 + 产出计划)。
