@@ -34,7 +34,7 @@ import {
   type ChecklistContext,
 } from './middleware/checklist.js';
 import { inferModelFamily } from './work-discipline.js';
-import { reflectionHint, classifyError } from './retry-classifier.js';
+import { reflectionHint, classifyError, type ErrorCategory } from './retry-classifier.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import {
   maybeCompact,
@@ -241,20 +241,23 @@ function readDiffContext(
 /** RETRY-01: 把 thrash hint + 反思指针一次性拼到 output 尾部。
  *  - thrash hint 永远可能存在(连续失败才出现);
  *  - 反思指针仅在 error/denied 状态追加,success 跳过避免噪声。
- *  抽出 helper 是为了 sequential + parallel 两处共用,避免拼装逻辑漂移。 */
+ *  抽出 helper 是为了 sequential + parallel 两处共用,避免拼装逻辑漂移。
+ *  返回追加后的字符串 + 反思 category(用于 QUAL-01 trace 硬事件),
+ *  success / aborted 时 category === null,调用方据此决定是否 emit 'retry_reflection' 事件。 */
 function appendRetryAnnotations(
   output: string,
   status: 'success' | 'error' | 'denied' | 'aborted',
   code: import('./../tools/types.js').ToolOutcomeCode,
   thrashHint: string | null,
-): string {
+): { output: string; reflectionCategory: ErrorCategory | null } {
   let result = thrashHint ? `${output}${thrashHint}` : output;
+  let reflectionCategory: ErrorCategory | null = null;
   if (status !== 'success' && status !== 'aborted') {
-    const category = classifyError(code);
-    const reflection = reflectionHint(category);
-    result = `${result}\n\n[retry reflection: ${category}]\n${reflection}`;
+    reflectionCategory = classifyError(code);
+    const reflection = reflectionHint(reflectionCategory);
+    result = `${result}\n\n[retry reflection: ${reflectionCategory}]\n${reflection}`;
   }
-  return result;
+  return { output: result, reflectionCategory };
 }
 
 /** ASK-01: ask_human 工具调用本 turn 计数器。纯函数无副作用,
@@ -892,10 +895,26 @@ export async function runAgentCore(
               hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
               // Thrashing:history 里附 hint(UI 已用干净 output 渲染,避免屏幕噪声)
               const hint = recordAndHint(tc.name, tc.arguments, outcome.status === 'success');
-              const annotated = appendRetryAnnotations(output, outcome.status, outcome.code, hint);
+              const { output: annotated, reflectionCategory } = appendRetryAnnotations(output, outcome.status, outcome.code, hint);
+              // QUAL-01 trace 硬事件:反思指针注入计数(history 文本扫描会因 LLM 在
+              // 正文里提一句 "[retry reflection]" 而误算,改用 core 接缝处显式 emit)。
+              if (reflectionCategory !== null) {
+                emitTrace('retry_reflection', {
+                  tool: tc.name,
+                  code: outcome.code,
+                  category: reflectionCategory,
+                  attempt: outcome.attempts ?? 1,
+                }, tc.id ? { providerToolCallId: tc.id } : {});
+              }
               // ASK-01: 计数 + 预算提示
               if (tc.name === 'ask_human' && outcome.status === 'success') {
                 askHumanCountThisTurn += 1;
+                // QUAL-01 trace 硬事件:ask_human 真实调用计数(取代 tool_call_end.name 推断)。
+                emitTrace('ask_human_call', {
+                  tool: tc.name,
+                  status: outcome.status,
+                  perTurnCount: askHumanCountThisTurn,
+                }, tc.id ? { providerToolCallId: tc.id } : {});
               }
               const askBudget = askHumanBudgetAnnotation(askHumanCountThisTurn, outcome.status);
               const finalOutput = askBudget ? `${annotated}${askBudget}` : annotated;
@@ -1098,10 +1117,26 @@ export async function runAgentCore(
             // Thrashing:同上(history 附 hint,UI 干净)
             const hint = recordAndHint(tc.name, tc.arguments, outcome.status === 'success');
             // RETRY-01: 同 parallel 路径,在非成功状态追加反思指针。
-            const annotated = appendRetryAnnotations(output, outcome.status, outcome.code, hint);
+            const { output: annotated, reflectionCategory } = appendRetryAnnotations(output, outcome.status, outcome.code, hint);
+            // QUAL-01 trace 硬事件:反思指针注入计数(history 文本扫描会因 LLM 在
+            // 正文里提一句 "[retry reflection]" 而误算,改用 core 接缝处显式 emit)。
+            if (reflectionCategory !== null) {
+              emitTrace('retry_reflection', {
+                tool: tc.name,
+                code: outcome.code,
+                category: reflectionCategory,
+                attempt: outcome.attempts ?? 1,
+              }, tc.id ? { providerToolCallId: tc.id } : {});
+            }
             // ASK-01: ask_human 计数 + 预算提示(同 parallel 路径)。
             if (tc.name === 'ask_human' && outcome.status === 'success') {
               askHumanCountThisTurn += 1;
+              // QUAL-01 trace 硬事件:ask_human 真实调用计数(取代 tool_call_end.name 推断)。
+              emitTrace('ask_human_call', {
+                tool: tc.name,
+                status: outcome.status,
+                perTurnCount: askHumanCountThisTurn,
+              }, tc.id ? { providerToolCallId: tc.id } : {});
             }
             const askBudget = askHumanBudgetAnnotation(askHumanCountThisTurn, outcome.status);
             const finalOutput = askBudget ? `${annotated}${askBudget}` : annotated;
@@ -1282,6 +1317,14 @@ export async function runAgentCore(
             content: _checklistMiddleware.buildUserMessage(checklistCtx.modelFamily),
           });
           (history as { __checklistStreak?: number }).__checklistStreak = checklistRetryCount + 1;
+          // QUAL-01 trace 硬事件:PROMPT-02 触发计数(取代 history 文本扫描
+          // [checklist] marker — LLM 在正文里提一句 "[checklist]" 也会被误算)。
+          emitTrace('checklist_triggered', {
+            streak: checklistRetryCount + 1,
+            validationStatus: checklistCtx.lastValidationStatus,
+            hadMutation: checklistCtx.hadMutation,
+            modelFamily: checklistCtx.modelFamily ?? 'other',
+          });
           // 重要: 不置 done,让主循环继续下一轮(模型被迫用工具或写出可验证声明)。
           continue;
         }

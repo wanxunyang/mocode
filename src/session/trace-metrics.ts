@@ -45,24 +45,61 @@ function joinHistoryForMarkerScan(history: readonly ChatMessage[] | undefined): 
   return parts.join('\n');
 }
 
-/** QUAL-01 质量维度:从 history 文本中扫描三种 marker。
- * - `[retry reflection:` → 反思重试注入次数(RETRY-01)
- * - `[checklist]` user 消息 → PROMPT-02 触发次数
- * - ask_human 工具名(从 events 的 tool_call_end.data.name 推断)+ success 状态 → ASK-01 触发次数
+/** QUAL-01 质量维度。
+ *
+ * 优先用硬事件(retry_reflection / checklist_triggered / ask_human_call),
+ * 这是 core.ts 在接缝处显式 emit 的,可信度高。
+ * 如果 events 里没有对应硬事件(老 trace / 旧 fixture 走 history 文本回放),fallback
+ * 到 history 文本扫描 + tool_call_end(name === 'ask_human', status === 'success')。
+ *
+ * - `retry_reflection` → 反思重试注入次数(RETRY-01)
+ * - `checklist_triggered` → PROMPT-02 触发次数
+ * - `ask_human_call` (status === 'success') → ASK-01 触发次数
+ *
  * 三类都给出 fallback 0,确保报告维度永远是 number,不会被 NaN 污染。 */
 function reduceQualityDimensions(
   events: readonly AgentTraceEvent[],
   history: readonly ChatMessage[] | undefined,
 ): Pick<TraceMetrics, 'reflectionRounds' | 'askHumanCount' | 'checklistTriggered'> {
-  const historyText = joinHistoryForMarkerScan(history);
-  const reflectionRounds = (historyText.match(/\[retry reflection:/g) ?? []).length;
-  const checklistTriggered = (historyText.match(/\[checklist\]/g) ?? []).length;
-  // ask_human 工具调用次数:从 events 推断,比 history 文本扫描更稳(避免 LLM 在
-  // 文本里误引用 "ask_human" 字面量时被误算)。
+  // 1. 硬事件计数(优先级最高)。
+  let reflectionRounds = 0;
+  let checklistTriggered = 0;
   let askHumanCount = 0;
+  let hasHardReflection = false;
+  let hasHardChecklist = false;
+  let hasHardAskHuman = false;
   for (const event of events) {
-    if (event.type !== 'tool_call_end') continue;
-    if (event.data.name === 'ask_human' && event.data.status === 'success') askHumanCount += 1;
+    if (event.type === 'retry_reflection') {
+      reflectionRounds += 1;
+      hasHardReflection = true;
+    } else if (event.type === 'checklist_triggered') {
+      checklistTriggered += 1;
+      hasHardChecklist = true;
+    } else if (event.type === 'ask_human_call' && event.data.status === 'success') {
+      askHumanCount += 1;
+      hasHardAskHuman = true;
+    }
+  }
+
+  // 2. fallback: 历史事件没有硬信号时,从 history 文本 + tool_call_end 推断。
+  //    保留旧 fixture / 回放 JSONL 的兼容能力。
+  if (!hasHardReflection || !hasHardChecklist || !hasHardAskHuman) {
+    if (!hasHardReflection) {
+      const historyText = joinHistoryForMarkerScan(history);
+      reflectionRounds += (historyText.match(/\[retry reflection:/g) ?? []).length;
+    }
+    if (!hasHardChecklist) {
+      const historyText = joinHistoryForMarkerScan(history);
+      checklistTriggered += (historyText.match(/\[checklist\]/g) ?? []).length;
+    }
+    if (!hasHardAskHuman) {
+      for (const event of events) {
+        if (event.type !== 'tool_call_end') continue;
+        if (event.data.name === 'ask_human' && event.data.status === 'success') {
+          askHumanCount += 1;
+        }
+      }
+    }
   }
   return { reflectionRounds, askHumanCount, checklistTriggered };
 }

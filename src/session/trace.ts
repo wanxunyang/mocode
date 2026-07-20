@@ -11,7 +11,11 @@ export type TraceEventType =
   | 'turn_start' | 'turn_end' | 'step_start' | 'step_end'
   | 'model_start' | 'model_retry' | 'model_end'
   | 'tool_call_start' | 'tool_retry' | 'tool_call_end' | 'permission'
-  | 'validation_start' | 'validation_end' | 'compact' | 'abort' | 'rollback';
+  | 'validation_start' | 'validation_end' | 'compact' | 'abort' | 'rollback'
+  // PROMPT-02 / RETRY-01: hard signal for quality dimensions (QUAL-01).
+  // Emitted by core.ts when checklist fires / retry reflection is injected,
+  // so reduceTraceMetrics can count without scanning history text (fragile).
+  | 'checklist_triggered' | 'retry_reflection' | 'ask_human_call';
 
 export interface AgentTraceEvent {
   schemaVersion: 1;

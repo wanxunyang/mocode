@@ -91,6 +91,32 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** RETRY-02 失败裁剪开关钩子(默认关,保留回滚语义)。
+ *
+ * 当整轮 retry 全部失败(达到 TOOL_RETRY_MAX_ATTEMPTS)且最终 outcome 是
+ * 不可恢复错误(NEVER_RETRY_CODES 中的 code)时,如果**调用方**启用了该钩子
+ * (即传入了 `onFailedAttempt`),会收到一个汇总信息,让调用方决定是否把
+ * 这段失败调用从 history 中裁掉(避免 Context Contamination:失败记忆
+ * 持续污染下一轮判断,见 arXiv 2605.08563)。
+ *
+ * 默认**不**启用 → 历史保持完整,rollback 语义不被破坏。
+ * 启用 = 调用方在 core.ts 里把 onFailedAttempt 接上;该接缝由 caller 控制。
+ */
+export interface FailedAttemptInfo {
+  /** 唯一 fingerprint(调用方传进来的那个)。 */
+  fingerprint: string;
+  /** 最终 outcome 状态。 */
+  status: ToolOutcome['status'];
+  /** 最终 outcome 的错误码。 */
+  code: ToolOutcomeCode;
+  /** 错误 category(RETRY-01 分类器)。 */
+  category: ErrorCategory;
+  /** 已经试过的总次数。 */
+  attempts: number;
+  /** 反思指针短文(给 LLM 看)。 */
+  reflectionHint: string;
+}
+
 /** Retry safe/idempotent transient outcomes; each execute call owns one complete lock attempt. */
 export async function executeWithToolRetry(
   capabilities: ToolCapabilities,
@@ -98,11 +124,14 @@ export async function executeWithToolRetry(
   signal: AbortSignal | undefined,
   execute: (attempt: number) => Promise<ToolOutcome>,
   onRetry?: (info: ToolRetryInfo) => void,
+  onFailedAttempt?: (info: FailedAttemptInfo) => void,
 ): Promise<ToolOutcome> {
   const startedAt = Date.now();
   let retryDelayMs = 0;
+  let lastOutcome: ToolOutcome | null = null;
   for (let attempt = 1; attempt <= TOOL_RETRY_MAX_ATTEMPTS; attempt++) {
     const outcome = await execute(attempt);
+    lastOutcome = outcome;
     const elapsed = Date.now() - startedAt;
     const waitMs = backoff(attempt);
     const canRetry = attempt < TOOL_RETRY_MAX_ATTEMPTS &&
@@ -111,6 +140,24 @@ export async function executeWithToolRetry(
       !signal?.aborted &&
       reserveFingerprintRetry(fingerprint, Date.now());
     if (!canRetry) {
+      // RETRY-02 接缝:所有 attempt 用尽时,如果调用方启用了 onFailedAttempt,
+      // 通知一次(用于 history 裁剪 / 等)。只在**真**失败(not success)时通知,
+      // success 路径不需要裁剪任何东西。
+      if (onFailedAttempt && outcome.status !== 'success') {
+        try {
+          const reflection = reflectOn(outcome.code);
+          onFailedAttempt({
+            fingerprint,
+            status: outcome.status,
+            code: outcome.code,
+            category: reflection.category,
+            attempts: attempt,
+            reflectionHint: reflection.hint,
+          });
+        } catch {
+          // 钩子失败不影响主流程。
+        }
+      }
       return {
         ...outcome,
         durationMs: elapsed,
@@ -135,6 +182,8 @@ export async function executeWithToolRetry(
     await sleep(waitMs, signal);
     retryDelayMs += waitMs;
   }
+  // 不可达路径:循环要么 return,要么最后一次 attempt 也 shouldRetry=false(走 return)。
+  // 留 throw 是为了编译期穷尽性检查(TypeScript 期望函数末尾 return)。
   throw new Error('unreachable tool retry state');
 }
 
