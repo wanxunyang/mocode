@@ -1318,7 +1318,7 @@ export async function startRepl(
             layout.contentWrite(`${ui.yellow}⚠ ${t('upgrade.fetchFailed')}${ui.reset}\n`);
           } else if (info.hasUpdate) {
             layout.contentWrite(`${ui.cyan}● ${t('upgrade.hasUpdate', { current: info.current, latest: info.latest })}${ui.reset}\n`);
-            layout.contentWrite(`${ui.dim}${t('upgrade.upgradeStarted', { version: `v${info.latest}` })}${ui.reset}\n`);
+            layout.contentWrite(`${ui.dim}${t('upgrade.checkHint')}${ui.reset}\n`);
           } else {
             layout.contentWrite(`${ui.green}✓ ${t('upgrade.noUpdate', { version: info.current })}${ui.reset}\n`);
           }
@@ -1363,7 +1363,11 @@ export async function startRepl(
             break;
           } else {
             layout.contentWrite(`${ui.red}✗ ${t('upgrade.failedWithCode', { code: String(result.exitCode ?? 'unknown') })}${ui.reset}\n`);
-            layout.contentWrite(`${ui.dim}${t('upgrade.manualHint')}${ui.reset}\n`);
+            if (result.output.includes('ETARGET') || result.output.includes('No matching version found')) {
+              layout.contentWrite(`${ui.yellow}${t('upgrade.etargetHint')}${ui.reset}\n`);
+            } else {
+              layout.contentWrite(`${ui.dim}${t('upgrade.manualHint')}${ui.reset}\n`);
+            }
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
