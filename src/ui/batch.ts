@@ -130,16 +130,19 @@ function buildSummaryLine(record: BatchRecord, live = false): string {
   const parts: string[] = [];
   for (const [n, c] of counts) parts.push(`${n} ${c}`);
   const completed = entries.filter((e) => e.resultSummary || e.diffBlock || e.failed).length;
-  const failed = entries.some((e) => e.failed);
+  const failedCount = entries.filter((e) => e.failed).length;
   // 工具本身完成就立即显示完成态，不等待整轮正文流完/onDone。
+  // 单项失败不代表整批失败：执行中优先展示进度；完成后区分部分失败与全部失败。
   const finished = completed >= entries.length;
-  const symbol = failed ? '×' : finished ? '●' : '◇';
-  const color = failed ? ui.red : finished ? ui.green : ui.accent;
-  const label = failed
-    ? t('agent.toolsFailed')
-    : finished
-      ? t('agent.toolsComplete')
-      : t('agent.toolsRunning');
+  const allFailed = finished && failedCount === entries.length;
+  const partiallyFailed = finished && failedCount > 0 && !allFailed;
+  const symbol = !finished ? '◇' : allFailed ? '×' : partiallyFailed ? '!' : '●';
+  const color = !finished ? ui.accent : allFailed ? ui.red : partiallyFailed ? ui.yellow : ui.green;
+  const label = !finished
+    ? t('agent.toolsRunning')
+    : allFailed
+      ? t('agent.toolsFailed')
+      : t('agent.toolsComplete');
   const progress = live && !finished ? `  ${completed}/${entries.length}` : `  ${entries.length}`;
   const elapsedMs = record.finishedAt ? record.finishedAt - record.startedAt : 0;
   const elapsed = record.finishedAt
