@@ -117,8 +117,7 @@ import {
   checkVersion,
   fetchLatestVersion,
   getCurrentVersion,
-  isDevRun,
-  spawnUpgrade,
+  runUpgradeForeground,
 } from '../commands/upgrade.js';
 
 /**
@@ -1340,23 +1339,31 @@ export async function startRepl(
         continue;
       }
 
-      // /upgrade 或 /upgrade now — 直接执行升级
+      // /upgrade 或 /upgrade now — 前台执行升级,实时显示 npm 输出
       if (arg === '' || arg === 'now') {
         const signal = startRunningListener(t('running.upgrading'));
         try {
-          // 先快速拉一次最新版本,给出一个明确的升级目标提示
           const latest = await fetchLatestVersion();
           const current = getCurrentVersion();
           if (latest && latest === current) {
             layout.contentWrite(`${ui.green}✓ ${t('upgrade.noUpdate', { version: current })}${ui.reset}\n`);
             continue;
           }
-          spawnUpgrade();
-          const target = latest ? `v${latest}` : t('upgrade.latestVersion', { version: '?' });
-          layout.contentWrite(`${ui.cyan}● ${t('upgrade.upgradeStarted', { version: target })}${ui.reset}\n`);
-          layout.contentWrite(`${ui.dim}${t('upgrade.upgradeHint')}${ui.reset}\n`);
-          if (isDevRun()) {
-            layout.contentWrite(`${ui.yellow}⚠ ${t('upgrade.devSkip')}${ui.reset}\n`);
+          const target = latest ?? 'latest';
+          layout.contentWrite(`${ui.cyan}● ${t('upgrade.begin', { version: target })}${ui.reset}\n`);
+
+          const result = await runUpgradeForeground((chunk) => {
+            layout.contentWrite(chunk);
+          });
+
+          if (result.ok) {
+            layout.contentWrite(`\n${ui.green}${ui.bold}✓ ${t('upgrade.completed')}${ui.reset}\n`);
+            // 给用户 2.5 秒看清提示,然后自动退出,下次启动即使用新版本。
+            await new Promise((resolve) => setTimeout(resolve, 2500));
+            break;
+          } else {
+            layout.contentWrite(`${ui.red}✗ ${t('upgrade.failedWithCode', { code: String(result.exitCode ?? 'unknown') })}${ui.reset}\n`);
+            layout.contentWrite(`${ui.dim}${t('upgrade.manualHint')}${ui.reset}\n`);
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);

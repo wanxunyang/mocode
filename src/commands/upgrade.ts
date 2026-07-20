@@ -25,6 +25,12 @@ export interface VersionInfo {
   hasUpdate: boolean;
 }
 
+export interface UpgradeResult {
+  ok: boolean;
+  exitCode: number | null;
+  output: string;
+}
+
 /** 是否 tsx 开发运行(import.meta.url 以 .ts 结尾)。 */
 export function isDevRun(): boolean {
   try {
@@ -90,6 +96,52 @@ export async function checkVersion(): Promise<VersionInfo> {
   const latest = await fetchLatestVersion();
   const hasUpdate = latest ? compareSemver(latest, current) > 0 : false;
   return { current, latest, hasUpdate };
+}
+
+/**
+ * 前台执行 npm install -g,实时输出到 REPL。
+ * Linux/macOS 下 Node 加载 JS 后通常不锁定文件,npm 可直接覆盖;
+ * 若目标平台确实锁定,会在输出里报 EBUSY/EPERM,用户根据提示退出后重试即可。
+ */
+export async function runUpgradeForeground(
+  onOutput: (chunk: string) => void,
+): Promise<UpgradeResult> {
+  const cmd = 'npm';
+  const args = ['install', '-g', `${PKG_NAME}@latest`];
+  let output = '';
+
+  if (isDevRun() || process.env.MOCODE_NO_SPAWN) {
+    const msg = '[upgrade] dev mode: skipped real npm install\n';
+    onOutput(msg);
+    return { ok: false, exitCode: null, output: msg };
+  }
+
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      shell: true,
+      stdio: 'pipe',
+      windowsHide: true,
+    });
+
+    const collect = (data: Buffer) => {
+      const chunk = data.toString();
+      output += chunk;
+      onOutput(chunk);
+    };
+    child.stdout?.on('data', collect);
+    child.stderr?.on('data', collect);
+
+    child.on('error', (err) => {
+      const msg = `[upgrade] spawn error: ${err.message}\n`;
+      output += msg;
+      onOutput(msg);
+      resolve({ ok: false, exitCode: null, output });
+    });
+
+    child.on('close', (code) => {
+      resolve({ ok: code === 0, exitCode: code, output });
+    });
+  });
 }
 
 /** 生成一个升级脚本,等当前 mocode 进程退出后再执行 `npm i -g`,避免 npm 无法覆盖正在运行的包文件。 */
