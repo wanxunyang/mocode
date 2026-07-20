@@ -6,6 +6,7 @@ import { loadSnapshot } from '../project-snapshot/index.js';
 import { buildProjectSkillSection } from '../project-skill/index.js';
 import { getSandboxRoot } from '../sandbox/root.js';
 import { getCurrentSessionId } from '../session/state.js';
+import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-discipline.js';
 import {
   detectLanguage,
   setLanguage,
@@ -305,6 +306,8 @@ ${autoAllToolsLine}
 ${planLine}
 
 ${PLATFORM_NOTE}
+
+${buildWorkDisciplineSection(inferModelFamily(config.model))}
 
 ## Tool details
 ### Token-efficient execution

@@ -279,6 +279,19 @@ Control via environment variables:
 
 See [docs/USAGE_SNAPSHOT_SKILL.md](./docs/USAGE_SNAPSHOT_SKILL.md) for detailed usage.
 
+## Working discipline (Build-and-Self-Verify)
+
+Every coding task runs through four sequential phases. Skipping or merging them is a failure mode — the system prompt injects this discipline on every turn (see `src/agent/work-discipline.ts`):
+
+1. **Plan & Discover** — restate the goal, identify the acceptance signal, read the relevant code, and surface ambiguities via `ask_human` before implementing.
+2. **Build** — make the smallest change that satisfies the spec; tests for new/changed behavior are an obligation, not a "should" aspiration.
+3. **Verify** — run a real, executable verification (typecheck, the project's test command, or a focused reproducer). Read the full output. Compare the result to the **spec**, not to your own diff.
+4. **Fix** — any failure → return to the spec, not to the diff. Re-derive what the spec requires; after a fix, re-run Phase 3 end-to-end. Cap blind retries at three identical failed attempts before changing approach.
+
+Hard rule: *"I read the code and it looks right" is not a completion signal.* A task is complete only when executable verification against the spec has run, its full output has been read, and the result matches the spec — and the final reply names the command, the output, and the spec line it satisfied.
+
+The section adapts lightly per `model_family` (anthropic / openai / qwen) so the wording matches each base model's instruction-following style. All four variants share the same 4-phase English body; only the opener sentence and the `[model: X]` tag differ. User language preference is handled by the existing i18n block.
+
 ## Project memory (MOCODE.md)
 
 MoCode has a **two-tier memory** model distinct from skills:

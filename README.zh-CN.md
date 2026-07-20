@@ -260,6 +260,19 @@ mocode 自动扫描以下目录的 skill(每个 skill 是 `<name>/SKILL.md`,带 
 
 skill 的 `description` 注入系统提示(渐进式披露第①层),模型只在任务相关时调 `use_skill` 加载完整正文(第②层)。用 `/skills` 查看已发现的 skill。
 
+## 工作纪律(4 阶段 — Build-and-Self-Verify)
+
+每个 coding 任务必须按顺序走完 4 个阶段。跳过/合并 = 失败模式 —— system prompt 每轮注入这段纪律(见 `src/agent/work-discipline.ts`):
+
+1. **Plan & Discover** — 用一句话复述目标,明确验收信号(测试名/命令输出/文件存在/行为变化);写代码前先读相关代码;不可逆选择(删除/公开 API/权限)用 `ask_human` 主动澄清。
+2. **Build** — 用最小改动满足 spec,不夹带无关重构;新/改行为必须有对应测试 —— 目标里的 "should" 是义务。
+3. **Verify** — 跑**真实**可执行验证(typecheck/项目 test 命令/聚焦 reproducer),读完整输出,与 **spec** 对比,不是与自己的 diff 对比。
+4. **Fix** — 任何失败 → 回 spec,不是回 diff;修完重跑 Phase 3 全程;同工具同参数 3 次连续失败后**换思路**(换工具/换不变量/`ask_human`)。
+
+**硬规则:** "我读代码觉得对"不是完成信号。任务完成的唯一判据:对 spec 的可执行验证已跑过、完整输出已读、结果与 spec 匹配 —— 最终回复里**显式给出证据**(哪个命令、哪段输出、对应 spec 哪一行)。
+
+段内措辞按 `model_family`(anthropic / openai / qwen)轻量适配,贴合各 base model 的指令遵从习惯。4 份共用同一套 4 阶段结构 + 英文纪律文本,只在首句与 `[model: X]` 标签上区分;用户语言偏好由现有 i18n 段负责。
+
 ## 项目记忆(MOCODE.md)
 
 mocode 的**双层记忆**模型,跟 Skills 是两件事:
