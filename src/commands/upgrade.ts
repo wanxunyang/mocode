@@ -92,12 +92,51 @@ export async function checkVersion(): Promise<VersionInfo> {
   return { current, latest, hasUpdate };
 }
 
-/** 后台 spawn `npm i -g mocode-ai@latest`。 */
+/** 生成一个升级脚本,等当前 mocode 进程退出后再执行 `npm i -g`,避免 npm 无法覆盖正在运行的包文件。 */
+function writeUpgradeScript(logPath: string, parentPid: number): { scriptPath: string; shell: string; args: string[] } {
+  const scriptDir = path.join(os.homedir(), '.mocode');
+  fs.mkdirSync(scriptDir, { recursive: true });
+
+  if (process.platform === 'win32') {
+    const scriptPath = path.join(scriptDir, 'upgrade.cmd');
+    const script =
+      `@echo off\r\n` +
+      `echo [upgrade] waiting for mocode pid ${parentPid} to exit... >> "${logPath}"\r\n` +
+      `:wait\r\n` +
+      `tasklist /FI "PID eq ${parentPid}" 2>NUL | findstr "${parentPid}" >NUL\r\n` +
+      `if %ERRORLEVEL% == 0 (\r\n` +
+      `  timeout /T 1 /NOBREAK >NUL\r\n` +
+      `  goto wait\r\n` +
+      `)\r\n` +
+      `echo [upgrade] mocode exited, running npm install... >> "${logPath}"\r\n` +
+      `npm install -g ${PKG_NAME}@latest >> "${logPath}" 2>&1\r\n` +
+      `echo [upgrade] done at %DATE% %TIME% >> "${logPath}"\r\n`;
+    fs.writeFileSync(scriptPath, script);
+    return { scriptPath, shell: 'cmd', args: ['/c', scriptPath] };
+  }
+
+  const scriptPath = path.join(scriptDir, 'upgrade.sh');
+  const script =
+    `#!/usr/bin/env sh\n` +
+    `set -e\n` +
+    `echo "[upgrade] waiting for mocode pid ${parentPid} to exit..." >> "${logPath}"\n` +
+    `while kill -0 ${parentPid} 2>/dev/null; do sleep 1; done\n` +
+    `echo "[upgrade] mocode exited, running npm install..." >> "${logPath}"\n` +
+    `npm install -g ${PKG_NAME}@latest >> "${logPath}" 2>&1\n` +
+    `echo "[upgrade] done at $(date -Iseconds)" >> "${logPath}"\n`;
+  fs.writeFileSync(scriptPath, script, { mode: 0o755 });
+  return { scriptPath, shell: 'sh', args: [scriptPath] };
+}
+
+/** 后台 spawn 升级脚本(当前进程退出后才真正跑 npm install)。 */
 export function spawnUpgrade(): void {
   if (isDevRun() || process.env.MOCODE_NO_SPAWN) return;
   try {
-    const child = spawn('npm', ['install', '-g', `${PKG_NAME}@latest`], {
-      shell: true,
+    const logDir = path.join(os.homedir(), '.mocode');
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, 'upgrade.log');
+    const { shell, args } = writeUpgradeScript(logPath, process.pid);
+    const child = spawn(shell, args, {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
