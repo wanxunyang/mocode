@@ -75,21 +75,43 @@ function adapt(model: ModelFamily, opener: string): string {
     );
 }
 
+/** ASK-01: 卡点白名单段。PROMPT-01 4 阶段纪律之后追加,告诉模型在哪些
+ * 边界情形应当优先调 `ask_human`,而不是猜测。语种统一英文(与 PROMPT-01
+ * 保持一致,避免多语种漂移);5 个固定条目,与 checklist 第 6 项耦合。
+ */
+const ASK_WHITELIST_SECTION = `## When to ask instead of guess
+
+The following situations are not guessable. When you encounter any of them, call \`ask_human\` BEFORE writing code; do not silently pick one option and proceed.
+
+1. **Cross-package impact** — the change touches public APIs, exports, or interfaces of other packages/modules; the user must confirm the blast radius.
+2. **Naming conventions** — the project has no obvious style for this artifact (e.g. new file in a folder with no precedent); naming is cheap to fix and expensive to mass-rename later.
+3. **Keep or remove old API** — the change deprecates, renames, or removes a function/type; the user must decide.
+4. **Test expectations** — the spec says "should work" or "should handle" but does not pin down the input/output contract; ask for a concrete example or assertion.
+5. **Implicit success criteria** — the user described intent but not the verification signal (which command, which output, which line of the spec). Without this, you cannot run Phase 3 honestly.
+
+Budget: at most 2 \`ask_human\` calls per turn. If you would exceed the budget, prefer the safer default (e.g. "preserve old behavior" / "add a test, do not change behavior") and explicitly disclose the choice in your final reply — do not silently guess without disclosure. The disclosure is what the checklist item 6 is about.`;
+
 /**
- * 拼出纪律段。modelFamily 不传或 'other' 时返回英文严谨版。
- * 段以 ## 起头,无需 \`\\n\\n\` 包裹(调用方决定换行)。
+ * 拼出纪律段 + ASK-01 卡点白名单。返回完整段(两段用 \`\\n\\n\` 隔开);
+ * 工厂之前只返回纪律段,ASK-01 落地后变成纪律 + 白名单两段;
+ * ASK-01 段是固定英文,不参与 per-model 适配(避免 4 份变体维护成本)。
  */
 export function buildWorkDisciplineSection(modelFamily?: ModelFamily): string {
+  let section: string;
   switch (modelFamily) {
     case 'anthropic':
-      return adapt('anthropic', 'Verification is a hard prerequisite for completion, not a courtesy.');
+      section = adapt('anthropic', 'Verification is a hard prerequisite for completion, not a courtesy.');
+      break;
     case 'openai':
-      return adapt('openai', 'Every coding task MUST complete these four phases in order. Skipping or merging phases is treated as a failure.');
+      section = adapt('openai', 'Every coding task MUST complete these four phases in order. Skipping or merging phases is treated as a failure.');
+      break;
     case 'qwen':
-      return adapt('qwen', 'Verification is a hard prerequisite for completion; "I wrote the code" is not evidence the code works.');
+      section = adapt('qwen', 'Verification is a hard prerequisite for completion; "I wrote the code" is not evidence the code works.');
+      break;
     case 'other':
     case undefined:
     default:
-      return CORE_SECTION;
+      section = CORE_SECTION;
   }
+  return `${section}\n\n${ASK_WHITELIST_SECTION}`;
 }

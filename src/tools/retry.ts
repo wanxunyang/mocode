@@ -1,10 +1,15 @@
 import type { ToolCapabilities, ToolOutcome, ToolOutcomeCode } from './types.js';
+import { reflectOn, type ErrorCategory } from '../agent/retry-classifier.js';
 
 export interface ToolRetryInfo {
   attempt: number;
   nextAttempt: number;
   waitMs: number;
   code: ToolOutcomeCode;
+  /** RETRY-01: 错误反思分类。 */
+  category: ErrorCategory;
+  /** RETRY-01: 给 LLM 看的"反思指针"短文。注入到 retry 提示尾部。 */
+  reflectionHint: string;
 }
 
 export const TOOL_RETRY_MAX_ATTEMPTS = 3;
@@ -115,7 +120,15 @@ export async function executeWithToolRetry(
     }
 
     try {
-      onRetry?.({ attempt, nextAttempt: attempt + 1, waitMs, code: outcome.code });
+      const reflection = reflectOn(outcome.code);
+      onRetry?.({
+        attempt,
+        nextAttempt: attempt + 1,
+        waitMs,
+        code: outcome.code,
+        category: reflection.category,
+        reflectionHint: reflection.hint,
+      });
     } catch {
       // Retry telemetry is best-effort and must never change tool execution.
     }

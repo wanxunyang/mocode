@@ -28,6 +28,13 @@ import {
 import { checkPermission } from '../permissions/index.js';
 import { validateToolArguments } from '../tools/validation.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools } from '../tools/constants.js';
+import {
+  createPreCompletionChecklistMiddleware,
+  type PreCompletionChecklistHandler,
+  type ChecklistContext,
+} from './middleware/checklist.js';
+import { inferModelFamily } from './work-discipline.js';
+import { reflectionHint, classifyError } from './retry-classifier.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import {
   maybeCompact,
@@ -230,6 +237,43 @@ function readDiffContext(
  *  - lifecycle 也在每个 runAgentCore 实例化一次,登记 grep/glob/codegraph 等 producer
  *    与 read/edit/write 的 consumer 关系;孤立+老化自动 STUB(观察类工具永不到 STUB)。
  *  - 开关关闭时 lifecycle=null 完全跳过。 */
+
+/** RETRY-01: 把 thrash hint + 反思指针一次性拼到 output 尾部。
+ *  - thrash hint 永远可能存在(连续失败才出现);
+ *  - 反思指针仅在 error/denied 状态追加,success 跳过避免噪声。
+ *  抽出 helper 是为了 sequential + parallel 两处共用,避免拼装逻辑漂移。 */
+function appendRetryAnnotations(
+  output: string,
+  status: 'success' | 'error' | 'denied' | 'aborted',
+  code: import('./../tools/types.js').ToolOutcomeCode,
+  thrashHint: string | null,
+): string {
+  let result = thrashHint ? `${output}${thrashHint}` : output;
+  if (status !== 'success' && status !== 'aborted') {
+    const category = classifyError(code);
+    const reflection = reflectionHint(category);
+    result = `${result}\n\n[retry reflection: ${category}]\n${reflection}`;
+  }
+  return result;
+}
+
+/** ASK-01: ask_human 工具调用本 turn 计数器。纯函数无副作用,
+ * 计数规则简单:1-based(本 turn 第 1 次 = 1, 第 2 次 = 2, 第 3+ 次 = exceeded)。
+ * 预算上限常量与工作纪律段 "Budget: at most 2 ask_human calls per turn" 保持一致;
+ * 改这里时,fixture 与纪律段都要同步。 */
+export const ASK_HUMAN_PER_TURN_BUDGET = 2;
+
+export function askHumanBudgetAnnotation(askHumanCountThisTurn: number, status: 'success' | 'error' | 'denied' | 'aborted'): string | null {
+  // 工具失败 / aborted 不追加(避免噪声;模型已被错误消息告知失败)。
+  if (status !== 'success') return null;
+  if (askHumanCountThisTurn < ASK_HUMAN_PER_TURN_BUDGET) return null;
+  if (askHumanCountThisTurn === ASK_HUMAN_PER_TURN_BUDGET) {
+    return `\n\n[ask budget] This was your ${askHumanCountThisTurn}nd ask_human call this turn (budget = ${ASK_HUMAN_PER_TURN_BUDGET}). For the rest of this turn, prefer the safer default and disclose the choice in your final reply — do not silently guess.`;
+  }
+  // 第 3+ 次(超过预算):强硬提示,鼓励模型停下问自己是否还有意义。
+  return `\n\n[ask budget EXCEEDED] This is ask_human call #${askHumanCountThisTurn} this turn (budget = ${ASK_HUMAN_PER_TURN_BUDGET}). Stop asking; choose a default, implement, and disclose the choice in your final reply. Continuing to ask is more harmful than a documented guess.`;
+}
+
 function pushToolResult(
   history: ChatMessage[],
   tc: ToolCallRef,
@@ -323,6 +367,15 @@ export interface AgentRunOptions {
   contextState?: ContextState;
   /** 主 Agent 收尾自动验证；子 Agent 必须保持 false，由主 Agent 统一验证共享工作区。 */
   autoValidate?: boolean;
+  /**
+   * PROMPT-02: 在 agent 宣告完成(no tool calls + 有 candidate 正文)那一刻,
+   * 向 history 推一条 user [checklist] 消息,强制模型再做一轮显式确认。
+   * - 缺省(undefined) = 启用内置 createPreCompletionChecklistMiddleware。
+   * - 传 false = 完全关闭(checklist 自身调试用)。
+   * - 传自定义 handler = 替换默认触发条件(调用方自定义更严格/更宽松的策略)。
+   * plan 模式永远不触发(无论 handler 是什么)。
+   */
+  preCompletionChecklist?: PreCompletionChecklistHandler | false;
   /** 验证器注入点；缺省使用项目脚本发现与 run_command 同源执行器。 */
   validator?: (
     signal?: AbortSignal,
@@ -364,6 +417,12 @@ export interface AgentRunResult {
   validation?: ValidationResult;
   /** rollback 事务观察到的本轮实际磁盘变化。 */
   changedFiles?: string[];
+  /**
+   * QUAL-01 affordance: 本轮 agent 收尾时的完整 chat history。
+   * 只读快照,evals/coding/runner 用它来推断 [checklist] / [retry reflection:]
+   * 等 marker 的真实触发次数。不序列化进磁盘(只内存)→ 减少 baseline json 体积。
+   * 不影响主 agent 行为,仅供 eval/trace 后处理使用。 */
+  history?: readonly ChatMessage[];
 }
 
 /**
@@ -386,6 +445,17 @@ export async function runAgentCore(
 ): Promise<AgentRunResult> {
   const { history, userInput, signal, onContextUpdate, hooks } = opts;
   const runtimeContextState = opts.contextState ?? contextState;
+  // ASK-01: 本 turn 已使用的 ask_human 次数(每次 tool call 后递增)。
+  // 预算超过时,工具结果尾部追加 ask budget 提示,不直接拒绝调用(更轻量,
+  // 也避免和现有 permission 系统的"拒绝"语义重叠)。
+  let askHumanCountThisTurn = 0;
+  // PROMPT-02: 解析 preCompletionChecklist 选项。undefined = 启用默认 middleware;
+  // false = opt-out(checklist 自身调试用);function = 调用方自定义。
+  const _checklistMiddleware = createPreCompletionChecklistMiddleware();
+  const preCompletionChecklistHandler: PreCompletionChecklistHandler | null =
+    opts.preCompletionChecklist === false
+      ? null
+      : (opts.preCompletionChecklist ?? _checklistMiddleware.handler);
   const maxSteps = opts.maxSteps ?? config.maxSteps;
   // 中断还原:LLM 中途可能调 switch_mode 切了模式,abort 时连同模式一起还原回轮首。
   const savedMode = getAgentMode();
@@ -822,10 +892,17 @@ export async function runAgentCore(
               hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
               // Thrashing:history 里附 hint(UI 已用干净 output 渲染,避免屏幕噪声)
               const hint = recordAndHint(tc.name, tc.arguments, outcome.status === 'success');
+              const annotated = appendRetryAnnotations(output, outcome.status, outcome.code, hint);
+              // ASK-01: 计数 + 预算提示
+              if (tc.name === 'ask_human' && outcome.status === 'success') {
+                askHumanCountThisTurn += 1;
+              }
+              const askBudget = askHumanBudgetAnnotation(askHumanCountThisTurn, outcome.status);
+              const finalOutput = askBudget ? `${annotated}${askBudget}` : annotated;
               pushToolResult(
                 history,
                 tc,
-                hint ? `${output}${hint}` : output,
+                finalOutput,
                 relprune,
                 lifecycle,
                 scheduler,
@@ -1020,10 +1097,18 @@ export async function runAgentCore(
             hooks.onToolResult?.(tc, output, mutationParsed, diff.preWriteOld, diff.editStartLine);
             // Thrashing:同上(history 附 hint,UI 干净)
             const hint = recordAndHint(tc.name, tc.arguments, outcome.status === 'success');
+            // RETRY-01: 同 parallel 路径,在非成功状态追加反思指针。
+            const annotated = appendRetryAnnotations(output, outcome.status, outcome.code, hint);
+            // ASK-01: ask_human 计数 + 预算提示(同 parallel 路径)。
+            if (tc.name === 'ask_human' && outcome.status === 'success') {
+              askHumanCountThisTurn += 1;
+            }
+            const askBudget = askHumanBudgetAnnotation(askHumanCountThisTurn, outcome.status);
+            const finalOutput = askBudget ? `${annotated}${askBudget}` : annotated;
             pushToolResult(
               history,
               tc,
-              hint ? `${output}${hint}` : output,
+              finalOutput,
               relprune,
               lifecycle,
               scheduler,
@@ -1173,6 +1258,33 @@ export async function runAgentCore(
           continue;
         }
       } else {
+        // PROMPT-02: 硬关卡 — 收尾路径上,如果本 turn 有 mutation 且未通过
+        // validation(autoValidate=false / 验证已 passed 但 LLM 又宣称完成),
+        // 推一条 [checklist] user 消息,强制模型再走一轮显式确认。
+        // 防死循环:checklist 已推过 2 次仍无新工具调用 → 放行(走原本的 push)。
+        const finalMutationForChecklist = getCurrentTurnMutationState();
+        const checklistCtx: ChecklistContext = {
+          hadMutation: finalMutationForChecklist.version > 0,
+          lastValidationStatus: (latestValidation?.status === 'failed' || latestValidation?.status === 'passed')
+            ? latestValidation.status
+            : 'none',
+          mode: getAgentMode(),
+          modelFamily: inferModelFamily(config.model),
+        };
+        const checklistRetryCount = (history as { __checklistStreak?: number }).__checklistStreak ?? 0;
+        const shouldFireChecklist = preCompletionChecklistHandler !== null
+          && preCompletionChecklistHandler(checklistCtx)
+          && checklistRetryCount < 2;
+        if (shouldFireChecklist) {
+          history.push(candidate);
+          history.push({
+            role: 'user',
+            content: _checklistMiddleware.buildUserMessage(checklistCtx.modelFamily),
+          });
+          (history as { __checklistStreak?: number }).__checklistStreak = checklistRetryCount + 1;
+          // 重要: 不置 done,让主循环继续下一轮(模型被迫用工具或写出可验证声明)。
+          continue;
+        }
         history.push(candidate);
       }
 
@@ -1187,6 +1299,7 @@ export async function runAgentCore(
         usage: turnUsage,
         validation: latestValidation,
         changedFiles: finalMutation.changedFiles.map((item) => item.path),
+        history: history.slice(),
       };
       } finally {
         emitTrace('step_end', {
@@ -1208,6 +1321,7 @@ export async function runAgentCore(
       usage: turnUsage,
       validation: latestValidation,
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
+      history: history.slice(),
     };
   } finally {
     const finalMutation = getCurrentTurnMutationState();

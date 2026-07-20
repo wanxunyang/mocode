@@ -7,6 +7,10 @@ export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, t
   const passed = tasks.filter(t => t.status === 'passed').length;
   const verified = tasks.filter(t => t.finalVerifiedSuccess).length;
   const recovered = tasks.filter(t => t.toolRecovery).length;
+  // QUAL-01 质量维度均值(per task)。三个新指标用 reduce 累计,tasks 为空时 fallback 0
+  // 而非 undefined,避免 NaN 污染 report。
+  const avgOf = (field: 'reflectionRounds' | 'askHumanCount' | 'checklistTriggered') =>
+    tasks.length ? tasks.reduce((n, t) => n + t[field], 0) / tasks.length : 0;
   return {
     ...meta,
     summary: {
@@ -24,6 +28,9 @@ export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, t
         : 0,
       tokens: tasks.reduce((n, t) => n + (t.tokens ?? 0), 0),
       durationMs: tasks.reduce((n, t) => n + t.durationMs, 0),
+      reflectionRounds: avgOf('reflectionRounds'),
+      askHumanCount: avgOf('askHumanCount'),
+      checklistTriggered: avgOf('checklistTriggered'),
     },
     tasks,
   };
@@ -31,6 +38,7 @@ export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, t
 
 export function renderSummary(r: BenchmarkReport): string {
   const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+  const num = (n: number) => n.toFixed(2);
   const lines = [
     `# Mocode coding benchmark`, '',
     `- Run: ${r.runId}`,
@@ -45,9 +53,14 @@ export function renderSummary(r: BenchmarkReport): string {
     `- Tool first-success rate: ${pct(r.summary.firstSuccessRate)}`,
     `- Tool calls / retries / tokens / elapsed: ${r.summary.toolCalls} / ${r.summary.retries} / ${r.summary.tokens} / ${(r.summary.durationMs / 1000).toFixed(1)}s`,
     '',
-    '| Task | Difficulty | Group | Result | First patch | Recovery | Calls | Tokens | Time |',
-    '|---|---|---|---:|---:|---:|---:|---:|---:|',
-    ...r.tasks.map(t => `| ${t.id} | ${t.difficulty} | ${t.group} | ${t.status} | ${t.firstPatchPass ? 'yes' : 'no'} | ${t.toolRecovery ? 'yes' : 'no'} | ${t.toolCalls} | ${t.tokens ?? '-'} | ${(t.durationMs / 1000).toFixed(1)}s |`),
+    `## Quality dimensions (per task average)`,
+    `- Reflection rounds: ${num(r.summary.reflectionRounds)}`,
+    `- Ask-human calls: ${num(r.summary.askHumanCount)}`,
+    `- Checklist triggered: ${num(r.summary.checklistTriggered)}`,
+    '',
+    '| Task | Difficulty | Group | Result | First patch | Recovery | Reflect | AskH | ChkL | Calls | Tokens | Time |',
+    '|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    ...r.tasks.map(t => `| ${t.id} | ${t.difficulty} | ${t.group} | ${t.status} | ${t.firstPatchPass ? 'yes' : 'no'} | ${t.toolRecovery ? 'yes' : 'no'} | ${t.reflectionRounds} | ${t.askHumanCount} | ${t.checklistTriggered} | ${t.toolCalls} | ${t.tokens ?? '-'} | ${(t.durationMs / 1000).toFixed(1)}s |`),
     '',
   ];
   return lines.join('\n');

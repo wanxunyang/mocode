@@ -75,9 +75,10 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutOverride ?? fixture.timeoutMs ?? 120_000);
+  let result: Awaited<ReturnType<typeof runAgentCore>> | undefined;
   try {
     process.chdir(root);
-    const result = await runAgentCore({
+    result = await runAgentCore({
       history: [], userInput: fixture.goal, signal: controller.signal, hooks: {},
       autoValidate: true,
       validator: async () => {
@@ -117,7 +118,7 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
     const regression = fixture.regressionCommand ? !(await verify(root, fixture.regressionCommand)) : false;
     const expectedChanged = fixture.expected.files ?? [];
     const changed = result.changedFiles ?? [];
-    const traceMetrics = reduceTraceMetrics(traceEvents);
+    const traceMetrics = reduceTraceMetrics(traceEvents, result.history);
     const expectedFilesTouched = expectedChanged.every(f => changed.some(c => c.replace(/\\/g, '/').endsWith(f)));
     const verifierUnchanged = createHash('sha256').update(readFileSync(path.join(root, 'verify.mjs'))).digest('hex') === verifierHash;
     const timedOut = controller.signal.aborted;
@@ -136,9 +137,12 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       durationMs: traceMetrics.durationMs,
       unverifiedCompletion: result.completed && result.validation?.verificationComplete !== true,
       changedFiles: changed,
+      reflectionRounds: traceMetrics.reflectionRounds,
+      askHumanCount: traceMetrics.askHumanCount,
+      checklistTriggered: traceMetrics.checklistTriggered,
     };
   } catch (error) {
-    const traceMetrics = reduceTraceMetrics(traceEvents);
+    const traceMetrics = reduceTraceMetrics(traceEvents, result?.history);
     return {
       id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
       status: controller.signal.aborted ? 'timeout' : 'error', finalVerifiedSuccess: false,
@@ -152,6 +156,9 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       durationMs: traceMetrics.durationMs || Date.now() - started,
       unverifiedCompletion: false,
       changedFiles: [], error: error instanceof Error ? error.message : String(error),
+      reflectionRounds: traceMetrics.reflectionRounds,
+      askHumanCount: traceMetrics.askHumanCount,
+      checklistTriggered: traceMetrics.checklistTriggered,
     };
   } finally {
     clearTimeout(timer);

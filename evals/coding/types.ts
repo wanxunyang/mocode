@@ -42,6 +42,13 @@ export interface BenchmarkTaskResult {
   unverifiedCompletion: boolean;
   changedFiles: string[];
   error?: string;
+  // ─────────── QUAL-01 质量维度 ───────────
+  /** RETRY-01: 反思重试注入次数(历史中含 [retry reflection: 的工具结果数)。 */
+  reflectionRounds: number;
+  /** ASK-01: ask_human 工具成功调用次数。 */
+  askHumanCount: number;
+  /** PROMPT-02: checklist 触发次数(推入 history 的 [checklist] user 消息计数)。 */
+  checklistTriggered: number;
 }
 
 export interface BenchmarkReport {
@@ -64,6 +71,13 @@ export interface BenchmarkReport {
     firstSuccessRate: number;
     tokens: number;
     durationMs: number;
+    // ─────────── QUAL-01 质量维度聚合 ───────────
+    /** 平均反思重试注入次数(per task)。 */
+    reflectionRounds: number;
+    /** 平均 ask_human 调用次数(per task)。 */
+    askHumanCount: number;
+    /** 平均 checklist 触发次数(per task)。 */
+    checklistTriggered: number;
   };
   tasks: BenchmarkTaskResult[];
 }
