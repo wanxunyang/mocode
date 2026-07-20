@@ -255,7 +255,7 @@ function memoryValue(on: boolean): string {
 /** 横幅纯文本(带 ANSI 颜色,不写出)——供 TUI 经 contentWrite 写入内容区以跟踪续写位。
  *  布局:大字 logo(4 行,块字符)左对齐,右侧并排放标题/信息(neofetch 风)。 */
 export function bannerString(info: BannerInfo): string {
-  const title = `${ui.bold}${ui.accent}◆  MoCode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
+  const title = `${ui.bold}${ui.accent}●  MoCode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
   const labels = [t('banner.model'), t('banner.directory'), t('banner.memory')];
   // 标签列按当前语言最长文本动态定宽，并至少留两个空格；中文保持原 6 列，英文扩至 11 列。
   const labelWidth = Math.max(...labels.map(displayWidth)) + 2;

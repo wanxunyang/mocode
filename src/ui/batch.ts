@@ -133,7 +133,7 @@ function buildSummaryLine(record: BatchRecord, live = false): string {
   const failed = entries.some((e) => e.failed);
   // 工具本身完成就立即显示完成态，不等待整轮正文流完/onDone。
   const finished = completed >= entries.length;
-  const symbol = failed ? '×' : finished ? '◆' : '◇';
+  const symbol = failed ? '×' : finished ? '●' : '◇';
   const color = failed ? ui.red : finished ? ui.green : ui.accent;
   const label = failed
     ? t('agent.toolsFailed')

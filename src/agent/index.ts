@@ -74,7 +74,7 @@ function writeChangeOverview(): void {
   const added = changes.reduce((n, c) => n + c.added, 0);
   const removed = changes.reduce((n, c) => n + c.removed, 0);
   layout.contentWrite(
-    `  ${ui.bold}${ui.green}◆${ui.reset} ${t('agent.changes')}  ${t('agent.files', { count: changes.length })}  ${ui.green}+${added}${ui.reset} ${ui.red}−${removed}${ui.reset}\n`,
+    `  ${ui.bold}${ui.accent}●${ui.reset} ${t('agent.changes')}  ${t('agent.files', { count: changes.length })}  ${ui.green}+${added}${ui.reset} ${ui.red}−${removed}${ui.reset}\n`,
   );
   for (const change of changes) {
     const kindLabel = change.kind === 'A' ? t('agent.changeAdded') : t('agent.changeModified');
@@ -268,7 +268,7 @@ export async function runAgent(
     onMaxSteps: () => {
       flushToolBatch();
       layout.contentWrite(
-        `  ${ui.yellow}●${ui.reset} ${ui.yellow}${t('agent.maxSteps', { count: config.maxSteps })}${ui.reset}\n`
+        `  ${ui.accent}●${ui.reset} ${ui.yellow}${t('agent.maxSteps', { count: config.maxSteps })}${ui.reset}\n`
       );
     },
     onAbort: () => {
@@ -292,7 +292,7 @@ export async function runAgent(
       const detail = validation.status === 'skipped' && validation.skipReason
         ? `${validation.status}: ${validation.skipReason}`
         : validation.status;
-      const symbol = validation.status === 'passed' ? '◆' : validation.status === 'failed' ? '×' : '!';
+      const symbol = validation.status === 'passed' ? '●' : validation.status === 'failed' ? '×' : '!';
       layout.contentWrite(
         `  ${color}${symbol}${ui.reset} ${t('agent.validationResult', { command, status: detail })}\n\n`,
       );
@@ -302,7 +302,7 @@ export async function runAgent(
       writeChangeOverview();
       const tok = formatTurnTokens(usage);
       layout.contentWrite(
-        `  ${ui.bold}${ui.green}◆${ui.reset} ${t('agent.complete')}  ${fmtElapsed(elapsedMs)}${tok}\n`
+        `  ${ui.bold}${ui.accent}●${ui.reset} ${t('agent.complete')}  ${fmtElapsed(elapsedMs)}${tok}\n`
       );
       // 内容区触底时，DECSTBM 增量滚屏可能只推进物理终端，未把 Worked 前已在
       // buffer 中的空行完整画出来；用户滚动/点击触发 repaint 后才“突然”出现。

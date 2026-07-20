@@ -95,7 +95,7 @@ let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态�
 let turnTimer: NodeJS.Timeout | null = null; // 走时刷新计时器(独立于 spinner):流式期间 spinner 停转,由它续刷状态行。
 // 运行态状态行 chip 心跳帧(♥/♡ 明灭)。turnTimer 每 tick 推进一帧,让状态行前导符在 agent
 // 运行时跳动——agent 的 spinner 走内容区续写位(paintLiveAtCursor),不调 setStatus,
-// 故状态行 chip 靠 turnTimer 独立驱动。INPUT 态 runningFrame=-1,composeStatus 退回静态 ◆。
+// 故状态行 chip 靠 turnTimer 独立驱动。INPUT 态 runningFrame=-1,composeStatus 退回静态 ●。
 const RUNNING_FRAMES = ['♥', '♡'];
 let runningFrame = -1;
 // 运行态用户打字时暂停流式物理写:流式每个 token 要 cup 到 contentRow 写入,IME 候选窗逐光标移动跟踪会跟过去;
@@ -1355,10 +1355,10 @@ function twoColumn(leftStr: string, leftW: number, rightStr: string, rightW: num
 /** 上线之上那行(spinner 行):左段 = spinner 帧 + 状态文字 + 走时(全部左对齐,紧跟不分离)。
  *  右段仅在滚动回看时显历史指示(右端对齐)。
  *  示例:
- *    INPUT:     ◆ 空闲
+ *    INPUT:     ● 空闲
  *    思考中:    ⠹ 思考中… 0.5s
  *    运行心跳:  ♥ 0.5s
- *    滚动回看:  ◆ 空闲                  历史 ↑3 (PgDn 回底)  */
+ *    滚动回看:  ● 空闲                  历史 ↑3 (PgDn 回底)  */
 function composeSpinnerLine(status: StatusBarData, cols: number): string {
   const spinning = mode === 'running' && runningFrame >= 0;
   const hasSpinner = !!status.spinnerFrame;
@@ -1374,11 +1374,11 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
   let leadW: number;
 
   if (scrolled) {
-    // 滚动回看:左段 = 符号(◆ 或 心跳帧) + 状态名(灰,无走时);右段 = 历史指示。
-    // 跟非回看的 INPUT/RUNNING 态保持一致——避免「◆ 留下、状态字蒸发」的视觉错觉。
+    // 滚动回看:左段 = 符号(● 或 心跳帧) + 状态名(灰,无走时);右段 = 历史指示。
+    // 跟非回看的 INPUT/RUNNING 态保持一致——避免「● 留下、状态字蒸发」的视觉错觉。
     const symbol = spinning
       ? `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset}`
-      : `${ui.accent}◆${ui.reset}`;
+      : `${ui.accent}●${ui.reset}`;
     lead = `${symbol} ${ui.dim}${status.status}${ui.reset}`;
     leadW = 1 + 1 + displayWidth(status.status);
   } else if (hasSpinner) {
@@ -1392,8 +1392,8 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
     lead = `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset}${ePart}`;
     leadW = 1 + (elapsed ? 1 + displayWidth(elapsed) : 0);
   } else {
-    // INPUT 态:◆ + 状态文字(无走时)
-    lead = `${ui.accent}◆${ui.reset} ${ui.dim}${status.status}${ui.reset}`;
+    // INPUT 态:● + 状态文字(无走时)
+    lead = `${ui.accent}●${ui.reset} ${ui.dim}${status.status}${ui.reset}`;
     leadW = 1 + 1 + displayWidth(status.status);
   }
 
@@ -1491,7 +1491,7 @@ function composePlanLine(status: StatusBarData, cols: number): string {
 /** 画状态行(plan 行 + spinner 行 + model 行,三行)。RUNNING 态 spinner 频繁调。
  *  行号(footerH=6):
  *    plan 行     = contentBottom+1  (活跃 plan 时显 chip;无则空)
- *    spinner 行  = contentBottom+2  (◆ 空闲 / ⠹ 思考中… / etc)
+ *    spinner 行  = contentBottom+2  (● 空闲 / ⠹ 思考中… / etc)
  *    上线        = contentBottom+3  (画在 paintInput)
  *    输入行      = contentBottom+4
  *    下线        = contentBottom+5
@@ -1989,7 +1989,7 @@ export function enterInputMode(status: string = t('repl.idle')): void {
   mode = 'input';
   statusText = status;
   spinnerFrame = undefined;
-  runningFrame = -1; // 回 INPUT 态:停状态行 chip 旋转,composeStatus 退回静态 ◆
+  runningFrame = -1; // 回 INPUT 态:停状态行 chip 旋转,composeStatus 退回静态 ●
   turnStart = null; // 停走时
   stopTurnTimer();
   scrollLockUntil = 0; // 轮末:清轮首滚动锁,INPUT 态可自由滚动

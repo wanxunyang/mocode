@@ -31,8 +31,8 @@ export interface Palette {
   brightCyan: string;
   brightMagenta: string;
   /**
-   * 主题主色(accent):承载"主题感"的关键 UI 锚点 —— 启动 logo / 标题 ◆ /
-   * 输入框顶上线 / 状态栏 ◆ / 菜单选中项。切主题时只动这一处,其它基础色
+   * 主题主色(accent):承载"主题感"的关键 UI 锚点 —— 启动 logo / 标题 ● /
+   * 输入框顶上线 / 状态栏 ● / 菜单选中项。切主题时只动这一处,其它基础色
    * 槽保持多色辨识度不变。各主题须显式定义(无默认值)。
    */
   accent: string;

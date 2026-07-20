@@ -90,7 +90,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
         if (a.kind === 'warn') {
           // system 超:写一行提示(配置漂移应由用户处理,不是调度器压)
           layout.contentWrite(
-            `  ${ui.yellow}●${ui.reset} ${ui.yellow}调度器警告 [${a.layer}] ${a.reason}${ui.reset}\n`,
+            `  ${ui.accent}●${ui.reset} ${ui.yellow}调度器警告 [${a.layer}] ${a.reason}${ui.reset}\n`,
           );
         } else if (a.kind === 'compact_history') {
           // 路由到 maybeCompact；把结构重建信号传回 core，使 lifecycle 按新 index 恢复。
