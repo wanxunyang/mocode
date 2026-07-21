@@ -1581,15 +1581,15 @@ export async function startRepl(
       continue;
     }
     if (line === '/compact' || line.startsWith('/compact ')) {
-      // /compact 可选语法:/compact [focus]  或  /compact --force [focus]
-      // --force:即便 oldGroups 空(history 全在保护区)也强行把早期消息降级压一次。
+      // /compact 默认强制压缩(force=true)，不受阈值/保护区限制
+      // 语法:/compact [focus] 或 /compact --no-force [focus] (显式关闭强制)
       const rest = line.slice('/compact'.length).trim();
-      let force = false;
+      let force = true; // 默认强制
       let focus: string | undefined;
-      if (rest === '--force') force = true;
-      else if (rest.startsWith('--force ')) {
-        force = true;
-        focus = rest.slice('--force '.length).trim() || undefined;
+      if (rest === '--no-force') force = false;
+      else if (rest.startsWith('--no-force ')) {
+        force = false;
+        focus = rest.slice('--no-force '.length).trim() || undefined;
       } else if (rest) focus = rest;
       // 走调度器路径:与自动每步压缩完全一致——五区按 ROI 压(cold tools 优先 → history 摘要最后)。
       // focus 透传到 compact_history action 的 LLM 摘要 prompt。
