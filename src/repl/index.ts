@@ -96,6 +96,7 @@ import {
 import {
   buildMemorySection,
   buildMemoryIndexSection,
+  invalidateMemoryCache,
   kickoffReflection,
   drainMemoryBackground,
   getLastReflectResult,
@@ -284,7 +285,7 @@ install / dev / build / test / typecheck / lint 等——从 package.json script
 
 硬要求:
 - 从实际代码提炼,引用具体文件名/命令/符号;不编造、不泛泛。
-- 总长 ≤ 1500 字;只写后续会话有用的稳定事实,不写易变项(当前 bug、临时文件、未决 TODO)。
+- 总长 ≤ 3000 字;只写后续会话有用的稳定事实,不写易变项(当前 bug、临时文件、未决 TODO)。
 - 用 write_file 写入项目根 MOCODE.md。
 - 写完简述:写了哪几节 + 从代码里发现的 2-3 条非显然关键约定(供用户校验)。`;
 }
@@ -2217,6 +2218,13 @@ export async function startRepl(
     queryHistory.push(joined);
     const initialPlan = getAgentMode() === 'plan'; // 轮首模式(在 runTurn 之前读)
     const ok = await runTurn(joined, initialPlan, placeholder);
+    // /init 收尾:Agent 已 write_file 写完新 MOCODE.md,失效 cache 并用新内容重建 history[0],
+    // 否则下一轮拿到的还是写之前的旧 memory 段,必须重启 REPL 才生效。
+    if (ok && line === '/init') {
+      invalidateMemoryCache();
+      history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
+      refreshStatusBase(history);
+    }
     // plan 轮正常结束(未中断 / 未抛错)→ 看轮末模式决定:
     //  - 仍 plan:模型只产计划就 STOP(模型已无 switch_mode 工具)→ 弹审批面板(原行为)。
     //  - 已 auto:本轮被切到 auto 模式(用户用 /auto 触发的合成执行轮)→ 跳过审批,不重复打扰。

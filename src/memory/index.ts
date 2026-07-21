@@ -32,6 +32,12 @@ const MAX_MEMORY_CHARS = 20000;
 
 let cache: string | null = null;
 
+/** 失效 memory 缓存:下次 loadMemory()/buildMemorySection() 重新扫描 MOCODE.md。
+ * 用于 /init 等"刚写完 MOCODE.md,下次轮想让新内容立刻可见"的场景。 */
+export function invalidateMemoryCache(): void {
+  cache = null;
+}
+
 /**
  * 合并全局 + 项目各级 MOCODE.md(远→近拼接,各段空行分隔),超 MAX_MEMORY_CHARS 截断 + 提示。
  * 懒加载(首次调用触发扫描;启动期 repl 调一次)。无 MOCODE.md 返空串。
@@ -68,6 +74,7 @@ export function buildMemorySection(): string {
     '',
     '## Project Memory (MOCODE.md)',
     'The following is project memory (architecture / conventions / commands and other cross-session long-term facts). Act accordingly:',
+    'If any fact here conflicts with the current code, treat the code as the source of truth and surface a brief reminder to update MOCODE.md (do not silently rewrite the file yourself).',
     mem,
   ].join('\n');
 }
