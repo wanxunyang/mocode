@@ -3,11 +3,53 @@ import { spawn, execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
 import path from 'node:path';
+import dotenv from 'dotenv';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
 const IGNORED_DIRECTORIES = new Set(['.git', '.mocode', 'node_modules', 'dist', 'coverage', '.next', '.cache']);
+
+/**
+ * 复用 mocode 已配好的模型 / 沙箱 / 记忆 / 验证 / 主题等配置。
+ * 与 src/config/index.ts 的 loadEnvFiles() 行为一致:
+ *   候选(后者覆盖前者,优先级升序):<projectRoot>/.env(兼容旧用法,最低)
+ *     → ~/.mocode/config(全局,/model 与 mocode config 写此)
+ *     → <projectRoot>/.mocode/config(项目级覆盖,最高)。
+ * shell 里 export 的同名键不被回填(/model 写文件的优先级语义与 REPL 一致)。
+ * 只把 mocode 自己认识的键回填到 process.env,避免把无关 .env 字段塞进 host。
+ */
+const MOCODE_CONFIG_KEYS = [
+  'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS', 'MAX_TOKENS',
+  'COMPACT_THRESHOLD', 'LLM_STREAM_USAGE', 'AUTO_COMPACT', 'MOCODE_AUTO_VALIDATE',
+  'MOCODE_CONTEXT_OPTIMIZE', 'MOCODE_CONTEXT_RELPRUNE', 'MOCODE_LIFECYCLE',
+  'MOCODE_BUDGET_SCHEDULER', 'AUTO_REFLECT', 'MEMORY_ENABLED', 'REFLECT_EVERY_N',
+  'MAX_STEPS', 'MOCODE_SUBAGENT_ENABLED', 'SUB_AGENT_MAX_STEPS', 'SANDBOX_ROOT',
+  'ANYSEARCH_API_KEY', 'ANYSEARCH_BASE_URL', 'MOCODE_MAX_IMAGE_BYTES',
+  'MOCODE_PERMISSION', 'MOCODE_PERMISSION_NON_INTERACTIVE_ALLOW', 'MOCODE_THEME', 'MOCODE_LANGUAGE',
+] as const;
+
+function loadMocodeConfig(projectRoot?: string): { loaded: string[]; missing: string[] } {
+  const candidates: string[] = [];
+  if (projectRoot) candidates.push(path.join(projectRoot, '.env'));
+  candidates.push(path.join(os.homedir(), '.mocode', 'config'));
+  if (projectRoot) candidates.push(path.join(projectRoot, '.mocode', 'config'));
+  const fromFiles: Record<string, string> = {};
+  for (const p of candidates) {
+    try { Object.assign(fromFiles, dotenv.parse(readFileSync(p, 'utf8'))); } catch { /* 文件不存在:跳过 */ }
+  }
+  const allowed = new Set<string>(MOCODE_CONFIG_KEYS);
+  const loaded: string[] = [];
+  for (const [k, v] of Object.entries(fromFiles)) {
+    if (!allowed.has(k)) continue;
+    if (process.env[k] === undefined) { process.env[k] = v; loaded.push(k); }
+  }
+  const missing: string[] = [];
+  if (!process.env.LLM_BASE_URL) missing.push('LLM_BASE_URL');
+  if (!process.env.LLM_API_KEY) missing.push('LLM_API_KEY');
+  return { loaded, missing };
+}
 
 type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 interface Project { id: string; name: string; root: string; branch: string; }
@@ -154,26 +196,87 @@ function updateTaskFromAgent(envelope: Record<string, unknown>): void {
 class LocalAgent {
   private child: ReturnType<typeof spawn> | null = null;
   private buffer = '';
+  private currentProject: Project | null = null;
+  private starting: Promise<void> | null = null;
+  // host 连续崩超过这个次数就不再自动重启,避免配置错误时刷屏 + 死循环
+  private crashStreak = 0;
+  private static MAX_CRASH_STREAK = 3;
 
   async start(project: Project): Promise<void> {
+    this.currentProject = project;
+    // 每次切换项目 / 启动 host 前,把 mocode 配置回填到 process.env(host 通过 {...process.env} 继承)。
+    const { loaded, missing } = loadMocodeConfig(project.root);
+    if (loaded.length) {
+      pushRenderer('work:agent-event', { type: 'event', event: 'host_log', payload: { message: `[mocode-work] 已加载 mocode 配置: ${loaded.join(', ')}` } });
+    }
+    if (missing.length) {
+      pushRenderer('work:agent-event', { type: 'event', event: 'host_log', payload: { message: `[mocode-work] mocode 配置缺少 ${missing.join(', ')}，请先在终端跑 mocode /model 配好模型再启动任务。` } });
+    }
+
     this.stop();
     const hostFile = process.env.MOCODE_HOST_PATH ?? path.resolve(__dirname, '..', '..', '..', 'dist', 'host', 'stdio.js');
-    if (!existsSync(hostFile)) return this.receive({ type: 'error', error: `Agent Host 未构建：${hostFile}` });
-    this.child = spawn(process.execPath, [hostFile], {
-      cwd: project.root, windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
+    if (!existsSync(hostFile)) {
+      this.crashStreak = LocalAgent.MAX_CRASH_STREAK;
+      return this.receive({ type: 'error', error: `Agent Host 未构建：${hostFile}` });
+    }
+    const child = spawn(process.execPath, [hostFile], {
+      cwd: project.root, windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_NO_WARNINGS: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
     });
-    this.child.stdout?.setEncoding('utf8');
-    this.child.stdout?.on('data', (chunk: string) => this.read(chunk));
-    this.child.stderr?.setEncoding('utf8');
-    this.child.stderr?.on('data', (message: string) => this.receive({ type: 'event', event: 'host_log', payload: { message } }));
-    this.child.once('exit', (code) => { this.receive({ type: 'event', event: 'host_exit', payload: { code } }); this.child = null; });
+    this.child = child;
+    this.starting = new Promise<void>((resolve) => {
+      let settled = false;
+      const settle = (): void => { if (settled) return; settled = true; resolve(); };
+      child.stdout?.setEncoding('utf8');
+      child.stdout?.on('data', (chunk: string) => { this.read(chunk); settle(); });
+      child.stderr?.setEncoding('utf8');
+      child.stderr?.on('data', (message: string) => this.receive({ type: 'event', event: 'host_log', payload: { message } }));
+      child.once('exit', (code) => {
+        this.receive({ type: 'event', event: 'host_exit', payload: { code } });
+        this.child = null;
+        settle();
+        // host 崩了:如果项目还在,就静默拉一个,避免下次 send 又回 "尚未就绪"
+        if (this.currentProject && this.crashStreak < LocalAgent.MAX_CRASH_STREAK) {
+          this.crashStreak += 1;
+          this.start(this.currentProject).catch(() => undefined);
+        }
+      });
+    });
   }
 
-  send(value: Record<string, unknown>): void {
-    if (!this.child?.stdin?.writable) return this.receive({ type: 'error', error: 'Agent Host 尚未就绪。' });
+  /** 等到 host 的 stdout 至少有首个 chunk(说明子进程已就绪并进入 readline 循环),或者已退出。 */
+  async waitReady(): Promise<void> {
+    if (this.starting) await this.starting;
+  }
+
+  async send(value: Record<string, unknown>): Promise<void> {
+    if (!this.child?.stdin?.writable) {
+      // host 没起 / 死了:有项目就拉一个,等就绪后再写
+      if (this.currentProject) {
+        if (this.crashStreak >= LocalAgent.MAX_CRASH_STREAK) {
+          this.receive({ type: 'error', error: 'Agent Host 连续崩溃，已停止自动重启。请在终端确认 mocode 配置后重试。' });
+          return;
+        }
+        await this.start(this.currentProject);
+      } else {
+        this.receive({ type: 'error', error: 'Agent Host 尚未就绪。' });
+        return;
+      }
+    }
+    await this.waitReady();
+    if (!this.child?.stdin?.writable) {
+      this.receive({ type: 'error', error: 'Agent Host 尚未就绪。' });
+      return;
+    }
+    this.crashStreak = 0; // 成功写入 stdin 说明 host 还活着,重置崩溃计数
     this.child.stdin.write(`${JSON.stringify(value)}\n`);
   }
-  stop(): void { this.child?.kill(); this.child = null; this.buffer = ''; }
+
+  stop(): void {
+    this.child?.kill();
+    this.child = null;
+    this.starting = null;
+    this.buffer = '';
+  }
 
   private read(chunk: string): void {
     this.buffer += chunk;
@@ -260,7 +363,7 @@ function installIpc(): void {
   ipcMain.on('work:agent-send', (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' ? value.id : randomUUID();
     if (value.type === 'run') { activeTaskId = id; const task = taskById(id); if (task) { task.status = 'running'; task.updatedAt = new Date().toISOString(); saveState(); broadcastState(); } }
-    agent?.send({ ...value, id });
+    void agent?.send({ ...value, id });
   });
 }
 

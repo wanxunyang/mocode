@@ -60,15 +60,19 @@ textarea::placeholder { color:#c1c7c6; }
 .send-button:hover { background:#737e7b; transform:translateY(-1px); }
 .send-button.stop { background:#cf7f70; font-size:11px; }
 
-.conversation { position:absolute; inset:0 0 125px; overflow:auto; padding:34px max(10%,44px) 34px; scroll-behavior:smooth; }
-.message { display:flex; gap:10px; max-width:760px; margin:0 auto 19px; }
-.message-avatar { flex:0 0 25px; width:25px; height:25px; display:grid; place-items:center; border-radius:8px; background:#e9f5f7; color:#54878c; font-weight:600; font-size:12px; }
+.conversation { position:absolute; inset:0 0 125px; overflow:auto; padding:34px 0; scroll-behavior:smooth; display:flex; flex-direction:column; align-items:center; }
+.message { display:flex; gap:10px; width:100%; max-width:760px; padding:0 max(10%,44px); margin:0 0 19px; align-items:flex-start; box-sizing:border-box; }
+.message.assistant { align-self:flex-start; }
+.message.user { align-self:flex-end; flex-direction:row-reverse; }
+.message.system { align-self:center; max-width:620px; padding:0 18px; opacity:.82; }
 .message.user .message-avatar { background:#eceded; color:#68706f; border-radius:50%; font-size:10px; }
+.message.assistant .message-avatar { background:#e9f5f7; color:#54878c; border-radius:8px; font-size:12px; }
 .message.system .message-avatar { background:#fff2de; color:#a87a31; border-radius:50%; font-size:11px; }
 .message-content { min-width:0; flex:1; }
 .message-label { color:#77807e; font-size:11px; margin:3px 0 5px; font-weight:600; }
-.message-body { white-space:pre-wrap; line-height:1.65; color:#2c3433; font-size:13px; }
-.tool-card { max-width:735px; margin:0 auto 10px 35px; border:1px solid #e3e8e7; border-radius:8px; background:#fafcfc; overflow:hidden; }
+.message.user .message-label { text-align:right; }
+.message-body { white-space:pre-wrap; line-height:1.65; color:#2c3433; font-size:13px; word-break:break-word; }
+.tool-card { max-width:735px; width:calc(100% - 90px); margin:0 0 10px 35px; align-self:flex-start; border:1px solid #e3e8e7; border-radius:8px; background:#fafcfc; overflow:hidden; }
 .tool-card summary { height:32px; display:flex; align-items:center; gap:7px; padding:0 10px; color:#536160; cursor:pointer; font-size:11px; list-style:none; }
 .tool-card summary::-webkit-details-marker { display:none; }
 .tool-state { color:#5895ed; font-size:14px; }

@@ -46,6 +46,30 @@ function selectedTask(): Task | undefined { return state?.tasks.find((task) => t
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]!)); }
 function statusText(status: TaskStatus): string { return ({ queued: '等待开始', running: '正在运行', waiting: '等待确认', completed: '已完成', failed: '运行失败', cancelled: '已停止' })[status]; }
 
+/**
+ * 把 Agent Host / LLM 流冒上来的原始错误翻成一句用户能看懂的话。
+ * 屏蔽 node-fetch / undici 的 ERR_STREAM_PREMATURE_CLOSE、网络断开、JSON 解析栈等
+ * 内部噪音,只保留"重试/换模型/查配置"这类可执行建议。
+ */
+function humanizeError(raw: string): string | null {
+  const text = raw.trim();
+  if (!text) return null;
+  if (/Premature close|ECONNRESET|ECONNREFUSED|socket hang up|ETIMEDOUT|ENOTFOUND|fetch failed|network/i.test(text)) {
+    return '与 AI 服务的连接中断了，请稍后重试或检查网络/模型配置。';
+  }
+  if (/Invalid Mocode Work host command|Invalid JSON command|输出格式错误/.test(text)) {
+    return 'Agent Host 输出了无法识别的数据，请重试一次。';
+  }
+  if (/Session .* could not be restored/.test(text)) return `历史会话丢失，已开启新会话。`;
+  if (/already active/.test(text)) return '当前还有任务在跑，请先等它结束或点停止。';
+  if (/Approval request has expired/.test(text)) return '上一次的确认请求已过期，请重新发起任务。';
+  if (/Agent Host 未构建/.test(text)) return 'Agent Host 还没有构建，请先在 mocode 仓库根目录运行 npm run build。';
+  if (/Agent Host 尚未就绪/.test(text)) return 'Agent Host 还没准备好，请稍候再发。';
+  if (/LLM_BASE_URL|LLM_API_KEY|baseURL|apiKey/i.test(text)) return '模型未配置：请运行 /model 或设置 LLM_BASE_URL / LLM_API_KEY 后重试。';
+  // 命中的是用户已经能看懂的原文,直接展示
+  return text;
+}
+
 function renderProjects(): void {
   const current = state; if (!current) return;
   projectList.innerHTML = current.projects.map((project) => `<button class="project-item ${project.id === current.selectedProjectId ? 'selected' : ''}" data-project="${escapeHtml(project.id)}"><span class="folder-icon">▱</span><span>${escapeHtml(project.name)}</span></button>`).join('');
@@ -125,7 +149,12 @@ async function submit(): Promise<void> {
 
 function finish(): void { activeRunId = null; activeAssistant = null; setRunning(false); }
 function handleAgentEvent(envelope: AgentEnvelope): void {
-  if (envelope.type === 'error') { addMessage('system', envelope.error ?? 'Agent Host 发生错误。'); finish(); return; }
+  if (envelope.type === 'error') {
+    const message = humanizeError(envelope.error ?? '');
+    if (message) addMessage('system', message);
+    finish();
+    return;
+  }
   const payload = envelope.payload ?? {};
   if (envelope.requestId && activeRunId && envelope.requestId !== activeRunId) return;
   switch (envelope.event) {
@@ -137,8 +166,29 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     case 'approval_requested': showApproval(payload); break;
     case 'run_aborted': addMessage('system', '任务已停止。'); finish(); break;
     case 'run_completed': { const changed = Array.isArray(payload.changedFiles) ? payload.changedFiles.length : 0; if (changed) addMessage('system', `本轮完成，修改了 ${changed} 个文件。`); finish(); break; }
-    case 'run_failed': addMessage('system', String(payload.message ?? '运行失败。')); finish(); break;
-    case 'host_exit': if (activeRunId) { addMessage('system', 'Agent Host 已退出。'); finish(); } break;
+    case 'host_log': {
+      const raw = String(payload.message ?? '').trim();
+      if (!raw) break;
+      // 屏蔽 Node 内置模块的 deprecation 噪音(whatwg-url / tr46 还在用 punycode 等)
+      if (/^\(?node:\d+\)? \[DEP\d{4}\]/.test(raw)) break;
+      addMessage('system', raw);
+      break;
+    }
+    case 'run_failed': {
+      const message = humanizeError(String(payload.message ?? '运行失败。'));
+      if (message) addMessage('system', message);
+      finish();
+      break;
+    }
+    case 'host_exit': {
+      // host 死了:如果还有挂着的 run,先把 run 标记为失败;主进程会自动拉起新 host。
+      const code = typeof payload.code === 'number' ? payload.code : null;
+      if (activeRunId) {
+        addMessage('system', `Agent Host 已退出（退出码 ${code ?? '?'}），正在自动重启……`);
+        finish();
+      }
+      break;
+    }
   }
 }
 
