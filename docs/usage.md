@@ -12,7 +12,7 @@
 | [04 TUI 命令菜单](#tui-命令菜单) | 在会话内管理配置、上下文、文件与界面 |
 | [05 PLAN / AUTO](#plan--auto-模式) | 先调研规划，或直接执行 |
 | [06 会话与回滚](#会话与回滚) | 恢复历史、中断任务、撤销文件变更 |
-| [07 项目上下文](#项目上下文) | Snapshot、Project Skill、`MOCODE.md` 与 Skills |
+| [07 项目上下文](#项目上下文) | `MOCODE.md` 与 Skills |
 | [08 配置参考](#配置参考) | 配置优先级和常用环境变量 |
 | [09 常见问题](#常见问题) | 连不上模型、工具不调用、上下文过长等 |
 
@@ -128,11 +128,6 @@ MoCode 会在“思考 → 调用工具 → 观察结果 → 再思考”的循�
 | `/memory_switch [on|off]` | 开关长期记忆；更改后需重启 REPL 才能完整刷新工具集。 |
 | `/memory_status` | 查看长期记忆开关状态。 |
 | `/reflect` | 手动触发一次后台记忆反思。 |
-| `/snapshot [on|off|status]` | 开关或查看 Project Snapshot。 |
-| `/snapshot_refresh` | 重新扫描并让 LLM 生成项目快照。 |
-| `/project_skill [on|off]` | 开关 Project Skill。 |
-| `/project_skill view` | 查看当前 Project Skill 内容。 |
-| `/project_skill init` | 扫描项目并生成或优化 Project Skill。 |
 
 [↑ 返回帮助菜单](#帮助菜单)
 
@@ -159,13 +154,12 @@ MoCode 会在“思考 → 调用工具 → 观察结果 → 再思考”的循�
 
 ## 项目上下文
 
-MoCode 通过三类互补信息理解项目：
+MoCode 通过 `MOCODE.md` 与 Skills 理解项目：
 
 | 功能 | 默认状态 | 内容与操作 |
 | --- | --- | --- |
-| **Project Snapshot** | 开启 | 自动扫描项目并生成 `.mocode/snapshot.json`；提供目录、技术栈、关键命令和模块摘要。用 `/snapshot` 开关，重大变更后用 `/snapshot_refresh` 重建。 |
-| **Project Skill** | 关闭 | 保存架构决策、约定和踩坑等“为什么 / 怎么做”。先用 `/project_skill on` 启用，再用 `/project_skill init` 生成 `.mocode/project-skill.md`。 |
-| **`MOCODE.md`** | 按文件存在情况加载 | 每轮自动加载的 Markdown 项目记忆。用 `/init` 生成初稿，随后可手工维护。 |
+| **`MOCODE.md`** | 按文件存在情况加载 | 每轮自动加载的 Markdown 项目记忆（同时覆盖静态文件结构、命令清单与项目约定/坑点）。用 `/init` 生成初稿，随后可手工维护。 |
+| **Skills** | 按需加载 | 通过 `use_skill` 工具按需加载的额外能力。详见 `~/.mocode/skills/` 与 `.mocode/skills/`。 |
 
 Skills 则是可复用的任务说明。MoCode 默认扫描：
 
@@ -210,8 +204,6 @@ LLM_MODEL=your-model-name
 | `MAX_STEPS` | 每轮 Agent 工具循环的最大步数。 | `200` |
 | `SUB_AGENT_MAX_STEPS` | 子 Agent 默认最大步数。 | `50` |
 | `SANDBOX_ROOT` | 文件操作与命令工作目录的沙箱根。 | 当前工作目录 |
-| `MOCODE_PROJECT_SNAPSHOT` | Project Snapshot 开关。 | `true` |
-| `MOCODE_PROJECT_SKILL` | Project Skill 开关。 | `false` |
 | `MEMORY_ENABLED` | 跨会话长期记忆开关。 | `false` |
 | `MOCODE_THEME` | TUI 颜色主题。 | `default` |
 | `ANYSEARCH_API_KEY` | 可选联网搜索 API Key。 | 未设置时使用匿名免费额度 |
@@ -233,9 +225,6 @@ LLM_MODEL=your-model-name
 
 **上下文快满了**  
 使用 `/context` 查看用量，使用 `/compact` 压缩；也可以缩小任务、明确焦点，或将 `CONTEXT_WINDOW_TOKENS` 设置为模型真实窗口。
-
-**Project Skill 没有注入**  
-它默认关闭。运行 `/project_skill on` 后重启 REPL，使工具表完整刷新；再使用 `/project_skill init` 创建内容。
 
 **联网搜索失败或限流**  
 可设置 `ANYSEARCH_API_KEY` 使用自己的额度；不设置时会使用匿名免费额度并受 IP 限流。

@@ -9,10 +9,6 @@ import {
   isMemoryEnabled,
   isSubAgentEnabled,
   updateSubAgentConfig,
-  isProjectSkillEnabled,
-  isProjectSnapshotEnabled,
-  updateProjectSkillConfig,
-  updateSnapshotConfig,
   updateLanguageConfig,
   languageFromShell,
   buildBasePrompt,
@@ -108,7 +104,6 @@ import {
   formatReflectResult,
   loadAll,
 } from '../memory/index.js';
-import { buildSnapshot, loadSnapshot, clearSnapshotCache } from '../project-snapshot/index.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getSandboxRoot } from '../sandbox/root.js';
@@ -159,24 +154,6 @@ function buildSlashCommands(): SlashCommand[] {
         { name: 'on', value: '/subagent on', desc: d('commands.subagentOn') },
         { name: 'off', value: '/subagent off', desc: d('commands.subagentOff') },
         { name: 'status', value: '/subagent status', desc: d('commands.subagentStatus') },
-      ],
-    },
-    {
-      name: '/project_skill', desc: d('commands.skill'), children: [
-        { name: 'toggle', value: '/project_skill', desc: d('commands.toggle') },
-        { name: 'on', value: '/project_skill on', desc: d('commands.skillOn') },
-        { name: 'off', value: '/project_skill off', desc: d('commands.skillOff') },
-        { name: 'view', value: '/project_skill view', desc: d('commands.skillView') },
-        { name: 'init', value: '/project_skill init', desc: d('commands.skillInit') },
-      ],
-    },
-    {
-      name: '/snapshot', desc: d('commands.snapshot'), children: [
-        { name: 'toggle', value: '/snapshot', desc: d('commands.snapshotToggle') },
-        { name: 'on', value: '/snapshot on', desc: d('commands.snapshotOn') },
-        { name: 'off', value: '/snapshot off', desc: d('commands.snapshotOff') },
-        { name: 'status', value: '/snapshot status', desc: d('commands.snapshotStatus') },
-        { name: 'refresh', value: '/snapshot_refresh', desc: d('commands.snapshotRefresh') },
       ],
     },
     { name: '/theme', desc: d('commands.theme') },
@@ -440,8 +417,6 @@ function runningStateFor(
       return { status: t('running.rollback'), placeholder: t('running.chooseTurn') };
     case '/init':
       return { status: t('running.init'), placeholder: t('running.generateMemory') };
-    case '/snapshot_refresh':
-      return { status: t('running.snapshot'), placeholder: t('running.scanning') };
     case '/plan':
       return { status: t('running.plan'), placeholder: '…' };
     case '/auto':
@@ -460,10 +435,6 @@ function runningStateFor(
       return { status: t('running.memoryStatus'), placeholder: '…' };
     case '/subagent':
       return { status: t('running.subagent'), placeholder: t('running.switching') };
-    case '/project_skill':
-      return { status: t('running.skill'), placeholder: t('running.processing') };
-    case '/snapshot':
-      return { status: t('running.snapshot'), placeholder: t('running.switching') };
     case '/language':
       return { status: t('running.language'), placeholder: t('running.chooseLanguage') };
     case '/upgrade':
@@ -868,12 +839,6 @@ export async function startRepl(
   const mcpReport = await initializeAllMcp();
   registerToolsExtension('mcp', getMcpTools());
   refreshChatTools();
-  // 项目快照：sandboxRoot 设定后异步构建（完全由 LLM 生成）。
-  // 构建失败不阻断 REPL：snapshot 内部 catch 所有异常。
-  if (config.projectSnapshotEnabled) {
-    // 异步触发 LLM 快照生成（不阻塞 REPL 启动）
-    buildSnapshot().catch(() => {/* LLM 生成失败不阻断 */});
-  }
   // --resume:读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
   let currentSessionId: string | undefined = sessionId;
   if (!currentSessionId) currentSessionId = newSessionId(); // 新会话立即分配 ID,确保 prompt 里有正确路径
@@ -1271,10 +1236,7 @@ export async function startRepl(
     // 语言命令把视觉分隔放在确认文案之后；避免回显后先空一行、下一条命令却紧贴确认。
     echoInput(input, cmd !== '/language');
     const state = runningStateFor(cmd);
-    const placeholder =
-      line === '/snapshot_refresh' || line === '/project_skill init'
-        ? ''
-        : state.placeholder;
+    const placeholder = state.placeholder;
     refreshStatusBase(history);
     layout.enterRunningMode(state.status, placeholder);
 
@@ -1650,45 +1612,6 @@ export async function startRepl(
         layout.contentWrite(`${ui.dim}(无需压缩:没有可压缩的旧消息,且不在手动触发)${ui.reset}\n`);
       } else {
         layout.contentWrite(`${ui.dim}(reason=${reason},${before} → ${after} tokens)${ui.reset}\n`);
-      }
-      continue;
-    }
-    if (line === '/snapshot_refresh') {
-      if (!config.projectSnapshotEnabled) {
-        layout.contentWrite(`${ui.dim}(项目快照功能已关闭,MOCODE_PROJECT_SNAPSHOT=false)${ui.reset}\n`);
-        continue;
-      }
-      // buildSnapshot 是异步操作(完全由 LLM 生成)，显示进度提示
-      layout.contentWrite(`${ui.dim}正在重新生成项目快照 (LLM 分析中)...${ui.reset}\n`);
-      const signal = startRunningListener('');
-      try {
-        // 清除缓存，强制重新生成
-        clearSnapshotCache();
-        const result = await buildSnapshot(signal, true);
-        if (result.snapshot) {
-          layout.contentWrite(
-            `${ui.cyan}✓ 项目快照已刷新${ui.reset} (${result.snapshot.builtAt})\n`
-          );
-          layout.contentWrite(
-            `${ui.dim}已生成 markdown 快照，注入到系统提示词中${ui.reset}\n`
-          );
-          // 刷新 history[0]：buildSnapshotSection 内部 loadSnapshot() 会拿到新快照，
-          // buildSystemMessage 重新拼 system prompt，快照段落就更新了。
-          history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
-          layout.contentWrite(`${ui.dim}(system prompt 已同步刷新)${ui.reset}\n`);
-        } else {
-          layout.contentWrite(`${ui.red}✗ 快照生成失败${ui.reset}: ${result.error || '未知错误'}\n`);
-          if (result.transcript) {
-            layout.contentWrite(`${ui.dim}--- 子 agent 日志 ---${ui.reset}\n`);
-            layout.contentWrite(`${ui.dim}${result.transcript}${ui.reset}\n`);
-            layout.contentWrite(`${ui.dim}--- 日志结束 ---${ui.reset}\n`);
-          }
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        layout.contentWrite(`${ui.red}[错误]${ui.reset} 刷新快照失败: ${msg}\n`);
-      } finally {
-        stopRunningListener();
       }
       continue;
     }
@@ -2275,238 +2198,6 @@ export async function startRepl(
         layout.rewriteBanner(bannerLines(banner()));
       } catch (e) {
         layout.contentWrite(`${ui.red}/memory_switch 失败:${ui.reset} ${(e as Error).message}\n`);
-      }
-      continue;
-    }
-
-    if (
-      line === '/project_skill' ||
-      line.startsWith('/project_skill ')
-    ) {
-      // /project_skill — 项目专属 Skill 总开关 + 查看/编辑。
-      // 用法:
-      //   /project_skill              切换 on/off
-      //   /project_skill on|off       显式开关
-      //   /project_skill view         查看当前内容
-      //   /project_skill edit         打开编辑器修改
-      try {
-        const arg = line.startsWith('/project_skill ')
-          ? line.slice('/project_skill '.length).trim().toLowerCase()
-          : '';
-
-        // /project_skill view — 查看当前内容
-        if (arg === 'view') {
-          const enabled = isProjectSkillEnabled();
-          layout.contentWrite(`${ui.accent}项目专属 Skill:${ui.reset} ${enabled ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`);
-          if (enabled) {
-            const { readProjectSkill } = await import('../project-skill/index.js');
-            const content = readProjectSkill();
-            if (content) {
-              layout.contentWrite(`${ui.dim}--- 内容 ---${ui.reset}\n${content}\n${ui.dim}--- 结束 ---${ui.reset}\n`);
-            } else {
-              layout.contentWrite(`${ui.dim}(尚未创建,可用 /project_skill init 生成初始内容)${ui.reset}\n`);
-            }
-          } else {
-            layout.contentWrite(`${ui.dim}(功能已关闭,用 /project_skill on 开启)${ui.reset}\n`);
-          }
-          continue;
-        }
-
-        // /project_skill init — 作为一条普通主 Agent 请求生成/优化 skill，不再派生高消耗子 agent。
-        if (arg === 'init') {
-          if (!isProjectSkillEnabled()) {
-            layout.contentWrite(`${ui.yellow}⚠ 项目专属 Skill 尚未开启${ui.reset}，请先运行 ${ui.cyan}/project_skill on${ui.reset}\n`);
-            continue;
-          }
-
-          // .codegraph/ 存在性动态决定:有索引时引导 LLM 优先用 codegraph skill(免去逐文件扫);
-          // 没索引时干脆不提,避免 LLM 调出失败。
-          const cgRule = hasCodegraphIndex()
-            ? '3. 最多进行 1 次 codegraph 探索(用 use_skill 加载 codegraph skill,再 run_command 调 codegraph explore / codegraph node);只有缺少关键依据时,才额外进行少量定点 read_file/grep。禁止全仓 glob 和逐文件扫描。\n'
-            : '3. 只在缺少关键依据时,进行少量定点 read_file/grep。禁止全仓 glob 和逐文件扫描。\n';
-          const initPrompt = `请直接初始化或优化当前项目的 Project Skill，并完成写入。
-
-要求：
-1. 直接由你完成，禁止调用 sub-agent 工具或派生任何子 agent。
-2. 优先利用系统提示中已有的 Project Snapshot 和 Project Skill；不要重复扫描其中已有的目录、依赖、命令和模块清单。
-${cgRule}4. Skill 只记录 Snapshot 无法提供的 WHY/HOW/GOTCHAS/CONVENTIONS：设计取舍、关键调用链、非直觉边界、项目约定和可操作坑点。使用具体路径和例子，删除重复或过时内容。
-5. 最终内容应完整、结构清晰。调用 project_skill_update，使用 action=write 一次性写入完整内容。
-6. 写入成功后只简短说明更新了哪些关键洞察，不要输出完整 Skill。`;
-
-          const previousMode = getAgentMode();
-          try {
-            await runTurn(initPrompt, false, '');
-          } finally {
-            // init 是一次明确写操作，临时使用 auto；完成后恢复用户原来的模式。
-            if (previousMode === 'plan') setAgentMode('plan');
-          }
-          continue;
-        }
-
-        // 开关切换
-        let nextEnabled: boolean;
-        if (arg === '') {
-          nextEnabled = !isProjectSkillEnabled();
-        } else if (['on', 'true', '1', 'yes', 'y', 'enable', 'enabled'].includes(arg)) {
-          nextEnabled = true;
-        } else if (['off', 'false', '0', 'no', 'n', 'disable', 'disabled'].includes(arg)) {
-          nextEnabled = false;
-        } else {
-          layout.contentWrite(
-            `${ui.yellow}/project_skill 用法:${ui.reset}\n` +
-              `  /project_skill             切换(开↔关)\n` +
-              `  /project_skill on|off      显式设值\n` +
-              `  /project_skill view        查看当前内容\n` +
-              `  /project_skill init        扫描项目生成/优化 skill（可重复运行）\n`
-          );
-          continue;
-        }
-
-        const prev = isProjectSkillEnabled();
-        if (nextEnabled === prev) {
-          layout.contentWrite(
-            `${ui.dim}(已是 ${nextEnabled ? '开启' : '关闭'},未变更 — 持久化字段未写入)${ui.reset}\n`
-          );
-          continue;
-        }
-
-        updateProjectSkillConfig(nextEnabled);
-        updateConfigKey('MOCODE_PROJECT_SKILL', nextEnabled ? 'true' : 'false');
-        const note =
-          nextEnabled
-            ? `${ui.green}已开启项目专属 Skill${ui.reset} — project_skill_update 工具进入工具表;` +
-              `项目 Skill 内容会在下次拼 system message 时注入。工具表快照需重启 REPL 才完整刷新。`
-            : `${ui.yellow}已关闭项目专属 Skill${ui.reset} — project_skill_update 工具将在下次拼 system message 时从工具表过滤;` +
-              `项目 Skill 内容不再注入。重启 REPL 后工具表完全不出现。`;
-        layout.contentWrite(`${note}\n`);
-        layout.contentWrite(
-          `${ui.dim}(写入 ${CONFIG_PATH}:MOCODE_PROJECT_SKILL=${nextEnabled ? 'true' : 'false'};${ui.reset}` +
-            (process.env.MOCODE_PROJECT_SKILL
-              ? `${ui.dim}同 session shell 未 export,文件写入即时生效)${ui.reset}\n`
-              : `${ui.dim}下次启动仍生效)${ui.reset}\n`)
-        );
-      } catch (e) {
-        layout.contentWrite(`${ui.red}/project_skill 失败:${ui.reset} ${(e as Error).message}\n`);
-      }
-      continue;
-    }
-
-    if (
-      line === '/snapshot' ||
-      line.startsWith('/snapshot ')
-    ) {
-      // /snapshot — 项目快照总开关。无参切换 on/off;/on 或 /off 显式;/status 只读。
-      //
-      // 设计原则(与 /project_skill / /memory_switch 对齐):
-      //  - 单一来源 config.projectSnapshotEnabled(被 buildSnapshotSection() 现拼 +
-      //    read_file 工具每次 execute 现读);改完下一轮 chat 的 system prompt 即时反映。
-      //  - 持久化字段 MOCODE_PROJECT_SNAPSHOT,默认值 true(默认开启,启动 lazy build)。
-      //  - 关闭时:system prompt 不注入快照段,read_file 不查 cache 直接走真实 readFile。
-      //  - 开启时:若还没有 snapshot.json,主动 buildProjectSnapshot() 一次(仿 startRepl
-      //    655-658 的 lazy build 模式),否则 buildSnapshotSection() 会因 loadSnapshot=null
-      //    返空串,用户感知不到自己刚打开的开关已经生效。
-      try {
-        const arg = line.startsWith('/snapshot ')
-          ? line.slice('/snapshot '.length).trim().toLowerCase()
-          : '';
-
-        // /snapshot status — 只读查询
-        if (arg === 'status') {
-          const on = isProjectSnapshotEnabled();
-          layout.contentWrite(
-            `${ui.accent}项目快照:${ui.reset} ${on ? `${ui.green}开启` : `${ui.yellow}关闭`}${ui.reset}\n`
-          );
-          layout.contentWrite(
-            `${ui.dim}  单一来源 config.projectSnapshotEnabled(${on ? 'true' : 'false'});` +
-              `持久化 ${ui.accent}MOCODE_PROJECT_SNAPSHOT${ui.dim};` +
-              `配置文件 ${CONFIG_PATH}${ui.reset}\n`
-          );
-          layout.contentWrite(
-            `${ui.dim}  关闭时:buildBasePrompt() 不含「## Project Snapshot」段;` +
-              `read_file 工具直接走真实 readFile,不走 snapshot cache。${ui.reset}\n`
-          );
-          layout.contentWrite(
-            `${ui.dim}  切换后下次 chat 即时反映(本轮已发出的请求不会回滚)。${ui.reset}\n`
-          );
-          continue;
-        }
-
-        // /snapshot(无参=切换;有参=按值设)
-        let nextEnabled: boolean;
-        if (arg === '') {
-          nextEnabled = !isProjectSnapshotEnabled();
-        } else if (['on', 'true', '1', 'yes', 'y', 'enable', 'enabled'].includes(arg)) {
-          nextEnabled = true;
-        } else if (['off', 'false', '0', 'no', 'n', 'disable', 'disabled'].includes(arg)) {
-          nextEnabled = false;
-        } else {
-          layout.contentWrite(
-            `${ui.yellow}/snapshot 用法:${ui.reset}\n` +
-              `  /snapshot                  切换(开↔关)\n` +
-              `  /snapshot on|off           显式设值\n` +
-              `  /snapshot status           查看当前状态\n`
-          );
-          continue;
-        }
-
-        const prev = isProjectSnapshotEnabled();
-        if (nextEnabled === prev) {
-          layout.contentWrite(
-            `${ui.dim}(已是 ${nextEnabled ? '开启' : '关闭'},未变更 — 持久化字段未写入)${ui.reset}\n`
-          );
-          continue;
-        }
-
-        updateSnapshotConfig(nextEnabled);
-        updateConfigKey('MOCODE_PROJECT_SNAPSHOT', nextEnabled ? 'true' : 'false');
-
-        // 开启时异步 build 一次,避免 buildSnapshotSection 因 loadSnapshot=null 返空串。
-        let built = false;
-        if (nextEnabled) {
-          try {
-            clearSnapshotCache();
-            const result = await buildSnapshot();
-            if (result.snapshot) {
-              built = true;
-            } else {
-              layout.contentWrite(
-                `${ui.yellow}⚠ 快照构建失败:${ui.reset} ${result.error || '未知错误'} ` +
-                  `${ui.dim}(开关已切换,系统提示词中的快照段将为空,稍后可用 /snapshot_refresh 重试)${ui.reset}\n`
-              );
-            }
-          } catch (e) {
-            layout.contentWrite(
-              `${ui.yellow}⚠ 快照构建失败:${ui.reset} ${(e as Error).message} ` +
-                `${ui.dim}(开关已切换,系统提示词中的快照段将为空,稍后可用 /snapshot_refresh 重试)${ui.reset}\n`
-            );
-          }
-        }
-
-        // 刷新 history[0] 使 system prompt 立即反映新值(仿 /snapshot_refresh)。
-        history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
-
-        const note = nextEnabled
-          ? `${ui.green}已开启项目快照${ui.reset} — ` +
-              `system prompt 将在下次 chat 注入「## Project Snapshot」段;` +
-              `read_file 工具优先走 snapshot cache(mtime 校验失败时回退真实 readFile)。`
-          : `${ui.yellow}已关闭项目快照${ui.reset} — ` +
-              `system prompt 不再注入「## Project Snapshot」段;` +
-              `read_file 工具直接走真实 readFile,不再查 cache。`;
-
-        let extra = '';
-        if (nextEnabled && built) {
-          extra = `${ui.dim}(已构建快照;如需刷新用 /snapshot_refresh)${ui.reset}\n`;
-        }
-
-        layout.contentWrite(`${note}\n${extra}`);
-        layout.contentWrite(
-          `${ui.dim}(写入 ${CONFIG_PATH}:MOCODE_PROJECT_SNAPSHOT=${nextEnabled ? 'true' : 'false'};` +
-            (process.env.MOCODE_PROJECT_SNAPSHOT
-              ? `${ui.dim}同 session shell 已 export MOCODE_PROJECT_SNAPSHOT,文件写入下次启动仍以 shell 值为准;取消 shell 设置后生效)${ui.reset}\n`
-              : `${ui.dim}下次启动仍生效)${ui.reset}\n`)
-        );
-      } catch (e) {
-        layout.contentWrite(`${ui.red}/snapshot 失败:${ui.reset} ${(e as Error).message}\n`);
       }
       continue;
     }

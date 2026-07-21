@@ -16,7 +16,6 @@ import { memoryListTool } from './memory-list.js';
 import { memoryUpdateTool } from './memory-update.js';
 import { memoryForgetTool } from './memory-forget.js';
 import { subAgentTool } from './task.js';
-import { projectSkillUpdateTool } from './project-skill-update.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
@@ -42,12 +41,6 @@ const _memoryTools = _memoryEnabledAtBoot
     ]
   : [];
 
-/** 项目专属 Skill 工具:仅在 MOCODE_PROJECT_SKILL=true 时注册,与 memory 同模式。 */
-const _projectSkillEnabledAtBoot = process.env.MOCODE_PROJECT_SKILL === 'true';
-const _projectSkillTools = _projectSkillEnabledAtBoot
-  ? [projectSkillUpdateTool]
-  : [];
-
 const pathResource = (args: Record<string, unknown>): string[] =>
   typeof args.path === 'string' && args.path ? [`file:${args.path}`] : ['workspace'];
 const workspaceResource = (): string[] => ['workspace'];
@@ -70,7 +63,6 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   memory_list: { effect: 'read', concurrency: 'serial', retry: 'safe', resources: memoryResource },
   memory_update: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
   memory_forget: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
-  project_skill_update: { effect: 'write', concurrency: 'serial', retry: 'never', resources: workspaceResource },
   // sub-agent 动态协调：只读任务无锁并行；写任务在 overlay 中执行，merge 时由 ChangeSet 持 canonical lock。
   'sub-agent': {
     effect: 'write',
@@ -97,7 +89,6 @@ const rawBuiltinTools: Tool[] = [
   askHumanTool,
   dropContextTool,
   ..._memoryTools,
-  ..._projectSkillTools,
   subAgentTool,
 ];
 

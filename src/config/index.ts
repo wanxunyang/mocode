@@ -2,10 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
-import { loadSnapshot } from '../project-snapshot/index.js';
-import { buildProjectSkillSection } from '../project-skill/index.js';
 import { getSandboxRoot } from '../sandbox/root.js';
-import { getCurrentSessionId } from '../session/state.js';
+import { getCurrentSessionId, setCurrentSessionId } from '../session/state.js';
 import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-discipline.js';
 import {
   detectLanguage,
@@ -118,20 +116,12 @@ export interface Config {
   themeFromShell: boolean;
   /** 由 shell 环境变量设置的 LLM 键名列表(非文件回填)。若含某键,/model 写该键下次启动仍被 shell 盖。 */
   llmKeysFromShell: string[];
-  /** 项目快照缓存总开关：跨 session 持久化静态项目文件 + 项目结构摘要。
-   *  关闭时 read_file 不走 snapshot cache，system prompt 不注入 snapshot 提示段。
-   *  默认 true；设 MOCODE_PROJECT_SNAPSHOT=false 全局回退。 */
-  projectSnapshotEnabled: boolean;
   /** 工具权限系统总开关:基于 Tool.risk 字段(safe/confirm/dangerous)在执行前弹确认面板。
    *  关闭则所有工具直接放行(零交互,向后兼容旧行为)。默认 true。
    *  设 MOCODE_PERMISSION=false 全局回退。 */
   permissionEnabled: boolean;
   /** Allow confirmation-requiring tools without a TTY. Defaults false (fail closed). */
   permissionNonInteractiveAllow: boolean;
-  /** 项目专属 Skill 总开关:跨 session 持久化项目开发知识(约定/架构/坑点)。
-   *  开启后 .mocode/project-skill.md 内容注入系统提示词，Agent 可通过 project_skill_update 工具动态更新。
-   *  默认 false(零侵入);设 MOCODE_PROJECT_SKILL=true 启用。 */
-  projectSkillEnabled: boolean;
 }
 
 /**
@@ -176,32 +166,6 @@ const PLATFORM_NOTE = (() => {
  * 默认关(新用户零侵入):这段 + 工具表里的 5 个 memory_* + 系统提示尾部的 Memory Index
  * 都不出现;打开 /memory_switch 后下一次新建 system message 才注入。
  */
-/**
- * 项目快照段落：开 isProjectSnapshotEnabled() 且有快照时才拼。
- * 告诉 LLM 项目已有哪些静态文件可 cache hit，减少无谓 read_file。
- */
-function buildSnapshotSection(): string {
-  if (!config.projectSnapshotEnabled) return '';
-  try {
-    const snap = loadSnapshot();
-    if (!snap) return '';
-    
-    // 快照内容已经是完整的 markdown，直接返回
-    return `\n${snap.content}\n`;
-  } catch {
-    return '';
-  }
-}
-
-/**
- * 项目快照总开关查询器（read-file 工具用）。
- */
-export function isProjectSnapshotEnabled(): boolean {
-  return config.projectSnapshotEnabled;
-}
-
-import { setCurrentSessionId } from '../session/state.js';
-
 /**
  * Session notepad 段落：读取 .mocode/sessions/<sessionId>/notes.md，只注入 ## 标题行作为目录摘要。
  * Agent 用 write_file/edit_file/read_file 维护此文件，抗 compact（在 context window 之外）。
@@ -359,7 +323,7 @@ ${buildCodegraphSection()}
 - Operate only within authorized scope; when unsure, ask — don't guess.
 
 ## Project context (dynamic reference)
-${buildSnapshotSection()}${config.projectSkillEnabled ? buildProjectSkillSection() : ''}${memorySection}${buildNotepadSection(sessionId)}
+${memorySection}${buildNotepadSection(sessionId)}
 
 ## Session Notepad — working notes file
 ${sessionId
@@ -501,10 +465,8 @@ export const config: Config = {
   theme: process.env.MOCODE_THEME || 'default',
   themeFromShell,
   llmKeysFromShell,
-  projectSnapshotEnabled: process.env.MOCODE_PROJECT_SNAPSHOT !== 'false',
   permissionEnabled: process.env.MOCODE_PERMISSION !== 'false',
   permissionNonInteractiveAllow: process.env.MOCODE_PERMISSION_NON_INTERACTIVE_ALLOW === 'true',
-  projectSkillEnabled: process.env.MOCODE_PROJECT_SKILL === 'true',
 };
 
 /**
@@ -599,37 +561,6 @@ export function buildCodegraphSection(): string {
 export function updateMemoryConfig(enabled: boolean): void {
   config.memoryEnabled = enabled;
   process.env.MEMORY_ENABLED = enabled ? 'true' : 'false';
-}
-
-/**
- * 项目专属 Skill 总开关:单一来源。/project_skill、buildBasePrompt、
- * tools/builtins/index.ts 都从这里查。默认 false(零侵入)。
- */
-export function isProjectSkillEnabled(): boolean {
-  return config.projectSkillEnabled;
-}
-
-/**
- * 切换项目专属 Skill 开关(/project_skill on|off 调)。
- * - 更新 config 单例字段(其它模块下次调 isProjectSkillEnabled() 即拿新值)。
- * - 同步 process.env.MOCODE_PROJECT_SKILL(下次启动 loadEnvFiles 不被文件回填)。
- * 持久化(写 ~/.mocode/config 的 MOCODE_PROJECT_SKILL 键)由调用方走 writeConfigKeys。
- */
-export function updateProjectSkillConfig(enabled: boolean): void {
-  config.projectSkillEnabled = enabled;
-  process.env.MOCODE_PROJECT_SKILL = enabled ? 'true' : 'false';
-}
-
-/**
- * 切换项目快照开关(/snapshot on|off 调)。
- * - 更新 config 单例字段(其它模块下次读 config.projectSnapshotEnabled 即拿新值:
- *   buildSnapshotSection 现拼现读、read-file 每次 execute 现读)。
- * - 同步 process.env.MOCODE_PROJECT_SNAPSHOT(下次启动 loadEnvFiles 不会被文件回填)。
- * 持久化(写 ~/.mocode/config 的 MOCODE_PROJECT_SNAPSHOT 键)由调用方走 updateConfigKey。
- */
-export function updateSnapshotConfig(enabled: boolean): void {
-  config.projectSnapshotEnabled = enabled;
-  process.env.MOCODE_PROJECT_SNAPSHOT = enabled ? 'true' : 'false';
 }
 
 /** 切换界面与模型回复语言；持久化由 REPL 调用 config/file.ts 完成。 */

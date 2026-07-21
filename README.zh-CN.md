@@ -88,7 +88,7 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 ## 使用文档
 
 - [菜单式使用指南](./docs/usage.md) — 快速上手、命令速查、模式、会话、项目上下文与排障。
-- [项目上下文：Snapshot 与 Project Skill](./docs/USAGE_SNAPSHOT_SKILL.md)
+- [项目上下文：`MOCODE.md` 与 Skills](./docs/usage.md#项目上下文)
 
 ## 安装
 
