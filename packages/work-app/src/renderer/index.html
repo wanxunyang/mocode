@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mocode Work</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <header class="brand-row"><button class="brand" aria-label="Mocode Work">Mocode <span>⌄</span></button><button class="icon-button muted" id="search-button" title="搜索">⌕</button></header>
+        <nav class="primary-nav" aria-label="主导航">
+          <button class="nav-item active" id="new-task"><span>□</span>新建任务</button>
+          <button class="nav-item" id="pull-requests"><span>⌘</span>拉取请求</button>
+        </nav>
+        <section class="sidebar-section projects-section"><div class="section-heading"><span>项目</span><button class="add-project" id="add-project" title="添加项目">＋</button></div><div id="project-list" class="project-list"></div></section>
+        <section class="sidebar-section tasks-section"><div class="section-heading"><span>任务</span><button class="add-project" id="clear-task" title="清除当前项目任务">×</button></div><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
+        <footer class="sidebar-footer"><span class="avatar">M</span><span>本地运行时</span><span class="usage" id="usage">0%</span></footer>
+      </aside>
+      <main class="workspace">
+        <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览">▣</button><button id="show-files" title="浏览文件">▱</button></div>
+        <section id="empty-state" class="empty-state"><div class="idea-mark"><span></span><span></span><span></span></div><h1>我们该构建什么？</h1></section>
+        <section id="conversation" class="conversation" aria-live="polite"></section>
+        <section id="approval-panel" class="approval-panel hidden"></section>
+        <aside id="inspector" class="inspector hidden">
+          <header class="inspector-header"><b id="inspector-title">项目概览</b><button id="close-inspector" title="关闭">×</button></header>
+          <nav class="inspector-tabs"><button data-tab="overview" class="selected">概览</button><button data-tab="files">文件</button><button data-tab="prs">拉取请求</button></nav>
+          <div id="inspector-content" class="inspector-content"></div>
+        </aside>
+        <section id="search-panel" class="search-panel hidden"><div class="search-dialog"><input id="search-input" placeholder="搜索项目或任务" /><div id="search-results"></div></div></section>
+        <footer class="composer-area">
+          <div class="composer-context"><span id="context-project">⌂ 项目</span><span>▣ 本地</span><span id="context-branch">⌘ main</span></div>
+          <div class="composer">
+            <div id="attachment-list" class="attachment-list"></div>
+            <textarea id="prompt" rows="1" placeholder="描述输入"></textarea>
+            <div class="composer-actions"><div class="left-actions"><button class="plus-button" id="add-attachment" title="添加图片">＋</button><button class="skill-button" id="skill-button">✧ 提示技能</button></div><div class="right-actions"><button id="mode-button" class="model-button">Mocode Agent <span>⌄</span></button><button class="voice-button" title="语音输入">♩</button><button id="send-button" class="send-button" title="发送">↑</button></div></div>
+          </div>
+        </footer>
+      </main>
+    </div>
+    <script type="module" src="renderer.js"></script>
+  </body>
+</html>

@@ -1,7 +1,7 @@
 // Observation Lifecycle Engine:tool 消息的「观察者生命周期」状态机。
 //
 // 在 Relevance Pruner 之上的第二层被动裁剪。Relevance Pruner 只管 read_file 的「同 path 新旧替换 +
-// mutation 覆写」,本层补足「grep/glob/codegraph 这类观察类工具」的引用追踪。
+// mutation 覆写」,本层补足「grep/glob/web_search/web_fetch 这类观察类工具」的引用追踪。
 //
 // 四态机(LIVE → REFERENCED → OBSOLETE → STUB):
 //   - LIVE:刚 push 进 history 的工具结果,尚未被任何下游工具消费。
@@ -10,7 +10,7 @@
 //   - STUB:已被替换为存根(物理上 content 变成「⌦[无消费者:...]」)。
 //
 // 观察类工具两阶段衰减(避免误伤):
-//   - grep/glob/codegraph/web_search/web_fetch 等「观察/检索类」工具两阶段衰减:
+//   - grep/glob/web_search/web_fetch 等「观察/检索类」工具两阶段衰减:
 //     Phase 1(10 步):LIVE → REFERENCED,保留完整内容(返回多个候选,剩余候选可能后续被消费)。
 //     Phase 2(+5 步):REFERENCED → DIGEST,替换为摘要存根(保留文件列表+命中数+参数,丢弃详情),
 //     释放 ~90% token。states 仍为 REFERENCED,不引入新状态。
@@ -49,7 +49,6 @@ export type LifeState = 'LIVE' | 'REFERENCED' | 'OBSOLETE' | 'STUB';
 const OBSERVER_TOOLS = new Set<string>([
   'grep',
   'glob',
-  'codegraph',
   'web_search',
   'web_fetch',
 ]);
@@ -86,7 +85,6 @@ const OBSERVER_DIGEST_AGE = 5;
  *  - grep:content 是 `file:line: ...` 行,提取每行的 file 段(只保留绝对路径形态或与 pattern 匹配的)。
  *    简化:把所有看起来像「相对路径 + 文件名」的 token 抽出,留 narrow。
  *  - glob:content 是路径列表,按行 / 空格拆。
- *  - codegraph:content 里通常含 `path/to/file.ts:line`,按行拆,提 file 段。
  *
  *  返回值:命中过的 path 字符串集合(已 dedup)。失败返空集。 */
 function extractProducerPaths(toolName: string, content: string): string[] {
@@ -113,12 +111,6 @@ function extractProducerPaths(toolName: string, content: string): string[] {
         if (!t || t.includes(' ')) continue;
         // 含扩展名或含路径分隔符
         if (/\.[A-Za-z0-9]+$/.test(t) || t.includes('/') || t.includes('\\')) addPath(t);
-      }
-    } else if (toolName === 'codegraph') {
-      // codegraph 输出通常 `path\to\file.ts:line:col  symbol` 或类似;按行 + 冒号分隔。
-      for (const line of content.split(/\r?\n/)) {
-        const m = /^([^\s:][^:]*?\.[A-Za-z0-9]+):(\d+):/.exec(line);
-        if (m) addPath(m[1]);
       }
     } else if (toolName === 'web_search' || toolName === 'web_fetch') {
       // 网络结果不在文件系统路径范畴;不参与 producer 路径索引(避免误匹配)。
@@ -296,7 +288,7 @@ export class LifecycleEngine {
         })();
         const path = canonicalizePath(extractPath(argsRaw));
         if (path) {
-          // 1) 找该 path 的所有上游 producer(grep/glob/codegraph)→ 标 REFERENCED。
+          // 1) 找该 path 的所有上游 producer(grep/glob/web_search/web_fetch)→ 标 REFERENCED。
           const producers = this.producersByPath.get(path);
           if (producers) {
             for (const pidx of producers) {
@@ -462,10 +454,6 @@ export class LifecycleEngine {
       case 'glob': {
         const args = (() => { try { return `"${JSON.parse(argsRaw).pattern ?? ''}"`; } catch { return '...'; } })();
         return `${DIGEST_PREFIX}glob(${args}) — 历史结果文件 ${files}，${origLen}→摘要]\n如需完整列表或最新信息请重新调用 glob`;
-      }
-      case 'codegraph': {
-        const args = (() => { try { const a = JSON.parse(argsRaw); return `"${a.query ?? ''}"`; } catch { return '...'; } })();
-        return `${DIGEST_PREFIX}codegraph(${args}) — 历史结果文件 ${files}，${origLen}→摘要]\n如需完整详情或最新信息请重新调用 codegraph`;
       }
       case 'web_search': {
         // 统计结果数

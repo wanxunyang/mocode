@@ -4,8 +4,9 @@
 // Phase 2:tree / search / log / table / memory(高价值低风险)。
 // Phase 2.5:code / graph / doc / summary(覆盖剩余有 encoder 的 kind)。
 //   - code(read_file):仅折叠 ≥3 连续空行,行号保真(edit_file 依赖)。
-//   - graph(codegraph)/ doc(web_fetch, use_skill)/ summary(task):去 ANSI + 折叠空行,保守不重构结构。
-//   - status(edit/write/ask_human/switch_mode/mem 增删改)无 encoder:本就是一行,无需编码。
+//   - graph(保留 kind,暂无 builtin 工具直接命中)/ doc(web_fetch, use_skill)/ summary(task):
+//     去 ANSI + 折叠空行,保守不重构结构。
+//   - status(edit/write/ask_human/mem 增删改)无 encoder:本就是一行,无需编码。
 //
 // 加 encoder:新建 encoders/xxx.ts 导出 ContextEncoder,在此数组加一行。无需动 agent / llm / core。
 
@@ -17,7 +18,6 @@ import { commandEncoder } from './command.js';
 import { tableEncoder } from './table.js';
 import { memoryEncoder } from './memory.js';
 import { codeEncoder } from './code.js';
-import { graphEncoder } from './graph.js';
 import { docEncoder } from './doc.js';
 import { summaryEncoder } from './summary.js';
 
@@ -29,7 +29,6 @@ export const builtinEncoders: ContextEncoder[] = [
   tableEncoder,
   memoryEncoder,
   codeEncoder,
-  graphEncoder,
   docEncoder,
   summaryEncoder,
 ];

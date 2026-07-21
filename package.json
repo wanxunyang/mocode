@@ -4,7 +4,8 @@
   "description": "终端编码 agent:LLM + tool-call 循环 + 流式输出(含思考)+ 16 个工具,接任意 OpenAI 兼容后端。",
   "type": "module",
   "bin": {
-    "mocode": "bin/mocode.js"
+    "mocode": "bin/mocode.js",
+    "mocode-agent-host": "bin/mocode-agent-host.js"
   },
   "files": [
     "dist",

@@ -57,20 +57,6 @@ function observationKey(call: ToolCallInfo): string | null {
       maxPerFile: Math.min(Math.max(rawMax, 1), 50),
     });
   }
-  if (call.name === 'codegraph') {
-    if (typeof args.action !== 'string' || typeof args.query !== 'string') return null;
-    const query = args.action === 'explore'
-      ? args.query.trim().replace(/\s+/g, ' ')
-      : args.query.trim();
-    return JSON.stringify({
-      tool: 'codegraph',
-      action: args.action,
-      query,
-      file: typeof args.file === 'string' ? args.file.trim().replace(/\\/g, '/') : '',
-      offset: args.offset === undefined ? null : normalizedInteger(args.offset, 0),
-      limit: args.limit === undefined ? null : normalizedInteger(args.limit, 0),
-    });
-  }
   return null;
 }
 
@@ -81,15 +67,13 @@ function observationLabel(call: ToolCallInfo): string {
     const glob = JSON.stringify(String(args.glob ?? '**/*')).slice(0, 80);
     return `grep(pattern=${pattern}, glob=${glob})`;
   }
-  const action = String(args.action ?? '');
-  const query = JSON.stringify(String(args.query ?? '')).slice(0, 100);
-  return `codegraph(action=${action}, query=${query})`;
+  return call.name;
 }
 
 /**
  * Cross-message relevance pruning:
  * - read_file: a newer successful read of the same canonical path supersedes old reads.
- * - grep/codegraph: a newer successful call with the exact same semantic arguments
+ * - grep: a newer successful call with the exact same semantic arguments
  *   supersedes old results. Partial file overlap is intentionally not enough.
  */
 export class RelevancePruner {
@@ -196,9 +180,7 @@ export class RelevancePruner {
       const call = this.callAt(history, idx);
       if (!call || call.name !== toolName || observationKey(call) !== key) return;
       if (!message.tool_call_id) return;
-      const reason = toolName === 'grep'
-        ? '相同 grep 查询已有更新结果'
-        : '相同 codegraph 查询已有更新结果';
+      const reason = '相同 grep 查询已有更新结果';
       message.content =
         `${STUB_PREFIX}${reason}] ${observationLabel(call)} ${content.length} 字符 ` +
         `→ 已被更新查询替代 · id …${message.tool_call_id.slice(-6)}⌫`;

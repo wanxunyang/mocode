@@ -70,7 +70,7 @@ function callArgs(history: ChatMessage[], idx: number): { tool: string; argsRaw:
 
 function sourceType(tool: string): ArtifactSourceType | null {
   if (tool === 'read_file') return 'read';
-  if (tool === 'grep' || tool === 'glob' || tool === 'codegraph') return 'search';
+  if (tool === 'grep' || tool === 'glob') return 'search';
   if (tool === 'run_command') return 'diagnostic';
   return null;
 }
@@ -81,7 +81,7 @@ function pathsFromOutput(tool: string, output: string): string[] {
     const normalized = canonicalizePath(value);
     if (normalized) paths.add(normalized);
   };
-  if (tool === 'grep' || tool === 'codegraph' || tool === 'run_command') {
+  if (tool === 'grep' || tool === 'run_command') {
     const expression = /^(.+?\.[A-Za-z0-9]+):(?:\d+|\s*\d+\s*(?:处匹配|matches?))/gmi;
     let match: RegExpExecArray | null;
     while ((match = expression.exec(output))) add(match[1]);

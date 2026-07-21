@@ -16,7 +16,7 @@ export const readFileTool: Tool = {
     'Read file content with line numbers. Read before editing.\n' +
     'For files >500 lines: grep first to locate regions, then call read_file multiple times ' +
     'with offset+limit (e.g. offset=350, limit=120). Do NOT read an entire large file in one call.\n' +
-    'Prefer codegraph over reading files one at a time for architecture/call-chain questions.',
+    'For architecture or call-chain questions, prefer loading the `codegraph` skill (use_skill) over reading files one at a time.',
   parameters: {
     type: 'object',
     properties: {

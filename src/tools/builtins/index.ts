@@ -9,8 +9,6 @@ import { webSearchTool } from './web-search.js';
 import { webFetchTool } from './web-fetch.js';
 import { useSkillTool } from './use-skill.js';
 import { askHumanTool } from './ask-human.js';
-import { codegraphTool } from './codegraph.js';
-import { switchModeTool } from './switch-mode.js';
 import { dropContextTool } from './drop-context.js';
 import { memorySaveTool } from './memory-save.js';
 import { memorySearchTool } from './memory-search.js';
@@ -62,12 +60,10 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   run_command: { effect: 'process', concurrency: 'serial', retry: 'never', resources: workspaceResource, supportsAbort: true },
   glob: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
   grep: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
-  codegraph: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource, supportsAbort: true },
   web_search: { effect: 'network', concurrency: 'parallel', retry: 'safe', supportsAbort: true },
   web_fetch: { effect: 'network', concurrency: 'parallel', retry: 'safe', supportsAbort: true },
   use_skill: { effect: 'read', concurrency: 'serial', retry: 'safe' },
   ask_human: { effect: 'read', concurrency: 'serial', retry: 'never' },
-  switch_mode: { effect: 'write', concurrency: 'serial', retry: 'never', resources: () => ['agent-mode'] },
   drop_context: { effect: 'write', concurrency: 'serial', retry: 'never', resources: () => ['conversation-context'] },
   memory_save: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
   memory_search: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
@@ -95,12 +91,10 @@ const rawBuiltinTools: Tool[] = [
   runCommandTool,
   globTool,
   grepTool,
-  codegraphTool,
   webSearchTool,
   webFetchTool,
   useSkillTool,
   askHumanTool,
-  switchModeTool,
   dropContextTool,
   ..._memoryTools,
   ..._projectSkillTools,

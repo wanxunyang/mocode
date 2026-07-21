@@ -234,7 +234,7 @@ function readDiffContext(
  *  - pruner 在每个 runAgentCore 实例化一次(本闭包持有),会话级状态。
  *  - 开关关闭时 pruner 不创建(零开销、零行为变化)。
  *  出口再经 Lifecycle Engine 做引用追踪:LIVE→REFERENCED→OBSOLETE→STUB 四态。
- *  - lifecycle 也在每个 runAgentCore 实例化一次,登记 grep/glob/codegraph 等 producer
+ *  - lifecycle 也在每个 runAgentCore 实例化一次,登记 grep/glob/web_search/web_fetch 等 producer
  *    与 read/edit/write 的 consumer 关系;孤立+老化自动 STUB(观察类工具永不到 STUB)。
  *  - 开关关闭时 lifecycle=null 完全跳过。 */
 
@@ -371,6 +371,11 @@ export interface AgentRunOptions {
   /** 主 Agent 收尾自动验证；子 Agent 必须保持 false，由主 Agent 统一验证共享工作区。 */
   autoValidate?: boolean;
   /**
+   * 可选的宿主交互桥：桌面端可将高风险工具的确认请求交给图形界面处理。
+   * 未传时保持原有 TUI / 非交互 fail-closed 行为。
+   */
+  permissionPrompt?: import('../permissions/index.js').PermissionCheckOptions['prompt'];
+  /**
    * PROMPT-02: 在 agent 宣告完成(no tool calls + 有 candidate 正文)那一刻,
    * 向 history 推一条 user [checklist] 消息,强制模型再做一轮显式确认。
    * - 缺省(undefined) = 启用内置 createPreCompletionChecklistMiddleware。
@@ -460,7 +465,8 @@ export async function runAgentCore(
       ? null
       : (opts.preCompletionChecklist ?? _checklistMiddleware.handler);
   const maxSteps = opts.maxSteps ?? config.maxSteps;
-  // 中断还原:LLM 中途可能调 switch_mode 切了模式,abort 时连同模式一起还原回轮首。
+  // 中断还原:repl 的 /plan / /auto / Shift+Tab 等用户面触发 setAgentMode 中途切了模式,
+  // abort 时连同模式一起还原回轮首。模型不再持有 switch_mode 工具,无法自切。
   const savedMode = getAgentMode();
   // 本轮计时:从入口到完毕(正常 return / 达上限),供 finally 打 ✻ Worked for 摘要行。
   const t0 = Date.now();
@@ -531,7 +537,7 @@ export async function runAgentCore(
   // 相关性裁剪 pruner:每个 runAgentCore 实例一个,纯静态、不调 LLM、自动判定 read_file 失效。
   // 开关关闭时为 null,所有 pushToolResult 调用走无 pruner 路径(零行为变化)。
   const relprune = config.contextRelprune ? createRelevancePruner() : null;
-  // 观察者生命周期引擎:每个 runAgentCore 实例一个,纯静态、自动维护 grep/glob/codegraph 等
+  // 观察者生命周期引擎:每个 runAgentCore 实例一个,纯静态、自动维护 grep/glob/web_search/web_fetch 等
   // producer 与 read/edit/write 的 consumer 引用关系;孤立+老化的非观察类工具自动 STUB。
   // 开关关闭时为 null,所有 pushToolResult / mutation 调用走无 lifecycle 路径(零行为变化)。
   // 引擎需要从已有会话 history 恢复观察结果的年龄和 path 索引；不能只追踪本次
@@ -961,7 +967,9 @@ export async function runAgentCore(
                 : false;
               let denied: ToolOutcome | undefined;
               if (tool && argumentsValid) {
-                const perm = await checkPermission(tool, parsed ?? {}, signal);
+                const perm = await checkPermission(tool, parsed ?? {}, signal, {
+                  prompt: opts.permissionPrompt,
+                });
                 emitTrace('permission', {
                   source: 'agent_tool',
                   tool: tc.name,
@@ -1065,7 +1073,9 @@ export async function runAgentCore(
               ? validateToolArguments(tool, parsed).valid
               : false;
             if (tool && argumentsValid) {
-              const perm = await checkPermission(tool, parsed ?? {}, signal);
+              const perm = await checkPermission(tool, parsed ?? {}, signal, {
+                prompt: opts.permissionPrompt,
+              });
               emitTrace('permission', {
                 source: 'agent_tool',
                 tool: tc.name,

@@ -106,7 +106,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   let toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined;
   const mode = opts.mode ?? 'read';
   const requested = opts.tools?.length ? new Set(opts.tools) : null;
-  const readOnly = new Set(['read_file', 'glob', 'grep', 'codegraph', 'web_search', 'web_fetch', 'use_skill', 'memory_search', 'memory_list']);
+  const readOnly = new Set(['read_file', 'glob', 'grep', 'web_search', 'web_fetch', 'use_skill', 'memory_search', 'memory_list']);
   toolsOverride = chatTools.filter((tool) =>
     tool.function.name !== 'sub-agent' &&
     (!requested || requested.has(tool.function.name)) &&
@@ -184,7 +184,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       autoValidate: false,
       onToolOutcome: (tool, args) => {
         if (tool === 'read_file' && typeof args.path === 'string') readSet.add(args.path);
-        else if (['glob', 'grep', 'codegraph'].includes(tool)) readSet.add('workspace');
+        else if (['glob', 'grep'].includes(tool)) readSet.add('workspace');
       },
     });
   let result;

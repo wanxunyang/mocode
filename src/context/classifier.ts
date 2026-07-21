@@ -1,7 +1,7 @@
 // Context Classifier:据工具名(强先验)+ 输出形状(启发)+ 兜底,选 ContextKind。
 //
 // 三级信号:
-//  1) 名字强先验(BY_NAME 表,覆盖全部 17 内置工具,确定性强)。
+//  1) 名字强先验(BY_NAME 表,覆盖全部内置工具,确定性强)。
 //  2) 形状启发(为 MCP 工具 / 未来工具 / 未登记工具兜底识别)。
 //  3) 兜底 'passthrough'(不认识 = 不动,零行为变化)。
 //
@@ -10,15 +10,13 @@
 
 import type { ContextKind } from './types.js';
 
-/** 工具名 → ContextKind 的强先验表(覆盖全部 18 内置工具)。 */
+/** 工具名 → ContextKind 的强先验表(覆盖全部内置工具)。 */
 const BY_NAME: Record<string, ContextKind> = {
   // tree:路径列表 → 缩进树
   glob: 'tree',
   // search:file:line 分组
   grep: 'search',
   web_search: 'search',
-  // graph:CLI dump → 精炼图
-  codegraph: 'graph',
   // log:分级 / 折叠 / 尾偏置
   run_command: 'log',
   // code:保行号(edit_file 依赖,最敏感)
@@ -34,7 +32,6 @@ const BY_NAME: Record<string, ContextKind> = {
   edit_file: 'status',
   write_file: 'status',
   ask_human: 'status',
-  switch_mode: 'status',
   drop_context: 'status',
   memory_save: 'status',
   memory_update: 'status',
@@ -50,7 +47,7 @@ const BY_NAME: Record<string, ContextKind> = {
 function classifyByShape(output: string): ContextKind {
   // file:line: content 形(grep 风格)
   if (/^[^\n:]+:\d+:[^\n]*$/m.test(output)) return 'search';
-  // [退出码 N] 前缀(run_command / codegraph 风格)
+  // [退出码 N] 前缀(run_command 风格)
   if (/^\[退出码 \d+\]/m.test(output)) return 'log';
   // 路径列表:多行都是含分隔符的相对路径(glob 风格)
   const lines = output.split('\n').filter((l) => l.trim().length > 0);

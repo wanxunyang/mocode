@@ -8,8 +8,9 @@ export function stripAnsi(s: string): string {
 
 /**
  * 折叠连续空行(只含空白字符的行)≥ threshold → 单个空行。
- * 用于 prose / source dump(web_fetch / use_skill / task / codegraph):HTML→文本与 markdown 常留多余空行,
+ * 用于 prose / source dump(web_fetch / use_skill / task):HTML→文本与 markdown 常留多余空行,
  * 多空行与单空行语义等价,折叠无损。默认 threshold=3(只动真正过量的空行,常见 ≤2 空行不动)。
+ * 注:codegraph 已 skill 化(用 run_command 调 CLI,落到 log encoder),graph kind 现仅作保留值。
  *
  * 注意:用 `.trim() === ''` 判空——故 read_file 的 `     2\t`(行号前缀 + tab,trim 后剩 `2`)不会被
  * 视作空行。read_file 的空行折叠见 code encoder(前缀感知)。

@@ -8,7 +8,7 @@ export const globTool: Tool = {
   name: 'glob',
   description:
     'Find files matching a glob pattern (e.g. **/*.ts). Auto-excludes node_modules/.git.' +
-    ' For architecture/call chains, prefer codegraph.',
+    ' For architecture or call chains, prefer loading the `codegraph` skill (use_skill).',
   parameters: {
     type: 'object',
     properties: {

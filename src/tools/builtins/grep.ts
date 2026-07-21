@@ -11,7 +11,7 @@ export const grepTool: Tool = {
     'Search file contents by regex (recursive, excludes node_modules/.git).\n' +
     'Output: per-file header "<path>: N matches, lines [l1, l2, ...]" + first N matching lines.\n' +
     'Use the line-number list to call read_file(offset=X, limit=Y) for each region — ' +
-    'do NOT read entire files after grepping. Prefer codegraph for call chains.',
+    'do NOT read entire files after grepping. For call chains across many files, prefer loading the `codegraph` skill (use_skill).',
   parameters: {
     type: 'object',
     properties: {

@@ -8,6 +8,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { builtinSkillNames } from './builtin-skills.js';
 
 export interface Skill {
   name: string;
@@ -16,6 +17,8 @@ export interface Skill {
   license?: string;
   dir: string;
   skillMdPath: string;
+  /** 内置 skill 的正文内联在此(避免文件系统依赖);用户/项目 skill 留空,getSkillBody 走文件读取。 */
+  body?: string;
 }
 
 /** 把开头的 ~/ 或 ~ 展开为 home 目录(Windows 与 POSIX 通用)。 */
@@ -128,6 +131,11 @@ export function discoverSkills(): Skill[] {
     }
 
     for (const name of entries) {
+      // 跳过内置 skill 同名目录(项目级用户版可放在 ~/.mocode/skills/<name>/
+      // 覆盖内置版;cwd/.mocode/skills/<name>/ 也算项目级覆盖)。discoverSkills 按
+      // 优先级升序遍历、项目级 Map.set 后写覆盖先写,所以这里只是「不重复登记内置」,
+      // 真实覆盖逻辑在 listSkills 的合并步骤。
+      if (builtinSkillNames.has(name)) continue;
       const skillDir = path.join(dir, name);
       const skillMdPath = path.join(skillDir, 'SKILL.md');
       try {

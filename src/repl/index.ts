@@ -281,7 +281,7 @@ function maskKey(k: string): string {
 const INIT_PROMPT = `分析当前项目(process.cwd()),生成 MOCODE.md 项目记忆文件,供 mocode 后续会话自动加载——目标是让后续会话无需重新摸索就能上手。
 
 先探查(尽量少调用拿全貌):
-- 若有 .codegraph/:用 codegraph 工具(explore "<架构或入口符号>")一次拿相关源码+调用路径,别逐文件读！！！
+- 若有 .codegraph/:用 use_skill 加载 codegraph skill 后用 run_command 调 codegraph explore "<架构或入口符号>" 一次拿相关源码+调用路径,别逐文件读！！！
 - read_file package.json(或 Cargo.toml/pyproject.toml/go.mod 等):scripts、依赖、入口、模块类型。
 - glob 顶层目录;read_file 入口文件 + 各子系统 index.ts/README。
 - 若 MOCODE.md 已存在:read_file 读它,在其基础上更新(补缺、修正过时),不丢已有准确事实。
@@ -2515,8 +2515,8 @@ export async function startRepl(
     const initialPlan = getAgentMode() === 'plan'; // 轮首模式(在 runTurn 之前读)
     const ok = await runTurn(joined, initialPlan, placeholder);
     // plan 轮正常结束(未中断 / 未抛错)→ 看轮末模式决定:
-    //  - 仍 plan:LLM 没自切(只产计划就 STOP)→ 弹审批面板(原行为)。
-    //  - 已 auto:LLM 调了 switch_mode('auto') 在同轮自主执行了 → 跳过审批,不重复打扰。
+    //  - 仍 plan:模型只产计划就 STOP(模型已无 switch_mode 工具)→ 弹审批面板(原行为)。
+    //  - 已 auto:本轮被切到 auto 模式(用户用 /auto 触发的合成执行轮)→ 跳过审批,不重复打扰。
     if (initialPlan && ok && getAgentMode() === 'plan') {
       // 桌宠:计划审批面板弹出期间广播 waiting_human(红灯闪烁);面板不在 runAgent/hooks 体系内,
       // 需在此单独广播——用户响应后由下一次 /pet 状态事件(或 idle 兜底)覆盖。

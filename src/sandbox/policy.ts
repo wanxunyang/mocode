@@ -7,16 +7,18 @@ import { jailResolve, jailGlobPattern } from './jail.js';
  *  - memory_*:操作 ~/.mocode 与 <cwd>/.mocode,本就该在外圈
  *  - use_skill:读 ~/.claude/skills、~/.mocode/skills、<cwd>/.mocode/skills,部分在外圈
  *  - web_*:跨网络,非文件路径
- *  - ask_human / switch_mode:无文件路径
- *  - codegraph:只读 cwd 下 .codegraph/ 索引(只读、不写盘)
+ *  - ask_human:无文件路径
  *  - sub-agent:派生子 agent，通过 scoped sandbox root 使用隔离 overlay
+ *
+ *  注:codegraph 不再是核心工具,已 skill 化(用 run_command 调 CLI),
+ * 不在此处登记。switch_mode 工具已砍,模式切换仅由 repl 的 /plan / /auto /
+ * Shift+Tab 等用户面触发,不经工具路径。
  */
 export const SANDBOX_EXEMPT_TOOLS = new Set([
   'memory_save', 'memory_update', 'memory_forget', 'memory_search', 'memory_list',
   'use_skill',
   'web_search', 'web_fetch',
-  'ask_human', 'switch_mode',
-  'codegraph',
+  'ask_human',
   'sub-agent',
 ]);
 

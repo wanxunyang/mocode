@@ -76,7 +76,7 @@ export interface Config {
    *  单条上限与 microcompact 旧区截短影响)。默认 true;
    *  设 MOCODE_CONTEXT_RELPRUNE=false 全局回退。 */
   contextRelprune: boolean;
-  /** 观察者生命周期总开关(LIVE→REFERENCED→OBSOLETE→STUB 四态机;grep/glob/codegraph
+  /** 观察者生命周期总开关(LIVE→REFERENCED→OBSOLETE→STUB 四态机;grep/glob/web_search/web_fetch
    *  producer ↔ read/edit/write consumer 引用追踪;孤立+老化非观察类工具自动 STUB;
    *  观察类工具永远只到 REFERENCED,不自动 STUB)。与 contextRelprune 并列,纯静态、不调 LLM。
    *  默认 true;设 MOCODE_LIFECYCLE=false 全局回退。 */
@@ -261,10 +261,10 @@ const SYSTEM_PROMPT_MEMORY_SECTION = `
  * 根本不存在的工具名引起 LLM 调不到。
  */
 const PLAN_RESEARCH_RULES = `
-- Research enough to locate relevant code, trace call paths, and understand existing conventions. Use the codegraph-first Workflow, but do not repeat information already retrieved in this session.
+- Research enough to locate relevant code, trace call paths, and understand existing conventions. If \`.codegraph/\` exists, prefer loading the \`codegraph\` skill (via use_skill) and using run_command to query it. Otherwise rely on read_file / glob / grep. Do not repeat information already retrieved in this session.
 - Produce an actionable plan: files and reasons, ordered steps, edge cases, and verification (typecheck / tests / build).
 - When ready, MUST call the \`ask_human\` tool with a concise summary and exactly these options:
-  1. "按计划执行 (switch to auto and implement)" — call \`switch_mode("auto")\` in the same turn, then implement.
+  1. "按计划执行 (please run /auto to switch to auto mode and proceed)" — wait for the user to run /auto, then implement.
   2. "继续细化方案 (stay in plan, refine)" — remain in plan and refine.
   3. "取消 / 暂不执行 (abort)" — stop without switching mode.
 - Never silently switch or stop. Do not ask approval in plain text; \`ask_human\` is the approval channel.
@@ -275,8 +275,8 @@ function buildPlanModeSuffix(): string {
     ? 'memory_save, memory_update, memory_forget'
     : '';
   const readOnlyTools = isMemoryEnabled()
-    ? 'read_file, glob, grep, codegraph, web_search, web_fetch, use_skill, ask_human, memory_search, memory_list'
-    : 'read_file, glob, grep, codegraph, web_search, web_fetch, use_skill, ask_human';
+    ? 'read_file, glob, grep, web_search, web_fetch, use_skill, ask_human, memory_search, memory_list'
+    : 'read_file, glob, grep, web_search, web_fetch, use_skill, ask_human';
   const removed = ['write_file', 'edit_file', 'run_command', memoryTools]
     .filter(Boolean)
     .join(', ');
@@ -322,7 +322,7 @@ ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 
 ## Workflow
 - Understand requirements and current code before acting; do not guess.
-- If \`.codegraph/\` exists, use \`codegraph\` first for unfamiliar code questions. Use direct reads for known or recently changed files.
+- If \`.codegraph/\` exists, load the \`codegraph\` skill (use_skill) and use run_command to query it for unfamiliar code questions. Otherwise use read_file / glob / grep. Use direct reads for known or recently changed files.
 - After modifications, run the smallest relevant verification, then typecheck/build when appropriate. Never claim success without evidence.
 - Use web search only when freshness materially affects the answer (new APIs, versions, security, current UI conventions).
 
