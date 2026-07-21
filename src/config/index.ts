@@ -259,9 +259,16 @@ const SYSTEM_PROMPT_MEMORY_SECTION = `
  * memoryEnabled=false 时:memory_save/update/forget 三个写工具名字 + "memory-write tools" 这
  * 句都不出现,且 read-only 列表里的 memory_search/memory_list 也移除——避免提示词里出现
  * 根本不存在的工具名引起 LLM 调不到。
+ *
+ * .codegraph/ 存在性也动态决定:有索引时引导 LLM 优先用 codegraph skill(免去逐文件扫);
+ * 没索引时干脆不提,避免 LLM 调出失败。函数化(非 const)以便在 buildPlanModeSuffix 里现拼。
  */
-const PLAN_RESEARCH_RULES = `
-- Research enough to locate relevant code, trace call paths, and understand existing conventions. If \`.codegraph/\` exists, prefer loading the \`codegraph\` skill (via use_skill) and using run_command to query it. Otherwise rely on read_file / glob / grep. Do not repeat information already retrieved in this session.
+function buildPlanResearchRules(): string {
+  const cg = hasCodegraphIndex()
+    ? ' If `.codegraph/` exists, prefer loading the `codegraph` skill (via use_skill) and using run_command to query it.'
+    : '';
+  return `
+- Research enough to locate relevant code, trace call paths, and understand existing conventions.${cg} Otherwise rely on read_file / glob / grep. Do not repeat information already retrieved in this session.
 - Produce an actionable plan: files and reasons, ordered steps, edge cases, and verification (typecheck / tests / build).
 - When ready, MUST call the \`ask_human\` tool with a concise summary and exactly these options:
   1. "按计划执行 (please run /auto to switch to auto mode and proceed)" — wait for the user to run /auto, then implement.
@@ -269,6 +276,7 @@ const PLAN_RESEARCH_RULES = `
   3. "取消 / 暂不执行 (abort)" — stop without switching mode.
 - Never silently switch or stop. Do not ask approval in plain text; \`ask_human\` is the approval channel.
 - The REPL approval prompt is only a fallback; do not rely on it.`;
+}
 
 function buildPlanModeSuffix(): string {
   const memoryTools = isMemoryEnabled()
@@ -285,7 +293,7 @@ function buildPlanModeSuffix(): string {
 ## ⛯ PLAN MODE (active now)
 You are in PLAN mode: investigate and design only — do NOT execute or change anything.
 - Removed from your tool list: ${removed}. Use only these read-only tools: ${readOnlyTools}.
-${PLAN_RESEARCH_RULES}`;
+${buildPlanResearchRules()}`;
 }
 
 /** 兼容旧名字:repl 的 buildSystemMessage 仍引 PLAN_MODE_SUFFIX(变量)。运行时按需现拼。 */
@@ -322,12 +330,12 @@ ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 
 ## Workflow
 - Understand requirements and current code before acting; do not guess.
-- If \`.codegraph/\` exists, load the \`codegraph\` skill (use_skill) and use run_command to query it for unfamiliar code questions. Otherwise use read_file / glob / grep. Use direct reads for known or recently changed files.
 - After modifications, run the smallest relevant verification, then typecheck/build when appropriate. Never claim success without evidence.
 - Use web search only when freshness materially affects the answer (new APIs, versions, security, current UI conventions).
+${buildCodegraphSection()}
 
 ## Tool rules
-- Precise path/symbol → go directly to \`read_file\` or \`codegraph node\`; use \`glob\`/\`grep\` only for discovery.
+- Precise path/symbol → go directly to \`read_file\`; use \`glob\`/\`grep\` only for discovery. If a codegraph index is available (see Workflow above), prefer \`codegraph node\` / \`codegraph query\` for symbol lookups.
 - Before editing, read the exact target region and copy both its artifact \`hash\` and verbatim text. Use \`edit_file\` with \`expected_hash\` for unique local replacements, and \`write_file\` with the latest hash for replacement (or null only for creation).
 - Local edits require an exact unique match; use \`write_file\` for new/full files.
 - Use \`glob\`/\`grep\` for discovery and \`run_command\` for execution or verification, not file existence checks. State intent before side effects.
@@ -549,6 +557,32 @@ export function updateSubAgentConfig(enabled: boolean): void {
  */
 export function isMemoryEnabled(): boolean {
   return config.memoryEnabled;
+}
+
+/**
+ * .codegraph/ 索引存在性:仅查 cwd 顶层 .codegraph(目录或文件均可,codegraph CLI
+ * 自己会处理内部布局)。用于动态决定是否在系统提示里注入 codegraph skill 用法段——
+ * 没有索引的项目不应被提示「用 codegraph」以免 LLM 调出失败。失败静默返 false。
+ */
+export function hasCodegraphIndex(): boolean {
+  try {
+    return fs.existsSync(path.join(process.cwd(), '.codegraph'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 当 .codegraph/ 存在时拼进 auto 模式系统提示的 codegraph 段;否则返空串(零成本)。
+ * 单一来源:被 buildBasePrompt 注入,确保 basePrompt 不含死字符串。
+ */
+export function buildCodegraphSection(): string {
+  if (!hasCodegraphIndex()) return '';
+  return [
+    '',
+    '## Codegraph (project has .codegraph/ index)',
+    '- For unfamiliar code questions, prefer loading the `codegraph` skill (via use_skill) and querying it with run_command (`codegraph explore <entry>`, `codegraph node <symbol>`). Falls back to read_file / glob / grep when not applicable.',
+  ].join('\n');
 }
 
 /**

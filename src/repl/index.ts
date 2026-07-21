@@ -17,6 +17,7 @@ import {
   languageFromShell,
   buildBasePrompt,
   getPlanModeSuffix,
+  hasCodegraphIndex,
 } from '../config/index.js';
 import {
   getLanguage,
@@ -277,12 +278,18 @@ function maskKey(k: string): string {
 
 /**
  * /init 指令:发给 agent 扫描项目并生成 MOCODE.md。已存在则让 agent 读后更新(不丢失事实)。写完供 memory 子系统下轮加载。
+ *
+ * 函数化(非 const):.codegraph/ 索引是否存在的探测放在调用瞬间,没索引时不提 codegraph,
+ * 避免 LLM 调出失败。/init 是冷启动动作,IO 开销可忽略。
  */
-const INIT_PROMPT = `分析当前项目(process.cwd()),生成 MOCODE.md 项目记忆文件,供 mocode 后续会话自动加载——目标是让后续会话无需重新摸索就能上手。
+function buildInitPrompt(): string {
+  const cg = hasCodegraphIndex()
+    ? '- 若有 .codegraph/:用 use_skill 加载 codegraph skill 后用 run_command 调 codegraph explore "<架构或入口符号>" 一次拿相关源码+调用路径,别逐文件读！！！\n'
+    : '';
+  return `分析当前项目(process.cwd()),生成 MOCODE.md 项目记忆文件,供 mocode 后续会话自动加载——目标是让后续会话无需重新摸索就能上手。
 
 先探查(尽量少调用拿全貌):
-- 若有 .codegraph/:用 use_skill 加载 codegraph skill 后用 run_command 调 codegraph explore "<架构或入口符号>" 一次拿相关源码+调用路径,别逐文件读！！！
-- read_file package.json(或 Cargo.toml/pyproject.toml/go.mod 等):scripts、依赖、入口、模块类型。
+${cg}- read_file package.json(或 Cargo.toml/pyproject.toml/go.mod 等):scripts、依赖、入口、模块类型。
 - glob 顶层目录;read_file 入口文件 + 各子系统 index.ts/README。
 - 若 MOCODE.md 已存在:read_file 读它,在其基础上更新(补缺、修正过时),不丢已有准确事实。
 
@@ -303,6 +310,7 @@ install / dev / build / test / typecheck / lint 等——从 package.json script
 - 总长 ≤ 1500 字;只写后续会话有用的稳定事实,不写易变项(当前 bug、临时文件、未决 TODO)。
 - 用 write_file 写入项目根 MOCODE.md。
 - 写完简述:写了哪几节 + 从代码里发现的 2-3 条非显然关键约定(供用户校验)。`;
+}
 
 /** 临时 readline 读一行(cooked,用于子提问;主输入走 promptWithSlashMenu)。 */
 async function askLine(prompt: string): Promise<string> {
@@ -1304,7 +1312,7 @@ export async function startRepl(
     }
     if (line === '/init') {
       // /init:把 init 指令当 user 输入发给 agent(扫描项目 + 生成 MOCODE.md),fall through 走 runAgent
-      joined = INIT_PROMPT;
+      joined = buildInitPrompt();
     }
     if (line === '/upgrade' || line.startsWith('/upgrade ')) {
       const arg = line === '/upgrade' ? '' : line.slice('/upgrade '.length).trim().toLowerCase();
@@ -2311,13 +2319,17 @@ export async function startRepl(
             continue;
           }
 
+          // .codegraph/ 存在性动态决定:有索引时引导 LLM 优先用 codegraph skill(免去逐文件扫);
+          // 没索引时干脆不提,避免 LLM 调出失败。
+          const cgRule = hasCodegraphIndex()
+            ? '3. 最多进行 1 次 codegraph 探索(用 use_skill 加载 codegraph skill,再 run_command 调 codegraph explore / codegraph node);只有缺少关键依据时,才额外进行少量定点 read_file/grep。禁止全仓 glob 和逐文件扫描。\n'
+            : '3. 只在缺少关键依据时,进行少量定点 read_file/grep。禁止全仓 glob 和逐文件扫描。\n';
           const initPrompt = `请直接初始化或优化当前项目的 Project Skill，并完成写入。
 
 要求：
 1. 直接由你完成，禁止调用 sub-agent 工具或派生任何子 agent。
 2. 优先利用系统提示中已有的 Project Snapshot 和 Project Skill；不要重复扫描其中已有的目录、依赖、命令和模块清单。
-3. 最多进行 1 次 codegraph 探索；只有缺少关键依据时，才额外进行少量定点 read_file/grep。禁止全仓 glob 和逐文件扫描。
-4. Skill 只记录 Snapshot 无法提供的 WHY/HOW/GOTCHAS/CONVENTIONS：设计取舍、关键调用链、非直觉边界、项目约定和可操作坑点。使用具体路径和例子，删除重复或过时内容。
+${cgRule}4. Skill 只记录 Snapshot 无法提供的 WHY/HOW/GOTCHAS/CONVENTIONS：设计取舍、关键调用链、非直觉边界、项目约定和可操作坑点。使用具体路径和例子，删除重复或过时内容。
 5. 最终内容应完整、结构清晰。调用 project_skill_update，使用 action=write 一次性写入完整内容。
 6. 写入成功后只简短说明更新了哪些关键洞察，不要输出完整 Skill。`;
 
