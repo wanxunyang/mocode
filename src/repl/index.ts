@@ -94,9 +94,7 @@ import {
   effectiveSystemPrompt,
 } from '../skills/index.js';
 import {
-  buildMemorySection,
   buildMemoryIndexSection,
-  invalidateMemoryCache,
   kickoffReflection,
   drainMemoryBackground,
   getLastReflectResult,
@@ -851,12 +849,11 @@ export async function startRepl(
   //
   // 与开关联动:① base 用 buildBasePrompt() 取代 config.systemPrompt(后者是启动时一次性
   // 求值的常量,运行时 /memory_switch 不会刷新);② plan suffix 走 getPlanModeSuffix() 现拼;
-  // ③ buildMemorySection 内已自决 ;④ buildMemoryIndexSection 显式传 isMemoryEnabled() 关闭段。
+  // ③ MOCODE.md 只在 base 中提示按需 read_file，不注入正文；④ Memory Index 按开关注入。
   const buildSystemMessage = (planMode: boolean): string =>
     effectiveSystemPrompt(
       buildBasePrompt(currentSessionId) +
         (planMode ? getPlanModeSuffix() : '') +
-        buildMemorySection() +
         buildMemoryIndexSection(isMemoryEnabled()),
     );
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
@@ -2218,13 +2215,6 @@ export async function startRepl(
     queryHistory.push(joined);
     const initialPlan = getAgentMode() === 'plan'; // 轮首模式(在 runTurn 之前读)
     const ok = await runTurn(joined, initialPlan, placeholder);
-    // /init 收尾:Agent 已 write_file 写完新 MOCODE.md,失效 cache 并用新内容重建 history[0],
-    // 否则下一轮拿到的还是写之前的旧 memory 段,必须重启 REPL 才生效。
-    if (ok && line === '/init') {
-      invalidateMemoryCache();
-      history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
-      refreshStatusBase(history);
-    }
     // plan 轮正常结束(未中断 / 未抛错)→ 看轮末模式决定:
     //  - 仍 plan:模型只产计划就 STOP(模型已无 switch_mode 工具)→ 弹审批面板(原行为)。
     //  - 已 auto:本轮被切到 auto 模式(用户用 /auto 触发的合成执行轮)→ 跳过审批,不重复打扰。

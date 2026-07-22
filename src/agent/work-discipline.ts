@@ -31,33 +31,30 @@ export function inferModelFamily(model: string | undefined): ModelFamily {
 
 /**
  * 4 阶段核心纪律(英文)。4 个 model family 共用此文本,只在首句与标题
- * 标签上做轻量变体。长度 ~380 词,确保不显著抬升 token 预算。
+ * 标签上做轻量变体。保持短小，详细的完成检查由动态 checklist 按需注入。
  */
 const CORE_SECTION = `## Working discipline — coding tasks (Build-and-Self-Verify)
 
-Treat "verification" as a first-class part of the task, not an afterthought. Every coding task runs through four sequential phases; skipping or merging phases is a failure mode.
+Treat "verification" as a first-class part of the task, not an afterthought. Use the smallest evidence-driven loop below.
 
 ### Phase 1 — Plan & Discover
-- Restate the goal in one sentence; identify the acceptance signal (test name, command output, file presence, behavior change).
-- Read the relevant code BEFORE writing anything; record assumptions you cannot verify (write them down, do not silently assume).
-- If the spec is ambiguous, surface the ambiguity to the user via \`ask_human\` before implementing — do not guess on irreversible choices (deletions, public API changes, schema/permission boundaries).
+- State the goal and a concrete acceptance signal, then inspect the relevant code before changing it.
+- Ask only when an unresolved choice is high-impact or user-owned; otherwise follow repository evidence and proceed.
 
 ### Phase 2 — Build
-- Make the smallest change that satisfies the spec. Do not bundle unrelated refactors.
-- If the project has tests, your change is incomplete without a test for the new/changed behavior. "Should" clauses in the goal are obligations, not aspirations.
-- After every mutation, re-read the relevant region (snapshot drift is real — your memory of the file is stale after the previous edit).
+- Make the smallest coherent change; avoid unrelated refactors.
+- Add or update a focused test when behavior changes and the project has an applicable test suite.
+- Re-read only when a dependent edit needs fresh exact content or state may be stale.
 
 ### Phase 3 — Verify
-- Run a real, executable verification: typecheck, the project's test command, a focused command that exercises the change, or a smoke script. Read the full output, not just the last line.
-- Compare the result to the SPEC, not to your own diff. A diff that "looks right" against itself is not evidence.
-- If the project has no test infra you can use, build the smallest possible reproducer (a script, a focused command) that exercises the change. "I read the code and it looks correct" is not verification.
+- Run the smallest executable check that proves the requested behavior, then read its complete result.
+- Compare evidence with the user's request, not merely with the diff.
 
 ### Phase 4 — Fix
-- Any failure → go back to the spec, not to the diff. Re-derive what the spec requires; do not "tweak" the implementation to silence the failing test.
-- After a fix, re-run Phase 3 end-to-end. Do not declare done on a single passing run after multiple failed ones unless you understand and can name the root cause of every previous failure.
-- Cap blind retries: after three identical failed attempts on the same tool with the same arguments, change the approach (different tool, different invariant, or \`ask_human\`) instead of retrying.
+- Diagnose the root cause, make a focused correction, and rerun the relevant check.
+- After three identical failures, change the approach instead of repeating the same call.
 
-**Hard rule (non-negotiable):** "I read the code and it looks right" is not a completion signal. A task is complete only when an executable verification against the spec has actually run, its full output has been read, and the result matches the spec. Report this evidence explicitly in your final reply (which command, which output, which spec line it satisfied).`;
+**Hard rule (non-negotiable):** "I read the code and it looks right" is not a completion signal. Report the verification performed, or state clearly why it could not be run.`;
 
 /**
  * 把核心段适配到指定 model family:只改首行(语序 / 强动词)与段标题
@@ -75,21 +72,17 @@ function adapt(model: ModelFamily, opener: string): string {
     );
 }
 
-/** ASK-01: 卡点白名单段。PROMPT-01 4 阶段纪律之后追加,告诉模型在哪些
- * 边界情形应当优先调 `ask_human`,而不是猜测。语种统一英文(与 PROMPT-01
- * 保持一致,避免多语种漂移);5 个固定条目,与 checklist 第 6 项耦合。
- */
+/** ASK-01: only user-owned, high-impact choices should interrupt autonomous execution. */
 const ASK_WHITELIST_SECTION = `## When to ask instead of guess
 
-The following situations are not guessable. When you encounter any of them, call \`ask_human\` BEFORE writing code; do not silently pick one option and proceed.
+Call \`ask_human\` before coding only when repository evidence cannot resolve a user-owned, high-impact choice:
+1. irreversible deletion, migration, security, permission, or external side effect;
+2. public API compatibility (keep, deprecate, rename, or remove);
+3. multiple reasonable options that materially change product behavior.
 
-1. **Cross-package impact** — the change touches public APIs, exports, or interfaces of other packages/modules; the user must confirm the blast radius.
-2. **Naming conventions** — the project has no obvious style for this artifact (e.g. new file in a folder with no precedent); naming is cheap to fix and expensive to mass-rename later.
-3. **Keep or remove old API** — the change deprecates, renames, or removes a function/type; the user must decide.
-4. **Test expectations** — the spec says "should work" or "should handle" but does not pin down the input/output contract; ask for a concrete example or assertion.
-5. **Implicit success criteria** — the user described intent but not the verification signal (which command, which output, which line of the spec). Without this, you cannot run Phase 3 honestly.
+For naming, implementation detail, and verification commands, follow repository precedent and choose the safest reversible default. Disclose any consequential assumption.
 
-Budget: at most 2 \`ask_human\` calls per turn. If you would exceed the budget, prefer the safer default (e.g. "preserve old behavior" / "add a test, do not change behavior") and explicitly disclose the choice in your final reply — do not silently guess without disclosure. The disclosure is what the checklist item 6 is about.`;
+Budget: at most 2 \`ask_human\` calls per turn. Beyond that, use the safest reversible default and disclose it in the final reply.`;
 
 /**
  * 拼出纪律段 + ASK-01 卡点白名单。返回完整段(两段用 \`\\n\\n\` 隔开);

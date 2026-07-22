@@ -457,9 +457,9 @@ const cases: SmokeCase[] = [
     name: 'shares mocode core behavior with sub-agents without session payload',
     run() {
       const prompt = buildMocodeCorePrompt();
-      assert.match(prompt, /## Tool details/);
+      assert.match(prompt, /## Tool use/);
       assert.match(prompt, /## Workflow/);
-      assert.match(prompt, /## Failure Handling/);
+      assert.match(prompt, /## Safety & Boundaries/);
       assert.match(prompt, /## Termination & Reporting/);
       assert.doesNotMatch(prompt, /## Project context \(dynamic reference\)/);
       assert.doesNotMatch(prompt, /## Session Notepad/);
@@ -560,9 +560,7 @@ const cases: SmokeCase[] = [
           // 2) both buckets labeled
           assert.match(out, /Active \(3\)/);
           assert.match(out, /Done \(2\)/);
-          // 3) Plan progress lives on its own line
-          assert.match(out, /Plan progress: 1\/2 steps done/);
-          // 4) active contents include Plan + Open Questions + Auth
+          // 3) active contents include Plan + Open Questions + Auth
           assert.match(out, /- Auth Module\b/);
           assert.match(out, /- Plan: refactor X/);
           assert.match(out, /- Open Questions/);

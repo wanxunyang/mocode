@@ -66,27 +66,18 @@ const assert = (condition: unknown, message: string): void => {
     'ask block must not include retry category enum');
 }
 
-// 4. 同步:work-discipline 段确实包含 "at most 2 ask_human" 与 5 个卡点关键词。
+// 4. 同步:work-discipline 段保留 ask budget，只把真正高影响、用户所有的选择列为卡点。
 {
   const sec = buildWorkDisciplineSection();
   assert(sec.includes('When to ask instead of guess'),
     'work discipline section should include "When to ask instead of guess" header');
   assert(sec.includes('Budget: at most 2 `ask_human` calls per turn'),
     'work discipline section should include ask_human budget line');
-  const askKeywords = [
-    'Cross-package impact',
-    'Naming conventions',
-    'Keep or remove old API',
-    'Test expectations',
-    'Implicit success criteria',
-  ];
-  for (const k of askKeywords) {
-    assert(sec.includes(k), `work discipline section missing ask keyword: ${k}`);
+  for (const keyword of ['irreversible deletion', 'public API compatibility', 'materially change product behavior']) {
+    assert(sec.includes(keyword), `work discipline section missing high-impact ask boundary: ${keyword}`);
   }
-  // 5 类 bullet 编号稳定(1./2./3./4./5.)
-  for (let i = 1; i <= 5; i += 1) {
-    assert(sec.includes(`${i}. **`), `work discipline section missing numbered ask item ${i}`);
-  }
+  assert(sec.includes('For naming, implementation detail, and verification commands'),
+    'routine reversible choices should remain autonomous');
 }
 
 // 5. 同步:checklist 尾部确实包含 ASK-01 bonus 段。

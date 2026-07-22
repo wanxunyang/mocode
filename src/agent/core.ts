@@ -688,7 +688,12 @@ export async function runAgentCore(
       const modelStartedAt = Date.now();
       const provider = safeProviderId(requestBaseURL);
       emitTrace('model_start', { model: requestModel, provider });
-      const dynamicSystemSuffix = opts.dynamicSystemSuffix?.().trim() ?? '';
+      const dynamicSystemSuffix = [
+        opts.dynamicSystemSuffix?.().trim() ?? '',
+        historyRebuilt
+          ? '## Post-compaction recovery\nContext was compacted before this request. Re-establish the current objective and unresolved work from retained evidence or the session note, avoid repeating completed investigation, and re-read exact file context before any dependent edit.'
+          : '',
+      ].filter(Boolean).join('\n\n');
       const systemMessage = history[0];
       const requestHistory: ChatMessage[] =
         dynamicSystemSuffix
