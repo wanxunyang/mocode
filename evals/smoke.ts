@@ -23,7 +23,8 @@ import {
   resetPermissionGrantsForTests,
 } from '../src/permissions/index.js';
 import { t } from '../src/i18n/index.js';
-import { buildMocodeCorePrompt } from '../src/config/index.js';
+import { buildMocodeCorePrompt, buildNotepadSection } from '../src/config/index.js';
+import { setCurrentSessionId } from '../src/session/state.js';
 
 interface SmokeCase {
   name: string;
@@ -515,6 +516,70 @@ const cases: SmokeCase[] = [
       assert.equal(failed.status, 'failed');
       assert.equal(failed.exitCode, 2);
       assert.equal(aborted.status, 'aborted');
+    },
+  },
+  {
+    name: 'notepad digest splits active vs Done into two buckets',
+    async run() {
+      const { withSandboxRoot } = await import('../src/sandbox/index.js');
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const os = await import('node:os');
+
+      const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mocode-notepad-'));
+      const sessionId = 'unit-notepad-buckets';
+      fs.mkdirSync(path.join(tmpRoot, '.mocode', 'sessions', sessionId), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpRoot, '.mocode', 'sessions', sessionId, 'notes.md'),
+        [
+          '## Auth Module',
+          '- JWT TTL: 86400',
+          '',
+          '## Plan: refactor X',
+          '- [ ] 1. step a',
+          '- [x] 2. step b',
+          '',
+          '## Open Questions',
+          '- refresh TTL?',
+          '',
+          '## Done: migrated DB',
+          '- done at T1',
+          '',
+          '## Done: fixed #42',
+          '',
+        ].join('\n'),
+      );
+
+      await withSandboxRoot(tmpRoot, async () => {
+        setCurrentSessionId(sessionId, tmpRoot);
+        try {
+          const out = buildNotepadSection(sessionId);
+
+          // 1) header mentions total section count
+          assert.match(out, /## Session Notepad \(5 sections/);
+          // 2) both buckets labeled
+          assert.match(out, /Active \(3\)/);
+          assert.match(out, /Done \(2\)/);
+          // 3) Plan progress lives on its own line
+          assert.match(out, /Plan progress: 1\/2 steps done/);
+          // 4) active contents include Plan + Open Questions + Auth
+          assert.match(out, /- Auth Module\b/);
+          assert.match(out, /- Plan: refactor X/);
+          assert.match(out, /- Open Questions/);
+          // 5) archived contents include the Done items
+          assert.match(out, /- Done: migrated DB/);
+          assert.match(out, /- Done: fixed #42/);
+          // 6) Done topics must not appear inside the Active block
+          const activeBlock = out.split('Done (')[0];
+          assert.doesNotMatch(activeBlock, /migrated DB/);
+          assert.doesNotMatch(activeBlock, /fixed #42/);
+          // 7) empty file → empty digest
+          fs.writeFileSync(path.join(tmpRoot, '.mocode', 'sessions', sessionId, 'notes.md'), '');
+          assert.equal(buildNotepadSection(sessionId), '');
+        } finally {
+          // last test in the suite — leaving the session id set is fine
+        }
+      });
     },
   },
 ];

@@ -170,10 +170,15 @@ const PLATFORM_NOTE = (() => {
  * Session notepad 段落：读取 .mocode/sessions/<sessionId>/notes.md，只注入 ## 标题行作为目录摘要。
  * Agent 用 write_file/edit_file/read_file 维护此文件，抗 compact（在 context window 之外）。
  * 文件不存在或为空时返空串（零开销）。
+ *
+ * 输出按"活跃 / 已完成"两栏分桶，让 agent 一眼看到还有未结的工作：
+ *   - Active: ## Plan: ...   ## Open Questions   ## <其它正在用的 topic>
+ *   - Done:   ## Done: ...   (agent 在完成时把 topic 重命名为 "## Done: ...")
+ * 这样比纯目录列表更显眼，降低 agent 在长上下文里扫过去就忘了的概率。
  */
-function buildNotepadSection(sessionId = getCurrentSessionId()): string {
+export function buildNotepadSection(sessionId = getCurrentSessionId()): string {
   if (!sessionId) return '';
-  
+
   const root = getSandboxRoot() ?? process.cwd();
   const p = path.join(root, '.mocode', 'sessions', sessionId, 'notes.md');
   if (!fs.existsSync(p)) return '';
@@ -181,28 +186,47 @@ function buildNotepadSection(sessionId = getCurrentSessionId()): string {
     const content = fs.readFileSync(p, 'utf8').trim();
     if (!content) return '';
 
-    // 1) 提取 ## 标题行（最多 15 个），用作目录摘要
+    // 1) 提取 ## 标题行（最多 15 个，按文件出现顺序保留）
     const headers = content.split('\n')
       .filter(l => /^##\s/.test(l))
       .slice(0, 15);
 
-    // 2) 提取 Plan 段进度（仅当存在 "## Plan: ..." 时）
+    // 2) 分桶：Done: 开头 → archived；其余 → active
+    //    "## Plan:" 和 "## Open Questions" 视为永久 active（不需要改名为 Done）。
+    const archived: string[] = [];
+    const active: string[] = [];
+    for (const h of headers) {
+      if (/^##\s+Done:\s/.test(h)) archived.push(h);
+      else active.push(h);
+    }
+
+    // 3) 提取 Plan 段进度（仅当存在 "## Plan: ..." 时）
     const planMatch = content.match(/^## Plan:\s*(.+)$/m);
     const stepsTotal = (content.match(/^\s*-\s*\[[ xX]\]\s*\d+\./gm) || []).length;
     const stepsDone  = (content.match(/^\s*-\s*\[[xX]\]\s*\d+\./gm) || []).length;
     const planChip = planMatch
-      ? `\nPlan: ${planMatch[1].trim()} (${stepsDone}/${stepsTotal})`
+      ? `  ·  ${stepsDone}/${stepsTotal} steps done`
       : '';
 
-    if (headers.length === 0 && !planChip) return '';
-    return [
+    if (active.length === 0 && archived.length === 0 && !planChip) return '';
+
+    const totalCount = active.length + archived.length;
+    const lines: string[] = [
       '',
-      `## Session Notepad (your working notes — use read_file(".mocode/sessions/${sessionId}/notes.md") for details)`,
-      'Sections:',
-      ...headers,
-      planChip,
-      '',
-    ].join('\n');
+      `## Session Notepad (${totalCount} section${totalCount === 1 ? '' : 's'} — read \`.mocode/sessions/${sessionId}/notes.md\` to recover full context; surviving compact is the whole point of this file)`,
+      `Active (${active.length}):`,
+      ...(active.length ? active.map(h => `  - ${h.replace(/^##\s+/, '')}`) : ['  - (none)']),
+    ];
+    if (planChip) {
+      // plan progress lives on its own line so the bucket counts stay easy to grep/match
+      lines.push(`Plan progress: ${stepsDone}/${stepsTotal} steps done`);
+    }
+    if (archived.length) {
+      lines.push(`Done (${archived.length}):`);
+      lines.push(...archived.map(h => `  - ${h.replace(/^##\s+/, '')}`));
+    }
+    lines.push('');
+    return lines.join('\n');
   } catch {
     return '';
   }
@@ -325,76 +349,35 @@ ${buildCodegraphSection()}
 ## Project context (dynamic reference)
 ${memorySection}${buildNotepadSection(sessionId)}
 
-## Session Notepad — working notes file
-${sessionId
-  ? `You maintain a working notepad at \`.mocode/sessions/${sessionId}/notes.md\` using write_file / edit_file / read_file.`
-  : 'You maintain a working notepad (path will be shown after the session starts).'}
-This is your private working surface — write intermediate findings, decisions, open questions,
-and anything you might need to recall later. The file survives context compaction.
+## Session Notepad (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)
+Private working surface; survives context compaction. Use read_file / edit_file / write_file.
 
-### WHEN TO WRITE
-The notepad is opt-in for complex work, not a routine task log. Use it only when the task has at least 3 meaningful steps, spans multiple investigation/implementation phases, or contains details that are genuinely at risk of being lost to context compaction.
+**When**: tasks with ≥3 steps, multi-phase work, or context at risk of being lost. Skip for one-shot questions, single-file edits, or anything that fits in current context.
 
-Do NOT create, read, or update the notepad for simple tasks, including:
-- Questions that can be answered directly
-- One-step commands or lookups
-- Small, localized edits that can be completed without intermediate notes
-- Work that only needs a few tool calls and fits comfortably in the current context
+**Format**: \`## <topic>\` sections, each self-contained. Examples:
+\`\`\`
+## Auth Module
+- JWT TTL: 86400, hardcoded at src/auth/jwt.ts:42
+## Decision: Zod
+- Chose zod; project already uses it (config/index.ts:8)
+## Open Questions
+- [ ] refresh token TTL?
+\`\`\`
+Finish a working section by renaming its heading to \`## Done: <topic>\` — it drops into the archived bucket in the notepad digest. Keep \`## Plan:\` and \`## Open Questions\` active until the task itself is finished.
 
-For qualifying complex work:
-- After exploring code and discovering key constraints → add a section
-- Before making a consequential design decision → record reasoning and alternatives considered
-- When accumulating data across many tool calls → store concise intermediates
-- When you realize important information may be lost after compaction → write it down
-- After completing a substantial phase → summarize what you learned
+**Plan** (tasks ≥3 steps): one active \`## Plan:\` section drives the status bar.
+\`\`\`
+## Plan: <title>
+Goal: <one line>
+### Steps
+- [ ] 1. <step>
+- [x] 2. <step>
+### Progress
+- <phase summary>
+\`\`\`
+Mark steps \`[x]\` as you complete them; append a line to \`### Progress\` after each phase. Before your final reply, reconcile every step vs the work actually done, then delete the plan or rename it to \`## Done: <title>\`.
 
-### FORMAT (markdown, section-based)
-Use \`## <topic>\` headers to organize. Each section is self-contained.
-Example:
-
-    ## Auth Module
-    - JWT TTL: 86400s, hardcoded at src/auth/jwt.ts:42
-    - Config path: config.auth.jwt.ttl (does not exist yet)
-    - Migration: read from config with fallback to 86400
-
-    ## Decision: Schema Validation
-    - Chose: zod over joi
-    - Why: project already uses zod (config/index.ts:8), joi would add a dep
-    - Risk: none — zod already in dependency tree
-
-    ## Open Questions
-    - [ ] Does the refresh token flow need TTL config too?
-    - [ ] Check if rate limiter interacts with auth middleware
-
-### RULES
-${sessionId
-  ? `- Your notepad file path is: \`.mocode/sessions/${sessionId}/notes.md\`. Use this exact path for all read_file/write_file/edit_file operations on your notes.`
-  : '- Your notepad file path will be available after the session starts.'}
-- Use write_file to create/overwrite; use edit_file to append or modify sections
-- Keep the file concise — summarize, don't dump raw tool output
-- At task completion, the file can be deleted or left for the user's reference
-- Do NOT use this for cross-session knowledge (use memory_save for that)
-
-### PLAN FORMAT (use for any task with ≥3 steps)
-Write the plan as a top-level \`## Plan:\` section. The system extracts this for the status bar chip, so follow the format exactly.
-
-    ## Plan: <task title>
-
-    Goal: <one-line goal>
-
-    ### Steps
-    - [ ] 1. <step 1>
-    - [x] 2. <step 2>
-    - [ ] 3. <step 3>
-
-    ### Progress
-    - <what you learned / did in this phase>
-
-Rules:
-- Only ONE active \`## Plan:\` section at a time.
-- Mark steps \`[x]\` as you complete them; append a line to \`### Progress\` after each phase.
-- Before your final response, reconcile every step with the work actually completed, then delete the plan section or rename it to \`## Done: <title>\`.
-- The host hides an unchanged active plan when an agent turn ends as a safety fallback; this does not edit the notepad. Keep updating the plan during execution so live progress remains accurate.
+Keep notes concise — summarize, don't dump raw tool output. Don't use this for cross-session knowledge (use \`memory_save\` for that).
 
 ## Termination & Reporting
 - Stop immediately when no more tools are needed; give conclusions directly.
