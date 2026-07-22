@@ -8,6 +8,7 @@ import { initializeAllMcp, getMcpTools, getMcpWarnings, closeAllMcp } from '../m
 import { setSandboxRoot } from '../sandbox/index.js';
 import { createContextState, loadSession, newSessionId, saveSession } from '../session/index.js';
 import { setCurrentSessionId } from '../session/state.js';
+import { buildActiveNotesPlanReminder } from '../session/notes-plan.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { registerToolsExtension } from '../tools/registry.js';
 import type { InterventionRequest, InterventionResult } from '../ui/intervention.js';
@@ -128,6 +129,7 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       history,
       userInput,
       signal: controller.signal,
+      dynamicSystemSuffix: buildActiveNotesPlanReminder,
       hooks: hooksFor(command.id),
       contextState,
       autoValidate: config.autoValidate,

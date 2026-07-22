@@ -360,6 +360,11 @@ export interface AgentRunOptions {
   signal?: AbortSignal;
   /** 每步 chat() 返回后回调:repl 据此重算并重画状态行 context 用量条。 */
   onContextUpdate?: () => void;
+  /**
+   * 每次模型请求前动态生成临时 system prompt 后缀。返回空串时不注入；
+   * 后缀仅用于本次请求，不写回 history，适合由外部状态驱动的提醒。
+   */
+  dynamicSystemSuffix?: () => string;
   hooks: AgentHooks;
   /** 步数上限;缺省 = config.maxSteps。子 agent 可传更低值。 */
   maxSteps?: number;
@@ -683,9 +688,23 @@ export async function runAgentCore(
       const modelStartedAt = Date.now();
       const provider = safeProviderId(requestBaseURL);
       emitTrace('model_start', { model: requestModel, provider });
+      const dynamicSystemSuffix = opts.dynamicSystemSuffix?.().trim() ?? '';
+      const systemMessage = history[0];
+      const requestHistory: ChatMessage[] =
+        dynamicSystemSuffix
+        && systemMessage?.role === 'system'
+        && typeof systemMessage.content === 'string'
+          ? [
+              {
+                ...systemMessage,
+                content: `${systemMessage.content}\n\n${dynamicSystemSuffix}`,
+              },
+              ...history.slice(1),
+            ]
+          : history;
       try {
         result = await chat(
-          history,
+          requestHistory,
           {
             onText,
             onToolCall,
@@ -751,7 +770,7 @@ export async function runAgentCore(
       // 用本次实际发送的 tools 计算分母，再以 EWMA 更新 provider/model/tool-set 校准。
       // 只持久化比例与样本数；无 usage 或短 prompt 时保持既有值。
       if (result.usage?.promptTokens && result.usage.promptTokens > 100) {
-        const estimated = estimatePromptTokens(history, activeTools);
+        const estimated = estimatePromptTokens(requestHistory, activeTools);
         const updated = updateTokenCalibration(
           requestBaseURL,
           requestModel,
