@@ -1,3 +1,6 @@
+import { renderMarkdown, enhanceCodeBlocks } from './markdown.js';
+import { mountIcons, icon } from './icons.js';
+
 export {};
 
 type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
@@ -23,6 +26,7 @@ declare global {
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       pullRequests: () => Promise<Record<string, unknown>>;
       pickAttachment: () => Promise<Attachment | null>;
+      getConfig: () => Promise<{ model: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }>;
       setTheme: (theme: 'light' | 'dark') => void;
       send: (value: Record<string, unknown>) => void;
       onAgentEvent: (callback: (event: AgentEnvelope) => void) => () => void;
@@ -74,11 +78,20 @@ function humanizeError(raw: string): string | null {
 
 function renderProjects(): void {
   const current = state; if (!current) return;
-  projectList.innerHTML = current.projects.map((project) => `<button class="project-item ${project.id === current.selectedProjectId ? 'selected' : ''}" data-project="${escapeHtml(project.id)}"><span class="folder-icon">▱</span><span>${escapeHtml(project.name)}</span></button>`).join('');
+  const folder = icon('folder');
+  const folderOpen = icon('folder-open');
+  projectList.innerHTML = current.projects.map((project) => {
+    const isSelected = project.id === current.selectedProjectId;
+    return `<button class="project-item ${isSelected ? 'selected' : ''}" data-project="${escapeHtml(project.id)}"><span class="folder-icon">${isSelected ? folderOpen : folder}</span><span>${escapeHtml(project.name)}</span></button>`;
+  }).join('');
   projectList.querySelectorAll<HTMLButtonElement>('[data-project]').forEach((button) => button.addEventListener('click', async () => {
     const next = await window.mocodeWork.selectProject(button.dataset.project!); updateState(next); clearWorkspace();
   }));
-  const project = selectedProject(); $('#context-project').textContent = `⌂ ${project?.name ?? '项目'}`; $('#context-branch').textContent = `⌘ ${project?.branch ?? '本地'}`;
+  const project = selectedProject();
+  const ctx = $('#context-project');
+  if (ctx) ctx.innerHTML = `${icon('home')}<span>${escapeHtml(project?.name ?? '项目')}</span>`;
+  const branch = $('#context-branch');
+  if (branch) branch.innerHTML = `${icon('branch')}<span>${escapeHtml(project?.branch ?? '本地')}</span>`;
 }
 
 function renderTasks(): void {
@@ -87,12 +100,22 @@ function renderTasks(): void {
   taskList.innerHTML = tasks.length ? tasks.map((task) => {
     const id = escapeHtml(task.id);
     const deleteTitle = task.status === 'running' || task.status === 'waiting' ? '停止并删除任务' : '删除任务';
-    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-spark">✦</span><span class="task-copy"><b>${escapeHtml(task.title)}</b><small>${statusText(task.status)}</small></span><span class="task-dot"></span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">×</button></div>`;
+    // 正在跑 / 等待中的任务,状态文字始终显示;其余 hover 才显示
+    const alwaysShow = task.status === 'running' || task.status === 'waiting' || task.id === current.selectedTaskId;
+    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-spark">${icon('sparkles')}</span><span class="task-copy"><b>${escapeHtml(task.title)}</b><small ${alwaysShow ? 'data-always="1"' : ''}>${statusText(task.status)}</small></span><span class="task-dot"></span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">${icon('close')}</button></div>`;
   }).join('') : '<p class="empty-tasks">无任务</p>';
   taskList.querySelectorAll<HTMLButtonElement>('[data-task]').forEach((button) => button.addEventListener('click', () => void openTask(button.dataset.task!)));
-  taskList.querySelectorAll<HTMLButtonElement>('[data-delete-task]').forEach((button) => button.addEventListener('click', () => void deleteTask(button.dataset.deleteTask!)));
+  taskList.querySelectorAll<HTMLButtonElement>('[data-delete-task]').forEach((button) => button.addEventListener('click', () => {
+    const taskId = button.dataset.deleteTask!;
+    const task = state?.tasks.find((item) => item.id === taskId);
+    if (task && (task.status === 'running' || task.status === 'waiting')) {
+      showToast('info', `正在停止任务 “${task.title}”…`);
+    }
+    void deleteTask(taskId);
+  }));
   const running = tasks.filter((task) => task.status === 'running' || task.status === 'waiting').length;
-  $('#usage').textContent = `${running ? Math.min(99, running * 20) : 0}%`;
+  const total = tasks.length;
+  $('#usage').textContent = total ? `${total} 任务${running ? ` · ${running} 运行中` : ''}` : '0%';
 }
 
 function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); }
@@ -102,8 +125,14 @@ function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
   emptyState.classList.add('hidden');
   const message = document.createElement('article'); message.className = `message ${kind}`;
   const label = kind === 'user' ? '你' : 'Mocode';
-  message.innerHTML = `<div class="message-avatar">${kind === 'assistant' ? '✦' : '你'}</div><div class="message-content"><div class="message-label">${label}</div><div class="message-body"></div></div>`;
-  (message.querySelector('.message-body') as HTMLElement).textContent = text; conversation.append(message); conversation.scrollTop = conversation.scrollHeight; return message;
+  const avatarIcon = kind === 'assistant' ? icon('spark-bot') : icon('user');
+  message.innerHTML = `<div class="message-avatar">${avatarIcon}</div><div class="message-content"><div class="message-label"><span>${label}</span><div class="message-actions"></div></div><div class="message-body"></div></div>`;
+  const body = message.querySelector('.message-body') as HTMLElement;
+  // 助手消息流式时只放纯文本,完成后再走 markdown 渲染,避免每 chunk 重排版。
+  body.textContent = text;
+  conversation.append(message);
+  smartScrollToBottom();
+  return message;
 }
 const activeTools = new Map<string, HTMLDetailsElement>();
 
@@ -144,7 +173,7 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   if (completed) entry.open = false;
   if (isNew) conversation.append(entry);
   if (id) completed ? activeTools.delete(id) : activeTools.set(id, entry);
-  conversation.scrollTop = conversation.scrollHeight;
+  smartScrollToBottom();
 }
 function appendText(text: string): void {
   // 复用当前气泡:仅当它仍是对话流末尾时(本轮尚未插入工具)。
@@ -157,7 +186,8 @@ function appendText(text: string): void {
     if (continued) activeAssistant.dataset.continued = '1';
   }
   const body = activeAssistant.querySelector('.message-body') as HTMLElement;
-  body.textContent = `${body.textContent ?? ''}${text}`; conversation.scrollTop = conversation.scrollHeight;
+  body.textContent = `${body.textContent ?? ''}${text}`;
+  smartScrollToBottom();
 }
 function renderHistory(history: HistoryItem[]): void {
   conversation.innerHTML = ''; activeAssistant = null;
@@ -168,10 +198,26 @@ function renderHistory(history: HistoryItem[]): void {
     if (item.role === 'tool') { addTool({ name: '工具结果', output: item.text }, true); }
     else {
       const el = addMessage(item.role, item.text);
+      // 历史消息(已结束)直接走 markdown 渲染
+      if (item.role === 'assistant') {
+        el.classList.remove('is-streaming');
+        renderMessageBody(el.querySelector('.message-body') as HTMLElement, item.text);
+        wireMessageActions(el, item.text);
+      }
       if (item.role === 'assistant' && prevRole === 'assistant') el.dataset.continued = '1';
     }
     prevRole = item.role;
   }
+}
+
+/**
+ * 把一段文本用 markdown 渲染到 .message-body 内,挂上交互。
+ * 助手消息流结束后调用,以及历史消息回放时调用。
+ */
+function renderMessageBody(body: HTMLElement, text: string): void {
+  body.classList.add('md-rendered');
+  body.innerHTML = renderMarkdown(text);
+  enhanceCodeBlocks(body);
 }
 
 async function openTask(taskId: string): Promise<void> {
@@ -181,27 +227,308 @@ async function openTask(taskId: string): Promise<void> {
 }
 
 async function deleteTask(taskId: string): Promise<void> {
+  const task = state?.tasks.find((item) => item.id === taskId);
+  // 非运行中任务加一个轻量二次确认
+  if (task && task.status !== 'running' && task.status !== 'waiting') {
+    const ok = window.confirm(`删除任务 “${task.title}”?此操作不可撤销。`);
+    if (!ok) return;
+  }
   const deletingSelectedTask = state?.selectedTaskId === taskId;
   const next = await window.mocodeWork.deleteTask(taskId);
   if (!next) return;
   updateState(next);
   if (deletingSelectedTask && next.selectedTaskId !== taskId) clearWorkspace();
+  showToast('info', '已删除任务');
 }
 
 function showApproval(payload: Record<string, unknown>): void {
   const approvalId = String(payload.approvalId ?? ''); const options = Array.isArray(payload.options) ? payload.options.map(String) : [];
   approvalPanel.classList.remove('hidden');
-  approvalPanel.innerHTML = `<div class="approval-title">需要你的确认</div><p>${escapeHtml(String(payload.title ?? '允许此操作？'))}</p><pre>${escapeHtml(String(payload.detail ?? ''))}</pre><div class="approval-actions">${options.map((option, index) => `<button data-approval="${escapeHtml(option)}" class="${index === 0 ? 'approve' : ''}">${escapeHtml(option)}</button>`).join('')}<button data-cancel>拒绝</button></div>`;
+  const buttons = options.length ? options.map((option, index) => `<button data-approval="${escapeHtml(option)}" class="${index === 0 ? 'approve' : ''}">${escapeHtml(option)}</button>`).join('') : `<button data-approval="approve" class="approve">${icon('check')}确认</button>`;
+  approvalPanel.innerHTML = `<div class="approval-title">${icon('warn')}<span>需要你的确认</span></div><p>${escapeHtml(String(payload.title ?? '允许此操作？'))}</p><pre>${escapeHtml(String(payload.detail ?? ''))}</pre><div class="approval-actions">${buttons}<button data-cancel>${icon('close')}拒绝</button></div>`;
   approvalPanel.querySelectorAll<HTMLButtonElement>('[data-approval]').forEach((button) => button.addEventListener('click', () => {
     window.mocodeWork.send({ type: 'approval', approvalId, action: 'selected', value: button.dataset.approval }); approvalPanel.classList.add('hidden');
   }));
   approvalPanel.querySelector<HTMLButtonElement>('[data-cancel]')?.addEventListener('click', () => { window.mocodeWork.send({ type: 'approval', approvalId, action: 'cancelled' }); approvalPanel.classList.add('hidden'); });
 }
-function setRunning(running: boolean): void { sendButton.textContent = running ? '■' : '↑'; sendButton.classList.toggle('stop', running); sendButton.title = running ? '停止运行' : '发送'; }
+function setRunning(running: boolean): void { sendButton.innerHTML = icon(running ? 'square' : 'paper-airplane'); sendButton.classList.toggle('stop', running); sendButton.title = running ? '停止运行 (⌘.)' : '发送 (⌘⏎)'; sendButton.setAttribute('aria-label', running ? '停止运行' : '发送'); }
 function resizePrompt(): void { promptInput.style.height = 'auto'; promptInput.style.height = `${Math.min(promptInput.scrollHeight, 128)}px`; }
 function renderAttachments(): void {
-  attachmentList.innerHTML = attachments.map((attachment, index) => `<span class="attachment-chip">▧ ${escapeHtml(attachment.name)}<button data-attachment="${index}" title="移除">×</button></span>`).join('');
+  attachmentList.innerHTML = attachments.map((attachment, index) => `<span class="attachment-chip">${icon('image')}<span class="attachment-name">${escapeHtml(attachment.name)}</span><button class="attachment-remove" data-attachment="${index}" title="移除" aria-label="移除附件"><svg class="icon" data-icon="close"></svg></button></span>`).join('');
+  mountIcons(attachmentList);
   attachmentList.querySelectorAll<HTMLButtonElement>('[data-attachment]').forEach((button) => button.addEventListener('click', () => { attachments.splice(Number(button.dataset.attachment), 1); renderAttachments(); }));
+}
+
+/* ── Smart scroll ──────────────────────────────────────── */
+/**
+ * 用户没在底部时不再强制跳到底,长任务翻历史时不会被打断。
+ * 距离底部 < 96px 视为"在底部",继续跟随;否则不打扰。
+ */
+function isAtBottom(): boolean {
+  const distance = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
+  return distance < 96;
+}
+function smartScrollToBottom(force = false): void {
+  if (force || isAtBottom()) conversation.scrollTop = conversation.scrollHeight;
+}
+// 用户主动滚动:离开底部超过阈值,直到再次回到底之前都不再自动跟。
+conversation.addEventListener('scroll', () => { userScrolled = !isAtBottom(); }, { passive: true });
+let userScrolled = false;
+
+/* ── Per-message actions (copy / regenerate / edit-resend) ── */
+function wireMessageActions(message: HTMLElement, text: string): void {
+  const actions = message.querySelector('.message-actions') as HTMLElement;
+  if (!actions || actions.childElementCount) return;
+  const isAssistant = message.classList.contains('assistant');
+  const isUser = message.classList.contains('user');
+  if (isAssistant) {
+    actions.innerHTML = `<button data-act="copy" title="复制内容" aria-label="复制内容">${icon('copy')}</button><button data-act="regen" title="基于这条重新生成" aria-label="基于这条重新生成">${icon('regen')}</button>`;
+  } else if (isUser) {
+    actions.innerHTML = `<button data-act="copy" title="复制内容" aria-label="复制内容">${icon('copy')}</button><button data-act="edit" title="编辑并重新发送" aria-label="编辑并重新发送">${icon('edit')}</button>`;
+  }
+  actions.addEventListener('click', async (event) => {
+    const target = event.target as HTMLElement;
+    const button = target.closest<HTMLButtonElement>('button[data-act]');
+    if (!button) return;
+    const act = button.dataset.act;
+    if (act === 'copy') {
+      try { await navigator.clipboard.writeText(text); showToast('info', '已复制到剪贴板'); }
+      catch { showToast('error', '复制失败'); }
+      return;
+    }
+    if (act === 'regen') { void regenerate(); return; }
+    if (act === 'edit') { promptInput.value = text; resizePrompt(); promptInput.focus(); return; }
+  });
+}
+
+/**
+ * 重新生成:从这条 assistant 之前的最后一条 user 消息,重发。
+ * 删掉本条及之后的所有 assistant/tool 消息,重发。
+ */
+async function regenerate(): Promise<void> {
+  if (activeRunId) { showToast('warn', '当前还有任务在跑,请先停止。'); return; }
+  const task = selectedTask();
+  if (!task?.sessionId) { showToast('warn', '这条消息没有可用的会话,无法重新生成。'); return; }
+  const messages = Array.from(conversation.querySelectorAll<HTMLElement>('.message'));
+  const target = activeMessage;
+  if (!target) return;
+  const index = messages.indexOf(target);
+  let userIndex = -1;
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (messages[i]!.classList.contains('user')) { userIndex = i; break; }
+  }
+  if (userIndex < 0) { showToast('warn', '找不到可重新生成的用户消息。'); return; }
+  const userText = messages[userIndex]!.querySelector('.message-body')?.textContent ?? '';
+  // 删 target 起所有后续消息(包括本条)
+  for (let i = messages.length - 1; i >= index; i -= 1) messages[i]!.remove();
+  // 直接重发(不再 addMessage,user 消息已经存在)
+  activeRunId = task.id;
+  setRunning(true);
+  window.mocodeWork.send({ type: 'run', id: task.id, prompt: userText, sessionId: task.sessionId, attachments: [] });
+  showToast('info', '已重新生成');
+}
+
+function setActiveMessage(message: HTMLElement | null): void {
+  if (activeMessage) activeMessage.classList.remove('is-active');
+  activeMessage = message;
+  if (activeMessage) activeMessage.classList.add('is-active');
+}
+let activeMessage: HTMLElement | null = null;
+
+conversation.addEventListener('mousemove', (event) => {
+  const target = event.target as HTMLElement;
+  const message = target.closest<HTMLElement>('.message');
+  setActiveMessage(message);
+});
+conversation.addEventListener('mouseleave', () => setActiveMessage(null));
+
+/* ── Toast ─────────────────────────────────────────────── */
+type ToastLevel = 'info' | 'success' | 'warn' | 'error';
+let toastHost: HTMLElement | null = null;
+function ensureToastHost(): HTMLElement {
+  if (toastHost) return toastHost;
+  toastHost = document.createElement('div');
+  toastHost.className = 'toast-host';
+  document.body.append(toastHost);
+  return toastHost;
+}
+function showToast(level: ToastLevel, text: string, durationMs = 3200): void {
+  const host = ensureToastHost();
+  const el = document.createElement('div');
+  el.className = `toast toast-${level}`;
+  const levelIcon = level === 'success' ? 'check' : level === 'warn' ? 'warn' : level === 'error' ? 'fail' : 'info';
+  el.innerHTML = `<span class="toast-icon">${icon(levelIcon)}</span><span class="toast-text">${escapeHtml(text)}</span>`;
+  host.append(el);
+  // 强制 reflow + 入场
+  el.getBoundingClientRect();
+  el.classList.add('toast-in');
+  const timer = setTimeout(() => dismiss(), durationMs);
+  function dismiss(): void { clearTimeout(timer); el.classList.remove('toast-in'); el.classList.add('toast-out'); setTimeout(() => el.remove(), 220); }
+  el.addEventListener('click', dismiss);
+}
+
+/* ── Cheatsheet ────────────────────────────────────────── */
+let cheatsheetEl: HTMLElement | null = null;
+function ensureCheatsheet(): HTMLElement {
+  if (cheatsheetEl) return cheatsheetEl;
+  const rows: Array<[string, string]> = [
+    ['⌘ K', '打开搜索'],
+    ['⌘ /', '切换助手模式'],
+    ['⌘ ⏎', '发送消息'],
+    ['⇧ ⏎', '在输入框换行'],
+    ['⌘ .', '停止当前任务'],
+    ['⌘ F', '在对话中搜索'],
+    ['Esc', '关闭弹窗 / 取消输入焦点'],
+    ['?', '显示 / 隐藏此快捷键面板'],
+  ];
+  const overlay = document.createElement('div');
+  overlay.className = 'cheatsheet hidden';
+  overlay.innerHTML = `<div class="cheatsheet-card">
+    <header><b>快捷键</b><button data-close title="关闭">×</button></header>
+    <div class="cheatsheet-grid">${rows.map(([key, desc]) => `<div class="cheatsheet-row"><kbd>${key}</kbd><span>${desc}</span></div>`).join('')}</div>
+    <footer>提示:大多数快捷键在 Mac 上是 ⌘,Windows/Linux 是 Ctrl。</footer>
+  </div>`;
+  document.body.append(overlay);
+  overlay.addEventListener('click', (e) => { if (e.target === overlay || (e.target as HTMLElement).dataset.close !== undefined) hideCheatsheet(); });
+  cheatsheetEl = overlay;
+  return overlay;
+}
+function showCheatsheet(): void { ensureCheatsheet()!.classList.remove('hidden'); }
+function hideCheatsheet(): void { cheatsheetEl?.classList.add('hidden'); }
+
+/* ── Drag & drop files into composer ──────────────────── */
+function setupDragDrop(): void {
+  const composer = $('.composer');
+  const area = $('.composer-area');
+  if (!composer || !area) return;
+  let depth = 0;
+  area.addEventListener('dragenter', (event) => {
+    if (!event.dataTransfer?.types?.includes('Files')) return;
+    event.preventDefault();
+    depth += 1;
+    composer.classList.add('composer-drag');
+  });
+  area.addEventListener('dragleave', () => {
+    depth = Math.max(0, depth - 1);
+    if (depth === 0) composer.classList.remove('composer-drag');
+  });
+  area.addEventListener('dragover', (event) => { if (event.dataTransfer?.types?.includes('Files')) event.preventDefault(); });
+  area.addEventListener('drop', async (event) => {
+    if (!event.dataTransfer?.files?.length) return;
+    event.preventDefault();
+    depth = 0;
+    composer.classList.remove('composer-drag');
+    const files = Array.from(event.dataTransfer.files);
+    for (const file of files) {
+      if (file.size > 4 * 1024 * 1024) { showToast('error', `${file.name} 超过 4MB 限制`); continue; }
+      if (!/^image\//.test(file.type)) { showToast('warn', `${file.name} 不是图片,已跳过`); continue; }
+      const reader = new FileReader();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      attachments.push({ name: file.name, dataUrl });
+    }
+    renderAttachments();
+    promptInput.focus();
+  });
+}
+setupDragDrop();
+
+/* ── Conversation search (⌘F) ─────────────────────────── */
+let searchOverlay: HTMLElement | null = null;
+function ensureSearchOverlay(): HTMLElement {
+  if (searchOverlay) return searchOverlay;
+  const overlay = document.createElement('div');
+  overlay.className = 'conv-search hidden';
+  overlay.innerHTML = `<div class="conv-search-bar">
+    <input type="text" placeholder="在当前对话中搜索…" />
+    <span class="conv-search-status"></span>
+    <button data-prev title="上一个 (Shift+Enter)">↑</button>
+    <button data-next title="下一个 (Enter)">↓</button>
+    <button data-close title="关闭 (Esc)">×</button>
+  </div>`;
+  document.body.append(overlay);
+  searchOverlay = overlay;
+  return overlay;
+}
+function openConvSearch(): void {
+  const overlay = ensureSearchOverlay();
+  const input = overlay.querySelector('input') as HTMLInputElement;
+  const status = overlay.querySelector('.conv-search-status') as HTMLElement;
+  let hits: HTMLElement[] = [];
+  let cursor = 0;
+
+  overlay.classList.remove('hidden');
+  input.focus();
+  input.select();
+
+  function clearHits(): void {
+    conversation.querySelectorAll<HTMLElement>('.conv-search-hit').forEach((el) => {
+      el.replaceWith(document.createTextNode(el.textContent ?? ''));
+    });
+    conversation.querySelectorAll<HTMLElement>('.conv-search-current').forEach((el) => el.classList.remove('conv-search-current'));
+  }
+  function runSearch(): void {
+    clearHits(); hits = []; cursor = 0;
+    const needle = input.value.trim();
+    if (!needle) { status.textContent = ''; return; }
+    const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    conversation.querySelectorAll<HTMLElement>('.message-body').forEach((body) => {
+      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      const texts: Text[] = [];
+      let node: Node | null; while ((node = walker.nextNode())) texts.push(node as Text);
+      for (const text of texts) {
+        const value = text.nodeValue ?? '';
+        if (!re.test(value)) { re.lastIndex = 0; continue; }
+        re.lastIndex = 0;
+        const fragment = document.createDocumentFragment();
+        let last = 0;
+        let match: RegExpExecArray | null;
+        while ((match = re.exec(value))) {
+          if (match.index > last) fragment.append(document.createTextNode(value.slice(last, match.index)));
+          const mark = document.createElement('mark');
+          mark.className = 'conv-search-hit';
+          mark.textContent = match[0];
+          fragment.append(mark);
+          hits.push(mark);
+          last = match.index + match[0].length;
+        }
+        if (last < value.length) fragment.append(document.createTextNode(value.slice(last)));
+        text.replaceWith(fragment);
+      }
+    });
+    if (!hits.length) { status.textContent = '无匹配'; return; }
+    status.textContent = `1 / ${hits.length}`;
+    goTo(0);
+  }
+  function goTo(index: number): void {
+    if (!hits.length) return;
+    cursor = ((index % hits.length) + hits.length) % hits.length;
+    hits.forEach((el) => el.classList.remove('conv-search-current'));
+    const current = hits[cursor]!;
+    current.classList.add('conv-search-current');
+    current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    status.textContent = `${cursor + 1} / ${hits.length}`;
+  }
+
+  input.oninput = runSearch;
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); goTo(cursor + (event.shiftKey ? -1 : 1)); }
+    if (event.key === 'Escape') { event.preventDefault(); closeConvSearch(); }
+  };
+  overlay.querySelector('[data-prev]')!.addEventListener('click', () => goTo(cursor - 1));
+  overlay.querySelector('[data-next]')!.addEventListener('click', () => goTo(cursor + 1));
+  overlay.querySelector('[data-close]')!.addEventListener('click', closeConvSearch);
+}
+function closeConvSearch(): void {
+  if (!searchOverlay) return;
+  searchOverlay.classList.add('hidden');
+  searchOverlay.querySelectorAll<HTMLElement>('.conv-search-hit').forEach((el) => {
+    el.replaceWith(document.createTextNode(el.textContent ?? ''));
+  });
+  searchOverlay.querySelectorAll<HTMLElement>('.conv-search-current').forEach((el) => el.classList.remove('conv-search-current'));
 }
 
 async function submit(): Promise<void> {
@@ -215,11 +542,20 @@ async function submit(): Promise<void> {
   window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments }); attachments = []; renderAttachments();
 }
 
-function finish(): void { activeAssistant?.classList.remove('is-streaming'); activeRunId = null; activeAssistant = null; setRunning(false); }
+function finish(): void {
+  if (activeAssistant) {
+    activeAssistant.classList.remove('is-streaming');
+    const body = activeAssistant.querySelector('.message-body') as HTMLElement;
+    const raw = body.textContent ?? '';
+    renderMessageBody(body, raw);
+    wireMessageActions(activeAssistant, raw);
+  }
+  activeRunId = null; activeAssistant = null; setRunning(false);
+}
 function handleAgentEvent(envelope: AgentEnvelope): void {
   if (envelope.type === 'error') {
     const message = humanizeError(envelope.error ?? '');
-    if (message) console.error('[Agent]', message);
+    if (message) { console.error('[Agent]', message); showToast('error', message); }
     finish();
     return;
   }
@@ -240,11 +576,15 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       // 内部日志只进开发者控制台，绝不进入用户对话。
       if (/^\(?node:\d+\)? \[DEP\d{4}\]/.test(raw)) break;
       console.debug('[Agent Host]', raw);
+      // 关键启动 / 配置提示用 toast 提示用户(避免淹没在控制台)
+      if (/Agent Host 未构建|配置缺少|连续崩溃|未找到系统 node/.test(raw)) {
+        showToast('warn', raw.replace(/^\[mocode-work\]\s*/, ''), 6000);
+      }
       break;
     }
     case 'run_failed': {
       const message = humanizeError(String(payload.message ?? '运行失败。'));
-      if (message) console.error('[Agent]', message);
+      if (message) { console.error('[Agent]', message); showToast('error', message, 5000); }
       finish();
       break;
     }
@@ -315,14 +655,78 @@ $('#theme-toggle').addEventListener('click', () => {
   document.documentElement.dataset.theme = next;
   try { localStorage.setItem('mocode-work-theme', next); } catch { /* 无 localStorage 则仅本次生效 */ }
   window.mocodeWork.setTheme(next);
+  showToast('info', `已切换到${next === 'dark' ? '黑夜' : '浅色'}主题`, 1600);
+});
+$('#mode-button')?.addEventListener?.('click', async () => {
+  const config = await window.mocodeWork.getConfig();
+  const detail = [
+    config.model ? `模型: ${config.model}` : '模型: 未配置 (请在终端跑 /model)',
+    config.baseUrl ? `API: ${config.baseUrl}` : null,
+    config.contextWindow ? `上下文: ${(config.contextWindow / 1000).toFixed(0)}k tokens` : null,
+  ].filter(Boolean).join('\n');
+  showToast('info', `当前助手配置\n${detail}`, 5000);
+});
+void window.mocodeWork.getConfig().then((config) => {
+  if (!config.model) return;
+  const model = config.model.split('/').pop() ?? config.model;
+  const short = model.length > 18 ? `${model.slice(0, 17)}…` : model;
+  const button = $('#mode-button');
+  if (button) {
+    button.innerHTML = `${escapeHtml(short)} <span>⌄</span>`;
+    button.title = `${config.model}\nAPI: ${config.baseUrl || '未知'}\n上下文: ${config.contextWindow ? `${(config.contextWindow / 1000).toFixed(0)}k` : '默认'}`;
+  }
 });
 searchInput.addEventListener('input', () => refreshSearch(searchInput.value));
 searchPanel.addEventListener('click', (event) => { if (event.target === searchPanel) searchPanel.classList.add('hidden'); });
 sendButton.addEventListener('click', () => void submit());
 promptInput.addEventListener('input', resizePrompt);
 promptInput.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } });
-window.addEventListener('keydown', (event) => { if (event.key === 'Escape') { searchPanel.classList.add('hidden'); approvalPanel.classList.add('hidden'); } if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); searchPanel.classList.remove('hidden'); searchInput.focus(); refreshSearch(); } });
+window.addEventListener('keydown', (event) => {
+  const cmd = event.ctrlKey || event.metaKey;
+  // ? 打开 cheatsheet(Shift + / 在大多数键盘上是 ?)
+  if (event.key === '?' && !(event.target instanceof HTMLElement && (event.target.matches('input, textarea') || event.target.isContentEditable))) { event.preventDefault(); cheatsheetEl?.classList.contains('hidden') ? showCheatsheet() : hideCheatsheet(); return; }
+  if (event.key === 'Escape') {
+    if (!cheatsheetEl?.classList.contains('hidden')) { hideCheatsheet(); return; }
+    if (!searchOverlay?.classList.contains('hidden')) { closeConvSearch(); return; }
+    searchPanel.classList.add('hidden'); approvalPanel.classList.add('hidden');
+    return;
+  }
+  if (cmd && event.key.toLowerCase() === 'k') { event.preventDefault(); searchPanel.classList.remove('hidden'); searchInput.value = ''; searchInput.focus(); refreshSearch(); return; }
+  if (cmd && event.key.toLowerCase() === '/') {
+    event.preventDefault();
+    if (activeRunId) { showToast('warn', '当前还有任务在跑,无法切换。'); return; }
+    showToast('info', '助手模式: Mocode Agent (暂未开放多模型切换)');
+    return;
+  }
+  if (cmd && event.key === '.') {
+    event.preventDefault();
+    if (activeRunId) { window.mocodeWork.send({ type: 'cancel', id: activeRunId }); showToast('info', '已停止当前任务'); }
+    return;
+  }
+  if (cmd && event.key.toLowerCase() === 'f') {
+    event.preventDefault();
+    if (!conversation.querySelector('.message')) { showToast('info', '当前没有对话可搜索'); return; }
+    openConvSearch();
+    return;
+  }
+});
 
 window.mocodeWork.onAgentEvent(handleAgentEvent);
 window.mocodeWork.onState((next) => updateState(next));
 void window.mocodeWork.getState().then(updateState);
+
+// Empty state hint chips
+document.querySelectorAll<HTMLButtonElement>('.empty-hint').forEach((button) => {
+  button.addEventListener('click', () => {
+    const hint = button.dataset.hint;
+    switch (hint) {
+      case 'new-task': $('#new-task').click(); break;
+      case 'cheatsheet': showCheatsheet(); break;
+      case 'pr': $('#pull-requests').click(); break;
+      case 'search': openConvSearch(); break;
+    }
+  });
+});
+
+// 把所有 [data-icon] 占位元素替换为 SVG
+mountIcons();

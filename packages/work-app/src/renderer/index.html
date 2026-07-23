@@ -20,32 +20,42 @@
   <body>
     <div class="app-shell">
       <aside class="sidebar">
-        <header class="brand-row"><button class="brand" aria-label="Mocode Work">Mocode <span>⌄</span></button><div class="brand-actions"><button class="icon-button muted" id="search-button" title="搜索">⌕</button><button class="icon-button muted" id="theme-toggle" title="切换主题" aria-label="切换主题"></button></div></header>
+        <header class="brand-row"><button class="brand" aria-label="Mocode Work">Mocode <svg class="icon icon-inline" data-icon="chevron-down"></svg></button><div class="brand-actions"><button class="icon-button muted" id="search-button" title="搜索" aria-label="搜索"><svg class="icon" data-icon="search"></svg></button><button class="icon-button muted" id="theme-toggle" title="切换主题" aria-label="切换主题"><svg class="icon" data-icon="moon"></svg><svg class="icon icon-swap" data-icon="sun"></svg></button></div></header>
         <nav class="primary-nav" aria-label="主导航">
-          <button class="nav-item active" id="new-task"><span>□</span>新建任务</button>
-          <button class="nav-item" id="pull-requests"><span>⌘</span>拉取请求</button>
+          <button class="nav-item active" id="new-task"><svg class="icon" data-icon="circle-plus"></svg>新建任务</button>
+          <button class="nav-item" id="pull-requests"><svg class="icon" data-icon="git-pull-request"></svg>拉取请求</button>
         </nav>
-        <section class="sidebar-section projects-section"><div class="section-heading"><span>项目</span><button class="add-project" id="add-project" title="添加项目">＋</button></div><div id="project-list" class="project-list"></div></section>
-        <section class="sidebar-section tasks-section"><div class="section-heading"><span>任务</span><button class="add-project" id="clear-task" title="清除当前项目任务">×</button></div><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
+        <section class="sidebar-section projects-section"><div class="section-heading"><span>项目</span><button class="add-project icon-button-square" id="add-project" title="添加项目" aria-label="添加项目"><svg class="icon" data-icon="plus"></svg></button></div><div id="project-list" class="project-list"></div></section>
+        <section class="sidebar-section tasks-section"><div class="section-heading"><span>任务</span><button class="add-project icon-button-square" id="clear-task" title="清除当前项目任务" aria-label="清除当前项目任务"><svg class="icon" data-icon="close"></svg></button></div><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
         <footer class="sidebar-footer"><span class="avatar">M</span><span>Mocode</span><span class="usage" id="usage">0%</span></footer>
       </aside>
       <main class="workspace">
-        <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览">▣</button><button id="show-files" title="浏览文件">▱</button></div>
-        <section id="empty-state" class="empty-state"><div class="idea-mark"><span></span><span></span><span></span></div><h1>开始一个任务</h1><p>选好左侧项目，在下方输入框写下要做的事，Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。</p></section>
+        <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览"><svg class="icon" data-icon="layout"></svg></button><button id="show-files" title="浏览文件"><svg class="icon" data-icon="files"></svg></button></div>
+        <section id="empty-state" class="empty-state">
+          <div class="idea-mark"><span></span><span></span><span></span></div>
+          <h1>开始一个任务</h1>
+          <p>选好左侧项目，在下方输入框写下要做的事，Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。</p>
+          <div class="empty-hints">
+            <button class="empty-hint" data-hint="new-task"><b>新建任务</b> <kbd>⌘ K</kbd></button>
+            <button class="empty-hint" data-hint="cheatsheet"><b>快捷键</b> <kbd>?</kbd></button>
+            <button class="empty-hint" data-hint="pr"><b>拉取请求</b> <kbd>⌘ /</kbd></button>
+            <button class="empty-hint" data-hint="search"><b>在对话中搜索</b> <kbd>⌘ F</kbd></button>
+          </div>
+        </section>
         <section id="conversation" class="conversation" aria-live="polite"></section>
         <section id="approval-panel" class="approval-panel hidden"></section>
         <aside id="inspector" class="inspector hidden">
-          <header class="inspector-header"><b id="inspector-title">项目概览</b><button id="close-inspector" title="关闭">×</button></header>
+          <header class="inspector-header"><b id="inspector-title">项目概览</b><button id="close-inspector" title="关闭" aria-label="关闭"><svg class="icon" data-icon="close"></svg></button></header>
           <nav class="inspector-tabs"><button data-tab="overview" class="selected">概览</button><button data-tab="files">文件</button><button data-tab="prs">拉取请求</button></nav>
           <div id="inspector-content" class="inspector-content"></div>
         </aside>
         <section id="search-panel" class="search-panel hidden"><div class="search-dialog"><input id="search-input" placeholder="搜索项目或任务" /><div id="search-results"></div></div></section>
         <footer class="composer-area">
-          <div class="composer-context"><span id="context-project">⌂ 项目</span><span>▣ 本地</span><span id="context-branch">⌘ main</span></div>
+          <div class="composer-context"><span id="context-project"><svg class="icon icon-inline" data-icon="home"></svg><span>项目</span></span><span><svg class="icon icon-inline" data-icon="globe"></svg>本地</span><span id="context-branch"><svg class="icon icon-inline" data-icon="branch"></svg>main</span></div>
           <div class="composer">
             <div id="attachment-list" class="attachment-list"></div>
             <textarea id="prompt" rows="1" placeholder="描述输入"></textarea>
-            <div class="composer-actions"><div class="left-actions"><button class="plus-button" id="add-attachment" title="添加图片">＋</button><button class="skill-button" id="skill-button">✧ 提示技能</button></div><div class="right-actions"><button id="mode-button" class="model-button">Mocode Agent <span>⌄</span></button><button class="voice-button" title="语音输入">♩</button><button id="send-button" class="send-button" title="发送">↑</button></div></div>
+            <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" title="添加图片 (也可拖入)" aria-label="添加图片"><svg class="icon" data-icon="image"></svg></button><button class="skill-button" id="skill-button" title="插入一段提示技能"><svg class="icon icon-inline" data-icon="sparkles"></svg>提示技能</button></div><div class="right-actions"><button id="mode-button" class="model-button" title="切换助手模式 (⌘/)"><span class="mode-label">Mocode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button class="voice-button icon-button-square" title="语音输入" aria-label="语音输入"><svg class="icon" data-icon="mic"></svg></button><button id="send-button" class="send-button" title="发送 (⌘⏎)" aria-label="发送"><svg class="icon" data-icon="paper-airplane"></svg></button></div></div>
           </div>
         </footer>
       </main>

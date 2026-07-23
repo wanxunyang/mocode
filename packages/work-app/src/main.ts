@@ -61,6 +61,7 @@ interface StoredState { version: 1; projects: Project[]; selectedProjectId: stri
 interface CommandResult { ok: boolean; stdout: string; stderr: string; }
 
 let windowRef: BrowserWindow | null = null;
+let appMenu: Menu | null = null;
 let state: StoredState;
 let agent: LocalAgent | null = null;
 let activeTaskId: string | null = null;
@@ -351,22 +352,39 @@ class LocalAgent {
 
 function createWindow(): void {
   windowRef = new BrowserWindow({
-    width: 1280, height: 820, minWidth: 980, minHeight: 620, title: 'Mocode Work', backgroundColor: '#ffffff',
+    width: 1280, height: 820, minWidth: 980, minHeight: 620, title: 'Mocode Work', backgroundColor: '#ffffff', autoHideMenuBar: true,
+    ...(process.platform === 'win32' ? {
+      titleBarStyle: 'hidden' as const,
+      titleBarOverlay: { color: '#f7f8f7', symbolColor: '#202124', height: 38 },
+    } : {}),
     webPreferences: { preload: path.join(__dirname, 'renderer', 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
+  windowRef.setMenuBarVisibility(false);
   void windowRef.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
-/** 让窗口原生背景色跟随应用主题，避免深色启动时白底闪屏。 */
+/** 让窗口原生背景和 Windows 控制按钮跟随应用主题。 */
 function applyThemeBackground(theme: 'light' | 'dark'): void {
   nativeTheme.themeSource = theme;
   const bg = theme === 'dark' ? '#1b1c1f' : '#ffffff';
   windowRef?.setBackgroundColor(bg);
+  if (process.platform === 'win32' && windowRef && !windowRef.isDestroyed()) {
+    windowRef.setTitleBarOverlay({
+      color: theme === 'dark' ? '#202225' : '#f7f8f7',
+      symbolColor: theme === 'dark' ? '#f5f5f5' : '#202124',
+      height: 38,
+    });
+  }
 }
 
 function currentTaskWorkspace(task: TaskRecord): Record<string, unknown> {
   const project = state.projects.find((item) => item.id === task.projectId);
   return { task, history: project ? sessionHistory(project, task.sessionId) : [] };
+}
+
+function maskUrl(raw: string): string {
+  if (!raw) return '';
+  try { const url = new URL(raw); return `${url.protocol}//${url.host}`; } catch { return ''; }
 }
 
 function attachmentFor(filePath: string): { name: string; dataUrl: string } | null {
@@ -437,7 +455,24 @@ function installIpc(): void {
     const result = await dialog.showOpenDialog(windowRef!, { properties: ['openFile'], filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
     return result.canceled || !result.filePaths[0] ? null : attachmentFor(result.filePaths[0]);
   });
+  // 把模型 / 上下文等关键配置透出给 renderer,用于在 UI 上显示真实信息。
+  // 注意:不返回 LLM_API_KEY 等敏感字段。
+  ipcMain.handle('work:get-config', () => ({
+    model: process.env.LLM_MODEL ?? '',
+    baseUrl: maskUrl(process.env.LLM_BASE_URL ?? ''),
+    contextWindow: Number(process.env.CONTEXT_WINDOW_TOKENS ?? 0) || null,
+    language: process.env.MOCODE_LANGUAGE ?? '',
+    theme: process.env.MOCODE_THEME ?? '',
+  }));
   ipcMain.on('work:set-theme', (_event, theme: 'light' | 'dark') => applyThemeBackground(theme));
+  ipcMain.on('work:show-menu', (event, menuId: string, clientX: number, clientY: number) => {
+    if (!['file', 'edit', 'view', 'help'].includes(menuId) || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+    const targetWindow = BrowserWindow.fromWebContents(event.sender);
+    const submenu = appMenu?.getMenuItemById(menuId)?.submenu;
+    if (!targetWindow || !submenu) return;
+    const bounds = targetWindow.getBounds();
+    submenu.popup({ window: targetWindow, x: bounds.x + Math.round(clientX), y: bounds.y + Math.round(clientY) });
+  });
   ipcMain.on('work:agent-send', (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' ? value.id : randomUUID();
     if (value.type === 'run') { activeTaskId = id; const task = taskById(id); if (task) { task.status = 'running'; task.updatedAt = new Date().toISOString(); saveState(); broadcastState(); } }
@@ -446,12 +481,13 @@ function installIpc(): void {
 }
 
 app.whenReady().then(async () => {
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { label: '文件', submenu: [{ role: 'close', label: '关闭窗口' }] },
-    { label: '编辑', submenu: [{ role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }] },
-    { label: '视图', submenu: [{ role: 'reload', label: '重新加载' }, { role: 'toggleDevTools', label: '开发者工具' }] },
-    { label: '帮助', submenu: [{ label: 'Mocode Work' }] },
-  ]));
+  appMenu = Menu.buildFromTemplate([
+    { id: 'file', label: '文件', submenu: [{ role: 'close', label: '关闭窗口' }] },
+    { id: 'edit', label: '编辑', submenu: [{ role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }] },
+    { id: 'view', label: '视图', submenu: [{ role: 'reload', label: '重新加载' }, { role: 'toggleDevTools', label: '开发者工具' }] },
+    { id: 'help', label: '帮助', submenu: [{ label: 'Mocode Work', enabled: false }] },
+  ]);
+  Menu.setApplicationMenu(null);
   state = await loadState(); agent = new LocalAgent(); installIpc(); createWindow(); await agent.start(selectedProject());
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
