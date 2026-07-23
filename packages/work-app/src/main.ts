@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme } from 'electron';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -173,10 +173,12 @@ function sessionHistory(project: Project, sessionId?: string): Array<{ role: 'us
       if (!Array.isArray(record.history)) continue;
       return record.history.flatMap((message) => {
         const role = message.role;
-        if (role === 'system') return [];
-        const text = contentText(message.content) || (Array.isArray(message.tool_calls) ? `调用工具：${message.tool_calls.map((call) => String((call as { function?: { name?: string } }).function?.name ?? 'tool')).join(', ')}` : '');
-        if (!text) return [];
-        return [{ role: role === 'tool' ? 'tool' : role === 'assistant' ? 'assistant' : 'user', text }];
+        if (role !== 'user' && role !== 'assistant' && role !== 'tool') return [];
+        const text = contentText(message.content);
+        if (text) return [{ role, text }];
+        if (role !== 'assistant' || !Array.isArray(message.tool_calls)) return [];
+        const names = message.tool_calls.map((call) => String((call as { function?: { name?: string } }).function?.name ?? 'tool'));
+        return names.length ? [{ role: 'tool' as const, text: `调用工具：${names.join(', ')}` }] : [];
       });
     } catch { /* Try old session layout. */ }
   }
@@ -355,6 +357,13 @@ function createWindow(): void {
   void windowRef.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
+/** 让窗口原生背景色跟随应用主题，避免深色启动时白底闪屏。 */
+function applyThemeBackground(theme: 'light' | 'dark'): void {
+  nativeTheme.themeSource = theme;
+  const bg = theme === 'dark' ? '#1b1c1f' : '#ffffff';
+  windowRef?.setBackgroundColor(bg);
+}
+
 function currentTaskWorkspace(task: TaskRecord): Record<string, unknown> {
   const project = state.projects.find((item) => item.id === task.projectId);
   return { task, history: project ? sessionHistory(project, task.sessionId) : [] };
@@ -412,6 +421,7 @@ function installIpc(): void {
     const result = await dialog.showOpenDialog(windowRef!, { properties: ['openFile'], filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
     return result.canceled || !result.filePaths[0] ? null : attachmentFor(result.filePaths[0]);
   });
+  ipcMain.on('work:set-theme', (_event, theme: 'light' | 'dark') => applyThemeBackground(theme));
   ipcMain.on('work:agent-send', (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' ? value.id : randomUUID();
     if (value.type === 'run') { activeTaskId = id; const task = taskById(id); if (task) { task.status = 'running'; task.updatedAt = new Date().toISOString(); saveState(); broadcastState(); } }

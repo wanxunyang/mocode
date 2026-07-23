@@ -6,18 +6,28 @@
     <title>Mocode Work</title>
     <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="style.css" />
+    <script>
+      // 首屏前同步应用主题，避免加载闪烁。优先级:localStorage > 系统偏好。
+      (function () {
+        try {
+          var saved = localStorage.getItem('mocode-work-theme');
+          var theme = saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+          document.documentElement.dataset.theme = theme;
+        } catch { /* localStorage 不可用时走默认浅色 */ }
+      })();
+    </script>
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar">
-        <header class="brand-row"><button class="brand" aria-label="Mocode Work">Mocode <span>⌄</span></button><button class="icon-button muted" id="search-button" title="搜索">⌕</button></header>
+        <header class="brand-row"><button class="brand" aria-label="Mocode Work">Mocode <span>⌄</span></button><div class="brand-actions"><button class="icon-button muted" id="search-button" title="搜索">⌕</button><button class="icon-button muted" id="theme-toggle" title="切换主题" aria-label="切换主题"></button></div></header>
         <nav class="primary-nav" aria-label="主导航">
           <button class="nav-item active" id="new-task"><span>□</span>新建任务</button>
           <button class="nav-item" id="pull-requests"><span>⌘</span>拉取请求</button>
         </nav>
         <section class="sidebar-section projects-section"><div class="section-heading"><span>项目</span><button class="add-project" id="add-project" title="添加项目">＋</button></div><div id="project-list" class="project-list"></div></section>
         <section class="sidebar-section tasks-section"><div class="section-heading"><span>任务</span><button class="add-project" id="clear-task" title="清除当前项目任务">×</button></div><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
-        <footer class="sidebar-footer"><span class="avatar">M</span><span>本地运行时</span><span class="usage" id="usage">0%</span></footer>
+        <footer class="sidebar-footer"><span class="avatar">M</span><span>Mocode</span><span class="usage" id="usage">0%</span></footer>
       </aside>
       <main class="workspace">
         <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览">▣</button><button id="show-files" title="浏览文件">▱</button></div>

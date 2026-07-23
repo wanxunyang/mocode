@@ -22,6 +22,7 @@ declare global {
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       pullRequests: () => Promise<Record<string, unknown>>;
       pickAttachment: () => Promise<Attachment | null>;
+      setTheme: (theme: 'light' | 'dark') => void;
       send: (value: Record<string, unknown>) => void;
       onAgentEvent: (callback: (event: AgentEnvelope) => void) => () => void;
       onState: (callback: (state: WorkState) => void) => () => void;
@@ -91,18 +92,53 @@ function renderTasks(): void {
 function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); }
 function clearWorkspace(): void { conversation.innerHTML = ''; emptyState.classList.remove('hidden'); activeAssistant = null; activeRunId = null; attachments = []; renderAttachments(); }
 
-function addMessage(kind: 'user' | 'assistant' | 'system', text = ''): HTMLElement {
+function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
   emptyState.classList.add('hidden');
   const message = document.createElement('article'); message.className = `message ${kind}`;
-  const label = kind === 'user' ? '你' : kind === 'assistant' ? 'Mocode' : '运行时';
-  message.innerHTML = `<div class="message-avatar">${kind === 'assistant' ? '✦' : kind === 'user' ? '你' : 'i'}</div><div class="message-content"><div class="message-label">${label}</div><div class="message-body"></div></div>`;
+  const label = kind === 'user' ? '你' : 'Mocode';
+  message.innerHTML = `<div class="message-avatar">${kind === 'assistant' ? '✦' : '你'}</div><div class="message-content"><div class="message-label">${label}</div><div class="message-body"></div></div>`;
   (message.querySelector('.message-body') as HTMLElement).textContent = text; conversation.append(message); conversation.scrollTop = conversation.scrollHeight; return message;
 }
+const activeTools = new Map<string, HTMLDetailsElement>();
+
+function toolText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value == null) return '';
+  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+}
+function toolCallSummary(value: unknown): string {
+  const raw = toolText(value).trim();
+  if (!raw) return '';
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const hint = ['path', 'file', 'command', 'query', 'pattern'].map((key) => parsed[key]).find((item) => typeof item === 'string');
+    if (typeof hint === 'string') return hint.length > 100 ? `${hint.slice(0, 99)}…` : hint;
+  } catch { /* Non-JSON arguments are summarized as plain text. */ }
+  const compact = raw.replace(/\s+/g, ' ');
+  return compact.length > 100 ? `${compact.slice(0, 99)}…` : compact;
+}
 function addTool(payload: Record<string, unknown>, completed = false): void {
-  emptyState.classList.add('hidden'); const name = String(payload.name ?? 'tool'); const output = typeof payload.output === 'string' ? payload.output : '';
-  const card = document.createElement('details'); card.className = `tool-card ${completed ? 'tool-done' : ''}`; card.open = !completed;
-  card.innerHTML = `<summary><span class="tool-state">${completed ? '✓' : '↻'}</span><span>${escapeHtml(name)}</span><span class="tool-meta">${completed ? '已完成' : '正在执行'}</span></summary>${output ? `<pre>${escapeHtml(output.slice(0, 6000))}</pre>` : ''}`;
-  conversation.append(card); conversation.scrollTop = conversation.scrollHeight;
+  emptyState.classList.add('hidden');
+  const id = payload.id == null ? '' : String(payload.id);
+  const existing = completed && id ? activeTools.get(id) : undefined;
+  const entry = existing?.isConnected ? existing : document.createElement('details');
+  const isNew = !entry.isConnected;
+  const name = String(payload.name ?? 'tool');
+  const args = toolText(payload.arguments ?? entry.dataset.toolArguments).trim();
+  const output = toolText(payload.output).trim();
+  if (!completed && args) entry.dataset.toolArguments = args;
+  const summary = toolCallSummary(args);
+  const detail = [
+    args ? `<section><span>调用</span><pre>${escapeHtml(args.slice(0, 6000))}</pre></section>` : '',
+    output ? `<section><span>结果</span><pre>${escapeHtml(output.slice(0, 12000))}</pre></section>` : '',
+  ].join('');
+
+  entry.className = `tool-entry ${completed ? 'tool-done' : 'tool-running'}${detail ? '' : ' tool-empty'}`;
+  entry.innerHTML = `<summary><span class="tool-state">${completed ? '●' : '◇'}</span><span class="tool-name">${escapeHtml(name)}</span>${summary ? `<span class="tool-summary">${escapeHtml(summary)}</span>` : ''}<span class="tool-meta">${completed ? '完成' : '执行中'}</span></summary>${detail ? `<div class="tool-detail">${detail}</div>` : ''}`;
+  if (completed) entry.open = false;
+  if (isNew) conversation.append(entry);
+  if (id) completed ? activeTools.delete(id) : activeTools.set(id, entry);
+  conversation.scrollTop = conversation.scrollHeight;
 }
 function appendText(text: string): void {
   if (!activeAssistant) { activeAssistant = addMessage('assistant'); activeAssistant.classList.add('is-streaming'); } const body = activeAssistant.querySelector('.message-body') as HTMLElement;
@@ -116,7 +152,7 @@ function renderHistory(history: HistoryItem[]): void {
 
 async function openTask(taskId: string): Promise<void> {
   const workspace = await window.mocodeWork.selectTask(taskId);
-  if (!workspace) { addMessage('system', '任务正在运行，无法切换到其他项目。'); return; }
+  if (!workspace) return;
   updateState(workspace.state); renderHistory(workspace.history); attachments = []; renderAttachments(); promptInput.focus();
 }
 
@@ -151,7 +187,7 @@ function finish(): void { activeAssistant?.classList.remove('is-streaming'); act
 function handleAgentEvent(envelope: AgentEnvelope): void {
   if (envelope.type === 'error') {
     const message = humanizeError(envelope.error ?? '');
-    if (message) addMessage('system', message);
+    if (message) console.error('[Agent]', message);
     finish();
     return;
   }
@@ -161,30 +197,29 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     case 'text_delta': appendText(String(payload.text ?? '')); break;
     case 'tool_started': addTool(payload); break;
     case 'tool_completed': addTool(payload, true); break;
-    case 'validation_started': addMessage('system', `正在验证：${String(payload.command ?? '')}`); break;
-    case 'validation_completed': addMessage('system', '验证完成。'); break;
+    case 'validation_started':
+    case 'validation_completed': break;
     case 'approval_requested': showApproval(payload); break;
-    case 'run_aborted': addMessage('system', '任务已停止。'); finish(); break;
-    case 'run_completed': { const changed = Array.isArray(payload.changedFiles) ? payload.changedFiles.length : 0; if (changed) addMessage('system', `本轮完成，修改了 ${changed} 个文件。`); finish(); break; }
+    case 'run_aborted': finish(); break;
+    case 'run_completed': finish(); break;
     case 'host_log': {
       const raw = String(payload.message ?? '').trim();
       if (!raw) break;
-      // 屏蔽 Node 内置模块的 deprecation 噪音(whatwg-url / tr46 还在用 punycode 等)
+      // 内部日志只进开发者控制台，绝不进入用户对话。
       if (/^\(?node:\d+\)? \[DEP\d{4}\]/.test(raw)) break;
-      addMessage('system', raw);
+      console.debug('[Agent Host]', raw);
       break;
     }
     case 'run_failed': {
       const message = humanizeError(String(payload.message ?? '运行失败。'));
-      if (message) addMessage('system', message);
+      if (message) console.error('[Agent]', message);
       finish();
       break;
     }
     case 'host_exit': {
-      // host 死了:如果还有挂着的 run,先把 run 标记为失败;主进程会自动拉起新 host。
-      const code = typeof payload.code === 'number' ? payload.code : null;
       if (activeRunId) {
-        addMessage('system', `Agent Host 已退出（退出码 ${code ?? '?'}），正在自动重启……`);
+        const code = typeof payload.code === 'number' ? payload.code : null;
+        console.error(`[Agent Host] 已退出（退出码 ${code ?? '?'}）`);
         finish();
       }
       break;
@@ -243,6 +278,12 @@ $('#close-inspector').addEventListener('click', () => inspector.classList.add('h
 $('#pull-requests').addEventListener('click', () => openInspector('prs'));
 document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => button.addEventListener('click', () => { activeInspectorTab = button.dataset.tab as 'overview' | 'files' | 'prs'; void refreshInspector(); }));
 $('#search-button').addEventListener('click', () => { searchPanel.classList.remove('hidden'); searchInput.value = ''; refreshSearch(); searchInput.focus(); });
+$('#theme-toggle').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('mocode-work-theme', next); } catch { /* 无 localStorage 则仅本次生效 */ }
+  window.mocodeWork.setTheme(next);
+});
 searchInput.addEventListener('input', () => refreshSearch(searchInput.value));
 searchPanel.addEventListener('click', (event) => { if (event.target === searchPanel) searchPanel.classList.add('hidden'); });
 sendButton.addEventListener('click', () => void submit());

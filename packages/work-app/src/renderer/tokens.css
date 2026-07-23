@@ -1,9 +1,11 @@
 /* Hallmark · theme: Studio · genre: modern-minimal · anchor hue: leaf-green (145)
- * palette: oklch paper 96.5% · ink 19% · accent 52% 0.16 145 · focus 50% 0.17 145
+ * palette: oklch paper 100% (light) / 17% (dark) · ink 19% (light) / 95% (dark) · accent 52% 0.16 145
  * type: Fraunces (display, 600/700) + Geist (body, 400/500) + Geist Mono (outlier, 400/500)
  * space: 4pt base, 9 steps named by role
  * states: default · hover · focus · active · disabled · loading · error · success
- * contrast: pass (body 7:1, UI 4.5:1) */
+ * contrast: pass (body 7:1, UI 4.5:1)
+ *
+ * 主题：默认浅色（纯白底）；document.documentElement.dataset.theme = 'dark' 切黑夜。 */
 
 :root {
   /* ── Type ───────────────────────────────────────────── */
@@ -11,21 +13,23 @@
   --font-body:    "Geist", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
   --font-outlier: "Geist Mono", "Noto Sans Mono CJK SC", ui-monospace, SFMono-Regular, Consolas, monospace;
 
-  /* ── Colour · Studio (light) ────────────────────────── */
-  --color-paper:    oklch(96.5% 0.012 145);
-  --color-paper-2:  oklch(93.5% 0.014 145);
-  --color-paper-3:  oklch(90.5% 0.016 145);
-  --color-rule:     oklch(85% 0.012 145);
-  --color-rule-soft:oklch(91% 0.010 145);
-  --color-neutral:  oklch(58% 0.010 145);
-  --color-muted:    oklch(44% 0.012 145);
-  --color-subtle:   oklch(72% 0.008 145);
+  /* ── Colour · Studio (light · 默认) ──────────────────── */
+  --color-paper:    oklch(100% 0 0);          /* 纯白主背景 */
+  --color-paper-2:  oklch(97.5% 0.003 145);   /* 侧栏 / 卡片 */
+  --color-paper-3:  oklch(94% 0.005 145);     /* hover / 强调面 */
+  --color-rule:     oklch(90% 0.003 145);
+  --color-rule-soft:oklch(94% 0.002 145);
+  --color-neutral:  oklch(55% 0.010 145);
+  --color-muted:    oklch(42% 0.012 145);
+  --color-subtle:   oklch(71% 0.008 145);
   --color-ink:      oklch(19% 0.014 150);
   --color-ink-soft: oklch(30% 0.012 150);
   --color-accent:   oklch(52% 0.16 145);
-  --color-accent-soft: oklch(92% 0.04 145);
+  --color-accent-soft: oklch(93% 0.04 145);
   --color-accent-ink:  oklch(38% 0.13 145);
   --color-focus:    oklch(50% 0.17 145);
+  --color-fail-ink: oklch(46% 0.16 25);       /* fail 加深态 */
+  --color-scrim:    oklch(19% 0.014 150 / 0.35); /* 模态遮罩 */
 
   /* state colours — semantic */
   --color-running:  oklch(58% 0.14 230);   /* cool blue, in-flight */
@@ -92,3 +96,41 @@
   --blue: var(--color-accent);
   --shadow: var(--shadow-raised);
 }
+
+/* ── Colour · Studio (dark · 黑夜主题) ────────────────────
+ * 深底 + 浅字，保持 leaf-green 145 色相锚点与设计层次。
+ * 仅覆盖颜色与阴影；间距 / 字号 / 动效 / 层级继承自 :root。 */
+:root[data-theme="dark"] {
+  --color-paper:    oklch(17% 0.012 150);
+  --color-paper-2:  oklch(21% 0.014 150);
+  --color-paper-3:  oklch(26% 0.015 150);
+  --color-rule:     oklch(30% 0.010 150);
+  --color-rule-soft:oklch(24% 0.010 150);
+  --color-neutral:  oklch(62% 0.010 145);
+  --color-muted:    oklch(70% 0.012 145);
+  --color-subtle:   oklch(48% 0.008 145);
+  --color-ink:      oklch(95% 0.010 145);
+  --color-ink-soft: oklch(82% 0.010 145);
+  --color-accent:   oklch(66% 0.16 145);
+  --color-accent-soft: oklch(30% 0.05 145);
+  --color-accent-ink:  oklch(82% 0.13 145);
+  --color-focus:    oklch(63% 0.17 145);
+  --color-fail-ink: oklch(58% 0.16 25);
+  --color-scrim:    oklch(0% 0 0 / 0.55);
+
+  /* state colours — 提亮以适配深底 */
+  --color-running:  oklch(70% 0.14 230);
+  --color-success:  oklch(66% 0.14 150);
+  --color-warn:     oklch(72% 0.15 75);
+  --color-fail:     oklch(64% 0.16 25);
+  --color-idle:     oklch(50% 0.008 145);
+
+  /* 深底阴影更重，靠对比而非色相 */
+  --shadow-whisper: 0 1px 2px oklch(0% 0 0 / 0.30);
+  --shadow-soft:    0 4px 16px oklch(0% 0 0 / 0.35);
+  --shadow-raised:  0 8px 28px oklch(0% 0 0 / 0.45);
+}
+
+/* color-scheme: 让原生控件(滚动条/输入框光标等)跟随主题 */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"]  { color-scheme: dark; }
