@@ -105,7 +105,7 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   conversation.append(card); conversation.scrollTop = conversation.scrollHeight;
 }
 function appendText(text: string): void {
-  if (!activeAssistant) activeAssistant = addMessage('assistant'); const body = activeAssistant.querySelector('.message-body') as HTMLElement;
+  if (!activeAssistant) { activeAssistant = addMessage('assistant'); activeAssistant.classList.add('is-streaming'); } const body = activeAssistant.querySelector('.message-body') as HTMLElement;
   body.textContent = `${body.textContent ?? ''}${text}`; conversation.scrollTop = conversation.scrollHeight;
 }
 function renderHistory(history: HistoryItem[]): void {
@@ -147,7 +147,7 @@ async function submit(): Promise<void> {
   window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments }); attachments = []; renderAttachments();
 }
 
-function finish(): void { activeRunId = null; activeAssistant = null; setRunning(false); }
+function finish(): void { activeAssistant?.classList.remove('is-streaming'); activeRunId = null; activeAssistant = null; setRunning(false); }
 function handleAgentEvent(envelope: AgentEnvelope): void {
   if (envelope.type === 'error') {
     const message = humanizeError(envelope.error ?? '');

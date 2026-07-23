@@ -1,0 +1,94 @@
+/* Hallmark · theme: Studio · genre: modern-minimal · anchor hue: leaf-green (145)
+ * palette: oklch paper 96.5% · ink 19% · accent 52% 0.16 145 · focus 50% 0.17 145
+ * type: Fraunces (display, 600/700) + Geist (body, 400/500) + Geist Mono (outlier, 400/500)
+ * space: 4pt base, 9 steps named by role
+ * states: default · hover · focus · active · disabled · loading · error · success
+ * contrast: pass (body 7:1, UI 4.5:1) */
+
+:root {
+  /* ── Type ───────────────────────────────────────────── */
+  --font-display: "Fraunces", "Noto Serif SC", ui-serif, Georgia, serif;
+  --font-body:    "Geist", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+  --font-outlier: "Geist Mono", "Noto Sans Mono CJK SC", ui-monospace, SFMono-Regular, Consolas, monospace;
+
+  /* ── Colour · Studio (light) ────────────────────────── */
+  --color-paper:    oklch(96.5% 0.012 145);
+  --color-paper-2:  oklch(93.5% 0.014 145);
+  --color-paper-3:  oklch(90.5% 0.016 145);
+  --color-rule:     oklch(85% 0.012 145);
+  --color-rule-soft:oklch(91% 0.010 145);
+  --color-neutral:  oklch(58% 0.010 145);
+  --color-muted:    oklch(44% 0.012 145);
+  --color-subtle:   oklch(72% 0.008 145);
+  --color-ink:      oklch(19% 0.014 150);
+  --color-ink-soft: oklch(30% 0.012 150);
+  --color-accent:   oklch(52% 0.16 145);
+  --color-accent-soft: oklch(92% 0.04 145);
+  --color-accent-ink:  oklch(38% 0.13 145);
+  --color-focus:    oklch(50% 0.17 145);
+
+  /* state colours — semantic */
+  --color-running:  oklch(58% 0.14 230);   /* cool blue, in-flight */
+  --color-success:  oklch(52% 0.14 150);   /* leaf, done */
+  --color-warn:     oklch(62% 0.15 75);    /* amber, waiting */
+  --color-fail:     oklch(56% 0.16 25);    /* warm red, error */
+  --color-idle:     oklch(68% 0.008 145);  /* grey, cancelled */
+
+  /* ── Space · 4pt base ──────────────────────────────── */
+  --space-3xs: 0.125rem; /* 2  */
+  --space-2xs: 0.25rem;  /* 4  */
+  --space-xs:  0.5rem;   /* 8  */
+  --space-sm:  0.75rem;  /* 12 */
+  --space-md:  1rem;     /* 16 */
+  --space-lg:  1.5rem;   /* 24 */
+  --space-xl:  2.25rem;  /* 36 */
+  --space-2xl: 3.5rem;   /* 56 */
+  --space-3xl: 5.5rem;   /* 88 */
+
+  /* ── Type scale · major third 1.25 ─────────────────── */
+  --text-2xs: 0.6875rem; /* 11 */
+  --text-xs:  0.75rem;   /* 12 */
+  --text-sm:  0.875rem;  /* 14 */
+  --text-md:  1rem;      /* 16 */
+  --text-lg:  1.25rem;   /* 20 */
+  --text-xl:  1.5rem;    /* 24 */
+  --text-2xl: 2rem;      /* 32 */
+  --text-display-s: 2.5rem;  /* 40 */
+
+  /* ── Motion ────────────────────────────────────────── */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in:  cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long:  420ms;
+
+  /* ── Depth ─────────────────────────────────────────── */
+  --shadow-whisper: 0 1px 2px oklch(20% 0.01 150 / 0.05);
+  --shadow-soft:    0 4px 16px oklch(20% 0.02 150 / 0.06);
+  --shadow-raised:  0 8px 28px oklch(20% 0.02 150 / 0.09);
+
+  /* ── Z-index ───────────────────────────────────────── */
+  --z-base: 1;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+
+  /* ── Rules & radii ─────────────────────────────────── */
+  --rule-hair: 1px solid var(--color-rule);
+  --rule-soft: 1px solid var(--color-rule-soft);
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 13px;
+  --radius-full: 999px;
+
+  /* legacy bridge — keep old var names alive for any untouched selectors */
+  --ink: var(--color-ink);
+  --muted: var(--color-muted);
+  --line: var(--color-rule);
+  --blue: var(--color-accent);
+  --shadow: var(--shadow-raised);
+}

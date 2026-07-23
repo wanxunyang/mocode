@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mocode Work</title>
+    <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -20,7 +21,7 @@
       </aside>
       <main class="workspace">
         <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览">▣</button><button id="show-files" title="浏览文件">▱</button></div>
-        <section id="empty-state" class="empty-state"><div class="idea-mark"><span></span><span></span><span></span></div><h1>我们该构建什么？</h1></section>
+        <section id="empty-state" class="empty-state"><div class="idea-mark"><span></span><span></span><span></span></div><h1>开始一个任务</h1><p>选好左侧项目，在下方输入框写下要做的事，Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。</p></section>
         <section id="conversation" class="conversation" aria-live="polite"></section>
         <section id="approval-panel" class="approval-panel hidden"></section>
         <aside id="inspector" class="inspector hidden">
