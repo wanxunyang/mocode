@@ -141,7 +141,11 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   conversation.scrollTop = conversation.scrollHeight;
 }
 function appendText(text: string): void {
-  if (!activeAssistant) { activeAssistant = addMessage('assistant'); activeAssistant.classList.add('is-streaming'); } const body = activeAssistant.querySelector('.message-body') as HTMLElement;
+  // 若当前气泡已不是对话流末尾(中间插入了工具条),则新建气泡,保证文字与工具按触发时序排列。
+  if (!activeAssistant || !activeAssistant.isConnected || activeAssistant !== conversation.lastElementChild) {
+    activeAssistant = addMessage('assistant'); activeAssistant.classList.add('is-streaming');
+  }
+  const body = activeAssistant.querySelector('.message-body') as HTMLElement;
   body.textContent = `${body.textContent ?? ''}${text}`; conversation.scrollTop = conversation.scrollHeight;
 }
 function renderHistory(history: HistoryItem[]): void {
