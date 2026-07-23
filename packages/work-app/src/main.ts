@@ -404,8 +404,24 @@ function installIpc(): void {
     state.selectedTaskId = task.id; state.selectedProjectId = project.id; saveState(); broadcastState(); await agent?.start(project);
     return { state, ...currentTaskWorkspace(task) };
   });
+  ipcMain.handle('work:delete-task', (_event, taskId: string) => {
+    if (typeof taskId !== 'string' || !taskId) return null;
+    const task = taskById(taskId);
+    if (!task || task.projectId !== state.selectedProjectId) return null;
+    if (task.id === activeTaskId) {
+      void agent?.send({ type: 'cancel', id: task.id });
+      activeTaskId = null;
+    }
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+    if (state.selectedTaskId === taskId) state.selectedTaskId = undefined;
+    saveState(); broadcastState(); return state;
+  });
   ipcMain.handle('work:clear-tasks', () => {
-    const projectId = state.selectedProjectId; state.tasks = state.tasks.filter((task) => task.projectId !== projectId); state.selectedTaskId = undefined; saveState(); broadcastState(); return state;
+    const projectId = state.selectedProjectId;
+    const selectedTaskId = state.selectedTaskId;
+    state.tasks = state.tasks.filter((task) => task.projectId !== projectId || task.id === activeTaskId || task.status === 'running' || task.status === 'waiting');
+    if (selectedTaskId && !state.tasks.some((task) => task.id === selectedTaskId)) state.selectedTaskId = undefined;
+    saveState(); broadcastState(); return state;
   });
   ipcMain.handle('work:project-overview', async () => projectOverview(selectedProject()));
   ipcMain.handle('work:read-file', (_event, relativePath: string) => {

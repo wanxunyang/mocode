@@ -17,6 +17,7 @@ declare global {
       createTask: (title: string) => Promise<{ state: WorkState; task: Task }>;
       selectTask: (id: string) => Promise<{ state: WorkState; task: Task; history: HistoryItem[] } | null>;
       clearTasks: () => Promise<WorkState>;
+      deleteTask: (id: string) => Promise<WorkState | null>;
       projectOverview: () => Promise<Record<string, unknown>>;
       readFile: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
@@ -83,8 +84,13 @@ function renderProjects(): void {
 function renderTasks(): void {
   const current = state; if (!current) return;
   const tasks = current.tasks.filter((task) => task.projectId === current.selectedProjectId).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  taskList.innerHTML = tasks.length ? tasks.map((task) => `<button class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task="${escapeHtml(task.id)}"><span class="task-spark">✦</span><span class="task-copy"><b>${escapeHtml(task.title)}</b><small>${statusText(task.status)}</small></span><span class="task-dot"></span></button>`).join('') : '<p class="empty-tasks">无任务</p>';
+  taskList.innerHTML = tasks.length ? tasks.map((task) => {
+    const id = escapeHtml(task.id);
+    const deleteTitle = task.status === 'running' || task.status === 'waiting' ? '停止并删除任务' : '删除任务';
+    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-spark">✦</span><span class="task-copy"><b>${escapeHtml(task.title)}</b><small>${statusText(task.status)}</small></span><span class="task-dot"></span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">×</button></div>`;
+  }).join('') : '<p class="empty-tasks">无任务</p>';
   taskList.querySelectorAll<HTMLButtonElement>('[data-task]').forEach((button) => button.addEventListener('click', () => void openTask(button.dataset.task!)));
+  taskList.querySelectorAll<HTMLButtonElement>('[data-delete-task]').forEach((button) => button.addEventListener('click', () => void deleteTask(button.dataset.deleteTask!)));
   const running = tasks.filter((task) => task.status === 'running' || task.status === 'waiting').length;
   $('#usage').textContent = `${running ? Math.min(99, running * 20) : 0}%`;
 }
@@ -141,9 +147,14 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   conversation.scrollTop = conversation.scrollHeight;
 }
 function appendText(text: string): void {
-  // 若当前气泡已不是对话流末尾(中间插入了工具条),则新建气泡,保证文字与工具按触发时序排列。
-  if (!activeAssistant || !activeAssistant.isConnected || activeAssistant !== conversation.lastElementChild) {
+  // 复用当前气泡:仅当它仍是对话流末尾时(本轮尚未插入工具)。
+  if (activeAssistant && activeAssistant.isConnected && activeAssistant === conversation.lastElementChild) {
+    // 继续往当前气泡追加文字
+  } else {
+    // 新建气泡:新轮次首个气泡显示 ✦Mocode 头像;工具之后的续接气泡隐藏头像(data-continued)。
+    const continued = activeAssistant && activeAssistant.isConnected;
     activeAssistant = addMessage('assistant'); activeAssistant.classList.add('is-streaming');
+    if (continued) activeAssistant.dataset.continued = '1';
   }
   const body = activeAssistant.querySelector('.message-body') as HTMLElement;
   body.textContent = `${body.textContent ?? ''}${text}`; conversation.scrollTop = conversation.scrollHeight;
@@ -151,13 +162,30 @@ function appendText(text: string): void {
 function renderHistory(history: HistoryItem[]): void {
   conversation.innerHTML = ''; activeAssistant = null;
   if (!history.length) { emptyState.classList.remove('hidden'); return; }
-  history.forEach((item) => item.role === 'tool' ? addTool({ name: '工具结果', output: item.text }, true) : addMessage(item.role, item.text));
+  // 连续的 assistant 文字段视为同一轮输出:仅首段带头像,后续段标记为续接(隐藏 ✦Mocode)。
+  let prevRole: HistoryItem['role'] | null = null;
+  for (const item of history) {
+    if (item.role === 'tool') { addTool({ name: '工具结果', output: item.text }, true); }
+    else {
+      const el = addMessage(item.role, item.text);
+      if (item.role === 'assistant' && prevRole === 'assistant') el.dataset.continued = '1';
+    }
+    prevRole = item.role;
+  }
 }
 
 async function openTask(taskId: string): Promise<void> {
   const workspace = await window.mocodeWork.selectTask(taskId);
   if (!workspace) return;
   updateState(workspace.state); renderHistory(workspace.history); attachments = []; renderAttachments(); promptInput.focus();
+}
+
+async function deleteTask(taskId: string): Promise<void> {
+  const deletingSelectedTask = state?.selectedTaskId === taskId;
+  const next = await window.mocodeWork.deleteTask(taskId);
+  if (!next) return;
+  updateState(next);
+  if (deletingSelectedTask && next.selectedTaskId !== taskId) clearWorkspace();
 }
 
 function showApproval(payload: Record<string, unknown>): void {

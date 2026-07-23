@@ -113,6 +113,12 @@ textarea::placeholder { color: var(--color-subtle); }
 /* 流式光标 —— renderer.ts 在 active assistant body 末尾加 <span class="stream-caret"></span> */
 .message.assistant.is-streaming .message-body::after { content: ""; display: inline-block; width: 7px; height: 1.05em; margin-left: 2px; vertical-align: -0.15em; background: var(--color-accent); animation: caret-blink 1s steps(2, end) infinite; }
 .message.assistant .stream-caret { display: none; }
+/* 续接气泡:一轮 agent 输出中工具之后的新文字段,隐藏 ✦Mocode 头像/标签,
+   左侧留出与头像等宽(28px+gap)的占位,与首个气泡的正文对齐。 */
+.message.assistant[data-continued="1"] .message-avatar,
+.message.assistant[data-continued="1"] .message-label { display: none; }
+.message.assistant[data-continued="1"] { margin-top: calc(var(--space-lg) * -1 + var(--space-2xs)); }
+.message.assistant[data-continued="1"] .message-content { margin-left: calc(28px + var(--space-md)); }
 @keyframes caret-blink { 50% { opacity: 0; } }
 
 /* ── Terminal-style collapsible tool calls ───────────── */
@@ -138,16 +144,21 @@ textarea::placeholder { color: var(--color-subtle); }
 .tool-detail pre::-webkit-scrollbar-thumb { background: var(--color-rule); border-radius: var(--radius-full); }
 
 /* ── Task item (sidebar) ─────────────────────────────── */
-.task-item { width: 100%; height: 24px; line-height: 1; display: flex; align-items: center; gap: var(--space-2xs); padding: 0 var(--space-xs); text-align: left; border-radius: var(--radius-sm); background: transparent; color: var(--color-muted); transition: background var(--dur-micro) var(--ease-out); }
+.task-item { width: 100%; height: 24px; display: flex; align-items: center; border-radius: var(--radius-sm); background: transparent; color: var(--color-muted); transition: background var(--dur-micro) var(--ease-out); }
 .task-item:hover { background: var(--color-paper-3); }
+.task-open { min-width: 0; height: 24px; flex: 1; display: flex; align-items: center; gap: var(--space-2xs); padding: 0 2px 0 var(--space-xs); text-align: left; border-radius: var(--radius-sm); }
 .task-spark { color: var(--color-subtle); font-size: var(--text-xs); line-height: 1; }
 .task-copy { display: flex; align-items: center; gap: var(--space-2xs); min-width: 0; flex: 1; line-height: 1; }
 .task-copy b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); line-height: 1; font-weight: 500; color: var(--color-ink-soft); }
 .task-copy small { margin-left: auto; flex: 0 0 auto; color: var(--color-subtle); font-size: 9px; line-height: 1; font-family: var(--font-outlier); }
 .task-dot { width: 7px; height: 7px; border-radius: var(--radius-full); background: var(--color-subtle); flex: 0 0 7px; }
+.task-delete { width: 20px; height: 20px; flex: 0 0 20px; display: grid; place-items: center; margin-right: 2px; border-radius: var(--radius-sm); color: var(--color-subtle); font-size: var(--text-sm); line-height: 1; opacity: 0.45; transition: opacity var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out); }
+.task-item:hover .task-delete, .task-delete:focus-visible { opacity: 1; }
+.task-delete:hover:not(:disabled) { color: var(--color-fail); background: color-mix(in srgb, var(--color-fail) 10%, transparent); }
+.task-delete:disabled { opacity: 0.2; cursor: not-allowed; }
 .task-item.running .task-dot { background: var(--color-running); animation: pulse 1.2s ease-in-out infinite; }
 .task-item.waiting .task-dot { background: var(--color-warn); animation: pulse 1.2s ease-in-out infinite; }
-.task-item.complete .task-dot { background: var(--color-success); }
+.task-item.completed .task-dot { background: var(--color-success); }
 .task-item.failed .task-dot { background: var(--color-fail); }
 .task-item.cancelled .task-dot { background: var(--color-idle); }
 .task-item.selected { background: var(--color-accent-soft); }
