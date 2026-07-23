@@ -1,5 +1,5 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron';
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -68,6 +68,54 @@ let activeTaskId: string | null = null;
 function statePath(): string { return path.join(app.getPath('userData'), 'work-projects.json'); }
 function pushRenderer(channel: string, payload: unknown): void { windowRef?.webContents.send(channel, payload); }
 function broadcastState(): void { pushRenderer('work:state', state); }
+
+/**
+ * 解析用来跑 Agent Host 的 node 可执行文件。
+ *
+ * 背景:Electron 自带的 node(ELECTRON_RUN_AS_NODE 模式)内嵌的 fetch/undici 在处理
+ * OpenAI 兼容的流式响应(SSE chunked)时会提前抛 "Premature close" —— LLM 明明正常返回了
+ * 文本,流却被 Electron 的网络栈判为异常断开,导致 host emit run_failed,任务永远跑不完一轮。
+ *
+ * 用系统 node(v18+)跑同一个 host 则完整跑通(已对照验证)。因此优先探测系统 node;
+ * 找不到才 fallback 回 Electron 自带 node,并经 host_log 告知用户——后者可能遭遇流式中断。
+ *
+ * 探测顺序:env 覆盖 → which/where → 常见安装路径 → process.execPath(fallback)。
+ * 缓存首次结果:resolveHostNode 在一个 app 生命周期内最多探测一次。
+ */
+let hostNodeCache: { exe: string; isElectron: boolean } | null = null;
+function resolveHostNode(): { exe: string; isElectron: boolean } {
+  if (hostNodeCache) return hostNodeCache;
+  const tryPaths: string[] = [];
+  if (process.env.MOCODE_HOST_NODE) tryPaths.push(process.env.MOCODE_HOST_NODE);
+  tryPaths.push('node'); // PATH 上的 node(which/where)
+  if (process.platform === 'win32') {
+    tryPaths.push('C:\\Program Files\\nodejs\\node.exe', 'D:\\nodejs\\node.exe');
+    const local = path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'node.exe');
+    tryPaths.push(local);
+  } else {
+    tryPaths.push('/usr/local/bin/node', '/usr/bin/node', '/opt/homebrew/bin/node');
+  }
+  for (const candidate of tryPaths) {
+    try {
+      // 对 'node'(无路径)用 execFileSync -v 探测 PATH;对绝对路径直接 existsSync。
+      if (candidate === 'node') {
+        const version = execFileSync(candidate, ['-v'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 4000 }).trim();
+        if (/^v(\d+)\./.test(version) && Number(RegExp.$1) >= 18) {
+          hostNodeCache = { exe: candidate, isElectron: false };
+          return hostNodeCache;
+        }
+      } else if (existsSync(candidate)) {
+        const version = execFileSync(candidate, ['-v'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 4000 }).trim();
+        if (/^v(\d+)\./.test(version) && Number(RegExp.$1) >= 18) {
+          hostNodeCache = { exe: candidate, isElectron: false };
+          return hostNodeCache;
+        }
+      }
+    } catch { /* 该候选不可用,继续 */ }
+  }
+  hostNodeCache = { exe: process.execPath, isElectron: true };
+  return hostNodeCache;
+}
 
 function runCommand(root: string, executable: string, args: string[]): Promise<CommandResult> {
   return new Promise((resolve) => execFile(executable, args, { cwd: root, windowsHide: true, maxBuffer: 1_024 * 1_024 }, (error, stdout, stderr) => {
@@ -219,8 +267,12 @@ class LocalAgent {
       this.crashStreak = LocalAgent.MAX_CRASH_STREAK;
       return this.receive({ type: 'error', error: `Agent Host 未构建：${hostFile}` });
     }
-    const child = spawn(process.execPath, [hostFile], {
-      cwd: project.root, windowsHide: true, env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_NO_WARNINGS: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
+    const hostNode = resolveHostNode();
+    const hostEnv: NodeJS.ProcessEnv = { ...process.env, NODE_NO_WARNINGS: '1' };
+    if (hostNode.isElectron) hostEnv.ELECTRON_RUN_AS_NODE = '1';
+    pushRenderer('work:agent-event', { type: 'event', event: 'host_log', payload: { message: hostNode.isElectron ? `[mocode-work] 未找到系统 node，用 Electron 内置 node 跑 host —— 流式响应可能中途断开，建议安装 Node.js ≥18。` : `[mocode-work] 用系统 node 跑 host：${hostNode.exe}` } });
+    const child = spawn(hostNode.exe, [hostFile], {
+      cwd: project.root, windowsHide: true, env: hostEnv, stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.child = child;
     this.starting = new Promise<void>((resolve) => {
