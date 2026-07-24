@@ -69,10 +69,12 @@ textarea:focus-visible, input:focus-visible { outline-offset: 0; }
   font-weight: 400;
   line-height: 1;
 }
-/* 侧栏折叠按钮放在 titlebar 里,无论侧栏收不收都可见。
-   按钮自身要可点击,所以 -webkit-app-region: no-drag 覆盖父级的 drag。 */
+/* 侧栏折叠按钮放在 sidebar header (.brand-row) 的最左。
+   它独立于右侧的 brand-actions 组(搜索/主题),用 margin-right: auto 推到行首。
+   折叠态(sidebar-collapsed)整条 sidebar 会被 display:none,这个按钮一起隐藏,
+   workspace 内另有一个 #sidebar-toggle-floating 兜底让用户能再展开。 */
 #sidebar-toggle {
-  -webkit-app-region: no-drag;
+  margin-right: auto;
 }
 /* Windows 任务栏图标和缩略图在浅色顶栏上更稳;深色主题下由 tokens.css 的 data-theme 覆盖 */
 :root[data-theme="dark"] .titlebar { background: #202225; }
