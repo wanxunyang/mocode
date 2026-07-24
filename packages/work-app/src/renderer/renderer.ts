@@ -3,6 +3,11 @@ import { mountIcons, icon } from './icons.js';
 
 export {};
 
+// 尽早把 HTML 里所有 data-icon 占位替换为 SVG,避免 first paint 看到空 icon。
+mountIcons();
+
+
+
 type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 type Project = { id: string; name: string; root: string; branch: string };
 type Task = { id: string; projectId: string; title: string; status: TaskStatus; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string };
@@ -26,7 +31,9 @@ declare global {
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       pullRequests: () => Promise<Record<string, unknown>>;
       pickAttachment: () => Promise<Attachment | null>;
-      getConfig: () => Promise<{ model: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }>;
+      getConfig: () => Promise<{ model: string; label: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }>;
+      listModels: () => Promise<Array<{ name: string; label: string; baseURL: string; contextWindow: number; isActive: boolean }>>;
+      switchModel: (name: string) => Promise<{ ok: boolean; message: string }>;
       setTheme: (theme: 'light' | 'dark') => void;
       send: (value: Record<string, unknown>) => void;
       onAgentEvent: (callback: (event: AgentEnvelope) => void) => () => void;
@@ -657,25 +664,231 @@ $('#theme-toggle').addEventListener('click', () => {
   window.mocodeWork.setTheme(next);
   showToast('info', `已切换到${next === 'dark' ? '黑夜' : '浅色'}主题`, 1600);
 });
-$('#mode-button')?.addEventListener?.('click', async () => {
-  const config = await window.mocodeWork.getConfig();
+/* ── Sidebar collapse ─────────────────────────────────── */
+// 关键:不依赖 #sidebar-toggle 引用,也不依赖 button 元素 —— 改用 data-attr + 事件代理 + 每次现查 DOM,
+// 这样即便 setIcon() 后续又把 button 替换成 svg (或任何原因 DOM 变了) 也不会失效。
+const SIDEBAR_KEY = 'mocode-work-sidebar';
+const SIDEBAR_TOGGLE_SEL = '[data-sidebar-toggle]';
+const appBody = document.querySelector('.app-body') as HTMLElement;
+function setSidebarCollapsed(collapsed: boolean, persist = true): void {
+  if (!appBody) return;
+  appBody.classList.toggle('sidebar-collapsed', collapsed);
+  // 每次重新查 —— 永远拿到当前 DOM 里真实的 button (即使是 setIcon 替换过的新 svg 也照样能找到)
+  document.querySelectorAll<HTMLElement>(SIDEBAR_TOGGLE_SEL).forEach((btn) => {
+    btn.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+    btn.title = collapsed ? '展开侧栏' : '折叠侧栏';
+    btn.setAttribute('aria-label', collapsed ? '展开侧栏' : '折叠侧栏');
+  });
+  if (persist) { try { localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0'); } catch { /* 忽略 */ } }
+}
+function toggleSidebar(): void {
+  const next = !(appBody?.classList.contains('sidebar-collapsed') ?? false);
+  console.log('[sidebar] toggle ->', next ? 'collapse' : 'expand');
+  setSidebarCollapsed(next);
+}
+// 主路径:document 上的事件代理(click + pointerdown 双重保险,捕获阶段)
+// 不用 closest('#sidebar-toggle') —— 改用 data-sidebar-toggle 属性,button 被 setIcon 替换后属性也跟着丢,
+// 但我们绑在 document 上,即使中间元素换了也不影响冒泡。
+document.addEventListener('click', (event) => {
+  const target = event.target as HTMLElement | null;
+  if (target && target.closest && target.closest(SIDEBAR_TOGGLE_SEL)) {
+    event.preventDefault();
+    toggleSidebar();
+  }
+}, true);
+document.addEventListener('pointerdown', (event) => {
+  const target = event.target as HTMLElement | null;
+  if (target && target.closest && target.closest(SIDEBAR_TOGGLE_SEL)) {
+    event.preventDefault();
+    toggleSidebar();
+  }
+}, true);
+// 启动时恢复用户上次的偏好
+try { if (localStorage.getItem(SIDEBAR_KEY) === '1') setSidebarCollapsed(true, false); } catch { /* 忽略 */ }
+/* ── Sidebar resize (拖拽调宽度) ───────────────────────── */
+const SIDEBAR_WIDTH_KEY = 'mocode-work-sidebar-width';
+const SIDEBAR_MIN = 200;
+const SIDEBAR_MAX = 480;
+const SIDEBAR_DEFAULT = 240;
+const sidebarResize = $('#sidebar-resize') as HTMLElement;
+function applySidebarWidth(width: number): void {
+  if (!appBody) return;
+  // 只设 CSS var;不要 inline 改 .sidebar.width —— 窄屏 @media 媒体查询的 56px
+  // 会跟 var 一起被 CSS 解析,媒体查询后定义会赢,所以窄屏下不会被用户拖动覆盖。
+  appBody.style.setProperty('--sidebar-width', `${width}px`);
+}
+function getSavedSidebarWidth(): number {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (raw) {
+      const n = parseInt(raw, 10);
+      if (Number.isFinite(n) && n >= SIDEBAR_MIN && n <= SIDEBAR_MAX) return n;
+    }
+  } catch { /* 忽略 */ }
+  return SIDEBAR_DEFAULT;
+}
+function saveSidebarWidth(width: number): void {
+  try { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width)); } catch { /* 忽略 */ }
+}
+// 启动时恢复
+applySidebarWidth(getSavedSidebarWidth());
+// 拖拽
+if (sidebarResize) {
+  let resizing = false;
+  let startX = 0;
+  let startWidth = SIDEBAR_DEFAULT;
+  sidebarResize.addEventListener('pointerdown', (event) => {
+    resizing = true;
+    startX = event.clientX;
+    const sidebar = appBody?.querySelector<HTMLElement>('.sidebar');
+    startWidth = sidebar?.offsetWidth ?? SIDEBAR_DEFAULT;
+    try { sidebarResize.setPointerCapture(event.pointerId); } catch { /* 忽略 */ }
+    document.body.classList.add('sidebar-resizing');
+    event.preventDefault();
+  });
+  sidebarResize.addEventListener('pointermove', (event) => {
+    if (!resizing) return;
+    const delta = event.clientX - startX;
+    const next = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, startWidth + delta));
+    applySidebarWidth(next);
+  });
+  const endResize = (event: PointerEvent) => {
+    if (!resizing) return;
+    resizing = false;
+    try { sidebarResize.releasePointerCapture(event.pointerId); } catch { /* 忽略 */ }
+    document.body.classList.remove('sidebar-resizing');
+    // 持久化最终宽度
+    const sidebar = appBody?.querySelector<HTMLElement>('.sidebar');
+    if (sidebar) saveSidebarWidth(sidebar.offsetWidth);
+  };
+  sidebarResize.addEventListener('pointerup', endResize);
+  sidebarResize.addEventListener('pointercancel', endResize);
+  // 双击 reset 到默认宽度
+  sidebarResize.addEventListener('dblclick', () => {
+    applySidebarWidth(SIDEBAR_DEFAULT);
+    saveSidebarWidth(SIDEBAR_DEFAULT);
+  });
+}
+/* ── Model picker ─────────────────────────────────────── */
+let modelPickerEl: HTMLElement | null = null;
+let modelList: Array<{ name: string; label: string; baseURL: string; contextWindow: number; isActive: boolean }> = [];
+
+function shortModelName(text: string): string {
+  if (!text) return '未配置模型';
+  return text.length > 18 ? `${text.slice(0, 17)}…` : text;
+}
+
+function setModeButton(config: { model: string; label: string; baseUrl: string; contextWindow: number | null }): void {
+  const button = $('#mode-button');
+  if (!button) return;
+  const display = config.label || config.model;
+  const label = config.model ? shortModelName(display) : '未配置模型';
+  button.innerHTML = `<span class="mode-label">${escapeHtml(label)}</span><svg class="icon icon-inline" data-icon="chevron-down"></svg>`;
+  mountIcons(button);
   const detail = [
-    config.model ? `模型: ${config.model}` : '模型: 未配置 (请在终端跑 /model)',
+    config.model ? `别名: ${config.model}` : null,
+    config.label && config.label !== config.model ? `模型: ${config.label}` : null,
     config.baseUrl ? `API: ${config.baseUrl}` : null,
     config.contextWindow ? `上下文: ${(config.contextWindow / 1000).toFixed(0)}k tokens` : null,
   ].filter(Boolean).join('\n');
-  showToast('info', `当前助手配置\n${detail}`, 5000);
-});
-void window.mocodeWork.getConfig().then((config) => {
-  if (!config.model) return;
-  const model = config.model.split('/').pop() ?? config.model;
-  const short = model.length > 18 ? `${model.slice(0, 17)}…` : model;
-  const button = $('#mode-button');
-  if (button) {
-    button.innerHTML = `${escapeHtml(short)} <span>⌄</span>`;
-    button.title = `${config.model}\nAPI: ${config.baseUrl || '未知'}\n上下文: ${config.contextWindow ? `${(config.contextWindow / 1000).toFixed(0)}k` : '默认'}`;
+  button.title = detail || '点击切换模型';
+}
+
+async function refreshModelList(): Promise<void> {
+  try { modelList = await window.mocodeWork.listModels(); }
+  catch (error) { modelList = []; console.error('[models]', error); }
+}
+
+function ensureModelPicker(): HTMLElement {
+  if (modelPickerEl) return modelPickerEl;
+  const el = $('#model-picker') as HTMLElement;
+  modelPickerEl = el;
+  return el;
+}
+
+function renderModelPicker(): void {
+  const el = ensureModelPicker();
+  if (!modelList.length) {
+    el.innerHTML = `<div class="model-picker-empty">${icon('warn')}<span>未发现模型配置</span></div><div class="model-picker-hint">在终端运行 <code>mocode /model</code> 添加模型</div>`;
+    return;
   }
+  el.innerHTML = `
+    <div class="model-picker-head">
+      <span>选择模型</span>
+      <span class="model-picker-count">${modelList.length} 个</span>
+    </div>
+    <div class="model-picker-list" role="listbox">
+      ${modelList.map((m) => `
+        <button class="model-picker-item ${m.isActive ? 'active' : ''}" data-model="${escapeHtml(m.name)}" role="option" aria-selected="${m.isActive}">
+          <span class="model-picker-radio">${m.isActive ? icon('check') : ''}</span>
+          <span class="model-picker-body">
+            <span class="model-picker-name">${escapeHtml(m.label)}</span>
+            <span class="model-picker-meta">
+              ${m.contextWindow ? `<span class="model-picker-ctx">${(m.contextWindow / 1000).toFixed(0)}k 上下文</span>` : ''}
+            </span>
+          </span>
+        </button>
+      `).join('')}
+    </div>
+  `;
+  el.querySelectorAll<HTMLButtonElement>('.model-picker-item').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const name = button.dataset.model;
+      if (!name) return;
+      const wasActive = button.classList.contains('active');
+      hideModelPicker();
+      if (wasActive) return;
+      const result = await window.mocodeWork.switchModel(name);
+      if (result.ok) {
+        showToast('success', result.message);
+        await refreshModelList();
+        renderModelPicker();
+        const config = await window.mocodeWork.getConfig();
+        setModeButton(config);
+      } else {
+        showToast('error', result.message);
+      }
+    });
+  });
+}
+
+function showModelPicker(): void {
+  const el = ensureModelPicker();
+  el.classList.remove('hidden');
+  $('#mode-button')?.setAttribute('aria-expanded', 'true');
+  requestAnimationFrame(() => el.classList.add('model-picker-in'));
+}
+function hideModelPicker(): void {
+  const el = ensureModelPicker();
+  el.classList.remove('model-picker-in');
+  el.classList.add('hidden');
+  $('#mode-button')?.setAttribute('aria-expanded', 'false');
+}
+
+$('#mode-button')?.addEventListener('click', async (event) => {
+  event.stopPropagation();
+  const el = ensureModelPicker();
+  if (!el.classList.contains('hidden')) { hideModelPicker(); return; }
+  await refreshModelList();
+  renderModelPicker();
+  showModelPicker();
 });
+document.addEventListener('click', (event) => {
+  if (!modelPickerEl || modelPickerEl.classList.contains('hidden')) return;
+  const target = event.target as Node;
+  if (modelPickerEl.contains(target)) return;
+  if ($('#mode-button')?.contains(target)) return;
+  hideModelPicker();
+});
+
+// init:刷新按钮显示当前模型 + 预热模型列表
+void (async () => {
+  try {
+    const config = await window.mocodeWork.getConfig();
+    setModeButton(config);
+    await refreshModelList();
+  } catch (error) { console.error('[config]', error); }
+})();
 searchInput.addEventListener('input', () => refreshSearch(searchInput.value));
 searchPanel.addEventListener('click', (event) => { if (event.target === searchPanel) searchPanel.classList.add('hidden'); });
 sendButton.addEventListener('click', () => void submit());
@@ -688,6 +901,7 @@ window.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     if (!cheatsheetEl?.classList.contains('hidden')) { hideCheatsheet(); return; }
     if (!searchOverlay?.classList.contains('hidden')) { closeConvSearch(); return; }
+    if (modelPickerEl && !modelPickerEl.classList.contains('hidden')) { hideModelPicker(); return; }
     searchPanel.classList.add('hidden'); approvalPanel.classList.add('hidden');
     return;
   }
@@ -709,6 +923,11 @@ window.addEventListener('keydown', (event) => {
     openConvSearch();
     return;
   }
+  if (cmd && event.key.toLowerCase() === 'b') {
+    event.preventDefault();
+    toggleSidebar();
+    return;
+  }
 });
 
 window.mocodeWork.onAgentEvent(handleAgentEvent);
@@ -728,5 +947,5 @@ document.querySelectorAll<HTMLButtonElement>('.empty-hint').forEach((button) => 
   });
 });
 
-// 把所有 [data-icon] 占位元素替换为 SVG
+// 末尾再 mount 一次,覆盖在 init 中通过 innerHTML 注入的 [data-icon](例如动态插的 SVG 占位)。
 mountIcons();

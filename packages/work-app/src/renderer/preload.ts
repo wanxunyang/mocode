@@ -18,7 +18,9 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   fileDiff: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:file-diff', file),
   pullRequests: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:pull-requests'),
   pickAttachment: (): Promise<{ name: string; dataUrl: string } | null> => ipcRenderer.invoke('work:pick-attachment'),
-  getConfig: (): Promise<{ model: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }> => ipcRenderer.invoke('work:get-config'),
+  getConfig: (): Promise<{ model: string; label: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }> => ipcRenderer.invoke('work:get-config'),
+  listModels: (): Promise<Array<{ name: string; label: string; baseURL: string; contextWindow: number; isActive: boolean }>> => ipcRenderer.invoke('work:list-models'),
+  switchModel: (name: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:switch-model', name),
   setTheme: (theme: 'light' | 'dark'): void => ipcRenderer.send('work:set-theme', theme),
   send: (value: Record<string, unknown>): void => ipcRenderer.send('work:agent-send', value),
   onAgentEvent: (callback: (event: AgentEnvelope) => void): (() => void) => {

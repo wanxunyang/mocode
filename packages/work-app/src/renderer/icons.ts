@@ -5,7 +5,7 @@
  * 加新图标只需在 ICONS 里加一项即可。
  */
 
-const SVG_ATTRS = 'viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"';
+const SVG_ATTRS = 'viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"';
 
 export const ICONS: Record<string, string> = {
   // 导航 / sidebar
@@ -20,6 +20,8 @@ export const ICONS: Record<string, string> = {
   'search': `<svg ${SVG_ATTRS}><circle cx="9" cy="9" r="5"/><path d="M13 13l4 4"/></svg>`,
   'moon': `<svg ${SVG_ATTRS}><path d="M16 11.5A6 6 0 1 1 8.5 4a5 5 0 0 0 7.5 7.5z"/></svg>`,
   'sun': `<svg ${SVG_ATTRS}><circle cx="10" cy="10" r="3.5"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.2 4.2l1.4 1.4M14.4 14.4l1.4 1.4M4.2 15.8l1.4-1.4M14.4 5.6l1.4-1.4"/></svg>`,
+  // 收起 / 展开侧栏:圆角矩形 + 右侧一道竖线(代表侧栏)。
+  'panel-right': `<svg ${SVG_ATTRS}><rect x="3" y="3" width="14" height="14" rx="2"/><line x1="13" y1="3" x2="13" y2="17"/></svg>`,
 
   // workspace actions
   'layout': `<svg ${SVG_ATTRS}><rect x="3" y="3" width="14" height="14" rx="1.5"/><path d="M3 8h14M8 8v9"/></svg>`,
@@ -41,7 +43,7 @@ export const ICONS: Record<string, string> = {
 
   // 消息头像
   'user': `<svg ${SVG_ATTRS}><circle cx="10" cy="7" r="3"/><path d="M3.5 17a6.5 6.5 0 0 1 13 0"/></svg>`,
-  'spark-bot': `<svg ${SVG_ATTRS}><rect x="4" y="7" width="12" height="9" rx="2"/><path d="M10 4v3M7.5 4h5"/><circle cx="8" cy="11.5" r="0.8" fill="currentColor"/><circle cx="12" cy="11.5" r="0.8" fill="currentColor"/><path d="M8.5 14.5h3"/></svg>`,
+  'spark-bot': `<svg ${SVG_ATTRS}><rect x="4" y="7" width="12" height="9" rx="2"/><path d="M10 4v3M7.5 4h5\"/><circle cx="8" cy="11.5" r="0.8" fill="currentColor"/><circle cx="12" cy="11.5" r="0.8" fill="currentColor"/><path d=\"M8.5 14.5h3\"/></svg>`,
 
   // 任务状态 / 通用
   'dot-running': `<svg viewBox="0 0 20 20" fill="currentColor" stroke="none"><circle cx="10" cy="10" r="3"/></svg>`,
@@ -58,20 +60,49 @@ export const ICONS: Record<string, string> = {
   // 空状态 idea-mark 备用装饰
   'arrow-up': `<svg ${SVG_ATTRS}><path d="M10 16V4M5 9l5-5 5 5"/></svg>`,
   'arrow-down': `<svg ${SVG_ATTRS}><path d="M10 4v12M5 11l5 5 5-5"/></svg>`,
+  'panel-left': `<svg ${SVG_ATTRS}><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16"/></svg>`,
+  'panel-left-close': `<svg ${SVG_ATTRS}><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16M14 8l-3 3 3 3"/></svg>`,
+  'panel-left-open': `<svg ${SVG_ATTRS}><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16M12 8l3 3-3 3"/></svg>`,
+  'panel-right-close': `<svg ${SVG_ATTRS}><rect x="2" y="2" width="16" height="16" rx="2"/><line x1="12" y1="2" x2="12" y2="18"/><path d="M8 7l-3 3 3 3"/></svg>`,
+  'panel-right-open': `<svg ${SVG_ATTRS}><rect x="2" y="2" width="16" height="16" rx="2"/><line x1="12" y1="2" x2="12" y2="18"/><path d="M10 7l3 3-3 3"/></svg>`,
 };
 
 /**
+ * 把 SVG 字符串解析成一个独立的 svg 元素。
+ * 用 Range.createContextualFragment 而不是 innerHTML,
+ * 因为 svg 元素设置 innerHTML 时,内嵌的 `<svg>` 标签会被当 SVG 子元素忽略(viewBox 丢失,导致残缺)。
+ * 而 createContextualFragment 会正确把外层 `<svg>` 解析为新元素。
+ */
+function parseSvg(svgString: string): Element | null {
+  const range = document.createRange();
+  range.selectNodeContents(document.body);
+  const frag = range.createContextualFragment(svgString);
+  return frag.firstElementChild;
+}
+
+/** 把 target 替换为 name 对应的全新 svg 元素。会保留 target 自身的 class。 */
+export function setIcon(target: HTMLElement, name: string): void {
+  const svgString = ICONS[name];
+  if (!svgString) return;
+  const svg = parseSvg(svgString);
+  if (!svg) return;
+  // 只继承 class(其它属性 id/title 在 svg 元素上没意义,新 svg 字符串里没有 class)
+  const cls = target.getAttribute('class');
+  if (cls) svg.setAttribute('class', cls);
+  // 一律整体替换 —— click 用事件代理,button 被销毁不影响
+  target.replaceWith(svg);
+}
+
+/**
  * 把 root 里所有 [data-icon] 占位元素替换为对应 SVG。
- * 占位写法: <span data-icon="search"></span> 或 <button data-icon="plus">click</button>
+ * 占位写法: <span data-icon="search"></span> 或 <button data-icon="plus">click</button> 或 <svg data-icon="x"></svg>
  */
 export function mountIcons(root: ParentNode = document.body): void {
   root.querySelectorAll<HTMLElement>('[data-icon]').forEach((el) => {
     if (el.dataset.iconMounted) return;
     const name = el.dataset.icon;
     if (!name) return;
-    const svg = ICONS[name];
-    if (!svg) return;
-    el.innerHTML = svg;
+    setIcon(el, name);
     el.dataset.iconMounted = '1';
   });
 }

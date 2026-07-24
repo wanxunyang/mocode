@@ -67,8 +67,99 @@ let agent: LocalAgent | null = null;
 let activeTaskId: string | null = null;
 
 function statePath(): string { return path.join(app.getPath('userData'), 'work-projects.json'); }
-function pushRenderer(channel: string, payload: unknown): void { windowRef?.webContents.send(channel, payload); }
+function modelsDir(): string { return path.join(os.homedir(), '.mocode', 'models'); }
+function userConfigPath(): string { return path.join(os.homedir(), '.mocode', 'config'); }
+function pushRenderer(channel: string, payload: unknown): void {
+  // 退出竞态:window-all-closed 之后 agent 子进程还可能 flush 最后一段 stdout,
+  // 此时 webContents 已 destroyed。`?.` 挡不住,必须显式判 isDestroyed。
+  const w = windowRef;
+  if (w && !w.isDestroyed() && !w.webContents.isDestroyed()) {
+    w.webContents.send(channel, payload);
+  }
+}
 function broadcastState(): void { pushRenderer('work:state', state); }
+
+/** 读取 ~/.mocode/config 的所有键(不写 process.env,仅作查询)。 */
+function readUserConfig(): Record<string, string> {
+  try { return dotenv.parse(readFileSync(userConfigPath(), 'utf8')); } catch { return {}; }
+}
+
+/** 写入 ~/.mocode/config —— 保留文件中其它键,只覆盖传入的。 */
+function writeUserConfig(patch: Record<string, string>): void {
+  const existing = readUserConfig();
+  const merged = { ...existing, ...patch };
+  mkdirSync(path.dirname(userConfigPath()), { recursive: true });
+  // 保持稳定顺序:patch 中声明的键排在最前
+  const ordered: string[] = [];
+  for (const k of Object.keys(patch)) ordered.push(k);
+  for (const k of Object.keys(existing)) if (!ordered.includes(k)) ordered.push(k);
+  const text = `${ordered.map((k) => `${k}=${merged[k] ?? ''}`).join('\n')}\n`;
+  writeFileSync(userConfigPath(), text, 'utf8');
+}
+
+interface ModelDescriptor {
+  name: string;          // 文件名(去掉 .json),用户标识 / 写入 config 的 LLM_MODEL
+  label: string;         // 实际 API 的 model 名
+  baseURL: string;       // 仅显示用(只返回 host,不泄漏完整 endpoint)
+  contextWindow: number; // tokens
+  isActive: boolean;
+}
+
+/** 扫描 ~/.mocode/models/*.json,返回所有模型描述 + 当前激活标记。 */
+function listModels(): ModelDescriptor[] {
+  const active = process.env.LLM_MODEL || readUserConfig().LLM_MODEL || '';
+  const dir = modelsDir();
+  let entries: string[] = [];
+  try { entries = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return []; }
+  const out: ModelDescriptor[] = [];
+  for (const file of entries) {
+    try {
+      const raw = JSON.parse(readFileSync(path.join(dir, file), 'utf8')) as Record<string, unknown>;
+      const name = path.basename(file, '.json');
+      const baseURL = typeof raw.baseURL === 'string' ? raw.baseURL : '';
+      const model = typeof raw.model === 'string' ? raw.model : name;
+      const contextWindow = Number(raw.contextWindow ?? 0) || 0;
+      out.push({ name, label: model, baseURL: maskUrl(baseURL), contextWindow, isActive: name === active });
+    } catch { /* 跳过解析失败的文件 */ }
+  }
+  // 激活项置顶,其余按名称字典序
+  out.sort((a, b) => (a.isActive === b.isActive ? a.name.localeCompare(b.name) : a.isActive ? -1 : 1));
+  return out;
+}
+
+/**
+ * 把指定模型切为当前激活:读目标 .json,把所有相关键写入 ~/.mocode/config 与 process.env。
+ * 同时取消正在运行的任务(host 进程下一次 send 时会自动重启并加载新配置)。
+ */
+function switchModel(name: string): { ok: boolean; message: string; model?: ModelDescriptor } {
+  const target = path.join(modelsDir(), `${name}.json`);
+  if (!existsSync(target)) return { ok: false, message: `模型 ${name} 不存在` };
+  let raw: Record<string, unknown>;
+  try { raw = JSON.parse(readFileSync(target, 'utf8')) as Record<string, unknown>; }
+  catch { return { ok: false, message: `无法读取模型 ${name}` }; }
+  const baseURL = typeof raw.baseURL === 'string' ? raw.baseURL : '';
+  const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey : '';
+  const model = typeof raw.model === 'string' ? raw.model : name;
+  const contextWindow = Number(raw.contextWindow ?? 0) || 0;
+  if (!baseURL || !model) return { ok: false, message: `模型 ${name} 缺少 baseURL / model 字段` };
+  // 写文件(只覆盖 4 个相关键)
+  const patch: Record<string, string> = {
+    LLM_BASE_URL: baseURL,
+    LLM_API_KEY: apiKey,
+    LLM_MODEL: name,
+  };
+  if (contextWindow) patch.CONTEXT_WINDOW_TOKENS = String(contextWindow);
+  try { writeUserConfig(patch); }
+  catch (error) { return { ok: false, message: `写入配置失败: ${(error as Error).message}` }; }
+  // 同步到 process.env,这样已经 start 过的 host 也会用新配置
+  process.env.LLM_BASE_URL = baseURL;
+  process.env.LLM_API_KEY = apiKey;
+  process.env.LLM_MODEL = name;
+  if (contextWindow) process.env.CONTEXT_WINDOW_TOKENS = String(contextWindow);
+  // 取消正在跑的任务
+  if (activeTaskId) { void agent?.send({ type: 'cancel', id: activeTaskId }); activeTaskId = null; }
+  return { ok: true, message: `已切换到 ${name}`, model: { name, label: model, baseURL: maskUrl(baseURL), contextWindow, isActive: true } };
+}
 
 /**
  * 解析用来跑 Agent Host 的 node 可执行文件。
@@ -351,8 +442,12 @@ class LocalAgent {
 }
 
 function createWindow(): void {
+  // 应用图标(白底圆角正方形 + 像素兔)。dev 模式下用于窗口/Dock;Windows 任务栏 / 打包后的 .exe
+  // 图标是 electron-builder 资源,需要打包时配 win.icon 才能换,这里管不到。
+  const appIconPath = path.join(__dirname, 'assets', 'icon.png');
   windowRef = new BrowserWindow({
     width: 1280, height: 820, minWidth: 980, minHeight: 620, title: 'Mocode Work', backgroundColor: '#ffffff', autoHideMenuBar: true,
+    ...(existsSync(appIconPath) ? { icon: appIconPath } : {}),
     ...(process.platform === 'win32' ? {
       titleBarStyle: 'hidden' as const,
       titleBarOverlay: { color: '#f7f8f7', symbolColor: '#202124', height: 38 },
@@ -361,6 +456,8 @@ function createWindow(): void {
   });
   windowRef.setMenuBarVisibility(false);
   void windowRef.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // 窗口关掉立刻清掉引用,免得 agent 后续 stdout 还往里塞 → "Object has been destroyed"。
+  windowRef.on('closed', () => { if (windowRef) windowRef = null; });
 }
 
 /** 让窗口原生背景和 Windows 控制按钮跟随应用主题。 */
@@ -457,13 +554,25 @@ function installIpc(): void {
   });
   // 把模型 / 上下文等关键配置透出给 renderer,用于在 UI 上显示真实信息。
   // 注意:不返回 LLM_API_KEY 等敏感字段。
-  ipcMain.handle('work:get-config', () => ({
-    model: process.env.LLM_MODEL ?? '',
-    baseUrl: maskUrl(process.env.LLM_BASE_URL ?? ''),
-    contextWindow: Number(process.env.CONTEXT_WINDOW_TOKENS ?? 0) || null,
-    language: process.env.MOCODE_LANGUAGE ?? '',
-    theme: process.env.MOCODE_THEME ?? '',
-  }));
+  ipcMain.handle('work:get-config', () => {
+    const models = listModels();
+    const active = models.find((item) => item.isActive) ?? null;
+    return {
+      model: process.env.LLM_MODEL ?? '',
+      label: active?.label ?? process.env.LLM_MODEL ?? '',
+      baseUrl: active?.baseURL ?? maskUrl(process.env.LLM_BASE_URL ?? ''),
+      contextWindow: active?.contextWindow ?? (Number(process.env.CONTEXT_WINDOW_TOKENS ?? 0) || null),
+      language: process.env.MOCODE_LANGUAGE ?? '',
+      theme: process.env.MOCODE_THEME ?? '',
+    };
+  });
+  ipcMain.handle('work:list-models', () => listModels());
+  ipcMain.handle('work:switch-model', (_event, name: string) => {
+    if (typeof name !== 'string' || !name) return { ok: false, message: '模型名为空' };
+    const result = switchModel(name);
+    if (result.ok) broadcastState();
+    return { ok: result.ok, message: result.message };
+  });
   ipcMain.on('work:set-theme', (_event, theme: 'light' | 'dark') => applyThemeBackground(theme));
   ipcMain.on('work:show-menu', (event, menuId: string, clientX: number, clientY: number) => {
     if (!['file', 'edit', 'view', 'help'].includes(menuId) || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
