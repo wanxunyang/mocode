@@ -36,14 +36,17 @@ textarea:focus-visible, input:focus-visible { outline-offset: 0; }
   align-items: center;
   justify-content: space-between;
   padding: 0 var(--space-md);
+  /* 顶层硬性兜底:品牌名一定用纯 sans,不允许任何 serif 回退。
+     这里只针对 .titlebar 内文字声明,不会影响其它面板的字体栈。 */
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
 }
 .titlebar-brand {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-family: var(--font-body);
-  font-size: var(--text-md);
-  font-weight: 500;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: 13px;
+  font-weight: 400;
   letter-spacing: 0;
   color: var(--color-subtle);
   /* 文字本身不需要拖拽,避免选中和双击冲突 */
@@ -51,16 +54,19 @@ textarea:focus-visible, input:focus-visible { outline-offset: 0; }
   user-select: none;
 }
 .titlebar-brand-logo {
-  width: 22px;
-  height: 22px;
-  flex: 0 0 22px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   display: block;
   object-fit: contain;
   border-radius: 4px; /* 与图标自身的圆角呼应,边缘更柔和 */
   -webkit-user-drag: none;
   user-select: none;
 }
+/* 双重显式声明,即使将来谁在 titlebar 里再嵌一层 span 也仍然是 sans。 */
 .titlebar-brand-text {
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-weight: 400;
   line-height: 1;
 }
 /* 侧栏折叠按钮放在 titlebar 里,无论侧栏收不收都可见。
