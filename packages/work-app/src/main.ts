@@ -549,6 +549,25 @@ function installIpc(): void {
     if (selectedTaskId && !state.tasks.some((task) => task.id === selectedTaskId)) state.selectedTaskId = undefined;
     saveState(); broadcastState(); return state;
   });
+  // 重命名任务：保留其余字段，仅覆盖 title。用于侧栏双击重命名与「新建任务」弹窗的重命名模式。
+  ipcMain.handle('work:rename-task', (_event, taskId: string, title: string) => {
+    if (typeof taskId !== 'string' || !taskId || typeof title !== 'string') return null;
+    const task = taskById(taskId);
+    if (!task || task.projectId !== state.selectedProjectId) return null;
+    task.title = title.trim().slice(0, 160) || task.title;
+    task.updatedAt = new Date().toISOString();
+    saveState(); broadcastState();
+    return state;
+  });
+  // 重命名项目：仅覆盖展示名（不影响 root/branch）。
+  ipcMain.handle('work:rename-project', (_event, projectId: string, name: string) => {
+    if (typeof projectId !== 'string' || !projectId || typeof name !== 'string') return null;
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project) return null;
+    project.name = name.trim().slice(0, 80) || project.name;
+    saveState(); broadcastState();
+    return state;
+  });
   ipcMain.handle('work:project-overview', async () => projectOverview(selectedProject()));
   ipcMain.handle('work:read-file', (_event, relativePath: string) => {
     const target = resolvedProjectFile(selectedProject(), relativePath); if (!target) return { error: '不允许读取项目目录外的文件。' };

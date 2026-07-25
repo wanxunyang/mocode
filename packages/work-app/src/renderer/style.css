@@ -562,3 +562,45 @@ textarea::placeholder { color: var(--color-subtle); }
 
 /* ── Empty state polish ───────────────────────────────── */
 .empty-state h1 { font-size: var(--text-display-s); }
+
+/* ── Active task chip (composer) ──────────────────── */
+.composer-task { display: flex; align-items: center; gap: var(--space-2xs); padding: var(--space-2xs) var(--space-md) 0; min-height: 30px; }
+.composer-task.hidden { display: none; }
+.composer-task-label { color: var(--color-subtle); font-size: var(--text-2xs); font-family: var(--font-outlier); letter-spacing: 0.05em; text-transform: uppercase; flex: 0 0 auto; }
+.composer-task-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-accent-ink); font-size: var(--text-xs); font-weight: 500; max-width: calc(100% - 56px); padding: 2px 6px; border-radius: var(--radius-sm); transition: background var(--dur-micro) var(--ease-out); }
+.composer-task-name:hover { background: var(--color-paper-3); }
+.composer-task-edit { width: 22px; height: 22px; flex: 0 0 22px; display: grid; place-items: center; border-radius: var(--radius-sm); color: var(--color-subtle); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.composer-task-edit .icon { width: 12px; height: 12px; }
+.composer-task-edit:hover { background: var(--color-paper-3); color: var(--color-ink); }
+
+/* ── Inline rename inputs (sidebar) ─────────────────── */
+.task-title { cursor: text; }
+.project-rename, .task-rename { width: 100%; height: 20px; padding: 0 4px; border: 1px solid var(--color-accent); border-radius: var(--radius-sm); background: var(--color-paper); color: var(--color-ink); font-size: var(--text-xs); font-family: inherit; outline: none; box-shadow: 0 0 0 3px var(--color-accent-soft); }
+.project-name { cursor: text; }
+
+/* ── Task / rename modal ───────────────────────────── */
+.modal { position: fixed; z-index: var(--z-modal); inset: 0; display: grid; place-items: center; padding: var(--space-md); background: var(--color-scrim); backdrop-filter: blur(4px); animation: fade-in var(--dur-short) var(--ease-out) both; }
+.modal.hidden { display: none; }
+.modal-card { width: min(460px, 92%); max-height: 86vh; display: flex; flex-direction: column; overflow: hidden; border: var(--rule-hair); border-radius: var(--radius-md); background: var(--color-paper); box-shadow: var(--shadow-raised); animation: dialog-in var(--dur-short) var(--ease-out) both; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: var(--space-sm) var(--space-md); border-bottom: var(--rule-soft); font-family: var(--font-display); font-size: var(--text-md); font-weight: 600; letter-spacing: -0.01em; color: var(--color-ink); }
+.modal-head .icon-button { width: 26px; height: 26px; }
+.modal-body { padding: var(--space-md); display: grid; gap: var(--space-md); overflow: auto; }
+.field { display: grid; gap: var(--space-2xs); }
+.field.hidden { display: none; }
+.field-label { color: var(--color-muted); font-size: var(--text-2xs); font-weight: 500; letter-spacing: 0.04em; font-family: var(--font-outlier); text-transform: uppercase; }
+.field-optional { color: var(--color-subtle); font-weight: 400; letter-spacing: 0; text-transform: none; }
+.field-input { width: 100%; padding: var(--space-xs); border: var(--rule-hair); border-radius: var(--radius-sm); background: var(--color-paper-2); color: var(--color-ink); font-size: var(--text-sm); line-height: 1.5; resize: vertical; transition: border-color var(--dur-micro) var(--ease-out), box-shadow var(--dur-micro) var(--ease-out); }
+.field-input::placeholder { color: var(--color-subtle); }
+.field-input:focus { outline: none; border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent-soft); }
+.field-input.shake { border-color: var(--color-fail); animation: shake 320ms var(--ease-in-out); }
+@keyframes shake { 10%, 90% { transform: translateX(-1px); } 20%, 80% { transform: translateX(2px); } 30%, 50%, 70% { transform: translateX(-4px); } 40%, 60% { transform: translateX(4px); } }
+.field-project { display: flex; align-items: center; gap: 4px; color: var(--color-subtle); font-size: var(--text-2xs); font-family: var(--font-outlier); }
+.field-project.hidden { display: none; }
+.field-project-name { color: var(--color-muted); }
+.modal-foot { display: flex; justify-content: flex-end; gap: var(--space-2xs); padding: var(--space-sm) var(--space-md); border-top: var(--rule-soft); }
+.btn-ghost, .btn-primary { padding: var(--space-2xs) var(--space-md); border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: 500; transition: background var(--dur-micro) var(--ease-out), border-color var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out), transform var(--dur-micro) var(--ease-out); }
+.btn-ghost { color: var(--color-muted); border: var(--rule-hair); background: var(--color-paper); }
+.btn-ghost:hover { background: var(--color-paper-3); color: var(--color-ink); }
+.btn-primary { color: var(--color-paper); background: var(--color-accent); border: var(--color-accent); }
+.btn-primary:hover { background: var(--color-accent-ink); border-color: var(--color-accent-ink); transform: translateY(-1px); }
+.btn-primary:active { transform: translateY(0); }

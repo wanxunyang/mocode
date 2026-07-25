@@ -26,6 +26,8 @@ declare global {
       selectTask: (id: string) => Promise<{ state: WorkState; task: Task; history: HistoryItem[] } | null>;
       clearTasks: () => Promise<WorkState>;
       deleteTask: (id: string) => Promise<WorkState | null>;
+      renameTask: (id: string, title: string) => Promise<WorkState | null>;
+      renameProject: (id: string, name: string) => Promise<WorkState | null>;
       projectOverview: () => Promise<Record<string, unknown>>;
       readFile: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
@@ -98,11 +100,15 @@ function renderProjects(): void {
   const folderOpen = icon('folder-open');
   projectList.innerHTML = current.projects.map((project) => {
     const isSelected = project.id === current.selectedProjectId;
-    return `<button class="project-item ${isSelected ? 'selected' : ''}" data-project="${escapeHtml(project.id)}"><span class="folder-icon">${isSelected ? folderOpen : folder}</span><span>${escapeHtml(project.name)}</span></button>`;
+    return `<button class="project-item ${isSelected ? 'selected' : ''}" data-project="${escapeHtml(project.id)}"><span class="folder-icon">${isSelected ? folderOpen : folder}</span><span class="project-name" title="双击重命名">${escapeHtml(project.name)}</span></button>`;
   }).join('');
-  projectList.querySelectorAll<HTMLButtonElement>('[data-project]').forEach((button) => button.addEventListener('click', async () => {
-    const next = await window.mocodeWork.selectProject(button.dataset.project!); updateState(next); clearWorkspace();
-  }));
+  projectList.querySelectorAll<HTMLButtonElement>('[data-project]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const next = await window.mocodeWork.selectProject(button.dataset.project!); updateState(next); clearWorkspace();
+    });
+    const nameSpan = button.querySelector<HTMLElement>('.project-name');
+    nameSpan?.addEventListener('dblclick', (event) => { event.preventDefault(); event.stopPropagation(); void startProjectRename(button.dataset.project!); });
+  });
   const project = selectedProject();
   const ctx = $('#context-project');
   if (ctx) ctx.innerHTML = `${icon('home')}<span>${escapeHtml(project?.name ?? '项目')}</span>`;
@@ -118,9 +124,12 @@ function renderTasks(): void {
     const deleteTitle = task.status === 'running' || task.status === 'waiting' ? '停止并删除任务' : '删除任务';
     // 正在跑 / 等待中的任务,状态文字始终显示;其余 hover 才显示
     const alwaysShow = task.status === 'running' || task.status === 'waiting' || task.id === current.selectedTaskId;
-    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-spark">${icon('sparkles')}</span><span class="task-copy"><b>${escapeHtml(task.title)}</b><small ${alwaysShow ? 'data-always="1"' : ''}>${statusText(task.status)}</small></span><span class="task-dot"></span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">${icon('close')}</button></div>`;
+    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-spark">${icon('sparkles')}</span><span class="task-copy"><b class="task-title" title="双击重命名">${escapeHtml(task.title)}</b><small ${alwaysShow ? 'data-always="1"' : ''}>${statusText(task.status)}</small></span><span class="task-dot"></span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">${icon('close')}</button></div>`;
   }).join('') : '<p class="empty-tasks">无任务</p>';
-  taskList.querySelectorAll<HTMLButtonElement>('[data-task]').forEach((button) => button.addEventListener('click', () => void openTask(button.dataset.task!)));
+  taskList.querySelectorAll<HTMLButtonElement>('[data-task]').forEach((button) => {
+    button.addEventListener('click', () => void openTask(button.dataset.task!));
+    button.querySelector<HTMLElement>('.task-title')?.addEventListener('dblclick', (event) => { event.preventDefault(); event.stopPropagation(); void startTaskRename(button.dataset.task!); });
+  });
   taskList.querySelectorAll<HTMLButtonElement>('[data-delete-task]').forEach((button) => button.addEventListener('click', () => {
     const taskId = button.dataset.deleteTask!;
     const task = state?.tasks.find((item) => item.id === taskId);
@@ -134,7 +143,22 @@ function renderTasks(): void {
   $('#usage').textContent = total ? `${total} 任务${running ? ` · ${running} 运行中` : ''}` : '0%';
 }
 
-function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); }
+function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); refreshComposerContext(); }
+
+/** 根据当前选中的任务，更新输入框上方的「任务」上下文条。*/
+function refreshComposerContext(): void {
+  const task = selectedTask();
+  const bar = $('#composer-task'); const nameBtn = $('#composer-task-name') as HTMLButtonElement | null;
+  if (task && bar && nameBtn) {
+    bar.classList.remove('hidden');
+    nameBtn.textContent = task.title;
+    nameBtn.title = `任务：${task.title}（点击重命名）`;
+    promptInput.placeholder = `为「${task.title}」继续输入指令…`;
+  } else {
+    bar?.classList.add('hidden');
+    promptInput.placeholder = '描述你想做的事…';
+  }
+}
 function clearWorkspace(): void { conversation.innerHTML = ''; emptyState.classList.remove('hidden'); activeAssistant = null; activeRunId = null; attachments = []; renderAttachments(); }
 
 function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
@@ -407,6 +431,7 @@ function ensureCheatsheet(): HTMLElement {
   if (cheatsheetEl) return cheatsheetEl;
   const rows: Array<[string, string]> = [
     ['⌘ K', '打开搜索'],
+    ['⌘ ⇧ N', '新建任务'],
     ['⌘ /', '切换助手模式'],
     ['⌘ ⏎', '发送消息'],
     ['⇧ ⏎', '在输入框换行'],
@@ -569,7 +594,8 @@ async function submit(): Promise<void> {
   if (activeRunId) { window.mocodeWork.send({ type: 'cancel', id: activeRunId }); return; }
   const prompt = promptInput.value.trim(); if (!prompt) return;
   let task = selectedTask();
-  if (!task || !task.sessionId) {
+  // 只有在完全没有选中的任务时才新建；若已选中（含弹窗预建的 queued 任务，尚无 session），直接续用，避免重复建任务。
+  if (!task) {
     const created = await window.mocodeWork.createTask(prompt.replace(/\s+/g, ' ').slice(0, 160)); updateState(created.state); task = created.task; conversation.innerHTML = ''; activeAssistant = null;
   }
   activeRunId = task.id; addMessage('user', prompt); promptInput.value = ''; resizePrompt(); setRunning(true);
@@ -683,8 +709,132 @@ function refreshSearch(query = ''): void {
   document.querySelectorAll<HTMLButtonElement>('[data-search-task]').forEach((button) => button.addEventListener('click', () => { searchPanel.classList.add('hidden'); void openTask(button.dataset.searchTask!); }));
 }
 
-$('#add-project').addEventListener('click', async () => { const next = await window.mocodeWork.pickProject(); if (next) { updateState(next); clearWorkspace(); } });
-$('#new-task').addEventListener('click', () => { if (state) updateState({ ...state, selectedTaskId: undefined }); clearWorkspace(); promptInput.focus(); });
+$('#add-project').addEventListener('click', async () => {
+  const before = state?.selectedProjectId;
+  let next: WorkState | null = null;
+  try { next = await window.mocodeWork.pickProject(); }
+  catch { showToast('error', '无法打开项目选择器'); return; }
+  if (!next) return;
+  updateState(next); clearWorkspace();
+  const project = selectedProject();
+  if (project && project.id !== before) showToast('success', `已切换到项目「${project.name}」`);
+});
+$('#new-task').addEventListener('click', () => openTaskModal('create'));
+
+/* ── Task modal (新建任务 / 重命名任务) ─────────────── */
+type TaskModalMode = 'create' | 'rename';
+let taskModalEl: HTMLElement | null = null;
+let taskModalMode: TaskModalMode = 'create';
+let taskModalTaskId: string | undefined;
+
+function ensureTaskModal(): HTMLElement {
+  if (taskModalEl) return taskModalEl;
+  taskModalEl = $('#task-modal');
+  return taskModalEl!;
+}
+function openTaskModal(mode: TaskModalMode, taskId?: string): void {
+  const el = ensureTaskModal();
+  taskModalMode = mode; taskModalTaskId = taskId;
+  const titleEl = $('#task-modal-title');
+  const nameInput = $('#task-name-input') as HTMLInputElement;
+  const goalField = $('#task-goal-field');
+  const goalInput = $('#task-goal-input') as HTMLTextAreaElement;
+  const projectRow = $('#task-modal-project');
+  const createBtn = $('#task-modal-create') as HTMLButtonElement;
+  if (mode === 'rename') {
+    const task = state?.tasks.find((item) => item.id === taskId);
+    if (!task) return;
+    titleEl.textContent = '重命名任务';
+    createBtn.textContent = '保存';
+    if (projectRow) projectRow.classList.add('hidden');
+    goalField.classList.add('hidden'); goalInput.value = '';
+    nameInput.value = task.title;
+  } else {
+    titleEl.textContent = '新建任务';
+    createBtn.textContent = '创建任务';
+    if (projectRow) projectRow.classList.remove('hidden');
+    goalField.classList.remove('hidden');
+    const project = selectedProject();
+    const projectName = projectRow?.querySelector('.field-project-name');
+    if (projectName) projectName.textContent = project?.name ?? '—';
+    nameInput.value = ''; goalInput.value = '';
+    // 新建前先清空当前工作区，确保从干净状态开始
+    if (state) updateState({ ...state, selectedTaskId: undefined });
+    clearWorkspace();
+  }
+  el.classList.remove('hidden');
+  requestAnimationFrame(() => { nameInput.focus(); nameInput.select(); });
+}
+function closeTaskModal(): void { ensureTaskModal().classList.add('hidden'); }
+async function submitTaskModal(): Promise<void> {
+  const nameInput = $('#task-name-input') as HTMLInputElement;
+  const goalInput = $('#task-goal-input') as HTMLTextAreaElement;
+  const name = nameInput.value.trim();
+  if (!name) { nameInput.classList.remove('shake'); void nameInput.offsetWidth; nameInput.classList.add('shake'); nameInput.focus(); return; }
+  if (taskModalMode === 'rename' && taskModalTaskId) {
+    const next = await window.mocodeWork.renameTask(taskModalTaskId, name.slice(0, 160));
+    if (next) updateState(next);
+    showToast('success', `已重命名为「${name}」`);
+    closeTaskModal();
+    return;
+  }
+  const goal = goalInput.value.trim();
+  const created = await window.mocodeWork.createTask(name.slice(0, 160));
+  updateState(created.state);
+  if (goal) { promptInput.value = goal; resizePrompt(); }
+  closeTaskModal();
+  promptInput.focus();
+  showToast('success', `已创建任务「${name}」`);
+}
+// 侧栏双击任务标题 → 打开重命名弹窗（复用上面的 modal）
+async function startTaskRename(taskId: string): Promise<void> {
+  const task = state?.tasks.find((item) => item.id === taskId);
+  if (!task) return;
+  openTaskModal('rename', taskId);
+}
+// 侧栏双击项目名 → 就地行内重命名（轻量，不需要弹窗）
+async function startProjectRename(projectId: string): Promise<void> {
+  const button = Array.from(projectList.querySelectorAll<HTMLButtonElement>('[data-project]')).find((b) => b.dataset.project === projectId);
+  const label = button?.querySelector<HTMLElement>('.project-name');
+  if (!button || !label) return;
+  const original = label.textContent ?? '';
+  const input = document.createElement('input');
+  input.className = 'project-rename';
+  input.value = original; input.maxLength = 80;
+  label.replaceWith(input);
+  input.focus(); input.select();
+  const commit = async (): Promise<void> => {
+    input.removeEventListener('blur', commit); input.removeEventListener('keydown', onKey);
+    const name = input.value.trim();
+    if (name && name !== original) {
+      const next = await window.mocodeWork.renameProject(projectId, name);
+      if (next) updateState(next);
+    } else { updateState(state!); }
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === 'Enter') { event.preventDefault(); void commit(); }
+    else if (event.key === 'Escape') { event.preventDefault(); input.value = original; void commit(); }
+  };
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', onKey);
+}
+
+// 弹窗交互：创建/保存、关闭、遮罩点击、回车快捷键
+$('#task-modal-create')?.addEventListener('click', () => void submitTaskModal());
+ensureTaskModal().querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeTaskModal));
+ensureTaskModal().addEventListener('click', (event) => { if (event.target === ensureTaskModal()) closeTaskModal(); });
+$('#task-name-input')?.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  const goal = $('#task-goal-input') as HTMLTextAreaElement;
+  if (taskModalMode === 'create' && !goal.value.trim()) goal.focus();
+  else void submitTaskModal();
+});
+$('#task-goal-input')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submitTaskModal(); }
+});
+$('#composer-task-name')?.addEventListener('click', () => { const t = selectedTask(); if (t) void startTaskRename(t.id); });
+$('#composer-task-edit')?.addEventListener('click', () => { const t = selectedTask(); if (t) void startTaskRename(t.id); });
 $('#clear-task').addEventListener('click', async () => { if (activeRunId) return; updateState(await window.mocodeWork.clearTasks()); clearWorkspace(); });
 $('#add-attachment').addEventListener('click', async () => { const attachment = await window.mocodeWork.pickAttachment(); if (attachment) { attachments.push(attachment); renderAttachments(); } });
 $('#compact-button').addEventListener('click', () => {
@@ -965,6 +1115,12 @@ window.addEventListener('keydown', (event) => {
   if (cmd && event.key.toLowerCase() === 'b') {
     event.preventDefault();
     toggleSidebar();
+    return;
+  }
+  if (cmd && event.shiftKey && event.key.toLowerCase() === 'n') {
+    event.preventDefault();
+    if (activeRunId) { showToast('warn', '当前还有任务在跑，无法新建。'); return; }
+    openTaskModal('create');
     return;
   }
 });

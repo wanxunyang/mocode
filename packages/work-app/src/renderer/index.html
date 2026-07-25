@@ -35,9 +35,9 @@
       <main class="workspace">
         <button class="sidebar-floating-toggle" id="sidebar-toggle-floating" data-sidebar-toggle title="展开侧栏" aria-label="展开侧栏"><svg class="icon" data-icon="panel-left"></svg></button>
         <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览"><svg class="icon" data-icon="layout"></svg></button><button id="show-files" title="浏览文件"><svg class="icon" data-icon="files"></svg></button></div>
-        <section id="empty-state" class="empty-state">
+          <section id="empty-state" class="empty-state">
           <h1>开始一个任务</h1>
-          <p>选好左侧项目，在下方输入框写下要做的事，Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。</p>
+          <p>选好左侧项目，点「新建任务」给它起个名字，再描述要做的改动。Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。</p>
         </section>
         <section id="conversation" class="conversation" aria-live="polite"></section>
         <section id="approval-panel" class="approval-panel hidden"></section>
@@ -49,6 +49,11 @@
         <section id="search-panel" class="search-panel hidden"><div class="search-dialog"><input id="search-input" placeholder="搜索项目或任务" /><div id="search-results"></div></div></section>
         <footer class="composer-area">
           <div class="composer">
+            <div class="composer-task" id="composer-task" hidden>
+              <span class="composer-task-label">任务</span>
+              <button class="composer-task-name" id="composer-task-name" title="点击重命名当前任务"></button>
+              <button class="composer-task-edit icon-button muted" id="composer-task-edit" title="重命名" aria-label="重命名"><svg class="icon" data-icon="edit"></svg></button>
+            </div>
             <div id="attachment-list" class="attachment-list"></div>
             <textarea id="prompt" rows="1" placeholder="描述输入"></textarea>
             <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" title="添加图片 (也可拖入)" aria-label="添加图片"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" title="压缩会话上下文"><svg class="icon icon-inline" data-icon="layers-compress"></svg>压缩</button><span class="context-usage" id="context-usage" title="上下文占用">--</span></div><div class="right-actions"><button id="mode-button" class="model-button" title="切换模型" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">Mocode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" title="发送 (⌘⏎)" aria-label="发送"><svg class="icon" data-icon="paper-airplane"></svg></button></div></div>
@@ -57,6 +62,31 @@
         </footer>
       </main>
       </div>
+
+      <!-- 新建任务 / 重命名任务 弹窗 -->
+      <section id="task-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
+        <div class="modal-card">
+          <header class="modal-head">
+            <b id="task-modal-title">新建任务</b>
+            <button class="modal-close icon-button muted" data-close title="关闭" aria-label="关闭"><svg class="icon" data-icon="close"></svg></button>
+          </header>
+          <div class="modal-body">
+            <label class="field">
+              <span class="field-label">任务名称</span>
+              <input id="task-name-input" class="field-input" type="text" maxlength="120" autocomplete="off" placeholder="例如：给登录页加一个「记住我」选项" />
+            </label>
+            <label class="field" id="task-goal-field">
+              <span class="field-label">第一条指令 <span class="field-optional">可选</span></span>
+              <textarea id="task-goal-input" class="field-input" rows="3" placeholder="想让 Mocode 先做点什么？留空也行，稍后直接在下方输入。"></textarea>
+            </label>
+            <div class="field-project" id="task-modal-project">项目：<span class="field-project-name"></span></div>
+          </div>
+          <footer class="modal-foot">
+            <button class="btn-ghost" data-close>取消</button>
+            <button class="btn-primary" id="task-modal-create">创建任务</button>
+          </footer>
+        </div>
+      </section>
     </div>
     <script type="module" src="renderer.js"></script>
   </body>

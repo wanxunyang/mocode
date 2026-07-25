@@ -14,4 +14,10 @@ if (existsSync(path.join(root, 'assets'))) {
   cpSync(path.join(root, 'assets'), path.join(root, 'dist', 'assets'), { recursive: true });
 }
 cpSync(path.join(root, 'dist-preload-tmp', 'renderer', 'preload.js'), path.join(root, 'dist', 'renderer', 'preload.js'));
-rmSync(path.join(root, 'dist-preload-tmp'), { recursive: true, force: true });
+// 某些环境下 fs.rmSync 被「安全删除」拦截、走回收站会失败；
+// 这个 tmp 目录是构建中间产物，删除失败不影响产物，忽略即可。
+try {
+  rmSync(path.join(root, 'dist-preload-tmp'), { recursive: true, force: true });
+} catch (error) {
+  console.warn('[copy-static] 清理临时目录失败（可忽略）：', error?.message ?? error);
+}
