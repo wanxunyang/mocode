@@ -36,7 +36,7 @@ declare global {
       getConfig: () => Promise<{ model: string; label: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }>;
       listModels: () => Promise<Array<{ name: string; label: string; baseURL: string; contextWindow: number; isActive: boolean }>>;
       switchModel: (name: string) => Promise<{ ok: boolean; message: string }>;
-      setTheme: (theme: 'light' | 'dark') => void;
+      setTheme: (theme: 'light' | 'dark' | 'system') => void;
       send: (value: Record<string, unknown>) => void;
       onAgentEvent: (callback: (event: AgentEnvelope) => void) => () => void;
       onState: (callback: (state: WorkState) => void) => () => void;
@@ -848,11 +848,66 @@ document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => b
 $('#search-button').addEventListener('click', () => { searchPanel.classList.remove('hidden'); searchInput.value = ''; refreshSearch(); searchInput.focus(); });
 $('#theme-toggle').addEventListener('click', () => {
   const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-  document.documentElement.dataset.theme = next;
-  try { localStorage.setItem('mocode-work-theme', next); } catch { /* 无 localStorage 则仅本次生效 */ }
-  window.mocodeWork.setTheme(next);
+  applyTheme(next);
   showToast('info', `已切换到${next === 'dark' ? '黑夜' : '浅色'}主题`, 1600);
 });
+
+/** 应用并持久化主题。saved 可为 light/dark/system; dataset 始终写入实际生效的 light/dark。 */
+function applyTheme(saved: 'light' | 'dark' | 'system'): void {
+  const effective = saved === 'system' ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : saved;
+  document.documentElement.dataset.theme = effective;
+  try { localStorage.setItem('mocode-work-theme', saved); } catch { /* 无 localStorage 则仅本次生效 */ }
+  window.mocodeWork.setTheme(saved);
+  refreshThemeSegmented();
+}
+
+const settingsButton = $('#settings-button') as HTMLButtonElement | null;
+const settingsPopover = $('#settings-popover');
+const themeSegmented = $('#theme-segmented');
+
+function refreshThemeSegmented(): void {
+  let saved: string;
+  try { saved = localStorage.getItem('mocode-work-theme') || 'system'; } catch { saved = 'system'; }
+  themeSegmented?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
+    const active = button.dataset.theme === saved;
+    button.setAttribute('aria-checked', String(active));
+  });
+}
+
+function toggleSettingsPopover(show?: boolean): void {
+  const next = show ?? settingsPopover?.classList.contains('hidden') ?? false;
+  settingsPopover?.classList.toggle('hidden', !next);
+  if (settingsButton) settingsButton.setAttribute('aria-expanded', String(next));
+  if (next) refreshThemeSegmented();
+}
+
+settingsButton?.addEventListener('click', () => toggleSettingsPopover());
+
+themeSegmented?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => button.addEventListener('click', () => {
+  const theme = button.dataset.theme as 'light' | 'dark' | 'system';
+  applyTheme(theme);
+}));
+
+$('#settings-shortcuts')?.addEventListener('click', () => {
+  toggleSettingsPopover(false);
+  showCheatsheet();
+});
+
+$('#settings-about')?.addEventListener('click', () => {
+  toggleSettingsPopover(false);
+  showToast('info', 'Mocode Work · 桌面客户端', 3000);
+});
+
+// 点击外部或按 Esc 关闭设置浮层
+document.addEventListener('click', (event) => {
+  if (!settingsPopover?.classList.contains('hidden') && event.target instanceof Node && !settingsPopover?.contains(event.target) && !settingsButton?.contains(event.target)) {
+    toggleSettingsPopover(false);
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !settingsPopover?.classList.contains('hidden')) toggleSettingsPopover(false);
+});
+refreshThemeSegmented();
 /* ── Sidebar collapse ─────────────────────────────────── */
 // 关键:不依赖 #sidebar-toggle 引用,也不依赖 button 元素 —— 改用 data-attr + 事件代理 + 每次现查 DOM,
 // 这样即便 setIcon() 后续又把 button 替换成 svg (或任何原因 DOM 变了) 也不会失效。

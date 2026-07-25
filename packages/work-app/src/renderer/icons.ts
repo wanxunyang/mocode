@@ -34,6 +34,7 @@ export const ICONS: Record<string, string> = {
   'sparkles': `<svg ${SVG_ATTRS}><path d="M10 3l1.5 3.8L15 8.5l-3.5 1.7L10 14l-1.5-3.8L5 8.5l3.5-1.7z"/><path d="M15 13.5l.7 1.5L17 15.5l-1.3.6L15 17.5l-.7-1.4L13 15.5l1.3-.6z"/></svg>`,
   'layers-compress': `<svg ${SVG_ATTRS}><path d="M3 6a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2H3V6z" opacity=".35"/><path d="M3 9h14v2a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9z" opacity=".65"/><path d="M6 13.5h8v1a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-1z"/><path d="M16 7l-3 3m0 0l3 3m-3-3H8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   'chevron-down': `<svg ${SVG_ATTRS}><path d="M6 8l4 4 4-4"/></svg>`,
+  'keyboard': `<svg ${SVG_ATTRS}><rect x="3" y="6" width="14" height="8" rx="1.5"/><path d="M5 8h1.5M8 8h1.5M11 8h1.5M14 8h1.5M5 11h1.5M8 11h1.5M11 11h1.5M14 11h1.5M6.5 9.5h1M9.5 9.5h1M12.5 9.5h1"/></svg>`,
   'image': `<svg ${SVG_ATTRS}><rect x="3" y="4" width="14" height="12" rx="1.5"/><circle cx="8" cy="9" r="1.5"/><path d="M3 14l4-4 4 4 3-3 3 3"/></svg>`,
   'x-circle': `<svg ${SVG_ATTRS}><circle cx="10" cy="10" r="6.5"/><path d="M7.5 7.5l5 5M12.5 7.5l-5 5"/></svg>`,
 

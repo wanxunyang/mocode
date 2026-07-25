@@ -120,9 +120,23 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .task-list::-webkit-scrollbar { width: 6px; }
 .task-list::-webkit-scrollbar-thumb { background: var(--color-rule); border-radius: var(--radius-full); }
 .empty-tasks { margin: var(--space-2xs) var(--space-xs); color: var(--color-subtle); font-size: var(--text-2xs); }
-.sidebar-footer { height: 30px; border-top: var(--rule-soft); display: flex; align-items: center; gap: var(--space-2xs); padding: var(--space-2xs) var(--space-2xs) 0; color: var(--color-subtle); font-size: var(--text-2xs); font-family: var(--font-outlier); }
+.sidebar-footer { width: 100%; height: 30px; border-top: var(--rule-soft); display: flex; align-items: center; gap: var(--space-2xs); padding: var(--space-2xs) var(--space-2xs) 0; color: var(--color-subtle); font-size: var(--text-2xs); font-family: var(--font-outlier); text-align: left; cursor: pointer; border-radius: var(--radius-sm); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.sidebar-footer:hover, .sidebar-footer[aria-expanded="true"] { background: var(--color-paper-3); color: var(--color-ink); }
+.sidebar-footer:focus-visible { outline-offset: -2px; }
 .avatar { width: 18px; height: 18px; border-radius: var(--radius-full); display: grid; place-items: center; background: var(--color-accent); color: var(--color-paper); font-size: 9px; font-weight: 600; }
+.footer-brand { color: var(--color-ink-soft); font-weight: 500; }
 .usage { margin-left: auto; color: var(--color-accent-ink); background: var(--color-accent-soft); border-radius: var(--radius-full); padding: 2px var(--space-2xs); font-weight: 500; }
+.footer-chevron { width: 12px; height: 12px; color: var(--color-subtle); margin-left: 2px; flex: 0 0 12px; }
+.settings-popover { position: absolute; left: var(--space-2xs); right: var(--space-2xs); bottom: 34px; background: var(--color-paper); border: var(--rule-hair); border-radius: var(--radius-md); box-shadow: var(--shadow-raised); padding: var(--space-xs); display: flex; flex-direction: column; gap: 2px; z-index: var(--z-dropdown); }
+.settings-popover.hidden { display: none; }
+.settings-label { display: block; padding: 0 var(--space-2xs); margin-bottom: var(--space-2xs); font-size: var(--text-2xs); color: var(--color-subtle); }
+.settings-segmented { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; background: var(--color-paper-2); padding: 2px; border-radius: var(--radius-md); }
+.settings-segmented button { padding: var(--space-2xs) 0; font-size: var(--text-2xs); color: var(--color-muted); border-radius: var(--radius-sm); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.settings-segmented button:hover { background: var(--color-paper-3); color: var(--color-ink); }
+.settings-segmented button[aria-checked="true"] { background: var(--color-accent); color: var(--color-paper); font-weight: 500; }
+.settings-item { display: flex; align-items: center; gap: var(--space-2xs); padding: var(--space-2xs) var(--space-xs); border-radius: var(--radius-sm); font-size: var(--text-xs); color: var(--color-muted); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.settings-item:hover { background: var(--color-paper-3); color: var(--color-ink); }
+.settings-item .icon { width: 14px; height: 14px; }
 
 /* ── Workspace ───────────────────────────────────────── */
 .workspace { --conversation-width: min(620px, 80%); position: relative; flex: 1; min-width: 0; height: 100%; background: var(--color-paper); overflow: hidden; }
@@ -369,7 +383,7 @@ textarea::placeholder { color: var(--color-subtle); }
 }
 @media (max-width: 40rem) {
   .sidebar { width: 56px; flex-basis: 56px; }
-  .sidebar .section-heading span:not(.add-project), .brand span, .nav-item span:last-child, .project-item span:last-child, .task-copy, .sidebar-footer .usage { display: none; }
+  .sidebar .section-heading span:not(.add-project), .brand span, .nav-item span:last-child, .project-item span:last-child, .task-copy, .sidebar-footer .usage, .sidebar-footer .footer-chevron { display: none; }
   .brand { font-size: var(--text-sm); }
   .inspector { width: 100%; }
   .conversation { padding: var(--space-xl) 0; }

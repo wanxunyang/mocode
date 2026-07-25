@@ -472,14 +472,15 @@ function createWindow(): void {
 }
 
 /** 让窗口原生背景和 Windows 控制按钮跟随应用主题。 */
-function applyThemeBackground(theme: 'light' | 'dark'): void {
+function applyThemeBackground(theme: 'light' | 'dark' | 'system'): void {
   nativeTheme.themeSource = theme;
-  const bg = theme === 'dark' ? '#1b1c1f' : '#ffffff';
+  const isDark = theme === 'system' ? nativeTheme.shouldUseDarkColors : theme === 'dark';
+  const bg = isDark ? '#1b1c1f' : '#ffffff';
   windowRef?.setBackgroundColor(bg);
   if (process.platform === 'win32' && windowRef && !windowRef.isDestroyed()) {
     windowRef.setTitleBarOverlay({
-      color: theme === 'dark' ? '#202225' : '#f7f8f7',
-      symbolColor: theme === 'dark' ? '#f5f5f5' : '#202124',
+      color: isDark ? '#202225' : '#f7f8f7',
+      symbolColor: isDark ? '#f5f5f5' : '#202124',
       height: 38,
     });
   }
@@ -603,7 +604,7 @@ function installIpc(): void {
     if (result.ok) broadcastState();
     return { ok: result.ok, message: result.message };
   });
-  ipcMain.on('work:set-theme', (_event, theme: 'light' | 'dark') => applyThemeBackground(theme));
+  ipcMain.on('work:set-theme', (_event, theme: 'light' | 'dark' | 'system') => applyThemeBackground(theme));
   ipcMain.on('work:show-menu', (event, menuId: string, clientX: number, clientY: number) => {
     if (!['file', 'edit', 'view', 'help'].includes(menuId) || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
     const targetWindow = BrowserWindow.fromWebContents(event.sender);

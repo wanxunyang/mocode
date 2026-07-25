@@ -11,8 +11,10 @@
       (function () {
         try {
           var saved = localStorage.getItem('mocode-work-theme');
-          var theme = saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-          document.documentElement.dataset.theme = theme;
+          var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var theme = saved || (systemDark ? 'dark' : 'light');
+          var effectiveTheme = theme === 'system' ? (systemDark ? 'dark' : 'light') : theme;
+          document.documentElement.dataset.theme = effectiveTheme;
         } catch { /* localStorage 不可用时走默认浅色 */ }
       })();
     </script>
@@ -29,7 +31,24 @@
         </nav>
         <section class="sidebar-section projects-section"><div class="section-heading"><span>项目</span><button class="add-project icon-button-square" id="add-project" title="添加项目" aria-label="添加项目"><svg class="icon" data-icon="plus"></svg></button></div><div id="project-list" class="project-list"></div></section>
         <section class="sidebar-section tasks-section"><div class="section-heading"><span>任务</span><button class="add-project icon-button-square" id="clear-task" title="清除当前项目任务" aria-label="清除当前项目任务"><svg class="icon" data-icon="close"></svg></button></div><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
-        <footer class="sidebar-footer"><span class="avatar">M</span><span>Mocode</span><span class="usage" id="usage">0%</span></footer>
+        <button class="sidebar-footer" id="settings-button" title="设置与帮助" aria-haspopup="true" aria-expanded="false">
+          <span class="avatar">M</span>
+          <span class="footer-brand">Mocode</span>
+          <span class="usage" id="usage">0%</span>
+          <svg class="icon footer-chevron" data-icon="chevron-down"></svg>
+        </button>
+        <div class="settings-popover hidden" id="settings-popover" role="menu" aria-label="设置与帮助">
+          <div class="settings-group">
+            <span class="settings-label">外观</span>
+            <div class="settings-segmented" id="theme-segmented" role="group" aria-label="主题">
+              <button data-theme="light" role="menuitemradio" aria-checked="false">浅色</button>
+              <button data-theme="dark" role="menuitemradio" aria-checked="false">深色</button>
+              <button data-theme="system" role="menuitemradio" aria-checked="false">自动</button>
+            </div>
+          </div>
+          <button class="settings-item" id="settings-shortcuts" role="menuitem"><svg class="icon" data-icon="keyboard"></svg>键盘快捷键</button>
+          <button class="settings-item" id="settings-about" role="menuitem"><svg class="icon" data-icon="info"></svg>关于 Mocode Work</button>
+        </div>
         <div class="sidebar-resize" id="sidebar-resize" aria-label="拖动调整侧栏宽度" role="separator" aria-orientation="vertical"></div>
       </aside>
       <main class="workspace">

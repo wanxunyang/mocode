@@ -23,7 +23,7 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   getConfig: (): Promise<{ model: string; label: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }> => ipcRenderer.invoke('work:get-config'),
   listModels: (): Promise<Array<{ name: string; label: string; baseURL: string; contextWindow: number; isActive: boolean }>> => ipcRenderer.invoke('work:list-models'),
   switchModel: (name: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:switch-model', name),
-  setTheme: (theme: 'light' | 'dark'): void => ipcRenderer.send('work:set-theme', theme),
+  setTheme: (theme: 'light' | 'dark' | 'system'): void => ipcRenderer.send('work:set-theme', theme),
   send: (value: Record<string, unknown>): void => ipcRenderer.send('work:agent-send', value),
   onAgentEvent: (callback: (event: AgentEnvelope) => void): (() => void) => {
     const listener = (_event: IpcRendererEvent, payload: AgentEnvelope) => callback(payload);
