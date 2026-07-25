@@ -3,12 +3,13 @@ import readline from 'node:readline';
 import { runAgentCore, type AgentHooks, type ContentPart } from '../agent/core.js';
 import { setAgentMode } from '../agent/mode.js';
 import { buildBasePrompt, config } from '../config/index.js';
-import { refreshChatTools, type ChatMessage } from '../llm/index.js';
+import { refreshChatTools, estimateMessagesTokens, type ChatMessage } from '../llm/index.js';
 import { initializeAllMcp, getMcpTools, getMcpWarnings, closeAllMcp } from '../mcp/index.js';
 import { setSandboxRoot } from '../sandbox/index.js';
 import { createContextState, loadSession, newSessionId, saveSession } from '../session/index.js';
 import { setCurrentSessionId } from '../session/state.js';
 import { buildActiveNotesPlanReminder } from '../session/notes-plan.js';
+import { manualCompact } from '../session/scheduler.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { registerToolsExtension } from '../tools/registry.js';
 import type { InterventionRequest, InterventionResult } from '../ui/intervention.js';
@@ -143,6 +144,8 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       changedFiles: result.changedFiles ?? [],
       validation: result.validation,
       usage: result.usage,
+      usagePercent: Math.round(contextUsagePercent() * 100),
+      contextWindow: config.contextWindowTokens,
     }, command.id);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
@@ -165,6 +168,35 @@ function cancel(command: Extract<HostCommand, { type: 'cancel' }>): void {
   emit('cancelling', {}, command.id);
 }
 
+/** 计算当前上下文用量百分比(不含 system prompt)，用于 UI 展示。 */
+function contextUsagePercent(): number {
+  const dialog = history.filter((m) => m.role !== 'system');
+  const est = estimateMessagesTokens(dialog);
+  return Math.min(1, est / config.contextWindowTokens);
+}
+
+async function compact(command: Extract<HostCommand, { type: 'compact' }>): Promise<void> {
+  if (activeRun) return error('有正在运行的任务，请先取消后再压缩。', command.id);
+  try {
+    await initializeRuntime();
+    if (!sessionId) createSession();
+    emit('status', { value: 'compacting' }, command.id);
+    const log = await manualCompact(history, command.focus, { force: true });
+    saveSession(history, sessionId, queryHistory);
+    const pct = contextUsagePercent();
+    emit('compact_done', {
+      compacted: log.compactHistoryCalled,
+      beforeTokens: log.compactDetail?.estimateBefore,
+      afterTokens: log.compactDetail?.estimateAfter,
+      usagePercent: Math.round(pct * 100),
+      contextWindow: config.contextWindowTokens,
+    }, command.id);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    error(`压缩失败: ${message}`, command.id);
+  }
+}
+
 function resolveApproval(command: Extract<HostCommand, { type: 'approval' }>): void {
   const waiter = approvals.get(command.approvalId);
   if (!waiter) return error('Approval request has expired.', command.id);
@@ -175,6 +207,7 @@ function resolveApproval(command: Extract<HostCommand, { type: 'approval' }>): v
 async function handle(command: HostCommand): Promise<void> {
   if (command.type === 'run') return run(command);
   if (command.type === 'cancel') return cancel(command);
+  if (command.type === 'compact') return compact(command);
   resolveApproval(command);
 }
 

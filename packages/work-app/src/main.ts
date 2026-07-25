@@ -184,6 +184,17 @@ function resolveHostNode(): { exe: string; isElectron: boolean } {
     tryPaths.push('C:\\Program Files\\nodejs\\node.exe', 'D:\\nodejs\\node.exe');
     const local = path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'node.exe');
     tryPaths.push(local);
+    // WorkBuddy 托管的 Node.js（PATH 上不一定有，需要显式探测）
+    const wbNodeDir = path.join(os.homedir(), '.workbuddy', 'binaries', 'node', 'versions');
+    try {
+      if (existsSync(wbNodeDir)) {
+        const versions = readdirSync(wbNodeDir).filter((d) => /^\d/.test(d)).sort().reverse();
+        for (const v of versions) {
+          const wbExe = path.join(wbNodeDir, v, 'node.exe');
+          if (existsSync(wbExe)) tryPaths.push(wbExe);
+        }
+      }
+    } catch { /* skip */ }
   } else {
     tryPaths.push('/usr/local/bin/node', '/usr/bin/node', '/opt/homebrew/bin/node');
   }

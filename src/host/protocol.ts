@@ -6,6 +6,7 @@ export interface HostAttachment {
 export type HostCommand =
   | { id: string; type: 'run'; prompt: string; sessionId?: string; attachments?: HostAttachment[] }
   | { id: string; type: 'cancel' }
+  | { id: string; type: 'compact'; focus?: string }
   | { id: string; type: 'approval'; approvalId: string; action: 'selected' | 'cancelled'; value?: string };
 
 export interface HostEnvelope {
@@ -40,6 +41,7 @@ export function parseCommand(value: unknown): HostCommand | null {
     };
   }
   if (input.type === 'cancel') return { id: input.id, type: 'cancel' };
+  if (input.type === 'compact') return { id: input.id, type: 'compact', focus: typeof input.focus === 'string' ? input.focus : undefined };
   if (input.type === 'approval' && typeof input.approvalId === 'string') {
     return {
       id: input.id,

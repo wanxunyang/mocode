@@ -47,6 +47,7 @@ const projectList = $('#project-list'); const taskList = $('#task-list'); const 
 const emptyState = $('#empty-state'); const approvalPanel = $('#approval-panel'); const promptInput = $('#prompt') as HTMLTextAreaElement;
 const sendButton = $('#send-button') as HTMLButtonElement; const inspector = $('#inspector'); const inspectorContent = $('#inspector-content');
 const inspectorTitle = $('#inspector-title'); const attachmentList = $('#attachment-list'); const searchPanel = $('#search-panel'); const searchInput = $('#search-input') as HTMLInputElement;
+const contextUsageEl = $('#context-usage');
 
 let state: WorkState | null = null;
 let activeRunId: string | null = null;
@@ -58,6 +59,14 @@ function selectedProject(): Project | undefined { return state?.projects.find((p
 function selectedTask(): Task | undefined { return state?.tasks.find((task) => task.id === state?.selectedTaskId); }
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]!)); }
 function statusText(status: TaskStatus): string { return ({ queued: '等待开始', running: '正在运行', waiting: '等待确认', completed: '已完成', failed: '运行失败', cancelled: '已停止' })[status]; }
+
+/** 更新输入栏的上下文占比显示。pct=null 表示未知/无会话。 */
+function updateContextUsage(pct: number | null): void {
+  if (pct === null || !contextUsageEl) { if (contextUsageEl) contextUsageEl.textContent = '--'; return; }
+  contextUsageEl.textContent = `${pct}%`;
+  // 超过阈值标红提醒
+  contextUsageEl.classList.toggle('usage-high', pct >= 70);
+}
 
 /**
  * 把 Agent Host / LLM 流冒上来的原始错误翻成一句用户能看懂的话。
@@ -131,12 +140,23 @@ function clearWorkspace(): void { conversation.innerHTML = ''; emptyState.classL
 function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
   emptyState.classList.add('hidden');
   const message = document.createElement('article'); message.className = `message ${kind}`;
-  const label = kind === 'user' ? '你' : 'Mocode';
-  const avatarIcon = kind === 'assistant' ? icon('spark-bot') : icon('user');
-  message.innerHTML = `<div class="message-avatar">${avatarIcon}</div><div class="message-content"><div class="message-label"><span>${label}</span><div class="message-actions"></div></div><div class="message-body"></div></div>`;
-  const body = message.querySelector('.message-body') as HTMLElement;
-  // 助手消息流式时只放纯文本,完成后再走 markdown 渲染,避免每 chunk 重排版。
-  body.textContent = text;
+  if (kind === 'user') {
+    // 用户消息：纯气泡，无头像/标签，灰色背景右对齐
+    const wrapper = document.createElement('div'); wrapper.className = 'message-content';
+    const body = document.createElement('div'); body.className = 'message-body';
+    body.textContent = text;
+    const label = document.createElement('div'); label.className = 'message-label';
+    label.innerHTML = '<div class="message-actions"></div>';
+    wrapper.append(body, label);
+    message.append(wrapper);
+  } else {
+    const label = 'Mocode';
+    const avatarIcon = '<img class="app-avatar" src="../assets/icon.png" alt="Mocode">';
+    message.innerHTML = `<div class="message-avatar">${avatarIcon}</div><div class="message-content"><div class="message-label"><span>${label}</span><div class="message-actions"></div></div><div class="message-body"></div></div>`;
+    const body = message.querySelector('.message-body') as HTMLElement;
+    // 助手消息流式时只放纯文本,完成后再走 markdown 渲染,避免每 chunk 重排版。
+    body.textContent = text;
+  }
   conversation.append(message);
   smartScrollToBottom();
   return message;
@@ -161,6 +181,11 @@ function toolCallSummary(value: unknown): string {
 }
 function addTool(payload: Record<string, unknown>, completed = false): void {
   emptyState.classList.add('hidden');
+  // 工具事件可能早于首个文字到达：先确保存在活跃的助手消息，工具调用要挂在其内容区内部
+  if (!activeAssistant || !activeAssistant.isConnected) {
+    activeAssistant = addMessage('assistant');
+    activeAssistant.classList.add('is-streaming');
+  }
   const id = payload.id == null ? '' : String(payload.id);
   const existing = completed && id ? activeTools.get(id) : undefined;
   const entry = existing?.isConnected ? existing : document.createElement('details');
@@ -178,19 +203,21 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   entry.className = `tool-entry ${completed ? 'tool-done' : 'tool-running'}${detail ? '' : ' tool-empty'}`;
   entry.innerHTML = `<summary><span class="tool-state">${completed ? '●' : '◇'}</span><span class="tool-name">${escapeHtml(name)}</span>${summary ? `<span class="tool-summary">${escapeHtml(summary)}</span>` : ''}<span class="tool-meta">${completed ? '完成' : '执行中'}</span></summary>${detail ? `<div class="tool-detail">${detail}</div>` : ''}`;
   if (completed) entry.open = false;
-  if (isNew) conversation.append(entry);
+  if (isNew) {
+    // 工具调用始终挂进当前助手消息的 content 内部：正文还空时放正文上方，已有正文时接在下方（保持时间顺序）
+    const body = activeAssistant.querySelector('.message-body') as HTMLElement;
+    if (body && !body.textContent?.trim()) body.before(entry);
+    else if (body) body.after(entry);
+    else conversation.append(entry);
+  }
   if (id) completed ? activeTools.delete(id) : activeTools.set(id, entry);
   smartScrollToBottom();
 }
 function appendText(text: string): void {
-  // 复用当前气泡:仅当它仍是对话流末尾时(本轮尚未插入工具)。
-  if (activeAssistant && activeAssistant.isConnected && activeAssistant === conversation.lastElementChild) {
-    // 继续往当前气泡追加文字
-  } else {
-    // 新建气泡:新轮次首个气泡显示 ✦Mocode 头像;工具之后的续接气泡隐藏头像(data-continued)。
-    const continued = activeAssistant && activeAssistant.isConnected;
-    activeAssistant = addMessage('assistant'); activeAssistant.classList.add('is-streaming');
-    if (continued) activeAssistant.dataset.continued = '1';
+  // 复用当前助手气泡；若尚不存在则创建（工具事件也可能先到）
+  if (!activeAssistant || !activeAssistant.isConnected) {
+    activeAssistant = addMessage('assistant');
+    activeAssistant.classList.add('is-streaming');
   }
   const body = activeAssistant.querySelector('.message-body') as HTMLElement;
   body.textContent = `${body.textContent ?? ''}${text}`;
@@ -576,7 +603,17 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     case 'validation_completed': break;
     case 'approval_requested': showApproval(payload); break;
     case 'run_aborted': finish(); break;
-    case 'run_completed': finish(); break;
+    case 'run_completed':
+      if (typeof payload.usagePercent === 'number') updateContextUsage(payload.usagePercent);
+      finish(); break;
+    case 'compact_done': {
+      const pct = typeof payload.usagePercent === 'number' ? payload.usagePercent : null;
+      updateContextUsage(pct);
+      const before = typeof payload.beforeTokens === 'number' ? Math.round(payload.beforeTokens / 1000) : '?';
+      const after = typeof payload.afterTokens === 'number' ? Math.round(payload.afterTokens / 1000) : '?';
+      showToast('success', `上下文已压缩: ${before}k → ${after}k tokens${pct !== null ? ` (${pct}%)` : ''}`, 4000);
+      break;
+    }
     case 'host_log': {
       const raw = String(payload.message ?? '').trim();
       if (!raw) break;
@@ -650,7 +687,9 @@ $('#add-project').addEventListener('click', async () => { const next = await win
 $('#new-task').addEventListener('click', () => { if (state) updateState({ ...state, selectedTaskId: undefined }); clearWorkspace(); promptInput.focus(); });
 $('#clear-task').addEventListener('click', async () => { if (activeRunId) return; updateState(await window.mocodeWork.clearTasks()); clearWorkspace(); });
 $('#add-attachment').addEventListener('click', async () => { const attachment = await window.mocodeWork.pickAttachment(); if (attachment) { attachments.push(attachment); renderAttachments(); } });
-$('#skill-button').addEventListener('click', () => { promptInput.value = `${promptInput.value}${promptInput.value ? '\n' : ''}请先分析现有代码和约束，然后实现并验证。`; resizePrompt(); promptInput.focus(); });
+$('#compact-button').addEventListener('click', () => {
+  window.mocodeWork.send({ type: 'compact', id: crypto.randomUUID() });
+});
 $('#toggle-inspector').addEventListener('click', () => inspector.classList.contains('hidden') ? openInspector('overview') : inspector.classList.add('hidden'));
 $('#show-files').addEventListener('click', () => openInspector('files'));
 $('#close-inspector').addEventListener('click', () => inspector.classList.add('hidden'));
