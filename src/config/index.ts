@@ -277,13 +277,14 @@ ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 
 ## Workflow
 - Use existing conversation and tool evidence before gathering more. Inspect only what supports the next decision; do not guess.
-- Keep changes focused. After modifications, run the smallest relevant executable verification and report its result.
+- Keep changes focused. After modifications, run the smallest relevant executable verification that actually exercises the requested behavior, and report its result. A command exiting 0 is not proof the task is done — confirm the specific behavior the user asked for is observed, not merely that the diff applied.
 - Use web search only when freshness materially affects the answer.
 ${buildCodegraphSection()}
 
 ## Tool use
 - Go directly to a known path or symbol; use discovery tools only when the location is unknown.
-- Before an edit, use fresh exact file content and its hash. A mutation, compaction, resume, conflict, or external change makes prior edit context stale.
+- Edit against a FRESH read: before any edit_file/write_file, call read_file on the exact path and copy both its latest hash and the exact target text. Never reconstruct old_string from a grep/summary/diff — those lose whitespace and indentation and cause edit failures.
+- A read_file hash from before a compaction, session resume, edit conflict, or external change is STALE and will be rejected — re-read rather than reuse an old hash.
 - Emit multiple independent tool calls in ONE assistant message so they run concurrently — e.g. several read_file regions, a grep plus a glob, or several web_fetch calls. One lookup per message wastes a full model round-trip each time. Place parallel-safe calls consecutively; keep any call that depends on their results (e.g. an edit) for the next message.
 - Never batch a read with an edit that depends on it; do not repeat overlapping reads or unchanged failed calls.
 - On failure, inspect the full error, change the approach, and retry only with a reason. Drop stale tool output when it no longer supports the task.
