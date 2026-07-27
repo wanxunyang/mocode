@@ -264,8 +264,12 @@ export function buildBasePrompt(sessionId = getCurrentSessionId()): string {
   const notepadSection = buildNotepadSection(sessionId);
 
   // 静态主体:稳定段落集中在前,让支持 prompt caching 的后端能命中前缀缓存(#12)。
+  // 约束:staticBody 的前缀段(尤其 ## Core behavior 第一行)必须是纯静态文本,
+  // 不得嵌入会话级可变函数调用(如 t()/config.model)。否则 /language、/model
+  // 切换会让最敏感的前缀变化,破坏自动前缀缓存命中。可变值统一放到
+  // ## Termination & Reporting 段末尾(仍在切片边界之前,子 agent 仍能拿到)。
   const staticBody = `## Core behavior
-You are mocode, a terminal coding agent. Complete programming tasks through a "think → call tool → observe result → think again" loop until solved. ${t('assistant.languageInstruction')}
+You are mocode, a terminal coding agent. Complete programming tasks through a "think → call tool → observe result → think again" loop until solved.
 
 ## Modes
 - AUTO is the default: investigate and complete the task with the tools currently exposed.
@@ -299,29 +303,36 @@ ${buildCodegraphSection()}
 - Stop immediately when no more tools are needed; give conclusions directly.
 - **Do not stop prematurely during exploration**: if you started investigating but haven't gathered enough information to answer the user's question, keep calling tools. Only stop when you have sufficient evidence or hit a dead end.
 - **No flattery / no preamble in conclusions**: skip "Sure", "好的", "我已经完成了" and similar no-information prefixes — jump straight to substance.
-- Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.`;
+- Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.
+${t('assistant.languageInstruction')}`;
 
-  // 动态段(置于末尾):memory 索引 + notepad 目录。仅当有内容才拼
-  // "## Project context" 标题,避免空标题噪声(#13)。notepad 使用说明始终保留。
+  // 动态段(置于末尾):memory 索引 + notepad 目录与使用说明。
+  // 按需注入(#13):仅当有内容才拼对应标题/说明,避免空标题与无文件时的模板噪声。
+  //   - "## Project context" 仅当 memorySection/notepadSection 非空;
+  //   - notepad 使用说明仅当 notes.md 文件存在(notepadSection 非空)—
+  //     无文件时连 marker 都不拼,既省 token 也让前缀缓存更稳。core 切片
+  //     回退到 MARKER_DYNAMIC_SECTION 或整段(见 buildMocodeCorePrompt)。
   const dynamicParts: string[] = [];
   const ctxContent = `${memorySection}${notepadSection}`.trimEnd();
   if (ctxContent) {
     dynamicParts.push(`## Project context (dynamic reference)\n${ctxContent}`);
   }
-  dynamicParts.push(
-    `## Session Notepad (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
-    'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
-    'Keep at most one active plan:\n' +
-    '```\n' +
-    '## Plan: <title>\n' +
-    'Goal: <outcome>\n' +
-    '### Steps\n' +
-    '- [ ] 1. <verifiable step>\n' +
-    '### Progress\n' +
-    '- <completed phase and evidence>\n' +
-    '```\n' +
-    'Update checkboxes and Progress after each completed phase. Before the final reply, reconcile the plan with actual work, then rename it to `## Done:` or remove it. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
-  );
+  if (notepadSection) {
+    dynamicParts.push(
+      `## Session Notepad (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
+      'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
+      'Keep at most one active plan:\n' +
+      '```\n' +
+      '## Plan: <title>\n' +
+      'Goal: <outcome>\n' +
+      '### Steps\n' +
+      '- [ ] 1. <verifiable step>\n' +
+      '### Progress\n' +
+      '- <completed phase and evidence>\n' +
+      '```\n' +
+      'Update checkboxes and Progress after each completed phase. Before the final reply, reconcile the plan with actual work, then rename it to `## Done:` or remove it. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
+    );
+  }
 
   return `${staticBody}\n\n${dynamicParts.join('\n\n')}`;
 }
