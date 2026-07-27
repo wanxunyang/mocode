@@ -158,7 +158,8 @@ function commandOutcome(result: RawCommandResult): ToolOutcome {
 export const runCommandTool: Tool = {
   name: 'run_command',
   description:
-    'Run a shell command, merging stdout+stderr. Default timeout 120s. For tests, builds, git, etc.',
+    'Run a shell command, merging stdout+stderr. Default timeout 120s. For tests, builds, git, etc.\n' +
+    'Multiple independent run_command calls may be issued in one response to save model round-trips; they execute serially, so do not depend one on another\'s output within the same message.',
   risk: 'dangerous',
   parameters: {
     type: 'object',

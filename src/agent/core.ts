@@ -103,7 +103,7 @@ function parseArgs(raw: string): Record<string, unknown> | null {
 /**
  * Thrashing 检测:同一工具 + 完全相同 arguments 在本轮重复 ≥ THRASH_THRESHOLD 次,
  * 返一段提示(注入到工具结果尾部),引导模型换思路而不是再试一次。
- * 阈值 3 = "试过两次同样的调用还没好,该停了"。指纹 = `${name}\\x00${args}`
+ * 阈值 2 = "试过两次同样的调用还没好,该停了"。指纹 = `${name}\\x00${args}`
  * (直接拼,不哈希——避免热路径开销;args 长度本身有限,内存压力可忽略)。
  * null 表示未触发,不污染输出。
  */

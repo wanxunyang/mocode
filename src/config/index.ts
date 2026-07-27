@@ -199,7 +199,7 @@ export function buildNotepadSection(sessionId = getCurrentSessionId()): string {
     const totalCount = active.length + archived.length;
     const lines: string[] = [
       '',
-      `## Session Notepad (${totalCount} section${totalCount === 1 ? '' : 's'} — read \`.mocode/sessions/${sessionId}/notes.md\` to recover full context; surviving compact is the whole point of this file)`,
+      `## Session Notepad index (${totalCount} section${totalCount === 1 ? '' : 's'} — read \`.mocode/sessions/${sessionId}/notes.md\` to recover full context; surviving compact is the whole point of this file)`,
       `Active (${active.length}):`,
       ...(active.length ? active.map(h => `  - ${h.replace(/^##\s+/, '')}`) : ['  - (none)']),
     ];
@@ -247,7 +247,7 @@ function buildPlanResearchRules(): string {
   return `
 - Locate relevant code and conventions without repeating retrieved work.${cg}
 - Return an actionable plan with affected files, ordered steps, edge cases, and verification.
-- When ready, call \`ask_human\` with exactly: "按计划执行", "继续细化方案", and "取消 / 暂不执行". Approval requires the user to switch to /auto; never execute or switch modes silently.`;
+- When ready, call \`ask_human\` with exactly: "${t('plan.approveOption')}", "${t('plan.refineOption')}", and "${t('plan.cancelOption')}". Approval requires the user to switch to /auto; never execute or switch modes silently.`;
 }
 
 function buildPlanModeSuffix(): string {
@@ -261,8 +261,10 @@ ${buildPlanResearchRules()}`;
 /** 兼容旧名字:repl 的 buildSystemMessage 仍引 PLAN_MODE_SUFFIX(变量)。运行时按需现拼。 */
 export function buildBasePrompt(sessionId = getCurrentSessionId()): string {
   const memorySection = buildMemoryPromptSection();
+  const notepadSection = buildNotepadSection(sessionId);
 
-  return `## Core behavior
+  // 静态主体:稳定段落集中在前,让支持 prompt caching 的后端能命中前缀缓存(#12)。
+  const staticBody = `## Core behavior
 You are mocode, a terminal coding agent. Complete programming tasks through a "think → call tool → observe result → think again" loop until solved. ${t('assistant.languageInstruction')}
 
 ## Modes
@@ -282,7 +284,8 @@ ${buildCodegraphSection()}
 ## Tool use
 - Go directly to a known path or symbol; use discovery tools only when the location is unknown.
 - Before an edit, use fresh exact file content and its hash. A mutation, compaction, resume, conflict, or external change makes prior edit context stale.
-- Batch only independent calls. Never batch a read with an edit that depends on it; do not repeat overlapping reads or unchanged failed calls.
+- Emit multiple independent tool calls in ONE assistant message so they run concurrently — e.g. several read_file regions, a grep plus a glob, or several web_fetch calls. One lookup per message wastes a full model round-trip each time. Place parallel-safe calls consecutively; keep any call that depends on their results (e.g. an edit) for the next message.
+- Never batch a read with an edit that depends on it; do not repeat overlapping reads or unchanged failed calls.
 - On failure, inspect the full error, change the approach, and retry only with a reason. Drop stale tool output when it no longer supports the task.
 - For generated content over roughly 200 lines or 5K tokens, use small staged writes rather than one oversized tool argument.
 - Use \`ask_human\` only for a genuinely user-owned decision; otherwise choose the safest reversible option and proceed.
@@ -291,41 +294,63 @@ ${buildCodegraphSection()}
 - Get confirmation before irreversible or outward-facing actions such as deletion, push, production changes, or external requests, unless explicitly authorized.
 - Stay within the authorized workspace and disclose anything skipped or unverifiable.
 
-## Project context (dynamic reference)
-${memorySection}${buildNotepadSection(sessionId)}
-
-## Session Notepad (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)
-Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.
-
-Keep at most one active plan:
-\`\`\`
-## Plan: <title>
-Goal: <outcome>
-### Steps
-- [ ] 1. <verifiable step>
-### Progress
-- <completed phase and evidence>
-\`\`\`
-Update checkboxes and Progress after each completed phase. Before the final reply, reconcile the plan with actual work, then rename it to \`## Done:\` or remove it. Keep other notes concise and session-specific; use memory for stable cross-session facts.
-
 ## Termination & Reporting
 - Stop immediately when no more tools are needed; give conclusions directly.
 - **Do not stop prematurely during exploration**: if you started investigating but haven't gathered enough information to answer the user's question, keep calling tools. Only stop when you have sufficient evidence or hit a dead end.
 - **No flattery / no preamble in conclusions**: skip "Sure", "好的", "我已经完成了" and similar no-information prefixes — jump straight to substance.
 - Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.`;
+
+  // 动态段(置于末尾):memory 索引 + notepad 目录。仅当有内容才拼
+  // "## Project context" 标题,避免空标题噪声(#13)。notepad 使用说明始终保留。
+  const dynamicParts: string[] = [];
+  const ctxContent = `${memorySection}${notepadSection}`.trimEnd();
+  if (ctxContent) {
+    dynamicParts.push(`## Project context (dynamic reference)\n${ctxContent}`);
+  }
+  dynamicParts.push(
+    `## Session Notepad (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
+    'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
+    'Keep at most one active plan:\n' +
+    '```\n' +
+    '## Plan: <title>\n' +
+    'Goal: <outcome>\n' +
+    '### Steps\n' +
+    '- [ ] 1. <verifiable step>\n' +
+    '### Progress\n' +
+    '- <completed phase and evidence>\n' +
+    '```\n' +
+    'Update checkboxes and Progress after each completed phase. Before the final reply, reconcile the plan with actual work, then rename it to `## Done:` or remove it. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
+  );
+
+  return `${staticBody}\n\n${dynamicParts.join('\n\n')}`;
 }
+
+/** 静态主体结束 + 会话私有段起点标记,供 buildMocodeCorePrompt 稳健切片(#17)。 */
+const MARKER_STATIC_END = '## Termination & Reporting';
+const MARKER_DYNAMIC_SECTION = '## Project context (dynamic reference)';
+const MARKER_DROPPABLE_SECTION = '## Session Notepad (';
 
 /**
  * Stable, production-grade behavior shared by main and sub agents.
- * It intentionally excludes session/project payload (snapshot, memory index, notepad), while
- * retaining the exact editing, verification, recovery, safety, and reporting rules.
+ * It intentionally excludes the trailing session-specific payload (notepad
+ * instructions + dynamic Project context block), while retaining the exact
+ * editing, verification, recovery, safety, and reporting rules.
+ *
+ * 用显式 marker 截取,而非依赖 '## Project context' 字符串的绝对位置——
+ * 该标题现在位于 prompt 末尾,且可能缺省(无 memory/无 notepad 时整段不拼,#13),
+ * 故以 report 段之后第一个会话私有段标记(memory 索引或 notepad 说明)为切片点,
+ * 比旧实现更稳健(#17)。
  */
 export function buildMocodeCorePrompt(): string {
   const full = buildBasePrompt();
-  const dynamicStart = full.indexOf('## Project context (dynamic reference)');
-  const reportingStart = full.indexOf('## Termination & Reporting');
-  if (dynamicStart < 0 || reportingStart < dynamicStart) return full;
-  return `${full.slice(0, dynamicStart).trimEnd()}\n\n${full.slice(reportingStart)}`;
+  const reportingStart = full.indexOf(MARKER_STATIC_END);
+  if (reportingStart < 0) return full;
+  const candidateIndices = [MARKER_DYNAMIC_SECTION, MARKER_DROPPABLE_SECTION]
+    .map((m) => full.indexOf(m))
+    .filter((i) => i > reportingStart);
+  if (candidateIndices.length === 0) return full; // 无会话私有尾段,整段即静态
+  const dropStart = Math.min(...candidateIndices);
+  return full.slice(0, dropStart).trimEnd();
 }
 
 /**

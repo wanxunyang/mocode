@@ -9,7 +9,7 @@
 // - 段标题在 buildMocodeCorePrompt 之外,不会被 `## Project context` 索引
 //   切片误伤;且 buildBasePrompt 注入位置在 ## Workflow 之前,确保 LLM
 //   先看到纪律再看工具/平台细节。
-// - per-model 措辞是"轻量"差异:3 个家族共享 4 阶段结构,只在首句/标签
+// - per-model 措辞是"轻量"差异:3 个家族共享 4 阶段结构,只在首句
 //   上贴近该家族的指令遵从习惯;真正的 prompt 反演化交给 AHE。
 // - 语种统一英文:4 份都用同一份核心纪律文本,避免多语种漂移;用户语言
 //   偏好由现有 i18n 段(assistant.languageInstruction)负责。
@@ -38,6 +38,7 @@ const CORE_SECTION = `## Working discipline — coding tasks (Build-and-Self-Ver
 Treat "verification" as a first-class part of the task, not an afterthought. Use the smallest evidence-driven loop below.
 
 ### Phase 1 — Plan & Discover
+- Open with a one-sentence restatement of your interpretation of the request; if a materially different reading exists, name it briefly before proceeding. This catches misunderstanding before any work is wasted.
 - State the goal and a concrete acceptance signal, then inspect the relevant code before changing it.
 - Ask only when an unresolved choice is high-impact or user-owned; otherwise follow repository evidence and proceed.
 
@@ -52,24 +53,23 @@ Treat "verification" as a first-class part of the task, not an afterthought. Use
 
 ### Phase 4 — Fix
 - Diagnose the root cause, make a focused correction, and rerun the relevant check.
-- After three identical failures, change the approach instead of repeating the same call.
+- After two identical failures, change the approach instead of repeating the same call.
 
-**Hard rule (non-negotiable):** "I read the code and it looks right" is not a completion signal. Report the verification performed, or state clearly why it could not be run.`;
+**Hard rule (non-negotiable):** "I read the code and it looks right" is not a completion signal. Report the verification performed, or state clearly why it could not be run.
+
+**Hard rule (non-negotiable):** Never invent file paths, APIs, config keys, flags, or behavior. Every claim about the codebase must trace to tool output in this conversation; explicitly label anything you have not verified as an assumption.`;
 
 /**
- * 把核心段适配到指定 model family:只改首行(语序 / 强动词)与段标题
- * 末尾的 [model: X] 标签。Phase 内容保持原样,4 份共享同一份结构化文本。
+ * 把核心段适配到指定 model family:只替换首行(语序 / 强动词),段标题
+ * 保持原样。Phase 内容保持原样,4 份共享同一份结构化文本。
+ * 注意:不再往标题注入 "[model: X]" 标签——它对模型是无意义噪声,
+ * 还可能引发自我指涉,反而干扰遵从。
  */
-function adapt(model: ModelFamily, opener: string): string {
-  return CORE_SECTION
-    .replace(
-      '## Working discipline — coding tasks (Build-and-Self-Verify)',
-      `## Working discipline — coding tasks (Build-and-Self-Verify) [model: ${model}]`,
-    )
-    .replace(
-      'Treat "verification" as a first-class part of the task, not an afterthought.',
-      opener,
-    );
+function adapt(_model: ModelFamily, opener: string): string {
+  return CORE_SECTION.replace(
+    'Treat "verification" as a first-class part of the task, not an afterthought.',
+    opener,
+  );
 }
 
 /** ASK-01: only user-owned, high-impact choices should interrupt autonomous execution. */
@@ -78,7 +78,8 @@ const ASK_WHITELIST_SECTION = `## When to ask instead of guess
 Call \`ask_human\` before coding only when repository evidence cannot resolve a user-owned, high-impact choice:
 1. irreversible deletion, migration, security, permission, or external side effect;
 2. public API compatibility (keep, deprecate, rename, or remove);
-3. multiple reasonable options that materially change product behavior.
+3. multiple reasonable options that materially change product behavior;
+4. the request itself admits two or more materially different readings that lead to different deliverables (do not silently pick one and guess).
 
 For naming, implementation detail, and verification commands, follow repository precedent and choose the safest reversible default. Disclose any consequential assumption.
 
@@ -96,7 +97,7 @@ export function buildWorkDisciplineSection(modelFamily?: ModelFamily): string {
       section = adapt('anthropic', 'Verification is a hard prerequisite for completion, not a courtesy.');
       break;
     case 'openai':
-      section = adapt('openai', 'Every coding task MUST complete these four phases in order. Skipping or merging phases is treated as a failure.');
+      section = adapt('openai', 'Every coding task MUST complete these four phases in order. Skipping or merging phases is treated as a failure. For trivial or read-only requests, phases may collapse.');
       break;
     case 'qwen':
       section = adapt('qwen', 'Verification is a hard prerequisite for completion; "I wrote the code" is not evidence the code works.');
