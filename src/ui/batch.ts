@@ -236,6 +236,8 @@ export function showLiveBatch(
     contentReplaceLine(absIdx: number, line: string): void;
     totalRows(): number;
     repaintViewport?(): void;
+    /** 查询当前是否处于滚动回看状态(scrollOffset > 0)，用于避免冻结视口下无效重画 */
+    isScrolled?(): boolean;
   },
 ): void {
   const b = batches.get(id);
@@ -247,7 +249,12 @@ export function showLiveBatch(
     // 首条摘要通过增量 contentWrite 落屏时，markdown→普通内容的边界可能只更新了
     // buffer/续写位；直到第二个 header 的 contentReplaceLine 或后续正文重绘才完全可见。
     // 立即按 buffer 原子重画，确保慢工具执行期间摘要前的空行已经显示。
-    layout.repaintViewport?.();
+    // 但滚动回看时(scrollOffset>0) contentWrite 只喂缓冲+冻结视口，此时 repaintViewport
+    // 会画出不含新摘要的冻结窗口（新摘要在窗口之下），造成闪烁；跳过重画，
+    // 等用户回底(scrollOffset=0)时自然可见。修复 rollback 后工具信息滚动消失问题。
+    if (!layout.isScrolled?.()) {
+      layout.repaintViewport?.();
+    }
   } else {
     layout.contentReplaceLine(b.summaryAbsIdx, summary);
   }

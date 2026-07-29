@@ -4,6 +4,14 @@ import { tools } from '../tools/registry.js';
 import { getPlanDisabledTools } from '../tools/constants.js';
 import { ThinkTagFilter } from './think-filter.js';
 
+// 强制关闭第三方调试日志泄漏:openai SDK 在 process.env.DEBUG === 'true' 时用裸
+// console.log 把请求/响应直写 stdout,会污染 TUI 输入框(并泄露 headers/URL)。
+// 仅拦截 'true' 这一开关值——保留 namespace 形式的 DEBUG(如 DEBUG=express:*) 调试能力。
+// 必须在 OpenAI 客户端实例化之前执行,确保任何实例都不再触发 debug 输出。
+if (process.env.DEBUG === 'true') {
+  process.env.DEBUG = 'false';
+}
+
 /**
  * LLM 调用重试策略:
  *   可重试  →  429 (rate limit) / 5xx (server) / APIConnectionError / Node 网络错 (ETIMEDOUT 等)

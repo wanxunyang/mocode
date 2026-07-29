@@ -1,4 +1,5 @@
 import { stdin, stdout } from 'node:process';
+import { inspect } from 'node:util';
 import { join } from 'node:path';
 import {
   charWidth,
@@ -76,6 +77,57 @@ export interface InputView {
 
 // ── 内部状态 ──
 let active = false;
+
+// ── 裸 console 防御:第三方库(如 openai SDK)可能用 console.log 直写 stdout,
+// 在 RUNNING 态会落到光标所在的底栏输入框,污染输入。进入 TUI 后把 console.*
+// 劫持到 contentWrite,统一进内容区(运行态下 contentWrite 末尾会把真光标归位输入框),
+// 既不再泄漏到输入框,也不会破坏 TUI 布局。TUI 外(active=false)不劫持,
+// 恢复原始 console,保证 host 子进程 JSON 协议 / 退出日志正常。
+let consoleHookInstalled = false;
+const origConsole = {
+  log: console.log,
+  error: console.error,
+  warn: console.warn,
+  info: console.info,
+};
+
+function routeConsoleToContent(method: 'log' | 'error' | 'warn' | 'info'): void {
+  const c = console as unknown as Record<string, (...args: any[]) => void>;
+  c[method] = (...args: any[]): void => {
+    if (active && ui.isTTY) {
+      let s: string;
+      try {
+        s = args
+          .map((a) => (typeof a === 'string' ? a : inspect(a, { depth: 4 })))
+          .join(' ');
+      } catch {
+        s = String(args[0]);
+      }
+      if (!s.endsWith('\n')) s += '\n';
+      contentWrite(s);
+    } else {
+      origConsole[method](...args);
+    }
+  };
+}
+
+function installConsoleGuard(): void {
+  if (consoleHookInstalled) return;
+  routeConsoleToContent('log');
+  routeConsoleToContent('error');
+  routeConsoleToContent('warn');
+  routeConsoleToContent('info');
+  consoleHookInstalled = true;
+}
+
+function uninstallConsoleGuard(): void {
+  if (!consoleHookInstalled) return;
+  console.log = origConsole.log;
+  console.error = origConsole.error;
+  console.warn = origConsole.warn;
+  console.info = origConsole.info;
+  consoleHookInstalled = false;
+}
 let mode: 'input' | 'running' = 'input';
 let footerH = 6; // 1 虚拟空行 + 1 spinner行 + 1 上线 + 输入行数 + 1 下线 + 1 model行(两行式底栏)
 let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
@@ -2095,12 +2147,15 @@ export function enterAltScreen(): void {
     resizeTimer?.unref?.();
   };
   process.on('SIGWINCH', sigwinchHandler);
+
+  installConsoleGuard(); // 进入 TUI 即接管裸 console 输出,防第三方日志污染输入框
 }
 
 /** 复原:复位 margins + 显光标 + 退 alt + 还原 raw。幂等。 */
 export function exitAltScreen(): void {
   if (!active) return;
   active = false;
+  uninstallConsoleGuard(); // 退出 TUI 恢复原始 console(不影响 host 子进程 / 退出日志)
   resetTerminalBackground();
   stopTurnTimer(); // 兜底清走时计时器(防异常退出泄漏)
   turnStart = null;

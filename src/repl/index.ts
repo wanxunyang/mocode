@@ -899,6 +899,8 @@ export async function startRepl(
   layout.contentMode();
   if (history.some((m) => m.role === 'user')) {
     renderHistory(history);
+    // 强制回尾:同 /resume 命令,renderHistory 展开详情会设 scrollOffset>0,需复位避免闪烁。
+    layout.resetScroll();
   } else {
     layout.writeBanner(bannerLines(banner()));
   }
@@ -1043,6 +1045,11 @@ export async function startRepl(
     // rollbackFlow 原本漏了这一行,renderHistory 末尾的 batch 摘要行 / assistant 文本
     // 收口后,续写位未稳到新空行,下一次 echoInput 的 ❯ 气泡会黏在最后一条输出后面。
     layout.contentWrite('\n');
+    // 回滚后强制回尾:确保 scrollOffset=0，避免后续 showLiveBatch 在冻结视口下
+    // 调用 repaintViewport 导致工具信息闪烁/滚动消失（rollback 后用户继续输入触发新 agent
+    // 运行时，若 scrollOffset 意外 >0，contentWrite 只喂缓冲不物理写，showLiveBatch 的
+    // repaintViewport 画出不含新摘要的冻结窗口 → 工具信息"闪现后消失"）。
+    layout.resetScroll();
     pendingPrefill = prefillText.split('\n');
   };
 
@@ -1182,6 +1189,9 @@ export async function startRepl(
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
     renderHistory(history);
+    // 强制回尾:renderHistory 展开 mutation 工具详情会经 contentInsertAfter 设置 scrollOffset>0;
+    // 若不复位，后续 showLiveBatch 在冻结视口下 repaintViewport 会导致工具信息闪烁/滚动消失。
+    layout.resetScroll();
     // 末尾 \n\n:与后续用户消息(❯ bubble)之间空一行。
     layout.contentWrite(`${ui.dim}${t('repl.resumed', { id: loaded.id })}${ui.reset}\n\n`);
   }
