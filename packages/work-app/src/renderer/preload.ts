@@ -11,7 +11,7 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   selectProject: (id: string): Promise<ProjectState> => ipcRenderer.invoke('work:select-project', id),
   createTask: (title: string): Promise<{ state: ProjectState; task: Task }> => ipcRenderer.invoke('work:create-task', title),
   selectTask: (id: string): Promise<{ state: ProjectState; task: Task; history: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> } | null> => ipcRenderer.invoke('work:select-task', id),
-  clearTasks: (): Promise<ProjectState> => ipcRenderer.invoke('work:clear-tasks'),
+  clearTasks: (projectId?: string): Promise<ProjectState> => ipcRenderer.invoke('work:clear-tasks', projectId),
   deleteTask: (id: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:delete-task', id),
   renameTask: (id: string, title: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:rename-task', id, title),
   renameProject: (id: string, name: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:rename-project', id, name),

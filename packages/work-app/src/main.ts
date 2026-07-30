@@ -543,10 +543,10 @@ function installIpc(): void {
     if (state.selectedTaskId === taskId) state.selectedTaskId = undefined;
     saveState(); broadcastState(); return state;
   });
-  ipcMain.handle('work:clear-tasks', () => {
-    const projectId = state.selectedProjectId;
+  ipcMain.handle('work:clear-tasks', (_event, projectId?: string) => {
+    const targetProjectId = projectId ?? state.selectedProjectId;
     const selectedTaskId = state.selectedTaskId;
-    state.tasks = state.tasks.filter((task) => task.projectId !== projectId || task.id === activeTaskId || task.status === 'running' || task.status === 'waiting');
+    state.tasks = state.tasks.filter((task) => task.projectId !== targetProjectId || task.id === activeTaskId || task.status === 'running' || task.status === 'waiting');
     if (selectedTaskId && !state.tasks.some((task) => task.id === selectedTaskId)) state.selectedTaskId = undefined;
     saveState(); broadcastState(); return state;
   });

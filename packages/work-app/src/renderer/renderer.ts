@@ -24,7 +24,7 @@ declare global {
       selectProject: (id: string) => Promise<WorkState>;
       createTask: (title: string) => Promise<{ state: WorkState; task: Task }>;
       selectTask: (id: string) => Promise<{ state: WorkState; task: Task; history: HistoryItem[] } | null>;
-      clearTasks: () => Promise<WorkState>;
+      clearTasks: (projectId?: string) => Promise<WorkState>;
       deleteTask: (id: string) => Promise<WorkState | null>;
       renameTask: (id: string, title: string) => Promise<WorkState | null>;
       renameProject: (id: string, name: string) => Promise<WorkState | null>;
@@ -45,7 +45,7 @@ declare global {
 }
 
 const $ = <T extends HTMLElement>(selector: string): T => document.querySelector(selector) as T;
-const projectList = $('#project-list'); const taskList = $('#task-list'); const conversation = $('#conversation');
+const taskList = $('#task-list'); const conversation = $('#conversation');
 const emptyState = $('#empty-state'); const approvalPanel = $('#approval-panel'); const promptInput = $('#prompt') as HTMLTextAreaElement;
 const sendButton = $('#send-button') as HTMLButtonElement; const inspector = $('#inspector'); const inspectorContent = $('#inspector-content');
 const inspectorTitle = $('#inspector-title'); const attachmentList = $('#attachment-list'); const searchPanel = $('#search-panel'); const searchInput = $('#search-input') as HTMLInputElement;
@@ -53,6 +53,7 @@ const contextUsageEl = $('#context-usage');
 
 let state: WorkState | null = null;
 let activeRunId: string | null = null;
+let collapsedProjects: Set<string> = new Set();
 let activeAssistant: HTMLElement | null = null;
 let attachments: Attachment[] = [];
 let activeInspectorTab: 'overview' | 'files' | 'prs' = 'overview';
@@ -96,19 +97,6 @@ function humanizeError(raw: string): string | null {
 
 function renderProjects(): void {
   const current = state; if (!current) return;
-  const folder = icon('folder');
-  const folderOpen = icon('folder-open');
-  projectList.innerHTML = current.projects.map((project) => {
-    const isSelected = project.id === current.selectedProjectId;
-    return `<button class="project-item ${isSelected ? 'selected' : ''}" data-project="${escapeHtml(project.id)}"><span class="folder-icon">${isSelected ? folderOpen : folder}</span><span class="project-name" title="双击重命名">${escapeHtml(project.name)}</span></button>`;
-  }).join('');
-  projectList.querySelectorAll<HTMLButtonElement>('[data-project]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const next = await window.mocodeWork.selectProject(button.dataset.project!); updateState(next); clearWorkspace();
-    });
-    const nameSpan = button.querySelector<HTMLElement>('.project-name');
-    nameSpan?.addEventListener('dblclick', (event) => { event.preventDefault(); event.stopPropagation(); void startProjectRename(button.dataset.project!); });
-  });
   const project = selectedProject();
   const ctx = $('#context-project');
   if (ctx) ctx.innerHTML = `${icon('home')}<span>${escapeHtml(project?.name ?? '项目')}</span>`;
@@ -116,20 +104,74 @@ function renderProjects(): void {
   if (branch) branch.innerHTML = `${icon('branch')}<span>${escapeHtml(project?.branch ?? '本地')}</span>`;
 }
 
+function timeAgo(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+  if (seconds < 60) return '刚刚';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}天前`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}个月前`;
+  const years = Math.floor(months / 12);
+  return `${years}年前`;
+}
+
 function renderTasks(): void {
   const current = state; if (!current) return;
-  const tasks = current.tasks.filter((task) => task.projectId === current.selectedProjectId).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  taskList.innerHTML = tasks.length ? tasks.map((task) => {
+  const groups = current.projects.map((project) => ({
+    project,
+    tasks: current.tasks.filter((task) => task.projectId === project.id).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+  })).filter((group) => group.tasks.length > 0);
+
+  if (!groups.length) {
+    taskList.innerHTML = '<p class="empty-tasks">无任务</p>';
+    $('#usage').textContent = '0%';
+    return;
+  }
+
+  taskList.innerHTML = groups.map(({ project, tasks }) => {
+    const isSelectedProject = project.id === current.selectedProjectId;
+    const projectId = project.id;
+    const isCollapsed = collapsedProjects.has(project.id);
+    return `<div class="project-group ${isCollapsed ? 'collapsed' : ''}">
+  <div class="project-group-heading ${isSelectedProject ? 'selected' : ''}" data-toggle-project="${projectId}" title="点击展开 / 折叠">
+    <span class="project-group-name" title="${escapeHtml(project.name)}">${escapeHtml(project.name)}</span>
+    <span class="project-group-chevron" aria-hidden="true">${icon(isCollapsed ? 'chevron-right' : 'chevron-down')}</span>
+    <span class="project-group-actions"><button class="clear-project-tasks icon-button-square" data-clear-project="${projectId}" title="清除该项目任务" aria-label="清除 ${escapeHtml(project.name)} 的任务">${icon('close')}</button></span>
+  </div>
+  <div class="project-group-tasks">${tasks.map((task) => {
     const id = escapeHtml(task.id);
     const deleteTitle = task.status === 'running' || task.status === 'waiting' ? '停止并删除任务' : '删除任务';
-    // 正在跑 / 等待中的任务,状态文字始终显示;其余 hover 才显示
-    const alwaysShow = task.status === 'running' || task.status === 'waiting' || task.id === current.selectedTaskId;
-    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-spark">${icon('sparkles')}</span><span class="task-copy"><b class="task-title" title="双击重命名">${escapeHtml(task.title)}</b><small ${alwaysShow ? 'data-always="1"' : ''}>${statusText(task.status)}</small></span><span class="task-dot"></span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">${icon('close')}</button></div>`;
-  }).join('') : '<p class="empty-tasks">无任务</p>';
+    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-spark">${icon('sparkles')}</span><span class="task-copy"><b class="task-title" title="双击重命名">${escapeHtml(task.title)}</b><small data-always="1">${timeAgo(task.updatedAt)}</small></span><span class="task-dot"></span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">${icon('close')}</button></div>`;
+  }).join('')}</div>
+</div>`;
+  }).join('');
+
+  taskList.querySelectorAll<HTMLElement>('[data-toggle-project]').forEach((heading) => {
+    const projectId = heading.dataset.toggleProject!;
+    heading.addEventListener('click', () => {
+      if (collapsedProjects.has(projectId)) collapsedProjects.delete(projectId);
+      else collapsedProjects.add(projectId);
+      persistCollapsedProjects();
+      const collapsed = collapsedProjects.has(projectId);
+      const group = heading.closest('.project-group');
+      if (group) group.classList.toggle('collapsed', collapsed);
+      const chevron = heading.querySelector<HTMLElement>('.project-group-chevron');
+      if (chevron) chevron.innerHTML = icon(collapsed ? 'chevron-right' : 'chevron-down');
+      heading.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    });
+  });
+
   taskList.querySelectorAll<HTMLButtonElement>('[data-task]').forEach((button) => {
     button.addEventListener('click', () => void openTask(button.dataset.task!));
     button.querySelector<HTMLElement>('.task-title')?.addEventListener('dblclick', (event) => { event.preventDefault(); event.stopPropagation(); void startTaskRename(button.dataset.task!); });
   });
+
   taskList.querySelectorAll<HTMLButtonElement>('[data-delete-task]').forEach((button) => button.addEventListener('click', () => {
     const taskId = button.dataset.deleteTask!;
     const task = state?.tasks.find((item) => item.id === taskId);
@@ -138,8 +180,19 @@ function renderTasks(): void {
     }
     void deleteTask(taskId);
   }));
-  const running = tasks.filter((task) => task.status === 'running' || task.status === 'waiting').length;
-  const total = tasks.length;
+
+  taskList.querySelectorAll<HTMLButtonElement>('[data-clear-project]').forEach((button) => button.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    if (activeRunId) return;
+    const projectId = button.dataset.clearProject!;
+    const project = state?.projects.find((p) => p.id === projectId);
+    updateState(await window.mocodeWork.clearTasks(projectId));
+    clearWorkspace();
+    showToast('info', project ? `已清除 “${project.name}” 的任务` : '已清除任务');
+  }));
+
+  const running = current.tasks.filter((task) => task.status === 'running' || task.status === 'waiting').length;
+  const total = current.tasks.length;
   $('#usage').textContent = total ? `${total} 任务${running ? ` · ${running} 运行中` : ''}` : '0%';
 }
 
@@ -792,32 +845,6 @@ async function startTaskRename(taskId: string): Promise<void> {
   if (!task) return;
   openTaskModal('rename', taskId);
 }
-// 侧栏双击项目名 → 就地行内重命名（轻量，不需要弹窗）
-async function startProjectRename(projectId: string): Promise<void> {
-  const button = Array.from(projectList.querySelectorAll<HTMLButtonElement>('[data-project]')).find((b) => b.dataset.project === projectId);
-  const label = button?.querySelector<HTMLElement>('.project-name');
-  if (!button || !label) return;
-  const original = label.textContent ?? '';
-  const input = document.createElement('input');
-  input.className = 'project-rename';
-  input.value = original; input.maxLength = 80;
-  label.replaceWith(input);
-  input.focus(); input.select();
-  const commit = async (): Promise<void> => {
-    input.removeEventListener('blur', commit); input.removeEventListener('keydown', onKey);
-    const name = input.value.trim();
-    if (name && name !== original) {
-      const next = await window.mocodeWork.renameProject(projectId, name);
-      if (next) updateState(next);
-    } else { updateState(state!); }
-  };
-  const onKey = (event: KeyboardEvent): void => {
-    if (event.key === 'Enter') { event.preventDefault(); void commit(); }
-    else if (event.key === 'Escape') { event.preventDefault(); input.value = original; void commit(); }
-  };
-  input.addEventListener('blur', commit);
-  input.addEventListener('keydown', onKey);
-}
 
 // 弹窗交互：创建/保存、关闭、遮罩点击、回车快捷键
 $('#task-modal-create')?.addEventListener('click', () => void submitTaskModal());
@@ -835,7 +862,6 @@ $('#task-goal-input')?.addEventListener('keydown', (event) => {
 });
 $('#composer-task-name')?.addEventListener('click', () => { const t = selectedTask(); if (t) void startTaskRename(t.id); });
 $('#composer-task-edit')?.addEventListener('click', () => { const t = selectedTask(); if (t) void startTaskRename(t.id); });
-$('#clear-task').addEventListener('click', async () => { if (activeRunId) return; updateState(await window.mocodeWork.clearTasks()); clearWorkspace(); });
 $('#add-attachment').addEventListener('click', async () => { const attachment = await window.mocodeWork.pickAttachment(); if (attachment) { attachments.push(attachment); renderAttachments(); } });
 $('#compact-button').addEventListener('click', () => {
   window.mocodeWork.send({ type: 'compact', id: crypto.randomUUID() });
@@ -912,6 +938,7 @@ refreshThemeSegmented();
 // 关键:不依赖 #sidebar-toggle 引用,也不依赖 button 元素 —— 改用 data-attr + 事件代理 + 每次现查 DOM,
 // 这样即便 setIcon() 后续又把 button 替换成 svg (或任何原因 DOM 变了) 也不会失效。
 const SIDEBAR_KEY = 'mocode-work-sidebar';
+const COLLAPSED_PROJECTS_KEY = 'mocode-work-collapsed-projects';
 const SIDEBAR_TOGGLE_SEL = '[data-sidebar-toggle]';
 const appBody = document.querySelector('.app-body') as HTMLElement;
 function setSidebarCollapsed(collapsed: boolean, persist = true): void {
@@ -924,6 +951,9 @@ function setSidebarCollapsed(collapsed: boolean, persist = true): void {
     btn.setAttribute('aria-label', collapsed ? '展开侧栏' : '折叠侧栏');
   });
   if (persist) { try { localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0'); } catch { /* 忽略 */ } }
+}
+function persistCollapsedProjects(): void {
+  try { localStorage.setItem(COLLAPSED_PROJECTS_KEY, JSON.stringify([...collapsedProjects])); } catch { /* 忽略 */ }
 }
 function toggleSidebar(): void {
   const next = !(appBody?.classList.contains('sidebar-collapsed') ?? false);
@@ -949,6 +979,10 @@ document.addEventListener('pointerdown', (event) => {
 }, true);
 // 启动时恢复用户上次的偏好
 try { if (localStorage.getItem(SIDEBAR_KEY) === '1') setSidebarCollapsed(true, false); } catch { /* 忽略 */ }
+try {
+  const raw = localStorage.getItem(COLLAPSED_PROJECTS_KEY);
+  if (raw) collapsedProjects = new Set<string>(JSON.parse(raw) as string[]);
+} catch { /* 忽略 */ }
 /* ── Sidebar resize (拖拽调宽度) ───────────────────────── */
 const SIDEBAR_WIDTH_KEY = 'mocode-work-sidebar-width';
 const SIDEBAR_MIN = 200;
