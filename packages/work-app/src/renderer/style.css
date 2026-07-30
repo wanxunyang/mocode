@@ -87,8 +87,8 @@ textarea:focus-visible, input:focus-visible { outline-offset: 0; }
 .sidebar { width: var(--sidebar-width, 240px); flex: 0 0 var(--sidebar-width, 240px); display: flex; flex-direction: column; background: var(--color-paper-2); border-right: var(--rule-hair); padding: var(--space-sm) var(--space-2xs) var(--space-xs); color: var(--color-muted); position: relative; }
 /* 侧栏右沿的拖拽手柄:跨在 sidebar 边界,鼠标变 ew-resize;hover/active 出现细线高亮 */
 .sidebar-resize { position: absolute; right: -3px; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 5; background: transparent; transition: background var(--dur-micro) var(--ease-out); touch-action: none; }
-.sidebar-resize:hover { background: var(--color-accent-soft); }
-.sidebar-resize:active { background: var(--color-accent); }
+.sidebar-resize:hover { background: var(--color-rule); }
+.sidebar-resize:active { background: var(--color-neutral); }
 /* 折叠态:sidebar 整个 display:none,resize 也跟着消失 */
 .app-body.sidebar-collapsed .sidebar-resize { display: none; }
 /* 拖拽中:全局禁掉文字选择和默认光标,避免误选 */
@@ -139,7 +139,7 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .settings-item .icon { width: 14px; height: 14px; }
 
 /* ── Workspace ───────────────────────────────────────── */
-.workspace { --conversation-width: min(620px, 80%); position: relative; flex: 1; min-width: 0; height: 100%; background: var(--color-paper); overflow: hidden; }
+.workspace { --conversation-width: min(760px, 86%); position: relative; flex: 1; min-width: 0; height: 100%; background: var(--color-paper); overflow: hidden; }
 .workspace-actions { position: absolute; z-index: var(--z-raised); top: var(--space-sm); right: var(--space-md); display: flex; gap: var(--space-xs); }
 .workspace-actions button { width: 26px; height: 26px; color: var(--color-subtle); font-size: var(--text-sm); line-height: 1; display: grid; place-items: center; border-radius: var(--radius-sm); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
 .workspace-actions button .icon { width: 16px; height: 16px; }
@@ -277,7 +277,7 @@ textarea::placeholder { color: var(--color-subtle); }
 .tool-detail pre::-webkit-scrollbar-thumb { background: var(--color-rule); border-radius: var(--radius-full); }
 
 /* ── Task item (sidebar) ─────────────────────────────── */
-.task-item { width: 100%; height: 24px; display: flex; align-items: center; border-radius: var(--radius-sm); background: transparent; color: var(--color-muted); transition: background var(--dur-micro) var(--ease-out); }
+.task-item { width: 100%; height: 24px; display: flex; align-items: center; border-radius: var(--radius-sm); background: transparent; color: var(--color-muted); transition: background var(--dur-micro) var(--ease-out); padding-right: var(--space-2xs); }
 .task-item:hover { background: var(--color-paper-3); }
 .task-open { min-width: 0; height: 24px; flex: 1; display: flex; align-items: center; gap: var(--space-2xs); padding: 0 2px 0 var(--space-xs); text-align: left; border-radius: var(--radius-sm); }
 .task-spark { color: var(--color-subtle); display: inline-grid; place-items: center; line-height: 1; }
@@ -287,9 +287,9 @@ textarea::placeholder { color: var(--color-subtle); }
 .task-copy small { margin-left: auto; flex: 0 0 auto; color: var(--color-subtle); font-size: 9px; line-height: 1; font-family: var(--font-outlier); opacity: 0; transition: opacity var(--dur-micro) var(--ease-out); }
 .task-item:hover .task-copy small, .task-item.selected .task-copy small, .task-copy small[data-always="1"] { opacity: 1; }
 .task-dot { width: 7px; height: 7px; border-radius: var(--radius-full); background: var(--color-subtle); flex: 0 0 7px; }
-.task-delete { width: 20px; height: 20px; flex: 0 0 20px; display: grid; place-items: center; margin-right: 2px; border-radius: var(--radius-sm); color: var(--color-subtle); opacity: 0.45; transition: opacity var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out); }
+.task-delete { width: 20px; height: 20px; flex: 0 0 20px; display: grid; place-items: center; margin-right: 2px; border-radius: var(--radius-sm); color: var(--color-subtle); opacity: 0; visibility: hidden; transition: opacity var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out); }
 .task-delete .icon { width: 12px; height: 12px; }
-.task-item:hover .task-delete, .task-delete:focus-visible { opacity: 1; }
+.task-item:hover .task-delete, .task-delete:focus-visible { opacity: 1; visibility: visible; }
 .task-delete:hover:not(:disabled) { color: var(--color-fail); background: color-mix(in srgb, var(--color-fail) 10%, transparent); }
 .task-delete:disabled { opacity: 0.2; cursor: not-allowed; }
 .task-item.running .task-dot { background: var(--color-running); animation: pulse 1.2s ease-in-out infinite; }
@@ -376,7 +376,7 @@ textarea::placeholder { color: var(--color-subtle); }
 
 /* ── Responsive ──────────────────────────────────────── */
 @media (max-width: 60rem) {
-  .workspace { --conversation-width: 92%; }
+  .workspace { --conversation-width: 94%; }
   .sidebar { width: 180px; flex-basis: 180px; }
   .inspector { width: 280px; }
   .nav-item { font-size: var(--text-2xs); }

@@ -453,6 +453,7 @@ const emitter = stdin as unknown as KeypressEmitter;
 // ── 运行态交互(typeahead 输入 + 滚动回看 + Ctrl+C 中断)──
 // 只在 await runAgent() 期间挂载;/resume /rollback /compact 等走 askLine(cooked readline)的分支不挂(避免抢 stdin)。
 let runningInput = ''; // 运行中已打字缓冲(单行;agent 结束后预填下一轮 INPUT 态)
+let runningCursor = 0; // 缓冲内光标字符索引(0..len);运行态支持任意位置编辑,与空闲态一致
 let runningPlaceholder = '';
 let currentAbort: AbortController | null = null;
 let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user 输入(下轮 INPUT 态消费)
@@ -505,7 +506,8 @@ function onRunningKey(_str: string, key?: Key): void {
   if (key.ctrl && key.name === 'c') {
     if (runningInput.length > 0) {
       runningInput = '';
-      layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+      runningCursor = 0;
+      layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
     } else if (currentAbort && !currentAbort.signal.aborted) {
       appendCurrentSessionRuntimeEvent('abort', { phase: 'requested', source: 'keyboard' });
       currentAbort.abort();
@@ -513,16 +515,30 @@ function onRunningKey(_str: string, key?: Key): void {
     return;
   }
   const s = key.sequence ?? '';
+  // 光标移动(单行 typeahead,光标可任意位置,与空闲态一致)
+  if (key.name === 'left') { runningCursor = Math.max(0, runningCursor - 1); layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder); return; }
+  if (key.name === 'right') { runningCursor = Math.min(runningInput.length, runningCursor + 1); layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder); return; }
+  if (key.name === 'home' || (key.ctrl && key.name === 'a')) { runningCursor = 0; layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder); return; }
+  if (key.name === 'end' || (key.ctrl && key.name === 'e')) { runningCursor = runningInput.length; layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder); return; }
   if (key.name === 'backspace') {
-    if (runningInput.length > 0) {
-      runningInput = runningInput.slice(0, -1);
-      layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+    if (runningCursor > 0) {
+      runningInput = runningInput.slice(0, runningCursor - 1) + runningInput.slice(runningCursor);
+      runningCursor--;
+      layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
+    }
+    return;
+  }
+  if (key.name === 'delete') {
+    if (runningCursor < runningInput.length) {
+      runningInput = runningInput.slice(0, runningCursor) + runningInput.slice(runningCursor + 1);
+      layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
     }
     return;
   }
   if (key.name === 'escape') {
     runningInput = '';
-    layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+    runningCursor = 0;
+    layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
     return;
   }
   // Enter / Ctrl+J:运行中 no-op(单行 typeahead;agent 结束后预填,用户在 INPUT 态按 Enter 提交)
@@ -533,23 +549,27 @@ function onRunningKey(_str: string, key?: Key): void {
   ) {
     return;
   }
-  // 可打印字符(>= 空格,非 ctrl/meta)→ 追加 + dim 回显
+  // 可打印字符(>= 空格,非 ctrl/meta)→ 光标处插入 + 非 dim 回显(与空闲态一致)
   if (s && s >= ' ' && !key.ctrl && !key.meta) {
-    runningInput += s;
-    layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+    runningInput = runningInput.slice(0, runningCursor) + s + runningInput.slice(runningCursor);
+    runningCursor += s.length;
+    layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
   }
 }
 
-/** 鼠标右键单击输入框(未拖动)时 layout 读剪贴板后回调:追加到 typeahead 缓冲(简单粘贴,不分长短)。 */
+/** 鼠标右键单击输入框(未拖动)时 layout 读剪贴板后回调:在光标处插入 typeahead 缓冲(单行,换行折为空格)。 */
 function onRunningMousePaste(text: string): void {
-  runningInput += text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  layout.paintRunningInputEcho(runningInput, runningPlaceholder);
+  const flat = text.replace(/[\r\n]+/g, ' ');
+  runningInput = runningInput.slice(0, runningCursor) + flat + runningInput.slice(runningCursor);
+  runningCursor += flat.length;
+  layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
 }
 
 /** 进入运行态:挂 keypress 监听 + raw mode + 新建 abort 控制器,返回其 signal。在 await runAgent 前、enterRunningMode 后调。 */
 function startRunningListener(placeholder: string): AbortSignal {
   runningPlaceholder = placeholder;
   runningInput = '';
+  runningCursor = 0;
   emitKeypressEvents(stdin); // 幂等:首轮 prompt 已永久挂解析器,这里防御性再调
   try {
     stdin.setRawMode(true);
@@ -901,6 +921,7 @@ export async function startRepl(
     renderHistory(history);
     // 强制回尾:同 /resume 命令,renderHistory 展开详情会设 scrollOffset>0,需复位避免闪烁。
     layout.resetScroll();
+    layout.repaintViewport();
   } else {
     layout.writeBanner(bannerLines(banner()));
   }
@@ -1189,11 +1210,12 @@ export async function startRepl(
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
     renderHistory(history);
-    // 强制回尾:renderHistory 展开 mutation 工具详情会经 contentInsertAfter 设置 scrollOffset>0;
-    // 若不复位，后续 showLiveBatch 在冻结视口下 repaintViewport 会导致工具信息闪烁/滚动消失。
-    layout.resetScroll();
     // 末尾 \n\n:与后续用户消息(❯ bubble)之间空一行。
     layout.contentWrite(`${ui.dim}${t('repl.resumed', { id: loaded.id })}${ui.reset}\n\n`);
+    // 强制回尾:renderHistory 展开 mutation 工具详情会经 contentInsertAfter 设置 scrollOffset>0;
+    // 先把"已续接会话"提示写入缓冲，再统一回尾重画，避免切换后视口停留在历史顶部。
+    layout.resetScroll();
+    layout.repaintViewport();
   }
 
   let hasSubmittedInput = false;

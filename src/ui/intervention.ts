@@ -276,7 +276,6 @@ export async function promptIntervention(
       cursorLine: 0,
       cursorCol: 0,
       menu: null,
-      dim: true,
     });
     if (layout.isScrolled()) layout.resetScroll();
     else layout.repaintViewport();

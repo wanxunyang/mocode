@@ -24,13 +24,12 @@
       <div class="titlebar"><span class="titlebar-brand"><img class="titlebar-brand-logo" src="../assets/icon.png" alt="Mocode" title="Mocode" /><span class="titlebar-brand-text">Mocode</span></span></div>
       <div class="app-body">
       <aside class="sidebar">
-        <header class="brand-row"><button class="icon-button muted" id="sidebar-toggle" data-sidebar-toggle title="折叠 / 展开侧栏" aria-label="折叠 / 展开侧栏" aria-pressed="false"><svg class="icon" data-icon="panel-left"></svg></button><div class="brand-actions"><button class="icon-button muted" id="search-button" title="搜索 (⌘K)" aria-label="搜索"><svg class="icon" data-icon="search"></svg></button><button class="icon-button muted" id="theme-toggle" title="切换主题" aria-label="切换主题"><svg class="icon" data-icon="moon"></svg><svg class="icon icon-swap" data-icon="sun"></svg></button></div></header>
+        <header class="brand-row"><button class="icon-button muted" id="sidebar-toggle" data-sidebar-toggle title="折叠 / 展开侧栏" aria-label="折叠 / 展开侧栏" aria-pressed="false"><svg class="icon" data-icon="panel-left"></svg></button><div class="brand-actions"><button class="icon-button muted" id="add-project" title="添加项目" aria-label="添加项目"><svg class="icon" data-icon="plus"></svg></button><button class="icon-button muted" id="search-button" title="搜索 (⌘K)" aria-label="搜索"><svg class="icon" data-icon="search"></svg></button><button class="icon-button muted" id="theme-toggle" title="切换主题" aria-label="切换主题"><svg class="icon" data-icon="moon"></svg><svg class="icon icon-swap" data-icon="sun"></svg></button></div></header>
         <nav class="primary-nav" aria-label="主导航">
           <button class="nav-item active" id="new-task"><svg class="icon" data-icon="circle-plus"></svg>新建任务</button>
           <button class="nav-item" id="pull-requests"><svg class="icon" data-icon="git-pull-request"></svg>拉取请求</button>
         </nav>
-        <section class="sidebar-section projects-section"><div class="section-heading"><span>项目</span><button class="add-project icon-button-square" id="add-project" title="添加项目" aria-label="添加项目"><svg class="icon" data-icon="plus"></svg></button></div><div id="project-list" class="project-list"></div></section>
-        <section class="sidebar-section tasks-section"><div class="section-heading"><span>任务</span><button class="add-project icon-button-square" id="clear-task" title="清除当前项目任务" aria-label="清除当前项目任务"><svg class="icon" data-icon="close"></svg></button></div><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
+        <section class="sidebar-section tasks-section"><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
         <button class="sidebar-footer" id="settings-button" title="设置与帮助" aria-haspopup="true" aria-expanded="false">
           <span class="avatar">M</span>
           <span class="footer-brand">Mocode</span>
@@ -75,7 +74,7 @@
             </div>
             <div id="attachment-list" class="attachment-list"></div>
             <textarea id="prompt" rows="1" placeholder="描述输入"></textarea>
-            <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" title="添加图片 (也可拖入)" aria-label="添加图片"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" title="压缩会话上下文"><svg class="icon icon-inline" data-icon="layers-compress"></svg>压缩</button><span class="context-usage" id="context-usage" title="上下文占用">--</span></div><div class="right-actions"><button id="mode-button" class="model-button" title="切换模型" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">Mocode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" title="发送 (⌘⏎)" aria-label="发送"><svg class="icon" data-icon="paper-airplane"></svg></button></div></div>
+            <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" title="添加图片 (也可拖入)" aria-label="添加图片"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" title="压缩会话上下文"><svg class="icon icon-inline" data-icon="layers-compress"></svg>压缩</button><span class="context-usage" id="context-usage" title="上下文占用">--</span></div><div class="right-actions"><button id="mode-button" class="model-button" title="切换模型" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">Mocode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" title="发送 (⌘⏎)" aria-label="发送"><svg class="icon" data-icon="arrow-up"></svg></button></div></div>
             <div id="model-picker" class="model-picker hidden" role="listbox" aria-label="选择模型"></div>
           </div>
         </footer>

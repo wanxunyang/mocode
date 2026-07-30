@@ -15,28 +15,28 @@
 
   /* ── Colour · Studio (light · 默认) ──────────────────── */
   --color-paper:    oklch(100% 0 0);          /* 纯白主背景 */
-  --color-paper-2:  oklch(97.5% 0.003 145);   /* 侧栏 / 卡片 */
-  --color-paper-3:  oklch(94% 0.005 145);     /* hover / 强调面 */
-  --color-rule:     oklch(90% 0.003 145);
-  --color-rule-soft:oklch(94% 0.002 145);
-  --color-neutral:  oklch(55% 0.010 145);
-  --color-muted:    oklch(42% 0.012 145);
-  --color-subtle:   oklch(71% 0.008 145);
-  --color-ink:      oklch(19% 0.014 150);
-  --color-ink-soft: oklch(30% 0.012 150);
-  --color-accent:   oklch(52% 0.16 145);
-  --color-accent-soft: oklch(93% 0.04 145);
-  --color-accent-ink:  oklch(38% 0.13 145);
-  --color-focus:    oklch(50% 0.17 145);
+  --color-paper-2:  oklch(97.5% 0 0);         /* 侧栏 / 卡片 */
+  --color-paper-3:  oklch(94% 0 0);           /* hover / 强调面 */
+  --color-rule:     oklch(90% 0 0);
+  --color-rule-soft:oklch(94% 0 0);
+  --color-neutral:  oklch(55% 0 0);
+  --color-muted:    oklch(42% 0 0);
+  --color-subtle:   oklch(71% 0 0);
+  --color-ink:      oklch(19% 0 0);
+  --color-ink-soft: oklch(30% 0 0);
+  --color-accent:   oklch(32% 0 0);           /* 中性深灰强调 */
+  --color-accent-soft: oklch(93% 0 0);
+  --color-accent-ink:  oklch(22% 0 0);
+  --color-focus:    oklch(38% 0 0);
   --color-fail-ink: oklch(46% 0.16 25);       /* fail 加深态 */
-  --color-scrim:    oklch(19% 0.014 150 / 0.35); /* 模态遮罩 */
+  --color-scrim:    oklch(19% 0 0 / 0.35);    /* 模态遮罩 */
 
   /* state colours — semantic */
   --color-running:  oklch(58% 0.14 230);   /* cool blue, in-flight */
-  --color-success:  oklch(52% 0.14 150);   /* leaf, done */
+  --color-success:  oklch(45% 0 0);        /* neutral grey, done */
   --color-warn:     oklch(62% 0.15 75);    /* amber, waiting */
   --color-fail:     oklch(56% 0.16 25);    /* warm red, error */
-  --color-idle:     oklch(68% 0.008 145);  /* grey, cancelled */
+  --color-idle:     oklch(68% 0 0);        /* grey, cancelled */
 
   /* ── Space · 4pt base ──────────────────────────────── */
   --space-3xs: 0.125rem; /* 2  */
@@ -68,9 +68,9 @@
   --dur-long:  420ms;
 
   /* ── Depth ─────────────────────────────────────────── */
-  --shadow-whisper: 0 1px 2px oklch(20% 0.01 150 / 0.05);
-  --shadow-soft:    0 4px 16px oklch(20% 0.02 150 / 0.06);
-  --shadow-raised:  0 8px 28px oklch(20% 0.02 150 / 0.09);
+  --shadow-whisper: 0 1px 2px oklch(20% 0 0 / 0.05);
+  --shadow-soft:    0 4px 16px oklch(20% 0 0 / 0.06);
+  --shadow-raised:  0 8px 28px oklch(20% 0 0 / 0.09);
 
   /* ── Z-index ───────────────────────────────────────── */
   --z-base: 1;
@@ -101,29 +101,29 @@
  * 深底 + 浅字，保持 leaf-green 145 色相锚点与设计层次。
  * 仅覆盖颜色与阴影；间距 / 字号 / 动效 / 层级继承自 :root。 */
 :root[data-theme="dark"] {
-  --color-paper:    oklch(17% 0.012 150);
-  --color-paper-2:  oklch(21% 0.014 150);
-  --color-paper-3:  oklch(26% 0.015 150);
-  --color-rule:     oklch(30% 0.010 150);
-  --color-rule-soft:oklch(24% 0.010 150);
-  --color-neutral:  oklch(62% 0.010 145);
-  --color-muted:    oklch(70% 0.012 145);
-  --color-subtle:   oklch(48% 0.008 145);
-  --color-ink:      oklch(95% 0.010 145);
-  --color-ink-soft: oklch(82% 0.010 145);
-  --color-accent:   oklch(66% 0.16 145);
-  --color-accent-soft: oklch(30% 0.05 145);
-  --color-accent-ink:  oklch(82% 0.13 145);
-  --color-focus:    oklch(63% 0.17 145);
+  --color-paper:    oklch(17% 0 0);
+  --color-paper-2:  oklch(21% 0 0);
+  --color-paper-3:  oklch(26% 0 0);
+  --color-rule:     oklch(30% 0 0);
+  --color-rule-soft:oklch(24% 0 0);
+  --color-neutral:  oklch(62% 0 0);
+  --color-muted:    oklch(70% 0 0);
+  --color-subtle:   oklch(48% 0 0);
+  --color-ink:      oklch(95% 0 0);
+  --color-ink-soft: oklch(82% 0 0);
+  --color-accent:   oklch(82% 0 0);           /* 中性浅灰强调 */
+  --color-accent-soft: oklch(30% 0 0);
+  --color-accent-ink:  oklch(90% 0 0);
+  --color-focus:    oklch(70% 0 0);
   --color-fail-ink: oklch(58% 0.16 25);
   --color-scrim:    oklch(0% 0 0 / 0.55);
 
   /* state colours — 提亮以适配深底 */
   --color-running:  oklch(70% 0.14 230);
-  --color-success:  oklch(66% 0.14 150);
+  --color-success:  oklch(60% 0 0);
   --color-warn:     oklch(72% 0.15 75);
   --color-fail:     oklch(64% 0.16 25);
-  --color-idle:     oklch(50% 0.008 145);
+  --color-idle:     oklch(50% 0 0);
 
   /* 深底阴影更重，靠对比而非色相 */
   --shadow-whisper: 0 1px 2px oklch(0% 0 0 / 0.30);
