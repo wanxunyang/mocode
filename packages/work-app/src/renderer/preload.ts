@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   getState: (): Promise<ProjectState> => ipcRenderer.invoke('work:get-state'),
   pickProject: (): Promise<ProjectState | null> => ipcRenderer.invoke('work:pick-project'),
   selectProject: (id: string): Promise<ProjectState> => ipcRenderer.invoke('work:select-project', id),
-  createTask: (title: string): Promise<{ state: ProjectState; task: Task }> => ipcRenderer.invoke('work:create-task', title),
+  createTask: (title: string, projectId?: string): Promise<{ state: ProjectState; task: Task }> => ipcRenderer.invoke('work:create-task', title, projectId),
   selectTask: (id: string): Promise<{ state: ProjectState; task: Task; history: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> } | null> => ipcRenderer.invoke('work:select-task', id),
   clearTasks: (projectId?: string): Promise<ProjectState> => ipcRenderer.invoke('work:clear-tasks', projectId),
   deleteTask: (id: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:delete-task', id),

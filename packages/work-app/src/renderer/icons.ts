@@ -50,6 +50,7 @@ export const ICONS: Record<string, string> = {
 
   // 任务状态 / 通用
   'dot-running': `<svg viewBox="0 0 20 20" fill="currentColor" stroke="none"><circle cx="10" cy="10" r="3"/></svg>`,
+  'loader': `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M10 2a8 8 0 0 1 8 8" opacity=".9"/><path d="M18 10a8 8 0 0 1-8 8" opacity=".5"/><path d="M10 18a8 8 0 0 1-8-8" opacity=".25"/></svg>`,
 
   // 消息操作
   'copy': `<svg ${SVG_ATTRS}><rect x="7" y="3" width="10" height="10" rx="1.5"/><path d="M13 17H5a1.5 1.5 0 0 1-1.5-1.5V6"/></svg>`,

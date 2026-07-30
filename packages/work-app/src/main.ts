@@ -54,6 +54,7 @@ function loadMocodeConfig(projectRoot?: string): { loaded: string[]; missing: st
 type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 interface Project { id: string; name: string; root: string; branch: string; }
 interface TaskRecord {
+  // projectId 为空字符串 = 普通任务（不加入任何空间 / 项目文件夹），agent 在 scratch 目录运行
   id: string; projectId: string; title: string; status: TaskStatus; createdAt: string; updatedAt: string;
   sessionId?: string; changedFiles: string[]; lastError?: string;
 }
@@ -261,6 +262,24 @@ function saveState(): void {
 function selectedProject(): Project { return state.projects.find((item) => item.id === state.selectedProjectId) ?? state.projects[0]; }
 function taskById(id?: string): TaskRecord | undefined { return state.tasks.find((item) => item.id === id); }
 
+/**
+ * 普通任务（无项目文件夹）的 pseudo-project：agent host 需要一个 cwd 跑子进程、
+ * 会话历史也按 <root>/.mocode/sessions 存放，所以给它一个稳定的 scratch 目录。
+ * 放在 userData 下，不污染用户的项目目录。
+ */
+let scratch: Project | null = null;
+function scratchProject(): Project {
+  if (scratch) return scratch;
+  const root = path.join(app.getPath('userData'), 'scratch');
+  mkdirSync(root, { recursive: true });
+  scratch = { id: '__scratch__', name: '普通任务', root, branch: '' };
+  return scratch;
+}
+/** 任务实际运行的 project：普通任务落到 scratch，其余按 projectId 找。 */
+function workspaceForTask(task: TaskRecord): Project | undefined {
+  return task.projectId ? state.projects.find((item) => item.id === task.projectId) : scratchProject();
+}
+
 function contentText(value: unknown): string {
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map((part) => typeof part?.text === 'string' ? part.text : '').join('');
@@ -354,6 +373,9 @@ class LocalAgent {
   // host 连续崩超过这个次数就不再自动重启,避免配置错误时刷屏 + 死循环
   private crashStreak = 0;
   private static MAX_CRASH_STREAK = 3;
+
+  /** 当前 host 进程所在的工作目录 id（普通任务是 __scratch__），用于避免不必要的重启。 */
+  get projectId(): string | null { return this.currentProject?.id ?? null; }
 
   async start(project: Project): Promise<void> {
     this.currentProject = project;
@@ -487,7 +509,7 @@ function applyThemeBackground(theme: 'light' | 'dark' | 'system'): void {
 }
 
 function currentTaskWorkspace(task: TaskRecord): Record<string, unknown> {
-  const project = state.projects.find((item) => item.id === task.projectId);
+  const project = workspaceForTask(task);
   return { task, history: project ? sessionHistory(project, task.sessionId) : [] };
 }
 
@@ -520,21 +542,39 @@ function installIpc(): void {
     if (!state.projects.some((item) => item.id === projectId) || activeTaskId) return state;
     state.selectedProjectId = projectId; state.selectedTaskId = undefined; saveState(); broadcastState(); await agent?.start(selectedProject()); return state;
   });
-  ipcMain.handle('work:create-task', (_event, title: string) => {
-    const project = selectedProject(); const now = new Date().toISOString();
-    const task: TaskRecord = { id: randomUUID(), projectId: project.id, title: title.slice(0, 160), status: 'queued', createdAt: now, updatedAt: now, changedFiles: [] };
-    state.tasks.unshift(task); state.selectedTaskId = task.id; saveState(); broadcastState(); return { state, task };
+  // projectId 传 '' = 普通任务（不进任何空间）；传项目 id = 归入对应空间；不传 = 当前选中项目（兼容旧调用）。
+  ipcMain.handle('work:create-task', async (_event, title: string, projectId?: string) => {
+    const now = new Date().toISOString();
+    let targetProjectId: string;
+    if (typeof projectId === 'string') {
+      targetProjectId = projectId && state.projects.some((item) => item.id === projectId) ? projectId : '';
+    } else {
+      targetProjectId = selectedProject().id;
+    }
+    const task: TaskRecord = { id: randomUUID(), projectId: targetProjectId, title: title.slice(0, 160), status: 'queued', createdAt: now, updatedAt: now, changedFiles: [] };
+    state.tasks.unshift(task); state.selectedTaskId = task.id;
+    if (targetProjectId) state.selectedProjectId = targetProjectId;
+    saveState(); broadcastState();
+    // agent 的工作目录跟随任务归属（普通任务 → scratch 目录）
+    const workspace = workspaceForTask(task);
+    if (workspace && agent && agent.projectId !== workspace.id) await agent.start(workspace);
+    return { state, task };
   });
   ipcMain.handle('work:select-task', async (_event, taskId: string) => {
     const task = taskById(taskId); if (!task || (activeTaskId && activeTaskId !== taskId)) return null;
-    const project = state.projects.find((item) => item.id === task.projectId); if (!project) return null;
-    state.selectedTaskId = task.id; state.selectedProjectId = project.id; saveState(); broadcastState(); await agent?.start(project);
+    const project = workspaceForTask(task); if (!project) return null;
+    state.selectedTaskId = task.id;
+    // 普通任务不改变当前选中的项目（空间高亮保持不变）
+    if (task.projectId) state.selectedProjectId = project.id;
+    saveState(); broadcastState();
+    if (agent && agent.projectId !== project.id) await agent.start(project);
     return { state, ...currentTaskWorkspace(task) };
   });
   ipcMain.handle('work:delete-task', (_event, taskId: string) => {
     if (typeof taskId !== 'string' || !taskId) return null;
     const task = taskById(taskId);
-    if (!task || task.projectId !== state.selectedProjectId) return null;
+    // 普通任务（projectId 为空）不受当前选中项目限制
+    if (!task || (task.projectId && task.projectId !== state.selectedProjectId)) return null;
     if (task.id === activeTaskId) {
       void agent?.send({ type: 'cancel', id: task.id });
       activeTaskId = null;
@@ -554,7 +594,7 @@ function installIpc(): void {
   ipcMain.handle('work:rename-task', (_event, taskId: string, title: string) => {
     if (typeof taskId !== 'string' || !taskId || typeof title !== 'string') return null;
     const task = taskById(taskId);
-    if (!task || task.projectId !== state.selectedProjectId) return null;
+    if (!task || (task.projectId && task.projectId !== state.selectedProjectId)) return null;
     task.title = title.trim().slice(0, 160) || task.title;
     task.updatedAt = new Date().toISOString();
     saveState(); broadcastState();

@@ -22,7 +22,7 @@ declare global {
       getState: () => Promise<WorkState>;
       pickProject: () => Promise<WorkState | null>;
       selectProject: (id: string) => Promise<WorkState>;
-      createTask: (title: string) => Promise<{ state: WorkState; task: Task }>;
+      createTask: (title: string, projectId?: string) => Promise<{ state: WorkState; task: Task }>;
       selectTask: (id: string) => Promise<{ state: WorkState; task: Task; history: HistoryItem[] } | null>;
       clearTasks: (projectId?: string) => Promise<WorkState>;
       deleteTask: (id: string) => Promise<WorkState | null>;
@@ -54,6 +54,7 @@ const contextUsageEl = $('#context-usage');
 let state: WorkState | null = null;
 let activeRunId: string | null = null;
 let collapsedProjects: Set<string> = new Set();
+let collapsedSections: Set<string> = new Set();
 let activeAssistant: HTMLElement | null = null;
 let attachments: Attachment[] = [];
 let activeInspectorTab: 'overview' | 'files' | 'prs' = 'overview';
@@ -123,34 +124,62 @@ function timeAgo(iso: string): string {
 
 function renderTasks(): void {
   const current = state; if (!current) return;
-  const groups = current.projects.map((project) => ({
+  const byUpdatedDesc = (left: Task, right: Task) => right.updatedAt.localeCompare(left.updatedAt);
+  // 普通任务：projectId 为空，平铺在「任务」分组下；加入项目文件夹的任务归在「空间」分组对应文件夹下
+  const normalTasks = current.tasks.filter((task) => !task.projectId).sort(byUpdatedDesc);
+  const spaces = current.projects.map((project) => ({
     project,
-    tasks: current.tasks.filter((task) => task.projectId === project.id).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
-  })).filter((group) => group.tasks.length > 0);
+    tasks: current.tasks.filter((task) => task.projectId === project.id).sort(byUpdatedDesc),
+  }));
 
-  if (!groups.length) {
-    taskList.innerHTML = '<p class="empty-tasks">无任务</p>';
-    $('#usage').textContent = '0%';
-    return;
-  }
-
-  taskList.innerHTML = groups.map(({ project, tasks }) => {
-    const isSelectedProject = project.id === current.selectedProjectId;
-    const projectId = project.id;
-    const isCollapsed = collapsedProjects.has(project.id);
-    return `<div class="project-group ${isCollapsed ? 'collapsed' : ''}">
-  <div class="project-group-heading ${isSelectedProject ? 'selected' : ''}" data-toggle-project="${projectId}" title="点击展开 / 折叠">
-    <span class="project-group-name" title="${escapeHtml(project.name)}">${escapeHtml(project.name)}</span>
-    <span class="project-group-chevron" aria-hidden="true">${icon(isCollapsed ? 'chevron-right' : 'chevron-down')}</span>
-    <span class="project-group-actions"><button class="clear-project-tasks icon-button-square" data-clear-project="${projectId}" title="清除该项目任务" aria-label="清除 ${escapeHtml(project.name)} 的任务">${icon('close')}</button></span>
-  </div>
-  <div class="project-group-tasks">${tasks.map((task) => {
+  const taskItemHtml = (task: Task): string => {
     const id = escapeHtml(task.id);
     const deleteTitle = task.status === 'running' || task.status === 'waiting' ? '停止并删除任务' : '删除任务';
-    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-spark">${icon('sparkles')}</span><span class="task-copy"><b class="task-title" title="双击重命名">${escapeHtml(task.title)}</b><small data-always="1">${timeAgo(task.updatedAt)}</small></span><span class="task-dot"></span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">${icon('close')}</button></div>`;
+    const isRunning = task.status === 'running' || task.status === 'waiting';
+    const meta = isRunning ? `<span class="task-spinner">${icon('loader')}</span>` : `<small data-always="1">${timeAgo(task.updatedAt)}</small>`;
+    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-title" title="双击重命名">${escapeHtml(task.title)}</span><span class="task-meta">${meta}</span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">${icon('close')}</button></div>`;
+  };
+
+  const tasksCollapsed = collapsedSections.has('tasks');
+  const spacesCollapsed = collapsedSections.has('spaces');
+  const sectionHeading = (key: string, title: string, count: number, collapsed: boolean): string =>
+    `<div class="sidebar-group-heading" data-toggle-section="${key}" title="点击展开 / 折叠" aria-expanded="${!collapsed}"><span class="sidebar-group-title">${title}</span><span class="sidebar-group-count">(${count})</span><span class="sidebar-group-chevron">${icon(collapsed ? 'chevron-right' : 'chevron-down')}</span></div>`;
+
+  taskList.innerHTML = `<div class="sidebar-group ${tasksCollapsed ? 'collapsed' : ''}">
+  ${sectionHeading('tasks', '任务', normalTasks.length, tasksCollapsed)}
+  <div class="sidebar-group-body">${normalTasks.map(taskItemHtml).join('')}</div>
+</div>
+<div class="sidebar-group ${spacesCollapsed ? 'collapsed' : ''}">
+  ${sectionHeading('spaces', '空间', spaces.length, spacesCollapsed)}
+  <div class="sidebar-group-body">${spaces.map(({ project, tasks }) => {
+    const isSelectedProject = project.id === current.selectedProjectId;
+    const projectId = escapeHtml(project.id);
+    const isCollapsed = collapsedProjects.has(project.id);
+    return `<div class="project-group ${isCollapsed ? 'collapsed' : ''}">
+  <div class="project-group-heading ${isSelectedProject ? 'selected' : ''}" data-toggle-project="${projectId}" title="点击展开 / 折叠" aria-expanded="${!isCollapsed}">
+    <span class="project-group-icon">${icon('folder')}</span>
+    <span class="project-group-name" title="${escapeHtml(project.name)}">${escapeHtml(project.name)}</span>
+    <span class="project-group-actions"><button class="clear-project-tasks icon-button-square" data-clear-project="${projectId}" title="清除该空间任务" aria-label="清除 ${escapeHtml(project.name)} 的任务">${icon('close')}</button></span>
+    <span class="project-group-chevron">${icon(isCollapsed ? 'chevron-right' : 'chevron-down')}</span>
+  </div>
+  <div class="project-group-tasks">${tasks.length ? tasks.map(taskItemHtml).join('') : '<p class="empty-tasks">无任务</p>'}</div>
+</div>`;
   }).join('')}</div>
 </div>`;
-  }).join('');
+
+  taskList.querySelectorAll<HTMLElement>('[data-toggle-section]').forEach((heading) => {
+    const key = heading.dataset.toggleSection!;
+    heading.addEventListener('click', () => {
+      if (collapsedSections.has(key)) collapsedSections.delete(key);
+      else collapsedSections.add(key);
+      persistCollapsedSections();
+      const collapsed = collapsedSections.has(key);
+      heading.closest('.sidebar-group')?.classList.toggle('collapsed', collapsed);
+      const chevron = heading.querySelector<HTMLElement>('.sidebar-group-chevron');
+      if (chevron) chevron.innerHTML = icon(collapsed ? 'chevron-right' : 'chevron-down');
+      heading.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    });
+  });
 
   taskList.querySelectorAll<HTMLElement>('[data-toggle-project]').forEach((heading) => {
     const projectId = heading.dataset.toggleProject!;
@@ -792,24 +821,31 @@ function openTaskModal(mode: TaskModalMode, taskId?: string): void {
   const nameInput = $('#task-name-input') as HTMLInputElement;
   const goalField = $('#task-goal-field');
   const goalInput = $('#task-goal-input') as HTMLTextAreaElement;
-  const projectRow = $('#task-modal-project');
+  const spaceField = $('#task-space-field');
+  const spaceSelect = $('#task-space-select') as HTMLSelectElement | null;
   const createBtn = $('#task-modal-create') as HTMLButtonElement;
   if (mode === 'rename') {
     const task = state?.tasks.find((item) => item.id === taskId);
     if (!task) return;
     titleEl.textContent = '重命名任务';
     createBtn.textContent = '保存';
-    if (projectRow) projectRow.classList.add('hidden');
+    spaceField?.classList.add('hidden');
     goalField.classList.add('hidden'); goalInput.value = '';
     nameInput.value = task.title;
   } else {
     titleEl.textContent = '新建任务';
     createBtn.textContent = '创建任务';
-    if (projectRow) projectRow.classList.remove('hidden');
+    spaceField?.classList.remove('hidden');
     goalField.classList.remove('hidden');
-    const project = selectedProject();
-    const projectName = projectRow?.querySelector('.field-project-name');
-    if (projectName) projectName.textContent = project?.name ?? '—';
+    // 归属：普通任务（不加入空间）或某个项目文件夹。默认跟随当前上下文 ——
+    // 当前选中的任务归哪就默认建到哪；没选任务时用当前项目。
+    const currentTask = selectedTask();
+    const defaultSpace = currentTask ? currentTask.projectId : (state?.selectedProjectId ?? '');
+    if (spaceSelect) {
+      spaceSelect.innerHTML = `<option value="">普通任务（不加入空间）</option>${(state?.projects ?? []).map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join('')}`;
+      spaceSelect.value = defaultSpace;
+      if (spaceSelect.selectedIndex < 0) spaceSelect.selectedIndex = 0;
+    }
     nameInput.value = ''; goalInput.value = '';
     // 新建前先清空当前工作区，确保从干净状态开始
     if (state) updateState({ ...state, selectedTaskId: undefined });
@@ -832,7 +868,8 @@ async function submitTaskModal(): Promise<void> {
     return;
   }
   const goal = goalInput.value.trim();
-  const created = await window.mocodeWork.createTask(name.slice(0, 160));
+  const spaceId = ($('#task-space-select') as HTMLSelectElement | null)?.value ?? '';
+  const created = await window.mocodeWork.createTask(name.slice(0, 160), spaceId);
   updateState(created.state);
   if (goal) { promptInput.value = goal; resizePrompt(); }
   closeTaskModal();
@@ -939,6 +976,7 @@ refreshThemeSegmented();
 // 这样即便 setIcon() 后续又把 button 替换成 svg (或任何原因 DOM 变了) 也不会失效。
 const SIDEBAR_KEY = 'mocode-work-sidebar';
 const COLLAPSED_PROJECTS_KEY = 'mocode-work-collapsed-projects';
+const COLLAPSED_SECTIONS_KEY = 'mocode-work-collapsed-sections';
 const SIDEBAR_TOGGLE_SEL = '[data-sidebar-toggle]';
 const appBody = document.querySelector('.app-body') as HTMLElement;
 function setSidebarCollapsed(collapsed: boolean, persist = true): void {
@@ -954,6 +992,9 @@ function setSidebarCollapsed(collapsed: boolean, persist = true): void {
 }
 function persistCollapsedProjects(): void {
   try { localStorage.setItem(COLLAPSED_PROJECTS_KEY, JSON.stringify([...collapsedProjects])); } catch { /* 忽略 */ }
+}
+function persistCollapsedSections(): void {
+  try { localStorage.setItem(COLLAPSED_SECTIONS_KEY, JSON.stringify([...collapsedSections])); } catch { /* 忽略 */ }
 }
 function toggleSidebar(): void {
   const next = !(appBody?.classList.contains('sidebar-collapsed') ?? false);
@@ -982,6 +1023,10 @@ try { if (localStorage.getItem(SIDEBAR_KEY) === '1') setSidebarCollapsed(true, f
 try {
   const raw = localStorage.getItem(COLLAPSED_PROJECTS_KEY);
   if (raw) collapsedProjects = new Set<string>(JSON.parse(raw) as string[]);
+} catch { /* 忽略 */ }
+try {
+  const raw = localStorage.getItem(COLLAPSED_SECTIONS_KEY);
+  if (raw) collapsedSections = new Set<string>(JSON.parse(raw) as string[]);
 } catch { /* 忽略 */ }
 /* ── Sidebar resize (拖拽调宽度) ───────────────────────── */
 const SIDEBAR_WIDTH_KEY = 'mocode-work-sidebar-width';
