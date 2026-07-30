@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme } from 'electron';
+import { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, shell } from 'electron';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -608,6 +608,29 @@ function installIpc(): void {
     project.name = name.trim().slice(0, 80) || project.name;
     saveState(); broadcastState();
     return state;
+  });
+  // 在系统文件管理器中打开项目文件夹。
+  ipcMain.handle('work:open-folder', (_event, projectId: string) => {
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project) return false;
+    shell.openPath(project.root).catch(() => {});
+    return true;
+  });
+  // 从空间列表中移除一个项目（不删除磁盘文件，仅从 UI 列表移除）。
+  ipcMain.handle('work:remove-project', (_event, projectId: string) => {
+    if (typeof projectId !== 'string' || !projectId) return null;
+    const idx = state.projects.findIndex((item) => item.id === projectId);
+    if (idx === -1) return null;
+    const removed = state.projects.splice(idx, 1)[0];
+    // 如果移除的是当前选中项目，切到第一个剩余项目
+    if (state.selectedProjectId === projectId) {
+      state.selectedProjectId = state.projects[0]?.id ?? '';
+      state.selectedTaskId = undefined;
+    }
+    // 清理该项目的任务
+    state.tasks = state.tasks.filter((task) => task.projectId !== projectId);
+    saveState(); broadcastState();
+    return { state, removed: removed.name };
   });
   ipcMain.handle('work:project-overview', async () => projectOverview(selectedProject()));
   ipcMain.handle('work:read-file', (_event, relativePath: string) => {

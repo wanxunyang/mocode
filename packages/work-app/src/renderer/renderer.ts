@@ -28,6 +28,8 @@ declare global {
       deleteTask: (id: string) => Promise<WorkState | null>;
       renameTask: (id: string, title: string) => Promise<WorkState | null>;
       renameProject: (id: string, name: string) => Promise<WorkState | null>;
+      openFolder: (projectId: string) => Promise<boolean>;
+      removeProject: (projectId: string) => Promise<{ state: WorkState; removed: string } | null>;
       projectOverview: () => Promise<Record<string, unknown>>;
       readFile: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
@@ -159,8 +161,8 @@ function renderTasks(): void {
   <div class="project-group-heading ${isSelectedProject ? 'selected' : ''}" data-toggle-project="${projectId}" title="点击展开 / 折叠" aria-expanded="${!isCollapsed}">
     <span class="project-group-icon">${icon('folder')}</span>
     <span class="project-group-name" title="${escapeHtml(project.name)}">${escapeHtml(project.name)}</span>
-    <span class="project-group-actions"><button class="clear-project-tasks icon-button-square" data-clear-project="${projectId}" title="清除该空间任务" aria-label="清除 ${escapeHtml(project.name)} 的任务">${icon('close')}</button></span>
     <span class="project-group-chevron">${icon(isCollapsed ? 'chevron-right' : 'chevron-down')}</span>
+    <span class="project-group-actions"><button class="project-menu-btn icon-button-square" data-project-menu="${projectId}" title="更多操作" aria-label="${escapeHtml(project.name)} 更多操作">${icon('more')}</button></span>
   </div>
   <div class="project-group-tasks">${tasks.length ? tasks.map(taskItemHtml).join('') : '<p class="empty-tasks">无任务</p>'}</div>
 </div>`;
@@ -210,14 +212,44 @@ function renderTasks(): void {
     void deleteTask(taskId);
   }));
 
-  taskList.querySelectorAll<HTMLButtonElement>('[data-clear-project]').forEach((button) => button.addEventListener('click', async (event) => {
+  // 项目行「...」菜单：打开文件夹 / 从列表移除
+  taskList.querySelectorAll<HTMLButtonElement>('[data-project-menu]').forEach((button) => button.addEventListener('click', (event) => {
     event.stopPropagation();
-    if (activeRunId) return;
-    const projectId = button.dataset.clearProject!;
+    const existing = document.getElementById('project-context-menu');
+    if (existing) existing.remove();
+    const projectId = button.dataset.projectMenu!;
     const project = state?.projects.find((p) => p.id === projectId);
-    updateState(await window.mocodeWork.clearTasks(projectId));
-    clearWorkspace();
-    showToast('info', project ? `已清除 “${project.name}” 的任务` : '已清除任务');
+    if (!project) return;
+    const rect = button.getBoundingClientRect();
+    const menu = document.createElement('div');
+    menu.id = 'project-context-menu';
+    menu.className = 'project-context-menu';
+    menu.innerHTML = `<button class="project-context-item" data-action="open-folder" data-pid="${projectId}"><span class="project-context-icon">${icon('folder-open')}</span>打开文件夹</button><button class="project-context-item" data-action="remove" data-pid="${projectId}"><span class="project-context-icon">${icon('close')}</span>从列表中移除</button>`;
+    document.body.appendChild(menu);
+    // 定位：按钮右下方弹出
+    const menuRect = menu.getBoundingClientRect();
+    let left = rect.right - menuRect.width;
+    let top = rect.bottom + 4;
+    if (left < 4) left = 4;
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    // 点击外部关闭
+    const close = () => { menu.remove(); document.removeEventListener('click', close); document.removeEventListener('keydown', close); };
+    requestAnimationFrame(() => { document.addEventListener('click', close); document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); }); });
+    // 菜单项事件
+    menu.querySelectorAll<HTMLButtonElement>('.project-context-item').forEach((item) => item.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const action = item.dataset.action!;
+      const pid = item.dataset.pid!;
+      menu.remove(); document.removeEventListener('click', close); document.removeEventListener('keydown', close);
+      if (action === 'open-folder') {
+        await window.mocodeWork.openFolder(pid);
+      } else if (action === 'remove') {
+        if (activeRunId) { showToast('warn', '有任务运行中，无法移除空间'); return; }
+        const result = await window.mocodeWork.removeProject(pid);
+        if (result) { updateState(result.state); clearWorkspace(); showToast('info', `已移除空间 "${result.removed}"`); }
+      }
+    }));
   }));
 
   const running = current.tasks.filter((task) => task.status === 'running' || task.status === 'waiting').length;

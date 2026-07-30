@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   deleteTask: (id: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:delete-task', id),
   renameTask: (id: string, title: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:rename-task', id, title),
   renameProject: (id: string, name: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:rename-project', id, name),
+  openFolder: (projectId: string): Promise<boolean> => ipcRenderer.invoke('work:open-folder', projectId),
+  removeProject: (projectId: string): Promise<{ state: ProjectState; removed: string } | null> => ipcRenderer.invoke('work:remove-project', projectId),
   projectOverview: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:project-overview'),
   readFile: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:read-file', file),
   fileDiff: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:file-diff', file),

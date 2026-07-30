@@ -122,18 +122,24 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .sidebar-group.collapsed > .sidebar-group-body { display: none; }
 .project-group { display: flex; flex-direction: column; }
 .project-group-heading { height: 32px; padding: 0 var(--space-2xs) 0 var(--space-xs); display: flex; align-items: center; gap: var(--space-2xs); border-radius: var(--radius-sm); color: var(--color-ink); font-size: var(--text-sm); font-weight: 400; cursor: pointer; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
-.project-group-heading:hover { background: var(--color-paper-3); }
+.project-group-heading:hover { background: transparent; }
 .project-group-heading.selected { background: var(--color-paper-2); color: var(--color-ink); }
 .project-group-icon { display: grid; place-items: center; flex: 0 0 14px; color: var(--color-subtle); }
 .project-group-icon .icon { width: 14px; height: 14px; }
 .project-group-chevron { display: grid; place-items: center; flex: 0 0 12px; color: var(--color-subtle); }
 .project-group-chevron .icon { width: 12px; height: 12px; }
-.project-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-group-actions { display: flex; align-items: center; gap: 2px; opacity: 0; visibility: hidden; transition: opacity var(--dur-micro) var(--ease-out), visibility var(--dur-micro) var(--ease-out); }
+.project-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-group-actions { display: flex; align-items: center; gap: 2px; opacity: 0; visibility: hidden; margin-left: auto; margin-right: 2px; transition: opacity var(--dur-micro) var(--ease-out), visibility var(--dur-micro) var(--ease-out); }
 .project-group-heading:hover .project-group-actions, .project-group-heading:focus-within .project-group-actions { opacity: 1; visibility: visible; }
-.clear-project-tasks { width: 20px; height: 20px; display: grid; place-items: center; border-radius: var(--radius-sm); color: var(--color-subtle); transition: color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out); }
-.clear-project-tasks .icon { width: 12px; height: 12px; }
-.clear-project-tasks:hover { color: var(--color-fail); background: color-mix(in srgb, var(--color-fail) 10%, transparent); }
+.project-menu-btn { width: 20px; height: 20px; padding: 0; display: grid; place-items: center; border-radius: var(--radius-sm); color: var(--color-subtle); transition: background var(--dur-micro) var(--ease-out); }
+.project-menu-btn svg { width: 12px; height: 12px; }
+.project-menu-btn:hover { background: var(--color-paper-2); }
+/* 项目行 ... 弹出菜单 */
+.project-context-menu { position: fixed; z-index: var(--z-dropdown); background: var(--color-paper); border: var(--rule-hair); border-radius: var(--radius-md); box-shadow: var(--shadow-raised); padding: var(--space-2xs); display: flex; flex-direction: column; gap: 1px; min-width: 140px; }
+.project-context-item { display: flex; align-items: center; gap: var(--space-2xs); padding: var(--space-2xs) var(--space-xs); border-radius: var(--radius-sm); font-size: var(--text-xs); color: var(--color-muted); border: none; background: none; cursor: pointer; text-align: left; width: 100%; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.project-context-item:hover { background: var(--color-paper-2); color: var(--color-ink); }
+.project-context-icon { display: grid; place-items: center; flex: 0 0 16px; color: var(--color-subtle); }
+.project-context-icon .icon { width: 14px; height: 14px; }
 .project-group-tasks { display: flex; flex-direction: column; gap: 1px; padding-top: 1px; padding-left: 20px; }
 .project-group.collapsed > .project-group-tasks { display: none; }
 .sidebar-footer { width: 100%; height: 30px; border-top: var(--rule-soft); display: flex; align-items: center; gap: var(--space-2xs); padding: var(--space-2xs) var(--space-2xs) 0; color: var(--color-subtle); font-size: var(--text-2xs); font-family: var(--font-outlier); text-align: left; cursor: pointer; border-radius: var(--radius-sm); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }

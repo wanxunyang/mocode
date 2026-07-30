@@ -15,6 +15,7 @@ export const ICONS: Record<string, string> = {
   'folder-open': `<svg ${SVG_ATTRS}><path d="M2.5 6.8a1 1 0 0 1 1-1h4l1.5 1.5h7.5a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V6.8z"/><path d="M2 8h16"/></svg>`,
   'plus': `<svg ${SVG_ATTRS}><path d="M10 4v12M4 10h12"/></svg>`,
   'close': `<svg ${SVG_ATTRS}><path d="M5 5l10 10M15 5L5 15"/></svg>`,
+  'more': `<svg ${SVG_ATTRS}><circle cx="5.5" cy="10" r="1"/><circle cx="10" cy="10" r="1"/><circle cx="14.5" cy="10" r="1"/></svg>`,
 
   // 顶栏
   'search': `<svg ${SVG_ATTRS}><circle cx="9" cy="9" r="5"/><path d="M13 13l4 4"/></svg>`,
