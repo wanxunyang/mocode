@@ -286,6 +286,7 @@ ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 ${buildCodegraphSection()}
 
 ## Tool use
+- During tool-calling turns, stay silent unless something important enough must reach the user — otherwise just call the tool and let it run.
 - Go directly to a known path or symbol; use discovery tools only when the location is unknown.
 - Edit against a FRESH read: before any edit_file/write_file, call read_file on the exact path and copy both its latest hash and the exact target text. Never reconstruct old_string from a grep/summary/diff — those lose whitespace and indentation and cause edit failures.
 - A read_file hash from before a compaction, session resume, edit conflict, or external change is STALE and will be rejected — re-read rather than reuse an old hash.
