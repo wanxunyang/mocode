@@ -64,6 +64,19 @@ MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，
 
 ## 为什么用 mocode
 
+## 工程化纪律
+
+mocode 把"如何认真写代码"这件事也写进了 agent 自身的行为准则，而不是只靠 prompt 教：
+
+- **Plan → Build → Verify → Fix 四阶段纪律** — 每轮 prompt 现拼现读注入 `buildBasePrompt`,并按模型家族做轻量适配;agent 必须先复述任务、规划与验收信号,再动手,改动必经自动验证门,失败时进入修复阶段并把真实命令输出当新观察反馈。证据:`src/agent/work-discipline.ts` + `evals/work-discipline.ts`(6 块断言)。依据:[`docs/coding-harness-quality-roadmap.md` §4.1 PROMPT-01](docs/coding-harness-quality-roadmap.md)。
+- **Pre-Completion Checklist 硬关卡** — 在 `mutation > 0 && no tool call && validation !== 'passed'` 三个条件同时成立前,`finish`/`stop` 不会被放行;简单无改动的任务刻意不触发,避免噪音。证据:`src/agent/middleware/checklist.ts` + `evals/checklist.ts`(6 块断言)。
+- **反思式重试 + thrash 节流** — 错误按 6 类分类(`retry-classifier`),同一工具同参数 ≥3 次追加 hint 提醒换策略;失败 trace 留在上下文中但有针对性反思 prompt 注入,而不是盲目重试。证据:`src/tools/retry.ts` + `src/agent/retry-classifier.ts` + `evals/retry-classifier.ts`(9 块断言)。
+- **ask_human 卡点降级** — 不盲猜:遇到 sandbox 偏差、参数二义、用户指令冲突等白名单场景时,agent 倾向"披露而不是瞎猜",必要时显式调用 `ask_human` 弹面板让你拍板(带调用预算)。证据:`src/agent/work-discipline.ts` 的 ASK_WHITELIST_SECTION + `evals/ask-budget.ts`(6 块断言)。
+- **验证瀑布 V0 → V3 + 内容指纹缓存** — 改动先走文件后置条件 → 受限 tsc/eslint → 定向单测 → 受影响 npm 脚本,首个可操作失败立刻停;SHA-256 文件指纹缓存保证未改动文件不重复劳动。证据:`src/validators/` + 主路线图 VER 章节。
+- **五区上下文控制 + token 自校准** — 五个独立开关各自把控一档(`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget`),即使全关观察结果也按生命周期老化;token 估算走 EWMA 自动校准真实 provider 用量,而不是死信估算函数。证据:`src/context/` 五模块 + `src/config/index.ts` 的 `MOCODE_*` 开关。
+
+## 为什么用 mocode
+
 mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 
 - **自主多步推进** — 一次对话里连续多步:读代码、改代码、跑测试、根据报错再改……agent 自己决定下一步,中途不用你反复催。遇到卡点会调 `ask_human` 弹面板问你(阻塞到回应)。

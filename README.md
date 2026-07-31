@@ -10,6 +10,19 @@ MoCode explores your code, reads/writes/edits files, runs shell commands, and se
 
 ## Architecture
 
+## Engineering discipline
+
+MoCode encodes "how to take coding seriously" into the agent's own behavior, not just into the prompt:
+
+- **Plan → Build → Verify → Fix four-phase discipline** — Injected fresh each turn into `buildBasePrompt`, with per-model-family light adaptation. The agent must restate the task, plan, and acceptance signal before touching anything; changes must pass an automatic validation gate; on failure the agent enters a Fix phase and feeds real command output back as a fresh observation. Evidence: `src/agent/work-discipline.ts` + `evals/work-discipline.ts` (6 assertions). Basis: [`docs/coding-harness-quality-roadmap.md` §4.1 PROMPT-01](docs/coding-harness-quality-roadmap.md).
+- **Pre-Completion Checklist middleware** — `finish`/`stop` is blocked when `mutation > 0 && no tool call && validation !== 'passed'`. Simple read-only tasks deliberately bypass it to avoid noise. Evidence: `src/agent/middleware/checklist.ts` + `evals/checklist.ts` (6 assertions).
+- **Reflective retry + thrash throttling** — Errors are classified into 6 categories (`retry-classifier`); the same tool with the same args ≥3 times appends a hint to switch strategy; failed traces stay in context but receive a targeted reflection prompt instead of a blind retry. Evidence: `src/tools/retry.ts` + `src/agent/retry-classifier.ts` + `evals/retry-classifier.ts` (9 assertions).
+- **`ask_human` as a deliberate de-escalation** — No blind guessing. On whitelisted scenarios (sandbox deviation, ambiguous params, conflicting user instructions) the agent prefers "disclose rather than guess" and will explicitly call `ask_human` to pop a panel for your decision (with a call budget). Evidence: ASK_WHITELIST_SECTION in `src/agent/work-discipline.ts` + `evals/ask-budget.ts` (6 assertions).
+- **Verification cascade V0 → V3 with content fingerprint cache** — Changes pass through file post-conditions → scoped tsc/eslint → targeted unit tests → affected npm scripts, in that order; the first actionable failure stops the cascade; a SHA-256 content cache skips repeated work on unchanged files. Evidence: `src/validators/` plus the VER chapters in the main roadmap.
+- **Five-zone context controls + token self-calibration** — Five independent dials (`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget`), each with its own `MOCODE_*=false` kill switch; even with all five off, observations still age through the lifecycle. Token estimation uses EWMA to self-calibrate against real provider usage rather than trusting the estimator. Evidence: the five modules under `src/context/` plus the `MOCODE_*` switches in `src/config/index.ts`.
+
+## Architecture
+
 MoCode is organized as a layered runtime: the terminal experience drives an autonomous core, the core reaches capabilities through a guarded execution plane, and a persistent intelligence layer keeps long-running work coherent.
 
 <p align="center"><img src="./assets/architecture/system-overview.svg" alt="MoCode layered system architecture" width="100%"></p>
