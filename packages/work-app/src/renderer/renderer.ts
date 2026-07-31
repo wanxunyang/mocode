@@ -136,10 +136,9 @@ function renderTasks(): void {
 
   const taskItemHtml = (task: Task): string => {
     const id = escapeHtml(task.id);
-    const deleteTitle = task.status === 'running' || task.status === 'waiting' ? '停止并删除任务' : '删除任务';
     const isRunning = task.status === 'running' || task.status === 'waiting';
     const meta = isRunning ? `<span class="task-spinner">${icon('loader')}</span>` : `<small data-always="1">${timeAgo(task.updatedAt)}</small>`;
-    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-title" title="双击重命名">${escapeHtml(task.title)}</span><span class="task-meta">${meta}</span></button><button class="task-delete" data-delete-task="${id}" aria-label="${deleteTitle} ${escapeHtml(task.title)}" title="${deleteTitle}">${icon('close')}</button></div>`;
+    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-title" title="双击重命名">${escapeHtml(task.title)}</span><span class="task-meta">${meta}</span></button><button class="task-menu-btn" data-task-menu="${id}" aria-label="任务菜单" title="更多操作">${icon('more')}</button></div>`;
   };
 
   const tasksCollapsed = collapsedSections.has('tasks');
@@ -203,13 +202,39 @@ function renderTasks(): void {
     button.querySelector<HTMLElement>('.task-title')?.addEventListener('dblclick', (event) => { event.preventDefault(); event.stopPropagation(); void startTaskRename(button.dataset.task!); });
   });
 
-  taskList.querySelectorAll<HTMLButtonElement>('[data-delete-task]').forEach((button) => button.addEventListener('click', () => {
-    const taskId = button.dataset.deleteTask!;
+  taskList.querySelectorAll<HTMLButtonElement>('[data-task-menu]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const existing = document.getElementById('task-context-menu');
+    if (existing) existing.remove();
+    const taskId = button.dataset.taskMenu!;
     const task = state?.tasks.find((item) => item.id === taskId);
-    if (task && (task.status === 'running' || task.status === 'waiting')) {
-      showToast('info', `正在停止任务 “${task.title}”…`);
-    }
-    void deleteTask(taskId);
+    if (!task) return;
+    const isRunning = task.status === 'running' || task.status === 'waiting';
+    const rect = button.getBoundingClientRect();
+    const menu = document.createElement('div');
+    menu.id = 'task-context-menu';
+    menu.className = 'project-context-menu';
+    menu.innerHTML = `<button class="project-context-item" data-action="rename" data-tid="${taskId}"><span class="project-context-icon">${icon('edit')}</span>重命名</button><button class="project-context-item" data-action="delete" data-tid="${taskId}"${isRunning ? ' data-running="1"' : ''}><span class="project-context-icon">${icon('trash')}</span>${isRunning ? '停止并删除' : '删除'}</button>`;
+    document.body.appendChild(menu);
+    const menuRect = menu.getBoundingClientRect();
+    let left = rect.right - menuRect.width;
+    let top = rect.bottom + 4;
+    if (left < 4) left = 4;
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    const close = () => { menu.remove(); document.removeEventListener('click', close); document.removeEventListener('keydown', close); };
+    requestAnimationFrame(() => { document.addEventListener('click', close); document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); }); });
+    menu.querySelectorAll<HTMLButtonElement>('.project-context-item').forEach((item) => item.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const action = item.dataset.action!;
+      const tid = item.dataset.tid!;
+      menu.remove(); document.removeEventListener('click', close); document.removeEventListener('keydown', close);
+      if (action === 'rename') {
+        void startTaskRename(tid);
+      } else if (action === 'delete') {
+        void deleteTask(tid);
+      }
+    }));
   }));
 
   // 项目行「...」菜单：打开文件夹 / 从列表移除

@@ -57,6 +57,7 @@ export const ICONS: Record<string, string> = {
   'copy': `<svg ${SVG_ATTRS}><rect x="7" y="3" width="10" height="10" rx="1.5"/><path d="M13 17H5a1.5 1.5 0 0 1-1.5-1.5V6"/></svg>`,
   'regen': `<svg ${SVG_ATTRS}><path d="M4 10a6 6 0 0 1 10-4.5L16 7"/><path d="M16 3v4h-4"/><path d="M16 10a6 6 0 0 1-10 4.5L4 13"/><path d="M4 17v-4h4"/></svg>`,
   'edit': `<svg ${SVG_ATTRS}><path d="M13 3l4 4-9 9H4v-4l9-9z"/><path d="M11 5l4 4"/></svg>`,
+  'trash': `<svg ${SVG_ATTRS}><path d="M4 6h12M8 6V4h4v2M6 6l1 11h6l1-11"/></svg>`,
   'check': `<svg ${SVG_ATTRS}><path d="M4 10l4 4 8-8"/></svg>`,
   'warn': `<svg ${SVG_ATTRS}><path d="M10 3l8 14H2L10 3z"/><path d="M10 9v4M10 15.5v.5"/></svg>`,
   'info': `<svg ${SVG_ATTRS}><circle cx="10" cy="10" r="6.5"/><path d="M10 9v4M10 6.5v.5"/></svg>`,
