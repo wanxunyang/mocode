@@ -47,12 +47,14 @@ const HARD_RULE_NEEDLE = '"I read the code and it looks right" is not a completi
     'core section missing section title');
 }
 
-// 2. per-model 切换:anthropic / openai / qwen 都拼出独立标题,但 4 份
-//    共享同一套 4 阶段结构(无语种漂移)。first-line 包含 [model: X] 标签,
-//    4 份都应保留 4 个 Phase 标题 + 反面规则锚点。
+// 2. per-model 切换:anthropic / openai / qwen 都拼出独立开场句,但 4 份
+//    共享同一套 4 阶段结构(无语种漂移)。标题行对 4 份必须**完全相同**——
+//    per-model 差异只体现在开场句上(不再往标题注入 "[model: X]" 标签,
+//    那对模型是无意义噪声)。
 {
   const families: Array<'anthropic' | 'openai' | 'qwen' | 'other'> = ['anthropic', 'openai', 'qwen', 'other'];
-  const titles = new Set<string>();
+  const openers = new Set<string>();
+  const firstLines = new Set<string>();
   for (const f of families) {
     const s = buildWorkDisciplineSection(f);
     assert(s.includes('## Working discipline — coding tasks (Build-and-Self-Verify)'),
@@ -61,18 +63,41 @@ const HARD_RULE_NEEDLE = '"I read the code and it looks right" is not a completi
       assert(s.includes(header), `${f} section missing shared phase: ${header}`);
     }
     assert(s.includes(HARD_RULE_NEEDLE), `${f} section missing shared hard rule`);
-    titles.add(s.split('\n')[0] ?? '');
+    assert(!s.includes(`[model: ${f}]`), `${f} section must NOT self-tag the model family`);
+    const lines = s.split('\n');
+    firstLines.add(lines[0] ?? '');
+    // 开场句 = 标题后的第一段非空行(adapt 只替换这一句)。
+    openers.add(lines.find((line, i) => i > 0 && line.trim().length > 0) ?? '');
   }
-  // 4 份都该有独立首行(标签不同),证明 per-model 适配起效。
-  assert(titles.size === families.length,
-    `per-model first-line should differ across all ${families.length} families, got: ${[...titles].join(' | ')}`);
-  assert(buildWorkDisciplineSection('anthropic').includes('[model: anthropic]'),
-    'anthropic section must self-tag');
-  assert(buildWorkDisciplineSection('openai').includes('[model: openai]'),
-    'openai section must self-tag');
-  assert(buildWorkDisciplineSection('qwen').includes('[model: qwen]'),
-    'qwen section must self-tag');
+  // 标题行 4 份完全一致(前缀缓存友好 + 无自我指涉噪声)。
+  assert(firstLines.size === 1,
+    `title line must be identical across families, got: ${[...firstLines].join(' | ')}`);
+  // 开场句 4 份各不相同,证明 per-model 适配起效。
+  assert(openers.size === families.length,
+    `per-model opener should differ across all ${families.length} families, got: ${[...openers].join(' | ')}`);
+  assert(buildWorkDisciplineSection('anthropic').includes('not a courtesy'),
+    'anthropic opener missing');
+  assert(buildWorkDisciplineSection('openai').includes('MUST complete these four phases in order'),
+    'openai opener missing');
+  assert(buildWorkDisciplineSection('qwen').includes('"I wrote the code" is not evidence the code works'),
+    'qwen opener missing');
 }
+
+// 2b. NARRATION-01 配套:Phase 1 的复述规则必须是**条件式**(仅歧义时复述),
+//     且显式声明自己是"工具轮静默"的唯一例外——否则与 ## Tool use 首条冲突,
+//     模型会每轮开头都吐一句旁白。
+{
+  const section = buildWorkDisciplineSection('other');
+  assert(section.includes('ONLY when it admits two or more materially different readings'),
+    'restatement rule must be conditional on genuine ambiguity');
+  assert(section.includes('An unambiguous request gets no restatement'),
+    'restatement rule must explicitly opt out for unambiguous requests');
+  assert(section.includes('single exception to staying silent during tool-calling turns'),
+    'restatement rule must declare itself the sole exception to the silence rule');
+  assert(!section.includes('Open with a one-sentence restatement of your interpretation'),
+    'unconditional "open with a restatement" wording must be gone');
+}
+
 
 // 3. inferModelFamily:嗅探各家族 + fallback 到 other。
 {
@@ -117,27 +142,30 @@ const HARD_RULE_NEEDLE = '"I read the code and it looks right" is not a completi
     'discipline section must survive core prompt extraction (kept in both main and sub)');
 }
 
-// 6. config.model 切换 per-model 措辞真实生效(用 setModel 走现拼现读路径)。
+// 6. config.model 切换 per-model 措辞真实生效(走 buildBasePrompt 现拼现读路径)。
+//    断言开场句而非 "[model: X]" 标签——标签已移除(见 work-discipline.ts 的 adapt 注释),
+//    开场句才是 per-model 适配唯一的可观测差异。
 {
   const originalModel = config.model;
   try {
     config.model = 'gpt-4o-mini';
     const prompt = buildBasePrompt();
-    assert(prompt.includes('[model: openai]'),
+    assert(prompt.includes('MUST complete these four phases in order'),
       'setting config.model to gpt-4o must switch to openai wording');
 
     config.model = 'qwen2.5-coder';
     const prompt2 = buildBasePrompt();
-    assert(prompt2.includes('[model: qwen]'),
+    assert(prompt2.includes('"I wrote the code" is not evidence the code works'),
       'setting config.model to qwen2.5 must switch to qwen wording');
 
     config.model = 'claude-3-5-sonnet';
     const prompt3 = buildBasePrompt();
-    assert(prompt3.includes('[model: anthropic]'),
+    assert(prompt3.includes('not a courtesy'),
       'setting config.model to claude must switch to anthropic wording');
   } finally {
     config.model = originalModel;
   }
 }
+
 
 console.log('work-discipline regression checks passed');

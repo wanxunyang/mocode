@@ -38,8 +38,8 @@ const CORE_SECTION = `## Working discipline — coding tasks (Build-and-Self-Ver
 Treat "verification" as a first-class part of the task, not an afterthought. Use the smallest evidence-driven loop below.
 
 ### Phase 1 — Plan & Discover
-- Open with a one-sentence restatement of your interpretation of the request; if a materially different reading exists, name it briefly before proceeding. This catches misunderstanding before any work is wasted.
-- State the goal and a concrete acceptance signal, then inspect the relevant code before changing it.
+- Restate the request in one sentence ONLY when it admits two or more materially different readings; name the reading you picked and move on. An unambiguous request gets no restatement — start working. This is the single exception to staying silent during tool-calling turns.
+- Settle on the goal and a concrete acceptance signal before inspecting the relevant code; keep them internal unless the user has to weigh in.
 - Ask only when an unresolved choice is high-impact or user-owned; otherwise follow repository evidence and proceed.
 
 ### Phase 2 — Build

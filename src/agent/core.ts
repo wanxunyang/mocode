@@ -277,6 +277,39 @@ export function askHumanBudgetAnnotation(askHumanCountThisTurn: number, status: 
   return `\n\n[ask budget EXCEEDED] This is ask_human call #${askHumanCountThisTurn} this turn (budget = ${ASK_HUMAN_PER_TURN_BUDGET}). Stop asking; choose a default, implement, and disclose the choice in your final reply. Continuing to ask is more harmful than a documented guess.`;
 }
 
+/** NARR-01: 工具轮旁白(assistant 消息同时带 content + tool_calls)的软预算。
+ * 超出即追加回压提示;未超只 emit trace(可度量,不打扰)。
+ * 单位是 code point 而非字节——中文一字一 point,英文一字母一 point,
+ * 对两种语言都是"一句话大约多长"的直觉量级。 */
+export const NARRATION_CHAR_BUDGET = 120;
+
+/** 分类工具轮旁白。返回 null 表示这一轮没有旁白(纯工具调用,理想情况)。
+ * hint 仅在超预算时非 null:prompt 里的"工具轮保持静默"是软约束,
+ * 这里给出机制层面的回压,同时让 trace 能统计旁白率。 */
+export function classifyNarration(
+  content: string | null | undefined,
+  toolCallCount: number,
+): { chars: number; overBudget: boolean; hint: string | null } | null {
+  const text = content?.trim() ?? '';
+  if (!text) return null;
+  const chars = [...text].length;
+  if (chars <= NARRATION_CHAR_BUDGET) {
+    return { chars, overBudget: false, hint: null };
+  }
+  const plural = toolCallCount === 1 ? '' : 's';
+  return {
+    chars,
+    overBudget: true,
+    hint:
+      `\n\n[narration] Your previous message emitted ${chars} characters of prose alongside ` +
+      `${toolCallCount} tool call${plural} (soft budget = ${NARRATION_CHAR_BUDGET}). ` +
+      'Interstitial commentary costs the user screen space and costs you context on every ' +
+      'later step. For the rest of this turn, emit prose mid-turn ONLY to (a) flag a genuine ' +
+      'decision fork needing user input, (b) disclose an error or risk, or (c) deliver the ' +
+      'final answer once tools are done. Otherwise call the next tool with no preamble.',
+  };
+}
+
 function pushToolResult(
   history: ChatMessage[],
   tc: ToolCallRef,
@@ -462,6 +495,15 @@ export async function runAgentCore(
   // 预算超过时,工具结果尾部追加 ask budget 提示,不直接拒绝调用(更轻量,
   // 也避免和现有 permission 系统的"拒绝"语义重叠)。
   let askHumanCountThisTurn = 0;
+  // NARR-01: 上一条 assistant 消息(带 tool_calls)超出旁白预算时,待注入的回压提示。
+  // 只挂在本批次的第一条工具结果上并立即清空——重复注入会变成新的噪声源。
+  let pendingNarrationHint: string | null = null;
+  /** 取出并清空待注入的旁白回压提示(每批工具只消费一次)。 */
+  const takeNarrationHint = (): string | null => {
+    const hint = pendingNarrationHint;
+    pendingNarrationHint = null;
+    return hint;
+  };
   // PROMPT-02: 解析 preCompletionChecklist 选项。undefined = 启用默认 middleware;
   // false = opt-out(checklist 自身调试用);function = 调用方自定义。
   const _checklistMiddleware = createPreCompletionChecklistMiddleware();
@@ -806,6 +848,23 @@ export async function runAgentCore(
           })),
         } as ChatMessage);
 
+        // NARR-01: 这条 assistant 消息同时带正文 + tool_calls,即"工具轮旁白"。
+        // prompt 里的"工具轮保持静默"只是软约束,这里补上机制层:
+        //   - 永远 emit trace(旁白率可度量,不再靠肉眼感觉);
+        //   - 超预算时把回压提示挂到本批第一条工具结果尾部(复用 thrash/ask
+        //     budget 已验证的注入接缝,不新增消息、不打断工具流)。
+        const narration = classifyNarration(result.content, result.toolCalls.length);
+        if (narration) {
+          emitTrace('narration', {
+            chars: narration.chars,
+            toolCalls: result.toolCalls.length,
+            budget: NARRATION_CHAR_BUDGET,
+            overBudget: narration.overBudget,
+            step,
+          });
+          pendingNarrationHint = narration.hint;
+        }
+
         // 工具分组执行(保 tool_calls 原顺序)：safe parallel 工具照常并发；连续
         // resource-locked mutation 先按序完成权限预检，再按 canonical resource lock 启动。
         // registry 对所有真实资源访问统一持锁，所以不同 Agent 间的 read/write/process 也不会竞态。
@@ -947,7 +1006,9 @@ export async function runAgentCore(
                 }, tc.id ? { providerToolCallId: tc.id } : {});
               }
               const askBudget = askHumanBudgetAnnotation(askHumanCountThisTurn, outcome.status);
-              const finalOutput = askBudget ? `${annotated}${askBudget}` : annotated;
+              // NARR-01: 旁白回压提示只挂本批第一条结果(takeNarrationHint 自清空)。
+              const narrationHint = takeNarrationHint();
+              const finalOutput = `${annotated}${askBudget ?? ''}${narrationHint ?? ''}`;
               pushToolResult(
                 history,
                 tc,
@@ -1173,7 +1234,9 @@ export async function runAgentCore(
               }, tc.id ? { providerToolCallId: tc.id } : {});
             }
             const askBudget = askHumanBudgetAnnotation(askHumanCountThisTurn, outcome.status);
-            const finalOutput = askBudget ? `${annotated}${askBudget}` : annotated;
+            // NARR-01: 旁白回压提示只挂本批第一条结果(takeNarrationHint 自清空)。
+            const narrationHint = takeNarrationHint();
+            const finalOutput = `${annotated}${askBudget ?? ''}${narrationHint ?? ''}`;
             pushToolResult(
               history,
               tc,

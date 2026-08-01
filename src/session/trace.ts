@@ -15,7 +15,11 @@ export type TraceEventType =
   // PROMPT-02 / RETRY-01: hard signal for quality dimensions (QUAL-01).
   // Emitted by core.ts when checklist fires / retry reflection is injected,
   // so reduceTraceMetrics can count without scanning history text (fragile).
-  | 'checklist_triggered' | 'retry_reflection' | 'ask_human_call';
+  | 'checklist_triggered' | 'retry_reflection' | 'ask_human_call'
+  // NARR-01: interstitial narration — assistant prose emitted in the same
+  // message as tool_calls. The "stay silent during tool-calling turns" rule is
+  // prompt-only; this event makes violations measurable instead of vibes-based.
+  | 'narration';
 
 export interface AgentTraceEvent {
   schemaVersion: 1;
