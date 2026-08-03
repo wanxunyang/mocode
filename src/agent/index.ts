@@ -280,26 +280,6 @@ export async function runAgent(
       flushToolBatch();
       layout.contentWrite(`${ui.dim}${t('agent.aborted')}${ui.reset}\n`);
     },
-    onValidationStart: (command) => {
-      flushToolBatch();
-      spinner.start(t('agent.validating', { command }));
-    },
-    onValidationResult: (validation) => {
-      spinner.stop();
-      const color = validation.status === 'passed'
-        ? ui.green
-        : validation.status === 'failed'
-          ? ui.red
-          : ui.yellow;
-      const command = validation.command ?? t('agent.validationNoCommand');
-      const detail = validation.status === 'skipped' && validation.skipReason
-        ? `${validation.status}: ${validation.skipReason}`
-        : validation.status;
-      const symbol = validation.status === 'passed' ? '●' : validation.status === 'failed' ? '×' : '!';
-      layout.contentWrite(
-        `  ${color}${symbol}${ui.reset} ${t('agent.validationResult', { command, status: detail })}\n\n`,
-      );
-    },
     onDone: (elapsedMs, usage) => {
       flushToolBatch();
       writeChangeOverview();
@@ -329,7 +309,6 @@ export async function runAgent(
       onContextUpdate,
       dynamicSystemSuffix: buildActiveNotesPlanReminder,
       hooks: combinedHooks,
-      autoValidate: config.autoValidate,
       onTraceEvent: appendCurrentSessionTraceEvent,
     });
   } finally {

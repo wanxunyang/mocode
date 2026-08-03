@@ -16,7 +16,7 @@ MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，
 
 ### 自治执行循环
 
-每次模型响应都是闭环中的一步。工具调用按能力声明分类，安全读取可以并行，写操作获取规范化资源锁，观察结果编码后才回到上下文，代码改动最终经过自动验证门。
+每次模型响应都是闭环中的一步。工具调用按能力声明分类，安全读取可以并行，写操作获取规范化资源锁，观察结果编码后才回到上下文。agent 没有更多工具调用时立即完成；框架不会暗中运行验证，也不会强迫追加一轮模型调用。
 
 <p align="center"><img src="./assets/architecture/agent-loop-zh-CN.svg" alt="MoCode 自治 Agent 执行循环" width="100%"></p>
 
@@ -28,7 +28,7 @@ MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，
 
 ### 多 Agent 并行，但不冒险共享写入
 
-只读子 Agent 可以并行扇出；写任务在私有文件系统 overlay 中完成并返回结构化 ChangeSet。协调器校验 expected hash、获取规范化资源锁、安全合并冲突，最后由主工作区统一执行验证。
+只读子 Agent 可以并行扇出；写任务在私有文件系统 overlay 中完成并返回结构化 ChangeSet。协调器校验 expected hash、获取规范化资源锁并安全合并冲突；是否验证以及验证范围由 agent 在主工作区自行决定。
 
 <p align="center"><img src="./assets/architecture/multi-agent-zh-CN.svg" alt="MoCode 多 Agent overlay 与 ChangeSet 协调" width="100%"></p>
 
@@ -38,15 +38,13 @@ MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，
 
 <p align="center"><img src="./assets/architecture/permission-model-zh-CN.svg" alt="MoCode 权限模型:工具分级、四档授权、指纹、持久化" width="100%"></p>
 
-### 验证瀑布:便宜检查先做,贵检查按需上场
+### Agent 自主验证
 
-代码改动按 V0(文件级后置条件)→ V1(限范围的 tsc/eslint)→ V2(定向单元测试)→ V3(受影响 package 的脚本)由低到高执行。首个可操作失败立即停止,作为新的观察反馈给 Agent;SHA-256 文件指纹缓存避免对未改动文件重复劳动。
-
-<p align="center"><img src="./assets/architecture/verification-cascade-zh-CN.svg" alt="MoCode 自动验证瀑布 V0 到 V3,带文件指纹缓存" width="100%"></p>
+mocode 不会在任务结束时暗中启动验证瀑布。agent 可以根据任务风险自行调用 `run_command` 跑聚焦测试、typecheck 或 build；也可以在无需额外证据时直接结束，不产生框架强制的额外轮次。
 
 ### 回滚时间线:每次写入都留干净撤销点
 
-每次写入工具执行前先存一份 undo 快照。`/rollback <turnId>` 按时间逆序在 canonical 资源锁下恢复文件缓冲,然后重跑 V0+V1 验证状态干净——完全不重跑模型。读取类工具、网络副作用、二进制改动明确不在截图范围,契约里写死。
+每次写入工具执行前先存一份 undo 快照。`/rollback <turnId>` 按时间逆序在 canonical 资源锁下恢复文件缓冲，不重跑模型，也不自动启动测试。读取类工具、网络副作用、二进制改动明确不在截图范围，契约里写死。
 
 <p align="center"><img src="./assets/architecture/rollback-flow-zh-CN.svg" alt="MoCode 回滚时间线和每轮快照流" width="100%"></p>
 
@@ -66,14 +64,12 @@ MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，
 
 ## 工程化纪律
 
-mocode 把"如何认真写代码"这件事也写进了 agent 自身的行为准则，而不是只靠 prompt 教：
+mocode 把代码层控制保持得尽量轻，把任务策略交给 agent：
 
-- **Plan → Build → Verify → Fix 四阶段纪律** — 每轮 prompt 现拼现读注入 `buildBasePrompt`,并按模型家族做轻量适配;agent 必须先复述任务、规划与验收信号,再动手,改动必经自动验证门,失败时进入修复阶段并把真实命令输出当新观察反馈。证据:`src/agent/work-discipline.ts` + `evals/work-discipline.ts`(6 块断言)。依据:[`docs/coding-harness-quality-roadmap.md` §4.1 PROMPT-01](docs/coding-harness-quality-roadmap.md)。
-- **Pre-Completion Checklist 硬关卡** — 在 `mutation > 0 && no tool call && validation !== 'passed'` 三个条件同时成立前,`finish`/`stop` 不会被放行;简单无改动的任务刻意不触发,避免噪音。证据:`src/agent/middleware/checklist.ts` + `evals/checklist.ts`(6 块断言)。
-- **反思式重试 + thrash 节流** — 错误按 6 类分类(`retry-classifier`),同一工具同参数 ≥3 次追加 hint 提醒换策略;失败 trace 留在上下文中但有针对性反思 prompt 注入,而不是盲目重试。证据:`src/tools/retry.ts` + `src/agent/retry-classifier.ts` + `evals/retry-classifier.ts`(9 块断言)。
-- **ask_human 卡点降级** — 不盲猜:遇到 sandbox 偏差、参数二义、用户指令冲突等白名单场景时,agent 倾向"披露而不是瞎猜",必要时显式调用 `ask_human` 弹面板让你拍板(带调用预算)。证据:`src/agent/work-discipline.ts` 的 ASK_WHITELIST_SECTION + `evals/ask-budget.ts`(6 块断言)。
-- **验证瀑布 V0 → V3 + 内容指纹缓存** — 改动先走文件后置条件 → 受限 tsc/eslint → 定向单测 → 受影响 npm 脚本,首个可操作失败立刻停;SHA-256 文件指纹缓存保证未改动文件不重复劳动。证据:`src/validators/` + 主路线图 VER 章节。
-- **五区上下文控制 + token 自校准** — 五个独立开关各自把控一档(`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget`),即使全关观察结果也按生命周期老化;token 估算走 EWMA 自动校准真实 provider 用量,而不是死信估算函数。证据:`src/context/` 五模块 + `src/config/index.ts` 的 `MOCODE_*` 开关。
+- **建议式工作纪律** — system prompt 只要求聚焦改动、避免重复检索、诚实报告不确定性；是否验证及验证范围由 agent 自主决定，不是完成硬门。
+- **反思式重试 + thrash 节流** — 连续重复失败时提示换策略，而不是盲目重跑。
+- **ask_human 卡点降级** — 仅高影响且属于用户所有权的选择才询问，其余实现细节由 agent 自主推进。
+- **五区上下文控制 + token 自校准** — 独立旋钮管理上下文压力，token 估算根据真实 provider 用量校准。
 
 ## 为什么用 mocode
 
@@ -273,18 +269,9 @@ mocode 自动扫描以下目录的 skill(每个 skill 是 `<name>/SKILL.md`,带 
 
 skill 的 `description` 注入系统提示(渐进式披露第①层),模型只在任务相关时调 `use_skill` 加载完整正文(第②层)。用 `/skills` 查看已发现的 skill。
 
-## 工作纪律(4 阶段 — Build-and-Self-Verify)
+## 工作纪律
 
-每个 coding 任务必须按顺序走完 4 个阶段。跳过/合并 = 失败模式 —— system prompt 每轮注入这段纪律(见 `src/agent/work-discipline.ts`):
-
-1. **Plan & Discover** — 用一句话复述目标,明确验收信号(测试名/命令输出/文件存在/行为变化);写代码前先读相关代码;不可逆选择(删除/公开 API/权限)用 `ask_human` 主动澄清。
-2. **Build** — 用最小改动满足 spec,不夹带无关重构;新/改行为必须有对应测试 —— 目标里的 "should" 是义务。
-3. **Verify** — 跑**真实**可执行验证(typecheck/项目 test 命令/聚焦 reproducer),读完整输出,与 **spec** 对比,不是与自己的 diff 对比。
-4. **Fix** — 任何失败 → 回 spec,不是回 diff;修完重跑 Phase 3 全程;同工具同参数 3 次连续失败后**换思路**(换工具/换不变量/`ask_human`)。
-
-**硬规则:** "我读代码觉得对"不是完成信号。任务完成的唯一判据:对 spec 的可执行验证已跑过、完整输出已读、结果与 spec 匹配 —— 最终回复里**显式给出证据**(哪个命令、哪段输出、对应 spec 哪一行)。
-
-段内措辞按 `model_family`(anthropic / openai / qwen)轻量适配,贴合各 base model 的指令遵从习惯。4 份共用同一套 4 阶段结构 + 英文纪律文本,只在首句与 `[model: X]` 标签上区分;用户语言偏好由现有 i18n 段负责。
+system prompt 提供轻量建议而不是框架硬门：只检查支持下一步决策的内容，做最小完整改动，避免重复读取，并诚实说明不确定性。agent 自主决定是否需要验证以及验证范围；框架不会因为未验证阻止完成或追加模型轮次。
 
 ## 项目记忆(MOCODE.md)
 

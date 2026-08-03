@@ -6,7 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { runAgentCore } from '../../src/agent/core.js';
 import { config } from '../../src/config/index.js';
-import { beginTurn, getCurrentTurnMutationState, resetState } from '../../src/rollback/index.js';
+import { beginTurn, resetState } from '../../src/rollback/index.js';
 import { setSandboxRoot } from '../../src/sandbox/root.js';
 import type { AgentTraceEvent } from '../../src/session/trace.js';
 import { reduceTraceMetrics } from '../../src/session/trace-metrics.js';
@@ -71,7 +71,6 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
   resetState();
   const turnId = beginTurn(fixture.goal);
   const traceEvents: AgentTraceEvent[] = [];
-  let validationRuns = 0;
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutOverride ?? fixture.timeoutMs ?? 120_000);
@@ -80,37 +79,6 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
     process.chdir(root);
     result = await runAgentCore({
       history: [], userInput: fixture.goal, signal: controller.signal, hooks: {},
-      autoValidate: true,
-      validator: async () => {
-        const validationStarted = Date.now();
-        const passed = await verify(root, fixture.verificationCommand);
-        validationRuns += 1;
-        const status = passed ? 'passed' : 'failed';
-        const output = passed ? 'ok' : 'verification failed';
-        const fingerprint = `fixture-${status}-${validationRuns}`;
-        const mutation = getCurrentTurnMutationState();
-        return {
-          status,
-          level: 'V3' as const,
-          command: fixture.verificationCommand,
-          output,
-          durationMs: Date.now() - validationStarted,
-          diagnostics: passed ? [] : [{
-            level: 'V3' as const,
-            source: 'test' as const,
-            severity: 'error' as const,
-            message: output,
-          }],
-          stages: [],
-          verificationComplete: passed,
-          fingerprint,
-          inputFingerprint: `fixture-input-${validationRuns}`,
-          inputMutationVersion: mutation.version,
-          affectedPackages: [],
-          changedFiles: mutation.changedFiles.map((item) => item.path),
-          mutationVersion: mutation.version,
-        };
-      },
       onTraceEvent: event => traceEvents.push(event),
       traceContext: { sessionId: `eval-${fixture.id}`, turnId },
     });
@@ -127,7 +95,6 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
       status: timedOut ? 'timeout' : verified ? 'passed' : 'failed',
       finalVerifiedSuccess: verified,
-      firstPatchPass: traceMetrics.firstValidationPassed,
       regression,
       toolRecovery: traceMetrics.toolRecovery,
       toolCalls: traceMetrics.toolCalls,
@@ -135,18 +102,15 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       firstSuccessRate: traceMetrics.firstSuccessRate,
       tokens: traceMetrics.tokens,
       durationMs: traceMetrics.durationMs,
-      unverifiedCompletion: result.completed && result.validation?.verificationComplete !== true,
       changedFiles: changed,
       reflectionRounds: traceMetrics.reflectionRounds,
       askHumanCount: traceMetrics.askHumanCount,
-      checklistTriggered: traceMetrics.checklistTriggered,
     };
   } catch (error) {
     const traceMetrics = reduceTraceMetrics(traceEvents, result?.history);
     return {
       id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
       status: controller.signal.aborted ? 'timeout' : 'error', finalVerifiedSuccess: false,
-      firstPatchPass: traceMetrics.firstValidationPassed,
       regression: false,
       toolRecovery: traceMetrics.toolRecovery,
       toolCalls: traceMetrics.toolCalls,
@@ -154,11 +118,9 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       firstSuccessRate: traceMetrics.firstSuccessRate,
       tokens: traceMetrics.tokens,
       durationMs: traceMetrics.durationMs || Date.now() - started,
-      unverifiedCompletion: false,
       changedFiles: [], error: error instanceof Error ? error.message : String(error),
       reflectionRounds: traceMetrics.reflectionRounds,
       askHumanCount: traceMetrics.askHumanCount,
-      checklistTriggered: traceMetrics.checklistTriggered,
     };
   } finally {
     clearTimeout(timer);

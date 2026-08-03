@@ -1,8 +1,15 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { discoverProjectProfile } from './profile.js';
-import type { PackageProfile, ProjectProfile } from './profile.js';
-import type { ValidationCommand } from './types.js';
+import type { PackageProfile, ProjectProfile, ProjectPackageManager } from './profile.js';
+
+/** Command metadata used by offline project-profile evaluation; nothing executes it automatically. */
+export interface ValidationCommand {
+  script: 'typecheck' | 'test' | 'build';
+  command: string;
+  packageManager: ProjectPackageManager;
+  cwd: string;
+}
 
 const COMPATIBILITY_PRIORITY = ['typecheck', 'test', 'build'] as const;
 const LAYERED_ORDER = ['typecheck', 'build', 'test'] as const;

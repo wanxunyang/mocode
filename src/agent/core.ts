@@ -28,12 +28,6 @@ import {
 import { checkPermission } from '../permissions/index.js';
 import { validateToolArguments } from '../tools/validation.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools } from '../tools/constants.js';
-import {
-  createPreCompletionChecklistMiddleware,
-  type PreCompletionChecklistHandler,
-  type ChecklistContext,
-} from './middleware/checklist.js';
-import { inferModelFamily } from './work-discipline.js';
 import { reflectionHint, classifyError, type ErrorCategory } from './retry-classifier.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import {
@@ -72,11 +66,6 @@ import {
   updateTokenCalibration,
 } from '../context/token-calibration.js';
 import { getCurrentTurnId, getCurrentTurnMutationState } from '../rollback/index.js';
-import {
-  createAutomaticValidator,
-  type ValidationCallbacks,
-  type ValidationResult,
-} from '../verification/index.js';
 import type { AgentTraceEvent, AgentTurnTrace, TraceEventType } from '../session/trace.js';
 import { getCurrentSessionId } from '../session/state.js';
 
@@ -352,7 +341,8 @@ export interface AgentHooks {
   /** 每步开始,spinner 启「思考中」(主 agent:spinner.start)。 */
   onStepStart?: () => void;
   /** 流式实时 token 用量(本轮累计 = 已完成步实测 + 当前步估算)。
-   *  cachedTokens = 已完成步实测 cache 命中 + 当前步末尾 usage chunk 到达后的实测值(流式期间不含当前步)。
+   *  cachedTokens = 已完成步实测 cache 命中 + 当前步(流式期间按前缀缓存估算 ≈ 上一步实测 prompt,
+   *  末尾 usage chunk 到达后换实测),与轮末摘要的百分比同口径。
    *  主 agent:写底栏 context 进度条左侧的实时 chip;200ms 心跳重画自然取最新值。 */
   onLiveUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number }) => void;
   /** chat 返回后停 spinner(主 agent:spinner.stop)。 */
@@ -381,9 +371,6 @@ export interface AgentHooks {
   onMaxSteps?: () => void;
   /** 中断还原:停 spinner + 补换行 + (已中断)提示 + history 还原 + 模式还原。 */
   onAbort?: () => void;
-  /** 自动验证开始/结束；验证不是模型 tool_call，不写入 tool role history。 */
-  onValidationStart?: (command: string) => void;
-  onValidationResult?: (result: ValidationResult) => void;
   /** 跑完(正常/达上限)在回复末尾打耗时摘要行;中断不调。
    *  usage 是本轮 chat 调用累计的 token 用量(未开启 include_usage 或全失败时为 undefined)。 */
   onDone?: (elapsedMs: number, usage?: ChatUsage) => void;
@@ -410,27 +397,11 @@ export interface AgentRunOptions {
   toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[];
   /** 本 agent 独享的上下文统计状态；缺省为主 agent 全局 contextState。 */
   contextState?: ContextState;
-  /** 主 Agent 收尾自动验证；子 Agent 必须保持 false，由主 Agent 统一验证共享工作区。 */
-  autoValidate?: boolean;
   /**
    * 可选的宿主交互桥：桌面端可将高风险工具的确认请求交给图形界面处理。
    * 未传时保持原有 TUI / 非交互 fail-closed 行为。
    */
   permissionPrompt?: import('../permissions/index.js').PermissionCheckOptions['prompt'];
-  /**
-   * PROMPT-02: 在 agent 宣告完成(no tool calls + 有 candidate 正文)那一刻,
-   * 向 history 推一条 user [checklist] 消息,强制模型再做一轮显式确认。
-   * - 缺省(undefined) = 启用内置 createPreCompletionChecklistMiddleware。
-   * - 传 false = 完全关闭(checklist 自身调试用)。
-   * - 传自定义 handler = 替换默认触发条件(调用方自定义更严格/更宽松的策略)。
-   * plan 模式永远不触发(无论 handler 是什么)。
-   */
-  preCompletionChecklist?: PreCompletionChecklistHandler | false;
-  /** 验证器注入点；缺省使用项目脚本发现与 run_command 同源执行器。 */
-  validator?: (
-    signal?: AbortSignal,
-    callbacks?: ValidationCallbacks,
-  ) => Promise<ValidationResult>;
   /** 每轮结束的兼容汇总 sink。 */
   onTrace?: (trace: AgentTurnTrace) => void;
   /** 逐事件黑匣子 sink；写入失败不得影响 Agent。 */
@@ -446,13 +417,11 @@ export type ContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
 
-/** Why the agent loop stopped; max_steps and unverified changes are never normal completion. */
+/** Why the agent loop stopped. */
 export type AgentTerminationReason =
   | 'completed'
-  | 'completed_unverified'
   | 'aborted'
-  | 'max_steps'
-  | 'unverified_changes';
+  | 'max_steps';
 
 /** runAgentCore 的运行结果。 */
 export interface AgentRunResult {
@@ -463,15 +432,12 @@ export interface AgentRunResult {
   finalText: string | null;
   /** 本轮累计 token 用量(各 chat 步 prompt+completion 之和);后端不开 include_usage 或全失败则 undefined。 */
   usage?: ChatUsage;
-  /** 本轮最终自动验证状态；无代码变更或未启用时为空。 */
-  validation?: ValidationResult;
   /** rollback 事务观察到的本轮实际磁盘变化。 */
   changedFiles?: string[];
   /**
    * QUAL-01 affordance: 本轮 agent 收尾时的完整 chat history。
-   * 只读快照,evals/coding/runner 用它来推断 [checklist] / [retry reflection:]
-   * 等 marker 的真实触发次数。不序列化进磁盘(只内存)→ 减少 baseline json 体积。
-   * 不影响主 agent 行为,仅供 eval/trace 后处理使用。 */
+   * 只读快照供 eval/trace 后处理 retry reflection 等 marker；不序列化进磁盘。
+   */
   history?: readonly ChatMessage[];
 }
 
@@ -508,13 +474,6 @@ export async function runAgentCore(
     pendingNarrationHint = null;
     return hint;
   };
-  // PROMPT-02: 解析 preCompletionChecklist 选项。undefined = 启用默认 middleware;
-  // false = opt-out(checklist 自身调试用);function = 调用方自定义。
-  const _checklistMiddleware = createPreCompletionChecklistMiddleware();
-  const preCompletionChecklistHandler: PreCompletionChecklistHandler | null =
-    opts.preCompletionChecklist === false
-      ? null
-      : (opts.preCompletionChecklist ?? _checklistMiddleware.handler);
   const maxSteps = opts.maxSteps ?? config.maxSteps;
   // 中断还原:repl 的 /plan / /auto / Shift+Tab 等用户面触发 setAgentMode 中途切了模式,
   // abort 时连同模式一起还原回轮首。模型不再持有 switch_mode 工具,无法自切。
@@ -550,14 +509,13 @@ export async function runAgentCore(
   let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
   let traceStatus: AgentTurnTrace['status'] = 'error';
   let toolCallCount = 0;
-  let latestValidation: ValidationResult | undefined;
-  const initialMutationVersion = getCurrentTurnMutationState().version;
-  let validatedMutationVersion = initialMutationVersion;
-  let fullyValidatedMutationVersion = initialMutationVersion;
-  const validator = opts.validator ?? createAutomaticValidator();
   // 本轮 token 累计:每步 chat() 返回后把 result.usage 累加,供 onDone 摘要行 + AgentRunResult.usage
   // 透传给 repl(显示在底栏模式 chip 右边)。未开启 include_usage 或全失败时为 undefined。
   let turnUsage: ChatUsage | undefined;
+  // 实时 chip ↻ 估算用:上一步 chat 实测 prompt(前缀缓存下当前步命中 ≈ 它)+ 后端是否报过 cache 命中
+  // (从不报 cache 的后端不估算,避免虚显 ↻)。
+  let lastStepPromptTokens = 0;
+  let providerCacheSeen = false;
   const addUsage = (u: ChatUsage | undefined): void => {
     if (!u) return;
     turnUsage = turnUsage
@@ -610,10 +568,6 @@ export async function runAgentCore(
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
   let lastChar = '';
-  // 早退重探:本 turn 已执行过工具但模型突然返回无工具调用 + 空文本 → 推一条提示让模型继续。
-  // 短回复也可能是合法完成结果，不再按字符数误判；每 turn 最多触发 1 次以防死循环。
-  let nudgeCount = 0;
-  let hadToolsThisTurn = false;
 
   const onText = (s: string) => {
     hooks.onText?.(s); // 主 agent:走 markdown 渲染写内容区
@@ -661,7 +615,6 @@ export async function runAgentCore(
           terminationReason: 'aborted',
           finalText: null,
           usage: turnUsage,
-          validation: latestValidation,
           changedFiles: mutation.changedFiles.map((item) => item.path),
         };
       }
@@ -762,12 +715,17 @@ export async function runAgentCore(
         runtimeContextState.correction,
       );
       const reportLive = (comp: number, cached?: number): void => {
+        // 当前步 cache 命中后端在末尾 usage chunk 才上报(cached 有值直接用实测);
+        // 流式期间按前缀缓存估算 ≈ 上一步实测 prompt(当前 prompt 总含其为前缀),
+        // 不超过当前步 prompt 估算;后端从不报 cache 时不估算。使实时 ↻ 与轮末百分比口径一致。
+        const curCached = cached ?? (providerCacheSeen
+          ? Math.min(lastStepPromptTokens, stepPromptEst)
+          : 0);
         hooks.onLiveUsage?.({
           promptTokens: (turnUsage?.promptTokens ?? 0) + stepPromptEst,
           completionTokens: (turnUsage?.completionTokens ?? 0) + comp,
           totalTokens: (turnUsage?.totalTokens ?? 0) + stepPromptEst + comp,
-          // 当前步 cache 命中在末尾 usage chunk 才可知(cached 有值时叠上);流式期间只显已完成步的。
-          cachedTokens: (turnUsage?.cachedTokens ?? 0) + (cached ?? 0),
+          cachedTokens: (turnUsage?.cachedTokens ?? 0) + curCached,
         });
       };
       reportLive(0); // 思考阶段先显 ↑ prompt 估算,首 token 到达后 ↓ 开始涨
@@ -818,7 +776,6 @@ export async function runAgentCore(
             terminationReason: 'aborted',
             finalText: null,
             usage: turnUsage,
-            validation: latestValidation,
             changedFiles: mutation.changedFiles.map((item) => item.path),
           };
         }
@@ -837,6 +794,10 @@ export async function runAgentCore(
       });
       runtimeContextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
       addUsage(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
+      if (result.usage) {
+        lastStepPromptTokens = result.usage.promptTokens; // 下一步流式期 ↻ 估算的前缀基准
+        if (result.usage.cachedTokens > 0) providerCacheSeen = true;
+      }
       // 用本次实际发送的 tools 计算分母，再以 EWMA 更新 provider/model/tool-set 校准。
       // 只持久化比例与样本数；无 usage 或短 prompt 时保持既有值。
       if (result.usage?.promptTokens && result.usage.promptTokens > 100) {
@@ -857,7 +818,6 @@ export async function runAgentCore(
 
       if (result.toolCalls.length > 0) {
         toolCallCount += result.toolCalls.length;
-        hadToolsThisTurn = true;
         // 流式正文末尾补换行(若 onToolCall 已补则 lastChar='\n',此处 no-op);防 ● 行黏在正文行尾
         if (mode !== 'idle' && lastChar !== '\n') hooks.onTextEnd?.();
         // 带工具调用的 assistant 消息原样回灌(OpenAI 格式要求)
@@ -1296,171 +1256,19 @@ export async function runAgentCore(
 
       if (mode !== 'idle' && lastChar !== '\n') hooks.onTextEnd?.(); // 流式末尾补换行
 
-      // 早退保护:本 turn 已执行过工具调用,但模型突然返回无工具 + 极短/空文本 → 很可能是在探索中途
-      // 提前"说完了"。此时推一条 user 提示消息让模型继续探索,而非直接退出。每 turn 最多 1 次,防死循环。
-      // 早退重探只处理真正的空回复。短回复可能是合法完成结果（例如精确状态标记）；
-      // 仅凭字符数继续调用会重复输出，并产生一次完整的额外模型请求。
-      const replyIsEmpty = (result.content?.trim().length ?? 0) === 0;
-      if (hadToolsThisTurn && nudgeCount < 1 && replyIsEmpty) {
-        nudgeCount++;
-        history.push({ role: 'assistant', content: result.content });
-        history.push({
-          role: 'user',
-          content: 'You stopped before completing the task. Please continue investigating — call more tools if needed, or provide a complete answer based on what you have gathered so far.',
-        });
-        continue; // 带着提示再调一次 LLM
-      }
-
-      // 没有工具调用:候选正文已流式打印。若本轮有新的代码变更，先通过框架验证门；
-      // failed 作为 system observation 风格的 user 消息回灌，不能伪造无配对的 tool 消息。
+      // 没有工具调用：接受 agent 的完成判断。框架不自动运行测试、构建或完成门，
+      // 也不因缺少验证证据强制追加模型轮次；agent 仍可自行调用工具验证。
       if (!gotText) hooks.onNoReply?.();
-      const candidate = { role: 'assistant' as const, content: result.content } as ChatMessage;
-      const mutationBeforeValidation = getCurrentTurnMutationState();
-      const shouldValidate =
-        opts.autoValidate === true &&
-        getAgentMode() !== 'plan' &&
-        (mutationBeforeValidation.version > validatedMutationVersion || latestValidation?.status === 'failed');
-
-      if (shouldValidate) {
-        history.push(candidate);
-        emitTrace('validation_start', {
-          mutationVersion: mutationBeforeValidation.version,
-          changedFiles: mutationBeforeValidation.changedFiles.map((item) => item.path),
-        });
-        try {
-          latestValidation = await validator(signal, {
-            onCommandStart: (command) => hooks.onValidationStart?.(command),
-            onPermissionDecision: (permission) => {
-              const summary = summarizeToolArguments(JSON.stringify(permission.arguments));
-              emitTrace('permission', {
-                source: 'automatic_validation',
-                tool: permission.tool,
-                decision: permission.decision,
-                argumentHash: summary.sha256,
-              });
-            },
-          });
-        } catch (error) {
-          const mutation = getCurrentTurnMutationState();
-          const message = `Automatic validation failed to run: ${error instanceof Error ? error.message : String(error)}`;
-          const status = signal?.aborted ? 'aborted' : 'failed';
-          latestValidation = {
-            status,
-            level: 'V0',
-            output: message,
-            durationMs: 0,
-            diagnostics: [{
-              level: 'V0', source: 'verifier', severity: 'error', code: 'VERIFIER_ERROR', message,
-            }],
-            stages: [],
-            verificationComplete: false,
-            fingerprint: `verifier-error-${mutation.version}`,
-            inputFingerprint: `mutation-${mutation.version}`,
-            inputMutationVersion: mutation.version,
-            affectedPackages: [],
-            changedFiles: mutation.changedFiles.map((item) => item.path),
-            mutationVersion: mutation.version,
-          };
-        }
-        emitTrace('validation_end', {
-          status: latestValidation.status,
-          level: latestValidation.level,
-          durationMs: latestValidation.durationMs,
-          verificationComplete: latestValidation.verificationComplete,
-          skipReason: latestValidation.skipReason,
-          fingerprint: latestValidation.fingerprint,
-          mutationVersion: latestValidation.mutationVersion,
-          stages: latestValidation.stages.map((stage) => ({
-            level: stage.level,
-            status: stage.status,
-            adapter: stage.adapter,
-            code: stage.diagnostics[0]?.code,
-            durationMs: stage.durationMs,
-            cached: stage.cached === true,
-          })),
-        });
-        hooks.onValidationResult?.(latestValidation);
-        validatedMutationVersion = latestValidation.mutationVersion;
-        if (latestValidation.status === 'passed' && latestValidation.verificationComplete) {
-          fullyValidatedMutationVersion = latestValidation.mutationVersion;
-        }
-
-        if (signal?.aborted || latestValidation.status === 'aborted') {
-          abortRestore();
-          traceStatus = 'aborted';
-          const mutation = getCurrentTurnMutationState();
-          return {
-            completed: false,
-            terminationReason: 'aborted',
-            finalText: null,
-            usage: turnUsage,
-            validation: latestValidation,
-            changedFiles: mutation.changedFiles.map((item) => item.path),
-          };
-        }
-
-        if (latestValidation.status === 'failed') {
-          history.push({
-            role: 'user',
-            content:
-              '[System observation: automatic validation failed]\n' +
-              `Command: ${latestValidation.command ?? '(internal verifier)'}\n` +
-              `${latestValidation.output}\n\n` +
-              'Fix the reported problem, then finish the task. Do not claim success until validation passes.',
-          });
-          // 验证及其失败观察均已完整落入 history；下一步中断时可安全保留。
-          savedHistory = history.slice();
-          continue;
-        }
-      } else {
-        // PROMPT-02: 硬关卡 — 收尾路径上,如果本 turn 有 mutation 且未通过
-        // validation(autoValidate=false / 验证已 passed 但 LLM 又宣称完成),
-        // 推一条 [checklist] user 消息,强制模型再走一轮显式确认。
-        // 防死循环:checklist 已推过 2 次仍无新工具调用 → 放行(走原本的 push)。
-        const finalMutationForChecklist = getCurrentTurnMutationState();
-        const checklistCtx: ChecklistContext = {
-          hadMutation: finalMutationForChecklist.version > 0,
-          lastValidationStatus: (latestValidation?.status === 'failed' || latestValidation?.status === 'passed')
-            ? latestValidation.status
-            : 'none',
-          mode: getAgentMode(),
-          modelFamily: inferModelFamily(config.model),
-        };
-        const checklistRetryCount = (history as { __checklistStreak?: number }).__checklistStreak ?? 0;
-        const shouldFireChecklist = preCompletionChecklistHandler !== null
-          && preCompletionChecklistHandler(checklistCtx)
-          && checklistRetryCount < 2;
-        if (shouldFireChecklist) {
-          history.push(candidate);
-          history.push({
-            role: 'user',
-            content: _checklistMiddleware.buildUserMessage(checklistCtx.modelFamily),
-          });
-          (history as { __checklistStreak?: number }).__checklistStreak = checklistRetryCount + 1;
-          // QUAL-01 trace 硬事件:PROMPT-02 触发计数(取代 history 文本扫描
-          // [checklist] marker — LLM 在正文里提一句 "[checklist]" 也会被误算)。
-          emitTrace('checklist_triggered', {
-            streak: checklistRetryCount + 1,
-            validationStatus: checklistCtx.lastValidationStatus,
-            hadMutation: checklistCtx.hadMutation,
-            modelFamily: checklistCtx.modelFamily ?? 'other',
-          });
-          // 重要: 不置 done,让主循环继续下一轮(模型被迫用工具或写出可验证声明)。
-          continue;
-        }
-        history.push(candidate);
-      }
+      history.push({ role: 'assistant', content: result.content } as ChatMessage);
 
       const finalMutation = getCurrentTurnMutationState();
       done = true;
       traceStatus = 'completed';
-      const verified = finalMutation.version <= fullyValidatedMutationVersion;
       return {
         completed: true,
-        terminationReason: verified ? 'completed' : 'completed_unverified',
+        terminationReason: 'completed',
         finalText: result.content,
         usage: turnUsage,
-        validation: latestValidation,
         changedFiles: finalMutation.changedFiles.map((item) => item.path),
         history: history.slice(),
       };
@@ -1476,13 +1284,11 @@ export async function runAgentCore(
     done = true;
     traceStatus = 'max_steps';
     const finalMutation = getCurrentTurnMutationState();
-    const hasUnverifiedChanges = finalMutation.version > fullyValidatedMutationVersion;
     return {
       completed: false,
-      terminationReason: hasUnverifiedChanges ? 'unverified_changes' : 'max_steps',
+      terminationReason: 'max_steps',
       finalText: null,
       usage: turnUsage,
-      validation: latestValidation,
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
       history: history.slice(),
     };
@@ -1495,7 +1301,6 @@ export async function runAgentCore(
       toolCalls: toolCallCount,
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
       totalTokens: turnUsage?.totalTokens,
-      validationStatus: latestValidation?.status,
     });
     try {
       opts.onTrace?.({
@@ -1507,7 +1312,6 @@ export async function runAgentCore(
         toolCalls: toolCallCount,
         changedFiles: finalMutation.changedFiles.map((item) => item.path),
         usage: turnUsage,
-        validation: latestValidation,
       });
     } catch {
       // Trace is best-effort and must not change the turn result.

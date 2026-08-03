@@ -2,7 +2,7 @@
 
 子 Agent 使用独立 history、可受限工具集和较低步数上限执行子任务，最终只把摘要回灌主 history。
 
-**状态**：已实现结构化结果、只读并发、overlay 写隔离、ChangeSet coordinator 合并与主 Agent 统一验证。
+**状态**：已实现结构化结果、只读并发、overlay 写隔离与 ChangeSet coordinator 合并；验证由 agent 自主决定。
 
 ## 结构
 
@@ -23,7 +23,7 @@
 - **写隔离**：写 task 在临时 overlay 中运行，不直接触碰主工作区；二进制变更会被保守拒绝。
 - **安全合并**：coordinator 把 overlay diff 转为带 expected hash 的 ChangeSet；提交使用 canonical resource lock，冲突不覆盖。
 - **调度**：未知 write set 保持串行；已知 write set 的任务可并发生成 ChangeSet，并在真实写路径上持锁合并。
-- **统一验证**：子 Agent 不单独验证；主 Agent 在一批 ChangeSet 全部合并后使用既有自动验证门统一验证。
+- **验证自主**：主/子 Agent 都可按任务需要显式运行检查；合并后没有框架强制检查。
 - **PLAN 防线**：plan 模式不会向模型暴露 `sub-agent`，core 仍保留防幻觉调用检查。
 
-`SubAgentResult` 暴露 `status/findings/readSet/changeSet/verification`；其中 verification 在子任务返回时为 null，明确表示由主 Agent 的统一验证门填补，而不是伪报已验证。
+`SubAgentResult` 暴露 `status/findings/readSet/changeSet/summary/usage`，不携带框架生成的验证状态。

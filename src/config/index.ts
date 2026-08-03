@@ -64,8 +64,6 @@ export interface Config {
   includeUsage: boolean;
   /** 自动压缩总开关。关掉则只靠手动 /compact。 */
   autoCompact: boolean;
-  /** 代码变更后的任务收尾自动验证。默认 true；失败会回灌 Agent 继续修复。 */
-  autoValidate: boolean;
   /** Context Optimization Pipeline 总开关(工具结果进 LLM 前的类型化编码:tree/search/log/…)。
    *  关掉则工具结果原样进 LLM(仅长度裁剪),零行为变化。默认 true。 */
   contextOptimize: boolean;
@@ -281,7 +279,7 @@ ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 
 ## Workflow
 - Use existing conversation and tool evidence before gathering more. Inspect only what supports the next decision; do not guess.
-- Keep changes focused. After modifications, run the smallest relevant executable verification that actually exercises the requested behavior, and report its result. A command exiting 0 is not proof the task is done — confirm the specific behavior the user asked for is observed, not merely that the diff applied.
+- Keep changes focused. Decide for yourself whether a check is worth running; prefer the smallest relevant check and avoid broad test/build suites unless the task or risk justifies them.
 - Use web search only when freshness materially affects the answer.
 ${buildCodegraphSection()}
 
@@ -394,7 +392,6 @@ export const config: Config = {
   compactThreshold: Number(process.env.COMPACT_THRESHOLD) || 0.85,
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
   autoCompact: process.env.AUTO_COMPACT !== 'false',
-  autoValidate: process.env.MOCODE_AUTO_VALIDATE !== 'false',
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',

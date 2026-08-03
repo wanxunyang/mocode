@@ -199,7 +199,6 @@ LLM_MODEL=your-model-name
 | `CONTEXT_WINDOW_TOKENS` | 模型实际上下文窗口大小。 | `128000` |
 | `MAX_TOKENS` | 单次回复最大 token 数。 | 不限制 |
 | `AUTO_COMPACT` | 上下文自动压缩开关。 | `true` |
-| `MOCODE_AUTO_VALIDATE` | 代码变更后自动发现并运行 `typecheck` / `test` / `build`；失败会回灌 Agent 修复。 | `true` |
 | `COMPACT_THRESHOLD` | 自动压缩阈值，占窗口比例。 | `0.85` |
 | `MAX_STEPS` | 每轮 Agent 工具循环的最大步数。 | `200` |
 | `SUB_AGENT_MAX_STEPS` | 子 Agent 默认最大步数。 | `50` |

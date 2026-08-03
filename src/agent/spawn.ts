@@ -35,8 +35,8 @@ const SUBAGENT_ROLE = `## Sub-agent execution
 You are executing one delegated sub-task with the same engineering standards and capabilities as mocode.
 - Treat Task context as authoritative facts already established by the main agent; do not rediscover them without evidence they are stale.
 - Focus on the delegated scope, but continue until it is genuinely complete. Do not stop to save tokens.
-- Do not recursively call sub-agent. A write task runs in an isolated overlay; the coordinator merges and performs final unified verification.
-- Return concise findings, changes, verification evidence, and blockers to the coordinator.`;
+- Do not recursively call sub-agent. A write task runs in an isolated overlay; the coordinator merges it safely.
+- Return concise findings, changes, checks you chose to run, and blockers to the coordinator.`;
 
 /** 子 agent 运行选项。 */
 export interface SpawnOptions {
@@ -87,7 +87,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       summary: null,
       completed: false,
       transcript: 'Sub-agent execution is disabled. Enable it with /subagent on.',
-      status: 'failed', findings: [], readSet: [], changeSet: null, verification: null,
+      status: 'failed', findings: [], readSet: [], changeSet: null,
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0 },
     };
   }
@@ -181,7 +181,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       maxSteps,
       toolsOverride,
       contextState: localContextState,
-      autoValidate: false,
       onToolOutcome: (tool, args) => {
         if (tool === 'read_file' && typeof args.path === 'string') readSet.add(args.path);
         else if (['glob', 'grep'].includes(tool)) readSet.add('workspace');
@@ -218,7 +217,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     findings: result.finalText ? [result.finalText] : [],
     readSet: [...readSet].sort(),
     changeSet,
-    verification: null, // 主 Agent 在所有 coordinator merge 完成后统一验证
     usage: {
       promptTokens: result.usage?.promptTokens ?? 0,
       completionTokens: result.usage?.completionTokens ?? 0,

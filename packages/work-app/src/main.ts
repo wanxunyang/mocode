@@ -12,7 +12,7 @@ const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
 const IGNORED_DIRECTORIES = new Set(['.git', '.mocode', 'node_modules', 'dist', 'coverage', '.next', '.cache']);
 
 /**
- * 复用 mocode 已配好的模型 / 沙箱 / 记忆 / 验证 / 主题等配置。
+ * 复用 mocode 已配好的模型 / 沙箱 / 记忆 / 主题等配置。
  * 与 src/config/index.ts 的 loadEnvFiles() 行为一致:
  *   候选(后者覆盖前者,优先级升序):<projectRoot>/.env(兼容旧用法,最低)
  *     → ~/.mocode/config(全局,/model 与 mocode config 写此)
@@ -22,7 +22,7 @@ const IGNORED_DIRECTORIES = new Set(['.git', '.mocode', 'node_modules', 'dist', 
  */
 const MOCODE_CONFIG_KEYS = [
   'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS', 'MAX_TOKENS',
-  'COMPACT_THRESHOLD', 'LLM_STREAM_USAGE', 'AUTO_COMPACT', 'MOCODE_AUTO_VALIDATE',
+  'COMPACT_THRESHOLD', 'LLM_STREAM_USAGE', 'AUTO_COMPACT',
   'MOCODE_CONTEXT_OPTIMIZE', 'MOCODE_CONTEXT_RELPRUNE', 'MOCODE_LIFECYCLE',
   'MOCODE_BUDGET_SCHEDULER', 'AUTO_REFLECT', 'MEMORY_ENABLED', 'REFLECT_EVERY_N',
   'MAX_STEPS', 'MOCODE_SUBAGENT_ENABLED', 'SUB_AGENT_MAX_STEPS', 'SANDBOX_ROOT',

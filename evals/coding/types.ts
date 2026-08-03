@@ -29,7 +29,6 @@ export interface BenchmarkTaskResult {
   difficulty: BenchmarkDifficulty;
   status: 'passed' | 'failed' | 'timeout' | 'aborted' | 'error';
   finalVerifiedSuccess: boolean;
-  firstPatchPass: boolean;
   regression: boolean;
   toolRecovery: boolean;
   toolCalls: number;
@@ -39,7 +38,6 @@ export interface BenchmarkTaskResult {
   firstSuccessRate?: number;
   tokens: number | null;
   durationMs: number;
-  unverifiedCompletion: boolean;
   changedFiles: string[];
   error?: string;
   // ─────────── QUAL-01 质量维度 ───────────
@@ -47,8 +45,6 @@ export interface BenchmarkTaskResult {
   reflectionRounds: number;
   /** ASK-01: ask_human 工具成功调用次数。 */
   askHumanCount: number;
-  /** PROMPT-02: checklist 触发次数(推入 history 的 [checklist] user 消息计数)。 */
-  checklistTriggered: number;
 }
 
 export interface BenchmarkReport {
@@ -62,10 +58,8 @@ export interface BenchmarkReport {
     tasks: number;
     passed: number;
     finalVerifiedSuccessRate: number;
-    firstPatchPassRate: number;
     regressionRate: number;
     toolRecoveryRate: number;
-    unverifiedCompletionRate: number;
     toolCalls: number;
     retries: number;
     firstSuccessRate: number;
@@ -76,8 +70,6 @@ export interface BenchmarkReport {
     reflectionRounds: number;
     /** 平均 ask_human 调用次数(per task)。 */
     askHumanCount: number;
-    /** 平均 checklist 触发次数(per task)。 */
-    checklistTriggered: number;
   };
   tasks: BenchmarkTaskResult[];
 }

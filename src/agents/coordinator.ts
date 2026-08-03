@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { commitChangeSet, contentHash, createChangeSet, type ChangeSet, type FileChange } from '../changeset/index.js';
 import { getSandboxRoot, withSandboxRoot } from '../sandbox/index.js';
-import type { ValidationResult } from '../verification/index.js';
 import type { ChatUsage } from '../llm/index.js';
 
 export type SubAgentStatus = 'completed' | 'failed' | 'aborted' | 'conflict';
@@ -13,7 +12,6 @@ export interface SubAgentResult {
   findings: string[];
   readSet: string[];
   changeSet: ChangeSet | null;
-  verification: ValidationResult | null;
   summary: string | null;
   transcript: string;
   usage: ChatUsage;

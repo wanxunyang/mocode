@@ -15,18 +15,14 @@ assert.equal(selectTasks('hard').length, 20);
 assert.equal(selectTasks('advanced').length, 20);
 assert.deepEqual(selectTasks('single-01,multi-01').map(t => t.id), ['single-01', 'multi-01']);
 
-// checklist-trigger-01: PROMPT-02 设计意图 — fixture 内含**多文件 / 边界条件** bug,
-// 必须跑 verify.mjs 并核对真实输出才能确认修对(防止 agent 自己看代码就 declare done)。
+// multifile-boundary-01: fixture 内含多文件 / 边界条件 bug。
 {
-  const t = codingTasks.find(t => t.id === 'checklist-trigger-01');
-  assert.ok(t, 'checklist-trigger-01 fixture exists');
-  // 多文件 bug:utils.js 的 raw 是减法,math.js 不查直接转。
-  // 这要求 agent 必须读 2 个文件 + 跑 verify.mjs,而不是只读 math.js 改 sum。
+  const t = codingTasks.find(t => t.id === 'multifile-boundary-01');
+  assert.ok(t, 'multifile-boundary-01 fixture exists');
   assert.equal(t.files.filter(f => f.path.endsWith('.js')).length, 2,
-    'checklist-trigger fixture has 2 source files (multi-file bug)');
-  // goal 显式含"边界条件"要求(boundary: zero, negative)→ 强制触发 Phase 3 边界。
+    'multifile-boundary fixture has 2 source files');
   assert.ok(/boundary/i.test(t.goal) || /zero|neg/i.test(t.verificationCommand),
-    'checklist-trigger goal mentions boundary');
+    'multifile-boundary goal mentions boundary');
 }
 assert.equal(parseBenchmarkArgs(['--group', 'types']).selection, 'types');
 assert.equal(parseBenchmarkArgs([]).selection, '');
@@ -54,20 +50,19 @@ try {
 
 const report = createReport({ schemaVersion: 2, runId: 'test', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'all' }, [{
   id: 'x', title: 'x', group: 'tests', difficulty: 'basic', status: 'passed', finalVerifiedSuccess: true,
-  firstPatchPass: true, regression: false, toolRecovery: false, toolCalls: 2,
-  tokens: 10, durationMs: 20, unverifiedCompletion: false, changedFiles: ['x.js'],
-  reflectionRounds: 1, askHumanCount: 0, checklistTriggered: 0,
+  regression: false, toolRecovery: false, toolCalls: 2,
+  tokens: 10, durationMs: 20, changedFiles: ['x.js'],
+  reflectionRounds: 1, askHumanCount: 0,
 }]);
 assert.equal(report.summary.finalVerifiedSuccessRate, 1);
 assert.match(renderSummary(report), /1\/1 passed/);
 assert.equal(report.summary.reflectionRounds, 1);
 assert.equal(report.summary.askHumanCount, 0);
-assert.equal(report.summary.checklistTriggered, 0);
 const timeoutReport = createReport({ schemaVersion: 2, runId: 'timeout', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'hard' }, [{
   id: 'late', title: 'late', group: 'resilience', difficulty: 'hard', status: 'timeout',
-  finalVerifiedSuccess: false, firstPatchPass: false, regression: false, toolRecovery: false,
-  toolCalls: 1, tokens: 1, durationMs: 10, unverifiedCompletion: false, changedFiles: [],
-  reflectionRounds: 0, askHumanCount: 0, checklistTriggered: 0,
+  finalVerifiedSuccess: false, regression: false, toolRecovery: false,
+  toolCalls: 1, tokens: 1, durationMs: 10, changedFiles: [],
+  reflectionRounds: 0, askHumanCount: 0,
 }]);
 assert.equal(timeoutReport.summary.passed, 0);
-console.log(`coding benchmark smoke: 16/16 passed (${codingTasks.length} fixtures checked, incl. checklist-trigger-01)`);
+console.log(`coding benchmark smoke: 16/16 passed (${codingTasks.length} fixtures checked, incl. multifile-boundary-01)`);

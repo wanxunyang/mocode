@@ -97,8 +97,6 @@ function hooksFor(runId: string): AgentHooks {
     onToolHeader: (tool) => emit('tool_started', { id: tool.id, name: tool.name, arguments: tool.arguments }, runId),
     onToolStart: (name) => emit('status', { value: 'running_tool', tool: name }, runId),
     onToolResult: (tool, output) => emit('tool_completed', { id: tool.id, name: tool.name, output }, runId),
-    onValidationStart: (command) => emit('validation_started', { command }, runId),
-    onValidationResult: (result) => emit('validation_completed', { result }, runId),
     onAbort: () => emit('run_aborted', {}, runId),
     onDone: (elapsedMs, usage) => emit('run_finished', { elapsedMs, usage }, runId),
   };
@@ -133,7 +131,6 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       dynamicSystemSuffix: buildActiveNotesPlanReminder,
       hooks: hooksFor(command.id),
       contextState,
-      autoValidate: config.autoValidate,
       permissionPrompt: (request) => waitForApproval(command.id, request),
     });
     saveSession(history, sessionId, queryHistory);
@@ -142,7 +139,6 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       completed: result.completed,
       terminationReason: result.terminationReason,
       changedFiles: result.changedFiles ?? [],
-      validation: result.validation,
       usage: result.usage,
       usagePercent: Math.round(contextUsagePercent() * 100),
       contextWindow: config.contextWindowTokens,

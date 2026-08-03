@@ -4,18 +4,15 @@ import path from 'node:path';
 import { config } from '../config/index.js';
 import type { ChatUsage } from '../llm/index.js';
 import { getCurrentTurnId } from '../rollback/index.js';
-import type { ValidationResult } from '../verification/types.js';
 import { getCurrentSessionId } from './state.js';
 
 export type TraceEventType =
   | 'turn_start' | 'turn_end' | 'step_start' | 'step_end'
   | 'model_start' | 'model_retry' | 'model_end'
   | 'tool_call_start' | 'tool_retry' | 'tool_call_end' | 'permission'
-  | 'validation_start' | 'validation_end' | 'compact' | 'abort' | 'rollback'
-  // PROMPT-02 / RETRY-01: hard signal for quality dimensions (QUAL-01).
-  // Emitted by core.ts when checklist fires / retry reflection is injected,
-  // so reduceTraceMetrics can count without scanning history text (fragile).
-  | 'checklist_triggered' | 'retry_reflection' | 'ask_human_call'
+  | 'compact' | 'abort' | 'rollback'
+  // RETRY-01 / ASK-01: hard signals for quality dimensions.
+  | 'retry_reflection' | 'ask_human_call'
   // NARR-01: interstitial narration — assistant prose emitted in the same
   // message as tool_calls. The "stay silent during tool-calling turns" rule is
   // prompt-only; this event makes violations measurable instead of vibes-based.
@@ -44,7 +41,6 @@ export interface AgentTurnTrace {
   toolCalls: number;
   changedFiles: string[];
   usage?: ChatUsage;
-  validation?: ValidationResult;
 }
 
 export type TraceEventInput = Omit<AgentTraceEvent, 'schemaVersion' | 'eventId' | 'ts'>;
@@ -90,14 +86,5 @@ export function appendCurrentSessionRuntimeEvent(
 export function appendCurrentSessionTrace(trace: AgentTurnTrace): void {
   const sessionId = getCurrentSessionId();
   if (!sessionId) return;
-  const validation = trace.validation
-    ? {
-        status: trace.validation.status,
-        level: trace.validation.level,
-        durationMs: trace.validation.durationMs,
-        verificationComplete: trace.validation.verificationComplete,
-        fingerprint: trace.validation.fingerprint,
-      }
-    : undefined;
-  appendTraceLine(sessionId, { ...trace, sessionId, validation });
+  appendTraceLine(sessionId, { ...trace, sessionId });
 }

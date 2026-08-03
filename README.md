@@ -12,14 +12,12 @@ MoCode explores your code, reads/writes/edits files, runs shell commands, and se
 
 ## Engineering discipline
 
-MoCode encodes "how to take coding seriously" into the agent's own behavior, not just into the prompt:
+MoCode keeps code-level control light and leaves task strategy to the agent:
 
-- **Plan → Build → Verify → Fix four-phase discipline** — Injected fresh each turn into `buildBasePrompt`, with per-model-family light adaptation. The agent must restate the task, plan, and acceptance signal before touching anything; changes must pass an automatic validation gate; on failure the agent enters a Fix phase and feeds real command output back as a fresh observation. Evidence: `src/agent/work-discipline.ts` + `evals/work-discipline.ts` (6 assertions). Basis: [`docs/coding-harness-quality-roadmap.md` §4.1 PROMPT-01](docs/coding-harness-quality-roadmap.md).
-- **Pre-Completion Checklist middleware** — `finish`/`stop` is blocked when `mutation > 0 && no tool call && validation !== 'passed'`. Simple read-only tasks deliberately bypass it to avoid noise. Evidence: `src/agent/middleware/checklist.ts` + `evals/checklist.ts` (6 assertions).
-- **Reflective retry + thrash throttling** — Errors are classified into 6 categories (`retry-classifier`); the same tool with the same args ≥3 times appends a hint to switch strategy; failed traces stay in context but receive a targeted reflection prompt instead of a blind retry. Evidence: `src/tools/retry.ts` + `src/agent/retry-classifier.ts` + `evals/retry-classifier.ts` (9 assertions).
-- **`ask_human` as a deliberate de-escalation** — No blind guessing. On whitelisted scenarios (sandbox deviation, ambiguous params, conflicting user instructions) the agent prefers "disclose rather than guess" and will explicitly call `ask_human` to pop a panel for your decision (with a call budget). Evidence: ASK_WHITELIST_SECTION in `src/agent/work-discipline.ts` + `evals/ask-budget.ts` (6 assertions).
-- **Verification cascade V0 → V3 with content fingerprint cache** — Changes pass through file post-conditions → scoped tsc/eslint → targeted unit tests → affected npm scripts, in that order; the first actionable failure stops the cascade; a SHA-256 content cache skips repeated work on unchanged files. Evidence: `src/validators/` plus the VER chapters in the main roadmap.
-- **Five-zone context controls + token self-calibration** — Five independent dials (`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget`), each with its own `MOCODE_*=false` kill switch; even with all five off, observations still age through the lifecycle. Token estimation uses EWMA to self-calibrate against real provider usage rather than trusting the estimator. Evidence: the five modules under `src/context/` plus the `MOCODE_*` switches in `src/config/index.ts`.
+- **Advisory working discipline** — The system prompt asks the agent to make focused changes, avoid redundant retrieval, and decide for itself whether validation is useful. Validation is optional and is never a completion gate.
+- **Reflective retry + thrash throttling** — Errors are classified into 6 categories (`retry-classifier`); repeated identical failures append a hint to switch strategy instead of blindly retrying.
+- **`ask_human` for user-owned decisions** — The agent asks only when repository evidence cannot resolve a high-impact choice; implementation details remain autonomous.
+- **Five-zone context controls + token self-calibration** — Five independent dials (`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget`) manage context pressure. Token estimation self-calibrates against provider usage.
 
 ## Architecture
 
@@ -29,7 +27,7 @@ MoCode is organized as a layered runtime: the terminal experience drives an auto
 
 ### Autonomous execution loop
 
-Each model response is one step in a closed loop. Tool calls are classified by declared capabilities, safe reads can run in parallel, writes acquire canonical resource locks, observations are encoded before returning to context, and code changes pass through automatic validation.
+Each model response is one step in a closed loop. Tool calls are classified by declared capabilities, safe reads can run in parallel, writes acquire canonical resource locks, and observations are encoded before returning to context. When the agent has no more tools to call, its response completes immediately; the framework does not run hidden validation or force another model turn.
 
 <p align="center"><img src="./assets/architecture/agent-loop.svg" alt="MoCode autonomous agent execution loop" width="100%"></p>
 
@@ -41,7 +39,7 @@ Tool output does not accumulate as an undifferentiated transcript. Typed encoder
 
 ### Multi-agent work without unsafe shared writes
 
-Read-only sub-agents fan out concurrently. Writer agents work inside private filesystem overlays and return structured ChangeSets; the coordinator checks expected hashes, acquires canonical locks, performs conflict-safe merges, and runs one unified verification gate in the main workspace.
+Read-only sub-agents fan out concurrently. Writer agents work inside private filesystem overlays and return structured ChangeSets; the coordinator checks expected hashes, acquires canonical locks, and performs conflict-safe merges. Validation remains an explicit agent choice in the shared workspace.
 
 <p align="center"><img src="./assets/architecture/multi-agent.svg" alt="MoCode multi-agent overlay and ChangeSet coordination" width="100%"></p>
 
@@ -51,15 +49,13 @@ Every mutating tool calls into a permission layer before it runs. Tools are clas
 
 <p align="center"><img src="./assets/architecture/permission-model.svg" alt="MoCode permission model: tool classes, four-tier grants, fingerprinting, durable storage" width="100%"></p>
 
-### Verification cascade: cheap checks first, expensive checks only on demand
+### Agent-directed validation
 
-Code changes go through V0 (file post-conditions) → V1 (scoped tsc/eslint markers) → V2 (targeted unit tests) → V3 (affected package scripts). The first actionable failure stops the cascade and is fed back to the agent as a fresh observation; a SHA-256 content cache skips repeated work on unchanged files.
-
-<p align="center"><img src="./assets/architecture/verification-cascade.svg" alt="MoCode verification cascade V0 to V3 with content fingerprint cache" width="100%"></p>
+MoCode does not run a hidden validation cascade when a task ends. The agent can explicitly call `run_command` for a focused test, typecheck, or build when it judges that evidence useful; otherwise it may finish without an extra framework-controlled round trip.
 
 ### Rollback timeline: per-mutation snapshots, restore by turn
 
-A clean undo point is saved before every mutating tool. `/rollback <turnId>` restores file buffers in reverse-chronological order under canonical resource locks, then reruns V0+V1 to confirm a clean state — never re-runs the model. Read tools, network effects, and binary changes are explicitly out of scope, kept honest in the contract.
+A clean undo point is saved before every mutating tool. `/rollback <turnId>` restores file buffers in reverse-chronological order under canonical resource locks — it does not re-run the model or launch automatic tests. Read tools, network effects, and binary changes are explicitly out of scope, kept honest in the contract.
 
 <p align="center"><img src="./assets/architecture/rollback-flow.svg" alt="MoCode rollback timeline and per-turn snapshot flow" width="100%"></p>
 
@@ -172,7 +168,6 @@ Common backend `base_url` values:
 | `COMPACT_THRESHOLD`         | Auto-compaction trigger threshold (fraction of window)                | `0.85`                      |
 | `LLM_STREAM_USAGE`          | Include `stream_options.include_usage` on streaming requests for real usage | `true`                |
 | `AUTO_COMPACT`               | Auto-compaction master switch                                          | `true`                       |
-| `MOCODE_AUTO_VALIDATE`       | Auto-run the lowest-cost discovered validation command after code changes; feed failures back to the agent | `true` |
 | `AUTO_REFLECT`               | Background reflection pass master switch (periodically mines memories from conversations) | `true`   |
 | `REFLECT_EVERY_N`            | Trigger a background reflection every N turns (runs alongside the agent, non-blocking) | `5`      |
 | `ANYSEARCH_API_KEY`         | Web search API key (falls back to anonymous free quota if unset)      | none                         |
@@ -275,18 +270,9 @@ MoCode automatically scans the following directories for skills (each skill is a
 
 A skill's `description` is injected into the system prompt (progressive disclosure, tier 1); the model calls `use_skill` to load the full body (tier 2) only when the task is relevant. Use `/skills` to see discovered skills.
 
-## Working discipline (Build-and-Self-Verify)
+## Working discipline
 
-Every coding task runs through four sequential phases. Skipping or merging them is a failure mode — the system prompt injects this discipline on every turn (see `src/agent/work-discipline.ts`):
-
-1. **Plan & Discover** — restate the goal, identify the acceptance signal, read the relevant code, and surface ambiguities via `ask_human` before implementing.
-2. **Build** — make the smallest change that satisfies the spec; tests for new/changed behavior are an obligation, not a "should" aspiration.
-3. **Verify** — run a real, executable verification (typecheck, the project's test command, or a focused reproducer). Read the full output. Compare the result to the **spec**, not to your own diff.
-4. **Fix** — any failure → return to the spec, not to the diff. Re-derive what the spec requires; after a fix, re-run Phase 3 end-to-end. Cap blind retries at three identical failed attempts before changing approach.
-
-Hard rule: *"I read the code and it looks right" is not a completion signal.* A task is complete only when executable verification against the spec has run, its full output has been read, and the result matches the spec — and the final reply names the command, the output, and the spec line it satisfied.
-
-The section adapts lightly per `model_family` (anthropic / openai / qwen) so the wording matches each base model's instruction-following style. All four variants share the same 4-phase English body; only the opener sentence and the `[model: X]` tag differ. User language preference is handled by the existing i18n block.
+The system prompt provides lightweight guidance rather than a framework gate: inspect only what matters, make focused changes, avoid repeated stale reads, and report uncertainty honestly. The agent decides whether validation is useful for the task and chooses the scope itself. Broad test/build suites are not run by default, and lack of validation never blocks completion or triggers an extra model turn.
 
 ## Project memory (MOCODE.md)
 

@@ -17,7 +17,6 @@ export {};
 
 const { ASK_HUMAN_PER_TURN_BUDGET, askHumanBudgetAnnotation } = await import('../src/agent/core.js');
 const { buildWorkDisciplineSection } = await import('../src/agent/work-discipline.js');
-const { buildChecklistUserMessage } = await import('../src/agent/middleware/checklist.js');
 
 const assert = (condition: unknown, message: string): void => {
   if (!condition) throw new Error(message);
@@ -76,23 +75,11 @@ const assert = (condition: unknown, message: string): void => {
   for (const keyword of ['irreversible deletion', 'public API compatibility', 'materially change product behavior']) {
     assert(sec.includes(keyword), `work discipline section missing high-impact ask boundary: ${keyword}`);
   }
-  assert(sec.includes('For naming, implementation detail, and verification commands'),
+  assert(sec.includes('For naming and implementation details'),
     'routine reversible choices should remain autonomous');
 }
 
-// 5. 同步:checklist 尾部确实包含 ASK-01 bonus 段。
-{
-  const msg = buildChecklistUserMessage();
-  assert(msg.includes('Bonus (ASK-01)'),
-    'checklist should include ASK-01 bonus footer');
-  assert(msg.includes('guessing any fact the user did not state'),
-    'checklist bonus should mention guessing');
-  // 不破坏 5 项与 LangChain 对齐的硬约定。
-  const numbered = (msg.match(/^\d\. /gm) ?? []).length;
-  assert(numbered === 5, `checklist must have exactly 5 numbered items, got ${numbered}`);
-}
-
-// 6. 跨段一致性:纪律段 "at most 2" 与预算常量与 budget 块文案三者一致。
+// 5. 跨段一致性:纪律段 "at most 2" 与预算常量与 budget 块文案三者一致。
 {
   const sec = buildWorkDisciplineSection();
   const at2 = askHumanBudgetAnnotation(2, 'success');

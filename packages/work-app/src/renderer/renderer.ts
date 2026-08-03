@@ -764,8 +764,6 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     case 'text_delta': appendText(String(payload.text ?? '')); break;
     case 'tool_started': addTool(payload); break;
     case 'tool_completed': addTool(payload, true); break;
-    case 'validation_started':
-    case 'validation_completed': break;
     case 'approval_requested': showApproval(payload); break;
     case 'run_aborted': finish(); break;
     case 'run_completed':

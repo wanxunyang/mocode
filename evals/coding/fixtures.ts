@@ -64,7 +64,7 @@ const basicTasks: CodingTaskFixture[] = [
   task('no-tests-01', 'Document-only project', 'no-tests', 'Correct the installation command in README.md from npm add to npm install. There is no test framework.',
     [{ path: 'README.md', content: '# Demo\n\nRun `npm add demo`.\n' }],
     ["const s=fs.readFileSync('README.md','utf8'); if(!s.includes('npm install demo')||s.includes('npm add demo')) throw Error('readme');"], ['README.md']),
-  task('checklist-trigger-01', 'Multi-file bug spread across imports',
+  task('multifile-boundary-01', 'Multi-file bug spread across imports',
     'multi-file',
     `Make sum({a,b}) return a+b. The bug is spread: utils.js returns the wrong primitive and math.js forwards it without re-checking. ` +
     `Do not modify verify.mjs. Boundary: sum({a:0,b:0}) must be 0, sum({a:-1,b:1}) must be 0.`,

@@ -53,6 +53,12 @@ const OBSERVER_TOOLS = new Set<string>([
   'web_fetch',
 ]);
 
+/** 豁免老化的工具:指令/决策类输出,被自动归档会导致模型中途失忆。
+ *  - use_skill:skill 指令正文,归档后 skill 工作流直接断裂;
+ *  - ask_human:用户显式决策回复,归档后无法回溯约束;
+ *  - sub-agent:子 agent 最终结构化结果,主 agent 后续步骤仍要引用。 */
+const NEVER_AGE_TOOLS = new Set<string>(['use_skill', 'ask_human', 'sub-agent']);
+
 /** 消费者工具(这些工具的 push 会触发「上游被消费」标记)。
  *  只列能基于 path 静态判定消费的;run_command/memory_* 等不参与(避免误伤)。 */
 const CONSUMER_TOOLS = new Set<string>(['read_file', 'edit_file', 'write_file']);
@@ -68,10 +74,11 @@ const DIGEST_PREFIX = '⌦[摘要:';
 
 /** 老化阈值:某条工具消息自 push 以来经历的「消费者 push」次数。
  *  ≥ 这个值且仍为 LIVE 且非观察类 → 视为 OBSOLETE → STUB。
- *  默认 2:等价于「跨过两个消费者 push 仍无人引用」= 跨过整轮最末尾的工具调用。 */
-const DEFAULT_AGE_THRESHOLD = 2;
+ *  刻意取 8:旧值 2 意味着任何孤立工具结果后面只要再有 2 次工具调用就被归档,
+ *  模型刚建立的验证证据两步内即蒸发,诱发反复 re-run;8 留出合理的推理纵深。 */
+const DEFAULT_AGE_THRESHOLD = 8;
 
-/** 观察类工具 Phase 1:LIVE → REFERENCED 的老化阈值(普通工具用 DEFAULT_AGE_THRESHOLD=2)。
+/** 观察类工具 Phase 1:LIVE → REFERENCED 的老化阈值(普通工具用 DEFAULT_AGE_THRESHOLD=8)。
  *  10 步后才降为 REFERENCED,保留完整内容;理由:返回多个候选(grep 10 文件但只读 1 个),
  *  剩余候选可能后续被消费,给足够时间窗口。 */
 const OBSERVER_REFERENCED_AGE = 10;
@@ -370,6 +377,9 @@ export class LifecycleEngine {
         const age = this.age.get(idx) ?? 0;
         const tn = toolNameOf(history, idx);
         if (!tn) continue;
+        // 豁免老化:指令/决策类输出(use_skill/ask_human/sub-agent)。被自动归档
+        // 会导致模型中途失忆(skill 指令蒸发、用户拍板丢失),宁可占上下文也不 STUB。
+        if (NEVER_AGE_TOOLS.has(tn)) continue;
 
         if (OBSERVER_TOOLS.has(tn)) {
           // Phase 1: LIVE → REFERENCED(保留完整内容)。

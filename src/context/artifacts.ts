@@ -161,7 +161,10 @@ export function recordArtifact(
 }
 
 function affected(artifact: ContextArtifact, changed: Set<string>): boolean {
-  return artifact.dependencies.some((dependency) => dependency.path === '*' || changed.has(dependency.path));
+  // '*' 依赖(无法解析出具体文件路径的诊断/搜索结果)不与任何具体写操作关联:
+  // 任何文件写入都会作废全部 '*' artifact,等于每次 mutation 都销毁
+  // git/测试/构建等历史证据,模型被迫反复 re-run,轮次爆炸。只失效路径明确命中的。
+  return artifact.dependencies.some((dependency) => dependency.path !== '*' && changed.has(dependency.path));
 }
 
 /** Mark and immediately stub stale facts; this is stronger than waiting for budget pressure. */
@@ -182,7 +185,7 @@ export function invalidateArtifacts(
       const original = toText(message.content);
       const paths = artifact.dependencies.map((item) => item.path).join(', ');
       const stub = `${STALE_PREFIX}${artifact.source.tool}] source=${artifact.id} dependencies=${paths} ` +
-        `invalidated-by=${[...changed].join(', ')}; re-run ${artifact.source.tool} before using this fact.`;
+        `invalidated-by=${[...changed].join(', ')}; treat content as potentially outdated.`;
       message.content = stub;
       artifact.tokenCount = estimateTokens(stub);
     }
@@ -245,7 +248,7 @@ export function pruneStaleArtifacts(state: ContextState, history: ChatMessage[])
     if (message?.role !== 'tool') continue;
     const content = toText(message.content);
     if (!content.startsWith(STALE_PREFIX)) {
-      message.content = `${STALE_PREFIX}${artifact.source.tool}] source=${artifact.id}; re-run before use.`;
+      message.content = `${STALE_PREFIX}${artifact.source.tool}] source=${artifact.id}; source changed, so this content may be outdated.`;
       artifact.tokenCount = estimateTokens(String(message.content));
       pruned++;
     }

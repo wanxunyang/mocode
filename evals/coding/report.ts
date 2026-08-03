@@ -7,9 +7,8 @@ export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, t
   const passed = tasks.filter(t => t.status === 'passed').length;
   const verified = tasks.filter(t => t.finalVerifiedSuccess).length;
   const recovered = tasks.filter(t => t.toolRecovery).length;
-  // QUAL-01 质量维度均值(per task)。三个新指标用 reduce 累计,tasks 为空时 fallback 0
-  // 而非 undefined,避免 NaN 污染 report。
-  const avgOf = (field: 'reflectionRounds' | 'askHumanCount' | 'checklistTriggered') =>
+  // Quality-dimension averages; empty task sets fall back to zero.
+  const avgOf = (field: 'reflectionRounds' | 'askHumanCount') =>
     tasks.length ? tasks.reduce((n, t) => n + t[field], 0) / tasks.length : 0;
   return {
     ...meta,
@@ -17,10 +16,8 @@ export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, t
       tasks: tasks.length,
       passed,
       finalVerifiedSuccessRate: rate(verified, tasks.length),
-      firstPatchPassRate: rate(tasks.filter(t => t.firstPatchPass).length, tasks.length),
       regressionRate: rate(tasks.filter(t => t.regression).length, tasks.length),
       toolRecoveryRate: rate(recovered, tasks.length),
-      unverifiedCompletionRate: rate(tasks.filter(t => t.unverifiedCompletion).length, tasks.length),
       toolCalls: tasks.reduce((n, t) => n + t.toolCalls, 0),
       retries: tasks.reduce((n, t) => n + (t.retries ?? 0), 0),
       firstSuccessRate: tasks.length
@@ -30,7 +27,6 @@ export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, t
       durationMs: tasks.reduce((n, t) => n + t.durationMs, 0),
       reflectionRounds: avgOf('reflectionRounds'),
       askHumanCount: avgOf('askHumanCount'),
-      checklistTriggered: avgOf('checklistTriggered'),
     },
     tasks,
   };
@@ -46,21 +42,18 @@ export function renderSummary(r: BenchmarkReport): string {
     `- Selection: ${r.selection}`,
     `- Tasks: ${r.summary.passed}/${r.summary.tasks} passed`,
     `- Final verified success: ${pct(r.summary.finalVerifiedSuccessRate)}`,
-    `- First-patch pass: ${pct(r.summary.firstPatchPassRate)}`,
     `- Regression: ${pct(r.summary.regressionRate)}`,
     `- Tool recovery: ${pct(r.summary.toolRecoveryRate)}`,
-    `- Unverified completion: ${pct(r.summary.unverifiedCompletionRate)}`,
     `- Tool first-success rate: ${pct(r.summary.firstSuccessRate)}`,
     `- Tool calls / retries / tokens / elapsed: ${r.summary.toolCalls} / ${r.summary.retries} / ${r.summary.tokens} / ${(r.summary.durationMs / 1000).toFixed(1)}s`,
     '',
     `## Quality dimensions (per task average)`,
     `- Reflection rounds: ${num(r.summary.reflectionRounds)}`,
     `- Ask-human calls: ${num(r.summary.askHumanCount)}`,
-    `- Checklist triggered: ${num(r.summary.checklistTriggered)}`,
     '',
-    '| Task | Difficulty | Group | Result | First patch | Recovery | Reflect | AskH | ChkL | Calls | Tokens | Time |',
-    '|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
-    ...r.tasks.map(t => `| ${t.id} | ${t.difficulty} | ${t.group} | ${t.status} | ${t.firstPatchPass ? 'yes' : 'no'} | ${t.toolRecovery ? 'yes' : 'no'} | ${t.reflectionRounds} | ${t.askHumanCount} | ${t.checklistTriggered} | ${t.toolCalls} | ${t.tokens ?? '-'} | ${(t.durationMs / 1000).toFixed(1)}s |`),
+    '| Task | Difficulty | Group | Result | Recovery | Reflect | AskH | Calls | Tokens | Time |',
+    '|---|---|---|---:|---:|---:|---:|---:|---:|---:|',
+    ...r.tasks.map(t => `| ${t.id} | ${t.difficulty} | ${t.group} | ${t.status} | ${t.toolRecovery ? 'yes' : 'no'} | ${t.reflectionRounds} | ${t.askHumanCount} | ${t.toolCalls} | ${t.tokens ?? '-'} | ${(t.durationMs / 1000).toFixed(1)}s |`),
     '',
   ];
   return lines.join('\n');
