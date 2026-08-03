@@ -351,6 +351,10 @@ export interface AgentHooks {
   onToolCall?: (name: string) => void;
   /** 每步开始,spinner 启「思考中」(主 agent:spinner.start)。 */
   onStepStart?: () => void;
+  /** 流式实时 token 用量(本轮累计 = 已完成步实测 + 当前步估算)。
+   *  cachedTokens = 已完成步实测 cache 命中 + 当前步末尾 usage chunk 到达后的实测值(流式期间不含当前步)。
+   *  主 agent:写底栏 context 进度条左侧的实时 chip;200ms 心跳重画自然取最新值。 */
+  onLiveUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number }) => void;
   /** chat 返回后停 spinner(主 agent:spinner.stop)。 */
   onChatDone?: () => void;
   /** 流式正文末尾补换行(若 onToolCall 已补则 no-op);防 ● 行黏在正文行尾。 */
@@ -749,12 +753,31 @@ export async function runAgentCore(
               ...history.slice(1),
             ]
           : history;
+      // 实时用量:当前步 prompt 估算(含校准系数)+ 流式累计 completion 估算,
+      // 叠上已完成步的实测 turnUsage,经 onLiveUsage 推给底栏实时 chip。
+      // turnUsage 在闭包里被 addUsage 原地更新,reportLive 每次调用读最新值。
+      const stepPromptEst = estimatePromptTokens(
+        requestHistory,
+        activeTools,
+        runtimeContextState.correction,
+      );
+      const reportLive = (comp: number, cached?: number): void => {
+        hooks.onLiveUsage?.({
+          promptTokens: (turnUsage?.promptTokens ?? 0) + stepPromptEst,
+          completionTokens: (turnUsage?.completionTokens ?? 0) + comp,
+          totalTokens: (turnUsage?.totalTokens ?? 0) + stepPromptEst + comp,
+          // 当前步 cache 命中在末尾 usage chunk 才可知(cached 有值时叠上);流式期间只显已完成步的。
+          cachedTokens: (turnUsage?.cachedTokens ?? 0) + (cached ?? 0),
+        });
+      };
+      reportLive(0); // 思考阶段先显 ↑ prompt 估算,首 token 到达后 ↓ 开始涨
       try {
         result = await chat(
           requestHistory,
           {
             onText,
             onToolCall,
+            onProgress: reportLive,
             onRetry: (retry) => emitTrace('model_retry', {
               model: requestModel,
               provider,

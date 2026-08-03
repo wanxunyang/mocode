@@ -239,6 +239,8 @@ export async function runAgent(
     },
     onStepStart: () => spinner.start(t('agent.thinking')),
     onChatDone: () => spinner.stop(),
+    // 流式实时用量 → 底栏 context 进度条左侧 chip;轮末由 repl 清空。
+    onLiveUsage: (u) => layout.setLiveUsage(u),
     onTextEnd: () => {
       if (lastChar && lastChar !== '\n') {
         layout.contentWrite('\n');

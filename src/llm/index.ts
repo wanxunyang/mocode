@@ -307,6 +307,11 @@ export interface StreamHandlers {
   onToolCall?: (name: string) => void;
   /** Retry telemetry contains only a status/code, never provider error text or request data. */
   onRetry?: (info: ChatRetryInfo) => void;
+  /** 流式实时 completion token 估算(本请求累计值,含 think 段与 tool_call 参数)。
+   *  每个带 delta 的 chunk 后回调一次,供调用方驱动底栏实时用量 chip;不提供则不做任何统计。
+   *  末尾 usage chunk 到达时再回调一次,此时 completion 为实测值、cachedTokens 为后端报的
+   *  cache 命中(流式期间不可知,缺省 undefined)。 */
+  onProgress?: (completionTokensEst: number, cachedTokens?: number) => void;
 }
 
 function retryErrorCode(error: unknown): string {
@@ -409,6 +414,23 @@ async function chatOnce(
     consumedAny = true;
   };
 
+  // 实时 completion 估算(onProgress 提供时才统计,零开销兜底):
+  // 按 chunk 累加 CJK/other 字符数、汇总时才 ceil——逐片段 ceil 会把大量小 chunk 各向上
+  // 取整造成严重过估。统计口径 = raw content(含 think 段)+ tool_call 参数,与后端真实
+  // completion 计费范围一致(reasoning 也计费)。
+  let liveCjk = 0;
+  let liveOther = 0;
+  const countLive = (text: string): void => {
+    for (const ch of text) {
+      const cp = ch.codePointAt(0) ?? 0;
+      if (isCJK(cp)) liveCjk++;
+      else liveOther++;
+    }
+  };
+  const reportProgress = (): void => {
+    handlers.onProgress?.(Math.ceil(liveCjk + liveOther / 4));
+  };
+
   for await (const chunk of stream as AsyncIterable<{
     usage?: {
       prompt_tokens: number;
@@ -439,11 +461,16 @@ async function chatOnce(
         cachedTokens: extras.cachedTokens,
         reasoningTokens: extras.reasoningTokens,
       };
+      // 末尾 chunk 把实测 completion + cache 命中即时推给实时 chip(无 delta,下方 continue 不会再报)。
+      handlers.onProgress?.(usage.completionTokens, usage.cachedTokens);
     }
     const delta = chunk.choices?.[0]?.delta;
     if (!delta) continue; // 末尾 usage-only chunk 等无 delta
 
-    if (delta.content) emitVisible(thinkFilter.push(delta.content));
+    if (delta.content) {
+      if (handlers.onProgress) countLive(delta.content);
+      emitVisible(thinkFilter.push(delta.content));
+    }
 
     if (delta.tool_calls) {
       // 不在这里 flush thinkFilter：其内部若有残留，只可能是 `<th` / `</thi` 一类
@@ -462,9 +489,15 @@ async function chatOnce(
           if (!entry.name) handlers.onToolCall?.(fname); // 首次得知工具名:通知调用方启生成中 spinner
           entry.name += fname;
         }
-        if (tc.function?.arguments) entry.arguments += tc.function.arguments;
+        if (tc.function?.arguments) {
+          if (handlers.onProgress) countLive(tc.function.arguments);
+          entry.arguments += tc.function.arguments;
+        }
       }
     }
+
+    // 流式实时用量:每个带 delta 的 chunk 后回调累计估算,驱动底栏实时 chip。
+    if (handlers.onProgress) reportProgress();
   }
 
   // 流结束后只释放普通态下真实的文本尾；未闭合思考段继续丢弃。

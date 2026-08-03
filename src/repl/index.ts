@@ -1176,6 +1176,7 @@ export async function startRepl(
       // 结算只隐藏当前 fingerprint，不修改 notes；后续内容或 mtime 变化会自动重新显示。
       const waitingForPlanApproval = ok && planMode && getAgentMode() === 'plan';
       if (!waitingForPlanApproval) settlePlanStatus();
+      layout.setLiveUsage(undefined); // 轮末清实时 chip,回 INPUT 态不再显示
       refreshStatusBase(history, lastTurnUsage);
       layout.drawStatusBar();
     }

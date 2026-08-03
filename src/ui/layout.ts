@@ -141,6 +141,10 @@ let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 
 let scrollLockUntil = 0; // 发消息轮首滚动锁(绝对时间戳 ms,0=未锁):吸收 stdin 残留滚轮事件,防 resetScroll 回尾后被重新滚上去
 const SCROLL_LOCK_MS = 400; // 锁时长:覆盖 OS 缓冲残留 + 常规滚轮惯性;LLM TTFB 多 >200ms,不影响轮中后段滚动
 let base: { model: string; contextBar: string; cwd: string; modeTag?: string; planSummary?: string; lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } } | null = null;
+// 运行态实时 token 用量(agent core 流式推送,轮末 repl 清 undefined)。
+// composeModelLine 在 RUNNING 态把它画成 chip 放 context 进度条左侧;
+// 不主动触发重画——RUNNING 态 turnTimer 200ms 心跳重画自然取最新值。
+let liveUsage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined;
 let statusText = '';
 let spinnerFrame: string | undefined;
 let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
@@ -1505,14 +1509,18 @@ function composeModelLine(status: StatusBarData, cols: number): string {
     + hintW
     + ((hintPart && tokChip) ? sepHT.length : 0)
     + tokW;
-  // 右段:ctx + sep + cwd,右端对齐。cwd 按预算截断,极窄(<6)隐藏。
+  // 右段:实时用量 chip(仅 RUNNING)+ ctx + sep + cwd,右端对齐。cwd 按预算截断,极窄(<6)隐藏。
+  // 实时 chip 放 context 进度条左侧:本轮累计 ↑prompt ↓completion,流式实时增长。
   // 任一 chip 极宽时收紧 cwd(toolbar 列挤压场景),先从 cwd 砍、再隐藏 cwd、再按 hint→chip 顺序省。
+  const liveChip = mode === 'running' && liveUsage ? formatLiveUsageChip(liveUsage) : '';
+  const liveW = displayWidth(stripAnsi(liveChip));
+  const liveSepW = liveChip ? STATUS_SEP_W : 0;
   const minGap = 2;
-  let cwdBudget = cols - leftW - minGap - ctxW - STATUS_SEP_W - 1;
+  let cwdBudget = cols - leftW - minGap - liveW - liveSepW - ctxW - STATUS_SEP_W - 1;
   let cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
   let cwdW = displayWidth(cwd);
-  let rightStr = `${ctx}${STATUS_SEP}${ui.dim}${cwd}${ui.reset}`;
-  let rightW = ctxW + STATUS_SEP_W + cwdW;
+  let rightStr = `${liveChip}${liveChip ? STATUS_SEP : ''}${ctx}${STATUS_SEP}${ui.dim}${cwd}${ui.reset}`;
+  let rightW = liveW + liveSepW + ctxW + STATUS_SEP_W + cwdW;
   // 极窄:逐步降级——先藏 hint,再藏 token chip,只剩 modeTag 与右段挤。
   // 这样 80 列宽终端下 hint 和 chip 都能稳住,只 <50 列才退化到只剩 modeTag。
   if (leftW + minGap + rightW > cols) {
@@ -1541,10 +1549,20 @@ function formatTurnTokenChip(usage: { promptTokens: number; completionTokens: nu
   const text = n < 1000 ? `${n}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
   const cached = usage.cachedTokens ?? 0;
   const cacheTag = cached > 0
-    ? ` ↻${cached < 1000 ? cached : `${(cached / 1000).toFixed(cached >= 10000 ? 0 : 1)}k`}`
+    ? ` ↻ ${cached < 1000 ? cached : `${(cached / 1000).toFixed(cached >= 10000 ? 0 : 1)}k`}`
     : '';
   // chip 用 mid 灰(降优先级)— 模式仍是主色
   return `${ui.dim}${text} tokens${cacheTag}${ui.reset}`;
+}
+
+/** 运行态实时用量 chip(放 context 进度条左侧):↑prompt ↓completion,cache 命中带 ↻ 标记,
+ *  缩写与轮末摘要 / 左侧 turn chip 同款。估算值(当前步流式中),完成后被实测取代;
+ *  dim 灰降优先级,不与进度条阈值警示抢色。 */
+function formatLiveUsageChip(u: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string {
+  const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`);
+  const cached = u.cachedTokens ?? 0;
+  const cacheTag = cached > 0 ? ` ↻ ${fmt(cached)}` : '';
+  return `${ui.dim}↑ ${fmt(u.promptTokens)} ↓ ${fmt(u.completionTokens)}${cacheTag}${ui.reset}`;
 }
 
 /** spinner 行上方的「虚拟空行」(contentBottom+1)。
@@ -1700,6 +1718,12 @@ export function clearLiveAtCursor(): void {
   stdout.write(out);
   frameRow = 0;
   frameCol = 0;
+}
+
+/** 推送 / 清空运行态实时 token 用量(agent core 流式推送;repl 轮末清 undefined)。
+ *  不触发重画:RUNNING 态 turnTimer 200ms 心跳重画状态行,自然取到最新值。 */
+export function setLiveUsage(u: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined): void {
+  liveUsage = u;
 }
 
 /** 更新状态行基线(模型 / context / cwd / 模式标识 / 活跃 plan chip / 本轮 token chip)。repl 在轮次边界与切模式时调。 */
