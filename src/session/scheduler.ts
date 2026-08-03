@@ -80,29 +80,27 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
     async runStep(history, step, activeTools = chatTools) {
       // External file changes and mutations only update artifact metadata here.
       refreshArtifactFreshness(state, history);
-      let report = evaluate(history, step, activeTools);
+      const report = evaluate(history, step, activeTools);
       const pressure = emptyPressure(report);
       pressure.triggered = atPressure(report);
 
       if (pressure.triggered) {
-        // The order is deliberate. Re-evaluate after every stage and stop as soon
-        // as the request is below pressure, preserving lower-priority evidence.
+        // A single 80% pressure event owns every history rewrite. Run all enabled
+        // low-cost cleanup first, then always compact; do not introduce per-stage
+        // thresholds or stop early when one stage happens to cross below 80%.
         if (config.contextRelprune) {
           pressure.superseded = pruneSuperseded(history, report.hotBoundary);
-          report = evaluate(history, step, activeTools);
         }
-        if (atPressure(report)) {
-          pressure.staleArtifacts = pruneStaleArtifacts(state, history, report.hotBoundary);
-          report = evaluate(history, step, activeTools);
-        }
-        if (atPressure(report) && config.contextOptimize) {
+        pressure.staleArtifacts = pruneStaleArtifacts(state, history, report.hotBoundary);
+        if (config.contextOptimize) {
           const ageAware = createAgeAwareEncodingState(history);
           pressure.encodedLogsAndSearches = ageAware.sweepPressure(history, report.hotBoundary);
-          report = evaluate(history, step, activeTools);
         }
-        pressure.after = report.total;
+        pressure.after = evaluate(history, step, activeTools).total;
       }
 
+      // Use the trigger report intentionally: cleanup may reduce the current estimate,
+      // but crossing 80% commits this step to compacting for maximum token savings.
       const actions = scheduleActions(report);
       let compactHistoryCalled = false;
       let historyRebuilt = false;
@@ -153,7 +151,7 @@ export async function manualCompact(
     const result = await import('./compact.js').then(({ compactHistory }) =>
       compactHistory(history, {
         window: config.contextWindowTokens,
-        threshold: config.compactThreshold,
+        threshold: DEFAULT_BUDGET_POLICY.pressureTriggerRatio,
         focus,
         manual: true,
         force: opts?.force,

@@ -33,7 +33,7 @@ Each model response is one step in a closed loop. Tool calls are classified by d
 
 ### Context compression only under real pressure
 
-Normal sessions retain full tool evidence and structured freshness/provenance metadata. At about 90% of the model window, the scheduler can reduce Cold history in order: exact superseded evidence, stale artifacts, reproducible old logs/searches, then full history compaction. Lifecycle tracking never ages content by tool-call count.
+Normal sessions retain full tool evidence and structured freshness/provenance metadata. At 80% of the model window, one scheduler event runs enabled exact-supersession, stale-artifact, and old-log/search cleanup, then always compacts history. Lifecycle tracking never ages content by tool-call count.
 
 <p align="center"><img src="./assets/architecture/context-engine.svg" alt="MoCode context engineering and durable memory architecture" width="100%"></p>
 
@@ -61,7 +61,7 @@ A clean undo point is saved before every mutating tool. `/rollback <turnId>` res
 
 ### Context controls: one pressure gate, independently optional stages
 
-The five controls remain independently configurable, but automatic rewriting has one trigger: real occupancy near 90%. `contextLifecycle` only tracks provenance metadata; `contextRelprune` and `contextOptimize` are opt-in pressure stages (both default off); `autoCompact` is the final provider-limit fallback. An EWMA self-calibrates token estimates against provider usage.
+The controls remain independently configurable, but automatic rewriting has exactly one trigger: corrected or raw request occupancy reaching 80%. That event runs every enabled pressure cleanup and then always compacts history. `contextLifecycle` only tracks provenance metadata, while EWMA calibration keeps the estimate aligned with provider usage.
 
 <p align="center"><img src="./assets/architecture/context-controls.svg" alt="MoCode context controls: five independent toggles, observation lifecycle, token self-calibration" width="100%"></p>
 
@@ -79,7 +79,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Parallel read-only tools** — Consecutive read-only operations in a turn (reading files, grep, glob, codegraph, web search/fetch) run concurrently, so total time is roughly the slowest single call instead of the sum of all of them. Operations with side effects (writing/editing files) stay sequential to preserve snapshot ordering and data safety.
 - **Sub-agents divide and conquer** — Complex tasks can spawn independent sub-agents with isolated histories and scoped toolsets. Read-only workers can fan out concurrently; writer workers run in private filesystem overlays and return ChangeSets that are merged under expected-hash checks and canonical resource locks. Only structured findings return to the main thread.
 - **Plan / Auto dual mode** — In `plan` mode the agent is read-only (reads code, queries indexes, searches — never writes to disk, runs commands, or spawns sub-agents) and produces a plan; `auto` mode unlocks the full toolset. The agent can switch between the two on its own — scope out an unfamiliar codebase first, then start making changes.
-- **Pressure-driven context compression** — Normal history keeps full tool evidence. Near 90% occupancy, Cold history is reduced in priority order (superseded → stale artifact → old logs/searches → history summary). `/context` shows live usage and `/compact` remains an explicit manual override.
+- **Pressure-driven context compression** — Normal history keeps full tool evidence. At 80% occupancy, one scheduler event runs all enabled cleanup and always follows with a history summary. `/context` shows live usage and `/compact` remains an explicit manual override.
 - **Cross-session long-term memory** — The agent can save project architecture, conventions, and lessons learned as long-term memory, auto-loaded in future sessions. A background process periodically reflects on conversations to mine things worth remembering. Memories can be created, searched, updated, and forgotten, with recall-based decay.
 - **Project context (`MOCODE.md`)** — A single project-level memory file at `MOCODE.md` captures both static facts (project description, commands, module list, directory tree) and human/AI-written insights (conventions, architectural decisions, pitfalls). Generate it once with `/init`, then keep it up to date by hand or by asking the agent to refresh it. Loaded automatically into the system prompt on every turn.
 - **Session notepad (notes.md)** — For complex multi-step tasks (≥3 file changes / ≥5 tool calls), the agent maintains a working notepad at `.mocode/sessions/<sessionId>/notes.md` (file-based, survives context compression). It can record intermediate findings, design decisions, open questions, and structured plans. A live progress chip in the TUI status bar shows `plan: [title] (3/7) ▸ [current step]` when a `## Plan:` section is present. The agent manages the file directly with write_file/edit_file/read_file.
@@ -164,8 +164,7 @@ Common backend `base_url` values:
 | Environment variable       | Description                                                          | Default                     |
 | --------------------------- | ---------------------------------------------------------------------- | --------------------------- |
 | `MAX_TOKENS`                | Max tokens per response                                               | unlimited                   |
-| `CONTEXT_WINDOW_TOKENS`     | Model context window; must match the real model                      | `128000`                    |
-| `COMPACT_THRESHOLD`         | Shared pressure/auto-compaction trigger (fraction of window)           | `0.80`                      |
+| `CONTEXT_WINDOW_TOKENS`     | Model context window; must match the real model                      | `256000`                    |
 | `LLM_STREAM_USAGE`          | Include `stream_options.include_usage` on streaming requests for real usage | `true`                |
 | `AUTO_COMPACT`               | Final history-compaction safety fallback                                | `true`                       |
 | `AUTO_REFLECT`               | Background reflection pass (opt-in; periodically mines memories from conversations) | `false`  |

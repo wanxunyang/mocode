@@ -196,10 +196,9 @@ LLM_MODEL=your-model-name
 
 | 变量 | 用途 | 默认值 |
 | --- | --- | --- |
-| `CONTEXT_WINDOW_TOKENS` | 模型实际上下文窗口大小。 | `128000` |
+| `CONTEXT_WINDOW_TOKENS` | 模型实际上下文窗口大小。 | `256000` |
 | `MAX_TOKENS` | 单次回复最大 token 数。 | 不限制 |
-| `AUTO_COMPACT` | 上下文自动压缩开关。 | `true` |
-| `COMPACT_THRESHOLD` | 自动压缩阈值，占窗口比例。 | `0.85` |
+| `AUTO_COMPACT` | 上下文自动压缩开关；开启时统一在 80% 占用触发。 | `true` |
 | `MAX_STEPS` | 每轮 Agent 工具循环的最大步数。 | `200` |
 | `SUB_AGENT_MAX_STEPS` | 子 Agent 默认最大步数。 | `50` |
 | `SANDBOX_ROOT` | 文件操作与命令工作目录的沙箱根。 | 当前工作目录 |

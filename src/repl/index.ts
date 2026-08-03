@@ -14,6 +14,7 @@ import {
   buildBasePrompt,
   getPlanModeSuffix,
   hasCodegraphIndex,
+  DEFAULT_CONTEXT_WINDOW_TOKENS,
 } from '../config/index.js';
 import {
   getLanguage,
@@ -21,6 +22,7 @@ import {
   t,
   type TranslationKey,
 } from '../i18n/index.js';
+import { DEFAULT_BUDGET_POLICY } from '../context/budget.js';
 import { updateConfigKey, writeConfigKeys, CONFIG_PATH } from '../config/file.js';
 import {
   deletePreset,
@@ -234,15 +236,15 @@ function themeDescription(name: string): string {
 
 /** /model 预设后端:选一个预填 baseURL,仍可逐项改。base_url 取自 README 常见表。 */
 const MODEL_PRESETS: { label: string; baseURL: string; model: string; window: number }[] = [
-  { label: 'GLM(智谱)', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', window: 128000 },
-  { label: 'DeepSeek', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', window: 64000 },
-  { label: 'Qwen(阿里)', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', window: 128000 },
+  { label: 'GLM(智谱)', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
+  { label: 'DeepSeek', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
+  { label: 'Qwen(阿里)', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
   // MiniMax OpenAI 兼容端点(https://platform.minimax.io/docs/api-reference/text-openai-api)。
   // MiniMax-M3 为唯一支持图片/视频输入的模型;M2 系列纯文本(见 llm/capabilities.ts KNOWN_TEXT_ONLY_PREFIXES)。
-  { label: 'MiniMax', baseURL: 'https://api.minimax.io/v1', model: 'MiniMax-M3', window: 1000000 },
-  { label: '本地 Ollama', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', window: 32768 },
-  { label: '本地 vLLM', baseURL: 'http://localhost:8000/v1', model: 'default', window: 32768 },
-  { label: '自定义 base_url', baseURL: '', model: '', window: 128000 },
+  { label: 'MiniMax', baseURL: 'https://api.minimax.io/v1', model: 'MiniMax-M3', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
+  { label: '本地 Ollama', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
+  { label: '本地 vLLM', baseURL: 'http://localhost:8000/v1', model: 'default', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
+  { label: '自定义 base_url', baseURL: '', model: '', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
 ];
 
 /** apiKey 脱敏:只露末 4 位,前面打星号(显示用,绝不把明文 key 写进内容区)。 */
@@ -310,7 +312,7 @@ function renderContextBar(history: ChatMessage[]): string {
   const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
   const src = contextState.lastUsage ? t('status.measured') : t('status.estimated');
   const k = (n: number) => `${Math.round(n / 1000)}k`;
-  const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.accent;
+  const pctCol = pct >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio ? ui.yellow : ui.accent;
   const lifecycle = contextState.lifecycleStats;
   const archived = computePruneStats(history);
   const artifactStats = contextState.artifactStats;
@@ -336,7 +338,7 @@ function renderContextBarInline(history: ChatMessage[]): string {
   const filled = Math.round(pct * W);
   const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
   const k = (n: number) => `${Math.round(n / 1000)}k`;
-  const pctCol = pct >= config.compactThreshold ? ui.yellow : ui.accent;
+  const pctCol = pct >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio ? ui.yellow : ui.accent;
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
 }
 
@@ -2046,7 +2048,7 @@ export async function startRepl(
           const res = await promptIntervention({
             type: 'input',
             title: 'CONTEXT_WINDOW_TOKENS',
-            detail: '模型上下文窗口(须对齐真实模型;GLM≈128k,DeepSeek-V3≈64k)。回车采纳预填值。',
+            detail: '模型上下文窗口，全局默认 256k；如需不同窗口可手动覆盖。回车采纳预填值。',
             seed: String(preset.window || config.contextWindowTokens),
           });
           if (res.action === 'cancelled') { continue; }

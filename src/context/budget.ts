@@ -1,8 +1,8 @@
-// 五区 Context Budget accounting and the shared real-pressure threshold.
+// 五区 Context Budget accounting and the shared pressure threshold.
 //
 // This module only estimates and reports. session/scheduler.ts owns the sole
-// automatic rewrite sequence and invokes compact_history only if total/raw
-// occupancy remains at or above 90% after pressure stages.
+// automatic rewrite sequence and starts all pressure cleanup plus compact_history
+// when corrected or raw request occupancy reaches 80%.
 
 import type { ChatMessage, ChatTool } from '../llm/index.js';
 import {
@@ -47,8 +47,8 @@ export const DEFAULT_BUDGET_POLICY: BudgetPolicy = {
   },
   hotTurnWindow: 4,
   compactKeepRatio: 0.40,
-  pressureTriggerRatio: 0.90,
-  schedulerTargetRatio: 0.90,
+  pressureTriggerRatio: 0.80,
+  schedulerTargetRatio: 0.80,
   estimateSafetyFactor: 1.05,
   compactHeadroomTokens: 1500,
 };

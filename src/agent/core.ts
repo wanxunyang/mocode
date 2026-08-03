@@ -150,7 +150,7 @@ function readDiffContext(
 /** 回灌 tool 结果到 history。
  *  正常路径只做单条 hard cap；原始 output 同时供 TUI 展示，因此用户与模型
  *  看到同一事实。Artifact/Relevance/Lifecycle 仅登记 metadata/provenance，
- *  不在这里改写旧正文；真正的压缩统一由 90% pressure scheduler 决定。 */
+ *  不在这里改写旧正文；所有自动清理与压缩统一由 80% pressure scheduler 决定。 */
 
 function pushToolResult(
   history: ChatMessage[],
@@ -288,7 +288,7 @@ export interface AgentRunResult {
  * agent 核心循环(纯逻辑):
  *  流式调 LLM(经 hooks.onText 实时渲染)→ 有 tool_calls 就分组执行并回灌
  *  → 否则流式正文即最终回复。history 在调用间持久,由调用方持有。
- *  步前由 session scheduler 检查真实 context pressure；低于约 90% 时不改写历史。
+ *  步前由 session scheduler 检查真实 context pressure；达到 80% 时统一清理并压缩历史。
  *  工具结果正常只经 capToolResultForHistory 的单条 hard safety cap。
  *
  *  中断语义:signal 经 executeTool(name, args, signal) 串进工具;run_command/web_fetch 等 abort 即时杀

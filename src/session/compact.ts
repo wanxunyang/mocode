@@ -552,14 +552,14 @@ export async function compactHistory(
  * 自动压缩门槛:agent 每步调 chat() 前调用。
  * 用全量启发式估算(始终可用、安全侧、无 stale-usage 问题);超阈则压缩。
  *
- * Hard guard: raw estimate at `pressureTriggerRatio * window` must compact after
- * scheduler pressure stages, so correction<1 cannot hide a provider limit.
+ * The shared 80% pressure threshold is the only automatic trigger. Raw estimates
+ * participate so correction<1 cannot hide an oversized provider request.
  *
- * 升级到 Budget Scheduler:可传 `report: BudgetReport`。调度器会先完成
- * superseded → stale artifact → logs/search 的 pressure pass；仍超阈才压历史。
+ * Budget Scheduler 模式在同一次 80% pressure 事件中先完成已启用的
+ * superseded / stale artifact / logs-search 清理，然后无条件继续压缩历史。
  *
- * 不传 report 时退化为原行为:仅看总占用是否超 `compactThreshold * window`——
- * 兼容老调用方(子 agent / 测试直接调时);硬闸仍按裸估算生效。
+ * 不传 report 时使用同一个共享阈值，供子 agent 和关闭 scheduler 时 fallback；
+ * 不再维护独立的自动压缩触发线。
  *
  * manual 选项(repl /compact 用):true 时旁路 autoCompact 开关与 ROI 阈,
  * 强制走 compactHistory(manual/force 参数透传)。返 CompactResult 给 caller 文案展示。
@@ -592,23 +592,21 @@ export async function maybeCompact(
   if (!isManual) {
     if (!hardCap && !config.autoCompact) return;
     if (report) {
-      // Scheduler mode: per-layer overages are diagnostic only. Automatic
-      // history rewriting requires unresolved total pressure near the window.
+      // Scheduler mode: the shared pressure report is the sole automatic trigger.
       const needsCompact = hardCap || report.totalOver;
       if (!needsCompact) return;
     } else {
-      // 老路径:硬闸按裸估算判;否则总占用超阈才压
-      if (!hardCap) {
-        const raw = estimatePromptTokens(history, activeTools, 1);
-        hardCap = raw >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * config.contextWindowTokens;
-      }
-      if (!hardCap && est < config.compactThreshold * config.contextWindowTokens) return;
+      // Fallback mode uses the same threshold; there is no second compact gate.
+      const raw = estimatePromptTokens(history, activeTools, 1);
+      hardCap = raw >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * config.contextWindowTokens;
+      const pressureLine = DEFAULT_BUDGET_POLICY.pressureTriggerRatio * config.contextWindowTokens;
+      if (!hardCap && est < pressureLine) return;
     }
   }
 
   const r = await compactHistory(history, {
     window: config.contextWindowTokens,
-    threshold: config.compactThreshold,
+    threshold: DEFAULT_BUDGET_POLICY.pressureTriggerRatio,
     focus: manualOpts?.focus,
     manual: isManual,
     // 硬闸触发时 force 直通保护区:首轮/当前轮不豁免。

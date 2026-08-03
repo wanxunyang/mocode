@@ -46,6 +46,7 @@ export const languageFromShell = process.env.MOCODE_LANGUAGE !== undefined;
 // 仿 themeFromShell 模式:shell export 的环境变量在 loadEnvFiles 中不被回填(优先级最高),
 // 故 /model 写入 ~/.mocode/config 的同名键下次启动会被 shell 值覆盖——据此给 dim 警告。
 const LLM_ENV_KEYS = ['LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS'] as const;
+export const DEFAULT_CONTEXT_WINDOW_TOKENS = 256000;
 const llmKeysFromShell = LLM_ENV_KEYS.filter((k) => process.env[k] !== undefined);
 loadEnvFiles();
 setLanguage(detectLanguage(process.env.MOCODE_LANGUAGE));
@@ -56,10 +57,8 @@ export interface Config {
   model: string;
   maxTokens?: number;
   systemPrompt: string;
-  /** 模型上下文窗口(token)。须对齐真实模型窗口(GLM-4.6≈128k,DeepSeek-V3≈64k,Qwen 视版本)。 */
+  /** 模型上下文窗口(token)。全局默认 256000，可通过环境变量或 /model 覆盖。 */
   contextWindowTokens: number;
-  /** 自动压缩与 pressure pass 的触发阈值(占窗口比例)。默认 0.90。 */
-  compactThreshold: number;
   /** 流式请求里带 stream_options.include_usage 拿真实 usage。后端不认 stream_options 时关掉。 */
   includeUsage: boolean;
   /** 自动压缩总开关。关掉则只靠手动 /compact。 */
@@ -74,8 +73,8 @@ export interface Config {
   /** Lifecycle provenance tracking only. It no longer ages or stubs history by
    * tool-call count. Default true; set MOCODE_LIFECYCLE=false to disable tracking. */
   contextLifecycle: boolean;
-  /** Context Budget Scheduler 总开关(五区分账 + 真实 pressure 调度)。
-   *  关掉则仅保留 maybeCompact(history) 的 90% provider-limit 保护路径。
+  /** Context Budget Scheduler 总开关(五区分账 + 统一 80% pressure 调度)。
+   *  关掉仍由 maybeCompact(history) 使用同一 80% 基础保护线。
    *  默认 true;设 MOCODE_BUDGET_SCHEDULER=false 全局回退。 */
   contextBudget: boolean;
   /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
@@ -385,8 +384,7 @@ export const config: Config = {
   get systemPrompt(): string {
     return buildBasePrompt();
   },
-  contextWindowTokens: Number(process.env.CONTEXT_WINDOW_TOKENS) || 128000,
-  compactThreshold: Number(process.env.COMPACT_THRESHOLD) || 0.80,
+  contextWindowTokens: Number(process.env.CONTEXT_WINDOW_TOKENS) || DEFAULT_CONTEXT_WINDOW_TOKENS,
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
   autoCompact: process.env.AUTO_COMPACT !== 'false',
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE === 'true',
