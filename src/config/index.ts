@@ -58,28 +58,25 @@ export interface Config {
   systemPrompt: string;
   /** 模型上下文窗口(token)。须对齐真实模型窗口(GLM-4.6≈128k,DeepSeek-V3≈64k,Qwen 视版本)。 */
   contextWindowTokens: number;
-  /** 自动压缩触发阈值(占窗口比例)。默认 0.85,保守偏早以吸收估算误差与下一步增长。 */
+  /** 自动压缩与 pressure pass 的触发阈值(占窗口比例)。默认 0.90。 */
   compactThreshold: number;
   /** 流式请求里带 stream_options.include_usage 拿真实 usage。后端不认 stream_options 时关掉。 */
   includeUsage: boolean;
   /** 自动压缩总开关。关掉则只靠手动 /compact。 */
   autoCompact: boolean;
-  /** Context Optimization Pipeline 总开关(工具结果进 LLM 前的类型化编码:tree/search/log/…)。
-   *  关掉则工具结果原样进 LLM(仅长度裁剪),零行为变化。默认 true。 */
+  /** Typed context encoding for old logs/searches during real pressure only.
+   * Normal tool results remain raw (apart from the hard per-result safety cap).
+   * Default false; set MOCODE_CONTEXT_OPTIMIZE=true to enable this optional stage. */
   contextOptimize: boolean;
-  /** 相关性裁剪总开关(read_file 跨条裁剪:同 path 旧 read + 已被 mutation 覆写的旧 read
-   *  自动替换为存根)。纯静态、不调 LLM;关掉则保留所有 read 结果(只受 capToolResultForHistory
-   *  单条上限与 microcompact 旧区截短影响)。默认 true;
-   *  设 MOCODE_CONTEXT_RELPRUNE=false 全局回退。 */
+  /** Exact supersession pruning during real pressure only. Normal history is never
+   * rewritten. Default false; set MOCODE_CONTEXT_RELPRUNE=true to enable it. */
   contextRelprune: boolean;
-  /** 观察者生命周期总开关(LIVE→REFERENCED→OBSOLETE→STUB 四态机;grep/glob/web_search/web_fetch
-   *  producer ↔ read/edit/write consumer 引用追踪;孤立+老化非观察类工具自动 STUB;
-   *  观察类工具永远只到 REFERENCED,不自动 STUB)。与 contextRelprune 并列,纯静态、不调 LLM。
-   *  默认 true;设 MOCODE_LIFECYCLE=false 全局回退。 */
+  /** Lifecycle provenance tracking only. It no longer ages or stubs history by
+   * tool-call count. Default true; set MOCODE_LIFECYCLE=false to disable tracking. */
   contextLifecycle: boolean;
-  /** Context Budget Scheduler 总开关(五区分账 + ROI 排序调度)。
-   *  关掉则 agent 步前退化为 maybeCompact(history) 老路径(只看总占用 0.85 阈值),
-   *  零行为变化。默认 true;设 MOCODE_BUDGET_SCHEDULER=false 全局回退。 */
+  /** Context Budget Scheduler 总开关(五区分账 + 真实 pressure 调度)。
+   *  关掉则仅保留 maybeCompact(history) 的 90% provider-limit 保护路径。
+   *  默认 true;设 MOCODE_BUDGET_SCHEDULER=false 全局回退。 */
   contextBudget: boolean;
   /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
   autoReflect: boolean;
@@ -389,11 +386,11 @@ export const config: Config = {
     return buildBasePrompt();
   },
   contextWindowTokens: Number(process.env.CONTEXT_WINDOW_TOKENS) || 128000,
-  compactThreshold: Number(process.env.COMPACT_THRESHOLD) || 0.85,
+  compactThreshold: Number(process.env.COMPACT_THRESHOLD) || 0.80,
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
   autoCompact: process.env.AUTO_COMPACT !== 'false',
-  contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
-  contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
+  contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE === 'true',
+  contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE === 'true',
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',
   contextBudget: process.env.MOCODE_BUDGET_SCHEDULER !== 'false',
   autoReflect: process.env.AUTO_REFLECT === 'true',

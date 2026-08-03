@@ -552,14 +552,11 @@ export async function compactHistory(
  * 自动压缩门槛:agent 每步调 chat() 前调用。
  * 用全量启发式估算(始终可用、安全侧、无 stale-usage 问题);超阈则压缩。
  *
- * 硬闸(最高优先):裸估算(不乘 correction)达 `totalTriggerRatio * window` 必须压,
- * 且 force 直通保护区——correction<1 的折扣不能否决真实溢出,首轮/当前轮不豁免。
+ * Hard guard: raw estimate at `pressureTriggerRatio * window` must compact after
+ * scheduler pressure stages, so correction<1 cannot hide a provider limit.
  *
- * 升级到 Budget Scheduler:可传 `report: BudgetReport`。未达硬闸时**按 ROI 调度**:
- *   - 只有当 `report.layers.history.overBudget` 或 `report.totalOver` 时才压;
- *   - 冷工具超(Cold Tool ROI 最低)→ 不压 history,留给调度器的 cold tools 路径处理。
- * 这样 cold tools 路径(L1 中截 / L2 relevance / L3 age stub)能先动,history
- * 摘要(最贵)只在 cold tools 解不开时才触发。
+ * 升级到 Budget Scheduler:可传 `report: BudgetReport`。调度器会先完成
+ * superseded → stale artifact → logs/search 的 pressure pass；仍超阈才压历史。
  *
  * 不传 report 时退化为原行为:仅看总占用是否超 `compactThreshold * window`——
  * 兼容老调用方(子 agent / 测试直接调时);硬闸仍按裸估算生效。
@@ -585,25 +582,25 @@ export async function maybeCompact(
   state.lastEstimate = est;
   const isManual = manualOpts?.manual === true;
 
-  // 硬闸:裸估算(不乘 correction)达触发线 → 必须压,且无视 autoCompact 开关。
+  // Hard guard: the scheduler has already attempted pressure cleanup; if raw
+  // content remains near the provider limit, compact even when correction < 1.
   let hardCap = typeof report?.rawTotal === 'number'
     && typeof report?.window === 'number'
-    && report.rawTotal >= DEFAULT_BUDGET_POLICY.totalTriggerRatio * report.window;
+    && report.rawTotal >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * report.window;
 
   // 手动路径:旁路 autoCompact / report / 总阈三重门
   if (!isManual) {
     if (!hardCap && !config.autoCompact) return;
     if (report) {
-      // 调度模式:硬闸优先;否则只压 history 层超或兜底总超
-      const needsCompact = hardCap
-        || report.layers.history.overBudget
-        || report.totalOver;
+      // Scheduler mode: per-layer overages are diagnostic only. Automatic
+      // history rewriting requires unresolved total pressure near the window.
+      const needsCompact = hardCap || report.totalOver;
       if (!needsCompact) return;
     } else {
       // 老路径:硬闸按裸估算判;否则总占用超阈才压
       if (!hardCap) {
         const raw = estimatePromptTokens(history, activeTools, 1);
-        hardCap = raw >= DEFAULT_BUDGET_POLICY.totalTriggerRatio * config.contextWindowTokens;
+        hardCap = raw >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * config.contextWindowTokens;
       }
       if (!hardCap && est < config.compactThreshold * config.contextWindowTokens) return;
     }

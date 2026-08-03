@@ -1,19 +1,12 @@
-// Context Optimization Pipeline 单一入口。
+// Typed Context Optimization Pipeline.
 //
-// 接管"工具结果进 LLM 前"的表示优化(C1 收口,agent/core.ts pushToolResult 调)。
-// 流程:
-//   1) 解析 argsRaw(失败返 null,encoder 据此降级)。
-//   2) classify(name, output, args) → ContextKind。
-//   3) getEncoder(kind) ?? passthrough → encode(保不变量压缩,纯函数)。
-//   4) capToolResultForHistory(name, text) 作末尾长度裁剪兜底(保 head+标记+tail,与改造前一致)。
+// Normal tool insertion does not call this module: agent/core stores the raw
+// result after only capToolResultForHistory(). The pressure scheduler invokes
+// this encoder for Cold logs and retrievable searches when the opt-in switch is
+// enabled. Encoder failures always fall back to the raw hard-capped result.
 //
-// 不抛错:encoder 报错 → catch 回落原 output + capToolResultForHistory(对齐「调度器永不抛错」)。
-// 兜底零行为变化:未注册 encoder / pipeline 关闭 → passthrough identity → 末尾 cap 与改造前逐字节一致。
-//
-// 兼容:不改 Tool Calling JSON schema、不改 executeTool、不改 tool_call_id 配对、不改 TUI 渲染
-// (hooks.onToolResult 用原始 output,本函数只管进 history 的 content)。
-//
-// 依赖方向:context → {tools/constants, session/compact 的 cap, config};叶子,不反向依赖 llm/agent/tools。
+// This does not alter tool schemas, execution, tool_call_id pairing, or TUI
+// rendering; it only provides a pressure-stage representation transform.
 
 import type { ContextEncoder, EncoderRuntimeContext } from './types.js';
 import { classify } from './classifier.js';
@@ -71,7 +64,7 @@ export function optimizeToolResult(
   context: EncoderRuntimeContext = {},
 ): string {
   boot();
-  // 总开关关闭:完全走老路径,零行为变化(Phase 1 默认 true,但保留紧急回退开关)。
+  // Disabled by default: normal history is raw apart from the hard cap.
   if (!config.contextOptimize) {
     return capToolResultForHistory(name, output);
   }

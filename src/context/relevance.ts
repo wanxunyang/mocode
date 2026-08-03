@@ -6,7 +6,6 @@ import {
   canonicalizePath,
   extractPath,
   isToolResultSuccess,
-  lastUserIndex,
   toText,
 } from './utils.js';
 
@@ -94,7 +93,6 @@ export class RelevancePruner {
       if (call.name === 'read_file') {
         const path = canonicalizePath(extractPath(call.argsRaw));
         if (!path) return;
-        this.stubPriorReads(history, path, idx);
         const list = this.readByPath.get(path) ?? [];
         list.push(idx);
         this.readByPath.set(path, list);
@@ -103,7 +101,6 @@ export class RelevancePruner {
 
       const key = observationKey(call);
       if (!key) return;
-      this.stubPriorObservations(history, call.name, key, idx);
       const list = this.observationByKey.get(key) ?? [];
       list.push(idx);
       this.observationByKey.set(key, list);
@@ -126,76 +123,105 @@ export class RelevancePruner {
     return null;
   }
 
-  observeMutation(history: ChatMessage[], path: string): void {
+  observeMutation(_history: ChatMessage[], _path: string): void {
+    // Mutations are retained as provenance. pruneSuperseded() derives their
+    // impact only when the scheduler enters real context pressure.
+  }
+
+  /**
+   * Pressure-only cleanup. Scan the complete history to identify evidence that
+   * has an exact newer replacement, but only rewrite messages before the Cold
+   * boundary. This keeps the latest four user turns and current work intact.
+   */
+  pruneSuperseded(history: ChatMessage[], coldBoundary: number): number {
     try {
-      const canonicalPath = canonicalizePath(path);
-      if (!canonicalPath) return;
-      const idx = history.length - 1;
-      if (idx < 1) return;
-      this.stubPriorReads(history, canonicalPath, idx);
-      this.readByPath.delete(canonicalPath);
+      const latestRead = new Map<string, number>();
+      const latestObservation = new Map<string, { tool: string; index: number }>();
+      const mutations: Array<{ path: string; index: number }> = [];
+      for (let idx = 1; idx < history.length; idx++) {
+        const message = history[idx] as AnyMessage;
+        const content = toText(message.content);
+        if (message.role !== 'tool' || content.startsWith('⌦[') || !isToolResultSuccess(content)) continue;
+        const call = this.callAt(history, idx);
+        if (!call) continue;
+        if (call.name === 'read_file') {
+          const path = canonicalizePath(extractPath(call.argsRaw));
+          if (path) latestRead.set(path, idx);
+        } else if (call.name === 'edit_file' || call.name === 'write_file') {
+          const path = canonicalizePath(extractPath(call.argsRaw));
+          if (path) mutations.push({ path, index: idx });
+        }
+        const key = observationKey(call);
+        if (key) latestObservation.set(key, { tool: call.name, index: idx });
+      }
+
+      let pruned = 0;
+      for (const [path, index] of latestRead) {
+        pruned += this.stubPriorReads(history, path, index, coldBoundary);
+      }
+      for (const mutation of mutations) {
+        pruned += this.stubPriorReads(history, mutation.path, mutation.index, coldBoundary);
+      }
+      for (const [key, latest] of latestObservation) {
+        pruned += this.stubPriorObservations(history, latest.tool, key, latest.index, coldBoundary);
+      }
+      return pruned;
     } catch {
-      // Never throw from mutation cleanup.
+      return 0;
     }
   }
 
-  private stubPriorReads(history: ChatMessage[], path: string, beforeIdx: number): void {
+  private stubPriorReads(history: ChatMessage[], path: string, beforeIdx: number, coldBoundary: number): number {
     const targetPath = canonicalizePath(path);
-    if (!targetPath) return;
-    const protectedFrom = Math.max(0, lastUserIndex(history));
-
-    const stubOne = (idx: number): void => {
-      if (idx >= beforeIdx || (protectedFrom > 0 && idx >= protectedFrom)) return;
+    if (!targetPath) return 0;
+    let pruned = 0;
+    for (let idx = 1; idx < Math.min(beforeIdx, coldBoundary); idx++) {
       const message = history[idx] as AnyMessage;
-      if (!message || message.role !== 'tool') return;
+      if (!message || message.role !== 'tool') continue;
       const content = toText(message.content);
-      if (content.startsWith(STUB_PREFIX)) return;
+      if (content.startsWith('⌦[')) continue;
       const call = this.callAt(history, idx);
-      if (call?.name !== 'read_file') return;
-      if (canonicalizePath(extractPath(call.argsRaw)) !== targetPath) return;
-      if (!message.tool_call_id) return;
+      if (call?.name !== 'read_file') continue;
+      if (canonicalizePath(extractPath(call.argsRaw)) !== targetPath || !message.tool_call_id) continue;
       message.content =
         `${STUB_PREFIX}${READ_STUB_REASON}] read_file(${targetPath}) ${content.length} 字符 ` +
         `→ 已被新 read / mutation 替代 · id …${message.tool_call_id.slice(-6)}⌫`;
-    };
-
-    for (const idx of this.readByPath.get(targetPath) ?? []) stubOne(idx);
-    const scanEnd = Math.min(beforeIdx, protectedFrom > 0 ? protectedFrom : beforeIdx);
-    for (let idx = 1; idx < scanEnd; idx++) stubOne(idx);
+      pruned++;
+    }
+    return pruned;
   }
+
   private stubPriorObservations(
     history: ChatMessage[],
     toolName: string,
     key: string,
     beforeIdx: number,
-  ): void {
-    const protectedFrom = Math.max(0, lastUserIndex(history));
-
-    const stubOne = (idx: number): void => {
-      if (idx >= beforeIdx || (protectedFrom > 0 && idx >= protectedFrom)) return;
+    coldBoundary: number,
+  ): number {
+    let pruned = 0;
+    for (let idx = 1; idx < Math.min(beforeIdx, coldBoundary); idx++) {
       const message = history[idx] as AnyMessage;
-      if (!message || message.role !== 'tool') return;
+      if (!message || message.role !== 'tool') continue;
       const content = toText(message.content);
-      if (content.startsWith(STUB_PREFIX) || !isToolResultSuccess(content)) return;
+      if (content.startsWith('⌦[') || !isToolResultSuccess(content)) continue;
       const call = this.callAt(history, idx);
-      if (!call || call.name !== toolName || observationKey(call) !== key) return;
-      if (!message.tool_call_id) return;
-      const reason = '相同 grep 查询已有更新结果';
+      if (!call || call.name !== toolName || observationKey(call) !== key || !message.tool_call_id) continue;
       message.content =
-        `${STUB_PREFIX}${reason}] ${observationLabel(call)} ${content.length} 字符 ` +
+        `${STUB_PREFIX}相同 grep 查询已有更新结果] ${observationLabel(call)} ${content.length} 字符 ` +
         `→ 已被更新查询替代 · id …${message.tool_call_id.slice(-6)}⌫`;
-    };
-
-    for (const idx of this.observationByKey.get(key) ?? []) stubOne(idx);
-    // The fallback scan restores correctness after resume/compact when this instance
-    // has no index for older messages.
-    const scanEnd = Math.min(beforeIdx, protectedFrom > 0 ? protectedFrom : beforeIdx);
-    for (let idx = 1; idx < scanEnd; idx++) stubOne(idx);
+      pruned++;
+    }
+    return pruned;
   }
 }
 
 export function createRelevancePruner(): RelevancePruner {
   return new RelevancePruner();
+}
+
+/** Pressure-only convenience entry point for scheduler-owned pruning. */
+export function pruneSuperseded(history: ChatMessage[], coldBoundary: number): number {
+  return new RelevancePruner().pruneSuperseded(history, coldBoundary);
 }
 
 /** Parse the original content length recorded by any relevance stub. */

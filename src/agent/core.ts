@@ -36,20 +36,13 @@ import {
   summarizeToolArguments,
   safeProviderId,
 } from '../session/index.js';
-import type { ContextState } from '../session/compact.js';
+import { capToolResultForHistory, type ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
 import {
-  optimizeToolResult,
-  HOT_TURN_WINDOW,
-  userTurnBoundary,
   recordArtifact,
   invalidateArtifacts,
   rehydrateArtifacts,
 } from '../context/index.js';
-import {
-  createAgeAwareEncodingState,
-  type AgeAwareEncodingState,
-} from '../context/age-aware.js';
 import { createRelevancePruner } from '../context/relevance.js';
 import { isToolResultSuccess } from '../context/utils.js';
 import { config } from '../config/index.js';
@@ -66,17 +59,6 @@ import {
 import { getCurrentTurnId, getCurrentTurnMutationState } from '../rollback/index.js';
 import type { AgentTraceEvent, AgentTurnTrace, TraceEventType } from '../session/trace.js';
 import { getCurrentSessionId } from '../session/state.js';
-
-/** Stable per-history age state survives user turns; WeakMap avoids retaining closed sessions. */
-const ageAwareStateByHistory = new WeakMap<ChatMessage[], AgeAwareEncodingState>();
-
-function ageAwareStateFor(history: ChatMessage[]): AgeAwareEncodingState {
-  const existing = ageAwareStateByHistory.get(history);
-  if (existing) return existing;
-  const created = createAgeAwareEncodingState(history);
-  ageAwareStateByHistory.set(history, created);
-  return created;
-}
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
 function parseArgs(raw: string): Record<string, unknown> | null {
@@ -165,16 +147,10 @@ function readDiffContext(
   return { preWriteOld: null, editStartLine: 1 };
 }
 
-/** 回灌 tool 结果到 history:经 Context Optimization Pipeline 编码(tree/search/log/...)后裁到单条上限。
- *  tool_call_id 与 assistant.tool_calls 按序配对。未注册 encoder 时回落 capToolResultForHistory(零行为变化)。
- *  TUI 渲染(hooks.onToolResult)用原始 output,与此解耦——屏上看全量,LLM 看编码后紧凑版。
- *  出口再经 Relevance Pruner 做跨条裁剪:同 path 旧 read_file 自动 stub 为存根。
- *  - pruner 在每个 runAgentCore 实例化一次(本闭包持有),会话级状态。
- *  - 开关关闭时 pruner 不创建(零开销、零行为变化)。
- *  出口再经 Lifecycle Engine 做引用追踪:LIVE→REFERENCED→OBSOLETE→STUB 四态。
- *  - lifecycle 也在每个 runAgentCore 实例化一次,登记 grep/glob/web_search/web_fetch 等 producer
- *    与 read/edit/write 的 consumer 关系;孤立+老化自动 STUB(观察类工具永不到 STUB)。
- *  - 开关关闭时 lifecycle=null 完全跳过。 */
+/** 回灌 tool 结果到 history。
+ *  正常路径只做单条 hard cap；原始 output 同时供 TUI 展示，因此用户与模型
+ *  看到同一事实。Artifact/Relevance/Lifecycle 仅登记 metadata/provenance，
+ *  不在这里改写旧正文；真正的压缩统一由 90% pressure scheduler 决定。 */
 
 function pushToolResult(
   history: ChatMessage[],
@@ -187,13 +163,12 @@ function pushToolResult(
   succeededOverride?: boolean,
 ): void {
   const succeeded = succeededOverride ?? isToolResultSuccess(output);
-  const ageAware = config.contextOptimize ? ageAwareStateFor(history) : null;
-  const encodingContext = ageAware?.preparePush(tc, succeeded);
   const msg = {
     role: 'tool' as const,
     tool_call_id: tc.id,
-    // 初次 push 始终保守(age=0);旧 Cold 结果在下一 step 的 sweep 中按类型降级。
-    content: optimizeToolResult(tc.name, output, tc.arguments, encodingContext),
+    // Preserve evidence verbatim in normal operation; the hard per-result cap
+    // remains solely as a request-size safety rail.
+    content: capToolResultForHistory(tc.name, output),
   } as ChatMessage;
   history.push(msg);
   const messageIndex = history.length - 1;
@@ -313,8 +288,8 @@ export interface AgentRunResult {
  * agent 核心循环(纯逻辑):
  *  流式调 LLM(经 hooks.onText 实时渲染)→ 有 tool_calls 就分组执行并回灌
  *  → 否则流式正文即最终回复。history 在调用间持久,由调用方持有。
- *  步前经 session/maybeCompact 自动压缩(接近窗口上限时三层压缩);
- *  工具结果进 history 前经 Context Optimization Pipeline(optimizeToolResult:类型化编码 + 长度裁剪)。
+ *  步前由 session scheduler 检查真实 context pressure；低于约 90% 时不改写历史。
+ *  工具结果正常只经 capToolResultForHistory 的单条 hard safety cap。
  *
  *  中断语义:signal 经 executeTool(name, args, signal) 串进工具;run_command/web_fetch 等 abort 即时杀
  *  (树杀子进程 / 取消 fetch),循环顶 if(signal.aborted) 兜底还原。不会留下未配对的 tool_call_id。
@@ -397,27 +372,20 @@ export async function runAgentCore(
   // 子 agent 也在自己的 history 上操作(子 agent 独立 history)，文件回滚事务则与主轮共享。
   const dropContext = (filter: DropContextFilter): DropContextResult =>
     dropContextFromHistory(history, filter);
-  // 相关性裁剪 pruner:每个 runAgentCore 实例一个,纯静态、不调 LLM、自动判定 read_file 失效。
-  // 开关关闭时为 null,所有 pushToolResult 调用走无 pruner 路径(零行为变化)。
+  // Relevance and lifecycle collect provenance during normal work. Neither path
+  // rewrites history; exact supersession is applied only by the pressure scheduler.
   const relprune = config.contextRelprune ? createRelevancePruner() : null;
-  // 观察者生命周期引擎:每个 runAgentCore 实例一个,纯静态、自动维护 grep/glob/web_search/web_fetch 等
-  // producer 与 read/edit/write 的 consumer 引用关系;孤立+老化的非观察类工具自动 STUB。
-  // 开关关闭时为 null,所有 pushToolResult / mutation 调用走无 lifecycle 路径(零行为变化)。
-  // 引擎需要从已有会话 history 恢复观察结果的年龄和 path 索引；不能只追踪本次
-  // runAgentCore，否则跨用户轮次的 grep/glob 永远不会衰减。
   let lifecycle: LifecycleEngine | null = config.contextLifecycle
     ? createLifecycleEngine(history)
     : null;
   runtimeContextState.lifecycleStats = lifecycle?.stats();
   rehydrateArtifacts(runtimeContextState, history);
-  // 预算调度器:每个 runAgentCore 实例一个，在 age-aware sweep 后评估并执行 warn / compact。
-  // contextBudget 开关关闭时为 null。
+  // The scheduler is the sole automatic history-rewrite entry point. It runs
+  // superseded → stale artifact → old logs/search → compact at real pressure.
+  // contextBudget=false keeps only the infrastructure compact fallback.
   const scheduler: BudgetScheduler | null = config.contextBudget !== false
-    ? createBudgetScheduler(runtimeContextState) // 在 step 循环之外实例化一次,跨步持有 lastRunLog
+    ? createBudgetScheduler(runtimeContextState)
     : null;
-  // age-aware encoder 与 history 数组同寿命；每轮重建一次以覆盖外部 /compact 等原地修改。
-  const ageAware = config.contextOptimize ? ageAwareStateFor(history) : null;
-  ageAware?.rehydrate(history);
   // 本轮流式状态:首个正文 token 到达即停 spinner(思考期间 spinner 持续转「思考中…」,不写思考内容)。
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
@@ -450,7 +418,6 @@ export async function runAgentCore(
     hooks.onAbort?.();
     history.length = 0;
     history.push(...savedHistory);
-    ageAware?.rehydrate(history);
     setAgentMode(savedMode);
   };
   try {
@@ -485,11 +452,10 @@ export async function runAgentCore(
       runtimeContextState.correction = storedCalibration.correction;
       runtimeContextState.calibrationSamples = storedCalibration.samples;
 
-      // 初次 tool push 只做保守编码；预算评估前先对 Cold 且 age 达阈值的旧结果降级，
-      // 避免 scheduler 根据马上会被 sweep 的陈旧占用误触发 history compact。
-      ageAware?.sweep(history, userTurnBoundary(history, HOT_TURN_WINDOW));
+      // The scheduler is the only automatic path that may compress old evidence.
+      // Normal tool pushes and lifecycle tracking remain metadata-only.
 
-      // 步前:五区 Budget Scheduler 在优化后的 history 上决策；开关关闭时退化回原 maybeCompact 路径。
+      // 步前:五区 Budget Scheduler 在当前完整 history 上决策；开关关闭时退化回 maybeCompact 路径。
       // 此时 spinner 已停,通知行干净。
       let historyRebuilt = false;
       const compactStartedAt = Date.now();
@@ -530,7 +496,6 @@ export async function runAgentCore(
           lifecycle = createLifecycleEngine(history);
           runtimeContextState.lifecycleStats = lifecycle.stats();
         }
-        ageAware?.rehydrate(history);
         rehydrateArtifacts(runtimeContextState, history);
       }
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')

@@ -1,10 +1,8 @@
-// Age-aware tool-result encoding coordinator.
-// Initial pushes stay conservative; old Cold results are re-encoded before chat.
+// Pressure-only tool-result encoding coordinator.
+// Normal pushes are raw apart from the per-result hard safety cap.
 
-import type { ChatMessage, ToolCallRef } from '../llm/index.js';
-import { TOOL_OLD_AGE } from './budget.js';
+import type { ChatMessage } from '../llm/index.js';
 import { optimizeToolResult } from './pipeline.js';
-import type { EncoderRuntimeContext } from './types.js';
 import {
   canonicalizePath,
   extractPath,
@@ -19,7 +17,6 @@ interface ToolEncodingRecord {
   pushOrdinal: number;
   succeeded: boolean;
   isFirstRead?: boolean;
-  agedEncoded: boolean;
 }
 
 interface ToolCallShape {
@@ -32,10 +29,7 @@ interface ToolMessageShape {
   content?: unknown;
 }
 
-/**
- * Tracks successful first reads and tool-result age without coupling encoders to
- * lifecycle's mutable history indexes. All methods are fail-safe and idempotent.
- */
+/** Rebuilds records from current history for each pressure pass. */
 export class AgeAwareEncodingState {
   private pushOrdinal = 0;
   private readonly records = new Map<string, ToolEncodingRecord>();
@@ -44,39 +38,17 @@ export class AgeAwareEncodingState {
   constructor(history: ChatMessage[] = []) {
     this.rehydrate(history);
   }
-  /** Build the conservative context for a newly completed tool result. */
-  preparePush(tc: ToolCallRef, succeeded: boolean): EncoderRuntimeContext {
-    const path = tc.name === 'read_file'
-      ? canonicalizePath(extractPath(tc.arguments))
-      : null;
-    const isFirstRead = path ? !this.seenReadPaths.has(path) : undefined;
 
-    this.records.set(tc.id, {
-      toolCallId: tc.id,
-      toolName: tc.name,
-      argsRaw: tc.arguments,
-      pushOrdinal: this.pushOrdinal,
-      succeeded,
-      isFirstRead,
-      agedEncoded: false,
-    });
-    this.pushOrdinal++;
-
-    // Failed reads must not consume the "first successful read" privilege.
-    if (succeeded && path) this.seenReadPaths.add(path);
-
-    return {
-      age: 0,
-      isCold: false,
-      isFirstRead,
-      phase: 'push',
-    };
-  }
-
-  /** Re-encode eligible tool messages in the Cold prefix in place. */
-  sweep(history: ChatMessage[], hotBoundary: number): void {
+  /**
+   * Pressure-only, progressive encoding of Cold logs and retrievable searches.
+   * It never touches code reads, skills, human decisions, or sub-agent output;
+   * repeated pressure passes may further reduce content only when strictly shorter.
+   */
+  sweepPressure(history: ChatMessage[], hotBoundary: number): number {
     try {
+      const pressureEncodable = new Set(['run_command', 'grep', 'glob', 'web_search', 'web_fetch']);
       const end = Math.min(Math.max(hotBoundary, 1), history.length);
+      let encodedCount = 0;
       for (let idx = 1; idx < end; idx++) {
         const message = history[idx];
         if (message.role !== 'tool') continue;
@@ -84,18 +56,11 @@ export class AgeAwareEncodingState {
         const toolMessage = message as ToolMessageShape;
         const id = toolMessage.tool_call_id;
         const record = id ? this.records.get(id) : undefined;
-        if (!record || !record.succeeded || record.agedEncoded) continue;
+        if (!record || !record.succeeded || !pressureEncodable.has(record.toolName)) continue;
 
         const content = toText(toolMessage.content);
-        if (!content || content.startsWith('⌦[')) {
-          record.agedEncoded = true;
-          continue;
-        }
-
-        // Exclude the result's own push: immediately after insertion its age is 0.
+        if (!content || content.startsWith('⌦[')) continue;
         const age = Math.max(0, this.pushOrdinal - record.pushOrdinal - 1);
-        if (age < TOOL_OLD_AGE) continue;
-
         const encoded = optimizeToolResult(
           record.toolName,
           content,
@@ -107,14 +72,14 @@ export class AgeAwareEncodingState {
             phase: 'sweep',
           },
         );
-
-        // Aged encoding is a degradation step: never replace content with a
-        // representation that is equal-sized or larger.
-        if (encoded.length < content.length) toolMessage.content = encoded;
-        record.agedEncoded = true;
+        if (encoded.length < content.length) {
+          toolMessage.content = encoded;
+          encodedCount++;
+        }
       }
+      return encodedCount;
     } catch {
-      // Context optimization must never block an agent request.
+      return 0;
     }
   }
   /** Rebuild stable state after resume or structural history compaction. */
@@ -158,7 +123,6 @@ export class AgeAwareEncodingState {
           pushOrdinal: this.pushOrdinal,
           succeeded,
           isFirstRead,
-          agedEncoded: false,
         });
         this.pushOrdinal++;
         if (succeeded && path) this.seenReadPaths.add(path);

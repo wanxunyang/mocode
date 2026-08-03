@@ -167,10 +167,14 @@ function affected(artifact: ContextArtifact, changed: Set<string>): boolean {
   return artifact.dependencies.some((dependency) => dependency.path !== '*' && changed.has(dependency.path));
 }
 
-/** Mark and immediately stub stale facts; this is stronger than waiting for budget pressure. */
+/**
+ * Mark precise, file-backed facts stale without changing the evidence in history.
+ * A stale result can still explain a later edit or failure; pressure compression is
+ * the only path allowed to replace its content with a compact marker.
+ */
 export function invalidateArtifacts(
   state: ContextState,
-  history: ChatMessage[],
+  _history: ChatMessage[],
   changedFiles: readonly string[],
 ): number {
   const changed = new Set(changedFiles.map(canonicalizePath).filter((item): item is string => !!item));
@@ -180,15 +184,6 @@ export function invalidateArtifacts(
   for (const artifact of artifactState.artifacts.values()) {
     if (artifact.freshness !== 'fresh' || !affected(artifact, changed)) continue;
     artifact.freshness = 'stale';
-    const message = history[artifact.messageIndex] as { role?: string; content?: unknown } | undefined;
-    if (message?.role === 'tool') {
-      const original = toText(message.content);
-      const paths = artifact.dependencies.map((item) => item.path).join(', ');
-      const stub = `${STALE_PREFIX}${artifact.source.tool}] source=${artifact.id} dependencies=${paths} ` +
-        `invalidated-by=${[...changed].join(', ')}; treat content as potentially outdated.`;
-      message.content = stub;
-      artifact.tokenCount = estimateTokens(stub);
-    }
     count++;
   }
   updateStats(state, artifactState);
@@ -225,7 +220,7 @@ export function rehydrateArtifacts(state: ContextState, history: ChatMessage[]):
   updateStats(state, artifactState);
 }
 
-/** Compare captured dependency versions before each model step to detect external edits. */
+/** Compare captured dependency versions before each model step and mark stale metadata only. */
 export function refreshArtifactFreshness(state: ContextState, history: ChatMessage[]): number {
   const changed = new Set<string>();
   for (const artifact of stateFor(state).artifacts.values()) {
@@ -238,12 +233,20 @@ export function refreshArtifactFreshness(state: ContextState, history: ChatMessa
   return changed.size > 0 ? invalidateArtifacts(state, history, [...changed]) : 0;
 }
 
-/** Scheduler entry point: stale artifacts are already stubs; normalize any resumed stale message first. */
-export function pruneStaleArtifacts(state: ContextState, history: ChatMessage[]): number {
+/**
+ * Pressure-only stage: replace stale evidence in the Cold prefix with a compact
+ * marker. Recent/current work stays intact, and normal mutation handling never
+ * calls this function.
+ */
+export function pruneStaleArtifacts(
+  state: ContextState,
+  history: ChatMessage[],
+  coldBoundary: number,
+): number {
   const artifactState = stateFor(state);
   let pruned = 0;
   for (const artifact of artifactState.artifacts.values()) {
-    if (artifact.freshness !== 'stale') continue;
+    if (artifact.freshness !== 'stale' || artifact.messageIndex >= coldBoundary) continue;
     const message = history[artifact.messageIndex] as { role?: string; content?: unknown } | undefined;
     if (message?.role !== 'tool') continue;
     const content = toText(message.content);

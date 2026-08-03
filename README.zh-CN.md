@@ -16,13 +16,13 @@ MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，
 
 ### 自治执行循环
 
-每次模型响应都是闭环中的一步。工具调用按能力声明分类，安全读取可以并行，写操作获取规范化资源锁，观察结果编码后才回到上下文。agent 没有更多工具调用时立即完成；框架不会暗中运行验证，也不会强迫追加一轮模型调用。
+每次模型响应都是闭环中的一步。工具调用按能力声明分类，安全读取可以并行，写操作获取规范化资源锁。工具证据除单条 hard cap 外原样进入 history，用户与模型看到同一事实。agent 没有更多工具调用时立即完成；框架不会暗中运行验证，也不会强迫追加一轮模型调用。
 
 <p align="center"><img src="./assets/architecture/agent-loop-zh-CN.svg" alt="MoCode 自治 Agent 执行循环" width="100%"></p>
 
-### 会衰减、不会膨胀的上下文
+### 只在真实 Context Pressure 下压缩
 
-工具输出不会作为无差别日志无限堆积。类型化编码、相关性裁剪、观察生命周期、年龄感知压缩和五区预算调度持续重塑活跃工作集；会话、Snapshot、Skill、notes.md 与长期记忆负责保留耐久知识。
+正常会话保留完整工具证据，只维护 freshness / provenance 元数据。总上下文约到 90% 时，调度器才按 `superseded → stale artifact → 旧日志/搜索 → history compact` 的顺序处理 Cold 区；Lifecycle 不再按工具调用次数老化正文。
 
 <p align="center"><img src="./assets/architecture/context-engine-zh-CN.svg" alt="MoCode 上下文工程与持久化记忆架构" width="100%"></p>
 
@@ -48,9 +48,9 @@ mocode 不会在任务结束时暗中启动验证瀑布。agent 可以根据任�
 
 <p align="center"><img src="./assets/architecture/rollback-flow-zh-CN.svg" alt="MoCode 回滚时间线和每轮快照流" width="100%"></p>
 
-### 上下文控制:五个独立开关,不是一锅端
+### 上下文控制：一个真实压力线，阶段独立可选
 
-`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget` 各自把控一个旋钮(push 压缩、编码器、被取代读取的剪裁、观察生命周期、五区调度器)。每个都能用 `MOCODE_*=false` 单独关;即使五个全关,观察结果仍按生命周期老化。token 估算带 EWMA 自动校准真实 provider 用量。
+五个控制项仍可独立配置，但自动改写只有一个触发条件：总上下文接近 90%。`contextLifecycle` 只维护 provenance 元数据；`contextRelprune` 与 `contextOptimize` 是默认关闭的 pressure-only 可选阶段；`autoCompact` 是最终 provider-limit 保护。token 估算继续通过 EWMA 校准真实 provider 用量。
 
 <p align="center"><img src="./assets/architecture/context-controls-zh-CN.svg" alt="MoCode 上下文控制:五个独立开关、观察生命周期、token 自校准" width="100%"></p>
 
@@ -79,7 +79,7 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **只读工具并行执行** — 一轮里连续的只读操作(读文件、grep、glob、codegraph、联网搜索/抓取)自动并发跑,总耗时 ≈ 最慢一个,而不是逐个排队。写文件 / 改文件这类有副作用的操作仍串行,保快照顺序与数据安全。
 - **子 agent 分而治之** — 复杂任务可派生拥有独立历史与受限工具集的子 agent。只读 worker 可并行扇出；写 worker 在私有文件系统 overlay 中运行，返回的 ChangeSet 经过 expected hash 校验与规范化资源锁后才合并。主线只接收结构化发现，不接收过程噪声。
 - **计划 / 执行双模式** — `plan` 模式下只读探查(读代码、查索引、搜索,绝不写盘、不跑命令、不派生子 agent),产出计划;`auto` 模式全量工具放开。agent 还能在两者间自切换——先把陌生代码库摸清,再动手改。
-- **上下文自动压缩** — 接近窗口上限时三层压缩(单条结果裁剪 → 旧工具结果原地微压缩 → 旧对话摘要),长会话也不爆窗口;`/context` 实时显示 token 用量,`/compact` 可手动压缩(能带焦点指令聚焦保留)。
+- **真实压力驱动压缩** — 正常 history 保留完整工具证据；约到 90% 后才按 `superseded → stale artifact → 旧日志/搜索 → history 摘要` 的顺序压 Cold 区。`/context` 显示实时用量，`/compact` 仍是用户显式覆盖。
 - **跨会话长期记忆** — agent 能把项目架构、约定、踩过的坑存成长期记忆,下次会话自动加载;后台还会定期从对话里反思挖掘值得记住的事。记忆可增删改、带召回衰减。
 - **会话记事本(notes.md)** — 复杂多步任务(≥3 处文件改动 / ≥5 步工具调用)时,agent 在 `.mocode/sessions/<sessionId>/notes.md` 维护一个工作记事本(落盘抗压缩),可记录中间发现、设计决策、待验证问题和结构化计划。TUI 状态栏实时显示进度 chip:`plan: [标题] (3/7) ▸ [当前步]`(当存在 `## Plan:` 段时)。agent 直接用 write_file/edit_file/read_file 管理此文件。
 - **可中断、可回滚** — Ctrl+C 随时打断当前轮次(树杀子进程,历史还原到本轮开始前,不留残半的工具调用);`/rollback` 按轮次快照恢复文件改动,逐个文件「保留/撤销」,不依赖 git。
@@ -164,15 +164,17 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 | ----------------------- | ------------------------------------------ | --------------------------- |
 | `MAX_TOKENS`            | 单次回复最大 token                               | 不限                          |
 | `CONTEXT_WINDOW_TOKENS` | 模型上下文窗口,须对齐真实模型                            | `128000`                    |
-| `COMPACT_THRESHOLD`     | 自动压缩触发阈值(占窗口比例)                            | `0.85`                      |
+| `COMPACT_THRESHOLD`     | 统一 pressure / 自动 compact 触发阈值(占窗口比例)          | `0.90`                      |
 | `LLM_STREAM_USAGE`      | 流式请求带 `stream_options.include_usage` 拿真实用量 | `true`                      |
-| `AUTO_COMPACT`          | 自动压缩总开关                                    | `true`                      |
+| `AUTO_COMPACT`          | 最终 history compact 安全保护                          | `true`                      |
 | `AUTO_REFLECT`          | 后台反思 pass（默认关闭，需要时显式开启）                    | `false`                     |
 | `REFLECT_EVERY_N`       | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞)              | `5`                         |
 | `ANYSEARCH_API_KEY`     | 联网搜索 API key(不配走匿名免费额度)                    | 无                           |
 | `ANYSEARCH_BASE_URL`    | 搜索 API 端点                                  | `https://api.anysearch.com` |
 | `SKILLS_DIRS`           | 覆盖默认 skill 扫描目录(平台分隔符)                     | 三目录自动扫描                     |
-| `MOCODE_CONTEXT_OPTIMIZE` | 工具结果进 LLM 前的类型化编码(树/搜索/日志…),关掉则原样进(仅长度裁剪) | `true`                      |
+| `MOCODE_CONTEXT_OPTIMIZE` | 仅在真实 pressure 下编码 Cold 日志/搜索（显式开启）       | `false`                     |
+| `MOCODE_CONTEXT_RELPRUNE` | 仅在真实 pressure 下裁剪精确 superseded 证据（显式开启） | `false`                     |
+| `MOCODE_LIFECYCLE`      | 只维护 provenance 元数据，不按次数改写正文                | `true`                      |
 | `MAX_STEPS`             | 每轮 Agent 循环最大步数（仅防无限循环）                 | `1000`                      |
 | `SUB_AGENT_MAX_STEPS`   | 子 Agent 循环安全上限，默认与主 Agent 一致             | `1000`                      |
 | `SANDBOX_ROOT`          | 沙箱根目录(文件操作边界;未配则用 cwd 兜底)                | 无                           |

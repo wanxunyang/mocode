@@ -1,12 +1,8 @@
-// 五区 Context Budget Scheduler。
+// 五区 Context Budget accounting and the shared real-pressure threshold.
 //
-// 目的:把当前请求拆成 System / History / Tool-Recent / Tool-Old / Summary + Reserve，
-//      统一报告各区占用，并只调度执行层能够真正落地的 warn / compact_history。
-//
-// push-time cap、pipeline、relevance、lifecycle 与 age-aware sweep 负责工具结果优化；
-// scheduler 在这些处理完成后评估，不重复生成 Cold/Hot tool 压缩动作。
-// 本文件保持叶子级，只依赖 ChatMessage / token estimate，具体执行由 session/scheduler.ts 完成。
-// contextBudget 开关关闭时，agent/core.ts 退化为直接调用 maybeCompact。
+// This module only estimates and reports. session/scheduler.ts owns the sole
+// automatic rewrite sequence and invokes compact_history only if total/raw
+// occupancy remains at or above 90% after pressure stages.
 
 import type { ChatMessage, ChatTool } from '../llm/index.js';
 import {
@@ -32,9 +28,9 @@ export type BudgetLayer = (typeof BUDGET_LAYERS)[number];
 export interface BudgetPolicy {
   ratios: Readonly<Record<BudgetLayer, number>>;
   hotTurnWindow: number;
-  toolOldAge: number;
   compactKeepRatio: number;
-  totalTriggerRatio: number;
+  /** Context occupancy at which pressure-only history compression may run. */
+  pressureTriggerRatio: number;
   schedulerTargetRatio: number;
   estimateSafetyFactor: number;
   compactHeadroomTokens: number;
@@ -50,10 +46,9 @@ export const DEFAULT_BUDGET_POLICY: BudgetPolicy = {
     reserve: 0.05,
   },
   hotTurnWindow: 4,
-  toolOldAge: 2,
   compactKeepRatio: 0.40,
-  totalTriggerRatio: 0.80,
-  schedulerTargetRatio: 0.80,
+  pressureTriggerRatio: 0.90,
+  schedulerTargetRatio: 0.90,
   estimateSafetyFactor: 1.05,
   compactHeadroomTokens: 1500,
 };
@@ -61,7 +56,6 @@ export const DEFAULT_BUDGET_POLICY: BudgetPolicy = {
 /** 兼容既有调用方的只读别名；配置只在 DEFAULT_BUDGET_POLICY 中维护。 */
 export const BUDGET_RATIO = DEFAULT_BUDGET_POLICY.ratios;
 export const HOT_TURN_WINDOW = DEFAULT_BUDGET_POLICY.hotTurnWindow;
-export const TOOL_OLD_AGE = DEFAULT_BUDGET_POLICY.toolOldAge;
 
 function msgTokens(m: ChatMessage): number {
   // 与请求预估复用同一实现，避免角色结构开销、多模态和 tool_calls 在两个预算路径中漂移。
@@ -201,7 +195,7 @@ export function evaluateBudget(
   triggers.sort((a, b) => layers[b].overRatio - layers[a].overRatio);
 
   const total = BUDGET_LAYERS.reduce((s, k) => s + (k === 'reserve' ? 0 : layers[k].actual), 0);
-  const totalOver = total >= DEFAULT_BUDGET_POLICY.totalTriggerRatio * window;
+  const totalOver = total >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * window;
 
   return {
     step,
@@ -230,15 +224,11 @@ export type ScheduleAction =
     };
 
 /** 根据 BudgetReport 生成可执行动作。
- * push-time cap、relevance、lifecycle 与 age-aware sweep 已在评估前完成，
- * 因此这里不再生成无法执行的 Cold/Hot tool action。
- * History 或总量超预算时才考虑昂贵的 LLM 摘要。 */
+ * History compaction is the final fallback after pressure-only tool stages.
+ * Per-layer overages are diagnostics, never independent rewrite triggers. */
 export function scheduleActions(report: BudgetReport): ScheduleAction[] {
   const actions: ScheduleAction[] = [];
-  const { layers, totalOver, total } = report;
-  const policy = DEFAULT_BUDGET_POLICY;
-  const headroom = policy.schedulerTargetRatio * report.window
-    - total * policy.estimateSafetyFactor;
+  const { layers } = report;
 
   if (layers.system.overBudget) {
     const { prompt, toolSchemas } = report.systemCosts;
@@ -254,14 +244,8 @@ export function scheduleActions(report: BudgetReport): ScheduleAction[] {
     });
   }
 
-  // 硬闸:裸估算(不乘 correction)达触发线必须压——correction 折扣不能否决,
-  // 首轮/当前轮不豁免。未达硬闸才走常规 ROI 条件(层超/headroom)。
-  if (report.rawTotal >= policy.totalTriggerRatio * report.window) {
-    actions.push({ kind: 'compact_history' });
-  } else if (
-    (layers.history.overBudget || totalOver)
-    && headroom < -policy.compactHeadroomTokens
-  ) {
+  const pressureLine = DEFAULT_BUDGET_POLICY.pressureTriggerRatio * report.window;
+  if (Math.max(report.rawTotal, report.total) >= pressureLine) {
     actions.push({ kind: 'compact_history' });
   }
 
