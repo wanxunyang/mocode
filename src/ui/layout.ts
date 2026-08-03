@@ -1555,14 +1555,15 @@ function formatTurnTokenChip(usage: { promptTokens: number; completionTokens: nu
   return `${ui.dim}${text} tokens${cacheTag}${ui.reset}`;
 }
 
-/** 运行态实时用量 chip(放 context 进度条左侧):↑prompt ↓completion,cache 命中带 ↻ 标记,
- *  缩写与轮末摘要 / 左侧 turn chip 同款。估算值(当前步流式中),完成后被实测取代;
- *  dim 灰降优先级,不与进度条阈值警示抢色。 */
+/** 运行态实时用量 chip(放 context 进度条左侧):↑计费prompt(裸-cached,与轮末摘要 (↑…) 同口径)
+ *  ↓completion,cache 命中带 ↻ 标记;缩写与轮末摘要 / 左侧 turn chip 同款。
+ *  流式期为估算值,每步末尾 usage chunk 到达后换实测;dim 灰降优先级,不与进度条阈值警示抢色。 */
 function formatLiveUsageChip(u: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string {
   const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`);
   const cached = u.cachedTokens ?? 0;
+  const billable = Math.max(0, u.promptTokens - cached);
   const cacheTag = cached > 0 ? ` ↻ ${fmt(cached)}` : '';
-  return `${ui.dim}↑ ${fmt(u.promptTokens)} ↓ ${fmt(u.completionTokens)}${cacheTag}${ui.reset}`;
+  return `${ui.dim}↑ ${fmt(billable)} ↓ ${fmt(u.completionTokens)}${cacheTag}${ui.reset}`;
 }
 
 /** spinner 行上方的「虚拟空行」(contentBottom+1)。

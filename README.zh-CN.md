@@ -67,7 +67,7 @@ mocode 不会在任务结束时暗中启动验证瀑布。agent 可以根据任�
 mocode 把代码层控制保持得尽量轻，把任务策略交给 agent：
 
 - **建议式工作纪律** — system prompt 只要求聚焦改动、避免重复检索、诚实报告不确定性；是否验证及验证范围由 agent 自主决定，不是完成硬门。
-- **反思式重试 + thrash 节流** — 连续重复失败时提示换策略，而不是盲目重跑。
+- **透明工具失败** — 每个工具调用只执行一次，原始结构化错误直接交给 agent，由 agent 自主决定是否以及如何恢复。
 - **ask_human 卡点降级** — 仅高影响且属于用户所有权的选择才询问，其余实现细节由 agent 自主推进。
 - **五区上下文控制 + token 自校准** — 独立旋钮管理上下文压力，token 估算根据真实 provider 用量校准。
 
@@ -167,7 +167,7 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 | `COMPACT_THRESHOLD`     | 自动压缩触发阈值(占窗口比例)                            | `0.85`                      |
 | `LLM_STREAM_USAGE`      | 流式请求带 `stream_options.include_usage` 拿真实用量 | `true`                      |
 | `AUTO_COMPACT`          | 自动压缩总开关                                    | `true`                      |
-| `AUTO_REFLECT`          | 后台反思 pass 总开关(定期从会话挖掘记忆)                   | `true`                      |
+| `AUTO_REFLECT`          | 后台反思 pass（默认关闭，需要时显式开启）                    | `false`                     |
 | `REFLECT_EVERY_N`       | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞)              | `5`                         |
 | `ANYSEARCH_API_KEY`     | 联网搜索 API key(不配走匿名免费额度)                    | 无                           |
 | `ANYSEARCH_BASE_URL`    | 搜索 API 端点                                  | `https://api.anysearch.com` |

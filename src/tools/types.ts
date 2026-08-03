@@ -35,13 +35,11 @@ export type ToolRisk = 'safe' | 'confirm' | 'dangerous';
 /** 工具对外部状态的主要影响；unknown 必须按最保守策略调度。 */
 export type ToolEffect = 'read' | 'write' | 'process' | 'network' | 'unknown';
 export type ToolConcurrency = 'parallel' | 'serial' | 'resource-locked';
-export type ToolRetry = 'never' | 'safe' | 'idempotent';
 
-/** Agent 调度、回滚捕获和后续重试策略使用的工具能力声明。 */
+/** Agent scheduling, rollback capture, and resource coordination metadata. */
 export interface ToolCapabilities {
   effect: ToolEffect;
   concurrency: ToolConcurrency;
-  retry: ToolRetry;
   /** 返回该调用会访问的逻辑资源键；用于细粒度锁与冲突诊断。 */
   resources?: (args: Record<string, unknown>) => string[];
   /** 编排器本身不持锁；其嵌套工具调用负责获取真实资源锁，避免父子自锁。 */
@@ -84,10 +82,6 @@ export interface ToolOutcome {
   /** The committed transaction; diff, rollback, tracing and freshness share this identity. */
   changeSet?: import('../changeset/types.js').ChangeSetSummary;
   durationMs?: number;
-  /** Total executions for this provider tool call, including automatic retries. */
-  attempts?: number;
-  /** Aggregate backoff time spent between attempts. */
-  retryDelayMs?: number;
   /** LLM usage incurred inside an orchestrating tool (for example sub-agent). */
   usage?: import('../llm/index.js').ChatUsage;
 }

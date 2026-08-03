@@ -54,7 +54,6 @@ export function getMcpTools(): Tool[] {
         capabilities: {
           effect: 'unknown',
           concurrency: 'serial',
-          retry: 'never',
           resources: () => ['workspace'],
           supportsAbort: true,
         },

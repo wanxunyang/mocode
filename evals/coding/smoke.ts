@@ -52,17 +52,16 @@ const report = createReport({ schemaVersion: 2, runId: 'test', generatedAt: 'now
   id: 'x', title: 'x', group: 'tests', difficulty: 'basic', status: 'passed', finalVerifiedSuccess: true,
   regression: false, toolRecovery: false, toolCalls: 2,
   tokens: 10, durationMs: 20, changedFiles: ['x.js'],
-  reflectionRounds: 1, askHumanCount: 0,
+  askHumanCount: 0,
 }]);
 assert.equal(report.summary.finalVerifiedSuccessRate, 1);
 assert.match(renderSummary(report), /1\/1 passed/);
-assert.equal(report.summary.reflectionRounds, 1);
 assert.equal(report.summary.askHumanCount, 0);
 const timeoutReport = createReport({ schemaVersion: 2, runId: 'timeout', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'hard' }, [{
   id: 'late', title: 'late', group: 'resilience', difficulty: 'hard', status: 'timeout',
   finalVerifiedSuccess: false, regression: false, toolRecovery: false,
   toolCalls: 1, tokens: 1, durationMs: 10, changedFiles: [],
-  reflectionRounds: 0, askHumanCount: 0,
+  askHumanCount: 0,
 }]);
 assert.equal(timeoutReport.summary.passed, 0);
 console.log(`coding benchmark smoke: 16/16 passed (${codingTasks.length} fixtures checked, incl. multifile-boundary-01)`);

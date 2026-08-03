@@ -9,13 +9,10 @@ import { getCurrentSessionId } from './state.js';
 export type TraceEventType =
   | 'turn_start' | 'turn_end' | 'step_start' | 'step_end'
   | 'model_start' | 'model_retry' | 'model_end'
-  | 'tool_call_start' | 'tool_retry' | 'tool_call_end' | 'permission'
+  | 'tool_call_start' | 'tool_call_end' | 'permission'
   | 'compact' | 'abort' | 'rollback'
-  // RETRY-01 / ASK-01: hard signals for quality dimensions.
-  | 'retry_reflection' | 'ask_human_call'
-  // NARR-01: interstitial narration — assistant prose emitted in the same
-  // message as tool_calls. The "stay silent during tool-calling turns" rule is
-  // prompt-only; this event makes violations measurable instead of vibes-based.
+  | 'ask_human_call'
+  // Interstitial narration is observation-only; it never feeds instructions back to the model.
   | 'narration';
 
 export interface AgentTraceEvent {

@@ -396,7 +396,7 @@ export const config: Config = {
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',
   contextBudget: process.env.MOCODE_BUDGET_SCHEDULER !== 'false',
-  autoReflect: process.env.AUTO_REFLECT !== 'false',
+  autoReflect: process.env.AUTO_REFLECT === 'true',
   memoryEnabled: process.env.MEMORY_ENABLED === 'true',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   maxSteps: Number(process.env.MAX_STEPS) || 1000,

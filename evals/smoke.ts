@@ -556,7 +556,7 @@ const cases: SmokeCase[] = [
           const out = buildNotepadSection(sessionId);
 
           // 1) header mentions total section count
-          assert.match(out, /## Session Notepad \(5 sections/);
+          assert.match(out, /## Session Notepad index \(5 sections/);
           // 2) both buckets labeled
           assert.match(out, /Active \(3\)/);
           assert.match(out, /Done \(2\)/);
@@ -595,4 +595,4 @@ for (const item of cases) {
 }
 
 if (failures > 0) process.exitCode = 1;
-else console.log(`PASS ${cases.length} automatic-validation smoke cases`);
+else console.log(`PASS ${cases.length} core runtime smoke cases`);

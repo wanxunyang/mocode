@@ -17,7 +17,6 @@ import {
 } from '../rollback/index.js';
 import { enforceSandbox } from '../sandbox/index.js';
 import { resolveResourceLockRequests, toolResourceLockManager } from './resource-lock.js';
-import { executeWithToolRetry, type ToolRetryInfo } from './retry.js';
 import { validateToolArguments } from './validation.js';
 import { t } from '../i18n/index.js';
 import { isToolErrorOutput } from './result.js';
@@ -61,7 +60,6 @@ function rebuildTools(): void {
 const DEFAULT_CAPABILITIES: ToolCapabilities = Object.freeze({
   effect: 'unknown',
   concurrency: 'serial',
-  retry: 'never',
 });
 
 export function findTool(name: string): Tool | undefined {
@@ -142,7 +140,6 @@ function terminalOutcome(
 export interface ToolExecutionOptions {
   dropContext?: (filter: DropContextFilter) => DropContextResult;
   onLockAcquired?: (args: Record<string, unknown>) => void;
-  onRetry?: (info: ToolRetryInfo) => void;
 }
 
 function isTransientExecutionError(error: unknown): boolean {
@@ -182,13 +179,12 @@ function executionErrorOutcome(
   };
 }
 
-/** One complete attempt: acquire/release locks and capture rollback independently. */
-async function executeToolAttempt(
+/** Execute one tool call while holding its declared locks and capturing rollback state. */
+async function executeToolOnce(
   tool: Tool,
   args: Record<string, unknown>,
   signal: AbortSignal | undefined,
   opts: ToolExecutionOptions | undefined,
-  notifyLockAcquired: boolean,
 ): Promise<ToolOutcome> {
   const startedAt = Date.now();
   const capabilities = getToolCapabilities(tool);
@@ -197,7 +193,7 @@ async function executeToolAttempt(
   try {
     const requests = resolveResourceLockRequests(capabilities, args);
     return await toolResourceLockManager.withLocks(requests, signal, async () => {
-      if (notifyLockAcquired) opts?.onLockAcquired?.(args);
+      opts?.onLockAcquired?.(args);
       const mutationBefore = getCurrentTurnMutationState();
       mutationVersionBefore = mutationBefore.version;
       // Transactional tools own their full write-set capture inside ChangeSet commit.
@@ -244,17 +240,6 @@ async function executeToolAttempt(
   }
 }
 
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'null';
-}
-
 /**
  * 结构化工具调度入口。永不抛错；旧字符串工具在此归一化为 ToolOutcome。
  * 权限仍由 Agent 在展示工具头之前预检，保持现有交互时序。
@@ -297,27 +282,12 @@ export async function executeToolOutcome(
     );
   }
   const args = parsed as Record<string, unknown>;
-  const fingerprint = `${name}\x00${stableJson(args)}`;
   const sandboxError = enforceSandbox(name, args);
   if (sandboxError) {
     return terminalOutcome('denied', 'SANDBOX_DENIED', sandboxError, startedAt);
   }
 
-  const capabilities = getToolCapabilities(tool);
-  try {
-    return await executeWithToolRetry(
-      capabilities,
-      fingerprint,
-      signal,
-      (attempt) => executeToolAttempt(tool, args, signal, opts, attempt === 1),
-      opts?.onRetry,
-    );
-  } catch (error) {
-    if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
-      return terminalOutcome('aborted', 'ABORTED', t('command.interrupted'), startedAt);
-    }
-    return executionErrorOutcome(name, error, startedAt, []);
-  }
+  return executeToolOnce(tool, args, signal, opts);
 }
 
 /** 字符串兼容入口：现有调用方、TUI 和 LLM history 无需同步迁移。 */
@@ -339,4 +309,3 @@ export type {
   DropContextFilter,
   DropContextResult,
 } from './types.js';
-export type { ToolRetryInfo } from './retry.js';

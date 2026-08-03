@@ -86,7 +86,7 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
     const regression = fixture.regressionCommand ? !(await verify(root, fixture.regressionCommand)) : false;
     const expectedChanged = fixture.expected.files ?? [];
     const changed = result.changedFiles ?? [];
-    const traceMetrics = reduceTraceMetrics(traceEvents, result.history);
+    const traceMetrics = reduceTraceMetrics(traceEvents);
     const expectedFilesTouched = expectedChanged.every(f => changed.some(c => c.replace(/\\/g, '/').endsWith(f)));
     const verifierUnchanged = createHash('sha256').update(readFileSync(path.join(root, 'verify.mjs'))).digest('hex') === verifierHash;
     const timedOut = controller.signal.aborted;
@@ -103,11 +103,10 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       tokens: traceMetrics.tokens,
       durationMs: traceMetrics.durationMs,
       changedFiles: changed,
-      reflectionRounds: traceMetrics.reflectionRounds,
       askHumanCount: traceMetrics.askHumanCount,
     };
   } catch (error) {
-    const traceMetrics = reduceTraceMetrics(traceEvents, result?.history);
+    const traceMetrics = reduceTraceMetrics(traceEvents);
     return {
       id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
       status: controller.signal.aborted ? 'timeout' : 'error', finalVerifiedSuccess: false,
@@ -119,7 +118,6 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       tokens: traceMetrics.tokens,
       durationMs: traceMetrics.durationMs || Date.now() - started,
       changedFiles: [], error: error instanceof Error ? error.message : String(error),
-      reflectionRounds: traceMetrics.reflectionRounds,
       askHumanCount: traceMetrics.askHumanCount,
     };
   } finally {

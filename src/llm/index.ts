@@ -307,11 +307,14 @@ export interface StreamHandlers {
   onToolCall?: (name: string) => void;
   /** Retry telemetry contains only a status/code, never provider error text or request data. */
   onRetry?: (info: ChatRetryInfo) => void;
-  /** 流式实时 completion token 估算(本请求累计值,含 think 段与 tool_call 参数)。
-   *  每个带 delta 的 chunk 后回调一次,供调用方驱动底栏实时用量 chip;不提供则不做任何统计。
-   *  末尾 usage chunk 到达时再回调一次,此时 completion 为实测值、cachedTokens 为后端报的
-   *  cache 命中(流式期间不可知,缺省 undefined)。 */
-  onProgress?: (completionTokensEst: number, cachedTokens?: number) => void;
+  /** 流式实时用量(本请求累计),供调用方驱动底栏实时用量 chip;不提供则不做任何统计。
+   *  每个带 delta 的 chunk 后回调一次:completionTokens 为估算值(含 think 段与 tool_call 参数)。
+   *  末尾 usage chunk 到达时再回调一次:三个字段均为后端实测值(流式期间 prompt / cached 不可知)。 */
+  onProgress?: (progress: {
+    completionTokens: number;
+    promptTokens?: number;
+    cachedTokens?: number;
+  }) => void;
 }
 
 function retryErrorCode(error: unknown): string {
@@ -428,7 +431,7 @@ async function chatOnce(
     }
   };
   const reportProgress = (): void => {
-    handlers.onProgress?.(Math.ceil(liveCjk + liveOther / 4));
+    handlers.onProgress?.({ completionTokens: Math.ceil(liveCjk + liveOther / 4) });
   };
 
   for await (const chunk of stream as AsyncIterable<{
@@ -461,8 +464,12 @@ async function chatOnce(
         cachedTokens: extras.cachedTokens,
         reasoningTokens: extras.reasoningTokens,
       };
-      // 末尾 chunk 把实测 completion + cache 命中即时推给实时 chip(无 delta,下方 continue 不会再报)。
-      handlers.onProgress?.(usage.completionTokens, usage.cachedTokens);
+      // 末尾 chunk 把实测 prompt / completion / cache 命中即时推给实时 chip(无 delta,下方 continue 不会再报)。
+      handlers.onProgress?.({
+        completionTokens: usage.completionTokens,
+        promptTokens: usage.promptTokens,
+        cachedTokens: usage.cachedTokens,
+      });
     }
     const delta = chunk.choices?.[0]?.delta;
     if (!delta) continue; // 末尾 usage-only chunk 等无 delta

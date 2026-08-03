@@ -15,7 +15,7 @@ MoCode explores your code, reads/writes/edits files, runs shell commands, and se
 MoCode keeps code-level control light and leaves task strategy to the agent:
 
 - **Advisory working discipline** — The system prompt asks the agent to make focused changes, avoid redundant retrieval, and decide for itself whether validation is useful. Validation is optional and is never a completion gate.
-- **Reflective retry + thrash throttling** — Errors are classified into 6 categories (`retry-classifier`); repeated identical failures append a hint to switch strategy instead of blindly retrying.
+- **Transparent tool failures** — Each tool call runs once and returns its raw structured failure to the agent, which decides whether and how to recover.
 - **`ask_human` for user-owned decisions** — The agent asks only when repository evidence cannot resolve a high-impact choice; implementation details remain autonomous.
 - **Five-zone context controls + token self-calibration** — Five independent dials (`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget`) manage context pressure. Token estimation self-calibrates against provider usage.
 
@@ -168,7 +168,7 @@ Common backend `base_url` values:
 | `COMPACT_THRESHOLD`         | Auto-compaction trigger threshold (fraction of window)                | `0.85`                      |
 | `LLM_STREAM_USAGE`          | Include `stream_options.include_usage` on streaming requests for real usage | `true`                |
 | `AUTO_COMPACT`               | Auto-compaction master switch                                          | `true`                       |
-| `AUTO_REFLECT`               | Background reflection pass master switch (periodically mines memories from conversations) | `true`   |
+| `AUTO_REFLECT`               | Background reflection pass (opt-in; periodically mines memories from conversations) | `false`  |
 | `REFLECT_EVERY_N`            | Trigger a background reflection every N turns (runs alongside the agent, non-blocking) | `5`      |
 | `ANYSEARCH_API_KEY`         | Web search API key (falls back to anonymous free quota if unset)      | none                         |
 | `ANYSEARCH_BASE_URL`        | Search API endpoint                                                    | `https://api.anysearch.com` |

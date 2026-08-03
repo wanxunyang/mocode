@@ -32,7 +32,7 @@ export interface BenchmarkTaskResult {
   regression: boolean;
   toolRecovery: boolean;
   toolCalls: number;
-  /** Trace-derived model + tool retry count. */
+  /** Trace-derived model request retry count. */
   retries?: number;
   /** Fraction of completed tool calls that succeeded on their first recorded attempt. */
   firstSuccessRate?: number;
@@ -40,10 +40,7 @@ export interface BenchmarkTaskResult {
   durationMs: number;
   changedFiles: string[];
   error?: string;
-  // ─────────── QUAL-01 质量维度 ───────────
-  /** RETRY-01: 反思重试注入次数(历史中含 [retry reflection: 的工具结果数)。 */
-  reflectionRounds: number;
-  /** ASK-01: ask_human 工具成功调用次数。 */
+  /** ask_human 工具成功调用次数。 */
   askHumanCount: number;
 }
 
@@ -65,9 +62,6 @@ export interface BenchmarkReport {
     firstSuccessRate: number;
     tokens: number;
     durationMs: number;
-    // ─────────── QUAL-01 质量维度聚合 ───────────
-    /** 平均反思重试注入次数(per task)。 */
-    reflectionRounds: number;
     /** 平均 ask_human 调用次数(per task)。 */
     askHumanCount: number;
   };

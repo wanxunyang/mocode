@@ -23,12 +23,10 @@ import {
   isFileMutationTool,
   tools,
   type ToolOutcome,
-  type ToolRetryInfo,
 } from '../tools/registry.js';
 import { checkPermission } from '../permissions/index.js';
 import { validateToolArguments } from '../tools/validation.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools } from '../tools/constants.js';
-import { reflectionHint, classifyError, type ErrorCategory } from './retry-classifier.js';
 import { getAgentMode, setAgentMode } from './mode.js';
 import {
   maybeCompact,
@@ -87,55 +85,6 @@ function parseArgs(raw: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
-}
-
-/**
- * Thrashing 检测:同一工具 + 完全相同 arguments 在本轮重复 ≥ THRASH_THRESHOLD 次,
- * 返一段提示(注入到工具结果尾部),引导模型换思路而不是再试一次。
- * 阈值 2 = "试过两次同样的调用还没好,该停了"。指纹 = `${name}\\x00${args}`
- * (直接拼,不哈希——避免热路径开销;args 长度本身有限,内存压力可忽略)。
- * null 表示未触发,不污染输出。
- */
-const THRASH_THRESHOLD = 2;
-function thrashHint(name: string, args: string, count: number): string | null {
-  if (count < THRASH_THRESHOLD) return null;
-  return (
-    `\n\n[hint] This is call #${count} of \`${name}\` with identical arguments — ` +
-    'either failing or returning the same content. STOP retrying and switch strategy:\n' +
-    '- read_file / glob → path likely wrong; call `glob` to discover paths, or `ask_human`\n' +
-    '- run_command → Windows path-escaping issue; use `read_file` / `glob` with absolute paths instead\n' +
-    '- write_file / edit_file CHANGE_CONFLICT → do not resend; read_file the same path and use its latest hash (use null only when read_file says the path is missing)\n' +
-    '- edit_file old_string mismatch → re-read the exact region and copy it verbatim\n' +
-    '- otherwise → re-read the tool description; the argument shape may be wrong'
-  );
-}
-
-/**
- * Detect only a strict streak of identical failures. Successful calls, or a
- * different tool/argument pair, end the streak. This keeps intentional phased
- * read_file/glob calls from being mislabeled after the underlying files change.
- */
-export function createThrashTracker(): (
-  name: string,
-  args: string,
-  succeeded: boolean,
-) => string | null {
-  let lastFailedFingerprint: string | null = null;
-  let consecutiveFailures = 0;
-  return (name, args, succeeded) => {
-    if (succeeded) {
-      lastFailedFingerprint = null;
-      consecutiveFailures = 0;
-      return null;
-    }
-    const fingerprint = `${name}\x00${args}`;
-    if (fingerprint === lastFailedFingerprint) consecutiveFailures += 1;
-    else {
-      lastFailedFingerprint = fingerprint;
-      consecutiveFailures = 1;
-    }
-    return thrashHint(name, args, consecutiveFailures);
-  };
 }
 
 /** 只有显式声明 parallel 且无需权限确认的工具才进入普通并发组。 */
@@ -227,78 +176,6 @@ function readDiffContext(
  *    与 read/edit/write 的 consumer 关系;孤立+老化自动 STUB(观察类工具永不到 STUB)。
  *  - 开关关闭时 lifecycle=null 完全跳过。 */
 
-/** RETRY-01: 把 thrash hint + 反思指针一次性拼到 output 尾部。
- *  - thrash hint 永远可能存在(连续失败才出现);
- *  - 反思指针仅在 error/denied 状态追加,success 跳过避免噪声。
- *  抽出 helper 是为了 sequential + parallel 两处共用,避免拼装逻辑漂移。
- *  返回追加后的字符串 + 反思 category(用于 QUAL-01 trace 硬事件),
- *  success / aborted 时 category === null,调用方据此决定是否 emit 'retry_reflection' 事件。 */
-function appendRetryAnnotations(
-  output: string,
-  status: 'success' | 'error' | 'denied' | 'aborted',
-  code: import('./../tools/types.js').ToolOutcomeCode,
-  thrashHint: string | null,
-): { output: string; reflectionCategory: ErrorCategory | null } {
-  let result = thrashHint ? `${output}${thrashHint}` : output;
-  let reflectionCategory: ErrorCategory | null = null;
-  if (status !== 'success' && status !== 'aborted') {
-    reflectionCategory = classifyError(code);
-    const reflection = reflectionHint(reflectionCategory);
-    result = `${result}\n\n[retry reflection: ${reflectionCategory}]\n${reflection}`;
-  }
-  return { output: result, reflectionCategory };
-}
-
-/** ASK-01: ask_human 工具调用本 turn 计数器。纯函数无副作用,
- * 计数规则简单:1-based(本 turn 第 1 次 = 1, 第 2 次 = 2, 第 3+ 次 = exceeded)。
- * 预算上限常量与工作纪律段 "Budget: at most 2 ask_human calls per turn" 保持一致;
- * 改这里时,fixture 与纪律段都要同步。 */
-export const ASK_HUMAN_PER_TURN_BUDGET = 2;
-
-export function askHumanBudgetAnnotation(askHumanCountThisTurn: number, status: 'success' | 'error' | 'denied' | 'aborted'): string | null {
-  // 工具失败 / aborted 不追加(避免噪声;模型已被错误消息告知失败)。
-  if (status !== 'success') return null;
-  if (askHumanCountThisTurn < ASK_HUMAN_PER_TURN_BUDGET) return null;
-  if (askHumanCountThisTurn === ASK_HUMAN_PER_TURN_BUDGET) {
-    return `\n\n[ask budget] This was your ${askHumanCountThisTurn}nd ask_human call this turn (budget = ${ASK_HUMAN_PER_TURN_BUDGET}). For the rest of this turn, prefer the safer default and disclose the choice in your final reply — do not silently guess.`;
-  }
-  // 第 3+ 次(超过预算):强硬提示,鼓励模型停下问自己是否还有意义。
-  return `\n\n[ask budget EXCEEDED] This is ask_human call #${askHumanCountThisTurn} this turn (budget = ${ASK_HUMAN_PER_TURN_BUDGET}). Stop asking; choose a default, implement, and disclose the choice in your final reply. Continuing to ask is more harmful than a documented guess.`;
-}
-
-/** NARR-01: 工具轮旁白(assistant 消息同时带 content + tool_calls)的软预算。
- * 超出即追加回压提示;未超只 emit trace(可度量,不打扰)。
- * 单位是 code point 而非字节——中文一字一 point,英文一字母一 point,
- * 对两种语言都是"一句话大约多长"的直觉量级。 */
-export const NARRATION_CHAR_BUDGET = 120;
-
-/** 分类工具轮旁白。返回 null 表示这一轮没有旁白(纯工具调用,理想情况)。
- * hint 仅在超预算时非 null:prompt 里的"工具轮保持静默"是软约束,
- * 这里给出机制层面的回压,同时让 trace 能统计旁白率。 */
-export function classifyNarration(
-  content: string | null | undefined,
-  toolCallCount: number,
-): { chars: number; overBudget: boolean; hint: string | null } | null {
-  const text = content?.trim() ?? '';
-  if (!text) return null;
-  const chars = [...text].length;
-  if (chars <= NARRATION_CHAR_BUDGET) {
-    return { chars, overBudget: false, hint: null };
-  }
-  const plural = toolCallCount === 1 ? '' : 's';
-  return {
-    chars,
-    overBudget: true,
-    hint:
-      `\n\n[narration] Your previous message emitted ${chars} characters of prose alongside ` +
-      `${toolCallCount} tool call${plural} (soft budget = ${NARRATION_CHAR_BUDGET}). ` +
-      'Interstitial commentary costs the user screen space and costs you context on every ' +
-      'later step. For the rest of this turn, emit prose mid-turn ONLY to (a) flag a genuine ' +
-      'decision fork needing user input, (b) disclose an error or risk, or (c) deliver the ' +
-      'final answer once tools are done. Otherwise call the next tool with no preamble.',
-  };
-}
-
 function pushToolResult(
   history: ChatMessage[],
   tc: ToolCallRef,
@@ -341,8 +218,9 @@ export interface AgentHooks {
   /** 每步开始,spinner 启「思考中」(主 agent:spinner.start)。 */
   onStepStart?: () => void;
   /** 流式实时 token 用量(本轮累计 = 已完成步实测 + 当前步估算)。
+   *  promptTokens 为裸值(chip ↑ 由 layout 按 裸-cached 的计费口径显示,与轮末摘要 (↑…) 一致);
    *  cachedTokens = 已完成步实测 cache 命中 + 当前步(流式期间按前缀缓存估算 ≈ 上一步实测 prompt,
-   *  末尾 usage chunk 到达后换实测),与轮末摘要的百分比同口径。
+   *  末尾 usage chunk 到达后换实测)。prompt / completion 同样在末尾 chunk 后换实测。
    *  主 agent:写底栏 context 进度条左侧的实时 chip;200ms 心跳重画自然取最新值。 */
   onLiveUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number }) => void;
   /** chat 返回后停 spinner(主 agent:spinner.stop)。 */
@@ -384,11 +262,6 @@ export interface AgentRunOptions {
   signal?: AbortSignal;
   /** 每步 chat() 返回后回调:repl 据此重算并重画状态行 context 用量条。 */
   onContextUpdate?: () => void;
-  /**
-   * 每次模型请求前动态生成临时 system prompt 后缀。返回空串时不注入；
-   * 后缀仅用于本次请求，不写回 history，适合由外部状态驱动的提醒。
-   */
-  dynamicSystemSuffix?: () => string;
   hooks: AgentHooks;
   /** 步数上限;缺省 = config.maxSteps。子 agent 可传更低值。 */
   maxSteps?: number;
@@ -434,11 +307,6 @@ export interface AgentRunResult {
   usage?: ChatUsage;
   /** rollback 事务观察到的本轮实际磁盘变化。 */
   changedFiles?: string[];
-  /**
-   * QUAL-01 affordance: 本轮 agent 收尾时的完整 chat history。
-   * 只读快照供 eval/trace 后处理 retry reflection 等 marker；不序列化进磁盘。
-   */
-  history?: readonly ChatMessage[];
 }
 
 /**
@@ -461,19 +329,8 @@ export async function runAgentCore(
 ): Promise<AgentRunResult> {
   const { history, userInput, signal, onContextUpdate, hooks } = opts;
   const runtimeContextState = opts.contextState ?? contextState;
-  // ASK-01: 本 turn 已使用的 ask_human 次数(每次 tool call 后递增)。
-  // 预算超过时,工具结果尾部追加 ask budget 提示,不直接拒绝调用(更轻量,
-  // 也避免和现有 permission 系统的"拒绝"语义重叠)。
+  /** 本轮 ask_human 成功调用次数，仅用于 trace 观测，不影响工具执行或模型上下文。 */
   let askHumanCountThisTurn = 0;
-  // NARR-01: 上一条 assistant 消息(带 tool_calls)超出旁白预算时,待注入的回压提示。
-  // 只挂在本批次的第一条工具结果上并立即清空——重复注入会变成新的噪声源。
-  let pendingNarrationHint: string | null = null;
-  /** 取出并清空待注入的旁白回压提示(每批工具只消费一次)。 */
-  const takeNarrationHint = (): string | null => {
-    const hint = pendingNarrationHint;
-    pendingNarrationHint = null;
-    return hint;
-  };
   const maxSteps = opts.maxSteps ?? config.maxSteps;
   // 中断还原:repl 的 /plan / /auto / Shift+Tab 等用户面触发 setAgentMode 中途切了模式,
   // abort 时连同模式一起还原回轮首。模型不再持有 switch_mode 工具,无法自切。
@@ -529,9 +386,6 @@ export async function runAgentCore(
       : u;
   };
   const addToolUsage = (outcome: ToolOutcome): void => addUsage(outcome.usage);
-  // Only consecutive identical failures are thrashing. Any success (including
-  // a mutation between two reads) or different call resets the streak.
-  const recordAndHint = createThrashTracker();
   history.push({ role: 'user', content: userInput });
   // 中断回滚快照:push 用户消息后整段浅拷贝。abort 时 length=0;push(...saved) 还原。
   // 这样中断时至少保留用户消息(及之前的历史);每步工具全部执行完毕后刷新快照,
@@ -687,12 +541,9 @@ export async function runAgentCore(
       const modelStartedAt = Date.now();
       const provider = safeProviderId(requestBaseURL);
       emitTrace('model_start', { model: requestModel, provider });
-      const dynamicSystemSuffix = [
-        opts.dynamicSystemSuffix?.().trim() ?? '',
-        historyRebuilt
-          ? '## Post-compaction recovery\nContext was compacted before this request. Re-establish the current objective and unresolved work from retained evidence or the session note, avoid repeating completed investigation, and re-read exact file context before any dependent edit.'
-          : '',
-      ].filter(Boolean).join('\n\n');
+      const dynamicSystemSuffix = historyRebuilt
+        ? '## Post-compaction recovery\nContext was compacted before this request. Re-establish the current objective and unresolved work from retained evidence or the session note, avoid repeating completed investigation, and re-read exact file context before any dependent edit.'
+        : '';
       const systemMessage = history[0];
       const requestHistory: ChatMessage[] =
         dynamicSystemSuffix
@@ -714,21 +565,23 @@ export async function runAgentCore(
         activeTools,
         runtimeContextState.correction,
       );
-      const reportLive = (comp: number, cached?: number): void => {
-        // 当前步 cache 命中后端在末尾 usage chunk 才上报(cached 有值直接用实测);
-        // 流式期间按前缀缓存估算 ≈ 上一步实测 prompt(当前 prompt 总含其为前缀),
-        // 不超过当前步 prompt 估算;后端从不报 cache 时不估算。使实时 ↻ 与轮末百分比口径一致。
-        const curCached = cached ?? (providerCacheSeen
-          ? Math.min(lastStepPromptTokens, stepPromptEst)
+      const reportLive = (p: { completionTokens: number; promptTokens?: number; cachedTokens?: number }): void => {
+        // 当前步 prompt:末尾 usage chunk 到达后用实测,流式期间用估算(含校准)。
+        // 当前步 cache 命中同理:上报即用实测;流式期间按前缀缓存估算 ≈ 上一步实测 prompt
+        // (当前 prompt 总含其为前缀),不超过当前步 prompt;后端从不报 cache 时不估算。
+        // 口径与轮末摘要一致:chip ↑ 显计费 prompt(裸 - cached),↓/↻ 同。
+        const curPrompt = p.promptTokens ?? stepPromptEst;
+        const curCached = p.cachedTokens ?? (providerCacheSeen
+          ? Math.min(lastStepPromptTokens, curPrompt)
           : 0);
         hooks.onLiveUsage?.({
-          promptTokens: (turnUsage?.promptTokens ?? 0) + stepPromptEst,
-          completionTokens: (turnUsage?.completionTokens ?? 0) + comp,
-          totalTokens: (turnUsage?.totalTokens ?? 0) + stepPromptEst + comp,
+          promptTokens: (turnUsage?.promptTokens ?? 0) + curPrompt,
+          completionTokens: (turnUsage?.completionTokens ?? 0) + p.completionTokens,
+          totalTokens: (turnUsage?.totalTokens ?? 0) + curPrompt + p.completionTokens,
           cachedTokens: (turnUsage?.cachedTokens ?? 0) + curCached,
         });
       };
-      reportLive(0); // 思考阶段先显 ↑ prompt 估算,首 token 到达后 ↓ 开始涨
+      reportLive({ completionTokens: 0 }); // 思考阶段先显 ↑ prompt 估算,首 token 到达后 ↓ 开始涨
       try {
         result = await chat(
           requestHistory,
@@ -831,21 +684,15 @@ export async function runAgentCore(
           })),
         } as ChatMessage);
 
-        // NARR-01: 这条 assistant 消息同时带正文 + tool_calls,即"工具轮旁白"。
-        // prompt 里的"工具轮保持静默"只是软约束,这里补上机制层:
-        //   - 永远 emit trace(旁白率可度量,不再靠肉眼感觉);
-        //   - 超预算时把回压提示挂到本批第一条工具结果尾部(复用 thrash/ask
-        //     budget 已验证的注入接缝,不新增消息、不打断工具流)。
-        const narration = classifyNarration(result.content, result.toolCalls.length);
+        // Record interstitial narration for observability only. It never changes tool output
+        // or injects instructions back into the model context.
+        const narration = result.content?.trim() ?? '';
         if (narration) {
           emitTrace('narration', {
-            chars: narration.chars,
+            chars: [...narration].length,
             toolCalls: result.toolCalls.length,
-            budget: NARRATION_CHAR_BUDGET,
-            overBudget: narration.overBudget,
             step,
           });
-          pendingNarrationHint = narration.hint;
         }
 
         // 工具分组执行(保 tool_calls 原顺序)：safe parallel 工具照常并发；连续
@@ -865,27 +712,11 @@ export async function runAgentCore(
             tool: tc.name,
             argumentHash: traceCall.args.sha256,
             arguments: traceCall.args,
-            attempt: 1,
-            retry: 0,
           }, {
             toolCallId: traceCall.toolCallId,
             ...(tc.id ? { providerToolCallId: tc.id } : {}),
           });
         }
-        const traceToolRetry = (tc: ToolCallRef, index: number, retry: ToolRetryInfo): void => {
-          const traceCall = tracedCalls[index];
-          emitTrace('tool_retry', {
-            tool: tc.name,
-            argumentHash: traceCall.args.sha256,
-            attempt: retry.attempt,
-            nextAttempt: retry.nextAttempt,
-            waitMs: retry.waitMs,
-            code: retry.code,
-          }, {
-            toolCallId: traceCall.toolCallId,
-            ...(tc.id ? { providerToolCallId: tc.id } : {}),
-          });
-        };
         const traceToolEnd = (tc: ToolCallRef, index: number, outcome: ToolOutcome): void => {
           const traceCall = tracedCalls[index];
           emitTrace('tool_call_end', {
@@ -895,9 +726,6 @@ export async function runAgentCore(
             code: outcome.code,
             retryable: outcome.retryable,
             durationMs: outcome.durationMs ?? 0,
-            attempt: outcome.attempts ?? 1,
-            retry: Math.max(0, (outcome.attempts ?? 1) - 1),
-            retryDelayMs: outcome.retryDelayMs ?? 0,
             changedFiles: outcome.changedFiles ?? [],
             staleFiles: outcome.staleFiles ?? [],
             ...(outcome.changeSet ? { changeSet: outcome.changeSet } : {}),
@@ -922,11 +750,10 @@ export async function runAgentCore(
               durationMs: 0,
             };
             hooks.onToolResult?.(currentCall, error, null, null, 1);
-            const hint = recordAndHint(currentCall.name, currentCall.arguments, false);
             pushToolResult(
               history,
               currentCall,
-              hint ? `${error}${hint}` : error,
+              error,
               relprune,
               lifecycle,
               scheduler,
@@ -948,14 +775,11 @@ export async function runAgentCore(
             const batch = calls.slice(i, j);
             for (const tc of batch) hooks.onToolHeader?.(tc);
             hooks.onToolStart?.(batch[0].name);
-            const started = batch.map((tc, offset) => executeToolOutcome(
+            const started = batch.map((tc) => executeToolOutcome(
               tc.name,
               tc.arguments,
               signal,
-              {
-                dropContext,
-                onRetry: (retry) => traceToolRetry(tc, i + offset, retry),
-              },
+              { dropContext },
             ));
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
@@ -965,37 +789,18 @@ export async function runAgentCore(
               traceToolEnd(tc, i + k, outcome);
               const output = outcome.output;
               hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
-              // Thrashing:history 里附 hint(UI 已用干净 output 渲染,避免屏幕噪声)
-              const hint = recordAndHint(tc.name, tc.arguments, outcome.status === 'success');
-              const { output: annotated, reflectionCategory } = appendRetryAnnotations(output, outcome.status, outcome.code, hint);
-              // QUAL-01 trace 硬事件:反思指针注入计数(history 文本扫描会因 LLM 在
-              // 正文里提一句 "[retry reflection]" 而误算,改用 core 接缝处显式 emit)。
-              if (reflectionCategory !== null) {
-                emitTrace('retry_reflection', {
-                  tool: tc.name,
-                  code: outcome.code,
-                  category: reflectionCategory,
-                  attempt: outcome.attempts ?? 1,
-                }, tc.id ? { providerToolCallId: tc.id } : {});
-              }
-              // ASK-01: 计数 + 预算提示
               if (tc.name === 'ask_human' && outcome.status === 'success') {
                 askHumanCountThisTurn += 1;
-                // QUAL-01 trace 硬事件:ask_human 真实调用计数(取代 tool_call_end.name 推断)。
                 emitTrace('ask_human_call', {
                   tool: tc.name,
                   status: outcome.status,
                   perTurnCount: askHumanCountThisTurn,
                 }, tc.id ? { providerToolCallId: tc.id } : {});
               }
-              const askBudget = askHumanBudgetAnnotation(askHumanCountThisTurn, outcome.status);
-              // NARR-01: 旁白回压提示只挂本批第一条结果(takeNarrationHint 自清空)。
-              const narrationHint = takeNarrationHint();
-              const finalOutput = `${annotated}${askBudget ?? ''}${narrationHint ?? ''}`;
               pushToolResult(
                 history,
                 tc,
-                finalOutput,
+                output,
                 relprune,
                 lifecycle,
                 scheduler,
@@ -1060,14 +865,13 @@ export async function runAgentCore(
             for (const entry of entries) hooks.onToolHeader?.(entry.tc);
             const firstAllowed = entries.find((entry) => !entry.denied);
             if (firstAllowed) hooks.onToolStart?.(firstAllowed.tc.name);
-            const started = entries.map((entry, offset) => entry.denied
+            const started = entries.map((entry) => entry.denied
               ? Promise.resolve(entry.denied)
               : executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
                   dropContext,
                   onLockAcquired: (lockedArgs) => {
                     entry.diff = readDiffContext(entry.tc, lockedArgs);
                   },
-                  onRetry: (retry) => traceToolRetry(entry.tc, i + offset, retry),
                 }));
 
             for (let k = 0; k < entries.length; k++) {
@@ -1083,11 +887,10 @@ export async function runAgentCore(
                 entry.diff.preWriteOld,
                 entry.diff.editStartLine,
               );
-              const hint = recordAndHint(entry.tc.name, entry.tc.arguments, outcome.status === 'success');
               pushToolResult(
                 history,
                 entry.tc,
-                hint ? `${outcome.output}${hint}` : outcome.output,
+                outcome.output,
                 relprune,
                 lifecycle,
                 scheduler,
@@ -1126,9 +929,7 @@ export async function runAgentCore(
                 durationMs: 0,
               };
               hooks.onToolResult?.(tc, err, null, null, 1);
-              // Thrashing:同上
-              const hint = recordAndHint(tc.name, tc.arguments, false);
-              pushToolResult(history, tc, hint ? `${err}${hint}` : err, relprune, lifecycle, scheduler);
+              pushToolResult(history, tc, err, relprune, lifecycle, scheduler);
               traceToolEnd(tc, i, outcome);
               i++;
               continue;
@@ -1157,11 +958,10 @@ export async function runAgentCore(
                 hooks.onToolHeader?.(tc);
                 const outcome = deniedOutcome(tc.name);
                 hooks.onToolResult?.(tc, outcome.output, null, null, 1);
-                const hint = recordAndHint(tc.name, tc.arguments, false);
                 pushToolResult(
                   history,
                   tc,
-                  hint ? `${outcome.output}${hint}` : outcome.output,
+                  outcome.output,
                   relprune,
                   lifecycle,
                   scheduler,
@@ -1184,7 +984,6 @@ export async function runAgentCore(
               onLockAcquired: (lockedArgs) => {
                 if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
               },
-              onRetry: (retry) => traceToolRetry(tc, i, retry),
             });
             addToolUsage(outcome);
             opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
@@ -1192,38 +991,18 @@ export async function runAgentCore(
             const output = outcome.output;
             hooks.onToolDone?.();
             hooks.onToolResult?.(tc, output, mutationParsed, diff.preWriteOld, diff.editStartLine);
-            // Thrashing:同上(history 附 hint,UI 干净)
-            const hint = recordAndHint(tc.name, tc.arguments, outcome.status === 'success');
-            // RETRY-01: 同 parallel 路径,在非成功状态追加反思指针。
-            const { output: annotated, reflectionCategory } = appendRetryAnnotations(output, outcome.status, outcome.code, hint);
-            // QUAL-01 trace 硬事件:反思指针注入计数(history 文本扫描会因 LLM 在
-            // 正文里提一句 "[retry reflection]" 而误算,改用 core 接缝处显式 emit)。
-            if (reflectionCategory !== null) {
-              emitTrace('retry_reflection', {
-                tool: tc.name,
-                code: outcome.code,
-                category: reflectionCategory,
-                attempt: outcome.attempts ?? 1,
-              }, tc.id ? { providerToolCallId: tc.id } : {});
-            }
-            // ASK-01: ask_human 计数 + 预算提示(同 parallel 路径)。
             if (tc.name === 'ask_human' && outcome.status === 'success') {
               askHumanCountThisTurn += 1;
-              // QUAL-01 trace 硬事件:ask_human 真实调用计数(取代 tool_call_end.name 推断)。
               emitTrace('ask_human_call', {
                 tool: tc.name,
                 status: outcome.status,
                 perTurnCount: askHumanCountThisTurn,
               }, tc.id ? { providerToolCallId: tc.id } : {});
             }
-            const askBudget = askHumanBudgetAnnotation(askHumanCountThisTurn, outcome.status);
-            // NARR-01: 旁白回压提示只挂本批第一条结果(takeNarrationHint 自清空)。
-            const narrationHint = takeNarrationHint();
-            const finalOutput = `${annotated}${askBudget ?? ''}${narrationHint ?? ''}`;
             pushToolResult(
               history,
               tc,
-              finalOutput,
+              output,
               relprune,
               lifecycle,
               scheduler,
@@ -1270,7 +1049,6 @@ export async function runAgentCore(
         finalText: result.content,
         usage: turnUsage,
         changedFiles: finalMutation.changedFiles.map((item) => item.path),
-        history: history.slice(),
       };
       } finally {
         emitTrace('step_end', {
@@ -1290,7 +1068,6 @@ export async function runAgentCore(
       finalText: null,
       usage: turnUsage,
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
-      history: history.slice(),
     };
   } finally {
     const finalMutation = getCurrentTurnMutationState();

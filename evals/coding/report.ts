@@ -7,9 +7,9 @@ export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, t
   const passed = tasks.filter(t => t.status === 'passed').length;
   const verified = tasks.filter(t => t.finalVerifiedSuccess).length;
   const recovered = tasks.filter(t => t.toolRecovery).length;
-  // Quality-dimension averages; empty task sets fall back to zero.
-  const avgOf = (field: 'reflectionRounds' | 'askHumanCount') =>
-    tasks.length ? tasks.reduce((n, t) => n + t[field], 0) / tasks.length : 0;
+  const averageAskHuman = tasks.length
+    ? tasks.reduce((n, task) => n + task.askHumanCount, 0) / tasks.length
+    : 0;
   return {
     ...meta,
     summary: {
@@ -25,8 +25,7 @@ export function createReport(meta: Omit<BenchmarkReport, 'summary' | 'tasks'>, t
         : 0,
       tokens: tasks.reduce((n, t) => n + (t.tokens ?? 0), 0),
       durationMs: tasks.reduce((n, t) => n + t.durationMs, 0),
-      reflectionRounds: avgOf('reflectionRounds'),
-      askHumanCount: avgOf('askHumanCount'),
+      askHumanCount: averageAskHuman,
     },
     tasks,
   };
@@ -48,12 +47,11 @@ export function renderSummary(r: BenchmarkReport): string {
     `- Tool calls / retries / tokens / elapsed: ${r.summary.toolCalls} / ${r.summary.retries} / ${r.summary.tokens} / ${(r.summary.durationMs / 1000).toFixed(1)}s`,
     '',
     `## Quality dimensions (per task average)`,
-    `- Reflection rounds: ${num(r.summary.reflectionRounds)}`,
     `- Ask-human calls: ${num(r.summary.askHumanCount)}`,
     '',
-    '| Task | Difficulty | Group | Result | Recovery | Reflect | AskH | Calls | Tokens | Time |',
-    '|---|---|---|---:|---:|---:|---:|---:|---:|---:|',
-    ...r.tasks.map(t => `| ${t.id} | ${t.difficulty} | ${t.group} | ${t.status} | ${t.toolRecovery ? 'yes' : 'no'} | ${t.reflectionRounds} | ${t.askHumanCount} | ${t.toolCalls} | ${t.tokens ?? '-'} | ${(t.durationMs / 1000).toFixed(1)}s |`),
+    '| Task | Difficulty | Group | Result | Recovery | AskH | Calls | Tokens | Time |',
+    '|---|---|---|---:|---:|---:|---:|---:|---:|',
+    ...r.tasks.map(t => `| ${t.id} | ${t.difficulty} | ${t.group} | ${t.status} | ${t.toolRecovery ? 'yes' : 'no'} | ${t.askHumanCount} | ${t.toolCalls} | ${t.tokens ?? '-'} | ${(t.durationMs / 1000).toFixed(1)}s |`),
     '',
   ];
   return lines.join('\n');

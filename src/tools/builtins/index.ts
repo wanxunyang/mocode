@@ -47,27 +47,26 @@ const workspaceResource = (): string[] => ['workspace'];
 const memoryResource = (): string[] => ['memory-store'];
 
 const CAPABILITIES: Record<string, ToolCapabilities> = {
-  read_file: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: pathResource },
-  write_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource, delegatesResourceLocks: true },
-  edit_file: { effect: 'write', concurrency: 'resource-locked', retry: 'never', resources: pathResource, delegatesResourceLocks: true },
-  run_command: { effect: 'process', concurrency: 'serial', retry: 'never', resources: workspaceResource, supportsAbort: true },
-  glob: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
-  grep: { effect: 'read', concurrency: 'parallel', retry: 'safe', resources: workspaceResource },
-  web_search: { effect: 'network', concurrency: 'parallel', retry: 'safe', supportsAbort: true },
-  web_fetch: { effect: 'network', concurrency: 'parallel', retry: 'safe', supportsAbort: true },
-  use_skill: { effect: 'read', concurrency: 'serial', retry: 'safe' },
-  ask_human: { effect: 'read', concurrency: 'serial', retry: 'never' },
-  drop_context: { effect: 'write', concurrency: 'serial', retry: 'never', resources: () => ['conversation-context'] },
-  memory_save: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
-  memory_search: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
-  memory_list: { effect: 'read', concurrency: 'serial', retry: 'safe', resources: memoryResource },
-  memory_update: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
-  memory_forget: { effect: 'write', concurrency: 'serial', retry: 'never', resources: memoryResource },
+  read_file: { effect: 'read', concurrency: 'parallel', resources: pathResource },
+  write_file: { effect: 'write', concurrency: 'resource-locked', resources: pathResource, delegatesResourceLocks: true },
+  edit_file: { effect: 'write', concurrency: 'resource-locked', resources: pathResource, delegatesResourceLocks: true },
+  run_command: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
+  glob: { effect: 'read', concurrency: 'parallel', resources: workspaceResource },
+  grep: { effect: 'read', concurrency: 'parallel', resources: workspaceResource },
+  web_search: { effect: 'network', concurrency: 'parallel', supportsAbort: true },
+  web_fetch: { effect: 'network', concurrency: 'parallel', supportsAbort: true },
+  use_skill: { effect: 'read', concurrency: 'serial' },
+  ask_human: { effect: 'read', concurrency: 'serial' },
+  drop_context: { effect: 'write', concurrency: 'serial', resources: () => ['conversation-context'] },
+  memory_save: { effect: 'write', concurrency: 'serial', resources: memoryResource },
+  memory_search: { effect: 'write', concurrency: 'serial', resources: memoryResource },
+  memory_list: { effect: 'read', concurrency: 'serial', resources: memoryResource },
+  memory_update: { effect: 'write', concurrency: 'serial', resources: memoryResource },
+  memory_forget: { effect: 'write', concurrency: 'serial', resources: memoryResource },
   // sub-agent 动态协调：只读任务无锁并行；写任务在 overlay 中执行，merge 时由 ChangeSet 持 canonical lock。
   'sub-agent': {
     effect: 'write',
     concurrency: 'resource-locked',
-    retry: 'never',
     resources: (args) => args.mode === 'write' && Array.isArray(args.writeSet) && args.writeSet.length
       ? args.writeSet.map((item) => `file:${String(item)}`)
       : args.mode === 'write' ? ['workspace'] : [],
