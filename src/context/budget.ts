@@ -52,7 +52,7 @@ export const DEFAULT_BUDGET_POLICY: BudgetPolicy = {
   hotTurnWindow: 4,
   toolOldAge: 2,
   compactKeepRatio: 0.40,
-  totalTriggerRatio: 0.82,
+  totalTriggerRatio: 0.80,
   schedulerTargetRatio: 0.80,
   estimateSafetyFactor: 1.05,
   compactHeadroomTokens: 1500,
@@ -103,13 +103,16 @@ export interface SystemCostBreakdown {
 export interface BudgetReport {
   step: number;
   total: number; // 各区 actual 之和(已经过 correction 校正)
+  /** 裸估算总量(不乘 correction)。硬闸触发线用它判断:correction<1 把调度器视角
+   * 压到触发线以下、而 UI 裸估算已超窗时,仍必须触发压缩。 */
+  rawTotal: number;
   window: number;
   layers: Record<BudgetLayer, LayerBudget>;
   /** system 层固定请求开销的校正前拆分，供告警定位具体来源。 */
   systemCosts: SystemCostBreakdown;
   /** 实际超预算的层(按 overRatio 降序,排前面先处理)。 */
   triggers: BudgetLayer[];
-  /** 总占用超总阈(0.82*window)的兜底触发 — 单独字段,与 layers.triggers 分开。 */
+  /** 总占用超总阈(0.80*window,校正后)的兜底触发 — 单独字段,与 layers.triggers 分开。 */
   totalOver: boolean;
   /** Hot/Cold 边界:Cold 区 = [1, hotBoundary);Hot 区 = [hotBoundary, length)。
    * agent/core.ts 拿到后可对 Cold 区做就地 stub,Hot 区只 cap。 */
@@ -138,13 +141,18 @@ export function evaluateBudget(
   // 校正后的 token 数:raw * correction,最小 1(raw > 0 时)。
   const adj = (raw: number): number => (raw > 0 ? Math.max(1, Math.round(raw * correction)) : 0);
 
+  // 裸总量(不乘 correction):硬闸用它判断,防止 correction 折扣否决真实溢出。
+  let rawTotal = 0;
+
   const sysMsg = history[0];
   const systemCosts: SystemCostBreakdown = {
     prompt: sysMsg ? msgTokens(sysMsg) : 0,
     toolSchemas: estimateToolSchemaTokens(activeTools),
   };
   // 工具 schema 与 system prompt 同属请求固定开销；必须计入总量才能可靠触发压缩。
-  layers.system.actual = adj(systemCosts.prompt + systemCosts.toolSchemas);
+  const systemRaw = systemCosts.prompt + systemCosts.toolSchemas;
+  layers.system.actual = adj(systemRaw);
+  rawTotal += systemRaw;
 
   // Summary 检测:role:'system' 且不是 history[0] 的,视为摘要(compact.ts 摘要插 index 1)。
   // 简单启发:若 history[1]?.role === 'system' 且 content 含「# 会话摘要」特征串,计入 summary。
@@ -153,7 +161,9 @@ export function evaluateBudget(
   if (history.length > 1 && history[1].role === 'system') {
     const c1 = toText(history[1].content);
     if (c1.startsWith('# 会话摘要') || c1.includes('会话摘要')) {
-      layers.summary.actual = adj(msgTokens(history[1]));
+      const summaryRaw = msgTokens(history[1]);
+      layers.summary.actual = adj(summaryRaw);
+      rawTotal += summaryRaw;
       summaryHit = true;
     }
   }
@@ -164,13 +174,15 @@ export function evaluateBudget(
   for (let i = 1; i < history.length; i++) {
     const m = history[i];
     if (i === 1 && summaryHit) continue; // summary 已单独算过
+    const raw = msgTokens(m);
     if (m.role === 'tool') {
-      const t = adj(msgTokens(m));
-      if (i >= hotStart) layers.toolRecent.actual += t;
-      else layers.toolOld.actual += t;
+      if (i >= hotStart) layers.toolRecent.actual += adj(raw);
+      else layers.toolOld.actual += adj(raw);
+      rawTotal += raw;
     } else if (m.role !== 'system') {
       // user / assistant 全部计入 history(对话轨迹)
-      layers.history.actual += adj(msgTokens(m));
+      layers.history.actual += adj(raw);
+      rawTotal += raw;
     }
     // 其它 system(几乎不存在)跳过
   }
@@ -194,6 +206,7 @@ export function evaluateBudget(
   return {
     step,
     total,
+    rawTotal,
     window,
     layers,
     systemCosts,
@@ -241,7 +254,11 @@ export function scheduleActions(report: BudgetReport): ScheduleAction[] {
     });
   }
 
-  if (
+  // 硬闸:裸估算(不乘 correction)达触发线必须压——correction 折扣不能否决,
+  // 首轮/当前轮不豁免。未达硬闸才走常规 ROI 条件(层超/headroom)。
+  if (report.rawTotal >= policy.totalTriggerRatio * report.window) {
+    actions.push({ kind: 'compact_history' });
+  } else if (
     (layers.history.overBudget || totalOver)
     && headroom < -policy.compactHeadroomTokens
   ) {
@@ -254,7 +271,7 @@ export function scheduleActions(report: BudgetReport): ScheduleAction[] {
 /** 拍平成人类可读(供 /context 命令与 check-budget 脚本用)。 */
 export function formatReport(report: BudgetReport): string {
   const lines: string[] = [];
-  lines.push(`step ${report.step}  total ${report.total}/${report.window}  (${((report.total / report.window) * 100).toFixed(1)}%)`);
+  lines.push(`step ${report.step}  total ${report.total}/${report.window}  (${((report.total / report.window) * 100).toFixed(1)}%)  raw ${report.rawTotal}`);
   for (const k of BUDGET_LAYERS) {
     const lb = report.layers[k];
     const pct = lb.budget > 0 ? ((lb.actual / lb.budget) * 100).toFixed(0) : '-';

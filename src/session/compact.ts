@@ -275,6 +275,39 @@ function flattenGroups(groups: Group[]): ChatMessage[] {
   return out;
 }
 
+/** 微压缩单个 group(原地):① tool 结果 content ② assistant tool_calls.arguments(provenance stub)
+ * ③ assistant 正文。只裁模型/工具产物,不动 user 原话;保 tool_call_id 配对。返回是否有改动。 */
+function microcompactGroup(g: Group): boolean {
+  let done = false;
+  for (const t of g.tools) {
+    const c = (t as any).content;
+    if (typeof c === 'string' && c.length > MAX_OLD_TOOL_STUB) {
+      (t as any).content = truncateMid(c, MAX_OLD_TOOL_STUB);
+      done = true;
+    }
+  }
+  const as = g.assistant as any;
+  if (as && as.role === 'assistant') {
+    if (typeof as.content === 'string' && as.content.length > MAX_OLD_TOOL_STUB) {
+      as.content = truncateMid(as.content, MAX_OLD_TOOL_STUB);
+      done = true;
+    }
+    // tool_calls 参数:整体超长才进,provenance stub 大字段(保 path + JSON 合法)。
+    if (Array.isArray(as.tool_calls)) {
+      for (const tc of as.tool_calls) {
+        const args = tc?.function?.arguments;
+        if (typeof args !== 'string' || args.length <= MAX_OLD_TOOL_STUB) continue;
+        const stubbed = stubToolCallArguments(args);
+        if (stubbed !== args) {
+          tc.function.arguments = stubbed;
+          done = true;
+        }
+      }
+    }
+  }
+  return done;
+}
+
 // ── 默认摘要器:复用 chat(),空 handlers 不打印 ──────────────────────────
 
 async function defaultSummarize(
@@ -367,7 +400,15 @@ export async function compactHistory(
     kept.unshift(g);
     keptTokens = nextTokens;
   }
-  const oldGroups = groups.slice(0, groups.length - kept.length);
+  let oldGroups = groups.slice(0, groups.length - kept.length);
+
+  // force(硬闸/手动强压):保护区不豁免——常规切分无旧区时只保最后一组,
+  // 其余全部进可压区(首轮/当前轮也一样)。仍按 group 边界切,不破坏 tool_call 配对。
+  if (oldGroups.length === 0 && opts.force && groups.length >= 2) {
+    kept.length = 0;
+    kept.push(groups[groups.length - 1]);
+    oldGroups = groups.slice(0, groups.length - 1);
+  }
 
   const noop: CompactResult = {
     compacted: false,
@@ -382,66 +423,29 @@ export async function compactHistory(
   if (oldGroups.length === 0) {
     // 没有旧区可压缩
     const protectedRatio = history.length > 0 ? kept.length / history.length : 0;
-    if (opts.force && history.length > 2) {
-      // 真·强制压:把降 keepBudget 当 old group 强行创建一组可压区
-      // 取最早的 user/assistant/tool 当 old,后一段当 kept
-      const mid = Math.max(1, Math.floor(history.length / 2));
-      const older = history.slice(1, mid);
-      const keptAfter = history.slice(mid);
-      // 走仅微压缩(LLM 可能不可用,不强行 summarize)
-      let microcompactDone2 = false;
-      for (const m of older) {
-        const c = (m as any).content;
-        if (typeof c === 'string' && c.length > MAX_OLD_TOOL_STUB) {
-          (m as any).content = truncateMid(c, MAX_OLD_TOOL_STUB);
-          microcompactDone2 = true;
-        }
-        const as = m as any;
-        if (as.role === 'assistant') {
-          if (typeof as.content === 'string' && as.content.length > MAX_OLD_TOOL_STUB) {
-            as.content = truncateMid(as.content, MAX_OLD_TOOL_STUB);
-            microcompactDone2 = true;
-          }
-          if (Array.isArray(as.tool_calls)) {
-            for (const tc of as.tool_calls) {
-              const args = tc?.function?.arguments;
-              if (typeof args !== 'string' || args.length <= MAX_OLD_TOOL_STUB) continue;
-              const stubbed = stubToolCallArguments(args);
-              if (stubbed !== args) {
-                tc.function.arguments = stubbed;
-                microcompactDone2 = true;
-              }
-            }
-          }
-        }
+    if (opts.force && groups.length === 1) {
+      // force 但只剩单组(如首轮的单个 assistant+tools 组):原地微压缩、不动结构。
+      // 纯 user 原话组无可压项(不能毁掉用户请求),落到下方 noop 提示。
+      const single = groups[0];
+      const userOnly = single.tools.length === 0
+        && (single.assistant as { role?: string } | null)?.role === 'user';
+      if (!userOnly && microcompactGroup(single)) {
+        const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
+        state.lastEstimate = estimateAfter;
+        state.lastUsage = undefined;
+        layout.contentWrite(
+          `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}强制微压缩(单组)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
+        );
+        return {
+          compacted: true,
+          summarized: false,
+          estimateBefore,
+          estimateAfter,
+          reason: 'microcompact',
+          protectedRatio,
+          oldGroupCount: 0,
+        };
       }
-      const refs = collectArtifactRefs(older);
-      const summaryMsg: ChatMessage = {
-        role: 'system',
-        content: older.length > 0
-          ? `# 会话摘要(force)\n被跳过的早期对话 ${older.length} 条已微压缩(token 数减少)。${refs.length > 0 ? `\n[artifact refs: ${refs.join(', ')}]` : ''}`
-          : `# 会话摘要(force)\n无内容。`,
-      } as ChatMessage;
-      const rebuilt = [history[0], summaryMsg, ...keptAfter];
-      history.length = 0;
-      history.push(...rebuilt);
-      pruneAfterCompaction(history);
-      const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
-      state.lastEstimate = estimateAfter;
-      state.lastUsage = undefined;
-      layout.contentWrite(
-        `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}强制压缩(focus on early history)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
-      );
-      return {
-        compacted: true,
-        summarized: false,
-        historyRebuilt: true,
-        estimateBefore,
-        estimateAfter,
-        reason: microcompactDone2 ? 'microcompact' : 'summarize',
-        protectedRatio,
-        oldGroupCount: 0,
-      };
     }
     // 细分 noop 类型,供 repl 文案
     const isEmpty = history.length <= 1; // 只有 system 提示
@@ -467,34 +471,7 @@ export async function compactHistory(
   //   ③ 旧 assistant 正文 content(模型长解释,回看价值低)。
   let microcompactDone = false;
   for (const g of oldGroups) {
-    for (const t of g.tools) {
-      const c = (t as any).content;
-      if (typeof c === 'string' && c.length > MAX_OLD_TOOL_STUB) {
-        (t as any).content = truncateMid(c, MAX_OLD_TOOL_STUB);
-        microcompactDone = true;
-      }
-    }
-    const as = g.assistant as any;
-    if (as && as.role === 'assistant') {
-      // ③ 旧正文 content
-      if (typeof as.content === 'string' && as.content.length > MAX_OLD_TOOL_STUB) {
-        as.content = truncateMid(as.content, MAX_OLD_TOOL_STUB);
-        microcompactDone = true;
-      }
-      // ② tool_calls 参数:整体超长才进,provenance stub 大字段(保 path + JSON 合法)。
-      //   stubToolCallArguments:大字符串字段 → "<N 字符,已省略>";path 永不省(/rollback 依赖)。
-      if (Array.isArray(as.tool_calls)) {
-        for (const tc of as.tool_calls) {
-          const args = tc?.function?.arguments;
-          if (typeof args !== 'string' || args.length <= MAX_OLD_TOOL_STUB) continue;
-          const stubbed = stubToolCallArguments(args);
-          if (stubbed !== args) {
-            tc.function.arguments = stubbed;
-            microcompactDone = true;
-          }
-        }
-      }
-    }
+    if (microcompactGroup(g)) microcompactDone = true;
   }
 
   // 第二层:摘要——把旧区(微压缩后)压成一条 system 摘要
@@ -575,14 +552,17 @@ export async function compactHistory(
  * 自动压缩门槛:agent 每步调 chat() 前调用。
  * 用全量启发式估算(始终可用、安全侧、无 stale-usage 问题);超阈则压缩。
  *
- * 升级到 Budget Scheduler:可传 `report: BudgetReport`。传了就**按 ROI 调度**:
+ * 硬闸(最高优先):裸估算(不乘 correction)达 `totalTriggerRatio * window` 必须压,
+ * 且 force 直通保护区——correction<1 的折扣不能否决真实溢出,首轮/当前轮不豁免。
+ *
+ * 升级到 Budget Scheduler:可传 `report: BudgetReport`。未达硬闸时**按 ROI 调度**:
  *   - 只有当 `report.layers.history.overBudget` 或 `report.totalOver` 时才压;
  *   - 冷工具超(Cold Tool ROI 最低)→ 不压 history,留给调度器的 cold tools 路径处理。
  * 这样 cold tools 路径(L1 中截 / L2 relevance / L3 age stub)能先动,history
  * 摘要(最贵)只在 cold tools 解不开时才触发。
  *
  * 不传 report 时退化为原行为:仅看总占用是否超 `compactThreshold * window`——
- * 兼容老调用方(子 agent / 测试直接调时),零行为变化。
+ * 兼容老调用方(子 agent / 测试直接调时);硬闸仍按裸估算生效。
  *
  * manual 选项(repl /compact 用):true 时旁路 autoCompact 开关与 ROI 阈,
  * 强制走 compactHistory(manual/force 参数透传)。返 CompactResult 给 caller 文案展示。
@@ -593,6 +573,9 @@ export async function maybeCompact(
   report?: {
     layers: { history: { overBudget: boolean } };
     totalOver: boolean;
+    /** 硬闸输入:裸估算总量(不乘 correction)与窗口;两者齐备才参与硬闸判断。 */
+    rawTotal?: number;
+    window?: number;
   },
   manualOpts?: { manual?: boolean; force?: boolean; focus?: string },
   state: ContextState = contextState,
@@ -602,16 +585,27 @@ export async function maybeCompact(
   state.lastEstimate = est;
   const isManual = manualOpts?.manual === true;
 
+  // 硬闸:裸估算(不乘 correction)达触发线 → 必须压,且无视 autoCompact 开关。
+  let hardCap = typeof report?.rawTotal === 'number'
+    && typeof report?.window === 'number'
+    && report.rawTotal >= DEFAULT_BUDGET_POLICY.totalTriggerRatio * report.window;
+
   // 手动路径:旁路 autoCompact / report / 总阈三重门
   if (!isManual) {
-    if (!config.autoCompact) return;
+    if (!hardCap && !config.autoCompact) return;
     if (report) {
-      // 调度模式:只压 history 层超或兜底总超
-      const needsCompact = report.layers.history.overBudget || report.totalOver;
+      // 调度模式:硬闸优先;否则只压 history 层超或兜底总超
+      const needsCompact = hardCap
+        || report.layers.history.overBudget
+        || report.totalOver;
       if (!needsCompact) return;
     } else {
-      // 老路径:总占用超阈才压
-      if (est < config.compactThreshold * config.contextWindowTokens) return;
+      // 老路径:硬闸按裸估算判;否则总占用超阈才压
+      if (!hardCap) {
+        const raw = estimatePromptTokens(history, activeTools, 1);
+        hardCap = raw >= DEFAULT_BUDGET_POLICY.totalTriggerRatio * config.contextWindowTokens;
+      }
+      if (!hardCap && est < config.compactThreshold * config.contextWindowTokens) return;
     }
   }
 
@@ -620,7 +614,8 @@ export async function maybeCompact(
     threshold: config.compactThreshold,
     focus: manualOpts?.focus,
     manual: isManual,
-    force: manualOpts?.force,
+    // 硬闸触发时 force 直通保护区:首轮/当前轮不豁免。
+    force: manualOpts?.force === true || hardCap,
     tools: activeTools,
     contextState: state,
   });
