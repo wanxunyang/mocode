@@ -147,9 +147,12 @@ function logRetry(attempt: number, err: unknown, waitMs: number): void {
   const e = err as { status?: number; name?: string; message?: string };
   const tag = e.status ? `HTTP ${e.status}` : e.name || 'Error';
   const msg = e.message ?? '未知错误';
-  // stderr 而非 stdout —— 不污染流式正文;行首换行防止黏在上一行尾巴。
-  process.stderr.write(
-    `\n[llm] 第 ${attempt}/${RETRY_MAX_ATTEMPTS} 次失败(${tag}: ${msg}),${(waitMs / 1000).toFixed(1)}s 后重试…\n`
+  // 走 console.error 而非 process.stderr.write:TUI active 时 layout.installConsoleGuard
+  // 已把 console.* 劫持到 contentWrite(内容区),错误会落在 agent 输出区,不污染输入框;
+  // 非 TTY(管道 / CI / 启动早期 TUI 未启)降级走原生 console.error → stderr,行为与改造前一致。
+  // 不写前导 \n —— contentWrite 由续写位管位置,前置换行会留空行;结尾 \n 由劫持逻辑补。
+  console.error(
+    `[llm] 第 ${attempt}/${RETRY_MAX_ATTEMPTS} 次失败(${tag}: ${msg}),${(waitMs / 1000).toFixed(1)}s 后重试…`
   );
 }
 
