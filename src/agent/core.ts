@@ -31,7 +31,6 @@ import { getAgentMode, setAgentMode } from './mode.js';
 import {
   maybeCompact,
   contextState,
-  dropContextFromHistory,
   createTraceEvent,
   summarizeToolArguments,
   safeProviderId,
@@ -51,7 +50,6 @@ import { jailResolve } from '../sandbox/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
-import type { DropContextFilter, DropContextResult } from '../tools/types.js';
 import {
   getTokenCalibration,
   updateTokenCalibration,
@@ -367,11 +365,6 @@ export async function runAgentCore(
   // 保留已完成的 assistant+tool_calls+tool 结果,只丢弃当前未完成步骤的消息。
   // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
   let savedHistory = history.slice();
-  // drop_context 工具的上下文剔除回调:闭包捕获 history,原地剔除无关旧 tool 结果。
-  // 保护由 dropContextFromHistory 内部保证:history[0](system)+ 当前轮(最后 user 及其后)永不剔除。
-  // 子 agent 也在自己的 history 上操作(子 agent 独立 history)，文件回滚事务则与主轮共享。
-  const dropContext = (filter: DropContextFilter): DropContextResult =>
-    dropContextFromHistory(history, filter);
   // Relevance and lifecycle collect provenance during normal work. Neither path
   // rewrites history; exact supersession is applied only by the pressure scheduler.
   const relprune = config.contextRelprune ? createRelevancePruner() : null;
@@ -744,7 +737,6 @@ export async function runAgentCore(
               tc.name,
               tc.arguments,
               signal,
-              { dropContext },
             ));
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
@@ -833,7 +825,6 @@ export async function runAgentCore(
             const started = entries.map((entry) => entry.denied
               ? Promise.resolve(entry.denied)
               : executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
-                  dropContext,
                   onLockAcquired: (lockedArgs) => {
                     entry.diff = readDiffContext(entry.tc, lockedArgs);
                   },
@@ -945,7 +936,6 @@ export async function runAgentCore(
             let diff = readDiffContext(tc, mutationParsed);
             hooks.onToolStart?.(tc.name);
             const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, {
-              dropContext,
               onLockAcquired: (lockedArgs) => {
                 if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
               },

@@ -32,7 +32,6 @@ const BY_NAME: Record<string, ContextKind> = {
   edit_file: 'status',
   write_file: 'status',
   ask_human: 'status',
-  drop_context: 'status',
   memory_save: 'status',
   memory_update: 'status',
   memory_forget: 'status',

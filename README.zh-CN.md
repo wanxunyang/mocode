@@ -210,7 +210,6 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `use_skill`     | 加载某 skill 的完整 SKILL.md 指令                                |
 | `ask_human`     | 决策点弹终端问答面板,用户选预设项或自由输入(阻塞至回应)                            |
 | `switch_mode`   | 在 `plan`(只读规划)与 `auto`(全量执行)间切换;agent 可自行调用,先探查再动手       |
-| `drop_context`  | 把历史里无关的旧工具结果替换为存根释放上下文(保 tool_call_id 配对,不动 system 与当前轮;幂等) |
 | `sub-agent`     | 派生具备完整能力的隔离子 Agent；只读任务可并发，写任务通过 overlay + ChangeSet 安全合并 |
 
 | `memory_save`   | 存一条跨会话长期记忆(标题进索引,正文按需取)                                  |

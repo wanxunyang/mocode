@@ -211,7 +211,6 @@ The agent operates in **the working directory it was launched from** — to have
 | `use_skill`       | Load the full SKILL.md instructions for a given skill                    |
 | `ask_human`        | Pop up a Q&A panel at decision points; user picks a preset or types freely (blocks until answered) |
 | `switch_mode`      | Switch between `plan` (read-only planning) and `auto` (full execution); the agent can call this itself to explore before acting |
-| `drop_context`     | Replace irrelevant old tool results in history with stubs to free up context (preserves tool_call_id pairing, leaves system prompt and current turn untouched, idempotent) |
 | `sub-agent`        | Spawn a capable isolated worker; read tasks can run concurrently and writes use overlay + ChangeSet safe merge |
 
 | `memory_save`      | Save a piece of cross-session long-term memory (title indexed, body fetched on demand) |

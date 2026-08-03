@@ -4,8 +4,6 @@ import type {
   ToolContext,
   ToolOutcome,
   ToolExecuteResult,
-  DropContextFilter,
-  DropContextResult,
 } from './types.js';
 import { builtinTools } from './builtins/index.js';
 import {
@@ -138,7 +136,6 @@ function terminalOutcome(
 }
 
 export interface ToolExecutionOptions {
-  dropContext?: (filter: DropContextFilter) => DropContextResult;
   onLockAcquired?: (args: Record<string, unknown>) => void;
 }
 
@@ -208,7 +205,7 @@ async function executeToolOnce(
 
       let raw: ToolExecuteResult;
       try {
-        raw = await tool.execute(args, { signal, dropContext: opts?.dropContext });
+        raw = await tool.execute(args, { signal });
       } finally {
         if (pathCapture) endPathMutation(pathCapture, tool.name);
         if (workspaceCapture) endWorkspaceMutation(workspaceCapture, tool.name);
@@ -306,6 +303,4 @@ export type {
   ToolContext,
   ToolOutcome,
   ToolExecuteResult,
-  DropContextFilter,
-  DropContextResult,
 } from './types.js';

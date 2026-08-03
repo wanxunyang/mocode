@@ -26,11 +26,6 @@ export {
 export type { BudgetScheduler, SchedulerRunLog } from './scheduler.js';
 
 export {
-  dropContextFromHistory,
-  formatDropResult,
-} from './drop.js';
-
-export {
   newSessionId,
   saveSession,
   loadSession,
