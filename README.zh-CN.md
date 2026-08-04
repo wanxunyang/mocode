@@ -204,6 +204,8 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `write_file`    | 创建/覆盖文件,自动建父目录                                           |
 | `edit_file`     | 精确字符串替换(`old_string` 须唯一匹配)                              |
 | `run_command`   | 执行 shell 命令,合并 stdout+stderr,默认 120s 超时                  |
+| `dev_server`    | 启动/查看/读日志/停止常驻后台进程(dev server),跨工具调用存活           |
+| `browser`       | Playwright 驱动真实 Chromium:导航 / 点击 / 填表 / 取文本 / 截图 / 控制台诊断 |
 | `glob`          | 按 glob 模式找文件(排除 node\_modules/.git)                      |
 | `grep`          | 内容正则搜索,纯 JS 实现,不依赖 `rg`                                  |
 | `codegraph`     | 已建 `.codegraph/` 索引时,查代码符号源码与调用链(比 read\_file/grep 更准更省) |
@@ -219,6 +221,22 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `memory_list`   | 列记忆索引(id/标题/摘要,无正文)                                      |
 | `memory_update` | 原地改一条记忆(id 不变;纠正过时事实 / 改摘要 / 改 pin)                      |
 | `memory_forget` | 遗忘记忆:默认归档(可复活),`mode=delete` 硬删(pinned 拒删)               |
+
+### 前端 / UI 闭环
+
+`dev_server` + `browser` 组成「跑起来 → 打开页面 → 看渲染结果」的闭环:
+
+```
+dev_server start  command="npm run dev" readyUrl="http://localhost:5173"
+browser    open  →  navigate  →  click / fill  →  screenshot
+dev_server stop   id=srv-xxxx
+```
+
+- `dev_server` 的进程跨工具调用存活(`run_command` 做不到:它会在超时或本轮中断时树杀)。就绪等待支持 `readyUrl`(仅回环地址)或 `readyPattern`(匹配启动日志),日志写在 `.mocode/dev-servers/<id>.log`,支持按 `offset` 增量读取。
+- `browser` 的页面会话同样跨调用存活,截图经多模态通道回灌给模型,顺带返回最近的 console、页面报错和失败请求。
+- 安全默认:`browser` 只允许 `http/https` 的 `localhost / 127.0.0.1 / ::1`,拒绝 `file:` 与带凭据的 URL;需要访问远端时显式设 `MOCODE_BROWSER_ALLOW_REMOTE=true`。`dev_server` 执行任意命令,风险等级与 `run_command` 同为 dangerous,执行前需用户确认。
+- 两者在 plan 模式下均被禁用;mocode 退出时会树杀后台进程并关闭浏览器。
+- 浏览器二进制不随 npm 包分发,首次使用前需 `npx playwright install chromium`。
 
 5 个 `memory_*` 工具受启动时 `MEMORY_ENABLED=true` 总开关控制;运行时切换用 `/memory_switch`(需重启 REPL,刻意为之,见下「项目记忆」小节区分 Tier-1 / Tier-2)。
 

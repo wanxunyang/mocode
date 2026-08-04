@@ -5,6 +5,8 @@ import { screenshotTool } from './screenshot.js';
 import { writeFileTool } from './write-file.js';
 import { editFileTool } from './edit-file.js';
 import { runCommandTool } from './run-command.js';
+import { devServerTool } from './dev-server.js';
+import { browserTool } from './browser.js';
 import { globTool } from './glob.js';
 import { grepTool } from './grep.js';
 import { webSearchTool } from './web-search.js';
@@ -54,6 +56,9 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   write_file: { effect: 'write', concurrency: 'resource-locked', resources: pathResource, delegatesResourceLocks: true },
   edit_file: { effect: 'write', concurrency: 'resource-locked', resources: pathResource, delegatesResourceLocks: true },
   run_command: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
+  // 后台进程与浏览器会话跨调用存活；串行执行避免同一页面/服务被并发操作。
+  dev_server: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
+  browser: { effect: 'process', concurrency: 'serial', resources: workspaceResource },
   glob: { effect: 'read', concurrency: 'parallel', resources: workspaceResource },
   grep: { effect: 'read', concurrency: 'parallel', resources: workspaceResource },
   web_search: { effect: 'network', concurrency: 'parallel', supportsAbort: true },
@@ -84,6 +89,8 @@ const rawBuiltinTools: Tool[] = [
   writeFileTool,
   editFileTool,
   runCommandTool,
+  devServerTool,
+  browserTool,
   globTool,
   grepTool,
   webSearchTool,

@@ -316,6 +316,17 @@ export function summarizeToolCall(name: string, argsRaw: string): string {
       return s('path') || truncateDisplay(argsRaw, 80);
     case 'run_command':
       return truncateDisplay(s('command') || argsRaw, 100);
+    case 'dev_server': {
+      const action = s('action');
+      const detail = s('command') || s('id') || s('readyUrl');
+      return truncateDisplay(detail ? `${action}  ·  ${detail}` : action || argsRaw, 100);
+    }
+    case 'browser': {
+      // 刻意不显示 fill 的 value:可能是密码等敏感输入。
+      const action = s('action');
+      const detail = s('url') || s('selector') || s('key') || s('sessionId');
+      return truncateDisplay(detail ? `${action}  ·  ${detail}` : action || argsRaw, 100);
+    }
     case 'glob':
       return s('pattern') || argsRaw;
     case 'grep': {

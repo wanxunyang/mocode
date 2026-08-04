@@ -41,6 +41,8 @@ export const PLAN_DISABLED_TOOLS = new Set([
   'edit_file',
   'run_command',
   'screenshot',
+  'dev_server',
+  'browser',
   'memory_save',
   'memory_update',
   'memory_forget',

@@ -1,17 +1,25 @@
 import { exitAltScreen } from './ui/layout.js';
 import { readConfigFile } from './config/file.js';
 import { detectLanguage, setLanguage, t } from './i18n/index.js';
+import { shutdownRuntime, shutdownRuntimeSync } from './runtime/shutdown.js';
 
 // 终端恢复兜底:任一退出 / 中断 / 未捕获异常路径都要恢复 alt screen,避免残留备用屏 + 滚动区域。
 // exitAltScreen 幂等(未激活时空操作),故全局注册安全——进 alt screen 前的路径(如 --resume 列表、缺环境变量、`mocode config`)调用它无副作用。
 // 仅 layout 是叶子(不依赖 config),故静态导入安全;repl / session 依赖 config(模块加载触发 loadEnvFiles + config 单例初始化),
 // 改动态按需加载——`mocode config` 向导只需读写文件(走 config/file.ts 叶子),不经 config 单例初始化,零配置也能跑。
-process.on('exit', () => exitAltScreen());
+// dev_server 拉起的后台进程不随父进程退出而消失(Windows 无 job object),故每条退出路径
+// 都同步树杀一次;shutdownRuntimeSync 幂等。
+process.on('exit', () => {
+  shutdownRuntimeSync();
+  exitAltScreen();
+});
 process.on('SIGINT', () => {
+  shutdownRuntimeSync();
   exitAltScreen();
   process.exit(130);
 });
 process.on('uncaughtException', (e) => {
+  shutdownRuntimeSync();
   try {
     process.stderr.write(`\n[uncaught] ${e instanceof Error ? e.stack || e.message : String(e)}\n`);
   } catch {
@@ -91,6 +99,8 @@ async function main(): Promise<void> {
     const { startRepl } = await import('./repl/index.js');
     await startRepl(undefined, undefined, sandboxRootOverride);
   }
+  // 正常退出:优雅关闭浏览器与后台进程(同步兜底仍在 exit 钩子里)。
+  await shutdownRuntime();
   process.exit(0);
 }
 
