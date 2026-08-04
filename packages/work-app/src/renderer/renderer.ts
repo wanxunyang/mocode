@@ -38,6 +38,8 @@ declare global {
       getConfig: () => Promise<{ model: string; label: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }>;
       listModels: () => Promise<Array<{ name: string; label: string; baseURL: string; contextWindow: number; isActive: boolean }>>;
       switchModel: (name: string) => Promise<{ ok: boolean; message: string }>;
+      listBranches: () => Promise<{ ok: boolean; message: string; current: string; branches: string[] }>;
+      switchBranch: (branch: string) => Promise<{ ok: boolean; message: string; branch?: string }>;
       setTheme: (theme: 'light' | 'dark' | 'system') => void;
       send: (value: Record<string, unknown>) => void;
       onAgentEvent: (callback: (event: AgentEnvelope) => void) => () => void;
@@ -282,7 +284,7 @@ function renderTasks(): void {
   $('#usage').textContent = total ? `${total} 任务${running ? ` · ${running} 运行中` : ''}` : '0%';
 }
 
-function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); refreshComposerContext(); }
+function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); refreshComposerContext(); renderEmptyChips(); }
 
 /** 根据当前选中的任务，更新输入框上方的「任务」上下文条。*/
 function refreshComposerContext(): void {
@@ -1333,3 +1335,55 @@ document.querySelectorAll<HTMLButtonElement>('.empty-hint').forEach((button) => 
 
 // 末尾再 mount 一次,覆盖在 init 中通过 innerHTML 注入的 [data-icon](例如动态插的 SVG 占位)。
 mountIcons();
+
+/* ── 空状态下的 3 个 chip：项目 / 分支 / 模型 ─────────────── */
+function renderEmptyChips(): void {
+  const project = state?.projects.find((p) => p.id === state?.selectedProjectId) ?? state?.projects[0];
+  const projectLabel = $('#empty-chip-project .empty-chip-label');
+  const branchLabel = $('#empty-chip-branch .empty-chip-label');
+  const modelLabel = $('#empty-chip-model .empty-chip-label');
+  if (projectLabel) projectLabel.textContent = project?.name ?? '选择项目';
+  if (branchLabel) branchLabel.textContent = project?.branch && project.branch !== '本地' ? project.branch : '—';
+  // 模型来自 getConfig；异步,首次为空时显示占位
+  void window.mocodeWork.getConfig().then((cfg) => {
+    if (modelLabel) modelLabel.textContent = cfg.label || cfg.model || '未配置';
+  }).catch(() => { if (modelLabel) modelLabel.textContent = '未配置'; });
+}
+
+$('#empty-chip-project')?.addEventListener('click', async () => {
+  try {
+    const next = await window.mocodeWork.pickProject();
+    if (next) { updateState(next); showToast('success', '已切换项目'); }
+  } catch (error) { showToast('error', (error as Error).message); }
+});
+
+$('#empty-chip-branch')?.addEventListener('click', async () => {
+  try {
+    const res = await window.mocodeWork.listBranches();
+    if (!res.ok) { showToast('warn', res.message || '无法读取分支'); return; }
+    if (res.branches.length === 0) { showToast('warn', '当前项目无 git 分支'); return; }
+    // 简易选择：用 prompt；若需要更花哨的 picker 后续可换 modal
+    const choice = window.prompt('切换到哪个分支？\n\n' + res.branches.map((b: string, i: number) => `${i + 1}. ${b}${b === res.current ? ' (当前)' : ''}`).join('\n') + '\n\n输入编号或名称：', res.current);
+    if (!choice) return;
+    const target = /^\d+$/.test(choice) ? res.branches[Number(choice) - 1] : choice;
+    if (!target) { showToast('warn', '无效选择'); return; }
+    const sw = await window.mocodeWork.switchBranch(target);
+    if (sw.ok) showToast('success', sw.message);
+    else showToast('error', sw.message);
+  } catch (error) { showToast('error', (error as Error).message); }
+});
+
+$('#empty-chip-model')?.addEventListener('click', async () => {
+  try {
+    const models = await window.mocodeWork.listModels();
+    if (models.length === 0) { showToast('warn', '未配置任何模型'); return; }
+    const active = models.find((m: { isActive: boolean }) => m.isActive)?.name ?? models[0].name;
+    const choice = window.prompt('切换到哪个模型？\n\n' + models.map((m: { name: string }, i: number) => `${i + 1}. ${m.name}${m.name === active ? ' (当前)' : ''}`).join('\n') + '\n\n输入编号或名称：', active);
+    if (!choice) return;
+    const target = /^\d+$/.test(choice) ? models[Number(choice) - 1]?.name : choice;
+    if (!target) { showToast('warn', '无效选择'); return; }
+    const sw = await window.mocodeWork.switchModel(target);
+    if (sw.ok) { showToast('success', sw.message); renderEmptyChips(); }
+    else showToast('error', sw.message);
+  } catch (error) { showToast('error', (error as Error).message); }
+});

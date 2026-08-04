@@ -172,12 +172,57 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .empty-state h1 { margin: 0; font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 600; letter-spacing: -0.03em; line-height: 1.1; color: var(--color-ink); }
 .empty-state p { margin: var(--space-sm) auto 0; max-width: 46ch; color: var(--color-neutral); font-size: var(--text-sm); line-height: 1.6; }
 
+/* ── 空状态：标题 + 输入框一起在视口中央 ────────────────── */
+.workspace:has(> #empty-state:not(.hidden)) {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--space-md);
+}
+.workspace:has(> #empty-state:not(.hidden)) .empty-state {
+  position: static; inset: auto; transform: none; padding: 0;
+}
+.workspace:has(> #empty-state:not(.hidden)) .composer-area {
+  position: static; left: auto; right: auto; bottom: auto; padding: 0;
+}
+.workspace:has(> #empty-state:not(.hidden)) #conversation,
+.workspace:has(> #empty-state:not(.hidden)) #approval-panel,
+.workspace:has(> #empty-state:not(.hidden)) #inspector,
+.workspace:has(> #empty-state:not(.hidden)) #search-panel { display: none; }
+
 /* ── Composer ────────────────────────────────────────── */
 .composer-area { position: absolute; z-index: var(--z-sticky); bottom: 0; left: 0; right: 0; padding: 0 0 var(--space-md); display: flex; flex-direction: column; align-items: center; pointer-events: none; }
 .composer-context { width: var(--conversation-width); height: 32px; margin-bottom: -1px; padding: 0 var(--space-md); border: var(--rule-hair); border-bottom: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; background: var(--color-paper-2); display: flex; align-items: center; gap: var(--space-md); color: var(--color-neutral); font-size: var(--text-2xs); font-family: var(--font-outlier); pointer-events: auto; }
 .composer-context > span { display: inline-flex; align-items: center; gap: 4px; }
 .composer-context .icon { width: 12px; height: 12px; color: var(--color-subtle); }
 .composer { width: var(--conversation-width); background: var(--color-paper); border: var(--rule-hair); border-radius: var(--radius-lg); box-shadow: var(--shadow-soft); overflow: hidden; pointer-events: auto; }
+
+/* ── 空状态下的 chip 行（项目 / 分支 / 模型） ────────────── */
+.empty-chips { width: min(620px, 86%); margin-top: var(--space-xs); display: flex; gap: var(--space-2xs); justify-content: flex-start; pointer-events: auto; }
+.empty-chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 var(--space-sm); border: var(--rule-hair); border-radius: var(--radius-full); background: var(--color-paper); color: var(--color-neutral); font-size: var(--text-2xs); font-family: var(--font-outlier); white-space: nowrap; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.empty-chip:hover { background: var(--color-paper-2); color: var(--color-ink); }
+.empty-chip .icon { width: 12px; height: 12px; color: var(--color-subtle); flex-shrink: 0; }
+
+/* ── 空状态下的快捷入口（幻灯片 / PDF / 文档 / 表格） ───── */
+.empty-shortcuts { width: min(620px, 86%); margin-top: var(--space-sm); display: flex; gap: var(--space-xs); justify-content: space-between; pointer-events: auto; }
+.empty-shortcut { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 var(--space-md); border: var(--rule-hair); border-radius: var(--radius-full); background: var(--color-paper); color: var(--color-neutral); font-size: var(--text-2xs); font-family: var(--font-outlier); white-space: nowrap; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.empty-shortcut:hover { background: var(--color-paper-2); color: var(--color-ink); }
+.empty-shortcut .icon { width: 14px; height: 14px; color: var(--color-subtle); flex-shrink: 0; }
+
+/* ── 空状态：输入框 + chip + 快捷入口都按 conversation-width 居中,
+ *    整组（标题 / 输入 / chip / 快捷入口）同宽对齐 ─────────── */
+.workspace:has(> #empty-state:not(.hidden)) .composer-area {
+  width: 100%;
+  display: flex; flex-direction: column; align-items: center;
+}
+.workspace:has(> #empty-state:not(.hidden)) .composer,
+.workspace:has(> #empty-state:not(.hidden)) .empty-chips,
+.workspace:has(> #empty-state:not(.hidden)) .empty-shortcuts {
+  width: min(620px, 86%);
+}
+
+/* 隐藏非空状态下也能用的元素 */
+.workspace:not(:has(> #empty-state:not(.hidden))) .empty-chips,
+.workspace:not(:has(> #empty-state:not(.hidden))) .empty-shortcuts { display: none; }
+
 /* 输入框聚焦时不做任何视觉变化 —— 保持"正常输入框"观感。 */
 .composer:focus-within { border-color: var(--color-rule); box-shadow: var(--shadow-soft); }
 textarea { display: block; width: 100%; min-height: 52px; max-height: 128px; resize: none; border: 0; outline: none; padding: var(--space-md) var(--space-md) var(--space-2xs); color: var(--color-ink); line-height: 1.6; background: transparent; font-size: var(--text-sm); }

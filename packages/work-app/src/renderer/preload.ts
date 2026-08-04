@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   getConfig: (): Promise<{ model: string; label: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }> => ipcRenderer.invoke('work:get-config'),
   listModels: (): Promise<Array<{ name: string; label: string; baseURL: string; contextWindow: number; isActive: boolean }>> => ipcRenderer.invoke('work:list-models'),
   switchModel: (name: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:switch-model', name),
+  listBranches: (): Promise<{ ok: boolean; message: string; current: string; branches: string[] }> => ipcRenderer.invoke('work:list-branches'),
+  switchBranch: (branch: string): Promise<{ ok: boolean; message: string; branch?: string }> => ipcRenderer.invoke('work:switch-branch', branch),
   setTheme: (theme: 'light' | 'dark' | 'system'): void => ipcRenderer.send('work:set-theme', theme),
   send: (value: Record<string, unknown>): void => ipcRenderer.send('work:agent-send', value),
   onAgentEvent: (callback: (event: AgentEnvelope) => void): (() => void) => {

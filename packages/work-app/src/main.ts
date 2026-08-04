@@ -667,6 +667,25 @@ function installIpc(): void {
     if (result.ok) broadcastState();
     return { ok: result.ok, message: result.message };
   });
+  ipcMain.handle('work:list-branches', async () => {
+    const project = selectedProject();
+    const res = await runCommand(project.root, 'git', ['branch', '--format', '%(refname:short)']);
+    if (!res.ok) return { ok: false, message: '无法读取分支列表: ' + (res.stderr || 'git 未安装或非 git 仓库'), current: project.branch, branches: [] };
+    const branches = res.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    return { ok: true, message: '', current: project.branch, branches };
+  });
+  ipcMain.handle('work:switch-branch', async (_event, branch: string) => {
+    if (typeof branch !== 'string' || !branch) return { ok: false, message: '分支名为空' };
+    const project = selectedProject();
+    const res = await runCommand(project.root, 'git', ['checkout', branch]);
+    if (!res.ok) return { ok: false, message: '切换失败: ' + (res.stderr || res.stdout) };
+    const updated = { ...project, branch: await branchAt(project.root) };
+    state.projects = state.projects.map((p) => (p.id === project.id ? updated : p));
+    state.selectedProjectId = updated.id;
+    saveState();
+    broadcastState();
+    return { ok: true, message: `已切换到 ${updated.branch}`, branch: updated.branch };
+  });
   ipcMain.on('work:set-theme', (_event, theme: 'light' | 'dark' | 'system') => applyThemeBackground(theme));
   ipcMain.on('work:show-menu', (event, menuId: string, clientX: number, clientY: number) => {
     if (!['file', 'edit', 'view', 'help'].includes(menuId) || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return;

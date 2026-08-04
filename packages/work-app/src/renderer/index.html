@@ -77,6 +77,17 @@
             <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" title="添加图片 (也可拖入)" aria-label="添加图片"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" title="压缩会话上下文"><svg class="icon icon-inline" data-icon="layers-compress"></svg>压缩</button><span class="context-usage" id="context-usage" title="上下文占用">--</span></div><div class="right-actions"><button id="mode-button" class="model-button" title="切换模型" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">Mocode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" title="发送 (⌘⏎)" aria-label="发送"><svg class="icon" data-icon="arrow-up"></svg></button></div></div>
             <div id="model-picker" class="model-picker hidden" role="listbox" aria-label="选择模型"></div>
           </div>
+          <div class="empty-chips" aria-label="会话上下文">
+            <button class="empty-chip" type="button" id="empty-chip-project" title="选择项目"><svg class="icon" data-icon="folder"></svg><span class="empty-chip-label">选择项目</span><svg class="icon" data-icon="chevron-down"></svg></button>
+            <button class="empty-chip" type="button" id="empty-chip-branch" title="切换分支"><svg class="icon" data-icon="branch"></svg><span class="empty-chip-label">—</span><svg class="icon" data-icon="chevron-down"></svg></button>
+            <button class="empty-chip" type="button" id="empty-chip-model" title="切换模型"><svg class="icon" data-icon="sparkles"></svg><span class="empty-chip-label">模型</span><svg class="icon" data-icon="chevron-down"></svg></button>
+          </div>
+          <div class="empty-shortcuts" aria-label="快捷入口">
+            <button class="empty-shortcut" type="button" title="新建幻灯片">📊 幻灯片</button>
+            <button class="empty-shortcut" type="button" title="新建 PDF">📄 PDF</button>
+            <button class="empty-shortcut" type="button" title="新建文档">📝 文档</button>
+            <button class="empty-shortcut" type="button" title="新建表格">📋 表格</button>
+          </div>
         </footer>
       </main>
       </div>
