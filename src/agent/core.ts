@@ -994,9 +994,16 @@ export async function runAgentCore(
               type: 'image_url',
               image_url: {
                 url: attachment.dataUrl,
-                detail: attachment.detail ?? 'auto',
+                // 不默认补 auto: OpenAI 省略时等同 auto，但 MiniMax 仅接受 low/default/high。
+                // 让各 provider 采用默认枚举；仅保留工具明确请求的 low/high。
+                ...(
+                  attachment.detail === 'low' || attachment.detail === 'high'
+                    ? { detail: attachment.detail }
+                    : {}
+                ),
               },
             })),
+
           ];
           // OpenAI tool-call protocol requires every tool result to immediately follow the
           // assistant tool_calls message; append visual input only after the full batch.

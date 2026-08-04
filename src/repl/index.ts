@@ -1158,11 +1158,17 @@ export async function startRepl(
       // 直接给原文对中文用户不友好。这里翻译成中文 + 提示 /model 换视觉模型。
       const msg = e instanceof Error ? e.message : String(e);
       const lower = msg.toLowerCase();
-      const looksLikeImageError =
-        /\b(image|vision|multimodal|vision[-_ ]?capable|unsupported (media|image))\b/i.test(lower) ||
-        /不支持(视觉|图片|图像|多模态)/.test(msg) ||
-        (/图片|图像|视觉|多模态/.test(msg) && /不支持|invalid|reject|fail/i.test(lower));
-      if (looksLikeImageError) {
+      // 只有明确的「能力不支持」才显示换模型提示。不能仅因错误里出现 image/vision
+      // 就下结论:例如 MiniMax 会因 `image_url.detail=auto` 返 400 invalid params，
+      // 模型本身仍支持视觉。参数/格式错误应保留原始 provider 诊断，方便准确修复。
+      const isImageParameterError =
+        /\b(?:invalid|unsupported)\s+(?:image\s+)?(?:detail|parameter|param|format|url)\b/i.test(lower);
+      const isVisionUnsupportedError = !isImageParameterError && (
+        /\b(?:does not support|doesn't support|not supported|unsupported)\b.{0,48}\b(?:image|vision|multimodal|media)\b/i.test(lower) ||
+        /\b(?:image|vision|multimodal|media)\b.{0,48}\b(?:is not supported|not supported|unsupported)\b/i.test(lower) ||
+        /(?:不支持|不具备).{0,12}(?:视觉|图片|图像|多模态)|(?:视觉|图片|图像|多模态).{0,12}(?:不支持|不可用)/.test(msg)
+      );
+      if (isVisionUnsupportedError) {
         layout.contentWrite(
           `${ui.red}${t('repl.errorLabel')}${ui.reset} ${t('repl.visionUnsupported', { model: `${ui.accent}${config.model}${ui.reset}` })}${ui.dim}${t('repl.originalError', { message: msg })}${ui.reset}\n`
         );

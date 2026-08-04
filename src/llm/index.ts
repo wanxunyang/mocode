@@ -367,6 +367,39 @@ export async function chat(
   throw lastErr;
 }
 
+/**
+ * 发送前规范化多模态 image_url:去掉 `detail:"auto"`。
+ *
+ * `auto` 是 OpenAI 的合法枚举,但 MiniMax 等兼容后端只认 low/default/high,收到 auto 直接
+ * 400(invalid image detail: auto, 2013)。省略该字段时各家都会用自己的默认值,是唯一
+ * 在所有后端都安全的写法;显式 low/high 属通用取值,原样保留。
+ *
+ * 放在 transport 边界而非构造点:历史里可能已经存着旧版本(或续接会话 / 外部注入)写下的
+ * `auto`,那种消息每轮都会被重发,只修构造点无法自愈。
+ *
+ * 无需改写时返回原数组引用 —— 图片消息含大段 base64,不能无条件深拷贝。
+ */
+export function normalizeImageDetail(messages: ChatMessage[]): ChatMessage[] {
+  let changed = false;
+  const next = messages.map((message) => {
+    const content = (message as { content?: unknown }).content;
+    if (!Array.isArray(content)) return message;
+    let messageChanged = false;
+    const parts = content.map((part) => {
+      const image = (part as { type?: string; image_url?: { detail?: unknown } }).image_url;
+      if ((part as { type?: string }).type !== 'image_url' || !image) return part;
+      if (image.detail !== 'auto') return part;
+      messageChanged = true;
+      const { detail: _dropped, ...rest } = image;
+      return { ...(part as object), image_url: rest };
+    });
+    if (!messageChanged) return message;
+    changed = true;
+    return { ...(message as object), content: parts } as ChatMessage;
+  });
+  return changed ? next : messages;
+}
+
 /** 单次流式 LLM 请求(无重试);chat() 的内部实现,可被 __setChatCreateImpl 注入桩以做单测。 */
 async function chatOnce(
   messages: ChatMessage[],
@@ -387,7 +420,7 @@ async function chatOnce(
   const stream = await create(
     {
       model: config.model,
-      messages,
+      messages: normalizeImageDetail(messages),
       tools: activeTools,
       stream: true,
       // 显式声明允许一次响应携带多个 tool_call(OpenAI 兼容协议标准字段)。
