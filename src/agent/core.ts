@@ -659,6 +659,7 @@ export async function runAgentCore(
         // 串行工具仍是本调用列表内的屏障；渲染/history 回灌始终按原 tool_calls 顺序。
         // executeToolOutcome 永不抛错，失败通过结构化 status/code 返回。
         const calls = result.toolCalls;
+        const modelAttachments: NonNullable<ToolOutcome['modelAttachments']> = [];
         const tracedCalls = calls.map((tc, index) => ({
           toolCallId: `${traceTurnId}:step:${step}:tool:${index}`,
           args: summarizeToolArguments(tc.arguments),
@@ -676,6 +677,9 @@ export async function runAgentCore(
           });
         }
         const traceToolEnd = (tc: ToolCallRef, index: number, outcome: ToolOutcome): void => {
+          if (outcome.status === 'success' && outcome.modelAttachments?.length) {
+            modelAttachments.push(...outcome.modelAttachments);
+          }
           const traceCall = tracedCalls[index];
           emitTrace('tool_call_end', {
             tool: tc.name,
@@ -978,6 +982,25 @@ export async function runAgentCore(
             }
             i++;
           }
+        }
+        if (modelAttachments.length > 0) {
+          const names = modelAttachments.map((attachment) => attachment.name).join(', ');
+          const content: ContentPart[] = [
+            {
+              type: 'text',
+              text: `The view_image tool loaded the following visual input: ${names}. Analyze the attached image content directly.`,
+            },
+            ...modelAttachments.map((attachment): ContentPart => ({
+              type: 'image_url',
+              image_url: {
+                url: attachment.dataUrl,
+                detail: attachment.detail ?? 'auto',
+              },
+            })),
+          ];
+          // OpenAI tool-call protocol requires every tool result to immediately follow the
+          // assistant tool_calls message; append visual input only after the full batch.
+          history.push({ role: 'user', content } as ChatMessage);
         }
         // 工具步末尾补一空行:与下一轮的思考 / 正文分隔(否则 ↳ 后紧接 ▎ 思考,无空行不好看;
         // 与正文→● 的 1 空行对称)。工具结果已以 \n 收尾,此处再补 \n 恰好 1 空行。

@@ -47,12 +47,23 @@ export type ToolOutcomeCode =
   | 'POSTCONDITION_FAILED'
   | 'MCP_ERROR';
 
+/** 可由工具私下回灌给模型的多模态附件；不得拼进 output、日志或 TUI。 */
+export interface ModelImageAttachment {
+  type: 'image';
+  name: string;
+  mime: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+  dataUrl: string;
+  detail?: 'auto' | 'low' | 'high';
+}
+
 /** 框架内部的结构化工具结果；LLM/TUI 边界仍使用 output 文本。 */
 export interface ToolOutcome {
   status: ToolOutcomeStatus;
   code: ToolOutcomeCode;
   retryable: boolean;
   output: string;
+  /** 仅供下一轮模型请求使用，不进入文本 history / trace。 */
+  modelAttachments?: ModelImageAttachment[];
   changedFiles?: string[];
   /** Paths whose previously observed content is known stale after a conflict. */
   staleFiles?: string[];

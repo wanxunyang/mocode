@@ -1,5 +1,7 @@
 import type { Tool, ToolCapabilities } from '../types.js';
 import { readFileTool } from './read-file.js';
+import { viewImageTool } from './view-image.js';
+import { screenshotTool } from './screenshot.js';
 import { writeFileTool } from './write-file.js';
 import { editFileTool } from './edit-file.js';
 import { runCommandTool } from './run-command.js';
@@ -47,6 +49,8 @@ const memoryResource = (): string[] => ['memory-store'];
 
 const CAPABILITIES: Record<string, ToolCapabilities> = {
   read_file: { effect: 'read', concurrency: 'parallel', resources: pathResource },
+  view_image: { effect: 'read', concurrency: 'parallel', resources: pathResource },
+  screenshot: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
   write_file: { effect: 'write', concurrency: 'resource-locked', resources: pathResource, delegatesResourceLocks: true },
   edit_file: { effect: 'write', concurrency: 'resource-locked', resources: pathResource, delegatesResourceLocks: true },
   run_command: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
@@ -75,6 +79,8 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
 
 const rawBuiltinTools: Tool[] = [
   readFileTool,
+  viewImageTool,
+  screenshotTool,
   writeFileTool,
   editFileTool,
   runCommandTool,
