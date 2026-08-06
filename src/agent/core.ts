@@ -6,6 +6,7 @@
 // spawn.ts 的 spawnAgent = runAgentCore + 静默 hooks(子 agent)。
 
 import { readFileSync } from 'node:fs';
+import { getNotesMtime } from '../session/notes.js';
 import type OpenAI from 'openai';
 import {
   chat,
@@ -44,7 +45,7 @@ import {
 } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
 import { isToolResultSuccess } from '../context/utils.js';
-import { config, reinjectActivePlanIntoSystem } from '../config/index.js';
+import { config, extractActivePlanSection, reinjectActivePlanIntoSystem } from '../config/index.js';
 import { t } from '../i18n/index.js';
 import { jailResolve } from '../sandbox/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
@@ -57,6 +58,14 @@ import {
 import { getCurrentTurnId, getCurrentTurnMutationState } from '../rollback/index.js';
 import type { AgentTraceEvent, AgentTurnTrace, TraceEventType } from '../session/trace.js';
 import { getCurrentSessionId } from '../session/state.js';
+
+/** nag 提醒阈值:连续 N 个"执行了工具但没更新 notes.md"的步后提醒一次(对齐 Claude Code TodoWrite 的 3 轮)。 */
+const PLAN_NAG_THRESHOLD = 3;
+/** nag 提醒文本:注入到当前步第一条 tool_result 内容前(与最新工具输出同批被模型看到,而非单独一条易被冲淡)。 */
+const PLAN_NAG_TEXT =
+  '[mocode] Reminder: you have an active plan in notes.md but have not updated it recently. ' +
+  'If you finished a step, call plan_update to check it off (keep at most one in_progress); ' +
+  'if the whole plan is done, let plan_update settle it to ## Done:. If the plan changed scope, update it to match reality.';
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
 function parseArgs(raw: string): Record<string, unknown> | null {
@@ -339,6 +348,10 @@ export async function runAgentCore(
   let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
   let traceStatus: AgentTurnTrace['status'] = 'error';
   let toolCallCount = 0;
+  // A+B(plan 可靠性):跨步计数"执行了工具但没改动 notes.md"的连续步数。
+  // 本步写了 notes.md(plan_update 或直接 write/edit)→ 清零并重同步 history[0];
+  // 否则累计,达阈值则在当前步 tool_result 前注入 nag 提醒。
+  let stepsSincePlanTouch = 0;
   // 本轮 token 累计:每步 chat() 返回后把 result.usage 累加,供 onDone 摘要行 + AgentRunResult.usage
   // 透传给 repl(显示在底栏模式 chip 右边)。未开启 include_usage 或全失败时为 undefined。
   let turnUsage: ChatUsage | undefined;
@@ -643,6 +656,10 @@ export async function runAgentCore(
             function: { name: tc.name, arguments: tc.arguments },
           })),
         } as ChatMessage);
+        // A+B:记录本步第一条 tool_result 的下标 + 执行前 notes.md 的 mtime,
+        // 工具全部执行完后据此判断"本步是否改动了 notes.md"(重同步 / nag)。
+        const toolResultStartIdx = history.length;
+        const notesMtimeBefore = getNotesMtime();
 
         // Record interstitial narration for observability only. It never changes tool output
         // or injects instructions back into the model context.
@@ -985,6 +1002,25 @@ export async function runAgentCore(
             i++;
           }
         }
+        // A(事件驱动重同步):本步若改动了 notes.md,把最新 plan 块刷回 history[0],
+        // 让模型上下文镜像当前勾选态(不再停留在轮首的旧副本)。只在 mtime 变化时触发,零额外 churn。
+        // B(nag 提醒):连续 N 步有工具活动但没更新 plan,在当前步第一条 tool_result 前注入提醒。
+        const notesMtimeAfter = getNotesMtime();
+        if (notesMtimeAfter !== notesMtimeBefore) {
+          reinjectActivePlanIntoSystem(history);
+          stepsSincePlanTouch = 0;
+        } else {
+          stepsSincePlanTouch += 1;
+          if (stepsSincePlanTouch >= PLAN_NAG_THRESHOLD) {
+            const activePlan = extractActivePlanSection();
+            const firstToolMsg = history[toolResultStartIdx];
+            if (activePlan && firstToolMsg && firstToolMsg.role === 'tool' && typeof firstToolMsg.content === 'string') {
+              firstToolMsg.content = `${PLAN_NAG_TEXT}\n\n${firstToolMsg.content}`;
+            }
+            stepsSincePlanTouch = 0;
+          }
+        }
+
         if (modelAttachments.length > 0) {
           const names = modelAttachments.map((attachment) => attachment.name).join(', ');
           const content: ContentPart[] = [

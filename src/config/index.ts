@@ -4,6 +4,7 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 import { getSandboxRoot } from '../sandbox/root.js';
 import { getCurrentSessionId, setCurrentSessionId } from '../session/state.js';
+import { getNotesFilePath } from '../session/notes.js';
 import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-discipline.js';
 import {
   detectLanguage,
@@ -168,11 +169,8 @@ const PLATFORM_NOTE = (() => {
  * 这样比纯目录列表更显眼，降低 agent 在长上下文里扫过去就忘了的概率。
  */
 export function buildNotepadSection(sessionId = getCurrentSessionId()): string {
-  if (!sessionId) return '';
-
-  const root = getSandboxRoot() ?? process.cwd();
-  const p = path.join(root, '.mocode', 'sessions', sessionId, 'notes.md');
-  if (!fs.existsSync(p)) return '';
+  const p = getNotesFilePath(sessionId);
+  if (!p || !fs.existsSync(p)) return '';
   try {
     const content = fs.readFileSync(p, 'utf8').trim();
     if (!content) return '';
@@ -217,10 +215,8 @@ export function buildNotepadSection(sessionId = getCurrentSessionId()): string {
  * 已结算（`## Done:`）或无 plan 时返回 null。
  */
 export function extractActivePlanSection(sessionId = getCurrentSessionId()): string | null {
-  if (!sessionId) return null;
-  const root = getSandboxRoot() ?? process.cwd();
-  const p = path.join(root, '.mocode', 'sessions', sessionId, 'notes.md');
-  if (!fs.existsSync(p)) return null;
+  const p = getNotesFilePath(sessionId);
+  if (!p || !fs.existsSync(p)) return null;
   try {
     const normalized = fs.readFileSync(p, 'utf8').replace(/\r\n?/g, '\n');
     const lines = normalized.split('\n');
@@ -367,17 +363,19 @@ ${t('assistant.languageInstruction')}`;
   dynamicParts.push(
     `## Session Notepad (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
     'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
-    'Keep at most one active plan:\n' +
+    'Record and update the execution plan with the `plan_update` tool (preferred over editing checkboxes by hand); it keeps at most one active plan as a `## Plan:` section:\n' +
     '```\n' +
     '## Plan: <title>\n' +
     'Goal: <outcome>\n' +
     '### Steps\n' +
-    '- [ ] 1. <verifiable step>\n' +
+    '- [ ] 1. <self-contained step: target file/symbol, the change, and how to verify>\n' +
     '### Progress\n' +
-    '- <completed phase and evidence>\n' +
+    '- <completed/total>\n' +
     '```\n' +
-    'Create this file proactively with write_file when the task warrants it; read_file the full notes.md whenever you need to recover context after compaction.\n' +
-    'Update checkboxes and Progress after each completed phase. Before the final reply, reconcile the plan with actual work, then rename it to `## Done:` or remove it. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
+    'Keep at most one step in_progress, and mark a step completed as soon as its work is done — do not batch updates to the end of the turn. ' +
+    'Write each step so a teammate who lost the conversation could pick it up cold: name the file or symbol, the exact change, and the verification, so the plan survives context compaction. ' +
+    'plan_update creates notes.md for you when the task warrants it; read_file the full notes.md whenever you need to recover context after compaction. ' +
+    'When every step is completed, plan_update settles the plan to `## Done:` automatically. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
   );
 
   return `${staticBody}\n\n${dynamicParts.join('\n\n')}`;

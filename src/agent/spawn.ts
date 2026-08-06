@@ -109,6 +109,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const readOnly = new Set(['read_file', 'glob', 'grep', 'web_search', 'web_fetch', 'use_skill', 'memory_search', 'memory_list']);
   toolsOverride = chatTools.filter((tool) =>
     tool.function.name !== 'sub-agent' &&
+    // plan_update 直写主会话 notes.md(不走 overlay),子代理不应改动主计划——统一排除。
+    tool.function.name !== 'plan_update' &&
     (!requested || requested.has(tool.function.name)) &&
     (mode === 'write' || readOnly.has(tool.function.name)),
   );

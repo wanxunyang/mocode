@@ -13,6 +13,7 @@ import { webSearchTool } from './web-search.js';
 import { webFetchTool } from './web-fetch.js';
 import { useSkillTool } from './use-skill.js';
 import { askHumanTool } from './ask-human.js';
+import { planUpdateTool } from './plan-update.js';
 import { memorySaveTool } from './memory-save.js';
 import { memorySearchTool } from './memory-search.js';
 import { memoryListTool } from './memory-list.js';
@@ -65,6 +66,9 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   web_fetch: { effect: 'network', concurrency: 'parallel', supportsAbort: true },
   use_skill: { effect: 'read', concurrency: 'serial' },
   ask_human: { effect: 'read', concurrency: 'serial' },
+  // plan_update 只写内部 notes.md(session 工作面),不作为用户代码 mutation 追踪/回滚/diff;
+  // 串行即可(调用不频繁),固定资源键让并发调用排队。
+  plan_update: { effect: 'write', concurrency: 'serial', resources: () => ['session-notepad'] },
   memory_save: { effect: 'write', concurrency: 'serial', resources: memoryResource },
   memory_search: { effect: 'write', concurrency: 'serial', resources: memoryResource },
   memory_list: { effect: 'read', concurrency: 'serial', resources: memoryResource },
@@ -97,6 +101,7 @@ const rawBuiltinTools: Tool[] = [
   webFetchTool,
   useSkillTool,
   askHumanTool,
+  planUpdateTool,
   ..._memoryTools,
   subAgentTool,
 ];
