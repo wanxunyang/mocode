@@ -211,6 +211,57 @@ export function buildNotepadSection(sessionId = getCurrentSessionId()): string {
   }
 }
 
+/**
+ * 抽取 notes.md 中**唯一活跃**的 `## Plan:` 段原文（含标题行到下一个 `## ` 之前）。
+ * 用于 compact 后把计划重注入系统提示，避免 agent 因上下文压缩丢失执行计划。
+ * 已结算（`## Done:`）或无 plan 时返回 null。
+ */
+export function extractActivePlanSection(sessionId = getCurrentSessionId()): string | null {
+  if (!sessionId) return null;
+  const root = getSandboxRoot() ?? process.cwd();
+  const p = path.join(root, '.mocode', 'sessions', sessionId, 'notes.md');
+  if (!fs.existsSync(p)) return null;
+  try {
+    const normalized = fs.readFileSync(p, 'utf8').replace(/\r\n?/g, '\n');
+    const lines = normalized.split('\n');
+    const start = lines.findIndex((l) => /^## Plan:\s*.+$/.test(l));
+    if (start < 0) return null;
+    const endOffset = lines.slice(start + 1).findIndex((l) => /^##\s/.test(l));
+    const end = endOffset < 0 ? lines.length : start + 1 + endOffset;
+    return lines.slice(start, end).join('\n').trimEnd();
+  } catch {
+    return null;
+  }
+}
+
+/** compact 重注入用的幂等标记：history[0] 中夹住活跃 plan 块，重复注入只替换不累积。 */
+const ACTIVE_PLAN_MARKER = '\n\n<!-- mocode:active-plan -->\n';
+
+/**
+ * 把活跃 `## Plan:` 段重注入系统提示（history[0]）。compact 后调用：
+ * 若 notes.md 有活跃 plan，则覆盖旧标记块写入最新内容；若无，则清掉残留标记块。
+ * 直接改 history[0].content（compact 不破坏 index 0），幂等，返回是否改动。
+ */
+export function reinjectActivePlanIntoSystem(
+  history: { role: string; content?: unknown }[],
+): boolean {
+  const sys = history[0];
+  if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return false;
+  let content = sys.content;
+  const markerIdx = content.indexOf(ACTIVE_PLAN_MARKER);
+  if (markerIdx >= 0) {
+    content = content.slice(0, markerIdx).replace(/\s+$/, '');
+  }
+  const plan = extractActivePlanSection();
+  if (!plan) {
+    if (markerIdx < 0) return false;
+    sys.content = content;
+    return true;
+  }
+  sys.content = `${content}${ACTIVE_PLAN_MARKER}${plan}\n`;
+  return true;
+}
+
 const SYSTEM_PROMPT_MEMORY_SECTION = `
 ## Memory (cross-session facts)
 - The prompt may contain a title/summary index; retrieve details with memory_search or inspect all with memory_list.

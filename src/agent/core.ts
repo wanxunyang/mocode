@@ -44,7 +44,7 @@ import {
 } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
 import { isToolResultSuccess } from '../context/utils.js';
-import { config } from '../config/index.js';
+import { config, reinjectActivePlanIntoSystem } from '../config/index.js';
 import { t } from '../i18n/index.js';
 import { jailResolve } from '../sandbox/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
@@ -490,6 +490,8 @@ export async function runAgentCore(
           runtimeContextState.lifecycleStats = lifecycle.stats();
         }
         rehydrateArtifacts(runtimeContextState, history);
+        // ② compact 后把活跃 plan 重注入系统提示，避免 agent 因上下文压缩丢失执行计划。
+        reinjectActivePlanIntoSystem(history);
       }
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')
       mode = 'idle';

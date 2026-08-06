@@ -16,6 +16,7 @@ import {
   buildBasePrompt,
   getPlanModeSuffix,
   hasCodegraphIndex,
+  reinjectActivePlanIntoSystem,
   DEFAULT_CONTEXT_WINDOW_TOKENS,
 } from '../config/index.js';
 import {
@@ -1613,6 +1614,8 @@ export async function startRepl(
       // focus 透传到 compact_history action 的 LLM 摘要 prompt。
       // 返回 SchedulerRunLog 给 UI 显示决策;退化路径(开关关时)在 manualCompact 内部走 compactHistory。
       const log = await manualCompact(history, focus, { force });
+      // ② compact 后把活跃 plan 重注入系统提示（history[0]），避免 agent 因上下文压缩丢失执行计划。
+      if (log.compactHistoryCalled) reinjectActivePlanIntoSystem(history);
       const d = log.compactDetail;
       appendCurrentSessionRuntimeEvent('compact', {
         source: 'manual',
