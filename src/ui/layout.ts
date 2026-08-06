@@ -149,11 +149,12 @@ let statusText = '';
 let spinnerFrame: string | undefined;
 let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
 let turnTimer: NodeJS.Timeout | null = null; // 走时刷新计时器(独立于 spinner):流式期间 spinner 停转,由它续刷状态行。
-// 运行态状态行 chip 心跳帧(♥/♡ 明灭)。turnTimer 每 tick 推进一帧,让状态行前导符在 agent
-// 运行时跳动——agent 的 spinner 走内容区续写位(paintLiveAtCursor),不调 setStatus,
-// 故状态行 chip 靠 turnTimer 独立驱动。INPUT 态 runningFrame=-1,composeStatus 退回静态 ●。
+/** 当前 plan chip 占用脚栏行数(1 或 2)。composePlanLines 每次重算后写入。
+ *  驱动 paintInput setRegion(fh) 动态撑高脚栏;drawStatusBar 据此画 1/2 行 plan,
+ *  与 spinner/上线/输入/下线/model 行的 +1/+2/+3/+4/+5 偏移天然一致(contentBottom 自动重算)。 */
+let planRows: 1 | 2 = 1;
+let runningFrame = -1; // 运行态状态行 chip 心跳帧(♥/♡ 明灭);INPUT 态 -1 退回静态 ●
 const RUNNING_FRAMES = ['♥', '♡'];
-let runningFrame = -1;
 // 运行态用户打字时暂停流式物理写:流式每个 token 要 cup 到 contentRow 写入,IME 候选窗逐光标移动跟踪会跟过去;
 // 用户打字期间只喂缓冲、不物理写,光标留输入框;停手 USER_ACTIVE_PAUSE_MS 后 flush 重画缓冲内容。
 let userActiveUntil = 0; // 打字活跃截止时刻(Date.now()+PAUSE);0=未活跃
@@ -272,12 +273,12 @@ export function setRegion(fh: number): Geo {
   return g;
 }
 
-/** 运行态真光标(隐藏)的归位点 = 输入框光标位:行 = 动态 contentBottom+4(resize 安全)。
+/** 运行态真光标(隐藏)的归位点 = 输入框光标位:行 = 动态 contentBottom+3+planRows(resize 安全)。
  *  非 dim 运行态(与空闲态同色、可任意位置编辑)→ 归当前编辑位,供 IME 锚定气泡到光标处;
  *  dim 占位(空 + placeholder)兼容态→ 归输入框起点。供 IME 锚定。 */
 function runningCaretPos(): { row: number; col: number } {
   const g = getGeo();
-  const row = g.contentBottom + 4;
+  const row = g.contentBottom + 3 + planRows;
   if (lastView && !lastView.dim) {
     const promptW = displayWidth(lastView.prompt);
     const line = lastView.lines[lastView.cursorLine] ?? '';
@@ -1060,8 +1061,8 @@ function clearInputSelection(): void {
 /** 屏行是否落在底栏输入行范围内(paintInput 的 firstInputRow..firstInputRow+inputRowsAvail-1)。 */
 function isInputRow(row: number): boolean {
   const g = getGeo();
-  const firstInputRow = g.contentBottom + 4;
-  const inputRowsAvail = Math.max(0, g.footerH - 5);
+  const firstInputRow = g.contentBottom + 3 + planRows;
+  const inputRowsAvail = Math.max(0, g.footerH - 4 - planRows);
   return row >= firstInputRow && row < firstInputRow + inputRowsAvail;
 }
 
@@ -1131,8 +1132,8 @@ function inputScreenToInputPos(
   if (!lastView) return null;
   const g = getGeo();
   const promptW = displayWidth(lastView.prompt);
-  const firstInputRow = g.contentBottom + 4;
-  const inputRowsAvail = Math.max(0, g.footerH - 5);
+  const firstInputRow = g.contentBottom + 3 + planRows;
+  const inputRowsAvail = Math.max(0, g.footerH - 4 - planRows);
 
   // 输入框可视区的 (visRow, visCol) 屏幕坐标 → 0-based。
   // 点到可视区末行之下(空白区)→ 落到最末可视行(光标归最后一段);isInputRow 已挡可视区之上的点击。
@@ -1567,34 +1568,62 @@ function formatLiveUsageChip(u: { promptTokens: number; completionTokens: number
 }
 
 /** spinner 行上方的「虚拟空行」(contentBottom+1)。
- *  - 有活跃 plan:显「plan: <summary> ▸ N. step」整行左对齐(yellow + dim)
+ *  - 有活跃 plan:显「plan: <summary> ▸ N. step」整行左对齐(yellow)
  *  - 无活跃 plan:空(保留原分隔视觉,避免内容贴输入区)
+ *  - 过长(> cols):始终**截断保 1 行 + "…"**,不撑高脚栏、不拆 2 行——
+ *    步进式任务标题/current step 通常是自然语言,即使切「 ▸ 」拆 2 行,第 2 行也大概率仍超长
+ *    (实测「第三步:实现核心业务模块。…」本身就比 cols 长),拆完依然覆盖 spinner/输入区,得不偿失。
+ *    截断 + "…" 一行内永远不溢出,脚栏恒 6 行,spinner/输入/下线/model 行偏移稳定。
  *  这行在 DECSTBM 滚动区外([1, contentBottom]),稳定不滚。 */
-function composePlanLine(status: StatusBarData, cols: number): string {
+function composePlanLines(status: StatusBarData, cols: number): string[] {
   const plan = (status.planSummary ?? '').trim();
-  if (!plan) return ''; // 无 plan:画空,等 paint 路径 clearLine
-  // 整行左对齐,不留右段(plan 自带进度信息,不需要 cwd)
-  return `${ui.yellow}${plan}${ui.reset}`;
+  if (!plan) {
+    planRows = 1;
+    return [];
+  }
+  const w = displayWidth(stripAnsi(plan));
+  if (w <= cols) {
+    planRows = 1;
+    return [`${ui.yellow}${plan}${ui.reset}`];
+  }
+  // 溢出:截断为 1 行 + "…" 后缀(留 1 列空间给省略号)。
+  planRows = 1;
+  return [`${ui.yellow}${truncateDisplay(plan, Math.max(1, cols - 1))}…${ui.reset}`];
 }
 
 /** 画状态行(plan 行 + spinner 行 + model 行,三行)。RUNNING 态 spinner 频繁调。
- *  行号(footerH=6):
- *    plan 行     = contentBottom+1  (活跃 plan 时显 chip;无则空)
- *    spinner 行  = contentBottom+2  (● 空闲 / ⠹ 思考中… / etc)
- *    上线        = contentBottom+3  (画在 paintInput)
- *    输入行      = contentBottom+4
- *    下线        = contentBottom+5
- *    model 行    = rows              (屏底:auto + ctx + cwd) */
+ *  行号(footerH=6 当 plan 单行;footerH=7 当 plan 撑 2 行):
+ *    plan 行     = contentBottom+1          (单行)
+ *    plan 第 2 行 = contentBottom+2          (双行,可选)
+ *    spinner 行  = contentBottom+1+planRows  (● 空闲 / ⠹ 思考中… / etc)
+ *    上线        = contentBottom+2+planRows  (画在 paintInput)
+ *    输入行      = contentBottom+3+planRows
+ *    下线        = contentBottom+4+planRows
+ *    model 行    = rows                       (屏底:auto + ctx + cwd) */
 export function drawStatusBar(status?: StatusBarData): void {
   if (!active || !base) return;
   const s = status ?? { ...base, status: statusText, spinnerFrame };
   const g = getGeo();
-  const planRow = g.contentBottom + 1;
-  const spinnerRow = g.contentBottom + 2;
+  const planLines = composePlanLines(s, g.cols);
+  const planRow1 = g.contentBottom + 1;
+  const spinnerRow = g.contentBottom + 1 + planRows;
   const modelRow = g.rows; // 屏底:model 行
-  // 一次写入:三行 cup+clear+内容,末尾 cup 回续写位/输入框光标
-  let out =
-    cup(planRow, 1) + esc.clearLine + composePlanLine(s, g.cols) +
+  // plan 可能占 1 或 2 行(过长自动撑开);spinner/model 行随之平移。
+  // 一次写入:plan 1/2 行 + spinner 行 + model 行,末尾 cup 回续写位/输入框光标。
+  let planBuf = '';
+  for (let i = 0; i < planLines.length; i++) {
+    planBuf += cup(planRow1 + i, 1) + esc.clearLine + planLines[i];
+  }
+  // 计划行从 2 行降到 1 行时,清掉残留的第 2 行(撑高后回退不留尾巴)。
+  if (planRows === 1 && g.footerH > 6) {
+    planBuf += cup(planRow1 + 1, 1) + esc.clearLine;
+  }
+  // plan 从非空变成空(已结算为 ## Done:/ notes 里无活跃 ## Plan: 段)时,清掉残留的 plan 行 1。
+  // 否则上轮渲染的「plan: 标题 (N/M) ▸ 当前步」会卡在底栏「虚拟空行」位置直到下一次重启 REPL。
+  if (planLines.length === 0) {
+    planBuf += cup(planRow1, 1) + esc.clearLine;
+  }
+  let out = planBuf +
     cup(spinnerRow, 1) + esc.clearLine + composeSpinnerLine(s, g.cols) +
     cup(modelRow, 1) + esc.clearLine + composeModelLine(s, g.cols);
   if (mode === 'running') {
@@ -1892,7 +1921,7 @@ export function paintInput(view: InputView): void {
         promptW,
         preGeo.rows
       );
-  const needFooterH = 5 + vis.inputRows; // 1 虚拟空 + 1 spinner 行 + 1 上线 + 输入行 + 1 下线 + 1 model 行
+  const needFooterH = 5 + vis.inputRows + (planRows - 1); // 1 虚拟空 + 1 spinner 行 + 1 上线 + 输入行 + 1 下线 + 1 model 行 + plan 多出的行数
   let g = preGeo;
   if (needFooterH !== footerH) {
     // setRegion 自己 write(DECSTBM + 清行 + 归位):先把已累积的擦除 flush 出去保序(擦除用的是旧几何的
@@ -1915,25 +1944,38 @@ export function paintInput(view: InputView): void {
   // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):
   //     - 无活跃 plan:清空保留作分隔(原设计)
   //     - 有活跃 plan:渲染 plan chip(整帧重画时也要更新,避免 listener 漏触发后残留)
+  //     - plan 过长:占 2 行(planRows=2),spinner/上线/输入行随之整体下移 1 行
+  //     paintInput 与 drawStatusBar 共享同一 planRows 模块态,setRegion 已据此把脚栏撑高。
   {
-    const plan = (base.planSummary ?? '').trim();
-    buf += cup(g.contentBottom + 1, 1) + esc.clearLine;
-    if (plan) buf += `${ui.yellow}${plan}${ui.reset}`;
+    const planBuf = composePlanLines(base as StatusBarData, preGeo.cols);
+    for (let i = 0; i < planBuf.length; i++) {
+      buf += cup(g.contentBottom + 1 + i, 1) + esc.clearLine + planBuf[i];
+    }
+    // 计划行从 2 行降到 1 行(plan 当前很短):清掉残留的第 2 行,不留尾巴。
+    if (planBuf.length < planRows && planRows === 2) {
+      buf += cup(g.contentBottom + 2, 1) + esc.clearLine;
+      planRows = 1;
+    }
+    // plan 从非空变成空(已结算/无活跃段)时,清掉残留的 plan 行 1。
+    // 上面 for 循环在 planBuf.length===0 时不写任何 cup,需要显式清一行回到「虚拟空行」。
+    if (planBuf.length === 0) {
+      buf += cup(g.contentBottom + 1, 1) + esc.clearLine;
+    }
   }
 
   // 3. 状态行:spinner 行 + model 行(两行式底栏)
-  const spinnerRow = g.contentBottom + 2; // +1 虚拟空行(plan 行),+2 spinner 行
+  const spinnerRow = g.contentBottom + 1 + planRows; // plan 占 planRows 行(1 或 2),spinner 紧跟其后
   const modelRow = g.rows; // 屏底:model 行
   const status: StatusBarData = { ...base, status: statusText, spinnerFrame };
   buf += cup(spinnerRow, 1) + esc.clearLine + composeSpinnerLine(status, g.cols);
   buf += cup(modelRow, 1) + esc.clearLine + composeModelLine(status, g.cols);
 
   // 3b. 上线(输入框顶):满屏宽细线 ─(cyan),框住输入区上边界
-  buf += cup(g.contentBottom + 3, 1) + esc.clearLine + ui.accent + '─'.repeat(g.cols) + ui.reset;
+  buf += cup(g.contentBottom + 2 + planRows, 1) + esc.clearLine + ui.accent + '─'.repeat(g.cols) + ui.reset;
 
-  // 4. 输入行(g.contentBottom+4 .. rows-1)——按可视行画,首行带 prompt、其余缩进 promptW
-  const firstInputRow = g.contentBottom + 4;
-  const inputRowsAvail = g.footerH - 5; // 去掉虚拟空/spinner行/上线/下线/model行,留输入行
+  // 4. 输入行(g.contentBottom+3+planRows .. rows-1)——按可视行画,首行带 prompt、其余缩进 promptW
+  const firstInputRow = g.contentBottom + 3 + planRows;
+  const inputRowsAvail = vis.inputRows; // 脚栏总高 - 1(spinner) - 1(上 sep) - 1(下 sep) - 1(model) - planRows
   const indent = ' '.repeat(promptW);
   // 光标:不画反白块/假光标——输入框走终端真光标(WT / VSCode 终端默认竖线/闪烁块,
   // 各终端表现略不同但都贴合 IME 候选气泡且不再"挡住字符")。真光标位置由下方第 6 步 cup 写。
@@ -2069,7 +2111,7 @@ function windowSingleLine(text: string, cursor: number, contentW: number): { sho
 export function paintRunningInput(text: string, cursor: number, placeholder?: string): void {
   if (!active || !base) return;
   const g = getGeo();
-  const inputRow = g.contentBottom + 4; // 运行态 footerH 恒 6(单行,无 setRegion)
+  const inputRow = g.contentBottom + 3 + planRows; // 运行态 footerH 随 plan 行数动态(6 或 7)
   const promptW = displayWidth('❯ ');
   const contentW = Math.max(1, g.cols - promptW);
   let outLine: string;
@@ -2120,7 +2162,10 @@ export function enterInputMode(status: string = t('repl.idle')): void {
     if (active) repaintViewport();
   }
   if (active && base) {
-    setRegion(6); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行(两行式底栏)
+    // 先按当前 base.planSummary 重算 planRows(可能从上次会话残留 stale 值),再据此 setRegion
+    // 撑出正确脚栏高;否则 plan 撑 2 行时 setRegion(6) 会把 spinner 挤到 plan 第 2 行位置。
+    composePlanLines(base as StatusBarData, (getGeo()).cols);
+    setRegion(4 + planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
     paintInput({
       prompt: '❯ ',
       lines: [''],
@@ -2141,7 +2186,10 @@ export function enterRunningMode(status: string, placeholder: string): void {
   resetScroll(); // 若上轮 INPUT 滚动过(未打字回底),新轮回尾
   lockScrollToBottom(); // 轮首短时锁:吸收发消息前后残留滚轮事件,保 agent 输出从底部开始(锁过期或轮末 enterInputMode 解)
   if (active && base) {
-    setRegion(6); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行
+    // 先按当前 base.planSummary 重算 planRows(可能从上次会话残留 stale 值),再据此 setRegion
+    // 撑出正确脚栏高;否则 plan 撑 2 行时 setRegion(6) 会把 spinner 挤到 plan 第 2 行位置。
+    composePlanLines(base as StatusBarData, (getGeo()).cols);
+    setRegion(4 + planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
     paintInput({
       prompt: '❯ ',
       lines: [''],
@@ -2167,7 +2215,10 @@ export function enterAltScreen(): void {
   applyTerminalBackground();
   stdout.write(esc.mouseOn); // 完整鼠标追踪(按下/拖动/释放/滚轮)→ mouse.swallow 重组 → handleMouseEvent
   mouse.setHandler(handleMouseEvent);
-  setRegion(6); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行(两行式底栏)
+  // 进入 alt screen 前 base 可能已设了 planSummary;按当前 planSummary 重算 planRows,
+  // 让首次 setRegion 撑出正确脚栏高(否则 plan 撑 2 行时会被 spinner 行覆盖)。
+  if (base) composePlanLines(base as StatusBarData, (getGeo()).cols);
+  setRegion(4 + planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
   contentRow = 1;
   contentCol = 1;
   segmentStartRow = 1;
