@@ -92,6 +92,9 @@ export interface Config {
   maxSteps: number;
   /** 子 Agent 总开关。默认关闭；/subagent on|off 运行时切换并刷新模型工具表。 */
   subAgentEnabled: boolean;
+  /** 前端工具簇总开关(browser / dev_server / screenshot / view_image)。默认关闭；
+   *  /fe on|off 运行时切换并刷新模型工具表;这些工具依赖 playwright 二进制或抓取桌面,隐私/资源面大,默认不暴露。 */
+  frontendToolsEnabled: boolean;
   /** 子 Agent 默认步数上限，只防止无限循环；调用方可按任务提高。 */
   subAgentMaxSteps: number;
   /** 会话落盘目录(cwd 下)。 */
@@ -301,33 +304,30 @@ ${buildCodegraphSection()}
 - Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.
 ${t('assistant.languageInstruction')}`;
 
-  // 动态段(置于末尾):memory 索引 + notepad 目录与使用说明。
-  // 按需注入(#13):仅当有内容才拼对应标题/说明,避免空标题与无文件时的模板噪声。
-  //   - "## Project context" 仅当 memorySection/notepadSection 非空;
-  //   - notepad 使用说明仅当 notes.md 文件存在(notepadSection 非空)—
-  //     无文件时连 marker 都不拼,既省 token 也让前缀缓存更稳。core 切片
-  //     回退到 MARKER_DYNAMIC_SECTION 或整段(见 buildMocodeCorePrompt)。
+  // 动态段(置于末尾):memory 索引 + notepad 索引 + notepad 使用说明。
+  // 按需注入(#13):有内容的索引才拼对应标题,避免空标题噪声。
+  //   - "## Project context" 仅当 memorySection/notepadSection 非空(notepad 索引依赖 notes.md 存在);
+  //   - notepad 使用说明**无条件**注入:否则会陷入"说明依赖 notes.md 存在 → 模型不知要建 → 文件永不存在"的鸡生蛋循环,功能对模型不可见。说明放在 prompt 末尾,不影响 staticBody 的前缀缓存。
   const dynamicParts: string[] = [];
   const ctxContent = `${memorySection}${notepadSection}`.trimEnd();
   if (ctxContent) {
     dynamicParts.push(`## Project context (dynamic reference)\n${ctxContent}`);
   }
-  if (notepadSection) {
-    dynamicParts.push(
-      `## Session Notepad (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
-      'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
-      'Keep at most one active plan:\n' +
-      '```\n' +
-      '## Plan: <title>\n' +
-      'Goal: <outcome>\n' +
-      '### Steps\n' +
-      '- [ ] 1. <verifiable step>\n' +
-      '### Progress\n' +
-      '- <completed phase and evidence>\n' +
-      '```\n' +
-      'Update checkboxes and Progress after each completed phase. Before the final reply, reconcile the plan with actual work, then rename it to `## Done:` or remove it. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
-    );
-  }
+  dynamicParts.push(
+    `## Session Notepad (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
+    'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
+    'Keep at most one active plan:\n' +
+    '```\n' +
+    '## Plan: <title>\n' +
+    'Goal: <outcome>\n' +
+    '### Steps\n' +
+    '- [ ] 1. <verifiable step>\n' +
+    '### Progress\n' +
+    '- <completed phase and evidence>\n' +
+    '```\n' +
+    'Create this file proactively with write_file when the task warrants it; read_file the full notes.md whenever you need to recover context after compaction.\n' +
+    'Update checkboxes and Progress after each completed phase. Before the final reply, reconcile the plan with actual work, then rename it to `## Done:` or remove it. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
+  );
 
   return `${staticBody}\n\n${dynamicParts.join('\n\n')}`;
 }
@@ -397,6 +397,7 @@ export const config: Config = {
   maxSteps: Number(process.env.MAX_STEPS) || 1000,
   subAgentEnabled: process.env.MOCODE_SUBAGENT_ENABLED === 'true',
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || Number(process.env.MAX_STEPS) || 1000,
+  frontendToolsEnabled: process.env.MOCODE_FRONTEND_TOOLS_ENABLED === 'true',
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
   sandboxRoot: process.env.SANDBOX_ROOT || undefined,
@@ -452,6 +453,17 @@ export function isSubAgentEnabled(): boolean {
 export function updateSubAgentConfig(enabled: boolean): void {
   config.subAgentEnabled = enabled;
   process.env.MOCODE_SUBAGENT_ENABLED = enabled ? 'true' : 'false';
+}
+
+/** 前端工具簇总开关；默认 false，关闭时 browser/dev_server/screenshot/view_image 不进入模型工具表。 */
+export function isFrontendToolsEnabled(): boolean {
+  return config.frontendToolsEnabled;
+}
+
+/** 运行时切换前端工具簇；工具 schema 刷新与持久化由 REPL 调用方完成。 */
+export function updateFrontendToolsConfig(enabled: boolean): void {
+  config.frontendToolsEnabled = enabled;
+  process.env.MOCODE_FRONTEND_TOOLS_ENABLED = enabled ? 'true' : 'false';
 }
 
 /**

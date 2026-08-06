@@ -9,6 +9,8 @@ import {
   isMemoryEnabled,
   isSubAgentEnabled,
   updateSubAgentConfig,
+  isFrontendToolsEnabled,
+  updateFrontendToolsConfig,
   updateLanguageConfig,
   languageFromShell,
   buildBasePrompt,
@@ -155,6 +157,13 @@ function buildSlashCommands(): SlashCommand[] {
         { name: 'on', value: '/subagent on', desc: d('commands.subagentOn') },
         { name: 'off', value: '/subagent off', desc: d('commands.subagentOff') },
         { name: 'status', value: '/subagent status', desc: d('commands.subagentStatus') },
+      ],
+    },
+    {
+      name: '/fe', desc: d('commands.fe'), children: [
+        { name: 'on', value: '/fe on', desc: d('commands.feOn') },
+        { name: 'off', value: '/fe off', desc: d('commands.feOff') },
+        { name: 'status', value: '/fe status', desc: d('commands.feStatus') },
       ],
     },
     { name: '/theme', desc: d('commands.theme') },
@@ -2150,6 +2159,51 @@ export async function startRepl(
       }
       layout.contentWrite(
         `${enabled ? ui.green : ui.yellow}${t(enabled ? 'subagent.changedOn' : 'subagent.changedOff')}${ui.reset}\n`,
+      );
+      continue;
+    }
+
+    if (
+      line === '/fe' ||
+      line.startsWith('/fe ') ||
+      line === '/frontend' ||
+      line.startsWith('/frontend ')
+    ) {
+      // /fe — 前端工具簇总开关(browser / dev_server / screenshot / view_image)。
+      // 无参切换 on/off;有参 on|off 显式;status 只读。设计同 /subagent:单一来源
+      // isFrontendToolsEnabled();关闭时 4 个工具不进模型 schema(refreshChatTools 过滤)、
+      // 运行时 getRuntimeDisabledTools 兜底拦截、plan 模式 getPlanDisabledTools 也剔除。默认 false。
+      const raw = line.startsWith('/fe ')
+        ? line.slice('/fe '.length)
+        : line.startsWith('/frontend ')
+          ? line.slice('/frontend '.length)
+          : line === '/frontend'
+            ? ''
+            : line.slice('/fe'.length);
+      const arg = raw.trim().toLowerCase();
+      if (arg === '' || arg === 'status') {
+        const enabled = isFrontendToolsEnabled();
+        const state = t(enabled ? 'fe.stateOn' : 'fe.stateOff');
+        layout.contentWrite(
+          `${ui.accent}${t('fe.status', { state })}${ui.reset}\n` +
+          `${ui.dim}MOCODE_FRONTEND_TOOLS_ENABLED=${enabled ? 'true' : 'false'} · ${CONFIG_PATH}${ui.reset}\n`,
+        );
+        continue;
+      }
+      if (arg !== 'on' && arg !== 'off') {
+        layout.contentWrite(`${ui.yellow}${t('fe.usage')}${ui.reset}\n`);
+        continue;
+      }
+      const enabled = arg === 'on';
+      if (enabled !== isFrontendToolsEnabled()) {
+        updateFrontendToolsConfig(enabled);
+        updateConfigKey('MOCODE_FRONTEND_TOOLS_ENABLED', enabled ? 'true' : 'false');
+        refreshChatTools();
+        history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
+        layout.rewriteBanner(bannerLines(banner()));
+      }
+      layout.contentWrite(
+        `${enabled ? ui.green : ui.yellow}${t(enabled ? 'fe.changedOn' : 'fe.changedOff')}${ui.reset}\n`,
       );
       continue;
     }

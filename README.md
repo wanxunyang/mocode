@@ -8,8 +8,6 @@ A terminal coding agent: give it a goal, and it **completes it autonomously** �
 
 MoCode explores your code, reads/writes/edits files, runs shell commands, and searches the web on its own, driving the task forward through a loop of "think → call a tool → observe the result → think again." It works with any OpenAI-compatible endpoint (GLM, DeepSeek, Qwen, local Ollama / vLLM, etc.), runs as a full-screen TUI with streaming output and visible reasoning.
 
-## Architecture
-
 ## Engineering discipline
 
 MoCode keeps code-level control light and leaves task strategy to the agent:
@@ -221,12 +219,31 @@ The agent operates in **the working directory it was launched from** — to have
 
 The five `memory_*` tools are gated on `MEMORY_ENABLED=true` at startup; toggle at runtime with `/memory_switch` (REPL restart required, by design — see Skills section for the difference between Tier-1 `MOCODE.md` and Tier-2 memory).
 
+The four frontend tools — `browser`, `dev_server`, `screenshot`, `view_image` — are **off by default** (they depend on the Playwright binary, spawn long-lived processes, or capture the desktop). Enable the whole cluster at runtime with `/fe on`; the model only sees them once enabled. Toggle with `/fe on|off|status`.
+
+### Frontend / UI loop
+
+`dev_server` + `browser` form a loop of "start it → open the page → see the rendered result":
+
+```
+dev_server start  command="npm run dev"  readyUrl="http://localhost:5173"
+browser    open  →  navigate  →  click / fill  →  screenshot
+dev_server stop   id=srv-xxxx
+```
+
+- `dev_server` processes survive across tool calls (`run_command` can't — it tree-kills children on timeout or when the turn is interrupted). Readiness waiting supports `readyUrl` (loopback only) or `readyPattern` (matches startup logs); logs go to `.mocode/dev-servers/<id>.log` and support incremental reads via `offset`.
+- `browser` page sessions also persist across calls; screenshots feed back to the model through the multimodal channel, along with recent console output, page errors, and failed requests.
+- Safe defaults: `browser` only allows `http/https` on `localhost / 127.0.0.1 / ::1`, rejecting `file:` and credentialed URLs; set `MOCODE_BROWSER_ALLOW_REMOTE=true` to reach remote hosts. `dev_server` runs arbitrary commands and shares `run_command`'s `dangerous` risk class — requires user confirmation before execution.
+- Both are disabled in plan mode; on exit mocode tree-kills background processes and closes the browser.
+- The browser binary is not bundled with the npm package; run `npx playwright install chromium` before first use.
+
 ## Slash commands
 
 | Command           | Purpose                                                              |
 | ------------------ | ----------------------------------------------------------------------- |
 | `/exit` `/quit`     | Exit MoCode                                                          |
 | `/clear`            | Clear history (keeps the system prompt) + clear screen               |
+| `/image`            | Attach a local image to the next message; supports `attach <path>` / `list` / `clear` |
 | `/context`          | Show a context usage bar (tokens / message count, estimated or measured) |
 | `/skills`           | List discovered skills                                               |
 | `/compact`          | Compress history (optionally with a focus hint: `/compact …`)        |
@@ -241,6 +258,7 @@ The five `memory_*` tools are gated on `MEMORY_ENABLED=true` at startup; toggle 
 | `/plan`             | Switch to plan mode (read-only exploration + plan output, approve to switch to auto) |
 | `/auto`             | Switch back to auto mode (full toolset execution)                     |
 | `/pet`              | Toggle the optional desktop pet (floating window mirroring agent state) |
+| `/fe`               | Toggle the frontend tool cluster `browser` / `dev_server` / `screenshot` / `view_image` on/off (off by default) |
 | `/pet skin`         | Pick a pet skin (↑↓ · Enter)                                          |
 | `/pet quit`         | Fully shut down the pet process (not just disconnect)                 |
 

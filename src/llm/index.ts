@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
-import { config, isSubAgentEnabled } from '../config/index.js';
+import { config, isSubAgentEnabled, isFrontendToolsEnabled } from '../config/index.js';
 import { tools } from '../tools/registry.js';
-import { getPlanDisabledTools } from '../tools/constants.js';
+import { getPlanDisabledTools, FRONTEND_TOOLS } from '../tools/constants.js';
 import { ThinkTagFilter } from './think-filter.js';
 
 // 强制关闭第三方调试日志泄漏:openai SDK 在 process.env.DEBUG === 'true' 时用裸
@@ -179,10 +179,12 @@ export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 export const planChatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 
 export function refreshChatTools(): void {
-  // sub-agent 常驻内部 registry，运行时开关只控制模型可见 schema，因而 on/off 可即时生效。
-  const visibleTools = isSubAgentEnabled()
-    ? tools
-    : tools.filter((tool) => tool.name !== 'sub-agent');
+  // sub-agent 与前端工具簇常驻内部 registry，运行时开关只控制模型可见 schema，因而 on/off 可即时生效。
+  const visibleTools = tools.filter((tool) => {
+    if (tool.name === 'sub-agent') return isSubAgentEnabled();
+    if (FRONTEND_TOOLS.has(tool.name)) return isFrontendToolsEnabled();
+    return true;
+  });
   const next = visibleTools.map((t) => ({
     type: 'function' as const,
     function: {

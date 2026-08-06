@@ -1,5 +1,5 @@
 /** 工具共享的截断 / 上限 / 忽略规则。 */
-import { isMemoryEnabled, isSubAgentEnabled } from '../config/index.js';
+import { isMemoryEnabled, isSubAgentEnabled, isFrontendToolsEnabled } from '../config/index.js';
 
 export const MAX_FILE_LINES = 2000;
 export const MAX_OUTPUT = 20000;
@@ -27,6 +27,21 @@ export const GC_DAYS = 90;
 export const MAX_MEMORY_RESULT = 64000;
 
 export const IGNORE = ['**/node_modules/**', '**/.git/**'];
+
+// ── 前端工具簇(默认关闭,显式开启)─────────────────────────────────────────
+/**
+ * 前端开发相关工具簇:browser / dev_server 依赖 playwright 二进制且拉起长驻进程,
+ * screenshot 抓整个桌面(隐私敏感),view_image 仅视觉模型有用。这 4 个默认不进入
+ * 模型工具表,由 isFrontendToolsEnabled() 单一来源控制;/fe on|off 切换。
+ */
+export const FRONTEND_TOOLS = new Set([
+  'browser',
+  'dev_server',
+  'screenshot',
+  'view_image',
+]);
+
+
 
 // ── plan 模式(只读规划,不执行)──────────────────────────────────────────────
 /**
@@ -56,15 +71,28 @@ export const PLAN_DISABLED_TOOLS = new Set([
  * 调用方(agent/core 串行分支、llm/planChatTools)每次 chat 时调本函数拿当前值。
  */
 export function getPlanDisabledTools(): Set<string> {
-  if (isMemoryEnabled()) return PLAN_DISABLED_TOOLS;
-  const next = new Set<string>(PLAN_DISABLED_TOOLS);
-  next.delete('memory_save');
-  next.delete('memory_update');
-  next.delete('memory_forget');
+  const next = isMemoryEnabled()
+    ? new Set<string>(PLAN_DISABLED_TOOLS)
+    : (() => {
+        const n = new Set<string>(PLAN_DISABLED_TOOLS);
+        n.delete('memory_save');
+        n.delete('memory_update');
+        n.delete('memory_forget');
+        return n;
+      })();
+  // 前端工具簇关闭时,plan 模式 schema 也一并剔除(与 auto 模式一致)。
+  if (!isFrontendToolsEnabled()) {
+    for (const name of FRONTEND_TOOLS) next.add(name);
+  }
   return next;
 }
 
 /** auto/plan 共用的运行时功能开关防线；关闭时即使模型幻觉调用也不得执行。 */
 export function getRuntimeDisabledTools(): Set<string> {
-  return isSubAgentEnabled() ? new Set<string>() : new Set<string>(['sub-agent']);
+  const disabled = new Set<string>();
+  if (!isSubAgentEnabled()) disabled.add('sub-agent');
+  if (!isFrontendToolsEnabled()) {
+    for (const name of FRONTEND_TOOLS) disabled.add(name);
+  }
+  return disabled;
 }

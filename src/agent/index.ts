@@ -150,9 +150,9 @@ function flushToolBatch(expandSingleEntry = false): void {
   currentBatchId = null;
   batch.endBatch(id, layout);
   if (expandSingleEntry) batch.expandSingleEntryFully(id, layout);
-  // 普通摘要只有一个“当前空行”，再 break 一次把它提交为分隔空行。
-  // mutation 自动展开时 content.insertAfter 已先把该当前空行提交到 rows；若这里仍补 \n，
-  // diff 后就会固定出现两条空白行。
+  // 普通批：endBatch 留了 1 个 hasCurrent 空行，break 一次把它提交为分隔空行。
+  // mutation 自动展开：expandSingleEntryFully 自己补 separator (\n)，这里不能再补 \n，
+  // 不然 diff 后面就会出现两条空白行。
   if (!expandSingleEntry) layout.contentWrite('\n');
 }
 

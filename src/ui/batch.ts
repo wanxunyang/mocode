@@ -310,7 +310,7 @@ function expand(
 /** mutation 独占 batch 收尾后立即展示其调用概要和 diff。 */
 export function expandSingleEntryFully(
   id: string,
-  layout: { contentInsertAfter(after: number, lines: string[]): void },
+  layout: { contentInsertAfter(after: number, lines: string[]): void; contentWrite(s: string): void },
 ): void {
   const b = batches.get(id);
   if (!b || b.entries.length !== 1 || expandedBatches.has(id)) return;
@@ -319,6 +319,9 @@ export function expandSingleEntryFully(
     ...buildEntryDetailLines(b.entries[0], entryDetailIndent(b.entries, 0)),
   ];
   layout.contentInsertAfter(b.summaryAbsIdx, lines);
+  // 修复：contentInsertAfter 不再 commit was-current（避免 collapse 后留孤儿空行）；
+  // mutation 路径不再由 flushToolBatch 写 \n separator，所以这里手动补一个 \n。
+  layout.contentWrite('\n');
   expandedBatches.add(id);
   b.expandedEntries.add(0);
   absLineToEntry.set(b.summaryAbsIdx + 1, { batchId: id, entryIndex: 0 });

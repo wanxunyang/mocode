@@ -60,8 +60,6 @@ mocode 不会在任务结束时暗中启动验证瀑布。agent 可以根据任�
 
 <p align="center"><img src="./assets/architecture/pet-bridge-zh-CN.svg" alt="MoCode 桌宠桥:hooks、事件帧、Electron 客户端" width="100%"></p>
 
-## 为什么用 mocode
-
 ## 工程化纪律
 
 mocode 把代码层控制保持得尽量轻，把任务策略交给 agent：
@@ -238,6 +236,8 @@ dev_server stop   id=srv-xxxx
 - 两者在 plan 模式下均被禁用;mocode 退出时会树杀后台进程并关闭浏览器。
 - 浏览器二进制不随 npm 包分发,首次使用前需 `npx playwright install chromium`。
 
+这 4 个前端工具 —— `browser`、`dev_server`、`screenshot`、`view_image` —— **默认关闭**(依赖 Playwright 二进制、会拉起长驻进程或截取桌面)。运行时用 `/fe on` 整体开启,开启后模型才看得到;用 `/fe on|off|status` 切换。
+
 5 个 `memory_*` 工具受启动时 `MEMORY_ENABLED=true` 总开关控制;运行时切换用 `/memory_switch`(需重启 REPL,刻意为之,见下「项目记忆」小节区分 Tier-1 / Tier-2)。
 
 ## 斜杠命令
@@ -261,6 +261,7 @@ dev_server stop   id=srv-xxxx
 | `/plan`         | 切到 plan 模式(只读探查 + 产出计划,审批后切 auto 执行)              |
 | `/auto`         | 切回 auto 模式(全量工具执行)                                  |
 | `/pet`          | 开关桌宠(独立悬浮窗,镜像 agent 状态动画)                          |
+| `/fe`           | 切换前端工具簇 `browser` / `dev_server` / `screenshot` / `view_image` 的开关(默认关闭) |
 | `/pet skin`     | 选桌宠皮肤(↑↓ · Enter)                                  |
 | `/pet quit`     | 完全关闭桌宠进程(而非仅断开本连接)                                 |
 

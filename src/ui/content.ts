@@ -239,17 +239,20 @@ export function lastUserMessageBefore(absStart: number): string | null {
  * 若 segMark 活跃且插入点在 segMark.rowIdx 之前,则 segMark.rowIdx 跟着平移(否则
  * 流式 md 段活跃期间展开/折叠 batch 后,下一个 md chunk 的 setLines 截断到错误位置)。
  *
- * 后置条件:插入后 hasCurrent=false(新空行不由本函数建立);调用方须自行决定续写位
- * (BatchRenderer 在插入后调 layout.contentWrite 续写,新 \n 自然在详情块后建新行)。
+ * 后置条件:插入后 hasCurrent 保持不变(若进来时 hasCurrent=true，则仍为 true),
+ * curRaw 也保持不变 —— cursor 概念上跟到 inserted block 末尾,后续 contentWrite 自然续写。
+ * 关键:不再"先 commit 当前行到 rows 末尾再 splice",那样会在 rows 末尾留下
+ * 一条 was-current 孤儿空行,在后续 collapse 删除 inserted lines 时无法被对称清掉,
+ * 导致下一段文本与该批之间多出 1 行视觉空白(用户报告:「展开又关闭工具信息后
+ * 下面空两行」)。现在 leave cursor 不动，由调用方按需补 separator。
+ * 例外：expandSingleEntryFully (mutation 自动展开) 在调用本函数后
+ * 主动 layout.contentWrite('\n') 写 separator blank,
+ * 因为 mutation 不走 flushToolBatch 的 \n。
  */
 export function insertAfter(after: number, lines: string[]): void {
   if (lines.length === 0) return;
-  if (hasCurrent) {
-    rows.push(rowStartSgr + curRaw + '\x1B[0m');
-    curRaw = '';
-    rowStartSgr = curSgr;
-    hasCurrent = false;
-  }
+  // 修复:不再提交 was-current 行到 rows 末尾(避免后续 collapse 后留孤儿空白)。
+  // cursor 留在原位置(指向 spliced block 之后);调用方按需显式 contentWrite('\n') 补 separator。
   const committed = rows.length;
   // after 是绝对行索引;若超过 committed(例如快照时 hasCurrent=true),钳到末尾
   const target = after < 0 ? 0 : Math.min(after + 1, committed);
@@ -265,18 +268,18 @@ export function insertAfter(after: number, lines: string[]): void {
 /**
  * 从绝对行索引 startIdx(0-based,已 commit)起删 n 行。
  * 用于「已展开明细折回摘要」——把详情行从中段裁掉,保留摘要行和后续内容。
- * startIdx 越界或 n <= 0 直接 no-op。hasCurrent 时先 commit(同 insertAfter)。
+ * startIdx 越界或 n <= 0 直接 no-op。
  *
- * 后置条件:删除后 hasCurrent=false。后续 layout.contentWrite 自然续写。
+ * 不动当前行(同 insertAfter 修复后的语义):cursor 概念上仍指向 spliced
+ * 区间后的同一绝对位置(若 startIdx+1+lines 数 ≥ 新 rows.length,curRaw
+ * 代表的就是 spliced 区间内的逻辑行,内容保留)。
+ * 后置条件:hasCurrent 与 curRaw 与调用前一致。
  */
 export function deleteFrom(startIdx: number, n: number): void {
   if (n <= 0) return;
-  if (hasCurrent) {
-    rows.push(rowStartSgr + curRaw + '\x1B[0m');
-    curRaw = '';
-    rowStartSgr = curSgr;
-    hasCurrent = false;
-  }
+  // 修复：保持与 insertAfter 对称——不动 hasCurrent/curRaw，避免 splice 后
+  // 把 was-current 空行当成普通行 commit 变成孤儿（与 insertAfter 的孤儿
+  // bug 是同一个根因的两个对称面）。
   const committed = rows.length;
   if (startIdx >= committed) return;
   const end = Math.min(startIdx + n, committed);
