@@ -275,11 +275,19 @@ export function endPathMutation(capture: PathMutationCapture, op: string): void 
   if (changed) mutationVersion += 1;
 }
 
+// 构建产物 / 临时 / 缓存目录：可再生运行时状态，扫描它们既昂贵（dist/ 含大量 .js bundle，
+// 全量 readFileSync 会同步卡死事件循环，表现为 run_command 期间滚轮划不动、spinner 冻结），
+// 也易把后台 daemon / 打包器的写入误判成模型改动。回滚本就只应覆盖源码，构建产物可再生。
+const EXCLUDED_WORKSPACE_DIRS = new Set([
+  '.git', '.codegraph', 'node_modules',
+  'dist', 'build', 'out', 'coverage', '.tmp', 'tmp',
+  '.output', '.next', '.vite', '.turbo', '.svelte-kit',
+]);
+
 function isWorkspaceExcluded(full: string): boolean {
   const base = path.basename(full).toLowerCase();
-  // Git 元数据必须永久排除以保护 index；依赖树/代码索引是可再生运行时状态，
-  // 扫描它们既昂贵，也可能把后台 daemon 的写入误判成模型改动。
-  if (base === '.git' || base === '.codegraph' || base === 'node_modules') return true;
+  // Git 元数据必须永久排除以保护 index；依赖树/代码索引/构建产物/临时目录是可再生运行时状态。
+  if (EXCLUDED_WORKSPACE_DIRS.has(base)) return true;
   const sessionDir = path.resolve(config.sessionDir);
   return isInside(sessionDir, full);
 }
