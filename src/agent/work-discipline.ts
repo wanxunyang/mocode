@@ -20,12 +20,11 @@ export function inferModelFamily(model: string | undefined): ModelFamily {
  * 4 阶段核心纪律(英文)。4 个 model family 共用此文本,只在首句与标题
  * 标签上做轻量变体。保持短小，详细的完成检查由动态 checklist 按需注入。
  */
-const CORE_SECTION = `## Working discipline — coding tasks
-
-Use your judgment to choose the shortest reliable path from the request to a useful result.
+const CORE_SECTION = `Use your judgment to choose the shortest reliable path from the request to a useful result.
 
 - Inspect only the code and context needed for the next decision.
 - Make the smallest coherent change and avoid unrelated refactors.
+- Preserve existing behavior and public API compatibility unless the task explicitly requires a change.
 - Decide whether validation is useful based on risk, scope, available commands, and the user's request. Validation is optional, not a completion gate.
 - When validation is useful, choose the smallest relevant check yourself; do not run broad test/build suites by default.
 - Re-read or rerun only when evidence is stale or the next edit depends on exact current content.

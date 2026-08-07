@@ -141,17 +141,53 @@ export function isModelConfigured(): boolean {
 
 const PLATFORM_NOTE = (() => {
   if (process.platform === 'win32') {
-    return `## Environment (Windows)
-- \`run_command\` uses \`cmd.exe /c\`: use cmd syntax and \`%VAR%\`; Unix builtins and command substitution are unavailable.
+    return `- This is Windows: \`run_command\` uses \`cmd.exe /c\` — use cmd syntax and \`%VAR%\`; Unix builtins and command substitution are unavailable.
 - Prefer read_file/glob/grep for file discovery and reading. When shell is necessary, use forward-slash paths or invoke PowerShell explicitly.`;
   }
   if (process.platform === 'darwin') {
-    return `## Environment (macOS)
-- \`run_command\` uses bash with BSD utilities. Prefer read_file/glob/grep; account for BSD/GNU differences when shell commands are necessary.`;
+    return `- This is macOS: \`run_command\` uses bash with BSD utilities. Prefer read_file/glob/grep; account for BSD/GNU differences when shell commands are necessary.`;
   }
-  return `## Environment (Linux/Unix)
-- \`run_command\` uses bash. Prefer read_file/glob/grep when they fit; otherwise use standard POSIX/GNU syntax.`;
+  return `- This is Linux/Unix: \`run_command\` uses bash. Prefer read_file/glob/grep when they fit; otherwise use standard POSIX/GNU syntax.`;
 })();
+
+/**
+ * 默认「声音」(Voice):给 mocode 一点人情味与性格,贴近 ChatGPT / 豆包的语感——
+ * 简洁但有温度、有观点、不谄媚、不啰嗦。这是性格的"底座"。
+ * 性格主要来自**身段/语气约束**,而非长篇指令,所以这段文字很短,不撑爆系统提示。
+ * 用户可用下列方式整段替换(自定义品牌声音):
+ *   1. `<cwd>/.mocode/persona.md`(项目级,最高)或 `~/.mocode/persona.md`(全局)
+ *   2. 环境变量 `MOCODE_PERSONA`(整段覆盖)
+ * 两者皆无则用本默认底座。
+ */
+const DEFAULT_VOICE = `## Voice
+- Act as a skilled engineering partner: clear, concise, practical. Avoid generic chatbot behavior.
+- Give technical recommendations with brief trade-off reasoning when choices exist.
+- Focus on useful information. Avoid unnecessary greetings, apologies, repetition, or filler.
+- Match the user's style and language while staying task-focused.
+- For long operations, briefly state the plan and expected result. Avoid step-by-step narration.
+- State assumptions and ask when uncertain. Do not guess.`;
+
+/** 解析用户自定义声音:persona.md 文件优先(项目级 > 全局),其次 env MOCODE_PERSONA。无则返回 ''。 */
+function readPersonaFile(): string {
+  const candidates = [
+    path.join(process.cwd(), '.mocode', 'persona.md'),
+    path.join(os.homedir(), '.mocode', 'persona.md'),
+  ];
+  for (const p of candidates) {
+    try {
+      const txt = fs.readFileSync(p, 'utf8').trim();
+      if (txt) return txt;
+    } catch {
+      // 不存在/不可读:跳过
+    }
+  }
+  return process.env.MOCODE_PERSONA?.trim() ?? '';
+}
+
+/** 解析最终注入的 Voice 段:用户自定义优先,否则用默认底座。 */
+function buildVoiceSection(): string {
+  return readPersonaFile() || DEFAULT_VOICE;
+}
 
 /**
  * 基础系统提示的"记忆段落":开 isMemoryEnabled() 时才拼。
@@ -308,28 +344,33 @@ export function buildBasePrompt(sessionId = getCurrentSessionId()): string {
   const notepadSection = buildNotepadSection(sessionId);
 
   // 静态主体:稳定段落集中在前,让支持 prompt caching 的后端能命中前缀缓存(#12)。
-  // 约束:staticBody 的前缀段(尤其 ## Core behavior 第一行)必须是纯静态文本,
+  // 约束:staticBody 的前缀段(尤其 ## Identity 第一行)必须是纯静态文本,
   // 不得嵌入会话级可变函数调用(如 t()/config.model)。否则 /language、/model
   // 切换会让最敏感的前缀变化,破坏自动前缀缓存命中。可变值统一放到
-  // ## Termination & Reporting 段末尾(仍在切片边界之前,子 agent 仍能拿到)。
-  const staticBody = `## Core behavior
-You are mocode, a terminal coding agent. Complete programming tasks through a "think → call tool → observe result → think again" loop until solved.
+  // ## Reporting 段末尾(仍在切片边界之前,子 agent 仍能拿到)。
+  const staticBody = `## Identity
+You are mocode, a terminal coding agent.
+
+## Core behavior
+Complete programming tasks through an "analyze → call tool → observe result → decide next step" loop until solved.
 
 ## Modes
 - AUTO is the default: investigate and complete the task with the tools currently exposed.
 - PLAN is read-only research and design; do not make changes until the user approves and switches back to AUTO.
 
-${PLATFORM_NOTE}
-
-${buildWorkDisciplineSection(inferModelFamily(config.model))}
-
 ## Workflow
-- Use existing conversation and tool evidence before gathering more. Inspect only what supports the next decision; do not guess.
-- Keep changes focused. Decide for yourself whether a check is worth running; prefer the smallest relevant check and avoid broad test/build suites unless the task or risk justifies them.
+- Understand: use existing conversation and tool evidence before gathering more; inspect only what supports the next decision, do not guess.
+- Plan: for tasks with 3+ steps or context-loss risk, record the plan with the \`plan_update\` tool (see Session state); keep each step self-contained.
+- Implement: make the smallest coherent change; edit against a fresh read (see Tool policy); avoid unrelated refactors.
+- Verify: decide whether validation is useful by risk and scope; run the smallest relevant check, not broad test/build suites by default.
+- Report: stop when done and give honest conclusions with path:line references (see Reporting).
 - Use web search only when freshness materially affects the answer.
 ${buildCodegraphSection()}
 
-## Tool use
+## Engineering principles
+${buildWorkDisciplineSection(inferModelFamily(config.model))}
+
+## Tool policy
 - During tool-calling turns, stay silent unless something important enough must reach the user — otherwise just call the tool and let it run.
 - Go directly to a known path or symbol; use discovery tools only when the location is unknown.
 - Edit against a FRESH read: before any edit_file/write_file, call read_file on the exact path and copy both its latest hash and the exact target text. Never reconstruct old_string from a grep/summary/diff — those lose whitespace and indentation and cause edit failures.
@@ -340,11 +381,16 @@ ${buildCodegraphSection()}
 - For generated content over roughly 200 lines or 5K tokens, use small staged writes rather than one oversized tool argument.
 - Use \`ask_human\` only for a genuinely user-owned decision; otherwise choose the safest reversible option and proceed.
 
-## Safety & Boundaries
+## Environment
+${PLATFORM_NOTE}
+
+## Safety
 - Get confirmation before irreversible or outward-facing actions such as deletion, push, production changes, or external requests, unless explicitly authorized.
 - Stay within the authorized workspace and disclose anything skipped or unverifiable.
 
-## Termination & Reporting
+${buildVoiceSection()}
+
+## Reporting
 - Stop immediately when no more tools are needed; give conclusions directly.
 - **Do not stop prematurely during exploration**: if you started investigating but haven't gathered enough information to answer the user's question, keep calling tools. Only stop when you have sufficient evidence or hit a dead end.
 - **No flattery / no preamble in conclusions**: skip "Sure", "好的", "我已经完成了" and similar no-information prefixes — jump straight to substance.
@@ -354,14 +400,12 @@ ${t('assistant.languageInstruction')}`;
   // 动态段(置于末尾):memory 索引 + notepad 索引 + notepad 使用说明。
   // 按需注入(#13):有内容的索引才拼对应标题,避免空标题噪声。
   //   - "## Project context" 仅当 memorySection/notepadSection 非空(notepad 索引依赖 notes.md 存在);
-  //   - notepad 使用说明**无条件**注入:否则会陷入"说明依赖 notes.md 存在 → 模型不知要建 → 文件永不存在"的鸡生蛋循环,功能对模型不可见。说明放在 prompt 末尾,不影响 staticBody 的前缀缓存。
+  //   - "## Session state" 使用说明**无条件**注入(放在动态尾段首位):否则会陷入"说明依赖 notes.md 存在 → 模型不知要建 → 文件永不存在"的鸡生蛋循环,功能对模型不可见。动态段在静态前缀之后,不影响 prompt 缓存。
   const dynamicParts: string[] = [];
-  const ctxContent = `${memorySection}${notepadSection}`.trimEnd();
-  if (ctxContent) {
-    dynamicParts.push(`## Project context (dynamic reference)\n${ctxContent}`);
-  }
+
+  // 会话级私有尾段(子 agent 切片会丢弃):Session state 说明无条件注入在前,Project context 按需在后。
   dynamicParts.push(
-    `## Session Notepad (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
+    `## Session state (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
     'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
     'Record and update the execution plan with the `plan_update` tool (preferred over editing checkboxes by hand); it keeps at most one active plan as a `## Plan:` section:\n' +
     '```\n' +
@@ -378,13 +422,18 @@ ${t('assistant.languageInstruction')}`;
     'When every step is completed, plan_update settles the plan to `## Done:` automatically. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
   );
 
+  const ctxContent = `${memorySection}${notepadSection}`.trimEnd();
+  if (ctxContent) {
+    dynamicParts.push(`## Project context\n${ctxContent}`);
+  }
+
   return `${staticBody}\n\n${dynamicParts.join('\n\n')}`;
 }
 
 /** 静态主体结束 + 会话私有段起点标记,供 buildMocodeCorePrompt 稳健切片(#17)。 */
-const MARKER_STATIC_END = '## Termination & Reporting';
-const MARKER_DYNAMIC_SECTION = '## Project context (dynamic reference)';
-const MARKER_DROPPABLE_SECTION = '## Session Notepad (';
+const MARKER_STATIC_END = '## Reporting';
+const MARKER_DYNAMIC_SECTION = '## Project context';
+const MARKER_DROPPABLE_SECTION = '## Session state';
 
 /**
  * Stable, production-grade behavior shared by main and sub agents.
