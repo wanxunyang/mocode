@@ -380,9 +380,12 @@ function readPlanStatusFromNotes(): NotesPlanStatus | null {
     if (!title) return null;
 
     const total = (section.match(/^\s*-\s*\[[ xX]\]\s*\d+\./gm) || []).length;
-    const done = (section.match(/^\s*-\s*\[[xX]\]\s*\d+\./gm) || []).length;
-    const current = section.match(/^\s*-\s*\[ \]\s*\d+\.\s*(.+)$/m)?.[1].trim();
-    const summary = `plan: ${title} (${done}/${total})`;
+    const currentMatch = section.match(/^\s*-\s*\[ \]\s*(\d+)\.\s*(.+)$/m);
+    const current = currentMatch?.[2].trim();
+    // 括号进度 = 「当前执行到的步骤序号/总数」(执行第 1 步显示 1/3),与 `▸ 当前步` 后缀自洽;
+    // 旧语义 done/total 会永远慢一拍(执行第 2 步显示 1/3)。全勾选时显示 total/total(通常已自动结算为 Done,chip 消失)。
+    const activeNo = currentMatch ? Number(currentMatch[1]) : total;
+    const summary = `plan: ${title} (${activeNo}/${total})`;
     // mtime 让“相同内容被重写为一项新计划”也能重新出现，而不被旧轮次误抑制。
     const fingerprint = `${sessionId}\0${fs.statSync(p).mtimeMs}\0${section}`;
     return { fingerprint, summary: current ? `${summary} ▸ ${current}` : summary };
