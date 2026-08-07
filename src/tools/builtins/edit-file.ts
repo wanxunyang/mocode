@@ -49,7 +49,12 @@ expected_hash is required (sha256 from read_file artifact header) and must match
       line_end: { type: 'integer', description: 'Line-range mode: end line (1-based, inclusive). Mutually exclusive with old_string.' },
       expected_hash: { type: 'string', description: 'sha256 hash from the latest read_file artifact header (sha256:<64 hex>).' },
     },
-    required: ['path', 'new_string', 'expected_hash'],
+    // 注意:expected_hash 故意不放进 schema 的 required。
+    // 原因:缺失时若被 AJV 在 schema 层拦下,只会得到泛化的
+    // "缺少必填字段 expected_hash",模型据此只补该字段、反而丢掉 path,形成乒乓失败。
+    // 改为只在 execute 内校验(见下方 normalizeContentHash 检查),缺失时返回富指导信息,
+    // 明确要求先 read_file 并复制最新 hash——与 write_file 的设计保持一致。
+    required: ['path', 'new_string'],
   },
   async execute(args, ctx) {
     const file = String(args.path);

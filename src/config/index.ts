@@ -164,7 +164,7 @@ const DEFAULT_VOICE = `## Voice
 - Give technical recommendations with brief trade-off reasoning when choices exist.
 - Focus on useful information. Avoid unnecessary greetings, apologies, repetition, or filler.
 - Match the user's style and language while staying task-focused.
-- For long operations, briefly state the plan and expected result. Avoid step-by-step narration.
+- Work quietly: jump straight into tool calls without announcing them; reserve visible text for the final answer and truly important mid-task findings. No step-by-step narration.
 - State assumptions and ask when uncertain. Do not guess.`;
 
 /** 解析用户自定义声音:persona.md 文件优先(项目级 > 全局),其次 env MOCODE_PERSONA。无则返回 ''。 */
@@ -371,7 +371,7 @@ ${buildCodegraphSection()}
 ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 
 ## Tool policy
-- During tool-calling turns, stay silent unless something important enough must reach the user — otherwise just call the tool and let it run.
+- Silent Execution: invoke tools directly without preamble. Output visible text ONLY for the final answer and critical mid-task findings. Strictly no step-by-step narration (no "let me…", "让我先…", "now checking…" between calls).
 - Go directly to a known path or symbol; use discovery tools only when the location is unknown.
 - Edit against a FRESH read: before any edit_file/write_file, call read_file on the exact path and copy both its latest hash and the exact target text. Never reconstruct old_string from a grep/summary/diff — those lose whitespace and indentation and cause edit failures.
 - A read_file hash from before a compaction, session resume, edit conflict, or external change is STALE and will be rejected — re-read rather than reuse an old hash.

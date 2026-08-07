@@ -47,9 +47,17 @@ function compile(schema: Record<string, unknown>): CachedValidator {
   return result;
 }
 
-function formatErrors(errors: ErrorObject[] | null | undefined): string {
+function formatErrors(
+  errors: ErrorObject[] | null | undefined,
+  schema?: Record<string, unknown>,
+): string {
   if (!errors?.length) return '参数不符合 JSON Schema';
-  return errors.slice(0, 5).map((error) => {
+  // 收集所有「缺少必填字段」涉及的属性名,用于在文末一次性列出完整必填签名,
+  // 避免模型只补齐报错点名的一个字段、下一次又把别的字段弄丢(乒乓失败)。
+  const missing = errors
+    .filter((e) => e.keyword === 'required')
+    .map((e) => String((e.params as { missingProperty?: unknown }).missingProperty ?? '?'));
+  const body = errors.slice(0, 5).map((error) => {
     const location = error.instancePath || '/';
     if (error.keyword === 'required') {
       const property = String((error.params as { missingProperty?: unknown }).missingProperty ?? '?');
@@ -61,6 +69,17 @@ function formatErrors(errors: ErrorObject[] | null | undefined): string {
     }
     return `${location} ${error.message ?? error.keyword}`;
   }).join('; ');
+
+  let hint = '';
+  const required = (schema?.required as string[] | undefined) ?? [];
+  const properties = (schema?.properties as Record<string, { description?: string }> | undefined) ?? {};
+  if (missing.length > 0 && required.length > 0) {
+    const lines = required
+      .map((k) => `- ${k}: ${properties[k]?.description ?? '(无描述)'}`)
+      .join('\n');
+    hint = `。请一次性补齐全部必填参数,不要在重试时只补其中一部分:\n${lines}`;
+  }
+  return body + hint;
 }
 
 /** Validate after tool-local normalization; AJV itself never coerces or mutates arguments. */
@@ -98,6 +117,6 @@ export function validateToolArguments(
   return {
     valid: false,
     code: 'INVALID_ARGUMENTS',
-    message: formatErrors(compiled.validate.errors),
+    message: formatErrors(compiled.validate.errors, tool.parameters),
   };
 }
