@@ -17,7 +17,7 @@ import {
 import { ui, applyTerminalBackground, resetTerminalBackground } from './theme.js';
 import * as content from './content.js';
 import * as mouse from './mouse.js';
-import { reset as resetBatches, shiftBatchesAfter } from './batch.js';
+import { reset as resetBatches, shiftBatchesAfter, setMaxCols } from './batch.js';
 import { copyToClipboard, readClipboard } from './clipboard.js';
 import { renderMarkdown } from './markdown.js';
 import { t } from '../i18n/index.js';
@@ -2211,6 +2211,7 @@ export function enterRunningMode(status: string, placeholder: string): void {
 export function enterAltScreen(): void {
   if (active || !ui.isTTY) return;
   active = true;
+  setMaxCols(getGeo().cols); // 同步 batch 展开行宽钳制,防超宽行 auto-wrap 打乱屏位
   stdout.write(esc.altOn);
   applyTerminalBackground();
   stdout.write(esc.mouseOn); // 完整鼠标追踪(按下/拖动/释放/滚轮)→ mouse.swallow 重组 → handleMouseEvent
@@ -2239,6 +2240,7 @@ export function enterAltScreen(): void {
     // contentRow 停在旧值、区域未更新,spinner/contentWrite 画到旧行号(「思考中在消息堆里」根因)。
     // 重画 repaintViewport 防抖(下面 timer),避免连续拖动闪烁;但行号/区域必须立即正确。
     const g = getGeo(footerH);
+    setMaxCols(g.cols); // 列宽变 → 展开行钳宽上限同步(后续新展开行生效)
     const total = content.totalRows();
     const committed = content.committedRows();
     // 缩小:contentRow > 新 bottom → 钳到新 bottom

@@ -26,7 +26,9 @@ export const GC_DAYS = 90;
 /** memory_search 结果(召回的记忆正文)的放宽上限:指令性内容,中截破坏语义,对齐 use_skill。 */
 export const MAX_MEMORY_RESULT = 64000;
 
-export const IGNORE = ['**/node_modules/**', '**/.git/**'];
+// .codegraph:codegraph 索引目录(codegraph.db 是 SQLite 二进制 + daemon.log),
+// grep/glob 扫它无意义且会产出数 KB 的超长「行」,污染 TUI 展开渲染。
+export const IGNORE = ['**/node_modules/**', '**/.git/**', '**/.codegraph/**'];
 
 // ── 前端工具簇(默认关闭,显式开启)─────────────────────────────────────────
 /**

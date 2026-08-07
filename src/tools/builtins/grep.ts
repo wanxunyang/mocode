@@ -1,6 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import fg from 'fast-glob';
 import { MAX_RESULTS, IGNORE } from '../constants.js';
+
+// 二进制文件探测:头部 4KB 含 C0 控制字符(NUL/BEL 等)即视为二进制,跳过。
+// 否则 grep 扫到 SQLite/压缩文件等会产出「单行数 KB + 控制字符」的匹配行,
+// 这类行进 TUI 展开后被终端 auto-wrap,物理行与缓冲行失配导致整屏错乱。
+const BINARY_PROBE_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 import { getSandboxRoot, isInsideRoot, jailResolve } from '../../sandbox/index.js';
 import type { Tool } from '../types.js';
 
@@ -64,6 +69,9 @@ export const grepTool: Tool = {
         continue; // 跳过无法读的文件(二进制/权限/沙箱越界)
       }
       scanned++;
+      // 二进制文件(如 .codegraph/codegraph.db 这类 SQLite)跳过:其「行」是数 KB 的
+      // 序列化记录 + 控制字符,匹配行对 LLM 无意义,还会污染 TUI 展开渲染。
+      if (BINARY_PROBE_RE.test(content.slice(0, 4096))) continue;
       const lines = content.split(/\r?\n/);
       const lineNos: number[] = [];
       for (let i = 0; i < lines.length; i++) {

@@ -14,6 +14,7 @@
 
 import { ui } from './theme.js';
 import { t } from '../i18n/index.js';
+import { truncateAnsi } from './render.js';
 
 /** 一条工具调用在批内的展示数据(由 agent 的 hooks 累积,endBatch 时收尾)。 */
 export interface BatchEntry {
@@ -53,6 +54,34 @@ const expandedBatches = new Set<string>();
 
 /** 展开时完整输出的最大行数;超出截断,避免巨型输出撑爆 viewport。 */
 const MAX_EXPAND_LINES = 200;
+
+/** 自洽行允许的最大显示宽(= 终端 cols)。buffer 行超 cols 会被终端 auto-wrap,
+ *  物理行与缓冲行失配 → repaintViewport 的 CUP 寻址全错(屏幕错乱)。 */
+let maxCols = 200;
+
+/** layout 在进 alt 屏 / SIGWINCH 时调,同步当前终端列宽供行宽钳制。 */
+export function setMaxCols(n: number): void {
+  if (Number.isFinite(n) && n >= 8) maxCols = Math.floor(n);
+}
+
+/** 行内控制字符(NUL/BEL/TAB 等,常见于 grep 扫到二进制)替换为可见替代符。
+ *  必须保护 SGR 序列:行已带 ui.* 颜色码,裸 replace 会把 \x1B 一并替换、
+ *  毁掉转义序列(显示成字面 "[90m")。按 SGR 切分后只清洗文本段。 */
+function visibleControl(s: string): string {
+  return s
+    .split(/(\x1b\[[0-9;]*m)/)
+    .map((part, i) => (i % 2 === 1 ? part : part.replace(/[\x00-\x1f\x7f]/g, '·')))
+    .join('');
+}
+
+/** 自洽行统一收尾:行宽钳到 maxCols + 行末补 reset。
+ *  超宽行若直接入 rows[],repaintViewport 逐行 cup+clearLine 直出时终端会
+ *  auto-wrap 成多条物理行,把后续所有行的屏位打乱(用户报告:展开含超长行的
+ *  工具输出后整屏错乱)。truncateAnsi 保留行内 SGR 且断尾补 reset,再统一 \x1B[0m 收尾。 */
+function sanitizeRow(s: string): string {
+  const cleaned = visibleControl(s);
+  return truncateAnsi(cleaned, maxCols) + '\x1B[0m';
+}
 
 export function isMutationToolName(name: string): boolean {
   return name === 'write_file' || name === 'edit_file';
@@ -166,21 +195,23 @@ function buildEntryDetailLines(e: BatchEntry, indent = '      '): string[] {
         if (line === '' && lines.length > 0 && lines[lines.length - 1] === '') continue; // 折叠连续空行
         if (line === '' && lines.length > 0) continue; // 跳过首尾空行(diff 头/尾换行)
         const prefixed = `${ui.dim}${indent}${ui.reset}${line}`;
-        lines.push(prefixed.endsWith('\x1B[0m') ? prefixed : prefixed + '\x1B[0m');
+        lines.push(sanitizeRow(prefixed));
       }
   } else if (e.fullOutput) {
-      // 完整工具输出(纯文本):按行展开,每行缩进 + dim 样式;长输出截断到 MAX_EXPAND_LINES 行
+      // 完整工具输出(纯文本):按行展开,每行缩进 + dim 样式;长输出截断到 MAX_EXPAND_LINES 行。
+      // 每行经 sanitizeRow 钳宽:fullOutput 可能含 grep 扫二进制(db/压缩文件)得到的
+      // 超长行 + 控制字符,不钳会让终端 auto-wrap 打乱屏位。
       const rawLines = e.fullOutput.split('\n');
       const truncated = rawLines.length > MAX_EXPAND_LINES;
       const displayLines = truncated ? rawLines.slice(0, MAX_EXPAND_LINES) : rawLines;
       for (const line of displayLines) {
-        lines.push(`${indent}${ui.gray}${line}${ui.reset}\x1B[0m`);
+        lines.push(sanitizeRow(`${indent}${ui.gray}${line}${ui.reset}`));
       }
       if (truncated) {
-        lines.push(`${indent}${ui.dim}… (${rawLines.length - MAX_EXPAND_LINES} more lines)${ui.reset}\x1B[0m`);
+        lines.push(sanitizeRow(`${indent}${ui.dim}… (${rawLines.length - MAX_EXPAND_LINES} more lines)${ui.reset}`));
       }
   } else if (e.resultSummary) {
-    lines.push(`${indent}${ui.gray}↳ ${e.resultSummary}${ui.reset}\x1B[0m`);
+    lines.push(sanitizeRow(`${indent}${ui.gray}↳ ${e.resultSummary}${ui.reset}`));
   }
   return lines;
 }
@@ -191,7 +222,7 @@ function buildExpandedLines(entries: BatchEntry[]): string[] {
     const result = e.resultSummary ? `  ${ui.gray}↳ ${e.resultSummary}${ui.reset}` : '';
     const branch = index === entries.length - 1 ? '└─' : '├─';
     const failure = e.failed ? `${ui.red}×${ui.reset} ` : '';
-    return `    ${ui.dim}${branch}${ui.reset} ${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}\x1B[0m`;
+    return sanitizeRow(`    ${ui.dim}${branch}${ui.reset} ${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`);
   });
 }
 
