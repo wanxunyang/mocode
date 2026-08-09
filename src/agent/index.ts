@@ -14,6 +14,7 @@ import {
 } from '../ui/render.js';
 import { renderFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
+import * as content from '../ui/content.js';
 import * as batch from '../ui/batch.js';
 import { beginTurn } from '../rollback/index.js';
 import { config } from '../config/index.js';
@@ -33,6 +34,27 @@ import { appendCurrentSessionTraceEvent } from '../session/index.js';
 
 /** 当前 turn 的 batch id(runAgent 内闭包变量;一条 turn 一轮 tool batch 结束即清空)。 */
 let currentBatchId: string | null = null;
+/** 当前活跃的 sub-agent 组容器批 id(同一轮并行派发的多个 sub-agent 合并到这一个顶层摘要行下)。
+ *  null 表示当前没有进行中的子 agent 组。 */
+let subAgentGroupId: string | null = null;
+/** sub-agent 组收口后,与后续内容(普通工具/正文)之间欠一条分隔空行。
+ *  由 flushToolBatch / onText 在合适位置补,尾部已空则不再叠。 */
+let subAgentGroupPendingSeparator = false;
+
+/** 派生子 agent 的工具名。它的调用要独占一批:子 agent 的实时工具明细会挂到这一行下面,
+ *  并行派发多个子 agent 时,每个子 agent 才有自己可归属的摘要行。 */
+const SUB_AGENT_TOOL = 'sub-agent';
+
+/** 缓冲尾部是否已经是空白行(去掉 ANSI 后无可见字符)。用于避免 sub-agent 分隔空行叠成两行。 */
+function isLastContentRowBlank(): boolean {
+  // 用 committedRows 而不是 totalRows：hasCurrent 那行是未提交的光标等待位，
+  // 永远空白，不能把它当作“已经有一条空行分隔”。
+  const committed = content.committedRows();
+  if (committed === 0) return false;
+  const line = content.lineAt(committed - 1);
+  if (line === null) return false;
+  return line.replace(/\x1b\[[0-9;]*m/g, '').trim().length === 0;
+}
 
 interface TurnFileChange {
   path: string;
@@ -96,12 +118,50 @@ function firstLineOf(ui: string | ContentPart[]): string {
  *  重构后改为累积到 BatchRenderer,onToolBatchEnd 时统一打摘要行;
  *  展开/折叠由 BatchRenderer + 鼠标 release 决定,本函数不再直接写屏。 */
 function writeToolHeader(tc: ToolCallRef): void {
-  // 改文件工具是 batch 屏障：先收尾之前的普通工具，确保 mutation 永远独占一批。
-  if (isMutationTool(tc.name)) flushToolBatch();
-  if (!currentBatchId) currentBatchId = batch.beginBatch();
-  batch.recordCall(currentBatchId, tc.name, summarizeToolCall(tc.name, tc.arguments));
-  // 第一条工具开始时立即落摘要；后续调用加入同一 batch，并原地刷新计数。
-  batch.showLiveBatch(currentBatchId, layout);
+  if (tc.name === SUB_AGENT_TOOL) {
+    // sub-agent：同一轮并行派发的多个 sub-agent 合并进同一个「组容器批」——
+    // 顶层只有一个 ● 探索 N ... sub-agent N 摘要行,下面按 └─ sub-agent {...} 逐条
+    // 列出每个子 agent 调用,各自子批(实时工具)更深一层缩进。
+    // 注意：sub-agent header 到来时**不要** flushToolBatch,否则会把正在进行的组容器批收口。
+    if (subAgentGroupId == null) {
+      // 首个 sub-agent 调用：建组容器批(顶层)。label 缺省=「探索」,entries 累计各 sub-agent 调用。
+      subAgentGroupId = batch.beginBatch(undefined, { groupParent: true });
+      batch.recordCall(subAgentGroupId, tc.name, summarizeToolCall(tc.name, tc.arguments), tc.id);
+      batch.bindCall(tc.id, subAgentGroupId);
+      batch.showLiveBatch(subAgentGroupId, layout);
+      // 立即展开第一组 └─ sub-agent 行(运行态不锚定视口),让子 agent 调用马上可见。
+      batch.expandBatch(subAgentGroupId, layout, true);
+    } else {
+      // 同一轮并行派发的后续 sub-agent：向组追加 entry,实时刷新进度。
+      batch.recordCall(subAgentGroupId, tc.name, summarizeToolCall(tc.name, tc.arguments), tc.id);
+      batch.bindCall(tc.id, subAgentGroupId);
+      // 组已展开:追加新的 └─ sub-agent 行(插到已渲染 entry 之后),并刷新顶层摘要行计数。
+      batch.refreshBatchExpanded(subAgentGroupId, layout);
+      batch.showLiveBatch(subAgentGroupId, layout);
+    }
+    return;
+  }
+
+  // 普通 / mutation 工具：先收口 sub-agent 组和普通批。
+  flushToolBatch();
+
+  if (isMutationTool(tc.name)) {
+    // mutation 永远独占一批（diff 要紧跟调用行）。
+    const id = batch.beginBatch();
+    currentBatchId = id;
+    batch.bindCall(tc.id, id);
+    batch.recordCall(id, tc.name, summarizeToolCall(tc.name, tc.arguments));
+    batch.showLiveBatch(id, layout);
+  } else {
+    // 普通工具合并到 currentBatchId。
+    const id = currentBatchId ??= batch.beginBatch();
+    // 结果按 tool_call id 归位：并行执行时 currentBatchId 会漂移，只按“当前批”回填会漏填，
+    // 摘要行就永远停在 ◇（用户实测：子 agent 跑完主侧菱形没变成实心圆）。
+    batch.bindCall(tc.id, id);
+    batch.recordCall(id, tc.name, summarizeToolCall(tc.name, tc.arguments));
+    // 第一条工具开始时立即落摘要；后续调用加入同一 batch，并原地刷新计数。
+    batch.showLiveBatch(id, layout);
+  }
 }
 
 /** 渲染工具结果:mutation 成功走 diff 块(行号 + 语法高亮);其余走一行 preview。
@@ -113,7 +173,24 @@ function writeToolResult(
   preWriteOld: string | null,
   editStartLine: number,
 ): void {
-  if (!currentBatchId) return;
+  // 优先按 tool_call id 反查所属批（并行 / sub-agent 组时 currentBatchId 已不是它）。
+  const batchId = batch.batchIdForCall(tc.id) ?? currentBatchId;
+  if (!batchId) return;
+  if (tc.name === SUB_AGENT_TOOL) {
+    // sub-agent 调用只是组容器批的一个 entry：结果回填到对应 entry 即可,
+    // 无需独立批。全部 entry 完成后收口组容器批(落完成态 + 开放点击展开),
+    // 并与后续内容约定一条分隔空行。
+    const preview = summarizeToolResult(tc.name, output);
+    batch.recordResult(batchId, tc.name, preview, null, output, isToolErrorOutput(output), tc.id);
+    if (batch.isBatchComplete(batchId)) {
+      batch.endBatch(batchId, layout);
+      subAgentGroupId = null;
+      subAgentGroupPendingSeparator = true;
+    } else {
+      batch.showLiveBatch(batchId, layout);
+    }
+    return;
+  }
   let diff: string | null = null;
   if ((tc.name === 'edit_file' || tc.name === 'write_file') && parsed && !isToolErrorOutput(output)) {
     const oldText = tc.name === 'edit_file' ? String(parsed.old_string ?? '') : preWriteOld;
@@ -137,15 +214,40 @@ function writeToolResult(
     });
   }
   const preview = diff ? '' : summarizeToolResult(tc.name, output);
-  batch.recordResult(currentBatchId, tc.name, preview, diff, output, isToolErrorOutput(output));
-  batch.showLiveBatch(currentBatchId, layout);
+  batch.recordResult(batchId, tc.name, preview, diff, output, isToolErrorOutput(output));
+  batch.showLiveBatch(batchId, layout);
   // mutation 结果（成功 diff 或错误输出）立即可见，并阻止后续普通工具并入这一批。
-  if (isMutationTool(tc.name)) flushToolBatch(true);
+  if (isMutationTool(tc.name)) finishStandaloneBatch(batchId, true);
+}
+
+/** 收尾一个独占批（mutation / sub-agent）。按 id 收尾而不是按 currentBatchId：
+ *  同一轮里 mutation 与 sub-agent 混排时，后者的 header 已经把前者切走，
+ *  只认 currentBatchId 会漏掉 diff 展开、把摘要永久留在未完成态。endBatch 幂等。 */
+function finishStandaloneBatch(id: string, expandSingleEntry: boolean): void {
+  if (currentBatchId === id) currentBatchId = null;
+  batch.endBatch(id, layout);
+  if (expandSingleEntry) batch.expandSingleEntryFully(id, layout);
+  // mutation 独占批收尾:分隔空行由 flushToolBatch 负责(见 subAgentGroupPendingSeparator);
+  // 不再有 sub-agent 独占批——sub-agent 已合并进组容器批。
 }
 
 /** 将跨 LLM 工具轮次累计的调用写入内容区；正文开始或整个 turn 收尾时才切批。 */
 function flushToolBatch(expandSingleEntry = false): void {
-  if (!currentBatchId) return;
+  if (!currentBatchId) {
+    // 异常路径:组容器批尚未收口(理论上最后一个 sub-agent 结果时已收口),这里补收口。
+    if (subAgentGroupId) {
+      const id = subAgentGroupId;
+      subAgentGroupId = null;
+      batch.endBatch(id, layout);
+      subAgentGroupPendingSeparator = true;
+    }
+    // 组 / 工具块与后续内容之间补一条分隔空行(尾部已空则不叠,避免空两行)。
+    if (subAgentGroupPendingSeparator) {
+      if (!isLastContentRowBlank()) layout.contentWrite('\n');
+      subAgentGroupPendingSeparator = false;
+    }
+    return;
+  }
   const id = currentBatchId;
   currentBatchId = null;
   batch.endBatch(id, layout);
@@ -153,6 +255,7 @@ function flushToolBatch(expandSingleEntry = false): void {
   // 普通批：endBatch 留了 1 个 hasCurrent 空行，break 一次把它提交为分隔空行。
   // mutation 自动展开：expandSingleEntryFully 自己补 separator (\n)，这里不能再补 \n，
   // 不然 diff 后面就会出现两条空白行。
+  subAgentGroupPendingSeparator = false;
   if (!expandSingleEntry) layout.contentWrite('\n');
 }
 
@@ -181,6 +284,8 @@ export async function runAgent(
   beginTurn(truncateDisplay(firstLineOf(userInput), 40));
   layout.contentMode(); // 防御性:运行态光标归输入框光标位供 IME 锚定(enterRunningMode 已置,这里兜底)
   currentBatchId = null; // 新 turn 清旧 batch id(防上 turn 残留)
+  subAgentGroupId = null;
+  subAgentGroupPendingSeparator = false;
   turnFileChanges = [];
 
   // spinner:状态行最前面转圈(思考中 / 生成 / 执行 工具时,状态栏 lead 位显帧 + 文字)。
@@ -204,8 +309,10 @@ export async function runAgent(
     onText: (s) => {
       // 纯空白 chunk 在视觉上不是正文：既不切 batch，也不写入 markdown 缓冲。
       // 部分兼容后端会在连续工具轮次间流出 " " / "\n"，若据此切批会漏掉首个工具。
-      if (currentBatchId && s.trim().length === 0) return;
-      const followsToolBatch = currentBatchId !== null;
+      // sub-agent 独占批不占 currentBatchId，但同样处在“工具块刚结束”的边界上。
+      const inToolBlock = currentBatchId !== null || subAgentGroupId !== null || subAgentGroupPendingSeparator;
+      if (inToolBlock && s.trim().length === 0) return;
+      const followsToolBatch = inToolBlock;
       // batch 收尾已经统一留了一条空白行。部分后端会把下一段正文以 \n / \n\n
       // 开头发来；去掉这些“边界换行”，避免与 UI 分隔叠成两条空白行。
       const visible = followsToolBatch ? s.replace(/^(?:[ \t]*\r?\n)+/, '') : s;

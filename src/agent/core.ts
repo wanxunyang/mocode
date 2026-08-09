@@ -760,6 +760,7 @@ export async function runAgentCore(
               tc.name,
               tc.arguments,
               signal,
+              { callId: tc.id },
             ));
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
@@ -848,6 +849,7 @@ export async function runAgentCore(
             const started = entries.map((entry) => entry.denied
               ? Promise.resolve(entry.denied)
               : executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
+                  callId: entry.tc.id,
                   onLockAcquired: (lockedArgs) => {
                     entry.diff = readDiffContext(entry.tc, lockedArgs);
                   },
@@ -959,6 +961,7 @@ export async function runAgentCore(
             let diff = readDiffContext(tc, mutationParsed);
             hooks.onToolStart?.(tc.name);
             const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, {
+              callId: tc.id,
               onLockAcquired: (lockedArgs) => {
                 if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
               },

@@ -137,6 +137,8 @@ function terminalOutcome(
 
 export interface ToolExecutionOptions {
   onLockAcquired?: (args: Record<string, unknown>) => void;
+  /** 本次调用的 tool_call id,透传给工具 ctx(编排型工具关联渲染用)。 */
+  callId?: string;
 }
 
 function isTransientExecutionError(error: unknown): boolean {
@@ -205,7 +207,7 @@ async function executeToolOnce(
 
       let raw: ToolExecuteResult;
       try {
-        raw = await tool.execute(args, { signal });
+        raw = await tool.execute(args, { signal, callId: opts?.callId });
       } finally {
         if (pathCapture) endPathMutation(pathCapture, tool.name);
         if (workspaceCapture) endWorkspaceMutation(workspaceCapture, tool.name);

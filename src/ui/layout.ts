@@ -78,6 +78,12 @@ export interface InputView {
 // ── 内部状态 ──
 let active = false;
 
+/** 是否处于全屏 TUI(alt screen)激活态。非 TTY / 嵌入宿主(host)下为 false。
+ *  子 agent 等异步路径据此判断能否把中间过程实时写入主内容区。 */
+export function isTuiActive(): boolean {
+  return active;
+}
+
 // ── 裸 console 防御:第三方库(如 openai SDK)可能用 console.log 直写 stdout,
 // 在 RUNNING 态会落到光标所在的底栏输入框,污染输入。进入 TUI 后把 console.*
 // 劫持到 contentWrite,统一进内容区(运行态下 contentWrite 末尾会把真光标归位输入框),
@@ -688,8 +694,12 @@ export function rewindContent(rowsToRewind: number): void {
  *
  * 续写位(contentRow):若原写头在插入点之后,前移 lines.length,保持相对位置;
  * 若原写头 ≤ after,不变(新行在写头之后)。非 TTY 直接调 content.insertAfter。
+ *
+ * keepViewport:鼠标点击展开时 true(视口锚定原位,详情在下方展开,屏幕不跳);
+ * 子 agent 实时嵌套渲染时传 false —— 那是"新内容"而非"回看展开",必须跟随屏底,
+ * 否则每插一行就把视口冻住 1 行,子 agent 跑起来后主内容区看着像卡住不动。
  */
-export function contentInsertAfter(after: number, lines: string[]): void {
+export function contentInsertAfter(after: number, lines: string[], keepViewport = true): void {
   if (!active || lines.length === 0) return;
   const g = getGeo();
   const totalBefore = content.totalRows();
@@ -718,7 +728,7 @@ export function contentInsertAfter(after: number, lines: string[]): void {
   // 而不是自动跳到展开内容底部(用户体验:点击摘要行,视口不动,详情在下方展开)。
   // 关键:插入点绝对行 = after;插入前视口尾行绝对行 = totalBefore - 1;
   // 插入后要让原视口尾行仍在屏底 → scrollOffset = 插入后新增的、在原视口尾行之后的行数。
-  if (!scrolled && after < totalBefore) {
+  if (keepViewport && !scrolled && after < totalBefore) {
     // 插入点在原缓冲内(非追加到末尾),计算需要滚动的偏移量
     const insertedAfterViewport = after >= (totalBefore - g.contentBottom);
     if (insertedAfterViewport) {

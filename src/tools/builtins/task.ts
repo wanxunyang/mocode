@@ -69,7 +69,8 @@ export const subAgentTool: Tool = {
     const context = typeof args.context === 'string' ? args.context.slice(0, 4000) : undefined;
 
     // 透传主 agent 的 abort signal:主 Ctrl+C 树杀子 agent(chat abort + 工具 abort)。
-    const result = await spawnAgent({ prompt, tools, maxSteps, signal: ctx?.signal, mode, writeSet, context });
+    // callId 透传:子 agent 实时渲染据此挂靠主侧对应批次(并行派发时各行归位)。
+    const result = await spawnAgent({ prompt, tools, maxSteps, signal: ctx?.signal, mode, writeSet, context, callId: ctx?.callId });
 
     let output: string;
     if (!result.completed) {

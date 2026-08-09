@@ -4,6 +4,8 @@ export interface ToolContext {
    * 挂监听:abort 即取消(杀子进程 / 取消 fetch),让中断跟手而非等命令跑完或超时。
    * 子 agent 透传主 signal:主 Ctrl+C 树杀子 agent(经 task→spawnAgent→runAgentCore→executeTool)。 */
   signal?: AbortSignal;
+  /** 本次调用的 tool_call id(编排型工具用,如 sub-agent 把主侧批次与子 agent 关联渲染)。 */
+  callId?: string;
 }
 
 /** 工具风险等级(权限系统用)。 */

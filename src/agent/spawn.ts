@@ -1,9 +1,10 @@
-// 子 agent 封装:runAgentCore + 静默 hooks。独立 history / 可受限工具子集 / 低步数上限。
+// 子 agent 封装:runAgentCore + (TUI 激活时)实时渲染 hooks。独立 history / 可受限工具子集 / 低步数上限。
 // 供 task 工具(主 agent 派生子任务)调用——子 agent 的最终摘要回灌主 history。
 //
 // 与主 agent 的区别:
-//  - 不写主屏(layout.contentWrite):中间过程(流式正文 / 工具头 / diff)缓冲到内部字符串,
-//    结束返回给 task 工具(task 把它当 tool 结果回灌主 history,主 agent 据此继续)。
+//  - 主屏渲染可选:全屏 TUI 激活时(layout.isTuiActive()),把子 agent 内部工具调用实时写入
+//    主内容区并复用 batch 折叠机制(运行态逐条展开,执行完自动折叠回单行摘要,鼠标可点开查看);
+//    TUI 未激活(host 嵌入 / 非 TTY)时保持纯静默——中间过程只缓冲进 transcript,不写主屏。
 //  - 独立 history:不共享主对话,避免子任务的工具噪声污染主上下文。
 //  - 紧凑系统提示:不复制主 agent 的 memory/skills/项目快照；由 context 传入已知事实。
 //  - 工具子集:写任务默认继承主 Agent 工具（仅禁止递归 task）；只读模式按安全语义移除写工具。
@@ -17,8 +18,13 @@ import { chatTools, type ChatMessage } from '../llm/index.js';
 import { buildMocodeCorePrompt, config, isSubAgentEnabled } from '../config/index.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { ui } from '../ui/theme.js';
+import * as layout from '../ui/layout.js';
+import { isTuiActive } from '../ui/layout.js';
+import * as batch from '../ui/batch.js';
+import { isToolErrorOutput } from '../tools/result.js';
 import { runAgentCore, type AgentHooks } from './core.js';
 import { summarizeToolCall, summarizeToolResult, truncateDisplay } from '../ui/render.js';
+import { t } from '../i18n/index.js';
 import { createContextState } from '../session/compact.js';
 import { inOverlay, mergeSubAgentChangeSet, type SubAgentResult } from '../agents/coordinator.js';
 
@@ -57,6 +63,9 @@ export interface SpawnOptions {
   writeSet?: string[];
   /** Small coordinator-produced facts to reuse instead of rediscovering main-agent context. */
   context?: string;
+  /** 主侧 sub-agent 调用的 tool_call id。实时渲染据此反查主侧批次,
+   *  把本子 agent 的摘要行 + 工具明细挂到对应的调用行下面(并行派发时各归各行)。 */
+  callId?: string;
 }
 
 /** 子 agent 运行结果。 */
@@ -129,6 +138,58 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     transcript += s;
   };
 
+  // 主屏实时渲染(子 agent 透明化):TUI 激活时把子 agent 内部步骤实时写入主内容区,
+  // 复用 batch 折叠机制(mouse 点击摘要行可展开/收起)。TUI 未激活(host/非 TTY)时
+  // 保持纯静默——只缓冲 transcript,不写屏,兼容嵌入宿主。
+  const live = isTuiActive();
+  let liveBatchId: string | null = null;
+  const liveLayout = () => ({
+    contentWrite: (s: string) => layout.contentWrite(s),
+    contentReplaceLine: (absIdx: number, line: string) => layout.contentReplaceLine(absIdx, line),
+    contentInsertAfter: (after: number, lines: string[], keepViewport?: boolean) =>
+      layout.contentInsertAfter(after, lines, keepViewport),
+    contentDeleteFrom: (startIdx: number, n: number) => layout.contentDeleteFrom(startIdx, n),
+    totalRows: () => layout.totalRows(),
+    repaintViewport: () => layout.repaintViewport(),
+    isScrolled: () => layout.isScrolled(),
+  });
+  /** 本批是否挂在主侧调用行下(挂上了就由主侧负责分隔空行,自己不能往 buffer 末尾追加)。 */
+  let nested = false;
+  const ensureLiveBatch = (): void => {
+    if (!live || liveBatchId) return;
+    // 主侧 sub-agent 组容器批 = 父批;本子 agent 的工具批挂在其下并更深一层缩进,
+    // 与同组其它子 agent 各归各的 └─ sub-agent 行(通过 groupChildIndex 定锚点)。
+    const parentId = batch.batchIdForCall(opts.callId) ?? undefined;
+    nested = parentId != null;
+    const childIndex = parentId ? batch.getGroupChildIndex(opts.callId) : undefined;
+    liveBatchId = batch.beginBatch(t('subagent.running'), {
+      parentId,
+      indent: parentId ? '        ' : undefined,
+      groupChildIndex: childIndex,
+      running: true,
+    });
+    batch.showLiveBatch(liveBatchId, liveLayout());
+    // 默认折叠:只显示一行「子 Agent 运行中 · glob X  read_file Y」,不展开明细;
+    // 用户点击摘要行后才展开看具体工具调用。
+  };
+  const finishLiveBatch = (status?: 'complete' | 'failed' | 'aborted'): void => {
+    if (!live || !liveBatchId) return;
+    const id = liveBatchId;
+    liveBatchId = null;
+    if (status) batch.setBatchLabel(id, status === 'complete'
+      ? t('subagent.complete')
+      : status === 'failed' ? t('subagent.failed') : t('subagent.running'));
+    // 收尾:清除运行态标志,摘要行图标从「运行中 ◐」切回完成态 ●。
+    batch.setBatchRunning(id, false);
+    batch.endBatch(id, liveLayout());
+    // 子 agent 完成后自动折叠:endBatch 登记了点击,但默认保持展开态;
+    // 这里显式折叠回单行摘要,让执行完的批自动收起(用户可再点开)。
+    if (status === 'complete' && batch.isExpanded(id)) batch.toggleBatch(id, liveLayout());
+    // 嵌套批的分隔空行由主侧 flushToolBatch 统一补;这里再写会往 buffer 末尾插孤儿空行
+    // (并行子 agent 各写一条,块尾堆出空白)。
+    if (!nested) layout.contentWrite('\n');
+  };
+
   let lastChar = '';
 
   const hooks: AgentHooks = {
@@ -146,10 +207,30 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     onToolHeader: (tc) => {
       const summary = summarizeToolCall(tc.name, tc.arguments);
       writeBuf(`  ● ${tc.name}  ${summary}\n`);
+      // 实时写入主内容区:子 agent 的每次工具调用累计到摘要行计数。
+      ensureLiveBatch();
+      if (liveBatchId) {
+        batch.recordCall(liveBatchId, tc.name, summary);
+        // 默认折叠,只刷新摘要行计数(glob/read_file 数量),不展开明细列表。
+        batch.showLiveBatch(liveBatchId, liveLayout());
+      }
     },
     onToolResult: (tc, output) => {
       const preview = summarizeToolResult(tc.name, output);
       if (preview) writeBuf(`  ↳ ${preview}\n`);
+      if (liveBatchId) {
+        // 子 agent 批无 diff(写任务走 overlay,最终由主 agent 合并);空 preview 用占位
+        // 标记 entry 已完成,避免折叠后摘要仍显示"运行中"。
+        batch.recordResult(
+          liveBatchId,
+          tc.name,
+          preview || t('toolSummary.noOutput'),
+          null,
+          output,
+          isToolErrorOutput(output),
+        );
+        batch.showLiveBatch(liveBatchId, liveLayout());
+      }
     },
     onTextEnd: () => {
       if (lastChar && lastChar !== '\n') {
@@ -157,17 +238,29 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         lastChar = '\n';
       }
     },
-    onToolBatchEnd: () => writeBuf('\n'),
+    onToolBatchEnd: () => {
+      writeBuf('\n');
+      // 子 agent 一轮工具调用结束:仍在运行(可能还有后续轮次),仅推进实时摘要,
+      // 不折叠——等 onDone 整体完成才自动收起。
+      if (liveBatchId) batch.showLiveBatch(liveBatchId, liveLayout());
+    },
     onNoReply: () => writeBuf(`${ui.dim}(无回复)${ui.reset}\n`),
-    onMaxSteps: () =>
-      writeBuf(`  ● 达到最大步数(${maxSteps}),子 agent 停止。\n`),
+    onMaxSteps: () => {
+      writeBuf(`  ● 达到最大步数(${maxSteps}),子 agent 停止。\n`);
+      finishLiveBatch('failed');
+    },
     onDone: (elapsedMs, usage) => {
       const tok = usage && usage.totalTokens
         ? `  · ${usage.totalTokens} tokens${usage.cachedTokens ? ` ↻${usage.cachedTokens} cached` : ''}`
         : '';
       writeBuf(`  ✻ 子 agent 耗时 ${(elapsedMs / 1000).toFixed(1)}s${tok}\n`);
+      finishLiveBatch('complete');
     },
-    // onStepStart / onChatDone / onToolStart / onToolDone / onAbort:子 agent 静默,无需 spinner / 中断渲染。
+    onAbort: () => {
+      // 中断:子 agent 未完成,收尾批(不折叠——用户可能想看中断前做了什么)。
+      finishLiveBatch('aborted');
+    },
+    // onStepStart / onChatDone / onToolStart / onToolDone:子 agent 静默,无需 spinner 渲染。
     // abort 还原(history 还原 + 模式还原)由 core 的 abortRestore 处理,hooks 只管展示。
   };
 
