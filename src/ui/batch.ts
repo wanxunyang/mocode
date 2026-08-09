@@ -692,13 +692,22 @@ export function toggleEntry(
   const b = batches.get(batchId);
   if (!b || !expandedBatches.has(batchId)) return;
 
-  // 组容器批的 entry 对应一个子 Agent 批；点击应展开/折叠该子批的工具列表。
+  // 组容器批的 entry 对应一个子 Agent 批；点击 entry 行应展开/折叠该 entry
+  // 自身的详情（即子 agent 返回的完整文本输出）。子 agent 的工具调用列表由点击
+  // 子批自己的摘要行（● 子 Agent 完成 ...）来控制。
   if (b.groupParent) {
-    const child = [...batches.values()].find(
-      (x) => x.parentId === batchId && x.groupChildIndex === entryIndex,
+    // 如果该 sub-agent entry 没有可展开的详情，fallback 到 toggle 子批工具列表。
+    const details = buildEntryDetailLines(
+      b.entries[entryIndex],
+      entryDetailIndent(b.entries, entryIndex),
     );
-    if (child) {
-      toggleBatch(child.id, layout);
+    if (details.length === 0) {
+      const child = [...batches.values()].find(
+        (x) => x.parentId === batchId && x.groupChildIndex === entryIndex,
+      );
+      if (child) {
+        toggleBatch(child.id, layout);
+      }
       return;
     }
   }
