@@ -678,17 +678,31 @@ export function findEntryByAbsLine(absLine: number): { batchId: string; entryInd
   return absLineToEntry.get(absLine) ?? null;
 }
 
-/** 第二层：只展开/折叠某一个工具的完整输出。 */
+/** 第二层：只展开/折叠某一个工具的完整输出。
+ *  特殊地，组容器批(groupParent)下的 sub-agent entry 行点击时，
+ *  切换的是对应子 Agent 批(child batch)的展开/折叠，而不是 entry 自身详情。 */
 export function toggleEntry(
   batchId: string,
   entryIndex: number,
   layout: {
-    contentInsertAfter(after: number, lines: string[]): void;
+    contentInsertAfter(after: number, lines: string[], keepViewport?: boolean): void;
     contentDeleteFrom(startIdx: number, n: number): void;
   },
 ): void {
   const b = batches.get(batchId);
   if (!b || !expandedBatches.has(batchId)) return;
+
+  // 组容器批的 entry 对应一个子 Agent 批；点击应展开/折叠该子批的工具列表。
+  if (b.groupParent) {
+    const child = [...batches.values()].find(
+      (x) => x.parentId === batchId && x.groupChildIndex === entryIndex,
+    );
+    if (child) {
+      toggleBatch(child.id, layout);
+      return;
+    }
+  }
+
   let headerIdx = -1;
   for (const [idx, target] of absLineToEntry) {
     if (target.batchId === batchId && target.entryIndex === entryIndex) headerIdx = idx;

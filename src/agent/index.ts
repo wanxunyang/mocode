@@ -124,6 +124,9 @@ function writeToolHeader(tc: ToolCallRef): void {
     // 列出每个子 agent 调用,各自子批(实时工具)更深一层缩进。
     // 注意：sub-agent header 到来时**不要** flushToolBatch,否则会把正在进行的组容器批收口。
     if (subAgentGroupId == null) {
+      // 首个 sub-agent 调用前：若前面已经有一个普通工具批在跑，先收口它并补分隔空行，
+      // 避免普通批摘要行与 sub-agent 组摘要行粘在一起。
+      if (currentBatchId) flushToolBatch();
       // 首个 sub-agent 调用：建组容器批(顶层)。label 缺省=「探索」,entries 累计各 sub-agent 调用。
       subAgentGroupId = batch.beginBatch(undefined, { groupParent: true });
       batch.recordCall(subAgentGroupId, tc.name, summarizeToolCall(tc.name, tc.arguments), tc.id);
@@ -142,18 +145,21 @@ function writeToolHeader(tc: ToolCallRef): void {
     return;
   }
 
-  // 普通 / mutation 工具：先收口 sub-agent 组和普通批。
-  flushToolBatch();
+  // sub-agent 组还在跑但普通/mutation 工具先来了：收口 sub-agent 组，并补一条分隔空行。
+  if (subAgentGroupId) {
+    flushToolBatch();
+  }
 
   if (isMutationTool(tc.name)) {
-    // mutation 永远独占一批（diff 要紧跟调用行）。
+    // mutation 永远独占一批（diff 要紧跟调用行）。先收口当前普通批。
+    if (currentBatchId) flushToolBatch();
     const id = batch.beginBatch();
     currentBatchId = id;
     batch.bindCall(tc.id, id);
     batch.recordCall(id, tc.name, summarizeToolCall(tc.name, tc.arguments));
     batch.showLiveBatch(id, layout);
   } else {
-    // 普通工具合并到 currentBatchId。
+    // 普通工具合并到 currentBatchId；同轮并行或连续无正文的工具轮次共享一个摘要行。
     const id = currentBatchId ??= batch.beginBatch();
     // 结果按 tool_call id 归位：并行执行时 currentBatchId 会漂移，只按“当前批”回填会漏填，
     // 摘要行就永远停在 ◇（用户实测：子 agent 跑完主侧菱形没变成实心圆）。
