@@ -201,8 +201,10 @@ async function executeToolOnce(
         ? beginPathMutation(args.path)
         : null;
       capturedPath = pathCapture?.path;
+      // 工作区快照是异步的:它遍历整棵工作树,同步实现会在每次 run_command/MCP 调用前后
+      // 阻塞事件循环数秒(TUI 完全冻结)。await 让 spinner / 走时 / 键鼠在扫描期间继续工作。
       const workspaceCapture = capabilities.effect === 'process' || capabilities.effect === 'unknown'
-        ? beginWorkspaceMutation()
+        ? await beginWorkspaceMutation()
         : null;
 
       let raw: ToolExecuteResult;
@@ -210,7 +212,7 @@ async function executeToolOnce(
         raw = await tool.execute(args, { signal, callId: opts?.callId });
       } finally {
         if (pathCapture) endPathMutation(pathCapture, tool.name);
-        if (workspaceCapture) endWorkspaceMutation(workspaceCapture, tool.name);
+        if (workspaceCapture) await endWorkspaceMutation(workspaceCapture, tool.name);
       }
 
       const mutationAfter = getCurrentTurnMutationState();
