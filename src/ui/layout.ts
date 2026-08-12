@@ -149,7 +149,7 @@ const SCROLL_LOCK_MS = 400; // 锁时长:覆盖 OS 缓冲残留 + 常规滚轮�
 let base: { model: string; contextBar: string; cwd: string; modeTag?: string; planSummary?: string; lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } } | null = null;
 // 运行态实时 token 用量(agent core 流式推送,轮末 repl 清 undefined)。
 // composeModelLine 在 RUNNING 态把它画成 chip 放 context 进度条左侧;
-// 不主动触发重画——RUNNING 态 turnTimer 200ms 心跳重画自然取最新值。
+// 不主动触发重画——RUNNING 态 turnTimer 80ms 心跳重画自然取最新值。
 let liveUsage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined;
 let statusText = '';
 let spinnerFrame: string | undefined;
@@ -159,8 +159,8 @@ let turnTimer: NodeJS.Timeout | null = null; // 走时刷新计时器(独立于 
  *  驱动 paintInput setRegion(fh) 动态撑高脚栏;drawStatusBar 据此画 1/2 行 plan,
  *  与 spinner/上线/输入/下线/model 行的 +1/+2/+3/+4/+5 偏移天然一致(contentBottom 自动重算)。 */
 let planRows: 1 | 2 = 1;
-let runningFrame = -1; // 运行态状态行 chip 心跳帧(♥/♡ 明灭);INPUT 态 -1 退回静态 ●
-const RUNNING_FRAMES = ['♥', '♡'];
+let runningFrame = -1; // 运行态状态行 chip 心跳帧(转圈帧 明灭);INPUT 态 -1 退回静态 ●
+const RUNNING_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 // 运行态用户打字时暂停流式物理写:流式每个 token 要 cup 到 contentRow 写入,IME 候选窗逐光标移动跟踪会跟过去;
 // 用户打字期间只喂缓冲、不物理写,光标留输入框;停手 USER_ACTIVE_PAUSE_MS 后 flush 重画缓冲内容。
 let userActiveUntil = 0; // 打字活跃截止时刻(Date.now()+PAUSE);0=未活跃
@@ -1442,7 +1442,7 @@ function twoColumn(leftStr: string, leftW: number, rightStr: string, rightW: num
  *  示例:
  *    INPUT:     ● 空闲
  *    思考中:    ⠹ 思考中… 0.5s
- *    运行心跳:  ♥ 0.5s
+ *    运行心跳:  ⠋ 生成中 0.5s
  *    滚动回看:  ● 空闲                  历史 ↑3 (PgDn 回底)  */
 function composeSpinnerLine(status: StatusBarData, cols: number): string {
   const spinning = mode === 'running' && runningFrame >= 0;
@@ -1472,10 +1472,11 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
     lead = `${ui.bold}${ui.accent}${status.spinnerFrame}${ui.reset} ${ui.dim}${status.status}${ui.reset}${ePart}`;
     leadW = 1 + 1 + displayWidth(status.status) + (elapsed ? 1 + displayWidth(elapsed) : 0);
   } else if (spinning) {
-    // 运行态心跳帧(流式输出中):帧 + 走时
+    // 运行态心跳帧(流式输出中):帧 + 生成中 + 走时
+    const label = '生成中';
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
-    lead = `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset}${ePart}`;
-    leadW = 1 + (elapsed ? 1 + displayWidth(elapsed) : 0);
+    lead = `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset} ${ui.dim}${label}${ui.reset}${ePart}`;
+    leadW = 1 + 1 + displayWidth(label) + (elapsed ? 1 + displayWidth(elapsed) : 0);
   } else {
     // INPUT 态:● + 状态文字(无走时)
     lead = `${ui.accent}●${ui.reset} ${ui.dim}${status.status}${ui.reset}`;
@@ -1654,9 +1655,9 @@ export function setStatus(status: string, frame?: string): void {
 }
 
 /**
- * 启走时刷新计时器:RUNNING 态每 200ms 重画状态行,使 composeStatus 重算 elapsed。
+ * 启走时刷新计时器:RUNNING 态每 80ms 重画状态行,使 composeStatus 重算 elapsed。
  * 必要性:spinner 在首 token 到达即 stop,思考/正文流式期间状态行不再经 spinner 刷新;
- * 若走时只挂 spinner onFrame,流式那几十秒会冻住。此计时器独立续刷,与 spinner 80ms 重叠幂等无妨。
+ * 若走时只挂 spinner onFrame,流式那几十秒会冻住。此计时器独立续刷,与 spinner 80ms 同速,重叠幂等无妨。
  * 非 TTY 不启(active=false 时 drawStatusBar 为 no-op)。
  */
 function startTurnTimer(): void {
@@ -1666,11 +1667,11 @@ function startTurnTimer(): void {
   turnTimer = setInterval(() => {
     runningFrame = (runningFrame + 1) % RUNNING_FRAMES.length; // 推进心跳帧,让前导符跳动
     drawStatusBar();
-  }, 200);
+  }, 80);
   turnTimer.unref();
 }
 
-/** 停走时计时器。enterInputMode / exitAltScreen 调;intervention 面板进入时也调(防 drawStatusBar 200ms 心跳把光标拉到 runningCaretPos,覆盖 paintInput 的正确光标位)。 */
+/** 停走时计时器。enterInputMode / exitAltScreen 调;intervention 面板进入时也调(防 drawStatusBar 80ms 心跳把光标拉到 runningCaretPos,覆盖 paintInput 的正确光标位)。 */
 export function stopTurnTimer(): void {
   if (turnTimer) {
     clearInterval(turnTimer);
@@ -1761,7 +1762,7 @@ export function clearLiveAtCursor(): void {
 }
 
 /** 推送 / 清空运行态实时 token 用量(agent core 流式推送;repl 轮末清 undefined)。
- *  不触发重画:RUNNING 态 turnTimer 200ms 心跳重画状态行,自然取到最新值。 */
+ *  不触发重画:RUNNING 态 turnTimer 80ms 心跳重画状态行,自然取到最新值。 */
 export function setLiveUsage(u: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined): void {
   liveUsage = u;
 }

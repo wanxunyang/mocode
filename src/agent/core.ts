@@ -514,9 +514,18 @@ export async function runAgentCore(
       const modelStartedAt = Date.now();
       const provider = safeProviderId(requestBaseURL);
       emitTrace('model_start', { model: requestModel, provider });
-      const dynamicSystemSuffix = historyRebuilt
-        ? '## Post-compaction recovery\nContext was compacted before this request. Re-establish the current objective and unresolved work from retained evidence or the session note, avoid repeating completed investigation, and re-read exact file context before any dependent edit.'
-        : '';
+      // 动态注入(仅追加到 system 末尾,不触碰 staticBody 前缀 → 不破坏 prompt 缓存):
+      //  - step===0:turn 的第一条模型输入;要求先简短分析需求再动手,且这是唯一允许前置文字的地方。
+      //  - historyRebuilt:compact 恢复步;要求重新锚定目标。两者可叠加。
+      //  .filter(Boolean) 保证空段不产生多余空行;后续 step 均为空串 → system 前缀稳定命中缓存。
+      const dynamicSystemSuffix = [
+        step === 0
+          ? '## Opening analysis\nBegin your FIRST response of this turn with a brief analysis of the request and your planned approach (1-3 sentences, no filler), THEN start tool calls. This opening is the only place where pre-tool prose is expected; after it, work quietly with no narration between tool calls.'
+          : '',
+        historyRebuilt
+          ? '## Post-compaction recovery\nContext was compacted before this request. Re-establish the current objective and unresolved work from retained evidence or the session note, avoid repeating completed investigation, and re-read exact file context before any dependent edit.'
+          : '',
+      ].filter(Boolean).join('\n\n');
       const systemMessage = history[0];
       const requestHistory: ChatMessage[] =
         dynamicSystemSuffix
