@@ -265,6 +265,8 @@ export interface AgentRunOptions {
   traceContext?: { sessionId?: string; turnId?: number };
   /** Structured observer used by sub-agent coordinators to build read/write provenance. */
   onToolOutcome?: (tool: string, args: Record<string, unknown>, outcome: ToolOutcome) => void;
+  /** 子代理传 true:不注入「开场分析」动态段(该指令仅用于主线面对用户的首次响应)。 */
+  suppressOpeningAnalysis?: boolean;
 }
 
 /** OpenAI content array 的子集(text + image_url);repl 构造 user 多模态消息用。 */
@@ -515,11 +517,13 @@ export async function runAgentCore(
       const provider = safeProviderId(requestBaseURL);
       emitTrace('model_start', { model: requestModel, provider });
       // 动态注入(仅追加到 system 末尾,不触碰 staticBody 前缀 → 不破坏 prompt 缓存):
-      //  - step===0:turn 的第一条模型输入;要求先简短分析需求再动手,且这是唯一允许前置文字的地方。
-      //  - historyRebuilt:compact 恢复步;要求重新锚定目标。两者可叠加。
+      //  - 开场分析:仅主线(step===0 且 !suppressOpeningAnalysis)注入——即"用户发一个任务后,
+      //    agent 第一次模型调用"。子代理经 spawn.ts 传 suppressOpeningAnalysis:true 排除。
+      //  - historyRebuilt:compact 恢复步;要求重新锚定目标。两者可叠加但互不串扰。
       //  .filter(Boolean) 保证空段不产生多余空行;后续 step 均为空串 → system 前缀稳定命中缓存。
+      //  安全保证:此段只拼进 requestHistory(新建对象),绝不回写 history[0],故不会跨 step/跨 turn 残留。
       const dynamicSystemSuffix = [
-        step === 0
+        (!opts.suppressOpeningAnalysis && step === 0)
           ? '## Opening analysis\nBegin your FIRST response of this turn with a brief analysis of the request and your planned approach (1-3 sentences, no filler), THEN start tool calls. This opening is the only place where pre-tool prose is expected; after it, work quietly with no narration between tool calls.'
           : '',
         historyRebuilt

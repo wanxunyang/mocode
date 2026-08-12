@@ -276,6 +276,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       maxSteps,
       toolsOverride,
       contextState: localContextState,
+      suppressOpeningAnalysis: true, // 子代理不注入「开场分析」:仅主线面对用户的首次响应用
       onToolOutcome: (tool, args) => {
         if (tool === 'read_file' && typeof args.path === 'string') readSet.add(args.path);
         else if (['glob', 'grep'].includes(tool)) readSet.add('workspace');
