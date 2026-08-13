@@ -1472,8 +1472,8 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
     lead = `${ui.bold}${ui.accent}${status.spinnerFrame}${ui.reset} ${ui.dim}${status.status}${ui.reset}${ePart}`;
     leadW = 1 + 1 + displayWidth(status.status) + (elapsed ? 1 + displayWidth(elapsed) : 0);
   } else if (spinning) {
-    // 运行态心跳帧(流式输出中):帧 + 生成中 + 走时
-    const label = '生成中';
+    // 运行态心跳帧(流式输出中 / 命令态如 /rollback /compact /resume):帧 + 状态文字(优先)或生成中(兜底) + 走时
+    const label = status.status || '生成中';
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
     lead = `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset} ${ui.dim}${label}${ui.reset}${ePart}`;
     leadW = 1 + 1 + displayWidth(label) + (elapsed ? 1 + displayWidth(elapsed) : 0);
