@@ -27,6 +27,12 @@ export const GC_DAYS = 90;
 /** memory_search 结果(召回的记忆正文)的放宽上限:指令性内容,中截破坏语义,对齐 use_skill。 */
 export const MAX_MEMORY_RESULT = 64000;
 
+// ── 知识图谱层(memory-graph.json,单 scope 容量)──────────────────────────
+/** 单 scope 实体封顶:超限先清孤儿实体(无 active 边相连),仍超则拒绝新建。 */
+export const MAX_GRAPH_ENTITIES = 500;
+/** 单 scope 边封顶:超限先清已失效边,仍超则拒绝新边。 */
+export const MAX_GRAPH_EDGES = 2000;
+
 // .codegraph:codegraph 索引目录(codegraph.db 是 SQLite 二进制 + daemon.log),
 // grep/glob 扫它无意义且会产出数 KB 的超长「行」,污染 TUI 展开渲染。
 export const IGNORE = ['**/node_modules/**', '**/.git/**', '**/.codegraph/**'];
@@ -64,6 +70,7 @@ export const PLAN_DISABLED_TOOLS = new Set([
   'memory_save',
   'memory_update',
   'memory_forget',
+  'memory_graph', // 混合工具(add 写图),plan 只读模式整体屏蔽
   'sub-agent',
   'run_skill', // fork 子 agent 执行面;plan 模式不应派生子工作流
 ]);

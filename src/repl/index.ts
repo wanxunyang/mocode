@@ -2345,9 +2345,9 @@ export async function startRepl(
         updateConfigKey('MEMORY_ENABLED', nextEnabled ? 'true' : 'false');
         const note =
           nextEnabled
-            ? `${ui.green}已开启记忆子系统${ui.reset} — memory_save/search/list/update/forget 进入工具表;` +
+            ? `${ui.green}已开启记忆子系统${ui.reset} — memory_save/search/list/update/forget/graph 进入工具表;` +
               `Memory Index 段会在下次拼 system message 时注入。工具表本身的快照需要重启 REPL 才完整刷新。`
-            : `${ui.yellow}已关闭记忆子系统${ui.reset} — 五个 memory_* 工具将在下次拼 system message 时从工具表过滤;` +
+            : `${ui.yellow}已关闭记忆子系统${ui.reset} — 六个 memory_* 工具将在下次拼 system message 时从工具表过滤;` +
               `Memory Index 段不再出现;plan-mode 提示词里的 memory_* 字样消失。重启 REPL 后工具表完全不出现。`;
         layout.contentWrite(`${note}\n`);
         layout.contentWrite(

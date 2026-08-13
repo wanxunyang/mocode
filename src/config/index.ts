@@ -296,8 +296,9 @@ export function reinjectActivePlanIntoSystem(
 
 const SYSTEM_PROMPT_MEMORY_SECTION = `
 ## Memory (cross-session facts)
-- The prompt may contain a title/summary index; retrieve details with memory_search or inspect all with memory_list.
-- Save only stable, non-obvious cross-session facts. Search before saving; update an existing entry instead of duplicating it, and archive stale entries.`;
+- The prompt may contain a title/summary index; retrieve details with memory_search or inspect all with memory_list. memory_search also surfaces knowledge-graph facts (relations between entities) alongside entry bodies.
+- Save only stable, non-obvious cross-session facts. Search before saving; update an existing entry instead of duplicating it, and archive stale entries.
+- A knowledge-graph layer links entities across memories: explore relations/neighbors with memory_graph (neighbors/add/stats), and attach meaningful links via the links parameter of memory_save when saving.`;
 
 /** Inject only retrieval guidance; MOCODE.md contents stay outside the prompt until read on demand. */
 function buildMemoryPromptSection(): string {

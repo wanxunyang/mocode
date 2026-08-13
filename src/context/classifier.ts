@@ -35,6 +35,7 @@ const BY_NAME: Record<string, ContextKind> = {
   memory_save: 'status',
   memory_update: 'status',
   memory_forget: 'status',
+  memory_graph: 'status',
   // summary:子 agent 摘要(轻量)
   'sub-agent': 'summary',
 };

@@ -20,13 +20,14 @@ import { memorySearchTool } from './memory-search.js';
 import { memoryListTool } from './memory-list.js';
 import { memoryUpdateTool } from './memory-update.js';
 import { memoryForgetTool } from './memory-forget.js';
+import { memoryGraphTool } from './memory-graph.js';
 import { subAgentTool } from './task.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
  * 加新工具:在本目录新建 `xxx.ts` 导出一个 Tool,再在下面数组里加一行。无需改 agent / llm。
  *
- * 记忆子系统总开关(MEMORY_ENABLED !== 'true'):5 个 memory_* 工具整体不进 builtinTools,
+ * 记忆子系统总开关(MEMORY_ENABLED !== 'true'):6 个 memory_* 工具整体不进 builtinTools,
  * 进而不进 LLM 的工具表(模型根本看不到、也不会想着去调)。运行时通过 /memory_switch 切;
  * 切换对当前会话的 tool list 不重算(取的是模块初始化时的快照),所以需要重启 REPL 才生效
  * —— 这是有意为之,避免切开关瞬间把已发出请求的工具列表打乱。
@@ -43,6 +44,7 @@ const _memoryTools = _memoryEnabledAtBoot
       memoryListTool,
       memoryUpdateTool,
       memoryForgetTool,
+      memoryGraphTool,
     ]
   : [];
 
@@ -76,6 +78,8 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   memory_list: { effect: 'read', concurrency: 'serial', resources: memoryResource },
   memory_update: { effect: 'write', concurrency: 'serial', resources: memoryResource },
   memory_forget: { effect: 'write', concurrency: 'serial', resources: memoryResource },
+  // memory_graph:search/neighbors/stats 只读、add 写,统一按写处理走串行(调用不频繁,简化)。
+  memory_graph: { effect: 'write', concurrency: 'serial', resources: memoryResource },
   // sub-agent 动态协调：只读任务无锁并行；写任务在 overlay 中执行，merge 时由 ChangeSet 持 canonical lock。
   'sub-agent': {
     effect: 'write',

@@ -15,7 +15,7 @@ import { jailResolve, jailGlobPattern } from './jail.js';
  * Shift+Tab 等用户面触发,不经工具路径。
  */
 export const SANDBOX_EXEMPT_TOOLS = new Set([
-  'memory_save', 'memory_update', 'memory_forget', 'memory_search', 'memory_list',
+  'memory_save', 'memory_update', 'memory_forget', 'memory_search', 'memory_list', 'memory_graph',
   'use_skill',
   'web_search', 'web_fetch',
   'ask_human',

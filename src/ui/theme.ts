@@ -61,7 +61,7 @@ const DEFAULT: Palette = {
   brightCyan: '\x1B[38;2;86;182;194m',
   brightMagenta: '\x1B[38;2;198;120;221m',
   accent: '\x1B[38;2;86;182;194m', // 与 cyan 同源(One Dark):logo/标题/输入框顶线/选中项统一承载
-  userBg: '\x1B[48;2;44;49;60m', // One Dark current-line bg,深色终端上微妙可辨
+  userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
   // diff 行底色:One Dark bg #282c34 上加 ~14% 亮度的对应色,够辨识但不刺眼
   addBg: '\x1B[48;2;44;62;42m', // 偏暗绿(One Dark green(152,195,121)暗化)
   delBg: '\x1B[48;2;62;38;42m', // 偏暗红(One Dark red(224,108,117)暗化)
@@ -87,7 +87,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;42;161;152m',
     brightMagenta: '\x1B[38;2;108;113;196m',
     accent: '\x1B[38;2;38;139;210m', // Solarized blue:浅底下更醒目的强调
-    userBg: '\x1B[48;2;238;232;213m',
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:Solarized Light base2(238,232,213)上贴同色族浅 tint,
     // 比直接用 base1 更柔,跟深 fg(red/green)对比充足
     addBg: '\x1B[48;2;220;235;205m',
@@ -105,7 +105,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;147;161;161m',
     brightMagenta: '\x1B[38;2;108;113;196m',
     accent: '\x1B[38;2;42;161;152m', // Solarized cyan(深底版):暗底上跳出
-    userBg: '\x1B[48;2;7;54;66m',
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:Solarized Dark base03(0,43,54)上加对应色族暗 tint
     addBg: '\x1B[48;2;20;50;38m',
     delBg: '\x1B[48;2;55;30;30m',
@@ -122,7 +122,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;142;192;124m',
     brightMagenta: '\x1B[38;2;211;134;155m',
     accent: '\x1B[38;2;250;189;47m', // Gruvbox yellow(主题色)
-    userBg: '\x1B[48;2;40;40;40m',
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:Gruvbox dark bg(40,40,40)上贴暗 bg0_a 风格
     addBg: '\x1B[48;2;40;55;30m',
     delBg: '\x1B[48;2;70;35;30m',
@@ -139,7 +139,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;136;192;208m',
     brightMagenta: '\x1B[38;2;180;142;173m',
     accent: '\x1B[38;2;136;192;208m', // Nord 浅冰蓝(主题色)
-    userBg: '\x1B[48;2;67;76;94m',
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:Nord polar night(46,52,64)上贴对应色族暗 tint
     addBg: '\x1B[48;2;46;66;52m',
     delBg: '\x1B[48;2;72;46;52m',
@@ -159,7 +159,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;160;220;220m',
     brightMagenta: '\x1B[38;2;245;165;215m',
     accent: '\x1B[38;2;255;170;60m', // 南瓜橙(主题主色:logo/标题/输入框顶线/选中项)
-    userBg: '\x1B[48;2;55;42;32m', // 暖深棕(略亮于 #231c16 背景)
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:暖深棕底上贴对应色族暗 tint,跟 fg 配对柔和可辨
     addBg: '\x1B[48;2;55;70;35m',
     delBg: '\x1B[48;2;78;42;32m',
@@ -178,7 +178,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;170;220;220m',
     brightMagenta: '\x1B[38;2;250;160;200m',
     accent: '\x1B[38;2;230;90;150m', // 玫粉(主题主色)
-    userBg: '\x1B[48;2;50;32;46m', // 深紫底
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:深紫底贴对应色族暗 tint,绿暗化偏橄榄、红暗化偏紫红
     addBg: '\x1B[48;2;50;60;42m',
     delBg: '\x1B[48;2;75;40;52m',
@@ -197,7 +197,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;140;230;210m',
     brightMagenta: '\x1B[38;2;210;170;230m',
     accent: '\x1B[38;2;80;210;140m', // 翡翠绿(主题主色)
-    userBg: '\x1B[48;2;18;42;34m', // 深绿底
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:深绿底贴对应色族暗 tint,绿暗化偏深绿、红暗化偏暗红
     addBg: '\x1B[48;2;30;55;40m',
     delBg: '\x1B[48;2;60;40;40m',
@@ -216,7 +216,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;170;210;200m',
     brightMagenta: '\x1B[38;2;240;180;210m',
     accent: '\x1B[38;2;255;200;80m', // 琥珀金黄(主题主色)
-    userBg: '\x1B[48;2;43;31;14m', // 深棕底(比 orange 略浅,避免撞色)
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:深棕底贴对应色族暗 tint,绿暗化偏橄榄、红暗化偏暗棕红
     addBg: '\x1B[48;2;50;55;25m',
     delBg: '\x1B[48;2;70;40;28m',
@@ -235,7 +235,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;180;230;230m',
     brightMagenta: '\x1B[38;2;210;180;250m',
     accent: '\x1B[38;2;180;150;230m', // 薰衣草紫(主题主色)
-    userBg: '\x1B[48;2;31;26;46m', // 深紫底(比 rose 更冷)
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:深紫底贴对应色族暗 tint,绿暗化偏冷绿、红暗化偏冷紫红
     addBg: '\x1B[48;2;38;46;42m',
     delBg: '\x1B[48;2;60;40;55m',
@@ -254,7 +254,7 @@ const THEMES: Record<string, Palette> = {
     brightCyan: '\x1B[38;2;170;225;215m',
     brightMagenta: '\x1B[38;2;250;170;210m',
     accent: '\x1B[38;2;255;120;100m', // 珊瑚红(主题主色)
-    userBg: '\x1B[48;2;42;22;20m', // 深棕红底
+    userBg: '\x1B[48;2;72;78;90m', // 统一灰白用户消息底(黑底终端可见)
     // diff 行底色:深棕红底贴对应色族暗 tint,绿暗化偏橄榄、红暗化偏暗棕红
     addBg: '\x1B[48;2;50;55;30m',
     delBg: '\x1B[48;2;75;32;30m',

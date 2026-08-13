@@ -1,4 +1,4 @@
-// Memory barrel: Tier-2 JSONL store + background reflection.
+// Memory barrel: Tier-2 JSONL store + knowledge-graph layer + background reflection.
 // MOCODE.md is intentionally not loaded here: the system prompt only tells the agent
 // to read the workspace file on demand, keeping its full body out of every request.
 
@@ -12,6 +12,20 @@ export {
   type MemoryStatus,
   type MemoryScope,
 } from './store.js';
+
+export {
+  addTriple,
+  upsertEntity,
+  findEntity,
+  searchGraph,
+  neighborsOf,
+  pathBetween,
+  graphStats,
+  type GraphEntity,
+  type GraphEdge,
+  type TripleInput,
+  type AddTripleResult,
+} from './graph.js';
 
 export {
   kickoffReflection,

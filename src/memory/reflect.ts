@@ -21,12 +21,14 @@ import {
   gcMemories,
   type MemoryType,
 } from './store.js';
+import { addTriple } from './graph.js';
 
 export interface ReflectResult {
   ts: string;
   saves: number;
   updates: number;
   forgets: number;
+  triples: number;
   gcDecayed: number;
   gcCapped: number;
   gcGced: number;
@@ -110,15 +112,16 @@ function buildMemorySample(): string {
 const TYPES = 'decision | fact | pitfall | reference | feedback';
 
 const REFLECT_SYS = `You are mocode's memory reflector. Review the recent session and existing memories, producing **only** updates worth remembering long-term.
-Output strictly JSON (no markdown code blocks, no explanatory text): {"saves":[{"type":"...","name":"...","summary":"...","body":"..."}],"updates":[{"id":"...","reason":"...","summary":"...","body":"..."}],"forgets":[{"id":"...","reason":"..."}]}
-Empty arrays are valid (if nothing is worth saving, all three arrays are empty).
+Output strictly JSON (no markdown code blocks, no explanatory text): {"saves":[{"type":"...","name":"...","summary":"...","body":"..."}],"updates":[{"id":"...","reason":"...","summary":"...","body":"..."}],"forgets":[{"id":"...","reason":"..."}],"triples":[{"src":"...","relation":"...","dst":"...","fact":"..."}]}
+Empty arrays are valid (if nothing is worth saving, all arrays are empty).
 Rules:
 ① Only store non-obvious, cross-session-useful facts/decisions/pitfalls; do not store current bugs, temp files, undecided TODOs, or volatile items;
 ② Better to store less than to store trivially correct info (e.g. "keep it concise");
 ③ ids in updates/forgets must come from the "existing memories" list below; do not fabricate ids not listed there;
 ④ names in saves must be concise and not collide with existing ones; type ∈ {${TYPES}};
 ⑤ If an existing memory contradicts new facts or is outdated, update the old entry (modify summary/body) rather than creating a duplicate;
-⑥ forgets are for memories clearly stale / superseded by a new entry (archive, not hard-delete).`;
+⑥ forgets are for memories clearly stale / superseded by a new entry (archive, not hard-delete);
+⑦ triples are knowledge-graph facts distilled from this session: concise entity names (lowercase snake_case or proper nouns), relation in snake_case (e.g. depends_on, decided_by, implemented_in, conflicts_with), plus a one-line fact. Only emit triples that are stable, non-obvious and cross-session-useful (2-6 at most); they may reference entities from saves/updates or existing memories.`;
 
 const REFLECT_USER = (transcript: string, sample: string) =>
   `## Recent session\n${transcript}\n\n## Existing memories\n${sample}\n\nProduce JSON:`;
@@ -127,6 +130,7 @@ interface ReflectPlan {
   saves?: { type?: string; name?: string; summary?: string; body?: string }[];
   updates?: { id?: string; reason?: string; summary?: string; body?: string }[];
   forgets?: { id?: string; reason?: string }[];
+  triples?: { src?: string; relation?: string; dst?: string; fact?: string }[];
 }
 
 function parsePlan(content: string | null): ReflectPlan | null {
@@ -167,6 +171,7 @@ export async function runReflection(
     saves: 0,
     updates: 0,
     forgets: 0,
+    triples: 0,
     gcDecayed: 0,
     gcCapped: 0,
     gcGced: 0,
@@ -221,9 +226,23 @@ export async function runReflection(
       if (r.ok) forgets++;
     }
   }
+  // 知识图谱三元组:容错——单项失败跳过,不影响 saves/updates/forgets 已落地的结果。
+  let triples = 0;
+  if (Array.isArray(plan.triples)) {
+    for (const t of plan.triples.slice(0, 10)) {
+      if (!t?.src || !t?.relation || !t?.dst) continue;
+      const r = addTriple({
+        src: String(t.src),
+        relation: String(t.relation),
+        dst: String(t.dst),
+        fact: t.fact ? String(t.fact) : undefined,
+      });
+      if (r.ok && !r.duplicate) triples++;
+    }
+  }
   const gc = gcMemories();
 
-  result = { ...result, saves, updates, forgets, gcDecayed: gc.decayed, gcCapped: gc.capped, gcGced: gc.gced };
+  result = { ...result, saves, updates, forgets, triples, gcDecayed: gc.decayed, gcCapped: gc.capped, gcGced: gc.gced };
   return result;
 }
 
@@ -239,9 +258,9 @@ function normalizeType(t: unknown): MemoryType | undefined {
 let inflight: Promise<void> | null = null;
 let lastReflectResult: ReflectResult | null = null;
 
-/** 摘要串(供 repl flush):存N 改N 忘N;有错误附上。 */
+/** 摘要串(供 repl flush):存N 改N 忘N 图N;有错误附上。 */
 export function formatReflectResult(r: ReflectResult): string {
-  const parts = [`存${r.saves}`, `改${r.updates}`, `忘${r.forgets}`];
+  const parts = [`存${r.saves}`, `改${r.updates}`, `忘${r.forgets}`, `图${r.triples}`];
   if (r.gcDecayed || r.gcCapped || r.gcGced) {
     parts.push(`遗忘(衰减${r.gcDecayed}/封顶${r.gcCapped}/清除${r.gcGced})`);
   }
