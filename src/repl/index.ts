@@ -97,7 +97,11 @@ import {
 import {
   listSkills,
   effectiveSystemPrompt,
+  findSkill,
 } from '../skills/index.js';
+import { clearSkillActivation } from '../skills/activation.js';
+import { runSkill, renderSkillBody } from '../skills/runner.js';
+import { isSkillTrusted } from '../skills/trust.js';
 import {
   buildMemoryIndexSection,
   kickoffReflection,
@@ -138,6 +142,7 @@ function buildSlashCommands(): SlashCommand[] {
     { name: '/clear', desc: d('commands.clear') },
     { name: '/context', desc: d('commands.context') },
     { name: '/skills', desc: d('commands.skills') },
+    { name: '/skill', desc: '执行某个 skill(/skill <name> [args-json])' },
     { name: '/compact', desc: d('commands.compact') },
     { name: '/resume', desc: d('commands.sessionResume') },
     { name: '/sessions', desc: d('commands.sessionBrowse') },
@@ -1127,6 +1132,8 @@ export async function startRepl(
       // 入口设定本轮初始模式(合成执行轮传 false→auto;用户轮传当前 mode)。
       // setAgentMode 触发 listener 重写 history[0];LLM 可在轮中调 switch_mode 切模式,runAgent 每步读实时值。
       setAgentMode(planMode ? 'plan' : 'auto');
+      // 新用户轮开始:清除上一轮 inline skill 的激活态(允许/disallowed 约束一 turn 有效)。
+      clearSkillActivation();
       // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
       // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
       const result = await runAgent(
@@ -1592,13 +1599,70 @@ export async function startRepl(
           `${ui.dim}已发现 ${skills.length} 个 skill:${ui.reset}\n`
         );
         for (const s of skills) {
+          const badges: string[] = [];
+          if (s.context === 'fork') badges.push('fork');
+          if (!s.modelInvocable) badges.push('manual-only');
+          badges.push(s.origin);
+          if (s.origin === 'project') {
+            badges.push(isSkillTrusted(s) ? 'trusted' : 'untrusted');
+          }
+          const badgeStr = badges.length ? ` ${ui.dim}[${badges.join('|')}]${ui.reset}` : '';
           layout.contentWrite(
-            `  ${ui.accent}${s.name}${ui.reset}  ${ui.dim}${s.description}${ui.reset}\n`
+            `  ${ui.accent}${s.name}${ui.reset}${badgeStr}  ${ui.dim}${s.description}${ui.reset}\n`
           );
+          if (s.allowedTools?.length) {
+            layout.contentWrite(`    ${ui.dim}allowed: ${s.allowedTools.join(', ')}${ui.reset}\n`);
+          }
+          if (s.disallowedTools?.length) {
+            layout.contentWrite(`    ${ui.dim}disallowed: ${s.disallowedTools.join(', ')}${ui.reset}\n`);
+          }
+          if (s.warnings.length) {
+            layout.contentWrite(`    ${ui.dim}warnings: ${s.warnings.join('; ')}${ui.reset}\n`);
+          }
         }
         layout.contentWrite(
-          `${ui.dim}(用 use_skill 工具加载某 skill 的完整指令)${ui.reset}\n`
+          `${ui.dim}(用 use_skill 加载指令; fork 类用 run_skill 执行; 也支持 /skill <name> [args-json])${ui.reset}\n`
         );
+      }
+      continue;
+    }
+    // /skill <name> [args-json]:直接执行一个 skill(fork 走 run_skill,inline 打印渲染后正文)。
+    if (line === '/skill' || line.startsWith('/skill ')) {
+      const rest = line.slice('/skill'.length).trim();
+      const sp = rest.indexOf(' ');
+      const name = sp === -1 ? rest : rest.slice(0, sp);
+      const argStr = sp === -1 ? '' : rest.slice(sp + 1).trim();
+      if (!name) {
+        layout.contentWrite(`${ui.dim}用法: /skill <name> [args-json]${ui.reset}\n`);
+        continue;
+      }
+      let args: Record<string, unknown> | undefined;
+      if (argStr) {
+        try {
+          args = JSON.parse(argStr);
+        } catch {
+          layout.contentWrite(`${ui.dim}args 不是合法 JSON,已忽略。${ui.reset}\n`);
+        }
+      }
+      const skill = findSkill(name);
+      if (!skill) {
+        layout.contentWrite(`错误:未找到 skill "${name}"。\n`);
+        continue;
+      }
+      if (skill.context === 'fork') {
+        layout.contentWrite(`${ui.dim}执行 fork skill "${name}"…${ui.reset}\n`);
+        const out = await runSkill({ name, args });
+        layout.contentWrite(
+          (out.status === 'success' ? '' : `[${out.status}] `) + out.output + '\n',
+        );
+      } else {
+        const body = await renderSkillBody(skill, args);
+        if (body === null) layout.contentWrite(`错误:未找到 skill "${name}" 的正文。\n`);
+        else {
+          // 仅预览:inline 正文未进入模型 history,不激活工具面约束;
+          // 要让模型按此 skill 工作,请让它调 use_skill(name) 或在下条消息里提及该 skill。
+          layout.contentWrite(`# Skill: ${name}(预览,模型尚未看到此内容)\n\n${body}\n`);
+        }
       }
       continue;
     }

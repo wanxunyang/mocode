@@ -67,6 +67,11 @@ export const builtinSkills: BuiltinSkill[] = [
     body: CODEGRAPH_BODY,
     dir: 'builtin',
     skillMdPath: 'builtin',
+    // 内置 skill:恒信任、内联、模型可自动触发。
+    context: 'inline',
+    modelInvocable: true,
+    origin: 'builtin',
+    warnings: [],
   },
 ];
 

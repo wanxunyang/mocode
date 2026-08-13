@@ -12,6 +12,7 @@ import { grepTool } from './grep.js';
 import { webSearchTool } from './web-search.js';
 import { webFetchTool } from './web-fetch.js';
 import { useSkillTool } from './use-skill.js';
+import { runSkillTool } from './run-skill.js';
 import { askHumanTool } from './ask-human.js';
 import { planUpdateTool } from './plan-update.js';
 import { memorySaveTool } from './memory-save.js';
@@ -65,6 +66,7 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   web_search: { effect: 'network', concurrency: 'parallel', supportsAbort: true },
   web_fetch: { effect: 'network', concurrency: 'parallel', supportsAbort: true },
   use_skill: { effect: 'read', concurrency: 'serial' },
+  run_skill: { effect: 'process', concurrency: 'serial', delegatesResourceLocks: true, supportsAbort: true },
   ask_human: { effect: 'read', concurrency: 'serial' },
   // plan_update 只写内部 notes.md(session 工作面),不作为用户代码 mutation 追踪/回滚/diff;
   // 串行即可(调用不频繁),固定资源键让并发调用排队。
@@ -100,6 +102,7 @@ const rawBuiltinTools: Tool[] = [
   webSearchTool,
   webFetchTool,
   useSkillTool,
+  runSkillTool,
   askHumanTool,
   planUpdateTool,
   ..._memoryTools,

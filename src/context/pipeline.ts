@@ -44,7 +44,7 @@ function tryParseArgs(raw: string): Record<string, unknown> | null {
  * 仅作 encoder 软目标;最终裁剪仍由末尾 capToolResultForHistory 兜底,故两处常量偶有漂移不致命。
  */
 function budgetFor(name: string): number {
-  if (name === 'use_skill') return MAX_SKILL_RESULT;
+  if (name === 'use_skill' || name === 'run_skill') return MAX_SKILL_RESULT;
   if (name === 'memory_search') return MAX_MEMORY_RESULT;
   return MAX_HISTORY_RESULT;
 }

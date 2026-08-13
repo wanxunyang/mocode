@@ -1,5 +1,6 @@
 /** 工具共享的截断 / 上限 / 忽略规则。 */
 import { isMemoryEnabled, isSubAgentEnabled, isFrontendToolsEnabled } from '../config/index.js';
+import { getActiveSkill } from '../skills/activation.js';
 
 export const MAX_FILE_LINES = 2000;
 export const MAX_OUTPUT = 20000;
@@ -64,6 +65,7 @@ export const PLAN_DISABLED_TOOLS = new Set([
   'memory_update',
   'memory_forget',
   'sub-agent',
+  'run_skill', // fork 子 agent 执行面;plan 模式不应派生子工作流
 ]);
 
 /**
@@ -95,6 +97,11 @@ export function getRuntimeDisabledTools(): Set<string> {
   if (!isSubAgentEnabled()) disabled.add('sub-agent');
   if (!isFrontendToolsEnabled()) {
     for (const name of FRONTEND_TOOLS) disabled.add(name);
+  }
+  // inline skill 激活态的 disallowed-tools:即便模型幻觉调用也执行不了(设计 §3.6)。
+  const active = getActiveSkill();
+  if (active?.disallowed) {
+    for (const name of active.disallowed) disabled.add(name);
   }
   return disabled;
 }

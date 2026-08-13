@@ -66,6 +66,11 @@ export interface SpawnOptions {
   /** 主侧 sub-agent 调用的 tool_call id。实时渲染据此反查主侧批次,
    *  把本子 agent 的摘要行 + 工具明细挂到对应的调用行下面(并行派发时各归各行)。 */
   callId?: string;
+  /** 静默模式(供 run_skill 等 opaque workflow 用):TUI 下不产可展开 batch,
+   *  只写一行 spinner → 完成后替换为单行结果摘要。 */
+  quiet?: boolean;
+  /** quiet 模式的标签文字;缺省从 prompt 截取(通常不够好,建议调用方显式传)。 */
+  quietLabel?: string;
 }
 
 /** 子 agent 运行结果。 */
@@ -118,6 +123,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const readOnly = new Set(['read_file', 'glob', 'grep', 'web_search', 'web_fetch', 'use_skill', 'memory_search', 'memory_list']);
   toolsOverride = chatTools.filter((tool) =>
     tool.function.name !== 'sub-agent' &&
+    // run_skill 会再次 spawn,禁止递归(避免 fork skill 里又 run_skill 套娃)。
+    tool.function.name !== 'run_skill' &&
     // plan_update 直写主会话 notes.md(不走 overlay),子代理不应改动主计划——统一排除。
     tool.function.name !== 'plan_update' &&
     (!requested || requested.has(tool.function.name)) &&
@@ -141,7 +148,11 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // 主屏实时渲染(子 agent 透明化):TUI 激活时把子 agent 内部步骤实时写入主内容区,
   // 复用 batch 折叠机制(mouse 点击摘要行可展开/收起)。TUI 未激活(host/非 TTY)时
   // 保持纯静默——只缓冲 transcript,不写屏,兼容嵌入宿主。
-  const live = isTuiActive();
+  //
+  // quiet 模式(供 run_skill 等 opaque workflow 用):不产可展开 batch,
+  // 只在首次工具调用时写一行「◐ 执行 skill…」,完成后替换为「● skill 完成: 摘要」。
+  const live = isTuiActive() && !opts.quiet;
+  const quiet = isTuiActive() && !!opts.quiet;
   let liveBatchId: string | null = null;
   const liveLayout = () => ({
     contentWrite: (s: string) => layout.contentWrite(s),
@@ -155,6 +166,16 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   });
   /** 本批是否挂在主侧调用行下(挂上了就由主侧负责分隔空行,自己不能往 buffer 末尾追加)。 */
   let nested = false;
+
+  // quiet 模式:完全静默,不写任何行(连 spinner 都没有);
+  // 子 agent 的执行过程与结果只回灌为主 agent 的 run_skill 工具结果。
+  const ensureQuietLine = (_label: string): void => {
+    if (!quiet) return; // 静默:什么都不输出
+  };
+  const replaceQuietLine = (_status: string, _detail: string): void => {
+    if (!quiet) return; // 静默:什么都不输出
+  };
+
   const ensureLiveBatch = (): void => {
     if (!live || liveBatchId) return;
     // 主侧 sub-agent 组容器批 = 父批;本子 agent 的工具批挂在其下并更深一层缩进,
@@ -208,6 +229,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       const summary = summarizeToolCall(tc.name, tc.arguments);
       writeBuf(`  ● ${tc.name}  ${summary}\n`);
       // 实时写入主内容区:子 agent 的每次工具调用累计到摘要行计数。
+      ensureQuietLine(opts.quietLabel ?? t('skill.executing', { name: opts.prompt.slice(0, 40) }));
       ensureLiveBatch();
       if (liveBatchId) {
         batch.recordCall(liveBatchId, tc.name, summary);
@@ -248,6 +270,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     onMaxSteps: () => {
       writeBuf(`  ● 达到最大步数(${maxSteps}),子 agent 停止。\n`);
       finishLiveBatch('failed');
+      if (quiet) replaceQuietLine('failed', t('skill.maxSteps', { max: String(maxSteps) }));
     },
     onDone: (elapsedMs, usage) => {
       const tok = usage && usage.totalTokens
@@ -255,10 +278,15 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         : '';
       writeBuf(`  ✻ 子 agent 耗时 ${(elapsedMs / 1000).toFixed(1)}s${tok}\n`);
       finishLiveBatch('complete');
+      if (quiet) {
+        replaceQuietLine('complete',
+          `${t('skill.complete')}  ${(elapsedMs / 1000).toFixed(1)}s${tok}`);
+      }
     },
     onAbort: () => {
       // 中断:子 agent 未完成,收尾批(不折叠——用户可能想看中断前做了什么)。
       finishLiveBatch('aborted');
+      if (quiet) replaceQuietLine('aborted', t('skill.aborted'));
     },
     // onStepStart / onChatDone / onToolStart / onToolDone:子 agent 静默,无需 spinner 渲染。
     // abort 还原(history 还原 + 模式还原)由 core 的 abortRestore 处理,hooks 只管展示。
