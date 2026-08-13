@@ -145,8 +145,9 @@ function writeToolHeader(tc: ToolCallRef): void {
     return;
   }
 
-  // sub-agent 组还在跑但普通/mutation 工具先来了：收口 sub-agent 组，并补一条分隔空行。
-  if (subAgentGroupId) {
+  // sub-agent 组还在跑，或组刚收口但尚未写入分隔空行时，
+  // 普通/mutation 工具先来了：先 flush 补一条分隔空行，避免摘要行粘在一起。
+  if (subAgentGroupId || subAgentGroupPendingSeparator) {
     flushToolBatch();
   }
 
