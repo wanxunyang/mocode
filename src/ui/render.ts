@@ -3,7 +3,12 @@ import { createRequire } from 'node:module';
 import { ui } from './theme.js';
 import { t } from '../i18n/index.js';
 
-const VERSION = createRequire(import.meta.url)('../../package.json').version as string;
+let VERSION = '0.0.0';
+try {
+  VERSION = createRequire(import.meta.url)('../../package.json').version as string;
+} catch {
+  // 非标准布局(测试编译产物、自定义打包)不含 package.json:版本号回落,不阻断模块加载。
+}
 
 /**
  * 清空整屏 + 滚动缓冲(向上滚动可见的历史输出),光标归位。

@@ -201,7 +201,11 @@ export function refreshChatTools(): void {
   ));
 }
 
-refreshChatTools();
+// 不在模块顶层调用 refreshChatTools():llm → registry 的 import 在部分加载顺序下会
+// 形成循环(registry → builtins → … → llm),顶层执行时 tools 尚未初始化(TDZ ReferenceError)。
+// chatTools 初始为空数组;两个真实入口(repl 启动、stdio host 启动)都会显式刷新,
+// 所有消费方(budget/compact/scheduler 默认参数、agent 装配)均在运行时求值,不受影响。
+
 
 export interface ToolCallRef {
   id: string;

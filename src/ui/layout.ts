@@ -2096,7 +2096,7 @@ function renderDimInputRow(
 /**
  * 单行运行态滑窗:以光标为中心,向左右扩展填满 contentW-1(留 1 cell 给光标),
  * 返回可见子串与光标在子串内的显示列。保证光标恒可见,且不软折行(运行态输入框恒单行,
- * 不触发 setRegion/ED,避免流式期间底栏抖动——见 scripts/check-layout.ts 断言)。
+ * 不触发 setRegion/ED,避免流式期间底栏抖动)。
  */
 function windowSingleLine(text: string, cursor: number, contentW: number): { shown: string; curDisp: number } {
   const n = text.length;

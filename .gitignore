@@ -23,3 +23,5 @@ MOCODE.md
 .claude/
 .agents/
 .workbuddy/
+dist-tests/
+

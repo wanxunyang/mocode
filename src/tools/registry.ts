@@ -25,6 +25,12 @@ import { isToolErrorOutput } from './result.js';
  */
 const extensions = new Map<string, Tool[]>();
 export const tools: Tool[] = [...builtinTools];
+/** 名字 → 工具 的 O(1) 索引，与 tools 数组在每次 rebuild 时同步重建；findTool 走此索引。 */
+let toolIndex = buildToolIndex(tools);
+
+function buildToolIndex(list: Tool[]): Map<string, Tool> {
+  return new Map(list.map((tool) => [tool.name, tool]));
+}
 
 export function registerToolsExtension(source: string, additions: Tool[]): string[];
 /** 向后兼容：未命名扩展使用 external 槽位。 */
@@ -53,6 +59,7 @@ function rebuildTools(): void {
     next.push(tool);
   }
   tools.splice(0, tools.length, ...next);
+  toolIndex = buildToolIndex(next);
 }
 
 const DEFAULT_CAPABILITIES: ToolCapabilities = Object.freeze({
@@ -61,7 +68,7 @@ const DEFAULT_CAPABILITIES: ToolCapabilities = Object.freeze({
 });
 
 export function findTool(name: string): Tool | undefined {
-  return tools.find((tool) => tool.name === name);
+  return toolIndex.get(name);
 }
 
 /** 缺少声明或找不到工具时返回保守能力，绝不把未知扩展并发执行。 */
@@ -83,9 +90,13 @@ export function getToolResourceKeys(
 }
 
 /** resource-locked write 是可生成文件 diff/按路径记 rollback 的文件 mutation。 */
-export function isFileMutationTool(name: string): boolean {
-  const capabilities = getToolCapabilities(name);
+export function isFileMutationCapabilities(capabilities: ToolCapabilities): boolean {
   return capabilities.effect === 'write' && capabilities.concurrency === 'resource-locked';
+}
+
+/** 按工具名判定(兼容入口);热路径请直接复用已解析的 capabilities 走 isFileMutationCapabilities。 */
+export function isFileMutationTool(name: string): boolean {
+  return isFileMutationCapabilities(getToolCapabilities(name));
 }
 
 function isStructuredOutcome(value: ToolExecuteResult): value is ToolOutcome {
@@ -197,7 +208,7 @@ async function executeToolOnce(
       mutationVersionBefore = mutationBefore.version;
       // Transactional tools own their full write-set capture inside ChangeSet commit.
       const pathCapture = !capabilities.delegatesResourceLocks &&
-        isFileMutationTool(tool.name) && typeof args.path === 'string' && args.path
+        isFileMutationCapabilities(capabilities) && typeof args.path === 'string' && args.path
         ? beginPathMutation(args.path)
         : null;
       capturedPath = pathCapture?.path;

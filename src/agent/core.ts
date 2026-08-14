@@ -20,9 +20,9 @@ import {
 } from '../llm/index.js';
 import {
   executeToolOutcome,
+  findTool,
   getToolCapabilities,
   isFileMutationTool,
-  tools,
   type ToolOutcome,
 } from '../tools/registry.js';
 import { checkPermission } from '../permissions/index.js';
@@ -78,14 +78,14 @@ function parseArgs(raw: string): Record<string, unknown> | null {
 
 /** 只有显式声明 parallel 且无需权限确认的工具才进入普通并发组。 */
 function isParallelTool(name: string): boolean {
-  const tool = tools.find((candidate) => candidate.name === name);
+  const tool = findTool(name);
   return !!tool && (tool.risk ?? 'safe') === 'safe' &&
     getToolCapabilities(tool).concurrency === 'parallel';
 }
 
 /** resource-locked 工具先顺序完成权限预检，再依赖 canonical resource lock 并发执行。 */
 function isResourceLockedTool(name: string): boolean {
-  const tool = tools.find((candidate) => candidate.name === name);
+  const tool = findTool(name);
   return !!tool && getToolCapabilities(tool).concurrency === 'resource-locked';
 }
 
@@ -828,7 +828,7 @@ export async function runAgentCore(
             for (let k = 0; k < batch.length; k++) {
               const tc = batch[k];
               const parsed = parseArgs(tc.arguments);
-              const tool = tools.find((candidate) => candidate.name === tc.name);
+              const tool = findTool(tc.name);
               const argumentsValid = tool && parsed !== null
                 ? validateToolArguments(tool, parsed).valid
                 : false;
@@ -931,7 +931,7 @@ export async function runAgentCore(
             // 权限预检查:在渲染 ● 头之前弹确认面板(体验:先问再执行,而非执行完再问)。
             // 拒绝时只渲染拒绝结果,不渲染执行头;放行则继续走 header → start → executeTool 流程。
             const parsed = parseArgs(tc.arguments);
-            const tool = tools.find((t) => t.name === tc.name);
+            const tool = findTool(tc.name);
             const argumentsValid = tool && parsed !== null
               ? validateToolArguments(tool, parsed).valid
               : false;

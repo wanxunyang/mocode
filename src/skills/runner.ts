@@ -161,7 +161,6 @@ const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'run_command']);
  * fork 子 agent 模式:`agent:` 显式声明优先;否则按工具面推断——
  * 未声明 allowed-tools(完整工具集)或白名单含写工具 → 'write',纯只读白名单 → 'read'。
  * 避免写类 skill 因缺省字段被静默降级为只读。
- * 导出仅供 scripts/check-skills.ts 离线断言。
  */
 export function resolveSpawnMode(skill: Skill, tools: string[] | null): 'read' | 'write' {
   if (skill.agentMode) return skill.agentMode;

@@ -282,7 +282,7 @@ export function renderFileChange(opts: {
 /** 头行 + 计数行 + 正文(折叠 + 截断 + 行号),每行尾 \n。 */
 function renderBody(head: string, counts: string, items: Item[], padW: number, startLine: number, lang: string | undefined): string {
   const lines: string[] = [head, counts];
-  const metaPrefix = `${BODY_INDENT}${' '.repeat(padW)}   `; // 对齐到代码列(num + 空格 + gutter + 空格)
+  const metaPrefix = `${BODY_INDENT}`; // 与正文行左对齐(batch 展开时还会再加外层 indent,避免双重缩进导致提示行突兀)
 
   let oldLine = startLine;
   let newLine = startLine;
