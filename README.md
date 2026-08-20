@@ -79,7 +79,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Plan / Auto dual mode** — In `plan` mode the agent is read-only (reads code, queries indexes, searches — never writes to disk, runs commands, or spawns sub-agents) and produces a plan; `auto` mode unlocks the full toolset. The agent can switch between the two on its own — scope out an unfamiliar codebase first, then start making changes.
 - **Pressure-driven context compression** — Normal history keeps full tool evidence. At 80% occupancy, one scheduler event runs all enabled cleanup and always follows with a history summary. `/context` shows live usage and `/compact` remains an explicit manual override.
 - **Cross-session long-term memory** — The agent can save project architecture, conventions, and lessons learned as long-term memory, auto-loaded in future sessions. A background process periodically reflects on conversations to mine things worth remembering. Memories can be created, searched, updated, and forgotten, with recall-based decay.
-- **Project context (`MOCODE.md`)** — A single project-level memory file at `MOCODE.md` captures both static facts (project description, commands, module list, directory tree) and human/AI-written insights (conventions, architectural decisions, pitfalls). Generate it once with `/init`, then keep it up to date by hand or by asking the agent to refresh it. Loaded automatically into the system prompt on every turn.
+- **Project context (`AGENTS.md`)** — A single project-level memory file at `AGENTS.md` captures both static facts (project description, commands, module list, directory tree) and human/AI-written insights (conventions, architectural decisions, pitfalls). Generate it once with `/init`, then keep it up to date by hand or by asking the agent to refresh it. Loaded automatically into the system prompt on every turn.
 - **Session notepad (notes.md)** — For complex multi-step tasks (≥3 file changes / ≥5 tool calls), the agent maintains a working notepad at `.mocode/sessions/<sessionId>/notes.md` (file-based, survives context compression). It records the execution plan with the dedicated `plan_update` tool — a three-state step machine (`pending`/`in_progress`/`completed`, at most one `in_progress`) that auto-settles to `## Done:` when finished. The active plan is re-injected into the system prompt after compaction and re-synced into context whenever notes.md changes, and a gentle reminder nudges the agent if it goes several tool-steps without updating the plan. A live progress chip in the TUI status bar shows `plan: [title] (3/7) ▸ [current step]`.
 - **Interruptible and reversible** — Ctrl+C interrupts the current turn at any time (kills child processes recursively, rolls history back to before the turn started, leaves no half-finished tool calls). `/rollback` restores file changes from per-turn snapshots, with a per-file keep/undo choice — no git dependency required.
 - **Sandbox protection** — File reads/writes go through a sandbox that blocks out-of-bounds paths (`../../`, absolute paths outside the root, symlink escapes, etc.), so the agent never touches files outside your working directory.
@@ -96,7 +96,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 ## Documentation
 
 - [中文使用指南](./docs/usage.md) — 菜单式快速上手、命令速查、模式、会话、项目上下文与排障。
-- [Project context](./docs/usage.md#项目上下文) — `MOCODE.md` and Skills.
+- [Project context](./docs/usage.md#项目上下文) — `AGENTS.md` and Skills.
 
 ## Installation
 
@@ -218,7 +218,7 @@ The agent operates in **the working directory it was launched from** — to have
 | `memory_update`     | Edit a memory in place (id unchanged; correct stale facts / update summary / toggle pin) |
 | `memory_forget`     | Forget a memory: archived by default (recoverable), `mode=delete` for a hard delete (pinned memories can't be deleted) |
 
-The five `memory_*` tools are gated on `MEMORY_ENABLED=true` at startup; toggle at runtime with `/memory_switch` (REPL restart required, by design — see Skills section for the difference between Tier-1 `MOCODE.md` and Tier-2 memory).
+The five `memory_*` tools are gated on `MEMORY_ENABLED=true` at startup; toggle at runtime with `/memory_switch` (REPL restart required, by design — see Skills section for the difference between Tier-1 `AGENTS.md` and Tier-2 memory).
 
 The four frontend tools — `browser`, `dev_server`, `screenshot`, `view_image` — are **off by default** (they depend on the Playwright binary, spawn long-lived processes, or capture the desktop). Enable the whole cluster at runtime with `/fe on`; the model only sees them once enabled. Toggle with `/fe on|off|status`.
 
@@ -254,7 +254,7 @@ dev_server stop   id=srv-xxxx
 | `/memory_switch`   | Toggle Tier-2 memory on/off (REPL restart required — by design)       |
 | `/reflect`          | Manually trigger a background memory reflection pass                  |
 | `/model`            | Configure the LLM (baseURL / apiKey / model / context window), applied immediately + persisted |
-| `/init`             | Scan the project and generate `MOCODE.md` project memory (dispatched to the agent) |
+| `/init`             | Scan the project and generate `AGENTS.md` project memory (dispatched to the agent) |
 | `/theme`            | Switch color theme (↑↓ · Enter, or `/theme <name>` directly)         |
 | `/plan`             | Switch to plan mode (read-only exploration + plan output, approve to switch to auto) |
 | `/auto`             | Switch back to auto mode (full toolset execution)                     |
@@ -293,11 +293,11 @@ A skill's `description` is injected into the system prompt (progressive disclosu
 
 The system prompt provides lightweight guidance rather than a framework gate: inspect only what matters, make focused changes, avoid repeated stale reads, and report uncertainty honestly. The agent decides whether validation is useful for the task and chooses the scope itself. Broad test/build suites are not run by default, and lack of validation never blocks completion or triggers an extra model turn.
 
-## Project memory (MOCODE.md)
+## Project memory (AGENTS.md)
 
 MoCode has a **two-tier memory** model distinct from skills:
 
-- **Tier-1 — `MOCODE.md` (auto-loaded every session):** Markdown project memory that gets concatenated into the system prompt on every turn. Discovery walks `~/.mocode/MOCODE.md` → every `MOCODE.md` from the cwd up to the filesystem root (far→near, near wins). On overflow the body is truncated with a marker pointing back at the files. Generate or refresh one with `/init`, or write it by hand — it's plain Markdown, no schema. `MOCODE.md` is also where the agent itself persists "next-session facts" it deduces (architecture, conventions, pitfalls).
+- **Tier-1 — `AGENTS.md` (auto-loaded every session):** Markdown project memory that gets concatenated into the system prompt on every turn. Discovery walks `~/.mocode/AGENTS.md` → every `AGENTS.md` from the cwd up to the filesystem root (far→near, near wins). On overflow the body is truncated with a marker pointing back at the files. Generate or refresh one with `/init`, or write it by hand — it's plain Markdown, no schema. `AGENTS.md` is also where the agent itself persists "next-session facts" it deduces (architecture, conventions, pitfalls).
 - **Tier-2 — `memory_*` tool library (agent-driven, opt-in):** Discrete tagged records (`decision` / `fact` / `pitfall` / `reference` / `feedback`) with recall-count-based decay (30-day → archived; 90-day → GC). The agent saves / searches / updates / forgets via tools; titles go in the system-prompt index (≤50), bodies fetched on demand via `memory_search`. Off by default; toggle with `MEMORY_ENABLED=true` at startup or `/memory_switch` (REPL restart required).
 
 ## Type checking

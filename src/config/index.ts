@@ -300,14 +300,37 @@ const SYSTEM_PROMPT_MEMORY_SECTION = `
 - Save only stable, non-obvious cross-session facts. Search before saving; update an existing entry instead of duplicating it, and archive stale entries.
 - A knowledge-graph layer links entities across memories: explore relations/neighbors with memory_graph (neighbors/add/stats), and attach meaningful links via the links parameter of memory_save when saving.`;
 
-/** Inject only retrieval guidance; MOCODE.md contents stay outside the prompt until read on demand. */
+/** AGENTS.md 自动导入正文上限:system 位于 history[0] 且 compactHistory 不压缩 system,超长需截断防占窗口(见 memory/README.md)。 */
+const MAX_AGENTS_IMPORT_CHARS = 20000;
+
+/**
+ * 工作区根 AGENTS.md 自动导入段:与 memory 开关完全无关——
+ * 只要 <cwd>/AGENTS.md 存在就把正文直接拼进 prompt(超 {@link MAX_AGENTS_IMPORT_CHARS} 截断+末尾提示),
+ * 不再只指路让模型按需 read_file。读失败静默跳过(返空串)。
+ */
+function buildAgentsImportSection(): string {
+  try {
+    const projectAgents = path.join(process.cwd(), 'AGENTS.md');
+    if (!fs.existsSync(projectAgents)) return '';
+    const content = fs.readFileSync(projectAgents, 'utf8').trim();
+    if (!content) return '';
+    const body =
+      content.length > MAX_AGENTS_IMPORT_CHARS
+        ? `${content.slice(0, MAX_AGENTS_IMPORT_CHARS)}\n…[AGENTS.md truncated: first ${MAX_AGENTS_IMPORT_CHARS} characters injected]`
+        : content;
+    return `\n## Project memory (AGENTS.md, auto-imported)\n${body}\n- AGENTS.md may be stale: current code and the user request override stale memory.`;
+  } catch {
+    return ''; // 读失败静默跳过:不让导入破坏 prompt 构建
+  }
+}
+
+/**
+ * Memory 检索指导段(与 AGENTS.md 导入无关):开 isMemoryEnabled() 时才拼,
+ * 注入 memory_search/list/graph 的使用指导。默认关(新用户零侵入)。
+ */
 function buildMemoryPromptSection(): string {
   if (!isMemoryEnabled()) return '';
-  const projectMocode = path.join(process.cwd(), 'MOCODE.md');
-  const mocodeHint = fs.existsSync(projectMocode)
-    ? '\n- `MOCODE.md` exists at the workspace root but is not preloaded. Read it with `read_file` only when the task may depend on project architecture, conventions, commands, prior decisions, or user preferences; skip it for greetings and unrelated simple requests. Current code and the user request override stale memory.'
-    : '';
-  return SYSTEM_PROMPT_MEMORY_SECTION + mocodeHint;
+  return SYSTEM_PROMPT_MEMORY_SECTION;
 }
 
 /**
@@ -341,6 +364,7 @@ ${buildPlanResearchRules()}`;
 
 /** 兼容旧名字:repl 的 buildSystemMessage 仍引 PLAN_MODE_SUFFIX(变量)。运行时按需现拼。 */
 export function buildBasePrompt(sessionId = getCurrentSessionId()): string {
+  const agentsImportSection = buildAgentsImportSection();
   const memorySection = buildMemoryPromptSection();
   const notepadSection = buildNotepadSection(sessionId);
 
@@ -398,9 +422,9 @@ ${buildVoiceSection()}
 - Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.
 ${t('assistant.languageInstruction')}`;
 
-  // 动态段(置于末尾):memory 索引 + notepad 索引 + notepad 使用说明。
+  // 动态段(置于末尾):AGENTS.md 项目记忆(无条件) + memory 索引(按开关) + notepad 索引 + notepad 使用说明。
   // 按需注入(#13):有内容的索引才拼对应标题,避免空标题噪声。
-  //   - "## Project context" 仅当 memorySection/notepadSection 非空(notepad 索引依赖 notes.md 存在);
+  //   - "## Project context" 仅当 agentsImportSection/memorySection/notepadSection 任一非空(notepad 索引依赖 notes.md 存在);
   //   - "## Session state" 使用说明**无条件**注入(放在动态尾段首位):否则会陷入"说明依赖 notes.md 存在 → 模型不知要建 → 文件永不存在"的鸡生蛋循环,功能对模型不可见。动态段在静态前缀之后,不影响 prompt 缓存。
   const dynamicParts: string[] = [];
 
@@ -423,7 +447,7 @@ ${t('assistant.languageInstruction')}`;
     'When every step is completed, plan_update settles the plan to `## Done:` automatically. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
   );
 
-  const ctxContent = `${memorySection}${notepadSection}`.trimEnd();
+  const ctxContent = `${agentsImportSection}${memorySection}${notepadSection}`.trimEnd();
   if (ctxContent) {
     dynamicParts.push(`## Project context\n${ctxContent}`);
   }

@@ -15,7 +15,7 @@ dist/
 
 # agent产物
 CLAUDE.md
-MOCODE.md
+AGENTS.md
 .codegraph/
 .trae/
 .mocode/

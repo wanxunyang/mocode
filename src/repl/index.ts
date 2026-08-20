@@ -155,9 +155,9 @@ function buildSlashCommands(): SlashCommand[] {
         { name: 'off', value: '/memory_switch off', desc: d('commands.memoryOff') },
         { name: 'status', value: '/memory_status', desc: d('commands.memoryStatus') },
         { name: 'reflect', value: '/reflect', desc: d('commands.memoryReflect') },
-        { name: 'init', value: '/init', desc: d('commands.memoryInit') },
       ],
     },
+    { name: '/init', desc: d('commands.memoryInit') },
     {
       name: '/subagent', desc: d('commands.subagent'), children: [
         { name: 'on', value: '/subagent on', desc: d('commands.subagentOn') },
@@ -270,7 +270,7 @@ function maskKey(k: string): string {
 }
 
 /**
- * /init 指令:发给 agent 扫描项目并生成 MOCODE.md。已存在则让 agent 读后更新(不丢失事实)。写完供 memory 子系统下轮加载。
+ * /init 指令:发给 agent 扫描项目并生成 AGENTS.md。已存在则让 agent 读后更新(不丢失事实)。写完供 memory 子系统下轮加载。
  *
  * 函数化(非 const):.codegraph/ 索引是否存在的探测放在调用瞬间,没索引时不提 codegraph,
  * 避免 LLM 调出失败。/init 是冷启动动作,IO 开销可忽略。
@@ -279,14 +279,14 @@ function buildInitPrompt(): string {
   const cg = hasCodegraphIndex()
     ? '- 若有 .codegraph/:用 use_skill 加载 codegraph skill 后用 run_command 调 codegraph explore "<架构或入口符号>" 一次拿相关源码+调用路径,别逐文件读！！！\n'
     : '';
-  return `分析当前项目(process.cwd()),生成 MOCODE.md 项目记忆文件,供 mocode 后续会话自动加载——目标是让后续会话无需重新摸索就能上手。
+  return `分析当前项目(process.cwd()),生成 AGENTS.md 项目记忆文件,供 mocode 后续会话自动加载——目标是让后续会话无需重新摸索就能上手。
 
 先探查(尽量少调用拿全貌):
 ${cg}- read_file package.json(或 Cargo.toml/pyproject.toml/go.mod 等):scripts、依赖、入口、模块类型。
 - glob 顶层目录;read_file 入口文件 + 各子系统 index.ts/README。
-- 若 MOCODE.md 已存在:read_file 读它,在其基础上更新(补缺、修正过时),不丢已有准确事实。
+- 若 AGENTS.md 已存在:read_file 读它,在其基础上更新(补缺、修正过时),不丢已有准确事实。
 
-MOCODE.md 按以下结构写(每节简短,只写稳定、非显然的事实):
+AGENTS.md 按以下结构写(每节简短,只写稳定、非显然的事实):
 ## 项目
 一两句:是什么、技术栈、运行环境。
 ## 命令
@@ -301,7 +301,7 @@ install / dev / build / test / typecheck / lint 等——从 package.json script
 硬要求:
 - 从实际代码提炼,引用具体文件名/命令/符号;不编造、不泛泛。
 - 总长 ≤ 3000 字;只写后续会话有用的稳定事实,不写易变项(当前 bug、临时文件、未决 TODO)。
-- 用 write_file 写入项目根 MOCODE.md。
+- 用 write_file 写入项目根 AGENTS.md。
 - 写完简述:写了哪几节 + 从代码里发现的 2-3 条非显然关键约定(供用户校验)。`;
 }
 
@@ -889,7 +889,7 @@ export async function startRepl(
   //
   // 与开关联动:① base 用 buildBasePrompt() 取代 config.systemPrompt(后者是启动时一次性
   // 求值的常量,运行时 /memory_switch 不会刷新);② plan suffix 走 getPlanModeSuffix() 现拼;
-  // ③ MOCODE.md 只在 base 中提示按需 read_file，不注入正文；④ Memory Index 按开关注入。
+  // ③ AGENTS.md 存在工作区根时由 base 无条件自动导入正文(超长截断，与 memory 开关无关)；④ Memory Index 按开关注入。
   const buildSystemMessage = (planMode: boolean): string =>
     effectiveSystemPrompt(
       buildBasePrompt(currentSessionId) +
@@ -1332,7 +1332,7 @@ export async function startRepl(
       continue;
     }
     if (line === '/init') {
-      // /init:把 init 指令当 user 输入发给 agent(扫描项目 + 生成 MOCODE.md),fall through 走 runAgent
+      // /init:把 init 指令当 user 输入发给 agent(扫描项目 + 生成 AGENTS.md),fall through 走 runAgent
       joined = buildInitPrompt();
     }
     if (line === '/upgrade' || line.startsWith('/upgrade ')) {
@@ -1571,7 +1571,7 @@ export async function startRepl(
         );
       }
       if (active.length === 0)
-        layout.contentWrite(`${ui.dim}(无 active 记忆;用 memory_save 存,或 /init 生成 MOCODE.md)${ui.reset}\n`);
+        layout.contentWrite(`${ui.dim}(无 active 记忆;用 memory_save 存,或 /init 生成 AGENTS.md)${ui.reset}\n`);
       layout.contentWrite(`${ui.dim}(详情用 memory_search;启动索引已注入 systemPrompt)${ui.reset}\n`);
       continue;
     }

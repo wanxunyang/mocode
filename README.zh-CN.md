@@ -95,7 +95,7 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 ## 使用文档
 
 - [菜单式使用指南](./docs/usage.md) — 快速上手、命令速查、模式、会话、项目上下文与排障。
-- [项目上下文：`MOCODE.md` 与 Skills](./docs/usage.md#项目上下文)
+- [项目上下文：`AGENTS.md` 与 Skills](./docs/usage.md#项目上下文)
 
 ## 安装
 
@@ -257,7 +257,7 @@ dev_server stop   id=srv-xxxx
 | `/memory_switch` | 切换 Tier-2 记忆开关(需重启 REPL,刻意为之)                  |
 | `/reflect`      | 手动触发一次后台记忆反思 pass                                   |
 | `/model`        | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
-| `/init`         | 扫描项目生成 `MOCODE.md` 项目记忆(发给 agent 执行)               |
+| `/init`         | 扫描项目生成 `AGENTS.md` 项目记忆(发给 agent 执行)               |
 | `/theme`        | 切换颜色主题(↑↓ · Enter,或 `/theme <name>` 直切)            |
 | `/plan`         | 切到 plan 模式(只读探查 + 产出计划,审批后切 auto 执行)              |
 | `/auto`         | 切回 auto 模式(全量工具执行)                                  |
@@ -296,11 +296,11 @@ skill 的 `description` 注入系统提示(渐进式披露第①层),模型只�
 
 system prompt 提供轻量建议而不是框架硬门：只检查支持下一步决策的内容，做最小完整改动，避免重复读取，并诚实说明不确定性。agent 自主决定是否需要验证以及验证范围；框架不会因为未验证阻止完成或追加模型轮次。
 
-## 项目记忆(MOCODE.md)
+## 项目记忆(AGENTS.md)
 
 mocode 的**双层记忆**模型,跟 Skills 是两件事:
 
-- **Tier-1 — `MOCODE.md`(每轮自动加载):** Markdown 项目记忆,每轮拼进 system prompt。发现路径:`~/.mocode/MOCODE.md` → 从 cwd 往上逐级 `MOCODE.md`(远→近拼接,近的覆盖更突出);超长截断并标注原始文件。运行 `/init` 生成或刷新,纯 Markdown,可手写,无 schema。agent 自己推得的「下次要记住的事实」(架构/约定/坑位)也写在这里。
+- **Tier-1 — `AGENTS.md`(每轮自动加载):** Markdown 项目记忆,每轮拼进 system prompt。发现路径:`~/.mocode/AGENTS.md` → 从 cwd 往上逐级 `AGENTS.md`(远→近拼接,近的覆盖更突出);超长截断并标注原始文件。运行 `/init` 生成或刷新,纯 Markdown,可手写,无 schema。agent 自己推得的「下次要记住的事实」(架构/约定/坑位)也写在这里。
 - **Tier-2 — `memory_*` 工具库(agent 主导,需启用):** 离散带标签条目(`decision` / `fact` / `pitfall` / `reference` / `feedback`),按召回计数衰减(30 天 → archived,90 天 → 硬删 GC)。agent 用工具存 / 搜 / 改 / 删;索引(标题)进系统提示(≤50 条),正文按需 `memory_search` 取。默认关,启动 `MEMORY_ENABLED=true` 或 REPL 内 `/memory_switch`(需重启 REPL,刻意为之)。
 
 ## 类型检查

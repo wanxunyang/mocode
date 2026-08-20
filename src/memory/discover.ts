@@ -1,8 +1,8 @@
-// memory 发现子系统:加载项目记忆 MOCODE.md(对标 skills/discover.ts 的叶子模式)。
+// memory 发现子系统:加载项目记忆 AGENTS.md(对标 skills/discover.ts 的叶子模式)。
 // 仅依赖 node 标准库,是叶子模块:不依赖 config/agent/llm/tools/skills,避免环。
 //
-// 约定:纯 MOCODE.md(mocode 是独立工具,有自己的工具集与约定)。
-// 项目级从 cwd 向上逐级找,全局 ~/.mocode/MOCODE.md。全量注入 systemPrompt(超长截断);
+// 约定:纯 AGENTS.md(mocode 是独立工具,有自己的工具集与约定)。
+// 项目级从 cwd 向上逐级找,全局 ~/.mocode/AGENTS.md。全量注入 systemPrompt(超长截断);
 
 import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -14,17 +14,17 @@ export interface MemoryFile {
 }
 
 /**
- * 返回要查找的 MOCODE.md 路径列表,按「远→近」顺序(合并时近的在后,更突出):
- * 全局 ~/.mocode/MOCODE.md → 项目级从根到 cwd 逐级 MOCODE.md。
+ * 返回要查找的 AGENTS.md 路径列表,按「远→近」顺序(合并时近的在后,更突出):
+ * 全局 ~/.mocode/AGENTS.md → 项目级从根到 cwd 逐级 AGENTS.md。
  * 向上遍历 cwd 到根收集 [cwd..root],反转为 [root..cwd](远→近),前拼全局。
  */
 export function resolveMemoryFiles(): string[] {
-  const globalPath = path.join(os.homedir(), '.mocode', 'MOCODE.md');
+  const globalPath = path.join(os.homedir(), '.mocode', 'AGENTS.md');
   const projectFiles: string[] = [];
   let dir = process.cwd();
   const root = path.parse(dir).root; // win32 'C:\\', POSIX '/'
   for (;;) {
-    projectFiles.push(path.join(dir, 'MOCODE.md'));
+    projectFiles.push(path.join(dir, 'AGENTS.md'));
     if (dir === root || dir === path.dirname(dir)) break; // 到根:dirname 自身
     dir = path.dirname(dir);
   }
@@ -33,7 +33,7 @@ export function resolveMemoryFiles(): string[] {
 }
 
 /**
- * 读取所有存在的 MOCODE.md,返回 { path, content }(content 已 trim)。
+ * 读取所有存在的 AGENTS.md,返回 { path, content }(content 已 trim)。
  * 全程静默容错(不存在 / 读失败 → 跳过,不抛),风格对齐 skills/discover.ts 与 session/persist.ts。
  */
 export function loadMemoryFiles(): MemoryFile[] {

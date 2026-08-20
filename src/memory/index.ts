@@ -1,6 +1,7 @@
 // Memory barrel: Tier-2 JSONL store + knowledge-graph layer + background reflection.
-// MOCODE.md is intentionally not loaded here: the system prompt only tells the agent
-// to read the workspace file on demand, keeping its full body out of every request.
+// AGENTS.md is intentionally not loaded here either: config/index.ts
+// (buildAgentsImportSection) auto-imports the workspace-root AGENTS.md body into the
+// system prompt — independent of the memory switch — truncating it when it exceeds the cap.
 
 export {
   buildMemoryIndexSection,
