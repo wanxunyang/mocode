@@ -4,7 +4,7 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 import { getSandboxRoot } from '../sandbox/root.js';
 import { getCurrentSessionId, setCurrentSessionId } from '../session/state.js';
-import { getNotesFilePath } from '../session/notes.js';
+import { getNotesFilePath, extractActiveNotesSections } from '../session/notes.js';
 import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-discipline.js';
 import {
   detectLanguage,
@@ -294,6 +294,49 @@ export function reinjectActivePlanIntoSystem(
   return true;
 }
 
+/** compact 重注入用的幂等标记:history[0] 中夹住会话笔记段正文(Findings/Decisions/Open Questions/Risks),
+ *  重复注入只替换不累积。与 ACTIVE_PLAN_MARKER 独立,互不干扰。 */
+const NOTES_BODY_MARKER = '\n\n<!-- mocode:session-notes -->\n';
+
+/**
+ * 把会话笔记段正文重注入系统提示(history[0])。compact 后或本步改了 notes.md 时调用:
+ * 若 notes.md 有活跃笔记段(extractActiveNotesSections 返回非空,已按 5k token 预算裁剪),
+ * 则覆盖旧标记块写入最新内容;若无,则清掉残留标记块。直接改 history[0].content,
+ * 幂等,返回是否改动。与 reinjectActivePlanIntoSystem 独立:plan 段由后者管,笔记段由本函数管。
+ */
+export function reinjectSessionNotesIntoSystem(
+  history: { role: string; content?: unknown }[],
+): boolean {
+  const sys = history[0];
+  if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return false;
+  let content = sys.content;
+  const markerIdx = content.indexOf(NOTES_BODY_MARKER);
+  if (markerIdx >= 0) {
+    content = content.slice(0, markerIdx).replace(/\s+$/, '');
+  }
+  const notes = extractActiveNotesSections();
+  if (!notes) {
+    if (markerIdx < 0) return false;
+    sys.content = content;
+    return true;
+  }
+  sys.content = `${content}${NOTES_BODY_MARKER}${notes}\n`;
+  return true;
+}
+
+/**
+ * 一次性重注入会话状态(plan 段 + 笔记段)到系统提示。调用点(core.ts compact 后 /
+ * 本步改 notes.md、repl compact 时)统一用本函数替代 reinjectActivePlanIntoSystem,
+ * 让笔记段享有与 plan 段完全对称的常驻 + 恢复时机。返回任一 marker 是否改动。
+ */
+export function reinjectSessionStateIntoSystem(
+  history: { role: string; content?: unknown }[],
+): boolean {
+  const planChanged = reinjectActivePlanIntoSystem(history);
+  const notesChanged = reinjectSessionNotesIntoSystem(history);
+  return planChanged || notesChanged;
+}
+
 const SYSTEM_PROMPT_MEMORY_SECTION = `
 ## Memory (cross-session facts)
 - The prompt may contain a title/summary index; retrieve details with memory_search or inspect all with memory_list. memory_search also surfaces knowledge-graph facts (relations between entities) alongside entry bodies.
@@ -444,7 +487,9 @@ ${t('assistant.languageInstruction')}`;
     'Keep at most one step in_progress, and mark a step completed as soon as its work is done — do not batch updates to the end of the turn. ' +
     'Write each step so a teammate who lost the conversation could pick it up cold: name the file or symbol, the exact change, and the verification, so the plan survives context compaction. ' +
     'plan_update creates notes.md for you when the task warrants it; read_file the full notes.md whenever you need to recover context after compaction. ' +
-    'When every step is completed, plan_update settles the plan to `## Done:` automatically. Keep other notes concise and session-specific; use memory for stable cross-session facts.',
+    'When every step is completed, plan_update settles the plan to `## Done:` automatically. Keep other notes concise and session-specific; use memory for stable cross-session facts.\n' +
+    '## Session notes (resident memory)\n' +
+    'For non-obvious, lasting-value discoveries — subtle constraints, decisions with downstream impact, open questions blocking a choice, or risks affecting later steps — call `note_append` IMMEDIATELY when you make the discovery. The note is written to the same notes.md and its body is re-injected into the prompt automatically (within a 5k-token budget), surviving compaction so you keep remembering what you found/decided this session. Do NOT use it for routine progress (that is the plan) or stable cross-session facts (that is memory_save). Each call appends one item.',
   );
 
   const ctxContent = `${agentsImportSection}${memorySection}${notepadSection}`.trimEnd();

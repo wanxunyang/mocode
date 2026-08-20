@@ -45,7 +45,7 @@ import {
 } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
 import { isToolResultSuccess } from '../context/utils.js';
-import { config, extractActivePlanSection, reinjectActivePlanIntoSystem } from '../config/index.js';
+import { config, extractActivePlanSection, reinjectSessionStateIntoSystem } from '../config/index.js';
 import { t } from '../i18n/index.js';
 import { jailResolve } from '../sandbox/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
@@ -505,8 +505,8 @@ export async function runAgentCore(
           runtimeContextState.lifecycleStats = lifecycle.stats();
         }
         rehydrateArtifacts(runtimeContextState, history);
-        // ② compact 后把活跃 plan 重注入系统提示，避免 agent 因上下文压缩丢失执行计划。
-        reinjectActivePlanIntoSystem(history);
+        // ② compact 后把会话状态(活跃 plan + 笔记段)重注入系统提示，避免 agent 因上下文压缩丢失计划与笔记。
+        reinjectSessionStateIntoSystem(history);
       }
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')
       mode = 'idle';
@@ -1023,7 +1023,7 @@ export async function runAgentCore(
         // B(nag 提醒):连续 N 步有工具活动但没更新 plan,在当前步第一条 tool_result 前注入提醒。
         const notesMtimeAfter = getNotesMtime();
         if (notesMtimeAfter !== notesMtimeBefore) {
-          reinjectActivePlanIntoSystem(history);
+          reinjectSessionStateIntoSystem(history);
           stepsSincePlanTouch = 0;
         } else {
           stepsSincePlanTouch += 1;

@@ -15,6 +15,7 @@ import { useSkillTool } from './use-skill.js';
 import { runSkillTool } from './run-skill.js';
 import { askHumanTool } from './ask-human.js';
 import { planUpdateTool } from './plan-update.js';
+import { noteAppendTool } from './note-append.js';
 import { memorySaveTool } from './memory-save.js';
 import { memorySearchTool } from './memory-search.js';
 import { memoryListTool } from './memory-list.js';
@@ -73,6 +74,8 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   // plan_update 只写内部 notes.md(session 工作面),不作为用户代码 mutation 追踪/回滚/diff;
   // 串行即可(调用不频繁),固定资源键让并发调用排队。
   plan_update: { effect: 'write', concurrency: 'serial', resources: () => ['session-notepad'] },
+  // note_append 与 plan_update 同款:只写内部 notes.md 笔记段,不作 project mutation 追踪/diff/回滚;串行 + 固定资源键排队。
+  note_append: { effect: 'write', concurrency: 'serial', resources: () => ['session-notepad'] },
   memory_save: { effect: 'write', concurrency: 'serial', resources: memoryResource },
   memory_search: { effect: 'write', concurrency: 'serial', resources: memoryResource },
   memory_list: { effect: 'read', concurrency: 'serial', resources: memoryResource },
@@ -109,6 +112,7 @@ const rawBuiltinTools: Tool[] = [
   runSkillTool,
   askHumanTool,
   planUpdateTool,
+  noteAppendTool,
   ..._memoryTools,
   subAgentTool,
 ];

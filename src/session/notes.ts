@@ -123,3 +123,222 @@ export function writePlanToNotes(
   }
   return { path: p, settled: plan.steps.length > 0 && plan.steps.every((s) => s.status === 'completed') };
 }
+
+// ── Session notes(单会话永久记忆):note_append 写入,reinject 常驻 system ──────
+// 设计:notes.md 不止放 Plan。note_append 往预设笔记段追加一条 finding/decision/
+// open_question/risk;extractActiveNotesSections 读出活跃笔记段正文(排除 Plan/Done),
+// 按 5k token 预算裁剪后由 reinjectSessionStateIntoSystem 注入 system prompt——compact
+// 后仍能恢复,让 agent 始终记得本会话做过什么、发现过什么(单会话永久记忆)。
+
+/** note_append 接受的预设段 key → 渲染标题。 */
+const NOTE_SECTION_TITLES: Record<string, string> = {
+  findings: 'Findings',
+  decisions: 'Decisions',
+  open_questions: 'Open Questions',
+  risks: 'Risks',
+};
+/** 预设段 key 列表(供工具 schema enum 与校验用)。 */
+export const NOTE_SECTION_KEYS = Object.keys(NOTE_SECTION_TITLES);
+/** 段注入优先级:数值越大越先占预算、越后丢弃正文。Risks 最重要。 */
+const SECTION_PRIORITY: Record<string, number> = {
+  risks: 4, findings: 3, decisions: 2, open_questions: 1,
+};
+
+/** 常驻笔记正文总预算(token)。5k:占百万级 context 的 0.5%,可常驻相当量笔记。 */
+const NOTES_INJECT_BUDGET_TOKENS = 5000;
+/** 单段正文上限(token):防单段独占预算。 */
+const NOTES_PER_SECTION_TOKENS = 2000;
+/** 单条笔记上限(token):防一条过长吃掉整段预算。 */
+const NOTES_PER_ENTRY_TOKENS = 800;
+
+/**
+ * 轻量 token 估算(启发式,不依赖 tokenizer):CJK ≈ 0.6 token/字,
+ * ASCII ≈ 0.25 token/字。对 GLM/DeepSeek/Qwen 等中文偏多的后端略偏保守
+ * (估算略高于实际 → 注入实际 token 略低于预算 → 安全侧)。仅供笔记 cap 用,
+ * 不替换 llm/estimatePromptTokens 的主口径。
+ */
+function estimateTokens(text: string): number {
+  let cjk = 0;
+  let other = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if ((c >= 0x3000 && c <= 0x9fff) || (c >= 0xff00 && c <= 0xffef)) cjk++;
+    else other++;
+  }
+  return Math.ceil(cjk * 0.6 + other * 0.25);
+}
+
+/** 把标题映射回预设 key(非预设段返 '',优先级 0,最后注入)。 */
+function matchSectionKey(title: string): string {
+  const t = title.trim().toLowerCase();
+  for (const [k, v] of Object.entries(NOTE_SECTION_TITLES)) {
+    if (v.toLowerCase() === t) return k;
+  }
+  return '';
+}
+
+/**
+ * 往 notes.md 的指定笔记段追加一条。段存在则在其末尾追加(保留其它段不动);
+ * 段不存在则在文件末新建。返回 { path } 或 { error }。
+ */
+export function appendNoteToSection(
+  section: string,
+  entry: string,
+  tag?: string,
+  sessionId = getCurrentSessionId(),
+): { path: string } | { error: string } {
+  const title = NOTE_SECTION_TITLES[section];
+  if (!title) return { error: `unknown note section "${section}"` };
+  const p = getNotesFilePath(sessionId);
+  if (!p) return { error: 'no active session' };
+  const line = tag ? `- **[${tag}]** ${entry}` : `- ${entry}`;
+  let existing = '';
+  try {
+    existing = fs.readFileSync(p, 'utf8').replace(/\r\n?/g, '\n');
+  } catch {
+    existing = '';
+  }
+  const header = `## ${title}`;
+  const lines = existing.split('\n');
+  const start = lines.findIndex((l) => l.trim() === header);
+  let next: string;
+  if (start >= 0) {
+    // 段末 = 下一个 ## 或文件末
+    let end = lines.length;
+    for (let k = start + 1; k < lines.length; k++) {
+      if (/^##\s/.test(lines[k])) { end = k; break; }
+    }
+    const before = lines.slice(0, start).join('\n').replace(/\s+$/, '');
+    const sectionLines = lines.slice(start, end);
+    // 去段尾空行后追加新条目
+    while (sectionLines.length && sectionLines[sectionLines.length - 1].trim() === '') sectionLines.pop();
+    sectionLines.push(line);
+    const section = sectionLines.join('\n');
+    const after = lines.slice(end).join('\n').replace(/^\s+/, '');
+    next = [before, section, after].filter((s) => s.length > 0).join('\n\n') + '\n';
+  } else {
+    // 新建段:放文件末,与已有内容以空行分隔
+    const rest = existing.trim();
+    const newSection = `${header}\n${line}`;
+    next = rest ? `${rest}\n\n${newSection}\n` : `${newSection}\n`;
+  }
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, next, 'utf8');
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+  return { path: p };
+}
+
+/** 按字符二分截断条目到 token 上限,加省略标记。条目不长,线性二分足够。 */
+function truncateEntry(entry: string, maxTokens: number): string {
+  if (estimateTokens(entry) <= maxTokens) return entry;
+  let lo = 0;
+  let hi = entry.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (estimateTokens(entry.slice(0, mid)) <= maxTokens) lo = mid;
+    else hi = mid - 1;
+  }
+  return entry.slice(0, lo).replace(/\s+$/, '') + ' …[truncated]';
+}
+
+/** 把单段正文按条目分割,从末尾(最近)保留,丢最旧,裁到 token 预算内。 */
+function trimSectionToBudget(body: string, budgetTokens: number): string | null {
+  if (budgetTokens <= 0) return null;
+  const bodyLines = body.split('\n');
+  const header = bodyLines[0] ?? '';
+  const rest = bodyLines.slice(1);
+  // 分条目:以 "- " 开头为一条起始,后续非 "- " 行归入该条
+  const entries: string[] = [];
+  let cur: string[] = [];
+  for (const ln of rest) {
+    if (/^-\s+/.test(ln)) {
+      if (cur.length) entries.push(cur.join('\n'));
+      cur = [ln];
+    } else {
+      cur.push(ln);
+    }
+  }
+  if (cur.length) entries.push(cur.join('\n'));
+  const kept: string[] = [];
+  let used = estimateTokens(header);
+  for (let k = entries.length - 1; k >= 0; k--) {
+    let e = entries[k];
+    if (estimateTokens(e) > NOTES_PER_ENTRY_TOKENS) {
+      e = truncateEntry(e, NOTES_PER_ENTRY_TOKENS);
+    }
+    const t = estimateTokens(e);
+    if (used + t > budgetTokens) break;
+    kept.unshift(e);
+    used += t;
+  }
+  if (kept.length === 0) return null;
+  return `${header}\n${kept.join('\n')}`;
+}
+
+/**
+ * 读 notes.md,提取所有活跃笔记段正文(排除 `## Plan:` 与 `## Done:`),
+ * 按 NOTES_INJECT_BUDGET_TOKENS 裁剪后返回——供 reinject 注入 system prompt。
+ * 裁剪策略:段按优先级排序(Risks>Findings>Decisions>Open Questions>自定义),
+ * 逐段注入累计 token;单段超 per-section 则段内从最近条目保留丢最旧;
+ * 总预算用尽则后续段不注入正文(其标题仍由 buildNotepadSection 索引常驻,
+ * agent 可 read_file 取细节)。这样 5k 预算内"写了就常驻",超出降级为索引+按需 read。
+ */
+export function extractActiveNotesSections(
+  budget = NOTES_INJECT_BUDGET_TOKENS,
+  sessionId = getCurrentSessionId(),
+): string {
+  const p = getNotesFilePath(sessionId);
+  if (!p) return '';
+  let content = '';
+  try {
+    content = fs.readFileSync(p, 'utf8').replace(/\r\n?/g, '\n');
+  } catch {
+    return '';
+  }
+  const lines = content.split('\n');
+  const sections: { key: string; body: string }[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const m = lines[i].match(/^##\s+(.+?)\s*$/);
+    if (!m) { i++; continue; }
+    const title = m[1];
+    // 跳过 Plan/Done 段(Plan 有专属 ACTIVE_PLAN_MARKER 重注入;Done 是归档不常驻)
+    if (/^Plan:/.test(title) || /^Done:/.test(title)) {
+      i++;
+      while (i < lines.length && !/^##\s/.test(lines[i])) i++;
+      continue;
+    }
+    const start = i;
+    i++;
+    while (i < lines.length && !/^##\s/.test(lines[i])) i++;
+    const body = lines.slice(start, i).join('\n').trim();
+    if (body) sections.push({ key: matchSectionKey(title), body });
+  }
+  // 按优先级降序(优先级高的先占预算)
+  sections.sort((a, b) => (SECTION_PRIORITY[b.key] ?? 0) - (SECTION_PRIORITY[a.key] ?? 0));
+  let used = 0;
+  const out: string[] = [];
+  for (const s of sections) {
+    const remaining = budget - used;
+    if (remaining <= 0) break;
+    const bodyTokens = estimateTokens(s.body);
+    if (bodyTokens <= Math.min(remaining, NOTES_PER_SECTION_TOKENS)) {
+      out.push(s.body);
+      used += bodyTokens;
+      continue;
+    }
+    // 段超预算:段内裁条目(从最近保留)
+    const cap = Math.min(remaining, NOTES_PER_SECTION_TOKENS);
+    const trimmed = trimSectionToBudget(s.body, cap);
+    if (trimmed) {
+      out.push(trimmed);
+      used += estimateTokens(trimmed);
+    }
+    // 预算用尽则后续段不再注入正文(降级为索引)
+    if (used >= budget) break;
+  }
+  return out.join('\n\n');
+}
