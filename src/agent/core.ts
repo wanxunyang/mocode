@@ -499,8 +499,8 @@ export async function runAgentCore(
       //  ① 它会被追加到本次请求末尾(见下方 ephemeralReminder),属于本步固定开销,
       //     必须计入压力线——它不在 history 里,调度器只能由此入参看见(否则最多 5k
       //     的笔记 + plan 段对 80% 触发线完全不可见,小窗口模型会压不住);
-      //  ② 同一份字符串复用到下方 reminder,避免每步重复读 notes.md。
-      const sessionStateText = opts.suppressSessionState ? '' : buildSessionStateReminder();
+      //  ② 压缩步在压缩成功后重取(P2 固结的 Compaction Snapshot 当步即可见)。
+      let sessionStateText = opts.suppressSessionState ? '' : buildSessionStateReminder();
 
       // The scheduler is the only automatic path that may compress old evidence.
       // Normal tool pushes and lifecycle tracking remain metadata-only.
@@ -564,6 +564,10 @@ export async function runAgentCore(
           runtimeContextState.lifecycleStats = lifecycle.stats();
         }
         rehydrateArtifacts(runtimeContextState, history);
+        // 压缩可能刚把进度快照固结进 notes.md(P2)→ 重取,让本步 requestHistory
+        // 末尾就带上最新 Compaction Snapshot,不必等下一步。bar 口径对应的
+        // ephemeralText 仍用触发时旧值(见 buildRequestHistory 注释),仅差这一段。
+        if (!opts.suppressSessionState) sessionStateText = buildSessionStateReminder();
         // 会话状态(活跃 plan + 笔记段)不再回写 history[0]:每步都会在 requestHistory
         // 末尾注入最新副本(见下方 ephemeralReminder),compact 后自然恢复。
       }
@@ -597,7 +601,15 @@ export async function runAgentCore(
             ? '## Opening analysis\nBegin your FIRST response of this turn with a brief analysis of the request and your planned approach (1-3 sentences, no filler), THEN start tool calls. This opening is the only place where pre-tool prose is expected; after it, work quietly with no narration between tool calls.'
             : '',
           historyRebuilt
-            ? '## Post-compaction recovery\nContext was compacted before this request. Re-establish the current objective and unresolved work from retained evidence or the session note, avoid repeating completed investigation, and re-read exact file context before any dependent edit.'
+            ? '## Post-compaction recovery\n' +
+              'Context was compacted before this request. Recover before doing anything else, in this order:\n' +
+              '1. Read the session summary at the top of the history: `## Completed` is already done — do not redo or re-verify it. `## In Progress` / `## Next Steps` tell you exactly where work stopped and what is next.\n' +
+              '2. Read `## Session state` below (from notes.md, refreshed every step): the active plan is authoritative — `[x]` steps are finished, resume from the first `[ ]`. A `## Compaction Snapshot` section there is the progress checkpoint written at this compaction.\n' +
+              (sessionStateText
+                ? ''
+                : '(No active plan or snapshot was found in notes.md — reconstruct what is done purely from the summary and treat its `## Completed` as ground truth.)\n') +
+              '3. Before any file edit, read_file the target fresh to get the current content hash — never edit from memory of pre-compaction content.\n' +
+              '4. Before re-running a search/read you think you already did, check the summary and notes first: only repeat it if the result is genuinely missing or the target has changed.'
             : '',
           sessionStateText, // 调度器之前已取(并计入压力线),此处复用同一份,不重复读文件
         ].filter(Boolean).join('\n\n');

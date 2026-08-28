@@ -28,6 +28,7 @@ import { pruneAfterCompaction } from '../rollback/index.js';
 import { toText } from '../context/utils.js';
 import { DEFAULT_BUDGET_POLICY } from '../context/budget.js';
 import { collectArtifactRefs } from '../context/artifacts.js';
+import { writeCompactionSnapshot } from './notes.js';
 
 /**
  * 上下文压缩子系统:
@@ -328,6 +329,28 @@ function factKey(line: string): string {
     .replace(/^[-*•]\s*/, '')
     .replace(/[。.,;；:：]+$/, '')
     .trim();
+}
+
+/**
+ * 从摘要正文提取「当前进度快照」段:Objective / In Progress / Next Steps。
+ * 这是压缩后最该被记住的「做到哪了」,固结到 notes.md 供恢复步骤注入。
+ * 只识别 `## ` 级标题(摘要器固定输出此结构);一个都没有时返 null(不写空快照)。
+ */
+export function extractProgressSnapshot(summaryRest: string): string | null {
+  const WANT = new Set(['objective', 'in progress', 'next steps']);
+  const lines = summaryRest.split('\n');
+  const out: string[] = [];
+  let taking = false;
+  for (const line of lines) {
+    const m = line.match(/^ {0,3}##\s+(.+?)\s*$/);
+    if (m) {
+      const name = m[1].replace(/\s*[—–-].*$/, '').trim().toLowerCase();
+      taking = WANT.has(name);
+    }
+    if (taking) out.push(line);
+  }
+  const text = out.join('\n').trim();
+  return text ? text : null;
 }
 
 /**
@@ -795,6 +818,14 @@ export async function compactHistory(
       parsed.keyFacts,
       keyFactsBudgetChars(opts.window),
     );
+    // P2:把 Objective/In Progress/Next Steps 固结到 notes.md——压缩那一刻
+    // notes.md 就有当前进度的权威副本,压缩后恢复提示据此续工,不再只依赖
+    // 模型自觉 plan_update。仅主 agent(共享 contextState)写;子 agent 独立
+    // contextState 不应污染主会话笔记。无活跃 plan 时写入(有则权威计划仍在)。
+    if (state === contextState) {
+      const snapshot = extractProgressSnapshot(parsed.rest);
+      if (snapshot) writeCompactionSnapshot(snapshot);
+    }
     const body = [
       parsed.rest,
       pinnedFacts ? `## Key Facts\n${pinnedFacts}` : '',

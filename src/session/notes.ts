@@ -136,11 +136,17 @@ const NOTE_SECTION_TITLES: Record<string, string> = {
   decisions: 'Decisions',
   open_questions: 'Open Questions',
   risks: 'Risks',
+  // compaction_snapshot 是压缩成功后自动写入的机器快照(非 note_append 手填):
+  // 让摘要的 Objective/In Progress/Next Steps 在压缩后仍作为活跃笔记段注入。
+  compaction_snapshot: 'Compaction Snapshot',
 };
 /** 预设段 key 列表(供工具 schema enum 与校验用)。 */
 export const NOTE_SECTION_KEYS = Object.keys(NOTE_SECTION_TITLES);
 /** 段注入优先级:数值越大越先占预算、越后丢弃正文。Risks 最重要。 */
 const SECTION_PRIORITY: Record<string, number> = {
+  // compaction_snapshot 提到最高:它是压缩当次的权威进度快照,比手填 findings 更能
+  // 直接告诉模型「做到哪了」,压缩后第一步最该看到的就是它。
+  compaction_snapshot: 5,
   risks: 4, findings: 3, decisions: 2, open_questions: 1,
 };
 
@@ -341,4 +347,58 @@ export function extractActiveNotesSections(
     if (used >= budget) break;
   }
   return out.join('\n\n');
+}
+
+// ── Compaction Snapshot(压缩时自动固结的进度快照)──────────────────────────
+// 由 compactHistory 在摘要成功后写入;替代「模型需自觉 plan_update」的软约定——
+// 压缩那一刻 notes.md 里一定有当前进度的权威副本,压缩后恢复提示据此续工。
+// 与 plan/notes 不同:这是机器产出、整段替换(不逐条累积),因此不会跨压缩膨胀。
+
+/** 快照段标题。extractActiveNotesSections 经 matchSectionKey 识别并注入。 */
+export const COMPACTION_SNAPSHOT_TITLE = NOTE_SECTION_TITLES.compaction_snapshot;
+
+/**
+ * 把压缩摘要的关键段固结到 notes.md 的 `## Compaction Snapshot` 段。
+ * 整段替换旧快照(不累积);仅在当前无活跃 plan 时写入(已有 plan 时权威计划仍在,
+ * 快照只会重复)。body 为空时不动。永不抛错:压缩主流程不能因快照失败而失败。
+ */
+export function writeCompactionSnapshot(
+  body: string,
+  sessionId = getCurrentSessionId(),
+): void {
+  try {
+    const trimmed = (body ?? '').trim();
+    if (!trimmed) return;
+    if (readActivePlanTitle(sessionId)) return; // 已有权威计划,快照是冗余
+    const p = getNotesFilePath(sessionId);
+    if (!p) return;
+    let existing = '';
+    try {
+      existing = fs.readFileSync(p, 'utf8').replace(/\r\n?/g, '\n');
+    } catch {
+      existing = '';
+    }
+    const header = `## ${COMPACTION_SNAPSHOT_TITLE}`;
+    const newSection = `${header}\n${trimmed}`;
+    const lines = existing.split('\n');
+    const start = lines.findIndex((l) => l.trim() === header);
+    let next: string;
+    if (start >= 0) {
+      // 段末 = 下一个 ## 或文件末;整段替换
+      let end = lines.length;
+      for (let k = start + 1; k < lines.length; k++) {
+        if (/^##\s/.test(lines[k])) { end = k; break; }
+      }
+      const before = lines.slice(0, start).join('\n').replace(/\s+$/, '');
+      const after = lines.slice(end).join('\n').replace(/^\s+/, '');
+      next = [before, newSection, after].filter((s) => s.length > 0).join('\n\n') + '\n';
+    } else {
+      const rest = existing.trim();
+      next = rest ? `${rest}\n\n${newSection}\n` : `${newSection}\n`;
+    }
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, next, 'utf8');
+  } catch {
+    // 快照是 best-effort 增强,绝不影响压缩主流程。
+  }
 }

@@ -5,6 +5,7 @@ import type { ChatMessage } from '../src/llm/index.js';
 import {
   compactHistory,
   createContextState,
+  extractProgressSnapshot,
   keyFactsBudgetChars,
   mergeKeyFacts,
   splitSummaryText,
@@ -331,4 +332,109 @@ test('compactHistory force: 多轮 history 必须保留最早 user 所在 group(
   // 最后一组 tool 也必须保留
   assert.ok(history.some((message) => (message as { tool_call_id?: string }).tool_call_id === 'read-2'));
   assertToolCallsHaveProducers(history);
+});
+
+// ── P2:压缩进度快照固结 ──────────────────────────────────────────────────
+
+test('extractProgressSnapshot 只取 Objective/In Progress/Next Steps 段', () => {
+  const rest = [
+    '## Objective',
+    '完成 P1+P2 缓解',
+    '## Completed',
+    '改了 src/a.ts 和 src/b.ts',
+    '## In Progress',
+    '正在写测试',
+    '## Next Steps',
+    '跑 typecheck',
+    '## Key Facts',
+    '- src/a.ts:42 是入口',
+  ].join('\n');
+  const snap = extractProgressSnapshot(rest);
+  assert.ok(snap, '应提取到快照');
+  assert.ok(snap!.includes('## Objective'), '含 Objective');
+  assert.ok(snap!.includes('## In Progress'), '含 In Progress');
+  assert.ok(snap!.includes('## Next Steps'), '含 Next Steps');
+  assert.ok(!snap!.includes('## Completed'), '不含 Completed(不属进度快照)');
+  assert.ok(!snap!.includes('## Key Facts'), '不含 Key Facts(已钉住,不进快照)');
+});
+
+test('extractProgressSnapshot 标题带 "— 说明" 后缀也识别;无目标段返 null', () => {
+  const rest = '## Objective — 用户的核心诉求\n做 X\n## Completed\ndid Y';
+  const snap = extractProgressSnapshot(rest);
+  assert.ok(snap!.includes('做 X'), 'Objective(带 — 后缀)仍被识别');
+  assert.ok(!snap!.includes('did Y'));
+  assert.equal(extractProgressSnapshot('## Completed\nonly done'), null, '无目标段时返 null');
+});
+
+test('compactHistory 摘要成功后把进度快照固结进 notes.md(仅主 agent contextState)', async () => {
+  // 模拟主 agent 压缩:contextState 缺省(共享) → 应写 notes.md。
+  // 用一个全新 createContextState() 的子 agent 路径对照 → 不应写。
+  const { getNotesFilePath, readActivePlanTitle } = await import('../src/session/notes.js');
+  const { setCurrentSessionId } = await import('../src/session/state.js');
+  const { setSandboxRoot } = await import('../src/sandbox/root.js');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const os = await import('node:os');
+
+  // 隔离临时 sandbox root:notes.md 落到 <tmp>/.mocode/sessions/<sid>/notes.md,
+  // 不污染真实工作区。
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mocode-compact-snap-'));
+  const sid = `snap-${Date.now()}`;
+  const prevRoot = setSandboxRoot(tmpRoot);
+  setCurrentSessionId(sid, tmpRoot);
+  const notesPath = getNotesFilePath(sid)!;
+
+  const summaryBody =
+    '## Objective\n做 P1+P2\n## Completed\n改完代码\n## In Progress\n写测试\n## Next Steps\n跑验证\n## Key Facts\n- fact';
+  const summarize = async () => summaryBody;
+
+  // 主 agent:共享 contextState(缺省 opts.contextState)→ 快照应写入 notes.md。
+  // history 构造:旧区须含非 user 组(old-read),否则 user 兜底把唯一旧区组捞回
+  // 保留区 → oldGroups 空 → noop-protected,根本走不到摘要。
+  const mainHistory: ChatMessage[] = [system('sys')];
+  mainHistory.push({ role: 'user', content: 'task' } as ChatMessage);
+  appendTool(mainHistory, 'read_file', 'r1', { path: 'a.ts' }, 'x'.repeat(2_000));
+  mainHistory.push({ role: 'user', content: 'continue' } as ChatMessage);
+  appendTool(mainHistory, 'run_command', 'r2', { command: 'echo ok' }, 'ok');
+  const mainResult = await compactHistory(mainHistory, {
+    window: 1_200,
+    threshold: 100,
+    summarize,
+  });
+  assert.equal(mainResult.reason, 'summarize');
+  const notes = fs.readFileSync(notesPath, 'utf8');
+  assert.ok(notes.includes('## Compaction Snapshot'), 'notes.md 应出现快照段');
+  assert.ok(notes.includes('## In Progress'), '快照含 In Progress');
+  assert.ok(notes.includes('写测试'), '快照含进度内容');
+  assert.ok(!notes.includes('## Completed'), '快照不含 Completed 段');
+  // 不应覆盖出活跃 plan
+  assert.equal(readActivePlanTitle(sid), null, '本场景无活跃 plan');
+
+  // 再次压缩:旧快照被整段替换,不累积。
+  mainHistory.push({ role: 'user', content: 'again' } as ChatMessage);
+  appendTool(mainHistory, 'read_file', 'r2', { path: 'b.ts' }, 'y'.repeat(2_000));
+  mainHistory.push({ role: 'user', content: 'continue-2' } as ChatMessage);
+  appendTool(mainHistory, 'run_command', 'r2b', { command: 'echo ok2' }, 'ok2');
+  await compactHistory(mainHistory, { window: 1_200, threshold: 100, summarize });
+  const notes2 = fs.readFileSync(notesPath, 'utf8');
+  assert.equal(notes2.split('## Compaction Snapshot').length - 1, 1, '快照段唯一,不累积');
+
+  // 子 agent:独立 contextState → 不写主会话 notes.md。
+  fs.writeFileSync(notesPath, '', 'utf8');
+  const subHistory: ChatMessage[] = [system('sys')];
+  subHistory.push({ role: 'user', content: 'task' } as ChatMessage);
+  appendTool(subHistory, 'read_file', 'r3', { path: 'c.ts' }, 'z'.repeat(2_000));
+  subHistory.push({ role: 'user', content: 'continue' } as ChatMessage);
+  appendTool(subHistory, 'run_command', 'r4', { command: 'echo ok' }, 'ok');
+  await compactHistory(subHistory, {
+    window: 1_200,
+    threshold: 100,
+    contextState: createContextState(),
+    summarize,
+  });
+  assert.equal(fs.readFileSync(notesPath, 'utf8'), '', '子 agent 不应写主会话 notes.md');
+
+  setCurrentSessionId(undefined, tmpRoot);
+  setSandboxRoot(prevRoot);
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
