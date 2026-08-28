@@ -92,11 +92,44 @@ test('compactHistory 对全保护区返回 noop 且不调用摘要器', async ()
   assert.equal(called, false);
 });
 
-test('compactHistory force: 全在保护区也强压(首轮/当前轮不豁免)', async () => {
-  // 首轮形态:user + assistant(tool_calls) + tool;窗口给大,常规切分全进保护区(oldGroups 空)。
-  // force 必须只保最后一组、摘要其余,而不是 noop-protected。
+test('compactHistory force: 单 user + 单 tool 组时保 user 不压(noop)', async () => {
+  // 首轮形态:user + assistant(tool_calls) + tool;窗口给大,常规切分全进保护区。
+  // force 旧实现把 user 丢进摘要 → 重建后 history 无 user → 下一轮 400。
+  // 修复后:force 保留最早 user,此时无中间旧区可压 → noop-protected(不丢 user)。
   const history: ChatMessage[] = [system(), { role: 'user', content: 'fix the bug' } as ChatMessage];
   appendTool(history, 'read_file', 'big-read', { path: 'src/a.ts' }, 'x'.repeat(30_000));
+  let summarizeCalled = false;
+  const result = await compactHistory(history, {
+    window: 1_000_000,
+    threshold: 100,
+    force: true,
+    contextState: createContextState(),
+    summarize: async () => {
+      summarizeCalled = true;
+      return 'should not be called';
+    },
+  });
+  // 只有 2 组(user + tool),保留 user 后无旧区 → noop,不调摘要器
+  assert.equal(summarizeCalled, false);
+  // user 必须还在 history 中
+  assert.ok(
+    history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === 'fix the bug'),
+    'earliest user message must survive force compaction',
+  );
+  // tool 也在
+  assert.ok(history.some((message) => (message as { tool_call_id?: string }).tool_call_id === 'big-read'));
+  assertToolCallsHaveProducers(history);
+});
+
+test('compactHistory force: 多轮 history 必须保留最早 user 所在 group(防 400)', async () => {
+  // 多轮 history:user1 + tool1 + user2 + tool2;窗口给大,常规切分全进保护区。
+  // force 旧实现把所有 user 丢进摘要 → 重建后 history 无 user → LLM API 报 400。
+  // 修复后 force 必须保留最早 user 所在 group。
+  const history: ChatMessage[] = [system()];
+  history.push({ role: 'user', content: 'first request' } as ChatMessage);
+  appendTool(history, 'read_file', 'read-1', { path: 'a.ts' }, 'content-a');
+  history.push({ role: 'user', content: 'second request' } as ChatMessage);
+  appendTool(history, 'read_file', 'read-2', { path: 'b.ts' }, 'content-b');
   let summarizedRoles: string[] = [];
   const result = await compactHistory(history, {
     window: 1_000_000,
@@ -105,16 +138,18 @@ test('compactHistory force: 全在保护区也强压(首轮/当前轮不豁免)'
     contextState: createContextState(),
     summarize: async (older) => {
       summarizedRoles = older.map((message) => message.role);
-      return 'first turn summary';
+      return 'multi-turn summary';
     },
   });
   assert.equal(result.compacted, true);
   assert.equal(result.summarized, true);
   assert.equal(result.historyRebuilt, true);
-  assert.deepEqual(summarizedRoles, ['user']);
-  assert.equal(history[0].role, 'system');
-  assert.match(contentAt(history, 1), /^# 会话摘要/);
-  // 最后一组(assistant+tool)原样保留且配对完整
-  assert.ok(history.some((message) => (message as { tool_call_id?: string }).tool_call_id === 'big-read'));
+  // 最早 user (first request) 必须保留在重建后的 history 中
+  assert.ok(
+    history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === 'first request'),
+    'earliest user message must survive force compaction',
+  );
+  // 最后一组 tool 也必须保留
+  assert.ok(history.some((message) => (message as { tool_call_id?: string }).tool_call_id === 'read-2'));
   assertToolCallsHaveProducers(history);
 });

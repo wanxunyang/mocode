@@ -305,6 +305,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       toolsOverride,
       contextState: localContextState,
       suppressOpeningAnalysis: true, // 子代理不注入「开场分析」:仅主线面对用户的首次响应用
+      // 子代理不注入主会话「会话状态」(plan + 笔记):systemPrompt 已用
+      // buildMocodeCorePrompt() 切掉会话私有尾段,工具表也排除了 plan_update——
+      // 灌主计划只会干扰窄 worker 并白付 token。
+      suppressSessionState: true,
       onToolOutcome: (tool, args) => {
         if (tool === 'read_file' && typeof args.path === 'string') readSet.add(args.path);
         else if (['glob', 'grep'].includes(tool)) readSet.add('workspace');

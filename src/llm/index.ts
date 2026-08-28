@@ -1,8 +1,9 @@
 import OpenAI from 'openai';
-import { config, isSubAgentEnabled, isFrontendToolsEnabled } from '../config/index.js';
+import { config, getActiveModel, isSubAgentEnabled, isFrontendToolsEnabled } from '../config/index.js';
 import { tools } from '../tools/registry.js';
 import { getPlanDisabledTools, FRONTEND_TOOLS } from '../tools/constants.js';
 import { ThinkTagFilter } from './think-filter.js';
+import { anthropicChatOnce } from './providers/anthropic.js';
 
 // 强制关闭第三方调试日志泄漏:openai SDK 在 process.env.DEBUG === 'true' 时用裸
 // console.log 把请求/响应直写 stdout,会污染 TUI 输入框(并泄露 headers/URL)。
@@ -223,6 +224,8 @@ export interface ChatUsage {
    *  ——成本监控要从 promptTokens 中剔除,否则高估一个数量级。
    *  多 provider 字段名不一致,见 extractUsageExtras。 */
   cachedTokens: number;
+  /** Anthropic 本次写入 prompt cache 的 token；其它 provider 缺省为 0/undefined。 */
+  cacheCreationTokens?: number;
   /** completion 中"思考"消耗的 token(CoT 模型:OpenAI o1 / DeepSeek R1 / GLM-Z1)。
    *  仍按 completion 全价计费,但对调试 thinking 长度有用。 */
   reasoningTokens: number;
@@ -320,6 +323,8 @@ export interface StreamHandlers {
     completionTokens: number;
     promptTokens?: number;
     cachedTokens?: number;
+    /** Anthropic 本次创建缓存的输入 token；其它 provider 不上报。 */
+    cacheCreationTokens?: number;
   }) => void;
 }
 
@@ -351,6 +356,14 @@ export async function chat(
       throw new DOMException('This operation was aborted', 'AbortError');
     }
     try {
+      if (config.provider === 'anthropic') {
+        return await anthropicChatOnce(
+          messages,
+          handlers,
+          signal,
+          toolsOverride ?? chatTools,
+        );
+      }
       return await chatOnce(messages, handlers, signal, toolsOverride);
     } catch (err) {
       lastErr = err;
@@ -413,6 +426,19 @@ async function chatOnce(
   signal: AbortSignal | undefined,
   toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined
 ): Promise<ChatResult> {
+  // 防御:messages 必须至少含一条非空 user 消息,否则 OpenAI/Anthropic 都会 400。
+  // compact force 分支曾把所有 user 丢进摘要 → 重建 history 无 user → 下一轮 400。
+  // 在 transport 边界拦住所有类似回归(compact / 外部注入 / resume 损坏)。
+  const hasNonEmptyUser = messages.some((m) => {
+    if (m.role !== 'user') return false;
+    const c = (m as { content?: unknown }).content;
+    if (typeof c === 'string') return c.length > 0;
+    if (Array.isArray(c)) return c.some((p) => (p as { type?: string; text?: string }).type === 'text' && ((p as { text?: string }).text?.length ?? 0) > 0);
+    return false;
+  });
+  if (!hasNonEmptyUser) {
+    throw new Error('messages must contain at least one non-empty user message');
+  }
   // signal 透传给 SDK 第二参(RequestOptions);abort 后 for await 抛错,chat 不 catch,透传 runAgent 处理。
   // createImplOverride 的 body 类型故意宽成 Record(测试桩用),生产走 client 分支时由 OpenAI 自己的类型守门。
   const create = createImplOverride
@@ -425,7 +451,7 @@ async function chatOnce(
   const activeTools = toolsOverride ?? chatTools;
   const stream = await create(
     {
-      model: config.model,
+      model: getActiveModel(),
       messages: normalizeImageDetail(messages),
       tools: activeTools,
       stream: true,

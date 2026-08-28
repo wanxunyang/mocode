@@ -15,6 +15,9 @@ type WorkState = { version: 1; projects: Project[]; selectedProjectId: string; t
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
 type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string };
 type Attachment = { name: string; dataUrl: string };
+type LlmProvider = 'openai' | 'anthropic';
+type ModelConfig = { model: string; label: string; provider: LlmProvider; promptCache: boolean; baseUrl: string; contextWindow: number | null; language: string; theme: string };
+type ModelItem = { name: string; label: string; provider: LlmProvider; promptCache: boolean; baseURL: string; contextWindow: number; isActive: boolean };
 
 declare global {
   interface Window {
@@ -35,8 +38,8 @@ declare global {
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       pullRequests: () => Promise<Record<string, unknown>>;
       pickAttachment: () => Promise<Attachment | null>;
-      getConfig: () => Promise<{ model: string; label: string; baseUrl: string; contextWindow: number | null; language: string; theme: string }>;
-      listModels: () => Promise<Array<{ name: string; label: string; baseURL: string; contextWindow: number; isActive: boolean }>>;
+      getConfig: () => Promise<ModelConfig>;
+      listModels: () => Promise<ModelItem[]>;
       switchModel: (name: string) => Promise<{ ok: boolean; message: string }>;
       listBranches: () => Promise<{ ok: boolean; message: string; current: string; branches: string[] }>;
       switchBranch: (branch: string) => Promise<{ ok: boolean; message: string; branch?: string }>;
@@ -768,9 +771,23 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     case 'tool_completed': addTool(payload, true); break;
     case 'approval_requested': showApproval(payload); break;
     case 'run_aborted': finish(); break;
-    case 'run_completed':
+    case 'run_completed': {
       if (typeof payload.usagePercent === 'number') updateContextUsage(payload.usagePercent);
-      finish(); break;
+      const usage = payload.usage && typeof payload.usage === 'object'
+        ? payload.usage as Record<string, unknown>
+        : null;
+      const created = typeof usage?.cacheCreationTokens === 'number' ? usage.cacheCreationTokens : 0;
+      const cached = typeof usage?.cachedTokens === 'number' ? usage.cachedTokens : 0;
+      if (created > 0 || cached > 0) {
+        const details = [
+          created > 0 ? `创建 ${Math.round(created).toLocaleString()} tokens` : null,
+          cached > 0 ? `命中 ${Math.round(cached).toLocaleString()} tokens` : null,
+        ].filter(Boolean).join(' · ');
+        showToast('success', `Prompt Cache: ${details}`, 3500);
+      }
+      finish();
+      break;
+    }
     case 'compact_done': {
       const pct = typeof payload.usagePercent === 'number' ? payload.usagePercent : null;
       updateContextUsage(pct);
@@ -1151,23 +1168,28 @@ if (sidebarResize) {
 }
 /* ── Model picker ─────────────────────────────────────── */
 let modelPickerEl: HTMLElement | null = null;
-let modelList: Array<{ name: string; label: string; baseURL: string; contextWindow: number; isActive: boolean }> = [];
+let modelList: ModelItem[] = [];
 
 function shortModelName(text: string): string {
   if (!text) return '未配置模型';
   return text.length > 18 ? `${text.slice(0, 17)}…` : text;
 }
 
-function setModeButton(config: { model: string; label: string; baseUrl: string; contextWindow: number | null }): void {
+function setModeButton(config: ModelConfig): void {
   const button = $('#mode-button');
   if (!button) return;
   const display = config.label || config.model;
   const label = config.model ? shortModelName(display) : '未配置模型';
-  button.innerHTML = `<span class="mode-label">${escapeHtml(label)}</span><svg class="icon icon-inline" data-icon="chevron-down"></svg>`;
+  const cacheBadge = config.provider === 'anthropic' && config.promptCache
+    ? '<span class="model-picker-cache">cache</span>'
+    : '';
+  button.innerHTML = `<span class="mode-label">${escapeHtml(label)}</span><span class="model-picker-provider">${config.provider}</span>${cacheBadge}<svg class="icon icon-inline" data-icon="chevron-down"></svg>`;
   mountIcons(button);
   const detail = [
     config.model ? `别名: ${config.model}` : null,
     config.label && config.label !== config.model ? `模型: ${config.label}` : null,
+    `协议: ${config.provider}`,
+    config.provider === 'anthropic' ? `Prompt Cache: ${config.promptCache ? 'on' : 'off'}` : null,
     config.baseUrl ? `API: ${config.baseUrl}` : null,
     config.contextWindow ? `上下文: ${(config.contextWindow / 1000).toFixed(0)}k tokens` : null,
   ].filter(Boolean).join('\n');
@@ -1204,6 +1226,8 @@ function renderModelPicker(): void {
           <span class="model-picker-body">
             <span class="model-picker-name">${escapeHtml(m.label)}</span>
             <span class="model-picker-meta">
+              <span class="model-picker-provider">${m.provider}</span>
+              ${m.provider === 'anthropic' && m.promptCache ? '<span class="model-picker-cache">cache</span>' : ''}
               ${m.contextWindow ? `<span class="model-picker-ctx">${(m.contextWindow / 1000).toFixed(0)}k 上下文</span>` : ''}
             </span>
           </span>

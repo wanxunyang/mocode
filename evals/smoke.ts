@@ -457,12 +457,12 @@ const cases: SmokeCase[] = [
     name: 'shares mocode core behavior with sub-agents without session payload',
     run() {
       const prompt = buildMocodeCorePrompt();
-      assert.match(prompt, /## Tool use/);
+      assert.match(prompt, /## Tool policy/);
       assert.match(prompt, /## Workflow/);
-      assert.match(prompt, /## Safety & Boundaries/);
-      assert.match(prompt, /## Termination & Reporting/);
-      assert.doesNotMatch(prompt, /## Project context \(dynamic reference\)/);
-      assert.doesNotMatch(prompt, /## Session Notepad/);
+      assert.match(prompt, /## Safety/);
+      assert.match(prompt, /## Reporting/);
+      assert.doesNotMatch(prompt, /## Project context/);
+      assert.doesNotMatch(prompt, /## Session state/);
     },
   },
   {

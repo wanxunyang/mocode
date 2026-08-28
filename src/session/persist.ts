@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
-import { config } from '../config/index.js';
+import { config, getActiveModel } from '../config/index.js';
 import type { ChatMessage } from '../llm/index.js';
 import { truncateDisplay } from '../ui/render.js';
 
@@ -84,7 +84,7 @@ export function saveSession(
   const meta: SessionMeta = {
     id,
     createdAt: idToIso(id),
-    model: config.model,
+    model: getActiveModel(),
     firstUser:
       history.length > 1
         ? firstUserOf(history)

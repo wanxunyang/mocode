@@ -3,15 +3,20 @@ prompt_image/
 tmp/
 docs/*
 !docs/usage.md
-!docs/USAGE_SNAPSHOT_SKILL.md
 task_management/
-scripts/
 .env
 *.log
 evals/results/
 
+# 本地脚本沙盒:必须锚定到根(写 `scripts/` 会匹配任意深度,
+# 把 packages/*/scripts 下的构建依赖一并吞掉,导致 fresh clone 构建失败)。
+/scripts/
+# 演示脚手架:仅本地演示用,不入库。
+/demo-plan/
+
 # 构建产物(npm publish 经 files 字段打包,不入库)
 dist/
+*.tsbuildinfo
 
 # agent产物
 CLAUDE.md
@@ -25,3 +30,12 @@ AGENTS.md
 .workbuddy/
 dist-tests/
 
+# 打包与覆盖率产物
+*.tgz
+coverage/
+
+# 编辑器与 OS 产物
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

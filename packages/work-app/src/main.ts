@@ -21,8 +21,8 @@ const IGNORED_DIRECTORIES = new Set(['.git', '.mocode', 'node_modules', 'dist', 
  * 只把 mocode 自己认识的键回填到 process.env,避免把无关 .env 字段塞进 host。
  */
 const MOCODE_CONFIG_KEYS = [
-  'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS', 'MAX_TOKENS',
-  'LLM_STREAM_USAGE', 'AUTO_COMPACT',
+  'LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS', 'MAX_TOKENS',
+  'ANTHROPIC_PROMPT_CACHE', 'LLM_STREAM_USAGE', 'AUTO_COMPACT',
   'MOCODE_CONTEXT_OPTIMIZE', 'MOCODE_CONTEXT_RELPRUNE', 'MOCODE_LIFECYCLE',
   'MOCODE_BUDGET_SCHEDULER', 'AUTO_REFLECT', 'MEMORY_ENABLED', 'REFLECT_EVERY_N',
   'MAX_STEPS', 'MOCODE_SUBAGENT_ENABLED', 'SUB_AGENT_MAX_STEPS', 'SANDBOX_ROOT',
@@ -101,6 +101,8 @@ function writeUserConfig(patch: Record<string, string>): void {
 interface ModelDescriptor {
   name: string;          // 文件名(去掉 .json),用户标识 / 写入 config 的 LLM_MODEL
   label: string;         // 实际 API 的 model 名
+  provider: 'openai' | 'anthropic';
+  promptCache: boolean;
   baseURL: string;       // 仅显示用(只返回 host,不泄漏完整 endpoint)
   contextWindow: number; // tokens
   isActive: boolean;
@@ -119,8 +121,18 @@ function listModels(): ModelDescriptor[] {
       const name = path.basename(file, '.json');
       const baseURL = typeof raw.baseURL === 'string' ? raw.baseURL : '';
       const model = typeof raw.model === 'string' ? raw.model : name;
+      const provider = raw.provider === 'anthropic' ? 'anthropic' : 'openai';
+      const promptCache = provider === 'anthropic' && raw.anthropicPromptCache !== false;
       const contextWindow = Number(raw.contextWindow ?? 0) || 0;
-      out.push({ name, label: model, baseURL: maskUrl(baseURL), contextWindow, isActive: name === active });
+      out.push({
+        name,
+        label: model,
+        provider,
+        promptCache,
+        baseURL: maskUrl(baseURL),
+        contextWindow,
+        isActive: name === active,
+      });
     } catch { /* 跳过解析失败的文件 */ }
   }
   // 激活项置顶,其余按名称字典序
@@ -141,26 +153,34 @@ function switchModel(name: string): { ok: boolean; message: string; model?: Mode
   const baseURL = typeof raw.baseURL === 'string' ? raw.baseURL : '';
   const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey : '';
   const model = typeof raw.model === 'string' ? raw.model : name;
+  const provider = raw.provider === 'anthropic' ? 'anthropic' : 'openai';
+  const promptCache = provider === 'anthropic' && raw.anthropicPromptCache !== false;
   const contextWindow = Number(raw.contextWindow ?? 0) || 0;
   if (!baseURL || !model) return { ok: false, message: `模型 ${name} 缺少 baseURL / model 字段` };
-  // 写文件(只覆盖 4 个相关键)
   const patch: Record<string, string> = {
+    LLM_PROVIDER: provider,
     LLM_BASE_URL: baseURL,
     LLM_API_KEY: apiKey,
     LLM_MODEL: name,
+    ANTHROPIC_PROMPT_CACHE: promptCache ? 'true' : 'false',
   };
   if (contextWindow) patch.CONTEXT_WINDOW_TOKENS = String(contextWindow);
   try { writeUserConfig(patch); }
   catch (error) { return { ok: false, message: `写入配置失败: ${(error as Error).message}` }; }
-  // 同步到 process.env,这样已经 start 过的 host 也会用新配置
+  process.env.LLM_PROVIDER = provider;
   process.env.LLM_BASE_URL = baseURL;
   process.env.LLM_API_KEY = apiKey;
   process.env.LLM_MODEL = name;
+  process.env.ANTHROPIC_PROMPT_CACHE = promptCache ? 'true' : 'false';
   if (contextWindow) process.env.CONTEXT_WINDOW_TOKENS = String(contextWindow);
-  // 取消正在跑的任务
   if (activeTaskId) { void agent?.send({ type: 'cancel', id: activeTaskId }); activeTaskId = null; }
-  return { ok: true, message: `已切换到 ${name}`, model: { name, label: model, baseURL: maskUrl(baseURL), contextWindow, isActive: true } };
+  return {
+    ok: true,
+    message: `已切换到 ${name} (${provider}${promptCache ? ' · cache on' : ''})`,
+    model: { name, label: model, provider, promptCache, baseURL: maskUrl(baseURL), contextWindow, isActive: true },
+  };
 }
+
 
 /**
  * 解析用来跑 Agent Host 的 node 可执行文件。
@@ -651,9 +671,14 @@ function installIpc(): void {
   ipcMain.handle('work:get-config', () => {
     const models = listModels();
     const active = models.find((item) => item.isActive) ?? null;
+    const provider = active?.provider ?? (process.env.LLM_PROVIDER === 'anthropic' ? 'anthropic' : 'openai');
+    const promptCache = provider === 'anthropic'
+      && (active?.promptCache ?? process.env.ANTHROPIC_PROMPT_CACHE !== 'false');
     return {
       model: process.env.LLM_MODEL ?? '',
       label: active?.label ?? process.env.LLM_MODEL ?? '',
+      provider,
+      promptCache,
       baseUrl: active?.baseURL ?? maskUrl(process.env.LLM_BASE_URL ?? ''),
       contextWindow: active?.contextWindow ?? (Number(process.env.CONTEXT_WINDOW_TOKENS ?? 0) || null),
       language: process.env.MOCODE_LANGUAGE ?? '',

@@ -22,13 +22,17 @@ import path from 'node:path';
 /** 预设目录:`~/.mocode/models/`(按需创建)。 */
 export const MODELS_DIR = path.join(os.homedir(), '.mocode', 'models');
 
-/** 单个预设的内容:与 updateModelConfig 的可选字段对齐。 */
+export type PresetProvider = 'openai' | 'anthropic';
+
+/** 单个预设的内容:provider/cache 字段可选输入，读取后总会规范化。 */
 export interface ModelPreset {
   name: string;
+  provider: PresetProvider;
   baseURL: string;
   apiKey: string;
   model: string;
   contextWindow: number;
+  anthropicPromptCache: boolean;
 }
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,32}$/;
@@ -46,8 +50,8 @@ function filePathFor(name: string): string {
   return path.join(MODELS_DIR, `${name}.json`);
 }
 
-/** 把磁盘上的 raw JSON 解析并校验为 ModelPreset;非法字段抛错。 */
-function parsePreset(raw: string): ModelPreset {
+/** 把磁盘上的 raw JSON 解析并校验为 ModelPreset;旧预设缺 provider 时按 openai 读取。 */
+export function parsePreset(raw: string): ModelPreset {
   const obj = JSON.parse(raw) as Record<string, unknown>;
   const { name, baseURL, apiKey, model, contextWindow } = obj;
   if (typeof name !== 'string' || !isValidPresetName(name)) {
@@ -65,7 +69,17 @@ function parsePreset(raw: string): ModelPreset {
   if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) {
     throw new Error(`预设 ${name}: contextWindow 必须为正数`);
   }
-  return { name, baseURL, apiKey, model, contextWindow: Math.floor(contextWindow) };
+  const provider: PresetProvider = obj.provider === 'anthropic' ? 'anthropic' : 'openai';
+  const anthropicPromptCache = provider === 'anthropic' && obj.anthropicPromptCache !== false;
+  return {
+    name,
+    provider,
+    baseURL,
+    apiKey,
+    model,
+    contextWindow: Math.floor(contextWindow),
+    anthropicPromptCache,
+  };
 }
 
 /** 读单个预设;不存在抛错。 */
@@ -84,15 +98,24 @@ export function readPreset(name: string): ModelPreset | null {
   }
 }
 
-/** 写/覆盖一个预设(原子:写 tmp 再 rename)。 */
-export function savePreset(preset: ModelPreset): void {
+/** 写/覆盖一个预设(原子:写 tmp 再 rename)。旧调用缺 provider 时仍按 openai 保存。 */
+export function savePreset(
+  preset: Omit<ModelPreset, 'provider' | 'anthropicPromptCache'>
+    & Partial<Pick<ModelPreset, 'provider' | 'anthropicPromptCache'>>,
+): void {
   if (!isValidPresetName(preset.name)) {
     throw new Error(`非法预设名: ${JSON.stringify(preset.name)}`);
   }
+  const provider = preset.provider ?? 'openai';
+  const normalized: ModelPreset = {
+    ...preset,
+    provider,
+    anthropicPromptCache: provider === 'anthropic' && preset.anthropicPromptCache !== false,
+  };
   fs.mkdirSync(MODELS_DIR, { recursive: true });
   const dest = filePathFor(preset.name);
   const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(preset, null, 2), 'utf8');
+  fs.writeFileSync(tmp, JSON.stringify(normalized, null, 2), 'utf8');
   fs.renameSync(tmp, dest);
 }
 
@@ -161,30 +184,38 @@ export function listPresets(): ModelPreset[] {
  * 设计为幂等:重启调用一次也只会生效一次。
  */
 export function migrateCurrentToPreset(input: {
+  provider?: PresetProvider;
   baseURL: string;
   apiKey: string;
   model: string;
   contextWindow: number;
+  anthropicPromptCache?: boolean;
 }): string | null {
   if (!input.baseURL || !input.apiKey || !input.model) return null;
   if (!Number.isFinite(input.contextWindow) || input.contextWindow <= 0) return null;
+  const provider = input.provider ?? 'openai';
+  const anthropicPromptCache = provider === 'anthropic' && input.anthropicPromptCache !== false;
   const existing = listPresets();
   const dup = existing.find(
     (p) =>
+      p.provider === provider &&
       p.baseURL === input.baseURL &&
       p.apiKey === input.apiKey &&
       p.model === input.model &&
-      p.contextWindow === input.contextWindow,
+      p.contextWindow === input.contextWindow &&
+      p.anthropicPromptCache === anthropicPromptCache,
   );
   if (dup) return null;
   // 'default' 已被占 → 用户已显式起过预设,无需老数据迁入;返回 null 让调用方跳过即可。
   if (existing.some((p) => p.name === 'default')) return null;
   savePreset({
     name: 'default',
+    provider,
     baseURL: input.baseURL,
     apiKey: input.apiKey,
     model: input.model,
     contextWindow: input.contextWindow,
+    anthropicPromptCache,
   });
   return 'default';
 }

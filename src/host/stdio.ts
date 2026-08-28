@@ -38,7 +38,12 @@ async function initializeRuntime(): Promise<void> {
     await initializeAllMcp();
     registerToolsExtension('mcp', getMcpTools());
     refreshChatTools();
-    emit('runtime_ready', { projectRoot: process.cwd(), warnings: getMcpWarnings() });
+    emit('runtime_ready', {
+      projectRoot: process.cwd(),
+      provider: config.provider,
+      promptCache: config.provider === 'anthropic' && config.anthropicPromptCache,
+      warnings: getMcpWarnings(),
+    });
   })();
   return initialized;
 }
@@ -121,6 +126,8 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       sessionId,
       projectRoot: process.cwd(),
       resumed,
+      provider: config.provider,
+      promptCache: config.provider === 'anthropic' && config.anthropicPromptCache,
       attachments: command.attachments?.map((attachment) => attachment.name) ?? [],
     }, command.id);
     const result = await runAgentCore({
@@ -138,6 +145,8 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       terminationReason: result.terminationReason,
       changedFiles: result.changedFiles ?? [],
       usage: result.usage,
+      provider: config.provider,
+      promptCache: config.provider === 'anthropic' && config.anthropicPromptCache,
       usagePercent: Math.round(contextUsagePercent() * 100),
       contextWindow: config.contextWindowTokens,
     }, command.id);

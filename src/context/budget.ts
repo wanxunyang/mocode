@@ -92,6 +92,16 @@ export interface SystemCostBreakdown {
   prompt: number;
   /** 校正前的本次 active tool schema token 估算。 */
   toolSchemas: number;
+  /**
+   * 校正前的「尾部 ephemeral 注入」token 估算(会话状态提醒 / 开场分析 / compact 恢复段)。
+   *
+   * 为什么必须单独记账:这些段为了不破坏 prompt 缓存,只拼进 agent/core 的 requestHistory
+   * 末尾,**不写回 history**(见 core.ts 的 ephemeralReminder)。调度器拿到的 history 里
+   * 没有它们,若不显式计入,这部分请求开销对压力线完全不可见——会话笔记单独就可达 5k
+   * (NOTES_INJECT_BUDGET_TOKENS),小窗口模型(32k)下约占 17%,压力线会系统性偏低。
+   * 它与 system prompt / 工具 schema 同属「每次请求都要付的固定开销」,故并入 system 层。
+   */
+  ephemeralInjection: number;
 }
 
 export interface BudgetReport {
@@ -118,13 +128,16 @@ export interface BudgetReport {
 /** 评估当前 history 的五区预算(纯函数,改不动 history)。
  * 传入 step 是当前所在 step 编号(agent 循环 step 变量),用于日志/调试。
  * correction:API 实测 / 估算的校正系数(默认 1);>1 表示粗估偏低,乘以系数后 actual 更接近真实值。
- * activeTools 必须与下一次 chat() 实际发送的工具集合一致，避免 plan/子 agent 误算 schema。 */
+ * activeTools 必须与下一次 chat() 实际发送的工具集合一致，避免 plan/子 agent 误算 schema。
+ * ephemeralTokens:本次请求会追加、但不在 history 里的尾部注入(会话状态提醒等)的裸 token,
+ *   必须传入,否则压力线看不见这部分开销(见 SystemCostBreakdown.ephemeral)。 */
 export function evaluateBudget(
   history: ChatMessage[],
   window: number,
   step: number = 0,
   correction: number = 1,
   activeTools: readonly ChatTool[] = chatTools,
+  ephemeralTokens: number = 0,
 ): BudgetReport {
   const layers: Record<BudgetLayer, LayerBudget> = {} as Record<BudgetLayer, LayerBudget>;
   for (const k of BUDGET_LAYERS) {
@@ -139,12 +152,18 @@ export function evaluateBudget(
   let rawTotal = 0;
 
   const sysMsg = history[0];
+  const safeEphemeral = Number.isFinite(ephemeralTokens)
+    ? Math.max(0, Math.round(ephemeralTokens))
+    : 0;
   const systemCosts: SystemCostBreakdown = {
     prompt: sysMsg ? msgTokens(sysMsg) : 0,
     toolSchemas: estimateToolSchemaTokens(activeTools),
+    ephemeralInjection: safeEphemeral,
   };
-  // 工具 schema 与 system prompt 同属请求固定开销；必须计入总量才能可靠触发压缩。
-  const systemRaw = systemCosts.prompt + systemCosts.toolSchemas;
+  // 工具 schema、system prompt 与尾部 ephemeral 注入同属请求固定开销；
+  // 必须计入总量才能可靠触发压缩(尾部注入不在 history 里,只能由调用方传入)。
+  const systemRaw =
+    systemCosts.prompt + systemCosts.toolSchemas + systemCosts.ephemeralInjection;
   layers.system.actual = adj(systemRaw);
   rawTotal += systemRaw;
 
@@ -231,7 +250,7 @@ export function scheduleActions(report: BudgetReport): ScheduleAction[] {
   const { layers } = report;
 
   if (layers.system.overBudget) {
-    const { prompt, toolSchemas } = report.systemCosts;
+    const { prompt, toolSchemas, ephemeralInjection } = report.systemCosts;
     const { actual, budget } = layers.system;
     const excess = actual - budget;
     const percent = ((actual / Math.max(budget, 1)) * 100).toFixed(0);
@@ -240,7 +259,9 @@ export function scheduleActions(report: BudgetReport): ScheduleAction[] {
       layer: 'system',
       reason:
         `固定开销 ${actual}/${budget} (+${excess}, ${percent}%)；`
-        + `提示 ${prompt} + 工具 ${toolSchemas}，×${report.correction.toFixed(2)}。`,
+        + `提示 ${prompt} + 工具 ${toolSchemas}`
+        + (ephemeralInjection > 0 ? ` + 尾部注入 ${ephemeralInjection}` : '')
+        + `，×${report.correction.toFixed(2)}。`,
     });
   }
 
