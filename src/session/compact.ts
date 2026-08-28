@@ -14,6 +14,9 @@ import {
   MAX_MEMORY_RESULT,
   MAX_OLD_TOOL_STUB,
   MAX_SKILL_RESULT,
+  SUMMARY_KEYFACTS_MAX_CHARS,
+  SUMMARY_KEYFACTS_MIN_CHARS,
+  SUMMARY_KEYFACTS_WINDOW_RATIO,
   SUMMARY_MSG_MAX_CHARS,
   SUMMARY_OUTPUT_MAX_CHARS,
   SUMMARY_TRANSCRIPT_WINDOW_RATIO,
@@ -38,7 +41,9 @@ import { collectArtifactRefs } from '../context/artifacts.js';
  *  - 原地修改:用 history.length=0; push(...) 重建,repl 持有同一引用。
  *  - tool_call_id 配对:按完整 group(assistant+其后连续 tool)切,永不劈开;
  *    微压缩只改 .content 不删消息。
- *  - history[0] 永远是当前 systemPrompt;摘要插 index 1。
+ *  - history[0] 永远是当前 systemPrompt;摘要插 index 1(恒单条)。
+ *  - 已有摘要不再进摘要器(见 splitSummaryText / mergeKeyFacts):只钉 `## Key Facts`,
+ *    叙述段随旧区照常滚动压缩——否则每代压缩都对上一代摘要再摘要一遍(递归衰减)。
  */
 
 export interface CompactOptions {
@@ -46,8 +51,13 @@ export interface CompactOptions {
   threshold: number;
   /** 手动 /compact 的聚焦指令,会拼进摘要 prompt。 */
   focus?: string;
-  /** 可注入的摘要器(测试用);缺省调 chat()。 */
-  summarize?: (older: ChatMessage[], focus?: string) => Promise<string | null>;
+  /** 可注入的摘要器(测试用);缺省调 chat()。第三参是 abort signal,必须透传给底层
+   *  chat(),否则 Ctrl+C 掐不断摘要请求。 */
+  summarize?: (
+    older: ChatMessage[],
+    focus?: string,
+    signal?: AbortSignal,
+  ) => Promise<string | null>;
   /** 手动触发(repl /compact)开关:强制走 microcompact/summarize,绕过 autoCompact 阈。
    *  设为 true 后,即便无 ROI 触发(history 不超/totalOver=false)也压——对齐用户拍板的"真·强制"。
    *  force:在 manual 基础上再绕过「oldGroups 空 → 直接 noop」的硬边界,允许降 keepBudget 强压。
@@ -58,6 +68,10 @@ export interface CompactOptions {
   tools?: readonly ChatTool[];
   /** 本次 agent 运行独享的上下文统计状态；缺省使用主 agent 全局状态。 */
   contextState?: ContextState;
+  /** 主 agent 的 abort signal(Ctrl+C)。摘要是几十秒的 LLM 调用,不串进来 Ctrl+C 就
+   *  只能干等到它跑完——用户视角就是「压缩中取消不了」。abort 时 compactHistory 会
+   *  把 AbortError 冒泡给 runAgentCore 走 abortRestore,而不是降级成微压缩继续干活。 */
+  signal?: AbortSignal;
 }
 
 export interface CompactResult {
@@ -107,6 +121,10 @@ export interface ContextState {
     stubbed: number;
     tokensBySource: Partial<Record<'read' | 'search' | 'diagnostic' | 'summary', number>>;
   };
+  /** agent/core 每步拼到 requestHistory 末尾的 ephemeral 注入文本(notes.md / 开场分析 /
+   * 压缩恢复段),供 repl 状态栏算「与触发器同口径」的全 prompt token。不写回 history、
+   * 不跨 step 残留(每步 core 都会重建)。 */
+  ephemeralText?: string;
 }
 
 export function createContextState(): ContextState {
@@ -228,6 +246,145 @@ export function stripImagesForSummary(m: ChatMessage): ChatMessage {
 interface Group {
   assistant: ChatMessage | null; // user / 纯 assistant / 带 tool_calls 的 assistant;孤儿 tool 时 null
   tools: ChatMessage[]; // 该 assistant 后紧跟的 tool 消息(可能空)
+}
+
+// ── 摘要钉住:Key Facts 跨代累积,叙述段照常滚动压缩 ──────────────────────
+//
+// 为什么需要:摘要写在 history[1](role:'system'),而 groupFromEnd 只排除 history[0],
+// 于是它被当成普通 group 排到最老位置 → 下次压缩进 oldGroups → 被喂给摘要器再摘要一遍。
+// 每代压缩都对上一代摘要做一次有损再压缩,首轮的用户约束经 2-3 代即糊掉。堵住这个衰减
+// 源比设计任何打分模型都划算。
+//
+// 为什么只钉 Key Facts:钉整段(含 Objective/Completed/Next Steps)会线性膨胀——那些
+// 叙述重跑一遍命令、重读一次文件就能拿回来;Key Facts 才是不在就真没了的东西(路径、
+// 约束、失败结论),且每代只增加几十字符。
+
+/** 摘要消息头。budget.ts 用同一前缀识别摘要层,勿改。 */
+export const SUMMARY_MARKER = '# 会话摘要';
+/** `## Key Facts` 段标题(model 按 prompt 输出,可能带 "— 说明" 后缀)。 */
+const KEY_FACTS_HEADING_RE = /^ {0,3}##\s*key facts\b/i;
+/** 任意 `## ` 级标题:Key Facts 段到此为止。 */
+const ANY_HEADING_RE = /^ {0,3}##\s+\S/;
+/** 上一代叙述段进 transcript 时的标注:告诉摘要器这是已压过一遍的内容,合并而非抄录。 */
+const PRIOR_NARRATIVE_LABEL =
+  '[prior summary — 上一代摘要的叙述部分:与下方新内容合并压缩,不要重复罗列细节]';
+/** 尾部 provenance 块:解析时剥掉,重建时按当次 older 重算(否则跨代累积并重复)。 */
+const ARTIFACT_REFS_RE = /\n*\[artifact refs:[^\]]*\]\s*$/;
+
+/** Key Facts 累计预算(字符):窗口比例换算 + 上下限——小窗口留得住初始约束,
+ *  大窗口也不会让索引段膨胀成正文。 */
+export function keyFactsBudgetChars(window: number): number {
+  const byWindow = Math.floor(Math.max(0, window) * SUMMARY_KEYFACTS_WINDOW_RATIO);
+  return Math.max(
+    SUMMARY_KEYFACTS_MIN_CHARS,
+    Math.min(SUMMARY_KEYFACTS_MAX_CHARS, byWindow),
+  );
+}
+
+/**
+ * 拆摘要成「Key Facts 段」+「叙述段」。
+ * 顺带剥掉 `# 会话摘要` 头与尾部 `[artifact refs: …]` provenance——后者每次压缩按当次
+ * older 重算,不该跨代累积。无 Key Facts 段时 rest 为全文、keyFacts 为空。
+ */
+export function splitSummaryText(raw: string): { keyFacts: string; rest: string } {
+  let text = (raw ?? '').replace(ARTIFACT_REFS_RE, '').trim();
+  if (text.startsWith(SUMMARY_MARKER)) {
+    const nl = text.indexOf('\n');
+    text = (nl < 0 ? '' : text.slice(nl + 1)).trim();
+  }
+  const lines = text.split('\n');
+  const headIdx = lines.findIndex((l) => KEY_FACTS_HEADING_RE.test(l));
+  if (headIdx < 0) return { keyFacts: '', rest: text };
+  let endIdx = lines.length;
+  for (let i = headIdx + 1; i < lines.length; i++) {
+    if (ANY_HEADING_RE.test(lines[i])) {
+      endIdx = i;
+      break;
+    }
+  }
+  const keyFacts = lines.slice(headIdx + 1, endIdx).join('\n').trim();
+  const rest = [...lines.slice(0, headIdx), ...lines.slice(endIdx)].join('\n').trim();
+  return { keyFacts, rest };
+}
+
+/**
+ * 中断判定:signal 已 abort,或错误本身是 AbortError / APIUserAbortError。
+ * 与 llm 层、core 层的判定保持同一套(两处 name + signal 双判),避免各写各的漏判。
+ */
+function isAbortError(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true;
+  // 鸭子类型判定而非 instanceof Error:DOMException / SDK 的 APIUserAbortError 在
+  // 不同 Node 版本下 instanceof Error 的结果不一致,认 name 更稳。
+  if (!err || typeof err !== 'object') return false;
+  const name = (err as { name?: string }).name;
+  return name === 'AbortError' || name === 'APIUserAbortError';
+}
+
+/** 归一化一行事实用于去重:去项目符号/空白/句末标点后小写。 */
+function factKey(line: string): string {
+  return line
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/^[-*•]\s*/, '')
+    .replace(/[。.,;；:：]+$/, '')
+    .trim();
+}
+
+/**
+ * 合并跨代 Key Facts:按行去重(老 → 新),超预算时丢较新条目。
+ *
+ * 丢新不丢旧的理由:最老那几条通常是首轮用户约束(不可重建,丢了就永远没了);
+ * 较新的事实通常在本代叙述段或保留区里还有副本。
+ */
+export function mergeKeyFacts(
+  prev: string | undefined,
+  next: string | undefined,
+  maxChars: number,
+): string {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const block of [prev ?? '', next ?? '']) {
+    for (const rawLine of block.split('\n')) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const key = factKey(line);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      lines.push(line);
+    }
+  }
+  const cap = Math.max(0, Math.floor(maxChars));
+  const text = lines.join('\n');
+  if (text.length <= cap) return text;
+  const kept: string[] = [];
+  let len = 0;
+  for (const line of lines) {
+    if (len + line.length + 1 > cap) break;
+    kept.push(line);
+    len += line.length + 1;
+  }
+  return `${kept.join('\n')}\n…[Key Facts 超预算,已省略较新条目]`;
+}
+
+/**
+ * 非空 user group 判定。LLM API(OpenAI / Anthropic)要求 messages 至少含一条**非空**
+ * user 消息,llm/chatOnce 入口有 hasNonEmptyUser 守卫,缺则直接抛。压缩重建 history 后
+ * 必须仍有这样一条,否则下一步 chat() 当场失败——见下方 user 保留兜底。
+ */
+function isUserGroup(g: Group): boolean {
+  const a = g.assistant as { role?: string; content?: unknown } | null;
+  return !!a && a.role === 'user' && toText(a.content).trim().length > 0;
+}
+
+/** 摘要 group 判定:非 history[0] 的 system 消息,以 `# 会话摘要` 开头,且不带 tool_calls。 */
+function isSummaryGroup(g: Group): boolean {
+  const a = g.assistant as { role?: string; content?: unknown } | null;
+  return (
+    !!a &&
+    a.role === 'system' &&
+    g.tools.length === 0 &&
+    toText(a.content).startsWith(SUMMARY_MARKER)
+  );
 }
 
 /** 从尾向头划分 group;history[0](system)排除。连续 tool 归到前导 assistant。 */
@@ -380,8 +537,13 @@ function buildTranscript(stripped: ChatMessage[], scale: number): string {
 
 async function defaultSummarize(
   older: ChatMessage[],
-  focus?: string
+  focus?: string,
+  signal?: AbortSignal
 ): Promise<string | null> {
+  // 已中断就别白拼转录了(几千 token 的字符串拼接 + 一去不回的 LLM 请求)。
+  if (signal?.aborted) {
+    throw new DOMException('This operation was aborted', 'AbortError');
+  }
   // 摘要前剥离多模态 user 消息里的图片(base64 会撑爆摘要 prompt;image 对摘要无信息量)。
   const stripped = older.map(stripImagesForSummary);
 
@@ -415,6 +577,8 @@ async function defaultSummarize(
       'What counts as important (keep): user requests and constraints; final state of each modified file; conclusions and results, not the steps that led there; decisions with reasons; precise references (paths, symbols, hashes, commands) that later steps must cite; failures and what was tried, so mistakes are not repeated.\n' +
       'What to drop: verbatim file contents and tool-output dumps, step-by-step recaps, exploration dead-ends that led nowhere, polite chatter, anything re-derivable by re-reading files.\n' +
       'Rules: total ≤ 400 words. State conclusions and locations (path:line where useful), never paste content. ' +
+      'The Key Facts section is carried forward verbatim into future summaries: write each fact as one self-contained line ' +
+      '(no pronouns, no "as above", no cross-references), so it still reads correctly after later compactions. ' +
       'Never invent facts, paths, or results that are not in the transcript; if unsure whether something happened, omit it.',
   } as ChatMessage;
   const userMsg = {
@@ -427,11 +591,12 @@ async function defaultSummarize(
   const spinner = new Spinner((msg, frame) =>
     layout.setStatus(msg, frame ?? undefined)
   );
-  spinner.start('压缩中');
+  spinner.start(signal ? '压缩中(Ctrl+C 取消)' : '压缩中');
   try {
+    // signal 必须透传:摘要是几十秒的 LLM 调用,不串进来 Ctrl+C 只能干等它跑完。
     // 空 handlers:不打印、不外显流式;tools=[] 不带工具表——摘要纯文本任务,
     // 全量工具 schema 白占几千 token 窗口,还诱导幻觉工具调用。
-    const r = await chat([sysMsg, userMsg], {}, undefined, []);
+    const r = await chat([sysMsg, userMsg], {}, signal, []);
     // 推理模型可能只返 reasoning_content(content 为 null),或幻觉出 tool_calls → 视为失败
     if (r.toolCalls.length > 0 || !r.content) return null;
     return capSummaryOutput(r.content);
@@ -455,7 +620,26 @@ export async function compactHistory(
   const estimateBefore = estimatePromptTokens(history, activeTools, state.correction);
   state.lastEstimate = estimateBefore;
 
-  const groups = groupFromEnd(history);
+  // 调用前就已中断(用户在上一步末尾按的 Ctrl+C):一步都别做,直接冒泡。
+  // 不做完再抛是为了保证 history 完全未被触碰——abortRestore 才还原得干净。
+  if (opts.signal?.aborted) {
+    throw new DOMException('This operation was aborted', 'AbortError');
+  }
+
+  const allGroups = groupFromEnd(history);
+  // 摘要钉住:把已有摘要从 group 序列里摘出来,永不送进摘要器(否则每代再摘要一次 →
+  // 递归衰减)。它的 Key Facts 段跨代累积,叙述段则并入下方转录照常滚动压缩。
+  const pinnedGroups = allGroups.filter(isSummaryGroup);
+  const groups =
+    pinnedGroups.length > 0 ? allGroups.filter((g) => !isSummaryGroup(g)) : allGroups;
+  const pinned =
+    pinnedGroups.length > 0
+      ? splitSummaryText(
+          pinnedGroups
+            .map((g) => toText((g.assistant as { content?: unknown } | null)?.content))
+            .join('\n\n'),
+        )
+      : null;
 
   // 保近期:按策略中的 token 比例累积(至少保 1 组),永不劈开 group。
   // force(手动 /compact 默认、硬闸触发)用更激进的保留比例;再加绝对上限,
@@ -481,18 +665,31 @@ export async function compactHistory(
   }
   let oldGroups = groups.slice(0, groups.length - kept.length);
 
+  // 非空 user 兜底:保留区从尾部累积,长回合里最近的若干组常常全是 assistant+tool,
+  // 一个 8000 字符的工具结果就能吃满小窗口的 keepBudget → user 全落进旧区被摘要掉 →
+  // 重建后 history 无 user → 下一步 chat() 被 hasNonEmptyUser 守卫直接拒(整轮中断)。
+  // 把紧邻保留区之前的那条 user 移进保留区:它是当前任务的原始请求,且 user 消息本身极小。
+  // 放这里(而非重建后补 stub)是因为:原文保留,不造新消息形状,也不必进摘要器。
+  if (!kept.some(isUserGroup)) {
+    for (let i = oldGroups.length - 1; i >= 0; i--) {
+      if (!isUserGroup(oldGroups[i])) continue;
+      kept.unshift(oldGroups[i]);
+      oldGroups.splice(i, 1);
+      break;
+    }
+  }
+
   // force(硬闸/手动强压):保护区不豁免——常规切分无旧区时只保最后一组,
   // 其余全部进可压区(首轮/当前轮也一样)。仍按 group 边界切,不破坏 tool_call 配对。
   // **必须保留最早 user 所在 group**:LLM API(OpenAI / Anthropic)要求 messages 至少
   //  含一条非空 user 消息,否则 400。force 旧实现把所有 user 丢进摘要 → 重建后 history
   //  无 user → 下一轮 chat() 被后端拒绝。保最早 user(而非最后一个)因为它是最原始的
-  //  请求上下文,摘要器已覆盖后续交互。
+  //  请求上下文,摘要器已覆盖后续交互。用 isUserGroup(非空判定)而非只看 role:
+  //  空 content 的 user 同样过不了 hasNonEmptyUser 守卫。
   if (oldGroups.length === 0 && opts.force && groups.length >= 2) {
     kept.length = 0;
     const lastIdx = groups.length - 1;
-    const firstUserIdx = groups.findIndex(
-      (g) => (g.assistant as { role?: string } | null)?.role === 'user',
-    );
+    const firstUserIdx = groups.findIndex(isUserGroup);
     if (firstUserIdx >= 0 && firstUserIdx !== lastIdx) {
       kept.push(groups[firstUserIdx], groups[lastIdx]);
       oldGroups = groups.filter((_, i) => i !== firstUserIdx && i !== lastIdx);
@@ -561,13 +758,28 @@ export async function compactHistory(
   // 触发压缩时旧区约占窗口 50-60%,摘要请求与摘要器共享窗口,逐条封顶后即装得下;
   // 不在这里预跑微压缩——预截断会让摘要模型看到 600 字符残片,等于弄瞎它,
   // 且摘要成功后旧区整体丢弃,预截断本身也无收益。
-  const older = flattenGroups(oldGroups);
+  // 上一代摘要的叙述段并入转录:它压的就是更早的轮次,不并进来等于把那些轮次整段丢弃;
+  // 并进来则由本代摘要统一重压(可重建内容,磨掉不心疼)。Key Facts 不并——它已被钉住。
+  let older = flattenGroups(oldGroups);
+  if (pinned?.rest) {
+    older = [
+      {
+        role: 'system' as const,
+        content: `${PRIOR_NARRATIVE_LABEL}\n${pinned.rest}`,
+      } as ChatMessage,
+      ...older,
+    ];
+  }
   const summarizeFn = opts.summarize ?? defaultSummarize;
   let summary: string | null = null;
   try {
-    summary = await summarizeFn(older, opts.focus);
-  } catch {
-    summary = null; // 摘要失败 → 回退微压缩兜底,不崩
+    summary = await summarizeFn(older, opts.focus, opts.signal);
+  } catch (err) {
+    // **中断必须冒泡,不能降级成微压缩**:用户按了 Ctrl+C 是要立刻停,不是"换个姿势继续压"。
+    // 冒泡后由 runAgentCore 步骤 catch 里的 abort 分支走 abortRestore(还原 history + 模式)。
+    // 此处 history 尚未被改动(重建在摘要成功之后),所以直接抛是安全的。
+    if (isAbortError(err, opts.signal)) throw err;
+    summary = null; // 真·摘要失败 → 回退微压缩兜底,不崩
   }
 
   if (summary) {
@@ -575,9 +787,23 @@ export async function compactHistory(
     const provenance = artifactRefs.length > 0
       ? `\n\n[artifact refs: ${artifactRefs.join(', ')}]`
       : '';
+    // 钉住的 Key Facts 拼在段尾:单条 system 消息里尾部注意力最强,老事实不会被"读漏"。
+    // 恒为单条——并排多条 system 摘要会触发近因效应,早期摘要形同虚设。
+    const parsed = splitSummaryText(summary);
+    const pinnedFacts = mergeKeyFacts(
+      pinned?.keyFacts,
+      parsed.keyFacts,
+      keyFactsBudgetChars(opts.window),
+    );
+    const body = [
+      parsed.rest,
+      pinnedFacts ? `## Key Facts\n${pinnedFacts}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
     const summaryMsg = {
       role: 'system' as const,
-      content: `# 会话摘要\n${summary}${provenance}`,
+      content: `${SUMMARY_MARKER}\n${body}${provenance}`,
     } as ChatMessage;
     // 原地重建:[systemPrompt, summaryMsg, ...kept]
     const systemMsg = history[0];
@@ -674,6 +900,8 @@ export async function maybeCompact(
   manualOpts?: { manual?: boolean; force?: boolean; focus?: string },
   state: ContextState = contextState,
   activeTools: readonly ChatTool[] = chatTools,
+  /** 主 agent 的 abort signal;透传给 compactHistory → 摘要器 → chat()。 */
+  signal?: AbortSignal,
 ): Promise<CompactResult | void> {
   const est = estimatePromptTokens(history, activeTools, state.correction);
   state.lastEstimate = est;
@@ -710,6 +938,7 @@ export async function maybeCompact(
     force: manualOpts?.force === true || hardCap,
     tools: activeTools,
     contextState: state,
+    signal,
   });
   return r;
 }

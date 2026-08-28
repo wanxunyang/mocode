@@ -22,6 +22,34 @@ import path from 'node:path';
 /** 预设目录:`~/.mocode/models/`(按需创建)。 */
 export const MODELS_DIR = path.join(os.homedir(), '.mocode', 'models');
 
+/**
+ * 激活预设指针文件:`~/.mocode/models/.active`,内容为一行预设名。
+ * 激活预设是"上下文窗口等配置跟随模型"的真相来源:启动与它窗切换都以此覆盖 LLM 四键。
+ * 与 <name>.json 区分:`.active` 不以 .json 结尾、且 '.' 非法首字符,listPresets 天然跳过。
+ */
+export const ACTIVE_PRESET_PATH = path.join(MODELS_DIR, '.active');
+
+/** 读激活预设名;不存在/空返回 null(供启动回退到 config 文件的裸 LLM 键)。 */
+export function getActivePresetName(): string | null {
+  try {
+    const name = fs.readFileSync(ACTIVE_PRESET_PATH, 'utf8').trim();
+    return isValidPresetName(name) ? name : null;
+  } catch {
+    return null; // 不存在或不可读:无激活预设
+  }
+}
+
+/** 写激活预设指针(原子:写 tmp 再 rename)。name 必须在预设目录里存在,防止指向空指针。 */
+export function setActivePresetName(name: string): void {
+  if (!isValidPresetName(name)) {
+    throw new Error(`非法预设名: ${JSON.stringify(name)}`);
+  }
+  fs.mkdirSync(MODELS_DIR, { recursive: true });
+  const tmp = `${ACTIVE_PRESET_PATH}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, `${name}\n`, 'utf8');
+  fs.renameSync(tmp, ACTIVE_PRESET_PATH);
+}
+
 export type PresetProvider = 'openai' | 'anthropic';
 
 /** 单个预设的内容:provider/cache 字段可选输入，读取后总会规范化。 */
@@ -119,10 +147,13 @@ export function savePreset(
   fs.renameSync(tmp, dest);
 }
 
-/** 删除一个预设;不存在返回 false,成功返回 true。 */
+/** 删除一个预设;不存在返回 false,成功返回 true。若删的是激活预设,顺带清掉指针。 */
 export function deletePreset(name: string): boolean {
   try {
     fs.unlinkSync(filePathFor(name));
+    if (getActivePresetName() === name) {
+      try { fs.unlinkSync(ACTIVE_PRESET_PATH); } catch { /* 指针已不在,忽略 */ }
+    }
     return true;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return false;
@@ -154,6 +185,8 @@ export function renamePreset(oldName: string, newName: string): boolean {
   // 重命名后同步更新文件内的 name 字段(我们写出去时总一致,但允许用户手改过 JSON 后不一致)。
   const p = parsePreset(fs.readFileSync(newPath, 'utf8'));
   if (p.name !== newName) savePreset({ ...p, name: newName });
+  // 激活预设被重命名 → 指针跟随新名,否则下次启动回退裸 config 丢窗口。
+  if (getActivePresetName() === oldName) setActivePresetName(newName);
   return true;
 }
 

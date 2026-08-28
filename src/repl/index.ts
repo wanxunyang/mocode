@@ -34,6 +34,7 @@ import {
   listPresets,
   migrateCurrentToPreset,
   savePreset,
+  setActivePresetName,
 } from '../config/presets.js';
 import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
@@ -61,6 +62,8 @@ import {
   reconfigureClient,
   refreshChatTools,
   chatTools,
+  estimatePromptTokens,
+  estimateTokens,
   type ChatMessage,
   type ChatUsage,
 } from '../llm/index.js';
@@ -350,11 +353,21 @@ function renderContextBar(history: ChatMessage[]): string {
 }
 
 /** 状态行用量条(精简版,进底栏):[bar] pct% k/k。
- * 只计算对话内容(不含 system prompt),让用户感知"我发了多少、agent 回复了多少"占用 context。 */
+ * 必须**用全 prompt 估算**(消息 + 工具 schema + 尾部 ephemeral 注入),与压缩触发器
+ * evaluateBudget 的 system+history+toolOld+toolRecent 总账对齐——任何一段漏算都会让
+ * bar 与触发器口径不一致、看着没到 80% 实际已经在压。
+ * 触发器用 `Math.max(rawTotal, total) >= 0.8 * window`,bar 也照搬:校正后和校正前
+ * 哪个大取哪个,确保不会因 correction<1 而低估。ephemeral 文本由 agent/core 每步写入
+ * contextState.ephemeralText(避免在 bar 里再读一次 notes.md)。
+ *
+ * /context 命令仍是 dialog-only(见 renderContextBar):它的设计意图是"我说了多少"而非
+ * "还剩多少空间",两条职责分开。 */
 function renderContextBarInline(history: ChatMessage[]): string {
-  // 过滤掉 system 消息,只算对话内容
-  const dialog = history.filter(m => m.role !== 'system');
-  const est = estimateMessagesTokens(dialog);
+  const baseRaw = estimatePromptTokens(history, chatTools, 1);
+  const baseAdj = estimatePromptTokens(history, chatTools, contextState.correction);
+  const ephemeral = contextState.ephemeralText ? estimateTokens(contextState.ephemeralText) : 0;
+  // 与触发器同样的「取大」语义:correction<1 时 raw 更大,bar 不会假装很安全。
+  const est = Math.max(baseRaw, baseAdj) + ephemeral;
   const win = config.contextWindowTokens;
   const pct = Math.min(1, est / win);
   const W = 10;
@@ -1248,6 +1261,7 @@ export async function startRepl(
     if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
     contextState.lastUsage = undefined;
     contextState.lifecycleStats = undefined;
+    contextState.ephemeralText = undefined;
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
     renderHistory(history);
@@ -1500,6 +1514,7 @@ export async function startRepl(
       turnCount = 0; // 反思 cadence 重新计数
       contextState.lastUsage = undefined;
       contextState.lifecycleStats = undefined;
+      contextState.ephemeralText = undefined;
       lastTurnUsage = undefined; // 清空旧轮的 token 累计
       pendingAttachments = []; // 一并清空待发图片
       layout.clearContent();
@@ -1692,7 +1707,24 @@ export async function startRepl(
       // 走调度器路径:与自动每步压缩完全一致——五区按 ROI 压(cold tools 优先 → history 摘要最后)。
       // focus 透传到 compact_history action 的 LLM 摘要 prompt。
       // 返回 SchedulerRunLog 给 UI 显示决策;退化路径(开关关时)在 manualCompact 内部走 compactHistory。
-      const log = await manualCompact(history, focus, { force });
+      const log = await (async () => {
+        // /compact 的摘要是几十秒的 LLM 调用:包一层运行态监听让 Ctrl+C 能掐断它
+        // (信号透传 manualCompact → maybeCompact → compactHistory → chat)。
+        const signal = startRunningListener(t('running.compacting'));
+        try {
+          return await manualCompact(history, focus, { force, signal });
+        } finally {
+          stopRunningListener();
+        }
+      })().catch((e: unknown) => {
+        // 中断:history 未被改动(重建在摘要成功之后),直接提示并回到输入态。
+        if (e instanceof Error && (e.name === 'AbortError' || e.name === 'APIUserAbortError')) {
+          layout.contentWrite(`${ui.dim}(已取消压缩)${ui.reset}\n`);
+          return null;
+        }
+        throw e;
+      });
+      if (!log) continue;
       // 会话状态(plan + 笔记段)不在此处回写 history[0]:agent/core 每步都在 requestHistory
       // 末尾注入最新副本(buildSessionStateReminder),压缩后下一步自然恢复,且系统提示保持
       // 逐字节稳定以命中 prompt 缓存。
@@ -1881,6 +1913,8 @@ export async function startRepl(
           ANTHROPIC_PROMPT_CACHE: target.anthropicPromptCache ? 'true' : 'false',
         });
         reconfigureClient();
+        // 记为激活预设:让上下文窗口等配置从此跟随该预设文件(下次启动也用它,不再回退 config 裸键)。
+        try { setActivePresetName(target.name); } catch { /* 指针写失败不阻断切换 */ }
         refreshStatusBase(history);
         layout.clearContent();
         if (history.some((m) => m.role === 'user')) {
@@ -1891,10 +1925,10 @@ export async function startRepl(
         const cacheLabel = target.provider === 'anthropic'
           ? ` · Prompt Cache ${target.anthropicPromptCache ? 'on' : 'off'}`
           : '';
-        layout.contentWrite(`${ui.dim}(已切换到预设 “${target.name}” → ${target.model} · ${target.provider}${cacheLabel} @ ${target.baseURL})${ui.reset}\n`);
+        layout.contentWrite(`${ui.dim}(已切换到预设 “${target.name}” → ${target.model} · ${target.provider}${cacheLabel} · 窗口 ${target.contextWindow} @ ${target.baseURL})${ui.reset}\n`);
         if (config.llmKeysFromShell.length > 0) {
           layout.contentWrite(
-            `${ui.dim}(shell 环境变量已设 ${config.llmKeysFromShell.join(' / ')},文件写入下次启动被其覆盖)${ui.reset}\n`,
+            `${ui.dim}(shell 环境变量已设 ${config.llmKeysFromShell.join(' / ')},优先级最高,下次启动会盖掉预设的对应字段;预设仍记为激活,取消 shell 设置后恢复跟随)${ui.reset}\n`,
           );
         }
       };
@@ -1962,10 +1996,10 @@ export async function startRepl(
           allowCustom: false, // 纯切换,不需要「其他」干扰
         });
         if (choice.action === 'selected' && choice.value) {
-          // value 含 ANSI 序列(labelFor 用了 ui.dim);按 preset.name 前缀匹配。
-          const idx = presets.findIndex((p) => choice.value!.startsWith(p.name));
-          const target = idx >= 0 ? presets[idx] : presets[0];
-          applyPresetAndPersist(target);
+          // 精确匹配 labelFor 生成的完整选项串,避免 name 前缀误命中
+          // (如 'qwen3-8-27b' 是 'qwen3-8-27b-2' 的前缀,排序在前会抢中,应用错 contextWindow)。
+          const target = presets.find((p) => labelFor(p) === choice.value);
+          if (target) applyPresetAndPersist(target);
         }
         continue;
       }
@@ -2236,6 +2270,10 @@ export async function startRepl(
             anthropicPromptCache,
           });
           savedName = finalName;
+        }
+        // 记为激活预设(新存或复用同名都记),让窗口跟随该预设文件。
+        if (savedName) {
+          try { setActivePresetName(savedName); } catch { /* 指针写失败不阻断 */ }
         }
       } catch (e) {
         layout.contentWrite(`${ui.red}保存预设失败: ${(e as Error).message}${ui.reset}\n`);

@@ -12,8 +12,6 @@ import {
 import { chatTools, type ChatMessage, type ChatTool } from '../llm/index.js';
 import { config } from '../config/index.js';
 import { maybeCompact, contextState, type ContextState } from './compact.js';
-import * as layout from '../ui/layout.js';
-import { ui } from '../ui/theme.js';
 import { pruneStaleArtifacts, refreshArtifactFreshness } from '../context/artifacts.js';
 import { pruneSuperseded } from '../context/relevance.js';
 import { createAgeAwareEncodingState } from '../context/age-aware.js';
@@ -45,6 +43,8 @@ export interface BudgetScheduler {
      *  agent/core 传入,否则这部分固定开销对压力线不可见(见 budget.ts 的
      *  SystemCostBreakdown.ephemeralInjection)。 */
     ephemeralTokens?: number,
+    /** 主 agent 的 abort signal;透传给压缩的 LLM 摘要调用(Ctrl+C 可掐断「压缩中」)。 */
+    signal?: AbortSignal,
   ) => Promise<boolean>;
   lastRunLog: SchedulerRunLog | null;
 }
@@ -93,7 +93,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
 
   const scheduler: BudgetScheduler = {
     lastRunLog: null,
-    async runStep(history, step, activeTools = chatTools, ephemeralTokens = 0) {
+    async runStep(history, step, activeTools = chatTools, ephemeralTokens = 0, signal?: AbortSignal) {
       // External file changes and mutations only update artifact metadata here.
       refreshArtifactFreshness(state, history);
       const report = evaluate(history, step, activeTools, ephemeralTokens);
@@ -121,13 +121,14 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
       let compactHistoryCalled = false;
       let historyRebuilt = false;
       for (const action of actions) {
-        if (action.kind === 'warn') {
-          layout.contentWrite(
-            `  ${ui.accent}●${ui.reset} ${ui.yellow}调度器警告 [${action.layer}] ${action.reason}${ui.reset}\n`,
-          );
-          continue;
-        }
-        const result = await maybeCompact(history, report, undefined, state, activeTools);
+        const result = await maybeCompact(
+          history,
+          report,
+          undefined,
+          state,
+          activeTools,
+          signal,
+        );
         compactHistoryCalled = true;
         historyRebuilt ||= result?.historyRebuilt === true;
       }
@@ -161,8 +162,9 @@ export async function runScheduler(
 export async function manualCompact(
   history: ChatMessage[],
   focus?: string,
-  opts?: { force?: boolean },
+  opts?: { force?: boolean; signal?: AbortSignal },
 ): Promise<SchedulerRunLog & { compactDetail?: CompactHistoryDetail }> {
+  const signal = opts?.signal;
   if (config.contextBudget === false) {
     const result = await import('./compact.js').then(({ compactHistory }) =>
       compactHistory(history, {
@@ -171,6 +173,7 @@ export async function manualCompact(
         focus,
         manual: true,
         force: opts?.force,
+        signal,
       }),
     );
     const report = evaluateBudget(history, config.contextWindowTokens, -1, contextState.correction);
@@ -212,7 +215,7 @@ export async function manualCompact(
       manual: true,
       force: opts?.force,
       focus: action.focus,
-    });
+    }, contextState, chatTools, signal);
     compactHistoryCalled = true;
     if (result) {
       compactDetail = {

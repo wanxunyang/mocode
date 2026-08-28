@@ -7,6 +7,7 @@ import { getCurrentSessionId, setCurrentSessionId } from '../session/state.js';
 import { getNotesFilePath, extractActiveNotesSections } from '../session/notes.js';
 import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-discipline.js';
 import { buildValidationCommandsSection } from '../verification/prompt.js';
+import { getActivePresetName, readPreset } from './presets.js';
 import {
   detectLanguage,
   setLanguage,
@@ -51,6 +52,17 @@ const LLM_ENV_KEYS = ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL'
 export const DEFAULT_CONTEXT_WINDOW_TOKENS = 256000;
 const llmKeysFromShell = LLM_ENV_KEYS.filter((k) => process.env[k] !== undefined);
 loadEnvFiles();
+
+/**
+ * 激活预设覆盖:若用户曾用 /model 激活过预设,启动时让上下文窗口等配置**跟随该预设文件**,
+ * 而不是只信 config 文件里上一组裸 LLM 键——这正是"切换后窗口不再退回 256k"的关键。
+ * 逐字段覆盖,且 shell 已显式设置的键**不覆盖**(保持 shell 环境变量最高优先级)。
+ * 不 import repl,无副作用;读失败(指针失效/文件坏)静默回退到 config 文件裸键。
+ */
+const __activePreset = (() => {
+  const n = getActivePresetName();
+  return n ? readPreset(n) : null;
+})();
 setLanguage(detectLanguage(process.env.MOCODE_LANGUAGE));
 
 export type LlmProvider = 'openai' | 'anthropic';
@@ -585,19 +597,33 @@ export function getPlanModeSuffix(): string {
 }
 
 export const config: Config = {
-  provider: normalizeLlmProvider(process.env.LLM_PROVIDER),
-  baseURL: requireEnv('LLM_BASE_URL'),
-  apiKey: requireEnv('LLM_API_KEY'),
-  model: process.env.LLM_MODEL || 'gpt-4o-mini',
+  provider: llmKeysFromShell.includes('LLM_PROVIDER')
+    ? normalizeLlmProvider(process.env.LLM_PROVIDER)
+    : (__activePreset?.provider ?? normalizeLlmProvider(process.env.LLM_PROVIDER)),
+  baseURL: llmKeysFromShell.includes('LLM_BASE_URL')
+    ? requireEnv('LLM_BASE_URL')
+    : (__activePreset?.baseURL ?? requireEnv('LLM_BASE_URL')),
+  apiKey: llmKeysFromShell.includes('LLM_API_KEY')
+    ? requireEnv('LLM_API_KEY')
+    : (__activePreset?.apiKey ?? requireEnv('LLM_API_KEY')),
+  model: llmKeysFromShell.includes('LLM_MODEL')
+    ? (process.env.LLM_MODEL || 'gpt-4o-mini')
+    : (__activePreset?.model ?? process.env.LLM_MODEL ?? 'gpt-4o-mini'),
   maxTokens: process.env.MAX_TOKENS ? Number(process.env.MAX_TOKENS) : undefined,
   // 用 getter 而非 buildBasePrompt() 立即求值:因为本对象字面量求值时 buildBasePrompt 读 config.memoryEnabled,
   // 而 config 还没完成初始化(TDZ)。Getter 让每次访问都现拼,运行时 /memory_switch 立即生效。
   get systemPrompt(): string {
     return buildBasePrompt();
   },
-  contextWindowTokens: Number(process.env.CONTEXT_WINDOW_TOKENS) || DEFAULT_CONTEXT_WINDOW_TOKENS,
+  contextWindowTokens: llmKeysFromShell.includes('CONTEXT_WINDOW_TOKENS')
+    ? (Number(process.env.CONTEXT_WINDOW_TOKENS) || DEFAULT_CONTEXT_WINDOW_TOKENS)
+    : (__activePreset?.contextWindow
+        ?? Number(process.env.CONTEXT_WINDOW_TOKENS)
+        ?? DEFAULT_CONTEXT_WINDOW_TOKENS),
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
-  anthropicPromptCache: process.env.ANTHROPIC_PROMPT_CACHE !== 'false',
+  anthropicPromptCache: llmKeysFromShell.includes('ANTHROPIC_PROMPT_CACHE')
+    ? process.env.ANTHROPIC_PROMPT_CACHE !== 'false'
+    : (__activePreset?.anthropicPromptCache ?? process.env.ANTHROPIC_PROMPT_CACHE !== 'false'),
   autoCompact: process.env.AUTO_COMPACT !== 'false',
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE === 'true',
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE === 'true',

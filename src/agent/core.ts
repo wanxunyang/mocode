@@ -12,6 +12,7 @@ import {
   chat,
   estimatePromptTokens,
   estimateTokens,
+  isContextLengthError,
   planChatTools,
   chatTools,
   type ChatMessage,
@@ -504,9 +505,18 @@ export async function runAgentCore(
       // The scheduler is the only automatic path that may compress old evidence.
       // Normal tool pushes and lifecycle tracking remain metadata-only.
 
+      // 压缩**之前**先刷一次状态栏:bar 要显示「本步真实 prompt 撞线」那一刻。
+      // 触发器算的就是 history + 工具 schema + 本段 sessionStateText,此刻三者都已就位,
+      // bar 与触发器完全同口径同一步。若等压缩跑完再刷,那 30+ 秒的 LLM 摘要调用里
+      // bar 一直冻在上一步的值,用户只看到「75% 怎么就压了」。
+      runtimeContextState.ephemeralText = sessionStateText || undefined;
+      onContextUpdate?.();
+
       // 步前:五区 Budget Scheduler 在当前完整 history 上决策；开关关闭时退化回 maybeCompact 路径。
       // 此时 spinner 已停,通知行干净。
       let historyRebuilt = false;
+      /** 本步是否已因「后端报上下文超长」压过一轮(限一次,防压缩↔重试死循环)。 */
+      let overflowRetried = false;
       const compactStartedAt = Date.now();
       if (scheduler) {
         historyRebuilt = await scheduler.runStep(
@@ -514,6 +524,8 @@ export async function runAgentCore(
           step,
           activeTools,
           sessionStateText ? estimateTokens(sessionStateText) : 0,
+          // signal 透传:压缩的 LLM 摘要是几十秒的调用,不串进来 Ctrl+C 掐不断。
+          signal,
         );
         if (scheduler.lastRunLog?.compactHistoryCalled) {
           emitTrace('compact', {
@@ -530,6 +542,7 @@ export async function runAgentCore(
           undefined,
           runtimeContextState,
           activeTools,
+          signal,
         );
         historyRebuilt = compactResult?.historyRebuilt === true;
         if (compactResult) {
@@ -574,23 +587,34 @@ export async function runAgentCore(
       //  - 会话状态:notes.md 的活跃 plan + 笔记正文(纯读,每步重取,始终最新)。
       //  .filter(Boolean) 保证空段不产生多余空行;三段全空时不追加任何消息(requestHistory === history)。
       //  安全保证:只拼进 requestHistory(新建数组),绝不写回 history,故不会跨 step/跨 turn 残留。
-      const ephemeralReminder = [
-        (!opts.suppressOpeningAnalysis && step === 0)
-          ? '## Opening analysis\nBegin your FIRST response of this turn with a brief analysis of the request and your planned approach (1-3 sentences, no filler), THEN start tool calls. This opening is the only place where pre-tool prose is expected; after it, work quietly with no narration between tool calls.'
-          : '',
-        historyRebuilt
-          ? '## Post-compaction recovery\nContext was compacted before this request. Re-establish the current objective and unresolved work from retained evidence or the session note, avoid repeating completed investigation, and re-read exact file context before any dependent edit.'
-          : '',
-        sessionStateText, // 调度器之前已取(并计入压力线),此处复用同一份,不重复读文件
-      ].filter(Boolean).join('\n\n');
-      const requestHistory: ChatMessage[] = ephemeralReminder
-        ? [...history, { role: 'system', content: ephemeralReminder } as ChatMessage]
-        : history;
+      // 抽成函数:后端报上下文超长时压缩后要按新 history 重建一次(见下方 catch)。
+      // 不写 contextState.ephemeralText:bar 用的是触发器同口径的 sessionStateText
+      // (步骤顶部已设),而本函数还会额外拼 opening / post-compact 段——那两段触发器
+      // 不计,让 bar 用会让两条线再错开几百 token。
+      const buildRequestHistory = (): ChatMessage[] => {
+        const ephemeralReminder = [
+          (!opts.suppressOpeningAnalysis && step === 0)
+            ? '## Opening analysis\nBegin your FIRST response of this turn with a brief analysis of the request and your planned approach (1-3 sentences, no filler), THEN start tool calls. This opening is the only place where pre-tool prose is expected; after it, work quietly with no narration between tool calls.'
+            : '',
+          historyRebuilt
+            ? '## Post-compaction recovery\nContext was compacted before this request. Re-establish the current objective and unresolved work from retained evidence or the session note, avoid repeating completed investigation, and re-read exact file context before any dependent edit.'
+            : '',
+          sessionStateText, // 调度器之前已取(并计入压力线),此处复用同一份,不重复读文件
+        ].filter(Boolean).join('\n\n');
+        return ephemeralReminder
+          ? [...history, { role: 'system', content: ephemeralReminder } as ChatMessage]
+          : history;
+      };
+      let requestHistory: ChatMessage[] = buildRequestHistory();
+      // 再刷一次:压缩刚跑完(history 已重建),bar 从「撞线 82%」跳到「压后 62%」,
+      // 让用户看到压缩确实起了作用。撞线那一刻的刷新在步骤顶部(trigger 之前),
+      // 那一次才是解释「为什么要压」的。
+      onContextUpdate?.();
 
       // 实时用量:当前步 prompt 估算(含校准系数)+ 流式累计 completion 估算,
       // 叠上已完成步的实测 turnUsage,经 onLiveUsage 推给底栏实时 chip。
       // turnUsage 在闭包里被 addUsage 原地更新,reportLive 每次调用读最新值。
-      const stepPromptEst = estimatePromptTokens(
+      let stepPromptEst = estimatePromptTokens(
         requestHistory,
         activeTools,
         runtimeContextState.correction,
@@ -612,38 +636,43 @@ export async function runAgentCore(
         });
       };
       reportLive({ completionTokens: 0 }); // 思考阶段先显 ↑ prompt 估算,首 token 到达后 ↓ 开始涨
+      // 单一 chat 入口:错误侧的 model_end 埋点只写一处(重试也会记,不丢失败轨迹)。
+      const chatHandlers = {
+        onText,
+        onToolCall,
+        onProgress: reportLive,
+        onRetry: (retry: { attempt: number; nextAttempt: number; waitMs: number; code: string }) =>
+          emitTrace('model_retry', {
+            model: requestModel,
+            provider,
+            attempt: retry.attempt,
+            nextAttempt: retry.nextAttempt,
+            waitMs: retry.waitMs,
+            code: retry.code,
+          }),
+      };
+      const runChatOnce = async (): Promise<ChatResult> => {
+        try {
+          return await chat(requestHistory, chatHandlers, signal, activeTools);
+        } catch (err) {
+          const errorValue = err && typeof err === 'object'
+            ? err as { status?: number; code?: string; name?: string }
+            : undefined;
+          emitTrace('model_end', {
+            model: requestModel,
+            provider,
+            status: signal?.aborted ? 'aborted' : 'error',
+            code: typeof errorValue?.status === 'number'
+              ? `HTTP_${errorValue.status}`
+              : errorValue?.code ?? errorValue?.name ?? 'MODEL_ERROR',
+            durationMs: Date.now() - modelStartedAt,
+          });
+          throw err;
+        }
+      };
       try {
-        result = await chat(
-          requestHistory,
-          {
-            onText,
-            onToolCall,
-            onProgress: reportLive,
-            onRetry: (retry) => emitTrace('model_retry', {
-              model: requestModel,
-              provider,
-              attempt: retry.attempt,
-              nextAttempt: retry.nextAttempt,
-              waitMs: retry.waitMs,
-              code: retry.code,
-            }),
-          },
-          signal,
-          activeTools,
-        );
+        result = await runChatOnce();
       } catch (e) {
-        const errorValue = e && typeof e === 'object'
-          ? e as { status?: number; code?: string; name?: string }
-          : undefined;
-        emitTrace('model_end', {
-          model: requestModel,
-          provider,
-          status: signal?.aborted ? 'aborted' : 'error',
-          code: typeof errorValue?.status === 'number'
-            ? `HTTP_${errorValue.status}`
-            : errorValue?.code ?? errorValue?.name ?? 'MODEL_ERROR',
-          durationMs: Date.now() - modelStartedAt,
-        });
         // 中断(用户运行中 Ctrl+C):chat() 抛 AbortError(signal.aborted)→ 还原 history + 模式 + return(不抛)。
         // 工具执行现已串 signal:run_command/web_fetch 被 abort 即时杀,循环顶检查兜底(不会留未配对 tool_call_id)。
         if (
@@ -662,7 +691,61 @@ export async function runAgentCore(
             changedFiles: mutation.changedFiles.map((item) => item.path),
           };
         }
-        throw e;
+        // 后端实测拒绝了 prompt(上下文超长):本地估算对该 provider 系统性偏低时,
+        // 压力线压不住,这是唯一可信的触发。强压一轮后重试一次;仍失败才抛(限一次,防循环)。
+        if (!overflowRetried && isContextLengthError(e)) {
+          overflowRetried = true;
+          // 估算被后端证伪:raw×correction 明明在压力线以下,真实 prompt 却超了窗。
+          // 用「实测 = 窗口」这个下限样本喂校准,让压力线对这家 provider 立刻变严——
+          // 否则每一步都要等后端报错才压,而不是提前压。EWMA α=0.2 + [0.5,2] 夹逼,
+          // 偶发误判会被后续真实 usage 样本拉回。
+          const rawEstimate = estimatePromptTokens(requestHistory, activeTools);
+          if (rawEstimate > 1_000) {
+            const cal = updateTokenCalibration(
+              requestBaseURL,
+              requestModel,
+              activeTools,
+              rawEstimate,
+              config.contextWindowTokens,
+            );
+            runtimeContextState.correction = cal.correction;
+            runtimeContextState.calibrationSamples = cal.samples;
+          }
+          const overflowResult = await maybeCompact(
+            history,
+            undefined,
+            { manual: true, force: true },
+            runtimeContextState,
+            activeTools,
+            signal,
+          );
+          emitTrace('compact', {
+            source: 'overflow_retry',
+            reason: overflowResult?.reason ?? 'noop',
+            compacted: overflowResult?.compacted === true,
+            estimateBefore: overflowResult?.estimateBefore,
+            estimateAfter: overflowResult?.estimateAfter,
+            durationMs: Date.now() - modelStartedAt,
+          });
+          if (!overflowResult?.compacted) throw e; // 压不动:没法救,原样抛
+          if (overflowResult.historyRebuilt) {
+            historyRebuilt = true;
+            if (lifecycle) {
+              lifecycle = createLifecycleEngine(history);
+              runtimeContextState.lifecycleStats = lifecycle.stats();
+            }
+            rehydrateArtifacts(runtimeContextState, history);
+          }
+          requestHistory = buildRequestHistory();
+          stepPromptEst = estimatePromptTokens(
+            requestHistory,
+            activeTools,
+            runtimeContextState.correction,
+          );
+          result = await runChatOnce(); // 仍超长 → 抛出,交给上层报错
+        } else {
+          throw e;
+        }
       }
       emitTrace('model_end', {
         model: requestModel,

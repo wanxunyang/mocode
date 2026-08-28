@@ -27,6 +27,13 @@ export const SUMMARY_MSG_MAX_CHARS = {
 export const SUMMARY_TRANSCRIPT_WINDOW_RATIO = 0.55;
 /** 摘要输出硬上限(字符):模型不听话产出超长摘要时按段落边界裁,防摘要本身撑大 history。 */
 export const SUMMARY_OUTPUT_MAX_CHARS = 6000;
+// ── 跨代钉住的 Key Facts 预算(见 compact.ts mergeKeyFacts)────────────────
+/** 占窗口比例。按「字符≈token」的保守换算(中文 1 字≈1 token),取 summary 层的一半。 */
+export const SUMMARY_KEYFACTS_WINDOW_RATIO = 0.05;
+/** 小窗口下的绝对下限:首轮约束通常就几条,32k 窗口按比例只有 1.6k 也得保住。 */
+export const SUMMARY_KEYFACTS_MIN_CHARS = 1200;
+/** 大窗口下的绝对上限:Key Facts 是索引不是正文,不该无限膨胀。 */
+export const SUMMARY_KEYFACTS_MAX_CHARS = 8000;
 
 // ── 记忆(Tier-2 JSONL 工具库)──────────────────────────────────────────────
 /** 单条记忆 body 上限(字符)。进 history 前 memory_search 结果另有 MAX_MEMORY_RESULT 兜底。 */

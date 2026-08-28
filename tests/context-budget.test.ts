@@ -72,10 +72,8 @@ test('evaluateBudget 正确分层、排序且不修改 history', () => {
 
 test('scheduleActions 常规触发与窗口硬闸', () => {
   assert.deepEqual(scheduleActions(report({})), []);
-  assert.deepEqual(
-    scheduleActions(report({ system: true })),
-    [{ kind: 'warn', layer: 'system', reason: '固定开销 101/100 (+1, 101%)；提示 10 + 工具 5，×1.00。' }],
-  );
+  // system 层超预算只是诊断,不再产出告警动作(唯一消费方是每步刷屏,小窗口下是常态噪声)
+  assert.deepEqual(scheduleActions(report({ system: true })), []);
   // 常规:history 层超预算 + headroom 为负 → compact
   assert.deepEqual(
     scheduleActions(report({ history: true, total: 10_000 })),
@@ -213,7 +211,7 @@ test('scheduleActions property: 300 组报告动作有序且硬闸不被校正�
         rawTotal,
         correction,
       }));
-      assert.ok(actions.every((action) => action.kind === 'warn' || action.kind === 'compact_history'));
+      assert.ok(actions.every((action) => action.kind === 'compact_history'));
       const hasCompact = actions.some((action) => action.kind === 'compact_history');
       if (rawTotal >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * 10_000) {
         assert.ok(hasCompact, `硬闸:rawTotal=${rawTotal} 必须触发 compact`);

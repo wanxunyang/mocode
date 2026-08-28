@@ -119,6 +119,36 @@ export function isRetryableError(err: unknown, signal?: AbortSignal): boolean {
   return false;
 }
 
+/**
+ * 判定一次失败是否是「请求上下文超长」(后端实测拒绝了我们的 prompt)。
+ *
+ * 与压力线(本地启发式估算)的区别:这是**实测**信号。估算对某些 provider 会系统性偏低
+ * (CJK 分词、多模态、特殊 schema),压力线压不住时,后端这声 400 是唯一可信的兜底触发。
+ * agent/core 捕获后强压一轮再重试一次(限一次,防循环)。
+ *
+ * 判定刻意保守:只在 status 明确(400/413/422)或 status 缺失(代理把错误折叠成普通
+ * Error)时才认语义;5xx / 429 一律不算——那种重试压缩也救不回来。
+ */
+export function isContextLengthError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { status?: number; code?: string; type?: string; message?: string };
+  if (e.code === 'context_length_exceeded' || e.type === 'context_length_exceeded') return true;
+  if (e.code === 'string_above_max_length') return true;
+  if (typeof e.status === 'number' && e.status >= 500) return false;
+  if (typeof e.status === 'number' && e.status !== 400 && e.status !== 413 && e.status !== 422) {
+    return false;
+  }
+  // 413 是网关/代理对「请求体过大」的直白判决,不带 message 也认。
+  if (e.status === 413) return true;
+  const msg = typeof e.message === 'string' ? e.message.toLowerCase() : '';
+  if (!msg) return false;
+  return (
+    /context[_ ]length|context window|maximum context|too many tokens|string_above_max_length/.test(msg) ||
+    /(input|prompt|context|request).{0,20}too (long|large)|exceeds? the (model|maximum|context)/.test(msg) ||
+    /reduce the length|上下文(长度)?(超|过)|超出.*上下文|请求过长|长度超过|token 数?超过/.test(msg)
+  );
+}
+
 /** 从 OpenAI APIError.headers 解析 Retry-After(秒);不支持或缺失返回 undefined。封顶 RETRY_MAX_MS。 */
 export function getRetryAfterMs(err: unknown): number | undefined {
   const headers = (err as { headers?: unknown } | undefined)?.headers;

@@ -238,40 +238,22 @@ export function evaluateBudget(
   };
 }
 
-/** 调度器只生成执行层能够真正落地的动作。 */
-export type ScheduleAction =
-  | {
-      kind: 'warn';
-      layer: BudgetLayer;
-      reason: string;
-    }
-  | {
-      kind: 'compact_history';
-      focus?: string;
-    };
+/** 调度器只生成执行层能够真正落地的动作。
+ * 分层超预算纯属诊断:不再生成 warn 动作——它唯一的消费方是每步往内容区打一行告警,
+ * 而小窗口下「固定开销超预算」是常态(提示 + 工具 schema 就吃掉固定比例),每步刷屏只是噪声。
+ * 数字没丢:`BudgetReport.layers[layer]` 与 `systemCosts`(提示/工具/尾部注入拆分)照常计算,
+ * formatReport 仍能打出分层明细,只是不再自动往 TUI 写。注意 /context 显式排除 system
+ * prompt(只看对话内容),要查固定开销得走 formatReport 或看 layers 字段。 */
+export type ScheduleAction = {
+  kind: 'compact_history';
+  focus?: string;
+};
 
 /** 根据 BudgetReport 生成可执行动作。
  * History compaction is the final fallback after pressure-only tool stages.
  * Per-layer overages are diagnostics, never independent rewrite triggers. */
 export function scheduleActions(report: BudgetReport): ScheduleAction[] {
   const actions: ScheduleAction[] = [];
-  const { layers } = report;
-
-  if (layers.system.overBudget) {
-    const { prompt, toolSchemas, ephemeralInjection } = report.systemCosts;
-    const { actual, budget } = layers.system;
-    const excess = actual - budget;
-    const percent = ((actual / Math.max(budget, 1)) * 100).toFixed(0);
-    actions.push({
-      kind: 'warn',
-      layer: 'system',
-      reason:
-        `固定开销 ${actual}/${budget} (+${excess}, ${percent}%)；`
-        + `提示 ${prompt} + 工具 ${toolSchemas}`
-        + (ephemeralInjection > 0 ? ` + 尾部注入 ${ephemeralInjection}` : '')
-        + `，×${report.correction.toFixed(2)}。`,
-    });
-  }
 
   const pressureLine = DEFAULT_BUDGET_POLICY.pressureTriggerRatio * report.window;
   if (Math.max(report.rawTotal, report.total) >= pressureLine) {
