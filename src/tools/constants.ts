@@ -14,13 +14,17 @@ export const MAX_SKILL_RESULT = 64000;
 export const MAX_OLD_TOOL_STUB = 600;
 
 // ── 上下文压缩摘要(见 session/compact.ts defaultSummarize)────────────────
-/** 摘要输入单条消息封顶:逐条封顶保证每轮对话都有代表,替代整段中截(会切掉中间整轮)。 */
+/** 摘要输入单条消息封顶:逐条封顶保证每轮对话都有代表,替代整段中截(会切掉中间整轮)。
+ *  转录总量超 SUMMARY_TRANSCRIPT_WINDOW_RATIO 时,这些封顶会被等比缩小重拼。 */
 export const SUMMARY_MSG_MAX_CHARS = {
   user: 3000, // 用户原话价值最高,给大额度
   assistant: 1600,
   tool: 800,
   other: 2000,
 };
+/** 摘要转录总预算占上下文窗口的比例:超预算时等比缩小单条封顶重拼——
+ *  优先保消息条数(每轮都有代表),其次才保单条长度。 */
+export const SUMMARY_TRANSCRIPT_WINDOW_RATIO = 0.55;
 /** 摘要输出硬上限(字符):模型不听话产出超长摘要时按段落边界裁,防摘要本身撑大 history。 */
 export const SUMMARY_OUTPUT_MAX_CHARS = 6000;
 

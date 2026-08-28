@@ -453,11 +453,16 @@ async function chatOnce(
     {
       model: getActiveModel(),
       messages: normalizeImageDetail(messages),
-      tools: activeTools,
       stream: true,
-      // 显式声明允许一次响应携带多个 tool_call(OpenAI 兼容协议标准字段)。
-      // 不设置时依赖各家后端的默认值,某些第三方网关/模型在缺省时会退化为串行单步调用。
-      ...(activeTools.length > 0 ? { parallel_tool_calls: true } : {}),
+      // 空工具表(如摘要请求)不发 tools 字段——部分网关拒绝空数组。
+      ...(activeTools.length > 0
+        ? {
+            tools: activeTools,
+            // 显式声明允许一次响应携带多个 tool_call(OpenAI 兼容协议标准字段)。
+            // 不设置时依赖各家后端的默认值,某些第三方网关/模型在缺省时会退化为串行单步调用。
+            parallel_tool_calls: true,
+          }
+        : {}),
       ...(config.maxTokens ? { max_tokens: config.maxTokens } : {}),
       ...(config.includeUsage ? { stream_options: { include_usage: true } } : {}),
     },

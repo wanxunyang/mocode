@@ -16,6 +16,7 @@ import {
   MAX_SKILL_RESULT,
   SUMMARY_MSG_MAX_CHARS,
   SUMMARY_OUTPUT_MAX_CHARS,
+  SUMMARY_TRANSCRIPT_WINDOW_RATIO,
 } from '../tools/constants.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
@@ -28,8 +29,10 @@ import { collectArtifactRefs } from '../context/artifacts.js';
 /**
  * 上下文压缩子系统:
  *  三层 —— ① push-time 单条上限(见 capToolResultForHistory,在 agent push 时调用)
- *          ② 微压缩:旧工具结果原地截短(保 tool_call_id,无 LLM 调用)
- *          ③ 摘要:旧的非工具消息由一次 chat() 压成一条 role:'system' 摘要(index 1)
+ *          ② 摘要(主层):旧区原始内容由一次 chat() 压成一条 role:'system' 摘要(index 1)。
+ *             触发压缩时旧区 ≤80% 窗口、与摘要器共享窗口,封顶后即装得下——
+ *             不预截断,否则等于把摘要模型弄瞎。
+ *          ③ 微压缩(兜底):仅在摘要失败后对旧区原地截短(保 tool_call_id,无 LLM 调用)。
  *
  *  不变量:
  *  - 原地修改:用 history.length=0; push(...) 重建,repl 持有同一引用。
@@ -317,12 +320,21 @@ function microcompactGroup(g: Group): boolean {
 
 // ── 默认摘要器:复用 chat(),空 handlers 不打印 ──────────────────────────
 
-/** 单条消息封顶:保头(首段通常含意图/结论),尾部加省略标记。
- *  逐条封顶(而非整段中截)保证每一轮对话在摘要输入里都有代表——
- *  整段中截会把中间整轮直接切掉,用户中途提的需求可能整体消失。 */
+/** 单条消息封顶:中间段省略、保头 + 尾(头有路径/意图,尾有结论/报错),总长 ≤ max。 */
 function capMessageText(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max) + ` …[本条消息另有 ${text.length - max} 字符已省略]`;
+  const removed = text.length - max;
+  const marker = `\n…[中间 ${removed} 字符已省略]…\n`;
+  let remain = max - marker.length;
+  if (remain <= 0) return text.slice(0, Math.max(0, max)) + marker;
+  const head = Math.ceil(remain * 0.6);
+  return text.slice(0, head) + marker + text.slice(text.length - (remain - head));
+}
+
+/** tool_call 参数封顶:只保头(路径/目标等关键信息在开头,长正文对摘要无信息量)。 */
+function capArgsHead(args: string, max: number): string {
+  if (args.length <= max) return args;
+  return args.slice(0, max) + ` …[另有 ${args.length - max} 字符已省略]`;
 }
 
 /** 摘要输出硬上限:按最后换行处裁断(不留半句),防模型不听话产出巨长摘要撑大 history。 */
@@ -333,45 +345,60 @@ function capSummaryOutput(summary: string): string {
   return summary.slice(0, at) + '\n[摘要输出超长,已截断]';
 }
 
+/** 按封顶配额拼转录。scale ∈ (0,1] 等比缩小各角色配额(总预算不足时用)。 */
+function buildTranscript(stripped: ChatMessage[], scale: number): string {
+  const caps = SUMMARY_MSG_MAX_CHARS;
+  const capFor = (role: string): number =>
+    Math.max(
+      200,
+      Math.floor(
+        scale *
+          (role === 'user'
+            ? caps.user
+            : role === 'assistant'
+              ? caps.assistant
+              : role === 'tool'
+                ? caps.tool
+                : caps.other)
+      )
+    );
+  return stripped
+    .map((m) => {
+      const cap = capFor(m.role);
+      let line = `${m.role}: ${capMessageText(toText((m as any).content), cap)}`;
+      const tcs = (m as any).tool_calls;
+      if (tcs) {
+        for (const tc of tcs) {
+          const args = tc?.function?.arguments ?? '';
+          line += `\n  [tool_call ${tc?.function?.name}] ${capArgsHead(args, Math.max(200, Math.floor(scale * caps.tool)))}`;
+        }
+      }
+      return line;
+    })
+    .join('\n');
+}
+
 async function defaultSummarize(
   older: ChatMessage[],
   focus?: string
 ): Promise<string | null> {
   // 摘要前剥离多模态 user 消息里的图片(base64 会撑爆摘要 prompt;image 对摘要无信息量)。
   const stripped = older.map(stripImagesForSummary);
-  let transcript = stripped
-    .map((m) => {
-      const role = m.role;
-      const cap =
-        role === 'user'
-          ? SUMMARY_MSG_MAX_CHARS.user
-          : role === 'assistant'
-            ? SUMMARY_MSG_MAX_CHARS.assistant
-            : role === 'tool'
-              ? SUMMARY_MSG_MAX_CHARS.tool
-              : SUMMARY_MSG_MAX_CHARS.other;
-      let line = `${role}: ${capMessageText(toText((m as any).content), cap)}`;
-      const tcs = (m as any).tool_calls;
-      if (tcs) {
-        for (const tc of tcs) {
-          // 参数只留头部片段:路径/目标等关键信息在开头,长正文对摘要无信息量
-          const args = tc?.function?.arguments ?? '';
-          line += `\n  [tool_call ${tc?.function?.name}] ${capMessageText(args, SUMMARY_MSG_MAX_CHARS.tool)}`;
-        }
-      }
-      return line;
-    })
-    .join('\n');
 
-  // 兜底:逐条封顶后仍超窗(极端多轮)才整段中截——此分支罕见,常规路径永不触发
-  if (
-    estimateTokens(transcript) >
-    Math.floor(config.contextWindowTokens * 0.6)
-  ) {
-    transcript = truncateMid(
-      transcript,
-      Math.floor(config.contextWindowTokens * 0.5)
-    );
+  // 触发压缩时旧区约占窗口 50-60%,摘要器共享同一窗口——逐条封顶后旧区原文即可装入,
+  // 不需要"先压一遍再摘要"。封顶策略:先按满额封顶;总量仍超窗口 55% 预算时等比缩小
+  // 配额重拼(优先保条数/每轮都有代表,其次保单条长度);再超才整段中截兜底(罕见)。
+  let transcript = buildTranscript(stripped, 1);
+  const tokenBudget = Math.floor(
+    config.contextWindowTokens * SUMMARY_TRANSCRIPT_WINDOW_RATIO
+  );
+  let tokens = estimateTokens(transcript);
+  if (tokens > tokenBudget) {
+    transcript = buildTranscript(stripped, tokenBudget / tokens);
+    tokens = estimateTokens(transcript);
+    if (tokens > Math.floor(config.contextWindowTokens * 0.6)) {
+      transcript = truncateMid(transcript, Math.floor(config.contextWindowTokens * 0.5));
+    }
   }
 
   const sysMsg = {
@@ -402,7 +429,9 @@ async function defaultSummarize(
   );
   spinner.start('压缩中');
   try {
-    const r = await chat([sysMsg, userMsg], {}); // 空 handlers:不打印、不外显流式
+    // 空 handlers:不打印、不外显流式;tools=[] 不带工具表——摘要纯文本任务,
+    // 全量工具 schema 白占几千 token 窗口,还诱导幻觉工具调用。
+    const r = await chat([sysMsg, userMsg], {}, undefined, []);
     // 推理模型可能只返 reasoning_content(content 为 null),或幻觉出 tool_calls → 视为失败
     if (r.toolCalls.length > 0 || !r.content) return null;
     return capSummaryOutput(r.content);
@@ -528,25 +557,17 @@ export async function compactHistory(
     return { ...noop, reason: 'noop-protected', protectedRatio };
   }
 
-  // 第一层:微压缩——旧区原地截短(保 tool_call_id,无 LLM 调用)
-  // 覆盖三类大字段,均只裁模型/工具产物,不动 user 原话与 system(摘要):
-  //   ① tool 结果 content;
-  //   ② 旧 assistant 的 tool_calls.arguments —— provenance stub:整体超长才进,大字段
-  //     替换为 "<N 字符,已省略>"(保 path + JSON 合法,见 stubToolCallArguments);
-  //   ③ 旧 assistant 正文 content(模型长解释,回看价值低)。
-  let microcompactDone = false;
-  for (const g of oldGroups) {
-    if (microcompactGroup(g)) microcompactDone = true;
-  }
-
-  // 第二层:摘要——把旧区(微压缩后)压成一条 system 摘要
+  // 主层:摘要——把旧区【原始内容】压成一条 system 摘要。
+  // 触发压缩时旧区约占窗口 50-60%,摘要请求与摘要器共享窗口,逐条封顶后即装得下;
+  // 不在这里预跑微压缩——预截断会让摘要模型看到 600 字符残片,等于弄瞎它,
+  // 且摘要成功后旧区整体丢弃,预截断本身也无收益。
   const older = flattenGroups(oldGroups);
   const summarizeFn = opts.summarize ?? defaultSummarize;
   let summary: string | null = null;
   try {
     summary = await summarizeFn(older, opts.focus);
   } catch {
-    summary = null; // 摘要失败 → 回退仅微压缩,不崩
+    summary = null; // 摘要失败 → 回退微压缩兜底,不崩
   }
 
   if (summary) {
@@ -589,7 +610,14 @@ export async function compactHistory(
     };
   }
 
-  // 摘要失败:回退仅微压缩(tool content 已原地改),结构不动
+  // 摘要失败兜底:微压缩——旧区原地截短(保 tool_call_id,无 LLM 调用),结构不动。
+  // 覆盖三类大字段,均只裁模型/工具产物,不动 user 原话与 system:
+  //   ① tool 结果 content;② 旧 assistant 的 tool_calls.arguments(provenance stub,
+  //     整体超长才进,大字段替换为 "<N 字符,已省略>",保 path + JSON 合法);③ 旧 assistant 正文。
+  let microcompactDone = false;
+  for (const g of oldGroups) {
+    if (microcompactGroup(g)) microcompactDone = true;
+  }
   const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
   state.lastEstimate = estimateAfter;
   state.lastUsage = undefined; // token 数已变,旧 usage 失效
