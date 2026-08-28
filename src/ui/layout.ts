@@ -775,6 +775,16 @@ export function totalRows(): number {
   return content.totalRows();
 }
 
+/** 缓冲尾部(已提交行)是否已经是空白行(去掉 ANSI 后无可见字符)。
+ *  供 compact 等在 step 循环顶部写通知行前判断是否需要补空行分隔。 */
+export function isLastContentRowBlank(): boolean {
+  const committed = content.committedRows();
+  if (committed === 0) return false;
+  const line = content.lineAt(committed - 1);
+  if (line === null) return false;
+  return line.replace(/\x1b\[[0-9;]*m/g, '').trim().length === 0;
+}
+
 /** 正文→mutation 首摘要前，把尾部间距强制归一为一条视觉空行。 */
 export function normalizeMutationBoundary(): void {
   if (!active || !ui.isTTY) return;

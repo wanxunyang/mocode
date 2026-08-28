@@ -23,7 +23,7 @@
     "build": "tsc -p tsconfig.build.json",
     "test": "tsc -p tsconfig.test-build.json && node --test --experimental-test-isolation=none \"dist-tests/tests/*.test.js\"",
     "typecheck": "tsc --noEmit && tsc -p tests/tsconfig.json && tsc -p evals/tsconfig.json",
-    "eval:smoke": "tsx evals/smoke.ts && tsx evals/coding/smoke.ts",
+    "eval:smoke": "tsx evals/smoke.ts && tsx evals/coding/smoke.ts && tsx evals/work-discipline.ts",
     "eval:coding": "tsx evals/coding/runner.ts",
     "eval:coding:list": "tsx evals/coding/runner.ts --list",
     "prepare": "npm run build"

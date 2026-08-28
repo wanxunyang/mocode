@@ -16,8 +16,8 @@ import {
   buildBasePrompt,
   getPlanModeSuffix,
   hasCodegraphIndex,
-  reinjectSessionStateIntoSystem,
   DEFAULT_CONTEXT_WINDOW_TOKENS,
+  pinSessionModel,
 } from '../config/index.js';
 import {
   getLanguage,
@@ -249,17 +249,25 @@ function themeDescription(name: string): string {
   } ? t(key) : '';
 }
 
-/** /model 预设后端:选一个预填 baseURL,仍可逐项改。base_url 取自 README 常见表。 */
-const MODEL_PRESETS: { label: string; baseURL: string; model: string; window: number }[] = [
-  { label: 'GLM(智谱)', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
-  { label: 'DeepSeek', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
-  { label: 'Qwen(阿里)', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
+/** /model 预设后端：同时声明原生协议；旧服务继续走 OpenAI-compatible。 */
+const MODEL_PRESETS: {
+  label: string;
+  provider: 'openai' | 'anthropic';
+  baseURL: string;
+  model: string;
+  window: number;
+  anthropicPromptCache: boolean;
+}[] = [
+  { label: 'Anthropic Claude', provider: 'anthropic', baseURL: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', window: 200000, anthropicPromptCache: true },
+  { label: 'GLM(智谱)', provider: 'openai', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
+  { label: 'DeepSeek', provider: 'openai', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
+  { label: 'Qwen(阿里)', provider: 'openai', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
   // MiniMax OpenAI 兼容端点(https://platform.minimax.io/docs/api-reference/text-openai-api)。
   // MiniMax-M3 为唯一支持图片/视频输入的模型;M2 系列纯文本(见 llm/capabilities.ts KNOWN_TEXT_ONLY_PREFIXES)。
-  { label: 'MiniMax', baseURL: 'https://api.minimax.io/v1', model: 'MiniMax-M3', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
-  { label: '本地 Ollama', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
-  { label: '本地 vLLM', baseURL: 'http://localhost:8000/v1', model: 'default', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
-  { label: '自定义 base_url', baseURL: '', model: '', window: DEFAULT_CONTEXT_WINDOW_TOKENS },
+  { label: 'MiniMax', provider: 'openai', baseURL: 'https://api.minimax.io/v1', model: 'MiniMax-M3', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
+  { label: '本地 Ollama', provider: 'openai', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
+  { label: '本地 vLLM', provider: 'openai', baseURL: 'http://localhost:8000/v1', model: 'default', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
+  { label: '自定义 base_url', provider: 'openai', baseURL: '', model: '', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
 ];
 
 /** apiKey 脱敏:只露末 4 位,前面打星号(显示用,绝不把明文 key 写进内容区)。 */
@@ -871,6 +879,8 @@ export async function startRepl(
 ): Promise<void> {
   // 模式重置:agentMode 不落盘,每个 REPL 会话从 auto 开始(/resume / --resume 亦重置)。
   setAgentMode('auto');
+  // 钉死本会话模型：之后运行中 agent 一律用此值，其它窗口的 /model switch 不会影响本窗口。
+  pinSessionModel();
   // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
   // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
@@ -962,10 +972,12 @@ export async function startRepl(
     if (listPresets().length === 0) {
       try {
         const migrated = migrateCurrentToPreset({
+          provider: config.provider,
           baseURL: config.baseURL,
           apiKey: config.apiKey,
           model: config.model,
           contextWindow: config.contextWindowTokens,
+          anthropicPromptCache: config.anthropicPromptCache,
         });
         if (migrated) {
           layout.contentWrite(
@@ -1681,8 +1693,9 @@ export async function startRepl(
       // focus 透传到 compact_history action 的 LLM 摘要 prompt。
       // 返回 SchedulerRunLog 给 UI 显示决策;退化路径(开关关时)在 manualCompact 内部走 compactHistory。
       const log = await manualCompact(history, focus, { force });
-      // ② compact 后把会话状态(plan + 笔记段)重注入系统提示（history[0]），避免 agent 因上下文压缩丢失计划与笔记。
-      if (log.compactHistoryCalled) reinjectSessionStateIntoSystem(history);
+      // 会话状态(plan + 笔记段)不在此处回写 history[0]:agent/core 每步都在 requestHistory
+      // 末尾注入最新副本(buildSessionStateReminder),压缩后下一步自然恢复,且系统提示保持
+      // 逐字节稳定以命中 prompt 缓存。
       const d = log.compactDetail;
       appendCurrentSessionRuntimeEvent('compact', {
         source: 'manual',
@@ -1842,18 +1855,30 @@ export async function startRepl(
       // ── /model 子命令(use/save/list/delete/rename)优先派发,免得被无参向导路径吞掉。
 
       // 共用:apply 一个预设到 config + 持久化 + 重建 client + 重显横幅。无参 /model 选菜单和 /model use 都走这里。
-      const applyPresetAndPersist = (target: { name: string; baseURL: string; apiKey: string; model: string; contextWindow: number }): void => {
+      const applyPresetAndPersist = (target: {
+        name: string;
+        provider: 'openai' | 'anthropic';
+        baseURL: string;
+        apiKey: string;
+        model: string;
+        contextWindow: number;
+        anthropicPromptCache: boolean;
+      }): void => {
         updateModelConfig({
+          provider: target.provider,
           model: target.model,
           baseURL: target.baseURL,
           apiKey: target.apiKey,
           contextWindowTokens: target.contextWindow,
+          anthropicPromptCache: target.anthropicPromptCache,
         });
         writeConfigKeys({
+          LLM_PROVIDER: target.provider,
           LLM_BASE_URL: target.baseURL,
           LLM_API_KEY: target.apiKey,
           LLM_MODEL: target.model,
           CONTEXT_WINDOW_TOKENS: String(target.contextWindow),
+          ANTHROPIC_PROMPT_CACHE: target.anthropicPromptCache ? 'true' : 'false',
         });
         reconfigureClient();
         refreshStatusBase(history);
@@ -1863,7 +1888,10 @@ export async function startRepl(
         } else {
           layout.writeBanner(bannerLines(banner()));
         }
-        layout.contentWrite(`${ui.dim}(已切换到预设 “${target.name}” → ${target.model} @ ${target.baseURL})${ui.reset}\n`);
+        const cacheLabel = target.provider === 'anthropic'
+          ? ` · Prompt Cache ${target.anthropicPromptCache ? 'on' : 'off'}`
+          : '';
+        layout.contentWrite(`${ui.dim}(已切换到预设 “${target.name}” → ${target.model} · ${target.provider}${cacheLabel} @ ${target.baseURL})${ui.reset}\n`);
         if (config.llmKeysFromShell.length > 0) {
           layout.contentWrite(
             `${ui.dim}(shell 环境变量已设 ${config.llmKeysFromShell.join(' / ')},文件写入下次启动被其覆盖)${ui.reset}\n`,
@@ -1871,22 +1899,23 @@ export async function startRepl(
         }
       };
 
-      // 决定自动存的预设名:用 desired(model 字段),若与已有预设四元组完全相同则不重复存(返 null);
-      // 否则若 desired 已存在则追加 -2/-3/...。desired 含非法字符(如 glm-4.6 的 '.')时先 sanitize(. → -),
-// sanitize 后仍空才退化到 'preset'。
+      // 决定自动存的预设名:协议、缓存配置和连接四元组都一致时不重复存。
       const uniquePresetName = (
         desired: string,
+        provider: 'openai' | 'anthropic',
         baseURL: string,
         apiKey: string,
         model: string,
         contextWindow: number,
+        anthropicPromptCache: boolean,
       ): string | null => {
         const existing = listPresets();
         const sameEntry = existing.find(
-          (p) => p.baseURL === baseURL && p.apiKey === apiKey && p.model === model && p.contextWindow === contextWindow,
+          (p) => p.provider === provider && p.baseURL === baseURL && p.apiKey === apiKey
+            && p.model === model && p.contextWindow === contextWindow
+            && p.anthropicPromptCache === anthropicPromptCache,
         );
-        if (sameEntry) return null; // 完全相同,不重复存
-        // sanitize:把非 [a-zA-Z0-9_-] 字符(如 glm-4.6 的 '.')替换为 -,压缩两端 -,裁 1-32。
+        if (sameEntry) return null;
         const sanitized = desired
           .replace(/[^a-zA-Z0-9_-]+/g, '-')
           .replace(/^-+|-+$/g, '')
@@ -1909,14 +1938,17 @@ export async function startRepl(
           continue;
         }
         const isCurrent = (p: typeof presets[number]): boolean =>
+          p.provider === config.provider &&
           p.baseURL === config.baseURL &&
           p.apiKey === config.apiKey &&
           p.model === config.model &&
-          p.contextWindow === config.contextWindowTokens;
+          p.contextWindow === config.contextWindowTokens &&
+          p.anthropicPromptCache === (config.provider === 'anthropic' && config.anthropicPromptCache);
         const cols = layout.getGeo().cols;
         const labelFor = (p: typeof presets[number]): string => {
           const tag = isCurrent(p) ? ' ★current' : '';
-          const right = `${p.model} @ ${p.baseURL}`;
+          const cache = p.provider === 'anthropic' ? ` · cache ${p.anthropicPromptCache ? 'on' : 'off'}` : '';
+          const right = `${p.provider}${cache} · ${p.model} @ ${p.baseURL}`;
           const left = `${p.name}${tag}`;
           const sep = left.length + 1 + right.length;
           if (sep <= cols - 2) return `${left} ${ui.dim}${right}${ui.reset}`;
@@ -1925,7 +1957,7 @@ export async function startRepl(
         const choice = await promptIntervention({
           type: 'choice',
           title: '切换模型预设',
-          detail: `当前: ${config.model} @ ${config.baseURL}(★ = 已匹配)`,
+          detail: `当前: ${config.provider} · ${config.model} @ ${config.baseURL}(★ = 已匹配)`,
           options: presets.map(labelFor),
           allowCustom: false, // 纯切换,不需要「其他」干扰
         });
@@ -1948,25 +1980,37 @@ export async function startRepl(
         }
         layout.contentWrite(`${ui.dim}已配置 ${ps.length} 个预设:${ui.reset}\n`);
         for (const p of ps) {
-          const star = p.baseURL === config.baseURL && p.apiKey === config.apiKey && p.model === config.model ? ' ★' : '';
+          const current = p.provider === config.provider
+            && p.baseURL === config.baseURL
+            && p.apiKey === config.apiKey
+            && p.model === config.model
+            && p.contextWindow === config.contextWindowTokens
+            && p.anthropicPromptCache === (config.provider === 'anthropic' && config.anthropicPromptCache);
+          const star = current ? ' ★' : '';
+          const cache = p.provider === 'anthropic' ? ` · cache ${p.anthropicPromptCache ? 'on' : 'off'}` : '';
           layout.contentWrite(
-            `  ${ui.accent}${p.name}${ui.reset}${star}  ${ui.dim}${p.model} @ ${p.baseURL}${ui.reset}\n`,
+            `  ${ui.accent}${p.name}${ui.reset}${star}  ${ui.dim}${p.provider}${cache} · ${p.model} @ ${p.baseURL}${ui.reset}\n`,
           );
         }
-        layout.contentWrite(`${ui.dim}(★ = 与当前一致;切换用 /model switch)${ui.reset}\n`);
+        layout.contentWrite(`${ui.dim}(★ = 与当前协议及缓存配置一致;切换用 /model switch)${ui.reset}\n`);
         continue;
       }
 
-      // /model show:显示当前四项配置(apiKey 脱敏)。
+      // /model show:显示当前协议、连接与缓存配置(apiKey 脱敏)。
       if (arg === 'show') {
         layout.contentWrite(`${ui.dim}当前模型配置:${ui.reset}\n`);
-        layout.contentWrite(`  ${ui.accent}baseURL${ui.reset}  ${config.baseURL}\n`);
-        layout.contentWrite(`  ${ui.accent}apiKey ${ui.reset}  ${maskKey(config.apiKey)}\n`);
-        layout.contentWrite(`  ${ui.accent}model  ${ui.reset}  ${config.model}\n`);
-        layout.contentWrite(`  ${ui.accent}窗口   ${ui.reset}  ${config.contextWindowTokens} tokens\n`);
+        layout.contentWrite(`  ${ui.accent}provider${ui.reset}  ${config.provider}\n`);
+        layout.contentWrite(`  ${ui.accent}baseURL ${ui.reset}  ${config.baseURL}\n`);
+        layout.contentWrite(`  ${ui.accent}apiKey  ${ui.reset}  ${maskKey(config.apiKey)}\n`);
+        layout.contentWrite(`  ${ui.accent}model   ${ui.reset}  ${config.model}\n`);
+        layout.contentWrite(`  ${ui.accent}窗口    ${ui.reset}  ${config.contextWindowTokens} tokens\n`);
+        if (config.provider === 'anthropic') {
+          layout.contentWrite(`  ${ui.accent}缓存    ${ui.reset}  Prompt Cache ${config.anthropicPromptCache ? 'on' : 'off'}\n`);
+        }
         layout.contentWrite(`${ui.dim}(配置文件: ${CONFIG_PATH})${ui.reset}\n`);
         continue;
       }
+
 
       // /model use <name>:一键把预设应用到 config + 持久化 + 重建 client。
       if (arg.startsWith('use ')) {
@@ -2148,26 +2192,51 @@ export async function startRepl(
         }
       }
 
-      // 3) 应用:内存 config + env(updateModelConfig)→ 持久化(writeConfigKeys)→ 重建 client(reconfigureClient)。
-      updateModelConfig({ model, baseURL, apiKey, contextWindowTokens: window });
+      // 3) 应用协议、连接与缓存配置；Anthropic 原生协议无需重建 OpenAI client，但统一刷新无害。
+      const provider = preset.provider;
+      const anthropicPromptCache = provider === 'anthropic' && preset.anthropicPromptCache;
+      updateModelConfig({
+        provider,
+        model,
+        baseURL,
+        apiKey,
+        contextWindowTokens: window,
+        anthropicPromptCache,
+      });
       writeConfigKeys({
+        LLM_PROVIDER: provider,
         LLM_BASE_URL: baseURL,
         LLM_API_KEY: apiKey,
         LLM_MODEL: model,
         CONTEXT_WINDOW_TOKENS: String(window),
+        ANTHROPIC_PROMPT_CACHE: anthropicPromptCache ? 'true' : 'false',
       });
       reconfigureClient();
 
-      // 3.5) 自动存为命名预设:用 model 字段,重名追加 -2/-3,完全相同的四元组不重复存。
-      //     让 /model 跑一次就多一份可切换的预设,/model switch 切回去。
+      // 3.5) 自动存为命名预设；协议与缓存策略也是去重键的一部分。
       let savedName: string | null = null;
       try {
-        const finalName = uniquePresetName(model, baseURL, apiKey, model, window);
+        const finalName = uniquePresetName(
+          model,
+          provider,
+          baseURL,
+          apiKey,
+          model,
+          window,
+          anthropicPromptCache,
+        );
         if (finalName) {
-          savePreset({ name: finalName, baseURL, apiKey, model, contextWindow: window });
+          savePreset({
+            name: finalName,
+            provider,
+            baseURL,
+            apiKey,
+            model,
+            contextWindow: window,
+            anthropicPromptCache,
+          });
           savedName = finalName;
         }
-        // finalName === null 表示与某个已存在预设完全一致,不再重复保存。
       } catch (e) {
         layout.contentWrite(`${ui.red}保存预设失败: ${(e as Error).message}${ui.reset}\n`);
       }
@@ -2180,7 +2249,10 @@ export async function startRepl(
       } else {
         layout.writeBanner(bannerLines(banner()));
       }
-      layout.contentWrite(`${ui.dim}(已切换模型 → ${model} @ ${baseURL})${ui.reset}\n`);
+      const cacheLabel = provider === 'anthropic'
+        ? ` · Prompt Cache ${anthropicPromptCache ? 'on' : 'off'}`
+        : '';
+      layout.contentWrite(`${ui.dim}(已切换模型 → ${model} · ${provider}${cacheLabel} @ ${baseURL})${ui.reset}\n`);
       if (savedName) {
         layout.contentWrite(`${ui.dim}(已保存为预设 “${savedName}”,下次 /model use ${savedName} 一键切回)${ui.reset}\n`);
       }

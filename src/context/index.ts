@@ -19,6 +19,7 @@ export {
   pruneStaleArtifacts,
   collectArtifactRefs,
   formatArtifactTokenSources,
+  knownEditTargets,
 } from './artifacts.js';
 export type {
   ArtifactDependency,
@@ -26,6 +27,7 @@ export type {
   ArtifactSourceType,
   ArtifactStats,
   ContextArtifact,
+  KnownEditTarget,
 } from './artifacts.js';
 export {
   registerEncoder,

@@ -404,10 +404,23 @@ export async function compactHistory(
 
   // force(硬闸/手动强压):保护区不豁免——常规切分无旧区时只保最后一组,
   // 其余全部进可压区(首轮/当前轮也一样)。仍按 group 边界切,不破坏 tool_call 配对。
+  // **必须保留最早 user 所在 group**:LLM API(OpenAI / Anthropic)要求 messages 至少
+  //  含一条非空 user 消息,否则 400。force 旧实现把所有 user 丢进摘要 → 重建后 history
+  //  无 user → 下一轮 chat() 被后端拒绝。保最早 user(而非最后一个)因为它是最原始的
+  //  请求上下文,摘要器已覆盖后续交互。
   if (oldGroups.length === 0 && opts.force && groups.length >= 2) {
     kept.length = 0;
-    kept.push(groups[groups.length - 1]);
-    oldGroups = groups.slice(0, groups.length - 1);
+    const lastIdx = groups.length - 1;
+    const firstUserIdx = groups.findIndex(
+      (g) => (g.assistant as { role?: string } | null)?.role === 'user',
+    );
+    if (firstUserIdx >= 0 && firstUserIdx !== lastIdx) {
+      kept.push(groups[firstUserIdx], groups[lastIdx]);
+      oldGroups = groups.filter((_, i) => i !== firstUserIdx && i !== lastIdx);
+    } else {
+      kept.push(groups[lastIdx]);
+      oldGroups = groups.slice(0, groups.length - 1);
+    }
   }
 
   const noop: CompactResult = {
@@ -433,6 +446,7 @@ export async function compactHistory(
         const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
         state.lastEstimate = estimateAfter;
         state.lastUsage = undefined;
+        if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
         layout.contentWrite(
           `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}强制微压缩(单组)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
         );
@@ -455,6 +469,7 @@ export async function compactHistory(
     }
     // history 有内容但全在保护区(系统 + 当前轮)
     if (estimateBefore >= opts.threshold * opts.window) {
+      if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
       layout.contentWrite(
         `  ${ui.yellow}●${ui.reset} ${ui.yellow}上下文已超阈但无可压缩项(全在保护区),建议 /clear 或缩短输入。${ui.reset}\n`,
       );
@@ -502,6 +517,9 @@ export async function compactHistory(
     const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
     state.lastEstimate = estimateAfter;
     state.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用校正估算
+    // 压缩行与上一个工具批次摘要行之间补空行分隔(compact 在 core step 循环顶部触发,
+    // 上一步的 batch 可能尚未 flush,缓冲末行仍是 ● 工具摘要行 → 两行黏在一起)。
+    if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
     layout.contentWrite(
       `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
     );
@@ -526,6 +544,7 @@ export async function compactHistory(
   state.lastEstimate = estimateAfter;
   state.lastUsage = undefined; // token 数已变,旧 usage 失效
   if (microcompactDone) {
+    if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
     layout.contentWrite(
       `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
     );

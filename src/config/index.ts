@@ -6,6 +6,7 @@ import { getSandboxRoot } from '../sandbox/root.js';
 import { getCurrentSessionId, setCurrentSessionId } from '../session/state.js';
 import { getNotesFilePath, extractActiveNotesSections } from '../session/notes.js';
 import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-discipline.js';
+import { buildValidationCommandsSection } from '../verification/prompt.js';
 import {
   detectLanguage,
   setLanguage,
@@ -46,13 +47,21 @@ export const languageFromShell = process.env.MOCODE_LANGUAGE !== undefined;
 // 在 loadEnvFiles 回填前捕获:哪些 LLM 键由 shell 设置(决定 /model 写文件是否下次启动生效)。
 // 仿 themeFromShell 模式:shell export 的环境变量在 loadEnvFiles 中不被回填(优先级最高),
 // 故 /model 写入 ~/.mocode/config 的同名键下次启动会被 shell 值覆盖——据此给 dim 警告。
-const LLM_ENV_KEYS = ['LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS'] as const;
+const LLM_ENV_KEYS = ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS', 'ANTHROPIC_PROMPT_CACHE'] as const;
 export const DEFAULT_CONTEXT_WINDOW_TOKENS = 256000;
 const llmKeysFromShell = LLM_ENV_KEYS.filter((k) => process.env[k] !== undefined);
 loadEnvFiles();
 setLanguage(detectLanguage(process.env.MOCODE_LANGUAGE));
 
+export type LlmProvider = 'openai' | 'anthropic';
+
+export function normalizeLlmProvider(value: unknown): LlmProvider {
+  return typeof value === 'string' && value.toLowerCase() === 'anthropic' ? 'anthropic' : 'openai';
+}
+
 export interface Config {
+  /** 上游原生协议。缺省为 openai，保持旧配置与 OpenAI-compatible 网关兼容。 */
+  provider: LlmProvider;
   baseURL: string;
   apiKey: string;
   model: string;
@@ -62,6 +71,8 @@ export interface Config {
   contextWindowTokens: number;
   /** 流式请求里带 stream_options.include_usage 拿真实 usage。后端不认 stream_options 时关掉。 */
   includeUsage: boolean;
+  /** Anthropic Prompt Caching。开启时在稳定 system/tools 前缀设置 ephemeral cache breakpoint。 */
+  anthropicPromptCache: boolean;
   /** 自动压缩总开关。关掉则只靠手动 /compact。 */
   autoCompact: boolean;
   /** Typed context encoding for old logs/searches during real pressure only.
@@ -325,9 +336,13 @@ export function reinjectSessionNotesIntoSystem(
 }
 
 /**
- * 一次性重注入会话状态(plan 段 + 笔记段)到系统提示。调用点(core.ts compact 后 /
- * 本步改 notes.md、repl compact 时)统一用本函数替代 reinjectActivePlanIntoSystem,
- * 让笔记段享有与 plan 段完全对称的常驻 + 恢复时机。返回任一 marker 是否改动。
+ * 一次性重注入会话状态(plan 段 + 笔记段)到系统提示。返回任一 marker 是否改动。
+ *
+ * @deprecated 热路径已不再调用(#prompt-cache):往 history[0] 追加 plan/笔记会让
+ *   系统提示每次 plan_update / note_append 后变字节,前缀缓存整段失效(系统提示 6-8k token,
+ *   本轮后续每步全价重算)。现由 agent/core 每步在 requestHistory **末尾**注入
+ *   {@link buildSessionStateReminder} 的 ephemeral system 消息:模型看到的信息等价,
+ *   但变动落在前缀末端。本函数仅留给外部集成 / 旧测试,新增调用点请勿使用。
  */
 export function reinjectSessionStateIntoSystem(
   history: { role: string; content?: unknown }[],
@@ -335,6 +350,32 @@ export function reinjectSessionStateIntoSystem(
   const planChanged = reinjectActivePlanIntoSystem(history);
   const notesChanged = reinjectSessionNotesIntoSystem(history);
   return planChanged || notesChanged;
+}
+
+/**
+ * 构造"会话状态提醒"正文(活跃 `## Plan:` 段 + 活跃笔记段正文),供 agent/core 每步
+ * 拼进 requestHistory **末尾**的 ephemeral system 消息。
+ *
+ * 为什么在尾部而不是 history[0](prompt 缓存):plan_update / note_append 是设计上鼓励
+ * 高频调用的工具,一旦它们改写系统提示,支持自动前缀缓存的后端(OpenAI / DeepSeek /
+ * GLM / Qwen)就会从第一个 token 起全部 miss。放到历史末尾后,前面整段(系统提示 + 全部
+ * 已有对话)保持逐字节稳定,只有尾部这一小条随 notes.md 变化。
+ *
+ * 纯读函数:不改 history,也不写文件。notes.md 不存在 / 无活跃内容时返回 ''(零开销)。
+ */
+export function buildSessionStateReminder(
+  sessionId = getCurrentSessionId(),
+): string {
+  const plan = extractActivePlanSection(sessionId);
+  const notes = extractActiveNotesSections(undefined, sessionId);
+  if (!plan && !notes) return '';
+  const parts = [
+    '## Session state (current, from notes.md)',
+    'This block mirrors the live session notepad and is refreshed every step; treat it as the authoritative plan/notes state, and ignore any older copy earlier in this conversation.',
+    ...(plan ? [plan] : []),
+    ...(notes ? [notes] : []),
+  ];
+  return parts.join('\n\n');
 }
 
 const SYSTEM_PROMPT_MEMORY_SECTION = `
@@ -434,6 +475,7 @@ Complete programming tasks through an "analyze → call tool → observe result 
 - Report: stop when done and give honest conclusions with path:line references (see Reporting).
 - Use web search only when freshness materially affects the answer.
 ${buildCodegraphSection()}
+${buildValidationCommandsSection()}
 
 ## Engineering principles
 ${buildWorkDisciplineSection(inferModelFamily(config.model))}
@@ -543,6 +585,7 @@ export function getPlanModeSuffix(): string {
 }
 
 export const config: Config = {
+  provider: normalizeLlmProvider(process.env.LLM_PROVIDER),
   baseURL: requireEnv('LLM_BASE_URL'),
   apiKey: requireEnv('LLM_API_KEY'),
   model: process.env.LLM_MODEL || 'gpt-4o-mini',
@@ -554,6 +597,7 @@ export const config: Config = {
   },
   contextWindowTokens: Number(process.env.CONTEXT_WINDOW_TOKENS) || DEFAULT_CONTEXT_WINDOW_TOKENS,
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
+  anthropicPromptCache: process.env.ANTHROPIC_PROMPT_CACHE !== 'false',
   autoCompact: process.env.AUTO_COMPACT !== 'false',
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE === 'true',
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE === 'true',
@@ -581,6 +625,24 @@ export const config: Config = {
 };
 
 /**
+ * 会话钉死模型：窗口/会话启动时由 pinSessionModel() 捕获一次。
+ * 运行中 agent 一律经 getActiveModel() 取模型，而非热切的 config.model——
+ * 这样某窗口 /model switch 改写全局 config 后，其它【已经打开】的窗口的
+ * 运行 agent 仍用各自启动时的模型，不会被影响；只有重启/新开窗口才会读全局 config。
+ */
+let sessionModel: string | null = null;
+
+/** 在 REPL 启动时调用一次，把当前模型钉成本会话的活跃模型。 */
+export function pinSessionModel(): void {
+  sessionModel = config.model;
+}
+
+/** 运行中 agent 实际使用的模型：优先钉死值，未钉(极早路径)则回退 config.model。 */
+export function getActiveModel(): string {
+  return sessionModel ?? config.model;
+}
+
+/**
  * 运行时更新模型相关配置(/model 命令调)。
  * - 更新 config 对象字段(即时生效:chat() 读 config.model,reconfigureClient 读 config.baseURL/apiKey)。
  * - 同步 process.env(保持内存一致:其他读 process.env 的路径也拿到新值;且使新值在下次启动的
@@ -589,13 +651,22 @@ export const config: Config = {
  * 重建 OpenAI 客户端(baseURL/apiKey 是构造时固化的实例字段)由调用方走 reconfigureClient。
  */
 export function updateModelConfig(opts: {
+  provider?: LlmProvider;
   model?: string;
   baseURL?: string;
   apiKey?: string;
   contextWindowTokens?: number;
+  anthropicPromptCache?: boolean;
 }): void {
+  if (opts.provider !== undefined) {
+    config.provider = opts.provider;
+    process.env.LLM_PROVIDER = opts.provider;
+  }
   if (opts.model !== undefined) {
     config.model = opts.model;
+    // 钉死值同步更新：本窗口显式 /model switch 立即对本窗口运行 agent 生效；
+    // 其它已开窗口的 sessionModel 不受影响（各自启动时钉死）。
+    if (sessionModel !== null) sessionModel = opts.model;
     process.env.LLM_MODEL = opts.model;
   }
   if (opts.baseURL !== undefined) {
@@ -609,6 +680,10 @@ export function updateModelConfig(opts: {
   if (opts.contextWindowTokens !== undefined) {
     config.contextWindowTokens = opts.contextWindowTokens;
     process.env.CONTEXT_WINDOW_TOKENS = String(opts.contextWindowTokens);
+  }
+  if (opts.anthropicPromptCache !== undefined) {
+    config.anthropicPromptCache = opts.anthropicPromptCache;
+    process.env.ANTHROPIC_PROMPT_CACHE = opts.anthropicPromptCache ? 'true' : 'false';
   }
 }
 

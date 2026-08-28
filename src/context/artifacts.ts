@@ -160,6 +160,32 @@ export function recordArtifact(
   updateStats(state, stateFor(state));
 }
 
+/** 已知编辑目标:fresh 的 read_file artifact 携带的「路径 + 当前内容 hash」。
+ * 文件被改动后会经 invalidateArtifacts 转 stale,因此这里只含尚未失效的证据。 */
+export interface KnownEditTarget {
+  path: string;
+  hash: string;
+}
+
+/**
+ * 按读取时间倒序返回最近若干「仍新鲜的 read_file 目标」(path + hash)。
+ * 用途:文件编辑工具参数校验失败(如缺 path)时,把系统已知的候选直接回灌给模型照抄,
+ * 避免模型在长上下文里凭记忆复述出错、补一个字段丢另一个字段的乒乓重试。
+ * 只展示事实、不替模型填值——选哪个候选仍由模型判断。永不抛错。
+ */
+export function knownEditTargets(state: ContextState, limit = 3): KnownEditTarget[] {
+  const artifacts = stateFor(state).artifacts;
+  const targets: Array<KnownEditTarget & { version: number }> = [];
+  for (const artifact of artifacts.values()) {
+    if (artifact.freshness !== 'fresh' || artifact.source.type !== 'read') continue;
+    const dependency = artifact.dependencies[0];
+    if (!dependency || dependency.path === '*' || !dependency.hash) continue;
+    targets.push({ path: dependency.path, hash: dependency.hash, version: artifact.version ?? 0 });
+  }
+  targets.sort((a, b) => b.version - a.version);
+  return targets.slice(0, Math.max(1, Math.floor(limit) || 3)).map(({ path, hash }) => ({ path, hash }));
+}
+
 function affected(artifact: ContextArtifact, changed: Set<string>): boolean {
   // '*' 依赖(无法解析出具体文件路径的诊断/搜索结果)不与任何具体写操作关联:
   // 任何文件写入都会作废全部 '*' artifact,等于每次 mutation 都销毁

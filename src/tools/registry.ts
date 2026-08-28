@@ -150,6 +150,10 @@ export interface ToolExecutionOptions {
   onLockAcquired?: (args: Record<string, unknown>) => void;
   /** 本次调用的 tool_call id,透传给工具 ctx(编排型工具关联渲染用)。 */
   callId?: string;
+  /** 参数校验失败(INVALID_ARGUMENTS)时追加到报错文案末尾的恢复提示。
+   * 由 agent 注入系统已知的候选(如最近 read_file 的 path/hash),
+   * 让模型照抄而非凭长上下文记忆复述。仅在参数校验失败时使用。 */
+  argumentErrorHint?: string;
 }
 
 function isTransientExecutionError(error: unknown): boolean {
@@ -286,12 +290,11 @@ export async function executeToolOutcome(
 
   const validation = validateToolArguments(tool, parsed);
   if (!validation.valid) {
-    return terminalOutcome(
-      'error',
-      validation.code,
-      `错误:工具 ${name} 参数无效: ${validation.message}`,
-      startedAt,
-    );
+    const hint = opts?.argumentErrorHint?.trim();
+    const message = hint
+      ? `错误:工具 ${name} 参数无效: ${validation.message}\n${hint}`
+      : `错误:工具 ${name} 参数无效: ${validation.message}`;
+    return terminalOutcome('error', validation.code, message, startedAt);
   }
   const args = parsed as Record<string, unknown>;
   const sandboxError = enforceSandbox(name, args);

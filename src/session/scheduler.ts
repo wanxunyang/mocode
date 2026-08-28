@@ -41,6 +41,10 @@ export interface BudgetScheduler {
     history: ChatMessage[],
     step: number,
     activeTools?: readonly ChatTool[],
+    /** 本步将追加到请求末尾、但不写回 history 的 ephemeral 注入裸 token 数。
+     *  agent/core 传入,否则这部分固定开销对压力线不可见(见 budget.ts 的
+     *  SystemCostBreakdown.ephemeralInjection)。 */
+    ephemeralTokens?: number,
   ) => Promise<boolean>;
   lastRunLog: SchedulerRunLog | null;
 }
@@ -72,15 +76,27 @@ function emptyPressure(report: BudgetReport): PressureCompressionLog {
 
 /** One scheduler instance is owned by one agent run. */
 export function createBudgetScheduler(state: ContextState = contextState): BudgetScheduler {
-  const evaluate = (history: ChatMessage[], step: number, activeTools: readonly ChatTool[]): BudgetReport =>
-    evaluateBudget(history, config.contextWindowTokens, step, state.correction, activeTools);
+  const evaluate = (
+    history: ChatMessage[],
+    step: number,
+    activeTools: readonly ChatTool[],
+    ephemeralTokens: number,
+  ): BudgetReport =>
+    evaluateBudget(
+      history,
+      config.contextWindowTokens,
+      step,
+      state.correction,
+      activeTools,
+      ephemeralTokens,
+    );
 
   const scheduler: BudgetScheduler = {
     lastRunLog: null,
-    async runStep(history, step, activeTools = chatTools) {
+    async runStep(history, step, activeTools = chatTools, ephemeralTokens = 0) {
       // External file changes and mutations only update artifact metadata here.
       refreshArtifactFreshness(state, history);
-      const report = evaluate(history, step, activeTools);
+      const report = evaluate(history, step, activeTools, ephemeralTokens);
       const pressure = emptyPressure(report);
       pressure.triggered = atPressure(report);
 
@@ -96,7 +112,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
           const ageAware = createAgeAwareEncodingState(history);
           pressure.encodedLogsAndSearches = ageAware.sweepPressure(history, report.hotBoundary);
         }
-        pressure.after = evaluate(history, step, activeTools).total;
+        pressure.after = evaluate(history, step, activeTools, ephemeralTokens).total;
       }
 
       // Use the trigger report intentionally: cleanup may reduce the current estimate,

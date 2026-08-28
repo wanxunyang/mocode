@@ -11,6 +11,7 @@ import type OpenAI from 'openai';
 import {
   chat,
   estimatePromptTokens,
+  estimateTokens,
   planChatTools,
   chatTools,
   type ChatMessage,
@@ -42,10 +43,11 @@ import {
   recordArtifact,
   invalidateArtifacts,
   rehydrateArtifacts,
+  knownEditTargets,
 } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
 import { isToolResultSuccess } from '../context/utils.js';
-import { config, extractActivePlanSection, reinjectSessionStateIntoSystem } from '../config/index.js';
+import { config, getActiveModel, extractActivePlanSection, buildSessionStateReminder } from '../config/index.js';
 import { t } from '../i18n/index.js';
 import { jailResolve } from '../sandbox/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
@@ -74,6 +76,30 @@ function parseArgs(raw: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/** 需要「已知编辑目标」恢复提示的文件编辑工具;其余工具的参数报错不注入该提示。 */
+const EDIT_HINT_TOOLS = new Set(['edit_file', 'write_file']);
+
+/** 文件编辑工具参数校验失败时的恢复提示:把系统已知仍新鲜的「最近 read_file 的
+ *  path + hash」直接递给模型照抄,替代其在长上下文里凭记忆复述。
+ *  只展示事实、不替模型填值;没有候选(从未 read_file / 全部已失效)返 undefined。 */
+function argumentErrorHint(name: string, state: ContextState): string | undefined {
+  if (!EDIT_HINT_TOOLS.has(name)) return undefined;
+  const targets = knownEditTargets(state);
+  if (targets.length === 0) return undefined;
+  const lines = targets.map((target) => `  path=${target.path}  expected_hash=${target.hash}`).join('\n');
+  return (
+    '系统已知最近 read_file 且尚未被修改的文件(直接复制下面的 path / expected_hash,勿凭记忆复述):\n' +
+    `${lines}\n如目标文件不在其中,先 read_file 该文件再发起编辑。`
+  );
+}
+
+/** 判定 assistant content 是否只是 "Tool results:" 这类工具结果前缀噪声。
+ *  部分模型(如 Claude)会在 tool_calls 前输出此种无意义过渡文本，写入 history
+ *  会污染后续轮次上下文并在 TUI 上泄露为孤立行。 */
+function isToolResultsNoise(content: string): boolean {
+  return /^(?:\s*Tool results:\s*)+$/i.test(content.trim());
 }
 
 /** 只有显式声明 parallel 且无需权限确认的工具才进入普通并发组。 */
@@ -267,6 +293,13 @@ export interface AgentRunOptions {
   onToolOutcome?: (tool: string, args: Record<string, unknown>, outcome: ToolOutcome) => void;
   /** 子代理传 true:不注入「开场分析」动态段(该指令仅用于主线面对用户的首次响应)。 */
   suppressOpeningAnalysis?: boolean;
+  /**
+   * 子代理传 true:不注入主会话的「会话状态」提醒(活跃 plan + 笔记正文)。
+   * 子 worker 的系统提示本就用 buildMocodeCorePrompt() 切掉了会话私有尾段(见 spawn.ts),
+   * 且其工具表排除 plan_update(不应改动主计划);若把主会话 plan/笔记灌进去,
+   * 窄 worker 会被无关上下文干扰,也白付这部分 token。
+   */
+  suppressSessionState?: boolean;
 }
 
 /** OpenAI content array 的子集(text + image_url);repl 构造 user 多模态消息用。 */
@@ -369,6 +402,7 @@ export async function runAgentCore(
           completionTokens: turnUsage.completionTokens + u.completionTokens,
           totalTokens: turnUsage.totalTokens + u.totalTokens,
           cachedTokens: turnUsage.cachedTokens + u.cachedTokens,
+          cacheCreationTokens: (turnUsage.cacheCreationTokens ?? 0) + (u.cacheCreationTokens ?? 0),
           reasoningTokens: turnUsage.reasoningTokens + u.reasoningTokens,
         }
       : u;
@@ -451,7 +485,7 @@ export async function runAgentCore(
       const activeTools = opts.toolsOverride
         ?? (getAgentMode() === 'plan' ? planChatTools : chatTools);
       const requestBaseURL = config.baseURL;
-      const requestModel = config.model;
+      const requestModel = getActiveModel();
       const storedCalibration = getTokenCalibration(
         requestBaseURL,
         requestModel,
@@ -459,6 +493,13 @@ export async function runAgentCore(
       );
       runtimeContextState.correction = storedCalibration.correction;
       runtimeContextState.calibrationSamples = storedCalibration.samples;
+
+      // 会话状态(活跃 plan + 笔记正文)在调度器**之前**取一次:
+      //  ① 它会被追加到本次请求末尾(见下方 ephemeralReminder),属于本步固定开销,
+      //     必须计入压力线——它不在 history 里,调度器只能由此入参看见(否则最多 5k
+      //     的笔记 + plan 段对 80% 触发线完全不可见,小窗口模型会压不住);
+      //  ② 同一份字符串复用到下方 reminder,避免每步重复读 notes.md。
+      const sessionStateText = opts.suppressSessionState ? '' : buildSessionStateReminder();
 
       // The scheduler is the only automatic path that may compress old evidence.
       // Normal tool pushes and lifecycle tracking remain metadata-only.
@@ -468,7 +509,12 @@ export async function runAgentCore(
       let historyRebuilt = false;
       const compactStartedAt = Date.now();
       if (scheduler) {
-        historyRebuilt = await scheduler.runStep(history, step, activeTools);
+        historyRebuilt = await scheduler.runStep(
+          history,
+          step,
+          activeTools,
+          sessionStateText ? estimateTokens(sessionStateText) : 0,
+        );
         if (scheduler.lastRunLog?.compactHistoryCalled) {
           emitTrace('compact', {
             source: 'automatic',
@@ -505,8 +551,8 @@ export async function runAgentCore(
           runtimeContextState.lifecycleStats = lifecycle.stats();
         }
         rehydrateArtifacts(runtimeContextState, history);
-        // ② compact 后把会话状态(活跃 plan + 笔记段)重注入系统提示，避免 agent 因上下文压缩丢失计划与笔记。
-        reinjectSessionStateIntoSystem(history);
+        // 会话状态(活跃 plan + 笔记段)不再回写 history[0]:每步都会在 requestHistory
+        // 末尾注入最新副本(见下方 ephemeralReminder),compact 后自然恢复。
       }
       hooks.onStepStart?.(); // 主 agent:spinner.start('思考中')
       mode = 'idle';
@@ -516,33 +562,31 @@ export async function runAgentCore(
       const modelStartedAt = Date.now();
       const provider = safeProviderId(requestBaseURL);
       emitTrace('model_start', { model: requestModel, provider });
-      // 动态注入(仅追加到 system 末尾,不触碰 staticBody 前缀 → 不破坏 prompt 缓存):
-      //  - 开场分析:仅主线(step===0 且 !suppressOpeningAnalysis)注入——即"用户发一个任务后,
-      //    agent 第一次模型调用"。子代理经 spawn.ts 传 suppressOpeningAnalysis:true 排除。
-      //  - historyRebuilt:compact 恢复步;要求重新锚定目标。两者可叠加但互不串扰。
-      //  .filter(Boolean) 保证空段不产生多余空行;后续 step 均为空串 → system 前缀稳定命中缓存。
-      //  安全保证:此段只拼进 requestHistory(新建对象),绝不回写 history[0],故不会跨 step/跨 turn 残留。
-      const dynamicSystemSuffix = [
+      // 动态注入(prompt 缓存关键):所有随步/随文件变化的提示统一拼成**历史末尾**一条
+      // ephemeral system 消息,不再改写 history[0]。这样系统提示 + 已有对话逐字节稳定,
+      // 支持自动前缀缓存的后端(OpenAI / DeepSeek / GLM / Qwen)可从头命中,只有尾部这
+      // 一小条随内容变化;若改写 history[0],单次 plan_update 就会让 6-8k 的系统提示
+      // 在本轮后续每步全价重算。
+      //  - 开场分析:仅主线(step===0 且 !suppressOpeningAnalysis)——用户发任务后 agent
+      //    的第一次模型调用。子代理经 spawn.ts 传 suppressOpeningAnalysis:true 排除。
+      //    放在尾部还有额外好处:step 0 与 step 1 的前缀不再因这段的出现/消失而错位。
+      //  - historyRebuilt:compact 恢复步,要求重新锚定目标。
+      //  - 会话状态:notes.md 的活跃 plan + 笔记正文(纯读,每步重取,始终最新)。
+      //  .filter(Boolean) 保证空段不产生多余空行;三段全空时不追加任何消息(requestHistory === history)。
+      //  安全保证:只拼进 requestHistory(新建数组),绝不写回 history,故不会跨 step/跨 turn 残留。
+      const ephemeralReminder = [
         (!opts.suppressOpeningAnalysis && step === 0)
           ? '## Opening analysis\nBegin your FIRST response of this turn with a brief analysis of the request and your planned approach (1-3 sentences, no filler), THEN start tool calls. This opening is the only place where pre-tool prose is expected; after it, work quietly with no narration between tool calls.'
           : '',
         historyRebuilt
           ? '## Post-compaction recovery\nContext was compacted before this request. Re-establish the current objective and unresolved work from retained evidence or the session note, avoid repeating completed investigation, and re-read exact file context before any dependent edit.'
           : '',
+        sessionStateText, // 调度器之前已取(并计入压力线),此处复用同一份,不重复读文件
       ].filter(Boolean).join('\n\n');
-      const systemMessage = history[0];
-      const requestHistory: ChatMessage[] =
-        dynamicSystemSuffix
-        && systemMessage?.role === 'system'
-        && typeof systemMessage.content === 'string'
-          ? [
-              {
-                ...systemMessage,
-                content: `${systemMessage.content}\n\n${dynamicSystemSuffix}`,
-              },
-              ...history.slice(1),
-            ]
-          : history;
+      const requestHistory: ChatMessage[] = ephemeralReminder
+        ? [...history, { role: 'system', content: ephemeralReminder } as ChatMessage]
+        : history;
+
       // 实时用量:当前步 prompt 估算(含校准系数)+ 流式累计 completion 估算,
       // 叠上已完成步的实测 turnUsage,经 onLiveUsage 推给底栏实时 chip。
       // turnUsage 在闭包里被 addUsage 原地更新,reportLive 每次调用读最新值。
@@ -657,6 +701,14 @@ export async function runAgentCore(
 
       if (result.toolCalls.length > 0) {
         toolCallCount += result.toolCalls.length;
+        // 若 content 只是 Claude 式 "Tool results:" 噪声，清空它：不补换行、不写入 history，
+        // 避免污染后续轮次上下文并在 TUI 泄露为孤立行。
+        if (result.content && isToolResultsNoise(result.content)) {
+          result.content = null;
+          mode = 'idle';
+          gotText = false;
+          lastChar = '';
+        }
         // 流式正文末尾补换行(若 onToolCall 已补则 lastChar='\n',此处 no-op);防 ● 行黏在正文行尾
         if (mode !== 'idle' && lastChar !== '\n') hooks.onTextEnd?.();
         // 带工具调用的 assistant 消息原样回灌(OpenAI 格式要求)
@@ -859,14 +911,17 @@ export async function runAgentCore(
             for (const entry of entries) hooks.onToolHeader?.(entry.tc);
             const firstAllowed = entries.find((entry) => !entry.denied);
             if (firstAllowed) hooks.onToolStart?.(firstAllowed.tc.name);
-            const started = entries.map((entry) => entry.denied
-              ? Promise.resolve(entry.denied)
-              : executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
-                  callId: entry.tc.id,
-                  onLockAcquired: (lockedArgs) => {
-                    entry.diff = readDiffContext(entry.tc, lockedArgs);
-                  },
-                }));
+            const started = entries.map((entry) => {
+              if (entry.denied) return Promise.resolve(entry.denied);
+              const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
+              return executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
+                callId: entry.tc.id,
+                ...(hint ? { argumentErrorHint: hint } : {}),
+                onLockAcquired: (lockedArgs) => {
+                  entry.diff = readDiffContext(entry.tc, lockedArgs);
+                },
+              });
+            });
 
             for (let k = 0; k < entries.length; k++) {
               const entry = entries[k];
@@ -973,8 +1028,10 @@ export async function runAgentCore(
               : null;
             let diff = readDiffContext(tc, mutationParsed);
             hooks.onToolStart?.(tc.name);
+            const serialHint = argumentErrorHint(tc.name, runtimeContextState);
             const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, {
               callId: tc.id,
+              ...(serialHint ? { argumentErrorHint: serialHint } : {}),
               onLockAcquired: (lockedArgs) => {
                 if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
               },
@@ -1018,14 +1075,15 @@ export async function runAgentCore(
             i++;
           }
         }
-        // A(事件驱动重同步):本步若改动了 notes.md,把最新 plan 块刷回 history[0],
-        // 让模型上下文镜像当前勾选态(不再停留在轮首的旧副本)。只在 mtime 变化时触发,零额外 churn。
+        // A(计划触碰计数):本步若改动了 notes.md 则清零计数。会话状态本身无需在此重注入——
+        // 每步都会由 buildSessionStateReminder() 在 requestHistory 末尾重建最新副本(见上方注入点),
+        // 所以模型下一步看到的必然是当前勾选态。只保留计数,避免多余的 history 改写(prompt 缓存)。
         // B(nag 提醒):连续 N 步有工具活动但没更新 plan,在当前步第一条 tool_result 前注入提醒。
         const notesMtimeAfter = getNotesMtime();
         if (notesMtimeAfter !== notesMtimeBefore) {
-          reinjectSessionStateIntoSystem(history);
           stepsSincePlanTouch = 0;
         } else {
+
           stepsSincePlanTouch += 1;
           if (stepsSincePlanTouch >= PLAN_NAG_THRESHOLD) {
             const activePlan = extractActivePlanSection();

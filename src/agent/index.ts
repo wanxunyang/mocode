@@ -14,7 +14,6 @@ import {
 } from '../ui/render.js';
 import { renderFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
-import * as content from '../ui/content.js';
 import * as batch from '../ui/batch.js';
 import { beginTurn } from '../rollback/index.js';
 import { config } from '../config/index.js';
@@ -45,15 +44,10 @@ let subAgentGroupPendingSeparator = false;
  *  并行派发多个子 agent 时,每个子 agent 才有自己可归属的摘要行。 */
 const SUB_AGENT_TOOL = 'sub-agent';
 
-/** 缓冲尾部是否已经是空白行(去掉 ANSI 后无可见字符)。用于避免 sub-agent 分隔空行叠成两行。 */
+/** 缓冲尾部是否已经是空白行(去掉 ANSI 后无可见字符)。用于避免 sub-agent 分隔空行叠成两行。
+ *  实现委托 layout.isLastContentRowBlank(compact 等模块共用同一判断)。 */
 function isLastContentRowBlank(): boolean {
-  // 用 committedRows 而不是 totalRows：hasCurrent 那行是未提交的光标等待位，
-  // 永远空白，不能把它当作“已经有一条空行分隔”。
-  const committed = content.committedRows();
-  if (committed === 0) return false;
-  const line = content.lineAt(committed - 1);
-  if (line === null) return false;
-  return line.replace(/\x1b\[[0-9;]*m/g, '').trim().length === 0;
+  return layout.isLastContentRowBlank();
 }
 
 interface TurnFileChange {
@@ -312,31 +306,73 @@ export async function runAgent(
   let hasPendingTextBoundary = false;
   let toolBatchFollowsText = false;
 
+  // Claude 等模型在 tool_calls 前常输出 "Tool results:" 这类无意义叙述。
+  // 它违反 silent execution，会在正文区泄露成孤立行。这里先缓冲，若累积内容
+  // 只是该噪声则抑制；一旦后面跟了实质正文，再丢弃噪声前缀并 flush。
+  let pendingNarration = '';
+  let narrationIsNoise = false;
+  const TOOL_RESULTS_NOISE_RE = /^(?:\s*Tool results:\s*)+$/i;
+
+  function writeAssistantText(s: string): void {
+    const inToolBlock = currentBatchId !== null || subAgentGroupId !== null || subAgentGroupPendingSeparator;
+    if (inToolBlock && s.trim().length === 0) return;
+    const followsToolBatch = inToolBlock;
+    // batch 收尾已经统一留了一条空白行。部分后端会把下一段正文以 \n / \n\n
+    // 开头发来；去掉这些“边界换行”，避免与 UI 分隔叠成两条空白行。
+    const visible = followsToolBatch ? s.replace(/^(?:[ \t]*\r?\n)+/, '') : s;
+    // 正文是工具批次边界：只有“连续且中间没有正文”的工具调用才合并。
+    // 一旦模型开始解释阶段结果，立即收尾当前摘要；后续工具重新建立批次。
+    if (visible) flushToolBatch();
+    spinner.stop(); // 任何正文 token 都停 spinner(首 token 停「思考中」;onToolCall 重启后若又来文本则停「生成中」)。未旋转时 stop 为 no-op。
+    layout.contentWriteMd(visible); // 正文走 markdown 渲染(代码块高亮 / 标题 / 列表 / 行内 …),见 ui/markdown.ts
+    if (visible) {
+      lastChar = visible[visible.length - 1];
+      if (visible.trim().length > 0) {
+        hasPendingTextBoundary = true;
+        textBoundaryNewlines = 0;
+      }
+    }
+  }
+
+  function trySuppressNoise(s: string): string | null {
+    pendingNarration += s;
+    const stripped = pendingNarration.replace(/\s+/g, ' ').trim();
+    if (TOOL_RESULTS_NOISE_RE.test(stripped)) {
+      narrationIsNoise = true;
+      return null;
+    }
+    let visible = pendingNarration;
+    if (narrationIsNoise) {
+      visible = pendingNarration.replace(/^(?:\s*Tool results:\s*)+/i, '');
+      narrationIsNoise = false;
+    }
+    pendingNarration = '';
+    return visible;
+  }
+
+  function flushPendingNarrationIfAny(): void {
+    if (!pendingNarration) return;
+    const stripped = pendingNarration.replace(/\s+/g, ' ').trim();
+    if (TOOL_RESULTS_NOISE_RE.test(stripped)) {
+      pendingNarration = '';
+      narrationIsNoise = false;
+      return;
+    }
+    const visible = pendingNarration;
+    pendingNarration = '';
+    narrationIsNoise = false;
+    writeAssistantText(visible);
+  }
+
   const hooks: AgentHooks = {
     onText: (s) => {
-      // 纯空白 chunk 在视觉上不是正文：既不切 batch，也不写入 markdown 缓冲。
-      // 部分兼容后端会在连续工具轮次间流出 " " / "\n"，若据此切批会漏掉首个工具。
-      // sub-agent 独占批不占 currentBatchId，但同样处在“工具块刚结束”的边界上。
-      const inToolBlock = currentBatchId !== null || subAgentGroupId !== null || subAgentGroupPendingSeparator;
-      if (inToolBlock && s.trim().length === 0) return;
-      const followsToolBatch = inToolBlock;
-      // batch 收尾已经统一留了一条空白行。部分后端会把下一段正文以 \n / \n\n
-      // 开头发来；去掉这些“边界换行”，避免与 UI 分隔叠成两条空白行。
-      const visible = followsToolBatch ? s.replace(/^(?:[ \t]*\r?\n)+/, '') : s;
-      // 正文是工具批次边界：只有“连续且中间没有正文”的工具调用才合并。
-      // 一旦模型开始解释阶段结果，立即收尾当前摘要；后续工具重新建立批次。
-      if (s) flushToolBatch();
-      spinner.stop(); // 任何正文 token 都停 spinner(首 token 停「思考中」;onToolCall 重启后若又来文本则停「生成中」)。未旋转时 stop 为 no-op。
-      layout.contentWriteMd(visible); // 正文走 markdown 渲染(代码块高亮 / 标题 / 列表 / 行内 …),见 ui/markdown.ts
-      if (visible) {
-        lastChar = visible[visible.length - 1];
-        if (visible.trim().length > 0) {
-          hasPendingTextBoundary = true;
-          textBoundaryNewlines = 0;
-        }
-      }
+      const visible = trySuppressNoise(s);
+      if (visible === null) return; // 纯噪声，抑制
+      writeAssistantText(visible);
     },
     onToolCall: (name) => {
+      // 工具调用开始前，先 flush 被抑制的叙述缓冲（若是纯噪声则丢弃）。
+      flushPendingNarrationIfAny();
       // 文本/思考已流完,模型转而生成 tool_call 参数(可能很长,如 write_file 整篇内容):
       // 补换行(让随后的 ● 行与 diff 不黏在正文末尾)+ 启「生成中」内联 spinner,内容区不再干等。
       if (hasPendingTextBoundary) {
@@ -394,6 +430,7 @@ export async function runAgent(
       layout.contentWrite(`${ui.dim}${t('agent.aborted')}${ui.reset}\n`);
     },
     onDone: (elapsedMs, usage) => {
+      flushPendingNarrationIfAny();
       flushToolBatch();
       writeChangeOverview();
       const tok = formatTurnTokens(usage);
@@ -466,9 +503,11 @@ function formatTurnTokens(usage: ChatUsage | undefined): string {
   if (!total) return '';
   const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(total >= 10000 ? 0 : 1)}k`);
   const cached = usage.cachedTokens;
+  const cacheCreated = usage.cacheCreationTokens ?? 0;
   const reasoning = usage.reasoningTokens;
   const billablePrompt = usage.promptTokens - cached;
   const extras: string[] = [];
+  if (cacheCreated > 0) extras.push(`cache created ${fmt(cacheCreated)}`);
   if (cached > 0) extras.push(`${Math.round((cached / Math.max(1, usage.promptTokens)) * 100)}% cached`);
   if (reasoning > 0) extras.push(`reasoning ${fmt(reasoning)}`);
   const extrasStr = extras.length > 0 ? ` · ${extras.join(' · ')}` : '';

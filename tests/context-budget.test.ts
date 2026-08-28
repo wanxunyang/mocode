@@ -37,7 +37,7 @@ function report(input: {
     rawTotal: input.rawTotal ?? input.total ?? 0,
     window: input.window ?? 10_000,
     layers,
-    systemCosts: { prompt: 10, toolSchemas: 5 },
+    systemCosts: { prompt: 10, toolSchemas: 5, ephemeralInjection: 0 },
     triggers: [],
     totalOver: input.totalOver ?? false,
     hotBoundary: 1,
@@ -122,6 +122,51 @@ test('硬闸回归:correction<1 折扣不否决真实溢出(289k/256k bug)', () 
   assert.ok(result.rawTotal < 2 * triggerLine, '保持 totalOver=false 的构造(校正后不超阈)');
   const actions = scheduleActions(result);
   assert.deepEqual(actions, [{ kind: 'compact_history' }], '硬闸必须强制触发压缩');
+});
+
+test('ephemeralTokens 计入 system 层与总量(尾部注入不在 history 里)', () => {
+  // 回归:会话状态提醒等尾部注入只进 requestHistory,不写回 history。
+  // 若不显式传入,这部分固定开销对压力线不可见 → 小窗口下压不住。
+  const history: ChatMessage[] = [system('sys')];
+  history.push({ role: 'user', content: 'hi' } as ChatMessage);
+  const window = 32_000;
+
+  const without = evaluateBudget(history, window, 0, 1, [], 0);
+  const withEphemeral = evaluateBudget(history, window, 0, 1, [], 5_000);
+
+  assert.equal(without.systemCosts.ephemeralInjection, 0);
+  assert.equal(withEphemeral.systemCosts.ephemeralInjection, 5_000);
+  // 计入 system 层、总量与裸总量,三者同步增加。
+  assert.equal(withEphemeral.layers.system.actual - without.layers.system.actual, 5_000);
+  assert.equal(withEphemeral.total - without.total, 5_000);
+  assert.equal(withEphemeral.rawTotal - without.rawTotal, 5_000);
+  // 纯函数:不改 history。
+  assert.equal(history.length, 2);
+
+  // 负数 / NaN 等非法入参归零,不污染报告。
+  assert.equal(evaluateBudget(history, window, 0, 1, [], -100).systemCosts.ephemeralInjection, 0);
+  assert.equal(evaluateBudget(history, window, 0, 1, [], Number.NaN).systemCosts.ephemeralInjection, 0);
+});
+
+test('ephemeralTokens 可独立把总量推过压力线', () => {
+  // 构造:history 本身刚好在触发线以下,仅靠尾部注入越线 → 必须触发 compact。
+  const window = 32_000;
+  const triggerLine = DEFAULT_BUDGET_POLICY.pressureTriggerRatio * window;
+  const history: ChatMessage[] = [system('s')];
+  history.push({ role: 'user', content: 'x'.repeat(90_000) } as ChatMessage);
+
+  const before = evaluateBudget(history, window, 0, 1, [], 0);
+  assert.ok(before.rawTotal < triggerLine, `基线 ${before.rawTotal} 应低于触发线 ${triggerLine}`);
+  assert.deepEqual(scheduleActions(before), [], '基线不应触发压缩');
+
+  const gap = Math.ceil(triggerLine - before.rawTotal) + 1;
+  const after = evaluateBudget(history, window, 0, 1, [], gap);
+  assert.ok(after.rawTotal >= triggerLine, '加上尾部注入后应达触发线');
+  assert.deepEqual(
+    scheduleActions(after),
+    [{ kind: 'compact_history' }],
+    '尾部注入的固定开销必须能独立触发压缩',
+  );
 });
 
 test('evaluateBudget property: 300 组输入保持纯函数与报告不变量', () => {
