@@ -29,6 +29,10 @@ export interface BudgetPolicy {
   ratios: Readonly<Record<BudgetLayer, number>>;
   hotTurnWindow: number;
   compactKeepRatio: number;
+  /** force/手动强压时的保留比例(比自动路径更激进)。 */
+  compactForceKeepRatio: number;
+  /** 保留区绝对上限(token):防大窗口下按比例保留区仍过大(如 256k×0.15≈38k)。 */
+  compactKeepMaxTokens: number;
   /** Context occupancy at which pressure-only history compression may run. */
   pressureTriggerRatio: number;
   schedulerTargetRatio: number;
@@ -46,7 +50,11 @@ export const DEFAULT_BUDGET_POLICY: BudgetPolicy = {
     reserve: 0.05,
   },
   hotTurnWindow: 4,
-  compactKeepRatio: 0.40,
+  // 压缩保留区:自动 15% / 强压 5%,且绝对上限 48k——摘要+最近几轮足够续工,
+  // 旧 0.40 在大窗口下导致"160k 压到 100k"的无效压缩。
+  compactKeepRatio: 0.15,
+  compactForceKeepRatio: 0.05,
+  compactKeepMaxTokens: 48000,
   pressureTriggerRatio: 0.80,
   schedulerTargetRatio: 0.80,
   estimateSafetyFactor: 1.05,

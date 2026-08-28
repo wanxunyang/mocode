@@ -13,6 +13,17 @@ export const MAX_SKILL_RESULT = 64000;
 /** 微压缩时旧工具结果截到的存根长度(字符)。 */
 export const MAX_OLD_TOOL_STUB = 600;
 
+// ── 上下文压缩摘要(见 session/compact.ts defaultSummarize)────────────────
+/** 摘要输入单条消息封顶:逐条封顶保证每轮对话都有代表,替代整段中截(会切掉中间整轮)。 */
+export const SUMMARY_MSG_MAX_CHARS = {
+  user: 3000, // 用户原话价值最高,给大额度
+  assistant: 1600,
+  tool: 800,
+  other: 2000,
+};
+/** 摘要输出硬上限(字符):模型不听话产出超长摘要时按段落边界裁,防摘要本身撑大 history。 */
+export const SUMMARY_OUTPUT_MAX_CHARS = 6000;
+
 // ── 记忆(Tier-2 JSONL 工具库)──────────────────────────────────────────────
 /** 单条记忆 body 上限(字符)。进 history 前 memory_search 结果另有 MAX_MEMORY_RESULT 兜底。 */
 export const MAX_MEMORY_ENTRY = 4000;

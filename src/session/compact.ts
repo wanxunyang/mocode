@@ -9,7 +9,14 @@ import {
   estimateTokens,
 } from '../llm/index.js';
 import { config } from '../config/index.js';
-import { MAX_HISTORY_RESULT, MAX_MEMORY_RESULT, MAX_OLD_TOOL_STUB, MAX_SKILL_RESULT } from '../tools/constants.js';
+import {
+  MAX_HISTORY_RESULT,
+  MAX_MEMORY_RESULT,
+  MAX_OLD_TOOL_STUB,
+  MAX_SKILL_RESULT,
+  SUMMARY_MSG_MAX_CHARS,
+  SUMMARY_OUTPUT_MAX_CHARS,
+} from '../tools/constants.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
 import * as layout from '../ui/layout.js';
@@ -310,6 +317,22 @@ function microcompactGroup(g: Group): boolean {
 
 // ── 默认摘要器:复用 chat(),空 handlers 不打印 ──────────────────────────
 
+/** 单条消息封顶:保头(首段通常含意图/结论),尾部加省略标记。
+ *  逐条封顶(而非整段中截)保证每一轮对话在摘要输入里都有代表——
+ *  整段中截会把中间整轮直接切掉,用户中途提的需求可能整体消失。 */
+function capMessageText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max) + ` …[本条消息另有 ${text.length - max} 字符已省略]`;
+}
+
+/** 摘要输出硬上限:按最后换行处裁断(不留半句),防模型不听话产出巨长摘要撑大 history。 */
+function capSummaryOutput(summary: string): string {
+  if (summary.length <= SUMMARY_OUTPUT_MAX_CHARS) return summary;
+  const cut = summary.lastIndexOf('\n', SUMMARY_OUTPUT_MAX_CHARS);
+  const at = cut > SUMMARY_OUTPUT_MAX_CHARS * 0.5 ? cut : SUMMARY_OUTPUT_MAX_CHARS;
+  return summary.slice(0, at) + '\n[摘要输出超长,已截断]';
+}
+
 async function defaultSummarize(
   older: ChatMessage[],
   focus?: string
@@ -319,18 +342,28 @@ async function defaultSummarize(
   let transcript = stripped
     .map((m) => {
       const role = m.role;
-      let line = `${role}: ${toText((m as any).content)}`;
+      const cap =
+        role === 'user'
+          ? SUMMARY_MSG_MAX_CHARS.user
+          : role === 'assistant'
+            ? SUMMARY_MSG_MAX_CHARS.assistant
+            : role === 'tool'
+              ? SUMMARY_MSG_MAX_CHARS.tool
+              : SUMMARY_MSG_MAX_CHARS.other;
+      let line = `${role}: ${capMessageText(toText((m as any).content), cap)}`;
       const tcs = (m as any).tool_calls;
       if (tcs) {
         for (const tc of tcs) {
-          line += `\n  [tool_call ${tc?.function?.name}] ${tc?.function?.arguments ?? ''}`;
+          // 参数只留头部片段:路径/目标等关键信息在开头,长正文对摘要无信息量
+          const args = tc?.function?.arguments ?? '';
+          line += `\n  [tool_call ${tc?.function?.name}] ${capMessageText(args, SUMMARY_MSG_MAX_CHARS.tool)}`;
         }
       }
       return line;
     })
     .join('\n');
 
-  // 防摘要提示本身溢出:超 60% 窗口就先中截到 50%
+  // 兜底:逐条封顶后仍超窗(极端多轮)才整段中截——此分支罕见,常规路径永不触发
   if (
     estimateTokens(transcript) >
     Math.floor(config.contextWindowTokens * 0.6)
@@ -344,13 +377,24 @@ async function defaultSummarize(
   const sysMsg = {
     role: 'system' as const,
     content:
-      'You are a session summarizer. Output only the summary body, max 300 words, preserving: the user\'s core request; files read/written/modified and key changes; source artifact IDs/hashes; key commands run and their result highlights; decisions made; current task progress and next step; open questions. Do not recap every detail.',
+      'You are an aggressive session compressor writing a handoff note for an agent that lost its context. ' +
+      'The agent will continue the task with ONLY your summary plus a few most-recent messages, so your summary is the sole memory of everything older.\n' +
+      'Output ONLY the summary body in this exact structure (omit empty sections):\n' +
+      '## Objective — the user\'s core request(s); cover EVERY distinct user request in the transcript, in order, noting which are completed vs pending.\n' +
+      '## Completed — what is already done: files created/modified (exact paths), key change per file, commands run and their outcomes (pass/fail, key numbers), decisions made and why.\n' +
+      '## In Progress — what is being worked on right now and exactly where it stopped (e.g. "edit applied to foo.ts, test not yet run").\n' +
+      '## Next Steps — the concrete next actions in order.\n' +
+      '## Key Facts — only what later steps cannot work without: exact paths, symbols/API shapes, artifact IDs/hashes, constraints, open questions, failed approaches and errors to avoid repeating.\n' +
+      'What counts as important (keep): user requests and constraints; final state of each modified file; conclusions and results, not the steps that led there; decisions with reasons; precise references (paths, symbols, hashes, commands) that later steps must cite; failures and what was tried, so mistakes are not repeated.\n' +
+      'What to drop: verbatim file contents and tool-output dumps, step-by-step recaps, exploration dead-ends that led nowhere, polite chatter, anything re-derivable by re-reading files.\n' +
+      'Rules: total ≤ 400 words. State conclusions and locations (path:line where useful), never paste content. ' +
+      'Never invent facts, paths, or results that are not in the transcript; if unsure whether something happened, omit it.',
   } as ChatMessage;
   const userMsg = {
     role: 'user' as const,
     content: focus
-      ? `请将以下会话历史压缩成摘要,重点保留与「${focus}」相关的事实/决策/文件改动:\n\n${transcript}\n\n摘要:`
-      : `请将以下会话历史压缩成摘要:\n\n${transcript}\n\n摘要:`,
+      ? `请将以下会话历史压缩成交接摘要,重点保留与「${focus}」相关的事实/决策/文件改动:\n\n${transcript}\n\n摘要:`
+      : `请将以下会话历史压缩成交接摘要:\n\n${transcript}\n\n摘要:`,
   } as ChatMessage;
 
   const spinner = new Spinner((msg, frame) =>
@@ -361,7 +405,7 @@ async function defaultSummarize(
     const r = await chat([sysMsg, userMsg], {}); // 空 handlers:不打印、不外显流式
     // 推理模型可能只返 reasoning_content(content 为 null),或幻觉出 tool_calls → 视为失败
     if (r.toolCalls.length > 0 || !r.content) return null;
-    return r.content;
+    return capSummaryOutput(r.content);
   } finally {
     spinner.stop();
   }
@@ -385,8 +429,14 @@ export async function compactHistory(
   const groups = groupFromEnd(history);
 
   // 保近期:按策略中的 token 比例累积(至少保 1 组),永不劈开 group。
-  const keepBudget = Math.floor(
-    opts.window * DEFAULT_BUDGET_POLICY.compactKeepRatio,
+  // force(手动 /compact 默认、硬闸触发)用更激进的保留比例;再加绝对上限,
+  // 防大窗口(如 256k)下保留区按比例仍过大——压缩目标 = 摘要 + 最小续工上下文。
+  const keepRatio = opts.force
+    ? DEFAULT_BUDGET_POLICY.compactForceKeepRatio
+    : DEFAULT_BUDGET_POLICY.compactKeepRatio;
+  const keepBudget = Math.min(
+    Math.floor(opts.window * keepRatio),
+    DEFAULT_BUDGET_POLICY.compactKeepMaxTokens,
   );
   const kept: Group[] = [];
   let keptTokens = 0;
