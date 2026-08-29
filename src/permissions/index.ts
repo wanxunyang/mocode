@@ -177,6 +177,9 @@ export async function checkPermission(
     detail: summarizeArgs(args) + (dangerous ? `\n\n${t('permission.dangerWarning')}` : ''),
     options: choices,
     allowCustom: false,
+    // dangerous 默认落在「拒绝」:面板一弹出就高亮"允许一次"时,用户顺手回车就把命令放出去了。
+    // 放行必须是一次明确的选择(↑↓ 移到某一项,或按数字键),而不是默认项的惯性。
+    defaultIndex: dangerous ? choices.indexOf(denyOption) : 0,
   });
   if (signal?.aborted || result.action === 'cancelled' || result.value === denyOption) return 'deny';
 

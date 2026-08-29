@@ -130,6 +130,14 @@ export async function promptWithSlashMenu(
   let filtered: SlashMenuItem[] = [];
   const MENU_MAX_VISIBLE = 7;
   let menuTop = 0; // 窗口首项在 filtered 中的索引,菜单最多显示 MENU_MAX_VISIBLE 条
+  /** Ctrl+C 清空前的缓冲快照(Ctrl+Z 还原一次);单次生效,还原后即清。 */
+  let undoSnapshot: {
+    lines: string[];
+    cl: number;
+    cc: number;
+    chip: string | null;
+    chipPre: string;
+  } | null = null;
   let resolved = false;
   let resolve!: (v: string[] | null) => void;
   let reject!: (e: Error) => void;
@@ -483,9 +491,59 @@ export async function promptWithSlashMenu(
     redraw();
   }
 
-  /** 清空输入(含 chip / 斜杠菜单 / 粘贴缓冲):Ctrl+C 在有内容时调用——清空而非退出。 */
+  /** 删掉当前行 [from, to),光标落在 from;空区间直接忽略(避免无谓重画)。 */
+  function deleteRange(from: number, to: number): void {
+    if (to <= from) return;
+    lines[cl] = lines[cl].slice(0, from) + lines[cl].slice(to);
+    cc = from;
+    computeFiltered();
+    redraw();
+  }
+
+  /** 光标在行尾且非末行:并掉下一行(Delete 键与 Ctrl+K 在行尾时的共同收尾)。 */
+  function joinNextLine(): void {
+    if (cl >= lines.length - 1) return;
+    lines[cl] = lines[cl] + lines[cl + 1];
+    lines.splice(cl + 1, 1);
+    computeFiltered();
+    redraw();
+  }
+
+  /** Ctrl+U:删到行首。已在行首则 no-op(对齐 readline unix-line-discard,不并上一行)。 */
+  function deleteToLineStart(): void {
+    deleteRange(0, cc);
+  }
+
+  /** Ctrl+K:删到行尾;已在行尾则并掉下一行(对齐 readline kill-line 吃掉换行的语义)。 */
+  function deleteToLineEnd(): void {
+    if (cc < lines[cl].length) {
+      deleteRange(cc, lines[cl].length);
+      return;
+    }
+    joinNextLine();
+  }
+
+  /** Ctrl+Z:还原被 Ctrl+C 清掉的输入(单次)。 */
+  function restoreUndo(): void {
+    const snap = undoSnapshot;
+    if (!snap) return;
+    lines = [...snap.lines];
+    cl = snap.cl;
+    cc = snap.cc;
+    chip = snap.chip;
+    chipPre = snap.chipPre;
+    undoSnapshot = null;
+    computeFiltered();
+    redraw();
+  }
+
+  /**
+   * 清空输入(含 chip / 斜杠菜单 / 粘贴缓冲):Ctrl+C 在有内容时调用——清空而非退出。
+   * 清空前留一份快照供 Ctrl+Z 还原——手滑按在输入框上时,正在写的长 prompt 不至于白打。
+   */
   function clearInput(): void {
     if (layout.isScrolled()) layout.resetScroll(); // 回尾(若滚动回看),再清空
+    undoSnapshot = { lines: [...lines], cl, cc, chip, chipPre };
     lines = [''];
     cl = 0;
     cc = 0;
@@ -589,9 +647,36 @@ export async function promptWithSlashMenu(
       redraw();
       return;
     }
+    if (key.ctrl && key.name === 'q') {
+      // 行首的对称搭档:与 Ctrl+E(行尾)同处顶行相邻(Q/E),左=起始右=结束。
+      // Ctrl+A 仍作别名保留(全 app 一致:运行中预填、权限面板都用 Ctrl+A 跳开头)。
+      cc = 0;
+      redraw();
+      return;
+    }
     if (key.ctrl && key.name === 'e') {
       cc = lines[cl].length;
       redraw();
+      return;
+    }
+
+    // Ctrl+Z:还原被 Ctrl+C 清掉的输入。无快照时 no-op。
+    if (key.ctrl && key.name === 'z') {
+      restoreUndo();
+      return;
+    }
+
+    // 行级删除:Ctrl+U 删到行首,Ctrl+K 删到行尾。此前这两个键是 no-op——
+    // 既没有 case,又被尾部落字守卫的 !ctrl/!meta 挡住。
+    // 刻意**不做**词级删除(Ctrl+W / Alt+Backspace / Alt+D)与词级跳转(Ctrl+←/→ / Alt+B/F):
+    // 终端里这些序列各终端发得不一样(Ctrl+Backspace 在多数终端发 \x08,与裸退格无从区分),
+    // 做一半反而变成按了没反应的哑键。
+    if (key.ctrl && key.name === 'u') {
+      deleteToLineStart();
+      return;
+    }
+    if (key.ctrl && key.name === 'k') {
+      deleteToLineEnd();
       return;
     }
 
@@ -647,6 +732,18 @@ export async function promptWithSlashMenu(
           chipPre = '';
           computeFiltered();
           redraw();
+        }
+        return;
+      case 'delete':
+        // 行内删光标后一个字符;已在行尾则并掉下一行——与退格在行首并上一行对称。
+        // 没有这一条,换行就成了单向的:Ctrl+J 造出来的换行只能靠「移到下一行行首再退格」消掉,
+        // 光标停在本行行尾时删不掉。
+        if (cc < lines[cl].length) {
+          lines[cl] = lines[cl].slice(0, cc) + lines[cl].slice(cc + 1);
+          computeFiltered();
+          redraw();
+        } else {
+          joinNextLine();
         }
         return;
       case 'up':

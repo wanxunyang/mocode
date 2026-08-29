@@ -243,6 +243,73 @@ function slashHelpLines(
   return lines;
 }
 
+/**
+ * 菜单树里全部可用命令名(含分支路径与叶子的真实命令),供未知命令纠错建议用。
+ * /quit、/frontend 确实可用但没登记进菜单树,单独补上——否则用户照提示打了却仍被判未知。
+ */
+function knownCommandNames(): string[] {
+  const out: string[] = [];
+  const walk = (nodes: SlashCommand[], parent: string): void => {
+    for (const node of nodes) {
+      const path = parent ? `${parent} ${node.name}` : node.name;
+      out.push(path);
+      const actual = node.value?.trim();
+      if (actual) out.push(actual.split(/\s+/)[0]);
+      if (node.children?.length) walk(node.children, path);
+    }
+  };
+  walk(buildSlashCommands(), '');
+  out.push('/quit', '/frontend');
+  return [...new Set(out)];
+}
+
+/**
+ * 是否"长得像一条斜杠命令":单个前导 / + 词字符(字母开头,可含数字/下划线/连字符)。
+ * 用来把 /hepl 这类拼写错误与 /tmp/foo、/src/index.ts:12:5 这类路径区分开——
+ * 后者在编码 agent 里很常见,同样以 / 开头,绝不能被当成命令拦下。
+ */
+function isCommandShape(cmd: string): boolean {
+  return /^\/[A-Za-z][\w-]*$/.test(cmd);
+}
+
+/** Levenshtein 距离(标准 DP)。短命令字符串,直接两行数组滚动即可。 */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1, // 删
+        cur[j - 1] + 1, // 插
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1), // 替换/相同
+      );
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** 未知命令的纠错建议:返回编辑距离最近且在阈值内的命令名,没有则 null(不要瞎猜)。 */
+export function suggestCommand(input: string): string | null {
+  // 阈值随长度放宽,但对短命令保持严格:/hepl(5) vs /help 距离 2 → 命中;
+  // /x(2) 不该被建议成任何东西。
+  const threshold = Math.max(1, Math.ceil(input.length / 3));
+  let best: string | null = null;
+  let bestDist = Infinity;
+  for (const name of knownCommandNames()) {
+    if (name === input) continue; // 别建议"你自己"(分支节点如 /mode 也在候选里)
+    const d = editDistance(input, name);
+    if (d < bestDist) {
+      bestDist = d;
+      best = name;
+    }
+  }
+  return bestDist <= threshold ? best : null;
+}
+
 /** 主题名 → 本地化描述。 */
 function themeDescription(name: string): string {
   const key = `theme.${name}` as TranslationKey;
@@ -1317,6 +1384,8 @@ export async function startRepl(
 
     // RUNNING 态:回显输入 → 底栏改 dim 占位、光标回内容续写位
     const cmd = line.split(/\s+/)[0];
+    // 命令被刻意改写成别的内容后转发给 agent(如 /init)。这类不算"未知命令"。
+    let forwardToAgent = false;
     // 语言命令把视觉分隔放在确认文案之后；避免回显后先空一行、下一条命令却紧贴确认。
     echoInput(input, cmd !== '/language');
     const state = runningStateFor(cmd);
@@ -1359,6 +1428,7 @@ export async function startRepl(
     if (line === '/init') {
       // /init:把 init 指令当 user 输入发给 agent(扫描项目 + 生成 AGENTS.md),fall through 走 runAgent
       joined = buildInitPrompt();
+      forwardToAgent = true; // 不是"没匹配上",别被下方未知命令兜底拦掉
     }
     if (line === '/upgrade' || line.startsWith('/upgrade ')) {
       const arg = line === '/upgrade' ? '' : line.slice('/upgrade '.length).trim().toLowerCase();
@@ -1453,6 +1523,12 @@ export async function startRepl(
         setAgentMode('auto');
         layout.contentWrite(`${ui.dim}${t('repl.autoChanged')}${ui.reset}\n`);
       }
+      continue;
+    }
+    if (line === '/mode') {
+      // /mode:菜单里的分支节点(本身不切换,只挂 /plan 与 /auto)。/help 会把它列出来,
+      // 所以直接敲它必须给点有用的东西——打印当前模式与两个子命令,而不是报未知命令。
+      layout.contentWrite(`${ui.dim}${t('repl.modeCurrent', { mode: getAgentMode() })}${ui.reset}\n`);
       continue;
     }
     if (line === '/pet quit') {
@@ -2472,6 +2548,20 @@ export async function startRepl(
         layout.contentWrite(`${ui.red}/memory_switch 失败:${ui.reset} ${(e as Error).message}\n`);
       }
       continue;
+    }
+
+    // 未知斜杠命令兜底:命令分派是一串独立的 if(…){ …continue },没有 else,
+    // 拼错的 /hepl 会一路走到这里被当成普通 prompt 送给模型——白烧一轮还拿不到任何提示。
+    // 只拦「长得像命令」的输入:单个前导 / + 词字符。像 /tmp/foo/bar、/src/index.ts:12:5 这类
+    // 路径(在编码 agent 里很常见,且同样以 / 开头)必须放行,不能当成拼错的命令。
+    if (isCommandShape(cmd) && !forwardToAgent) {
+      const suggestion = suggestCommand(cmd);
+      layout.contentWrite(`${ui.yellow}${t('repl.unknownCommand', { value: cmd })}${ui.reset}\n`);
+      if (suggestion) {
+        layout.contentWrite(`${ui.dim}${t('repl.didYouMean', { value: suggestion })}${ui.reset}\n`);
+      }
+      layout.contentWrite(`${ui.dim}${t('repl.unknownCommandHint')}${ui.reset}\n`);
+      continue; // 与其他命令一致:回 INPUT 态由循环顶部的 normalizeInputBoundary + enterInputMode 负责
     }
 
     const bubbleRows = input.length + 2 + pendingAttachments.length; // N 行 message + 2 行尾随空(含 \n\n 留下的 open current 行) + 每附件 1 行

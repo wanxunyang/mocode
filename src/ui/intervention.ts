@@ -48,6 +48,11 @@ export interface InterventionRequest {
   seed?: string;
   /** choice 末尾是否追加「其他(自定义输入)」项。默认 true;只有调用方确实想关掉才传 false。 */
   allowCustom?: boolean;
+  /**
+   * choice 初始选中项下标(默认 0)。只作用于真实选项,越界会被钳到末项。
+   * 危险操作应传「拒绝」项的下标——面板默认高亮「允许」时,盲按回车等于放行。
+   */
+  defaultIndex?: number;
 }
 
 export interface InterventionResult {
@@ -104,7 +109,13 @@ export async function promptIntervention(
 
   let mode: InterventionType = startMode;
   // choice:选中下标(0..options.length-1 为各选项,options.length 为"自定义"项)。
-  let selected = 0;
+  // 初始选中项:默认 0(首项);调用方可传 defaultIndex 改。危险操作用它把默认落在「拒绝」上,
+  // 否则面板一弹出就高亮「允许一次」,用户顺手回车就把 rm -rf 放出去了。只认真实选项,不含"自定义"项。
+  const defaultIndex = Math.max(
+    0,
+    Math.min(req.defaultIndex ?? 0, Math.max(0, options.length - 1)),
+  );
+  let selected = defaultIndex;
   // input:可编辑文本 + 光标(UTF-16 码元索引;显示位置由 displayWidth 算,见 paintInput)。
   let text = req.seed ?? '';
   let cursor = text.length;
