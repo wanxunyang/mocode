@@ -979,6 +979,14 @@ export function scrollBy(delta: number): void {
   repaint();
 }
 
+/**
+ * 滚动一格「滚轮量」(WHEEL_LINES 行):dir=+1 看更旧(等同 ↑ / PgUp),dir=-1 看更新(等同 ↓ / PgDn)。
+ * 鼠标滚轮与键盘裸 ↑/↓ 共用同一入口,保证两者行为与步长恒一致。
+ */
+export function scrollWheel(dir: number): void {
+  scrollBy(dir > 0 ? WHEEL_LINES : -WHEEL_LINES);
+}
+
 /** 清活跃选区(不复制),若原有选区则重画去掉反白。供 ESC / 点击别处 / 退出滚动态等场景调。 */
 export function clearSelection(): void {
   if (!selection && !inputSelection) return;
@@ -1265,7 +1273,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
   if (e.type === 'wheel') {
     // 滚轮始终可用:面板/picker 期间也允许上下查看 agent 输出,
     // 与 onRunningKey 的 PgUp/PgDn 行为一致;mouseEnabled 仅管选区/拖拽。
-    scrollBy(e.dir * WHEEL_LINES);
+    scrollWheel(e.dir);
     return;
   }
   // 输入行左键点击:即使 mouseEnabled=false(如 intervention 面板期间)也允许定位光标,

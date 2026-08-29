@@ -1294,7 +1294,6 @@ export async function startRepl(
       input = await promptWithSlashMenu({
         prompt: PROMPT,
         commands: buildSlashCommands(),
-        queryHistory,
         onCycleMode: cycleMode,
         // /rollback 预填优先;否则上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
         ...(pendingPrefill
