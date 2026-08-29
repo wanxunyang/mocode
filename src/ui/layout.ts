@@ -1469,13 +1469,18 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
   let leadW: number;
 
   if (scrolled) {
-    // 滚动回看:左段 = 符号(● 或 心跳帧) + 状态名(灰,无走时);右段 = 历史指示。
-    // 跟非回看的 INPUT/RUNNING 态保持一致——避免「● 留下、状态字蒸发」的视觉错觉。
+    // 滚动回看:左段 = 符号(● 或 心跳帧) + 状态名 + (运行态)走时;右段 = 历史指示。
+    // 跟非回看态严格对齐——RUNNING 态显示走时,INPUT 态不显示,避免滚动时信息降级。
     const symbol = spinning
       ? `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset}`
       : `${ui.accent}●${ui.reset}`;
-    lead = `${symbol} ${ui.dim}${status.status}${ui.reset}`;
-    leadW = 1 + 1 + displayWidth(status.status);
+    // spinning(运行态流式中 spinner 已停,靠 turnTimer 心跳):同非滚动 spinning 分支加
+    // || '生成中' fallback——流式首 token 到即 spinner.stop(),若 stop() 回调未留状态字,
+    // 此处兜底不再让 lead 只剩心跳帧字符(用户误读为"左侧蒸发了")。
+    const label = spinning ? (status.status || '生成中') : status.status;
+    const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
+    lead = `${symbol} ${ui.dim}${label}${ui.reset}${ePart}`;
+    leadW = 1 + 1 + displayWidth(label) + (elapsed ? 1 + displayWidth(elapsed) : 0);
   } else if (hasSpinner) {
     // spinner 激活(思考中/执行工具…):帧 + 状态 + 走时
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';

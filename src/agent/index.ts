@@ -293,7 +293,11 @@ export async function runAgent(
   // 经 setStatus 注入状态行(spinnerFrame + statusText),composeStatus 把帧 + 文字放 lead 位;
   // 不画内容区续写位——内容区在等待期间保持干净,首 token 到达即从续写位开始写正文。
   const spinner = new Spinner((msg, frame) => {
-    layout.setStatus(frame ? `${msg}…` : '', frame ?? undefined);
+    // frame 在转:msg + … + 帧字符;stop() 时 frame=null,去帧,保留 msg 作为状态文字
+    // (spinner.ts line 71 注释:"状态行去帧,保留状态文字")。旧版用 '' 会把 statusText 清空,
+    // 导致流式期间(spinner 已停、走时由 turnTimer 兜底)状态行只剩心跳帧字符,
+    // 再叠加 composeSpinnerLine scrolled 分支无 fallback,滚动态左侧像"蒸发"了。
+    layout.setStatus(frame ? `${msg}…` : msg, frame ?? undefined);
   });
 
   // lastChar 镜像:core 跟踪流式末字符决定补换行,但 TUI hooks 需读它决定 layout.contentWrite('\n')。
