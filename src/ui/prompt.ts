@@ -25,6 +25,14 @@ interface SlashMenuItem {
   input: string;
 }
 
+/** 输入框里的一段内容。frozen=false 是可编辑文本(可含换行)；frozen=true 是只读粘贴块(原子,
+ *  提交时拼回原文)。整篇输入是 Seg[]：可编辑段与粘贴块交替，光标永远落在某个可编辑段上。
+ *  多个粘贴块之间夹的可编辑段就是「粘贴之间敲的字」，可直接编辑——这是相对旧版单 chip 模型的核心改进。 */
+interface Seg {
+  frozen: boolean;
+  text: string;
+}
+
 export interface PromptOpts {
   /** 纯文本 prompt(无 ANSI),如 '❯ '。 */
   prompt: string;
@@ -115,16 +123,15 @@ export async function promptWithSlashMenu(
 
   const emitter = stdin as unknown as KeypressEmitter;
   const promptW = displayWidth(opts.prompt);
-  // initialLines(运行中 typeahead 预填):用调用方给的行初始化,光标置末行末尾。
-  let lines: string[] =
+  // initialLines(运行中 typeahead 预填):用调用方给的行初始化;光标置文末。
+  // 整篇输入是一个 Seg[]:可编辑段与粘贴块交替。光标永远落在某个可编辑段(segs[curSeg].frozen===false)上。
+  let segs: Seg[] =
     opts.initialLines && opts.initialLines.length > 0
-      ? [...opts.initialLines]
-      : [''];
-  let cl = lines.length - 1; // 光标行(0-based)= 末行
-  let cc = lines[cl].length; // 光标在该行的字符索引 = 末行末尾
+      ? [{ frozen: false, text: opts.initialLines.join('\n') }]
+      : [{ frozen: false, text: '' }];
+  let curSeg = 0; // 光标所在段(始终可编辑)
+  let curOff = segs[0].text.length; // 段内字符偏移 = 文末
   let justSawCR = false; // \r\n 合一:粘贴的 \r 折行后,紧跟的 \n 吞掉(避免折两行)
-  let chip: string | null = null; // 原子粘贴块:整段封进 [预览…],不可编辑;提交时拼回全文
-  let chipPre = ''; // chip 之前已存在的文本(粘贴发生时光标前的原文,原样多行保留,不截断);随 chip 一起提交/删除
   let menuOpen = false;
   let selected = 0;
   let filtered: SlashMenuItem[] = [];
@@ -132,11 +139,9 @@ export async function promptWithSlashMenu(
   let menuTop = 0; // 窗口首项在 filtered 中的索引,菜单最多显示 MENU_MAX_VISIBLE 条
   /** Ctrl+C 清空前的缓冲快照(Ctrl+Z 还原一次);单次生效,还原后即清。 */
   let undoSnapshot: {
-    lines: string[];
-    cl: number;
-    cc: number;
-    chip: string | null;
-    chipPre: string;
+    segs: Seg[];
+    curSeg: number;
+    curOff: number;
   } | null = null;
   let resolved = false;
   let resolve!: (v: string[] | null) => void;
@@ -176,84 +181,150 @@ export async function promptWithSlashMenu(
     });
   }
 
-  /** 当前光标在该行的显示列(供 layout 定位光标)。 */
-  function cursorCol(): number {
-    return displayWidth(lines[cl].slice(0, cc));
-  }
-
-  /** chip 预览前缀:行数 + 字符数(字符 <1K 直出,≥1K 缩为 X.XK)。比"前 20 字符截断"对 CJK 更友好
-   * ——后者在中文里 20 列只够 10 个汉字就截没,几乎看不到内容;元信息密度更高、长度可预测。 */
-  function chipPrefix(): string {
-    if (!chip) return '';
-    const lines = chip.split('\n').length;
-    const chars = chip.length;
-    const lineText = t('prompt.lines', { count: lines });
+  /** 单个 chip 的展示 token:[📋 行数 · 字符数] (含尾部空格,使相邻 chip 之间留空隙)。 */
+  function chipToken(text: string): string {
+    const lineCount = text.split('\n').length;
+    const charCount = text.length;
+    const lineText = t('prompt.lines', { count: lineCount });
     const charText = t('prompt.chars', {
-      count: chars < 1000 ? chars : `${(chars / 1000).toFixed(1)}K`,
+      count: charCount < 1000 ? charCount : `${(charCount / 1000).toFixed(1)}K`,
     });
     return `[📋 ${lineText} · ${charText}] `;
   }
-  /** chipPre 按行拆分(粘贴发生前光标之前已有的文本,可能多行,原样保留在 chip 之前)。 */
-  function chipPreLines(): string[] {
-    return chip ? chipPre.split('\n') : [];
+
+  /** 构建整段显示:可编辑段按原文(含换行)展开,粘贴块(chip)折叠成一行 token 内联在光标原位。
+   *  返回展示行数组,以及每个段在"展示串"(= 展示行以 \n 拼接)中的字符起点,供光标正/反向映射。
+   *  关键不变量:展示串与 segs 的"段贡献"长度一致(可编辑段贡献其原文长度,含其中 \n;
+   *  chip 贡献其 token 长度,无 \n),故 segStart 同时是 dispLines.join('\n') 内的字符偏移。 */
+  function buildDisplay(): { lines: string[]; segStart: number[] } {
+    const out: string[] = [];
+    const segStart: number[] = [];
+    let gLen = 0;
+    for (const s of segs) {
+      segStart.push(gLen);
+      if (!s.frozen) {
+        const ls = s.text.split('\n');
+        if (out.length === 0) out.push(...ls);
+        else {
+          out[out.length - 1] += ls[0];
+          for (let k = 1; k < ls.length; k++) out.push(ls[k]);
+        }
+        gLen += s.text.length;
+      } else {
+        const tok = chipToken(s.text);
+        if (out.length === 0) out.push(tok);
+        else out[out.length - 1] += tok;
+        gLen += tok.length;
+      }
+    }
+    if (out.length === 0) out.push('');
+    return { lines: out, segStart };
   }
-  /** 供 layout 画的行:chipPre 的行原样排在前面,最后一行接上 chip 前缀 + suffix 第 0 行
-   * (chip 原子显示,不可编辑;chipPre 同样不可直接编辑,光标只活在 suffix)。 */
-  function dispLines(): string[] {
-    if (!chip) return lines;
-    const pre = chipPreLines();
-    const lastPre = pre[pre.length - 1];
-    const mergedRow = lastPre + chipPrefix() + lines[0];
-    return [...pre.slice(0, -1), mergedRow, ...lines.slice(1)];
+
+  /** 当前光标段内显示列。 */
+  function cursorCol(): number {
+    return displayWidth(segs[curSeg].text.slice(0, curOff));
   }
-  /** 供 layout 定位光标行:chipPre 多出的行数计入偏移(suffix 的 cl=0 对应 chipPre 最后一行所在的合并行)。 */
-  function dispCursorLine(): number {
-    return chip ? chipPreLines().length - 1 + cl : cl;
+
+  /** 光标 → 展示 (行, 列)。展示行内的列以显示宽度计。 */
+  function cursorDisp(): { line: number; col: number } {
+    const { lines: dispLines, segStart } = buildDisplay();
+    const off = segStart[curSeg] + curOff;
+    let remaining = off;
+    let dl = 0;
+    let dispColChars = 0;
+    for (; dl < dispLines.length; dl++) {
+      const L = dispLines[dl].length;
+      if (remaining <= L) {
+        dispColChars = remaining;
+        break;
+      }
+      remaining -= L + 1;
+    }
+    if (dl >= dispLines.length) {
+      dl = Math.max(0, dispLines.length - 1);
+      dispColChars = dispLines[dl].length;
+    }
+    return { line: dl, col: displayWidth(dispLines[dl].slice(0, dispColChars)) };
   }
-  /** 供 layout 定位光标列:chip 在合并行(cl===0)时偏移 chipPre 末行宽度 + chipPrefix 宽度。 */
-  function dispCursorCol(): number {
-    if (!chip || cl !== 0) return cursorCol();
-    const pre = chipPreLines();
-    return displayWidth(pre[pre.length - 1]) + displayWidth(chipPrefix()) + cursorCol();
+
+  /** 展示 (行, 显示列) → 段内字符偏移。供 ↑/↓ 移动后重新定位,以及鼠标点击的反向映射。 */
+  function dispColToCharInLine(dispLine: number, dispCol: number): number {
+    const { lines } = buildDisplay();
+    const ln = lines[dispLine] ?? '';
+    return visColToCharCol(ln, dispCol);
   }
-  /** 在光标处插入文本(含换行则拆行)。供短粘贴 finalize 落为可编辑文本。 */
+
+  /** 展示 (行, 字符内偏移) → 段+偏移。光标永远落在可编辑段;点中 chip 则吸附到最近的可编辑边界。 */
+  function mapDispToCursor(dispLine: number, charInLine: number): { seg: number; off: number } {
+    const { lines: dispLines, segStart } = buildDisplay();
+    let off = 0;
+    for (let k = 0; k < dispLine && k < dispLines.length; k++) off += dispLines[k].length + 1;
+    off += Math.max(0, Math.min(charInLine, (dispLines[dispLine] ?? '').length));
+    for (let i = 0; i < segs.length; i++) {
+      const start = segStart[i];
+      const len = segs[i].frozen ? chipToken(segs[i].text).length : segs[i].text.length;
+      // 可编辑段用闭区间;只读块用半开区间——其结束边界归紧随其后的可编辑段,
+      // 否则光标恰好停在 chip 后的可编辑段开头时,会被误判落在 chip 上(边界争用)。
+      const inside = segs[i].frozen ? off >= start && off < start + len : off >= start && off <= start + len;
+      if (inside) {
+        if (!segs[i].frozen) return { seg: i, off: off - start };
+        // 落在只读块内:按就近原则吸附——靠近左沿→其前可编辑段末尾,靠近右沿→其后可编辑段开头。
+        const distStart = off - start;
+        const distEnd = start + len - off;
+        return distStart <= distEnd ? editableEndBefore(i) : editableStartAfter(i);
+      }
+    }
+    return lastEditableEnd();
+  }
+  function editableStartAfter(i: number): { seg: number; off: number } {
+    let j = i + 1;
+    while (j < segs.length && segs[j].frozen) j++;
+    if (j < segs.length) return { seg: j, off: 0 };
+    return lastEditableEnd();
+  }
+  function editableEndBefore(i: number): { seg: number; off: number } {
+    let j = i - 1;
+    while (j >= 0 && segs[j].frozen) j--;
+    if (j >= 0) return { seg: j, off: segs[j].text.length };
+    return firstEditableStart();
+  }
+  function firstEditableStart(): { seg: number; off: number } {
+    for (let j = 0; j < segs.length; j++) if (!segs[j].frozen) return { seg: j, off: 0 };
+    return { seg: 0, off: 0 };
+  }
+  function lastEditableEnd(): { seg: number; off: number } {
+    for (let j = segs.length - 1; j >= 0; j--) if (!segs[j].frozen) return { seg: j, off: segs[j].text.length };
+    return { seg: 0, off: 0 };
+  }
+  /** 在光标处插入文本(含换行则落进当前可编辑段,原样保留)。供短粘贴与可打印字符共用。 */
   function insertText(text: string): void {
-    const parts = text.split('\n');
-    const before = lines[cl].slice(0, cc);
-    const after = lines[cl].slice(cc);
-    const newLines: string[] = [before + parts[0]];
-    for (let i = 1; i < parts.length; i++) newLines.push(parts[i]);
-    newLines[newLines.length - 1] += after;
-    lines.splice(cl, 1, ...newLines);
-    cl = cl + parts.length - 1;
-    // 光标置于插入文本末尾 = 原 before + 末段长度(指向插入文本之后、after 之前)。
-    // 旧值 parts[...].length 漏算 before → 光标落到插入文本内部(行中间)→ 后续打字插到中间(bug)。
-    cc = before.length + parts[parts.length - 1].length;
+    const s = segs[curSeg].text;
+    segs[curSeg].text = s.slice(0, curOff) + text + s.slice(curOff);
+    curOff += text.length;
   }
-  /** 落一段粘贴文本(长/短判定与 chip 逻辑,finalizePaste 与鼠标点击贴入共用)。
-   * 长粘贴落 chip 时不再吞掉用户已打的字:光标前的文本并入 chipPre(原样保留,与 chip 一起原子化),
-   * 光标后的文本留在 suffix(lines)——即"前段文字 [长文本…] 后段文字"而非清空覆盖。 */
+  /** 落一段粘贴文本:长粘贴 → 在此处插入一个只读 chip(把当前可编辑段从光标切开成「前段 + chip + 后段」),
+   *  短粘贴 → 作为可编辑文本插入。连续长粘贴会产生相邻 chip,各自独立;两次粘贴之间敲的字是可编辑段,
+   *  可直接编辑、也可退格删掉任一 chip。光标落在 chip 之后的可编辑段(即使为空也保留,保证光标有落点)。 */
   function applyPastedText(buf: string): void {
     if (!buf) return;
     const isLong = buf.split('\n').length > 8 || buf.length > 200;
-    if (isLong) {
-      const before = lines[cl].slice(0, cc);
-      const after = lines[cl].slice(cc);
-      if (chip == null) {
-        // 首次起 chip:光标前的行(含之前的整行)转入 chipPre,光标后的部分留作 suffix 首行。
-        chipPre = [...lines.slice(0, cl), before].join('\n');
-        chip = buf;
-      } else {
-        // 已有 chip:光标前若已打了字(chip 之后、本次粘贴之前),并入 chip 尾部保留(不丢字),
-        // 光标后的部分仍留作 suffix 首行。
-        chip = before ? chip + '\n' + before + '\n' + buf : chip + '\n' + buf;
-      }
-      lines = [after, ...lines.slice(cl + 1)];
-      cl = 0;
-      cc = 0;
-    } else {
+    if (!isLong) {
       insertText(buf);
+      computeFiltered();
+      redraw();
+      return;
     }
+    const s = segs[curSeg].text;
+    const before = s.slice(0, curOff);
+    const after = s.slice(curOff);
+    const newSegs: Seg[] = [];
+    if (before) newSegs.push({ frozen: false, text: before });
+    newSegs.push({ frozen: true, text: buf });
+    newSegs.push({ frozen: false, text: after }); // 始终保留可编辑后缀(可为空),保证光标有落点
+    segs.splice(curSeg, 1, ...newSegs);
+    curSeg = curSeg + (before ? 2 : 1); // 落到 chip 之后的可编辑段
+    curOff = 0;
     computeFiltered();
     redraw();
   }
@@ -289,11 +360,12 @@ export async function promptWithSlashMenu(
   }
 
   function computeFiltered(): void {
-    if (cl === 0 && lines[0].startsWith('/')) {
-      const { nodes, prefix } = menuContext(lines[0]);
+    const firstLine = buildDisplay().lines[0] ?? '';
+    if (firstLine.startsWith('/')) {
+      const { nodes, prefix } = menuContext(firstLine);
       filtered = nodes
         .map((node): SlashMenuItem => ({ node, input: `${prefix}${node.name}` }))
-        .filter((item) => item.input.startsWith(lines[0]));
+        .filter((item) => item.input.startsWith(firstLine));
       menuOpen = filtered.length > 0;
       if (selected >= filtered.length) {
         selected = 0;
@@ -307,38 +379,35 @@ export async function promptWithSlashMenu(
   }
 
   function redraw(): void {
+    const { lines } = buildDisplay();
+    const cur = cursorDisp();
     layout.paintInput({
       prompt: opts.prompt,
-      lines: dispLines(),
-      cursorLine: dispCursorLine(),
-      cursorCol: dispCursorCol(),
+      lines,
+      cursorLine: cur.line,
+      cursorCol: cur.col,
       menu: menuLines().length ? { lines: menuLines() } : null,
     });
   }
 
   /** 鼠标点击输入框:layout 已把"屏 tap 位置"以 (flatIdx, inSegVis) 形式传进来
-   *  (flatIdx = flat 中的绝对段号;inSegVis = 段内显示列)。
-   *  本函数在 prompt 自己的 (lines + chip) 上复刻 wrap/flat 还原 (cl, cc)→ redraw。
-   *  chip 模式自动扣 chip prefix:
-   *  - dispLines() 把 chipPre 末行 + chipPrefix + suffix[0] 拼成一行 "mergedRow"
-   *  - flat 中对应的"合并行段"是 mergedRow 的折行段,段内 inChar 累加从 mergedRow 起
-   *  - 要得到 lines[cl=0] 内的字符索引,扣掉 mergedRow 起始到 lines[0] 起始的字符数
-   *    = chipPre 末行字符数 + chipPrefix 字符数。 */
+   *  (flatIdx = flat 中的绝对段号;inSegVis = 段内显示列)。本函数把点击位还原成 (段, 偏移) → redraw。
+   *  点中只读粘贴块时吸附到最近的可编辑边界(见 mapDispToCursor)。 */
   function applyExternalCursor(flatIdx: number, inSegVis: number): void {
     const g = layout.getGeo();
     const promptW = displayWidth(opts.prompt);
     const W = Math.max(1, g.cols - promptW);
-    const dispLs = dispLines();
+    const { lines: dispLs } = buildDisplay();
     const lineVis: string[][] = dispLs.map((l) => wrapByDisplayWidth(l, W));
     const flat: string[] = [];
     for (const lv of lineVis) for (const r of lv) flat.push(r);
 
-    let newCl: number;
-    let newCc: number;
+    let dispLine: number;
+    let charInLine: number;
 
     if (flat.length === 0) {
-      newCl = 0;
-      newCc = 0;
+      dispLine = 0;
+      charInLine = 0;
     } else {
       const safeIdx = Math.max(0, Math.min(flatIdx, flat.length - 1));
       const seg = flat[safeIdx];
@@ -347,59 +416,26 @@ export async function promptWithSlashMenu(
       const inChar = visColToCharCol(seg, safeInSeg);
 
       // safeIdx → (dispLine, segInLine)
-      let dispLine = 0;
+      let dl = 0;
       let segInLine = safeIdx;
-      while (dispLine < lineVis.length && segInLine >= lineVis[dispLine].length) {
-        segInLine -= lineVis[dispLine].length;
-        dispLine++;
+      while (dl < lineVis.length && segInLine >= lineVis[dl].length) {
+        segInLine -= lineVis[dl].length;
+        dl++;
       }
-      if (dispLine >= lineVis.length) {
-        dispLine = lineVis.length - 1;
-        segInLine = lineVis[dispLine].length - 1;
+      if (dl >= lineVis.length) {
+        dl = lineVis.length - 1;
+        segInLine = lineVis[dl].length - 1;
       }
-
-      // dispLine → cl(chip-aware)
-      if (chip) {
-        const preLen = chipPreLines().length;
-        if (dispLine < preLen - 1) {
-          // 落在 chipPre 内(非末行)→ 走出 chip 到 suffix 起点
-          newCl = 0;
-        } else if (dispLine === preLen - 1) {
-          // 合并行 = suffix 第 0 行(cl=0)
-          newCl = 0;
-        } else {
-          newCl = dispLine - (preLen - 1);
-        }
-      } else {
-        newCl = dispLine;
-      }
-      newCl = Math.max(0, Math.min(newCl, lines.length - 1));
-      const lineText = lines[newCl] ?? '';
-
-      // cc 必须在 lines[newCl] 内。flat 中 seg 是 dispLs[dispLine] 的某折行段,
-      // seg 内 inChar 是段内字符偏移,但 lines[newCl] 的字符是按 (dispLs 前段累加) + (本段 inChar) 算的。
-      // ——非 chip 模式下:dispLine = newCl, segStartChars = sum(lineVis[dispLine][0..segInLine-1].length)
-      //   ccInLine = segStartChars + inChar
-      // ——chip 模式下 newCl=0(合并行):dispLine 是合并行 dispLine,segStartChars 同上,
-      //   但 lines[0] 在合并行中"起始处"在 (mergedRow.length - lines[0].length) 字符处,
-      //   故 ccInLine = segStartChars + inChar - chipOverheadChars。
       let segStartChars = 0;
-      const segs = lineVis[dispLine];
-      for (let s = 0; s < segInLine; s++) segStartChars += segs[s]?.length ?? 0;
-      let ccInLine = segStartChars + inChar;
-      if (chip && newCl === 0) {
-        const pre = chipPreLines();
-        const mergedRow = pre[pre.length - 1] ?? '';
-        const prefix = chipPrefix();
-        // mergedRow 起始到 lines[0] 起始的字符数 = (chipPreLast + chipPrefix) 字符数
-        const chipOverheadChars = mergedRow.length + prefix.length - lineText.length;
-        ccInLine = ccInLine - chipOverheadChars;
-      }
-      newCc = Math.max(0, Math.min(ccInLine, lineText.length));
+      const segsVis = lineVis[dl];
+      for (let s = 0; s < segInLine; s++) segStartChars += segsVis[s]?.length ?? 0;
+      charInLine = Math.max(0, Math.min(segStartChars + inChar, dispLs[dl]?.length ?? 0));
+      dispLine = dl;
     }
 
-    cl = newCl;
-    cc = newCc;
+    const { seg, off } = mapDispToCursor(dispLine, charInLine);
+    curSeg = seg;
+    curOff = off;
     // 收起菜单/过滤态:点击输入框关闭菜单,回到纯文本编辑。
     if (menuOpen) {
       menuOpen = false;
@@ -447,9 +483,9 @@ export async function promptWithSlashMenu(
     if (!menuOpen || !item) return submitLeaf;
 
     if (item.node.children?.length) {
-      lines = [`${item.input} `];
-      cl = 0;
-      cc = lines[0].length;
+      segs = [{ frozen: false, text: `${item.input} ` }];
+      curSeg = 0;
+      curOff = segs[0].text.length;
       selected = 0;
       menuTop = 0;
       computeFiltered();
@@ -457,9 +493,9 @@ export async function promptWithSlashMenu(
       return false;
     }
 
-    lines = [item.node.value ?? item.input];
-    cl = 0;
-    cc = lines[0].length;
+    segs = [{ frozen: false, text: item.node.value ?? item.input }];
+    curSeg = 0;
+    curOff = segs[0].text.length;
     computeFiltered();
     if (!submitLeaf || item.node.submit === false) {
       redraw();
@@ -468,87 +504,81 @@ export async function promptWithSlashMenu(
     return true;
   }
 
-  /** 提交:菜单打开时先应用选中项；分支进入子菜单，需要参数的叶子只补全。 */
+  /** 提交:菜单打开时先应用选中项;分支进入子菜单,需要参数的叶子只补全。
+   *  段序列直接按原文(可编辑段原文 + 粘贴块原文)拼接——所见即所得,不再额外插换行。 */
   function submit(): void {
     if (menuOpen && !applySelected(true)) return;
-    const suffix = lines.join('\n');
-    let content = suffix;
-    if (chip) {
-      content = suffix.length > 0 ? chip + '\n' + suffix : chip;
-      if (chipPre) content = chipPre + '\n' + content;
-    }
+    const content = segs.map((s) => s.text).join('');
     finish(content === '' ? [''] : content.split('\n'));
   }
 
-  /** 插换行:在光标处断行。 */
+  /** 插换行:在光标处断行(落进当前可编辑段)。 */
   function insertNewline(): void {
-    const after = lines[cl].slice(cc);
-    lines[cl] = lines[cl].slice(0, cc);
-    lines.splice(cl + 1, 0, after);
-    cl++;
-    cc = 0;
+    insertText('\n');
     computeFiltered();
     redraw();
   }
 
-  /** 删掉当前行 [from, to),光标落在 from;空区间直接忽略(避免无谓重画)。 */
-  function deleteRange(from: number, to: number): void {
-    if (to <= from) return;
-    lines[cl] = lines[cl].slice(0, from) + lines[cl].slice(to);
-    cc = from;
-    computeFiltered();
+  /** 光标移到当前可编辑段内的行首/行尾(不含段内 \n)。 */
+  function moveToLineStart(): void {
+    const s = segs[curSeg].text;
+    curOff = s.lastIndexOf('\n', curOff - 1) + 1;
+    redraw();
+  }
+  function moveToLineEnd(): void {
+    const s = segs[curSeg].text;
+    const ne = s.indexOf('\n', curOff);
+    curOff = ne < 0 ? s.length : ne;
     redraw();
   }
 
-  /** 光标在行尾且非末行:并掉下一行(Delete 键与 Ctrl+K 在行尾时的共同收尾)。 */
-  function joinNextLine(): void {
-    if (cl >= lines.length - 1) return;
-    lines[cl] = lines[cl] + lines[cl + 1];
-    lines.splice(cl + 1, 1);
-    computeFiltered();
-    redraw();
-  }
-
-  /** Ctrl+U:删到行首。已在行首则 no-op(对齐 readline unix-line-discard,不并上一行)。 */
+  /** Ctrl+U:删到行首(当前可编辑段内的当前行;已在行首则 no-op,不跨入相邻粘贴块)。 */
   function deleteToLineStart(): void {
-    deleteRange(0, cc);
+    const s = segs[curSeg].text;
+    const ls = s.lastIndexOf('\n', curOff - 1) + 1;
+    if (ls === curOff) return;
+    segs[curSeg].text = s.slice(0, ls) + s.slice(curOff);
+    curOff = ls;
+    computeFiltered();
+    redraw();
   }
 
-  /** Ctrl+K:删到行尾;已在行尾则并掉下一行(对齐 readline kill-line 吃掉换行的语义)。 */
+  /** Ctrl+K:删到行尾(当前可编辑段内的当前行;已在行尾则 no-op,不跨入相邻粘贴块)。 */
   function deleteToLineEnd(): void {
-    if (cc < lines[cl].length) {
-      deleteRange(cc, lines[cl].length);
-      return;
+    const s = segs[curSeg].text;
+    const ne = s.indexOf('\n', curOff);
+    if (ne < 0) {
+      if (curOff === s.length) return;
+      segs[curSeg].text = s.slice(0, curOff);
+    } else {
+      segs[curSeg].text = s.slice(0, curOff) + s.slice(ne + 1);
     }
-    joinNextLine();
+    computeFiltered();
+    redraw();
   }
 
   /** Ctrl+Z:还原被 Ctrl+C 清掉的输入(单次)。 */
   function restoreUndo(): void {
     const snap = undoSnapshot;
     if (!snap) return;
-    lines = [...snap.lines];
-    cl = snap.cl;
-    cc = snap.cc;
-    chip = snap.chip;
-    chipPre = snap.chipPre;
+    segs = snap.segs.map((s) => ({ ...s }));
+    curSeg = Math.min(snap.curSeg, segs.length - 1);
+    curOff = Math.min(snap.curOff, segs[curSeg].text.length);
     undoSnapshot = null;
     computeFiltered();
     redraw();
   }
 
   /**
-   * 清空输入(含 chip / 斜杠菜单 / 粘贴缓冲):Ctrl+C 在有内容时调用——清空而非退出。
+   * 清空输入(含粘贴块 / 斜杠菜单 / 粘贴缓冲):Ctrl+C 在有内容时调用——清空而非退出。
    * 清空前留一份快照供 Ctrl+Z 还原——手滑按在输入框上时,正在写的长 prompt 不至于白打。
    */
   function clearInput(): void {
     if (layout.isScrolled()) layout.resetScroll(); // 回尾(若滚动回看),再清空
-    undoSnapshot = { lines: [...lines], cl, cc, chip, chipPre };
-    lines = [''];
-    cl = 0;
-    cc = 0;
-    chip = null;
-    chipPre = '';
+    undoSnapshot = { segs: segs.map((s) => ({ ...s })), curSeg, curOff };
+    segs = [{ frozen: false, text: '' }];
+    curSeg = 0;
+    curOff = 0;
     menuOpen = false;
     filtered = [];
     selected = 0;
@@ -564,14 +594,10 @@ export async function promptWithSlashMenu(
     redraw();
   }
 
-  /** Ctrl+C:有内容(已打字 / 多行 / chip / 菜单草稿 / 粘贴缓冲 / 粘贴中)则清空,再按一次(空)才退出(仿 fish)。 */
+  /** Ctrl+C:有内容(已打字 / 多行 / 粘贴块 / 菜单草稿 / 粘贴缓冲 / 粘贴中)则清空,再按一次(空)才退出(仿 fish)。 */
   function onCtrlC(): void {
-    const hasContent =
-      chip != null ||
-      lines.length > 1 ||
-      lines.some((l) => l !== '') ||
-      pasteParts.length > 0 ||
-      pasting;
+    const flat = segs.map((s) => s.text).join('');
+    const hasContent = flat.length > 0 || menuOpen || pasteParts.length > 0 || pasting;
     if (hasContent) {
       clearInput();
       return;
@@ -639,24 +665,21 @@ export async function promptWithSlashMenu(
 
     // Ctrl+C 已在 onKey 顶部统一处理(清空或退出);Ctrl+D:空缓冲退出,否则忽略
     if (key.ctrl && key.name === 'd') {
-      if (lines.every((l) => l === '') && cl === 0 && cc === 0) finish(null);
+      if (segs.map((s) => s.text).join('') === '') finish(null);
       return;
     }
     if (key.ctrl && key.name === 'a') {
-      cc = 0;
-      redraw();
+      moveToLineStart();
       return;
     }
     if (key.ctrl && key.name === 'q') {
       // 行首的对称搭档:与 Ctrl+E(行尾)同处顶行相邻(Q/E),左=起始右=结束。
       // Ctrl+A 仍作别名保留(全 app 一致:运行中预填、权限面板都用 Ctrl+A 跳开头)。
-      cc = 0;
-      redraw();
+      moveToLineStart();
       return;
     }
     if (key.ctrl && key.name === 'e') {
-      cc = lines[cl].length;
-      redraw();
+      moveToLineEnd();
       return;
     }
 
@@ -666,11 +689,9 @@ export async function promptWithSlashMenu(
       return;
     }
 
-    // 行级删除:Ctrl+U 删到行首,Ctrl+K 删到行尾。此前这两个键是 no-op——
-    // 既没有 case,又被尾部落字守卫的 !ctrl/!meta 挡住。
-    // 刻意**不做**词级删除(Ctrl+W / Alt+Backspace / Alt+D)与词级跳转(Ctrl+←/→ / Alt+B/F):
-    // 终端里这些序列各终端发得不一样(Ctrl+Backspace 在多数终端发 \x08,与裸退格无从区分),
-    // 做一半反而变成按了没反应的哑键。
+    // 行级删除:Ctrl+U 删到行首,Ctrl+K 删到行尾(均在当前可编辑段内,不跨入相邻粘贴块)。
+    // 词级删除/跳转(Ctrl+W / Ctrl+← 等)刻意不做:终端序列各终端发得不一样
+    // (Ctrl+Backspace 在多数终端发 \x08,与裸退格无从区分),做一半会变成按了没反应的哑键。
     if (key.ctrl && key.name === 'u') {
       deleteToLineStart();
       return;
@@ -706,80 +727,94 @@ export async function promptWithSlashMenu(
     }
 
     switch (key.name) {
-      case 'backspace':
-        if (cc > 0) {
-          lines[cl] = lines[cl].slice(0, cc - 1) + lines[cl].slice(cc);
-          cc--;
+      case 'backspace': {
+        const s = segs[curSeg].text;
+        if (curOff > 0) {
+          segs[curSeg].text = s.slice(0, curOff - 1) + s.slice(curOff);
+          curOff--;
           computeFiltered();
           redraw();
-        } else if (cl > 0) {
-          // 行首退格:并入上一行
-          const cur = lines[cl];
-          cc = lines[cl - 1].length;
-          lines[cl - 1] = lines[cl - 1] + cur;
-          lines.splice(cl, 1);
-          cl--;
-          computeFiltered();
-          redraw();
-        } else if (chip) {
-          // 光标在 suffix 开头(紧贴 ] 后):退格删整个 chip(原子),chipPre 还原为可编辑行,
-          // 光标落在 chipPre 末尾(紧接原来打的字继续编辑)。
-          const preLines = chipPre ? chipPre.split('\n') : [''];
-          lines = [...preLines.slice(0, -1), preLines[preLines.length - 1] + lines[0], ...lines.slice(1)];
-          cl = preLines.length - 1;
-          cc = preLines[preLines.length - 1].length;
-          chip = null;
-          chipPre = '';
+        } else if (curSeg > 0) {
+          const prev = segs[curSeg - 1];
+          if (prev.frozen) {
+            // 紧贴粘贴块后沿退格:删整块(原子)
+            segs.splice(curSeg - 1, 1);
+            curSeg--;
+            curOff = 0;
+          } else {
+            // 并回上一个可编辑段
+            prev.text += segs[curSeg].text;
+            const joinOff = prev.text.length - segs[curSeg].text.length;
+            segs.splice(curSeg, 1);
+            curSeg--;
+            curOff = joinOff;
+          }
           computeFiltered();
           redraw();
         }
         return;
-      case 'delete':
-        // 行内删光标后一个字符;已在行尾则并掉下一行——与退格在行首并上一行对称。
-        // 没有这一条,换行就成了单向的:Ctrl+J 造出来的换行只能靠「移到下一行行首再退格」消掉,
-        // 光标停在本行行尾时删不掉。
-        if (cc < lines[cl].length) {
-          lines[cl] = lines[cl].slice(0, cc) + lines[cl].slice(cc + 1);
+      }
+      case 'delete': {
+        const s = segs[curSeg].text;
+        if (curOff < s.length) {
+          segs[curSeg].text = s.slice(0, curOff) + s.slice(curOff + 1);
           computeFiltered();
           redraw();
-        } else {
-          joinNextLine();
+        } else if (curSeg < segs.length - 1) {
+          const next = segs[curSeg + 1];
+          if (next.frozen) segs.splice(curSeg + 1, 1); // 并掉下一个粘贴块
+          else {
+            segs[curSeg].text += next.text;
+            segs.splice(curSeg + 1, 1);
+          }
+          computeFiltered();
+          redraw();
         }
         return;
+      }
       case 'up':
         if (menuOpen && filtered.length) {
           selected = (selected - 1 + filtered.length) % filtered.length;
           redraw();
-        } else if (cl > 0) {
-          cl--;
-          cc = Math.min(cc, lines[cl].length);
-          redraw();
         } else {
-          layout.scrollWheel(1); // 等同鼠标滚轮上滚一格
+          const { line, col } = cursorDisp();
+          if (line > 0) {
+            const m = mapDispToCursor(line - 1, dispColToCharInLine(line - 1, col));
+            curSeg = m.seg;
+            curOff = m.off;
+            redraw();
+          } else {
+            layout.scrollWheel(1); // 等同鼠标滚轮上滚一格
+          }
         }
         return;
       case 'down':
         if (menuOpen && filtered.length) {
           selected = (selected + 1) % filtered.length;
           redraw();
-        } else if (cl < lines.length - 1) {
-          cl++;
-          cc = Math.min(cc, lines[cl].length);
-          redraw();
         } else {
-          layout.scrollWheel(-1); // 等同鼠标滚轮下滚一格
+          const { lines: dispLines } = buildDisplay();
+          const { line, col } = cursorDisp();
+          if (line < dispLines.length - 1) {
+            const m = mapDispToCursor(line + 1, dispColToCharInLine(line + 1, col));
+            curSeg = m.seg;
+            curOff = m.off;
+            redraw();
+          } else {
+            layout.scrollWheel(-1); // 等同鼠标滚轮下滚一格
+          }
         }
         return;
       case 'tab':
         if (menuOpen && filtered[selected]) applySelected(false);
         return;
       case 'escape': {
-        const { prefix } = menuContext(lines[0]);
+        const { prefix } = menuContext(buildDisplay().lines[0] ?? '');
         if (prefix) {
           // 子层 Esc 回到父节点；例如 /model sw → /model。
-          lines = [prefix.trimEnd()];
-          cl = 0;
-          cc = lines[0].length;
+          segs = [{ frozen: false, text: prefix.trimEnd() }];
+          curSeg = 0;
+          curOff = segs[0].text.length;
           selected = 0;
           menuTop = 0;
           computeFiltered();
@@ -792,41 +827,49 @@ export async function promptWithSlashMenu(
         redraw();
         return;
       }
-      case 'left':
-        if (cc > 0) {
-          cc--;
+      case 'left': {
+        if (curOff > 0) {
+          curOff--;
           redraw();
-        } else if (cl > 0) {
-          cl--;
-          cc = lines[cl].length;
-          redraw();
+        } else if (curSeg > 0) {
+          let p = curSeg - 1;
+          while (p >= 0 && segs[p].frozen) p--;
+          if (p >= 0) {
+            curSeg = p;
+            curOff = segs[p].text.length;
+            redraw();
+          }
         }
         return;
-      case 'right':
-        if (cc < lines[cl].length) {
-          cc++;
+      }
+      case 'right': {
+        const s = segs[curSeg].text;
+        if (curOff < s.length) {
+          curOff++;
           redraw();
-        } else if (cl < lines.length - 1) {
-          cl++;
-          cc = 0;
-          redraw();
+        } else if (curSeg < segs.length - 1) {
+          let nx = curSeg + 1;
+          while (nx < segs.length && segs[nx].frozen) nx++;
+          if (nx < segs.length) {
+            curSeg = nx;
+            curOff = 0;
+            redraw();
+          }
         }
         return;
+      }
       case 'home':
-        cc = 0;
-        redraw();
+        moveToLineStart();
         return;
       case 'end':
-        cc = lines[cl].length;
-        redraw();
+        moveToLineEnd();
         return;
     }
 
     // 可打印字符(>= 空格,非 ctrl/meta)
     const s = key.sequence ?? '';
     if (s && s >= ' ' && !key.ctrl && !key.meta) {
-      lines[cl] = lines[cl].slice(0, cc) + s + lines[cl].slice(cc);
-      cc += s.length;
+      insertText(s);
       computeFiltered();
       redraw();
     }
