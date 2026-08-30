@@ -381,12 +381,16 @@ export async function promptWithSlashMenu(
   function redraw(): void {
     const { lines } = buildDisplay();
     const cur = cursorDisp();
+    // 空输入引导:缓冲为空时输入框内画 dim ghost 占位(含 /help 提示),让用户知道怎么开始;
+    // 一旦有输入(打字/粘贴/补全)isEmpty 变 false,下一帧占位即消失。
+    const isEmpty = segs.length === 1 && !segs[0].frozen && segs[0].text === '';
     layout.paintInput({
       prompt: opts.prompt,
       lines,
       cursorLine: cur.line,
       cursorCol: cur.col,
       menu: menuLines().length ? { lines: menuLines() } : null,
+      placeholder: isEmpty ? t('prompt.emptyPlaceholder') : undefined,
     });
   }
 

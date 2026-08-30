@@ -72,7 +72,7 @@ export interface InputView {
   cursorCol: number; // 显示宽度列(0-based)
   menu: { lines: string[] } | null; // 预渲染菜单行(带色),向上展开进内容区底
   dim?: boolean; // true=运行态占位(整行 dim)
-  placeholder?: string; // dim 态专用:无打字时的 ghost 占位文本(画在光标右侧)
+  placeholder?: string; // dim 态:无打字时的 ghost 占位文本(画在光标右侧);INPUT 态:缓冲为空时的 dim 引导占位(画在 prompt 右侧,prompt.ts 传入)
 }
 
 // ── 内部状态 ──
@@ -653,6 +653,9 @@ export function clearContent(): void {
   // /theme、/clear、/resume 等命令 clearContent 后紧接 writeBanner 的场景均依赖此重置。
   bannerH = 0;
   bannerRows = [];
+  // 欢迎引导块随 buffer 一起清掉(/clear / /resume 等路径),状态复位后可由 repl 重新写入。
+  welcomeStart = -1;
+  welcomeRows = 0;
   // 清内容区必须同时作废旧菜单擦除坐标:picker(/resume /rollback /theme)把菜单画在内容区底部,
   // 菜单行号缓存在 lastMenuStartRow/lastMenuRows;若不清零,后续 paintInput 会按旧坐标“擦菜单”,
   // 把刚 renderHistory/contentWrite 写好的内容(如“已续接会话”提示)清掉,导致用户要滚动一下才刷新。
@@ -684,6 +687,38 @@ export function rewindContent(rowsToRewind: number): void {
   scrollOffset = Math.min(scrollOffset, maxOff);
   // 末段 frameRow/frameCol 是 spinner 的画位,撤回若跨过 frame 行也不必清——
   // repaintViewport 会按新 buffer 重画整片,旧 frame 自然被覆盖。
+  repaintViewport();
+}
+
+// ── 欢迎引导块(新会话开场)──
+// 开场写在内容区(banner 之下),教用户怎么开始;首次提交任何输入(消息或斜杠命令)前
+// 由 dismissWelcomeBlock 整块从 buffer 撤掉——「一打开就能看见,开始干活就消失」。
+let welcomeStart = -1; // 块起点(content.committedRows 口径的绝对行索引)
+let welcomeRows = 0; // 块行数(0 = 屏上无欢迎块)
+
+/** 写欢迎引导块(每行自洽带色、行宽须 ≤ cols,contentWrite 状态机兜底折行);已在屏上则跳过。 */
+export function writeWelcomeBlock(lines: string[]): void {
+  if (!active || !ui.isTTY || lines.length === 0) return;
+  if (welcomeRows > 0) return; // 已在屏上,不重复写
+  welcomeStart = content.committedRows();
+  contentWrite(lines.join('\n') + '\n');
+  welcomeRows = content.committedRows() - welcomeStart;
+}
+
+/** 撤掉欢迎引导块:删 buffer 区间(若已被外部清空/裁掉则只复位状态)+ 续写位前移 + 钳位重画。 */
+export function dismissWelcomeBlock(): void {
+  if (welcomeRows <= 0) return;
+  const start = welcomeStart;
+  const n = welcomeRows;
+  welcomeRows = 0;
+  welcomeStart = -1;
+  if (start < 0 || start >= content.committedRows()) return; // 块已被 clear/trim,无需删
+  content.deleteFrom(start, n);
+  const g = getGeo();
+  contentRow = Math.max(g.contentTop, contentRow - n);
+  contentCol = 1;
+  const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
+  scrollOffset = Math.min(scrollOffset, maxOff);
   repaintViewport();
 }
 
@@ -2040,6 +2075,12 @@ export function paintInput(view: InputView): void {
       text = renderDimInputRow(view.prompt, line, view.placeholder ?? '', g.cols);
     } else {
       text = `${prefix}${line}`;
+      // 空输入引导:INPUT 态缓冲为空时,在首行画 dim ghost 占位(「输入 / 查看命令…」);
+      // 任何按键都会改变缓冲 → 下一帧 isEmpty=false → 占位自然消失,无需额外擦除逻辑。
+      if (!line && view.placeholder && vis.startVis === 0 && i === 0) {
+        const avail = Math.max(0, preGeo.cols - promptW);
+        text = `${prefix}${ui.dim}${truncateDisplay(view.placeholder, avail)}${ui.reset}`;
+      }
       // 输入框反白叠层:仅当 paintInput 不是 dim(运行态 typeahead 不参与选区,避免干扰 IME 气泡),
       // 且该可视段所属的逻辑行落在 inpSel 区间内 → 高亮行内 [colStart,colEnd) 段。
       if (inpSel) {

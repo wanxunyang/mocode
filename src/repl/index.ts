@@ -1020,6 +1020,27 @@ export async function startRepl(
     memoryEnabled: isMemoryEnabled(),
   });
 
+  /**
+   * 欢迎引导块:新会话开场写在内容区(banner 之下),教用户怎么开始 / 能做什么。
+   * 首次提交任何输入(消息或斜杠命令)前由 layout.dismissWelcomeBlock 整块撤掉——
+   * 「一打开就能看见,开始干活就消失」。/clear 清空后重新写一次(回到空会话状态)。
+   */
+  const welcomeLines = (): string[] => [
+    '',
+    `  ${ui.accent}${ui.bold}${t('welcome.gettingStarted')}${ui.reset}`,
+    `  ${ui.dim}· ${t('welcome.start1')}${ui.reset}`,
+    `  ${ui.dim}· ${t('welcome.start2')}${ui.reset}`,
+    `  ${ui.dim}· ${t('welcome.start3')}${ui.reset}`,
+    '',
+    `  ${ui.accent}${ui.bold}${t('welcome.capabilities')}${ui.reset}`,
+    `  ${ui.dim}· ${t('welcome.cap1')}${ui.reset}`,
+    `  ${ui.dim}· ${t('welcome.cap2')}${ui.reset}`,
+    `  ${ui.dim}· ${t('welcome.cap3')}${ui.reset}`,
+    '',
+    `  ${ui.dim}${t('welcome.try')}${ui.reset}`,
+    '',
+  ];
+
   // 开场:按 config.theme 切主题(横幅 / 状态行 / 后续渲染皆用新色),再进 alt screen + 状态基线 + 清内容区。
   // --resume 有历史则渲染对话,否则横幅。
   setTheme(config.theme);
@@ -1068,6 +1089,10 @@ export async function startRepl(
         // 迁移失败不阻塞启动;用户后续 /model 时仍能手动配。
       }
     }
+  }
+  // 新会话开场:banner 之后写欢迎引导块(--resume 有历史时不写,历史本身就是上下文)。
+  if (!history.some((m) => m.role === 'user')) {
+    layout.writeWelcomeBlock(welcomeLines());
   }
   /**
    * 切换 agent 模式(Shift+Tab 触发,经 prompt.ts 的 onCycleMode 回调)。
@@ -1382,6 +1407,9 @@ export async function startRepl(
     hasSubmittedInput = true;
     if (line === '/exit' || line === '/quit') break;
 
+    // 首次提交任何输入(消息或斜杠命令)→ 撤掉欢迎引导块,不让它出现在工作画面里。
+    layout.dismissWelcomeBlock();
+
     // RUNNING 态:回显输入 → 底栏改 dim 占位、光标回内容续写位
     const cmd = line.split(/\s+/)[0];
     // 命令被刻意改写成别的内容后转发给 agent(如 /init)。这类不算"未知命令"。
@@ -1595,6 +1623,7 @@ export async function startRepl(
       layout.clearContent();
       layout.writeBanner(bannerLines(banner()));
       layout.contentWrite(`${ui.dim}${t('repl.historyCleared')}${ui.reset}\n`);
+      layout.writeWelcomeBlock(welcomeLines()); // 回到空会话状态,欢迎引导重新出现
       continue;
     }
     // /image:附加本地图片到下一条 user 消息(支持 /image <path> · /image list · /image clear)。
