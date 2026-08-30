@@ -149,6 +149,40 @@ export function isContextLengthError(err: unknown): boolean {
   );
 }
 
+/**
+ * 把一次 chat 失败的原始错误消息归类为新手可引导的错误类别(纯展示层判定,不改控制流)。
+ * 返回 null = 认不出的错误,展示层保留原始 provider 诊断(方便准确修复,不瞎猜)。
+ * 供 repl 的错误出口翻译成中文引导(配 key / 切模型 / 压缩会话等)。
+ */
+export type ChatErrorKind = 'auth' | 'quota' | 'timeout' | 'network' | 'context';
+
+export function classifyChatError(msg: string): ChatErrorKind | null {
+  const m = (msg || '').toLowerCase();
+  if (!m) return null;
+  // 上下文超长(复用 transport 层判定,提示 /compact)
+  if (isContextLengthError({ message: msg })) return 'context';
+  // 认证:401 / key 无效缺失
+  if (
+    /\b401\b|unauthorized|forbidden[^\n]*(?:api[ _-]?key|token)/.test(m) ||
+    /(?:invalid|incorrect|missing|no|not[ _-]?(?:provided|configured|valid))[^\n]{0,24}api[ _-]?key/.test(m) ||
+    /api[ _-]?key[^\n]{0,24}(?:invalid|incorrect|missing|not[ _-]?(?:provided|configured|valid))/.test(m) ||
+    /无效的|未配置.{0,8}(?:key|密钥)|(?:密钥|令牌).{0,8}(?:无效|错误)/.test(msg)
+  ) return 'auth';
+  // 限流 / 配额:429 / rate limit / quota / 余额不足
+  if (
+    /\b429\b|rate[ _-]?limit|insufficient[ _-]?(?:quota|balance|funds)|quota[ _-]?(?:exceeded|exhausted)/.test(m) ||
+    /频率限制|使用量已超出|余额不足|配额(?:不足|已用完|超)/.test(msg)
+  ) return 'quota';
+  // 超时 / 连接中断
+  if (/\btime(?:d|ed)?[ _-]?out\b|etimedout|econnreset|socket hang up|econnaborted|请求超时/.test(m)) return 'timeout';
+  // 网络 / DNS / baseURL 不通
+  if (
+    /\benotfound\b|\beconnrefused\b|\beai_again\b|getaddrinfo|fetch failed|network error|certificate/.test(m) ||
+    /无法连接|网络(?:错误|异常|不可用)|域名解析/.test(msg)
+  ) return 'network';
+  return null;
+}
+
 /** 从 OpenAI APIError.headers 解析 Retry-After(秒);不支持或缺失返回 undefined。封顶 RETRY_MAX_MS。 */
 export function getRetryAfterMs(err: unknown): number | undefined {
   const headers = (err as { headers?: unknown } | undefined)?.headers;

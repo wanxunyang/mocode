@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { Tool, ToolRisk } from '../tools/types.js';
 import { promptIntervention, type InterventionResult } from '../ui/intervention.js';
 import { config } from '../config/index.js';
+import { readConfigFile, updateConfigKey } from '../config/file.js';
 import { getSandboxRoot } from '../sandbox/index.js';
 import { t } from '../i18n/index.js';
 
@@ -169,12 +170,25 @@ export async function checkPermission(
   const dangerous = getToolRisk(tool) === 'dangerous';
   const choices = [onceOption, sessionOption, projectOption, alwaysOption, denyOption];
 
+  // 新手首次审批引导:第一次弹出确认面板时附一段说明(每个用户只出现一次,
+  // ~/.mocode/config 的 onboarding_approval_hint 标记;读写失败静默,不阻断审批)。
+  let detail = summarizeArgs(args) + (dangerous ? `\n\n${t('permission.dangerWarning')}` : '');
+  const ONBOARDING_KEY = 'onboarding_approval_hint';
+  try {
+    if (!readConfigFile()[ONBOARDING_KEY]) {
+      detail += `\n\n${t('permission.firstTimeHint')}`;
+      updateConfigKey(ONBOARDING_KEY, '1');
+    }
+  } catch {
+    // 标记读/写失败 → 视为未展示过:多提示一次无害,少提示也只是回归现状。
+  }
+
   const result = await (options.prompt ?? promptIntervention)({
     type: 'choice',
     title: dangerous
       ? t('permission.dangerTitle', { tool: tool.name })
       : t('permission.confirmTitle', { tool: tool.name }),
-    detail: summarizeArgs(args) + (dangerous ? `\n\n${t('permission.dangerWarning')}` : ''),
+    detail,
     options: choices,
     allowCustom: false,
     // dangerous 默认落在「拒绝」:面板一弹出就高亮"允许一次"时,用户顺手回车就把命令放出去了。

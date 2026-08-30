@@ -64,6 +64,8 @@ import {
   chatTools,
   estimatePromptTokens,
   estimateTokens,
+  classifyChatError,
+  type ChatErrorKind,
   type ChatMessage,
   type ChatUsage,
 } from '../llm/index.js';
@@ -242,6 +244,22 @@ function slashHelpLines(
   }
   return lines;
 }
+
+/** chat 常见错误类别 → 中文引导文案的 i18n 键(识别不出的错误不走这张表,保留原始诊断)。 */
+const LLM_ERROR_HINT_KEYS: Record<ChatErrorKind, TranslationKey> = {
+  auth: 'repl.llmAuthError',
+  quota: 'repl.llmQuotaError',
+  timeout: 'repl.llmTimeoutError',
+  network: 'repl.llmNetworkError',
+  context: 'repl.llmContextError',
+};
+
+/** /help 的分组:按使用场景归组,组内保持菜单树顺序。未列入的顶层命令兜底进「其他」。 */
+const HELP_GROUPS: { key: TranslationKey; names: string[] }[] = [
+  { key: 'help.groupFrequent', names: ['/help', '/clear', '/context', '/compact', '/resume', '/model'] },
+  { key: 'help.groupSession', names: ['/sessions', '/rollback', '/memory', '/skills', '/skill', '/init'] },
+  { key: 'help.groupConfig', names: ['/mode', '/subagent', '/fe', '/theme', '/pet', '/image', '/language', '/upgrade'] },
+];
 
 /**
  * 菜单树里全部可用命令名(含分支路径与叶子的真实命令),供未知命令纠错建议用。
@@ -1049,6 +1067,12 @@ export async function startRepl(
   layout.clearContent();
   layout.contentMode();
   if (history.some((m) => m.role === 'user')) {
+    // --resume 锚点:先给一行会话摘要(id/消息数/当前模型),新手对恢复状态有定位感,
+    // 再铺历史对话。renderHistory 之后不再追加,锚点恒为恢复内容的第一行。
+    const anchorCount = history.filter((m) => m.role !== 'system').length;
+    layout.contentWrite(
+      `${ui.dim}${t('repl.resumeAnchor', { id: currentSessionId, count: anchorCount, model: config.model })}${ui.reset}\n`,
+    );
     renderHistory(history);
     // 强制回尾:同 /resume 命令,renderHistory 展开详情会设 scrollOffset>0,需复位避免闪烁。
     layout.resetScroll();
@@ -1103,7 +1127,10 @@ export async function startRepl(
     history[0] = { role: 'system', content: buildSystemMessage(planMode) };
   };
   const cycleMode = (): void => {
-    setAgentMode(getAgentMode() === 'plan' ? 'auto' : 'plan'); // listener 接手 applyMode + refreshStatusBase
+    const prev = getAgentMode();
+    setAgentMode(prev === 'plan' ? 'auto' : 'plan'); // listener 接手 applyMode + refreshStatusBase
+    // Shift+Tab 只有 chip 变化,新手可能没感知:内容区补一行确认(与 /plan / /auto 同文案,复用不新造键)。
+    layout.contentWrite(`${ui.dim}${t(prev === 'plan' ? 'repl.autoChanged' : 'repl.planChanged')}${ui.reset}\n`);
   };
   // 注册模式变更监听器:switch_mode 工具 / cycleMode / /plan / /auto / runTurn 调 setAgentMode 时同步触发,
   // 重写 history[0] 系统提示(切 plan 追加 PLAN_MODE_SUFFIX)+ 刷状态行 modeTag。
@@ -1313,7 +1340,18 @@ export async function startRepl(
           `${ui.dim}${t('repl.visionHint')}${ui.reset}\n`
         );
       } else {
-        layout.contentWrite(`${ui.red}${t('repl.errorLabel')}${ui.reset} ${msg}\n`);
+        // 常见错误翻译:认证 / 限流 / 超时 / 网络 / 上下文超长 → 中文引导(新手第一堵墙);
+        // 认不出的错误保留原始 provider 诊断,不瞎猜。
+        const kind = classifyChatError(msg);
+        if (kind) {
+          const key = LLM_ERROR_HINT_KEYS[kind];
+          layout.contentWrite(
+            `${ui.red}${t('repl.errorLabel')}${ui.reset} ${t(key, { base: config.baseURL, model: config.model })}\n`,
+          );
+          layout.contentWrite(`${ui.dim}${t('repl.originalError', { message: msg })}${ui.reset}\n`);
+        } else {
+          layout.contentWrite(`${ui.red}${t('repl.errorLabel')}${ui.reset} ${msg}\n`);
+        }
       }
     } finally {
       stopRunningListener();
@@ -1356,9 +1394,12 @@ export async function startRepl(
     contextState.ephemeralText = undefined;
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
+    // 锚点行:会话 id / 消息数 / 当前模型,给续接的会话一个定位起点(与 --resume 启动路径同文案)。
+    const anchorCount = history.filter((m) => m.role !== 'system').length;
+    layout.contentWrite(
+      `${ui.dim}${t('repl.resumeAnchor', { id: loaded.id, count: anchorCount, model: config.model })}${ui.reset}\n\n`,
+    );
     renderHistory(history);
-    // 末尾 \n\n:与后续用户消息(❯ bubble)之间空一行。
-    layout.contentWrite(`${ui.dim}${t('repl.resumed', { id: loaded.id })}${ui.reset}\n\n`);
     // 强制回尾:renderHistory 展开 mutation 工具详情会经 contentInsertAfter 设置 scrollOffset>0;
     // 先把"已续接会话"提示写入缓冲，再统一回尾重画，避免切换后视口停留在历史顶部。
     layout.resetScroll();
@@ -1422,9 +1463,25 @@ export async function startRepl(
     layout.enterRunningMode(state.status, placeholder);
 
     if (line === '/help') {
+      const nodes = buildSlashCommands();
       layout.contentWrite(`${ui.bold}${t('help.title')}${ui.reset}\n`);
       layout.contentWrite(`${ui.dim}${t('help.hint')}${ui.reset}\n`);
-      layout.contentWrite(`${slashHelpLines().join('\n')}\n`);
+      // 按使用场景分组输出,常用置顶;未归组命令(如 /exit)兜底进「其他」。
+      let first = true;
+      for (const group of HELP_GROUPS) {
+        const picked = nodes.filter((n) => group.names.includes(n.name));
+        if (!picked.length) continue;
+        if (!first) layout.contentWrite('\n');
+        first = false;
+        layout.contentWrite(`${ui.accent}${ui.bold}${t(group.key)}${ui.reset}\n`);
+        layout.contentWrite(`${slashHelpLines(picked).join('\n')}\n`);
+      }
+      const rest = nodes.filter((n) => !HELP_GROUPS.some((g) => g.names.includes(n.name)));
+      if (rest.length) {
+        if (!first) layout.contentWrite('\n');
+        layout.contentWrite(`${ui.accent}${ui.bold}${t('help.groupOther')}${ui.reset}\n`);
+        layout.contentWrite(`${slashHelpLines(rest).join('\n')}\n`);
+      }
       continue;
     }
     if (line === '/language' || line.startsWith('/language ')) {

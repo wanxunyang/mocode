@@ -1507,6 +1507,16 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
     ? fmtElapsed(Date.now() - turnStart)
     : '';
 
+  // 新手中断提示:每轮开始后前 6 秒,spinner 行尾随一次 dim「(Esc / Ctrl+C 中断)」,
+  // 6 秒后自然消失(不常驻,不打扰老用户)。只在非滚动回看时画,回看态右段让给历史指示。
+  const INTERRUPT_HINT_WINDOW_MS = 6000;
+  const hintActive =
+    !scrolled && mode === 'running' && turnStart != null
+    && Date.now() - turnStart < INTERRUPT_HINT_WINDOW_MS;
+  const hintText = t('status.interruptHint');
+  const hint = hintActive ? `  ${ui.dim}(${hintText})${ui.reset}` : '';
+  const hintW = hintActive ? 4 + displayWidth(hintText) : 0; // 2 缩进 + 左右括号
+
   // ── 左段:帧 + 状态 + 走时,全部紧跟 ──
   let lead: string;
   let leadW: number;
@@ -1525,16 +1535,16 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
     lead = `${symbol} ${ui.dim}${label}${ui.reset}${ePart}`;
     leadW = 1 + 1 + displayWidth(label) + (elapsed ? 1 + displayWidth(elapsed) : 0);
   } else if (hasSpinner) {
-    // spinner 激活(思考中/执行工具…):帧 + 状态 + 走时
+    // spinner 激活(思考中/执行工具…):帧 + 状态 + 走时 (+ 新手中断提示)
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
-    lead = `${ui.bold}${ui.accent}${status.spinnerFrame}${ui.reset} ${ui.dim}${status.status}${ui.reset}${ePart}`;
-    leadW = 1 + 1 + displayWidth(status.status) + (elapsed ? 1 + displayWidth(elapsed) : 0);
+    lead = `${ui.bold}${ui.accent}${status.spinnerFrame}${ui.reset} ${ui.dim}${status.status}${ui.reset}${ePart}${hint}`;
+    leadW = 1 + 1 + displayWidth(status.status) + (elapsed ? 1 + displayWidth(elapsed) : 0) + hintW;
   } else if (spinning) {
-    // 运行态心跳帧(流式输出中 / 命令态如 /rollback /compact /resume):帧 + 状态文字(优先)或生成中(兜底) + 走时
+    // 运行态心跳帧(流式输出中 / 命令态如 /rollback /compact /resume):帧 + 状态文字(优先)或生成中(兜底) + 走时 (+ 新手中断提示)
     const label = status.status || '生成中';
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
-    lead = `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset} ${ui.dim}${label}${ui.reset}${ePart}`;
-    leadW = 1 + 1 + displayWidth(label) + (elapsed ? 1 + displayWidth(elapsed) : 0);
+    lead = `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset} ${ui.dim}${label}${ui.reset}${ePart}${hint}`;
+    leadW = 1 + 1 + displayWidth(label) + (elapsed ? 1 + displayWidth(elapsed) : 0) + hintW;
   } else {
     // INPUT 态:● + 状态文字(无走时)
     lead = `${ui.accent}●${ui.reset} ${ui.dim}${status.status}${ui.reset}`;
