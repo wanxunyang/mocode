@@ -109,7 +109,7 @@ const zhCN = {
   'prompt.revertFiles': '撤销文件改动{detail}',
   'prompt.revertDetail': '（{count} 个文件恢复到回滚前）',
   'prompt.messagesOnly': '只撤销消息，保留文件改动',
-  'prompt.emptyPlaceholder': '输入消息，按 Enter 开始对话；输入 /help 查看命令…',
+  'prompt.emptyPlaceholder': '输入需求，按 Enter 开始干活；输入 /help 查看所有命令…',
   'prompt.confirmSendHint': '再按一次 Enter 发送 · 其它键继续编辑',
   'composer.title': '输入面板',
   'composer.pos': '{row}/{total} 行 · {col} 列 · {chars} 字',
