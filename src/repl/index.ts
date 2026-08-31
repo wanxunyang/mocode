@@ -40,7 +40,7 @@ import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { togglePet, killPetProcess, listSkins, setSkin, sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
-import { ui, setTheme, getTheme, listThemes, themeExists, applyTerminalBackground } from '../ui/theme.js';
+import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
 import { bannerString, bannerLines, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
@@ -122,6 +122,7 @@ import path from 'node:path';
 import { getSandboxRoot } from '../sandbox/root.js';
 
 import { setCurrentSessionId, getCurrentSessionId } from '../session/state.js';
+import { collectQueryHistory } from '../session/query-history.js';
 import {
   checkVersion,
   fetchLatestVersion,
@@ -588,7 +589,21 @@ let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user
 // 500ms 内 Ctrl+C / Esc → 整条用户气泡从内容区擦掉 + 原行 prefilled 回输入框(可改可再发);
 // 期间再按 Enter 立即推进 / 时间到自然推进 → 走原流程 enterRunningMode + runTurn。
 // attachmentsCount 记 pendingAttachments 当时长度——撤回时 attachments 保留(用户意图未变,只是改字)。
+// 短单行:500ms(不拖慢日常)。长文本:MOCODE_RECALL_MS,默认 2000ms —— 人发现"误发了"通常要 1-3 秒,
+// 500ms 根本来不及反应,只能事后 /rollback。
 const PENDING_RECALL_MS = 500;
+const PENDING_RECALL_LONG_MS = 2000;
+/** 长输入阈值:与 prompt.ts 的二次确认阈值保持一致(≥2 行 或 ≥120 码点)。 */
+const LONG_INPUT_CHARS = 120;
+
+/** 按输入长度决定撤回窗口:长 prompt 给更宽的补救时间,短单行仍走 500ms。 */
+function recallWindowMs(input: string[]): number {
+  const joined = input.join('\n');
+  const long = input.length >= 2 || [...joined].length >= LONG_INPUT_CHARS;
+  if (!long) return PENDING_RECALL_MS;
+  const env = Number(process.env.MOCODE_RECALL_MS);
+  return Number.isFinite(env) && env >= 0 ? env : PENDING_RECALL_LONG_MS;
+}
 let pendingRecall: {
   lines: string[];
   attachmentsCount: number;
@@ -815,15 +830,19 @@ function awaitPendingRecall(
         finalize(false);
         return;
       }
-      // 立即 commit
+      // 确认立即发送:Enter / Return
       if (key.name === 'enter' || key.name === 'return') {
         finalize(true);
         return;
       }
-      // 其他键忽略
+      // 其它任何键 → 撤回。
+      // 旧实现把非 Enter 键"忽略"掉:误按 Enter 后人的第一反应是狂敲键盘 / 按空格 / 按退格,
+      // 这一串输入被静默丢弃,白白错过补救窗口。撤回窗口期间输入框尚未接管键盘,
+      // 这些键本来也不会进输入框,吞掉它们没有任何收益 —— 全部当作撤回信号更有用。
+      finalize(false);
     };
     emitter.on('keypress', onPendingKey);
-    pendingTimer = setTimeout(() => finalize(true), PENDING_RECALL_MS);
+    pendingTimer = setTimeout(() => finalize(true), recallWindowMs(input));
     pendingTimer.unref?.();
   });
 }
@@ -1428,6 +1447,9 @@ export async function startRepl(
         prompt: PROMPT,
         commands: buildSlashCommands(),
         onCycleMode: cycleMode,
+        // Ctrl+R / Ctrl+P 历史搜索候选源:惰性工厂——当前会话内存 queryHistory + 最近落盘会话,
+        // 聚合要读盘,只有面板真正打开(Ctrl+R/P)才求值,平常轮次零开销
+        history: () => collectQueryHistory(queryHistory).map((e) => e.text),
         // /rollback 预填优先;否则上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
         ...(pendingPrefill
           ? { initialLines: pendingPrefill }
@@ -2022,7 +2044,6 @@ export async function startRepl(
       // 切:setTheme → 重算状态行(新色)→ 清内容重绘(历史 / 横幅,镜像启动 + /resume)→ 确认 → 持久化。
       // markdown MEMO 按 themeVersion 自动失效,故 renderHistory 取新色;状态栏 / 输入框由 continue 回 INPUT 态时读 getter 刷。
       setTheme(name);
-      applyTerminalBackground();
       refreshStatusBase(history);
       layout.clearContent();
       if (history.some((m) => m.role === 'user')) {

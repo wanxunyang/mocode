@@ -14,7 +14,7 @@ import {
   sliceByDisplayCol,
   visColToCharCol,
 } from './render.js';
-import { ui, applyTerminalBackground, resetTerminalBackground } from './theme.js';
+import { ui, resetTerminalBackground } from './theme.js';
 import * as content from './content.js';
 import * as mouse from './mouse.js';
 import { reset as resetBatches, shiftBatchesAfter, setMaxCols } from './batch.js';
@@ -1051,6 +1051,15 @@ export function setCursorChangeHandler(fn: ((line: number, col: number) => void)
   cursorChangeHandler = fn;
 }
 
+/** overlay 鼠标接管者(composer 输入面板等全屏弹窗)。非 null 时所有鼠标事件先喂给它,
+ *  返回 true = 已消费(不再走 layout 默认处理);弹窗自己消费全部事件,
+ *  防止背景选区/翻页触发 repaintViewport 重画覆盖弹窗。传 null 注销。 */
+let overlayMouseHandler: ((e: mouse.MouseEvent) => boolean) | null = null;
+
+export function setOverlayMouseHandler(fn: ((e: mouse.MouseEvent) => boolean) | null): void {
+  overlayMouseHandler = fn;
+}
+
 /** picker / 介入面板期间禁用鼠标选区与拖拽(避免 viewport 重画覆盖菜单);滚轮仍可用。面板退出后恢复。 */
 export function setMouseEnabled(v: boolean): void {
   mouseEnabled = v;
@@ -1305,6 +1314,7 @@ function inputScreenToInputPos(
  */
 function handleMouseEvent(e: mouse.MouseEvent): void {
   if (!active) return;
+  if (overlayMouseHandler && overlayMouseHandler(e)) return; // overlay(composer 等)先接管,消费即止
   if (e.type === 'wheel') {
     // 滚轮始终可用:面板/picker 期间也允许上下查看 agent 输出,
     // 与 onRunningKey 的 PgUp/PgDn 行为一致;mouseEnabled 仅管选区/拖拽。
@@ -2298,7 +2308,7 @@ export function enterAltScreen(): void {
   active = true;
   setMaxCols(getGeo().cols); // 同步 batch 展开行宽钳制,防超宽行 auto-wrap 打乱屏位
   stdout.write(esc.altOn);
-  applyTerminalBackground();
+  // 不动终端窗口背景:底色保持用户终端原色,主题只作用于我们画出的 SGR 颜色。
   stdout.write(esc.mouseOn); // 完整鼠标追踪(按下/拖动/释放/滚轮)→ mouse.swallow 重组 → handleMouseEvent
   mouse.setHandler(handleMouseEvent);
   // 进入 alt screen 前 base 可能已设了 planSummary;按当前 planSummary 重算 planRows,
@@ -2408,6 +2418,19 @@ export function exitAltScreen(): void {
     flushTimer = null;
   }
   userActiveUntil = 0;
+}
+
+/**
+ * 直写终端(绕过 content buffer):仅限弹窗类覆盖层(输入面板)使用——
+ * 它画在 content 区之上,关闭后由调用方 repaintViewport() 整幅还原。
+ * 不做行宽钳制:调用方自己保证每行 ≤ cols(弹窗几何已按 getGeo() 计)。
+ */
+export function writeDirect(s: string): void {
+  try {
+    stdout.write(s);
+  } catch {
+    // 忽略
+  }
 }
 
 export function isActive(): boolean {
