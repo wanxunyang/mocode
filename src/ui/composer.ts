@@ -500,9 +500,13 @@ export async function promptComposer(opts: ComposerOpts = {}): Promise<ComposerR
       buf += `${ui.accent}│${ui.reset}${renderRow(r, s, innerW)}${ui.accent}│${ui.reset}`;
     }
 
-    // 提示行
+    // 提示行(居中:截断后左右平分补空格,余数列归左)
+    const hintText = truncateDisplay(t('composer.hint'), innerW);
+    const hintW = displayWidth(hintText);
+    const padL = Math.floor((innerW - hintW) / 2);
+    const padR = Math.max(0, innerW - hintW - padL);
     buf += CUP(hintRow, left);
-    buf += `${ui.accent}├${ui.reset}${ui.dim}${padEndAnsi(truncateDisplay(t('composer.hint'), innerW), innerW)}${ui.reset}${ui.accent}┤${ui.reset}`;
+    buf += `${ui.accent}├${ui.reset}${ui.dim}${' '.repeat(padL)}${hintText}${' '.repeat(padR)}${ui.reset}${ui.accent}┤${ui.reset}`;
 
     // 底边框
     buf += CUP(boxBottom, left);
