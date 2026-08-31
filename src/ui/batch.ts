@@ -32,6 +32,9 @@ export interface BatchEntry {
   /** 结果已回填。不能只看 resultSummary 是否非空——sub-agent 等工具的 preview 可能为空串,
    *  那样摘要行会永远停在 ◇「正在探索」(用户实测:子 agent 跑完主侧菱形不变实心圆)。 */
   done?: boolean;
+  /** 该 entry 明细行上次渲染时的结果摘要指纹(运行态原位刷新用):
+   *  结果晚于渲染到达时,据此判定需 contentReplaceLine 更新明细行,避免展开视图停留在「无结果」。 */
+  renderedDigest?: string;
 }
 
 /** entry 是否已拿到结果。历史回放构造的 entry 无 done 字段,退化按内容判定。 */
@@ -348,14 +351,22 @@ function buildEntryDetailLines(e: BatchEntry, indent = '      '): string[] {
   return lines;
 }
 
+/** entry 第一层明细行的结果指纹:结果/失败态/diff 有变时指纹变,驱动运行态原位刷新。 */
+function entryLineDigest(e: BatchEntry): string {
+  return `${e.resultSummary}\u0001${e.diffBlock ? '1' : '0'}\u0001${e.failed ? '1' : '0'}`;
+}
+
+/** 单条第一层明细行。isLast 决定分支符(└─/├─);结果回填原位替换时也要用对分支符。 */
+function buildEntryLine(e: BatchEntry, index: number, isLast: boolean, extraIndent = ''): string {
+  const result = e.resultSummary ? `  ${ui.gray}↳ ${e.resultSummary}${ui.reset}` : '';
+  const branch = isLast ? '└─' : '├─';
+  const failure = e.failed ? `${ui.red}×${ui.reset} ` : '';
+  return sanitizeRow(`${extraIndent}    ${ui.dim}${branch}${ui.reset} ${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`);
+}
+
 /** 第一层只展示有哪些调用及其简短结果，不展开完整输出。extraIndent 供子批嵌套加深缩进。 */
 function buildExpandedLines(entries: BatchEntry[], extraIndent = ''): string[] {
-  return entries.map((e, index) => {
-    const result = e.resultSummary ? `  ${ui.gray}↳ ${e.resultSummary}${ui.reset}` : '';
-    const branch = index === entries.length - 1 ? '└─' : '├─';
-    const failure = e.failed ? `${ui.red}×${ui.reset} ` : '';
-    return sanitizeRow(`${extraIndent}    ${ui.dim}${branch}${ui.reset} ${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`);
-  });
+  return entries.map((e, index) => buildEntryLine(e, index, index === entries.length - 1, extraIndent));
 }
 
 function entryDetailIndent(entries: BatchEntry[], index: number): string {
@@ -377,7 +388,8 @@ export function endBatch(
   b.finishedAt ??= Date.now();
   if (b.summaryAbsIdx >= 0) {
     layout.contentReplaceLine?.(b.summaryAbsIdx, buildSummaryLine(b));
-    // 执行阶段只展示实时摘要；到 endBatch 才开放点击，避免未完成 batch 的第一层列表失步。
+    // 点击命中在 showLiveBatch 首次落盘时即已登记(运行态可展开);这里幂等重登,
+    // 并把摘要行刷成最终完成态文案。
     absLineToBatchId.set(b.summaryAbsIdx, b.id);
     return;
   }
@@ -405,7 +417,9 @@ export function endBatch(
 }
 
 /**
- * 工具执行中立即显示/刷新摘要，但暂不登记点击命中；endBatch 收尾后才开放两层展开。
+ * 工具执行中立即显示/刷新摘要,并登记点击命中——运行态即可展开/折叠(此前只在
+ * endBatch 收尾后开放,导致「连续无正文的工具链」在整轮结束前无法展开,用户报告痛点)。
+ * 展开态下由 syncLiveExpanded 保持明细视图与新 entry/结果同步。
  */
 export function showLiveBatch(
   id: string,
@@ -451,10 +465,12 @@ export function showLiveBatch(
       }
       layout.contentInsertAfter(anchor, [sanitizeRow(summary)], false);
       b.summaryAbsIdx = anchor + 1;
+      absLineToBatchId.set(b.summaryAbsIdx, b.id); // 运行态同样开放点击(endBatch 幂等重登)
       return;
     }
     layout.contentWrite(summary + '\n');
     b.summaryAbsIdx = Math.max(0, layout.totalRows() - 2);
+    absLineToBatchId.set(b.summaryAbsIdx, b.id); // 运行态同样开放点击
     // 首条摘要通过增量 contentWrite 落屏时，markdown→普通内容的边界可能只更新了
     // buffer/续写位；直到第二个 header 的 contentReplaceLine 或后续正文重绘才完全可见。
     // 立即按 buffer 原子重画，确保慢工具执行期间摘要前的空行已经显示。
@@ -466,6 +482,34 @@ export function showLiveBatch(
     }
   } else {
     layout.contentReplaceLine(b.summaryAbsIdx, summary);
+  }
+  // 展开态的运行态同步:已渲染 entry 的结果回填原位替换 + 新 entry 追加。
+  syncLiveExpanded(b, layout);
+}
+
+/** 展开态 batch 的运行态同步(每次 showLiveBatch 后调):不展开/未落盘时 no-op。 */
+function syncLiveExpanded(
+  b: BatchRecord,
+  layout: {
+    contentReplaceLine(absIdx: number, line: string): void;
+    contentInsertAfter?(after: number, lines: string[], keepViewport?: boolean): void;
+  },
+): void {
+  if (!expandedBatches.has(b.id) || b.summaryAbsIdx < 0) return;
+  // ① 已渲染 entry 的结果晚于渲染到达 → 原位替换该明细行(否则展开视图永远停在「无结果」)。
+  for (let i = 0; i < b.renderedCount && i < b.entries.length; i++) {
+    const e = b.entries[i];
+    const digest = entryLineDigest(e);
+    if (e.renderedDigest === digest) continue;
+    const abs = findParentEntryAbsLine(b.id, i);
+    if (abs == null) continue;
+    layout.contentReplaceLine(abs, buildEntryLine(e, i, i === b.entries.length - 1, b.indent ?? ''));
+    e.renderedDigest = digest;
+  }
+  // ② 新 entry(运行态 recordCall 后)追加到明细区末尾。
+  const ins = layout.contentInsertAfter;
+  if (ins && b.entries.length > b.renderedCount) {
+    refreshBatchExpanded(b.id, { contentInsertAfter: ins });
   }
 }
 
@@ -511,11 +555,23 @@ export function refreshBatchExpanded(
   // 实时追加:不锚定视口,让新明细行自然出现在屏底。
   // 组容器批的 entry 与子批摘要行交错,新 entry 必须插在当前块末尾,
   // 不能简单用 summaryAbsIdx+renderedCount(否则 entry 会插到前一个子批摘要行之前)。
+  // 块末还必须计入已渲染 entry 的二层展开明细行(toggleEntry 把明细插在 entry 行下方,
+  // 会把后续 entry 行整体下移;运行态可交互后这条路径高频,漏算会插错位)。
   let anchor = b.summaryAbsIdx + b.renderedCount;
+  for (const j of b.expandedEntries) {
+    if (j < b.renderedCount) {
+      anchor += buildEntryDetailLines(b.entries[j], entryDetailIndent(b.entries, j)).length;
+    }
+  }
   if (b.groupParent) {
-    let maxIdx = b.summaryAbsIdx;
+    let maxIdx = anchor;
     for (const [idx, target] of absLineToEntry) {
-      if (target.batchId === b.id && idx > maxIdx) maxIdx = idx;
+      if (target.batchId !== b.id) continue;
+      // entry 行自身(含其二层明细)的块末位置
+      const end = b.expandedEntries.has(target.entryIndex)
+        ? idx + buildEntryDetailLines(b.entries[target.entryIndex], entryDetailIndent(b.entries, target.entryIndex)).length
+        : idx;
+      if (end > maxIdx) maxIdx = end;
     }
     for (const child of batches.values()) {
       if (child.parentId === b.id && child.summaryAbsIdx >= 0) {
@@ -535,6 +591,7 @@ export function refreshBatchExpanded(
   // 登记新增明细行的点击命中(按实际插入位置)
   for (let i = 0; i < newEntries.length; i++) {
     absLineToEntry.set(anchor + 1 + i, { batchId: b.id, entryIndex: b.renderedCount + i });
+    newEntries[i].renderedDigest = entryLineDigest(newEntries[i]);
   }
   b.renderedCount = b.entries.length;
 }
@@ -576,6 +633,7 @@ function expand(
   b.renderedCount = b.entries.length;
   for (let i = 0; i < b.entries.length; i++) {
     absLineToEntry.set(b.summaryAbsIdx + 1 + i, { batchId: b.id, entryIndex: i });
+    b.entries[i].renderedDigest = entryLineDigest(b.entries[i]); // 记指纹,供运行态结果回填原位刷新
   }
   // 组容器批展开时:把之前被折叠隐藏的子批摘要行重新插回对应 entry 下方,
   // 否则子批摘要行会留在父批摘要行之后、造成明细重复/错位。
@@ -618,6 +676,7 @@ export function expandSingleEntryFully(
   layout.contentWrite('\n');
   expandedBatches.add(id);
   b.expandedEntries.add(0);
+  b.entries[0].renderedDigest = entryLineDigest(b.entries[0]);
   absLineToEntry.set(b.summaryAbsIdx + 1, { batchId: id, entryIndex: 0 });
 }
 

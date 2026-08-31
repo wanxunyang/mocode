@@ -6,6 +6,8 @@ import { displayWidth, padEndDisplay, truncateDisplay, visColToCharCol, wrapByDi
 import * as layout from './layout.js';
 import * as mouse from './mouse.js';
 import { t } from '../i18n/index.js';
+import { promptComposer } from './composer.js';
+import { promptHistorySearch } from './history-picker.js';
 
 export interface SlashCommand {
   /** 当前菜单层显示的名称。根节点通常以 / 开头，子节点使用相对名称。 */
@@ -40,6 +42,11 @@ export interface PromptOpts {
   commands: SlashCommand[];
   /** 预填初始行(运行中 typeahead 缓冲 → 下一轮 INPUT 态预填);光标置末行末尾。 */
   initialLines?: string[];
+  /**
+   * 历史 query 候选(最近在前),供 Ctrl+R / Ctrl+P 模糊搜索面板用;不传则不启用该面板。
+   * 可传数组,也可传工厂函数(惰性求值)——跨会话聚合要扫盘,仅在面板真正打开时才调。
+   */
+  history?: readonly string[] | (() => readonly string[]);
   /** Shift+Tab 循环切换 agent 模式(auto ↔ plan)的回调;repl 注入(翻 agentMode + 重写 history[0] + 设状态行 modeTag)。回调后 prompt 自调 redraw() 刷新底栏。 */
   onCycleMode?: () => void;
 }
@@ -51,6 +58,16 @@ interface KeypressEmitter {
     event: 'keypress',
     listener: (str: string, key: Key) => void
   ): this;
+}
+
+// ── 二次确认发送(MOCODE_CONFIRM_SEND=long 时启用,默认关)──
+// 长 prompt 首次 Enter 只武装,窗口内再按一次才真发。默认 opt-in:新交互默认不打扰既有习惯。
+const CONFIRM_SEND_MS = 2000;
+const LONG_INPUT_CHARS = 120;
+
+/** 二次确认模式:only 'long' 会启用(长/多行输入需按两次 Enter)。每次读 env,便于运行期改配置生效。 */
+function confirmSendMode(): 'never' | 'long' {
+  return process.env.MOCODE_CONFIRM_SEND === 'long' ? 'long' : 'never';
 }
 
 // ── 粘贴检测(块级 + 时间窗)──
@@ -143,6 +160,8 @@ export async function promptWithSlashMenu(
     curSeg: number;
     curOff: number;
   } | null = null;
+  /** 二次确认武装截止时刻(绝对 ms);0=未武装。见 submit() 与 MOCODE_CONFIRM_SEND。 */
+  let confirmArmedUntil = 0;
   let resolved = false;
   let resolve!: (v: string[] | null) => void;
   let reject!: (e: Error) => void;
@@ -384,12 +403,21 @@ export async function promptWithSlashMenu(
     // 空输入引导:缓冲为空时输入框内画 dim ghost 占位(含 /help 提示),让用户知道怎么开始;
     // 一旦有输入(打字/粘贴/补全)isEmpty 变 false,下一帧占位即消失。
     const isEmpty = segs.length === 1 && !segs[0].frozen && segs[0].text === '';
+    // 二次确认已武装:把提示画成菜单行(向上展开进内容区底,输入框上方),黄色 + 图标。
+    // 不复用 placeholder —— layout 只在输入行为空时画 placeholder,而武装态必然有内容。
+    const armed = confirmArmedUntil > Date.now();
+    const menu = menuLines();
+    const menuView = menu.length
+      ? { lines: menu }
+      : armed
+        ? { lines: [`${ui.yellow}${t('prompt.confirmSendHint')}${ui.reset}`] }
+        : null;
     layout.paintInput({
       prompt: opts.prompt,
       lines,
       cursorLine: cur.line,
       cursorCol: cur.col,
-      menu: menuLines().length ? { lines: menuLines() } : null,
+      menu: menuView,
       placeholder: isEmpty ? t('prompt.emptyPlaceholder') : undefined,
     });
   }
@@ -509,11 +537,28 @@ export async function promptWithSlashMenu(
   }
 
   /** 提交:菜单打开时先应用选中项;分支进入子菜单,需要参数的叶子只补全。
-   *  段序列直接按原文(可编辑段原文 + 粘贴块原文)拼接——所见即所得,不再额外插换行。 */
+   *  段序列直接按原文(可编辑段原文 + 粘贴块原文)拼接——所见即所得,不再额外插换行。
+   *
+   *  二次确认(MOCODE_CONFIRM_SEND=long,默认关):长/多行输入首次 Enter 只"武装"并显示提示行,
+   *  CONFIRM_SEND_MS 内再按一次 Enter 才真发;任何其它键都会解除武装(见 onKey 顶部)——
+   *  误触一次 Enter 发不出去,而正常发送只是多敲一下。 */
   function submit(): void {
     if (menuOpen && !applySelected(true)) return;
     const content = segs.map((s) => s.text).join('');
+    const now = Date.now();
+    if (confirmSendMode() === 'long' && isLongInput(content) && now > confirmArmedUntil) {
+      confirmArmedUntil = now + CONFIRM_SEND_MS;
+      redraw();
+      return;
+    }
+    confirmArmedUntil = 0;
     finish(content === '' ? [''] : content.split('\n'));
+  }
+
+  /** 长输入判定:≥2 行 或 ≥120 码点(单行短消息不触发二次确认,免得打扰日常)。 */
+  function isLongInput(text: string): boolean {
+    if (text.indexOf('\n') >= 0) return true;
+    return [...text].length >= LONG_INPUT_CHARS;
   }
 
   /** 插换行:在光标处断行(落进当前可编辑段)。 */
@@ -617,6 +662,16 @@ export async function promptWithSlashMenu(
     // layout.handleMouseEvent(滚轮/框选/复制全在那处理);此处只需吞掉 fragment 不进 pasteParts/输入框。
     if (mouse.swallow(key.sequence ?? '')) return;
 
+    // 二次确认已武装:任何非「提交键」都解除武装(继续编辑 / 换行 / 删除都算放弃这次提交)。
+    if (confirmArmedUntil) {
+      const isSubmitKey =
+        (key.name === 'return' || key.name === 'enter') && !key.shift && !key.meta && !key.ctrl;
+      if (!isSubmitKey) {
+        confirmArmedUntil = 0;
+        redraw();
+      }
+    }
+
     // Shift+Tab:循环切换 agent 模式(auto ↔ plan)。不插字符、不提交、不影响输入文本;
     // 回调由 repl 注入(翻 agentMode + 重写 history[0] + 设状态行 modeTag),再 redraw() 经
     // paintInput 重画底栏(状态行 chip 即时刷新 + 光标留输入框)。置于 case 'tab' 之前,故不触发菜单补全。
@@ -646,7 +701,9 @@ export async function promptWithSlashMenu(
         return;
       }
       justSawCR = false;
-      if (s && s >= ' ' && !key.ctrl && !key.meta) pasteParts.push(s);
+      // FEFF(BOM 字符)过滤:其他应用写入剪贴板的正文可能带 BOM,终端级粘贴逐字符灌入时
+      // 会敲进输入框(charWidth 按 1 列算但终端渲染成缺字形方块)
+      if (s && s >= ' ' && s !== '\uFEFF' && !key.ctrl && !key.meta) pasteParts.push(s);
       return;
     }
 
@@ -702,6 +759,18 @@ export async function promptWithSlashMenu(
     }
     if (key.ctrl && key.name === 'k') {
       deleteToLineEnd();
+      return;
+    }
+
+    // Ctrl+G:打开输入面板弹窗(记事本式编辑,Enter=换行不发送;确认只填回不发送)。
+    if (key.ctrl && key.name === 'g') {
+      void openComposer();
+      return;
+    }
+    // Ctrl+R / Ctrl+P:历史模糊搜索。Ctrl+R 对齐 bash 反向搜索语义,Ctrl+P 对齐 previous-history 语义,
+    // 两者是同一个面板——记住哪个都行。
+    if (key.ctrl && (key.name === 'r' || key.name === 'p')) {
+      void openHistorySearch();
       return;
     }
 
@@ -879,9 +948,79 @@ export async function promptWithSlashMenu(
     }
   }
 
+  /**
+   * Ctrl+G:打开 TUI 内「输入面板」弹窗(记事本式多行编辑,**不外调 $EDITOR**)。
+   * 弹窗里 Enter 就是换行,不会再触发发送;确认(Ctrl+S)只把内容填回输入框,不自动发送。
+   * 期间必须摘掉主 keypress 监听:弹窗关闭后终端可能残留按键事件,不摘会被当成输入吞掉。
+   */
+  async function openComposer(): Promise<void> {
+    if (resolved) return;
+    const before = segs.map((s) => s.text).join('');
+    emitter.removeListener('keypress', onKey);
+    let result: { text: string | null };
+    try {
+      result = await promptComposer({ initialText: before });
+    } finally {
+      emitter.on('keypress', onKey);
+      stdin.resume();
+      // 弹窗是直写覆盖层,关闭后整幅重画还原 content 区
+      layout.repaintViewport();
+    }
+    if (resolved) return; // 极端路径:弹窗期间被 finish
+    if (result.text != null && result.text !== before) {
+      undoSnapshot = { segs: segs.map((s) => ({ ...s })), curSeg, curOff }; // Ctrl+Z 可还原回弹窗前
+      segs = [{ frozen: false, text: result.text }];
+      curSeg = 0;
+      curOff = segs[0].text.length;
+    }
+    computeFiltered();
+    redraw();
+  }
+
+  /**
+   * Ctrl+R / Ctrl+P:历史模糊搜索面板。
+   * Enter 只把选中项**填回输入框**(安全网:找回来的长 prompt 通常还要改),Ctrl+Enter 才直接发送。
+   */
+  async function openHistorySearch(): Promise<void> {
+    if (resolved || !opts.history) return;
+    // 惰性求值:跨会话聚合要读盘,只在面板真正打开时做
+    const historyItems = typeof opts.history === 'function' ? opts.history() : opts.history;
+    if (historyItems.length === 0) return;
+    const before = segs.map((s) => s.text).join('');
+    emitter.removeListener('keypress', onKey);
+    let picked: { text: string; send: boolean } | null = null;
+    try {
+      picked = await promptHistorySearch({ items: historyItems, initialQuery: before });
+    } finally {
+      emitter.on('keypress', onKey);
+      stdin.resume();
+    }
+    if (resolved) return;
+    if (picked) {
+      segs = [{ frozen: false, text: picked.text }];
+      curSeg = 0;
+      curOff = segs[0].text.length;
+      computeFiltered();
+      if (picked.send) {
+        submit();
+        return;
+      }
+    }
+    redraw();
+  }
+
   return new Promise<string[] | null>((res, rej) => {
     resolve = res;
     reject = rej;
+    // 清掉上一轮可能残留的粘贴状态:子面板(历史搜索)不装 paste sink,粘贴的字会逐字符进它的输入框,
+    // 但共享的 pasteParts 不会有人消费 —— 残留会让 Ctrl+C 的"有内容"判定误判。
+    if (pasteTimer) {
+      clearTimeout(pasteTimer);
+      pasteTimer = null;
+    }
+    pasting = false;
+    pasteParts = [];
+    justSawCR = false;
     ensurePasteDetector(); // 首次调用在 emitKeypressEvents 之前装 data 监听器(保序:mine 先于 解析器)
     onPasteEnd = finalizePaste; // 粘贴结束回调:落 chip 或保留文本
     readline.emitKeypressEvents(stdin);

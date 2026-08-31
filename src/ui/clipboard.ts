@@ -7,8 +7,9 @@ import { spawn } from 'node:child_process';
  * 写入(copyToClipboard):选区复制(layout 鼠标选择)与 /copy 等命令共用,双通道:
  *  1. OSC 52(`\x1B]52;c;<base64>\x07`):请求终端把文本写入系统剪贴板。经终端转发,SSH / 远程也生效;
  *     Windows Terminal ≥1.16、iTerm2、kitty、WezTerm 等支持(部分终端默认关,需开"允许应用访问剪贴板")。
- *  2. 本地原生工具(best-effort,失败静默):win32=clip.exe(UTF-16LE)、darwin=pbcopy、
- *     linux=wl-copy / xclip / xsel。覆盖 OSC52 被禁用的场景(如部分 VS Code 集成终端配置)。
+ *  2. 本地原生工具(best-effort,失败静默):win32=PowerShell Set-Clipboard(stdin 显式 Unicode 编码,
+ *     保证剪贴板正文无 BOM/杂字符——clip.exe 会把 BOM 字符 U+FEFF 留进正文,终端级粘贴会把它敲进输入框)、
+ *     darwin=pbcopy、linux=wl-copy / xclip / xsel。覆盖 OSC52 被禁用的场景(如部分 VS Code 集成终端配置)。
  * 两条都发:哪条生效由环境决定,重复写同一内容无副作用。
  *
  * 读取(readClipboard):OSC 52 是单向的(终端不会把剪贴板内容回传给应用,即便发 `\x1B]52;c;?\x07`
@@ -43,9 +44,26 @@ function pipeTo(cmd: string, args: string[], buf: Buffer): void {
 /** 本地原生剪贴板(best-effort)。 */
 function nativeCopy(text: string): void {
   if (platform === 'win32') {
-    // clip.exe 在 Win10+ 接受 UTF-16LE 字节(无 BOM),可正确处理中文/emoji;
-    // 直接管 UTF-8 会按控制台代码页解码致乱码,故用 utf16le。
-    pipeTo('clip', [], Buffer.from(text, 'utf16le'));
+    // 不走 clip.exe 直写:BOM-less UTF-16LE 会被按控制台代码页(GBK)解码成乱码,
+    // 而 BOM 版虽能正确解码,clip.exe 却会把 BOM 字符(U+FEFF)留进剪贴板正文——
+    // 终端级粘贴(Ctrl+V 由终端直接灌键盘输入)绕过 readClipboard 的 FEFF 剥离,
+    // FEFF 会敲进输入框渲染成缺字形方块。故改走 PowerShell stdin:显式 Unicode
+    // 输入编码,无 BOM、无杂字符;PowerShell 拉不起(spawn error)才兜底 clip.exe+BOM。
+    const buf = Buffer.from(text, 'utf16le');
+    const bom = Buffer.from([0xff, 0xfe]);
+    try {
+      const p = spawn(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-Command',
+          '[Console]::InputEncoding=[System.Text.Encoding]::Unicode; Set-Clipboard -Value ([Console]::In.ReadToEnd())'],
+        { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true }
+      );
+      p.on('error', () => pipeTo('clip', [], Buffer.concat([bom, buf]))); // 无 PowerShell:退 clip.exe(乱码/FEFF 风险自负,OSC52 兜底)
+      p.stdin.on('error', () => {});
+      p.stdin.end(buf);
+    } catch {
+      pipeTo('clip', [], Buffer.concat([bom, buf]));
+    }
   } else if (platform === 'darwin') {
     pipeTo('pbcopy', [], Buffer.from(text, 'utf8'));
   } else {
@@ -104,7 +122,10 @@ export async function readClipboard(): Promise<string> {
         '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Clipboard -Raw'],
       'utf8'
     );
-    return out?.replace(/\r\n/g, '\n').replace(/\r$/, '') ?? '';
+    // 末尾 strip 一个 \n:PowerShell 把字符串写到 stdout 时会追加行终止符(实验证实
+    // clipboard=abc 时读回 abc\r\n),属输出伪影而非剪贴板内容;真以换行结尾的剪贴板
+    // 内容多出的一个 \n 恰好被抵消,不受影响。
+    return out?.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r$/, '').replace(/\n$/, '') ?? '';
   }
   if (platform === 'darwin') {
     return (await captureOutput('pbpaste', [], 'utf8')) ?? '';
