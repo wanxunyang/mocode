@@ -113,7 +113,7 @@ const zhCN = {
   'prompt.confirmSendHint': '再按一次 Enter 发送 · 其它键继续编辑',
   'composer.title': '输入面板',
   'composer.pos': '{row}/{total} 行 · {col} 列 · {chars} 字',
-  'composer.hint': 'Enter 换行 · Ctrl+S 回填 · Esc 取消 · Ctrl+Z 撤销 · Ctrl+C/X/V 复制/剪切/粘贴 · Ctrl+A 全选',
+  'composer.hint': 'Enter 换行 · Ctrl+S 回填 · Esc 取消 · Ctrl+Z 撤销 · Ctrl+C/X/V 复制/剪切/粘贴 · Ctrl+A 全选 · Shift+方向键 选择',
   'history.hint': '输入过滤 · ↑↓ 选择 · Enter 填入输入框 · Ctrl+Enter 直接发送 · Esc 取消',
   'history.empty': '（无匹配的历史输入）',
   'welcome.gettingStarted': '快速上手',
