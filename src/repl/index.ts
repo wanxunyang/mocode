@@ -1064,6 +1064,8 @@ export async function startRepl(
    */
   const welcomeLines = (): string[] => [
     '',
+    `  ${ui.yellow}${ui.bold}⚠ ${t('welcome.ideNotice')}${ui.reset}`,
+    '',
     `  ${ui.accent}${ui.bold}${t('welcome.gettingStarted')}${ui.reset}`,
     `  ${ui.dim}· ${t('welcome.start1')}${ui.reset}`,
     `  ${ui.dim}· ${t('welcome.start2')}${ui.reset}`,
