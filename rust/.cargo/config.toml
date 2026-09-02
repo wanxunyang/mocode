@@ -1,0 +1,9 @@
+# 本机既没有 MSVC 也没有 MinGW 的链接器(gcc)。
+# 解法:让 rustc 用工具链自带的 rust-lld + mingw import libs —— gnu toolchain
+# 本身是 self-contained 的,纯 Rust 依赖(本项目全是)不需要外部 gcc。
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-self-contained=yes"]
+
+# 官方 sparse index 在本机实测最快(0.33s,比 rsproxy/ustc 都快),不替换镜像源。
+[registries.crates-io]
+protocol = "sparse"

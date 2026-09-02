@@ -36,7 +36,6 @@ coverage/
 
 # Rust 增量重构实验区(路径 A:Rust TUI 前端,经 JSON-over-stdio 复用现有 TS agent-host)。
 # 独立于 TS 主工程、不入库,便于随时丢弃重来;成熟后再考虑提升为正式产物。
-/rust/
 /rust/target/
 
 # 编辑器与 OS 产物
