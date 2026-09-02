@@ -1062,23 +1062,30 @@ export async function startRepl(
    * 首次提交任何输入(消息或斜杠命令)前由 layout.dismissWelcomeBlock 整块撤掉——
    * 「一打开就能看见,开始干活就消失」。/clear 清空后重新写一次(回到空会话状态)。
    */
-  const welcomeLines = (): string[] => [
-    '',
-    `  ${ui.yellow}${ui.bold}⚠ ${t('welcome.ideNotice')}${ui.reset}`,
-    '',
-    `  ${ui.accent}${ui.bold}${t('welcome.gettingStarted')}${ui.reset}`,
-    `  ${ui.dim}· ${t('welcome.start1')}${ui.reset}`,
-    `  ${ui.dim}· ${t('welcome.start2')}${ui.reset}`,
-    `  ${ui.dim}· ${t('welcome.start3')}${ui.reset}`,
-    '',
-    `  ${ui.accent}${ui.bold}${t('welcome.capabilities')}${ui.reset}`,
-    `  ${ui.dim}· ${t('welcome.cap1')}${ui.reset}`,
-    `  ${ui.dim}· ${t('welcome.cap2')}${ui.reset}`,
-    `  ${ui.dim}· ${t('welcome.cap3')}${ui.reset}`,
-    '',
-    `  ${ui.dim}${t('welcome.try')}${ui.reset}`,
-    '',
-  ];
+  // 欢迎块整块按终端宽度居中:先按纯文本(displayWidth 不剥 ANSI)算左缩进,再套色;
+  // 余数列归左,与输入框提示行的居中策略一致;超宽行由 contentWrite 兜底折行。
+  const welcomeLines = (): string[] => {
+    const cols = layout.getGeo().cols;
+    const pad = (plain: string): string => ' '.repeat(Math.max(0, Math.floor((cols - displayWidth(plain)) / 2)));
+    const ideNotice = `⚠ ${t('welcome.ideNotice')}`;
+    return [
+      '',
+      `${pad(ideNotice)}${ui.yellow}${ui.bold}${ideNotice}${ui.reset}`,
+      '',
+      `${pad(t('welcome.gettingStarted'))}${ui.accent}${ui.bold}${t('welcome.gettingStarted')}${ui.reset}`,
+      `${pad(`· ${t('welcome.start1')}`)}${ui.dim}· ${t('welcome.start1')}${ui.reset}`,
+      `${pad(`· ${t('welcome.start2')}`)}${ui.dim}· ${t('welcome.start2')}${ui.reset}`,
+      `${pad(`· ${t('welcome.start3')}`)}${ui.dim}· ${t('welcome.start3')}${ui.reset}`,
+      '',
+      `${pad(t('welcome.capabilities'))}${ui.accent}${ui.bold}${t('welcome.capabilities')}${ui.reset}`,
+      `${pad(`· ${t('welcome.cap1')}`)}${ui.dim}· ${t('welcome.cap1')}${ui.reset}`,
+      `${pad(`· ${t('welcome.cap2')}`)}${ui.dim}· ${t('welcome.cap2')}${ui.reset}`,
+      `${pad(`· ${t('welcome.cap3')}`)}${ui.dim}· ${t('welcome.cap3')}${ui.reset}`,
+      '',
+      `${pad(t('welcome.try'))}${ui.dim}${t('welcome.try')}${ui.reset}`,
+      '',
+    ];
+  };
 
   // 开场:按 config.theme 切主题(横幅 / 状态行 / 后续渲染皆用新色),再进 alt screen + 状态基线 + 清内容区。
   // --resume 有历史则渲染对话,否则横幅。
