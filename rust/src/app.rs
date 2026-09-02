@@ -296,6 +296,9 @@ pub struct App {
     pub stick_to_bottom: bool,
     /// 上一帧内容区矩形 —— 鼠标点击换算成内容行需要它。由 `ui::draw` 回填。
     pub content_area: Option<Rect>,
+    /// 内容视口前置的非交互行数（当前为随内容滚动的 banner）。
+    /// 鼠标点击换算到 entries 的 RowTag 时须跳过这些行。
+    pub content_prefix_lines: usize,
 
     pub status: RunStatus,
     /// 当前正在执行的工具名(状态栏显示)。
@@ -357,6 +360,7 @@ impl App {
             scroll: 0,
             stick_to_bottom: true,
             content_area: None,
+            content_prefix_lines: 0,
             status: RunStatus::Idle,
             active_tool: None,
             spinner_tick: 0,
@@ -2001,8 +2005,13 @@ impl App {
             return false;
         };
         let width = area.width as usize;
-        let row = self.scroll + view_row;
-        let tag = self.content(width).tags.get(row).copied().unwrap_or(RowTag::Plain);
+        let content_row = (self.scroll + view_row).saturating_sub(self.content_prefix_lines);
+        let tag = self
+            .content(width)
+            .tags
+            .get(content_row)
+            .copied()
+            .unwrap_or(RowTag::Plain);
         match tag {
             RowTag::BatchSummary(idx) => {
                 if let Some(Entry::ToolBatch(b)) = self.entries.get_mut(idx) {
@@ -2130,7 +2139,11 @@ impl App {
                     if text.lines().count() == 0 {
                         out.push((Row::bubble(Line::from("❯ ")), RowTag::Plain));
                     }
-                    out.push((Row::plain(Line::from("")), RowTag::Plain));
+                    // submit() 已在用户消息后加入 Blank；只有没有显式分隔时才补一行，
+                    // 避免用户消息与 assistant 正文之间出现两条空行。
+                    if !matches!(self.entries.get(idx + 1), Some(Entry::Blank)) {
+                        out.push((Row::plain(Line::from("")), RowTag::Plain));
+                    }
                 }
                 Entry::Assistant { text } => {
                     // 正文走 markdown 渲染(标题/代码块/列表/行内样式着色)。

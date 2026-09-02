@@ -346,31 +346,91 @@ function buildEntryDetailLines(e: BatchEntry, indent = '      '): string[] {
         lines.push(sanitizeRow(`${indent}${ui.dim}… (${rawLines.length - MAX_EXPAND_LINES} more lines)${ui.reset}`));
       }
   } else if (e.resultSummary) {
-    lines.push(sanitizeRow(`${indent}${ui.gray}↳ ${e.resultSummary}${ui.reset}`));
+    // 用 · 而非 ↳:entry 行尾已内联同一串,详情区再画一遍箭头会被读成「又一条子结果」;
+    // · 只表达「这是结论文本」,与 diff 块、fullOutput 原始输出行在视觉上分属三档。
+    lines.push(sanitizeRow(`${indent}${ui.dim}${DETAIL_RESULT_MARK}${ui.reset}${ui.gray}${e.resultSummary}${ui.reset}`));
   }
   return lines;
 }
 
-/** entry 第一层明细行的结果指纹:结果/失败态/diff 有变时指纹变,驱动运行态原位刷新。 */
+/**
+ * entry 第一层明细行的渲染指纹:指纹变则原位重画该行(驱动运行态结果回填)。
+ * 纳入 fullOutput **有无**(而非内容):hasEntryDetail 看它来决定画不画三角——
+ * 缺了它,「调用时无结果(空白占位)→ 结果回填」这一步不会重画,三角永远不出现。
+ * 只取有无不取内容:完整输出可能上万字符,拼进指纹是浪费,且其内容不影响 entry 行渲染。
+ */
 function entryLineDigest(e: BatchEntry): string {
-  return `${e.resultSummary}\u0001${e.diffBlock ? '1' : '0'}\u0001${e.failed ? '1' : '0'}`;
+  return `${e.resultSummary}\u0001${e.diffBlock ? '1' : '0'}\u0001${e.fullOutput ? '1' : '0'}\u0001${e.failed ? '1' : '0'}`;
 }
 
-/** 单条第一层明细行。isLast 决定分支符(└─/├─);结果回填原位替换时也要用对分支符。 */
-function buildEntryLine(e: BatchEntry, index: number, isLast: boolean, extraIndent = ''): string {
+/**
+ * 第二层展开三角:折叠 ▸ / 展开 ▾。替代原先的 ├─ / └─。
+ *
+ * 根因是**字体实现差异,不是 Unicode 分类差异**——两者 East Asian Width 同为
+ * Ambiguous(U+2500–257F Box Drawing 与 U+25A0–25FF Geometric Shapes 整块都是 A):
+ *  `render.ts: charWidth()` 对 Ambiguous 一律按 1 列算,但部分等宽字体为让竖线连续,
+ *  常把 Box Drawing 做成占 2 格的字形(尤其中文字体里 box drawing 取自全角字库)。
+ *  → sanitizeRow/truncateAnsi 钳宽失准 → 物理行超 cols → 终端 auto-wrap
+ *  → repaintViewport 的 CUP 寻址全错(整屏错位)。
+ *
+ * 换 Geometric Shapes 的依据是**实测**:同一终端下 `●`(U+25CF) 与 `◇`(U+25C7)
+ * 长期渲染正常,而 `├─`/`└─` 错位——即本机字体对 Geometric Shapes 按 1 列、
+ * 对 Box Drawing 按 2 列。故与 `●` 同族的 ▸/▾ 是安全选择。
+ *
+ * 注:Ambiguous 终究依赖字体。若要零风险,用 Latin-1 的 `·`(U+00B7, EAW=Na)。
+ */
+const CARET_COLLAPSED = '▸';
+const CARET_EXPANDED = '▾';
+/** 无详情可展开时占位,保持与 "▸ " 同宽,让工具名列对齐。 */
+const CARET_NONE = '  ';
+
+/** 详情行缩进:统一 7 空格(对齐 entry 行的 "    ▸ " 之后再右移一列,形成层次)。 */
+const DETAIL_INDENT = '       ';
+
+/**
+ * 详情行结果标记:·(U+00B7 MIDDLE DOT, Latin-1 Supplement, **EAW = Narrow**)。
+ * 比 ▸/▾ 更稳——Narrow 是 Unicode 层面的硬保证,不依赖字体对 Ambiguous 的取舍。
+ *
+ * 不用 entry 行尾那个 `↳`:①entry 行已内联同一串结果,详情区再原样输出一遍纯属重复;
+ * ②`↳`(U+21B3) 属 Arrows 块、EAW 同样是 Ambiguous。
+ */
+const DETAIL_RESULT_MARK = '· ';
+
+/** entry 是否有可展开的详情行。须与 buildEntryDetailLines 的分支一致,
+ *  否则会画出点了没反应的三角(toggleEntry 对空 details 直接 return)。 */
+function hasEntryDetail(e: BatchEntry): boolean {
+  return Boolean(e.diffBlock || e.fullOutput || e.resultSummary);
+}
+
+/** entry 行的展开三角(含尾随空格与配色)。折叠 dim、展开 accent,一眼区分当前态。 */
+function entryCaret(e: BatchEntry, expanded: boolean): string {
+  if (!hasEntryDetail(e)) return CARET_NONE;
+  return expanded ? `${ui.accent}${CARET_EXPANDED}${ui.reset} ` : `${ui.dim}${CARET_COLLAPSED}${ui.reset} `;
+}
+
+/**
+ * 单条第一层明细行。三角由 entry 自身的详情展开态决定(▸ 可展开 / ▾ 已展开 / 空白占位),
+ * 不再依赖 isLast —— 兄弟条目间没有嵌套语义,画分支符(├─/└─)纯属误导且引入宽度歧义。
+ */
+function buildEntryLine(b: BatchRecord, index: number, extraIndent = ''): string {
+  const e = b.entries[index];
   const result = e.resultSummary ? `  ${ui.gray}↳ ${e.resultSummary}${ui.reset}` : '';
-  const branch = isLast ? '└─' : '├─';
+  const caret = entryCaret(e, b.expandedEntries.has(index));
   const failure = e.failed ? `${ui.red}×${ui.reset} ` : '';
-  return sanitizeRow(`${extraIndent}    ${ui.dim}${branch}${ui.reset} ${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`);
+  return sanitizeRow(`${extraIndent}    ${caret}${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`);
 }
 
-/** 第一层只展示有哪些调用及其简短结果，不展开完整输出。extraIndent 供子批嵌套加深缩进。 */
-function buildExpandedLines(entries: BatchEntry[], extraIndent = ''): string[] {
-  return entries.map((e, index) => buildEntryLine(e, index, index === entries.length - 1, extraIndent));
+/** 第一层只展示有哪些调用及其简短结果，不展开完整输出。extraIndent 供子批嵌套加深缩进。
+ *  fromIndex:运行态追加渲染时只产出 entries[fromIndex, ...) 的行(已渲染的不能重复输出)。 */
+function buildExpandedLines(b: BatchRecord, extraIndent = '', fromIndex = 0): string[] {
+  const out: string[] = [];
+  for (let i = fromIndex; i < b.entries.length; i++) out.push(buildEntryLine(b, i, extraIndent));
+  return out;
 }
 
-function entryDetailIndent(entries: BatchEntry[], index: number): string {
-  return index < entries.length - 1 ? '    │  ' : '       ';
+/** 详情行缩进(现在与 index 无关,统一常量;保留签名以免调用点全改)。 */
+function entryDetailIndent(_entries: BatchEntry[], _index: number): string {
+  return DETAIL_INDENT;
 }
 
 /** 在 batch 收尾时(onToolBatchEnd):写摘要行 + 登记 summaryAbsIdx;若已展开(回放场景)立即插详情。 */
@@ -503,7 +563,7 @@ function syncLiveExpanded(
     if (e.renderedDigest === digest) continue;
     const abs = findParentEntryAbsLine(b.id, i);
     if (abs == null) continue;
-    layout.contentReplaceLine(abs, buildEntryLine(e, i, i === b.entries.length - 1, b.indent ?? ''));
+    layout.contentReplaceLine(abs, buildEntryLine(b, i, b.indent ?? ''));
     e.renderedDigest = digest;
   }
   // ② 新 entry(运行态 recordCall 后)追加到明细区末尾。
@@ -551,7 +611,7 @@ export function refreshBatchExpanded(
   if (b.summaryAbsIdx < 0) return; // 摘要行未落盘(父组容器折叠中):无处可挂,等展开时统一渲染
   if (b.entries.length <= b.renderedCount) return;
   const newEntries = b.entries.slice(b.renderedCount);
-  const lines = buildExpandedLines(newEntries, b.indent ?? '');
+  const lines = buildExpandedLines(b, b.indent ?? '', b.renderedCount);
   // 实时追加:不锚定视口,让新明细行自然出现在屏底。
   // 组容器批的 entry 与子批摘要行交错,新 entry 必须插在当前块末尾,
   // 不能简单用 summaryAbsIdx+renderedCount(否则 entry 会插到前一个子批摘要行之前)。
@@ -627,7 +687,7 @@ function expand(
   live = false,
 ): void {
   if (b.summaryAbsIdx < 0) return; // 摘要行未落盘时展开会把明细插到 buffer 头部
-  const lines = buildExpandedLines(b.entries, b.indent ?? '');
+  const lines = buildExpandedLines(b, b.indent ?? '');
   layout.contentInsertAfter(b.summaryAbsIdx, lines, !live);
   expandedBatches.add(b.id);
   b.renderedCount = b.entries.length;
@@ -667,7 +727,7 @@ export function expandSingleEntryFully(
   const b = batches.get(id);
   if (!b || b.entries.length !== 1 || expandedBatches.has(id)) return;
   const lines = [
-    ...buildExpandedLines(b.entries),
+    ...buildExpandedLines(b),
     ...buildEntryDetailLines(b.entries[0], entryDetailIndent(b.entries, 0)),
   ];
   layout.contentInsertAfter(b.summaryAbsIdx, lines);
@@ -746,6 +806,8 @@ export function toggleEntry(
   layout: {
     contentInsertAfter(after: number, lines: string[], keepViewport?: boolean): void;
     contentDeleteFrom(startIdx: number, n: number): void;
+    /** 翻转 entry 行的展开三角(▸→▾ / ▾→▸)。行内容换、行数不变,故不触发索引平移。 */
+    contentReplaceLine(absIdx: number, line: string): void;
   },
 ): void {
   const b = batches.get(batchId);
@@ -781,12 +843,16 @@ export function toggleEntry(
     entryDetailIndent(b.entries, entryIndex),
   );
   if (details.length === 0) return;
-  if (b.expandedEntries.has(entryIndex)) {
+  const wasExpanded = b.expandedEntries.has(entryIndex);
+  // 先翻状态再重画三角:buildEntryLine 读 b.expandedEntries 决定 ▸/▾。
+  // 替换 entry 行本身(行数不变)不会触发 shiftBatchesAfter,故可在插/删详情前做。
+  if (wasExpanded) b.expandedEntries.delete(entryIndex);
+  else b.expandedEntries.add(entryIndex);
+  layout.contentReplaceLine(headerIdx, buildEntryLine(b, entryIndex, b.indent ?? ''));
+  if (wasExpanded) {
     layout.contentDeleteFrom(headerIdx + 1, details.length);
-    b.expandedEntries.delete(entryIndex);
   } else {
     layout.contentInsertAfter(headerIdx, details);
-    b.expandedEntries.add(entryIndex);
   }
 }
 

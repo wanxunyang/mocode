@@ -1,11 +1,9 @@
-//! ratatui 渲染层 —— banner / 内容区 / 两段式脚栏(状态行+输入区+model 行) + 浮层。
+//! ratatui 渲染层 —— 可滚动 banner / 内容区 / 两段式脚栏(状态行+输入区+model 行) + 浮层。
 //!
 //! 布局对齐 TS `src/ui/layout.ts` 的两段式底栏:
 //! ```text
 //! ┌──────────────────────────────┐
-//! │ banner(logo + 信息)           │  <- 终端够高时固定 5 行
-//! ├──────────────────────────────┤
-//! │ 内容区(可滚动,Min)            │
+//! │ banner + 内容区(共同滚动)     │
 //! ├──────────────────────────────┤
 //! │ ● 空闲                       │  <- spinner 行
 //! │ ──────────────────────────── │  <- 输入框顶线
@@ -57,22 +55,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let input_rows = input_row_count(app, area.width);
     let footer_h = footer_height(input_rows, area.height);
-    let banner_h = banner_height(area.height, area.width, footer_h);
-    let content_h = area.height.saturating_sub(banner_h + footer_h);
+    let content_h = area.height.saturating_sub(footer_h);
+    let banner = if banner_visible(area.height, area.width, footer_h) {
+        banner_lines(app, area.width as usize)
+    } else {
+        Vec::new()
+    };
 
+    // 保留三个 chunk 的形状，避免浮层依赖的 footer 下标变化；中间零高块不渲染。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(banner_h),
             Constraint::Length(content_h),
+            Constraint::Length(0),
             Constraint::Length(footer_h),
         ])
         .split(area);
 
-    if banner_h > 0 {
-        draw_banner(f, app, chunks[0]);
-    }
-    draw_content(f, app, chunks[1]);
+    draw_content(f, app, chunks[0], banner);
     draw_footer(f, app, chunks[2], input_rows);
 
     // 斜杠菜单浮层:向上覆盖内容区底部,不受输入框高度限制。
@@ -91,22 +91,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 // ────────────────────────────── banner ──────────────────────────────
 
-fn banner_height(total_h: u16, total_w: u16, footer_h: u16) -> u16 {
+fn banner_visible(total_h: u16, total_w: u16, footer_h: u16) -> bool {
     // 终端太矮或太窄时隐藏 banner,把空间留给内容和脚栏。
-    if total_h >= BANNER_MIN_HEIGHT && total_w >= BANNER_MIN_WIDTH && total_h > footer_h + BANNER_ROWS + 4 {
-        BANNER_ROWS
-    } else {
-        0
-    }
+    total_h >= BANNER_MIN_HEIGHT
+        && total_w >= BANNER_MIN_WIDTH
+        && total_h > footer_h + BANNER_ROWS + 4
 }
 
-fn draw_banner(f: &mut Frame, app: &mut App, area: Rect) {
-    let width = area.width as usize;
-    if width == 0 || area.height < BANNER_ROWS {
-        return;
-    }
-
-    let logo: Vec<&'static str> = vec![
+/// 生成内容区最前面的 banner 行。它不再单独占据固定矩形，而是和聊天记录共用滚动偏移。
+fn banner_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let logo = [
         "                        ▄     ",
         "█▀█▀█ █▀▀█ ▄▄▄▄ ▄▄▄▄ ▄▄▄█ ▄▄▄▄",
         "█ █ █ █  █ █  ▀ █  █ █  █ █▄▄█",
@@ -115,6 +109,7 @@ fn draw_banner(f: &mut Frame, app: &mut App, area: Rect) {
 
     let labels = ["模型", "目录", "记忆"];
     let label_w = labels.iter().map(|l| display_width(l)).max().unwrap_or(4) + 2;
+    let value_w = width.saturating_sub(LOGO_W + label_w);
 
     let memory_label = if app.memory_enabled { "开启" } else { "关闭" };
     let memory_style = if app.memory_enabled {
@@ -122,9 +117,6 @@ fn draw_banner(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         theme::dim()
     };
-
-    let model = app.display_model();
-    let cwd = truncate_width(&app.project_root, 48);
 
     let title = Line::from(vec![
         Span::styled("●  ", theme::status_dot()),
@@ -136,11 +128,14 @@ fn draw_banner(f: &mut Frame, app: &mut App, area: Rect) {
         title,
         Line::from(vec![
             Span::styled(pad_end(labels[0], label_w), theme::banner_label()),
-            Span::styled(model.to_string(), theme::banner_value()),
+            Span::styled(truncate_width(app.display_model(), value_w), theme::banner_value()),
         ]),
         Line::from(vec![
             Span::styled(pad_end(labels[1], label_w), theme::banner_label()),
-            Span::styled(cwd, theme::banner_value()),
+            Span::styled(
+                truncate_width(&app.project_root, value_w),
+                theme::banner_value(),
+            ),
         ]),
         Line::from(vec![
             Span::styled(pad_end(labels[2], label_w), theme::banner_label()),
@@ -151,18 +146,12 @@ fn draw_banner(f: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(BANNER_ROWS as usize);
     for (i, logo_line) in logo.into_iter().enumerate() {
         let mut spans = vec![Span::styled(pad_end(logo_line, LOGO_W), accent_style())];
-        if i < info_rows.len() {
-            for span in &info_rows[i].spans {
-                spans.push(span.clone());
-            }
-        }
+        spans.extend(info_rows[i].spans.iter().cloned());
         lines.push(Line::from(spans));
     }
-    // 第 5 行空分隔,让 banner 与内容区有呼吸感。
+    // 保留 banner 与第一条聊天内容之间的一行呼吸感。
     lines.push(Line::from(""));
-
-    let visible: Vec<Line<'static>> = lines.into_iter().take(area.height as usize).collect();
-    f.render_widget(Paragraph::new(visible), area);
+    lines
 }
 
 // accent 的纯样式版本(不加粗),用于 logo 块字符。
@@ -172,34 +161,33 @@ fn accent_style() -> Style {
 
 // ────────────────────────────── 内容区 ──────────────────────────────
 
-fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_content(f: &mut Frame, app: &mut App, area: Rect, prefix: Vec<Line<'static>>) {
     let width = area.width as usize;
     let height = area.height as usize;
+    app.content_prefix_lines = prefix.len();
     if width == 0 || height == 0 {
+        app.content_area = None;
         return;
     }
 
     // 回填内容区矩形:鼠标点击要把它换算成内容行号(展开/折叠工具批)。
     app.content_area = Some(area);
 
-    // 先拿到精确总行数来夹 scroll,再切片 —— 折行结果带缓存,两次调用不重复计算。
-    let total = app.content(width).lines.len();
+    // banner 和聊天记录共享一份滚动偏移；贴底时新内容会把 banner 一同顶出视口。
+    let total = prefix.len() + app.content(width).lines.len();
     app.clamp_scroll(total, height);
     let scroll = app.scroll;
 
-    let visible: Vec<Line<'static>> = app
-        .content(width)
-        .lines
-        .iter()
+    let visible: Vec<Line<'static>> = prefix
+        .into_iter()
+        .chain(app.content(width).lines.iter().cloned())
         .skip(scroll)
         .take(height)
-        .cloned()
         .collect();
 
     // 不再让 ratatui 折行:每个元素已经是宽度合规的视觉行(见 wrap.rs 注释)。
     // 不设段落背景,未显式着色的区域使用用户终端的默认背景。
     f.render_widget(Paragraph::new(visible), area);
-
 
     // 右侧滚动指示:内容溢出且未贴底时给个提示。
     if total > height && scroll + height < total {
@@ -219,6 +207,7 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 }
+
 
 // ────────────────────────────── 脚栏 ──────────────────────────────
 

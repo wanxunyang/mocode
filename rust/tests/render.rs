@@ -201,6 +201,64 @@ fn content_is_actually_rendered() {
 }
 
 #[test]
+fn banner_scrolls_away_with_chat_history() {
+    // 空历史时 banner 位于滚动内容开头。
+    let mut fresh = App::hollow();
+    let mut fresh_term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    fresh_term.draw(|f| ui::draw(f, &mut fresh)).unwrap();
+    let fresh_rows = rendered_rows(fresh_term.backend().buffer()).join("\n");
+    assert!(fresh_rows.contains("MoCode"), "初始视图缺少 banner:\n{fresh_rows}");
+
+    // 贴底时，足够多的历史应把 banner 一起顶出内容视口；它不应再固定在屏幕顶部。
+    let mut app = App::hollow();
+    for i in 0..24 {
+        app.entries.push(Entry::System {
+            text: format!("历史行 {i}"),
+            tone: Tone::Info,
+        });
+    }
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+    let rows = rendered_rows(term.backend().buffer()).join("\n");
+
+    assert!(!rows.contains("MoCode"), "贴底时 banner 仍被固定显示:\n{rows}");
+    let rows_without_spaces = rows.replace(' ', "");
+    assert!(
+        rows_without_spaces.contains("历史行23"),
+        "贴底时未显示最新聊天记录:\n{rows}"
+    );
+}
+
+#[test]
+fn user_message_has_one_blank_row_before_assistant_reply() {
+    // submit() 已追加 Entry::Blank；build_rows 不应再额外补一条空行。
+    let mut app = App::hollow();
+    app.entries.push(Entry::User {
+        text: "用户消息".into(),
+    });
+    app.entries.push(Entry::Blank);
+    app.entries.push(Entry::Assistant {
+        text: "助手回复".into(),
+    });
+
+    let lines = &app.content(80).lines;
+    let user_row = lines
+        .iter()
+        .position(|line| line.spans.iter().any(|span| span.content.contains("用户消息")))
+        .expect("用户消息未渲染");
+    let assistant_row = lines
+        .iter()
+        .position(|line| line.spans.iter().any(|span| span.content.contains("助手回复")))
+        .expect("助手回复未渲染");
+
+    assert_eq!(
+        assistant_row - user_row,
+        2,
+        "用户消息与助手回复之间应恰好有一条空行"
+    );
+}
+
+#[test]
 fn tool_calls_are_grouped_into_one_batch_with_blank_separators() {
     // 用户反馈的核心回归:工具调用必须「聚成一条 + 逐条缩进 + 块间空行」,
     // 而不是每个调用各占一行黏成一坨。这里断言渲染缓冲里的真实视觉结构。

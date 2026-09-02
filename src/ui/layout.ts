@@ -1436,6 +1436,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
           m.toggleEntry(entry.batchId, entry.entryIndex, {
             contentInsertAfter: (after, lines) => contentInsertAfter(after, lines),
             contentDeleteFrom: (start, n) => contentDeleteFrom(start, n),
+            contentReplaceLine: (absIdx, line) => contentReplaceLine(absIdx, line),
           });
           repaint();
           return;
