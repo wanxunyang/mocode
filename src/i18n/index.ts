@@ -116,7 +116,7 @@ const zhCN = {
   'composer.hint': 'Enter 换行 · Ctrl+S 回填 · Esc 取消 · Ctrl+Z 撤销 · Ctrl+C/X/V 复制/剪切/粘贴 · Ctrl+A 全选 · Shift+方向键 选择',
   'history.hint': '输入过滤 · ↑↓ 选择 · Enter 填入输入框 · Ctrl+Enter 直接发送 · Esc 取消',
   'history.empty': '（无匹配的历史输入）',
-  'welcome.ideNotice': '在电脑原生终端运行 mocode 可获得比IDE集成终端更佳的操作体验',
+  'welcome.ideNotice': ' 在电脑原生终端运行 mocode 可获得比IDE集成终端更佳的操作体验',
   'welcome.gettingStarted': '快速上手',
   'welcome.start1': '直接输入消息，按 Enter 发送；Shift+Tab 切换 auto / plan 模式',
   'welcome.start2': '输入 / 打开命令菜单；输入 /help 查看全部命令',
