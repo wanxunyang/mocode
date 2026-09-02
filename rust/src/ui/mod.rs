@@ -46,6 +46,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
+    // 每帧先显式重置整块缓冲区，清除上一帧遗留的主题背景色。
+    // 不指定背景色会让终端使用自身默认背景。
+    f.buffer_mut().set_style(area, Style::reset());
+
     // 运行态推进 spinner 帧(每帧一步;渲染频率由主循环的 tick 控制)。
     if app.running {
         app.spinner_tick = app.spinner_tick.wrapping_add(1);
@@ -158,10 +162,7 @@ fn draw_banner(f: &mut Frame, app: &mut App, area: Rect) {
     lines.push(Line::from(""));
 
     let visible: Vec<Line<'static>> = lines.into_iter().take(area.height as usize).collect();
-    f.render_widget(
-        Paragraph::new(visible).style(Style::default().bg(theme::TERMINAL_BG)),
-        area,
-    );
+    f.render_widget(Paragraph::new(visible), area);
 }
 
 // accent 的纯样式版本(不加粗),用于 logo 块字符。
@@ -196,12 +197,9 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     // 不再让 ratatui 折行:每个元素已经是宽度合规的视觉行(见 wrap.rs 注释)。
-    // 用 TERMINAL_BG 填充内容区背景:ratatui 默认不会填充空格的背景色,
-    // 显式设 style 确保整行满宽着色(CJK 续行格也带底色)。
-    f.render_widget(
-        Paragraph::new(visible).style(Style::default().bg(theme::TERMINAL_BG)),
-        area,
-    );
+    // 不设段落背景,未显式着色的区域使用用户终端的默认背景。
+    f.render_widget(Paragraph::new(visible), area);
+
 
     // 右侧滚动指示:内容溢出且未贴底时给个提示。
     if total > height && scroll + height < total {

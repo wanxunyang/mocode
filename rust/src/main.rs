@@ -14,8 +14,9 @@ use crossterm::event::{
     KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
+use crossterm::style::{Attribute, ResetColor, SetAttribute};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -56,9 +57,14 @@ fn main() -> Result<()> {
     // EnableBracketedPaste:粘贴内容作为一个 `Event::Paste` 整体到达,而不是被拆成
     // 逐字符的 key press。没有它,粘贴多行文本会被当成多次 Enter —— 一段代码会被
     // 拆成好几条消息连续提交出去,是很难受的失败模式。
+    // 先复位 SGR 再清空备用屏，避免继承启动终端残留的主题背景色。
+    // Clear 使用当前 SGR 背景填充，因此必须位于 ResetColor 之后。
     execute!(
         stdout,
+        ResetColor,
+        SetAttribute(Attribute::Reset),
         EnterAlternateScreen,
+        Clear(ClearType::All),
         EnableMouseCapture,
         EnableBracketedPaste
     )?;

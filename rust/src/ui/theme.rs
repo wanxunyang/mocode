@@ -18,13 +18,9 @@ pub const TEXT: Color = Color::Rgb(0xe8, 0xe0, 0xd8);
 /// 弱色/辅助说明文字。
 pub const DIM: Color = Color::Rgb(0x96, 0x82, 0x6e);
 
-/// 应用画布填充色(内容区/侧边的整片底色,ratatui 需显式填充空格背景)。
+/// 状态栏和浮层共用的局部面板底色。
 ///
-/// 注意:这只是**我们画出的区域**的底色,不是终端窗口背景 —— 我们不下发 OSC 11,
-/// 终端窗口底色保持用户终端原色(见 `main.rs` 的注释)。
-pub const TERMINAL_BG: Color = Color::Rgb(0x23, 0x1c, 0x16);
-
-/// 状态栏/浮层底色:比终端背景稍亮的深棕,形成面板感。
+/// 状态栏不使用该颜色，避免覆盖终端原始背景；仅浮层等局部组件可使用。
 pub const STATUS_BG: Color = Color::Rgb(0x2e, 0x24, 0x1c);
 
 /// 用户消息满宽底色。与 TS `theme.ts` 各主题的 `userBg` 同值(灰蓝底,黑底下可辨)。
@@ -58,7 +54,7 @@ pub fn dim() -> Style {
 }
 
 pub fn status_bar() -> Style {
-    Style::default().fg(TEXT).bg(STATUS_BG)
+    Style::default().fg(TEXT)
 }
 
 /// 上下文用量条:按百分比取色(低=绿 / 中=黄 / 高=红)。

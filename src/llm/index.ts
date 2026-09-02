@@ -19,12 +19,12 @@ if (process.env.DEBUG === 'true') {
  *   不重试  →  400 (bad request) / 401 (auth) / 其他 4xx / 用户中断 (AbortError / APIUserAbortError)
  *
  * 退避:指数 + ±20% jitter,首等 1s,翻倍,封顶 30s;若后端返回 Retry-After 头则优先按其值。
- * 默认 4 次尝试(1 初始 + 3 重试),要调改 RETRY_MAX_ATTEMPTS。
+ * 默认 10 次尝试(1 初始 + 9 重试),要调改 RETRY_MAX_ATTEMPTS。
  *
  * SDK 内置 maxRetries 默认 2(对所有 5xx+网络错重试),与本策略叠加会双重重试 5xx —— 显式置 0 让
  * 全部重试由 chat() 外层重试循环统一控,行为可预期。
  */
-const RETRY_MAX_ATTEMPTS = 4;
+const RETRY_MAX_ATTEMPTS = 10;
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 30000;
 const RETRY_JITTER = 0.2;
@@ -435,13 +435,16 @@ export async function chat(
         throw err;
       }
       const wait = computeBackoff(attempt, getRetryAfterMs(err));
-      handlers.onRetry?.({
+      const retry = {
         attempt,
         nextAttempt: attempt + 1,
         waitMs: wait,
         code: retryErrorCode(err),
-      });
-      logRetry(attempt, err, wait);
+      };
+      // 交给宿主的 onRetry 负责展示：TUI 可将其作为瞬时状态处理，不能再用 console
+      // 追加到内容历史，否则重连成功后会留下过期的失败提示。没有宿主时保留 stderr 日志。
+      if (handlers.onRetry) handlers.onRetry(retry);
+      else logRetry(attempt, err, wait);
       // sleep 自己会在 signal abort 时抛 AbortError——透传,让 runAgentCore 的 catch 按中断处理。
       await sleep(wait, signal);
     }

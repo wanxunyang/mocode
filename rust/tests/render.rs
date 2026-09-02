@@ -255,6 +255,20 @@ fn empty_app_renders_without_panic() {
 }
 
 #[test]
+fn unstyled_content_uses_terminal_default_background() {
+    // 内容区右侧空白格没有局部组件覆盖，必须保持终端默认背景，而非主题画布色。
+    let mut app = App::hollow();
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| ui::draw(f, &mut app)).unwrap();
+
+    assert_eq!(
+        term.backend().buffer()[(79, 10)].bg,
+        ratatui::style::Color::Reset,
+        "内容区未着色单元格不应写入主题背景色"
+    );
+}
+
+#[test]
 fn degenerate_terminal_size_does_not_panic() {
     // 极端尺寸:用户把终端拖到 1 列 / 1 行时不能崩。
     // 只要求不 panic —— 这种尺寸下内容必然被裁掉,不校验宽度。
