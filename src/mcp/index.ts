@@ -1,6 +1,7 @@
 import type { Tool, ToolOutcome } from '../tools/types.js';
 import { readMcpServers } from './config.js';
 import { McpClient } from './client.js';
+import type { McpServerSpec } from './types.js';
 
 const clients = new Map<string, McpClient>();
 let startupWarnings: string[] = [];
@@ -37,6 +38,7 @@ export function getMcpTools(): Tool[] {
   for (const client of clients.values()) {
     const serverPart = sanitizeName(client.name);
     for (const remote of client.cachedTools) {
+      if (!shouldRegisterTool(client.spec, remote.name)) continue;
       const localName = `mcp__${serverPart}__${sanitizeName(remote.name)}`;
       if (usedNames.has(localName)) {
         startupWarnings.push(`MCP ${client.name} 的工具 ${remote.name} 名称冲突，已忽略`);
@@ -77,6 +79,11 @@ export async function closeAllMcp(): Promise<void> {
 }
 
 export function getMcpWarnings(): string[] { return [...startupWarnings]; }
+
+function shouldRegisterTool(spec: McpServerSpec, remoteName: string): boolean {
+  if (spec.excludeTools?.includes(remoteName)) return false;
+  return !spec.includeTools || spec.includeTools.includes(remoteName);
+}
 
 function sanitizeName(name: string): string {
   return name.replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'tool';

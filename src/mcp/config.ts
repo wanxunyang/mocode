@@ -65,7 +65,16 @@ function parseServer(name: string, raw: unknown, source: string, warnings: strin
   }
   const transport = normalizeTransport(raw.transport ?? raw.type, raw);
   const requestTimeoutMs = positiveNumber(raw.requestTimeoutMs ?? raw.timeoutMs);
-  const common = { name, transport, disabled: raw.disabled === true, ...(requestTimeoutMs ? { requestTimeoutMs } : {}) };
+  const includeTools = stringArray(raw.includeTools);
+  const excludeTools = stringArray(raw.excludeTools);
+  const common = {
+    name,
+    transport,
+    disabled: raw.disabled === true,
+    ...(requestTimeoutMs ? { requestTimeoutMs } : {}),
+    ...(includeTools ? { includeTools } : {}),
+    ...(excludeTools ? { excludeTools } : {}),
+  };
   if (transport === 'stdio') {
     if (typeof raw.command !== 'string' || !raw.command.trim()) {
       warnings.push(`${source}.${name} (stdio) 缺少 command`);

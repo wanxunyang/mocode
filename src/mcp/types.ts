@@ -7,6 +7,10 @@ export interface McpCommonServerSpec {
   disabled?: boolean;
   /** 单次 initialize / tools/list / tools/call 的超时，默认 30 秒。 */
   requestTimeoutMs?: number;
+  /** 仅向模型注册这些远程工具名；未配置时注册服务端提供的全部工具。 */
+  includeTools?: string[];
+  /** 不向模型注册这些远程工具名；与 includeTools 同时配置时本项优先。 */
+  excludeTools?: string[];
 }
 
 export interface McpStdioServerSpec extends McpCommonServerSpec {
