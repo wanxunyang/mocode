@@ -1709,8 +1709,12 @@ export async function startRepl(
     if (line === '/clear') {
       history.length = 1; // 保留 system 提示
       resetState(); // 同步清空回滚轮次/快照
-      currentSessionId = undefined; // 下轮起新会话文件
-      setCurrentSessionId(undefined, process.cwd()); // 同步清空 session/state
+      // /clear 立刻换新会话 id:之前延后到 turn 收尾(line 1334)分配,但 runAgent 期间模型
+      // 调 plan_update / note_append 会命中「no active session」——它们写 notes.md 靠
+      // getNotesFilePath(getCurrentSessionId()),而下一个 turn 还没走完。改为与启动对齐
+      // 立即分配(对照 line 1019):notes.md 由写入时按需建文件,这里预分配 id 不触盘。
+      currentSessionId = newSessionId();
+      setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state
       turnCount = 0; // 反思 cadence 重新计数
       contextState.lastUsage = undefined;
       contextState.lifecycleStats = undefined;
