@@ -38,6 +38,22 @@ test('readMcpServers: 解析每个服务的工具白名单和黑名单', () => {
   assert.equal(servers.find((server) => server.name === 'unfiltered')?.includeTools, undefined);
 });
 
+test('readMcpServers: MOCODE_MCP_ENABLED=false 时不读取任何 MCP 配置', () => {
+  const originalEnabled = process.env.MOCODE_MCP_ENABLED;
+  const originalPath = process.env.MCP_CONFIG_PATH;
+  try {
+    process.env.MOCODE_MCP_ENABLED = 'false';
+    process.env.MCP_CONFIG_PATH = join(tempDir, 'does-not-exist.json');
+
+    assert.deepEqual(readMcpServers(), { servers: [], warnings: [] });
+  } finally {
+    if (originalEnabled === undefined) delete process.env.MOCODE_MCP_ENABLED;
+    else process.env.MOCODE_MCP_ENABLED = originalEnabled;
+    if (originalPath === undefined) delete process.env.MCP_CONFIG_PATH;
+    else process.env.MCP_CONFIG_PATH = originalPath;
+  }
+});
+
 test('getMcpTools: 白名单过滤工具，黑名单优先于白名单，未配置时保留全部', async () => {
   await closeAllMcp();
   const filtered = new McpClient('filtered', {

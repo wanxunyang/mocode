@@ -9,6 +9,9 @@ import type { McpConfigResult, McpServerSpec, McpTransportKind } from './types.j
  * JSON 格式兼容常见的 { "mcpServers": { name: { command/url/... } } }，也允许直接 server map。
  */
 export function readMcpServers(): McpConfigResult {
+  // 总开关必须早于任何配置读取，以便即使用户级 MCP 配置存在也能快速启动。
+  if (process.env.MOCODE_MCP_ENABLED === 'false') return { servers: [], warnings: [] };
+
   const warnings: string[] = [];
   const servers = new Map<string, McpServerSpec>();
   const fromFile = process.env.MCP_CONFIG_PATH;
