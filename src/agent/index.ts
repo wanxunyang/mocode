@@ -228,8 +228,13 @@ function finishStandaloneBatch(id: string, expandSingleEntry: boolean): void {
   if (currentBatchId === id) currentBatchId = null;
   batch.endBatch(id, layout);
   if (expandSingleEntry) batch.expandSingleEntryFully(id, layout);
-  // mutation 独占批收尾:分隔空行由 flushToolBatch 负责(见 subAgentGroupPendingSeparator);
-  // 不再有 sub-agent 独占批——sub-agent 已合并进组容器批。
+  // mutation 独占批收尾:currentBatchId 已置空。若不告知后续正文「刚出工具块」，
+  // writeAssistantText 的 inToolBlock 会判 false，LLM 流式前缀的 \n / \n\n 就不会被剥掉，
+  // 与 expandSingleEntryFully 已写的 separator 叠成 2 行空白（edit_file 后偶发空两行）。
+  // 置位后与 sub-agent 组收口走同一条对称路径；separator 已由 expandSingleEntryFully
+  // 内部 commit，后续 flush 由 isLastContentRowBlank 守卫拦住，不会多补一行。
+  // 只读批无需此标记：它的 currentBatchId 一直挂到正文到达，inToolBlock 天然为 true。
+  subAgentGroupPendingSeparator = true;
 }
 
 /** 将跨 LLM 工具轮次累计的调用写入内容区；正文开始或整个 turn 收尾时才切批。 */
