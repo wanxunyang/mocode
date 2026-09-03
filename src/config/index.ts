@@ -119,6 +119,8 @@ export interface Config {
   /** 前端工具簇总开关(browser / dev_server / screenshot / view_image)。默认关闭；
    *  /fe on|off 运行时切换并刷新模型工具表;这些工具依赖 playwright 二进制或抓取桌面,隐私/资源面大,默认不暴露。 */
   frontendToolsEnabled: boolean;
+  /** MCP 总开关。默认开启；关闭时启动不读取 MCP 配置、不连接服务。/mcp on|off 改写下次启动状态。 */
+  mcpEnabled: boolean;
   /** 子 Agent 默认步数上限，只防止无限循环；调用方可按任务提高。 */
   subAgentMaxSteps: number;
   /** 会话落盘目录(cwd 下)。 */
@@ -636,6 +638,7 @@ export const config: Config = {
   subAgentEnabled: process.env.MOCODE_SUBAGENT_ENABLED === 'true',
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || Number(process.env.MAX_STEPS) || 1000,
   frontendToolsEnabled: process.env.MOCODE_FRONTEND_TOOLS_ENABLED === 'true',
+  mcpEnabled: process.env.MOCODE_MCP_ENABLED !== 'false',
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
   sandboxRoot: process.env.SANDBOX_ROOT || undefined,
@@ -733,6 +736,17 @@ export function isFrontendToolsEnabled(): boolean {
 export function updateFrontendToolsConfig(enabled: boolean): void {
   config.frontendToolsEnabled = enabled;
   process.env.MOCODE_FRONTEND_TOOLS_ENABLED = enabled ? 'true' : 'false';
+}
+
+/** MCP 总开关；关闭时下次启动跳过 MCP 配置读取与服务连接。 */
+export function isMcpEnabled(): boolean {
+  return config.mcpEnabled;
+}
+
+/** 运行时更新 MCP 开关；连接建立或释放、工具表刷新由 REPL 调用方执行。 */
+export function updateMcpConfig(enabled: boolean): void {
+  config.mcpEnabled = enabled;
+  process.env.MOCODE_MCP_ENABLED = enabled ? 'true' : 'false';
 }
 
 /**

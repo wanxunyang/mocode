@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readMcpServers } from '../src/mcp/config.js';
+import { isMcpEnabled, updateMcpConfig } from '../src/config/index.js';
 import { McpClient } from '../src/mcp/client.js';
 import { __testInjectClient, closeAllMcp, getMcpTools } from '../src/mcp/index.js';
 
@@ -51,6 +52,24 @@ test('readMcpServers: MOCODE_MCP_ENABLED=false 时不读取任何 MCP 配置', (
     else process.env.MOCODE_MCP_ENABLED = originalEnabled;
     if (originalPath === undefined) delete process.env.MCP_CONFIG_PATH;
     else process.env.MCP_CONFIG_PATH = originalPath;
+  }
+});
+
+test('updateMcpConfig: 同步内存状态与环境变量', () => {
+  const wasEnabled = isMcpEnabled();
+  const originalEnv = process.env.MOCODE_MCP_ENABLED;
+  try {
+    updateMcpConfig(false);
+    assert.equal(isMcpEnabled(), false);
+    assert.equal(process.env.MOCODE_MCP_ENABLED, 'false');
+
+    updateMcpConfig(true);
+    assert.equal(isMcpEnabled(), true);
+    assert.equal(process.env.MOCODE_MCP_ENABLED, 'true');
+  } finally {
+    updateMcpConfig(wasEnabled);
+    if (originalEnv === undefined) delete process.env.MOCODE_MCP_ENABLED;
+    else process.env.MOCODE_MCP_ENABLED = originalEnv;
   }
 });
 

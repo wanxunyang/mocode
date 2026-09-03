@@ -7,6 +7,7 @@ test('suggestCommand:常见拼写错误能纠到正确命令', () => {
   assert.equal(suggestCommand('/hepl'), '/help');
   assert.equal(suggestCommand('/hlep'), '/help');
   assert.equal(suggestCommand('/theem'), '/theme');
+  assert.equal(suggestCommand('/moc'), '/mcp');
   // /modle 离 /mode(真正的命令,plan/auto 的父节点)只差一个字母,比 /model 更近
   assert.equal(suggestCommand('/modle'), '/mode');
 });

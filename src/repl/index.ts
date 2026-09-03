@@ -11,6 +11,8 @@ import {
   updateSubAgentConfig,
   isFrontendToolsEnabled,
   updateFrontendToolsConfig,
+  isMcpEnabled,
+  updateMcpConfig,
   updateLanguageConfig,
   languageFromShell,
   buildBasePrompt,
@@ -178,6 +180,13 @@ function buildSlashCommands(): SlashCommand[] {
         { name: 'status', value: '/fe status', desc: d('commands.feStatus') },
       ],
     },
+    {
+      name: '/mcp', desc: d('commands.mcp'), children: [
+        { name: 'on', value: '/mcp on', desc: d('commands.mcpOn') },
+        { name: 'off', value: '/mcp off', desc: d('commands.mcpOff') },
+        { name: 'status', value: '/mcp status', desc: d('commands.mcpStatus') },
+      ],
+    },
     { name: '/theme', desc: d('commands.theme') },
     {
       name: '/model', desc: d('commands.model'), children: [
@@ -259,7 +268,7 @@ const LLM_ERROR_HINT_KEYS: Record<ChatErrorKind, TranslationKey> = {
 const HELP_GROUPS: { key: TranslationKey; names: string[] }[] = [
   { key: 'help.groupFrequent', names: ['/help', '/clear', '/context', '/compact', '/resume', '/model'] },
   { key: 'help.groupSession', names: ['/sessions', '/rollback', '/memory', '/skills', '/skill', '/init'] },
-  { key: 'help.groupConfig', names: ['/mode', '/subagent', '/fe', '/theme', '/pet', '/image', '/language', '/upgrade'] },
+  { key: 'help.groupConfig', names: ['/mode', '/subagent', '/fe', '/mcp', '/theme', '/pet', '/image', '/language', '/upgrade'] },
 ];
 
 /**
@@ -2576,6 +2585,46 @@ export async function startRepl(
       layout.contentWrite(
         `${enabled ? ui.green : ui.yellow}${t(enabled ? 'fe.changedOn' : 'fe.changedOff')}${ui.reset}\n`,
       );
+      continue;
+    }
+
+    if (line === '/mcp' || line.startsWith('/mcp ')) {
+      const arg = line.startsWith('/mcp ')
+        ? line.slice('/mcp '.length).trim().toLowerCase()
+        : 'status';
+      if (arg === '' || arg === 'status') {
+        const enabled = isMcpEnabled();
+        const state = t(enabled ? 'mcp.stateOn' : 'mcp.stateOff');
+        layout.contentWrite(
+          `${ui.accent}${t('mcp.status', { state })}${ui.reset}\n` +
+          `${ui.dim}MOCODE_MCP_ENABLED=${enabled ? 'true' : 'false'} · ${CONFIG_PATH}${ui.reset}\n` +
+          `${ui.dim}${t('mcp.restartHint')}${ui.reset}\n`,
+        );
+        continue;
+      }
+      if (arg !== 'on' && arg !== 'off') {
+        layout.contentWrite(`${ui.yellow}${t('mcp.usage')}${ui.reset}\n`);
+        continue;
+      }
+
+      const enabled = arg === 'on';
+      if (enabled === isMcpEnabled()) {
+        layout.contentWrite(`${ui.dim}${t('mcp.unchanged', { state: t(enabled ? 'mcp.stateOn' : 'mcp.stateOff') })}${ui.reset}\n`);
+        continue;
+      }
+      updateMcpConfig(enabled);
+      updateConfigKey('MOCODE_MCP_ENABLED', enabled ? 'true' : 'false');
+      if (enabled) {
+        await initializeAllMcp();
+        registerToolsExtension('mcp', getMcpTools());
+      } else {
+        await closeAllMcp();
+        registerToolsExtension('mcp', []);
+      }
+      refreshChatTools();
+      history[0] = { role: 'system', content: buildSystemMessage(getAgentMode() === 'plan') };
+      layout.rewriteBanner(bannerLines(banner()));
+      layout.contentWrite(`${enabled ? ui.green : ui.yellow}${t(enabled ? 'mcp.changedOn' : 'mcp.changedOff')}${ui.reset}\n`);
       continue;
     }
 
