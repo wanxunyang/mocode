@@ -461,6 +461,15 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
 
   while (i < src.length) {
     const line = src[i];
+    // 容错关闭 fence：部分模型偶尔把 ``` 的闭合标记少输出一个字符，变成独占一行的 ``。
+    // 若不恢复，后续所有标题、列表和下一段代码都会被吞进首个代码块，最终显示成截图里的原始
+    // `##` / ```。只接受“独占一行、恰好两个同类字符”，避免误伤代码中的行内双反引号。
+    const shortClose = inFence ? line.match(/^\s*(`{2}|~{2})\s*$/) : null;
+    if (shortClose && shortClose[1][0] === fenceChar) {
+      flushCode();
+      i++;
+      continue;
+    }
     // fence 探测(``` 或 ~~~,≥3)
     const fm = line.match(/^(\s*)(`{3,}|~{3,})(.*)$/);
     if (fm) {

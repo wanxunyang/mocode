@@ -860,9 +860,50 @@ export function toggleEntry(
  * 当 buffer 中段插/删 N 行后,所有受影响 batch 的 summaryAbsIdx 需平移。
  * 由 layout.contentInsertAfter / contentDeleteFrom 在每次变动后调一次,
  * 参数 afterIdx 是被插入/删除点的绝对索引(插入点之前索引不变;之后索引 += delta)。
+ * resize 导致整段物理行被替换时改走 shiftBatchesForReflow。
  */
 export function shiftBatchesAfter(absIdx: number, delta: number): void {
   if (delta === 0) return;
+  shiftBatchIndicesAfter(absIdx, delta);
+}
+
+/**
+ * resize reflow 专用索引平移：物理区间 [start, start+oldCount) 被替换成 newCount 行。
+ * 位于区间后的 batch/entry 整体平移；理论上 markdown 正文区间内不应存在工具命中行，
+ * 若存在则钳到新区间首行，避免留下越界索引。
+ */
+export function shiftBatchesForReflow(start: number, oldCount: number, newCount: number): void {
+  const delta = newCount - oldCount;
+  if (delta === 0) return;
+  const oldEnd = start + oldCount;
+  const remap = (idx: number): number | null => {
+    if (idx < start) return idx;
+    if (idx >= oldEnd) return Math.max(0, idx + delta);
+    // 头部裁剪等 newCount=0 场景中，区间内命中已从 buffer 消失，不能伪装成第 0 行。
+    if (newCount === 0) return null;
+    return Math.max(0, start);
+  };
+  const next = new Map<number, string>();
+  for (const [idx, id] of absLineToBatchId) {
+    const mapped = remap(idx);
+    if (mapped !== null) next.set(mapped, id);
+  }
+  absLineToBatchId.clear();
+  for (const [idx, id] of next) absLineToBatchId.set(idx, id);
+  const nextEntries = new Map<number, { batchId: string; entryIndex: number }>();
+  for (const [idx, target] of absLineToEntry) {
+    const mapped = remap(idx);
+    if (mapped !== null) nextEntries.set(mapped, target);
+  }
+  absLineToEntry.clear();
+  for (const [idx, target] of nextEntries) absLineToEntry.set(idx, target);
+  for (const record of batches.values()) {
+    const mapped = remap(record.summaryAbsIdx);
+    record.summaryAbsIdx = mapped ?? -1;
+  }
+}
+
+function shiftBatchIndicesAfter(absIdx: number, delta: number): void {
   // 重建 absLineToBatchId:删除所有 <= absIdx 的项,把 > absIdx 的项按 delta 平移
   const next = new Map<number, string>();
   for (const [idx, id] of absLineToBatchId) {

@@ -13,11 +13,18 @@ import {
   stripAnsi,
   sliceByDisplayCol,
   visColToCharCol,
+  remapWrappedPoint,
+  padEndAnsiBackground,
 } from './render.js';
 import { ui, resetTerminalBackground } from './theme.js';
 import * as content from './content.js';
 import * as mouse from './mouse.js';
-import { reset as resetBatches, shiftBatchesAfter, setMaxCols } from './batch.js';
+import {
+  reset as resetBatches,
+  shiftBatchesAfter,
+  shiftBatchesForReflow,
+  setMaxCols,
+} from './batch.js';
 import { copyToClipboard, readClipboard } from './clipboard.js';
 import { renderMarkdown } from './markdown.js';
 import { t } from '../i18n/index.js';
@@ -172,6 +179,7 @@ let lastView: InputView | null = null;
 let lastMenuStartRow = 0; // 上次菜单起始屏行(供擦除)
 let lastMenuRows = 0;
 let resizeTimer: NodeJS.Timeout | null = null;
+let lastTerminalCols = 0;
 let exitHandler: (() => void) | null = null;
 let sigwinchHandler: (() => void) | null = null;
 // markdown 流式段:agent onText 的 chunk 累积到 mdBuf,每 chunk 把整段经 renderMarkdown
@@ -365,6 +373,13 @@ export function contentWrite(s: string): void {
   const g = getGeo();
   const cols = g.cols;
   const bottom = g.contentBottom;
+  // resize 缩窄后，当前待写行可能已占满或超过新列宽。必须在捕获物理写起点前
+  // 先提交该行并移到下一行；否则 CUP 会把 cols+1 钳到末列，下一字符覆盖旧行尾。
+  if (contentCol > cols) {
+    content.breakRow();
+    contentRow = contentRow >= bottom ? bottom : contentRow + 1;
+    contentCol = 1;
+  }
   // resize 后 contentRow 可能过时(拖终端框):
   //  - 缩小:contentRow > 新 bottom → 钳到新 bottom
   //  - 放大:contentRow < 新 bottom 且回尾 → 推进到 min(committed+1, bottom)
@@ -596,7 +611,7 @@ export function contentWriteMd(s: string): void {
   const scrolled = scrollOffset > 0;
   const totalBefore = scrolled ? content.totalRows() : 0;
   const lines = renderMarkdown(mdBuf, g.cols);
-  content.setLines(lines);
+  content.setLines(lines, mdBuf);
   const segRows = lines.length;
   const available = g.contentBottom - segmentStartRow + 1;
   contentRow = segRows >= available ? g.contentBottom : segmentStartRow + segRows;
@@ -618,20 +633,27 @@ export function contentWriteMd(s: string): void {
 }
 
 /**
- * 把一段完整(非流式)assistant 文本一次性渲染成 markdown 写入(供 renderHistory 回显
- * /resume / /rollback 复显上下文):渲染一次 → join('\n') → 经 contentWrite 增量写
- * (无段 erase / 无 repaintViewport,无闪烁)。与流式 contentWriteMd 的区别:不累积 chunk、
- * 不走段替换——一次性把渲染结果当普通带色文本喂入(渲染行各自 ≤ cols、自洽带色,contentWrite
- * 的 SGR/折行状态机原样接纳)。非 TTY:退化为 stdout.write 原文(同 contentWrite)。
+ * 把一段完整(非流式)assistant 文本渲染进独立 markdown 段(供 renderHistory /resume /
+ * /rollback 回放)。与流式 contentWriteMd 的区别是一次完成 begin/set/commit，不累积 chunk；
+ * 但同样保留原始 markdown source，因此窗口列宽变化后历史正文也能重新排版。
  */
 export function contentWriteMdOnce(s: string): void {
   if (!active || !ui.isTTY) {
     stdout.write(s);
     return;
   }
+  if (mdActive) commitMd();
   const g = getGeo();
+  content.beginSegment();
   const lines = renderMarkdown(s, g.cols);
-  contentWrite(lines.join('\n'));
+  content.setLines(lines, s);
+  content.commitSegment();
+  // setLines 直接提交了全部 markdown 物理行；补回一个未提交的空当前行，保证满屏时
+  // 下一次 contentWrite 从正文下一行开始，而不是在 contentBottom 第 1 列覆盖正文末行。
+  content.ensureCurrentRow();
+  contentRow = Math.min(content.committedRows() + 1, g.contentBottom);
+  contentCol = 1;
+  if (scrollOffset === 0) repaintViewport();
 }
 
 /** 清空内容区(保留底栏):全屏清 + 重设区域 + 续写位归 (1,1) + 清缓冲 + 回尾。底栏由调用方随后重画。 */
@@ -862,6 +884,70 @@ export function notifyContentReset(): void {
 }
 
 
+/** 把物理行索引映射到一次 reflow 之后的新索引。段内锚点按段内相对进度映射，
+ * 段后的索引整体平移；用于 scroll viewport 锚点和选区在 resize 后保持语义位置。 */
+function remapLineForReflow(
+  line: number,
+  change: content.ReflowChange,
+): number {
+  const oldEnd = change.start + change.oldCount;
+  if (line < change.start) return line;
+  if (line >= oldEnd) return Math.max(0, line + change.delta);
+  if (change.newCount <= 0) return Math.max(0, change.start - 1);
+  if (change.oldCount <= 1) return change.start;
+  const relative = (line - change.start) / Math.max(1, change.oldCount - 1);
+  return change.start + Math.round(relative * Math.max(0, change.newCount - 1));
+}
+
+/** 终端尺寸变化后更新正文布局。列宽变化时重排 markdown；仅高度变化时只重算屏幕锚点。 */
+function reflowContentForResize(cols: number, colsChanged: boolean): void {
+  const oldTotal = content.totalRows();
+  const oldViewportStart = viewportAbsStart();
+  const oldViewportEnd = Math.max(oldViewportStart, oldTotal - scrollOffset - 1);
+  let mappedViewportEnd = oldViewportEnd;
+  const changes = colsChanged ? content.reflowMarkdown(cols, renderMarkdown) : [];
+  for (const change of changes) {
+    shiftBatchesForReflow(change.start, change.oldCount, change.newCount);
+    mappedViewportEnd = remapLineForReflow(mappedViewportEnd, change);
+    if (selection) {
+      const remapEndpoint = (line: number, col: number): { line: number; col: number } => {
+        const oldEnd = change.start + change.oldCount;
+        if (change.oldLines.length > 0 && line >= change.start && line < oldEnd) {
+          const mapped = remapWrappedPoint(
+            change.oldLines,
+            change.newLines,
+            { line: line - change.start, col },
+          );
+          return { line: change.start + mapped.line, col: mapped.col };
+        }
+        return { line: remapLineForReflow(line, change), col };
+      };
+      const anchor = remapEndpoint(selection.anchorLine, selection.anchorCol);
+      const end = remapEndpoint(selection.endLine, selection.endCol);
+      selection.anchorLine = anchor.line;
+      selection.anchorCol = anchor.col;
+      selection.endLine = end.line;
+      selection.endCol = end.col;
+    }
+  }
+  const g = getGeo();
+  const total = content.totalRows();
+  if (scrollOffset > 0) {
+    // 滚动回看时保持原窗口尾部的语义锚点，不因段行数变化跳到最新内容。
+    scrollOffset = Math.max(0, Math.min(total - mappedViewportEnd - 1, Math.max(0, total - g.contentBottom)));
+  }
+  contentRow = Math.min(content.committedRows() + 1, g.contentBottom);
+  const currentRaw = content.currentRowRaw();
+  contentCol = currentRaw === null ? 1 : ansiDisplayWidth(currentRaw) + 1;
+  const activeStart = content.activeSegmentStart();
+  if (activeStart !== null) {
+    // segmentStartRow 始终描述“回尾视图”中的段起点；即便用户正在滚动回看，
+    // 后续流式 chunk 也应继续按尾部坐标推进，不能把历史 viewport 的 offset 算进来。
+    const tailViewportStart = Math.max(0, total - g.contentBottom);
+    segmentStartRow = Math.max(1, Math.min(g.contentBottom, activeStart - tailViewportStart + 1));
+  }
+}
+
 // ── viewport 滚动回看(Phase 2)──
 
 /** 是否处于滚动回看态(offset>0,内容区显历史)。prompt 据此在非滚动键时回尾。 */
@@ -961,7 +1047,17 @@ export function repaintViewport(): void {
   const BANNER_ROW = 1; // 横幅占 viewport 第 1 行(会把原第 1 行内容遮住 —— 1 行换"我在看啥"的可读性,可接受)
   let p = '';
   for (let r = 1; r <= h; r++) {
-    let line = slice[r - 1] ?? '';
+    // 缓冲中的普通行（用户气泡、工具摘要等）仍按写入时宽度保存。窗口缩窄后若原样
+    // 输出会触发终端 auto-wrap，打破“一条 buffer 行 = 一条屏幕物理行”。重画时统一
+    // 钳到当前列宽：宽度恢复后原内容仍在 buffer 中，可重新完整显示。
+    const rawLine = slice[r - 1] ?? '';
+    let line = truncateAnsi(rawLine, g.cols);
+    // 用户消息是在提交时按当时 cols 填满背景的普通物理行。放宽终端后，buffer 里的
+    // 尾部 reset 仍停在旧列宽，若只重画就会留下截图中的灰条短一截。识别 userBg 行并
+    // 在 reset 后重新开启同一背景补齐新宽度；不改 buffer，后续缩放仍可从原文重算。
+    if (rawLine.includes(ui.userBg)) {
+      line = padEndAnsiBackground(line, g.cols, ui.userBg, ui.reset);
+    }
     if (bannerText && r === BANNER_ROW) {
       // banner 行:满宽 userBg + ❯ + 单行截断(多行 ⏎ 折叠)+ userBg 补到底 + 底线分隔短横
       const cols = g.cols;
@@ -2297,7 +2393,8 @@ export function enterRunningMode(status: string, placeholder: string): void {
 export function enterAltScreen(): void {
   if (active || !ui.isTTY) return;
   active = true;
-  setMaxCols(getGeo().cols); // 同步 batch 展开行宽钳制,防超宽行 auto-wrap 打乱屏位
+  lastTerminalCols = getGeo().cols;
+  setMaxCols(lastTerminalCols); // 同步 batch 展开行宽钳制,防超宽行 auto-wrap 打乱屏位
   stdout.write(esc.altOn);
   // 不动终端窗口背景:底色保持用户终端原色,主题只作用于我们画出的 SGR 颜色。
   stdout.write(esc.mouseOn); // 完整鼠标追踪(按下/拖动/释放/滚轮)→ mouse.swallow 重组 → handleMouseEvent
@@ -2345,7 +2442,13 @@ export function enterAltScreen(): void {
     resizeTimer = setTimeout(() => {
       resizeTimer = null;
       if (!active) return;
-      repaintViewport(); // 内容区按新高度 + 当前 offset 重画(物理行不 reflow)
+      const latest = getGeo(footerH);
+      // 列宽变化时会重排 markdown；即便仅高度变化或重排后行数不变，也必须重算
+      // active segment 的屏幕锚点与当前待写列，避免后续流式 chunk 使用旧坐标。
+      const colsChanged = latest.cols !== lastTerminalCols;
+      reflowContentForResize(latest.cols, colsChanged);
+      lastTerminalCols = latest.cols;
+      repaintViewport(); // 内容区按最新高度和列宽重画；markdown 历史已按新列宽 reflow
       repaint(); // 底栏重画
     }, 100);
     resizeTimer?.unref?.();

@@ -105,6 +105,90 @@ export function visColToCharCol(str: string, visCol: number): number {
   return i;
 }
 
+export interface DisplayPoint {
+  line: number;
+  col: number;
+}
+
+function flattenedOffset(lines: string[], point: DisplayPoint): number {
+  const line = Math.max(0, Math.min(point.line, Math.max(0, lines.length - 1)));
+  let offset = 0;
+  for (let i = 0; i < line; i++) offset += stripAnsi(lines[i]).length;
+  const plain = stripAnsi(lines[line] ?? '');
+  return offset + visColToCharCol(plain, point.col);
+}
+
+function pointAtFlattenedOffset(
+  lines: string[],
+  offset: number,
+  preferNextAtBoundary: boolean,
+): DisplayPoint {
+  if (lines.length === 0) return { line: 0, col: 0 };
+  let remaining = Math.max(0, offset);
+  for (let line = 0; line < lines.length; line++) {
+    const plain = stripAnsi(lines[line]);
+    if (remaining < plain.length || (remaining === plain.length && (!preferNextAtBoundary || line === lines.length - 1))) {
+      return { line, col: displayWidth(plain.slice(0, remaining)) };
+    }
+    remaining -= plain.length;
+  }
+  const last = stripAnsi(lines[lines.length - 1]);
+  return { line: lines.length - 1, col: displayWidth(last) };
+}
+
+/**
+ * 同一段文本重新软折行后迁移一个“物理行 + 显示列”端点。
+ *
+ * 常规段落在去 ANSI、去物理换行后文本完全一致，直接按 UTF-16 边界精确迁移；列表、
+ * 引用等可能因续行缩进导致扁平文本不同，此时退化为“非空白字符序号 + 尾随空白数”映射，
+ * 使端点仍跟随同一个内容字符，而不是按物理行比例漂移。
+ */
+export function remapWrappedPoint(
+  oldLines: string[],
+  newLines: string[],
+  point: DisplayPoint,
+): DisplayPoint {
+  if (newLines.length === 0) return { line: 0, col: 0 };
+  const oldPlain = oldLines.map(stripAnsi);
+  const newPlain = newLines.map(stripAnsi);
+  const oldFlat = oldPlain.join('');
+  const newFlat = newPlain.join('');
+  const oldOffset = flattenedOffset(oldLines, point);
+  const preferNext = point.line > 0 && point.col === 0;
+  if (oldFlat === newFlat) {
+    return pointAtFlattenedOffset(newLines, Math.min(oldOffset, newFlat.length), preferNext);
+  }
+
+  const prefix = oldFlat.slice(0, oldOffset);
+  let contentChars = 0;
+  let trailingWhitespace = 0;
+  for (const ch of prefix) {
+    if (/\s/u.test(ch)) trailingWhitespace++;
+    else {
+      contentChars++;
+      trailingWhitespace = 0;
+    }
+  }
+
+  let seen = 0;
+  let mappedOffset = 0;
+  while (mappedOffset < newFlat.length && seen < contentChars) {
+    const cp = newFlat.codePointAt(mappedOffset) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    mappedOffset += ch.length;
+    if (!/\s/u.test(ch)) seen++;
+  }
+  let spaces = 0;
+  while (mappedOffset < newFlat.length && spaces < trailingWhitespace) {
+    const cp = newFlat.codePointAt(mappedOffset) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    if (!/\s/u.test(ch)) break;
+    mappedOffset += ch.length;
+    spaces++;
+  }
+  return pointAtFlattenedOffset(newLines, mappedOffset, preferNext);
+}
+
 /** 带色串的可见显示宽度(先去 ANSI 再按 displayWidth 度量)。 */
 export function ansiDisplayWidth(s: string): number {
   return displayWidth(stripAnsi(s));
@@ -120,6 +204,24 @@ export function padEndDisplay(str: string, width: number): string {
 export function padEndAnsi(str: string, width: number): string {
   const w = ansiDisplayWidth(str);
   return w >= width ? str : str + ' '.repeat(width - w);
+}
+
+/**
+ * 用指定背景色把 ANSI 行补到目标宽度。
+ *
+ * 普通 padEndAnsi 会把空格追加在行末 reset 之后，视觉上仍是终端原底色；这里重新开启
+ * background 再补空格，供用户消息气泡在终端放宽后动态延伸到底。原串不改写，避免破坏
+ * 行内前景色或已有 reset；补段自身闭合，保证下一行不继承背景。
+ */
+export function padEndAnsiBackground(
+  str: string,
+  width: number,
+  background: string,
+  reset = '\x1B[0m',
+): string {
+  const w = ansiDisplayWidth(str);
+  if (w >= width) return str;
+  return `${str}${background}${' '.repeat(width - w)}${reset}`;
 }
 
 /** 带色串按可见宽度截断(保留中间 ANSI 码,超出末尾加 …,补 reset 防 … 继承颜色)。 */

@@ -931,7 +931,6 @@ export function renderHistory(history: ChatMessage[]): void {
       if (text) {
         flushBatch(); // 文本前若有累积 batch 先收尾(罕见:连续两个 assistant tool_calls 文本间)
         layout.contentWriteMdOnce(text);
-        if (!text.endsWith('\n')) layout.contentWrite('\n');
       }
       const tcs = (m as {
         tool_calls?: {
