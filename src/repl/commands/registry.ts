@@ -27,13 +27,16 @@ import { contextCommands } from './context.js';
 import { sessionCommands } from './session.js';
 import { memoryCommands } from './memory.js';
 import { skillCommands } from './skill.js';
+import { compactCommands } from './compact.js';
+import { appearanceCommands } from './appearance.js';
 
 /**
  * 命令注册表。顺序即匹配优先级 —— 更具体的分支放前面。
  * 组内顺序由各文件自己保证(见文件头注释);组间顺序互不影响(条件互斥)。
  *
- * 迁移进度:已搬 system / mode / pet / image / context / session / memory / skill;
- * 其余仍在 runtime.ts 的遗留 if 链里,dispatch 返回 unhandled 后由遗留链接手。搬完一组往这里加一行。
+ * 迁移进度:已搬 system / mode / pet / image / context / session / memory / skill /
+ * compact / appearance;其余仍在 runtime.ts 的遗留 if 链里,dispatch 返回 unhandled 后
+ * 由遗留链接手。搬完一组往这里加一行。
  */
 export const commandHandlers: CommandHandler[] = [
   ...systemCommands,
@@ -44,6 +47,8 @@ export const commandHandlers: CommandHandler[] = [
   ...sessionCommands,
   ...memoryCommands,
   ...skillCommands,
+  ...compactCommands,
+  ...appearanceCommands,
 ];
 
 /**

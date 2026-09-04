@@ -31,14 +31,13 @@ import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
-import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
+import { ui, setTheme } from '../ui/theme.js';
 import { bannerLines, displayWidth } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
 import {
   promptWithSlashMenu,
   promptTurnPicker,
-  promptThemePicker,
   promptRevertChoice,
   type SessionPickerItem,
 } from '../ui/prompt.js';
@@ -56,13 +55,11 @@ import {
 import { renderChip, type ImageAttachment } from '../attachments/image.js';
 import type { ContentPart } from '../agent/core.js';
 import {
-  manualCompact,
   contextState,
   newSessionId,
   saveSession,
   loadSession,
   appendCurrentSessionRuntimeEvent,
-  hashTraceValue,
 } from '../session/index.js';
 import {
   listTurns,
@@ -94,7 +91,6 @@ import {
   LLM_ERROR_HINT_KEYS,
   isCommandShape,
   suggestCommand,
-  themeDescription,
   MODEL_PRESETS,
   maskKey,
 } from './commands.js';
@@ -844,145 +840,10 @@ export async function startRepl(
     // /clear /sessions /resume /rollback 已搬到 repl/commands/session.ts
     // /image(list/clear/<path>)已搬到 repl/commands/image.ts;/context 搬到 repl/commands/context.ts
     // /memory /reflect 已搬到 repl/commands/memory.ts;/skills /skill 搬到 repl/commands/skill.ts
+    // /compact 已搬到 repl/commands/compact.ts
 
-    if (line === '/compact' || line.startsWith('/compact ')) {
-      // /compact 默认强制压缩(force=true)，不受阈值/保护区限制
-      // 语法:/compact [focus] 或 /compact --no-force [focus] (显式关闭强制)
-      const rest = line.slice('/compact'.length).trim();
-      let force = true; // 默认强制
-      let focus: string | undefined;
-      if (rest === '--no-force') force = false;
-      else if (rest.startsWith('--no-force ')) {
-        force = false;
-        focus = rest.slice('--no-force '.length).trim() || undefined;
-      } else if (rest) focus = rest;
-      // 走调度器路径:与自动每步压缩完全一致——五区按 ROI 压(cold tools 优先 → history 摘要最后)。
-      // focus 透传到 compact_history action 的 LLM 摘要 prompt。
-      // 返回 SchedulerRunLog 给 UI 显示决策;退化路径(开关关时)在 manualCompact 内部走 compactHistory。
-      const log = await (async () => {
-        // /compact 的摘要是几十秒的 LLM 调用:包一层运行态监听让 Ctrl+C 能掐断它
-        // (信号透传 manualCompact → maybeCompact → compactHistory → chat)。
-        const signal = startRunningListener(t('running.compacting'));
-        try {
-          return await manualCompact(history, focus, { force, signal });
-        } finally {
-          stopRunningListener();
-        }
-      })().catch((e: unknown) => {
-        // 中断:history 未被改动(重建在摘要成功之后),直接提示并回到输入态。
-        if (e instanceof Error && (e.name === 'AbortError' || e.name === 'APIUserAbortError')) {
-          layout.contentWrite(`${ui.dim}(已取消压缩)${ui.reset}\n`);
-          return null;
-        }
-        throw e;
-      });
-      if (!log) continue;
-      // 会话状态(plan + 笔记段)不在此处回写 history[0]:agent/core 每步都在 requestHistory
-      // 末尾注入最新副本(buildSessionStateReminder),压缩后下一步自然恢复,且系统提示保持
-      // 逐字节稳定以命中 prompt 缓存。
-      const d = log.compactDetail;
-      appendCurrentSessionRuntimeEvent('compact', {
-        source: 'manual',
-        force,
-        called: log.compactHistoryCalled,
-        reason: d?.reason ?? 'unknown',
-        estimateBefore: d?.estimateBefore,
-        estimateAfter: d?.estimateAfter,
-        focusHash: focus ? hashTraceValue(focus) : undefined,
-      });
-      if (!d) {
-        // 兜底(旧调用):只显示 old 文案
-        if (!log.compactHistoryCalled) {
-          layout.contentWrite(`${ui.dim}(无需压缩:没有可压缩的旧消息)${ui.reset}\n`);
-        } else if (focus) {
-          layout.contentWrite(`${ui.dim}(带焦点压缩:${focus})${ui.reset}\n`);
-        }
-        continue;
-      }
-      // 详细文案:按 reason 分类
-      const reason = d.reason;
-      const before = d.estimateBefore;
-      const after = d.estimateAfter;
-      const proto = d.protectedRatio !== undefined ? `保护区占比 ${(d.protectedRatio * 100).toFixed(0)}%` : '';
-      const oldCt = d.oldGroupCount !== undefined ? `旧区组数 ${d.oldGroupCount}` : '';
-      const focusNote = focus ? `焦点:${focus}` : '';
-      const stats = [proto, oldCt].filter(Boolean).join(' · ');
-
-      if (reason === 'microcompact') {
-        layout.contentWrite(`${ui.cyan}✓ 微压缩:${ui.reset} ${before} → ${after} tokens${stats ? `  (${ui.dim}${stats}${ui.reset})` : ''}\n`);
-      } else if (reason === 'summarize') {
-        layout.contentWrite(`${ui.cyan}✓ LLM 摘要:${ui.reset} ${before} → ${after} tokens${focusNote ? `  (${ui.dim}${focusNote}${ui.reset})` : ''}\n`);
-      } else if (reason === 'noop-empty') {
-        layout.contentWrite(`${ui.dim}(history 太短,只有 system 提示,无可压旧区)${ui.reset}\n`);
-      } else if (reason === 'noop-protected') {
-        layout.contentWrite(`${ui.dim}(无可压旧区:全部在保护区 system + 当前轮)${ui.reset}${stats ? `  ${ui.dim}(${stats})${ui.reset}` : ''}\n`);
-        layout.contentWrite(`${ui.dim}提示:/compact --force 强行把早期对话压成摘要${ui.reset}\n`);
-      } else if (reason === 'noop-ml-only') {
-        layout.contentWrite(`${ui.dim}(LLM 摘要失败,且无超大单条可微压;可能是后端不可用)${ui.reset}\n`);
-        layout.contentWrite(`${ui.dim}回退:只跑了 keep-current 结构,history 未变${ui.reset}\n`);
-      } else if (reason === 'noop-shrunk-too-large') {
-        layout.contentWrite(`${ui.yellow}● 上下文已超阈但无可压缩项(全在保护区),建议 /clear 或缩短输入。${ui.reset}\n`);
-        if (stats) layout.contentWrite(`${ui.dim}(${stats})${ui.reset}\n`);
-      } else if (reason === 'noop-noold-noop') {
-        layout.contentWrite(`${ui.dim}(无需压缩:没有可压缩的旧消息,且不在手动触发)${ui.reset}\n`);
-      } else {
-        layout.contentWrite(`${ui.dim}(reason=${reason},${before} → ${after} tokens)${ui.reset}\n`);
-      }
-      continue;
-    }
     // /sessions /resume 已搬到 repl/commands/session.ts
-    if (line === '/theme' || line.startsWith('/theme ')) {
-      // /theme:无参开菜单(↑↓ 选,Enter 切换,Esc 取消);/theme <name> 直切;/theme list 或未知名 → 列出。
-      const arg = line.startsWith('/theme ') ? line.slice('/theme '.length).trim() : '';
-      let name: string | null;
-      if (arg === '') {
-        // 无参:菜单选(仿 /resume /rollback 的 picker)
-        const items: SessionPickerItem[] = listThemes().map((t) => ({
-          id: t,
-          title: t,
-          subtitle: themeDescription(t),
-        }));
-        let pick: SessionPickerItem | null;
-        try {
-          pick = await promptThemePicker(items);
-        } catch {
-          continue; // Ctrl+C(SIGINT)→ 取消
-        }
-        name = pick?.id ?? null;
-      } else if (arg === 'list' || !themeExists(arg)) {
-        layout.contentWrite(`${ui.dim}${t('repl.themeList')}${ui.reset}\n`);
-        for (const theme of listThemes()) {
-          layout.contentWrite(
-            `  ${ui.accent}${theme}${ui.reset}  ${ui.dim}${themeDescription(theme)}${ui.reset}\n`
-          );
-        }
-        layout.contentWrite(
-          `${ui.dim}${t('repl.themeCurrent', { theme: getTheme() })}${ui.reset}\n`
-        );
-        continue;
-      } else {
-        name = arg;
-      }
-      if (name === null) continue; // Esc / Ctrl+D 取消
-      // 切:setTheme → 重算状态行(新色)→ 清内容重绘(历史 / 横幅,镜像启动 + /resume)→ 确认 → 持久化。
-      // markdown MEMO 按 themeVersion 自动失效,故 renderHistory 取新色;状态栏 / 输入框由 continue 回 INPUT 态时读 getter 刷。
-      setTheme(name);
-      refreshStatusBase(history);
-      layout.clearContent();
-      if (history.some((m) => m.role === 'user')) {
-        renderHistory(history);
-      } else {
-        layout.writeBanner(bannerLines(banner()));
-      }
-      layout.contentWrite(`${ui.dim}${t('repl.themeChanged', { theme: name })}${ui.reset}\n`);
-      updateConfigKey('MOCODE_THEME', name);
-      if (config.themeFromShell) {
-        layout.contentWrite(
-          `${ui.dim}(shell 环境变量 MOCODE_THEME 已设,文件写入下次启动被其覆盖;取消该 shell 设置后生效)${ui.reset}\n`
-        );
-      }
-      continue;
-    }
+    // /theme 已搬到 repl/commands/appearance.ts
     if (line === '/model' || line.startsWith('/model ')) {
       // /model:运行时配置大模型(baseURL/apiKey/model/contextWindowTokens)。
       // 即时生效(updateModelConfig 改内存 + env,reconfigureClient 重建 OpenAI 实例)+ 持久化(writeConfigKeys 写 ~/.mocode/config)。
