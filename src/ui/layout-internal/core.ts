@@ -27,6 +27,7 @@ import { copyToClipboard, readClipboard } from '../clipboard.js';
 import { renderMarkdown } from '../markdown.js';
 import { t } from '../../i18n/index.js';
 import type { Geo, StatusBarData, InputView } from '../layout-types.js';
+import { state } from './state.js';
 
 /**
  * 全屏 TUI 布局:alt screen + 单滚动区域(内容区)+ 区域外固定底栏(状态行 + 输入框)。
@@ -49,21 +50,20 @@ import type { Geo, StatusBarData, InputView } from '../layout-types.js';
  * 非 TTY:全部空操作,contentWrite 退化为 stdout.write,与改造前内联行为一致。
  */
 
-// ── 内部状态 ──
-let active = false;
+// 可变运行态全部集中在 ./state.ts 的共享单例;本文件只留纯常量与函数。
 
 /** 是否处于全屏 TUI(alt screen)激活态。非 TTY / 嵌入宿主(host)下为 false。
  *  子 agent 等异步路径据此判断能否把中间过程实时写入主内容区。 */
 export function isTuiActive(): boolean {
-  return active;
+  return state.active;
 }
 
-// ── 裸 console 防御:第三方库(如 openai SDK)可能用 console.log 直写 stdout,
-// 在 RUNNING 态会落到光标所在的底栏输入框,污染输入。进入 TUI 后把 console.*
-// 劫持到 contentWrite,统一进内容区(运行态下 contentWrite 末尾会把真光标归位输入框),
-// 既不再泄漏到输入框,也不会破坏 TUI 布局。TUI 外(active=false)不劫持,
-// 恢复原始 console,保证 host 子进程 JSON 协议 / 退出日志正常。
-let consoleHookInstalled = false;
+// ── 裸 console 防御 ──
+// 第三方库(如 openai SDK)可能用 console.log 直写 stdout,在 RUNNING 态会落到光标所在的底栏
+// 输入框、污染输入。进入 TUI 后把 console.* 劫持到 contentWrite,统一进内容区(运行态下
+// contentWrite 末尾会把真光标归位输入框),既不再泄漏到输入框,也不会破坏 TUI 布局。
+// TUI 外(active=false)不劫持、恢复原始 console,保证 host 子进程 JSON 协议 / 退出日志正常。
+// 开关标志 consoleHookInstalled 见 state.ts。
 const origConsole = {
   log: console.log,
   error: console.error,
@@ -74,7 +74,7 @@ const origConsole = {
 function routeConsoleToContent(method: 'log' | 'error' | 'warn' | 'info'): void {
   const c = console as unknown as Record<string, (...args: any[]) => void>;
   c[method] = (...args: any[]): void => {
-    if (active && ui.isTTY) {
+    if (state.active && ui.isTTY) {
       let s: string;
       try {
         s = args
@@ -92,105 +92,30 @@ function routeConsoleToContent(method: 'log' | 'error' | 'warn' | 'info'): void 
 }
 
 function installConsoleGuard(): void {
-  if (consoleHookInstalled) return;
+  if (state.consoleHookInstalled) return;
   routeConsoleToContent('log');
   routeConsoleToContent('error');
   routeConsoleToContent('warn');
   routeConsoleToContent('info');
-  consoleHookInstalled = true;
+  state.consoleHookInstalled = true;
 }
 
 function uninstallConsoleGuard(): void {
-  if (!consoleHookInstalled) return;
+  if (!state.consoleHookInstalled) return;
   console.log = origConsole.log;
   console.error = origConsole.error;
   console.warn = origConsole.warn;
   console.info = origConsole.info;
-  consoleHookInstalled = false;
+  state.consoleHookInstalled = false;
 }
-let mode: 'input' | 'running' = 'input';
-let footerH = 6; // 1 虚拟空行 + 1 spinner行 + 1 上线 + 输入行数 + 1 下线 + 1 model行(两行式底栏)
-let contentRow = 1; // 续写位行(1-based,屏坐标,[1,contentBottom])
-let contentCol = 1; // 续写位列(1-based)
-// 上一次 paintLiveAtCursor 实际画帧的屏坐标(0=未画)。clearLiveAtCursor 清"这行"而非当前续写位——
-// 防 spinner 运行期间续写位漂移时清错行、旧帧行残留(见 557e678 移除 isStreamingPaused 后的间歇性 frame 泄漏)。
-let frameRow = 0;
-let frameCol = 0;
-let segmentStartRow = 1; // 当前 md 段起始屏行(供 contentWriteMd 定位段末续写位;段内行数由 content 段标记跟踪)
-let scrollOffset = 0; // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示
-let scrollLockUntil = 0; // 发消息轮首滚动锁(绝对时间戳 ms,0=未锁):吸收 stdin 残留滚轮事件,防 resetScroll 回尾后被重新滚上去
+
+// ── 纯常量(可变运行态在 state.ts)──
 const SCROLL_LOCK_MS = 400; // 锁时长:覆盖 OS 缓冲残留 + 常规滚轮惯性;LLM TTFB 多 >200ms,不影响轮中后段滚动
-let base: { model: string; contextBar: string; cwd: string; modeTag?: string; planSummary?: string; lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } } | null = null;
-// 运行态实时 token 用量(agent core 流式推送,轮末 repl 清 undefined)。
-// composeModelLine 在 RUNNING 态把它画成 chip 放 context 进度条左侧;
-// 不主动触发重画——RUNNING 态 turnTimer 80ms 心跳重画自然取最新值。
-let liveUsage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined;
-let statusText = '';
-let spinnerFrame: string | undefined;
-let turnStart: number | null = null; // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
-let turnTimer: NodeJS.Timeout | null = null; // 走时刷新计时器(独立于 spinner):流式期间 spinner 停转,由它续刷状态行。
-/** 当前 plan chip 占用脚栏行数(1 或 2)。composePlanLines 每次重算后写入。
- *  驱动 paintInput setRegion(fh) 动态撑高脚栏;drawStatusBar 据此画 1/2 行 plan,
- *  与 spinner/上线/输入/下线/model 行的 +1/+2/+3/+4/+5 偏移天然一致(contentBottom 自动重算)。 */
-let planRows: 1 | 2 = 1;
-let runningFrame = -1; // 运行态状态行 chip 心跳帧(转圈帧 明灭);INPUT 态 -1 退回静态 ●
 const RUNNING_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-// 运行态用户打字时暂停流式物理写:流式每个 token 要 cup 到 contentRow 写入,IME 候选窗逐光标移动跟踪会跟过去;
-// 用户打字期间只喂缓冲、不物理写,光标留输入框;停手 USER_ACTIVE_PAUSE_MS 后 flush 重画缓冲内容。
-let userActiveUntil = 0; // 打字活跃截止时刻(Date.now()+PAUSE);0=未活跃
-let flushTimer: NodeJS.Timeout | null = null; // 用户停手后 flush 缓冲内容(repaintViewport)
 const USER_ACTIVE_PAUSE_MS = 1500;
 /** Sticky banner 的 ❯ 前缀(同 repl 的 PROMPT;常量统一视觉)。 */
 const BANNER_PROMPT = '❯ ';
-let lastView: InputView | null = null;
-let lastMenuStartRow = 0; // 上次菜单起始屏行(供擦除)
-let lastMenuRows = 0;
-let resizeTimer: NodeJS.Timeout | null = null;
-let lastTerminalCols = 0;
-let exitHandler: (() => void) | null = null;
-let sigwinchHandler: (() => void) | null = null;
-// markdown 流式段:agent onText 的 chunk 累积到 mdBuf,每 chunk 把整段经 renderMarkdown
-// 渲成自洽行,replace 缓冲段(content.setLines)+ repaintViewport 重画。mdActive 期间任何
-// 非 md 写(contentWrite)先 commitMd 收尾(清 segMark,后续写不再被 setLines 截断)。
-let mdActive = false;
-let mdBuf = '';
-
-// ── 鼠标选区(应用层框选复制)──
-// 选区以「绝对缓冲行索引 + 显示列」存(不用屏坐标)——滚动/追加新内容后 abs 索引仍稳定指向同段文字,
-// 故拖过多屏、触边自动翻页也能连续扩展。松开时从 content 缓冲抠纯文本(去 ANSI)写剪贴板。
-interface Selection {
-  anchorLine: number; // 起点绝对行索引(content 快照 0-based)
-  anchorCol: number; // 起点显示列(0-based)
-  endLine: number;
-  endCol: number;
-  dragged: boolean; // 是否真拖动过(纯点击不复制,只清选区)
-}
-let selection: Selection | null = null;
-let selecting = false; // 左键按下中(press→release 之间)
-let mouseEnabled = true; // 导航菜单(picker)期间置 false:只吞报表不做选区/滚动,防菜单被 viewport 重画覆盖
 const WHEEL_LINES = 3; // 滚轮每格滚动行数
-
-/**
- * 输入框反白选区:与内容区 selection 平行存在,坐标基于 lastView.lines(逻辑行 + display_col)。
- * - dragged=false 时是纯点击,松开后立即清掉(光标已定好,选区不必要)
- * - dragged=true 时保留高亮,等右键 release 复制;文本改动后由 paintInput 入口签名检测清空
- * 不参与内容区选区:两套选区互不污染,各自接自己的右键复制 / paste。
- */
-interface InputSelection {
-  anchor: { line: number; col: number };
-  end: { line: number; col: number };
-  dragged: boolean;
-}
-let inputSelection: InputSelection | null = null;
-/** 上次画过输入框的 lastView 签名(lines 数 + 每行 display_w 累加);变了说明 prompt.ts 改了文本 → 选区锚点失效,清掉。 */
-let lastInputSig = '';
-// 点击输入框粘贴:当前文本输入方(prompt.ts / repl 运行态 typeahead)注册回调,接收剪贴板文本贴入。
-// 只在输入区(底栏输入行)内右键单击(未拖动)时触发——与内容区选区互不干扰(内容区左键=框选,右键=复制)。
-let pasteHandler: ((text: string) => void) | null = null;
-/** 鼠标点击输入框 → prompt.ts(文本 source of truth)提供的光标应用回调;
- *  layout 只做"点击 → 算新位置"的映射,实际改 cl/cc 归 prompt(同 pasteHandler 套路)。
- *  若未注册(非输入态/未进 prompt):仅做视觉反馈,cl/cc 不变。 */
-let cursorChangeHandler: ((line: number, col: number) => void) | null = null;
 
 const esc = {
   altOn: '\x1B[?1049h',
@@ -219,7 +144,7 @@ function cup(row: number, col: number): string {
   return `\x1B[${Math.max(1, Math.round(row))};${Math.max(1, Math.round(col))}H`;
 }
 
-export function getGeo(fh: number = footerH): Geo {
+export function getGeo(fh: number = state.footerH): Geo {
   const rows = stdout.rows || 24;
   const cols = stdout.columns || 80;
   const f = Math.max(1, Math.min(fh, rows - 1));
@@ -235,10 +160,10 @@ export function getGeo(fh: number = footerH): Geo {
 /** (重)设滚动区域 [1, rows-footerH];设完 \x1B[H 归位(conhost 设 DECSTBM 时光标留旧位置行为未定义)。 */
 export function setRegion(fh: number): Geo {
   const rows = stdout.rows || 24;
-  const oldBottom = Math.max(1, rows - footerH);
+  const oldBottom = Math.max(1, rows - state.footerH);
   const g = getGeo(fh);
-  footerH = g.footerH;
-  if (active) {
+  state.footerH = g.footerH;
+  if (state.active) {
     stdout.write(`\x1B[1;${g.contentBottom}r`); // DECSTBM: top=1, bottom=contentBottom
     // 底栏缩小:原底栏行变回内容区,清掉残留底栏文本(否则提交多行后旧输入残留在底部)
     if (g.contentBottom > oldBottom) {
@@ -250,7 +175,7 @@ export function setRegion(fh: number): Geo {
     }
     stdout.write(esc.home);
   }
-  if (contentRow > g.contentBottom) contentRow = g.contentBottom; // 底栏撑高挤掉内容:钳到新区底
+  if (state.contentRow > g.contentBottom) state.contentRow = g.contentBottom; // 底栏撑高挤掉内容:钳到新区底
   return g;
 }
 
@@ -259,24 +184,24 @@ export function setRegion(fh: number): Geo {
  *  dim 占位(空 + placeholder)兼容态→ 归输入框起点。供 IME 锚定。 */
 function runningCaretPos(): { row: number; col: number } {
   const g = getGeo();
-  const row = g.contentBottom + 3 + planRows;
-  if (lastView && !lastView.dim) {
-    const promptW = displayWidth(lastView.prompt);
-    const line = lastView.lines[lastView.cursorLine] ?? '';
-    const before = line.slice(0, lastView.cursorCol);
+  const row = g.contentBottom + 3 + state.planRows;
+  if (state.lastView && !state.lastView.dim) {
+    const promptW = displayWidth(state.lastView.prompt);
+    const line = state.lastView.lines[state.lastView.cursorLine] ?? '';
+    const before = line.slice(0, state.lastView.cursorCol);
     const col = Math.min(g.cols, promptW + displayWidth(before) + 1);
     return { row, col };
   }
-  const text = lastView?.dim ? lastView.lines[0] ?? '' : '';
+  const text = state.lastView?.dim ? state.lastView.lines[0] ?? '' : '';
   const contentW = Math.max(0, g.cols - 3); // ❯ =2 + 光标=1
   const w = displayWidth(truncateDisplayHead(text, contentW));
   return { row, col: Math.min(g.cols, 2 + w + 1) };
 }
 
 export function contentMode(): void {
-  if (!active) return;
+  if (!state.active) return;
   const g = getGeo();
-  if (mode === 'running') {
+  if (state.mode === 'running') {
     // 运行态(回尾 / 滚动回看均):真光标归输入框光标位(供 IME 锚定,气泡不跟流式跑)。
     // 滚动态也归输入框——否则上滑看历史时打字,IME 候选气泡会锚到内容区底而非输入框
     // (conhost IME 不跟随 cup 后续移动,须让打字前光标已在输入框)。
@@ -286,8 +211,8 @@ export function contentMode(): void {
     // INPUT 态:回尾归续写位,滚动回看归内容区底(viewport 锁历史;INPUT 态无 IME 锚定需求)
     stdout.write(
       cup(
-        scrollOffset === 0 ? contentRow : g.contentBottom,
-        scrollOffset === 0 ? contentCol : 1
+        state.scrollOffset === 0 ? state.contentRow : g.contentBottom,
+        state.scrollOffset === 0 ? state.contentCol : 1
       )
     );
   }
@@ -295,7 +220,7 @@ export function contentMode(): void {
 
 /** 运行态用户是否在打字(近期有按键)——是则暂停流式物理写(contentWrite/drawStatusBar/paintLiveAtCursor 跳过物理写),光标留输入框,IME 候选窗稳定不跟流式跑。 */
 export function isStreamingPaused(): boolean {
-  return mode === 'running' && Date.now() < userActiveUntil;
+  return state.mode === 'running' && Date.now() < state.userActiveUntil;
 }
 
 /**
@@ -305,20 +230,20 @@ export function isStreamingPaused(): boolean {
  * 解决 IME 候选窗跟流式输出跑:流式写必须 cup 到 contentRow,IME 逐光标跟踪→气泡跟跑;打字时暂停写则光标不动。
  */
 export function setUserActive(): void {
-  if (!active || mode !== 'running') return;
-  userActiveUntil = Date.now() + USER_ACTIVE_PAUSE_MS;
-  if (flushTimer) clearTimeout(flushTimer);
-  flushTimer = setTimeout(() => {
-    flushTimer = null;
-    userActiveUntil = 0;
-    if (active && mode === 'running' && scrollOffset === 0) {
+  if (!state.active || state.mode !== 'running') return;
+  state.userActiveUntil = Date.now() + USER_ACTIVE_PAUSE_MS;
+  if (state.flushTimer) clearTimeout(state.flushTimer);
+  state.flushTimer = setTimeout(() => {
+    state.flushTimer = null;
+    state.userActiveUntil = 0;
+    if (state.active && state.mode === 'running' && state.scrollOffset === 0) {
       repaintViewport(); // 重画内容区(显示活跃期间缓冲的流式内容)
       drawStatusBar(); // 刷状态行(活跃期间冻住,现恢复)
       const p = runningCaretPos();
       stdout.write(cup(p.row, p.col));
     }
   }, USER_ACTIVE_PAUSE_MS);
-  flushTimer.unref();
+  state.flushTimer.unref();
 }
 
 /**
@@ -330,11 +255,11 @@ export function setUserActive(): void {
  * content.feedChar。SGR 在终端 0 宽,故续写位只按可见字符推进(与终端实际光标一致)。
  */
 export function contentWrite(s: string): void {
-  if (!active || !ui.isTTY) {
+  if (!state.active || !ui.isTTY) {
     stdout.write(s);
     return;
   }
-  if (mdActive) commitMd(); // 非 md 写接续:先收尾 md 段(清 segMark,否则 setLines 会截到旧段)
+  if (state.mdActive) commitMd(); // 非 md 写接续:先收尾 md 段(清 segMark,否则 setLines 会截到旧段)
   // 滚动回看时(scrollOffset>0)只喂缓冲 + 推进续写位,不物理写——否则新流式内容覆盖 viewport 历史行。
   // 回尾(scrollOffset===0)才物理写;写起点 = 当前续写位(loop 会推进续写位,故先捕获)。
   const g = getGeo();
@@ -342,10 +267,10 @@ export function contentWrite(s: string): void {
   const bottom = g.contentBottom;
   // resize 缩窄后，当前待写行可能已占满或超过新列宽。必须在捕获物理写起点前
   // 先提交该行并移到下一行；否则 CUP 会把 cols+1 钳到末列，下一字符覆盖旧行尾。
-  if (contentCol > cols) {
+  if (state.contentCol > cols) {
     content.breakRow();
-    contentRow = contentRow >= bottom ? bottom : contentRow + 1;
-    contentCol = 1;
+    state.contentRow = state.contentRow >= bottom ? bottom : state.contentRow + 1;
+    state.contentCol = 1;
   }
   // resize 后 contentRow 可能过时(拖终端框):
   //  - 缩小:contentRow > 新 bottom → 钳到新 bottom
@@ -354,18 +279,18 @@ export function contentWrite(s: string): void {
   // 最后一行 banner/content 上,首次 contentWrite 覆盖 banner(首条消息「插到 logo 下面」bug)。
   // 注意:不能用 totalRows()+1——breakRow 后 hasCurrent=true,totalRows 已含当前空行,再 +1 会多跳一行,
   // 导致 onDone 摘要行等写 \n 后的 contentWrite 入口多跳 1 行(2 空行 bug)。
-  if (contentRow > bottom) contentRow = bottom;
-  else if (scrollOffset === 0 && contentRow < bottom) {
-    contentRow = Math.min(content.committedRows() + 1, bottom);
+  if (state.contentRow > bottom) state.contentRow = bottom;
+  else if (state.scrollOffset === 0 && state.contentRow < bottom) {
+    state.contentRow = Math.min(content.committedRows() + 1, bottom);
   }
-  const startRow = contentRow;
-  const startCol = contentCol;
+  const startRow = state.contentRow;
+  const startCol = state.contentCol;
   const advanceRow = (r: number): number => (r >= bottom ? bottom : r + 1); // 到底则滚动,续写位留底
   // 滚动回看冻结(仿 ink store.pushBlock 的 offset+=newLines):scrollOffset>0 时新内容只入缓冲,
   // 但缓冲增长后若 offset 不变,下次 scrollBy→repaintViewport 会取漂移窗口、把新内容画进历史视图
   // (「工具消息跳到上面覆盖」bug;滚回底又正常,因 buffer 正确)。故入缓冲前后算 totalRows 差,
   // offset += 差以冻住视图(窗口停原绝对行,无需 repaint;滚回底自显尾部新内容)。
-  const scrolled = scrollOffset > 0;
+  const scrolled = state.scrollOffset > 0;
   const totalBefore = scrolled ? content.totalRows() : 0;
   let i = 0;
   while (i < s.length) {
@@ -395,24 +320,24 @@ export function contentWrite(s: string): void {
     const cp = s.codePointAt(i) ?? 0;
     const ch = String.fromCodePoint(cp);
     if (ch === '\n') {
-      contentRow = advanceRow(contentRow);
+      state.contentRow = advanceRow(state.contentRow);
       content.breakRow();
-      contentCol = 1;
+      state.contentCol = 1;
       i += ch.length;
       continue;
     }
     if (ch === '\r') {
-      contentCol = 1;
+      state.contentCol = 1;
       i += ch.length;
       continue;
     }
     if (ch === '\t') {
-      const next = Math.floor((contentCol - 1) / 8) * 8 + 8 + 1;
+      const next = Math.floor((state.contentCol - 1) / 8) * 8 + 8 + 1;
       if (next > cols) {
-        contentRow = advanceRow(contentRow);
+        state.contentRow = advanceRow(state.contentRow);
         content.breakRow();
-        contentCol = 1;
-      } else contentCol = next;
+        state.contentCol = 1;
+      } else state.contentCol = next;
       i += ch.length;
       continue;
     }
@@ -421,13 +346,13 @@ export function contentWrite(s: string): void {
       i += ch.length;
       continue; // 组合符 / 零宽:不推进
     }
-    if (contentCol + cw - 1 > cols) {
+    if (state.contentCol + cw - 1 > cols) {
       // 当前行放不下:折行
-      contentRow = advanceRow(contentRow);
+      state.contentRow = advanceRow(state.contentRow);
       content.breakRow();
-      contentCol = 1;
+      state.contentCol = 1;
     }
-    contentCol += cw;
+    state.contentCol += cw;
     content.feedChar(ch);
     i += ch.length;
   }
@@ -437,11 +362,11 @@ export function contentWrite(s: string): void {
   // cup 到 cols+1 并 \x1B[2K 擦掉整行。提交后模拟与终端都停在 (下一行,1)、无 pending,等价 ink 的
   // 「新输出永远在底」。代价:chunk 恰在末列结束且下一 chunk 以 \n 开头时多一个空行(cosmetic,远好于覆盖)。
   // 模拟归一化在物理写 guard 之外(滚动态也要保 buffer 自洽);物理补的 \n 在 guard 之内(滚动态/暂停态不物理写)。
-  const pendingWrap = contentCol > cols;
+  const pendingWrap = state.contentCol > cols;
   if (pendingWrap) {
     content.breakRow();
-    contentRow = advanceRow(contentRow);
-    contentCol = 1;
+    state.contentRow = advanceRow(state.contentRow);
+    state.contentCol = 1;
   }
   // 滚动回看冻结:新内容入缓冲后 offset += delta(contentWrite 只增故 ≥0;md 路径可负),钳到 [0, maxOff],
   // viewport 窗口停原绝对行(不漂移到新工具消息)。无需 repaint——窗口未变(屏仍显原历史)。
@@ -449,16 +374,16 @@ export function contentWrite(s: string): void {
     const delta = content.totalRows() - totalBefore;
     if (delta !== 0) {
       const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
-      scrollOffset = Math.max(0, Math.min(scrollOffset + delta, maxOff));
+      state.scrollOffset = Math.max(0, Math.min(state.scrollOffset + delta, maxOff));
     }
   }
   // 物理写(回尾 offset=0):cup 写起点 + s + (pending 时补 \n 提交换行)+ (运行态 cup 回输入框)。
   // 打字中不再暂停物理写——单次 write 结尾 cup 回 runningCaretPos(输入框),IME 锚定不动(跟踪每次 write
   // 最终位置);旧设计 isStreamingPaused 暂停写致流式卡顿,现单次写归位已无需暂停。
-  if (scrollOffset === 0) {
+  if (state.scrollOffset === 0) {
     let out = cup(startRow, startCol) + s;
     if (pendingWrap) out += '\n'; // 滚动区域底行触发 DECSTBM 上滚、中段 LF 下移到 (下一行,1)
-    if (mode === 'running') {
+    if (state.mode === 'running') {
       const p = runningCaretPos();
       out += cup(p.row, p.col);
     }
@@ -468,17 +393,17 @@ export function contentWrite(s: string): void {
 
 /** 进入 markdown 流式段:标记段起点(layout 续写位 + content.beginSegment),清 accumulator。 */
 function beginMdSegment(): void {
-  segmentStartRow = contentRow;
+  state.segmentStartRow = state.contentRow;
   content.beginSegment();
-  mdBuf = '';
-  mdActive = true;
+  state.mdBuf = '';
+  state.mdActive = true;
 }
 
 /** 提交 markdown 段:清 accumulator + content.commitSegment(后续非 md 写不再被 setLines 截断)。 */
 function commitMd(): void {
-  if (!mdActive) return;
-  mdActive = false;
-  mdBuf = '';
+  if (!state.mdActive) return;
+  state.mdActive = false;
+  state.mdBuf = '';
   content.commitSegment();
 }
 
@@ -490,7 +415,6 @@ function commitMd(): void {
 //
 // bannerH = bannerLines(banner()) 的行数(目前 5:4 行 logo+info + 1 空行分隔)。如未来
 // bannerString 变化,调用方需重调 writeBanner 重设 bannerH。
-let bannerH = 0;
 
 /**
  * 在 content 缓冲顶部建一份 banner;**首次**调用建好(bannerH = lines.length),**重复**调用
@@ -501,10 +425,10 @@ let bannerH = 0;
  * 仅当 scrollOffset === 0 时 repaintViewport 让新版 banner 立刻进 viewport 顶部。
  */
 export function writeBanner(lines: string[]): void {
-  if (bannerH === 0) {
+  if (state.bannerH === 0) {
     // 首次:buffer 通常空(启动最早时),用 setLines 灌入;若 buffer 非空(如 reseed)说明 banner
     // 已被前置写过,throw 阻止静默错位 — 调用方应先 reset banner 然后 writeBanner。
-    if (mdActive) commitMd();
+    if (state.mdActive) commitMd();
     const existed = content.totalRows();
     if (existed !== 0) {
       throw new Error(
@@ -512,13 +436,13 @@ export function writeBanner(lines: string[]): void {
       );
     }
     content.setLines(lines);
-    bannerH = lines.length;
+    state.bannerH = lines.length;
     // 续写位推进到 banner 之后:clearContent 把 contentRow 归到 1,writeBanner 灌入 bannerH 行
     // 但不动 contentRow → 首次 contentWrite 会从屏行 1 写出(覆盖 banner)。这里同步修正,
     // 让首条用户消息从 banner 下方开始(与 buffer 尾部对齐)。仅首次走这条,后续 rewriteBanner 不动续写位。
-    contentRow = Math.min(bannerH + 1, getGeo().contentBottom);
-    contentCol = 1;
-    if (scrollOffset === 0) repaintViewport();
+    state.contentRow = Math.min(state.bannerH + 1, getGeo().contentBottom);
+    state.contentCol = 1;
+    if (state.scrollOffset === 0) repaintViewport();
     return;
   }
   // 后续:等价 rewriteBanner
@@ -531,23 +455,23 @@ export function writeBanner(lines: string[]): void {
  * 滚动回看冻结:行数不变,offset 不动。等 scrollOffset 回到 0 时 viewport 自动显新版 banner。
  */
 export function rewriteBanner(lines: string[]): void {
-  if (bannerH === 0) {
+  if (state.bannerH === 0) {
     // 没建过 banner:等价首次 writeBanner(允许首次调用直接进 rewriteBanner 的别名入口)
     writeBanner(lines);
     return;
   }
-  if (lines.length !== bannerH) {
+  if (lines.length !== state.bannerH) {
     throw new Error(
-      `rewriteBanner: 行数 ${lines.length} ≠ 已建 bannerH ${bannerH}(调用方需统一行数)`
+      `rewriteBanner: 行数 ${lines.length} ≠ 已建 bannerH ${state.bannerH}(调用方需统一行数)`
     );
   }
   content.replaceHead(0, lines);
-  if (scrollOffset === 0) repaintViewport();
+  if (state.scrollOffset === 0) repaintViewport();
 }
 
 /** 测试 / 调试用:当前 banner 占多少行;0 表示未启用。 */
 export function bannerHeight(): number {
-  return bannerH;
+  return state.bannerH;
 }
 
 /**
@@ -562,34 +486,34 @@ export function bannerHeight(): number {
  * 滚动回看(scrollOffset>0)只更新缓冲不物理写(回尾时显);打字中照常物理写——单次 write 结尾 cup 回输入框,IME 锚定不动。
  */
 export function contentWriteMd(s: string): void {
-  if (!active || !ui.isTTY) {
+  if (!state.active || !ui.isTTY) {
     stdout.write(s);
     return;
   }
-  if (!mdActive) beginMdSegment();
-  mdBuf += s;
+  if (!state.mdActive) beginMdSegment();
+  state.mdBuf += s;
   const g = getGeo();
   // 滚动回看冻结(同 contentWrite):scrollOffset>0 时 setLines 替换段会改缓冲行数,若 offset 不变,
   // 下次 scrollBy→repaintViewport 取漂移窗口、把流式正文画进历史视图。故 setLines 前后算 totalRows 差,
   // offset += delta(可负:setLines 重渲染可能缩行)冻住视图。md 段在尾,窗口在上方,冻结后不重叠。
-  const scrolled = scrollOffset > 0;
+  const scrolled = state.scrollOffset > 0;
   const totalBefore = scrolled ? content.totalRows() : 0;
-  const lines = renderMarkdown(mdBuf, g.cols);
-  content.setLines(lines, mdBuf);
+  const lines = renderMarkdown(state.mdBuf, g.cols);
+  content.setLines(lines, state.mdBuf);
   const segRows = lines.length;
-  const available = g.contentBottom - segmentStartRow + 1;
-  contentRow = segRows >= available ? g.contentBottom : segmentStartRow + segRows;
-  contentCol = 1;
+  const available = g.contentBottom - state.segmentStartRow + 1;
+  state.contentRow = segRows >= available ? g.contentBottom : state.segmentStartRow + segRows;
+  state.contentCol = 1;
   if (scrolled) {
     const delta = content.totalRows() - totalBefore;
     if (delta !== 0) {
       const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
-      scrollOffset = Math.max(0, Math.min(scrollOffset + delta, maxOff));
+      state.scrollOffset = Math.max(0, Math.min(state.scrollOffset + delta, maxOff));
     }
   }
-  if (scrollOffset === 0) {
+  if (state.scrollOffset === 0) {
     repaintViewport(); // 单次 write 结尾 cup 回 runningCaretPos(运行态),IME 锚输入框;打字中不再暂停
-    if (mode === 'running') {
+    if (state.mode === 'running') {
       const p = runningCaretPos();
       stdout.write(cup(p.row, p.col));
     }
@@ -602,11 +526,11 @@ export function contentWriteMd(s: string): void {
  * 但同样保留原始 markdown source，因此窗口列宽变化后历史正文也能重新排版。
  */
 export function contentWriteMdOnce(s: string): void {
-  if (!active || !ui.isTTY) {
+  if (!state.active || !ui.isTTY) {
     stdout.write(s);
     return;
   }
-  if (mdActive) commitMd();
+  if (state.mdActive) commitMd();
   const g = getGeo();
   content.beginSegment();
   const lines = renderMarkdown(s, g.cols);
@@ -615,37 +539,37 @@ export function contentWriteMdOnce(s: string): void {
   // setLines 直接提交了全部 markdown 物理行；补回一个未提交的空当前行，保证满屏时
   // 下一次 contentWrite 从正文下一行开始，而不是在 contentBottom 第 1 列覆盖正文末行。
   content.ensureCurrentRow();
-  contentRow = Math.min(content.committedRows() + 1, g.contentBottom);
-  contentCol = 1;
-  if (scrollOffset === 0) repaintViewport();
+  state.contentRow = Math.min(content.committedRows() + 1, g.contentBottom);
+  state.contentCol = 1;
+  if (state.scrollOffset === 0) repaintViewport();
 }
 
 /** 清空内容区(保留底栏):全屏清 + 重设区域 + 续写位归 (1,1) + 清缓冲 + 回尾。底栏由调用方随后重画。 */
 export function clearContent(): void {
-  if (!active) return;
+  if (!state.active) return;
   stdout.write('\x1B[1;1H\x1B[2J');
-  setRegion(footerH);
-  contentRow = 1;
-  contentCol = 1;
-  frameRow = 0;
-  frameCol = 0;
-  segmentStartRow = 1;
-  scrollOffset = 0;
-  scrollLockUntil = 0;
-  mdActive = false;
-  mdBuf = '';
+  setRegion(state.footerH);
+  state.contentRow = 1;
+  state.contentCol = 1;
+  state.frameRow = 0;
+  state.frameCol = 0;
+  state.segmentStartRow = 1;
+  state.scrollOffset = 0;
+  state.scrollLockUntil = 0;
+  state.mdActive = false;
+  state.mdBuf = '';
   // 清内容缓冲时必须同步重置 banner 状态:否则后续 writeBanner() 会走 rewriteBanner 路径,
   // 在已空的 content 上调 replaceHead(0, lines) → startIdx(0) >= committed(0) → 抛错 → REPL 退出。
   // /theme、/clear、/resume 等命令 clearContent 后紧接 writeBanner 的场景均依赖此重置。
-  bannerH = 0;
+  state.bannerH = 0;
   // 欢迎引导块随 buffer 一起清掉(/clear / /resume 等路径),状态复位后可由 repl 重新写入。
-  welcomeStart = -1;
-  welcomeRows = 0;
+  state.welcomeStart = -1;
+  state.welcomeRows = 0;
   // 清内容区必须同时作废旧菜单擦除坐标:picker(/resume /rollback /theme)把菜单画在内容区底部,
   // 菜单行号缓存在 lastMenuStartRow/lastMenuRows;若不清零,后续 paintInput 会按旧坐标“擦菜单”,
   // 把刚 renderHistory/contentWrite 写好的内容(如“已续接会话”提示)清掉,导致用户要滚动一下才刷新。
-  lastMenuStartRow = 0;
-  lastMenuRows = 0;
+  state.lastMenuStartRow = 0;
+  state.lastMenuRows = 0;
   content.reset();
   notifyContentReset(); // batch 渲染器同步重置(batch 摘要行索引全部失效)
   stdout.write(esc.home);
@@ -662,14 +586,14 @@ export function clearContent(): void {
  * 通常再 enterInputMode 切回 INPUT 视觉,光标由后续 paintInput 重画。
  */
 export function rewindContent(rowsToRewind: number): void {
-  if (!active || rowsToRewind <= 0) return;
+  if (!state.active || rowsToRewind <= 0) return;
   content.rewind(rowsToRewind);
   const g = getGeo();
-  contentRow = Math.max(g.contentTop, contentRow - rowsToRewind);
-  contentCol = 1;
+  state.contentRow = Math.max(g.contentTop, state.contentRow - rowsToRewind);
+  state.contentCol = 1;
   // 钳 scrollOffset:不能让 viewport 视点超出新 totalRows
   const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
-  scrollOffset = Math.min(scrollOffset, maxOff);
+  state.scrollOffset = Math.min(state.scrollOffset, maxOff);
   // 末段 frameRow/frameCol 是 spinner 的画位,撤回若跨过 frame 行也不必清——
   // repaintViewport 会按新 buffer 重画整片,旧 frame 自然被覆盖。
   repaintViewport();
@@ -678,32 +602,30 @@ export function rewindContent(rowsToRewind: number): void {
 // ── 欢迎引导块(新会话开场)──
 // 开场写在内容区(banner 之下),教用户怎么开始;首次提交任何输入(消息或斜杠命令)前
 // 由 dismissWelcomeBlock 整块从 buffer 撤掉——「一打开就能看见,开始干活就消失」。
-let welcomeStart = -1; // 块起点(content.committedRows 口径的绝对行索引)
-let welcomeRows = 0; // 块行数(0 = 屏上无欢迎块)
 
 /** 写欢迎引导块(每行自洽带色、行宽须 ≤ cols,contentWrite 状态机兜底折行);已在屏上则跳过。 */
 export function writeWelcomeBlock(lines: string[]): void {
-  if (!active || !ui.isTTY || lines.length === 0) return;
-  if (welcomeRows > 0) return; // 已在屏上,不重复写
-  welcomeStart = content.committedRows();
+  if (!state.active || !ui.isTTY || lines.length === 0) return;
+  if (state.welcomeRows > 0) return; // 已在屏上,不重复写
+  state.welcomeStart = content.committedRows();
   contentWrite(lines.join('\n') + '\n');
-  welcomeRows = content.committedRows() - welcomeStart;
+  state.welcomeRows = content.committedRows() - state.welcomeStart;
 }
 
 /** 撤掉欢迎引导块:删 buffer 区间(若已被外部清空/裁掉则只复位状态)+ 续写位前移 + 钳位重画。 */
 export function dismissWelcomeBlock(): void {
-  if (welcomeRows <= 0) return;
-  const start = welcomeStart;
-  const n = welcomeRows;
-  welcomeRows = 0;
-  welcomeStart = -1;
+  if (state.welcomeRows <= 0) return;
+  const start = state.welcomeStart;
+  const n = state.welcomeRows;
+  state.welcomeRows = 0;
+  state.welcomeStart = -1;
   if (start < 0 || start >= content.committedRows()) return; // 块已被 clear/trim,无需删
   content.deleteFrom(start, n);
   const g = getGeo();
-  contentRow = Math.max(g.contentTop, contentRow - n);
-  contentCol = 1;
+  state.contentRow = Math.max(g.contentTop, state.contentRow - n);
+  state.contentCol = 1;
   const maxOff = Math.max(0, content.totalRows() - g.contentBottom);
-  scrollOffset = Math.min(scrollOffset, maxOff);
+  state.scrollOffset = Math.min(state.scrollOffset, maxOff);
   repaintViewport();
 }
 
@@ -720,27 +642,27 @@ export function dismissWelcomeBlock(): void {
  * 否则每插一行就把视口冻住 1 行,子 agent 跑起来后主内容区看着像卡住不动。
  */
 export function contentInsertAfter(after: number, lines: string[], keepViewport = true): void {
-  if (!active || lines.length === 0) return;
+  if (!state.active || lines.length === 0) return;
   const g = getGeo();
   const totalBefore = content.totalRows();
-  const scrolled = scrollOffset > 0;
+  const scrolled = state.scrollOffset > 0;
   content.insertAfter(after, lines);
   const delta = content.totalRows() - totalBefore;
   if (delta === 0) return;
   // 流式 md 段活跃期间:插入点在段起点之前 → segmentStartRow 平移,
   // 否则 contentWriteMd 的续写位算错,展开行被下一个 setLines 砍掉。
-  if (mdActive && after + 1 < segmentStartRow) {
-    segmentStartRow += delta;
+  if (state.mdActive && after + 1 < state.segmentStartRow) {
+    state.segmentStartRow += delta;
   }
   // 续写位:原写头绝对行 = viewport 起点 + (contentRow-1) [offset=0];偏移后才一致
-  if (scrollOffset === 0 && contentRow > after + 1) {
-    contentRow = Math.min(contentRow + delta, g.contentBottom);
+  if (state.scrollOffset === 0 && state.contentRow > after + 1) {
+    state.contentRow = Math.min(state.contentRow + delta, g.contentBottom);
   }
   // 滚动回看冻结(同 contentWrite)
   if (scrolled) {
-    scrollOffset = Math.max(
+    state.scrollOffset = Math.max(
       0,
-      Math.min(scrollOffset + delta, Math.max(0, content.totalRows() - g.contentBottom)),
+      Math.min(state.scrollOffset + delta, Math.max(0, content.totalRows() - g.contentBottom)),
     );
   }
   // 展开工具信息时保持视口位置:当 scrollOffset===0(未滚动)且插入点在视口内时,
@@ -753,7 +675,7 @@ export function contentInsertAfter(after: number, lines: string[], keepViewport 
     const insertedAfterViewport = after >= (totalBefore - g.contentBottom);
     if (insertedAfterViewport) {
       // 插入点在视口内:保持视口位置,scrollOffset = 插入行数(展开内容在视口下方)
-      scrollOffset = Math.min(delta, Math.max(0, content.totalRows() - g.contentBottom));
+      state.scrollOffset = Math.min(delta, Math.max(0, content.totalRows() - g.contentBottom));
     }
   }
   // 必须同步平移 batch 索引。若延迟到 dynamic import.then，下一条 mutation 可能已经
@@ -767,22 +689,22 @@ export function contentInsertAfter(after: number, lines: string[], keepViewport 
  * 滚动回看冻结同 insertAfter:offset -= delta,钳 ≥ 0。续写位若在删区后前移 delta。
  */
 export function contentDeleteFrom(startIdx: number, n: number): void {
-  if (!active || n <= 0) return;
+  if (!state.active || n <= 0) return;
   const totalBefore = content.totalRows();
-  const scrolled = scrollOffset > 0;
+  const scrolled = state.scrollOffset > 0;
   content.deleteFrom(startIdx, n);
   const delta = totalBefore - content.totalRows();
   if (delta === 0) return;
   // 流式 md 段活跃期间:删除区间全部在段起点之前 → segmentStartRow 回退,
   // 否则 contentWriteMd 的续写位算错,段内容错位。
-  if (mdActive && startIdx + delta <= segmentStartRow) {
-    segmentStartRow = Math.max(1, segmentStartRow - delta);
+  if (state.mdActive && startIdx + delta <= state.segmentStartRow) {
+    state.segmentStartRow = Math.max(1, state.segmentStartRow - delta);
   }
-  if (scrollOffset === 0 && contentRow > startIdx + 1) {
-    contentRow = Math.max(1, contentRow - delta);
+  if (state.scrollOffset === 0 && state.contentRow > startIdx + 1) {
+    state.contentRow = Math.max(1, state.contentRow - delta);
   }
   if (scrolled) {
-    scrollOffset = Math.max(0, scrollOffset - delta);
+    state.scrollOffset = Math.max(0, state.scrollOffset - delta);
   }
   // batch 摘要行索引平移(用 -delta 表示后段索引前移)，同插入路径必须同步。
   shiftBatchesAfter(startIdx, -delta);
@@ -806,21 +728,21 @@ export function isLastContentRowBlank(): boolean {
 
 /** 正文→mutation 首摘要前，把尾部间距强制归一为一条视觉空行。 */
 export function normalizeMutationBoundary(): void {
-  if (!active || !ui.isTTY) return;
-  if (mdActive) commitMd();
+  if (!state.active || !ui.isTTY) return;
+  if (state.mdActive) commitMd();
   const totalBefore = content.totalRows();
   content.normalizeTrailingBlankRows(1);
   const g = getGeo();
   const delta = content.totalRows() - totalBefore;
-  if (scrollOffset > 0 && delta !== 0) {
-    scrollOffset = Math.max(
+  if (state.scrollOffset > 0 && delta !== 0) {
+    state.scrollOffset = Math.max(
       0,
-      Math.min(scrollOffset + delta, Math.max(0, content.totalRows() - g.contentBottom)),
+      Math.min(state.scrollOffset + delta, Math.max(0, content.totalRows() - g.contentBottom)),
     );
   }
-  contentRow = Math.min(content.committedRows() + 1, g.contentBottom);
-  contentCol = 1;
-  if (scrollOffset === 0) repaintViewport();
+  state.contentRow = Math.min(content.committedRows() + 1, g.contentBottom);
+  state.contentCol = 1;
+  if (state.scrollOffset === 0) repaintViewport();
 }
 
 /** 命令/Agent 输出→下一条输入气泡前，统一保留恰好一条视觉空行。 */
@@ -830,7 +752,7 @@ export function normalizeInputBoundary(): void {
 
 /** 原地刷新一条内容行（行数不变），用于运行中的工具 batch 更新计数。 */
 export function contentReplaceLine(absIdx: number, line: string): void {
-  if (!active) return;
+  if (!state.active) return;
   // 原地更新的 batch 摘要可能随追加工具而变长。缓冲区仍把它当作一行，但若直接
   // 交给终端超过 cols，终端会自动折行，造成视觉上多出空行且续写位与缓冲失步。
   // 在写回缓冲前按 ANSI 可见宽度截断，确保“一条逻辑行 = 一条物理行”。
@@ -844,7 +766,6 @@ export function notifyContentReset(): void {
   // 若异步 reset，旧清理会在回放完成后反过来抹掉新摘要的点击映射。
   resetBatches();
 }
-
 
 /** 把物理行索引映射到一次 reflow 之后的新索引。段内锚点按段内相对进度映射，
  * 段后的索引整体平移；用于 scroll viewport 锚点和选区在 resize 后保持语义位置。 */
@@ -865,13 +786,13 @@ function remapLineForReflow(
 function reflowContentForResize(cols: number, colsChanged: boolean): void {
   const oldTotal = content.totalRows();
   const oldViewportStart = viewportAbsStart();
-  const oldViewportEnd = Math.max(oldViewportStart, oldTotal - scrollOffset - 1);
+  const oldViewportEnd = Math.max(oldViewportStart, oldTotal - state.scrollOffset - 1);
   let mappedViewportEnd = oldViewportEnd;
   const changes = colsChanged ? content.reflowMarkdown(cols, renderMarkdown) : [];
   for (const change of changes) {
     shiftBatchesForReflow(change.start, change.oldCount, change.newCount);
     mappedViewportEnd = remapLineForReflow(mappedViewportEnd, change);
-    if (selection) {
+    if (state.selection) {
       const remapEndpoint = (line: number, col: number): { line: number; col: number } => {
         const oldEnd = change.start + change.oldCount;
         if (change.oldLines.length > 0 && line >= change.start && line < oldEnd) {
@@ -884,29 +805,29 @@ function reflowContentForResize(cols: number, colsChanged: boolean): void {
         }
         return { line: remapLineForReflow(line, change), col };
       };
-      const anchor = remapEndpoint(selection.anchorLine, selection.anchorCol);
-      const end = remapEndpoint(selection.endLine, selection.endCol);
-      selection.anchorLine = anchor.line;
-      selection.anchorCol = anchor.col;
-      selection.endLine = end.line;
-      selection.endCol = end.col;
+      const anchor = remapEndpoint(state.selection.anchorLine, state.selection.anchorCol);
+      const end = remapEndpoint(state.selection.endLine, state.selection.endCol);
+      state.selection.anchorLine = anchor.line;
+      state.selection.anchorCol = anchor.col;
+      state.selection.endLine = end.line;
+      state.selection.endCol = end.col;
     }
   }
   const g = getGeo();
   const total = content.totalRows();
-  if (scrollOffset > 0) {
+  if (state.scrollOffset > 0) {
     // 滚动回看时保持原窗口尾部的语义锚点，不因段行数变化跳到最新内容。
-    scrollOffset = Math.max(0, Math.min(total - mappedViewportEnd - 1, Math.max(0, total - g.contentBottom)));
+    state.scrollOffset = Math.max(0, Math.min(total - mappedViewportEnd - 1, Math.max(0, total - g.contentBottom)));
   }
-  contentRow = Math.min(content.committedRows() + 1, g.contentBottom);
+  state.contentRow = Math.min(content.committedRows() + 1, g.contentBottom);
   const currentRaw = content.currentRowRaw();
-  contentCol = currentRaw === null ? 1 : ansiDisplayWidth(currentRaw) + 1;
+  state.contentCol = currentRaw === null ? 1 : ansiDisplayWidth(currentRaw) + 1;
   const activeStart = content.activeSegmentStart();
   if (activeStart !== null) {
     // segmentStartRow 始终描述“回尾视图”中的段起点；即便用户正在滚动回看，
     // 后续流式 chunk 也应继续按尾部坐标推进，不能把历史 viewport 的 offset 算进来。
     const tailViewportStart = Math.max(0, total - g.contentBottom);
-    segmentStartRow = Math.max(1, Math.min(g.contentBottom, activeStart - tailViewportStart + 1));
+    state.segmentStartRow = Math.max(1, Math.min(g.contentBottom, activeStart - tailViewportStart + 1));
   }
 }
 
@@ -914,14 +835,14 @@ function reflowContentForResize(cols: number, colsChanged: boolean): void {
 
 /** 是否处于滚动回看态(offset>0,内容区显历史)。prompt 据此在非滚动键时回尾。 */
 export function isScrolled(): boolean {
-  return scrollOffset > 0;
+  return state.scrollOffset > 0;
 }
 
 /** viewport 窗口起点绝对行索引(0-based,对齐 content.sliceFromEnd 的 start)。 */
 function viewportAbsStart(): number {
   const g = getGeo();
   const total = content.totalRows();
-  const end = Math.max(0, total - scrollOffset);
+  const end = Math.max(0, total - state.scrollOffset);
   return Math.max(0, end - g.contentBottom);
 }
 
@@ -932,9 +853,9 @@ function screenRowToAbsLine(row: number): number {
 
 /** 选区归一化(anchor/end 按阅读顺序排序为 start/end)。无选区返 null。 */
 function normalizeSelection(): { startLine: number; startCol: number; endLine: number; endCol: number } | null {
-  if (!selection) return null;
-  const a = { line: selection.anchorLine, col: selection.anchorCol };
-  const b = { line: selection.endLine, col: selection.endCol };
+  if (!state.selection) return null;
+  const a = { line: state.selection.anchorLine, col: state.selection.anchorCol };
+  const b = { line: state.selection.endLine, col: state.selection.endCol };
   const aFirst = a.line < b.line || (a.line === b.line && a.col <= b.col);
   return aFirst
     ? { startLine: a.line, startCol: a.col, endLine: b.line, endCol: b.col }
@@ -995,15 +916,15 @@ function highlightRange(line: string, colStart: number, colEnd: number): string 
  * 提示「↑ 这是上方滚走的内容」,不与内容区行内 SGR 冲突。
  */
 export function repaintViewport(): void {
-  if (!active) return;
+  if (!state.active) return;
   const g = getGeo();
   const h = g.contentBottom;
-  const slice = content.sliceFromEnd(scrollOffset, h);
+  const slice = content.sliceFromEnd(state.scrollOffset, h);
   const sel = normalizeSelection();
   // viewportAbsStart() 无选区时也用:sticky banner 必须按真实窗口头算,不能降级 0(否则 banner 永不出现)。
   const absStart = viewportAbsStart();
   // sticky banner:仅 scrollOffset>0 时显示;offset=0 即实时屏,user 气泡本来就在视口内,无需 banner。
-  const bannerText = scrollOffset > 0
+  const bannerText = state.scrollOffset > 0
     ? content.lastUserMessageBefore(absStart)
     : null;
   const BANNER_ROW = 1; // 横幅占 viewport 第 1 行(会把原第 1 行内容遮住 —— 1 行换"我在看啥"的可读性,可接受)
@@ -1043,31 +964,31 @@ export function repaintViewport(): void {
   // 光标:合并进同一 write(若拆成两次 stdout.write,行写完光标会暂留 contentRow/contentBottom,
   // 流式每 chunk 调一次 → contentBottom 频繁现块状光标白块;打字第一键赶上这瞬 IME 候选气泡锚到 contentBottom)。
   // 运行态(回尾 / 滚动均)归输入框 runningCaretPos(供 IME 锚定);INPUT 态回尾归续写位 / 滚动归内容区底。
-  if (mode === 'running') {
+  if (state.mode === 'running') {
     const c = runningCaretPos();
     p += cup(c.row, c.col);
   } else {
-    p += cup(scrollOffset === 0 ? contentRow : g.contentBottom, scrollOffset === 0 ? contentCol : 1);
+    p += cup(state.scrollOffset === 0 ? state.contentRow : g.contentBottom, state.scrollOffset === 0 ? state.contentCol : 1);
   }
   stdout.write(p);
 }
 
 /** 滚动 delta 行(正=往新、负=往旧);钳 [0, max(0, total-contentBottom)];变则重画 + 刷底栏(显指示、光标回输入框)。 */
 export function scrollBy(delta: number): void {
-  if (!active) return;
-  if (Date.now() < scrollLockUntil) return; // 轮首滚动锁:吸收发消息前后 stdin 残留滚轮事件,保 agent 输出从底部开始
+  if (!state.active) return;
+  if (Date.now() < state.scrollLockUntil) return; // 轮首滚动锁:吸收发消息前后 stdin 残留滚轮事件,保 agent 输出从底部开始
   const g = getGeo();
   const total = content.totalRows();
   const maxOff = Math.max(0, total - g.contentBottom);
-  const off = Math.max(0, Math.min(scrollOffset + delta, maxOff));
-  if (off === scrollOffset) return;
+  const off = Math.max(0, Math.min(state.scrollOffset + delta, maxOff));
+  if (off === state.scrollOffset) return;
   // 进入滚动态前清掉 spinner 内联帧:滚动态由状态行心跳兜底,内联帧若残留会卡在历史视图某行。
-  if (scrollOffset === 0 && off > 0 && frameRow) {
-    stdout.write(cup(Math.min(frameRow, g.contentBottom), frameCol) + esc.clearLine);
-    frameRow = 0;
-    frameCol = 0;
+  if (state.scrollOffset === 0 && off > 0 && state.frameRow) {
+    stdout.write(cup(Math.min(state.frameRow, g.contentBottom), state.frameCol) + esc.clearLine);
+    state.frameRow = 0;
+    state.frameCol = 0;
   }
-  scrollOffset = off;
+  state.scrollOffset = off;
   repaintViewport();
   repaint();
 }
@@ -1082,14 +1003,14 @@ export function scrollWheel(dir: number): void {
 
 /** 清活跃选区(不复制),若原有选区则重画去掉反白。供 ESC / 点击别处 / 退出滚动态等场景调。 */
 export function clearSelection(): void {
-  if (!selection && !inputSelection) return;
-  selection = null;
-  if (inputSelection) {
-    inputSelection = null;
-    if (active && base && lastView) paintInput(lastView);
+  if (!state.selection && !state.inputSelection) return;
+  state.selection = null;
+  if (state.inputSelection) {
+    state.inputSelection = null;
+    if (state.active && state.base && state.lastView) paintInput(state.lastView);
     return;
   }
-  if (scrollOffset >= 0) repaintViewport();
+  if (state.scrollOffset >= 0) repaintViewport();
 }
 
 /**
@@ -1098,7 +1019,7 @@ export function clearSelection(): void {
  * 由回调方完成插入(各输入状态的行/光标结构不同,layout 不掺和文本编辑逻辑,只管"贴入"这个动作触发)。
  */
 export function setPasteHandler(fn: ((text: string) => void) | null): void {
-  pasteHandler = fn;
+  state.pasteHandler = fn;
 }
 
 /** 注册"点击输入框 → 改光标"回调:prompt.ts 等文本所有者挂此回调后,
@@ -1106,30 +1027,25 @@ export function setPasteHandler(fn: ((text: string) => void) | null): void {
  *  (prompt 用它写自己的 cl / cc,真正改 source of truth)。
  *  传 null 注销(在 cleanup / 退出输入态时调,防下个 prompt 实例被旧回调污染)。 */
 export function setCursorChangeHandler(fn: ((line: number, col: number) => void) | null): void {
-  cursorChangeHandler = fn;
+  state.cursorChangeHandler = fn;
 }
 
-/** overlay 鼠标接管者(composer 输入面板等全屏弹窗)。非 null 时所有鼠标事件先喂给它,
- *  返回 true = 已消费(不再走 layout 默认处理);弹窗自己消费全部事件,
- *  防止背景选区/翻页触发 repaintViewport 重画覆盖弹窗。传 null 注销。 */
-let overlayMouseHandler: ((e: mouse.MouseEvent) => boolean) | null = null;
-
 export function setOverlayMouseHandler(fn: ((e: mouse.MouseEvent) => boolean) | null): void {
-  overlayMouseHandler = fn;
+  state.overlayMouseHandler = fn;
 }
 
 /** picker / 介入面板期间禁用鼠标选区与拖拽(避免 viewport 重画覆盖菜单);滚轮仍可用。面板退出后恢复。 */
 export function setMouseEnabled(v: boolean): void {
-  mouseEnabled = v;
+  state.mouseEnabled = v;
   if (!v) {
-    selecting = false;
-    if (selection) {
-      selection = null;
+    state.selecting = false;
+    if (state.selection) {
+      state.selection = null;
       repaintViewport();
     }
-    if (inputSelection) {
-      inputSelection = null;
-      if (active && base && lastView) paintInput(lastView);
+    if (state.inputSelection) {
+      state.inputSelection = null;
+      if (state.active && state.base && state.lastView) paintInput(state.lastView);
     }
   }
 }
@@ -1151,9 +1067,9 @@ function extractSelectionText(sel: { startLine: number; startCol: number; endLin
 
 /** 输入框选区归一化:按 (line, col) 字典序排成 start/end。无选区返 null。 */
 function normalizeInputSelection(): { startLine: number; startCol: number; endLine: number; endCol: number } | null {
-  if (!inputSelection) return null;
-  const a = inputSelection.anchor;
-  const b = inputSelection.end;
+  if (!state.inputSelection) return null;
+  const a = state.inputSelection.anchor;
+  const b = state.inputSelection.end;
   const aFirst = a.line < b.line || (a.line === b.line && a.col <= b.col);
   return aFirst
     ? { startLine: a.line, startCol: a.col, endLine: b.line, endCol: b.col }
@@ -1162,10 +1078,10 @@ function normalizeInputSelection(): { startLine: number; startCol: number; endLi
 
 /** 从归一化输入框选区抠出纯文本(lines 上不带 ANSI,直接按 display_col 切)。越界行跳到该行末尾。 */
 function extractInputSelectionText(sel: { startLine: number; startCol: number; endLine: number; endCol: number }): string {
-  if (!lastView) return '';
+  if (!state.lastView) return '';
   const out: string[] = [];
   for (let l = sel.startLine; l <= sel.endLine; l++) {
-    const raw = lastView.lines[l];
+    const raw = state.lastView.lines[l];
     if (raw == null) continue;
     const lineW = displayWidth(raw);
     const colStart = l === sel.startLine ? sel.startCol : 0;
@@ -1184,18 +1100,18 @@ function inputViewSig(view: InputView | null | undefined): string {
 /** 屏行是否落在底栏输入行范围内(paintInput 的 firstInputRow..firstInputRow+inputRowsAvail-1)。 */
 function isInputRow(row: number): boolean {
   const g = getGeo();
-  const firstInputRow = g.contentBottom + 3 + planRows;
-  const inputRowsAvail = Math.max(0, g.footerH - 4 - planRows);
+  const firstInputRow = g.contentBottom + 3 + state.planRows;
+  const inputRowsAvail = Math.max(0, g.footerH - 4 - state.planRows);
   return row >= firstInputRow && row < firstInputRow + inputRowsAvail;
 }
 
 /** 右键单击输入行(未拖动的 press→release):读剪贴板 + 回调 pasteHandler 贴入。异步但不阻塞其他事件。 */
 function pasteIntoInput(): void {
-  if (!pasteHandler) return;
-  const handler = pasteHandler;
+  if (!state.pasteHandler) return;
+  const handler = state.pasteHandler;
   readClipboard()
     .then((text) => {
-      if (text && active) handler(text);
+      if (text && state.active) handler(text);
     })
     .catch(() => {});
 }
@@ -1216,16 +1132,16 @@ function pasteIntoInput(): void {
  *  - 段接缝点击因 paintInput 协议限制(<= 还是 <),会落到前段末;这是 paintInput 全局行为,不归本函数。
  *  - 未注册 handler(非输入态)→ 仅视觉真光标可见;cl/cc 不变。 */
 function setInputCursorFromClick(screenRow: number, screenCol: number): void {
-  if (!active || !base || !lastView) return;
+  if (!state.active || !state.base || !state.lastView) return;
 
   // running 态:先收归输入态(enterInputMode 会 paintInput 整帧重画;之后我们再按新光标重画一次覆盖即可)
-  if (mode !== 'input') {
-    enterInputMode(statusText);
+  if (state.mode !== 'input') {
+    enterInputMode(state.statusText);
   }
 
   const pos = inputScreenToInputPos(screenRow, screenCol);
   if (!pos) {
-    paintInput(lastView);
+    paintInput(state.lastView);
     return;
   }
 
@@ -1237,9 +1153,9 @@ function setInputCursorFromClick(screenRow: number, screenCol: number): void {
   // 4) cursorChangeHandler(dispatchFlatIdx, dispatchInSegVis) — 给 prompt 的"屏 tap 原坐标",
   //    prompt 自己重做 flat 算 cl/cc(扣 chip prefix,与 layout 端的 stamp 时 dispLines 一致即可)。
   // 未注册 handler(非输入态)→ 仅步骤 3 可见真光标移动;步骤 4 不动 prompt 的 cl/cc。
-  lastView = { ...lastView, cursorLine: pos.line, cursorCol: pos.displayCol };
-  paintInput(lastView);
-  if (cursorChangeHandler) cursorChangeHandler(pos.flatIdx, pos.inSegVis);
+  state.lastView = { ...state.lastView, cursorLine: pos.line, cursorCol: pos.displayCol };
+  paintInput(state.lastView);
+  if (state.cursorChangeHandler) state.cursorChangeHandler(pos.flatIdx, pos.inSegVis);
 }
 
 /**
@@ -1252,11 +1168,11 @@ function inputScreenToInputPos(
   screenRow: number,
   screenCol: number
 ): { line: number; displayCol: number; flatIdx: number; inSegVis: number } | null {
-  if (!lastView) return null;
+  if (!state.lastView) return null;
   const g = getGeo();
-  const promptW = displayWidth(lastView.prompt);
-  const firstInputRow = g.contentBottom + 3 + planRows;
-  const inputRowsAvail = Math.max(0, g.footerH - 4 - planRows);
+  const promptW = displayWidth(state.lastView.prompt);
+  const firstInputRow = g.contentBottom + 3 + state.planRows;
+  const inputRowsAvail = Math.max(0, g.footerH - 4 - state.planRows);
 
   // 输入框可视区的 (visRow, visCol) 屏幕坐标 → 0-based。
   // 点到可视区末行之下(空白区)→ 落到最末可视行(光标归最后一段);isInputRow 已挡可视区之上的点击。
@@ -1271,7 +1187,7 @@ function inputScreenToInputPos(
   // lastView.lines 在 prompt 的 redraw() 中为 dispLines()(含 chip pre 行 / chip prefix 列);
   // chip 模式下点击 chip 区域也走同一算法,与 paintInput 的视协议(段接缝除外)一致。
   const cols = Math.max(1, g.cols - promptW);
-  const lineVis: string[][] = lastView.lines.map((l) => wrapByDisplayWidth(l, cols));
+  const lineVis: string[][] = state.lastView.lines.map((l) => wrapByDisplayWidth(l, cols));
   const flat: string[] = [];
   for (const lv of lineVis) for (const r of lv) flat.push(r);
   const totalVis = flat.length;
@@ -1280,11 +1196,11 @@ function inputScreenToInputPos(
   // 起窗偏移:用 lastView 当前光标位置作为锚(与 paintInput 同算法)。
   let curVisLine = 0;
   {
-    const clRows = lineVis[lastView.cursorLine] ?? [''];
+    const clRows = lineVis[state.lastView.cursorLine] ?? [''];
     let acc = 0;
     for (let i = 0; i < clRows.length; i++) {
       const rw = displayWidth(clRows[i]);
-      if (lastView.cursorCol <= acc + rw) {
+      if (state.lastView.cursorCol <= acc + rw) {
         curVisLine = i;
         break;
       }
@@ -1293,7 +1209,7 @@ function inputScreenToInputPos(
     }
   }
   let curAbs = curVisLine;
-  for (let i = 0; i < lastView.cursorLine; i++) curAbs += lineVis[i].length;
+  for (let i = 0; i < state.lastView.cursorLine; i++) curAbs += lineVis[i].length;
   const startVis =
     totalVis > maxInputRows
       ? Math.max(0, Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows))
@@ -1364,8 +1280,8 @@ function inputScreenToInputPos(
  * 选区坐标存绝对缓冲行(viewportAbsStart + 屏行),故翻页 / 追加新内容期间选区锚点仍指向同段文字。
  */
 function handleMouseEvent(e: mouse.MouseEvent): void {
-  if (!active) return;
-  if (overlayMouseHandler && overlayMouseHandler(e)) return; // overlay(composer 等)先接管,消费即止
+  if (!state.active) return;
+  if (state.overlayMouseHandler && state.overlayMouseHandler(e)) return; // overlay(composer 等)先接管,消费即止
   if (e.type === 'wheel') {
     // 滚轮始终可用:面板/picker 期间也允许上下查看 agent 输出,
     // 与 onRunningKey 的 PgUp/PgDn 行为一致;mouseEnabled 仅管选区/拖拽。
@@ -1378,19 +1294,19 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     setInputCursorFromClick(e.row, e.col);
     const pos = inputScreenToInputPos(e.row, e.col);
     if (pos) {
-      if (selection) {
-        selection = null;
+      if (state.selection) {
+        state.selection = null;
       }
-      inputSelection = {
+      state.inputSelection = {
         anchor: { line: pos.line, col: pos.displayCol },
         end: { line: pos.line, col: pos.displayCol },
         dragged: false,
       };
-      paintInput(lastView!);
+      paintInput(state.lastView!);
     }
     return;
   }
-  if (!mouseEnabled) return;
+  if (!state.mouseEnabled) return;
   const g = getGeo();
   const col = Math.max(0, e.col - 1); // SGR 报表列 1-based → 显示列 0-based
 
@@ -1401,8 +1317,8 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
       const inpSel = normalizeInputSelection();
       if (inpSel) {
         const text = extractInputSelectionText(inpSel);
-        inputSelection = null;
-        if (lastView) paintInput(lastView); // 立刻擦反白,视觉反馈
+        state.inputSelection = null;
+        if (state.lastView) paintInput(state.lastView); // 立刻擦反白,视觉反馈
         if (text) copyToClipboard(text);
         return;
       }
@@ -1412,7 +1328,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     const sel = normalizeSelection();
     if (!sel) return;
     const text = extractSelectionText(sel);
-    selection = null;
+    state.selection = null;
     repaintViewport(); // 复制后清高亮:视觉反馈"已复制",不留旧选区误导
     if (!text) return;
     copyToClipboard(text);
@@ -1424,58 +1340,58 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
   if (e.type === 'press') {
     // 输入行左键已在上方 mouseEnabled 检查之前处理(支持 intervention 面板期间点击定位光标)。
     // 此处只处理内容区选区。
-    selecting = true;
+    state.selecting = true;
     const rowInContent = Math.max(1, Math.min(e.row, g.contentBottom));
     const absLine = screenRowToAbsLine(rowInContent);
-    selection = { anchorLine: absLine, anchorCol: col, endLine: absLine, endCol: col, dragged: false };
+    state.selection = { anchorLine: absLine, anchorCol: col, endLine: absLine, endCol: col, dragged: false };
     // 切内容区选区时清掉输入框旧选区(若有)。
-    inputSelection = null;
+    state.inputSelection = null;
     repaintViewport();
     repaint(); // 补一次输入区重画:INPUT 态 repaintViewport 把真光标留在内容区续写位,须靠 repaint 把它带回输入框(否则点内容区会现假闪烁光标,见 issue)
     return;
   }
   if (e.type === 'drag') {
-    if (inputSelection) {
+    if (state.inputSelection) {
       // 输入框拖动选区:更新 end,触边不动 scroll(输入框行数有限,无外滚概念);重画底栏。
       const pos = inputScreenToInputPos(e.row, e.col);
       if (pos) {
-        if (pos.line !== inputSelection.end.line || pos.displayCol !== inputSelection.end.col) {
-          inputSelection.dragged = true;
-          inputSelection.end = { line: pos.line, col: pos.displayCol };
+        if (pos.line !== state.inputSelection.end.line || pos.displayCol !== state.inputSelection.end.col) {
+          state.inputSelection.dragged = true;
+          state.inputSelection.end = { line: pos.line, col: pos.displayCol };
         }
-        paintInput(lastView!);
+        paintInput(state.lastView!);
       }
       return;
     }
-    if (!selecting || !selection) return;
+    if (!state.selecting || !state.selection) return;
     // 触边自动翻页:motion 事件持续到达时靠此逐步滚动,把选区扩展到滚出去的历史行。
     if (e.row <= 1) scrollBy(WHEEL_LINES);
     else if (e.row >= g.contentBottom) scrollBy(-WHEEL_LINES);
     const rowInContent = Math.max(1, Math.min(e.row, g.contentBottom));
     const absLine = screenRowToAbsLine(rowInContent);
-    if (absLine !== selection.endLine || col !== selection.endCol) selection.dragged = true;
-    selection.endLine = absLine;
-    selection.endCol = col;
+    if (absLine !== state.selection.endLine || col !== state.selection.endCol) state.selection.dragged = true;
+    state.selection.endLine = absLine;
+    state.selection.endCol = col;
     repaintViewport();
     repaint(); // 同上:把真光标带回输入框,防拖动选区期间光标停留内容区闪烁
     return;
   }
   // release(左键)
-  selecting = false;
+  state.selecting = false;
   // 输入框 release 优先:未拖动 → 清选区(光标已定好);拖动过 → 留高亮等右键复制
-  if (inputSelection) {
-    if (!inputSelection.dragged) {
-      inputSelection = null;
-      if (lastView) paintInput(lastView);
+  if (state.inputSelection) {
+    if (!state.inputSelection.dragged) {
+      state.inputSelection = null;
+      if (state.lastView) paintInput(state.lastView);
     }
     // 拖动过:不操作,留高亮
     return;
   }
-  if (!selection) return;
-  if (!selection.dragged) {
+  if (!state.selection) return;
+  if (!state.selection.dragged) {
     // 内容区纯点击(未拖动):若落在工具 batch 摘要行上 → 切换展开/折叠;
     // 否则原行为:清选区。batch 反查通过 content lineAt + dynamic import(避免 layout↔batch 循环依赖)。
-    const absClick = selection.anchorLine; // 起止同行同列,取任一;未拖动时 line = anchor = end
+    const absClick = state.selection.anchorLine; // 起止同行同列,取任一;未拖动时 line = anchor = end
     void (async (): Promise<void> => {
       try {
         const m = await import('../batch.js');
@@ -1483,7 +1399,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
         if (entry) {
           // 先清选区再改 buffer：contentInsert/Delete 内会立即 repaintViewport；若此时仍保留
           // 旧绝对行选区，会短暂画出一帧错位高亮，随后二次重画，视觉上就是抖动。
-          selection = null;
+          state.selection = null;
           m.toggleEntry(entry.batchId, entry.entryIndex, {
             contentInsertAfter: (after, lines) => contentInsertAfter(after, lines),
             contentDeleteFrom: (start, n) => contentDeleteFrom(start, n),
@@ -1494,7 +1410,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
         }
         const id = m.findBatchByAbsLine(absClick);
         if (id) {
-          selection = null;
+          state.selection = null;
           m.toggleBatch(id, {
             contentInsertAfter: (after, lines) => contentInsertAfter(after, lines),
             contentDeleteFrom: (start, n) => contentDeleteFrom(start, n),
@@ -1505,7 +1421,7 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
       } catch {
         // batch 不可用(非 TTY 等)→ 走默认清选区路径
       }
-      selection = null;
+      state.selection = null;
       repaintViewport();
       repaint();
     })();
@@ -1517,8 +1433,8 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
 
 /** 回尾(offset=0);仅当原本滚动过才重画(避免每轮 enterRunningMode 闪烁)。 */
 export function resetScroll(): void {
-  if (scrollOffset === 0) return;
-  scrollOffset = 0;
+  if (state.scrollOffset === 0) return;
+  state.scrollOffset = 0;
   repaintViewport();
   repaint();
 }
@@ -1528,17 +1444,17 @@ export function resetScroll(): void {
  *  锁只挡 scrollBy(滚轮 / PgUp-PgDn);不影响 contentWrite 写屏(offset=0 时照常物理写,agent 输出从底部开始)。
  *  默认 SCROLL_LOCK_MS 后自动解锁;enterInputMode(轮末)也清锁。用户轮中后段仍可上滑(满足"输出时能看历史")。 */
 export function lockScrollToBottom(ms: number = SCROLL_LOCK_MS): void {
-  scrollLockUntil = Date.now() + ms;
+  state.scrollLockUntil = Date.now() + ms;
 }
 
 /** 解锁(轮末 enterInputMode / 测试用)。 */
 export function unlockScroll(): void {
-  scrollLockUntil = 0;
+  state.scrollLockUntil = 0;
 }
 
 /** 轮首滚动锁是否生效(测试用)。 */
 export function isScrollLocked(): boolean {
-  return Date.now() < scrollLockUntil;
+  return Date.now() < state.scrollLockUntil;
 }
 
 // ── 状态行(两行式:spinner 行 + model 行)──
@@ -1560,13 +1476,13 @@ function twoColumn(leftStr: string, leftW: number, rightStr: string, rightW: num
  *    运行心跳:  ⠋ 生成中 0.5s
  *    滚动回看:  ● 空闲                  历史 ↑3 (PgDn 回底)  */
 function composeSpinnerLine(status: StatusBarData, cols: number): string {
-  const spinning = mode === 'running' && runningFrame >= 0;
+  const spinning = state.mode === 'running' && state.runningFrame >= 0;
   const hasSpinner = !!status.spinnerFrame;
-  const scrolled = scrollOffset > 0;
+  const scrolled = state.scrollOffset > 0;
 
   // 走时(仅运行态)
-  const elapsed = (mode === 'running' && turnStart != null)
-    ? fmtElapsed(Date.now() - turnStart)
+  const elapsed = (state.mode === 'running' && state.turnStart != null)
+    ? fmtElapsed(Date.now() - state.turnStart)
     : '';
 
   // ── 左段:帧 + 状态 + 走时,全部紧跟 ──
@@ -1577,7 +1493,7 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
     // 滚动回看:左段 = 符号(● 或 心跳帧) + 状态名 + (运行态)走时;右段 = 历史指示。
     // 跟非回看态严格对齐——RUNNING 态显示走时,INPUT 态不显示,避免滚动时信息降级。
     const symbol = spinning
-      ? `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset}`
+      ? `${ui.bold}${ui.accent}${RUNNING_FRAMES[state.runningFrame]}${ui.reset}`
       : `${ui.accent}●${ui.reset}`;
     // spinning(运行态流式中 spinner 已停,靠 turnTimer 心跳):同非滚动 spinning 分支加
     // || '生成中' fallback——流式首 token 到即 spinner.stop(),若 stop() 回调未留状态字,
@@ -1595,7 +1511,7 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
     // 运行态心跳帧(流式输出中 / 命令态如 /rollback /compact /resume):帧 + 状态文字(优先)或生成中(兜底) + 走时
     const label = status.status || '生成中';
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
-    lead = `${ui.bold}${ui.accent}${RUNNING_FRAMES[runningFrame]}${ui.reset} ${ui.dim}${label}${ui.reset}${ePart}`;
+    lead = `${ui.bold}${ui.accent}${RUNNING_FRAMES[state.runningFrame]}${ui.reset} ${ui.dim}${label}${ui.reset}${ePart}`;
     leadW = 1 + 1 + displayWidth(label) + (elapsed ? 1 + displayWidth(elapsed) : 0);
   } else {
     // INPUT 态:● + 状态文字(无走时)
@@ -1607,7 +1523,7 @@ function composeSpinnerLine(status: StatusBarData, cols: number): string {
   let tail = '';
   let tailW = 0;
   if (scrolled) {
-    tail = t('status.history', { count: scrollOffset });
+    tail = t('status.history', { count: state.scrollOffset });
     tailW = displayWidth(tail);
   }
   const rightStr = tail ? `${ui.yellow}${tail}${ui.reset}` : '';
@@ -1644,7 +1560,7 @@ function composeModelLine(status: StatusBarData, cols: number): string {
   // 右段:实时用量 chip(仅 RUNNING)+ ctx + sep + cwd,右端对齐。cwd 按预算截断,极窄(<6)隐藏。
   // 实时 chip 放 context 进度条左侧:本轮累计 ↑prompt ↓completion,流式实时增长。
   // 任一 chip 极宽时收紧 cwd(toolbar 列挤压场景),先从 cwd 砍、再隐藏 cwd、再按 hint→chip 顺序省。
-  const liveChip = mode === 'running' && liveUsage ? formatLiveUsageChip(liveUsage) : '';
+  const liveChip = state.mode === 'running' && state.liveUsage ? formatLiveUsageChip(state.liveUsage) : '';
   const liveW = displayWidth(stripAnsi(liveChip));
   const liveSepW = liveChip ? STATUS_SEP_W : 0;
   const minGap = 2;
@@ -1709,16 +1625,16 @@ function formatLiveUsageChip(u: { promptTokens: number; completionTokens: number
 function composePlanLines(status: StatusBarData, cols: number): string[] {
   const plan = (status.planSummary ?? '').trim();
   if (!plan) {
-    planRows = 1;
+    state.planRows = 1;
     return [];
   }
   const w = displayWidth(stripAnsi(plan));
   if (w <= cols) {
-    planRows = 1;
+    state.planRows = 1;
     return [`${ui.yellow}${plan}${ui.reset}`];
   }
   // 溢出:截断为 1 行 + "…" 后缀(留 1 列空间给省略号)。
-  planRows = 1;
+  state.planRows = 1;
   return [`${ui.yellow}${truncateDisplay(plan, Math.max(1, cols - 1))}…${ui.reset}`];
 }
 
@@ -1732,12 +1648,12 @@ function composePlanLines(status: StatusBarData, cols: number): string[] {
  *    下线        = contentBottom+4+planRows
  *    model 行    = rows                       (屏底:auto + ctx + cwd) */
 export function drawStatusBar(status?: StatusBarData): void {
-  if (!active || !base) return;
-  const s = status ?? { ...base, status: statusText, spinnerFrame };
+  if (!state.active || !state.base) return;
+  const s = status ?? { ...state.base, status: state.statusText, spinnerFrame: state.spinnerFrame };
   const g = getGeo();
   const planLines = composePlanLines(s, g.cols);
   const planRow1 = g.contentBottom + 1;
-  const spinnerRow = g.contentBottom + 1 + planRows;
+  const spinnerRow = g.contentBottom + 1 + state.planRows;
   const modelRow = g.rows; // 屏底:model 行
   // plan 可能占 1 或 2 行(过长自动撑开);spinner/model 行随之平移。
   // 一次写入:plan 1/2 行 + spinner 行 + model 行,末尾 cup 回续写位/输入框光标。
@@ -1746,7 +1662,7 @@ export function drawStatusBar(status?: StatusBarData): void {
     planBuf += cup(planRow1 + i, 1) + esc.clearLine + planLines[i];
   }
   // 计划行从 2 行降到 1 行时,清掉残留的第 2 行(撑高后回退不留尾巴)。
-  if (planRows === 1 && g.footerH > 6) {
+  if (state.planRows === 1 && g.footerH > 6) {
     planBuf += cup(planRow1 + 1, 1) + esc.clearLine;
   }
   // plan 从非空变成空(已结算为 ## Done:/ notes 里无活跃 ## Plan: 段)时,清掉残留的 plan 行 1。
@@ -1757,20 +1673,20 @@ export function drawStatusBar(status?: StatusBarData): void {
   let out = planBuf +
     cup(spinnerRow, 1) + esc.clearLine + composeSpinnerLine(s, g.cols) +
     cup(modelRow, 1) + esc.clearLine + composeModelLine(s, g.cols);
-  if (mode === 'running') {
+  if (state.mode === 'running') {
     // 运行态(回尾 / 滚动回看均):cup 回输入框光标位(供 IME 锚定)。
     const p = runningCaretPos();
     out += cup(p.row, p.col);
   } else {
-    out += cup(scrollOffset === 0 ? contentRow : g.contentBottom, scrollOffset === 0 ? contentCol : 1);
+    out += cup(state.scrollOffset === 0 ? state.contentRow : g.contentBottom, state.scrollOffset === 0 ? state.contentCol : 1);
   }
   stdout.write(out);
 }
 
 /** 更新易变状态(状态文字 + spinner 帧)并重画状态行。spinner / agent 用。 */
 export function setStatus(status: string, frame?: string): void {
-  statusText = status;
-  spinnerFrame = frame;
+  state.statusText = status;
+  state.spinnerFrame = frame;
   drawStatusBar();
 }
 
@@ -1781,27 +1697,27 @@ export function setStatus(status: string, frame?: string): void {
  * 非 TTY 不启(active=false 时 drawStatusBar 为 no-op)。
  */
 function startTurnTimer(): void {
-  if (!active) return;
+  if (!state.active) return;
   stopTurnTimer();
-  runningFrame = 0; // 进入运行态:启动状态行 chip 心跳(首帧立即生效)
-  turnTimer = setInterval(() => {
-    runningFrame = (runningFrame + 1) % RUNNING_FRAMES.length; // 推进心跳帧,让前导符跳动
+  state.runningFrame = 0; // 进入运行态:启动状态行 chip 心跳(首帧立即生效)
+  state.turnTimer = setInterval(() => {
+    state.runningFrame = (state.runningFrame + 1) % RUNNING_FRAMES.length; // 推进心跳帧,让前导符跳动
     drawStatusBar();
   }, 80);
-  turnTimer.unref();
+  state.turnTimer.unref();
 }
 
 /** 停走时计时器。enterInputMode / exitAltScreen 调;intervention 面板进入时也调(防 drawStatusBar 80ms 心跳把光标拉到 runningCaretPos,覆盖 paintInput 的正确光标位)。 */
 export function stopTurnTimer(): void {
-  if (turnTimer) {
-    clearInterval(turnTimer);
-    turnTimer = null;
+  if (state.turnTimer) {
+    clearInterval(state.turnTimer);
+    state.turnTimer = null;
   }
 }
 
 /** 恢复走时计时器(若 RUNNING 态)。intervention 面板退出时调,恢复状态行走时心跳。 */
 export function startTurnTimerIfRunning(): void {
-  if (active && mode === 'running') startTurnTimer();
+  if (state.active && state.mode === 'running') startTurnTimer();
 }
 
 /**
@@ -1814,22 +1730,22 @@ export function startTurnTimerIfRunning(): void {
  * 打字暂停态(isStreamingPaused)spinner 不画帧——恢复 557e678 前的 spinner 隐形行为(只关 spinner,不动 contentWrite)。
  */
 export function paintLiveAtCursor(text: string): void {
-  if (!active || !ui.isTTY || scrollOffset !== 0 || isStreamingPaused()) {
+  if (!state.active || !ui.isTTY || state.scrollOffset !== 0 || isStreamingPaused()) {
     // 滚动态 / 暂停态:不画新帧。但若有旧帧残留(frameRow),必须清掉——
     // 否则旧 spinner 帧停在历史视图某行,用户看到「思考中」卡在消息堆里(根因)。
     // 滚动态由状态行心跳兜底显示运行状态,不需内联帧;清完后 frameRow 归零,回尾时下一帧自然重画。
-    if (frameRow) {
+    if (state.frameRow) {
       // resize 后 contentBottom 可能缩小:清旧帧时钳 frameRow 到当前可视区,避免 cup 到屏外行
       const g = getGeo();
-      const fr = Math.min(frameRow, g.contentBottom);
-      let out = cup(fr, frameCol) + esc.clearLine;
-      if (mode === 'running') {
+      const fr = Math.min(state.frameRow, g.contentBottom);
+      let out = cup(fr, state.frameCol) + esc.clearLine;
+      if (state.mode === 'running') {
         const p = runningCaretPos();
         out += cup(p.row, p.col);
       }
       stdout.write(out);
-      frameRow = 0;
-      frameCol = 0;
+      state.frameRow = 0;
+      state.frameCol = 0;
     }
     return;
   }
@@ -1841,50 +1757,50 @@ export function paintLiveAtCursor(text: string): void {
   // 否则 cup 到旧行号→帧画在屏幕中间(旧 bottom 位置),而非内容末尾/最底部。
   const g = getGeo();
   const committed = content.committedRows();
-  if (contentRow > g.contentBottom) contentRow = g.contentBottom;
-  if (scrollOffset === 0 && contentRow < g.contentBottom) {
+  if (state.contentRow > g.contentBottom) state.contentRow = g.contentBottom;
+  if (state.scrollOffset === 0 && state.contentRow < g.contentBottom) {
     // 用 committed+1 而非 total+1:breakRow 后 hasCurrent=true,totalRows 已含当前空行,+1 会多跳一行
     // (contentWrite 入口的同类逻辑已同步修正,见上方注释)。
-    contentRow = Math.min(committed + 1, g.contentBottom);
+    state.contentRow = Math.min(committed + 1, g.contentBottom);
   }
   let out = '';
-  if (frameRow && (frameRow !== contentRow || frameCol !== contentCol)) {
+  if (state.frameRow && (state.frameRow !== state.contentRow || state.frameCol !== state.contentCol)) {
     // 清旧帧同样钳到可视区(resize 后 frameRow 可能 > contentBottom)
-    out += cup(Math.min(frameRow, g.contentBottom), frameCol) + esc.clearLine; // 续写位漂移:先清旧帧行,否则残留
+    out += cup(Math.min(state.frameRow, g.contentBottom), state.frameCol) + esc.clearLine; // 续写位漂移:先清旧帧行,否则残留
   }
-  out += cup(contentRow, contentCol) + esc.clearLine + text;
-  if (mode === 'running') {
+  out += cup(state.contentRow, state.contentCol) + esc.clearLine + text;
+  if (state.mode === 'running') {
     const p = runningCaretPos();
     out += cup(p.row, p.col);
   }
   stdout.write(out);
-  frameRow = contentRow;
-  frameCol = contentCol;
+  state.frameRow = state.contentRow;
+  state.frameCol = state.contentCol;
 }
 
 /** 清掉 paintLiveAtCursor 画过的那行瞬时活动文本。清"实际画过的位置"(frameRow),非当前续写位。
  *  不加 isStreamingPaused 守卫——stop 时必须无条件清(只写一次、结尾 cup 回输入框,不扰 IME);否则打字中 stop 会跳过清帧、制造泄漏。
  *  滚动态(scrollOffset≠0)也必须清残留帧——否则旧 spinner 帧卡在历史视图某行(「思考中在消息堆里」根因)。 */
 export function clearLiveAtCursor(): void {
-  if (!active || !ui.isTTY) return;
-  if (!frameRow) return; // 没画过就不清(避免误清当前续写位内容)
+  if (!state.active || !ui.isTTY) return;
+  if (!state.frameRow) return; // 没画过就不清(避免误清当前续写位内容)
   // 滚动态也清:旧帧不该残留。清"画过的行"(frameRow),回尾后该行由 repaintViewport 重画历史内容。
   // resize 后 contentBottom 可能缩小:frameRow 钳到可视区,避免 cup 到屏外行清错位置。
   const g = getGeo();
-  let out = cup(Math.min(frameRow, g.contentBottom), frameCol) + esc.clearLine;
-  if (mode === 'running') {
+  let out = cup(Math.min(state.frameRow, g.contentBottom), state.frameCol) + esc.clearLine;
+  if (state.mode === 'running') {
     const p = runningCaretPos();
     out += cup(p.row, p.col);
   }
   stdout.write(out);
-  frameRow = 0;
-  frameCol = 0;
+  state.frameRow = 0;
+  state.frameCol = 0;
 }
 
 /** 推送 / 清空运行态实时 token 用量(agent core 流式推送;repl 轮末清 undefined)。
  *  不触发重画:RUNNING 态 turnTimer 80ms 心跳重画状态行,自然取到最新值。 */
 export function setLiveUsage(u: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined): void {
-  liveUsage = u;
+  state.liveUsage = u;
 }
 
 /** 更新状态行基线(模型 / context / cwd / 模式标识 / 活跃 plan chip / 本轮 token chip)。repl 在轮次边界与切模式时调。 */
@@ -1896,7 +1812,7 @@ export function setStatusBase(b: {
   planSummary?: string;
   lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }): void {
-  base = b;
+  state.base = b;
 }
 
 // ── 输入区(底栏输入框 + 向上菜单)──
@@ -2008,18 +1924,18 @@ function highlightWithinRow(seg: string, clipStart: number, clipEnd: number): st
  * prompt.ts 每次按键调;enterInputMode / enterRunningMode 也调(空 / dim)。
  */
 export function paintInput(view: InputView): void {
-  if (!active || !base) return;
-  lastView = view;
+  if (!state.active || !state.base) return;
+  state.lastView = view;
   // 失效检测:lastView 文本若有变化(键输入/AI 续写)→ 选区锚点不再有效,清掉避免「错位反白」。
   // 内容区选区用 content 自己的锚,与 lastView 无关,不动。
-  if (inputSelection) {
+  if (state.inputSelection) {
     const sig = inputViewSig(view);
-    if (sig !== lastInputSig) {
-      inputSelection = null;
+    if (sig !== state.lastInputSig) {
+      state.inputSelection = null;
     }
-    lastInputSig = sig;
+    state.lastInputSig = sig;
   } else {
-    lastInputSig = inputViewSig(view);
+    state.lastInputSig = inputViewSig(view);
   }
   const preGeo = getGeo();
   // 累积本帧所有 cup/clearLine/文本,末尾一次写出——避免「擦旧菜单」与「重画」分多次 write 时,
@@ -2027,11 +1943,11 @@ export function paintInput(view: InputView): void {
   let buf = '';
 
   // 1. 擦旧菜单(用上次记录的起始行 + 行数,与本次几何无关——setRegion 不动屏幕内容)
-  if (lastMenuRows > 0) {
-    for (let i = 0; i < lastMenuRows; i++) {
-      buf += cup(lastMenuStartRow + i, 1) + esc.clearLine;
+  if (state.lastMenuRows > 0) {
+    for (let i = 0; i < state.lastMenuRows; i++) {
+      buf += cup(state.lastMenuStartRow + i, 1) + esc.clearLine;
     }
-    lastMenuRows = 0;
+    state.lastMenuRows = 0;
   }
 
   // 2. 算输入可视行(软折行)+ 必要时 setRegion。dim=运行态占位:单行不折行。
@@ -2052,9 +1968,9 @@ export function paintInput(view: InputView): void {
         promptW,
         preGeo.rows
       );
-  const needFooterH = 5 + vis.inputRows + (planRows - 1); // 1 虚拟空 + 1 spinner 行 + 1 上线 + 输入行 + 1 下线 + 1 model 行 + plan 多出的行数
+  const needFooterH = 5 + vis.inputRows + (state.planRows - 1); // 1 虚拟空 + 1 spinner 行 + 1 上线 + 输入行 + 1 下线 + 1 model 行 + plan 多出的行数
   let g = preGeo;
-  if (needFooterH !== footerH) {
+  if (needFooterH !== state.footerH) {
     // setRegion 自己 write(DECSTBM + 清行 + 归位):先把已累积的擦除 flush 出去保序(擦除用的是旧几何的
     // lastMenuStartRow,须在 setRegion 改区域前落地),再 setRegion,之后 2b..6 重新累积。
     // footerH 不变时(常见:单行输入 / 菜单切换 / ↑↓ 导航)整帧一次 write,终端原子应用,无中间空白→不闪烁。
@@ -2067,7 +1983,7 @@ export function paintInput(view: InputView): void {
 
   // 2b. 重画内容末行(底栏上一行)从缓冲:防 WT 边距漏影(状态行重复到该行),并保证该行显正确内容
   {
-    const slice = content.sliceFromEnd(scrollOffset, g.contentBottom);
+    const slice = content.sliceFromEnd(state.scrollOffset, g.contentBottom);
     const line = slice[g.contentBottom - 1] ?? '';
     buf += cup(g.contentBottom, 1) + esc.clearLine + line;
   }
@@ -2078,14 +1994,14 @@ export function paintInput(view: InputView): void {
   //     - plan 过长:占 2 行(planRows=2),spinner/上线/输入行随之整体下移 1 行
   //     paintInput 与 drawStatusBar 共享同一 planRows 模块态,setRegion 已据此把脚栏撑高。
   {
-    const planBuf = composePlanLines(base as StatusBarData, preGeo.cols);
+    const planBuf = composePlanLines(state.base as StatusBarData, preGeo.cols);
     for (let i = 0; i < planBuf.length; i++) {
       buf += cup(g.contentBottom + 1 + i, 1) + esc.clearLine + planBuf[i];
     }
     // 计划行从 2 行降到 1 行(plan 当前很短):清掉残留的第 2 行,不留尾巴。
-    if (planBuf.length < planRows && planRows === 2) {
+    if (planBuf.length < state.planRows && state.planRows === 2) {
       buf += cup(g.contentBottom + 2, 1) + esc.clearLine;
-      planRows = 1;
+      state.planRows = 1;
     }
     // plan 从非空变成空(已结算/无活跃段)时,清掉残留的 plan 行 1。
     // 上面 for 循环在 planBuf.length===0 时不写任何 cup,需要显式清一行回到「虚拟空行」。
@@ -2095,17 +2011,17 @@ export function paintInput(view: InputView): void {
   }
 
   // 3. 状态行:spinner 行 + model 行(两行式底栏)
-  const spinnerRow = g.contentBottom + 1 + planRows; // plan 占 planRows 行(1 或 2),spinner 紧跟其后
+  const spinnerRow = g.contentBottom + 1 + state.planRows; // plan 占 planRows 行(1 或 2),spinner 紧跟其后
   const modelRow = g.rows; // 屏底:model 行
-  const status: StatusBarData = { ...base, status: statusText, spinnerFrame };
+  const status: StatusBarData = { ...state.base, status: state.statusText, spinnerFrame: state.spinnerFrame };
   buf += cup(spinnerRow, 1) + esc.clearLine + composeSpinnerLine(status, g.cols);
   buf += cup(modelRow, 1) + esc.clearLine + composeModelLine(status, g.cols);
 
   // 3b. 上线(输入框顶):满屏宽细线 ─(cyan),框住输入区上边界
-  buf += cup(g.contentBottom + 2 + planRows, 1) + esc.clearLine + ui.accent + '─'.repeat(g.cols) + ui.reset;
+  buf += cup(g.contentBottom + 2 + state.planRows, 1) + esc.clearLine + ui.accent + '─'.repeat(g.cols) + ui.reset;
 
   // 4. 输入行(g.contentBottom+3+planRows .. rows-1)——按可视行画,首行带 prompt、其余缩进 promptW
-  const firstInputRow = g.contentBottom + 3 + planRows;
+  const firstInputRow = g.contentBottom + 3 + state.planRows;
   const inputRowsAvail = vis.inputRows; // 脚栏总高 - 1(spinner) - 1(上 sep) - 1(下 sep) - 1(model) - planRows
   const indent = ' '.repeat(promptW);
   // 光标:不画反白块/假光标——输入框走终端真光标(WT / VSCode 终端默认竖线/闪烁块,
@@ -2172,8 +2088,8 @@ export function paintInput(view: InputView): void {
     for (let i = 0; i < menuRows; i++) {
       buf += cup(menuStart + i, 1) + esc.clearLine + view.menu.lines[i];
     }
-    lastMenuStartRow = menuStart;
-    lastMenuRows = menuRows;
+    state.lastMenuStartRow = menuStart;
+    state.lastMenuRows = menuRows;
   }
 
   // 6. 光标
@@ -2245,9 +2161,9 @@ function windowSingleLine(text: string, cursor: number, contentW: number): { sho
  * 选区高亮由 paintInput 路径(paint 时鼠标拖选)承担,此处轻量不重复实现。
  */
 export function paintRunningInput(text: string, cursor: number, placeholder?: string): void {
-  if (!active || !base) return;
+  if (!state.active || !state.base) return;
   const g = getGeo();
-  const inputRow = g.contentBottom + 3 + planRows; // 运行态 footerH 随 plan 行数动态(6 或 7)
+  const inputRow = g.contentBottom + 3 + state.planRows; // 运行态 footerH 随 plan 行数动态(6 或 7)
   const promptW = displayWidth('❯ ');
   const contentW = Math.max(1, g.cols - promptW);
   let outLine: string;
@@ -2260,7 +2176,7 @@ export function paintRunningInput(text: string, cursor: number, placeholder?: st
     outLine = `❯ ${shown}`; // 正常色 —— 运行态打字与空闲态一致
     curCol = curDisp;
   }
-  lastView = {
+  state.lastView = {
     prompt: '❯ ',
     lines: [text],
     placeholder,
@@ -2275,33 +2191,33 @@ export function paintRunningInput(text: string, cursor: number, placeholder?: st
 
 /** 重画当前视图(resize / 内部用)。 */
 export function repaint(): void {
-  if (!active || !base) return;
-  if (lastView) paintInput(lastView);
+  if (!state.active || !state.base) return;
+  if (state.lastView) paintInput(state.lastView);
   else drawStatusBar();
 }
 
 /** 进入输入态:画空输入框 + 状态行,光标入输入框。 */
 export function enterInputMode(status: string = t('repl.idle')): void {
-  mode = 'input';
-  statusText = status;
-  spinnerFrame = undefined;
-  runningFrame = -1; // 回 INPUT 态:停状态行 chip 旋转,composeStatus 退回静态 ●
-  turnStart = null; // 停走时
+  state.mode = 'input';
+  state.statusText = status;
+  state.spinnerFrame = undefined;
+  state.runningFrame = -1; // 回 INPUT 态:停状态行 chip 旋转,composeStatus 退回静态 ●
+  state.turnStart = null; // 停走时
   stopTurnTimer();
-  scrollLockUntil = 0; // 轮末:清轮首滚动锁,INPUT 态可自由滚动
-  frameRow = 0; // 轮末:清 spinner 帧位置(防下轮残留)
-  frameCol = 0;
+  state.scrollLockUntil = 0; // 轮末:清轮首滚动锁,INPUT 态可自由滚动
+  state.frameRow = 0; // 轮末:清 spinner 帧位置(防下轮残留)
+  state.frameCol = 0;
   // 运行态若有未 flush 的缓冲内容(用户打字暂停了流式写),切回 INPUT 前重画内容区显示之,免丢内容
-  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-  if (userActiveUntil) {
-    userActiveUntil = 0;
-    if (active) repaintViewport();
+  if (state.flushTimer) { clearTimeout(state.flushTimer); state.flushTimer = null; }
+  if (state.userActiveUntil) {
+    state.userActiveUntil = 0;
+    if (state.active) repaintViewport();
   }
-  if (active && base) {
+  if (state.active && state.base) {
     // 先按当前 base.planSummary 重算 planRows(可能从上次会话残留 stale 值),再据此 setRegion
     // 撑出正确脚栏高;否则 plan 撑 2 行时 setRegion(6) 会把 spinner 挤到 plan 第 2 行位置。
-    composePlanLines(base as StatusBarData, (getGeo()).cols);
-    setRegion(4 + planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
+    composePlanLines(state.base as StatusBarData, (getGeo()).cols);
+    setRegion(4 + state.planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
     paintInput({
       prompt: '❯ ',
       lines: [''],
@@ -2315,17 +2231,17 @@ export function enterInputMode(status: string = t('repl.idle')): void {
 
 /** 进入运行态:底栏输入行与空闲态同色(非 dim)、可任意位置编辑,cursor 留输入框。footerH 恒 6(虚拟空+spinner行+上线+输入+下线+model行)。新轮回尾(确保新内容可见)。 */
 export function enterRunningMode(status: string, placeholder: string): void {
-  mode = 'running';
-  statusText = status;
-  spinnerFrame = undefined;
-  turnStart = Date.now(); // 起走时(整轮从发起到 enterInputMode 止)
+  state.mode = 'running';
+  state.statusText = status;
+  state.spinnerFrame = undefined;
+  state.turnStart = Date.now(); // 起走时(整轮从发起到 enterInputMode 止)
   resetScroll(); // 若上轮 INPUT 滚动过(未打字回底),新轮回尾
   lockScrollToBottom(); // 轮首短时锁:吸收发消息前后残留滚轮事件,保 agent 输出从底部开始(锁过期或轮末 enterInputMode 解)
-  if (active && base) {
+  if (state.active && state.base) {
     // 先按当前 base.planSummary 重算 planRows(可能从上次会话残留 stale 值),再据此 setRegion
     // 撑出正确脚栏高;否则 plan 撑 2 行时 setRegion(6) 会把 spinner 挤到 plan 第 2 行位置。
-    composePlanLines(base as StatusBarData, (getGeo()).cols);
-    setRegion(4 + planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
+    composePlanLines(state.base as StatusBarData, (getGeo()).cols);
+    setRegion(4 + state.planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
     paintInput({
       prompt: '❯ ',
       lines: [''],
@@ -2345,88 +2261,88 @@ export function enterRunningMode(status: string, placeholder: string): void {
 // ── alt screen 生命周期 + 钩子 ──
 
 export function enterAltScreen(): void {
-  if (active || !ui.isTTY) return;
-  active = true;
-  lastTerminalCols = getGeo().cols;
-  setMaxCols(lastTerminalCols); // 同步 batch 展开行宽钳制,防超宽行 auto-wrap 打乱屏位
+  if (state.active || !ui.isTTY) return;
+  state.active = true;
+  state.lastTerminalCols = getGeo().cols;
+  setMaxCols(state.lastTerminalCols); // 同步 batch 展开行宽钳制,防超宽行 auto-wrap 打乱屏位
   stdout.write(esc.altOn);
   // 不动终端窗口背景:底色保持用户终端原色,主题只作用于我们画出的 SGR 颜色。
   stdout.write(esc.mouseOn); // 完整鼠标追踪(按下/拖动/释放/滚轮)→ mouse.swallow 重组 → handleMouseEvent
   mouse.setHandler(handleMouseEvent);
   // 进入 alt screen 前 base 可能已设了 planSummary;按当前 planSummary 重算 planRows,
   // 让首次 setRegion 撑出正确脚栏高(否则 plan 撑 2 行时会被 spinner 行覆盖)。
-  if (base) composePlanLines(base as StatusBarData, (getGeo()).cols);
-  setRegion(4 + planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
-  contentRow = 1;
-  contentCol = 1;
-  segmentStartRow = 1;
-  scrollOffset = 0;
-  scrollLockUntil = 0;
-  mdActive = false;
-  mdBuf = '';
-  selection = null;
-  selecting = false;
+  if (state.base) composePlanLines(state.base as StatusBarData, (getGeo()).cols);
+  setRegion(4 + state.planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
+  state.contentRow = 1;
+  state.contentCol = 1;
+  state.segmentStartRow = 1;
+  state.scrollOffset = 0;
+  state.scrollLockUntil = 0;
+  state.mdActive = false;
+  state.mdBuf = '';
+  state.selection = null;
+  state.selecting = false;
   content.reset();
 
-  exitHandler = () => exitAltScreen();
-  process.on('exit', exitHandler);
+  state.exitHandler = () => exitAltScreen();
+  process.on('exit', state.exitHandler);
 
-  sigwinchHandler = () => {
-    if (!active) return;
+  state.sigwinchHandler = () => {
+    if (!state.active) return;
     // 立即(同步)更新行号 + 重设 DECSTBM 区域:不 debounce,否则快速拖动边框时
     // contentRow 停在旧值、区域未更新,spinner/contentWrite 画到旧行号(「思考中在消息堆里」根因)。
     // 重画 repaintViewport 防抖(下面 timer),避免连续拖动闪烁;但行号/区域必须立即正确。
-    const g = getGeo(footerH);
+    const g = getGeo(state.footerH);
     setMaxCols(g.cols); // 列宽变 → 展开行钳宽上限同步(后续新展开行生效)
     const total = content.totalRows();
     const committed = content.committedRows();
     // 缩小:contentRow > 新 bottom → 钳到新 bottom
-    if (contentRow > g.contentBottom) contentRow = g.contentBottom;
+    if (state.contentRow > g.contentBottom) state.contentRow = g.contentBottom;
     // 放大:contentRow < 新 bottom 且回尾(offset=0)→ 推进到 min(committed+1, bottom)
     //    committed+1 是合法「待写位」;用 total+1 在 hasCurrent=true(breakRow 后)时会多跳一行。
-    if (scrollOffset === 0 && contentRow < g.contentBottom) {
-      contentRow = Math.min(committed + 1, g.contentBottom);
+    if (state.scrollOffset === 0 && state.contentRow < g.contentBottom) {
+      state.contentRow = Math.min(committed + 1, g.contentBottom);
     }
-    if (frameRow && frameRow > g.contentBottom) frameRow = g.contentBottom;
+    if (state.frameRow && state.frameRow > g.contentBottom) state.frameRow = g.contentBottom;
     const maxOff = Math.max(0, total - g.contentBottom);
-    if (scrollOffset > maxOff) scrollOffset = maxOff;
-    setRegion(footerH); // 用新 rows 立即重设 DECSTBM 区域(contentBottom 变)
+    if (state.scrollOffset > maxOff) state.scrollOffset = maxOff;
+    setRegion(state.footerH); // 用新 rows 立即重设 DECSTBM 区域(contentBottom 变)
     // 重画防抖(仅 repaint,避免快速拖动闪烁);行号/区域已立即更新
-    if (resizeTimer) clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      resizeTimer = null;
-      if (!active) return;
-      const latest = getGeo(footerH);
+    if (state.resizeTimer) clearTimeout(state.resizeTimer);
+    state.resizeTimer = setTimeout(() => {
+      state.resizeTimer = null;
+      if (!state.active) return;
+      const latest = getGeo(state.footerH);
       // 列宽变化时会重排 markdown；即便仅高度变化或重排后行数不变，也必须重算
       // active segment 的屏幕锚点与当前待写列，避免后续流式 chunk 使用旧坐标。
-      const colsChanged = latest.cols !== lastTerminalCols;
+      const colsChanged = latest.cols !== state.lastTerminalCols;
       reflowContentForResize(latest.cols, colsChanged);
-      lastTerminalCols = latest.cols;
+      state.lastTerminalCols = latest.cols;
       repaintViewport(); // 内容区按最新高度和列宽重画；markdown 历史已按新列宽 reflow
       repaint(); // 底栏重画
     }, 100);
-    resizeTimer?.unref?.();
+    state.resizeTimer?.unref?.();
   };
-  process.on('SIGWINCH', sigwinchHandler);
+  process.on('SIGWINCH', state.sigwinchHandler);
 
   installConsoleGuard(); // 进入 TUI 即接管裸 console 输出,防第三方日志污染输入框
 }
 
 /** 复原:复位 margins + 显光标 + 退 alt + 还原 raw。幂等。 */
 export function exitAltScreen(): void {
-  if (!active) return;
-  active = false;
+  if (!state.active) return;
+  state.active = false;
   uninstallConsoleGuard(); // 退出 TUI 恢复原始 console(不影响 host 子进程 / 退出日志)
   resetTerminalBackground();
   stopTurnTimer(); // 兜底清走时计时器(防异常退出泄漏)
-  turnStart = null;
-  scrollLockUntil = 0; // 清轮首滚动锁(防状态泄漏到下次进 alt 屏)
-  frameRow = 0; // 清 spinner 帧位置(防状态泄漏到下次进 alt 屏)
-  frameCol = 0;
+  state.turnStart = null;
+  state.scrollLockUntil = 0; // 清轮首滚动锁(防状态泄漏到下次进 alt 屏)
+  state.frameRow = 0; // 清 spinner 帧位置(防状态泄漏到下次进 alt 屏)
+  state.frameCol = 0;
   mouse.setHandler(null);
   mouse.resetMouse();
-  selection = null;
-  selecting = false;
+  state.selection = null;
+  state.selecting = false;
   // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。
   try {
     stdin.setRawMode(false); // 还原 raw(RUNNING 态常驻 raw,退出时必须还原,否则终端残留 raw 模式)
@@ -2441,31 +2357,31 @@ export function exitAltScreen(): void {
   } catch {
     // 忽略
   }
-  if (exitHandler) {
+  if (state.exitHandler) {
     try {
-      process.removeListener('exit', exitHandler);
+      process.removeListener('exit', state.exitHandler);
     } catch {
       // 忽略
     }
-    exitHandler = null;
+    state.exitHandler = null;
   }
-  if (sigwinchHandler) {
+  if (state.sigwinchHandler) {
     try {
-      process.removeListener('SIGWINCH', sigwinchHandler);
+      process.removeListener('SIGWINCH', state.sigwinchHandler);
     } catch {
       // 忽略
     }
-    sigwinchHandler = null;
+    state.sigwinchHandler = null;
   }
-  if (resizeTimer) {
-    clearTimeout(resizeTimer);
-    resizeTimer = null;
+  if (state.resizeTimer) {
+    clearTimeout(state.resizeTimer);
+    state.resizeTimer = null;
   }
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
+  if (state.flushTimer) {
+    clearTimeout(state.flushTimer);
+    state.flushTimer = null;
   }
-  userActiveUntil = 0;
+  state.userActiveUntil = 0;
 }
 
 /**
@@ -2482,5 +2398,5 @@ export function writeDirect(s: string): void {
 }
 
 export function isActive(): boolean {
-  return active;
+  return state.active;
 }
