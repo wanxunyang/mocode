@@ -36,7 +36,7 @@ import {
 } from '../config/presets.js';
 import { runAgent } from '../agent/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
-import { togglePet, killPetProcess, listSkins, setSkin, sendState } from '../pet/bridge.js';
+import { sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
 import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
 import { bannerLines, displayWidth } from '../ui/render.js';
@@ -61,13 +61,7 @@ import {
   type ChatMessage,
   type ChatUsage,
 } from '../llm/index.js';
-import {
-  loadImageAttachment,
-  renderChip,
-  MAX_INLINE_BYTES_DEFAULT,
-  type ImageAttachment,
-} from '../attachments/image.js';
-import { modelSupportsVision } from '../llm/capabilities.js';
+import { renderChip, type ImageAttachment } from '../attachments/image.js';
 import type { ContentPart } from '../agent/core.js';
 import {
   manualCompact,
@@ -129,8 +123,8 @@ import {
   MODEL_PRESETS,
   maskKey,
 } from './commands.js';
+import { dispatchCommand } from './commands/registry.js';
 import {
-  renderContextBar,
   settlePlanStatus,
   refreshStatusBase,
   runningStateFor,
@@ -832,6 +826,80 @@ export async function startRepl(
     refreshStatusBase(history);
     layout.enterRunningMode(state.status, placeholder);
 
+    // ── 斜杠命令分发(repl/commands/)──
+    // 迁移期间:已搬到 commands/ 的命令由 dispatchCommand 处理并返回结果;
+    // 未搬的返回 unhandled,直接落到下面的遗留 if 链——两条路径语义一致。
+    // 全部搬完后,遗留 if 链整块删除,unhandled 即等价于"未知命令"。
+    {
+      const outcome = await dispatchCommand({
+        line,
+        cmd,
+        inputLines: input,
+        history,
+        contextState,
+        // 访问器暴露闭包 `let`:命令会写它们(/clear 换 session id、/resume 换整个会话),传值会丢写回。
+        state: {
+          get currentSessionId() {
+            return currentSessionId;
+          },
+          set currentSessionId(v) {
+            currentSessionId = v;
+          },
+          get lastTurnUsage() {
+            return lastTurnUsage;
+          },
+          set lastTurnUsage(v) {
+            lastTurnUsage = v;
+          },
+          get turnCount() {
+            return turnCount;
+          },
+          set turnCount(v) {
+            turnCount = v;
+          },
+          get queryHistory() {
+            return queryHistory;
+          },
+          set queryHistory(v) {
+            queryHistory = v;
+          },
+        },
+        attachments: {
+          list: () => pendingAttachments,
+          clear: () => {
+            pendingAttachments = [];
+          },
+          push: (att) => {
+            pendingAttachments.push(att);
+          },
+        },
+        buildSystemMessage,
+        banner,
+        welcomeLines,
+        refreshStatusBase,
+        applyMode,
+        cycleMode,
+        runTurn,
+        resumeFromPick,
+        rollbackFlow,
+      });
+      switch (outcome.kind) {
+        case 'next':
+          continue;
+        case 'exit':
+          break;
+        case 'forward':
+          // 改写输入后当普通消息发给 agent(/init)。不 continue:fall through 到发送路径。
+          joined = outcome.input;
+          forwardToAgent = true; // 不是"没匹配上",别被下方未知命令兜底拦掉
+          break;
+        case 'unhandled':
+          break; // 遗留 if 链接手
+      }
+      // switch 的 break 只跳出 switch;'exit' 需要跳出 while,用显式二次判断。
+      if (outcome.kind === 'exit') break;
+    }
+
     if (line === '/help') {
       const nodes = buildSlashCommands();
       layout.contentWrite(`${ui.bold}${t('help.title')}${ui.reset}\n`);
@@ -961,80 +1029,7 @@ export async function startRepl(
       layout.contentWrite(`${ui.yellow}${t('upgrade.usage')}${ui.reset}\n`);
       continue;
     }
-    if (line === '/plan') {
-      // /plan:切到 plan 模式(只读探查 + 产出计划)。
-      if (getAgentMode() === 'plan') {
-        layout.contentWrite(`${ui.dim}${t('repl.planAlready')}${ui.reset}\n`);
-      } else {
-        setAgentMode('plan');
-        layout.contentWrite(`${ui.dim}${t('repl.planChanged')}${ui.reset}\n`);
-      }
-      continue;
-    }
-    if (line === '/auto') {
-      if (getAgentMode() === 'auto') {
-        layout.contentWrite(`${ui.dim}${t('repl.autoAlready')}${ui.reset}\n`);
-      } else {
-        setAgentMode('auto');
-        layout.contentWrite(`${ui.dim}${t('repl.autoChanged')}${ui.reset}\n`);
-      }
-      continue;
-    }
-    if (line === '/mode') {
-      // /mode:菜单里的分支节点(本身不切换,只挂 /plan 与 /auto)。/help 会把它列出来,
-      // 所以直接敲它必须给点有用的东西——打印当前模式与两个子命令,而不是报未知命令。
-      layout.contentWrite(`${ui.dim}${t('repl.modeCurrent', { mode: getAgentMode() })}${ui.reset}\n`);
-      continue;
-    }
-    if (line === '/pet quit') {
-      // /pet quit:完全关闭桌宠进程(区别于 /pet 的仅断开本连接)。方案C的 CLI 侧退出入口,
-      // 另一入口是桌宠托盘菜单"退出桌宠"(见 packages/pet-app/src/main.ts)。
-      const { ok, reason } = await killPetProcess();
-      layout.contentWrite(`${ui.dim}(${ok ? '已关闭桌宠进程' : reason ?? '关闭失败'})${ui.reset}\n`);
-      continue;
-    }
-    if (line === '/pet skin') {
-      // /pet skin:菜单选皮(↑↓ 选,Enter 切换,Esc 取消),仿 /theme 的交互。要求桌宠已在运行
-      // (未运行则先提示 /pet 打开;不在此处自动 spawn,避免选皮命令产生"顺带开桌宠"的意外副作用)。
-      let skinList: { skins: { id: string; name: string }[]; currentSkinId: string };
-      try {
-        skinList = await listSkins();
-      } catch (e) {
-        layout.contentWrite(
-          `${ui.dim}(${e instanceof Error ? e.message : '获取皮肤列表失败'})${ui.reset}\n`,
-        );
-        continue;
-      }
-      const items: SessionPickerItem[] = [
-        { id: 'default', title: '默认(mascot)', subtitle: skinList.currentSkinId === 'default' ? '当前' : '' },
-        ...skinList.skins.map((s) => ({
-          id: s.id,
-          title: s.name,
-          subtitle: skinList.currentSkinId === s.id ? '当前' : '',
-        })),
-      ];
-      let pick: SessionPickerItem | null;
-      try {
-        pick = await promptThemePicker(items);
-      } catch {
-        continue; // Ctrl+C(SIGINT)→ 取消
-      }
-      if (pick === null) continue; // Esc / Ctrl+D 取消
-      setSkin(pick.id);
-      layout.contentWrite(`${ui.dim}(已切换桌宠皮肤:${pick.title})${ui.reset}\n`);
-      continue;
-    }
-    if (line === '/pet') {
-      // /pet:开关桌宠。已连接→断开;未连接→探测端口(已有实例则直连)或 spawn 拉起 + 退避重试连接。
-      // togglePet 不抛异常,所有失败路径转为返回值——桌宠是可选增强,任何异常都不能影响 REPL 主流程。
-      const { connected, reason } = await togglePet();
-      if (connected) {
-        layout.contentWrite(`${ui.dim}(桌宠已连接)${ui.reset}\n`);
-      } else {
-        layout.contentWrite(`${ui.dim}(${reason ?? '桌宠已断开'})${ui.reset}\n`);
-      }
-      continue;
-    }
+    // /plan /auto /mode /pet quit /pet skin /pet 已搬到 repl/commands/{mode,pet}.ts
 
     if (line === '/clear') {
       history.length = 1; // 保留 system 提示
@@ -1057,58 +1052,8 @@ export async function startRepl(
       layout.writeWelcomeBlock(welcomeLines()); // 回到空会话状态,欢迎引导重新出现
       continue;
     }
-    // /image:附加本地图片到下一条 user 消息(支持 /image <path> · /image list · /image clear)。
-    // dispatch 阶段不调 runTurn:仅 mutate pendingAttachments 状态,提交时(runTurn 入口)才 flush 进 history。
-    if (line === '/image' || line === '/image list' || line === '/image clear' || line.startsWith('/image ')) {
-      if (line === '/image list' || (line === '/image' && pendingAttachments.length > 0)) {
-        // 空 /image 视为 list(无歧义;若用户想加图必须 /image <path>)
-        if (pendingAttachments.length === 0) {
-          layout.contentWrite(`${ui.dim}(无待发送图片)${ui.reset}\n`);
-        } else {
-          for (const a of pendingAttachments) {
-            layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
-          }
-        }
-        continue;
-      }
-      if (line === '/image clear' || (line === '/image' && pendingAttachments.length === 0)) {
-        // /image 单独输入 + 无 pending:也走 list(空集)
-        if (line === '/image' && pendingAttachments.length === 0) {
-          layout.contentWrite(`${ui.dim}(无待发送图片)${ui.reset}\n`);
-        } else {
-          pendingAttachments = [];
-          layout.contentWrite(`${ui.dim}(已清空待发送图片)${ui.reset}\n`);
-        }
-        continue;
-      }
-      const arg = line.slice('/image'.length).trim().replace(/^["']|["']$/g, '');
-      if (!arg) {
-        layout.contentWrite(`${ui.dim}用法: /image <path>${ui.reset}\n`);
-        continue;
-      }
-      const maxBytes = config.maxImageBytes ?? MAX_INLINE_BYTES_DEFAULT;
-      const r = await loadImageAttachment(arg, { maxBytes });
-      if (!r.ok) {
-        layout.contentWrite(`${ui.red}[image] ${r.reason}${ui.reset}\n`);
-        continue;
-      }
-      if (!pendingAttachments.find((a) => a.id === r.att.id)) {
-        pendingAttachments.push(r.att);
-      }
-      layout.contentWrite(`  ${ui.dim}${renderChip(r.att)} — will attach to next message${ui.reset}\n`);
-      // 提前警告(不阻断附加):当前模型已知不支持视觉(如 MiniMax M2.x / gpt-3.5 等)时,
-      // 附加时就提示,而不是等发送后才在 catch 块里翻译 API 报错——减少一轮无意义请求。
-      if (!modelSupportsVision(config.model)) {
-        layout.contentWrite(
-          `  ${ui.yellow}⚠ 当前模型 ${config.model} 已知不支持视觉输入,发送图片可能会失败。可用 /model 切换。${ui.reset}\n`
-        );
-      }
-      continue;
-    }
-    if (line === '/context') {
-      layout.contentWrite(`  ${renderContextBar(history)}\n`);
-      continue;
-    }
+    // /image(list/clear/<path>)已搬到 repl/commands/image.ts;/context 搬到 repl/commands/context.ts
+
     if (line === '/memory') {
       // 记忆库概览:计数 + 近期 active 索引(详情用 memory_search)。
       const all = loadAll();
