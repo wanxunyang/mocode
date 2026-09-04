@@ -394,7 +394,10 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
           // 旧绝对行选区，会短暂画出一帧错位高亮，随后二次重画，视觉上就是抖动。
           state.selection = null;
           m.toggleEntry(entry.batchId, entry.entryIndex, {
-            contentInsertAfter: (after, lines) => contentInsertAfter(after, lines),
+            // 鼠标点击属「回看式展开」:显式 keepViewport=true,视口锚定原位、详情在下方展开,
+            // 屏幕不跳。显式传参而非依赖 contentInsertAfter 的默认 true,避免将来内部改传
+            // false(跟随屏底)时被 adapter 静默吞掉。
+            contentInsertAfter: (after, lines) => contentInsertAfter(after, lines, true),
             contentDeleteFrom: (start, n) => contentDeleteFrom(start, n),
             contentReplaceLine: (absIdx, line) => contentReplaceLine(absIdx, line),
           });
@@ -405,7 +408,8 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
         if (id) {
           state.selection = null;
           m.toggleBatch(id, {
-            contentInsertAfter: (after, lines) => contentInsertAfter(after, lines),
+            // 同 toggleEntry:鼠标点击是回看式展开,显式 keepViewport=true 锚定视口。
+            contentInsertAfter: (after, lines) => contentInsertAfter(after, lines, true),
             contentDeleteFrom: (start, n) => contentDeleteFrom(start, n),
           });
           repaint();

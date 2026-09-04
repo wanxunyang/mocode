@@ -713,12 +713,19 @@ function findParentEntryAbsLine(parentId: string, entryIndex: number): number | 
 /** mutation 独占 batch 收尾后立即展示其调用概要和 diff。 */
 export function expandSingleEntryFully(
   id: string,
-  layout: { contentInsertAfter(after: number, lines: string[]): void; contentWrite(s: string): void },
+  layout: {
+    contentInsertAfter(after: number, lines: string[], keepViewport?: boolean): void;
+    contentWrite(s: string): void;
+  },
 ): void {
   const b = batches.get(id);
   if (!b || b.entries.length !== 1 || expandedBatches.has(id)) return;
   const lines = [...buildExpandedLines(b), ...buildEntryDetailLines(b.entries[0], entryDetailIndent(b.entries, 0))];
-  layout.contentInsertAfter(b.summaryAbsIdx, lines);
+  // keepViewport=false:这是 agent 产出后的**自动**展开,属于「新内容」而非用户点击的回看式展开,
+  // 视口必须跟随屏底(同其它工具输出 / 子 agent 实时嵌套)。传 true 会让视口锚定在摘要行、
+  // 把 scrollOffset 顶到插入行数(diff 常几百行),此后 contentWriteMd 见 offset>0 就只喂缓冲
+  // 不物理写 → 后续所有输出停在视口上方,表现为「edit_file 后不自动滚动,得手动拉到底」。
+  layout.contentInsertAfter(b.summaryAbsIdx, lines, false);
   // 修复：contentInsertAfter 不再 commit was-current（避免 collapse 后留孤儿空行）；
   // mutation 路径不再由 flushToolBatch 写 \n separator，所以这里手动补一个 \n。
   layout.contentWrite('\n');
@@ -941,7 +948,7 @@ export function writeSummaryOnly(
   entries: BatchEntry[],
   layout: {
     contentWrite(s: string): void;
-    contentInsertAfter(after: number, lines: string[]): void;
+    contentInsertAfter(after: number, lines: string[], keepViewport?: boolean): void;
     totalRows(): number;
   },
 ): void {

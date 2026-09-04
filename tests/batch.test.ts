@@ -29,6 +29,49 @@ function makeLayout() {
   };
 }
 
+/**
+ * 带 scrollOffset 的 layout：复刻 content-write.ts contentInsertAfter 的视口语义。
+ * keepViewport=true 且插入点在视口内时，会把 scrollOffset 顶到插入行数（视口锚定，
+ * 新内容在下方）；否则视口跟随屏底（scrollOffset 保持 0）。
+ */
+function makeScrollAwareLayout(contentBottom = 10) {
+  const st = { scrollOffset: 0, contentBottom };
+  return {
+    state: st,
+    contentWrite(s: string) {
+      for (const ch of s) {
+        if (ch === '\n') content.breakRow();
+        else content.feedChar(ch);
+      }
+    },
+    contentInsertAfter(after: number, lines: string[], keepViewport = true) {
+      const totalBefore = content.totalRows();
+      const scrolled = st.scrollOffset > 0;
+      content.insertAfter(after, lines);
+      const delta = content.totalRows() - totalBefore;
+      if (delta === 0) return;
+      if (scrolled) {
+        st.scrollOffset = Math.max(
+          0,
+          Math.min(st.scrollOffset + delta, Math.max(0, content.totalRows() - st.contentBottom)),
+        );
+      } else if (keepViewport && after < totalBefore) {
+        const insertedAfterViewport = after >= totalBefore - st.contentBottom;
+        if (insertedAfterViewport) {
+          st.scrollOffset = Math.min(delta, Math.max(0, content.totalRows() - st.contentBottom));
+        }
+      }
+    },
+    contentDeleteFrom(start: number, n: number) {
+      content.deleteFrom(start, n);
+    },
+    contentReplaceLine(abs: number, line: string) {
+      content.replaceLine(abs, line);
+    },
+    totalRows: () => content.totalRows(),
+  };
+}
+
 afterEach(() => {
   batch.reset();
   content.reset();
@@ -111,5 +154,52 @@ describe('batch mutation 工具块折叠/重开', () => {
       1,
       'mutation 工具块折叠后重开，entry 行不应重复出现',
     );
+  });
+
+  it('mutation 自动展开后视口跟随屏底，不把 scrollOffset 顶上去', () => {
+    batch.setMaxCols(120);
+    // contentBottom=10：可视区远小于 diff 行数，确保一旦锚定视口就会被顶出大量 offset
+    const layout = makeScrollAwareLayout(10);
+
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'edit_file', 'docs/computer-use-design.md');
+    // 造一个几十行的 diff（远超 contentBottom=10）
+    const diffLines = Array.from({ length: 40 }, (_, i) => `+ line ${i + 1}${RESET}`).join('\n');
+    batch.recordResult(id, 'edit_file', 'Applied 1 edit', diffLines);
+    batch.endBatch(id, layout);
+
+    assert.equal(layout.state.scrollOffset, 0, '展开前视口应在底部');
+
+    // mutation 自动展开（agent 产出新内容，非用户点击回看）
+    batch.expandSingleEntryFully(id, layout);
+
+    // 修复前：expandSingleEntryFully 未传 keepViewport=false → 默认 true → 视口锚定，
+    // scrollOffset 被顶到插入行数（40 行）→ 后续 contentWriteMd 见 offset>0 只喂缓冲不物理写，
+    // 表现为「edit_file 后不自动滚动，得手动拉到底」。
+    assert.equal(
+      layout.state.scrollOffset,
+      0,
+      'mutation 自动展开属新内容，视口必须跟随屏底（scrollOffset 保持 0）',
+    );
+  });
+
+  it('用户点击展开仍锚定视口（keepViewport 语义不被自动展开改动波及）', () => {
+    batch.setMaxCols(120);
+    const layout = makeScrollAwareLayout(10);
+
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'read_file', 'package.json');
+    batch.recordResult(id, 'read_file', 'Read 40 lines', null, 'line\n'.repeat(40));
+    batch.endBatch(id, layout);
+    assert.equal(layout.state.scrollOffset, 0);
+
+    // 模拟鼠标点击摘要行展开第一层
+    batch.toggleBatch(id, layout);
+    assert.equal(batch.isExpanded(id), true);
+    // 第一层只有 1 条 entry 行,视口(10 行)装得下,offset 仍为 0 属正常;
+    // 锚定语义要点在第二层:点击 entry 展开 40 行详情时视口必须锚定(不跳底)。
+    batch.toggleEntry(id, 0, layout);
+
+    assert.ok(layout.state.scrollOffset > 0, '用户点击展开应锚定视口，不自动跳到详情底部');
   });
 });
