@@ -22,6 +22,8 @@ import { join } from 'node:path';
 import { runAgentCore, type AgentHooks } from '../src/agent/core.js';
 import { __setChatCreateImpl, type ChatMessage } from '../src/llm/index.js';
 import { setSandboxRoot } from '../src/sandbox/root.js';
+// 装配官方默认工具包(提供本测试真执行的 read_file):registry 不再顶层 import builtins,须显式装配。
+import '../src/tools/builtins/index.js';
 
 /** 构造一个符合 chatOnce() 解析预期的异步 SSE chunk 流。 */
 function sseStream(
@@ -213,6 +215,50 @@ test('runAgentCore: abort 在第一步前还原 history', async () => {
     assert.equal(history.length, 2);
     assert.equal(history[0].role, 'system');
     assert.equal(history[1].role, 'user');
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('runAgentCore: 自定义 runtimeContext 生效(参数化可用,非仅绑定全局单例)', async () => {
+  // 注入一个自定义 context:覆盖 getCurrentSessionId(进 trace sessionId)与
+  // getActiveModel(进 model_start trace / chat model 字段)。其余成员沿用全局默认。
+  // 验证 runAgentCore 确实经 ctx 读取这两个值,而非直读模块级单例。
+  __setChatCreateImpl(async () =>
+    sseStream([{ delta: { content: 'ok' } }, { usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 } }]),
+  );
+
+  const traceEvents: Array<{ sessionId: string; type: string; data: Record<string, unknown> }> = [];
+
+  try {
+    const { defaultAgentRuntimeContext } = await import('../src/agent/runtime-context.js');
+    const customCtx = {
+      ...defaultAgentRuntimeContext,
+      getCurrentSessionId: () => 'custom-session-xyz',
+      getActiveModel: () => 'custom-model-abc',
+    };
+
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'hi',
+      hooks: {},
+      runtimeContext: customCtx,
+      onTraceEvent: (e) => traceEvents.push({ sessionId: e.sessionId, type: e.type, data: e.data }),
+    });
+
+    assert.equal(result.completed, true);
+    assert.equal(result.finalText, 'ok');
+
+    // 所有 trace 事件的 sessionId 必须来自自定义 context,而非全局 getCurrentSessionId()
+    assert.ok(traceEvents.length > 0, '应有 trace 事件');
+    for (const e of traceEvents) {
+      assert.equal(e.sessionId, 'custom-session-xyz', `trace 事件 ${e.type} 的 sessionId 应来自自定义 context`);
+    }
+    // model_start 事件的 model 字段必须来自自定义 getActiveModel()
+    const modelStart = traceEvents.find((e) => e.type === 'model_start');
+    assert.ok(modelStart, '应有 model_start 事件');
+    assert.equal(modelStart.data.model, 'custom-model-abc', 'model_start.model 应来自自定义 context');
   } finally {
     __setChatCreateImpl(null);
   }

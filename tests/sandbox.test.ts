@@ -13,6 +13,7 @@ import { setSandboxRoot } from '../src/sandbox/root.js';
 
 let sandboxRoot: string;
 let outsideDir: string;
+let prevRoot: string | null = null;
 
 before(() => {
   sandboxRoot = mkdtempSync(join(tmpdir(), 'mocode-sandbox-test-'));
@@ -20,11 +21,13 @@ before(() => {
   mkdirSync(join(sandboxRoot, 'sub'), { recursive: true });
   writeFileSync(join(sandboxRoot, 'sub', 'file.txt'), 'hello');
   writeFileSync(join(outsideDir, 'secret.txt'), 'secret');
-  setSandboxRoot(sandboxRoot);
+  // save/restore 而非清 null：共享进程(--experimental-test-isolation=none)下本文件测试与
+  // note-append/session-state-reminder 等交错执行,清 null 会让其它文件 jailResolve 兜底到 cwd。
+  prevRoot = setSandboxRoot(sandboxRoot);
 });
 
 after(() => {
-  setSandboxRoot(null);
+  setSandboxRoot(prevRoot);
   rmSync(sandboxRoot, { recursive: true, force: true });
   rmSync(outsideDir, { recursive: true, force: true });
 });

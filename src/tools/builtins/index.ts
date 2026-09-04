@@ -1,4 +1,5 @@
 import type { Tool, ToolCapabilities } from '../types.js';
+import { installBuiltinTools } from '../registry.js';
 import { readFileTool } from './read-file.js';
 import { viewImageTool } from './view-image.js';
 import { screenshotTool } from './screenshot.js';
@@ -123,3 +124,8 @@ export const builtinTools: Tool[] = rawBuiltinTools.map((tool) => ({
   ...tool,
   capabilities: CAPABILITIES[tool.name],
 }));
+
+// 自注册:registry 不再顶层 import builtins(破模块循环,见 registry.ts 顶部注释),改为本模块
+// 初始化时把官方默认工具包注入注册表。registry→builtins 边已断,此处调 installBuiltinTools 时
+// registry 模块必已完成求值,无 TDZ 风险。装配方(CLI/stdio host/eval/测试)import 本模块即完成装配。
+installBuiltinTools(builtinTools);

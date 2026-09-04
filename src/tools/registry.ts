@@ -1,5 +1,6 @@
 import type { Tool, ToolCapabilities, ToolOutcome, ToolExecuteResult } from './types.js';
-import { builtinTools } from './builtins/index.js';
+// 注意:不顶层 import builtins——会构成 registry → builtins → task(sub-agent) → agent/spawn
+// → agent/core → registry 的模块循环。官方默认工具包由 builtins/index.ts 经 installBuiltinTools 自注册。
 import {
   beginPathMutation,
   beginWorkspaceMutation,
@@ -16,14 +17,28 @@ import { isToolErrorOutput } from './result.js';
 /**
  * 可扩展工具注册表。数组实例始终稳定，使已经持有 tools 引用的 agent/LLM 能看到运行时新增工具。
  * 扩展按 source 替换，MCP 重连或配置刷新不会累积旧工具。
+ *
+ * 官方默认工具包不顶层 import——由装配方经 installBuiltinTools() 注入(见 builtins/index.ts 自注册)。
+ * 这是「framework 与 coding preset 分离」的装配缝:@mocode/tool-system 不含 builtin,builtin 是可替换默认包。
+ * 未 install 时 tools 为空数组;install 后 rebuild 合并 builtin + 已注册扩展。
  */
 const extensions = new Map<string, Tool[]>();
-export const tools: Tool[] = [...builtinTools];
+let builtinTools: Tool[] = [];
+export const tools: Tool[] = [];
 /** 名字 → 工具 的 O(1) 索引，与 tools 数组在每次 rebuild 时同步重建；findTool 走此索引。 */
 let toolIndex = buildToolIndex(tools);
 
 function buildToolIndex(list: Tool[]): Map<string, Tool> {
   return new Map(list.map((tool) => [tool.name, tool]));
+}
+
+/**
+ * 装配官方默认工具包(coding preset)。幂等:重复 install 覆盖上次,不累积。
+ * 由 builtins/index.ts 在模块初始化时调用;入口(CLI/stdio host/eval/测试)只需 import builtins 即完成装配。
+ */
+export function installBuiltinTools(list: Tool[]): void {
+  builtinTools = list;
+  rebuildTools();
 }
 
 export function registerToolsExtension(source: string, additions: Tool[]): string[];

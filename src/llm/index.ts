@@ -4,6 +4,7 @@ import { tools } from '../tools/registry.js';
 import { getPlanDisabledTools, FRONTEND_TOOLS } from '../tools/constants.js';
 import { ThinkTagFilter } from './think-filter.js';
 import { anthropicChatOnce } from './providers/anthropic.js';
+import { registerModelProvider, getModelProvider, listModelProviders } from './provider.js';
 
 // 强制关闭第三方调试日志泄漏:openai SDK 在 process.env.DEBUG === 'true' 时用裸
 // console.log 把请求/响应直写 stdout,会污染 TUI 输入框(并泄露 headers/URL)。
@@ -277,6 +278,19 @@ export function refreshChatTools(): void {
 // chatTools 初始为空数组;两个真实入口(repl 启动、stdio host 启动)都会显式刷新,
 // 所有消费方(budget/compact/scheduler 默认参数、agent 装配)均在运行时求值,不受影响。
 
+// ── 默认 provider 注册(2.0 步骤3)──────────────────────────────────────────────
+// 把 chat() 原本的 config.provider if-else 分流变成注册表查找:openai 走 chatOnce,
+// anthropic 走 anthropicChatOnce。chatOnce 是 hoisted 函数声明,模块顶层引用安全。
+// 新增 provider 只需 registerModelProvider,不必改 chat()。
+registerModelProvider({
+  name: 'openai',
+  chatOnce: (messages, handlers, signal, tools) => chatOnce(messages, handlers, signal, tools),
+});
+registerModelProvider({
+  name: 'anthropic',
+  chatOnce: (messages, handlers, signal, tools) => anthropicChatOnce(messages, handlers, signal, tools ?? chatTools),
+});
+
 export interface ToolCallRef {
   id: string;
   name: string;
@@ -425,10 +439,12 @@ export async function chat(
       throw new DOMException('This operation was aborted', 'AbortError');
     }
     try {
-      if (config.provider === 'anthropic') {
-        return await anthropicChatOnce(messages, handlers, signal, toolsOverride ?? chatTools);
+      const provider = getModelProvider(config.provider);
+      if (!provider) {
+        // 未注册的 provider:给出可用名单,避免悄悄落到错误实现。
+        throw new Error(`未知的 LLM provider "${config.provider}";已注册:${listModelProviders().join(', ') || '(空)'}`);
       }
-      return await chatOnce(messages, handlers, signal, toolsOverride);
+      return await provider.chatOnce(messages, handlers, signal, toolsOverride);
     } catch (err) {
       lastErr = err;
       if (attempt >= RETRY_MAX_ATTEMPTS || !isRetryableError(err, signal)) {

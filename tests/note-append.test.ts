@@ -36,14 +36,17 @@ function writeNotes(content: string): void {
   fs.writeFileSync(notesPath(), content, 'utf8');
 }
 
+let prevRoot: string | null = null;
+
 function setup(): void {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mocode-notes-'));
-  setSandboxRoot(tmpRoot);
+  // save/restore 而非清 null：共享进程下与其它沙箱测试交错执行,清 null 会污染全局 root。
+  prevRoot = setSandboxRoot(tmpRoot);
   setCurrentSessionId(SESSION_ID, tmpRoot);
 }
 
 function teardown(): void {
-  setSandboxRoot(null);
+  setSandboxRoot(prevRoot);
   setCurrentSessionId(undefined, tmpRoot);
   try {
     fs.rmSync(tmpRoot, { recursive: true, force: true });

@@ -5,8 +5,6 @@
 // 与 index.ts 的关系:index.ts 的 runAgent = runAgentCore + TUI hooks 薄封装(行为不变)。
 // spawn.ts 的 spawnAgent = runAgentCore + 静默 hooks(子 agent)。
 
-import { readFileSync } from 'node:fs';
-import { getNotesMtime } from '../session/notes.js';
 import type OpenAI from 'openai';
 import {
   chat,
@@ -30,29 +28,28 @@ import {
 import { checkPermission } from '../permissions/index.js';
 import { validateToolArguments } from '../tools/validation.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools } from '../tools/constants.js';
-import { getAgentMode, setAgentMode } from './mode.js';
+import { defaultAgentRuntimeContext, type AgentRuntimeContext } from './runtime-context.js';
 import {
-  maybeCompact,
-  contextState,
-  createTraceEvent,
-  summarizeToolArguments,
-  safeProviderId,
-} from '../session/index.js';
+  parseArgs,
+  argumentErrorHint,
+  isToolResultsNoise,
+  isParallelTool,
+  isResourceLockedCall,
+  deniedOutcome,
+  readDiffContext,
+  pushToolResult,
+} from './tool-helpers.js';
+import { maybeCompact, contextState, summarizeToolArguments } from '../session/index.js';
+import { TurnTraceState } from './trace-state.js';
 import { capToolResultForHistory, type ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
-import { recordArtifact, invalidateArtifacts, rehydrateArtifacts, knownEditTargets } from '../context/index.js';
+import { recordArtifact, invalidateArtifacts, rehydrateArtifacts } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
-import { isToolResultSuccess } from '../context/utils.js';
-import { config, getActiveModel, extractActivePlanSection, buildSessionStateReminder } from '../config/index.js';
 import { t } from '../i18n/index.js';
-import { jailResolve } from '../sandbox/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
-import { getTokenCalibration, updateTokenCalibration } from '../context/token-calibration.js';
-import { getCurrentTurnId, getCurrentTurnMutationState } from '../rollback/index.js';
 import type { AgentTraceEvent, AgentTurnTrace, TraceEventType } from '../session/trace.js';
-import { getCurrentSessionId } from '../session/state.js';
 
 /** nag 提醒阈值:连续 N 个"执行了工具但没更新 notes.md"的步后提醒一次(对齐 Claude Code TodoWrite 的 3 轮)。 */
 const PLAN_NAG_THRESHOLD = 3;
@@ -62,148 +59,18 @@ const PLAN_NAG_TEXT =
   'If you finished a step, call plan_update to check it off (keep at most one in_progress); ' +
   'if the whole plan is done, let plan_update settle it to ## Done:. If the plan changed scope, update it to match reality.';
 
-/** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
-function parseArgs(raw: string): Record<string, unknown> | null {
-  try {
-    return raw.trim() ? (JSON.parse(raw) as Record<string, unknown>) : {};
-  } catch {
-    return null;
-  }
-}
-
-/** 需要「已知编辑目标」恢复提示的文件编辑工具;其余工具的参数报错不注入该提示。 */
-const EDIT_HINT_TOOLS = new Set(['edit_file', 'write_file']);
-
-/** 文件编辑工具参数校验失败时的恢复提示:把系统已知仍新鲜的「最近 read_file 的
- *  path + hash」直接递给模型照抄,替代其在长上下文里凭记忆复述。
- *  只展示事实、不替模型填值;没有候选(从未 read_file / 全部已失效)返 undefined。 */
-function argumentErrorHint(name: string, state: ContextState): string | undefined {
-  if (!EDIT_HINT_TOOLS.has(name)) return undefined;
-  const targets = knownEditTargets(state);
-  if (targets.length === 0) return undefined;
-  const lines = targets.map((target) => `  path=${target.path}  expected_hash=${target.hash}`).join('\n');
-  return (
-    '系统已知最近 read_file 且尚未被修改的文件(直接复制下面的 path / expected_hash,勿凭记忆复述):\n' +
-    `${lines}\n如目标文件不在其中,先 read_file 该文件再发起编辑。`
-  );
-}
-
-/** 判定 assistant content 是否只是 "Tool results:" 这类工具结果前缀噪声。
- *  部分模型(如 Claude)会在 tool_calls 前输出此种无意义过渡文本，写入 history
- *  会污染后续轮次上下文并在 TUI 上泄露为孤立行。 */
-function isToolResultsNoise(content: string): boolean {
-  return /^(?:\s*Tool results:\s*)+$/i.test(content.trim());
-}
-
-/** 只有显式声明 parallel 且无需权限确认的工具才进入普通并发组。 */
-function isParallelTool(name: string): boolean {
-  const tool = findTool(name);
-  return !!tool && (tool.risk ?? 'safe') === 'safe' && getToolCapabilities(tool).concurrency === 'parallel';
-}
-
-/** resource-locked 工具先顺序完成权限预检，再依赖 canonical resource lock 并发执行。 */
-function isResourceLockedTool(name: string): boolean {
-  const tool = findTool(name);
-  return !!tool && getToolCapabilities(tool).concurrency === 'resource-locked';
-}
-
-function isResourceLockedCall(call: ToolCallRef): boolean {
-  if (!isResourceLockedTool(call.name)) return false;
-  if (call.name !== 'sub-agent') return true;
-  const args = parseArgs(call.arguments);
-  // Unknown write sets stay on the serial path. Read tasks and known disjoint write sets may batch.
-  return args?.mode !== 'write' || (Array.isArray(args.writeSet) && args.writeSet.length > 0);
-}
+// 工具辅助纯函数(parseArgs / argumentErrorHint / isToolResultsNoise / isParallelTool /
+// isResourceLockedTool / isResourceLockedCall / deniedOutcome / readDiffContext / pushToolResult)
+// 已提取至 ./tool-helpers.ts——它们不依赖本循环的局部状态,只接受显式参数,故可安全模块化。
 
 /** 文件 mutation 由 capability metadata 判定，供 diff、回滚与上下文失效共用。 */
 const isMutationTool = (name: string): boolean => isFileMutationTool(name);
-
-function deniedOutcome(name: string): ToolOutcome {
-  return {
-    status: 'denied',
-    code: 'PERMISSION_DENIED',
-    retryable: false,
-    output: `错误:用户拒绝了工具 ${name} 的执行。`,
-  };
-}
 
 /** 工具调用 ● 头所需信息(交给 hooks 渲染;core 不直接写屏)。 */
 export interface ToolCallView {
   name: string;
   arguments: string;
   id: string;
-}
-
-/** mutation 执行前读旧内容供 diff:write_file 取整文件旧内容(不存在→null=新建),
- * edit_file 取 old_string 起始行号(供 diff 显示真实文件行号)。读不到则 diff 退化为相对行号。
- * 非 mutation 或参数非法返 { preWriteOld: null, editStartLine: 1 }。失败不阻断。 */
-function readDiffContext(
-  tc: ToolCallRef,
-  parsed: Record<string, unknown> | null,
-): { preWriteOld: string | null; editStartLine: number } {
-  if (!parsed) return { preWriteOld: null, editStartLine: 1 };
-  const p = String(parsed.path ?? '');
-  if (!p) return { preWriteOld: null, editStartLine: 1 };
-  if (tc.name === 'write_file') {
-    try {
-      // jailResolve:沙箱越界(../../、绝对外圈、软链出圈)抛错 → catch 兜底返 null,不泄露牢外内容(TOCTOU)
-      return { preWriteOld: readFileSync(jailResolve(p), 'utf8'), editStartLine: 1 };
-    } catch {
-      return { preWriteOld: null, editStartLine: 1 }; // 文件不存在(新建)、不可读 或 沙箱越界(不泄露)
-    }
-  }
-  if (tc.name === 'edit_file') {
-    // 行尾归一化:LLM 生成的 old_string 用 LF(\n),但 Windows 文件可能是 CRLF(\r\n),
-    // 不统一则 indexOf 必败、editStartLine 恒为 1。与 edit-file.ts 保持一致归一化为 LF。
-    const oldStr = String(parsed.old_string ?? '')
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n');
-    try {
-      // jailResolve:同上,沙箱越界抛错 → catch 兜底,不泄露牢外内容
-      const raw = readFileSync(jailResolve(p), 'utf8');
-      const data = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-      const idx = oldStr ? data.indexOf(oldStr) : -1;
-      return {
-        preWriteOld: null,
-        editStartLine: idx >= 0 ? data.slice(0, idx).split('\n').length : 1,
-      };
-    } catch {
-      return { preWriteOld: null, editStartLine: 1 }; // 读不到:diff 退化为相对行号(含沙箱越界)
-    }
-  }
-  return { preWriteOld: null, editStartLine: 1 };
-}
-
-/** 回灌 tool 结果到 history。
- *  正常路径只做单条 hard cap；原始 output 同时供 TUI 展示，因此用户与模型
- *  看到同一事实。Artifact/Relevance/Lifecycle 仅登记 metadata/provenance，
- *  不在这里改写旧正文；所有自动清理与压缩统一由 80% pressure scheduler 决定。 */
-
-function pushToolResult(
-  history: ChatMessage[],
-  tc: ToolCallRef,
-  output: string,
-  pruner: ReturnType<typeof createRelevancePruner> | null,
-  lifecycle: LifecycleEngine | null,
-  _scheduler: BudgetScheduler | null,
-  runtimeContextState: ContextState = contextState,
-  succeededOverride?: boolean,
-): void {
-  const succeeded = succeededOverride ?? isToolResultSuccess(output);
-  const msg = {
-    role: 'tool' as const,
-    tool_call_id: tc.id,
-    // Preserve evidence verbatim in normal operation; the hard per-result cap
-    // remains solely as a request-size safety rail.
-    content: capToolResultForHistory(tc.name, output),
-  } as ChatMessage;
-  history.push(msg);
-  const messageIndex = history.length - 1;
-  recordArtifact(runtimeContextState, history, messageIndex, output, succeeded);
-  // 失败 read 不得淘汰旧 read；失败 consumer 也不能改变 lifecycle 上游状态。
-  if (pruner) pruner.observePush(history, msg, succeeded);
-  if (lifecycle) lifecycle.pushTool(history, messageIndex, succeeded);
-  runtimeContextState.lifecycleStats = lifecycle?.stats();
 }
 
 // ── hooks:把 runAgent 的展示副作用参数化 ──────────────────────────────────
@@ -278,6 +145,13 @@ export interface AgentRunOptions {
   /** 本 agent 独享的上下文统计状态；缺省为主 agent 全局 contextState。 */
   contextState?: ContextState;
   /**
+   * 运行时依赖注入(Context 参数化,2.0 步骤1):覆盖 config / agentMode / sessionId /
+   * token 校准 / notes mtime 等模块级单例的来源。缺省 = defaultAgentRuntimeContext
+   * (原样绑定全局单例,行为与改造前完全一致)。宿主(子 agent / stdio host / 未来
+   * 多 runtime)可注入自定义实现,在同一进程内获得互不干扰的运行时视图。
+   */
+  runtimeContext?: AgentRuntimeContext;
+  /**
    * 可选的宿主交互桥：桌面端可将高风险工具的确认请求交给图形界面处理。
    * 未传时保持原有 TUI / 非交互 fail-closed 行为。
    */
@@ -339,73 +213,43 @@ export interface AgentRunResult {
  */
 export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResult> {
   const { history, userInput, signal, onContextUpdate, hooks } = opts;
+  const ctx: AgentRuntimeContext = opts.runtimeContext ?? defaultAgentRuntimeContext;
   const runtimeContextState = opts.contextState ?? contextState;
   /** 本轮 ask_human 成功调用次数，仅用于 trace 观测，不影响工具执行或模型上下文。 */
   let askHumanCountThisTurn = 0;
-  const maxSteps = opts.maxSteps ?? config.maxSteps;
+  const maxSteps = opts.maxSteps ?? ctx.config.maxSteps;
   // 中断还原:repl 的 /plan / /auto / Shift+Tab 等用户面触发 setAgentMode 中途切了模式,
   // abort 时连同模式一起还原回轮首。模型不再持有 switch_mode 工具,无法自切。
-  const savedMode = getAgentMode();
+  const savedMode = ctx.getAgentMode();
   // 本轮计时:从入口到完毕(正常 return / 达上限),供 finally 打 ✻ Worked for 摘要行。
   const t0 = Date.now();
-  const traceSessionId = opts.traceContext?.sessionId ?? getCurrentSessionId() ?? `ephemeral-${process.pid}`;
-  const traceTurnId = opts.traceContext?.turnId ?? getCurrentTurnId();
-  let currentTraceStep: number | undefined;
-  let abortTraced = false;
+  // trace / token-usage 状态聚合(2.0 步骤2 深拆第一刀):emit/addUsage/turnUsage 收敛进
+  // TurnTraceState,事件 payload 与 hooks 序列保持字节级不变。
+  const traceState = new TurnTraceState({
+    sessionId: opts.traceContext?.sessionId ?? ctx.getCurrentSessionId() ?? `ephemeral-${process.pid}`,
+    turnId: opts.traceContext?.turnId ?? ctx.getCurrentTurnId(),
+    onTraceEvent: opts.onTraceEvent,
+  });
+  const traceSessionId = traceState.sessionId;
+  const traceTurnId = traceState.turnId;
   const emitTrace = (
     type: TraceEventType,
     data: Record<string, unknown> = {},
     ids: Partial<Pick<AgentTraceEvent, 'step' | 'stepId' | 'toolCallId' | 'providerToolCallId'>> = {},
-  ): void => {
-    try {
-      opts.onTraceEvent?.(
-        createTraceEvent({
-          sessionId: traceSessionId,
-          turnId: traceTurnId,
-          type,
-          ...(currentTraceStep === undefined
-            ? {}
-            : {
-                step: currentTraceStep,
-                stepId: `${traceTurnId}:step:${currentTraceStep}`,
-              }),
-          ...ids,
-          data,
-        }),
-      );
-    } catch {
-      // Trace is best-effort and must never alter execution.
-    }
-  };
-  emitTrace('turn_start', { mode: getAgentMode() });
+  ): void => traceState.emit(type, data, ids);
+  emitTrace('turn_start', { mode: ctx.getAgentMode() });
   let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
   let traceStatus: AgentTurnTrace['status'] = 'error';
-  let toolCallCount = 0;
   // A+B(plan 可靠性):跨步计数"执行了工具但没改动 notes.md"的连续步数。
   // 本步写了 notes.md(plan_update 或直接 write/edit)→ 清零并重同步 history[0];
   // 否则累计,达阈值则在当前步 tool_result 前注入 nag 提醒。
   let stepsSincePlanTouch = 0;
-  // 本轮 token 累计:每步 chat() 返回后把 result.usage 累加,供 onDone 摘要行 + AgentRunResult.usage
+  // 本轮 token 累计在 traceState.turnUsage(每步 chat() 返回后 addUsage),供 onDone 摘要行 + AgentRunResult.usage
   // 透传给 repl(显示在底栏模式 chip 右边)。未开启 include_usage 或全失败时为 undefined。
-  let turnUsage: ChatUsage | undefined;
   // 实时 chip ↻ 估算用:上一步 chat 实测 prompt(前缀缓存下当前步命中 ≈ 它)+ 后端是否报过 cache 命中
   // (从不报 cache 的后端不估算,避免虚显 ↻)。
   let lastStepPromptTokens = 0;
   let providerCacheSeen = false;
-  const addUsage = (u: ChatUsage | undefined): void => {
-    if (!u) return;
-    turnUsage = turnUsage
-      ? {
-          promptTokens: turnUsage.promptTokens + u.promptTokens,
-          completionTokens: turnUsage.completionTokens + u.completionTokens,
-          totalTokens: turnUsage.totalTokens + u.totalTokens,
-          cachedTokens: turnUsage.cachedTokens + u.cachedTokens,
-          cacheCreationTokens: (turnUsage.cacheCreationTokens ?? 0) + (u.cacheCreationTokens ?? 0),
-          reasoningTokens: turnUsage.reasoningTokens + u.reasoningTokens,
-        }
-      : u;
-  };
-  const addToolUsage = (outcome: ToolOutcome): void => addUsage(outcome.usage);
   history.push({ role: 'user', content: userInput });
   // 中断回滚快照:push 用户消息后整段浅拷贝。abort 时 length=0;push(...saved) 还原。
   // 这样中断时至少保留用户消息(及之前的历史);每步工具全部执行完毕后刷新快照,
@@ -414,15 +258,15 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
   let savedHistory = history.slice();
   // Relevance and lifecycle collect provenance during normal work. Neither path
   // rewrites history; exact supersession is applied only by the pressure scheduler.
-  const relprune = config.contextRelprune ? createRelevancePruner() : null;
-  let lifecycle: LifecycleEngine | null = config.contextLifecycle ? createLifecycleEngine(history) : null;
+  const relprune = ctx.config.contextRelprune ? createRelevancePruner() : null;
+  let lifecycle: LifecycleEngine | null = ctx.config.contextLifecycle ? createLifecycleEngine(history) : null;
   runtimeContextState.lifecycleStats = lifecycle?.stats();
   rehydrateArtifacts(runtimeContextState, history);
   // The scheduler is the sole automatic history-rewrite entry point. It runs
   // superseded → stale artifact → old logs/search → compact at real pressure.
   // contextBudget=false keeps only the infrastructure compact fallback.
   const scheduler: BudgetScheduler | null =
-    config.contextBudget !== false ? createBudgetScheduler(runtimeContextState) : null;
+    ctx.config.contextBudget !== false ? createBudgetScheduler(runtimeContextState) : null;
   // 本轮流式状态:首个正文 token 到达即停 spinner(思考期间 spinner 持续转「思考中…」,不写思考内容)。
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
@@ -447,19 +291,11 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
 
   // 中断还原:停 spinner + 补换行 + (已中断)提示 + history 还原到本 turn 前 + 模式还原。
   // 两处共用:① await chat() 抛 AbortError 的 catch;② 工具被 abort 杀后循环顶检查。
-  const abortRestore = (): void => {
-    if (!abortTraced) {
-      emitTrace('abort', { phase: 'observed', reason: 'signal' });
-      abortTraced = true;
-    }
-    hooks.onAbort?.();
-    history.length = 0;
-    history.push(...savedHistory);
-    setAgentMode(savedMode);
-  };
+  // 实现已收敛进 TurnTraceState.abortRestore;savedHistory/savedMode 是函数级 let,此处闭包现读。
+  const abortRestore = (): void => traceState.abortRestore({ hooks, history, savedHistory, ctx, savedMode });
   try {
     for (let step = 0; step < maxSteps; step++) {
-      currentTraceStep = step;
+      traceState.currentTraceStep = step;
       const stepStartedAt = Date.now();
       emitTrace('step_start', { ordinal: step });
       try {
@@ -467,20 +303,13 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         if (signal?.aborted) {
           abortRestore();
           traceStatus = 'aborted';
-          const mutation = getCurrentTurnMutationState();
-          return {
-            completed: false,
-            terminationReason: 'aborted',
-            finalText: null,
-            usage: turnUsage,
-            changedFiles: mutation.changedFiles.map((item) => item.path),
-          };
+          return traceState.buildAbortedResult(ctx.getCurrentTurnMutationState());
         }
         // 本步只计算一次实际工具集合，调度、请求和 usage 校准必须使用完全相同的 schema。
-        const activeTools = opts.toolsOverride ?? (getAgentMode() === 'plan' ? planChatTools : chatTools);
-        const requestBaseURL = config.baseURL;
-        const requestModel = getActiveModel();
-        const storedCalibration = getTokenCalibration(requestBaseURL, requestModel, activeTools);
+        const activeTools = opts.toolsOverride ?? (ctx.getAgentMode() === 'plan' ? planChatTools : chatTools);
+        const requestBaseURL = ctx.config.baseURL;
+        const requestModel = ctx.getActiveModel();
+        const storedCalibration = ctx.getTokenCalibration(requestBaseURL, requestModel, activeTools);
         runtimeContextState.correction = storedCalibration.correction;
         runtimeContextState.calibrationSamples = storedCalibration.samples;
 
@@ -489,7 +318,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         //     必须计入压力线——它不在 history 里,调度器只能由此入参看见(否则最多 5k
         //     的笔记 + plan 段对 80% 触发线完全不可见,小窗口模型会压不住);
         //  ② 压缩步在压缩成功后重取(P2 固结的 Compaction Snapshot 当步即可见)。
-        let sessionStateText = opts.suppressSessionState ? '' : buildSessionStateReminder();
+        let sessionStateText = opts.suppressSessionState ? '' : ctx.buildSessionStateReminder();
 
         // The scheduler is the only automatic path that may compress old evidence.
         // Normal tool pushes and lifecycle tracking remain metadata-only.
@@ -556,7 +385,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
           // 压缩可能刚把进度快照固结进 notes.md(P2)→ 重取,让本步 requestHistory
           // 末尾就带上最新 Compaction Snapshot,不必等下一步。bar 口径对应的
           // ephemeralText 仍用触发时旧值(见 buildRequestHistory 注释),仅差这一段。
-          if (!opts.suppressSessionState) sessionStateText = buildSessionStateReminder();
+          if (!opts.suppressSessionState) sessionStateText = ctx.buildSessionStateReminder();
           // 会话状态(活跃 plan + 笔记段)不再回写 history[0]:每步都会在 requestHistory
           // 末尾注入最新副本(见下方 ephemeralReminder),compact 后自然恢复。
         }
@@ -566,7 +395,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         lastChar = '';
         let result: ChatResult;
         const modelStartedAt = Date.now();
-        const provider = safeProviderId(requestBaseURL);
+        const provider = ctx.safeProviderId(requestBaseURL);
         emitTrace('model_start', { model: requestModel, provider });
         // 动态注入(prompt 缓存关键):所有随步/随文件变化的提示统一拼成**历史末尾**一条
         // ephemeral system 消息,不再改写 history[0]。这样系统提示 + 已有对话逐字节稳定,
@@ -615,23 +444,10 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         onContextUpdate?.();
 
         // 实时用量:当前步 prompt 估算(含校准系数)+ 流式累计 completion 估算,
-        // 叠上已完成步的实测 turnUsage,经 onLiveUsage 推给底栏实时 chip。
-        // turnUsage 在闭包里被 addUsage 原地更新,reportLive 每次调用读最新值。
+        // 叠上已完成步的实测 turnUsage(traceState 内累加,每次调用读最新值),经 onLiveUsage 推给底栏实时 chip。
         let stepPromptEst = estimatePromptTokens(requestHistory, activeTools, runtimeContextState.correction);
-        const reportLive = (p: { completionTokens: number; promptTokens?: number; cachedTokens?: number }): void => {
-          // 当前步 prompt:末尾 usage chunk 到达后用实测,流式期间用估算(含校准)。
-          // 当前步 cache 命中同理:上报即用实测;流式期间按前缀缓存估算 ≈ 上一步实测 prompt
-          // (当前 prompt 总含其为前缀),不超过当前步 prompt;后端从不报 cache 时不估算。
-          // 口径与轮末摘要一致:chip ↑ 显计费 prompt(裸 - cached),↓/↻ 同。
-          const curPrompt = p.promptTokens ?? stepPromptEst;
-          const curCached = p.cachedTokens ?? (providerCacheSeen ? Math.min(lastStepPromptTokens, curPrompt) : 0);
-          hooks.onLiveUsage?.({
-            promptTokens: (turnUsage?.promptTokens ?? 0) + curPrompt,
-            completionTokens: (turnUsage?.completionTokens ?? 0) + p.completionTokens,
-            totalTokens: (turnUsage?.totalTokens ?? 0) + curPrompt + p.completionTokens,
-            cachedTokens: (turnUsage?.cachedTokens ?? 0) + curCached,
-          });
-        };
+        const reportLive = (p: { completionTokens: number; promptTokens?: number; cachedTokens?: number }): void =>
+          traceState.reportLive(hooks, stepPromptEst, lastStepPromptTokens, providerCacheSeen, p);
         reportLive({ completionTokens: 0 }); // 思考阶段先显 ↑ prompt 估算,首 token 到达后 ↓ 开始涨
         // 单一 chat 入口:错误侧的 model_end 埋点只写一处(重试也会记,不丢失败轨迹)。
         const chatHandlers = {
@@ -675,14 +491,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
           if (signal?.aborted || (e instanceof Error && (e.name === 'AbortError' || e.name === 'APIUserAbortError'))) {
             abortRestore();
             traceStatus = 'aborted';
-            const mutation = getCurrentTurnMutationState();
-            return {
-              completed: false,
-              terminationReason: 'aborted',
-              finalText: null,
-              usage: turnUsage,
-              changedFiles: mutation.changedFiles.map((item) => item.path),
-            };
+            return traceState.buildAbortedResult(ctx.getCurrentTurnMutationState());
           }
           // 后端实测拒绝了 prompt(上下文超长):本地估算对该 provider 系统性偏低时,
           // 压力线压不住,这是唯一可信的触发。强压一轮后重试一次;仍失败才抛(限一次,防循环)。
@@ -694,12 +503,12 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
             // 偶发误判会被后续真实 usage 样本拉回。
             const rawEstimate = estimatePromptTokens(requestHistory, activeTools);
             if (rawEstimate > 1_000) {
-              const cal = updateTokenCalibration(
+              const cal = ctx.updateTokenCalibration(
                 requestBaseURL,
                 requestModel,
                 activeTools,
                 rawEstimate,
-                config.contextWindowTokens,
+                ctx.config.contextWindowTokens,
               );
               runtimeContextState.correction = cal.correction;
               runtimeContextState.calibrationSamples = cal.samples;
@@ -748,7 +557,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
           reasoningTokens: result.usage?.reasoningTokens,
         });
         runtimeContextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
-        addUsage(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
+        traceState.addUsage(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
         if (result.usage) {
           lastStepPromptTokens = result.usage.promptTokens; // 下一步流式期 ↻ 估算的前缀基准
           if (result.usage.cachedTokens > 0) providerCacheSeen = true;
@@ -757,7 +566,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         // 只持久化比例与样本数；无 usage 或短 prompt 时保持既有值。
         if (result.usage?.promptTokens && result.usage.promptTokens > 100) {
           const estimated = estimatePromptTokens(requestHistory, activeTools);
-          const updated = updateTokenCalibration(
+          const updated = ctx.updateTokenCalibration(
             requestBaseURL,
             requestModel,
             activeTools,
@@ -772,7 +581,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         onContextUpdate?.();
 
         if (result.toolCalls.length > 0) {
-          toolCallCount += result.toolCalls.length;
+          traceState.toolCallCount += result.toolCalls.length;
           // 若 content 只是 Claude 式 "Tool results:" 噪声，清空它：不补换行、不写入 history，
           // 避免污染后续轮次上下文并在 TUI 泄露为孤立行。
           if (result.content && isToolResultsNoise(result.content)) {
@@ -796,7 +605,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
           // A+B:记录本步第一条 tool_result 的下标 + 执行前 notes.md 的 mtime,
           // 工具全部执行完后据此判断"本步是否改动了 notes.md"(重同步 / nag)。
           const toolResultStartIdx = history.length;
-          const notesMtimeBefore = getNotesMtime();
+          const notesMtimeBefore = ctx.getNotesMtime();
 
           // Record interstitial narration for observability only. It never changes tool output
           // or injects instructions back into the model context.
@@ -896,7 +705,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               for (let k = 0; k < batch.length; k++) {
                 const tc = batch[k];
                 const outcome = await started[k];
-                addToolUsage(outcome);
+                traceState.addUsage(outcome.usage);
                 opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
                 traceToolEnd(tc, i + k, outcome);
                 const output = outcome.output;
@@ -928,7 +737,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               i = j;
             } else if (
               isResourceLockedCall(currentCall) &&
-              !(getAgentMode() === 'plan' && getPlanDisabledTools().has(currentCall.name))
+              !(ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(currentCall.name))
             ) {
               // 连续文件 mutation：权限确认仍严格按原序进行；全部 preflight 完成后再启动。
               // 每个执行在 registry 内按 canonical path 获取锁，不同文件可并发，同文件别名会排队。
@@ -937,7 +746,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
                 j < calls.length &&
                 isResourceLockedCall(calls[j]) &&
                 !getRuntimeDisabledTools().has(calls[j].name) &&
-                !(getAgentMode() === 'plan' && getPlanDisabledTools().has(calls[j].name))
+                !(ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(calls[j].name))
               )
                 j++;
               const batch = calls.slice(i, j);
@@ -999,7 +808,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               for (let k = 0; k < entries.length; k++) {
                 const entry = entries[k];
                 const outcome = await started[k];
-                addToolUsage(outcome);
+                traceState.addUsage(outcome.usage);
                 opts.onToolOutcome?.(entry.tc.name, entry.parsed ?? {}, outcome);
                 traceToolEnd(entry.tc, i + k, outcome);
                 hooks.onToolResult?.(
@@ -1036,7 +845,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               const tc = calls[i];
               // plan 模式防御 backstop:schema 已剔除这些工具,正常不会进这里;防后端幻觉调用——
               // 不执行,直接返错回灌(让模型看到「plan 模式禁用」并停止),绝不写盘 / 跑命令。
-              if (getAgentMode() === 'plan' && getPlanDisabledTools().has(tc.name)) {
+              if (ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(tc.name)) {
                 hooks.onToolHeader?.(tc);
                 const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
                 const outcome: ToolOutcome = {
@@ -1106,7 +915,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
                   if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
                 },
               });
-              addToolUsage(outcome);
+              traceState.addUsage(outcome.usage);
               opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
               traceToolEnd(tc, i, outcome);
               const output = outcome.output;
@@ -1150,13 +959,13 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
           // 每步都会由 buildSessionStateReminder() 在 requestHistory 末尾重建最新副本(见上方注入点),
           // 所以模型下一步看到的必然是当前勾选态。只保留计数,避免多余的 history 改写(prompt 缓存)。
           // B(nag 提醒):连续 N 步有工具活动但没更新 plan,在当前步第一条 tool_result 前注入提醒。
-          const notesMtimeAfter = getNotesMtime();
+          const notesMtimeAfter = ctx.getNotesMtime();
           if (notesMtimeAfter !== notesMtimeBefore) {
             stepsSincePlanTouch = 0;
           } else {
             stepsSincePlanTouch += 1;
             if (stepsSincePlanTouch >= PLAN_NAG_THRESHOLD) {
-              const activePlan = extractActivePlanSection();
+              const activePlan = ctx.extractActivePlanSection();
               const firstToolMsg = history[toolResultStartIdx];
               if (
                 activePlan &&
@@ -1211,14 +1020,14 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         if (!gotText) hooks.onNoReply?.();
         history.push({ role: 'assistant', content: result.content } as ChatMessage);
 
-        const finalMutation = getCurrentTurnMutationState();
+        const finalMutation = ctx.getCurrentTurnMutationState();
         done = true;
         traceStatus = 'completed';
         return {
           completed: true,
           terminationReason: 'completed',
           finalText: result.content,
-          usage: turnUsage,
+          usage: traceState.turnUsage,
           changedFiles: finalMutation.changedFiles.map((item) => item.path),
         };
       } finally {
@@ -1232,23 +1041,23 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
     hooks.onMaxSteps?.();
     done = true;
     traceStatus = 'max_steps';
-    const finalMutation = getCurrentTurnMutationState();
+    const finalMutation = ctx.getCurrentTurnMutationState();
     return {
       completed: false,
       terminationReason: 'max_steps',
       finalText: null,
-      usage: turnUsage,
+      usage: traceState.turnUsage,
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
     };
   } finally {
-    const finalMutation = getCurrentTurnMutationState();
-    currentTraceStep = undefined;
+    const finalMutation = ctx.getCurrentTurnMutationState();
+    traceState.currentTraceStep = undefined;
     emitTrace('turn_end', {
       status: traceStatus,
       durationMs: Date.now() - t0,
-      toolCalls: toolCallCount,
+      toolCalls: traceState.toolCallCount,
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
-      totalTokens: turnUsage?.totalTokens,
+      totalTokens: traceState.turnUsage?.totalTokens,
     });
     try {
       opts.onTrace?.({
@@ -1257,16 +1066,16 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         turnId: traceTurnId,
         status: traceStatus,
         durationMs: Date.now() - t0,
-        toolCalls: toolCallCount,
+        toolCalls: traceState.toolCallCount,
         changedFiles: finalMutation.changedFiles.map((item) => item.path),
-        usage: turnUsage,
+        usage: traceState.turnUsage,
       });
     } catch {
       // Trace is best-effort and must not change the turn result.
     }
     // 跑完(正常 / 达上限)在回复末尾打耗时摘要行;中断 done=false 不打。
     if (done) {
-      hooks.onDone?.(Date.now() - t0, turnUsage);
+      hooks.onDone?.(Date.now() - t0, traceState.turnUsage);
     }
   }
 }

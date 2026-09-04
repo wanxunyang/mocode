@@ -11,6 +11,8 @@ import { setCurrentSessionId } from '../session/state.js';
 import { manualCompact } from '../session/scheduler.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { registerToolsExtension } from '../tools/registry.js';
+// 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),host 入口须显式装配。
+import '../tools/builtins/index.js';
 import type { InterventionRequest, InterventionResult } from '../ui/intervention.js';
 import { parseCommand, type HostCommand, type HostEnvelope } from './protocol.js';
 

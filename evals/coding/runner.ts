@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { runAgentCore } from '../../src/agent/core.js';
+// 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),eval runner 须显式装配。
+import '../../src/tools/builtins/index.js';
 import { config } from '../../src/config/index.js';
 import { beginTurn, resetState } from '../../src/rollback/index.js';
 import { setSandboxRoot } from '../../src/sandbox/root.js';

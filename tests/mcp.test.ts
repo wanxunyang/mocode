@@ -35,11 +35,20 @@ test('readMcpServers: 解析每个服务的工具白名单和黑名单', () => {
   );
   process.env.MCP_CONFIG_PATH = configPath;
 
-  const { servers, warnings } = readMcpServers();
-  assert.deepEqual(warnings, []);
-  assert.deepEqual(servers.find((server) => server.name === 'filtered')?.includeTools, ['read', 'write']);
-  assert.deepEqual(servers.find((server) => server.name === 'filtered')?.excludeTools, ['write']);
-  assert.equal(servers.find((server) => server.name === 'unfiltered')?.includeTools, undefined);
+  // 共享进程 + 宿主机可能预设 MOCODE_MCP_ENABLED=false(此时 readMcpServers 早退返回空),
+  // 保存并临时删除该变量,确保本测试在"启用"语义下解析白名单,跑完恢复。
+  const prevEnabled = process.env.MOCODE_MCP_ENABLED;
+  delete process.env.MOCODE_MCP_ENABLED;
+  try {
+    const { servers, warnings } = readMcpServers();
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(servers.find((server) => server.name === 'filtered')?.includeTools, ['read', 'write']);
+    assert.deepEqual(servers.find((server) => server.name === 'filtered')?.excludeTools, ['write']);
+    assert.equal(servers.find((server) => server.name === 'unfiltered')?.includeTools, undefined);
+  } finally {
+    if (prevEnabled === undefined) delete process.env.MOCODE_MCP_ENABLED;
+    else process.env.MOCODE_MCP_ENABLED = prevEnabled;
+  }
 });
 
 test('readMcpServers: MOCODE_MCP_ENABLED=false 时不读取任何 MCP 配置', () => {

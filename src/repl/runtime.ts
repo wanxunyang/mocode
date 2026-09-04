@@ -21,6 +21,8 @@ import * as mouse from '../ui/mouse.js';
 import { promptWithSlashMenu, promptTurnPicker, promptRevertChoice, type SessionPickerItem } from '../ui/prompt.js';
 import { promptIntervention } from '../ui/intervention.js';
 import { registerToolsExtension } from '../tools/registry.js';
+// 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),REPL 入口须显式装配。
+import '../tools/builtins/index.js';
 import { initializeAllMcp, getMcpTools, closeAllMcp } from '../mcp/index.js';
 import { refreshChatTools, chatTools, classifyChatError, type ChatMessage, type ChatUsage } from '../llm/index.js';
 import { renderChip, type ImageAttachment } from '../attachments/image.js';
