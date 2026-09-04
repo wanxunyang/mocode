@@ -475,7 +475,7 @@ Complete programming tasks through an "analyze → call tool → observe result 
 
 ## Workflow
 - Understand: use existing conversation and tool evidence before gathering more; inspect only what supports the next decision, do not guess.
-- Plan: for tasks with 3+ steps or context-loss risk, record the plan with the \`plan_update\` tool (see Session state); keep each step self-contained.
+- Plan: for tasks with 3+ steps or context-loss risk, record the plan with the \`plan_update\` tool (see Session state); give each step a short title plus a self-contained content.
 - Implement: make the smallest coherent change; edit against a fresh read (see Tool policy); avoid unrelated refactors.
 - Verify: decide whether validation is useful by risk and scope; run the smallest relevant check, not broad test/build suites by default.
 - Report: stop when done and give honest conclusions with path:line references (see Reporting).
@@ -528,10 +528,11 @@ ${t('assistant.languageInstruction')}`;
       '## Plan: <title>\n' +
       'Goal: <outcome>\n' +
       '### Steps\n' +
-      '- [ ] 1. <self-contained step: target file/symbol, the change, and how to verify>\n' +
+      '- [ ] 1. **<short label, ≤20 chars>** — <self-contained step: target file/symbol, the change, and how to verify>\n' +
       '### Progress\n' +
       '- <completed/total>\n' +
       '```\n' +
+      'Give every step a short `title` (≤20 chars, e.g. "编写测试" / "修 status bar") that shows in the status bar, and keep the full detail in `content` — the label is for scanning, the content is what must survive compaction. ' +
       'Keep at most one step in_progress, and mark a step completed as soon as its work is done — do not batch updates to the end of the turn. ' +
       'Write each step so a teammate who lost the conversation could pick it up cold: name the file or symbol, the exact change, and the verification, so the plan survives context compaction. ' +
       'plan_update creates notes.md for you when the task warrants it; read_file the full notes.md whenever you need to recover context after compaction. ' +

@@ -12,6 +12,7 @@ import { formatArtifactTokenSources } from '../context/artifacts.js';
 import { getAgentMode } from '../agent/mode.js';
 import { getCurrentSessionId } from '../session/state.js';
 import { getSandboxRoot } from '../sandbox/root.js';
+import { planStepLabel } from '../session/notes.js';
 import type { ChatMessage, ChatUsage } from '../llm/index.js';
 
 /** /context 的用量条(详情版,进内容区):只算对话内容(不含 system prompt),方便用户感知自己发了多少、agent 回复了多少。 */
@@ -95,7 +96,7 @@ export function readPlanStatusFromNotes(): NotesPlanStatus | null {
 
     const total = (section.match(/^\s*-\s*\[[ xX]\]\s*\d+\./gm) || []).length;
     const currentMatch = section.match(/^\s*-\s*\[ \]\s*(\d+)\.\s*(.+)$/m);
-    const current = currentMatch?.[2].trim();
+    const current = currentMatch ? planStepLabel(currentMatch[2]) : undefined;
     // 括号进度 = 「当前执行到的步骤序号/总数」(执行第 1 步显示 1/3),与 `▸ 当前步` 后缀自洽;
     // 旧语义 done/total 会永远慢一拍(执行第 2 步显示 1/3)。全勾选时显示 total/total(通常已自动结算为 Done,chip 消失)。
     const activeNo = currentMatch ? Number(currentMatch[1]) : total;

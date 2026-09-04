@@ -11,6 +11,9 @@ import { getCurrentSessionId } from './state.js';
 export type PlanStepStatus = 'pending' | 'in_progress' | 'completed';
 
 export interface PlanStep {
+  /** 短标签(建议 ≤20 字):状态栏 chip 与 markdown 步骤行首显示,让长计划能被一眼扫读。
+   *  纯展示用途——压缩免疫靠 content,title 缺失时 UI 自动降级,不破坏任何既有行为。 */
+  title?: string;
   /** 自包含步骤描述:目标文件/符号 + 改动 + 验收方式(压缩免疫)。 */
   content: string;
   status: PlanStepStatus;
@@ -45,9 +48,23 @@ export function getNotesMtime(sessionId = getCurrentSessionId()): number | null 
   }
 }
 
+/** 单个步骤短标签的字符上限(软截断,防模型把 content 整段塞进 title)。 */
+export const PLAN_STEP_TITLE_MAX = 60;
+
+/** 清洗步骤短标签:压平换行、去掉星号(避免破坏 `**title**` 的行首解析)。 */
+function sanitizeStepTitle(raw: string): string {
+  return raw
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, PLAN_STEP_TITLE_MAX);
+}
+
 /**
  * 把 plan 渲染为 canonical markdown 段(不含首尾多余空行)。
  * 复选框格式 `- [ ] N.` / `- [x] N.` 与 repl 状态栏 chip 的计数正则严格对齐;
+ * 步骤正文为 `**短标签** — 详细描述`(有 title 时)或裸 content(老 plan 兼容),
  * in_progress 步骤追加 ` ◀ 当前` 后缀(仍计为未完成),让 compact 重注入后模型能直接续上。
  * 全部完成时标题写为 `## Done:`(自动结算),extractActivePlanSection 随之返回 null。
  */
@@ -59,12 +76,34 @@ export function renderPlanSection(plan: PlanState): string {
   lines.push('', '### Steps');
   plan.steps.forEach((s, i) => {
     const box = s.status === 'completed' ? '[x]' : '[ ]';
+    const title = s.title ? sanitizeStepTitle(s.title) : '';
+    const body = title ? `**${title}** — ${s.content}` : s.content;
     const suffix = s.status === 'in_progress' ? `  ◀ ${(s.activeForm ?? '').trim() || 'current'}` : '';
-    lines.push(`- ${box} ${i + 1}. ${s.content}${suffix}`);
+    lines.push(`- ${box} ${i + 1}. ${body}${suffix}`);
   });
   const done = plan.steps.filter((s) => s.status === 'completed').length;
   lines.push('', '### Progress', `- ${done}/${plan.steps.length} steps complete`);
   return lines.join('\n');
+}
+
+/**
+ * 从步骤行正文(去掉 `- [ ] N. ` 前缀后)提取 UI 用的短标签。兼容三种写法:
+ *  - `**短标签** — 详细描述  ◀ 进行中`  (plan_update 写了 title 的新格式)
+ *  - `**短标签** — 详细描述`
+ *  - `详细描述  ◀ 进行中`               (老 plan,无 title)
+ * 优先级 title > activeForm > content:状态栏 chip 只有一行,短的先上,细节交给
+ * composePlanLines 截断保单行(脚栏不撑高)。老 plan 无 title 时行为与加 title 前一致。
+ * 与 renderPlanSection 配对(一个写一个读),格式定义与解析同处,避免散落两处走样。
+ */
+export function planStepLabel(raw: string): string {
+  const body = raw.trim();
+  const afIdx = body.lastIndexOf('◀');
+  const activeForm = afIdx >= 0 ? body.slice(afIdx + 1).trim() : '';
+  const main = (afIdx >= 0 ? body.slice(0, afIdx) : body).trim();
+  const m = main.match(/^\*\*(.+?)\*\*(?:\s*—\s*)?([\s\S]*)$/);
+  const title = m?.[1]?.trim() ?? '';
+  const content = (m ? (m[2] ?? '') : main).trim();
+  return title || activeForm || content || main;
 }
 
 /** 读取当前活跃 `## Plan:` 段的标题;无活跃 plan 返 null。 */
