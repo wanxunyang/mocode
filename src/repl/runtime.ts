@@ -38,7 +38,6 @@ import * as mouse from '../ui/mouse.js';
 import {
   promptWithSlashMenu,
   promptTurnPicker,
-  promptSessionPicker,
   promptThemePicker,
   promptRevertChoice,
   type SessionPickerItem,
@@ -62,7 +61,6 @@ import {
   newSessionId,
   saveSession,
   loadSession,
-  listSessions,
   appendCurrentSessionRuntimeEvent,
   hashTraceValue,
 } from '../session/index.js';
@@ -73,17 +71,10 @@ import {
   persistSnapshots,
   loadSnapshots,
   rebuildFromHistory,
-  resetState,
   getCurrentTurnId,
 } from '../rollback/index.js';
-import {
-  listSkills,
-  effectiveSystemPrompt,
-  findSkill,
-} from '../skills/index.js';
+import { effectiveSystemPrompt } from '../skills/index.js';
 import { clearSkillActivation } from '../skills/activation.js';
-import { runSkill, renderSkillBody } from '../skills/runner.js';
-import { isSkillTrusted } from '../skills/trust.js';
 import {
   buildMemoryIndexSection,
   kickoffReflection,
@@ -92,7 +83,6 @@ import {
   clearLastReflectResult,
   snapshotTranscript,
   formatReflectResult,
-  loadAll,
 } from '../memory/index.js';
 import { setCurrentSessionId } from '../session/state.js';
 import { collectQueryHistory } from '../session/query-history.js';
@@ -851,149 +841,10 @@ export async function startRepl(
 
     // /help /language /init /upgrade 已搬到 repl/commands/system.ts
     // /plan /auto /mode /pet quit /pet skin /pet 已搬到 repl/commands/{mode,pet}.ts
-
-    if (line === '/clear') {
-      history.length = 1; // 保留 system 提示
-      resetState(); // 同步清空回滚轮次/快照
-      // /clear 立刻换新会话 id:之前延后到 turn 收尾(line 1334)分配,但 runAgent 期间模型
-      // 调 plan_update / note_append 会命中「no active session」——它们写 notes.md 靠
-      // getNotesFilePath(getCurrentSessionId()),而下一个 turn 还没走完。改为与启动对齐
-      // 立即分配(对照 line 1019):notes.md 由写入时按需建文件,这里预分配 id 不触盘。
-      currentSessionId = newSessionId();
-      setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state
-      turnCount = 0; // 反思 cadence 重新计数
-      contextState.lastUsage = undefined;
-      contextState.lifecycleStats = undefined;
-      contextState.ephemeralText = undefined;
-      lastTurnUsage = undefined; // 清空旧轮的 token 累计
-      pendingAttachments = []; // 一并清空待发图片
-      layout.clearContent();
-      layout.writeBanner(bannerLines(banner()));
-      layout.contentWrite(`${ui.dim}${t('repl.historyCleared')}${ui.reset}\n`);
-      layout.writeWelcomeBlock(welcomeLines()); // 回到空会话状态,欢迎引导重新出现
-      continue;
-    }
+    // /clear /sessions /resume /rollback 已搬到 repl/commands/session.ts
     // /image(list/clear/<path>)已搬到 repl/commands/image.ts;/context 搬到 repl/commands/context.ts
+    // /memory /reflect 已搬到 repl/commands/memory.ts;/skills /skill 搬到 repl/commands/skill.ts
 
-    if (line === '/memory') {
-      // 记忆库概览:计数 + 近期 active 索引(详情用 memory_search)。
-      const all = loadAll();
-      const active = all.filter((e) => e.status === 'active');
-      const archived = all.filter((e) => e.status === 'archived').length;
-      const byType: Record<string, number> = {};
-      for (const e of active) byType[e.type] = (byType[e.type] || 0) + 1;
-      layout.contentWrite(
-        `${ui.dim}记忆库:active ${active.length}${archived ? ` · archived ${archived}` : ''}${ui.reset}\n`,
-      );
-      if (Object.keys(byType).length) {
-        layout.contentWrite(
-          `${ui.dim}按类:${Object.entries(byType).map(([t, n]) => `${t} ${n}`).join('  ')}${ui.reset}\n`,
-        );
-      }
-      const recent = [...active]
-        .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
-        .slice(0, 10);
-      for (const e of recent) {
-        layout.contentWrite(
-          `  ${ui.accent}${e.id}${ui.reset}  ${ui.dim}${e.name} — ${e.summary}${ui.reset}\n`,
-        );
-      }
-      if (active.length === 0)
-        layout.contentWrite(`${ui.dim}(无 active 记忆;用 memory_save 存,或 /init 生成 AGENTS.md)${ui.reset}\n`);
-      layout.contentWrite(`${ui.dim}(详情用 memory_search;启动索引已注入 systemPrompt)${ui.reset}\n`);
-      continue;
-    }
-    if (line === '/reflect') {
-      // 记忆子系统总开关关闭时反思无意义(kickoffReflection 内部也会短路),直接提示,不误导用户"已触发"。
-      if (!isMemoryEnabled()) {
-        layout.contentWrite(
-          `${ui.dim}(记忆子系统已关闭,/reflect 无效。用 /memory_switch 打开后再试)${ui.reset}\n`,
-        );
-        continue;
-      }
-      // 手动触发后台反思 pass(不等;完成后下次 INPUT 态显摘要)。
-      kickoffReflection(snapshotTranscript(history, 20));
-      layout.contentWrite(
-        `${ui.dim}(反思已触发,后台进行;完成后下次输入态显示摘要。日志见 .mocode/memory.log)${ui.reset}\n`,
-      );
-      continue;
-    }
-    if (line === '/skills') {
-      const skills = listSkills();
-      if (skills.length === 0) {
-        layout.contentWrite(`${ui.dim}(没有已发现的 skill)${ui.reset}\n`);
-      } else {
-        layout.contentWrite(
-          `${ui.dim}已发现 ${skills.length} 个 skill:${ui.reset}\n`
-        );
-        for (const s of skills) {
-          const badges: string[] = [];
-          if (s.context === 'fork') badges.push('fork');
-          if (!s.modelInvocable) badges.push('manual-only');
-          badges.push(s.origin);
-          if (s.origin === 'project') {
-            badges.push(isSkillTrusted(s) ? 'trusted' : 'untrusted');
-          }
-          const badgeStr = badges.length ? ` ${ui.dim}[${badges.join('|')}]${ui.reset}` : '';
-          layout.contentWrite(
-            `  ${ui.accent}${s.name}${ui.reset}${badgeStr}  ${ui.dim}${s.description}${ui.reset}\n`
-          );
-          if (s.allowedTools?.length) {
-            layout.contentWrite(`    ${ui.dim}allowed: ${s.allowedTools.join(', ')}${ui.reset}\n`);
-          }
-          if (s.disallowedTools?.length) {
-            layout.contentWrite(`    ${ui.dim}disallowed: ${s.disallowedTools.join(', ')}${ui.reset}\n`);
-          }
-          if (s.warnings.length) {
-            layout.contentWrite(`    ${ui.dim}warnings: ${s.warnings.join('; ')}${ui.reset}\n`);
-          }
-        }
-        layout.contentWrite(
-          `${ui.dim}(用 use_skill 加载指令; fork 类用 run_skill 执行; 也支持 /skill <name> [args-json])${ui.reset}\n`
-        );
-      }
-      continue;
-    }
-    // /skill <name> [args-json]:直接执行一个 skill(fork 走 run_skill,inline 打印渲染后正文)。
-    if (line === '/skill' || line.startsWith('/skill ')) {
-      const rest = line.slice('/skill'.length).trim();
-      const sp = rest.indexOf(' ');
-      const name = sp === -1 ? rest : rest.slice(0, sp);
-      const argStr = sp === -1 ? '' : rest.slice(sp + 1).trim();
-      if (!name) {
-        layout.contentWrite(`${ui.dim}用法: /skill <name> [args-json]${ui.reset}\n`);
-        continue;
-      }
-      let args: Record<string, unknown> | undefined;
-      if (argStr) {
-        try {
-          args = JSON.parse(argStr);
-        } catch {
-          layout.contentWrite(`${ui.dim}args 不是合法 JSON,已忽略。${ui.reset}\n`);
-        }
-      }
-      const skill = findSkill(name);
-      if (!skill) {
-        layout.contentWrite(`错误:未找到 skill "${name}"。\n`);
-        continue;
-      }
-      if (skill.context === 'fork') {
-        layout.contentWrite(`${ui.dim}执行 fork skill "${name}"…${ui.reset}\n`);
-        const out = await runSkill({ name, args });
-        layout.contentWrite(
-          (out.status === 'success' ? '' : `[${out.status}] `) + out.output + '\n',
-        );
-      } else {
-        const body = await renderSkillBody(skill, args);
-        if (body === null) layout.contentWrite(`错误:未找到 skill "${name}" 的正文。\n`);
-        else {
-          // 仅预览:inline 正文未进入模型 history,不激活工具面约束;
-          // 要让模型按此 skill 工作,请让它调 use_skill(name) 或在下条消息里提及该 skill。
-          layout.contentWrite(`# Skill: ${name}(预览,模型尚未看到此内容)\n\n${body}\n`);
-        }
-      }
-      continue;
-    }
     if (line === '/compact' || line.startsWith('/compact ')) {
       // /compact 默认强制压缩(force=true)，不受阈值/保护区限制
       // 语法:/compact [focus] 或 /compact --no-force [focus] (显式关闭强制)
@@ -1079,53 +930,7 @@ export async function startRepl(
       }
       continue;
     }
-    if (line === '/sessions') {
-      // /sessions:浏览全部已保存会话(慢路径,readdir+全量 JSON.parse,目录 N 大时会有可感知卡顿)。
-      // 默认走 /resume(仅最近 10 条,瞬开);要翻历史续接更早的会话才用这条。
-      // picker 走全显(cap=items.length,无 a 展开提示),靠 picker 自身开窗(以选中为中心分屏)。
-      const sessions = listSessions(); // 不传 limit = 全量
-      if (sessions.length === 0) {
-        layout.contentWrite(`${ui.dim}(没有已保存的会话)${ui.reset}\n`);
-        continue;
-      }
-      const items: SessionPickerItem[] = sessions.map((s) => ({
-        id: s.id,
-        title: s.firstUser || '(无)',
-        subtitle: `${s.id}  ${s.model}`,
-      }));
-      let pick: SessionPickerItem | null;
-      try {
-        pick = await promptSessionPicker(items, items.length);
-      } catch {
-        continue; // Ctrl+C(SIGINT)→ 取消
-      }
-      await resumeFromPick(pick);
-      continue;
-    }
-    if (line === '/resume') {
-      // /resume:打开会话菜单(↑/↓ 选,Enter 续接,Esc 取消)。只加载最近 10 条,
-      // 避免 sessions 目录堆了几百个会话时 readdir+全量 JSON.parse 卡顿。
-      // 仿 /rollback 菜单化(promptSessionPicker);选中项 cyan+bold + ▸ 高亮。
-      // 要续接更早的会话请用 /sessions 翻全表,或 CLI `mocode --resume <id>`。
-      const sessions = listSessions(10);
-      if (sessions.length === 0) {
-        layout.contentWrite(`${ui.dim}(没有已保存的会话)${ui.reset}\n`);
-        continue;
-      }
-      const items: SessionPickerItem[] = sessions.map((s) => ({
-        id: s.id,
-        title: s.firstUser || '(无)',
-        subtitle: `${s.id}  ${s.model}`,
-      }));
-      let pick: SessionPickerItem | null;
-      try {
-        pick = await promptSessionPicker(items);
-      } catch {
-        continue; // Ctrl+C(SIGINT)→ 取消
-      }
-      await resumeFromPick(pick);
-      continue;
-    }
+    // /sessions /resume 已搬到 repl/commands/session.ts
     if (line === '/theme' || line.startsWith('/theme ')) {
       // /theme:无参开菜单(↑↓ 选,Enter 切换,Esc 取消);/theme <name> 直切;/theme list 或未知名 → 列出。
       const arg = line.startsWith('/theme ') ? line.slice('/theme '.length).trim() : '';
@@ -1604,12 +1409,7 @@ export async function startRepl(
       continue;
     }
 
-    if (line === '/rollback' || line.startsWith('/rollback ')) {
-      // /rollback:打开轮次菜单(↑/↓ 选,Enter 回滚到该轮并预填其输入,再 Enter 重新跑)。
-      // 忽略任何数字参数(原「输数字选回滚」已删,统一走菜单)。无快照的旧轮次(/resume 重建)文件改动不可撤销。
-      await rollbackFlow();
-      continue;
-    }
+    // /rollback 已搬到 repl/commands/session.ts
 
     if (line === '/subagent' || line.startsWith('/subagent ')) {
       const arg = line.startsWith('/subagent ')
