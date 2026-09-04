@@ -1,5 +1,5 @@
 import type { Tool, ToolContext } from '../types.js';
-import { findSkill, getSkillBody } from '../../skills/index.js';
+import { findSkill } from '../../skills/index.js';
 import { renderSkillBody, readSkillFile } from '../../skills/runner.js';
 import { activateSkill } from '../../skills/activation.js';
 

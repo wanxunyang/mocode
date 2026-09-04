@@ -55,7 +55,6 @@ export async function promptWithSlashMenu(
   }
 
   const emitter = stdin as unknown as KeypressEmitter;
-  const promptW = displayWidth(opts.prompt);
   // initialLines(运行中 typeahead 预填):用调用方给的行初始化;光标置文末。
   // 整篇输入是一个 Seg[]:可编辑段与粘贴块交替。光标永远落在某个可编辑段(segs[curSeg].frozen===false)上。
   let segs: Seg[] =
@@ -154,11 +153,6 @@ export async function promptWithSlashMenu(
     }
     if (out.length === 0) out.push('');
     return { lines: out, segStart };
-  }
-
-  /** 当前光标段内显示列。 */
-  function cursorCol(): number {
-    return displayWidth(segs[curSeg].text.slice(0, curOff));
   }
 
   /** 光标 → 展示 (行, 列)。展示行内的列以显示宽度计。 */

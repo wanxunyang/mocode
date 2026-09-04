@@ -2,8 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
-import { getSandboxRoot } from '../sandbox/root.js';
-import { getCurrentSessionId, setCurrentSessionId } from '../session/state.js';
+import { getCurrentSessionId } from '../session/state.js';
 import { getNotesFilePath, extractActiveNotesSections } from '../session/notes.js';
 import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-discipline.js';
 import { buildValidationCommandsSection } from '../verification/prompt.js';
@@ -620,8 +619,10 @@ export const config: Config = {
   contextWindowTokens: llmKeysFromShell.includes('CONTEXT_WINDOW_TOKENS')
     ? (Number(process.env.CONTEXT_WINDOW_TOKENS) || DEFAULT_CONTEXT_WINDOW_TOKENS)
     : (__activePreset?.contextWindow
-        ?? Number(process.env.CONTEXT_WINDOW_TOKENS)
-        ?? DEFAULT_CONTEXT_WINDOW_TOKENS),
+        // 必须用 ||:Number() 永不返回 null/undefined,?? 的右支是死代码;
+        // 且环境变量写成非数字时 Number() 得 NaN,?? 会把 NaN 直接放行到 contextWindow。
+        || Number(process.env.CONTEXT_WINDOW_TOKENS)
+        || DEFAULT_CONTEXT_WINDOW_TOKENS),
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
   anthropicPromptCache: llmKeysFromShell.includes('ANTHROPIC_PROMPT_CACHE')
     ? process.env.ANTHROPIC_PROMPT_CACHE !== 'false'

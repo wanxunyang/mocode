@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import type { ChatMessage } from '../llm/index.js';
 import { estimateTokens } from '../llm/index.js';
 import type { ContextState } from '../session/compact.js';
-import { canonicalizePath, extractPath, toText, toolNameOf } from './utils.js';
+import { canonicalizePath, extractPath, toText } from './utils.js';
 
 export type ArtifactFreshness = 'fresh' | 'stale' | 'stubbed';
 export type ArtifactSourceType = 'read' | 'search' | 'diagnostic' | 'summary';
@@ -44,15 +44,6 @@ function stateFor(state: ContextState): ArtifactState {
     states.set(state, current);
   }
   return current;
-}
-
-function parseArgs(raw: string): Record<string, unknown> | null {
-  try {
-    const value = JSON.parse(raw || '{}');
-    return value && typeof value === 'object' ? value as Record<string, unknown> : null;
-  } catch {
-    return null;
-  }
 }
 
 function callArgs(history: ChatMessage[], idx: number): { tool: string; argsRaw: string } | null {
@@ -129,7 +120,6 @@ export function recordArtifact(
   if (!call) return;
   const type = sourceType(call.tool);
   if (!type) return;
-  const args = parseArgs(call.argsRaw);
   const id = (history[idx] as { tool_call_id?: string }).tool_call_id ?? `${idx}`;
   const directPath = canonicalizePath(extractPath(call.argsRaw));
   let dependencies: ArtifactDependency[] = directPath

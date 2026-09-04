@@ -60,7 +60,7 @@ export const grepTool: Tool = {
     let scanned = 0;
     let truncated = false;
 
-    outer: for (const f of files) {
+    for (const f of files) {
       let content: string;
       try {
         // jailResolve:realpath 化,防「牢内文件软链→牢外」的内容泄露;越界/不可读均 catch 跳过

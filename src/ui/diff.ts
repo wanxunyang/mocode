@@ -237,7 +237,7 @@ export function renderFileChange(opts: {
   newStr: string;
   startLine?: number;
 }): string {
-  const { path, kind, oldStr, newStr } = opts;
+  const { path, oldStr, newStr } = opts;
   const startLine = opts.startLine ?? 1;
   const lang = langForPath(path);
   const pathDisp = path; // 路径原样展示(不做截断,长路径由 contentWrite 折行)

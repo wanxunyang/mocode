@@ -1,7 +1,6 @@
 import type {
   Tool,
   ToolCapabilities,
-  ToolContext,
   ToolOutcome,
   ToolExecuteResult,
 } from './types.js';

@@ -279,7 +279,7 @@ export function discoverSkills(): Skill[] {
         if (!existsSync(skillMdPath)) continue;
         seenMdPaths.push(skillMdPath);
         const content = readFileSync(skillMdPath, 'utf8');
-        const { meta, body } = parseFrontmatter(content);
+        const { meta } = parseFrontmatter(content);
         const skillName = (scalar(meta, 'name') || name).trim();
         const description = (scalar(meta, 'description') || '').trim();
         if (!description) continue; // 缺 description 跳过(它是最触发机制)

@@ -1,6 +1,5 @@
-import readline from 'node:readline/promises';
 import { emitKeypressEvents, type Key } from 'node:readline';
-import { stdin, stdout } from 'node:process';
+import { stdin } from 'node:process';
 import {
   config,
   updateModelConfig,
@@ -18,16 +17,13 @@ import {
   buildBasePrompt,
   getPlanModeSuffix,
   hasCodegraphIndex,
-  DEFAULT_CONTEXT_WINDOW_TOKENS,
   pinSessionModel,
 } from '../config/index.js';
 import {
   getLanguage,
   normalizeLanguage,
   t,
-  type TranslationKey,
 } from '../i18n/index.js';
-import { DEFAULT_BUDGET_POLICY } from '../context/budget.js';
 import { updateConfigKey, writeConfigKeys, CONFIG_PATH } from '../config/file.js';
 import {
   deletePreset,
@@ -43,10 +39,9 @@ import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { togglePet, killPetProcess, listSkins, setSkin, sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
 import { ui, setTheme, getTheme, listThemes, themeExists } from '../ui/theme.js';
-import { bannerString, bannerLines, displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
+import { bannerLines, displayWidth } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
-import * as batch from '../ui/batch.js';
 import {
   promptWithSlashMenu,
   promptTurnPicker,
@@ -54,20 +49,15 @@ import {
   promptThemePicker,
   promptRevertChoice,
   type SessionPickerItem,
-  type SlashCommand,
 } from '../ui/prompt.js';
 import { promptIntervention } from '../ui/intervention.js';
 import { registerToolsExtension } from '../tools/registry.js';
 import { initializeAllMcp, getMcpTools, closeAllMcp } from '../mcp/index.js';
 import {
-  estimateMessagesTokens,
   reconfigureClient,
   refreshChatTools,
   chatTools,
-  estimatePromptTokens,
-  estimateTokens,
   classifyChatError,
-  type ChatErrorKind,
   type ChatMessage,
   type ChatUsage,
 } from '../llm/index.js';
@@ -78,8 +68,6 @@ import {
   type ImageAttachment,
 } from '../attachments/image.js';
 import { modelSupportsVision } from '../llm/capabilities.js';
-import { computePruneStats } from '../context/relevance.js';
-import { formatArtifactTokenSources } from '../context/artifacts.js';
 import type { ContentPart } from '../agent/core.js';
 import {
   manualCompact,
@@ -119,11 +107,7 @@ import {
   formatReflectResult,
   loadAll,
 } from '../memory/index.js';
-import fs from 'node:fs';
-import path from 'node:path';
-import { getSandboxRoot } from '../sandbox/root.js';
-
-import { setCurrentSessionId, getCurrentSessionId } from '../session/state.js';
+import { setCurrentSessionId } from '../session/state.js';
 import { collectQueryHistory } from '../session/query-history.js';
 import {
   checkVersion,
@@ -139,9 +123,7 @@ import {
   slashHelpLines,
   LLM_ERROR_HINT_KEYS,
   HELP_GROUPS,
-  knownCommandNames,
   isCommandShape,
-  editDistance,
   suggestCommand,
   themeDescription,
   MODEL_PRESETS,
@@ -149,10 +131,7 @@ import {
 } from './commands.js';
 import {
   renderContextBar,
-  renderContextBarInline,
-  readPlanStatusFromNotes,
   settlePlanStatus,
-  readPlanFromNotes,
   refreshStatusBase,
   runningStateFor,
 } from './status-bar.js';
@@ -211,16 +190,6 @@ install / dev / build / test / typecheck / lint 等——从 package.json script
 - 写完简述:写了哪几节 + 从代码里发现的 2-3 条非显然关键约定(供用户校验)。`;
 }
 
-/** 临时 readline 读一行(cooked,用于子提问;主输入走 promptWithSlashMenu)。 */
-async function askLine(prompt: string): Promise<string> {
-  const rl = readline.createInterface({ input: stdin, output: stdout });
-  try {
-    return await rl.question(prompt);
-  } finally {
-    rl.close();
-  }
-}
-
 // ── 状态栏函数已移到 ./status-bar.ts ──
 
 /** stdin 的 keypress 事件接口(emitKeypressEvents 后发,不在 ReadStream 类型里)。 */
@@ -231,7 +200,7 @@ interface KeypressEmitter {
 const emitter = stdin as unknown as KeypressEmitter;
 
 // ── 运行态交互已移到 ./running-input.ts ──
-// pendingPrefill / pendingRecall / pendingTimer / pendingAttachments 保留在此(awaitPendingRecall / echoInput 用)
+// ── pendingPrefill / pendingTimer / pendingAttachments 保留在此(awaitPendingRecall / echoInput 用)
 let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user 输入(下轮 INPUT 态消费)
 
 // ── pending send 撤回窗口(用户按 Enter 后、agent 真发请求前)──
@@ -253,11 +222,6 @@ function recallWindowMs(input: string[]): number {
   const env = Number(process.env.MOCODE_RECALL_MS);
   return Number.isFinite(env) && env >= 0 ? env : PENDING_RECALL_LONG_MS;
 }
-let pendingRecall: {
-  lines: string[];
-  attachmentsCount: number;
-  placeholder: string;
-} | null = null;
 let pendingTimer: NodeJS.Timeout | null = null;
 // agent 模式状态已提到 src/agent/mode.ts(共享叶子:switch_mode 工具可写、agent 每步读、repl 注册 onModeChange 监听器)。
 
@@ -299,12 +263,7 @@ function echoInput(lines: string[], trailingBlank = true): void {
  *
  * 降级:非 TTY(setRawMode 抛错)直接 commit,window=0 —— CI / 管道回放路径不退化。
  */
-function awaitPendingRecall(
-  input: string[],
-  attachmentsCount: number,
-  placeholder: string,
-): Promise<boolean> {
-  pendingRecall = { lines: input, attachmentsCount, placeholder };
+function awaitPendingRecall(input: string[]): Promise<boolean> {
   layout.setStatus(t('agent.sending'), '●');
 
   // 非 TTY:setRawMode 抛错 → window=0 直返 true(向后退化,不走 raw + 不挂监听)。
@@ -316,7 +275,6 @@ function awaitPendingRecall(
     ttyReady = false;
   }
   if (!ttyReady) {
-    pendingRecall = null;
     return Promise.resolve(true);
   }
 
@@ -333,7 +291,6 @@ function awaitPendingRecall(
         pendingTimer = null;
       }
       emitter.off('keypress', onPendingKey);
-      pendingRecall = null;
       resolve(shouldCommit);
     };
     const onPendingKey = (_str: string, key?: Key): void => {
@@ -933,7 +890,7 @@ export async function startRepl(
 
       // /upgrade check — 联网检查当前版本与最新版本差异
       if (arg === 'check') {
-        const signal = startRunningListener(t('running.upgrading'));
+        startRunningListener(t('running.upgrading'));
         try {
           const info = await checkVersion();
           if (!info.latest) {
@@ -963,7 +920,7 @@ export async function startRepl(
 
       // /upgrade 或 /upgrade now — 前台执行升级,实时显示 npm 输出
       if (arg === '' || arg === 'now') {
-        const signal = startRunningListener(t('running.upgrading'));
+        startRunningListener(t('running.upgrading'));
         try {
           const latest = await fetchLatestVersion();
           const current = getCurrentVersion();
@@ -2107,7 +2064,7 @@ export async function startRepl(
     }
 
     const bubbleRows = input.length + 2 + pendingAttachments.length; // N 行 message + 2 行尾随空(含 \n\n 留下的 open current 行) + 每附件 1 行
-    const shouldCommit = await awaitPendingRecall(input, pendingAttachments.length, placeholder);
+    const shouldCommit = await awaitPendingRecall(input);
     if (!shouldCommit) {
       // 撤回:气泡从内容区擦掉 + 行放回输入框(下轮 promptWithSlashMenu 经 initialLines 消费)+ 切回 INPUT 视觉。
       // pendingAttachments **保留** —— 撤回的是输入文本不是意图,再发时随消息一起带走

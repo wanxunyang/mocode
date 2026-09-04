@@ -1,6 +1,5 @@
 import { stdin, stdout } from 'node:process';
 import { inspect } from 'node:util';
-import { join } from 'node:path';
 import {
   charWidth,
   displayWidth,
@@ -12,7 +11,6 @@ import {
   fmtElapsed,
   stripAnsi,
   sliceByDisplayCol,
-  visColToCharCol,
   remapWrappedPoint,
   padEndAnsiBackground,
 } from '../render.js';
@@ -493,7 +491,6 @@ function commitMd(): void {
 // bannerH = bannerLines(banner()) 的行数(目前 5:4 行 logo+info + 1 空行分隔)。如未来
 // bannerString 变化,调用方需重调 writeBanner 重设 bannerH。
 let bannerH = 0;
-let bannerRows: string[] = []; // 最新写入的 banner 行(供 rewriteBanner 复用 / 调试)
 
 /**
  * 在 content 缓冲顶部建一份 banner;**首次**调用建好(bannerH = lines.length),**重复**调用
@@ -516,7 +513,6 @@ export function writeBanner(lines: string[]): void {
     }
     content.setLines(lines);
     bannerH = lines.length;
-    bannerRows = lines;
     // 续写位推进到 banner 之后:clearContent 把 contentRow 归到 1,writeBanner 灌入 bannerH 行
     // 但不动 contentRow → 首次 contentWrite 会从屏行 1 写出(覆盖 banner)。这里同步修正,
     // 让首条用户消息从 banner 下方开始(与 buffer 尾部对齐)。仅首次走这条,后续 rewriteBanner 不动续写位。
@@ -546,7 +542,6 @@ export function rewriteBanner(lines: string[]): void {
     );
   }
   content.replaceHead(0, lines);
-  bannerRows = lines;
   if (scrollOffset === 0) repaintViewport();
 }
 
@@ -643,7 +638,6 @@ export function clearContent(): void {
   // 在已空的 content 上调 replaceHead(0, lines) → startIdx(0) >= committed(0) → 抛错 → REPL 退出。
   // /theme、/clear、/resume 等命令 clearContent 后紧接 writeBanner 的场景均依赖此重置。
   bannerH = 0;
-  bannerRows = [];
   // 欢迎引导块随 buffer 一起清掉(/clear / /resume 等路径),状态复位后可由 repl 重新写入。
   welcomeStart = -1;
   welcomeRows = 0;
@@ -774,7 +768,6 @@ export function contentInsertAfter(after: number, lines: string[], keepViewport 
  */
 export function contentDeleteFrom(startIdx: number, n: number): void {
   if (!active || n <= 0) return;
-  const g = getGeo();
   const totalBefore = content.totalRows();
   const scrolled = scrollOffset > 0;
   content.deleteFrom(startIdx, n);
@@ -1186,13 +1179,6 @@ function extractInputSelectionText(sel: { startLine: number; startCol: number; e
 function inputViewSig(view: InputView | null | undefined): string {
   if (!view) return '';
   return view.lines.length + '|' + view.lines.map((l) => displayWidth(l).toString()).join(',');
-}
-
-/** 清输入框反白选区并重画(若 active)。不复制,仅清。供 clearSelection / setMouseEnabled 复用。 */
-function clearInputSelection(): void {
-  if (!inputSelection) return;
-  inputSelection = null;
-  if (active && base && lastView) paintInput(lastView);
 }
 
 /** 屏行是否落在底栏输入行范围内(paintInput 的 firstInputRow..firstInputRow+inputRowsAvail-1)。 */
@@ -1662,11 +1648,11 @@ function composeModelLine(status: StatusBarData, cols: number): string {
   const liveW = displayWidth(stripAnsi(liveChip));
   const liveSepW = liveChip ? STATUS_SEP_W : 0;
   const minGap = 2;
-  let cwdBudget = cols - leftW - minGap - liveW - liveSepW - ctxW - STATUS_SEP_W - 1;
-  let cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
-  let cwdW = displayWidth(cwd);
-  let rightStr = `${liveChip}${liveChip ? STATUS_SEP : ''}${ctx}${STATUS_SEP}${ui.dim}${cwd}${ui.reset}`;
-  let rightW = liveW + liveSepW + ctxW + STATUS_SEP_W + cwdW;
+  const cwdBudget = cols - leftW - minGap - liveW - liveSepW - ctxW - STATUS_SEP_W - 1;
+  const cwd = cwdBudget >= 6 ? truncateDisplay(status.cwd, cwdBudget) : '';
+  const cwdW = displayWidth(cwd);
+  const rightStr = `${liveChip}${liveChip ? STATUS_SEP : ''}${ctx}${STATUS_SEP}${ui.dim}${cwd}${ui.reset}`;
+  const rightW = liveW + liveSepW + ctxW + STATUS_SEP_W + cwdW;
   // 极窄:逐步降级——先藏 hint,再藏 token chip,只剩 modeTag 与右段挤。
   // 这样 80 列宽终端下 hint 和 chip 都能稳住,只 <50 列才退化到只剩 modeTag。
   if (leftW + minGap + rightW > cols) {
@@ -2131,7 +2117,6 @@ export function paintInput(view: InputView): void {
   const lineVisArr: string[][] = visInputLines(view.lines, colW);
   const flatInput: string[] = [];
   for (const lv of lineVisArr) for (const r of lv) flatInput.push(r);
-  let cumLine = 0;
   const flatToLine: { line: number; segInLine: number; inLineDisplayCol: number }[] = [];
   for (let li = 0; li < lineVisArr.length; li++) {
     const segs = lineVisArr[li];

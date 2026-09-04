@@ -74,7 +74,6 @@ export async function runCommandRaw(
     );
     const output = new BoundedCommandOutput();
     let finished = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
 
     const killTree = (): void => {
       try {
@@ -92,7 +91,7 @@ export async function runCommandRaw(
     const finish = (result: Omit<RawCommandResult, 'durationMs'>): void => {
       if (finished) return;
       finished = true;
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
       done({ ...result, durationMs: Date.now() - startedAt });
     };
@@ -101,6 +100,13 @@ export async function runCommandRaw(
       finish({ status: 'aborted', exitCode: null, output: output.render().trim() });
     };
     const onChunk = (chunk: Buffer): void => output.append(chunk.toString('utf8'));
+
+    // 先起 timer 再挂事件:finish/onAbort 是闭包,里面要 clearTimeout(timer)。
+    // 把 timer 的初始化提到所有引用它的注册点之前,避免依赖"事件回调必然异步"这一前提。
+    const timer = setTimeout(() => {
+      killTree();
+      finish({ status: 'timed_out', exitCode: null, output: output.render().trim() });
+    }, timeout);
 
     child.stdout.on('data', onChunk);
     child.stderr.on('data', onChunk);
@@ -114,10 +120,6 @@ export async function runCommandRaw(
         output: output.render().trim(),
       });
     });
-    timer = setTimeout(() => {
-      killTree();
-      finish({ status: 'timed_out', exitCode: null, output: output.render().trim() });
-    }, timeout);
     if (signal) {
       if (signal.aborted) onAbort();
       else signal.addEventListener('abort', onAbort, { once: true });

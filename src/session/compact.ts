@@ -139,7 +139,7 @@ export function truncateMid(text: string, max: number): string {
   if (text.length <= max) return text;
   const removed = text.length - max;
   const marker = `…[已截断 ${removed} 字符]…`;
-  let remain = max - marker.length;
+  const remain = max - marker.length;
   if (remain <= 0) return marker.slice(0, Math.max(0, max));
   const head = Math.ceil(remain * 0.6);
   const tail = remain - head;
@@ -505,7 +505,7 @@ function capMessageText(text: string, max: number): string {
   if (text.length <= max) return text;
   const removed = text.length - max;
   const marker = `\n…[中间 ${removed} 字符已省略]…\n`;
-  let remain = max - marker.length;
+  const remain = max - marker.length;
   if (remain <= 0) return text.slice(0, Math.max(0, max)) + marker;
   const head = Math.ceil(remain * 0.6);
   return text.slice(0, head) + marker + text.slice(text.length - (remain - head));

@@ -325,7 +325,6 @@ export interface BannerInfo {
   memoryEnabled: boolean;
 }
 
-const BOX_W = 60; // 内容区显示宽度(logo 区 + 信息区)
 const MARGIN = '  '; // 盒外左缩进
 
 // ── MoCode 块字符 logo(4 行,neofetch 风)──

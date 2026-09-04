@@ -272,7 +272,7 @@ export async function commitChangeSet(
           if (temp) await rename(temp, change.absolutePath);
         }
 
-        for (const { change, capture } of captures) endPathMutation(capture, `changeset:${changeSet.id}`);
+        for (const { capture } of captures) endPathMutation(capture, `changeset:${changeSet.id}`);
         for (const backup of backupByPath.values()) {
           await removeIfPresent(backup).catch(() => undefined);
         }

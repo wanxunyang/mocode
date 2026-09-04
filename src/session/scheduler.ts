@@ -120,7 +120,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
       const actions = scheduleActions(report);
       let compactHistoryCalled = false;
       let historyRebuilt = false;
-      for (const action of actions) {
+      for (const _action of actions) {
         const result = await maybeCompact(
           history,
           report,

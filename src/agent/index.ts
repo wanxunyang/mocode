@@ -19,8 +19,6 @@ import { beginTurn } from '../rollback/index.js';
 import { config } from '../config/index.js';
 import {
   runAgentCore,
-  parseArgs,
-  readDiffContext,
   isMutationTool,
   type AgentHooks,
   type AgentRunResult,

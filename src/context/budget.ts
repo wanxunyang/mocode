@@ -11,7 +11,7 @@ import {
   estimateToolSchemaTokens,
   messageTokens,
 } from '../llm/index.js';
-import { lastUserIndex, toText } from './utils.js';
+import { toText } from './utils.js';
 
 /** 五区分账(占比对齐 CONTEXT_WINDOW)。顺序固定,便于遍历。 */
 export const BUDGET_LAYERS = [

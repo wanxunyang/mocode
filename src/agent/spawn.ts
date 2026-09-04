@@ -117,11 +117,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     : opts.prompt;
 
   // 写 worker 保留主 Agent 的完整能力；只读 mode 仅按调用契约移除副作用工具。
-  let toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined;
   const mode = opts.mode ?? 'read';
   const requested = opts.tools?.length ? new Set(opts.tools) : null;
   const readOnly = new Set(['read_file', 'glob', 'grep', 'web_search', 'web_fetch', 'use_skill', 'memory_search', 'memory_list']);
-  toolsOverride = chatTools.filter((tool) =>
+  const toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] = chatTools.filter((tool) =>
     tool.function.name !== 'sub-agent' &&
     // run_skill 会再次 spawn,禁止递归(避免 fork skill 里又 run_skill 套娃)。
     tool.function.name !== 'run_skill' &&
@@ -218,7 +217,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       writeBuf(s); // 缓冲流式正文(无 markdown 渲染,原始文本)
       if (s) lastChar = s[s.length - 1];
     },
-    onToolCall: (name) => {
+    onToolCall: (_name) => {
       if (lastChar && lastChar !== '\n') {
         writeBuf('\n');
         lastChar = '\n';

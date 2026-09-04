@@ -279,7 +279,7 @@ test('compactHistory force: 单 user + 单 tool 组时保 user 不压(noop)', as
   const history: ChatMessage[] = [system(), { role: 'user', content: 'fix the bug' } as ChatMessage];
   appendTool(history, 'read_file', 'big-read', { path: 'src/a.ts' }, 'x'.repeat(30_000));
   let summarizeCalled = false;
-  const result = await compactHistory(history, {
+  await compactHistory(history, {
     window: 1_000_000,
     threshold: 100,
     force: true,
@@ -310,16 +310,12 @@ test('compactHistory force: 多轮 history 必须保留最早 user 所在 group(
   appendTool(history, 'read_file', 'read-1', { path: 'a.ts' }, 'content-a');
   history.push({ role: 'user', content: 'second request' } as ChatMessage);
   appendTool(history, 'read_file', 'read-2', { path: 'b.ts' }, 'content-b');
-  let summarizedRoles: string[] = [];
   const result = await compactHistory(history, {
     window: 1_000_000,
     threshold: 100,
     force: true,
     contextState: createContextState(),
-    summarize: async (older) => {
-      summarizedRoles = older.map((message) => message.role);
-      return 'multi-turn summary';
-    },
+    summarize: async () => 'multi-turn summary',
   });
   assert.equal(result.compacted, true);
   assert.equal(result.summarized, true);

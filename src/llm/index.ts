@@ -63,12 +63,13 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new DOMException('This operation was aborted', 'AbortError'));
       return;
     }
-    let onAbort: (() => void) | undefined;
     const t = setTimeout(() => {
-      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      signal?.removeEventListener('abort', onAbort);
       resolve();
     }, ms);
-    onAbort = () => {
+    // onAbort 用 const:声明点即唯一赋值点。setTimeout 回调里的前向引用只在异步触发时求值,
+    // 那时 onAbort 已初始化,不存在 TDZ。
+    const onAbort = (): void => {
       clearTimeout(t);
       reject(new DOMException('This operation was aborted', 'AbortError'));
     };

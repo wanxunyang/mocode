@@ -41,7 +41,7 @@ let lastSentState: PetState | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
 let heartbeatTimeoutTimer: NodeJS.Timeout | null = null;
 /** list_skins 请求的等待队列(先进先出;桌宠单连接场景下不会有并发歧义)。 */
-let pendingSkinListResolvers: ((msg: SkinListMessage) => void)[] = [];
+const pendingSkinListResolvers: ((msg: SkinListMessage) => void)[] = [];
 
 function clearHeartbeat(): void {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -124,7 +124,7 @@ export function spawnPetProcess(): Promise<void> {
     try {
       const require = createRequire(import.meta.url);
       binPath = require.resolve('mocode-pet-app/bin/pet-app.js');
-    } catch (e) {
+    } catch {
       reject(new Error('mocode-pet-app 未安装,请运行 npm install mocode-pet-app'));
       return;
     }
