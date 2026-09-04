@@ -25,9 +25,7 @@ export class Spinner {
   private frame = 0;
   private msg = '';
 
-  constructor(
-    private readonly onFrame?: (msg: string, frame: string | null) => void
-  ) {}
+  constructor(private readonly onFrame?: (msg: string, frame: string | null) => void) {}
 
   start(msg: string): void {
     this.stop();
@@ -58,9 +56,7 @@ export class Spinner {
 
   private render(): void {
     const f = FRAMES[this.frame];
-    stdout.write(
-      `\r${ui.bold}${ui.accent}${f}${ui.reset} ${ui.dim}${this.msg}${ui.reset}\x1B[K`
-    );
+    stdout.write(`\r${ui.bold}${ui.accent}${f}${ui.reset} ${ui.dim}${this.msg}${ui.reset}\x1B[K`);
   }
 
   stop(): void {

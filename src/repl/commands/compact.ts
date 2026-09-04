@@ -77,13 +77,19 @@ export const compactCommands: CommandHandler[] = [
     const stats = [proto, oldCt].filter(Boolean).join(' · ');
 
     if (reason === 'microcompact') {
-      layout.contentWrite(`${ui.cyan}✓ 微压缩:${ui.reset} ${before} → ${after} tokens${stats ? `  (${ui.dim}${stats}${ui.reset})` : ''}\n`);
+      layout.contentWrite(
+        `${ui.cyan}✓ 微压缩:${ui.reset} ${before} → ${after} tokens${stats ? `  (${ui.dim}${stats}${ui.reset})` : ''}\n`,
+      );
     } else if (reason === 'summarize') {
-      layout.contentWrite(`${ui.cyan}✓ LLM 摘要:${ui.reset} ${before} → ${after} tokens${focusNote ? `  (${ui.dim}${focusNote}${ui.reset})` : ''}\n`);
+      layout.contentWrite(
+        `${ui.cyan}✓ LLM 摘要:${ui.reset} ${before} → ${after} tokens${focusNote ? `  (${ui.dim}${focusNote}${ui.reset})` : ''}\n`,
+      );
     } else if (reason === 'noop-empty') {
       layout.contentWrite(`${ui.dim}(history 太短,只有 system 提示,无可压旧区)${ui.reset}\n`);
     } else if (reason === 'noop-protected') {
-      layout.contentWrite(`${ui.dim}(无可压旧区:全部在保护区 system + 当前轮)${ui.reset}${stats ? `  ${ui.dim}(${stats})${ui.reset}` : ''}\n`);
+      layout.contentWrite(
+        `${ui.dim}(无可压旧区:全部在保护区 system + 当前轮)${ui.reset}${stats ? `  ${ui.dim}(${stats})${ui.reset}` : ''}\n`,
+      );
       layout.contentWrite(`${ui.dim}提示:/compact --force 强行把早期对话压成摘要${ui.reset}\n`);
     } else if (reason === 'noop-ml-only') {
       layout.contentWrite(`${ui.dim}(LLM 摘要失败,且无超大单条可微压;可能是后端不可用)${ui.reset}\n`);

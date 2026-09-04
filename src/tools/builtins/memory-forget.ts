@@ -6,7 +6,7 @@ import { forgetEntry } from '../../memory/store.js';
 export const memoryForgetTool: Tool = {
   name: 'memory_forget',
   description:
-    'Forget a memory entry: default archive (hidden, revivable via memory_update); mode=delete hard-deletes. Pinned entries can\'t be deleted (unpin first).',
+    "Forget a memory entry: default archive (hidden, revivable via memory_update); mode=delete hard-deletes. Pinned entries can't be deleted (unpin first).",
   risk: 'confirm',
   parameters: {
     type: 'object',

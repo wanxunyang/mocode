@@ -41,8 +41,14 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 const ROOT_INPUTS = [
-  'package.json', 'pnpm-workspace.yaml', 'pnpm-workspace.yml',
-  'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb',
+  'package.json',
+  'pnpm-workspace.yaml',
+  'pnpm-workspace.yml',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
 ];
 
 const SOURCE_DIRS = ['src', 'lib', 'app'];
@@ -83,7 +89,7 @@ function readManifest(file: string): PackageManifest {
 function packageManagerFromField(value: unknown): ProjectPackageManager | null {
   if (typeof value !== 'string') return null;
   const match = /^(npm|pnpm|yarn|bun)(?:@|$)/.exec(value.trim());
-  return match ? match[1] as ProjectPackageManager : null;
+  return match ? (match[1] as ProjectPackageManager) : null;
 }
 
 function detectPackageManager(root: string, field: unknown): ProjectPackageManager {
@@ -175,13 +181,15 @@ function discoverConfigPaths(root: string, patterns: string[]): string[] {
 }
 
 function existingDirectories(root: string, relativePaths: string[]): string[] {
-  return relativePaths.map((item) => path.resolve(root, item)).filter((item) => {
-    try {
-      return statSync(item).isDirectory();
-    } catch {
-      return false;
-    }
-  });
+  return relativePaths
+    .map((item) => path.resolve(root, item))
+    .filter((item) => {
+      try {
+        return statSync(item).isDirectory();
+      } catch {
+        return false;
+      }
+    });
 }
 
 function scriptsFromManifest(value: unknown): Record<string, string> {
@@ -218,7 +226,8 @@ function inputSignatures(root: string, workspacePatterns: string[]): string[] {
     ...discoverConfigPaths(packageRoot, LINT_CONFIG_GLOBS),
   ]);
   const directoryPaths = packageRoots.flatMap((packageRoot) =>
-    ALL_MARKED_DIRS.map((item) => path.resolve(packageRoot, item)));
+    ALL_MARKED_DIRS.map((item) => path.resolve(packageRoot, item)),
+  );
   const candidates = uniqueSorted([
     ...ROOT_INPUTS.map((item) => path.join(root, item)),
     ...manifestPaths,

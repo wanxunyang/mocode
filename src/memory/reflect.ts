@@ -13,14 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { chat, type ChatMessage } from '../llm/index.js';
 import { config, isMemoryEnabled } from '../config/index.js';
-import {
-  saveEntry,
-  updateEntry,
-  forgetEntry,
-  loadAll,
-  gcMemories,
-  type MemoryType,
-} from './store.js';
+import { saveEntry, updateEntry, forgetEntry, loadAll, gcMemories, type MemoryType } from './store.js';
 import { addTriple } from './graph.js';
 
 export interface ReflectResult {
@@ -58,9 +51,7 @@ function textOf(c: unknown): string {
   if (typeof c === 'string') return c;
   if (c == null) return '';
   if (Array.isArray(c)) {
-    return c
-      .map((p) => (typeof p === 'string' ? p : (p as { text?: string })?.text ?? ''))
-      .join('');
+    return c.map((p) => (typeof p === 'string' ? p : ((p as { text?: string })?.text ?? ''))).join('');
   }
   return String(c);
 }
@@ -74,8 +65,7 @@ export function snapshotTranscript(history: ChatMessage[], K: number): string {
   const lines = convo.map((m) => {
     const role = (m as { role?: string }).role ?? '?';
     let line = `${role}: ${textOf((m as { content?: unknown }).content)}`;
-    const tcs = (m as { tool_calls?: { function?: { name?: string; arguments?: string } }[] })
-      .tool_calls;
+    const tcs = (m as { tool_calls?: { function?: { name?: string; arguments?: string } }[] }).tool_calls;
     if (Array.isArray(tcs)) {
       for (const tc of tcs) {
         line += `\n  [tool_call ${tc?.function?.name ?? ''}] ${tc?.function?.arguments ?? ''}`;
@@ -93,11 +83,9 @@ export function snapshotTranscript(history: ChatMessage[], K: number): string {
 function buildMemorySample(): string {
   const all = loadAll().filter((e) => e.status === 'active');
   if (all.length === 0) return '(无)';
-  const byCreated = [...all].sort(
-    (a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''),
-  );
+  const byCreated = [...all].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
   const byRecall = [...all].sort((a, b) => a.recallCount - b.recallCount);
-  const picked = new Map<string, typeof all[number]>();
+  const picked = new Map<string, (typeof all)[number]>();
   for (const e of byCreated.slice(0, 10)) picked.set(e.id, e);
   for (const e of byRecall.slice(0, 10)) picked.set(e.id, e);
   const list = [...picked.values()].slice(0, 20);
@@ -157,10 +145,7 @@ function parsePlan(content: string | null): ReflectPlan | null {
  * 解析失败整 pass 放弃(不部分落地)。store 调用全同步,落地是一个原子块。
  * 60s 超时(AbortSignal.timeout)防 exit 时 drain 挂死。
  */
-export async function runReflection(
-  transcript: string,
-  signal?: AbortSignal,
-): Promise<ReflectResult> {
+export async function runReflection(transcript: string, signal?: AbortSignal): Promise<ReflectResult> {
   const ts = new Date().toISOString();
   const sample = buildMemorySample();
   const sys = { role: 'system' as const, content: REFLECT_SYS } as ChatMessage;
@@ -249,8 +234,7 @@ export async function runReflection(
 function normalizeType(t: unknown): MemoryType | undefined {
   if (typeof t !== 'string') return undefined;
   const v = t.trim().toLowerCase();
-  if (v === 'decision' || v === 'fact' || v === 'pitfall' || v === 'reference' || v === 'feedback')
-    return v;
+  if (v === 'decision' || v === 'fact' || v === 'pitfall' || v === 'reference' || v === 'feedback') return v;
   return undefined;
 }
 
@@ -282,9 +266,7 @@ export function kickoffReflection(transcript: string): void {
       lastReflectResult = r;
       appendLog(`[${r.ts}] ${formatReflectResult(r)}`);
     } catch (e) {
-      appendLog(
-        `[${new Date().toISOString()}] 反思异常: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      appendLog(`[${new Date().toISOString()}] 反思异常: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       inflight = null;
     }

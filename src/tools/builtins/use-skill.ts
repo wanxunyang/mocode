@@ -34,7 +34,8 @@ export const useSkillTool: Tool = {
       },
       file: {
         type: 'string',
-        description: 'Optional bundled file inside the skill directory to read (e.g. references/api.md). Subject to jail bounds.',
+        description:
+          'Optional bundled file inside the skill directory to read (e.g. references/api.md). Subject to jail bounds.',
       },
     },
     required: ['name'],
@@ -43,8 +44,7 @@ export const useSkillTool: Tool = {
     const name = String(args.name ?? '').trim();
     if (!name) return '错误:缺少 skill 名。用 /skills 查看可用 skill 列表。';
     const skill = findSkill(name);
-    if (!skill)
-      return `错误:未找到 skill "${name}"。用 /skills 查看可用 skill 列表。`;
+    if (!skill) return `错误:未找到 skill "${name}"。用 /skills 查看可用 skill 列表。`;
 
     // fork skill:不把正文读进主上下文,引导走 run_skill。
     if (skill.context === 'fork') {
@@ -59,14 +59,12 @@ export const useSkillTool: Tool = {
     // file 优先:L2 渐进式披露
     if (typeof args.file === 'string' && args.file.trim()) {
       const content = readSkillFile(skill, args.file.trim(), MAX_SKILL_FILE);
-      if (content === null)
-        return `错误:无法读取 skill "${name}" 的文件 "${args.file}"(不存在 / 越界 / 过大)。`;
+      if (content === null) return `错误:无法读取 skill "${name}" 的文件 "${args.file}"(不存在 / 越界 / 过大)。`;
       return `# Skill: ${name} · ${args.file}\n\n${content}`;
     }
 
     const body = await renderSkillBody(skill, args.args as Record<string, unknown> | undefined, ctx?.signal);
-    if (body === null)
-      return `错误:未找到 skill "${name}" 的正文。用 /skills 查看可用 skill 列表。`;
+    if (body === null) return `错误:未找到 skill "${name}" 的正文。用 /skills 查看可用 skill 列表。`;
 
     // 激活 inline skill 的工具面约束(allowed/disallowed),本轮内生效。
     activateSkill(skill);

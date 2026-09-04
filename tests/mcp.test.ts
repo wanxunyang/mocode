@@ -20,16 +20,19 @@ after(async () => {
 
 test('readMcpServers: 解析每个服务的工具白名单和黑名单', () => {
   const configPath = join(tempDir, 'servers.json');
-  writeFileSync(configPath, JSON.stringify({
-    mcpServers: {
-      filtered: {
-        command: 'mock-mcp',
-        includeTools: ['read', 'write'],
-        excludeTools: ['write'],
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      mcpServers: {
+        filtered: {
+          command: 'mock-mcp',
+          includeTools: ['read', 'write'],
+          excludeTools: ['write'],
+        },
+        unfiltered: { command: 'mock-mcp' },
       },
-      unfiltered: { command: 'mock-mcp' },
-    },
-  }));
+    }),
+  );
   process.env.MCP_CONFIG_PATH = configPath;
 
   const { servers, warnings } = readMcpServers();
@@ -76,8 +79,11 @@ test('updateMcpConfig: 同步内存状态与环境变量', () => {
 test('getMcpTools: 白名单过滤工具，黑名单优先于白名单，未配置时保留全部', async () => {
   await closeAllMcp();
   const filtered = new McpClient('filtered', {
-    name: 'filtered', transport: 'stdio', command: 'mock-mcp',
-    includeTools: ['keep', 'blocked'], excludeTools: ['blocked'],
+    name: 'filtered',
+    transport: 'stdio',
+    command: 'mock-mcp',
+    includeTools: ['keep', 'blocked'],
+    excludeTools: ['blocked'],
   });
   filtered.cachedTools = [
     { name: 'keep', inputSchema: { type: 'object' } },
@@ -85,14 +91,16 @@ test('getMcpTools: 白名单过滤工具，黑名单优先于白名单，未配�
     { name: 'other', inputSchema: { type: 'object' } },
   ];
   const unfiltered = new McpClient('unfiltered', {
-    name: 'unfiltered', transport: 'stdio', command: 'mock-mcp',
+    name: 'unfiltered',
+    transport: 'stdio',
+    command: 'mock-mcp',
   });
   unfiltered.cachedTools = [{ name: 'all', inputSchema: { type: 'object' } }];
   __testInjectClient(filtered);
   __testInjectClient(unfiltered);
 
-  assert.deepEqual(getMcpTools().map((tool) => tool.name), [
-    'mcp__filtered__keep',
-    'mcp__unfiltered__all',
-  ]);
+  assert.deepEqual(
+    getMcpTools().map((tool) => tool.name),
+    ['mcp__filtered__keep', 'mcp__unfiltered__all'],
+  );
 });

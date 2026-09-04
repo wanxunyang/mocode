@@ -1,24 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import {
-  chmod,
-  copyFile,
-  mkdir,
-  readFile,
-  rename,
-  rm,
-  rmdir,
-  stat,
-  writeFile,
-} from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { jailResolve } from '../sandbox/index.js';
 import { beginPathMutation, endPathMutation } from '../rollback/index.js';
-import {
-  canonicalFileResourceKey,
-  toolResourceLockManager,
-  type ResourceLockRequest,
-} from '../tools/resource-lock.js';
+import { canonicalFileResourceKey, toolResourceLockManager, type ResourceLockRequest } from '../tools/resource-lock.js';
 import type {
   ChangeConflict,
   ChangeSet,
@@ -61,8 +47,13 @@ function applyTextEdits(source: string, edits: readonly TextEdit[]): string {
   let cursor = 0;
   let output = '';
   for (const edit of ordered) {
-    if (!Number.isInteger(edit.start) || !Number.isInteger(edit.end) ||
-      edit.start < cursor || edit.end < edit.start || edit.end > source.length) {
+    if (
+      !Number.isInteger(edit.start) ||
+      !Number.isInteger(edit.end) ||
+      edit.start < cursor ||
+      edit.end < edit.start ||
+      edit.end > source.length
+    ) {
       throw new Error(`无效或重叠的 TextEdit 范围: ${edit.start}..${edit.end}`);
     }
     output += source.slice(cursor, edit.start) + edit.newText;
@@ -90,9 +81,7 @@ export function createChangeSet(changes: FileChange[]): ChangeSet {
   return { id: randomUUID(), createdAt: Date.now(), changes };
 }
 
-export type DryRunResult =
-  | { ok: true; changeSet: PreparedChangeSet }
-  | { ok: false; conflicts: ChangeConflict[] };
+export type DryRunResult = { ok: true; changeSet: PreparedChangeSet } | { ok: false; conflicts: ChangeConflict[] };
 
 /** Validate every precondition and calculate every output without touching disk. */
 export async function dryRunChangeSet(changeSet: ChangeSet): Promise<DryRunResult> {
@@ -155,9 +144,7 @@ export async function dryRunChangeSet(changeSet: ChangeSet): Promise<DryRunResul
       });
     }
   }
-  return conflicts.length > 0
-    ? { ok: false, conflicts }
-    : { ok: true, changeSet: { ...changeSet, prepared } };
+  return conflicts.length > 0 ? { ok: false, conflicts } : { ok: true, changeSet: { ...changeSet, prepared } };
 }
 
 async function removeIfPresent(target: string): Promise<void> {
@@ -208,10 +195,7 @@ async function missingParentDirectories(file: string): Promise<string[]> {
 }
 
 /** Commit is process-transactional: every target is prepared first and any failed swap is compensated. */
-export async function commitChangeSet(
-  changeSet: ChangeSet,
-  signal?: AbortSignal,
-): Promise<ChangeSetResult> {
+export async function commitChangeSet(changeSet: ChangeSet, signal?: AbortSignal): Promise<ChangeSetResult> {
   try {
     return await toolResourceLockManager.withLocks(lockRequests(changeSet), signal, async () => {
       if (signal?.aborted) {
@@ -242,7 +226,10 @@ export async function commitChangeSet(
           }
           await mkdir(path.dirname(change.absolutePath), { recursive: true });
           if (change.after !== null) {
-            const temp = path.join(path.dirname(change.absolutePath), `.${path.basename(change.absolutePath)}.${changeSet.id}.tmp`);
+            const temp = path.join(
+              path.dirname(change.absolutePath),
+              `.${path.basename(change.absolutePath)}.${changeSet.id}.tmp`,
+            );
             await writeFile(temp, change.after, { flag: 'wx' });
             if (change.before !== null) {
               const currentMode = (await stat(change.absolutePath)).mode;
@@ -260,7 +247,10 @@ export async function commitChangeSet(
 
         // Once the first swap starts, finish or compensate even if the caller aborts.
         for (const change of effective) {
-          const backup = path.join(path.dirname(change.absolutePath), `.${path.basename(change.absolutePath)}.${changeSet.id}.bak`);
+          const backup = path.join(
+            path.dirname(change.absolutePath),
+            `.${path.basename(change.absolutePath)}.${changeSet.id}.bak`,
+          );
           if (change.before !== null) {
             if (change.after === null) await rename(change.absolutePath, backup);
             else await copyFile(change.absolutePath, backup);

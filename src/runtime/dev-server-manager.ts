@@ -25,7 +25,10 @@ export type DevServerErrorCode =
   | 'EXECUTION_ERROR';
 
 export class DevServerManagerError extends Error {
-  constructor(public readonly code: DevServerErrorCode, message: string) {
+  constructor(
+    public readonly code: DevServerErrorCode,
+    message: string,
+  ) {
     super(message);
     this.name = 'DevServerManagerError';
   }
@@ -252,10 +255,7 @@ export async function startDevServer(opts: StartDevServerOptions): Promise<Start
 
   const readyUrl = opts.readyUrl ? validateReadyUrl(opts.readyUrl) : null;
   const readyPattern = opts.readyPattern ? compileReadyPattern(opts.readyPattern) : null;
-  const timeoutMs = Math.min(
-    Math.max(Number(opts.timeoutMs ?? DEFAULT_READY_TIMEOUT_MS), 1_000),
-    MAX_READY_TIMEOUT_MS,
-  );
+  const timeoutMs = Math.min(Math.max(Number(opts.timeoutMs ?? DEFAULT_READY_TIMEOUT_MS), 1_000), MAX_READY_TIMEOUT_MS);
 
   const id = `srv-${randomBytes(3).toString('hex')}`;
   const logPath = jailResolve(join('.mocode', 'dev-servers', `${id}.log`));
@@ -270,17 +270,13 @@ export async function startDevServer(opts: StartDevServerOptions): Promise<Start
 
   let child: ChildProcess;
   try {
-    child = spawn(
-      IS_WINDOWS ? 'cmd.exe' : 'bash',
-      IS_WINDOWS ? ['/d', '/s', '/c', command] : ['-c', command],
-      {
-        cwd,
-        env: filterEnv(process.env),
-        windowsVerbatimArguments: IS_WINDOWS,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
+    child = spawn(IS_WINDOWS ? 'cmd.exe' : 'bash', IS_WINDOWS ? ['/d', '/s', '/c', command] : ['-c', command], {
+      cwd,
+      env: filterEnv(process.env),
+      windowsVerbatimArguments: IS_WINDOWS,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
   } catch (error) {
     closeSync(logFd);
     throw new DevServerManagerError('EXECUTION_ERROR', `Unable to spawn dev server: ${errorMessage(error)}`);
@@ -339,7 +335,7 @@ export async function startDevServer(opts: StartDevServerOptions): Promise<Start
         ready = true;
         break;
       }
-      if (readyUrl && await probeReady(readyUrl)) {
+      if (readyUrl && (await probeReady(readyUrl))) {
         ready = true;
         break;
       }

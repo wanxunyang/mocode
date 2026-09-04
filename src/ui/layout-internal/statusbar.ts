@@ -36,9 +36,7 @@ export function composeSpinnerLine(status: StatusBarData, cols: number): string 
   const scrolled = state.scrollOffset > 0;
 
   // 走时(仅运行态)
-  const elapsed = (state.mode === 'running' && state.turnStart != null)
-    ? fmtElapsed(Date.now() - state.turnStart)
-    : '';
+  const elapsed = state.mode === 'running' && state.turnStart != null ? fmtElapsed(Date.now() - state.turnStart) : '';
 
   // ── 左段:帧 + 状态 + 走时,全部紧跟 ──
   let lead: string;
@@ -53,7 +51,7 @@ export function composeSpinnerLine(status: StatusBarData, cols: number): string 
     // spinning(运行态流式中 spinner 已停,靠 turnTimer 心跳):同非滚动 spinning 分支加
     // || '生成中' fallback——流式首 token 到即 spinner.stop(),若 stop() 回调未留状态字,
     // 此处兜底不再让 lead 只剩心跳帧字符(用户误读为"左侧蒸发了")。
-    const label = spinning ? (status.status || '生成中') : status.status;
+    const label = spinning ? status.status || '生成中' : status.status;
     const ePart = elapsed ? ` ${ui.dim}${elapsed}${ui.reset}` : '';
     lead = `${symbol} ${ui.dim}${label}${ui.reset}${ePart}`;
     leadW = 1 + 1 + displayWidth(label) + (elapsed ? 1 + displayWidth(elapsed) : 0);
@@ -105,13 +103,14 @@ export function composeModelLine(status: StatusBarData, cols: number): string {
   // 合并左段:段间留 2 空格分隔。极窄时 hint 与 chip 都可能藏掉。
   // 优先级:modeTag(必) > chip(提示累计 token,有信息量)> hint(纯说明性,窄时最先省)。
   const sepMH = modePart && (hintPart || tokChip) ? '  ' : '';
-  const sepHT = (hintPart && tokChip) ? '  ' : '';
+  const sepHT = hintPart && tokChip ? '  ' : '';
   const leftStr = `${modePart}${sepMH}${hintPart}${sepHT}${tokChip}`;
-  const leftW = modeW
-    + (modePart && (hintPart || tokChip) ? sepMH.length : 0)
-    + hintW
-    + ((hintPart && tokChip) ? sepHT.length : 0)
-    + tokW;
+  const leftW =
+    modeW +
+    (modePart && (hintPart || tokChip) ? sepMH.length : 0) +
+    hintW +
+    (hintPart && tokChip ? sepHT.length : 0) +
+    tokW;
   // 右段:实时用量 chip(仅 RUNNING)+ ctx + sep + cwd,右端对齐。cwd 按预算截断,极窄(<6)隐藏。
   // 实时 chip 放 context 进度条左侧:本轮累计 ↑prompt ↓completion,流式实时增长。
   // 任一 chip 极宽时收紧 cwd(toolbar 列挤压场景),先从 cwd 砍、再隐藏 cwd、再按 hint→chip 顺序省。
@@ -146,14 +145,15 @@ export function composeModelLine(status: StatusBarData, cols: number): string {
 /** 把本轮 token 总量格式化成 chip 文本(纯字符串,带 ANSI 色)。无 usage 返空串。
  *  显示策略:chip 信息密度有限,只显示总量 + 一个 ↻ 标记表示有 cache 命中。
  *  详细分项(↑↓ 计费/↻ 缓存/reasoning)在 turn 末 summary 行展示,不在此处展开。 */
-function formatTurnTokenChip(usage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined): string {
+function formatTurnTokenChip(
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined,
+): string {
   if (!usage || !usage.totalTokens) return '';
   const n = usage.totalTokens;
   const text = n < 1000 ? `${n}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
   const cached = usage.cachedTokens ?? 0;
-  const cacheTag = cached > 0
-    ? ` ↻ ${cached < 1000 ? cached : `${(cached / 1000).toFixed(cached >= 10000 ? 0 : 1)}k`}`
-    : '';
+  const cacheTag =
+    cached > 0 ? ` ↻ ${cached < 1000 ? cached : `${(cached / 1000).toFixed(cached >= 10000 ? 0 : 1)}k`}` : '';
   // chip 用 mid 灰(降优先级)— 模式仍是主色
   return `${ui.dim}${text} tokens${cacheTag}${ui.reset}`;
 }
@@ -225,15 +225,23 @@ export function drawStatusBar(status?: StatusBarData): void {
   if (planLines.length === 0) {
     planBuf += cup(planRow1, 1) + esc.clearLine;
   }
-  let out = planBuf +
-    cup(spinnerRow, 1) + esc.clearLine + composeSpinnerLine(s, g.cols) +
-    cup(modelRow, 1) + esc.clearLine + composeModelLine(s, g.cols);
+  let out =
+    planBuf +
+    cup(spinnerRow, 1) +
+    esc.clearLine +
+    composeSpinnerLine(s, g.cols) +
+    cup(modelRow, 1) +
+    esc.clearLine +
+    composeModelLine(s, g.cols);
   if (state.mode === 'running') {
     // 运行态(回尾 / 滚动回看均):cup 回输入框光标位(供 IME 锚定)。
     const p = runningCaretPos();
     out += cup(p.row, p.col);
   } else {
-    out += cup(state.scrollOffset === 0 ? state.contentRow : g.contentBottom, state.scrollOffset === 0 ? state.contentCol : 1);
+    out += cup(
+      state.scrollOffset === 0 ? state.contentRow : g.contentBottom,
+      state.scrollOffset === 0 ? state.contentCol : 1,
+    );
   }
   stdout.write(out);
 }
@@ -354,7 +362,9 @@ export function clearLiveAtCursor(): void {
 
 /** 推送 / 清空运行态实时 token 用量(agent core 流式推送;repl 轮末清 undefined)。
  *  不触发重画:RUNNING 态 turnTimer 80ms 心跳重画状态行,自然取到最新值。 */
-export function setLiveUsage(u: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined): void {
+export function setLiveUsage(
+  u: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined,
+): void {
   state.liveUsage = u;
 }
 

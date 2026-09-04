@@ -283,15 +283,7 @@ function buildSummaryLine(record: BatchRecord, live = false): string {
   const finished = completed >= entries.length;
   const allFailed = finished && failedCount === entries.length;
   const partiallyFailed = finished && failedCount > 0 && !allFailed;
-  const symbol = record.running
-    ? RUNNING_GLYPH
-    : !finished
-      ? '◇'
-      : allFailed
-        ? '×'
-        : partiallyFailed
-          ? '!'
-          : '●';
+  const symbol = record.running ? RUNNING_GLYPH : !finished ? '◇' : allFailed ? '×' : partiallyFailed ? '!' : '●';
   const color = record.running
     ? ui.accent
     : !finished
@@ -301,16 +293,10 @@ function buildSummaryLine(record: BatchRecord, live = false): string {
         : partiallyFailed
           ? ui.yellow
           : ui.green;
-  const label = !finished
-    ? t('agent.toolsRunning')
-    : allFailed
-      ? t('agent.toolsFailed')
-      : t('agent.toolsComplete');
+  const label = !finished ? t('agent.toolsRunning') : allFailed ? t('agent.toolsFailed') : t('agent.toolsComplete');
   const progress = live && !finished ? `  ${completed}/${entries.length}` : `  ${entries.length}`;
   const elapsedMs = record.finishedAt ? record.finishedAt - record.startedAt : 0;
-  const elapsed = record.finishedAt
-    ? `  ${elapsedMs < 100 ? '<0.1s' : `${(elapsedMs / 1000).toFixed(1)}s`}`
-    : '';
+  const elapsed = record.finishedAt ? `  ${elapsedMs < 100 ? '<0.1s' : `${(elapsedMs / 1000).toFixed(1)}s`}` : '';
   const displayLabel = record.label ?? label;
   return `${prefix}  ${ui.bold}${color}${symbol}${ui.reset} ${displayLabel}${progress}${elapsed}  ${ui.dim}${parts.join('  ')}${ui.reset}`;
 }
@@ -323,32 +309,34 @@ function buildSummaryLine(record: BatchRecord, live = false): string {
 function buildEntryDetailLines(e: BatchEntry, indent = '      '): string[] {
   const lines: string[] = [];
   if (e.diffBlock) {
-      // diff 块多行文本(由 renderFileChange 渲染);按 \n 拆成物理行,
-      // 每行单独入 rows[]。行末 reset 由本函数统一追加(若原行已带 reset,终端合并即可)。
-      const block = e.diffBlock.endsWith('\n') ? e.diffBlock : e.diffBlock + '\n';
-      for (const line of block.split('\n')) {
-        if (line === '' && lines.length > 0 && lines[lines.length - 1] === '') continue; // 折叠连续空行
-        if (line === '' && lines.length > 0) continue; // 跳过首尾空行(diff 头/尾换行)
-        const prefixed = `${ui.dim}${indent}${ui.reset}${line}`;
-        lines.push(sanitizeRow(prefixed));
-      }
+    // diff 块多行文本(由 renderFileChange 渲染);按 \n 拆成物理行,
+    // 每行单独入 rows[]。行末 reset 由本函数统一追加(若原行已带 reset,终端合并即可)。
+    const block = e.diffBlock.endsWith('\n') ? e.diffBlock : e.diffBlock + '\n';
+    for (const line of block.split('\n')) {
+      if (line === '' && lines.length > 0 && lines[lines.length - 1] === '') continue; // 折叠连续空行
+      if (line === '' && lines.length > 0) continue; // 跳过首尾空行(diff 头/尾换行)
+      const prefixed = `${ui.dim}${indent}${ui.reset}${line}`;
+      lines.push(sanitizeRow(prefixed));
+    }
   } else if (e.fullOutput) {
-      // 完整工具输出(纯文本):按行展开,每行缩进 + dim 样式;长输出截断到 MAX_EXPAND_LINES 行。
-      // 每行经 sanitizeRow 钳宽:fullOutput 可能含 grep 扫二进制(db/压缩文件)得到的
-      // 超长行 + 控制字符,不钳会让终端 auto-wrap 打乱屏位。
-      const rawLines = e.fullOutput.split('\n');
-      const truncated = rawLines.length > MAX_EXPAND_LINES;
-      const displayLines = truncated ? rawLines.slice(0, MAX_EXPAND_LINES) : rawLines;
-      for (const line of displayLines) {
-        lines.push(sanitizeRow(`${indent}${ui.gray}${line}${ui.reset}`));
-      }
-      if (truncated) {
-        lines.push(sanitizeRow(`${indent}${ui.dim}… (${rawLines.length - MAX_EXPAND_LINES} more lines)${ui.reset}`));
-      }
+    // 完整工具输出(纯文本):按行展开,每行缩进 + dim 样式;长输出截断到 MAX_EXPAND_LINES 行。
+    // 每行经 sanitizeRow 钳宽:fullOutput 可能含 grep 扫二进制(db/压缩文件)得到的
+    // 超长行 + 控制字符,不钳会让终端 auto-wrap 打乱屏位。
+    const rawLines = e.fullOutput.split('\n');
+    const truncated = rawLines.length > MAX_EXPAND_LINES;
+    const displayLines = truncated ? rawLines.slice(0, MAX_EXPAND_LINES) : rawLines;
+    for (const line of displayLines) {
+      lines.push(sanitizeRow(`${indent}${ui.gray}${line}${ui.reset}`));
+    }
+    if (truncated) {
+      lines.push(sanitizeRow(`${indent}${ui.dim}… (${rawLines.length - MAX_EXPAND_LINES} more lines)${ui.reset}`));
+    }
   } else if (e.resultSummary) {
     // 用 · 而非 ↳:entry 行尾已内联同一串,详情区再画一遍箭头会被读成「又一条子结果」;
     // · 只表达「这是结论文本」,与 diff 块、fullOutput 原始输出行在视觉上分属三档。
-    lines.push(sanitizeRow(`${indent}${ui.dim}${DETAIL_RESULT_MARK}${ui.reset}${ui.gray}${e.resultSummary}${ui.reset}`));
+    lines.push(
+      sanitizeRow(`${indent}${ui.dim}${DETAIL_RESULT_MARK}${ui.reset}${ui.gray}${e.resultSummary}${ui.reset}`),
+    );
   }
   return lines;
 }
@@ -417,7 +405,9 @@ function buildEntryLine(b: BatchRecord, index: number, extraIndent = ''): string
   const result = e.resultSummary ? `  ${ui.gray}↳ ${e.resultSummary}${ui.reset}` : '';
   const caret = entryCaret(e, b.expandedEntries.has(index));
   const failure = e.failed ? `${ui.red}×${ui.reset} ` : '';
-  return sanitizeRow(`${extraIndent}    ${caret}${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`);
+  return sanitizeRow(
+    `${extraIndent}    ${caret}${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`,
+  );
 }
 
 /** 第一层只展示有哪些调用及其简短结果，不展开完整输出。extraIndent 供子批嵌套加深缩进。
@@ -629,7 +619,8 @@ export function refreshBatchExpanded(
       if (target.batchId !== b.id) continue;
       // entry 行自身(含其二层明细)的块末位置
       const end = b.expandedEntries.has(target.entryIndex)
-        ? idx + buildEntryDetailLines(b.entries[target.entryIndex], entryDetailIndent(b.entries, target.entryIndex)).length
+        ? idx +
+          buildEntryDetailLines(b.entries[target.entryIndex], entryDetailIndent(b.entries, target.entryIndex)).length
         : idx;
       if (end > maxIdx) maxIdx = end;
     }
@@ -726,10 +717,7 @@ export function expandSingleEntryFully(
 ): void {
   const b = batches.get(id);
   if (!b || b.entries.length !== 1 || expandedBatches.has(id)) return;
-  const lines = [
-    ...buildExpandedLines(b),
-    ...buildEntryDetailLines(b.entries[0], entryDetailIndent(b.entries, 0)),
-  ];
+  const lines = [...buildExpandedLines(b), ...buildEntryDetailLines(b.entries[0], entryDetailIndent(b.entries, 0))];
   layout.contentInsertAfter(b.summaryAbsIdx, lines);
   // 修复：contentInsertAfter 不再 commit was-current（避免 collapse 后留孤儿空行）；
   // mutation 路径不再由 flushToolBatch 写 \n separator，所以这里手动补一个 \n。
@@ -818,14 +806,9 @@ export function toggleEntry(
   // 子批自己的摘要行（● 子 Agent 完成 ...）来控制。
   if (b.groupParent) {
     // 如果该 sub-agent entry 没有可展开的详情，fallback 到 toggle 子批工具列表。
-    const details = buildEntryDetailLines(
-      b.entries[entryIndex],
-      entryDetailIndent(b.entries, entryIndex),
-    );
+    const details = buildEntryDetailLines(b.entries[entryIndex], entryDetailIndent(b.entries, entryIndex));
     if (details.length === 0) {
-      const child = [...batches.values()].find(
-        (x) => x.parentId === batchId && x.groupChildIndex === entryIndex,
-      );
+      const child = [...batches.values()].find((x) => x.parentId === batchId && x.groupChildIndex === entryIndex);
       if (child) {
         toggleBatch(child.id, layout);
       }
@@ -838,10 +821,7 @@ export function toggleEntry(
     if (target.batchId === batchId && target.entryIndex === entryIndex) headerIdx = idx;
   }
   if (headerIdx < 0) return;
-  const details = buildEntryDetailLines(
-    b.entries[entryIndex],
-    entryDetailIndent(b.entries, entryIndex),
-  );
+  const details = buildEntryDetailLines(b.entries[entryIndex], entryDetailIndent(b.entries, entryIndex));
   if (details.length === 0) return;
   const wasExpanded = b.expandedEntries.has(entryIndex);
   // 先翻状态再重画三角:buildEntryLine 读 b.expandedEntries 决定 ▸/▾。
@@ -919,9 +899,10 @@ function shiftBatchIndicesAfter(absIdx: number, delta: number): void {
   const nextEntries = new Map<number, { batchId: string; entryIndex: number }>();
   // expand() 先插入整组概要行、再登记其命中位置；layout 随后的异步 shift 通知不应把
   // 这批“刚插入”的概要行再次平移。插入单个工具详情时 absIdx 不是 summary，仍正常平移。
-  const insertedOverviewBatch = delta > 0
-    ? [...batches.values()].find((b) => b.summaryAbsIdx === absIdx && expandedBatches.has(b.id))?.id
-    : undefined;
+  const insertedOverviewBatch =
+    delta > 0
+      ? [...batches.values()].find((b) => b.summaryAbsIdx === absIdx && expandedBatches.has(b.id))?.id
+      : undefined;
   for (const [idx, target] of absLineToEntry) {
     const isNewOverviewLine = target.batchId === insertedOverviewBatch;
     const newIdx = idx > absIdx && !isNewOverviewLine ? idx + delta : idx;

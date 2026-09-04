@@ -188,7 +188,11 @@ export async function promptComposer(opts: ComposerOpts = {}): Promise<ComposerR
   let wheelOnly = false; // 滚轮刚滚过:下一次 paint 不把光标拉回可视区(允许滚离光标翻看)
 
   // undo / redo
-  interface Snap { lines: string[]; cur: Pos; anchor: Pos | null }
+  interface Snap {
+    lines: string[];
+    cur: Pos;
+    anchor: Pos | null;
+  }
   const undoStack: Snap[] = [];
   const redoStack: Snap[] = [];
   let lastUndoKey = '';

@@ -168,19 +168,22 @@ export function classifyChatError(msg: string): ChatErrorKind | null {
     /(?:invalid|incorrect|missing|no|not[ _-]?(?:provided|configured|valid))[^\n]{0,24}api[ _-]?key/.test(m) ||
     /api[ _-]?key[^\n]{0,24}(?:invalid|incorrect|missing|not[ _-]?(?:provided|configured|valid))/.test(m) ||
     /无效的|未配置.{0,8}(?:key|密钥)|(?:密钥|令牌).{0,8}(?:无效|错误)/.test(msg)
-  ) return 'auth';
+  )
+    return 'auth';
   // 限流 / 配额:429 / rate limit / quota / 余额不足
   if (
     /\b429\b|rate[ _-]?limit|insufficient[ _-]?(?:quota|balance|funds)|quota[ _-]?(?:exceeded|exhausted)/.test(m) ||
     /频率限制|使用量已超出|余额不足|配额(?:不足|已用完|超)/.test(msg)
-  ) return 'quota';
+  )
+    return 'quota';
   // 超时 / 连接中断
   if (/\btime(?:d|ed)?[ _-]?out\b|etimedout|econnreset|socket hang up|econnaborted|请求超时/.test(m)) return 'timeout';
   // 网络 / DNS / baseURL 不通
   if (
     /\benotfound\b|\beconnrefused\b|\beai_again\b|getaddrinfo|fetch failed|network error|certificate/.test(m) ||
     /无法连接|网络(?:错误|异常|不可用)|域名解析/.test(msg)
-  ) return 'network';
+  )
+    return 'network';
   return null;
 }
 
@@ -218,13 +221,13 @@ function logRetry(attempt: number, err: unknown, waitMs: number): void {
   // 非 TTY(管道 / CI / 启动早期 TUI 未启)降级走原生 console.error → stderr,行为与改造前一致。
   // 不写前导 \n —— contentWrite 由续写位管位置,前置换行会留空行;结尾 \n 由劫持逻辑补。
   console.error(
-    `[llm] 第 ${attempt}/${RETRY_MAX_ATTEMPTS} 次失败(${tag}: ${msg}),${(waitMs / 1000).toFixed(1)}s 后重试…`
+    `[llm] 第 ${attempt}/${RETRY_MAX_ATTEMPTS} 次失败(${tag}: ${msg}),${(waitMs / 1000).toFixed(1)}s 后重试…`,
   );
 }
 
 type CreateImpl = (
   body: Record<string, unknown>,
-  opts: { signal?: AbortSignal } | undefined
+  opts: { signal?: AbortSignal } | undefined,
 ) => Promise<AsyncIterable<unknown>>;
 
 let createImplOverride: CreateImpl | null = null;
@@ -262,16 +265,17 @@ export function refreshChatTools(): void {
   }));
   chatTools.splice(0, chatTools.length, ...next);
   // MCP 协议没有可靠的副作用注解；plan 模式绝不暴露外部工具，保留只读探查保证。
-  planChatTools.splice(0, planChatTools.length, ...next.filter(
-    (t) => !t.function.name.startsWith('mcp__') && !getPlanDisabledTools().has(t.function.name),
-  ));
+  planChatTools.splice(
+    0,
+    planChatTools.length,
+    ...next.filter((t) => !t.function.name.startsWith('mcp__') && !getPlanDisabledTools().has(t.function.name)),
+  );
 }
 
 // 不在模块顶层调用 refreshChatTools():llm → registry 的 import 在部分加载顺序下会
 // 形成循环(registry → builtins → … → llm),顶层执行时 tools 尚未初始化(TDZ ReferenceError)。
 // chatTools 初始为空数组;两个真实入口(repl 启动、stdio host 启动)都会显式刷新,
 // 所有消费方(budget/compact/scheduler 默认参数、agent 装配)均在运行时求值,不受影响。
-
 
 export interface ToolCallRef {
   id: string;
@@ -413,7 +417,7 @@ export async function chat(
   handlers: StreamHandlers = {},
   signal?: AbortSignal,
   /** 覆盖默认工具 schema;plan 模式传 planChatTools(只读子集),缺省=全量 chatTools。 */
-  toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[]
+  toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[],
 ): Promise<ChatResult> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
@@ -422,12 +426,7 @@ export async function chat(
     }
     try {
       if (config.provider === 'anthropic') {
-        return await anthropicChatOnce(
-          messages,
-          handlers,
-          signal,
-          toolsOverride ?? chatTools,
-        );
+        return await anthropicChatOnce(messages, handlers, signal, toolsOverride ?? chatTools);
       }
       return await chatOnce(messages, handlers, signal, toolsOverride);
     } catch (err) {
@@ -492,7 +491,7 @@ async function chatOnce(
   messages: ChatMessage[],
   handlers: StreamHandlers,
   signal: AbortSignal | undefined,
-  toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined
+  toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined,
 ): Promise<ChatResult> {
   // 防御:messages 必须至少含一条非空 user 消息,否则 OpenAI/Anthropic 都会 400。
   // compact force 分支曾把所有 user 丢进摘要 → 重建 history 无 user → 下一轮 400。
@@ -501,7 +500,11 @@ async function chatOnce(
     if (m.role !== 'user') return false;
     const c = (m as { content?: unknown }).content;
     if (typeof c === 'string') return c.length > 0;
-    if (Array.isArray(c)) return c.some((p) => (p as { type?: string; text?: string }).type === 'text' && ((p as { text?: string }).text?.length ?? 0) > 0);
+    if (Array.isArray(c))
+      return c.some(
+        (p) =>
+          (p as { type?: string; text?: string }).type === 'text' && ((p as { text?: string }).text?.length ?? 0) > 0,
+      );
     return false;
   });
   if (!hasNonEmptyUser) {
@@ -514,7 +517,7 @@ async function chatOnce(
     : (body: Record<string, unknown>, opts: { signal?: AbortSignal } | undefined) =>
         client.chat.completions.create(
           body as unknown as Parameters<typeof client.chat.completions.create>[0],
-          opts as unknown as Parameters<typeof client.chat.completions.create>[1]
+          opts as unknown as Parameters<typeof client.chat.completions.create>[1],
         );
   const activeTools = toolsOverride ?? chatTools;
   const stream = await create(
@@ -534,7 +537,7 @@ async function chatOnce(
       ...(config.maxTokens ? { max_tokens: config.maxTokens } : {}),
       ...(config.includeUsage ? { stream_options: { include_usage: true } } : {}),
     },
-    signal ? { signal } : undefined
+    signal ? { signal } : undefined,
   );
 
   // content 内嵌 think 标签由独立增量状态机过滤。它只暂存“可能组成标签”的后缀，
@@ -543,10 +546,7 @@ async function chatOnce(
   let consumedAny = false;
   const thinkFilter = new ThinkTagFilter();
   let usage: ChatUsage | undefined;
-  const toolAcc = new Map<
-    number,
-    { id?: string; name: string; arguments: string }
-  >();
+  const toolAcc = new Map<number, { id?: string; name: string; arguments: string }>();
 
   const emitVisible = (text: string): void => {
     if (!text) return;
@@ -734,8 +734,7 @@ export function messageTokens(m: ChatMessage): number {
   if (role === 'system') structural = 3;
   else if (role === 'tool') structural = 6;
   let body = contentTokens((m as { content?: unknown }).content);
-  const tcs = (m as { tool_calls?: { function?: { arguments?: string } }[] })
-    .tool_calls;
+  const tcs = (m as { tool_calls?: { function?: { arguments?: string } }[] }).tool_calls;
   if (tcs) {
     for (const tc of tcs) body += estimateTokens(tc?.function?.arguments ?? '');
   }
@@ -752,9 +751,7 @@ export function estimateMessagesTokens(messages: ChatMessage[]): number {
 const schemaTokensCache = new WeakMap<object, number>();
 
 /** 估算本次实际发送的工具 schema token；按工具数组实例缓存。 */
-export function estimateToolSchemaTokens(
-  activeTools: readonly ChatTool[] = chatTools,
-): number {
+export function estimateToolSchemaTokens(activeTools: readonly ChatTool[] = chatTools): number {
   if (activeTools.length === 0) return 0;
   const key = activeTools as object;
   const cached = schemaTokensCache.get(key);
@@ -766,9 +763,7 @@ export function estimateToolSchemaTokens(
 
 /** 把模型级校正系数统一应用到原始估算。 */
 export function correctTokenEstimate(estimate: number, correction: number = 1): number {
-  const safeCorrection = Number.isFinite(correction)
-    ? Math.max(0.5, Math.min(2, correction))
-    : 1;
+  const safeCorrection = Number.isFinite(correction) ? Math.max(0.5, Math.min(2, correction)) : 1;
   return estimate > 0 ? Math.max(1, Math.ceil(estimate * safeCorrection)) : 0;
 }
 

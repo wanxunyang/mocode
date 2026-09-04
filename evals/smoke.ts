@@ -52,18 +52,17 @@ function removeFixture(root: string): void {
   rmSync(root, { recursive: true, force: true });
 }
 
-function assertWorkspaceProfile(
-  manager: ProjectPackageManager,
-  rootManifest: object,
-  workspaceYaml?: string,
-): void {
+function assertWorkspaceProfile(manager: ProjectPackageManager, rootManifest: object, workspaceYaml?: string): void {
   const root = fixture(rootManifest, manager === 'pnpm' ? 'pnpm-lock.yaml' : undefined);
   try {
     if (workspaceYaml) writeFileSync(path.join(root, 'pnpm-workspace.yaml'), workspaceYaml, 'utf8');
     writePackage(root, 'packages/app', { name: `${manager}-app`, scripts: { test: 'x' } });
     const profile = discoverProjectProfile(root);
     assert.equal(profile.packageManager, manager);
-    assert.deepEqual(profile.packages.map((item) => item.name), ['root', `${manager}-app`]);
+    assert.deepEqual(
+      profile.packages.map((item) => item.name),
+      ['root', `${manager}-app`],
+    );
   } finally {
     removeFixture(root);
   }
@@ -97,9 +96,12 @@ const cases: SmokeCase[] = [
       assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, { prompt }), 'allow');
       assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, { prompt }), 'allow');
       assert.equal(prompts, 1);
-      assert.equal(await checkPermission(runCommandTool, { command: 'npm publish' }, undefined, {
-        prompt: async () => ({ action: 'selected', value: t('permission.deny') }),
-      }), 'deny');
+      assert.equal(
+        await checkPermission(runCommandTool, { command: 'npm publish' }, undefined, {
+          prompt: async () => ({ action: 'selected', value: t('permission.deny') }),
+        }),
+        'deny',
+      );
       assert.notEqual(
         permissionFingerprint(runCommandTool, { command: 'npm test' }),
         permissionFingerprint(runCommandTool, { command: 'npm publish' }),
@@ -111,14 +113,20 @@ const cases: SmokeCase[] = [
     name: 'denies cancelled and aborted permission requests',
     async run() {
       resetPermissionGrantsForTests();
-      assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, {
-        prompt: async () => ({ action: 'cancelled' }),
-      }), 'deny');
+      assert.equal(
+        await checkPermission(runCommandTool, { command: 'npm test' }, undefined, {
+          prompt: async () => ({ action: 'cancelled' }),
+        }),
+        'deny',
+      );
       const controller = new AbortController();
       controller.abort();
-      assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, controller.signal, {
-        prompt: async () => ({ action: 'selected', value: t('permission.allow') }),
-      }), 'deny');
+      assert.equal(
+        await checkPermission(runCommandTool, { command: 'npm test' }, controller.signal, {
+          prompt: async () => ({ action: 'selected', value: t('permission.allow') }),
+        }),
+        'deny',
+      );
     },
   },
   {
@@ -136,17 +144,23 @@ const cases: SmokeCase[] = [
         assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, options), 'allow');
         assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, options), 'allow');
         assert.equal(prompts, 1);
-        assert.equal(await checkPermission(runCommandTool, { command: 'npm run build' }, undefined, {
-          ...options,
-          prompt: async () => ({ action: 'selected', value: t('permission.deny') }),
-        }), 'deny');
+        assert.equal(
+          await checkPermission(runCommandTool, { command: 'npm run build' }, undefined, {
+            ...options,
+            prompt: async () => ({ action: 'selected', value: t('permission.deny') }),
+          }),
+          'deny',
+        );
         const otherRoot = fixture({ scripts: { test: 'x' } });
         try {
-          assert.equal(await checkPermission(runCommandTool, { command: 'npm test' }, undefined, {
-            ...options,
-            projectRoot: otherRoot,
-            prompt: async () => ({ action: 'selected', value: t('permission.deny') }),
-          }), 'deny');
+          assert.equal(
+            await checkPermission(runCommandTool, { command: 'npm test' }, undefined, {
+              ...options,
+              projectRoot: otherRoot,
+              prompt: async () => ({ action: 'selected', value: t('permission.deny') }),
+            }),
+            'deny',
+          );
         } finally {
           removeFixture(otherRoot);
         }
@@ -211,7 +225,9 @@ const cases: SmokeCase[] = [
     name: 'discovers npm array workspaces',
     run() {
       assertWorkspaceProfile('npm', {
-        name: 'root', packageManager: 'npm@10.0.0', workspaces: ['packages/*'],
+        name: 'root',
+        packageManager: 'npm@10.0.0',
+        workspaces: ['packages/*'],
       });
     },
   },
@@ -219,18 +235,16 @@ const cases: SmokeCase[] = [
     name: 'discovers yarn object workspaces',
     run() {
       assertWorkspaceProfile('yarn', {
-        name: 'root', packageManager: 'yarn@4.0.0', workspaces: { packages: ['packages/*'] },
+        name: 'root',
+        packageManager: 'yarn@4.0.0',
+        workspaces: { packages: ['packages/*'] },
       });
     },
   },
   {
     name: 'discovers pnpm-workspace packages',
     run() {
-      assertWorkspaceProfile(
-        'pnpm',
-        { name: 'root', packageManager: 'pnpm@9.0.0' },
-        "packages:\n  - 'packages/*'\n",
-      );
+      assertWorkspaceProfile('pnpm', { name: 'root', packageManager: 'pnpm@9.0.0' }, "packages:\n  - 'packages/*'\n");
     },
   },
   {
@@ -248,15 +262,12 @@ const cases: SmokeCase[] = [
       const { root } = affectedWorkspaceFixture();
       try {
         const profile = discoverProjectProfile(root);
-        const changed = process.platform === 'win32'
-          ? 'PACKAGES\\A\\src\\..\\src\\x.ts'
-          : 'packages/a/src/../src/x.ts';
-        const result = resolveAffectedPackages(
-          profile,
-          [changed, 'packages/a/src/x.ts'],
-          { changedFilesBase: root },
+        const changed = process.platform === 'win32' ? 'PACKAGES\\A\\src\\..\\src\\x.ts' : 'packages/a/src/../src/x.ts';
+        const result = resolveAffectedPackages(profile, [changed, 'packages/a/src/x.ts'], { changedFilesBase: root });
+        assert.deepEqual(
+          result.packages.map((item) => item.package.name),
+          ['a'],
         );
-        assert.deepEqual(result.packages.map((item) => item.package.name), ['a']);
         assert.equal(result.canonicalChangedFiles.length, 1);
         assert.equal(result.packages[0]?.reasons[0]?.classification, 'source');
         assert.equal(result.rejected.length, 0);
@@ -271,16 +282,19 @@ const cases: SmokeCase[] = [
       const { root } = affectedWorkspaceFixture();
       try {
         const profile = discoverProjectProfile(root);
-        const result = resolveAffectedPackages(
-          profile,
-          ['tsconfig.json', 'package.json'],
-          { changedFilesBase: root },
-        );
+        const result = resolveAffectedPackages(profile, ['tsconfig.json', 'package.json'], { changedFilesBase: root });
         assert.equal(result.affectsAll, true);
-        assert.deepEqual(result.packages.map((item) => item.package.name), ['root', 'a', 'b']);
-        assert.ok(result.packages.every((item) =>
-          item.reasons.some((reason) => reason.kind === 'root_config_change')
-          && item.reasons.some((reason) => reason.kind === 'workspace_config_change')));
+        assert.deepEqual(
+          result.packages.map((item) => item.package.name),
+          ['root', 'a', 'b'],
+        );
+        assert.ok(
+          result.packages.every(
+            (item) =>
+              item.reasons.some((reason) => reason.kind === 'root_config_change') &&
+              item.reasons.some((reason) => reason.kind === 'workspace_config_change'),
+          ),
+        );
       } finally {
         removeFixture(root);
       }
@@ -292,24 +306,18 @@ const cases: SmokeCase[] = [
       const { root } = affectedWorkspaceFixture();
       try {
         const profile = discoverProjectProfile(root);
-        const escaped = resolveAffectedPackages(
-          profile,
-          ['../outside.ts'],
-          { changedFilesBase: root },
-        );
+        const escaped = resolveAffectedPackages(profile, ['../outside.ts'], { changedFilesBase: root });
         assert.equal(escaped.rejected[0]?.reason, 'outside_project');
         assert.equal(escaped.packages.length, 0);
 
-        const expanded = resolveAffectedPackages(
-          profile,
-          ['packages/a/tests/fixtures/case.ts'],
-          {
-            changedFilesBase: root,
-            expandDependents: (_direct, project) =>
-              project.packages.filter((item) => item.name === 'b'),
-          },
+        const expanded = resolveAffectedPackages(profile, ['packages/a/tests/fixtures/case.ts'], {
+          changedFilesBase: root,
+          expandDependents: (_direct, project) => project.packages.filter((item) => item.name === 'b'),
+        });
+        assert.deepEqual(
+          expanded.packages.map((item) => item.package.name),
+          ['a', 'b'],
         );
-        assert.deepEqual(expanded.packages.map((item) => item.package.name), ['a', 'b']);
         assert.equal(expanded.packages[0]?.reasons[0]?.classification, 'fixture');
         assert.equal(expanded.packages[1]?.reasons[0]?.kind, 'dependent_change');
       } finally {
@@ -323,12 +331,7 @@ const cases: SmokeCase[] = [
       const { root, packageA } = affectedWorkspaceFixture();
       const previousRoot = setSandboxRoot(root);
       try {
-        const result = await runCommandRaw(
-          'node -e "console.log(process.cwd())"',
-          5000,
-          undefined,
-          packageA,
-        );
+        const result = await runCommandRaw('node -e "console.log(process.cwd())"', 5000, undefined, packageA);
         assert.equal(result.status, 'passed');
         const actual = path.resolve(result.output.trim());
         assert.equal(
@@ -362,7 +365,7 @@ const cases: SmokeCase[] = [
     run() {
       const root = fixture({
         name: 'safe-json',
-        scripts: { postinstall: 'node -e "require(\'fs\').writeFileSync(\'executed\',\'yes\')"' },
+        scripts: { postinstall: "node -e \"require('fs').writeFileSync('executed','yes')\"" },
       });
       try {
         const profile = discoverProjectProfile(root);
@@ -440,10 +443,7 @@ const cases: SmokeCase[] = [
         options: ['  现有文档  ', '新建文件'],
       };
       assert.equal(validateToolArguments(askHumanTool, legacyStrings).valid, true);
-      assert.deepEqual(legacyStrings.options, [
-        { label: '现有文档' },
-        { label: '新建文件' },
-      ]);
+      assert.deepEqual(legacyStrings.options, [{ label: '现有文档' }, { label: '新建文件' }]);
       const askSchema = askHumanTool.parameters as {
         required?: string[];
         properties?: { options?: { minItems?: number } };

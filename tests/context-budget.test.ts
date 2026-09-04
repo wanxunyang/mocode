@@ -26,9 +26,7 @@ function report(input: {
   rawTotal?: number;
   correction?: number;
 }): BudgetReport {
-  const layers = Object.fromEntries(
-    BUDGET_LAYERS.map((name) => [name, layer()]),
-  ) as Record<BudgetLayer, LayerBudget>;
+  const layers = Object.fromEntries(BUDGET_LAYERS.map((name) => [name, layer()])) as Record<BudgetLayer, LayerBudget>;
   layers.system = layer(input.system ?? false, input.system ? 1 : 0);
   layers.history = layer(input.history ?? false, input.history ? 1 : 0);
   return {
@@ -62,8 +60,7 @@ test('evaluateBudget 正确分层、排序且不修改 history', () => {
   assert.ok(result.layers.toolRecent.actual > 0);
   assert.equal(
     result.total,
-    BUDGET_LAYERS.filter((name) => name !== 'reserve')
-      .reduce((sum, name) => sum + result.layers[name].actual, 0),
+    BUDGET_LAYERS.filter((name) => name !== 'reserve').reduce((sum, name) => sum + result.layers[name].actual, 0),
   );
   for (let index = 1; index < result.triggers.length; index++) {
     assert.ok(result.layers[result.triggers[index - 1]].overRatio >= result.layers[result.triggers[index]].overRatio);
@@ -75,26 +72,27 @@ test('scheduleActions 常规触发与窗口硬闸', () => {
   // system 层超预算只是诊断,不再产出告警动作(唯一消费方是每步刷屏,小窗口下是常态噪声)
   assert.deepEqual(scheduleActions(report({ system: true })), []);
   // 常规:history 层超预算 + headroom 为负 → compact
-  assert.deepEqual(
-    scheduleActions(report({ history: true, total: 10_000 })),
-    [{ kind: 'compact_history' }],
-  );
+  assert.deepEqual(scheduleActions(report({ history: true, total: 10_000 })), [{ kind: 'compact_history' }]);
   // 硬闸:校正后 total=0、history 层未超、totalOver=false,但 rawTotal 达触发线 → 照样 compact
   assert.deepEqual(
-    scheduleActions(report({
-      total: 0,
-      rawTotal: Math.ceil(DEFAULT_BUDGET_POLICY.pressureTriggerRatio * 10_000),
-      correction: 0.5,
-    })),
+    scheduleActions(
+      report({
+        total: 0,
+        rawTotal: Math.ceil(DEFAULT_BUDGET_POLICY.pressureTriggerRatio * 10_000),
+        correction: 0.5,
+      }),
+    ),
     [{ kind: 'compact_history' }],
   );
   // 硬闸未达触发线 → 不压
   assert.deepEqual(
-    scheduleActions(report({
-      total: 0,
-      rawTotal: Math.floor(DEFAULT_BUDGET_POLICY.pressureTriggerRatio * 10_000) - 1,
-      correction: 0.5,
-    })),
+    scheduleActions(
+      report({
+        total: 0,
+        rawTotal: Math.floor(DEFAULT_BUDGET_POLICY.pressureTriggerRatio * 10_000) - 1,
+        correction: 0.5,
+      }),
+    ),
     [],
   );
 });
@@ -160,11 +158,7 @@ test('ephemeralTokens 可独立把总量推过压力线', () => {
   const gap = Math.ceil(triggerLine - before.rawTotal) + 1;
   const after = evaluateBudget(history, window, 0, 1, [], gap);
   assert.ok(after.rawTotal >= triggerLine, '加上尾部注入后应达触发线');
-  assert.deepEqual(
-    scheduleActions(after),
-    [{ kind: 'compact_history' }],
-    '尾部注入的固定开销必须能独立触发压缩',
-  );
+  assert.deepEqual(scheduleActions(after), [{ kind: 'compact_history' }], '尾部注入的固定开销必须能独立触发压缩');
 });
 
 test('evaluateBudget property: 300 组输入保持纯函数与报告不变量', () => {
@@ -172,53 +166,68 @@ test('evaluateBudget property: 300 组输入保持纯函数与报告不变量', 
     role: fc.constantFrom<'user' | 'assistant' | 'tool'>('user', 'assistant', 'tool'),
     content: fc.string({ maxLength: 80 }),
   });
-  fc.assert(fc.property(
-    fc.array(messageArb, { maxLength: 30 }),
-    fc.integer({ min: 1, max: 100_000 }),
-    fc.integer({ min: 0, max: 300 }),
-    (messages, window, correctionPercent) => {
-      const history = [system('root'), ...messages] as ChatMessage[];
-      const before = JSON.stringify(history);
-      const result = evaluateBudget(history, window, 3, correctionPercent / 100);
-      assert.equal(JSON.stringify(history), before);
-      assert.equal(result.total, BUDGET_LAYERS.filter((name) => name !== 'reserve')
-        .reduce((sum, name) => sum + result.layers[name].actual, 0));
-      for (const name of BUDGET_LAYERS) {
-        assert.equal(result.layers[name].budget, Math.floor(BUDGET_RATIO[name] * window));
-        assert.ok(Number.isInteger(result.layers[name].actual) && result.layers[name].actual >= 0);
-      }
-      // rawTotal ≈ correction=1 时的总量:adj() 每条消息 round(raw*corr) 再除回 corr,
-      // 逐条误差 ≤ 0.5/corr ≤ 1(correction 已钳位到 ≥0.5),故容差取消息条数。
-      const raw = evaluateBudget(history, window, 3, 1);
-      assert.ok(Math.abs(result.rawTotal - raw.total) <= history.length + 1,
-        `rawTotal ${result.rawTotal} vs raw.total ${raw.total}`);
-    },
-  ), { numRuns: 300 });
+  fc.assert(
+    fc.property(
+      fc.array(messageArb, { maxLength: 30 }),
+      fc.integer({ min: 1, max: 100_000 }),
+      fc.integer({ min: 0, max: 300 }),
+      (messages, window, correctionPercent) => {
+        const history = [system('root'), ...messages] as ChatMessage[];
+        const before = JSON.stringify(history);
+        const result = evaluateBudget(history, window, 3, correctionPercent / 100);
+        assert.equal(JSON.stringify(history), before);
+        assert.equal(
+          result.total,
+          BUDGET_LAYERS.filter((name) => name !== 'reserve').reduce((sum, name) => sum + result.layers[name].actual, 0),
+        );
+        for (const name of BUDGET_LAYERS) {
+          assert.equal(result.layers[name].budget, Math.floor(BUDGET_RATIO[name] * window));
+          assert.ok(Number.isInteger(result.layers[name].actual) && result.layers[name].actual >= 0);
+        }
+        // rawTotal ≈ correction=1 时的总量:adj() 每条消息 round(raw*corr) 再除回 corr,
+        // 逐条误差 ≤ 0.5/corr ≤ 1(correction 已钳位到 ≥0.5),故容差取消息条数。
+        const raw = evaluateBudget(history, window, 3, 1);
+        assert.ok(
+          Math.abs(result.rawTotal - raw.total) <= history.length + 1,
+          `rawTotal ${result.rawTotal} vs raw.total ${raw.total}`,
+        );
+      },
+    ),
+    { numRuns: 300 },
+  );
 });
 
 test('scheduleActions property: 300 组报告动作有序且硬闸不被校正折扣否决', () => {
-  fc.assert(fc.property(
-    fc.integer({ min: 0, max: 100_000 }),
-    fc.integer({ min: 0, max: 100_000 }),
-    fc.boolean(),
-    fc.boolean(),
-    fc.double({ min: 0.5, max: 2, noNaN: true }),
-    (total, rawTotal, historyOver, totalOver, correction) => {
-      const actions = scheduleActions(report({
-        history: historyOver,
-        total: totalOver && total === 0 ? 1 : total,
-        totalOver,
-        rawTotal,
-        correction,
-      }));
-      assert.ok(actions.every((action) => action.kind === 'compact_history'));
-      const hasCompact = actions.some((action) => action.kind === 'compact_history');
-      if (rawTotal >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * 10_000) {
-        assert.ok(hasCompact, `硬闸:rawTotal=${rawTotal} 必须触发 compact`);
-      }
-      if (!hasCompact) {
-        assert.ok(Math.max(rawTotal, totalOver && total === 0 ? 1 : total) < DEFAULT_BUDGET_POLICY.pressureTriggerRatio * 10_000);
-      }
-    },
-  ), { numRuns: 300 });
+  fc.assert(
+    fc.property(
+      fc.integer({ min: 0, max: 100_000 }),
+      fc.integer({ min: 0, max: 100_000 }),
+      fc.boolean(),
+      fc.boolean(),
+      fc.double({ min: 0.5, max: 2, noNaN: true }),
+      (total, rawTotal, historyOver, totalOver, correction) => {
+        const actions = scheduleActions(
+          report({
+            history: historyOver,
+            total: totalOver && total === 0 ? 1 : total,
+            totalOver,
+            rawTotal,
+            correction,
+          }),
+        );
+        assert.ok(actions.every((action) => action.kind === 'compact_history'));
+        const hasCompact = actions.some((action) => action.kind === 'compact_history');
+        if (rawTotal >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * 10_000) {
+          assert.ok(hasCompact, `硬闸:rawTotal=${rawTotal} 必须触发 compact`);
+        }
+        if (!hasCompact) {
+          assert.ok(
+            Math.max(rawTotal, totalOver && total === 0 ? 1 : total) <
+              DEFAULT_BUDGET_POLICY.pressureTriggerRatio * 10_000,
+          );
+        }
+      },
+    ),
+    { numRuns: 300 },
+  );
 });

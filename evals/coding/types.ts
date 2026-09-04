@@ -1,6 +1,12 @@
 export type BenchmarkGroup =
-  | 'single-file' | 'multi-file' | 'types' | 'tests' | 'resilience'
-  | 'context' | 'monorepo' | 'no-tests';
+  | 'single-file'
+  | 'multi-file'
+  | 'types'
+  | 'tests'
+  | 'resilience'
+  | 'context'
+  | 'monorepo'
+  | 'no-tests';
 export type BenchmarkDifficulty = 'basic' | 'hard' | 'advanced';
 
 export interface FileFixture {

@@ -1,11 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { jailResolve } from '../../sandbox/index.js';
-import {
-  commitChangeSet,
-  createChangeSet,
-  normalizeContentHash,
-  summarizeChangeSet,
-} from '../../changeset/index.js';
+import { commitChangeSet, createChangeSet, normalizeContentHash, summarizeChangeSet } from '../../changeset/index.js';
 import type { Tool, ToolOutcome } from '../types.js';
 
 function conflict(path: string, details: string): ToolOutcome {
@@ -43,11 +38,24 @@ expected_hash is required (sha256 from read_file artifact header) and must match
     type: 'object',
     properties: {
       path: { type: 'string', description: 'Absolute file path.' },
-      old_string: { type: 'string', description: 'String replacement mode: the exact text to replace (must occur once). Mutually exclusive with line_start/line_end.' },
+      old_string: {
+        type: 'string',
+        description:
+          'String replacement mode: the exact text to replace (must occur once). Mutually exclusive with line_start/line_end.',
+      },
       new_string: { type: 'string', description: 'The replacement text.' },
-      line_start: { type: 'integer', description: 'Line-range mode: start line (1-based, inclusive). Mutually exclusive with old_string.' },
-      line_end: { type: 'integer', description: 'Line-range mode: end line (1-based, inclusive). Mutually exclusive with old_string.' },
-      expected_hash: { type: 'string', description: 'sha256 hash from the latest read_file artifact header (sha256:<64 hex>).' },
+      line_start: {
+        type: 'integer',
+        description: 'Line-range mode: start line (1-based, inclusive). Mutually exclusive with old_string.',
+      },
+      line_end: {
+        type: 'integer',
+        description: 'Line-range mode: end line (1-based, inclusive). Mutually exclusive with old_string.',
+      },
+      expected_hash: {
+        type: 'string',
+        description: 'sha256 hash from the latest read_file artifact header (sha256:<64 hex>).',
+      },
     },
     // 注意:expected_hash 故意不放进 schema 的 required。
     // 原因:缺失时若被 AJV 在 schema 层拦下,只会得到泛化的
@@ -102,7 +110,10 @@ expected_hash is required (sha256 from read_file artifact header) and must match
         return conflict(file, 'line_start 和 line_end 必须是整数。');
       }
       if (lineStart < 1 || lineEnd < lineStart) {
-        return conflict(file, `无效的 line range: line_start=${lineStart}, line_end=${lineEnd}。要求 line_start >= 1 且 line_end >= line_start。`);
+        return conflict(
+          file,
+          `无效的 line range: line_start=${lineStart}, line_end=${lineEnd}。要求 line_start >= 1 且 line_end >= line_start。`,
+        );
       }
 
       const lines = normalized.split('\n');
@@ -114,22 +125,30 @@ expected_hash is required (sha256 from read_file artifact header) and must match
       const startIndex = lineStart - 1;
       const endIndex = lineEnd - 1;
       const newLines = newNormalized.split('\n');
-      
+
       // 替换 lines[startIndex..endIndex] 为 newLines
       lines.splice(startIndex, endIndex - startIndex + 1, ...newLines);
       updated = lines.join('\n');
     }
 
     const replacement = data.includes('\r\n') ? updated.replace(/\n/g, '\r\n') : updated;
-    const result = await commitChangeSet(createChangeSet([{
-      path: file,
-      operation: 'update',
-      expectedHash,
-      replacement,
-    }]), ctx?.signal);
+    const result = await commitChangeSet(
+      createChangeSet([
+        {
+          path: file,
+          operation: 'update',
+          expectedHash,
+          replacement,
+        },
+      ]),
+      ctx?.signal,
+    );
     if (result.status === 'conflict') {
       const item = result.conflicts[0];
-      return conflict(file, `expected=${item?.expectedHash ?? 'missing'}, actual=${item?.actualHash ?? 'missing'}。请重新读取后再编辑。`);
+      return conflict(
+        file,
+        `expected=${item?.expectedHash ?? 'missing'}, actual=${item?.actualHash ?? 'missing'}。请重新读取后再编辑。`,
+      );
     }
     if (result.status === 'failed') {
       return {
@@ -147,9 +166,10 @@ expected_hash is required (sha256 from read_file artifact header) and must match
       retryable: false,
       changedFiles: result.changedFiles,
       changeSet: summary,
-      output: result.changedFiles.length === 0
-        ? `文件 ${file} 内容未变化 (ChangeSet ${summary.id})。`
-        : `已事务化编辑 ${file} (ChangeSet ${summary.id}, sha256=${summary.changes[0]?.afterHash})。`,
+      output:
+        result.changedFiles.length === 0
+          ? `文件 ${file} 内容未变化 (ChangeSet ${summary.id})。`
+          : `已事务化编辑 ${file} (ChangeSet ${summary.id}, sha256=${summary.changes[0]?.afterHash})。`,
     };
   },
 };

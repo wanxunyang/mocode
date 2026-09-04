@@ -13,14 +13,13 @@
 import type { Browser, BrowserContext, ConsoleMessage, Page } from 'playwright';
 import { randomBytes } from 'node:crypto';
 
-export type BrowserErrorCode =
-  | 'INVALID_ARGUMENTS'
-  | 'SANDBOX_DENIED'
-  | 'TIMEOUT'
-  | 'EXECUTION_ERROR';
+export type BrowserErrorCode = 'INVALID_ARGUMENTS' | 'SANDBOX_DENIED' | 'TIMEOUT' | 'EXECUTION_ERROR';
 
 export class BrowserManagerError extends Error {
-  constructor(public readonly code: BrowserErrorCode, message: string) {
+  constructor(
+    public readonly code: BrowserErrorCode,
+    message: string,
+  ) {
     super(message);
     this.name = 'BrowserManagerError';
   }
@@ -82,10 +81,7 @@ export function validateNavigationUrl(input: string): URL {
     throw new BrowserManagerError('INVALID_ARGUMENTS', `Invalid url: ${input}`);
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new BrowserManagerError(
-      'SANDBOX_DENIED',
-      `Only http and https URLs are allowed (received ${url.protocol}).`,
-    );
+    throw new BrowserManagerError('SANDBOX_DENIED', `Only http and https URLs are allowed (received ${url.protocol}).`);
   }
   if (url.username || url.password) {
     throw new BrowserManagerError('SANDBOX_DENIED', 'URLs with embedded credentials are not allowed.');
@@ -166,7 +162,11 @@ export async function openSession(opts: { headed?: boolean } = {}): Promise<Brow
   });
   page.on('pageerror', (error) => record(session, 'pageErrors', errorMessage(error)));
   page.on('requestfailed', (request) => {
-    record(session, 'failedRequests', `${request.method()} ${request.url()} — ${request.failure()?.errorText ?? 'failed'}`);
+    record(
+      session,
+      'failedRequests',
+      `${request.method()} ${request.url()} — ${request.failure()?.errorText ?? 'failed'}`,
+    );
   });
 
   sessions.set(session.sessionId, session);
@@ -242,9 +242,7 @@ async function finish(session: SessionRecord, action: string): Promise<ActionRes
   return { action, ...(await describeAsync(session)), diagnostics: diagnostics(session) };
 }
 
-export async function navigate(
-  opts: { sessionId?: string; url: string; timeoutMs?: number },
-): Promise<ActionResult> {
+export async function navigate(opts: { sessionId?: string; url: string; timeoutMs?: number }): Promise<ActionResult> {
   const session = requireSession(opts.sessionId);
   const url = validateNavigationUrl(opts.url);
   try {
@@ -261,9 +259,7 @@ export async function navigate(
   return finish(session, 'navigate');
 }
 
-export async function click(
-  opts: { sessionId?: string; selector: string; timeoutMs?: number },
-): Promise<ActionResult> {
+export async function click(opts: { sessionId?: string; selector: string; timeoutMs?: number }): Promise<ActionResult> {
   const session = requireSession(opts.sessionId);
   try {
     await session.page.click(opts.selector, { timeout: resolveTimeout(opts.timeoutMs) });
@@ -273,9 +269,12 @@ export async function click(
   return finish(session, 'click');
 }
 
-export async function fill(
-  opts: { sessionId?: string; selector: string; value: string; timeoutMs?: number },
-): Promise<ActionResult> {
+export async function fill(opts: {
+  sessionId?: string;
+  selector: string;
+  value: string;
+  timeoutMs?: number;
+}): Promise<ActionResult> {
   const session = requireSession(opts.sessionId);
   try {
     await session.page.fill(opts.selector, opts.value, { timeout: resolveTimeout(opts.timeoutMs) });
@@ -285,9 +284,12 @@ export async function fill(
   return finish(session, 'fill');
 }
 
-export async function press(
-  opts: { sessionId?: string; key: string; selector?: string; timeoutMs?: number },
-): Promise<ActionResult> {
+export async function press(opts: {
+  sessionId?: string;
+  key: string;
+  selector?: string;
+  timeoutMs?: number;
+}): Promise<ActionResult> {
   const session = requireSession(opts.sessionId);
   const timeout = resolveTimeout(opts.timeoutMs);
   try {
@@ -299,9 +301,11 @@ export async function press(
   return finish(session, 'press');
 }
 
-export async function waitFor(
-  opts: { sessionId?: string; selector: string; timeoutMs?: number },
-): Promise<ActionResult> {
+export async function waitFor(opts: {
+  sessionId?: string;
+  selector: string;
+  timeoutMs?: number;
+}): Promise<ActionResult> {
   const session = requireSession(opts.sessionId);
   try {
     await session.page.waitForSelector(opts.selector, { timeout: resolveTimeout(opts.timeoutMs) });
@@ -315,15 +319,13 @@ export interface TextResult extends ActionResult {
   text: string;
 }
 
-export async function readText(
-  opts: { sessionId?: string; selector?: string; limit?: number },
-): Promise<TextResult> {
+export async function readText(opts: { sessionId?: string; selector?: string; limit?: number }): Promise<TextResult> {
   const session = requireSession(opts.sessionId);
   const limit = Math.min(Math.max(Number(opts.limit ?? 4_000), 100), 32_000);
   let text: string;
   try {
     text = opts.selector
-      ? (await session.page.textContent(opts.selector, { timeout: DEFAULT_TIMEOUT_MS })) ?? ''
+      ? ((await session.page.textContent(opts.selector, { timeout: DEFAULT_TIMEOUT_MS })) ?? '')
       : await session.page.innerText('body');
   } catch (error) {
     wrapActionError(error);
@@ -339,9 +341,12 @@ export interface ScreenshotResult extends ActionResult {
   buffer: Buffer;
 }
 
-export async function screenshot(
-  opts: { sessionId?: string; fullPage?: boolean; selector?: string; timeoutMs?: number },
-): Promise<ScreenshotResult> {
+export async function screenshot(opts: {
+  sessionId?: string;
+  fullPage?: boolean;
+  selector?: string;
+  timeoutMs?: number;
+}): Promise<ScreenshotResult> {
   const session = requireSession(opts.sessionId);
   const timeout = resolveTimeout(opts.timeoutMs);
   let buffer: Buffer;

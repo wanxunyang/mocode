@@ -33,10 +33,7 @@ export async function runConfigWizard(): Promise<void> {
     process.exit(1);
   }
 
-  const apiKeyIn = await ask(
-    rl,
-    `LLM_API_KEY${cur.LLM_API_KEY ? t('config.keySet') : ''}: `,
-  );
+  const apiKeyIn = await ask(rl, `LLM_API_KEY${cur.LLM_API_KEY ? t('config.keySet') : ''}: `);
   const apiKey = apiKeyIn || cur.LLM_API_KEY || '';
   if (!apiKey) {
     console.error(t('config.required', { key: 'LLM_API_KEY' }));
@@ -44,10 +41,7 @@ export async function runConfigWizard(): Promise<void> {
     process.exit(1);
   }
 
-  const modelIn = await ask(
-    rl,
-    `LLM_MODEL${cur.LLM_MODEL ? ` [${cur.LLM_MODEL}]` : ''}${t('config.modelDefault')}: `,
-  );
+  const modelIn = await ask(rl, `LLM_MODEL${cur.LLM_MODEL ? ` [${cur.LLM_MODEL}]` : ''}${t('config.modelDefault')}: `);
   const model = modelIn || cur.LLM_MODEL || 'gpt-4o-mini';
 
   rl.close();

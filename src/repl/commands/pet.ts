@@ -16,7 +16,7 @@ export const petCommands: CommandHandler[] = [
   async (ctx) => {
     if (ctx.line !== '/pet quit') return unhandled();
     const { ok, reason } = await killPetProcess();
-    layout.contentWrite(`${ui.dim}(${ok ? '已关闭桌宠进程' : reason ?? '关闭失败'})${ui.reset}\n`);
+    layout.contentWrite(`${ui.dim}(${ok ? '已关闭桌宠进程' : (reason ?? '关闭失败')})${ui.reset}\n`);
     return next();
   },
   // /pet skin:菜单选皮(↑↓ 选,Enter 切换,Esc 取消),仿 /theme 的交互。要求桌宠已在运行

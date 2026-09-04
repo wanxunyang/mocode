@@ -3,12 +3,7 @@
 
 import type { ChatMessage } from '../llm/index.js';
 import { optimizeToolResult } from './pipeline.js';
-import {
-  canonicalizePath,
-  extractPath,
-  isToolResultSuccess,
-  toText,
-} from './utils.js';
+import { canonicalizePath, extractPath, isToolResultSuccess, toText } from './utils.js';
 
 interface ToolEncodingRecord {
   toolCallId: string;
@@ -61,17 +56,12 @@ export class AgeAwareEncodingState {
         const content = toText(toolMessage.content);
         if (!content || content.startsWith('⌦[')) continue;
         const age = Math.max(0, this.pushOrdinal - record.pushOrdinal - 1);
-        const encoded = optimizeToolResult(
-          record.toolName,
-          content,
-          record.argsRaw,
-          {
-            age,
-            isCold: true,
-            isFirstRead: record.isFirstRead,
-            phase: 'sweep',
-          },
-        );
+        const encoded = optimizeToolResult(record.toolName, content, record.argsRaw, {
+          age,
+          isCold: true,
+          isFirstRead: record.isFirstRead,
+          phase: 'sweep',
+        });
         if (encoded.length < content.length) {
           toolMessage.content = encoded;
           encodedCount++;
@@ -111,9 +101,7 @@ export class AgeAwareEncodingState {
 
         const content = toText(toolMessage.content);
         const succeeded = isToolResultSuccess(content);
-        const path = call.name === 'read_file'
-          ? canonicalizePath(extractPath(call.argsRaw))
-          : null;
+        const path = call.name === 'read_file' ? canonicalizePath(extractPath(call.argsRaw)) : null;
         const isFirstRead = path ? !this.seenReadPaths.has(path) : undefined;
 
         this.records.set(id, {
@@ -133,8 +121,6 @@ export class AgeAwareEncodingState {
   }
 }
 
-export function createAgeAwareEncodingState(
-  history: ChatMessage[] = [],
-): AgeAwareEncodingState {
+export function createAgeAwareEncodingState(history: ChatMessage[] = []): AgeAwareEncodingState {
   return new AgeAwareEncodingState(history);
 }

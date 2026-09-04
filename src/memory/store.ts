@@ -12,13 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  MAX_ACTIVE,
-  MAX_INDEX_ENTRIES,
-  MAX_MEMORY_ENTRY,
-  DECAY_DAYS,
-  GC_DAYS,
-} from '../tools/constants.js';
+import { MAX_ACTIVE, MAX_INDEX_ENTRIES, MAX_MEMORY_ENTRY, DECAY_DAYS, GC_DAYS } from '../tools/constants.js';
 
 export type MemoryType = 'decision' | 'fact' | 'pitfall' | 'reference' | 'feedback';
 export type MemoryStatus = 'active' | 'superseded' | 'archived';
@@ -215,12 +209,11 @@ function scoreEntry(e: MemoryEntry, terms: string[]): number {
 export function searchEntries(query: string, opts: SearchOpts = {}): MemoryEntry[] {
   const all = loadAll();
   const status = opts.status ?? 'active';
-  const pool = all.filter((e) => (status === 'any' ? true : e.status === status))
+  const pool = all
+    .filter((e) => (status === 'any' ? true : e.status === status))
     .filter((e) => (opts.type ? e.type === opts.type : true));
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const scored = pool
-    .map((e) => ({ e, s: scoreEntry(e, terms) }))
-    .filter((x) => x.s > 0);
+  const scored = pool.map((e) => ({ e, s: scoreEntry(e, terms) })).filter((x) => x.s > 0);
   scored.sort((a, b) => b.s - a.s);
   const limit = Math.max(1, Math.min(opts.limit ?? 5, 20));
   const top = scored.slice(0, limit);
@@ -422,16 +415,20 @@ export function buildMemoryIndexSection(memoryEnabled: boolean = true): string {
   const lines = shown.map((e) => `- ${e.id}: ${e.name} — ${e.summary} (${e.type})`);
   const capOmitted = Math.max(0, eligible.length - shown.length);
   const tailParts: string[] = [];
-  if (capOmitted > 0) tailParts.push(`${capOmitted} additional active entries omitted by cap (${shown.length}/${eligible.length} shown)`);
-  if (staleCount > 0) tailParts.push(`${staleCount} stale active entries hidden by index policy (no recall + older than ${DECAY_DAYS * 2}d; use memory_list to see all)`);
+  if (capOmitted > 0)
+    tailParts.push(`${capOmitted} additional active entries omitted by cap (${shown.length}/${eligible.length} shown)`);
+  if (staleCount > 0)
+    tailParts.push(
+      `${staleCount} stale active entries hidden by index policy (no recall + older than ${DECAY_DAYS * 2}d; use memory_list to see all)`,
+    );
   const tail = tailParts.length > 0 ? `\n\n…(${tailParts.join('; ')})` : '';
   return [
     '',
     '',
     '## Memory Index (retrieve full body via memory_search)',
-    'The following are saved memory entries (title/summary only). Retrieve full body via memory_search (pass id or keyword); use memory_list to see all,'
-      + ' memory_update to modify, memory_forget to archive. This list is a startup snapshot; entries added during the session are not listed here — use memory_list/memory_search to find them.'
-      + ' Index policy: pinned + recently-recalled always shown; long-untouched active entries are hidden to keep this section lean.',
+    'The following are saved memory entries (title/summary only). Retrieve full body via memory_search (pass id or keyword); use memory_list to see all,' +
+      ' memory_update to modify, memory_forget to archive. This list is a startup snapshot; entries added during the session are not listed here — use memory_list/memory_search to find them.' +
+      ' Index policy: pinned + recently-recalled always shown; long-untouched active entries are hidden to keep this section lean.',
     ...lines,
     tail,
   ].join('\n');

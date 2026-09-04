@@ -29,7 +29,7 @@ export function normalizeSelection(): { startLine: number; startCol: number; end
  *  反白外 SGR 直穿,保留原色。 */
 export const SEL_OPEN = '\x1B[30;103m'; // 30:黑前景 | 103:亮黄背景
 
-export const SEL_OFF = '\x1B[0m';       // 全清 SGR,行末 active 状态续接
+export const SEL_OFF = '\x1B[0m'; // 全清 SGR,行末 active 状态续接
 
 export function highlightRange(line: string, colStart: number, colEnd: number): string {
   if (colEnd <= colStart) return line;
@@ -63,7 +63,12 @@ export function highlightRange(line: string, colStart: number, colEnd: number): 
 }
 
 /** 从归一化选区抠出纯文本(去 ANSI,按显示列裁切,行间 \n 拼接)。越界行跳过(缓冲被 trim 等边界情况)。 */
-export function extractSelectionText(sel: { startLine: number; startCol: number; endLine: number; endCol: number }): string {
+export function extractSelectionText(sel: {
+  startLine: number;
+  startCol: number;
+  endLine: number;
+  endCol: number;
+}): string {
   const out: string[] = [];
   for (let abs = sel.startLine; abs <= sel.endLine; abs++) {
     const raw = content.lineAt(abs);
@@ -78,7 +83,12 @@ export function extractSelectionText(sel: { startLine: number; startCol: number;
 }
 
 /** 输入框选区归一化:按 (line, col) 字典序排成 start/end。无选区返 null。 */
-export function normalizeInputSelection(): { startLine: number; startCol: number; endLine: number; endCol: number } | null {
+export function normalizeInputSelection(): {
+  startLine: number;
+  startCol: number;
+  endLine: number;
+  endCol: number;
+} | null {
   if (!state.inputSelection) return null;
   const a = state.inputSelection.anchor;
   const b = state.inputSelection.end;
@@ -89,7 +99,12 @@ export function normalizeInputSelection(): { startLine: number; startCol: number
 }
 
 /** 从归一化输入框选区抠出纯文本(lines 上不带 ANSI,直接按 display_col 切)。越界行跳到该行末尾。 */
-export function extractInputSelectionText(sel: { startLine: number; startCol: number; endLine: number; endCol: number }): string {
+export function extractInputSelectionText(sel: {
+  startLine: number;
+  startCol: number;
+  endLine: number;
+  endCol: number;
+}): string {
   if (!state.lastView) return '';
   const out: string[] = [];
   for (let l = sel.startLine; l <= sel.endLine; l++) {
@@ -136,7 +151,7 @@ export function pasteIntoInput(): void {
  */
 export function inputScreenToInputPos(
   screenRow: number,
-  screenCol: number
+  screenCol: number,
 ): { line: number; displayCol: number; flatIdx: number; inSegVis: number } | null {
   if (!state.lastView) return null;
   const g = getGeo();
@@ -146,10 +161,7 @@ export function inputScreenToInputPos(
 
   // 输入框可视区的 (visRow, visCol) 屏幕坐标 → 0-based。
   // 点到可视区末行之下(空白区)→ 落到最末可视行(光标归最后一段);isInputRow 已挡可视区之上的点击。
-  const visRow = Math.max(
-    0,
-    Math.min(screenRow - firstInputRow, Math.max(0, inputRowsAvail - 1))
-  );
+  const visRow = Math.max(0, Math.min(screenRow - firstInputRow, Math.max(0, inputRowsAvail - 1)));
   // 屏幕列 (1-based SGR) → 显示列 (0-based),再扣 prompt 宽;尾点容许越界 clip 到 >=0。
   const visCol = Math.max(0, screenCol - 1 - promptW);
 
@@ -181,9 +193,7 @@ export function inputScreenToInputPos(
   let curAbs = curVisLine;
   for (let i = 0; i < state.lastView.cursorLine; i++) curAbs += lineVis[i].length;
   const startVis =
-    totalVis > maxInputRows
-      ? Math.max(0, Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows))
-      : 0;
+    totalVis > maxInputRows ? Math.max(0, Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows)) : 0;
 
   // 点到可视区末行之下(空行)→ 等价"光标在最末可视行的字符串末尾"。
   if (startVis + visRow >= totalVis) {

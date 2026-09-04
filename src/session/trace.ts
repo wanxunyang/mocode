@@ -7,10 +7,19 @@ import { getCurrentTurnId } from '../rollback/index.js';
 import { getCurrentSessionId } from './state.js';
 
 export type TraceEventType =
-  | 'turn_start' | 'turn_end' | 'step_start' | 'step_end'
-  | 'model_start' | 'model_retry' | 'model_end'
-  | 'tool_call_start' | 'tool_call_end' | 'permission'
-  | 'compact' | 'abort' | 'rollback'
+  | 'turn_start'
+  | 'turn_end'
+  | 'step_start'
+  | 'step_end'
+  | 'model_start'
+  | 'model_retry'
+  | 'model_end'
+  | 'tool_call_start'
+  | 'tool_call_end'
+  | 'permission'
+  | 'compact'
+  | 'abort'
+  | 'rollback'
   | 'ask_human_call'
   // Interstitial narration is observation-only; it never feeds instructions back to the model.
   | 'narration';

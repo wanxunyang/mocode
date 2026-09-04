@@ -61,17 +61,13 @@ export async function runCommandRaw(
 
   return new Promise<RawCommandResult>((done) => {
     const isWin = process.platform === 'win32';
-    const child = spawn(
-      isWin ? 'cmd.exe' : 'bash',
-      isWin ? ['/d', '/s', '/c', command] : ['-c', command],
-      {
-        cwd: executionCwd,
-        env: filterEnv(process.env),
-        // Without this, Node re-quotes cmd.exe arguments and `node -e "..."` can become
-        // a string literal that exits 0, causing false-positive validation on Windows.
-        windowsVerbatimArguments: isWin,
-      },
-    );
+    const child = spawn(isWin ? 'cmd.exe' : 'bash', isWin ? ['/d', '/s', '/c', command] : ['-c', command], {
+      cwd: executionCwd,
+      env: filterEnv(process.env),
+      // Without this, Node re-quotes cmd.exe arguments and `node -e "..."` can become
+      // a string literal that exits 0, causing false-positive validation on Windows.
+      windowsVerbatimArguments: isWin,
+    });
     const output = new BoundedCommandOutput();
     let finished = false;
 
@@ -161,7 +157,7 @@ export const runCommandTool: Tool = {
   name: 'run_command',
   description:
     'Run a shell command, merging stdout+stderr. Default timeout 120s. For tests, builds, git, etc.\n' +
-    'Multiple independent run_command calls may be issued in one response to save model round-trips; they execute serially, so do not depend one on another\'s output within the same message.',
+    "Multiple independent run_command calls may be issued in one response to save model round-trips; they execute serially, so do not depend one on another's output within the same message.",
   risk: 'dangerous',
   parameters: {
     type: 'object',

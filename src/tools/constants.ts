@@ -65,14 +65,7 @@ export const IGNORE = ['**/node_modules/**', '**/.git/**', '**/.codegraph/**'];
  * screenshot 抓整个桌面(隐私敏感),view_image 仅视觉模型有用。这 4 个默认不进入
  * 模型工具表,由 isFrontendToolsEnabled() 单一来源控制;/fe on|off 切换。
  */
-export const FRONTEND_TOOLS = new Set([
-  'browser',
-  'dev_server',
-  'screenshot',
-  'view_image',
-]);
-
-
+export const FRONTEND_TOOLS = new Set(['browser', 'dev_server', 'screenshot', 'view_image']);
 
 // ── plan 模式(只读规划,不执行)──────────────────────────────────────────────
 /**

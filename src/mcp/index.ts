@@ -48,9 +48,10 @@ export function getMcpTools(): Tool[] {
       tools.push({
         name: localName,
         description: `[MCP: ${client.name}] ${remote.description || `调用 ${remote.name}`}`,
-        parameters: remote.inputSchema && typeof remote.inputSchema === 'object'
-          ? remote.inputSchema
-          : { type: 'object', properties: {} },
+        parameters:
+          remote.inputSchema && typeof remote.inputSchema === 'object'
+            ? remote.inputSchema
+            : { type: 'object', properties: {} },
         // MCP 协议没有可靠副作用声明：未知能力、workspace 串行、每次确认。
         risk: 'dangerous',
         capabilities: {
@@ -78,7 +79,9 @@ export async function closeAllMcp(): Promise<void> {
   await Promise.allSettled(active.map((client) => client.close()));
 }
 
-export function getMcpWarnings(): string[] { return [...startupWarnings]; }
+export function getMcpWarnings(): string[] {
+  return [...startupWarnings];
+}
 
 function shouldRegisterTool(spec: McpServerSpec, remoteName: string): boolean {
   if (spec.excludeTools?.includes(remoteName)) return false;
@@ -100,12 +103,16 @@ function formatToolResult(result: { content: unknown[]; structuredContent?: unkn
     if (content.type === 'text' && typeof content.text === 'string') {
       parts.push(content.text);
     } else if (content.type === 'image') {
-      parts.push(`[MCP image: ${typeof content.mimeType === 'string' ? content.mimeType : 'unknown'}，已省略二进制数据]`);
+      parts.push(
+        `[MCP image: ${typeof content.mimeType === 'string' ? content.mimeType : 'unknown'}，已省略二进制数据]`,
+      );
     } else if (content.type === 'resource_link') {
       parts.push(`[MCP resource: ${String(content.name ?? content.uri ?? 'unknown')}]`);
     } else if (content.type === 'resource' && content.resource && typeof content.resource === 'object') {
       const resource = content.resource as Record<string, unknown>;
-      parts.push(typeof resource.text === 'string' ? resource.text : `[MCP resource: ${String(resource.uri ?? 'unknown')}]`);
+      parts.push(
+        typeof resource.text === 'string' ? resource.text : `[MCP resource: ${String(resource.uri ?? 'unknown')}]`,
+      );
     } else {
       parts.push(safeJson(content));
     }
@@ -116,7 +123,11 @@ function formatToolResult(result: { content: unknown[]; structuredContent?: unkn
 }
 
 function safeJson(value: unknown): string {
-  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function formatError(error: unknown): string {

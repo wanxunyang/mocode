@@ -197,7 +197,7 @@ export function writeBanner(lines: string[]): void {
     const existed = content.totalRows();
     if (existed !== 0) {
       throw new Error(
-        `writeBanner: 首次调用时 buffer 已有 ${existed} 行,需先 clearContent 再 writeBanner(否则会覆盖已有内容)`
+        `writeBanner: 首次调用时 buffer 已有 ${existed} 行,需先 clearContent 再 writeBanner(否则会覆盖已有内容)`,
       );
     }
     content.setLines(lines);
@@ -226,9 +226,7 @@ export function rewriteBanner(lines: string[]): void {
     return;
   }
   if (lines.length !== state.bannerH) {
-    throw new Error(
-      `rewriteBanner: 行数 ${lines.length} ≠ 已建 bannerH ${state.bannerH}(调用方需统一行数)`
-    );
+    throw new Error(`rewriteBanner: 行数 ${lines.length} ≠ 已建 bannerH ${state.bannerH}(调用方需统一行数)`);
   }
   content.replaceHead(0, lines);
   if (state.scrollOffset === 0) repaintViewport();
@@ -437,7 +435,7 @@ export function contentInsertAfter(after: number, lines: string[], keepViewport 
   // 插入后要让原视口尾行仍在屏底 → scrollOffset = 插入后新增的、在原视口尾行之后的行数。
   if (keepViewport && !scrolled && after < totalBefore) {
     // 插入点在原缓冲内(非追加到末尾),计算需要滚动的偏移量
-    const insertedAfterViewport = after >= (totalBefore - g.contentBottom);
+    const insertedAfterViewport = after >= totalBefore - g.contentBottom;
     if (insertedAfterViewport) {
       // 插入点在视口内:保持视口位置,scrollOffset = 插入行数(展开内容在视口下方)
       state.scrollOffset = Math.min(delta, Math.max(0, content.totalRows() - g.contentBottom));
@@ -534,10 +532,7 @@ export function notifyContentReset(): void {
 
 /** 把物理行索引映射到一次 reflow 之后的新索引。段内锚点按段内相对进度映射，
  * 段后的索引整体平移；用于 scroll viewport 锚点和选区在 resize 后保持语义位置。 */
-function remapLineForReflow(
-  line: number,
-  change: content.ReflowChange,
-): number {
+function remapLineForReflow(line: number, change: content.ReflowChange): number {
   const oldEnd = change.start + change.oldCount;
   if (line < change.start) return line;
   if (line >= oldEnd) return Math.max(0, line + change.delta);
@@ -561,11 +556,7 @@ export function reflowContentForResize(cols: number, colsChanged: boolean): void
       const remapEndpoint = (line: number, col: number): { line: number; col: number } => {
         const oldEnd = change.start + change.oldCount;
         if (change.oldLines.length > 0 && line >= change.start && line < oldEnd) {
-          const mapped = remapWrappedPoint(
-            change.oldLines,
-            change.newLines,
-            { line: line - change.start, col },
-          );
+          const mapped = remapWrappedPoint(change.oldLines, change.newLines, { line: line - change.start, col });
           return { line: change.start + mapped.line, col: mapped.col };
         }
         return { line: remapLineForReflow(line, change), col };

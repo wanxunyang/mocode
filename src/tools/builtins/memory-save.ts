@@ -14,7 +14,10 @@ export const memorySaveTool: Tool = {
   parameters: {
     type: 'object',
     properties: {
-      name: { type: 'string', description: 'Short unique title (converted to id; rejected if it collides with an existing one)' },
+      name: {
+        type: 'string',
+        description: 'Short unique title (converted to id; rejected if it collides with an existing one)',
+      },
       summary: { type: 'string', description: 'One-line summary (goes into the index; keep it short)' },
       body: { type: 'string', description: 'Full content (details/context/evidence)' },
       type: {
@@ -36,7 +39,10 @@ export const memorySaveTool: Tool = {
           type: 'object',
           properties: {
             src: { type: 'string', description: 'Source entity name (defaults to the memory name)' },
-            relation: { type: 'string', description: 'Relation, snake_case, e.g. depends_on / decided_by / conflicts_with' },
+            relation: {
+              type: 'string',
+              description: 'Relation, snake_case, e.g. depends_on / decided_by / conflicts_with',
+            },
             dst: { type: 'string', description: 'Target entity name' },
             fact: { type: 'string', description: 'Optional one-line statement for the edge' },
           },
@@ -53,8 +59,7 @@ export const memorySaveTool: Tool = {
     if (!name) return '错误:缺少 name。';
     if (!summary) return '错误:缺少 summary。';
     if (!body) return '错误:缺少 body。';
-    const type =
-      typeof args.type === 'string' ? (args.type as MemoryType) : undefined;
+    const type = typeof args.type === 'string' ? (args.type as MemoryType) : undefined;
     const scope = args.scope === 'global' ? 'global' : 'project';
     const r = saveEntry({
       name,

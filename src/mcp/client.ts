@@ -5,7 +5,13 @@ const PROTOCOL_VERSION = '2025-03-26';
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 type JsonObject = Record<string, unknown>;
-type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; signal?: AbortSignal; onAbort?: () => void };
+type Pending = {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+};
 type SseEvent = { event: string; data: string };
 
 abstract class McpTransport {
@@ -19,7 +25,10 @@ class StdioTransport extends McpTransport {
   private child: ChildProcess | null = null;
   private buffer = Buffer.alloc(0);
 
-  constructor(receive: (message: unknown) => void, private readonly spec: Extract<McpServerSpec, { transport: 'stdio' }>) {
+  constructor(
+    receive: (message: unknown) => void,
+    private readonly spec: Extract<McpServerSpec, { transport: 'stdio' }>,
+  ) {
     super(receive);
   }
 
@@ -35,11 +44,22 @@ class StdioTransport extends McpTransport {
     });
     this.child = child;
     child.stdout?.on('data', (chunk: Buffer) => this.onData(chunk));
-    child.stderr?.on('data', () => { /* MCP stderr 是诊断输出，不混入协议流。 */ });
-    child.on('exit', (code, signal) => { this.child = null; if (code !== 0 && signal == null) this.receive({ error: { message: `stdio server 已退出 (${code})` } }); });
+    child.stderr?.on('data', () => {
+      /* MCP stderr 是诊断输出，不混入协议流。 */
+    });
+    child.on('exit', (code, signal) => {
+      this.child = null;
+      if (code !== 0 && signal == null) this.receive({ error: { message: `stdio server 已退出 (${code})` } });
+    });
     await new Promise<void>((resolve, reject) => {
-      const onSpawn = (): void => { child.off('error', onError); resolve(); };
-      const onError = (error: Error): void => { child.off('spawn', onSpawn); reject(error); };
+      const onSpawn = (): void => {
+        child.off('error', onError);
+        resolve();
+      };
+      const onError = (error: Error): void => {
+        child.off('spawn', onSpawn);
+        reject(error);
+      };
       child.once('spawn', onSpawn);
       child.once('error', onError);
     });
@@ -49,10 +69,9 @@ class StdioTransport extends McpTransport {
     if (!this.child?.stdin?.writable) throw new Error('MCP stdio server 未连接');
     const body = `${JSON.stringify(message)}\n`;
     // MCP stdio 传输使用 NDJSON；接收端仍兼容 Content-Length，方便接入历史 LSP 风格服务。
-    await new Promise<void>((resolve, reject) => this.child!.stdin!.write(
-      body,
-      (error) => error ? reject(error) : resolve(),
-    ));
+    await new Promise<void>((resolve, reject) =>
+      this.child!.stdin!.write(body, (error) => (error ? reject(error) : resolve())),
+    );
   }
 
   async close(): Promise<void> {
@@ -76,7 +95,10 @@ class StdioTransport extends McpTransport {
       }
       const header = this.buffer.subarray(0, headerEnd).toString('ascii');
       const match = /content-length\s*:\s*(\d+)/i.exec(header);
-      if (!match) { this.buffer = this.buffer.subarray(headerEnd + 4); continue; }
+      if (!match) {
+        this.buffer = this.buffer.subarray(headerEnd + 4);
+        continue;
+      }
       const length = Number(match[1]);
       const bodyStart = headerEnd + 4;
       if (this.buffer.length < bodyStart + length) return;
@@ -86,15 +108,26 @@ class StdioTransport extends McpTransport {
   }
 
   private receiveJson(raw: string): void {
-    try { this.receive(JSON.parse(raw)); } catch { /* 忽略 server 的非协议 stdout，避免打断会话。 */ }
+    try {
+      this.receive(JSON.parse(raw));
+    } catch {
+      /* 忽略 server 的非协议 stdout，避免打断会话。 */
+    }
   }
 }
 
 class StreamableHttpTransport extends McpTransport {
   private sessionId: string | null = null;
 
-  constructor(receive: (message: unknown) => void, private readonly spec: McpRemoteServerSpec) { super(receive); }
-  async start(): Promise<void> { /* 每个 JSON-RPC 请求自行 POST，无长连接需预热。 */ }
+  constructor(
+    receive: (message: unknown) => void,
+    private readonly spec: McpRemoteServerSpec,
+  ) {
+    super(receive);
+  }
+  async start(): Promise<void> {
+    /* 每个 JSON-RPC 请求自行 POST，无长连接需预热。 */
+  }
 
   async send(message: JsonObject): Promise<void> {
     const controller = new AbortController();
@@ -107,7 +140,11 @@ class StreamableHttpTransport extends McpTransport {
       };
       if (this.sessionId) headers['mcp-session-id'] = this.sessionId;
       const response = await fetch(this.spec.url, {
-        method: 'POST', headers, body: JSON.stringify(message), signal: controller.signal, redirect: 'error',
+        method: 'POST',
+        headers,
+        body: JSON.stringify(message),
+        signal: controller.signal,
+        redirect: 'error',
       });
       this.captureSession(response);
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
@@ -123,9 +160,19 @@ class StreamableHttpTransport extends McpTransport {
     }
   }
 
-  async close(): Promise<void> { this.sessionId = null; }
-  private captureSession(response: Response): void { this.sessionId = response.headers.get('mcp-session-id') ?? this.sessionId; }
-  private receiveEvent(event: SseEvent): void { try { this.receive(JSON.parse(event.data)); } catch { /* 非 JSON SSE event 无法作为 MCP 响应。 */ } }
+  async close(): Promise<void> {
+    this.sessionId = null;
+  }
+  private captureSession(response: Response): void {
+    this.sessionId = response.headers.get('mcp-session-id') ?? this.sessionId;
+  }
+  private receiveEvent(event: SseEvent): void {
+    try {
+      this.receive(JSON.parse(event.data));
+    } catch {
+      /* 非 JSON SSE event 无法作为 MCP 响应。 */
+    }
+  }
 }
 
 class SseTransport extends McpTransport {
@@ -135,12 +182,20 @@ class SseTransport extends McpTransport {
   private resolveEndpoint: (() => void) | null = null;
   private rejectEndpoint: ((error: Error) => void) | null = null;
 
-  constructor(receive: (message: unknown) => void, private readonly spec: McpRemoteServerSpec) { super(receive); }
+  constructor(
+    receive: (message: unknown) => void,
+    private readonly spec: McpRemoteServerSpec,
+  ) {
+    super(receive);
+  }
 
   async start(): Promise<void> {
     if (this.connecting) return this.connecting;
     this.controller = new AbortController();
-    this.connecting = new Promise<void>((resolve, reject) => { this.resolveEndpoint = resolve; this.rejectEndpoint = reject; });
+    this.connecting = new Promise<void>((resolve, reject) => {
+      this.resolveEndpoint = resolve;
+      this.rejectEndpoint = reject;
+    });
     void this.open();
     return this.connecting;
   }
@@ -154,10 +209,14 @@ class SseTransport extends McpTransport {
       const response = await fetch(this.endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...this.spec.headers },
-        body: JSON.stringify(message), signal: controller.signal, redirect: 'error',
+        body: JSON.stringify(message),
+        signal: controller.signal,
+        redirect: 'error',
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async close(): Promise<void> {
@@ -170,17 +229,27 @@ class SseTransport extends McpTransport {
   private async open(): Promise<void> {
     try {
       const response = await fetch(this.spec.url, {
-        headers: { accept: 'text/event-stream', ...this.spec.headers }, signal: this.controller?.signal, redirect: 'error',
+        headers: { accept: 'text/event-stream', ...this.spec.headers },
+        signal: this.controller?.signal,
+        redirect: 'error',
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
-      await consumeSse(response.body, (event) => {
-        if (event.event === 'endpoint') {
-          this.endpoint = new URL(event.data, this.spec.url);
-          this.resolveEndpoint?.();
-          return;
-        }
-        try { this.receive(JSON.parse(event.data)); } catch { /* 忽略非 MCP SSE event。 */ }
-      }, this.controller?.signal);
+      await consumeSse(
+        response.body,
+        (event) => {
+          if (event.event === 'endpoint') {
+            this.endpoint = new URL(event.data, this.spec.url);
+            this.resolveEndpoint?.();
+            return;
+          }
+          try {
+            this.receive(JSON.parse(event.data));
+          } catch {
+            /* 忽略非 MCP SSE event。 */
+          }
+        },
+        this.controller?.signal,
+      );
       if (!this.endpoint) throw new Error('SSE MCP server 在连接关闭前未提供 endpoint');
     } catch (error) {
       if (!this.controller?.signal.aborted) this.rejectEndpoint?.(asError(error));
@@ -197,17 +266,23 @@ export class McpClient {
   private closed = false;
   cachedTools: McpToolDefinition[] = [];
 
-  constructor(public readonly name: string, readonly spec: McpServerSpec) {
+  constructor(
+    public readonly name: string,
+    readonly spec: McpServerSpec,
+  ) {
     const receive = (message: unknown): void => this.onMessage(message);
     // 向后兼容早期仅提供 command/args 的 stdio 配置；新配置显式写 transport 更清晰。
-    this.transport = spec.transport === 'stdio' || ('command' in spec && typeof spec.command === 'string')
-      ? new StdioTransport(receive, spec as Extract<McpServerSpec, { transport: 'stdio' }>)
-      : spec.transport === 'sse'
-        ? new SseTransport(receive, spec)
-        : new StreamableHttpTransport(receive, spec as McpRemoteServerSpec);
+    this.transport =
+      spec.transport === 'stdio' || ('command' in spec && typeof spec.command === 'string')
+        ? new StdioTransport(receive, spec as Extract<McpServerSpec, { transport: 'stdio' }>)
+        : spec.transport === 'sse'
+          ? new SseTransport(receive, spec)
+          : new StreamableHttpTransport(receive, spec as McpRemoteServerSpec);
   }
 
-  isReady(): boolean { return this.initialized && !this.closed; }
+  isReady(): boolean {
+    return this.initialized && !this.closed;
+  }
 
   async initialize(): Promise<void> {
     if (this.isReady()) return;
@@ -333,7 +408,14 @@ async function consumeSse(
       let boundary: number;
       while ((boundary = buffered.search(/\r?\n\r?\n/)) !== -1) {
         const block = buffered.slice(0, boundary);
-        const separatorLength = buffered[boundary] === '\r' ? (buffered[boundary + 2] === '\r' ? 4 : 3) : (buffered[boundary + 1] === '\r' ? 3 : 2);
+        const separatorLength =
+          buffered[boundary] === '\r'
+            ? buffered[boundary + 2] === '\r'
+              ? 4
+              : 3
+            : buffered[boundary + 1] === '\r'
+              ? 3
+              : 2;
         buffered = buffered.slice(boundary + separatorLength);
         const event = parseSseBlock(block);
         if (event) onEvent(event);

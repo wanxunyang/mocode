@@ -5,12 +5,7 @@
 // when corrected or raw request occupancy reaches 80%.
 
 import type { ChatMessage, ChatTool } from '../llm/index.js';
-import {
-  chatTools,
-  estimateMessagesTokens,
-  estimateToolSchemaTokens,
-  messageTokens,
-} from '../llm/index.js';
+import { chatTools, estimateMessagesTokens, estimateToolSchemaTokens, messageTokens } from '../llm/index.js';
 import { toText } from './utils.js';
 
 /** 五区分账(占比对齐 CONTEXT_WINDOW)。顺序固定,便于遍历。 */
@@ -43,10 +38,10 @@ export interface BudgetPolicy {
 export const DEFAULT_BUDGET_POLICY: BudgetPolicy = {
   ratios: {
     system: 0.15,
-    history: 0.20,
+    history: 0.2,
     toolRecent: 0.25,
     toolOld: 0.25,
-    summary: 0.10,
+    summary: 0.1,
     reserve: 0.05,
   },
   hotTurnWindow: 4,
@@ -55,8 +50,8 @@ export const DEFAULT_BUDGET_POLICY: BudgetPolicy = {
   compactKeepRatio: 0.15,
   compactForceKeepRatio: 0.05,
   compactKeepMaxTokens: 48000,
-  pressureTriggerRatio: 0.80,
-  schedulerTargetRatio: 0.80,
+  pressureTriggerRatio: 0.8,
+  schedulerTargetRatio: 0.8,
   estimateSafetyFactor: 1.05,
   compactHeadroomTokens: 1500,
 };
@@ -160,9 +155,7 @@ export function evaluateBudget(
   let rawTotal = 0;
 
   const sysMsg = history[0];
-  const safeEphemeral = Number.isFinite(ephemeralTokens)
-    ? Math.max(0, Math.round(ephemeralTokens))
-    : 0;
+  const safeEphemeral = Number.isFinite(ephemeralTokens) ? Math.max(0, Math.round(ephemeralTokens)) : 0;
   const systemCosts: SystemCostBreakdown = {
     prompt: sysMsg ? msgTokens(sysMsg) : 0,
     toolSchemas: estimateToolSchemaTokens(activeTools),
@@ -170,8 +163,7 @@ export function evaluateBudget(
   };
   // 工具 schema、system prompt 与尾部 ephemeral 注入同属请求固定开销；
   // 必须计入总量才能可靠触发压缩(尾部注入不在 history 里,只能由调用方传入)。
-  const systemRaw =
-    systemCosts.prompt + systemCosts.toolSchemas + systemCosts.ephemeralInjection;
+  const systemRaw = systemCosts.prompt + systemCosts.toolSchemas + systemCosts.ephemeralInjection;
   layers.system.actual = adj(systemRaw);
   rawTotal += systemRaw;
 
@@ -266,12 +258,16 @@ export function scheduleActions(report: BudgetReport): ScheduleAction[] {
 /** 拍平成人类可读(供 /context 命令与 check-budget 脚本用)。 */
 export function formatReport(report: BudgetReport): string {
   const lines: string[] = [];
-  lines.push(`step ${report.step}  total ${report.total}/${report.window}  (${((report.total / report.window) * 100).toFixed(1)}%)  raw ${report.rawTotal}`);
+  lines.push(
+    `step ${report.step}  total ${report.total}/${report.window}  (${((report.total / report.window) * 100).toFixed(1)}%)  raw ${report.rawTotal}`,
+  );
   for (const k of BUDGET_LAYERS) {
     const lb = report.layers[k];
     const pct = lb.budget > 0 ? ((lb.actual / lb.budget) * 100).toFixed(0) : '-';
     const flag = lb.overBudget ? '⚠' : ' ';
-    lines.push(`  ${flag} ${k.padEnd(10)} ${String(lb.actual).padStart(6)} / ${String(lb.budget).padStart(6)} (${pct.padStart(3)}%)`);
+    lines.push(
+      `  ${flag} ${k.padEnd(10)} ${String(lb.actual).padStart(6)} / ${String(lb.budget).padStart(6)} (${pct.padStart(3)}%)`,
+    );
   }
   if (report.triggers.length > 0) {
     lines.push(`  triggers: ${report.triggers.join(' → ')}`);

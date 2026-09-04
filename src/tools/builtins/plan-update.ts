@@ -17,8 +17,11 @@ function err(message: string): ToolOutcome {
 
 /** 归一化模型常见的 status 变体,降低调用摩擦(无损兼容,不补造业务值)。 */
 function normalizeStatus(raw: unknown): string {
-  const s = String(raw ?? 'pending').trim().toLowerCase();
-  if (['in_progress', 'in-progress', 'inprogress', 'doing', 'current', 'active', 'wip'].includes(s)) return 'in_progress';
+  const s = String(raw ?? 'pending')
+    .trim()
+    .toLowerCase();
+  if (['in_progress', 'in-progress', 'inprogress', 'doing', 'current', 'active', 'wip'].includes(s))
+    return 'in_progress';
   if (['completed', 'complete', 'done', 'finished', 'checked'].includes(s)) return 'completed';
   if (['pending', 'todo', 'to-do', 'open', 'not_started', 'not-started'].includes(s)) return 'pending';
   return s;
@@ -84,7 +87,10 @@ export const planUpdateTool: Tool = {
         const step = s as Record<string, unknown>;
         if (step.content === undefined) {
           for (const alt of ['text', 'task', 'description', 'title']) {
-            if (typeof step[alt] === 'string') { step.content = step[alt]; break; }
+            if (typeof step[alt] === 'string') {
+              step.content = step[alt];
+              break;
+            }
           }
         }
         if (step.activeForm !== undefined && step.active_form === undefined) {
@@ -98,7 +104,8 @@ export const planUpdateTool: Tool = {
   async execute(args): Promise<ToolOutcome> {
     const rawSteps = Array.isArray(args.steps) ? args.steps : null;
     if (!rawSteps || rawSteps.length === 0) return err('steps 不能为空(至少 1 步)。');
-    if (rawSteps.length > PLAN_MAX_STEPS) return err(`steps 最多 ${PLAN_MAX_STEPS} 条,当前 ${rawSteps.length} 条——请合并或拆分阶段。`);
+    if (rawSteps.length > PLAN_MAX_STEPS)
+      return err(`steps 最多 ${PLAN_MAX_STEPS} 条,当前 ${rawSteps.length} 条——请合并或拆分阶段。`);
 
     const steps: PlanStep[] = [];
     let inProgressCount = 0;
@@ -111,9 +118,8 @@ export const planUpdateTool: Tool = {
         return err(`第 ${i + 1} 步 status 非法:"${String(raw?.status)}"(仅 pending/in_progress/completed)。`);
       }
       if (status === 'in_progress') inProgressCount++;
-      const activeForm = typeof raw?.active_form === 'string' && raw.active_form.trim()
-        ? raw.active_form.trim()
-        : undefined;
+      const activeForm =
+        typeof raw?.active_form === 'string' && raw.active_form.trim() ? raw.active_form.trim() : undefined;
       steps.push({ content, status, ...(activeForm ? { activeForm } : {}) });
     }
     if (inProgressCount > 1) {
@@ -132,7 +138,12 @@ export const planUpdateTool: Tool = {
     const plan: PlanState = { title, ...(goal ? { goal } : {}), steps };
     const result = writePlanToNotes(plan);
     if ('error' in result) {
-      return { status: 'error', code: 'EXECUTION_ERROR', retryable: false, output: `错误:写入 notes.md 失败: ${result.error}` };
+      return {
+        status: 'error',
+        code: 'EXECUTION_ERROR',
+        retryable: false,
+        output: `错误:写入 notes.md 失败: ${result.error}`,
+      };
     }
 
     const done = steps.filter((s) => s.status === 'completed').length;

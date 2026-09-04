@@ -1,7 +1,4 @@
-import {
-  loadImageAttachment,
-  MAX_INLINE_BYTES_DEFAULT,
-} from '../../attachments/image.js';
+import { loadImageAttachment, MAX_INLINE_BYTES_DEFAULT } from '../../attachments/image.js';
 import type { Tool, ToolOutcome } from '../types.js';
 
 export const viewImageTool: Tool = {
@@ -44,13 +41,15 @@ export const viewImageTool: Tool = {
       code: 'OK',
       retryable: false,
       output: `Viewed image "${att.name}" (${att.mime}, ${att.bytes} bytes). Visual content is attached to the next model request.`,
-      modelAttachments: [{
-        type: 'image',
-        name: att.name,
-        mime: att.mime,
-        dataUrl: att.dataUrl,
-        detail,
-      }],
+      modelAttachments: [
+        {
+          type: 'image',
+          name: att.name,
+          mime: att.mime,
+          dataUrl: att.dataUrl,
+          detail,
+        },
+      ],
     };
   },
 };

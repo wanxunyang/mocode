@@ -15,9 +15,15 @@ import { jailResolve, jailGlobPattern } from './jail.js';
  * Shift+Tab 等用户面触发,不经工具路径。
  */
 export const SANDBOX_EXEMPT_TOOLS = new Set([
-  'memory_save', 'memory_update', 'memory_forget', 'memory_search', 'memory_list', 'memory_graph',
+  'memory_save',
+  'memory_update',
+  'memory_forget',
+  'memory_search',
+  'memory_list',
+  'memory_graph',
   'use_skill',
-  'web_search', 'web_fetch',
+  'web_search',
+  'web_fetch',
   'ask_human',
   'sub-agent',
 ]);
@@ -33,10 +39,7 @@ export const SANDBOX_PATH_TOOLS = new Set(['read_file', 'write_file', 'edit_file
  * **不抛**——契约对齐「调度器永不抛错、永远返回字符串」(tools/registry.ts executeTool)。
  * run_command 不在此处理(cwd / env / denylist 在其站点)。
  */
-export function enforceSandbox(
-  name: string,
-  args: Record<string, unknown>,
-): string | null {
+export function enforceSandbox(name: string, args: Record<string, unknown>): string | null {
   if (SANDBOX_EXEMPT_TOOLS.has(name)) return null;
 
   if (SANDBOX_PATH_TOOLS.has(name)) {

@@ -72,7 +72,10 @@ describe('fuzzyRank 排序', () => {
 
   it('过滤不匹配,高分在前', () => {
     const ranked = fuzzyRank('srt', ['assert', 'sort', 'no match here']);
-    assert.deepEqual(ranked.map((r) => r.text), ['sort', 'assert']);
+    assert.deepEqual(
+      ranked.map((r) => r.text),
+      ['sort', 'assert'],
+    );
   });
 
   it('真实场景:srt 命中 sort 而非 resort(连续命中优先)', () => {

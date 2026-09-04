@@ -39,14 +39,7 @@ import { subAgentTool } from './task.js';
  */
 const _memoryEnabledAtBoot = process.env.MEMORY_ENABLED === 'true';
 const _memoryTools = _memoryEnabledAtBoot
-  ? [
-      memorySaveTool,
-      memorySearchTool,
-      memoryListTool,
-      memoryUpdateTool,
-      memoryForgetTool,
-      memoryGraphTool,
-    ]
+  ? [memorySaveTool, memorySearchTool, memoryListTool, memoryUpdateTool, memoryForgetTool, memoryGraphTool]
   : [];
 
 const pathResource = (args: Record<string, unknown>): string[] =>
@@ -58,7 +51,12 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   read_file: { effect: 'read', concurrency: 'parallel', resources: pathResource },
   view_image: { effect: 'read', concurrency: 'parallel', resources: pathResource },
   screenshot: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
-  write_file: { effect: 'write', concurrency: 'resource-locked', resources: pathResource, delegatesResourceLocks: true },
+  write_file: {
+    effect: 'write',
+    concurrency: 'resource-locked',
+    resources: pathResource,
+    delegatesResourceLocks: true,
+  },
   edit_file: { effect: 'write', concurrency: 'resource-locked', resources: pathResource, delegatesResourceLocks: true },
   run_command: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
   // 后台进程与浏览器会话跨调用存活；串行执行避免同一页面/服务被并发操作。
@@ -87,9 +85,12 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   'sub-agent': {
     effect: 'write',
     concurrency: 'resource-locked',
-    resources: (args) => args.mode === 'write' && Array.isArray(args.writeSet) && args.writeSet.length
-      ? args.writeSet.map((item) => `file:${String(item)}`)
-      : args.mode === 'write' ? ['workspace'] : [],
+    resources: (args) =>
+      args.mode === 'write' && Array.isArray(args.writeSet) && args.writeSet.length
+        ? args.writeSet.map((item) => `file:${String(item)}`)
+        : args.mode === 'write'
+          ? ['workspace']
+          : [],
     delegatesResourceLocks: true,
     supportsAbort: true,
   },

@@ -10,10 +10,7 @@ import {
   mergeKeyFacts,
   splitSummaryText,
 } from '../src/session/compact.js';
-import {
-  SUMMARY_KEYFACTS_MAX_CHARS,
-  SUMMARY_KEYFACTS_MIN_CHARS,
-} from '../src/tools/constants.js';
+import { SUMMARY_KEYFACTS_MAX_CHARS, SUMMARY_KEYFACTS_MIN_CHARS } from '../src/tools/constants.js';
 import { appendTool, contentAt, system } from './helpers.js';
 
 function compactableHistory(): { history: ChatMessage[]; oldIdx: number } {
@@ -108,9 +105,7 @@ test('连续三代压缩后首轮约束仍存活(Key Facts 钉住,不递归衰�
       threshold: 100,
       contextState: createContextState(),
       summarize: async (older) => {
-        transcripts.push(
-          older.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n'),
-        );
+        transcripts.push(older.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n'));
         return lossySummarizer(older);
       },
     });
@@ -121,17 +116,11 @@ test('连续三代压缩后首轮约束仍存活(Key Facts 钉住,不递归衰�
   // 恒单条摘要:并排多条 system 摘要会触发近因效应,等于白钉。
   assert.equal(history.filter((m) => m.role === 'system').length, 2);
   assert.match(contentAt(history, 1), /^# 会话摘要/);
-  assert.ok(
-    contentAt(history, 1).includes(CONSTRAINT),
-    '首轮约束必须在第 3 代摘要里存活',
-  );
+  assert.ok(contentAt(history, 1).includes(CONSTRAINT), '首轮约束必须在第 3 代摘要里存活');
   // 叙述段照常滚动:上一代叙述要进 transcript,否则更早的轮次等于被整段丢弃。
   assert.ok(transcripts[1].includes('did work'), '上一代叙述段必须并入转录');
   // 钉住的 Key Facts 不再进摘要器(否则就是又一遍再摘要)。
-  assert.ok(
-    !transcripts[1].includes('CONSTRAINT:'),
-    '已钉住的 Key Facts 不应再喂给摘要器',
-  );
+  assert.ok(!transcripts[1].includes('CONSTRAINT:'), '已钉住的 Key Facts 不应再喂给摘要器');
   assertToolCallsHaveProducers(history);
 });
 
@@ -151,11 +140,7 @@ test('压缩后必须仍有一条非空 user(否则下一步 chat 被 transport 
   });
   assert.equal(result.reason, 'summarize');
   assert.ok(
-    history.some(
-      (m) =>
-        m.role === 'user' &&
-        String((m as { content?: unknown }).content ?? '').trim().length > 0,
-    ),
+    history.some((m) => m.role === 'user' && String((m as { content?: unknown }).content ?? '').trim().length > 0),
     '压缩后必须仍有非空 user 消息',
   );
   assertToolCallsHaveProducers(history);
@@ -250,7 +235,10 @@ test('compactHistory 摘要失败时安全回退微压缩且不改结构', async
   assert.equal(result.compacted, true);
   assert.equal(result.summarized, false);
   assert.equal(result.reason, 'microcompact');
-  assert.deepEqual(history.map((message) => message.role), rolesBefore);
+  assert.deepEqual(
+    history.map((message) => message.role),
+    rolesBefore,
+  );
   assert.ok(contentAt(history, oldIdx).length < 2_000);
   assertToolCallsHaveProducers(history);
 });

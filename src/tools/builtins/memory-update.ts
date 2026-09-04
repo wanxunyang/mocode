@@ -29,8 +29,7 @@ export const memoryUpdateTool: Tool = {
     if (typeof args.name === 'string') patch.name = args.name;
     if (typeof args.reason === 'string') patch.reason = args.reason;
     if (typeof args.pinned === 'boolean') patch.pinned = args.pinned;
-    if (Object.keys(patch).length === 0)
-      return '错误:至少传一个要改的字段(summary/body/name/pinned/reason)。';
+    if (Object.keys(patch).length === 0) return '错误:至少传一个要改的字段(summary/body/name/pinned/reason)。';
     const r = updateEntry(id, patch);
     if (r.ok) return `已更新记忆 [${id}]。`;
     return `错误:找不到记忆 id="${id}"。用 memory_list 查可用 id。`;

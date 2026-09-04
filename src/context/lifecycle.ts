@@ -5,13 +5,7 @@
 // relationships for diagnostics and future pressure-aware decisions.
 
 import type { ChatMessage } from '../llm/index.js';
-import {
-  canonicalizePath,
-  extractPath,
-  isToolResultSuccess,
-  toText,
-  toolNameOf,
-} from './utils.js';
+import { canonicalizePath, extractPath, isToolResultSuccess, toText, toolNameOf } from './utils.js';
 
 type AnyMessage = ChatMessage & { content?: unknown; tool_call_id?: string };
 
@@ -31,14 +25,19 @@ function extractProducerPaths(toolName: string, content: string): string[] {
   try {
     if (toolName === 'grep') {
       const rawLine = /^(.+?\.[A-Za-z0-9]+):\d+:/gm;
-      const summary = /^(.+?\.[A-Za-z0-9]+):\s*\d+\s*(?:处匹配|matches?)[,，]/gmi;
+      const summary = /^(.+?\.[A-Za-z0-9]+):\s*\d+\s*(?:处匹配|matches?)[,，]/gim;
       let match: RegExpExecArray | null;
       while ((match = rawLine.exec(content))) add(match[1]);
       while ((match = summary.exec(content))) add(match[1]);
     } else if (toolName === 'glob') {
       for (const line of content.split(/\r?\n/)) {
         const value = line.trim();
-        if (value && !value.includes(' ') && (/\.[A-Za-z0-9]+$/.test(value) || value.includes('/') || value.includes('\\'))) add(value);
+        if (
+          value &&
+          !value.includes(' ') &&
+          (/\.[A-Za-z0-9]+$/.test(value) || value.includes('/') || value.includes('\\'))
+        )
+          add(value);
       }
     }
   } catch {
@@ -64,9 +63,11 @@ export class LifecycleEngine {
       for (let cursor = idx - 1; cursor >= 1; cursor--) {
         const message = history[cursor];
         if (message.role !== 'assistant') continue;
-        const calls = (message as {
-          tool_calls?: Array<{ id?: string; function?: { arguments?: string } }>;
-        }).tool_calls;
+        const calls = (
+          message as {
+            tool_calls?: Array<{ id?: string; function?: { arguments?: string } }>;
+          }
+        ).tool_calls;
         const hit = calls?.find((call) => call.id === toolCallId);
         if (hit) return hit.function?.arguments ?? '';
       }

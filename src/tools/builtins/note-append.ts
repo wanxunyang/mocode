@@ -20,7 +20,10 @@ function err(message: string): ToolOutcome {
 
 /** 归一化 section:兼容单复数、下划线/空格/连字符、大小写偏差。 */
 function normalizeSection(raw: unknown): string | null {
-  const s = String(raw ?? '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[-\s]+/g, '_');
   if (NOTE_SECTION_KEYS.includes(s)) return s;
   // 单数/别名归一
   if (['finding', 'find', 'insight', 'insights'].includes(s)) return 'findings';
@@ -48,12 +51,14 @@ export const noteAppendTool: Tool = {
       section: {
         type: 'string',
         enum: NOTE_SECTION_KEYS,
-        description: 'Note category: findings (a non-obvious discovery/constraint), decisions (a choice with ' +
+        description:
+          'Note category: findings (a non-obvious discovery/constraint), decisions (a choice with ' +
           'lasting impact), open_questions (a blocker needing resolution), risks (a hazard affecting later work).',
       },
       entry: {
         type: 'string',
-        description: 'The note text. One concise, self-contained item: what was found/decided and why it matters. ' +
+        description:
+          'The note text. One concise, self-contained item: what was found/decided and why it matters. ' +
           'Keep each call to one item — call again for a second item.',
       },
       tag: {
@@ -84,11 +89,19 @@ export const noteAppendTool: Tool = {
 
     const result = appendNoteToSection(section, entry, tag);
     if ('error' in result) {
-      return { status: 'error', code: 'EXECUTION_ERROR', retryable: false, output: `错误:写入 notes.md 失败: ${result.error}` };
+      return {
+        status: 'error',
+        code: 'EXECUTION_ERROR',
+        retryable: false,
+        output: `错误:写入 notes.md 失败: ${result.error}`,
+      };
     }
     // note_append 写内部 notes.md,不作为用户代码 mutation 上报 changedFiles(与 plan_update 一致)。
     const titleMap: Record<string, string> = {
-      findings: 'Findings', decisions: 'Decisions', open_questions: 'Open Questions', risks: 'Risks',
+      findings: 'Findings',
+      decisions: 'Decisions',
+      open_questions: 'Open Questions',
+      risks: 'Risks',
     };
     const rendered = tag ? `- **[${tag}]** ${entry}` : `- ${entry}`;
     return {

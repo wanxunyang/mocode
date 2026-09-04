@@ -15,11 +15,7 @@ import { builtinEncoders } from './encoders/index.js';
 import { passthroughEncoder } from './encoders/passthrough.js';
 import { capToolResultForHistory } from '../session/compact.js';
 import { config } from '../config/index.js';
-import {
-  MAX_HISTORY_RESULT,
-  MAX_SKILL_RESULT,
-  MAX_MEMORY_RESULT,
-} from '../tools/constants.js';
+import { MAX_HISTORY_RESULT, MAX_SKILL_RESULT, MAX_MEMORY_RESULT } from '../tools/constants.js';
 
 let booted = false;
 /** 懒注册内置 encoder(首次调用 optimizeToolResult 时触发,避免模块加载期循环 import)。 */

@@ -84,7 +84,7 @@ export class ResourceLockManager {
 
   private dispatch(): void {
     const blocked: Waiter[] = [];
-    for (let index = 0; index < this.waiting.length;) {
+    for (let index = 0; index < this.waiting.length; ) {
       const waiter = this.waiting[index];
       const conflictsActive = [...this.active].some((claim) => claimsConflict(waiter, claim));
       const conflictsEarlier = blocked.some((claim) => claimsConflict(waiter, claim));
@@ -116,9 +116,7 @@ function dedupeRequests(requests: ResourceLockRequest[]): ResourceLockRequest[] 
     const existing = byKey.get(identity);
     if (!existing || request.mode === 'write') byKey.set(identity, request);
   }
-  return [...byKey.values()].sort((a, b) =>
-    `${a.scope}:${a.key}`.localeCompare(`${b.scope}:${b.key}`)
-  );
+  return [...byKey.values()].sort((a, b) => `${a.scope}:${a.key}`.localeCompare(`${b.scope}:${b.key}`));
 }
 
 /** Stable lock identity: sandbox realpath plus Windows case/separator normalization. */
@@ -132,11 +130,13 @@ function modeFor(effect: ToolEffect): ResourceLockMode {
   return effect === 'read' ? 'read' : 'write';
 }
 
-const workspaceWrite = (): ResourceLockRequest[] => [{
-  key: 'workspace',
-  scope: 'workspace',
-  mode: 'write',
-}];
+const workspaceWrite = (): ResourceLockRequest[] => [
+  {
+    key: 'workspace',
+    scope: 'workspace',
+    mode: 'write',
+  },
+];
 
 /** Resolve declared logical resources. Any ambiguity fails closed to a workspace write lock. */
 export function resolveResourceLockRequests(

@@ -50,7 +50,14 @@ export interface BudgetScheduler {
 }
 
 export interface CompactHistoryDetail {
-  reason: 'microcompact' | 'summarize' | 'noop-empty' | 'noop-protected' | 'noop-ml-only' | 'noop-shrunk-too-large' | 'noop-noold-noop';
+  reason:
+    | 'microcompact'
+    | 'summarize'
+    | 'noop-empty'
+    | 'noop-protected'
+    | 'noop-ml-only'
+    | 'noop-shrunk-too-large'
+    | 'noop-noold-noop';
   estimateBefore: number;
   estimateAfter: number;
   protectedRatio?: number;
@@ -59,8 +66,7 @@ export interface CompactHistoryDetail {
 }
 
 function atPressure(report: BudgetReport): boolean {
-  return Math.max(report.rawTotal, report.total)
-    >= report.window * DEFAULT_BUDGET_POLICY.pressureTriggerRatio;
+  return Math.max(report.rawTotal, report.total) >= report.window * DEFAULT_BUDGET_POLICY.pressureTriggerRatio;
 }
 
 function emptyPressure(report: BudgetReport): PressureCompressionLog {
@@ -82,14 +88,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
     activeTools: readonly ChatTool[],
     ephemeralTokens: number,
   ): BudgetReport =>
-    evaluateBudget(
-      history,
-      config.contextWindowTokens,
-      step,
-      state.correction,
-      activeTools,
-      ephemeralTokens,
-    );
+    evaluateBudget(history, config.contextWindowTokens, step, state.correction, activeTools, ephemeralTokens);
 
   const scheduler: BudgetScheduler = {
     lastRunLog: null,
@@ -121,14 +120,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
       let compactHistoryCalled = false;
       let historyRebuilt = false;
       for (const _action of actions) {
-        const result = await maybeCompact(
-          history,
-          report,
-          undefined,
-          state,
-          activeTools,
-          signal,
-        );
+        const result = await maybeCompact(history, report, undefined, state, activeTools, signal);
         compactHistoryCalled = true;
         historyRebuilt ||= result?.historyRebuilt === true;
       }
@@ -202,20 +194,25 @@ export async function manualCompact(
   if (!actions.some((action) => action.kind === 'compact_history')) {
     actions = [...actions, { kind: 'compact_history', focus }];
   } else if (focus) {
-    actions = actions.map((action) =>
-      action.kind === 'compact_history' ? { ...action, focus } : action,
-    );
+    actions = actions.map((action) => (action.kind === 'compact_history' ? { ...action, focus } : action));
   }
 
   let compactHistoryCalled = false;
   let compactDetail: CompactHistoryDetail | undefined;
   for (const action of actions) {
     if (action.kind !== 'compact_history') continue;
-    const result = await maybeCompact(history, report, {
-      manual: true,
-      force: opts?.force,
-      focus: action.focus,
-    }, contextState, chatTools, signal);
+    const result = await maybeCompact(
+      history,
+      report,
+      {
+        manual: true,
+        force: opts?.force,
+        focus: action.focus,
+      },
+      contextState,
+      chatTools,
+      signal,
+    );
     compactHistoryCalled = true;
     if (result) {
       compactDetail = {

@@ -101,7 +101,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       summary: null,
       completed: false,
       transcript: 'Sub-agent execution is disabled. Enable it with /subagent on.',
-      status: 'failed', findings: [], readSet: [], changeSet: null,
+      status: 'failed',
+      findings: [],
+      readSet: [],
+      changeSet: null,
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0 },
     };
   }
@@ -109,7 +112,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   // 构造窄 worker prompt；主 Agent 已知事实只通过有界 context 注入，避免重复探索与重复计费。
   const systemPrompt = effectiveSystemPrompt(
-    buildMocodeCorePrompt() + '\n\n' + SUBAGENT_ROLE + SUBAGENT_SUFFIX +
+    buildMocodeCorePrompt() +
+      '\n\n' +
+      SUBAGENT_ROLE +
+      SUBAGENT_SUFFIX +
       (opts.systemPromptSuffix ? `\n\n${opts.systemPromptSuffix}` : ''),
   );
   const taskPrompt = opts.context?.trim()
@@ -119,22 +125,30 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // 写 worker 保留主 Agent 的完整能力；只读 mode 仅按调用契约移除副作用工具。
   const mode = opts.mode ?? 'read';
   const requested = opts.tools?.length ? new Set(opts.tools) : null;
-  const readOnly = new Set(['read_file', 'glob', 'grep', 'web_search', 'web_fetch', 'use_skill', 'memory_search', 'memory_list']);
-  const toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] = chatTools.filter((tool) =>
-    tool.function.name !== 'sub-agent' &&
-    // run_skill 会再次 spawn,禁止递归(避免 fork skill 里又 run_skill 套娃)。
-    tool.function.name !== 'run_skill' &&
-    // plan_update 直写主会话 notes.md(不走 overlay),子代理不应改动主计划——统一排除。
-    tool.function.name !== 'plan_update' &&
-    (!requested || requested.has(tool.function.name)) &&
-    (mode === 'write' || readOnly.has(tool.function.name)),
+  const readOnly = new Set([
+    'read_file',
+    'glob',
+    'grep',
+    'web_search',
+    'web_fetch',
+    'use_skill',
+    'memory_search',
+    'memory_list',
+  ]);
+  const toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] = chatTools.filter(
+    (tool) =>
+      tool.function.name !== 'sub-agent' &&
+      // run_skill 会再次 spawn,禁止递归(避免 fork skill 里又 run_skill 套娃)。
+      tool.function.name !== 'run_skill' &&
+      // plan_update 直写主会话 notes.md(不走 overlay),子代理不应改动主计划——统一排除。
+      tool.function.name !== 'plan_update' &&
+      (!requested || requested.has(tool.function.name)) &&
+      (mode === 'write' || readOnly.has(tool.function.name)),
   );
 
   // 独立 history(子 agent 自己持有,不共享主对话)。
   // 只塞 system;user 消息由 runAgentCore 的 userInput 参数 push(与主 agent 一致)。
-  const history: ChatMessage[] = [
-    { role: 'system', content: systemPrompt },
-  ];
+  const history: ChatMessage[] = [{ role: 'system', content: systemPrompt }];
 
   // 静默 hooks:缓冲中间过程到 transcript,不写主屏。
   let transcript = '';
@@ -196,9 +210,15 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     if (!live || !liveBatchId) return;
     const id = liveBatchId;
     liveBatchId = null;
-    if (status) batch.setBatchLabel(id, status === 'complete'
-      ? t('subagent.complete')
-      : status === 'failed' ? t('subagent.failed') : t('subagent.running'));
+    if (status)
+      batch.setBatchLabel(
+        id,
+        status === 'complete'
+          ? t('subagent.complete')
+          : status === 'failed'
+            ? t('subagent.failed')
+            : t('subagent.running'),
+      );
     // 收尾:清除运行态标志,摘要行图标从「运行中 ◐」切回完成态 ●。
     batch.setBatchRunning(id, false);
     batch.endBatch(id, liveLayout());
@@ -272,14 +292,14 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       if (quiet) replaceQuietLine('failed', t('skill.maxSteps', { max: String(maxSteps) }));
     },
     onDone: (elapsedMs, usage) => {
-      const tok = usage && usage.totalTokens
-        ? `  · ${usage.totalTokens} tokens${usage.cachedTokens ? ` ↻${usage.cachedTokens} cached` : ''}`
-        : '';
+      const tok =
+        usage && usage.totalTokens
+          ? `  · ${usage.totalTokens} tokens${usage.cachedTokens ? ` ↻${usage.cachedTokens} cached` : ''}`
+          : '';
       writeBuf(`  ✻ 子 agent 耗时 ${(elapsedMs / 1000).toFixed(1)}s${tok}\n`);
       finishLiveBatch('complete');
       if (quiet) {
-        replaceQuietLine('complete',
-          `${t('skill.complete')}  ${(elapsedMs / 1000).toFixed(1)}s${tok}`);
+        replaceQuietLine('complete', `${t('skill.complete')}  ${(elapsedMs / 1000).toFixed(1)}s${tok}`);
       }
     },
     onAbort: () => {
@@ -295,7 +315,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // save/restore 会竞态，且 lastEstimate / schedulerLog 仍会污染主 agent。
   const localContextState = createContextState();
   const readSet = new Set<string>();
-  const run = () => runAgentCore({
+  const run = () =>
+    runAgentCore({
       history,
       userInput: taskPrompt,
       signal: opts.signal,
@@ -321,20 +342,23 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     result = isolated.value;
     changeSet = isolated.changeSet;
     const declared = new Set((opts.writeSet ?? []).map((item) => item.replaceAll('\\', '/').toLowerCase()));
-    const outsideDeclaration = declared.size > 0 && changeSet?.changes.some(
-      (change) => !declared.has(change.path.replaceAll('\\', '/').toLowerCase()),
-    );
+    const outsideDeclaration =
+      declared.size > 0 &&
+      changeSet?.changes.some((change) => !declared.has(change.path.replaceAll('\\', '/').toLowerCase()));
     if (!result.completed || outsideDeclaration) mergeStatus = 'failed';
     else mergeStatus = await mergeSubAgentChangeSet(changeSet, opts.signal);
   } else {
     result = await run();
   }
 
-  const status = opts.signal?.aborted || result.terminationReason === 'aborted'
-    ? 'aborted'
-    : mergeStatus === 'conflict' ? 'conflict'
-    : mergeStatus === 'failed' || !result.completed ? 'failed'
-    : 'completed';
+  const status =
+    opts.signal?.aborted || result.terminationReason === 'aborted'
+      ? 'aborted'
+      : mergeStatus === 'conflict'
+        ? 'conflict'
+        : mergeStatus === 'failed' || !result.completed
+          ? 'failed'
+          : 'completed';
 
   return {
     summary: result.finalText,

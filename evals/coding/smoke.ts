@@ -8,21 +8,29 @@ import { createReport, renderSummary } from './report.js';
 import { parseBenchmarkArgs } from './runner.js';
 
 assert.equal(codingTasks.length, 61);
-assert.equal(new Set(codingTasks.map(t => t.id)).size, 61);
-assert.ok(codingTasks.every(t => t.files.length >= 2 && t.verificationCommand && t.goal));
+assert.equal(new Set(codingTasks.map((t) => t.id)).size, 61);
+assert.ok(codingTasks.every((t) => t.files.length >= 2 && t.verificationCommand && t.goal));
 assert.equal(selectTasks('monorepo').length, 4);
 assert.equal(selectTasks('hard').length, 20);
 assert.equal(selectTasks('advanced').length, 20);
-assert.deepEqual(selectTasks('single-01,multi-01').map(t => t.id), ['single-01', 'multi-01']);
+assert.deepEqual(
+  selectTasks('single-01,multi-01').map((t) => t.id),
+  ['single-01', 'multi-01'],
+);
 
 // multifile-boundary-01: fixture 内含多文件 / 边界条件 bug。
 {
-  const t = codingTasks.find(t => t.id === 'multifile-boundary-01');
+  const t = codingTasks.find((t) => t.id === 'multifile-boundary-01');
   assert.ok(t, 'multifile-boundary-01 fixture exists');
-  assert.equal(t.files.filter(f => f.path.endsWith('.js')).length, 2,
-    'multifile-boundary fixture has 2 source files');
-  assert.ok(/boundary/i.test(t.goal) || /zero|neg/i.test(t.verificationCommand),
-    'multifile-boundary goal mentions boundary');
+  assert.equal(
+    t.files.filter((f) => f.path.endsWith('.js')).length,
+    2,
+    'multifile-boundary fixture has 2 source files',
+  );
+  assert.ok(
+    /boundary/i.test(t.goal) || /zero|neg/i.test(t.verificationCommand),
+    'multifile-boundary goal mentions boundary',
+  );
 }
 assert.equal(parseBenchmarkArgs(['--group', 'types']).selection, 'types');
 assert.equal(parseBenchmarkArgs([]).selection, '');
@@ -48,20 +56,50 @@ try {
   rmSync(fixtureRoot, { recursive: true, force: true });
 }
 
-const report = createReport({ schemaVersion: 2, runId: 'test', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'all' }, [{
-  id: 'x', title: 'x', group: 'tests', difficulty: 'basic', status: 'passed', finalVerifiedSuccess: true,
-  regression: false, toolRecovery: false, toolCalls: 2,
-  tokens: 10, durationMs: 20, changedFiles: ['x.js'],
-  askHumanCount: 0,
-}]);
+const report = createReport(
+  { schemaVersion: 2, runId: 'test', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'all' },
+  [
+    {
+      id: 'x',
+      title: 'x',
+      group: 'tests',
+      difficulty: 'basic',
+      status: 'passed',
+      finalVerifiedSuccess: true,
+      regression: false,
+      toolRecovery: false,
+      toolCalls: 2,
+      tokens: 10,
+      durationMs: 20,
+      changedFiles: ['x.js'],
+      askHumanCount: 0,
+    },
+  ],
+);
 assert.equal(report.summary.finalVerifiedSuccessRate, 1);
 assert.match(renderSummary(report), /1\/1 passed/);
 assert.equal(report.summary.askHumanCount, 0);
-const timeoutReport = createReport({ schemaVersion: 2, runId: 'timeout', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'hard' }, [{
-  id: 'late', title: 'late', group: 'resilience', difficulty: 'hard', status: 'timeout',
-  finalVerifiedSuccess: false, regression: false, toolRecovery: false,
-  toolCalls: 1, tokens: 1, durationMs: 10, changedFiles: [],
-  askHumanCount: 0,
-}]);
+const timeoutReport = createReport(
+  { schemaVersion: 2, runId: 'timeout', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'hard' },
+  [
+    {
+      id: 'late',
+      title: 'late',
+      group: 'resilience',
+      difficulty: 'hard',
+      status: 'timeout',
+      finalVerifiedSuccess: false,
+      regression: false,
+      toolRecovery: false,
+      toolCalls: 1,
+      tokens: 1,
+      durationMs: 10,
+      changedFiles: [],
+      askHumanCount: 0,
+    },
+  ],
+);
 assert.equal(timeoutReport.summary.passed, 0);
-console.log(`coding benchmark smoke: 16/16 passed (${codingTasks.length} fixtures checked, incl. multifile-boundary-01)`);
+console.log(
+  `coding benchmark smoke: 16/16 passed (${codingTasks.length} fixtures checked, incl. multifile-boundary-01)`,
+);

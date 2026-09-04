@@ -11,10 +11,8 @@ import {
 } from '../src/tools/resource-lock.js';
 import type { ToolCapabilities } from '../src/tools/types.js';
 
-const res = (key: string, mode: 'read' | 'write' = 'write') =>
-  ({ key, scope: 'resource', mode }) as const;
-const ws = (mode: 'read' | 'write' = 'write') =>
-  ({ key: 'workspace', scope: 'workspace', mode }) as const;
+const res = (key: string, mode: 'read' | 'write' = 'write') => ({ key, scope: 'resource', mode }) as const;
+const ws = (mode: 'read' | 'write' = 'write') => ({ key: 'workspace', scope: 'workspace', mode }) as const;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -33,7 +31,9 @@ test('写写互斥:同 key 第二个写必须等第一个释放', async () => {
   const mgr = new ResourceLockManager();
   const release1 = await mgr.acquire([res('f')]);
   let secondAcquired = false;
-  const p2 = mgr.acquire([res('f')]).then(() => { secondAcquired = true; });
+  const p2 = mgr.acquire([res('f')]).then(() => {
+    secondAcquired = true;
+  });
   await sleep(20);
   assert.equal(secondAcquired, false, '锁未释放前不得获取');
   release1();
@@ -45,7 +45,9 @@ test('读写互斥:写持有期间读等待', async () => {
   const mgr = new ResourceLockManager();
   const releaseW = await mgr.acquire([res('f', 'write')]);
   let readAcquired = false;
-  const pR = mgr.acquire([res('f', 'read')]).then(() => { readAcquired = true; });
+  const pR = mgr.acquire([res('f', 'read')]).then(() => {
+    readAcquired = true;
+  });
   await sleep(20);
   assert.equal(readAcquired, false);
   releaseW();
@@ -64,7 +66,9 @@ test('workspace 写锁与任意资源写锁冲突', async () => {
   const mgr = new ResourceLockManager();
   const releaseWs = await mgr.acquire([ws()]);
   let fileAcquired = false;
-  const pFile = mgr.acquire([res('f')]).then(() => { fileAcquired = true; });
+  const pFile = mgr.acquire([res('f')]).then(() => {
+    fileAcquired = true;
+  });
   await sleep(20);
   assert.equal(fileAcquired, false);
   releaseWs();
@@ -73,10 +77,7 @@ test('workspace 写锁与任意资源写锁冲突', async () => {
 
 test('workspace 读锁与资源读锁不冲突(读读共享)', async () => {
   const mgr = new ResourceLockManager();
-  await Promise.all([
-    mgr.acquire([ws('read')]),
-    mgr.acquire([res('f', 'read')]),
-  ]);
+  await Promise.all([mgr.acquire([ws('read')]), mgr.acquire([res('f', 'read')])]);
 });
 
 test('FIFO 公平性:同 key 排队者按到达顺序获得(无饥饿)', async () => {
@@ -85,7 +86,10 @@ test('FIFO 公平性:同 key 排队者按到达顺序获得(无饥饿)', async (
   const order: string[] = [];
   // 拿到锁后立即记录并释放,链式推进;若调度不 FIFO(后到者插队),order 会乱序。
   const claim = (label: string) =>
-    mgr.acquire([res('f')]).then((release) => { order.push(label); release(); });
+    mgr.acquire([res('f')]).then((release) => {
+      order.push(label);
+      release();
+    });
   const p2 = claim('w1');
   const p3 = claim('w2');
   const p4 = claim('w3');
@@ -112,7 +116,9 @@ test('abort: 排队等待中 abort,立即 reject 且后续 waiter 可继续', as
   const ac = new AbortController();
   const pAborted = mgr.acquire([res('f')], ac.signal);
   let thirdAcquired = false;
-  const pThird = mgr.acquire([res('f')]).then(() => { thirdAcquired = true; });
+  const pThird = mgr.acquire([res('f')]).then(() => {
+    thirdAcquired = true;
+  });
 
   await sleep(10);
   ac.abort();
@@ -144,9 +150,11 @@ test('空请求列表立即 resolve,不产生等待', async () => {
 
 test('withLocks: 异常时仍释放锁', async () => {
   const mgr = new ResourceLockManager();
-  await assert.rejects(mgr.withLocks([res('f')], undefined, async () => {
-    throw new Error('boom');
-  }));
+  await assert.rejects(
+    mgr.withLocks([res('f')], undefined, async () => {
+      throw new Error('boom');
+    }),
+  );
   // 锁已释放:再次获取应立即成功
   const release = await mgr.acquire([res('f')]);
   release();
@@ -166,7 +174,9 @@ test('resolveResourceLockRequests: resources() 抛错 → fail-closed 到 worksp
   const caps: ToolCapabilities = {
     effect: 'write',
     concurrency: 'resource-locked',
-    resources: () => { throw new Error('bad args'); },
+    resources: () => {
+      throw new Error('bad args');
+    },
   };
   assert.deepEqual(resolveResourceLockRequests(caps, {}), [ws()]);
 });
@@ -184,7 +194,9 @@ test('resolveResourceLockRequests: process/unknown effect 恒 workspace 写锁(�
   const caps: ToolCapabilities = {
     effect: 'process',
     concurrency: 'serial',
-    resources: () => { throw new Error('must not be called'); },
+    resources: () => {
+      throw new Error('must not be called');
+    },
   };
   assert.deepEqual(resolveResourceLockRequests(caps, {}), [ws()]);
 });

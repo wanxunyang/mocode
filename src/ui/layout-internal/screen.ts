@@ -110,7 +110,7 @@ export function runningCaretPos(): { row: number; col: number } {
     const col = Math.min(g.cols, promptW + displayWidth(before) + 1);
     return { row, col };
   }
-  const text = state.lastView?.dim ? state.lastView.lines[0] ?? '' : '';
+  const text = state.lastView?.dim ? (state.lastView.lines[0] ?? '') : '';
   const contentW = Math.max(0, g.cols - 3); // ❯ =2 + 光标=1
   const w = displayWidth(truncateDisplayHead(text, contentW));
   return { row, col: Math.min(g.cols, 2 + w + 1) };
@@ -130,8 +130,8 @@ export function contentMode(): void {
     stdout.write(
       cup(
         state.scrollOffset === 0 ? state.contentRow : g.contentBottom,
-        state.scrollOffset === 0 ? state.contentCol : 1
-      )
+        state.scrollOffset === 0 ? state.contentCol : 1,
+      ),
     );
   }
 }

@@ -128,8 +128,8 @@ export function readPreset(name: string): ModelPreset | null {
 
 /** 写/覆盖一个预设(原子:写 tmp 再 rename)。旧调用缺 provider 时仍按 openai 保存。 */
 export function savePreset(
-  preset: Omit<ModelPreset, 'provider' | 'anthropicPromptCache'>
-    & Partial<Pick<ModelPreset, 'provider' | 'anthropicPromptCache'>>,
+  preset: Omit<ModelPreset, 'provider' | 'anthropicPromptCache'> &
+    Partial<Pick<ModelPreset, 'provider' | 'anthropicPromptCache'>>,
 ): void {
   if (!isValidPresetName(preset.name)) {
     throw new Error(`非法预设名: ${JSON.stringify(preset.name)}`);
@@ -152,7 +152,11 @@ export function deletePreset(name: string): boolean {
   try {
     fs.unlinkSync(filePathFor(name));
     if (getActivePresetName() === name) {
-      try { fs.unlinkSync(ACTIVE_PRESET_PATH); } catch { /* 指针已不在,忽略 */ }
+      try {
+        fs.unlinkSync(ACTIVE_PRESET_PATH);
+      } catch {
+        /* 指针已不在,忽略 */
+      }
     }
     return true;
   } catch (e) {

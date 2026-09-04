@@ -40,28 +40,34 @@ function setup(): void {
 function teardown(): void {
   setSandboxRoot(null);
   setCurrentSessionId(undefined, tmpRoot);
-  try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
 }
 
 test('buildSessionStateReminder: 同时注入活跃 Plan 段与笔记段正文', () => {
   setup();
   try {
     writeNotes(
-      '## Plan: ship prefix cache fix\n'
-      + 'Goal: stable prefix\n'
-      + '### Steps\n'
-      + '- [x] 1. add builder\n'
-      + '- [ ] 2. wire core\n'
-      + '\n'
-      + '## Findings\n'
-      + '- **[cache]** history[0] rewrite kills the whole prefix\n',
+      '## Plan: ship prefix cache fix\n' +
+        'Goal: stable prefix\n' +
+        '### Steps\n' +
+        '- [x] 1. add builder\n' +
+        '- [ ] 2. wire core\n' +
+        '\n' +
+        '## Findings\n' +
+        '- **[cache]** history[0] rewrite kills the whole prefix\n',
     );
     const out = buildSessionStateReminder();
     assert.match(out, /## Session state/);
     assert.match(out, /ship prefix cache fix/);
     assert.match(out, /wire core/);
     assert.match(out, /history\[0\] rewrite kills the whole prefix/);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('buildSessionStateReminder: 只有笔记段(无 plan)时也注入', () => {
@@ -70,7 +76,9 @@ test('buildSessionStateReminder: 只有笔记段(无 plan)时也注入', () => {
     writeNotes('## Risks\n- token estimate may drift\n');
     const out = buildSessionStateReminder();
     assert.match(out, /token estimate may drift/);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('buildSessionStateReminder: 已结算 plan(## Done:)不注入', () => {
@@ -78,7 +86,9 @@ test('buildSessionStateReminder: 已结算 plan(## Done:)不注入', () => {
   try {
     writeNotes('## Done: finished work\n### Steps\n- [x] 1. all set\n');
     assert.equal(buildSessionStateReminder(), '');
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('buildSessionStateReminder: 无 notes.md / 空文件返回空串', () => {
@@ -87,7 +97,9 @@ test('buildSessionStateReminder: 无 notes.md / 空文件返回空串', () => {
     assert.equal(buildSessionStateReminder(), '', 'notes.md 不存在时应返空串');
     writeNotes('');
     assert.equal(buildSessionStateReminder(), '', '空 notes.md 应返空串');
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('buildSessionStateReminder: 纯读——不改 history、不写 notes.md', () => {
@@ -102,5 +114,7 @@ test('buildSessionStateReminder: 纯读——不改 history、不写 notes.md', 
     assert.equal(first, second, '同一 notes.md 下多次调用结果应逐字节一致');
     assert.equal(JSON.stringify(history), snapshot, 'history 不应被改写');
     assert.equal(fs.readFileSync(notesPath(), 'utf8'), original, 'notes.md 不应被改写');
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });

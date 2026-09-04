@@ -38,14 +38,9 @@ export function renderChip(att: ImageAttachment): string {
   return `📷 ${att.name} (${formatBytes(att.bytes)})`;
 }
 
-export type LoadImageResult =
-  | { ok: true; att: ImageAttachment }
-  | { ok: false; reason: string };
+export type LoadImageResult = { ok: true; att: ImageAttachment } | { ok: false; reason: string };
 
-export async function loadImageAttachment(
-  input: string,
-  opts: { maxBytes: number }
-): Promise<LoadImageResult> {
+export async function loadImageAttachment(input: string, opts: { maxBytes: number }): Promise<LoadImageResult> {
   const trimmed = input.trim();
   if (!trimmed) return { ok: false, reason: '路径为空' };
 

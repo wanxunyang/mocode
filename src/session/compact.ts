@@ -54,11 +54,7 @@ export interface CompactOptions {
   focus?: string;
   /** 可注入的摘要器(测试用);缺省调 chat()。第三参是 abort signal,必须透传给底层
    *  chat(),否则 Ctrl+C 掐不断摘要请求。 */
-  summarize?: (
-    older: ChatMessage[],
-    focus?: string,
-    signal?: AbortSignal,
-  ) => Promise<string | null>;
+  summarize?: (older: ChatMessage[], focus?: string, signal?: AbortSignal) => Promise<string | null>;
   /** 手动触发(repl /compact)开关:强制走 microcompact/summarize,绕过 autoCompact 阈。
    *  设为 true 后,即便无 ROI 触发(history 不超/totalOver=false)也压——对齐用户拍板的"真·强制"。
    *  force:在 manual 基础上再绕过「oldGroups 空 → 直接 noop」的硬边界,允许降 keepBudget 强压。
@@ -267,8 +263,7 @@ const KEY_FACTS_HEADING_RE = /^ {0,3}##\s*key facts\b/i;
 /** 任意 `## ` 级标题:Key Facts 段到此为止。 */
 const ANY_HEADING_RE = /^ {0,3}##\s+\S/;
 /** 上一代叙述段进 transcript 时的标注:告诉摘要器这是已压过一遍的内容,合并而非抄录。 */
-const PRIOR_NARRATIVE_LABEL =
-  '[prior summary — 上一代摘要的叙述部分:与下方新内容合并压缩,不要重复罗列细节]';
+const PRIOR_NARRATIVE_LABEL = '[prior summary — 上一代摘要的叙述部分:与下方新内容合并压缩,不要重复罗列细节]';
 /** 尾部 provenance 块:解析时剥掉,重建时按当次 older 重算(否则跨代累积并重复)。 */
 const ARTIFACT_REFS_RE = /\n*\[artifact refs:[^\]]*\]\s*$/;
 
@@ -276,10 +271,7 @@ const ARTIFACT_REFS_RE = /\n*\[artifact refs:[^\]]*\]\s*$/;
  *  大窗口也不会让索引段膨胀成正文。 */
 export function keyFactsBudgetChars(window: number): number {
   const byWindow = Math.floor(Math.max(0, window) * SUMMARY_KEYFACTS_WINDOW_RATIO);
-  return Math.max(
-    SUMMARY_KEYFACTS_MIN_CHARS,
-    Math.min(SUMMARY_KEYFACTS_MAX_CHARS, byWindow),
-  );
+  return Math.max(SUMMARY_KEYFACTS_MIN_CHARS, Math.min(SUMMARY_KEYFACTS_MAX_CHARS, byWindow));
 }
 
 /**
@@ -303,7 +295,10 @@ export function splitSummaryText(raw: string): { keyFacts: string; rest: string 
       break;
     }
   }
-  const keyFacts = lines.slice(headIdx + 1, endIdx).join('\n').trim();
+  const keyFacts = lines
+    .slice(headIdx + 1, endIdx)
+    .join('\n')
+    .trim();
   const rest = [...lines.slice(0, headIdx), ...lines.slice(endIdx)].join('\n').trim();
   return { keyFacts, rest };
 }
@@ -344,7 +339,10 @@ export function extractProgressSnapshot(summaryRest: string): string | null {
   for (const line of lines) {
     const m = line.match(/^ {0,3}##\s+(.+?)\s*$/);
     if (m) {
-      const name = m[1].replace(/\s*[—–-].*$/, '').trim().toLowerCase();
+      const name = m[1]
+        .replace(/\s*[—–-].*$/, '')
+        .trim()
+        .toLowerCase();
       taking = WANT.has(name);
     }
     if (taking) out.push(line);
@@ -359,11 +357,7 @@ export function extractProgressSnapshot(summaryRest: string): string | null {
  * 丢新不丢旧的理由:最老那几条通常是首轮用户约束(不可重建,丢了就永远没了);
  * 较新的事实通常在本代叙述段或保留区里还有副本。
  */
-export function mergeKeyFacts(
-  prev: string | undefined,
-  next: string | undefined,
-  maxChars: number,
-): string {
+export function mergeKeyFacts(prev: string | undefined, next: string | undefined, maxChars: number): string {
   const lines: string[] = [];
   const seen = new Set<string>();
   for (const block of [prev ?? '', next ?? '']) {
@@ -402,12 +396,7 @@ function isUserGroup(g: Group): boolean {
 /** 摘要 group 判定:非 history[0] 的 system 消息,以 `# 会话摘要` 开头,且不带 tool_calls。 */
 function isSummaryGroup(g: Group): boolean {
   const a = g.assistant as { role?: string; content?: unknown } | null;
-  return (
-    !!a &&
-    a.role === 'system' &&
-    g.tools.length === 0 &&
-    toText(a.content).startsWith(SUMMARY_MARKER)
-  );
+  return !!a && a.role === 'system' && g.tools.length === 0 && toText(a.content).startsWith(SUMMARY_MARKER);
 }
 
 /** 从尾向头划分 group;history[0](system)排除。连续 tool 归到前导 assistant。 */
@@ -422,11 +411,7 @@ function groupFromEnd(history: ChatMessage[]): Group[] {
         tools.unshift(history[i]);
         i--;
       }
-      if (
-        i >= 1 &&
-        history[i].role === 'assistant' &&
-        (history[i] as any).tool_calls
-      ) {
+      if (i >= 1 && history[i].role === 'assistant' && (history[i] as any).tool_calls) {
         groups.unshift({ assistant: history[i], tools });
         i--;
       } else {
@@ -539,8 +524,8 @@ function buildTranscript(stripped: ChatMessage[], scale: number): string {
               ? caps.assistant
               : role === 'tool'
                 ? caps.tool
-                : caps.other)
-      )
+                : caps.other),
+      ),
     );
   return stripped
     .map((m) => {
@@ -558,11 +543,7 @@ function buildTranscript(stripped: ChatMessage[], scale: number): string {
     .join('\n');
 }
 
-async function defaultSummarize(
-  older: ChatMessage[],
-  focus?: string,
-  signal?: AbortSignal
-): Promise<string | null> {
+async function defaultSummarize(older: ChatMessage[], focus?: string, signal?: AbortSignal): Promise<string | null> {
   // 已中断就别白拼转录了(几千 token 的字符串拼接 + 一去不回的 LLM 请求)。
   if (signal?.aborted) {
     throw new DOMException('This operation was aborted', 'AbortError');
@@ -574,9 +555,7 @@ async function defaultSummarize(
   // 不需要"先压一遍再摘要"。封顶策略:先按满额封顶;总量仍超窗口 55% 预算时等比缩小
   // 配额重拼(优先保条数/每轮都有代表,其次保单条长度);再超才整段中截兜底(罕见)。
   let transcript = buildTranscript(stripped, 1);
-  const tokenBudget = Math.floor(
-    config.contextWindowTokens * SUMMARY_TRANSCRIPT_WINDOW_RATIO
-  );
+  const tokenBudget = Math.floor(config.contextWindowTokens * SUMMARY_TRANSCRIPT_WINDOW_RATIO);
   let tokens = estimateTokens(transcript);
   if (tokens > tokenBudget) {
     transcript = buildTranscript(stripped, tokenBudget / tokens);
@@ -592,7 +571,7 @@ async function defaultSummarize(
       'You are an aggressive session compressor writing a handoff note for an agent that lost its context. ' +
       'The agent will continue the task with ONLY your summary plus a few most-recent messages, so your summary is the sole memory of everything older.\n' +
       'Output ONLY the summary body in this exact structure (omit empty sections):\n' +
-      '## Objective — the user\'s core request(s); cover EVERY distinct user request in the transcript, in order, noting which are completed vs pending.\n' +
+      "## Objective — the user's core request(s); cover EVERY distinct user request in the transcript, in order, noting which are completed vs pending.\n" +
       '## Completed — what is already done: files created/modified (exact paths), key change per file, commands run and their outcomes (pass/fail, key numbers), decisions made and why.\n' +
       '## In Progress — what is being worked on right now and exactly where it stopped (e.g. "edit applied to foo.ts, test not yet run").\n' +
       '## Next Steps — the concrete next actions in order.\n' +
@@ -611,9 +590,7 @@ async function defaultSummarize(
       : `请将以下会话历史压缩成交接摘要:\n\n${transcript}\n\n摘要:`,
   } as ChatMessage;
 
-  const spinner = new Spinner((msg, frame) =>
-    layout.setStatus(msg, frame ?? undefined)
-  );
+  const spinner = new Spinner((msg, frame) => layout.setStatus(msg, frame ?? undefined));
   spinner.start(signal ? '压缩中(Ctrl+C 取消)' : '压缩中');
   try {
     // signal 必须透传:摘要是几十秒的 LLM 调用,不串进来 Ctrl+C 只能干等它跑完。
@@ -634,10 +611,7 @@ async function defaultSummarize(
  * 压缩 history(原地)。手动 /compact 与自动 maybeCompact 都走这里。
  * 不检查阈值——调用方(maybeCompact)决定是否调;/compact 直接调以强制压缩。
  */
-export async function compactHistory(
-  history: ChatMessage[],
-  opts: CompactOptions
-): Promise<CompactResult> {
+export async function compactHistory(history: ChatMessage[], opts: CompactOptions): Promise<CompactResult> {
   const state = opts.contextState ?? contextState;
   const activeTools = opts.tools ?? chatTools;
   const estimateBefore = estimatePromptTokens(history, activeTools, state.correction);
@@ -653,36 +627,25 @@ export async function compactHistory(
   // 摘要钉住:把已有摘要从 group 序列里摘出来,永不送进摘要器(否则每代再摘要一次 →
   // 递归衰减)。它的 Key Facts 段跨代累积,叙述段则并入下方转录照常滚动压缩。
   const pinnedGroups = allGroups.filter(isSummaryGroup);
-  const groups =
-    pinnedGroups.length > 0 ? allGroups.filter((g) => !isSummaryGroup(g)) : allGroups;
+  const groups = pinnedGroups.length > 0 ? allGroups.filter((g) => !isSummaryGroup(g)) : allGroups;
   const pinned =
     pinnedGroups.length > 0
       ? splitSummaryText(
-          pinnedGroups
-            .map((g) => toText((g.assistant as { content?: unknown } | null)?.content))
-            .join('\n\n'),
+          pinnedGroups.map((g) => toText((g.assistant as { content?: unknown } | null)?.content)).join('\n\n'),
         )
       : null;
 
   // 保近期:按策略中的 token 比例累积(至少保 1 组),永不劈开 group。
   // force(手动 /compact 默认、硬闸触发)用更激进的保留比例;再加绝对上限,
   // 防大窗口(如 256k)下保留区按比例仍过大——压缩目标 = 摘要 + 最小续工上下文。
-  const keepRatio = opts.force
-    ? DEFAULT_BUDGET_POLICY.compactForceKeepRatio
-    : DEFAULT_BUDGET_POLICY.compactKeepRatio;
-  const keepBudget = Math.min(
-    Math.floor(opts.window * keepRatio),
-    DEFAULT_BUDGET_POLICY.compactKeepMaxTokens,
-  );
+  const keepRatio = opts.force ? DEFAULT_BUDGET_POLICY.compactForceKeepRatio : DEFAULT_BUDGET_POLICY.compactKeepRatio;
+  const keepBudget = Math.min(Math.floor(opts.window * keepRatio), DEFAULT_BUDGET_POLICY.compactKeepMaxTokens);
   const kept: Group[] = [];
   let keptTokens = 0;
   for (let k = groups.length - 1; k >= 0; k--) {
     const g = groups[k];
     const nextTokens = keptTokens + groupTokens(g);
-    if (
-      kept.length >= 1
-      && correctTokenEstimate(nextTokens, state.correction) > keepBudget
-    ) break;
+    if (kept.length >= 1 && correctTokenEstimate(nextTokens, state.correction) > keepBudget) break;
     kept.unshift(g);
     keptTokens = nextTokens;
   }
@@ -739,8 +702,7 @@ export async function compactHistory(
       // force 但只剩单组(如首轮的单个 assistant+tools 组):原地微压缩、不动结构。
       // 纯 user 原话组无可压项(不能毁掉用户请求),落到下方 noop 提示。
       const single = groups[0];
-      const userOnly = single.tools.length === 0
-        && (single.assistant as { role?: string } | null)?.role === 'user';
+      const userOnly = single.tools.length === 0 && (single.assistant as { role?: string } | null)?.role === 'user';
       if (!userOnly && microcompactGroup(single)) {
         const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
         state.lastEstimate = estimateAfter;
@@ -807,17 +769,11 @@ export async function compactHistory(
 
   if (summary) {
     const artifactRefs = collectArtifactRefs(older);
-    const provenance = artifactRefs.length > 0
-      ? `\n\n[artifact refs: ${artifactRefs.join(', ')}]`
-      : '';
+    const provenance = artifactRefs.length > 0 ? `\n\n[artifact refs: ${artifactRefs.join(', ')}]` : '';
     // 钉住的 Key Facts 拼在段尾:单条 system 消息里尾部注意力最强,老事实不会被"读漏"。
     // 恒为单条——并排多条 system 摘要会触发近因效应,早期摘要形同虚设。
     const parsed = splitSummaryText(summary);
-    const pinnedFacts = mergeKeyFacts(
-      pinned?.keyFacts,
-      parsed.keyFacts,
-      keyFactsBudgetChars(opts.window),
-    );
+    const pinnedFacts = mergeKeyFacts(pinned?.keyFacts, parsed.keyFacts, keyFactsBudgetChars(opts.window));
     // P2:把 Objective/In Progress/Next Steps 固结到 notes.md——压缩那一刻
     // notes.md 就有当前进度的权威副本,压缩后恢复提示据此续工,不再只依赖
     // 模型自觉 plan_update。仅主 agent(共享 contextState)写;子 agent 独立
@@ -826,12 +782,7 @@ export async function compactHistory(
       const snapshot = extractProgressSnapshot(parsed.rest);
       if (snapshot) writeCompactionSnapshot(snapshot);
     }
-    const body = [
-      parsed.rest,
-      pinnedFacts ? `## Key Facts\n${pinnedFacts}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n\n');
+    const body = [parsed.rest, pinnedFacts ? `## Key Facts\n${pinnedFacts}` : ''].filter(Boolean).join('\n\n');
     const summaryMsg = {
       role: 'system' as const,
       content: `${SUMMARY_MARKER}\n${body}${provenance}`,
@@ -849,12 +800,12 @@ export async function compactHistory(
     // 上一步的 batch 可能尚未 flush,缓冲末行仍是 ● 工具摘要行 → 两行黏在一起)。
     if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
     layout.contentWrite(
-      `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
+      `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
     );
     // 抖动保护:压缩后仍超阈 → 提示 /clear,不死循环
     if (estimateAfter >= opts.threshold * opts.window) {
       layout.contentWrite(
-        `  ${ui.yellow}●${ui.reset} ${ui.yellow}压缩后仍超阈,可能存在超大单条;建议 /clear。${ui.reset}\n`
+        `  ${ui.yellow}●${ui.reset} ${ui.yellow}压缩后仍超阈,可能存在超大单条;建议 /clear。${ui.reset}\n`,
       );
     }
     return {
@@ -881,7 +832,7 @@ export async function compactHistory(
   if (microcompactDone) {
     if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
     layout.contentWrite(
-      `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`
+      `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
     );
     return {
       compacted: true,
@@ -940,9 +891,10 @@ export async function maybeCompact(
 
   // Hard guard: the scheduler has already attempted pressure cleanup; if raw
   // content remains near the provider limit, compact even when correction < 1.
-  let hardCap = typeof report?.rawTotal === 'number'
-    && typeof report?.window === 'number'
-    && report.rawTotal >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * report.window;
+  let hardCap =
+    typeof report?.rawTotal === 'number' &&
+    typeof report?.window === 'number' &&
+    report.rawTotal >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * report.window;
 
   // 手动路径:旁路 autoCompact / report / 总阈三重门
   if (!isManual) {

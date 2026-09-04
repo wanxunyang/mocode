@@ -10,21 +10,12 @@ import * as layout from '../../ui/layout.js';
 import { ui } from '../../ui/theme.js';
 import { bannerLines } from '../../ui/render.js';
 import { t, getLanguage, normalizeLanguage } from '../../i18n/index.js';
-import {
-  updateLanguageConfig,
-  languageFromShell,
-  hasCodegraphIndex,
-} from '../../config/index.js';
+import { updateLanguageConfig, languageFromShell, hasCodegraphIndex } from '../../config/index.js';
 import { updateConfigKey } from '../../config/file.js';
 import { getAgentMode } from '../../agent/mode.js';
 import { buildSlashCommands, slashHelpLines, HELP_GROUPS } from '../commands.js';
 import { startRunningListener, stopRunningListener } from '../running-input.js';
-import {
-  checkVersion,
-  fetchLatestVersion,
-  getCurrentVersion,
-  runUpgradeForeground,
-} from '../../commands/upgrade.js';
+import { checkVersion, fetchLatestVersion, getCurrentVersion, runUpgradeForeground } from '../../commands/upgrade.js';
 import { unhandled, next, exit, forward, type CommandHandler } from './types.js';
 
 /**
@@ -133,7 +124,9 @@ export const systemCommands: CommandHandler[] = [
         if (!info.latest) {
           layout.contentWrite(`${ui.yellow}⚠ ${t('upgrade.fetchFailed')}${ui.reset}\n`);
         } else if (info.hasUpdate) {
-          layout.contentWrite(`${ui.cyan}● ${t('upgrade.hasUpdate', { current: info.current, latest: info.latest })}${ui.reset}\n`);
+          layout.contentWrite(
+            `${ui.cyan}● ${t('upgrade.hasUpdate', { current: info.current, latest: info.latest })}${ui.reset}\n`,
+          );
           layout.contentWrite(`${ui.dim}${t('upgrade.checkHint')}${ui.reset}\n`);
         } else {
           layout.contentWrite(`${ui.green}✓ ${t('upgrade.noUpdate', { version: info.current })}${ui.reset}\n`);
@@ -181,7 +174,9 @@ export const systemCommands: CommandHandler[] = [
           await new Promise((resolve) => setTimeout(resolve, 2500));
           exitAfterUpgrade = true;
         } else {
-          layout.contentWrite(`${ui.red}✗ ${t('upgrade.failedWithCode', { code: String(result.exitCode ?? 'unknown') })}${ui.reset}\n`);
+          layout.contentWrite(
+            `${ui.red}✗ ${t('upgrade.failedWithCode', { code: String(result.exitCode ?? 'unknown') })}${ui.reset}\n`,
+          );
           if (result.output.includes('ETARGET') || result.output.includes('No matching version found')) {
             layout.contentWrite(`${ui.yellow}${t('upgrade.etargetHint')}${ui.reset}\n`);
           } else {

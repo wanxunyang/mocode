@@ -22,7 +22,8 @@ function parseAttachments(value: unknown): HostAttachment[] | undefined {
   return value.flatMap((item) => {
     if (!item || typeof item !== 'object') return [];
     const entry = item as Record<string, unknown>;
-    if (typeof entry.name !== 'string' || typeof entry.dataUrl !== 'string' || !entry.dataUrl.startsWith('data:image/')) return [];
+    if (typeof entry.name !== 'string' || typeof entry.dataUrl !== 'string' || !entry.dataUrl.startsWith('data:image/'))
+      return [];
     return [{ name: entry.name.slice(0, 240), dataUrl: entry.dataUrl }];
   });
 }
@@ -41,7 +42,8 @@ export function parseCommand(value: unknown): HostCommand | null {
     };
   }
   if (input.type === 'cancel') return { id: input.id, type: 'cancel' };
-  if (input.type === 'compact') return { id: input.id, type: 'compact', focus: typeof input.focus === 'string' ? input.focus : undefined };
+  if (input.type === 'compact')
+    return { id: input.id, type: 'compact', focus: typeof input.focus === 'string' ? input.focus : undefined };
   if (input.type === 'approval' && typeof input.approvalId === 'string') {
     return {
       id: input.id,

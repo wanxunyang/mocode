@@ -6,9 +6,7 @@ export type ToolArgumentValidation =
   | { valid: true }
   | { valid: false; code: 'INVALID_ARGUMENTS' | 'INVALID_TOOL_SCHEMA'; message: string };
 
-type CachedValidator =
-  | { valid: true; validate: ValidateFunction }
-  | { valid: false; message: string };
+type CachedValidator = { valid: true; validate: ValidateFunction } | { valid: false; message: string };
 
 const options = {
   allErrors: true,
@@ -26,9 +24,10 @@ const cache = new WeakMap<object, CachedValidator>();
 function compile(schema: Record<string, unknown>): CachedValidator {
   const cached = cache.get(schema);
   if (cached) return cached;
-  const preferred = typeof schema.$schema === 'string' && schema.$schema.includes('2020-12')
-    ? [draft2020, draft7]
-    : [draft7, draft2020];
+  const preferred =
+    typeof schema.$schema === 'string' && schema.$schema.includes('2020-12')
+      ? [draft2020, draft7]
+      : [draft7, draft2020];
   let lastError: unknown;
   for (const ajv of preferred) {
     try {
@@ -47,46 +46,41 @@ function compile(schema: Record<string, unknown>): CachedValidator {
   return result;
 }
 
-function formatErrors(
-  errors: ErrorObject[] | null | undefined,
-  schema?: Record<string, unknown>,
-): string {
+function formatErrors(errors: ErrorObject[] | null | undefined, schema?: Record<string, unknown>): string {
   if (!errors?.length) return '参数不符合 JSON Schema';
   // 收集所有「缺少必填字段」涉及的属性名,用于在文末一次性列出完整必填签名,
   // 避免模型只补齐报错点名的一个字段、下一次又把别的字段弄丢(乒乓失败)。
   const missing = errors
     .filter((e) => e.keyword === 'required')
     .map((e) => String((e.params as { missingProperty?: unknown }).missingProperty ?? '?'));
-  const body = errors.slice(0, 5).map((error) => {
-    const location = error.instancePath || '/';
-    if (error.keyword === 'required') {
-      const property = String((error.params as { missingProperty?: unknown }).missingProperty ?? '?');
-      return `${location} 缺少必填字段 ${JSON.stringify(property)}`;
-    }
-    if (error.keyword === 'additionalProperties') {
-      const property = String((error.params as { additionalProperty?: unknown }).additionalProperty ?? '?');
-      return `${location} 含未知字段 ${JSON.stringify(property)}`;
-    }
-    return `${location} ${error.message ?? error.keyword}`;
-  }).join('; ');
+  const body = errors
+    .slice(0, 5)
+    .map((error) => {
+      const location = error.instancePath || '/';
+      if (error.keyword === 'required') {
+        const property = String((error.params as { missingProperty?: unknown }).missingProperty ?? '?');
+        return `${location} 缺少必填字段 ${JSON.stringify(property)}`;
+      }
+      if (error.keyword === 'additionalProperties') {
+        const property = String((error.params as { additionalProperty?: unknown }).additionalProperty ?? '?');
+        return `${location} 含未知字段 ${JSON.stringify(property)}`;
+      }
+      return `${location} ${error.message ?? error.keyword}`;
+    })
+    .join('; ');
 
   let hint = '';
   const required = (schema?.required as string[] | undefined) ?? [];
   const properties = (schema?.properties as Record<string, { description?: string }> | undefined) ?? {};
   if (missing.length > 0 && required.length > 0) {
-    const lines = required
-      .map((k) => `- ${k}: ${properties[k]?.description ?? '(无描述)'}`)
-      .join('\n');
+    const lines = required.map((k) => `- ${k}: ${properties[k]?.description ?? '(无描述)'}`).join('\n');
     hint = `。请一次性补齐全部必填参数,不要在重试时只补其中一部分:\n${lines}`;
   }
   return body + hint;
 }
 
 /** Validate after tool-local normalization; AJV itself never coerces or mutates arguments. */
-export function validateToolArguments(
-  tool: Tool,
-  args: unknown,
-): ToolArgumentValidation {
+export function validateToolArguments(tool: Tool, args: unknown): ToolArgumentValidation {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return {
       valid: false,

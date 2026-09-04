@@ -11,10 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setSandboxRoot } from '../src/sandbox/root.js';
 import { setCurrentSessionId } from '../src/session/state.js';
-import {
-  appendNoteToSection,
-  extractActiveNotesSections,
-} from '../src/session/notes.js';
+import { appendNoteToSection, extractActiveNotesSections } from '../src/session/notes.js';
 import { noteAppendTool } from '../src/tools/builtins/note-append.js';
 import { reinjectSessionNotesIntoSystem } from '../src/config/index.js';
 import type { ToolOutcome } from '../src/tools/types.js';
@@ -27,7 +24,11 @@ function notesPath(): string {
 }
 
 function readNotes(): string {
-  try { return fs.readFileSync(notesPath(), 'utf8'); } catch { return ''; }
+  try {
+    return fs.readFileSync(notesPath(), 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 function writeNotes(content: string): void {
@@ -44,7 +45,11 @@ function setup(): void {
 function teardown(): void {
   setSandboxRoot(null);
   setCurrentSessionId(undefined, tmpRoot);
-  try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
 }
 
 test('appendNoteToSection: 文件不存在时创建并写入段+条目', () => {
@@ -55,7 +60,9 @@ test('appendNoteToSection: 文件不存在时创建并写入段+条目', () => {
     const content = readNotes();
     assert.match(content, /^## Findings/m);
     assert.match(content, /\*\*\[parser\]\*\* parser rejects CRLF/);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('appendNoteToSection: 追加到已有段,Plan 段及其它段原样保留', () => {
@@ -69,7 +76,9 @@ test('appendNoteToSection: 追加到已有段,Plan 段及其它段原样保留',
     assert.match(content, /- \[ \] 1\. a/);
     // Findings 段追加:旧条目在,新条目在其后
     assert.match(content, /- old finding\n- new finding/);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('appendNoteToSection: 段不存在时在文件末新建,不破坏已有段', () => {
@@ -83,7 +92,9 @@ test('appendNoteToSection: 段不存在时在文件末新建,不破坏已有段'
     assert.match(content, /- API may change/);
     // Risks 在 Plan 之后(文件末新建)
     assert.ok(content.indexOf('## Risks') > content.indexOf('## Plan: x'));
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('appendNoteToSection: 非法 section 返 error', () => {
@@ -91,19 +102,34 @@ test('appendNoteToSection: 非法 section 返 error', () => {
   try {
     const r = appendNoteToSection('bogus', 'x');
     assert.equal('error' in r, true);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('extractActiveNotesSections: 排除 Plan/Done,按优先级 Risks 先于 Findings', () => {
   setup();
   try {
-    writeNotes([
-      '## Plan: x', '### Steps', '- [ ] 1. a', '',
-      '## Findings', '- f1', '',
-      '## Done: old', '- done item', '',
-      '## Risks', '- r1', '',
-      '## Decisions', '- d1', '',
-    ].join('\n'));
+    writeNotes(
+      [
+        '## Plan: x',
+        '### Steps',
+        '- [ ] 1. a',
+        '',
+        '## Findings',
+        '- f1',
+        '',
+        '## Done: old',
+        '- done item',
+        '',
+        '## Risks',
+        '- r1',
+        '',
+        '## Decisions',
+        '- d1',
+        '',
+      ].join('\n'),
+    );
     const out = extractActiveNotesSections();
     // Plan/Done 不注入
     assert.doesNotMatch(out, /## Plan:/);
@@ -118,7 +144,9 @@ test('extractActiveNotesSections: 排除 Plan/Done,按优先级 Risks 先于 Fin
     assert.match(out, /- f1/);
     assert.match(out, /- r1/);
     assert.match(out, /- d1/);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('extractActiveNotesSections: 超预算时段内从最近条目保留,丢最旧', () => {
@@ -133,7 +161,9 @@ test('extractActiveNotesSections: 超预算时段内从最近条目保留,丢最
     assert.match(out, /entry 49/);
     // 最旧条目(entry 0)被裁掉
     assert.doesNotMatch(out, /entry 0\b/);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('extractActiveNotesSections: 无笔记段时返空串', () => {
@@ -142,28 +172,36 @@ test('extractActiveNotesSections: 无笔记段时返空串', () => {
     writeNotes('## Plan: x\n### Steps\n- [ ] 1. a\n');
     const out = extractActiveNotesSections();
     assert.equal(out, '');
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('note_append 工具: 合法调用写入 notes.md 并返 success', async () => {
   setup();
   try {
-    const out = await noteAppendTool.execute({ section: 'risks', entry: 'API may change', tag: 'api' }) as ToolOutcome;
+    const out = (await noteAppendTool.execute({
+      section: 'risks',
+      entry: 'API may change',
+      tag: 'api',
+    })) as ToolOutcome;
     assert.equal(out.status, 'success');
     assert.match(out.output, /## Risks/);
     const content = readNotes();
     assert.match(content, /## Risks/);
     assert.match(content, /\*\*\[api\]\*\* API may change/);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('note_append 工具: 非法 section 返 error', async () => {
-  const out = await noteAppendTool.execute({ section: 'bogus', entry: 'x' }) as ToolOutcome;
+  const out = (await noteAppendTool.execute({ section: 'bogus', entry: 'x' })) as ToolOutcome;
   assert.equal(out.status, 'error');
 });
 
 test('note_append 工具: entry 为空返 error', async () => {
-  const out = await noteAppendTool.execute({ section: 'findings', entry: '   ' }) as ToolOutcome;
+  const out = (await noteAppendTool.execute({ section: 'findings', entry: '   ' })) as ToolOutcome;
   assert.equal(out.status, 'error');
 });
 
@@ -199,7 +237,9 @@ test('reinjectSessionNotesIntoSystem: 注入笔记段到 system,幂等不累积'
     assert.equal(matches.length, 1, '幂等注入不应累积重复段');
     // BASE PROMPT 保留
     assert.match(c2, /BASE PROMPT/);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('reinjectSessionNotesIntoSystem: 无笔记时清掉残留标记块', () => {
@@ -216,7 +256,9 @@ test('reinjectSessionNotesIntoSystem: 无笔记时清掉残留标记块', () => 
     assert.doesNotMatch(c, /constraint/);
     assert.doesNotMatch(c, /session-notes/);
     assert.match(c, /BASE/);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });
 
 test('reinjectSessionNotesIntoSystem: history[0] 非 system 时安全返回 false', () => {
@@ -225,5 +267,7 @@ test('reinjectSessionNotesIntoSystem: history[0] 非 system 时安全返回 fals
     const history: Array<{ role: string; content?: string }> = [{ role: 'user', content: 'hi' }];
     const changed = reinjectSessionNotesIntoSystem(history);
     assert.equal(changed, false);
-  } finally { teardown(); }
+  } finally {
+    teardown();
+  }
 });

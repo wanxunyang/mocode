@@ -27,21 +27,64 @@ const BODY_INDENT = '    ';
 
 /** 扩展名 / 文件名 → cli-highlight(hljs)语言 id;未命中则不高亮(纯文本)。 */
 const LANG_BY_EXT: Record<string, string> = {
-  '.ts': 'typescript', '.tsx': 'typescript', '.mts': 'typescript', '.cts': 'typescript',
-  '.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript',
-  '.py': 'python', '.pyw': 'python', '.pyi': 'python',
-  '.json': 'json', '.json5': 'json',
-  '.md': 'markdown', '.markdown': 'markdown',
-  '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash', '.fish': 'bash',
-  '.yml': 'yaml', '.yaml': 'yaml',
-  '.css': 'css', '.scss': 'scss', '.less': 'less',
-  '.html': 'xml', '.htm': 'xml', '.xml': 'xml', '.svg': 'xml',
-  '.go': 'go', '.rs': 'rust', '.java': 'java', '.kt': 'kotlin', '.kts': 'kotlin',
-  '.c': 'cpp', '.h': 'cpp', '.cpp': 'cpp', '.cc': 'cpp', '.hpp': 'cpp', '.cxx': 'cpp',
-  '.cs': 'csharp', '.rb': 'ruby', '.php': 'php', '.swift': 'swift',
-  '.sql': 'sql', '.lua': 'lua', '.r': 'r', '.dart': 'dart', '.scala': 'scala', '.groovy': 'groovy',
-  '.toml': 'ini', '.ini': 'ini', '.cfg': 'ini', '.conf': 'ini', '.properties': 'ini',
-  '.dockerfile': 'dockerfile', 'dockerfile': 'dockerfile', 'makefile': 'makefile', '.mk': 'makefile',
+  '.ts': 'typescript',
+  '.tsx': 'typescript',
+  '.mts': 'typescript',
+  '.cts': 'typescript',
+  '.js': 'javascript',
+  '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
+  '.py': 'python',
+  '.pyw': 'python',
+  '.pyi': 'python',
+  '.json': 'json',
+  '.json5': 'json',
+  '.md': 'markdown',
+  '.markdown': 'markdown',
+  '.sh': 'bash',
+  '.bash': 'bash',
+  '.zsh': 'bash',
+  '.fish': 'bash',
+  '.yml': 'yaml',
+  '.yaml': 'yaml',
+  '.css': 'css',
+  '.scss': 'scss',
+  '.less': 'less',
+  '.html': 'xml',
+  '.htm': 'xml',
+  '.xml': 'xml',
+  '.svg': 'xml',
+  '.go': 'go',
+  '.rs': 'rust',
+  '.java': 'java',
+  '.kt': 'kotlin',
+  '.kts': 'kotlin',
+  '.c': 'cpp',
+  '.h': 'cpp',
+  '.cpp': 'cpp',
+  '.cc': 'cpp',
+  '.hpp': 'cpp',
+  '.cxx': 'cpp',
+  '.cs': 'csharp',
+  '.rb': 'ruby',
+  '.php': 'php',
+  '.swift': 'swift',
+  '.sql': 'sql',
+  '.lua': 'lua',
+  '.r': 'r',
+  '.dart': 'dart',
+  '.scala': 'scala',
+  '.groovy': 'groovy',
+  '.toml': 'ini',
+  '.ini': 'ini',
+  '.cfg': 'ini',
+  '.conf': 'ini',
+  '.properties': 'ini',
+  '.dockerfile': 'dockerfile',
+  dockerfile: 'dockerfile',
+  makefile: 'makefile',
+  '.mk': 'makefile',
 };
 
 function langForPath(p: string): string | undefined {
@@ -59,13 +102,16 @@ function langForPath(p: string): string | undefined {
 /**
  * 包一层:token 文本 + 颜色 + reset,自成闭区间(防 SGR 跨行泄漏)。
  * 取 ColorKey 而非 ANSI 串——闭包调用时才读 `ui[key]`,故 setTheme 后 diff 高亮即跟随。 */
-const paint = (key: ColorKey) => (s: string): string => `${ui[key]}${s}${ui.reset}`;
+const paint =
+  (key: ColorKey) =>
+  (s: string): string =>
+    `${ui[key]}${s}${ui.reset}`;
 
 /** 自定义主题:default=plain(未匹配文本不着色,避免默认主题把普通代码染黄),常见 token 用 mocode ui 色板。 */
 const THEME: Theme = {
   default: plain,
   keyword: paint('magenta'),
-  'built_in': paint('cyan'),
+  built_in: paint('cyan'),
   type: paint('cyan'),
   literal: paint('cyan'),
   number: paint('green'),
@@ -151,8 +197,7 @@ export function lineDiff(oldS: string, newS: string): DiffLine[] | null {
   for (let i = 0; i <= n; i++) dp[i] = new Uint16Array(m + 1);
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] =
-        a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
     }
   }
   const out: DiffLine[] = [];
@@ -251,7 +296,14 @@ export function renderFileChange(opts: {
     const lines = splitLines(newStr);
     const counts = `${HEAD_INDENT}  ${ui.dim}Added ${ui.reset}${ui.green}${lines.length}${ui.reset}${ui.dim} ${lineWord(lines.length)}${ui.reset}`;
     const padW = Math.max(3, String(startLine + lines.length - 1).length);
-    return renderBody(head, counts, lines.map((l) => ({ kind: 'add', text: l })), padW, startLine, lang);
+    return renderBody(
+      head,
+      counts,
+      lines.map((l) => ({ kind: 'add', text: l })),
+      padW,
+      startLine,
+      lang,
+    );
   }
 
   const ops = lineDiff(oldStr, newStr);
@@ -280,7 +332,14 @@ export function renderFileChange(opts: {
 }
 
 /** 头行 + 计数行 + 正文(折叠 + 截断 + 行号),每行尾 \n。 */
-function renderBody(head: string, counts: string, items: Item[], padW: number, startLine: number, lang: string | undefined): string {
+function renderBody(
+  head: string,
+  counts: string,
+  items: Item[],
+  padW: number,
+  startLine: number,
+  lang: string | undefined,
+): string {
   const lines: string[] = [head, counts];
   const metaPrefix = `${BODY_INDENT}`; // 与正文行左对齐(batch 展开时还会再加外层 indent,避免双重缩进导致提示行突兀)
 

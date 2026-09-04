@@ -18,22 +18,11 @@ import { ui, setTheme } from '../ui/theme.js';
 import { bannerLines, displayWidth } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
-import {
-  promptWithSlashMenu,
-  promptTurnPicker,
-  promptRevertChoice,
-  type SessionPickerItem,
-} from '../ui/prompt.js';
+import { promptWithSlashMenu, promptTurnPicker, promptRevertChoice, type SessionPickerItem } from '../ui/prompt.js';
 import { promptIntervention } from '../ui/intervention.js';
 import { registerToolsExtension } from '../tools/registry.js';
 import { initializeAllMcp, getMcpTools, closeAllMcp } from '../mcp/index.js';
-import {
-  refreshChatTools,
-  chatTools,
-  classifyChatError,
-  type ChatMessage,
-  type ChatUsage,
-} from '../llm/index.js';
+import { refreshChatTools, chatTools, classifyChatError, type ChatMessage, type ChatUsage } from '../llm/index.js';
 import { renderChip, type ImageAttachment } from '../attachments/image.js';
 import type { ContentPart } from '../agent/core.js';
 import {
@@ -67,19 +56,9 @@ import { setCurrentSessionId } from '../session/state.js';
 import { collectQueryHistory } from '../session/query-history.js';
 
 // ── 已拆分的子模块 ──
-import {
-  PROMPT,
-  buildSlashCommands,
-  LLM_ERROR_HINT_KEYS,
-  isCommandShape,
-  suggestCommand,
-} from './commands.js';
+import { PROMPT, buildSlashCommands, LLM_ERROR_HINT_KEYS, isCommandShape, suggestCommand } from './commands.js';
 import { dispatchCommand } from './commands/registry.js';
-import {
-  settlePlanStatus,
-  refreshStatusBase,
-  runningStateFor,
-} from './status-bar.js';
+import { settlePlanStatus, refreshStatusBase, runningStateFor } from './status-bar.js';
 import {
   messageAttachments,
   formatUserMessage,
@@ -87,12 +66,7 @@ import {
   queryHistoryFromMessages,
   renderHistory,
 } from './message-format.js';
-import {
-  startRunningListener,
-  stopRunningListener,
-  getRunningInput,
-  clearRunningInput,
-} from './running-input.js';
+import { startRunningListener, stopRunningListener, getRunningInput, clearRunningInput } from './running-input.js';
 
 // ── 斜杠命令树已移到 ./commands.ts ──
 // ── 状态栏已移到 ./status-bar.ts ──
@@ -274,18 +248,10 @@ export async function startRepl(
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
   // 否则新会话只塞 system 提示(默认 auto)。
   const history: ChatMessage[] =
-    initialHistory && initialHistory.length
-      ? initialHistory
-      : [{ role: 'system', content: buildSystemMessage(false) }];
+    initialHistory && initialHistory.length ? initialHistory : [{ role: 'system', content: buildSystemMessage(false) }];
   // 新 session 使用独立输入历史；旧 session 没有该字段时从 user 消息兼容回填一次。
-  let queryHistory: string[] = initialQueryHistory
-    ? [...initialQueryHistory]
-    : queryHistoryFromMessages(history);
-  if (
-    initialHistory &&
-    initialHistory.length &&
-    history[0]?.role === 'system'
-  ) {
+  let queryHistory: string[] = initialQueryHistory ? [...initialQueryHistory] : queryHistoryFromMessages(history);
+  if (initialHistory && initialHistory.length && history[0]?.role === 'system') {
     history[0] = { role: 'system', content: buildSystemMessage(false) };
   }
   if (sessionId && initialHistory && initialHistory.length) {
@@ -357,7 +323,9 @@ export async function startRepl(
     layout.writeBanner(bannerLines(banner()));
   }
   if (mcpReport.connected.length > 0) {
-    layout.contentWrite(`${ui.dim}  ↳ 已连接 MCP: ${mcpReport.connected.join(', ')} (${getMcpTools().length} 个工具;外部工具每次均需授权)${ui.reset}\n`);
+    layout.contentWrite(
+      `${ui.dim}  ↳ 已连接 MCP: ${mcpReport.connected.join(', ')} (${getMcpTools().length} 个工具;外部工具每次均需授权)${ui.reset}\n`,
+    );
   }
   for (const warning of mcpReport.warnings) {
     layout.contentWrite(`${ui.yellow}  ⚠ ${warning}${ui.reset}\n`);
@@ -476,17 +444,21 @@ export async function startRepl(
     const rollbackResult = applyRollback(plan, history, revertPaths);
     if (!currentSessionId) currentSessionId = newSessionId();
     setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
-    appendCurrentSessionRuntimeEvent('rollback', {
-      status: 'applied',
-      rolledBackFromTurnId,
-      cutoffTurnId: plan.cutoffTurnId,
-      retainedTurns: plan.n,
-      rolledBackTurns: Math.max(0, turnCountBeforeRollback - plan.n),
-      deletedMessages: rollbackResult.deletedMsgs,
-      revertedFiles: rollbackResult.revertedFiles,
-      conflictedFiles: rollbackResult.conflictedFiles,
-      requestedFileCount: revertPaths.size,
-    }, plan.cutoffTurnId);
+    appendCurrentSessionRuntimeEvent(
+      'rollback',
+      {
+        status: 'applied',
+        rolledBackFromTurnId,
+        cutoffTurnId: plan.cutoffTurnId,
+        retainedTurns: plan.n,
+        rolledBackTurns: Math.max(0, turnCountBeforeRollback - plan.n),
+        deletedMessages: rollbackResult.deletedMsgs,
+        revertedFiles: rollbackResult.revertedFiles,
+        conflictedFiles: rollbackResult.conflictedFiles,
+        requestedFileCount: revertPaths.size,
+      },
+      plan.cutoffTurnId,
+    );
     try {
       saveSession(history, currentSessionId, queryHistory);
     } catch {
@@ -523,11 +495,7 @@ export async function startRepl(
    * 无图时保持 string(向后兼容,且 messageTokens 走 estimateTokens 不走 IMAGE_TOKEN_COST)。
    * side channel 记录本轮 msg 在 history 的 index → attachments,供 renderHistory 复显文件名。
    */
-  const runTurn = async (
-    input: string,
-    planMode: boolean,
-    placeholder: string,
-  ): Promise<boolean> => {
+  const runTurn = async (input: string, planMode: boolean, placeholder: string): Promise<boolean> => {
     const imgs = pendingAttachments;
     pendingAttachments = []; // 入口即清,即使后续抛错也不留陈旧附件
     const userInput: string | ContentPart[] =
@@ -556,15 +524,10 @@ export async function startRepl(
       clearSkillActivation();
       // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
       // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
-      const result = await runAgent(
-        history,
-        userInput,
-        signal,
-        () => {
-          refreshStatusBase(history);
-          layout.drawStatusBar();
-        },
-      );
+      const result = await runAgent(history, userInput, signal, () => {
+        refreshStatusBase(history);
+        layout.drawStatusBar();
+      });
       // 本轮 token 累计(底栏模式 chip 右边显示)。undefined = 后端不开 include_usage。
       // 状态栏统一在 finally 刷新，确保正常、中断、异常都经过同一 plan 收尾路径。
       lastTurnUsage = result.usage;
@@ -603,18 +566,22 @@ export async function startRepl(
       // 模型本身仍支持视觉。参数/格式错误应保留原始 provider 诊断，方便准确修复。
       const isImageParameterError =
         /\b(?:invalid|unsupported)\s+(?:image\s+)?(?:detail|parameter|param|format|url)\b/i.test(lower);
-      const isVisionUnsupportedError = !isImageParameterError && (
-        /\b(?:does not support|doesn't support|not supported|unsupported)\b.{0,48}\b(?:image|vision|multimodal|media)\b/i.test(lower) ||
-        /\b(?:image|vision|multimodal|media)\b.{0,48}\b(?:is not supported|not supported|unsupported)\b/i.test(lower) ||
-        /(?:不支持|不具备).{0,12}(?:视觉|图片|图像|多模态)|(?:视觉|图片|图像|多模态).{0,12}(?:不支持|不可用)/.test(msg)
-      );
+      const isVisionUnsupportedError =
+        !isImageParameterError &&
+        (/\b(?:does not support|doesn't support|not supported|unsupported)\b.{0,48}\b(?:image|vision|multimodal|media)\b/i.test(
+          lower,
+        ) ||
+          /\b(?:image|vision|multimodal|media)\b.{0,48}\b(?:is not supported|not supported|unsupported)\b/i.test(
+            lower,
+          ) ||
+          /(?:不支持|不具备).{0,12}(?:视觉|图片|图像|多模态)|(?:视觉|图片|图像|多模态).{0,12}(?:不支持|不可用)/.test(
+            msg,
+          ));
       if (isVisionUnsupportedError) {
         layout.contentWrite(
-          `${ui.red}${t('repl.errorLabel')}${ui.reset} ${t('repl.visionUnsupported', { model: `${ui.accent}${config.model}${ui.reset}` })}${ui.dim}${t('repl.originalError', { message: msg })}${ui.reset}\n`
+          `${ui.red}${t('repl.errorLabel')}${ui.reset} ${t('repl.visionUnsupported', { model: `${ui.accent}${config.model}${ui.reset}` })}${ui.dim}${t('repl.originalError', { message: msg })}${ui.reset}\n`,
         );
-        layout.contentWrite(
-          `${ui.dim}${t('repl.visionHint')}${ui.reset}\n`
-        );
+        layout.contentWrite(`${ui.dim}${t('repl.visionHint')}${ui.reset}\n`);
       } else {
         // 常见错误翻译:认证 / 限流 / 超时 / 网络 / 上下文超长 → 中文引导(新手第一堵墙);
         // 认不出的错误保留原始 provider 诊断,不瞎猜。
@@ -659,9 +626,7 @@ export async function startRepl(
     }
     history.length = 0;
     history.push(...loaded.history);
-    queryHistory = loaded.queryHistory
-      ? [...loaded.queryHistory]
-      : queryHistoryFromMessages(loaded.history);
+    queryHistory = loaded.queryHistory ? [...loaded.queryHistory] : queryHistoryFromMessages(loaded.history);
     setAgentMode('auto'); // 续接重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
     // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
     if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);

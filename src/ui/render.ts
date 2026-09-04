@@ -97,7 +97,10 @@ export function visColToCharCol(str: string, visCol: number): number {
   let i = 0;
   for (const ch of str) {
     const cw = charWidth(ch.codePointAt(0) ?? 0);
-    if (cw <= 0) { i += ch.length; continue; } // 零宽(组合符):不占列
+    if (cw <= 0) {
+      i += ch.length;
+      continue;
+    } // 零宽(组合符):不占列
     if (w + cw > visCol) break; // 落在该字符显示区间内 → 停在其左侧
     w += cw;
     i += ch.length;
@@ -118,16 +121,15 @@ function flattenedOffset(lines: string[], point: DisplayPoint): number {
   return offset + visColToCharCol(plain, point.col);
 }
 
-function pointAtFlattenedOffset(
-  lines: string[],
-  offset: number,
-  preferNextAtBoundary: boolean,
-): DisplayPoint {
+function pointAtFlattenedOffset(lines: string[], offset: number, preferNextAtBoundary: boolean): DisplayPoint {
   if (lines.length === 0) return { line: 0, col: 0 };
   let remaining = Math.max(0, offset);
   for (let line = 0; line < lines.length; line++) {
     const plain = stripAnsi(lines[line]);
-    if (remaining < plain.length || (remaining === plain.length && (!preferNextAtBoundary || line === lines.length - 1))) {
+    if (
+      remaining < plain.length ||
+      (remaining === plain.length && (!preferNextAtBoundary || line === lines.length - 1))
+    ) {
       return { line, col: displayWidth(plain.slice(0, remaining)) };
     }
     remaining -= plain.length;
@@ -143,11 +145,7 @@ function pointAtFlattenedOffset(
  * 引用等可能因续行缩进导致扁平文本不同，此时退化为“非空白字符序号 + 尾随空白数”映射，
  * 使端点仍跟随同一个内容字符，而不是按物理行比例漂移。
  */
-export function remapWrappedPoint(
-  oldLines: string[],
-  newLines: string[],
-  point: DisplayPoint,
-): DisplayPoint {
+export function remapWrappedPoint(oldLines: string[], newLines: string[], point: DisplayPoint): DisplayPoint {
   if (newLines.length === 0) return { line: 0, col: 0 };
   const oldPlain = oldLines.map(stripAnsi);
   const newPlain = newLines.map(stripAnsi);
@@ -213,12 +211,7 @@ export function padEndAnsi(str: string, width: number): string {
  * background 再补空格，供用户消息气泡在终端放宽后动态延伸到底。原串不改写，避免破坏
  * 行内前景色或已有 reset；补段自身闭合，保证下一行不继承背景。
  */
-export function padEndAnsiBackground(
-  str: string,
-  width: number,
-  background: string,
-  reset = '\x1B[0m',
-): string {
+export function padEndAnsiBackground(str: string, width: number, background: string, reset = '\x1B[0m'): string {
   const w = ansiDisplayWidth(str);
   if (w >= width) return str;
   return `${str}${background}${' '.repeat(width - w)}${reset}`;
@@ -413,8 +406,7 @@ function tryParse(raw: string): Record<string, unknown> | null {
 export function summarizeToolCall(name: string, argsRaw: string): string {
   const args = tryParse(argsRaw);
   if (!args) return truncateDisplay(argsRaw, 80);
-  const s = (k: string): string =>
-    typeof args[k] === 'string' ? (args[k] as string) : '';
+  const s = (k: string): string => (typeof args[k] === 'string' ? (args[k] as string) : '');
   switch (name) {
     case 'read_file':
     case 'write_file':

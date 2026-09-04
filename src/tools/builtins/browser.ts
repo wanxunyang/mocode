@@ -56,7 +56,19 @@ export const browserTool: Tool = {
     properties: {
       action: {
         type: 'string',
-        enum: ['open', 'navigate', 'click', 'fill', 'press', 'wait_for', 'text', 'screenshot', 'console', 'list', 'close'],
+        enum: [
+          'open',
+          'navigate',
+          'click',
+          'fill',
+          'press',
+          'wait_for',
+          'text',
+          'screenshot',
+          'console',
+          'list',
+          'close',
+        ],
         description: 'Operation to perform',
       },
       sessionId: { type: 'string', description: 'Session from action=open; optional when only one session exists' },
@@ -92,11 +104,15 @@ export const browserTool: Tool = {
         case 'navigate': {
           const url = optionalString(args, 'url');
           if (!url) return invalid('action=navigate requires a url.');
-          return result('success', 'OK', await navigate({
-            ...(sessionId ? { sessionId } : {}),
-            url,
-            ...(args.timeoutMs === undefined ? {} : { timeoutMs: Number(args.timeoutMs) }),
-          }));
+          return result(
+            'success',
+            'OK',
+            await navigate({
+              ...(sessionId ? { sessionId } : {}),
+              url,
+              ...(args.timeoutMs === undefined ? {} : { timeoutMs: Number(args.timeoutMs) }),
+            }),
+          );
         }
 
         case 'click':
@@ -115,31 +131,43 @@ export const browserTool: Tool = {
           const selector = optionalString(args, 'selector');
           if (!selector) return invalid('action=fill requires a selector.');
           if (typeof args.value !== 'string') return invalid('action=fill requires a value string.');
-          return result('success', 'OK', await fill({
-            ...(sessionId ? { sessionId } : {}),
-            selector,
-            value: args.value,
-            ...(args.timeoutMs === undefined ? {} : { timeoutMs: Number(args.timeoutMs) }),
-          }));
+          return result(
+            'success',
+            'OK',
+            await fill({
+              ...(sessionId ? { sessionId } : {}),
+              selector,
+              value: args.value,
+              ...(args.timeoutMs === undefined ? {} : { timeoutMs: Number(args.timeoutMs) }),
+            }),
+          );
         }
 
         case 'press': {
           const key = optionalString(args, 'key');
           if (!key) return invalid('action=press requires a key.');
-          return result('success', 'OK', await press({
-            ...(sessionId ? { sessionId } : {}),
-            key,
-            ...(optionalString(args, 'selector') ? { selector: optionalString(args, 'selector') as string } : {}),
-            ...(args.timeoutMs === undefined ? {} : { timeoutMs: Number(args.timeoutMs) }),
-          }));
+          return result(
+            'success',
+            'OK',
+            await press({
+              ...(sessionId ? { sessionId } : {}),
+              key,
+              ...(optionalString(args, 'selector') ? { selector: optionalString(args, 'selector') as string } : {}),
+              ...(args.timeoutMs === undefined ? {} : { timeoutMs: Number(args.timeoutMs) }),
+            }),
+          );
         }
 
         case 'text':
-          return result('success', 'OK', await readText({
-            ...(sessionId ? { sessionId } : {}),
-            ...(optionalString(args, 'selector') ? { selector: optionalString(args, 'selector') as string } : {}),
-            ...(args.limit === undefined ? {} : { limit: Number(args.limit) }),
-          }));
+          return result(
+            'success',
+            'OK',
+            await readText({
+              ...(sessionId ? { sessionId } : {}),
+              ...(optionalString(args, 'selector') ? { selector: optionalString(args, 'selector') as string } : {}),
+              ...(args.limit === undefined ? {} : { limit: Number(args.limit) }),
+            }),
+          );
 
         case 'console': {
           const sessions = listSessions();
@@ -191,19 +219,25 @@ export const browserTool: Tool = {
             status: 'success',
             code: 'OK',
             retryable: false,
-            output: JSON.stringify({
-              ...meta,
-              bytes: buffer.byteLength,
-              ...(savedPath ? { savedPath } : {}),
-              note: 'Rendered page is attached to the next model request.',
-            }, null, 2),
-            modelAttachments: [{
-              type: 'image',
-              name: `${meta.sessionId}.png`,
-              mime: 'image/png',
-              dataUrl: `data:image/png;base64,${buffer.toString('base64')}`,
-              detail,
-            }],
+            output: JSON.stringify(
+              {
+                ...meta,
+                bytes: buffer.byteLength,
+                ...(savedPath ? { savedPath } : {}),
+                note: 'Rendered page is attached to the next model request.',
+              },
+              null,
+              2,
+            ),
+            modelAttachments: [
+              {
+                type: 'image',
+                name: `${meta.sessionId}.png`,
+                mime: 'image/png',
+                dataUrl: `data:image/png;base64,${buffer.toString('base64')}`,
+                detail,
+              },
+            ],
           };
         }
 

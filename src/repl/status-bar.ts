@@ -17,7 +17,7 @@ import type { ChatMessage, ChatUsage } from '../llm/index.js';
 /** /context 的用量条(详情版,进内容区):只算对话内容(不含 system prompt),方便用户感知自己发了多少、agent 回复了多少。 */
 export function renderContextBar(history: ChatMessage[]): string {
   // 过滤掉 system 消息,只算对话内容
-  const dialog = history.filter(m => m.role !== 'system');
+  const dialog = history.filter((m) => m.role !== 'system');
   const est = estimateMessagesTokens(dialog);
   const win = config.contextWindowTokens;
   const pct = Math.min(1, est / win);
@@ -133,9 +133,7 @@ export function refreshStatusBase(history: ChatMessage[], lastTurnUsage?: ChatUs
 }
 
 /** 命令 → 运行态状态文字 + 底栏 dim 占位。 */
-export function runningStateFor(
-  cmd: string
-): { status: string; placeholder: string } {
+export function runningStateFor(cmd: string): { status: string; placeholder: string } {
   switch (cmd) {
     case '/compact':
       return { status: t('running.compact'), placeholder: t('running.compacting') };

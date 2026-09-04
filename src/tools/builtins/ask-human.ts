@@ -140,7 +140,8 @@ export const askHumanTool: Tool = {
             },
             description: {
               type: 'string',
-              description: 'What picking this option means or implies; explain the tradeoff when the label alone leaves the user unsure.',
+              description:
+                'What picking this option means or implies; explain the tradeoff when the label alone leaves the user unsure.',
             },
           },
           required: ['label'],

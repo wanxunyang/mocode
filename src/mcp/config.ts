@@ -33,12 +33,7 @@ export function readMcpServers(): McpConfigResult {
   return { servers: Array.from(servers.values()).filter((server) => !server.disabled), warnings };
 }
 
-function mergeServerMap(
-  raw: unknown,
-  target: Map<string, McpServerSpec>,
-  warnings: string[],
-  source: string,
-): void {
+function mergeServerMap(raw: unknown, target: Map<string, McpServerSpec>, warnings: string[], source: string): void {
   const root = isRecord(raw) && isRecord(raw.mcpServers) ? raw.mcpServers : raw;
   if (Array.isArray(root)) {
     for (const entry of root) {
@@ -118,9 +113,7 @@ function positiveNumber(value: unknown): number | undefined {
 }
 
 function stringArray(value: unknown): string[] | undefined {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string')
-    ? value.map(expandEnv)
-    : undefined;
+  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value.map(expandEnv) : undefined;
 }
 
 function stringRecord(value: unknown): Record<string, string> | undefined {

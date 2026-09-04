@@ -15,9 +15,7 @@ import type { KeypressEmitter, SessionPickerItem } from './types.js';
  * 返回选中的 0-based 下标;null=取消 / 非 TTY / 空列表。纯导航(不收文本输入)。
  * 长列表(超屏高)自动开窗保光标可见;默认聚焦末项(最新轮次,靠近输入框)。
  */
-export async function promptTurnPicker(
-  items: { firstLine: string }[]
-): Promise<number | null> {
+export async function promptTurnPicker(items: { firstLine: string }[]): Promise<number | null> {
   if (!layout.isActive() || items.length === 0) return null;
   const emitter = stdin as unknown as KeypressEmitter;
   const hint = t('prompt.chooseRollback');
@@ -32,10 +30,7 @@ export async function promptTurnPicker(
     const maxRows = Math.max(1, g.contentBottom);
     let start = 0;
     if (items.length > maxRows) {
-      start = Math.max(
-        0,
-        Math.min(selected - Math.floor(maxRows / 2), items.length - maxRows)
-      );
+      start = Math.max(0, Math.min(selected - Math.floor(maxRows / 2), items.length - maxRows));
     }
     const count = Math.min(maxRows, items.length);
     const cols = g.cols;
@@ -141,7 +136,7 @@ export async function promptTurnPicker(
  */
 export async function promptSessionPicker(
   items: SessionPickerItem[],
-  recentCap = 10
+  recentCap = 10,
 ): Promise<SessionPickerItem | null> {
   if (!layout.isActive() || items.length === 0) return null;
   const emitter = stdin as unknown as KeypressEmitter;
@@ -161,9 +156,7 @@ export async function promptSessionPicker(
   function hint(): string {
     const base = t('prompt.chooseResume');
     if (!canToggle) return base;
-    return showAll
-      ? t('prompt.recent', { count: cap })
-      : t('prompt.all', { count: items.length });
+    return showAll ? t('prompt.recent', { count: cap }) : t('prompt.all', { count: items.length });
   }
 
   /** 菜单行(带开窗):超屏高时以 selected 为中心取窗,保光标可见。行格式:▸ N  title  subtitle。 */
@@ -174,10 +167,7 @@ export async function promptSessionPicker(
     const vis = visible();
     let start = 0;
     if (vis.length > maxRows) {
-      start = Math.max(
-        0,
-        Math.min(selected - Math.floor(maxRows / 2), vis.length - maxRows)
-      );
+      start = Math.max(0, Math.min(selected - Math.floor(maxRows / 2), vis.length - maxRows));
     }
     const count = Math.min(maxRows, vis.length);
     return Array.from({ length: count }, (_, i) => {
@@ -300,9 +290,7 @@ export async function promptSessionPicker(
  * 返回选中的 item(含 id);null=取消 / 非 TTY / 空列表。纯导航(不收文本输入)。
  * 长列表超屏高自动开窗保光标可见;默认聚焦首项。
  */
-export async function promptThemePicker(
-  items: SessionPickerItem[]
-): Promise<SessionPickerItem | null> {
+export async function promptThemePicker(items: SessionPickerItem[]): Promise<SessionPickerItem | null> {
   if (!layout.isActive() || items.length === 0) return null;
   const emitter = stdin as unknown as KeypressEmitter;
   let selected = 0;
@@ -319,10 +307,7 @@ export async function promptThemePicker(
     const maxRows = Math.max(1, g.contentBottom);
     let start = 0;
     if (items.length > maxRows) {
-      start = Math.max(
-        0,
-        Math.min(selected - Math.floor(maxRows / 2), items.length - maxRows)
-      );
+      start = Math.max(0, Math.min(selected - Math.floor(maxRows / 2), items.length - maxRows));
     }
     const count = Math.min(maxRows, items.length);
     return Array.from({ length: count }, (_, i) => {
@@ -440,10 +425,7 @@ export async function promptRevertChoice(fileCount: number): Promise<boolean | n
   const emitter = stdin as unknown as KeypressEmitter;
   const hint = t('prompt.keepFiles');
   const detail = fileCount > 0 ? t('prompt.revertDetail', { count: fileCount }) : '';
-  const items = [
-    t('prompt.revertFiles', { detail }),
-    t('prompt.messagesOnly'),
-  ];
+  const items = [t('prompt.revertFiles', { detail }), t('prompt.messagesOnly')];
   let selected = 0; // 默认聚焦首项(撤销文件)
   let resolved = false;
   let resolve!: (v: boolean | null) => void;

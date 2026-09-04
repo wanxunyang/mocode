@@ -71,9 +71,10 @@ async function injectCommands(body: string, skillDir: string, signal?: AbortSign
       } else if (res.status === 'aborted') {
         replacement = '(command aborted)';
       } else {
-        const text = res.output.length > MAX_INJECTION_OUTPUT
-          ? res.output.slice(0, MAX_INJECTION_OUTPUT) + '\n…(truncated)'
-          : res.output;
+        const text =
+          res.output.length > MAX_INJECTION_OUTPUT
+            ? res.output.slice(0, MAX_INJECTION_OUTPUT) + '\n…(truncated)'
+            : res.output;
         replacement = text.trim() || '(no output)';
       }
     } catch (e) {
@@ -104,8 +105,7 @@ export async function renderSkillBody(
   if (/!`[^`]+`/.test(body)) {
     // 非 project 恒信任;project 依次查信任记录、再弹一次性确认。
     // ensureSkillTrust 的 true 覆盖 'trusted'(已记录)与 'once'(仅本次)两种,直接据此注入。
-    const trusted =
-      skill.origin !== 'project' || isSkillTrusted(skill) || (await ensureSkillTrust(skill));
+    const trusted = skill.origin !== 'project' || isSkillTrusted(skill) || (await ensureSkillTrust(skill));
     if (trusted) {
       body = await injectCommands(body, skill.dir, signal);
     } else {
@@ -122,10 +122,7 @@ function toOutcome(res: SpawnResult): ToolOutcome {
     res.status === 'completed' ? 'success' : res.status === 'aborted' ? 'aborted' : 'error';
   return {
     status,
-    code:
-      res.status === 'completed' ? 'OK'
-      : res.status === 'aborted' ? 'ABORTED'
-      : 'EXECUTION_ERROR',
+    code: res.status === 'completed' ? 'OK' : res.status === 'aborted' ? 'ABORTED' : 'EXECUTION_ERROR',
     retryable: false,
     output: res.summary ?? (res.status === 'failed' ? '(skill failed with no output)' : ''),
     changeSet: res.changeSet ? toChangeSetSummary(res.changeSet) : undefined,

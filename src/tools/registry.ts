@@ -1,9 +1,4 @@
-import type {
-  Tool,
-  ToolCapabilities,
-  ToolOutcome,
-  ToolExecuteResult,
-} from './types.js';
+import type { Tool, ToolCapabilities, ToolOutcome, ToolExecuteResult } from './types.js';
 import { builtinTools } from './builtins/index.js';
 import {
   beginPathMutation,
@@ -76,10 +71,7 @@ export function getToolCapabilities(toolOrName: Tool | string | undefined): Tool
   return tool?.capabilities ?? DEFAULT_CAPABILITIES;
 }
 
-export function getToolResourceKeys(
-  toolOrName: Tool | string | undefined,
-  args: Record<string, unknown>,
-): string[] {
+export function getToolResourceKeys(toolOrName: Tool | string | undefined, args: Record<string, unknown>): string[] {
   const capabilities = getToolCapabilities(toolOrName);
   try {
     return capabilities.resources?.(args) ?? [];
@@ -99,16 +91,17 @@ export function isFileMutationTool(name: string): boolean {
 }
 
 function isStructuredOutcome(value: ToolExecuteResult): value is ToolOutcome {
-  return typeof value === 'object' && value !== null &&
-    typeof value.status === 'string' && typeof value.code === 'string' &&
-    typeof value.retryable === 'boolean' && typeof value.output === 'string';
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof value.status === 'string' &&
+    typeof value.code === 'string' &&
+    typeof value.retryable === 'boolean' &&
+    typeof value.output === 'string'
+  );
 }
 
-function normalizeOutcome(
-  value: ToolExecuteResult,
-  durationMs: number,
-  changedFiles: string[],
-): ToolOutcome {
+function normalizeOutcome(value: ToolExecuteResult, durationMs: number, changedFiles: string[]): ToolOutcome {
   if (isStructuredOutcome(value)) {
     return {
       ...value,
@@ -159,26 +152,25 @@ function isTransientExecutionError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const value = error as { status?: number; code?: string; name?: string; message?: string };
   if (value.name === 'AbortError' || value.name === 'APIUserAbortError') return false;
-  if (value.status === 408 || value.status === 429 ||
-    (typeof value.status === 'number' && value.status >= 500)) return true;
-  if (['ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE']
-    .includes(value.code ?? '')) return true;
-  return value.name === 'APIConnectionError' ||
+  if (value.status === 408 || value.status === 429 || (typeof value.status === 'number' && value.status >= 500))
+    return true;
+  if (['ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE'].includes(value.code ?? ''))
+    return true;
+  return (
+    value.name === 'APIConnectionError' ||
     value.name === 'APIConnectionTimeoutError' ||
-    (typeof value.message === 'string' && /\btime(?:d)?\s*out\b|ETIMEDOUT/i.test(value.message));
+    (typeof value.message === 'string' && /\btime(?:d)?\s*out\b|ETIMEDOUT/i.test(value.message))
+  );
 }
 
-function executionErrorOutcome(
-  name: string,
-  error: unknown,
-  startedAt: number,
-  changedFiles: string[],
-): ToolOutcome {
+function executionErrorOutcome(name: string, error: unknown, startedAt: number, changedFiles: string[]): ToolOutcome {
   const transient = isTransientExecutionError(error);
   const value = error as { code?: string; name?: string } | undefined;
-  const timeout = transient && (value?.code === 'ETIMEDOUT' ||
-    value?.name === 'APIConnectionTimeoutError' ||
-    (error instanceof Error && /\btime(?:d)?\s*out\b|ETIMEDOUT/i.test(error.message)));
+  const timeout =
+    transient &&
+    (value?.code === 'ETIMEDOUT' ||
+      value?.name === 'APIConnectionTimeoutError' ||
+      (error instanceof Error && /\btime(?:d)?\s*out\b|ETIMEDOUT/i.test(error.message)));
   return {
     status: 'error',
     code: timeout ? 'TIMEOUT' : transient ? 'NETWORK_ERROR' : 'EXECUTION_ERROR',
@@ -210,16 +202,18 @@ async function executeToolOnce(
       const mutationBefore = getCurrentTurnMutationState();
       mutationVersionBefore = mutationBefore.version;
       // Transactional tools own their full write-set capture inside ChangeSet commit.
-      const pathCapture = !capabilities.delegatesResourceLocks &&
-        isFileMutationCapabilities(capabilities) && typeof args.path === 'string' && args.path
-        ? beginPathMutation(args.path)
-        : null;
+      const pathCapture =
+        !capabilities.delegatesResourceLocks &&
+        isFileMutationCapabilities(capabilities) &&
+        typeof args.path === 'string' &&
+        args.path
+          ? beginPathMutation(args.path)
+          : null;
       capturedPath = pathCapture?.path;
       // 工作区快照是异步的:它遍历整棵工作树,同步实现会在每次 run_command/MCP 调用前后
       // 阻塞事件循环数秒(TUI 完全冻结)。await 让 spinner / 走时 / 键鼠在扫描期间继续工作。
-      const workspaceCapture = capabilities.effect === 'process' || capabilities.effect === 'unknown'
-        ? await beginWorkspaceMutation()
-        : null;
+      const workspaceCapture =
+        capabilities.effect === 'process' || capabilities.effect === 'unknown' ? await beginWorkspaceMutation() : null;
 
       let raw: ToolExecuteResult;
       try {
@@ -230,24 +224,32 @@ async function executeToolOnce(
       }
 
       const mutationAfter = getCurrentTurnMutationState();
-      const changedFiles = mutationAfter.version !== mutationBefore.version
-        ? pathCapture
-          ? mutationAfter.changedFiles.filter((item) => item.path === pathCapture.path).map((item) => item.path)
-          : mutationAfter.changedFiles.map((item) => item.path)
-        : [];
+      const changedFiles =
+        mutationAfter.version !== mutationBefore.version
+          ? pathCapture
+            ? mutationAfter.changedFiles.filter((item) => item.path === pathCapture.path).map((item) => item.path)
+            : mutationAfter.changedFiles.map((item) => item.path)
+          : [];
       if (signal?.aborted) {
-        const aborted = terminalOutcome('aborted', 'ABORTED', String(isStructuredOutcome(raw) ? raw.output : raw), startedAt, changedFiles);
+        const aborted = terminalOutcome(
+          'aborted',
+          'ABORTED',
+          String(isStructuredOutcome(raw) ? raw.output : raw),
+          startedAt,
+          changedFiles,
+        );
         return isStructuredOutcome(raw) ? { ...aborted, usage: raw.usage } : aborted;
       }
       return normalizeOutcome(raw, Date.now() - startedAt, changedFiles);
     });
   } catch (error) {
     const mutationAfter = getCurrentTurnMutationState();
-    const changedFiles = mutationVersionBefore !== undefined && mutationAfter.version !== mutationVersionBefore
-      ? capturedPath
-        ? mutationAfter.changedFiles.filter((item) => item.path === capturedPath).map((item) => item.path)
-        : mutationAfter.changedFiles.map((item) => item.path)
-      : [];
+    const changedFiles =
+      mutationVersionBefore !== undefined && mutationAfter.version !== mutationVersionBefore
+        ? capturedPath
+          ? mutationAfter.changedFiles.filter((item) => item.path === capturedPath).map((item) => item.path)
+          : mutationAfter.changedFiles.map((item) => item.path)
+        : [];
     if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
       return terminalOutcome('aborted', 'ABORTED', t('command.interrupted'), startedAt, changedFiles);
     }
@@ -314,10 +316,4 @@ export async function executeTool(
   return (await executeToolOutcome(name, argsRaw, signal, opts)).output;
 }
 
-export type {
-  Tool,
-  ToolCapabilities,
-  ToolContext,
-  ToolOutcome,
-  ToolExecuteResult,
-} from './types.js';
+export type { Tool, ToolCapabilities, ToolContext, ToolOutcome, ToolExecuteResult } from './types.js';

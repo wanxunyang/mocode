@@ -1,10 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import { dirname, extname } from 'node:path';
-import {
-  loadImageAttachment,
-  MAX_INLINE_BYTES_DEFAULT,
-} from '../../attachments/image.js';
+import { loadImageAttachment, MAX_INLINE_BYTES_DEFAULT } from '../../attachments/image.js';
 import { filterEnv, jailResolve } from '../../sandbox/index.js';
 import type { Tool, ToolOutcome } from '../types.js';
 
@@ -42,10 +39,12 @@ function runCaptureProcess(
       stderr = (stderr + chunk.toString('utf8')).slice(-4000);
     });
     child.on('error', (error) => finish({ status: 'spawn_error', detail: error.message }));
-    child.on('close', (code) => finish({
-      status: code === 0 ? 'passed' : 'failed',
-      detail: stderr.trim() || `Capture process exited with code ${code ?? 'null'}.`,
-    }));
+    child.on('close', (code) =>
+      finish({
+        status: code === 0 ? 'passed' : 'failed',
+        detail: stderr.trim() || `Capture process exited with code ${code ?? 'null'}.`,
+      }),
+    );
     if (signal) {
       if (signal.aborted) onAbort();
       else signal.addEventListener('abort', onAbort, { once: true });
@@ -141,7 +140,9 @@ export const screenshotTool: Tool = {
     if (!extname(requestedPath)) requestedPath += '.png';
     if (extname(requestedPath).toLowerCase() !== '.png') {
       return {
-        status: 'error', code: 'INVALID_ARGUMENTS', retryable: false,
+        status: 'error',
+        code: 'INVALID_ARGUMENTS',
+        retryable: false,
         output: 'Screenshot output path must use the .png extension.',
       };
     }
@@ -188,13 +189,15 @@ export const screenshotTool: Tool = {
       code: 'OK',
       retryable: false,
       output: `Captured ${target} display to ${requestedPath} (${att.bytes} bytes). Visual content is attached to the next model request.`,
-      modelAttachments: [{
-        type: 'image',
-        name: att.name,
-        mime: att.mime,
-        dataUrl: att.dataUrl,
-        detail,
-      }],
+      modelAttachments: [
+        {
+          type: 'image',
+          name: att.name,
+          mime: att.mime,
+          dataUrl: att.dataUrl,
+          detail,
+        },
+      ],
     };
   },
 };

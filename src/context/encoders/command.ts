@@ -37,9 +37,7 @@ function parseDiagnostic(line: string): Diagnostic | null {
 
 function splitStatus(text: string): { status: string | null; lines: string[] } {
   const lines = text.split('\n');
-  const status = /^\[(?:退出码 [^\]]+|已中断|超时,已终止)\]$/.test(lines[0] ?? '')
-    ? lines.shift()!
-    : null;
+  const status = /^\[(?:退出码 [^\]]+|已中断|超时,已终止)\]$/.test(lines[0] ?? '') ? lines.shift()! : null;
   return { status, lines };
 }
 function formatDiagnostics(lines: string[]): { text: string; count: number } | null {
@@ -125,7 +123,7 @@ function collapseDuplicateLines(text: string): { text: string; runs: number } {
   const lines = text.split('\n');
   const out: string[] = [];
   let runs = 0;
-  for (let i = 0; i < lines.length;) {
+  for (let i = 0; i < lines.length; ) {
     let end = i + 1;
     while (end < lines.length && lines[end] === lines[i]) end++;
     const count = end - i;

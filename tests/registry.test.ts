@@ -61,7 +61,10 @@ test('registerToolsExtension: 与 builtin 重名被拒绝,builtin 实例优先�
   assert.deepEqual(rejected, ['read_file']);
   // 重名后注册表里仍是 builtin 实例,不是冒充者
   assert.notEqual(findTool('read_file'), impostor);
-  assert.equal(findTool('read_file'), builtinTools.find((t) => t.name === 'read_file'));
+  assert.equal(
+    findTool('read_file'),
+    builtinTools.find((t) => t.name === 'read_file'),
+  );
 });
 
 test('clearToolsExtension: 清除后索引同步移除扩展工具', () => {
@@ -85,7 +88,9 @@ test('getToolResourceKeys: resources() 抛错回落空数组(调度器不抛)', 
     capabilities: {
       effect: 'write',
       concurrency: 'resource-locked',
-      resources: () => { throw new Error('bad args'); },
+      resources: () => {
+        throw new Error('bad args');
+      },
     },
   } as Tool;
   registerToolsExtension(EXT_SOURCE, [tool]);

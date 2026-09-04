@@ -59,9 +59,7 @@ export function renderPlanSection(plan: PlanState): string {
   lines.push('', '### Steps');
   plan.steps.forEach((s, i) => {
     const box = s.status === 'completed' ? '[x]' : '[ ]';
-    const suffix = s.status === 'in_progress'
-      ? `  ◀ ${(s.activeForm ?? '').trim() || 'current'}`
-      : '';
+    const suffix = s.status === 'in_progress' ? `  ◀ ${(s.activeForm ?? '').trim() || 'current'}` : '';
     lines.push(`- ${box} ${i + 1}. ${s.content}${suffix}`);
   });
   const done = plan.steps.filter((s) => s.status === 'completed').length;
@@ -147,7 +145,10 @@ const SECTION_PRIORITY: Record<string, number> = {
   // compaction_snapshot 提到最高:它是压缩当次的权威进度快照,比手填 findings 更能
   // 直接告诉模型「做到哪了」,压缩后第一步最该看到的就是它。
   compaction_snapshot: 5,
-  risks: 4, findings: 3, decisions: 2, open_questions: 1,
+  risks: 4,
+  findings: 3,
+  decisions: 2,
+  open_questions: 1,
 };
 
 /** 常驻笔记正文总预算(token)。5k:占百万级 context 的 0.5%,可常驻相当量笔记。 */
@@ -212,7 +213,10 @@ export function appendNoteToSection(
     // 段末 = 下一个 ## 或文件末
     let end = lines.length;
     for (let k = start + 1; k < lines.length; k++) {
-      if (/^##\s/.test(lines[k])) { end = k; break; }
+      if (/^##\s/.test(lines[k])) {
+        end = k;
+        break;
+      }
     }
     const before = lines.slice(0, start).join('\n').replace(/\s+$/, '');
     const sectionLines = lines.slice(start, end);
@@ -309,7 +313,10 @@ export function extractActiveNotesSections(
   let i = 0;
   while (i < lines.length) {
     const m = lines[i].match(/^##\s+(.+?)\s*$/);
-    if (!m) { i++; continue; }
+    if (!m) {
+      i++;
+      continue;
+    }
     const title = m[1];
     // 跳过 Plan/Done 段(Plan 有专属 ACTIVE_PLAN_MARKER 重注入;Done 是归档不常驻)
     if (/^Plan:/.test(title) || /^Done:/.test(title)) {
@@ -362,10 +369,7 @@ export const COMPACTION_SNAPSHOT_TITLE = NOTE_SECTION_TITLES.compaction_snapshot
  * 整段替换旧快照(不累积);仅在当前无活跃 plan 时写入(已有 plan 时权威计划仍在,
  * 快照只会重复)。body 为空时不动。永不抛错:压缩主流程不能因快照失败而失败。
  */
-export function writeCompactionSnapshot(
-  body: string,
-  sessionId = getCurrentSessionId(),
-): void {
+export function writeCompactionSnapshot(body: string, sessionId = getCurrentSessionId()): void {
   try {
     const trimmed = (body ?? '').trim();
     if (!trimmed) return;
@@ -387,7 +391,10 @@ export function writeCompactionSnapshot(
       // 段末 = 下一个 ## 或文件末;整段替换
       let end = lines.length;
       for (let k = start + 1; k < lines.length; k++) {
-        if (/^##\s/.test(lines[k])) { end = k; break; }
+        if (/^##\s/.test(lines[k])) {
+          end = k;
+          break;
+        }
       }
       const before = lines.slice(0, start).join('\n').replace(/\s+$/, '');
       const after = lines.slice(end).join('\n').replace(/^\s+/, '');

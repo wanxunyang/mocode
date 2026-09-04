@@ -29,8 +29,7 @@ let cache: CalibrationCache | undefined;
 const toolFingerprints = new WeakMap<object, string>();
 
 function cachePath(): string {
-  return process.env.MOCODE_TOKEN_CALIBRATION_CACHE
-    || path.join(os.homedir(), '.mocode', 'token-calibration.json');
+  return process.env.MOCODE_TOKEN_CALIBRATION_CACHE || path.join(os.homedir(), '.mocode', 'token-calibration.json');
 }
 
 function hash(value: string): string {
@@ -46,11 +45,7 @@ function toolFingerprint(tools: readonly unknown[]): string {
   return fingerprint;
 }
 
-function calibrationKey(
-  baseURL: string,
-  model: string,
-  tools: readonly unknown[],
-): string {
+function calibrationKey(baseURL: string, model: string, tools: readonly unknown[]): string {
   // 只把摘要写盘，避免 URL 中偶然携带的凭据出现在缓存文件。
   return hash(`${baseURL}\0${model}\0${toolFingerprint(tools)}`);
 }
@@ -88,24 +83,20 @@ function writeCache(): void {
 }
 
 function validEntry(entry: CalibrationEntry | undefined): entry is CalibrationEntry {
-  return !!entry
-    && Number.isFinite(entry.correction)
-    && entry.correction >= MIN_CORRECTION
-    && entry.correction <= MAX_CORRECTION
-    && Number.isInteger(entry.samples)
-    && entry.samples > 0;
+  return (
+    !!entry &&
+    Number.isFinite(entry.correction) &&
+    entry.correction >= MIN_CORRECTION &&
+    entry.correction <= MAX_CORRECTION &&
+    Number.isInteger(entry.samples) &&
+    entry.samples > 0
+  );
 }
 
 /** 读取指定 provider/model/工具集合的历史校准；未命中时退回 1。 */
-export function getTokenCalibration(
-  baseURL: string,
-  model: string,
-  tools: readonly unknown[],
-): TokenCalibration {
+export function getTokenCalibration(baseURL: string, model: string, tools: readonly unknown[]): TokenCalibration {
   const entry = readCache().entries[calibrationKey(baseURL, model, tools)];
-  return validEntry(entry)
-    ? { correction: entry.correction, samples: entry.samples }
-    : { correction: 1, samples: 0 };
+  return validEntry(entry) ? { correction: entry.correction, samples: entry.samples } : { correction: 1, samples: 0 };
 }
 
 /** 用一次真实 prompt usage 更新 EWMA；只落比例和样本数，不保存任何消息内容。 */
@@ -117,10 +108,10 @@ export function updateTokenCalibration(
   actualTokens: number,
 ): TokenCalibration {
   if (
-    estimatedTokens <= 100
-    || actualTokens <= 100
-    || !Number.isFinite(estimatedTokens)
-    || !Number.isFinite(actualTokens)
+    estimatedTokens <= 100 ||
+    actualTokens <= 100 ||
+    !Number.isFinite(estimatedTokens) ||
+    !Number.isFinite(actualTokens)
   ) {
     return getTokenCalibration(baseURL, model, tools);
   }
@@ -128,13 +119,8 @@ export function updateTokenCalibration(
   const key = calibrationKey(baseURL, model, tools);
   const store = readCache();
   const previous = store.entries[key];
-  const raw = Math.max(
-    MIN_CORRECTION,
-    Math.min(MAX_CORRECTION, actualTokens / estimatedTokens),
-  );
-  const correction = validEntry(previous)
-    ? previous.correction * (1 - EWMA_ALPHA) + raw * EWMA_ALPHA
-    : raw;
+  const raw = Math.max(MIN_CORRECTION, Math.min(MAX_CORRECTION, actualTokens / estimatedTokens));
+  const correction = validEntry(previous) ? previous.correction * (1 - EWMA_ALPHA) + raw * EWMA_ALPHA : raw;
   const next: CalibrationEntry = {
     correction,
     samples: validEntry(previous) ? previous.samples + 1 : 1,

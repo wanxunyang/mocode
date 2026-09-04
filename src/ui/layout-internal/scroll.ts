@@ -58,9 +58,7 @@ export function repaintViewport(): void {
   // viewportAbsStart() 无选区时也用:sticky banner 必须按真实窗口头算,不能降级 0(否则 banner 永不出现)。
   const absStart = viewportAbsStart();
   // sticky banner:仅 scrollOffset>0 时显示;offset=0 即实时屏,user 气泡本来就在视口内,无需 banner。
-  const bannerText = state.scrollOffset > 0
-    ? content.lastUserMessageBefore(absStart)
-    : null;
+  const bannerText = state.scrollOffset > 0 ? content.lastUserMessageBefore(absStart) : null;
   const BANNER_ROW = 1; // 横幅占 viewport 第 1 行(会把原第 1 行内容遮住 —— 1 行换"我在看啥"的可读性,可接受)
   let p = '';
   for (let r = 1; r <= h; r++) {
@@ -102,7 +100,10 @@ export function repaintViewport(): void {
     const c = runningCaretPos();
     p += cup(c.row, c.col);
   } else {
-    p += cup(state.scrollOffset === 0 ? state.contentRow : g.contentBottom, state.scrollOffset === 0 ? state.contentCol : 1);
+    p += cup(
+      state.scrollOffset === 0 ? state.contentRow : g.contentBottom,
+      state.scrollOffset === 0 ? state.contentCol : 1,
+    );
   }
   stdout.write(p);
 }

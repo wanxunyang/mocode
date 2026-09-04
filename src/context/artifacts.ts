@@ -52,7 +52,8 @@ function callArgs(history: ChatMessage[], idx: number): { tool: string; argsRaw:
   for (let cursor = idx - 1; cursor >= 0; cursor--) {
     const message = history[cursor];
     if (message.role !== 'assistant') continue;
-    const calls = (message as { tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> }).tool_calls;
+    const calls = (message as { tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> })
+      .tool_calls;
     const hit = calls?.find((call) => call.id === id);
     if (hit?.function?.name) return { tool: hit.function.name, argsRaw: hit.function.arguments ?? '{}' };
   }
@@ -73,7 +74,7 @@ function pathsFromOutput(tool: string, output: string): string[] {
     if (normalized) paths.add(normalized);
   };
   if (tool === 'grep' || tool === 'run_command') {
-    const expression = /^(.+?\.[A-Za-z0-9]+):(?:\d+|\s*\d+\s*(?:处匹配|matches?))/gmi;
+    const expression = /^(.+?\.[A-Za-z0-9]+):(?:\d+|\s*\d+\s*(?:处匹配|matches?))/gim;
     let match: RegExpExecArray | null;
     while ((match = expression.exec(output))) add(match[1]);
   } else if (tool === 'glob') {
@@ -224,7 +225,9 @@ export function rehydrateArtifacts(state: ContextState, history: ChatMessage[]):
       retained.tokenCount = estimateTokens(content);
       retained.freshness = content.startsWith(STALE_PREFIX)
         ? 'stale'
-        : content.startsWith('⌦[') ? 'stubbed' : retained.freshness;
+        : content.startsWith('⌦[')
+          ? 'stubbed'
+          : retained.freshness;
       artifactState.artifacts.set(id, retained);
     } else {
       recordArtifact(state, history, idx, content, true);
@@ -254,11 +257,7 @@ export function refreshArtifactFreshness(state: ContextState, history: ChatMessa
  * marker. Recent/current work stays intact, and normal mutation handling never
  * calls this function.
  */
-export function pruneStaleArtifacts(
-  state: ContextState,
-  history: ChatMessage[],
-  coldBoundary: number,
-): number {
+export function pruneStaleArtifacts(state: ContextState, history: ChatMessage[], coldBoundary: number): number {
   const artifactState = stateFor(state);
   let pruned = 0;
   for (const artifact of artifactState.artifacts.values()) {

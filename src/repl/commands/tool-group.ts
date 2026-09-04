@@ -75,8 +75,7 @@ export const toolGroupCommands: CommandHandler[] = [
   // 运行时 getRuntimeDisabledTools 兜底拦截、plan 模式 getPlanDisabledTools 也剔除。默认 false。
   (ctx) => {
     const { line } = ctx;
-    const isFe =
-      line === '/fe' || line.startsWith('/fe ') || line === '/frontend' || line.startsWith('/frontend ');
+    const isFe = line === '/fe' || line.startsWith('/fe ') || line === '/frontend' || line.startsWith('/frontend ');
     if (!isFe) return unhandled();
     const raw = line.startsWith('/fe ')
       ? line.slice('/fe '.length)
@@ -188,9 +187,7 @@ export const toolGroupCommands: CommandHandler[] = [
         );
         return next();
       }
-      const arg = line.startsWith('/memory_switch ')
-        ? line.slice('/memory_switch '.length).trim().toLowerCase()
-        : '';
+      const arg = line.startsWith('/memory_switch ') ? line.slice('/memory_switch '.length).trim().toLowerCase() : '';
       let nextEnabled: boolean;
       if (arg === '') {
         nextEnabled = !isMemoryEnabled();
@@ -209,9 +206,7 @@ export const toolGroupCommands: CommandHandler[] = [
       }
       const prev = isMemoryEnabled();
       if (nextEnabled === prev) {
-        layout.contentWrite(
-          `${ui.dim}(已是 ${nextEnabled ? '开启' : '关闭'},未变更 — 持久化字段未写入)${ui.reset}\n`,
-        );
+        layout.contentWrite(`${ui.dim}(已是 ${nextEnabled ? '开启' : '关闭'},未变更 — 持久化字段未写入)${ui.reset}\n`);
         return next();
       }
       updateMemoryConfig(nextEnabled);

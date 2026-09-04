@@ -18,12 +18,14 @@ export const webSearchTool: Tool = {
       max_results: { type: 'integer', description: 'Number of results, 1-20, default 10' },
       tag: {
         type: 'string',
-        description: 'Sub-domain capability tag, e.g. general.general / code.doc / code.snippet; omit for general search',
+        description:
+          'Sub-domain capability tag, e.g. general.general / code.doc / code.snippet; omit for general search',
       },
       language: { type: 'string', description: 'Preferred language, e.g. zh-CN / en, default zh-CN' },
       params: {
         type: 'object',
-        description: 'Extended params for a specific tag, e.g. {"library":"golang"} for code.doc; not needed for general search',
+        description:
+          'Extended params for a specific tag, e.g. {"library":"golang"} for code.doc; not needed for general search',
       },
     },
     required: ['query'],
@@ -39,11 +41,7 @@ export const webSearchTool: Tool = {
     }
     if (args.tag) body.tag = String(args.tag);
     if (args.language) body.language = String(args.language);
-    if (
-      args.params &&
-      typeof args.params === 'object' &&
-      !Array.isArray(args.params)
-    ) {
+    if (args.params && typeof args.params === 'object' && !Array.isArray(args.params)) {
       body.params = args.params;
     }
 
@@ -104,8 +102,7 @@ export const webSearchTool: Tool = {
         return {
           status: 'error',
           code: !resp.ok || Number(code) === 429 ? 'HTTP_ERROR' : 'EXECUTION_ERROR',
-          retryable: resp.status === 408 || resp.status === 429 ||
-            resp.status >= 500 || Number(code) === 429,
+          retryable: resp.status === 408 || resp.status === 429 || resp.status >= 500 || Number(code) === 429,
           output: `错误:搜索失败 [${code}] ${message}${rid}${hint}`,
         };
       }
@@ -127,8 +124,7 @@ export const webSearchTool: Tool = {
         if (content) {
           const c =
             content.length > MAX_CONTENT_CHARS
-              ? content.slice(0, MAX_CONTENT_CHARS) +
-                ` …(共 ${content.length} 字符)`
+              ? content.slice(0, MAX_CONTENT_CHARS) + ` …(共 ${content.length} 字符)`
               : content;
           lines.push(`    ${c}`);
         }
@@ -136,11 +132,7 @@ export const webSearchTool: Tool = {
 
       const meta = data?.data?.metadata;
       if (meta) {
-        lines.push(
-          `(共 ${meta.total_results ?? results.length} 条,耗时 ${
-            meta.search_time_ms ?? '?'
-          }ms)`
-        );
+        lines.push(`(共 ${meta.total_results ?? results.length} 条,耗时 ${meta.search_time_ms ?? '?'}ms)`);
       }
 
       let out = lines.join('\n');

@@ -19,7 +19,11 @@ export interface SubAgentResult {
 
 const EXCLUDED = new Set(['.git', 'node_modules', 'dist', '.mocode']);
 
-async function filesBelow(root: string, dir = root, out: Map<string, Buffer> = new Map()): Promise<Map<string, Buffer>> {
+async function filesBelow(
+  root: string,
+  dir = root,
+  out: Map<string, Buffer> = new Map(),
+): Promise<Map<string, Buffer>> {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     if (EXCLUDED.has(entry.name)) continue;
     const absolute = path.join(dir, entry.name);
@@ -40,9 +44,17 @@ function diffToChangeSet(before: Map<string, Buffer>, after: Map<string, Buffer>
     const oldValue = before.get(file);
     const newValue = after.get(file);
     if (oldValue && newValue && oldValue.equals(newValue)) continue;
-    if (!oldValue && newValue) changes.push({ path: file, operation: 'create', expectedHash: null, replacement: text(newValue) });
-    else if (oldValue && !newValue) changes.push({ path: file, operation: 'delete', expectedHash: contentHash(oldValue) });
-    else if (oldValue && newValue) changes.push({ path: file, operation: 'update', expectedHash: contentHash(oldValue), replacement: text(newValue) });
+    if (!oldValue && newValue)
+      changes.push({ path: file, operation: 'create', expectedHash: null, replacement: text(newValue) });
+    else if (oldValue && !newValue)
+      changes.push({ path: file, operation: 'delete', expectedHash: contentHash(oldValue) });
+    else if (oldValue && newValue)
+      changes.push({
+        path: file,
+        operation: 'update',
+        expectedHash: contentHash(oldValue),
+        replacement: text(newValue),
+      });
   }
   return changes.length ? createChangeSet(changes) : null;
 }
@@ -62,7 +74,10 @@ export async function inOverlay<T>(run: () => Promise<T>): Promise<{ value: T; c
 }
 
 /** The only merge point: ChangeSet preconditions and canonical resource locks prevent silent overwrite. */
-export async function mergeSubAgentChangeSet(changeSet: ChangeSet | null, signal?: AbortSignal): Promise<'committed' | 'conflict' | 'failed'> {
+export async function mergeSubAgentChangeSet(
+  changeSet: ChangeSet | null,
+  signal?: AbortSignal,
+): Promise<'committed' | 'conflict' | 'failed'> {
   if (!changeSet) return 'committed';
   const result = await commitChangeSet(changeSet, signal);
   return result.status;

@@ -48,10 +48,7 @@ export interface EncoderInput {
 }
 
 /** pipeline 调用方可注入的运行时老化上下文。 */
-export type EncoderRuntimeContext = Pick<
-  EncoderInput,
-  'age' | 'isCold' | 'isFirstRead' | 'phase'
->;
+export type EncoderRuntimeContext = Pick<EncoderInput, 'age' | 'isCold' | 'isFirstRead' | 'phase'>;
 
 /** encoder 的输出。 */
 export interface EncoderOutput {

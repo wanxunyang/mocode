@@ -3,13 +3,7 @@
 // scheduler is the only automatic rewrite coordinator at real pressure.
 
 export { optimizeToolResult } from './pipeline.js';
-export type {
-  ContextKind,
-  ContextEncoder,
-  EncoderInput,
-  EncoderOutput,
-  EncoderRuntimeContext,
-} from './types.js';
+export type { ContextKind, ContextEncoder, EncoderInput, EncoderOutput, EncoderRuntimeContext } from './types.js';
 export { classify, knownToolKinds } from './classifier.js';
 export {
   recordArtifact,
@@ -29,12 +23,7 @@ export type {
   ContextArtifact,
   KnownEditTarget,
 } from './artifacts.js';
-export {
-  registerEncoder,
-  registerAll,
-  getEncoder,
-  registeredKinds,
-} from './registry.js';
+export { registerEncoder, registerAll, getEncoder, registeredKinds } from './registry.js';
 
 // ── Context Budget Scheduler ───────────────────────────────────────────────
 export {

@@ -1,10 +1,5 @@
 import type { Tool } from '../types.js';
-import {
-  addTriple,
-  graphStats,
-  neighborsOf,
-  pathBetween,
-} from '../../memory/graph.js';
+import { addTriple, graphStats, neighborsOf, pathBetween } from '../../memory/graph.js';
 
 // ---------- memory_graph ----------
 // 知识图谱维护工具:邻居遍历(1-3 跳,可 relation 过滤)、两点最短路径、手工加三元组、看图统计。
@@ -12,18 +7,16 @@ import {
 // 底层 memory-graph.json(Graphiti 式时序边:新事实取代旧边时旧边置 invalidAt,不删)。
 // neighbors/path/stats 只读;add 写。
 
-function fmtEdges(edges: { src: string; dst: string; relation: string; fact: string; invalidAt: string | null }[]): string {
+function fmtEdges(
+  edges: { src: string; dst: string; relation: string; fact: string; invalidAt: string | null }[],
+): string {
   if (edges.length === 0) return '(无边)';
-  return edges
-    .map((e) => `${e.src} --[${e.relation}]--> ${e.dst}${e.fact ? ` (${e.fact})` : ''}`)
-    .join('\n');
+  return edges.map((e) => `${e.src} --[${e.relation}]--> ${e.dst}${e.fact ? ` (${e.fact})` : ''}`).join('\n');
 }
 
 function fmtEntities(entities: { id: string; name: string; summary: string; scope: string }[]): string {
   if (entities.length === 0) return '(无实体)';
-  return entities
-    .map((e) => `- ${e.id}: ${e.name}${e.summary ? ` — ${e.summary}` : ''} [${e.scope}]`)
-    .join('\n');
+  return entities.map((e) => `- ${e.id}: ${e.name}${e.summary ? ` — ${e.summary}` : ''} [${e.scope}]`).join('\n');
 }
 
 export const memoryGraphTool: Tool = {

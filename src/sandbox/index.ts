@@ -2,8 +2,4 @@
 export { getSandboxRoot, setSandboxRoot, withSandboxRoot } from './root.js';
 export { jailResolve, jailGlobPattern, isInsideRoot } from './jail.js';
 export { filterEnv, isCommandDenied } from './command.js';
-export {
-  SANDBOX_EXEMPT_TOOLS,
-  SANDBOX_PATH_TOOLS,
-  enforceSandbox,
-} from './policy.js';
+export { SANDBOX_EXEMPT_TOOLS, SANDBOX_PATH_TOOLS, enforceSandbox } from './policy.js';

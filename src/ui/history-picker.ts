@@ -50,9 +50,7 @@ function displayLine(text: string): string {
   return extra > 0 ? `${lines[0] ?? ''}  (+${extra})` : (lines[0] ?? '');
 }
 
-export async function promptHistorySearch(
-  opts: HistorySearchOpts,
-): Promise<HistoryPickResult | null> {
+export async function promptHistorySearch(opts: HistorySearchOpts): Promise<HistoryPickResult | null> {
   if (!layout.isActive()) return null;
   const items = opts.items.filter((s) => s.trim().length > 0);
   if (items.length === 0) return null;

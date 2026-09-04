@@ -32,11 +32,7 @@ export function textOf(c: unknown): string {
   if (typeof c === 'string') return c;
   if (c == null) return '';
   if (Array.isArray(c)) {
-    return c
-      .map((p) =>
-        typeof p === 'string' ? p : (p as { text?: string })?.text ?? ''
-      )
-      .join('');
+    return c.map((p) => (typeof p === 'string' ? p : ((p as { text?: string })?.text ?? ''))).join('');
   }
   return String(c);
 }
@@ -103,12 +99,14 @@ export function renderHistory(history: ChatMessage[]): void {
         flushBatch(); // 文本前若有累积 batch 先收尾(罕见:连续两个 assistant tool_calls 文本间)
         layout.contentWriteMdOnce(text);
       }
-      const tcs = (m as {
-        tool_calls?: {
-          id?: string;
-          function?: { name?: string; arguments?: string };
-        }[];
-      }).tool_calls;
+      const tcs = (
+        m as {
+          tool_calls?: {
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }[];
+        }
+      ).tool_calls;
       if (Array.isArray(tcs) && tcs.length > 0) {
         if (text) {
           // contentWriteMdOnce 会裁掉 markdown 尾部空行，而 history 中的原始 text 是否以 \n

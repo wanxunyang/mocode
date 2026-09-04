@@ -54,9 +54,13 @@ function nativeCopy(text: string): void {
     try {
       const p = spawn(
         'powershell',
-        ['-NoProfile', '-NonInteractive', '-Command',
-          '[Console]::InputEncoding=[System.Text.Encoding]::Unicode; Set-Clipboard -Value ([Console]::In.ReadToEnd())'],
-        { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true }
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          '[Console]::InputEncoding=[System.Text.Encoding]::Unicode; Set-Clipboard -Value ([Console]::In.ReadToEnd())',
+        ],
+        { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true },
       );
       p.on('error', () => pipeTo('clip', [], Buffer.concat([bom, buf]))); // 无 PowerShell:退 clip.exe(乱码/FEFF 风险自负,OSC52 兜底)
       p.stdin.on('error', () => {});
@@ -118,14 +122,24 @@ export async function readClipboard(): Promise<string> {
     // Get-Clipboard 默认按控制台代码页输出;显式转 UTF8 避免中文乱码。
     const out = await captureOutput(
       'powershell',
-      ['-NoProfile', '-NonInteractive', '-Command',
-        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Clipboard -Raw'],
-      'utf8'
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Clipboard -Raw',
+      ],
+      'utf8',
     );
     // 末尾 strip 一个 \n:PowerShell 把字符串写到 stdout 时会追加行终止符(实验证实
     // clipboard=abc 时读回 abc\r\n),属输出伪影而非剪贴板内容;真以换行结尾的剪贴板
     // 内容多出的一个 \n 恰好被抵消,不受影响。
-    return out?.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r$/, '').replace(/\n$/, '') ?? '';
+    return (
+      out
+        ?.replace(/^\uFEFF/, '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r$/, '')
+        .replace(/\n$/, '') ?? ''
+    );
   }
   if (platform === 'darwin') {
     return (await captureOutput('pbpaste', [], 'utf8')) ?? '';

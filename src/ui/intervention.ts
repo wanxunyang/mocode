@@ -65,10 +65,7 @@ export interface InterventionResult {
 /** emitKeypressEvents 后 stdin 发 'keypress'(不在 ReadStream 类型里),单独声明。 */
 interface KeypressEmitter {
   on(event: 'keypress', listener: (str: string, key: Key) => void): this;
-  removeListener(
-    event: 'keypress',
-    listener: (str: string, key: Key) => void
-  ): this;
+  removeListener(event: 'keypress', listener: (str: string, key: Key) => void): this;
   listeners(event: 'keypress'): Array<(str: string, key: Key) => void>;
 }
 
@@ -78,18 +75,14 @@ const emitter = stdin as unknown as KeypressEmitter;
 const customLabel = (): string => t('intervention.custom');
 
 /** 弹出介入面板,阻塞直到用户完成选择。 */
-export async function promptIntervention(
-  req: InterventionRequest
-): Promise<InterventionResult> {
+export async function promptIntervention(req: InterventionRequest): Promise<InterventionResult> {
   // 非 TTY 降级:不阻塞,自动选默认。日志走 stderr(不污染 stdout 内容流)。
   if (!layout.isActive()) {
-    const kind = req.type === 'choice'
-      ? t('intervention.defaultChoice')
-      : t('intervention.emptyInput');
+    const kind = req.type === 'choice' ? t('intervention.defaultChoice') : t('intervention.emptyInput');
     stderr.write(`${t('intervention.nonInteractive', { title: req.title, kind })}\n`);
     if (req.type === 'choice') {
       const first = req.options?.[0];
-      const value = typeof first === 'string' ? first : first?.label ?? '';
+      const value = typeof first === 'string' ? first : (first?.label ?? '');
       return { action: 'selected', value };
     }
     return { action: 'submitted', value: req.seed ?? '' };
@@ -98,23 +91,20 @@ export async function promptIntervention(
   const options: ChoiceOption[] =
     req.type === 'choice' && Array.isArray(req.options)
       ? req.options
-          .map((o): ChoiceOption =>
-            typeof o === 'string' ? { label: o } : { label: String(o.label ?? ''), detail: o.detail }
+          .map(
+            (o): ChoiceOption =>
+              typeof o === 'string' ? { label: o } : { label: String(o.label ?? ''), detail: o.detail },
           )
           .filter((o) => o.label.length > 0)
       : [];
   // choice 但选项被滤空 → 降级 input(对齐设计文档 §8:ask_human 选项为空数组→input)。
-  const startMode: InterventionType =
-    req.type === 'choice' && options.length > 0 ? 'choice' : 'input';
+  const startMode: InterventionType = req.type === 'choice' && options.length > 0 ? 'choice' : 'input';
 
   let mode: InterventionType = startMode;
   // choice:选中下标(0..options.length-1 为各选项,options.length 为"自定义"项)。
   // 初始选中项:默认 0(首项);调用方可传 defaultIndex 改。危险操作用它把默认落在「拒绝」上,
   // 否则面板一弹出就高亮「允许一次」,用户顺手回车就把 rm -rf 放出去了。只认真实选项,不含"自定义"项。
-  const defaultIndex = Math.max(
-    0,
-    Math.min(req.defaultIndex ?? 0, Math.max(0, options.length - 1)),
-  );
+  const defaultIndex = Math.max(0, Math.min(req.defaultIndex ?? 0, Math.max(0, options.length - 1)));
   let selected = defaultIndex;
   // input:可编辑文本 + 光标(UTF-16 码元索引;显示位置由 displayWidth 算,见 paintInput)。
   let text = req.seed ?? '';
@@ -216,7 +206,7 @@ export async function promptIntervention(
     lines.push(
       `${ui.dim}${t('prompt.submit', {
         escape: cameFromChoice ? t('prompt.back') : t('prompt.cancel'),
-      })}${ui.reset}`
+      })}${ui.reset}`,
     );
     return lines;
   }

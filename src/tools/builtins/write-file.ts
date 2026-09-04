@@ -45,17 +45,25 @@ export const writeFileTool: Tool = {
       expectedHash = normalizeContentHash(String(args.expected_hash));
       if (!expectedHash) return conflict(file, 'expected_hash 必须是 null 或 sha256:<64 hex>。');
     }
-    const operation = expectedHash === null ? 'create' as const : 'update' as const;
-    const result = await commitChangeSet(createChangeSet([{
-      path: file,
-      operation,
-      expectedHash,
-      replacement: content,
-    }]), ctx?.signal);
+    const operation = expectedHash === null ? ('create' as const) : ('update' as const);
+    const result = await commitChangeSet(
+      createChangeSet([
+        {
+          path: file,
+          operation,
+          expectedHash,
+          replacement: content,
+        },
+      ]),
+      ctx?.signal,
+    );
 
     if (result.status === 'conflict') {
       const item = result.conflicts[0];
-      return conflict(file, `expected=${item?.expectedHash ?? 'missing'}, actual=${item?.actualHash ?? 'missing'}。请重新读取后再写入。`);
+      return conflict(
+        file,
+        `expected=${item?.expectedHash ?? 'missing'}, actual=${item?.actualHash ?? 'missing'}。请重新读取后再写入。`,
+      );
     }
     if (result.status === 'failed') {
       return {
@@ -73,9 +81,10 @@ export const writeFileTool: Tool = {
       retryable: false,
       changedFiles: result.changedFiles,
       changeSet: summary,
-      output: result.changedFiles.length === 0
-        ? `文件 ${file} 内容未变化 (ChangeSet ${summary.id})。`
-        : `已事务化写入 ${file} (${content.length} 字符, ChangeSet ${summary.id}, sha256=${summary.changes[0]?.afterHash})。`,
+      output:
+        result.changedFiles.length === 0
+          ? `文件 ${file} 内容未变化 (ChangeSet ${summary.id})。`
+          : `已事务化写入 ${file} (${content.length} 字符, ChangeSet ${summary.id}, sha256=${summary.changes[0]?.afterHash})。`,
     };
   },
 };

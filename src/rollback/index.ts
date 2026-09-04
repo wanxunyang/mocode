@@ -197,9 +197,7 @@ function snapshotFromState(
 /** 同轮同路径只保留最早的 before；后续实际改动仅合并工具名。 */
 function addSnapshot(next: Snapshot): void {
   if (next.turnId <= 0) return;
-  const existingIndex = snapshots.findIndex(
-    (item) => item.turnId === next.turnId && item.path === next.path,
-  );
+  const existingIndex = snapshots.findIndex((item) => item.turnId === next.turnId && item.path === next.path);
   if (existingIndex < 0) {
     snapshots.push(next);
     return;
@@ -208,9 +206,7 @@ function addSnapshot(next: Snapshot): void {
   const existingSequence = existing.sequence ?? Number.MAX_SAFE_INTEGER;
   const nextSequence = next.sequence ?? Number.MAX_SAFE_INTEGER;
   const ops = new Set([...(existing.ops ?? []), ...(next.ops ?? [])]);
-  const latestAfterFingerprint = nextSequence >= existingSequence
-    ? next.afterFingerprint
-    : existing.afterFingerprint;
+  const latestAfterFingerprint = nextSequence >= existingSequence ? next.afterFingerprint : existing.afterFingerprint;
   if (nextSequence < existingSequence) {
     snapshots[existingIndex] = { ...next, ops: [...ops], afterFingerprint: latestAfterFingerprint };
   } else {
@@ -263,32 +259,14 @@ export function endPathMutation(capture: PathMutationCapture, op: string): void 
   const after = readState(full);
   if (!sameState(capture.before, after)) {
     changed = true;
-    addSnapshot(
-      snapshotFromState(
-        capture.path,
-        capture.before,
-        capture.sequence,
-        op,
-        capture.createdParents,
-        after,
-      ),
-    );
+    addSnapshot(snapshotFromState(capture.path, capture.before, capture.sequence, op, capture.createdParents, after));
   }
   // write_file 会递归创建父目录；即使最终写文件失败，这些目录也是本轮真实副作用。
   for (const parentRel of capture.createdParents) {
     const parent = safeFullPath(parentRel);
     if (parent && readState(parent).kind !== 'missing') {
       changed = true;
-      addSnapshot(
-        snapshotFromState(
-          parentRel,
-          { kind: 'missing' },
-          capture.sequence,
-          op,
-          [],
-          readState(parent),
-        ),
-      );
+      addSnapshot(snapshotFromState(parentRel, { kind: 'missing' }, capture.sequence, op, [], readState(parent)));
     }
   }
   if (changed) mutationVersion += 1;
@@ -300,15 +278,48 @@ export function endPathMutation(capture: PathMutationCapture, op: string): void 
 const EXCLUDED_WORKSPACE_DIRS = new Set([
   // VCS / 索引 / mocode 自身运行时状态(会话、trace、dev-server 日志、记忆、截图每轮都在写,
   // 既无回滚意义,又会被误判成模型改动)
-  '.git', '.hg', '.svn', '.codegraph', '.mocode',
+  '.git',
+  '.hg',
+  '.svn',
+  '.codegraph',
+  '.mocode',
   // 依赖树与包管理器缓存
-  'node_modules', 'vendor', 'bower_components', '.yarn', '.pnpm-store', '.venv', 'venv', 'pods',
+  'node_modules',
+  'vendor',
+  'bower_components',
+  '.yarn',
+  '.pnpm-store',
+  '.venv',
+  'venv',
+  'pods',
   // 构建产物
-  'dist', 'build', 'out', 'target', 'coverage', '.output', '.next', '.nuxt', '.vite',
-  '.turbo', '.svelte-kit', '.angular', '.astro', '.docusaurus', '.dart_tool', '.terraform',
+  'dist',
+  'build',
+  'out',
+  'target',
+  'coverage',
+  '.output',
+  '.next',
+  '.nuxt',
+  '.vite',
+  '.turbo',
+  '.svelte-kit',
+  '.angular',
+  '.astro',
+  '.docusaurus',
+  '.dart_tool',
+  '.terraform',
   // 临时与缓存
-  '.tmp', 'tmp', '.cache', '.parcel-cache', '.nyc_output', '__pycache__',
-  '.pytest_cache', '.mypy_cache', '.ruff_cache', '.gradle',
+  '.tmp',
+  'tmp',
+  '.cache',
+  '.parcel-cache',
+  '.nyc_output',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  '.ruff_cache',
+  '.gradle',
 ]);
 
 /** 单文件内容捕获上限：更大的文件只留 stamp(可检测变化,不可恢复),避免把巨型二进制读进内存。 */
@@ -357,8 +368,7 @@ function isWorkspaceExcluded(full: string): boolean {
   return isInside(sessionDirAbs(), full);
 }
 
-const yieldToEventLoop = (): Promise<void> =>
-  new Promise<void>((resolve) => setImmediate(resolve));
+const yieldToEventLoop = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
 
 /**
  * 工作区快照(run_command / dev_server / MCP 等不透明工具用)。
@@ -451,9 +461,7 @@ async function scanWorkspace(): Promise<Map<string, StoredState>> {
       entries.set(toRel(full), state);
     }
   };
-  await Promise.all(
-    Array.from({ length: Math.min(SCAN_CONCURRENCY, Math.max(1, paths.length)) }, worker),
-  );
+  await Promise.all(Array.from({ length: Math.min(SCAN_CONCURRENCY, Math.max(1, paths.length)) }, worker));
 
   // 缓存整体替换:已删除的文件自然被淘汰,内存上限 ≈ CAPTURE_TOTAL_LIMIT。
   contentCache = nextCache;
@@ -466,10 +474,7 @@ export async function beginWorkspaceMutation(): Promise<WorkspaceMutationCapture
 }
 
 /** 不透明工具执行后比较整个工作区，把实际变化压入当前轮事务日志。 */
-export async function endWorkspaceMutation(
-  capture: WorkspaceMutationCapture,
-  op: string,
-): Promise<void> {
+export async function endWorkspaceMutation(capture: WorkspaceMutationCapture, op: string): Promise<void> {
   const after = await scanWorkspace();
   const paths = new Set([...capture.entries.keys(), ...after.keys()]);
   let changed = false;
@@ -621,9 +626,11 @@ export function applyRollback(
   for (const snapshot of snapshots) {
     if (snapshot.turnId <= plan.cutoffTurnId || !revertPaths.has(snapshot.path)) continue;
     const latestSnapshot = latest.get(snapshot.path);
-    if (!latestSnapshot || snapshot.turnId > latestSnapshot.turnId ||
-      (snapshot.turnId === latestSnapshot.turnId &&
-        (snapshot.sequence ?? -1) > (latestSnapshot.sequence ?? -1))) {
+    if (
+      !latestSnapshot ||
+      snapshot.turnId > latestSnapshot.turnId ||
+      (snapshot.turnId === latestSnapshot.turnId && (snapshot.sequence ?? -1) > (latestSnapshot.sequence ?? -1))
+    ) {
       latest.set(snapshot.path, snapshot);
     }
     const existing = picks.get(snapshot.path);
@@ -631,8 +638,7 @@ export function applyRollback(
       !existing ||
       snapshot.turnId < existing.turnId ||
       (snapshot.turnId === existing.turnId &&
-        (snapshot.sequence ?? Number.MAX_SAFE_INTEGER) <
-          (existing.sequence ?? Number.MAX_SAFE_INTEGER))
+        (snapshot.sequence ?? Number.MAX_SAFE_INTEGER) < (existing.sequence ?? Number.MAX_SAFE_INTEGER))
     ) {
       picks.set(snapshot.path, snapshot);
     }
@@ -719,11 +725,7 @@ export function persistSnapshots(id: string): void {
       return;
     }
     mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      current,
-      JSON.stringify({ version: 2, turns, snapshots }),
-      'utf8',
-    );
+    writeFileSync(current, JSON.stringify({ version: 2, turns, snapshots }), 'utf8');
     // 迁移后的旧式扁平快照不再需要，避免磁盘上残留已回滚内容。
     if (existsSync(legacy)) unlinkSync(legacy);
   } catch {
@@ -745,10 +747,7 @@ export function loadSnapshots(id: string): boolean {
     turns = record.turns;
     snapshots = record.snapshots;
     turnIdCounter = turns.reduce((max, turn) => Math.max(max, turn.turnId), 0);
-    sequenceCounter = snapshots.reduce(
-      (max, snapshot) => Math.max(max, snapshot.sequence ?? 0),
-      0,
-    );
+    sequenceCounter = snapshots.reduce((max, snapshot) => Math.max(max, snapshot.sequence ?? 0), 0);
     currentTurnId = 0;
     return true;
   } catch {

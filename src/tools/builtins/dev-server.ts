@@ -22,9 +22,8 @@ function optionalString(args: Record<string, unknown>, name: string): string | u
 
 function failure(error: unknown): ToolOutcome {
   if (error instanceof DevServerManagerError) {
-    const status: ToolOutcomeStatus = error.code === 'SANDBOX_DENIED'
-      ? 'denied'
-      : error.code === 'ABORTED' ? 'aborted' : 'error';
+    const status: ToolOutcomeStatus =
+      error.code === 'SANDBOX_DENIED' ? 'denied' : error.code === 'ABORTED' ? 'aborted' : 'error';
     return result(status, error.code, { error: error.message });
   }
   return result('error', 'EXECUTION_ERROR', {
@@ -54,7 +53,8 @@ export const devServerTool: Tool = {
       cwd: { type: 'string', description: 'Working directory inside the workspace (default: workspace root)' },
       readyUrl: {
         type: 'string',
-        description: 'Wait until this loopback URL responds, e.g. http://localhost:5173. Only localhost/127.0.0.1/::1 allowed.',
+        description:
+          'Wait until this loopback URL responds, e.g. http://localhost:5173. Only localhost/127.0.0.1/::1 allowed.',
       },
       readyPattern: {
         type: 'string',

@@ -39,7 +39,7 @@ function stable(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, item]) => [key, stable(item)])
+        .map(([key, item]) => [key, stable(item)]),
     );
   }
   return value;
@@ -64,9 +64,7 @@ export function permissionFingerprint(tool: Tool, args: Record<string, unknown>)
     }
     // File mutations may be granted by their concrete resource. Coarse resources such as
     // "workspace" must retain arguments so task/process-like calls cannot become tool-wide.
-    subject = resources?.length && typeof args.path === 'string'
-      ? { resources }
-      : stable(args);
+    subject = resources?.length && typeof args.path === 'string' ? { resources } : stable(args);
   }
   return crypto.createHash('sha256').update(JSON.stringify(subject)).digest('hex');
 }
@@ -74,10 +72,12 @@ export function permissionFingerprint(tool: Tool, args: Record<string, unknown>)
 function validGrant(value: unknown): value is PermissionGrant {
   if (!value || typeof value !== 'object') return false;
   const grant = value as PermissionGrant;
-  return typeof grant.tool === 'string'
-    && typeof grant.fingerprint === 'string'
-    && grant.fingerprint.length > 0
-    && (grant.scope === 'project' || grant.scope === 'session' || grant.scope === 'once');
+  return (
+    typeof grant.tool === 'string' &&
+    typeof grant.fingerprint === 'string' &&
+    grant.fingerprint.length > 0 &&
+    (grant.scope === 'project' || grant.scope === 'session' || grant.scope === 'once')
+  );
 }
 
 function loadPermanent(): PermissionGrant[] {
@@ -94,11 +94,10 @@ function loadPermanent(): PermissionGrant[] {
       : [];
     // Only the explicit v3 field enables broad grants. The retired legacy allowForever
     // field remains ignored so upgrades cannot silently restore old authorization.
-    permanentToolAllows = parsed.version === PERMISSIONS_VERSION && Array.isArray(parsed.alwaysAllowTools)
-      ? new Set(parsed.alwaysAllowTools.filter(
-        (tool): tool is string => typeof tool === 'string' && tool.length > 0
-      ))
-      : new Set();
+    permanentToolAllows =
+      parsed.version === PERMISSIONS_VERSION && Array.isArray(parsed.alwaysAllowTools)
+        ? new Set(parsed.alwaysAllowTools.filter((tool): tool is string => typeof tool === 'string' && tool.length > 0))
+        : new Set();
   } catch {
     permanentGrants = [];
     permanentToolAllows = new Set();
@@ -136,16 +135,18 @@ function summarizeArgs(args: Record<string, unknown>): string {
 }
 
 function matches(grant: PermissionGrant, tool: string, fingerprint: string, projectRoot: string): boolean {
-  return grant.tool === tool
-    && grant.fingerprint === fingerprint
-    && (grant.scope !== 'project' || grant.projectRoot === projectRoot);
+  return (
+    grant.tool === tool &&
+    grant.fingerprint === fingerprint &&
+    (grant.scope !== 'project' || grant.projectRoot === projectRoot)
+  );
 }
 
 export async function checkPermission(
   tool: Tool,
   args: Record<string, unknown>,
   signal?: AbortSignal,
-  options: PermissionCheckOptions = {}
+  options: PermissionCheckOptions = {},
 ): Promise<'allow' | 'deny'> {
   if (!config.permissionEnabled || getToolRisk(tool) === 'safe') return 'allow';
   if (signal?.aborted) return 'deny';
@@ -213,8 +214,8 @@ export async function checkPermission(
 
 export function revokePermanentAllow(toolName: string, fingerprint?: string): void {
   loadPermanent();
-  permanentGrants = permanentGrants.filter((grant) =>
-    grant.tool !== toolName || (fingerprint !== undefined && grant.fingerprint !== fingerprint)
+  permanentGrants = permanentGrants.filter(
+    (grant) => grant.tool !== toolName || (fingerprint !== undefined && grant.fingerprint !== fingerprint),
   );
   if (fingerprint === undefined) permanentToolAllows.delete(toolName);
   savePermanent();
@@ -238,10 +239,7 @@ export function listPermanentToolAllows(): string[] {
 /** Compatibility API: returns tools having any persistent resource or tool-wide grant. */
 export function listPermanentAllow(): string[] {
   loadPermanent();
-  return [...new Set([
-    ...permanentGrants.map((grant) => grant.tool),
-    ...permanentToolAllows,
-  ])].sort();
+  return [...new Set([...permanentGrants.map((grant) => grant.tool), ...permanentToolAllows])].sort();
 }
 
 export function clearSessionPermissionGrants(): void {

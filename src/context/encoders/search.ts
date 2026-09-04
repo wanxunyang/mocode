@@ -129,9 +129,7 @@ export const searchEncoder: ContextEncoder = {
       };
     }
 
-    const text = isAgedCold(input)
-      ? collapseLegacyBodies(legacy.text)
-      : legacy.text;
+    const text = isAgedCold(input) ? collapseLegacyBodies(legacy.text) : legacy.text;
     return {
       text,
       meta: {

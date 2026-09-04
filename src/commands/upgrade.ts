@@ -103,9 +103,7 @@ export async function checkVersion(): Promise<VersionInfo> {
  * Linux/macOS 下 Node 加载 JS 后通常不锁定文件,npm 可直接覆盖;
  * 若目标平台确实锁定,会在输出里报 EBUSY/EPERM,用户根据提示退出后重试即可。
  */
-export async function runUpgradeForeground(
-  onOutput: (chunk: string) => void,
-): Promise<UpgradeResult> {
+export async function runUpgradeForeground(onOutput: (chunk: string) => void): Promise<UpgradeResult> {
   const cmd = 'npm';
   const args = ['install', '-g', `${PKG_NAME}@latest`];
   let output = '';

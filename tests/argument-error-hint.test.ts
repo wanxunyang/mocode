@@ -9,11 +9,7 @@ import assert from 'node:assert/strict';
 import { createContextState } from '../src/session/compact.js';
 import { recordArtifact, invalidateArtifacts, knownEditTargets } from '../src/context/index.js';
 import type { ChatMessage } from '../src/llm/index.js';
-import {
-  executeToolOutcome,
-  registerToolsExtension,
-  clearToolsExtension,
-} from '../src/tools/registry.js';
+import { executeToolOutcome, registerToolsExtension, clearToolsExtension } from '../src/tools/registry.js';
 
 const EXT_SOURCE = 'argument-error-hint-test';
 const HASH_A = `sha256:${'a'.repeat(64)}`;
@@ -26,11 +22,13 @@ function readArtifactMessages(callId: string, path: string, hash: string): ChatM
     {
       role: 'assistant',
       content: null,
-      tool_calls: [{
-        id: callId,
-        type: 'function',
-        function: { name: 'read_file', arguments: JSON.stringify({ path }) },
-      }],
+      tool_calls: [
+        {
+          id: callId,
+          type: 'function',
+          function: { name: 'read_file', arguments: JSON.stringify({ path }) },
+        },
+      ],
     },
     {
       role: 'tool',
@@ -40,7 +38,12 @@ function readArtifactMessages(callId: string, path: string, hash: string): ChatM
   ];
 }
 
-function recordRead(state: ReturnType<typeof createContextState>, callId: string, path: string, hash: string): ChatMessage[] {
+function recordRead(
+  state: ReturnType<typeof createContextState>,
+  callId: string,
+  path: string,
+  hash: string,
+): ChatMessage[] {
   const history = readArtifactMessages(callId, path, hash);
   recordArtifact(state, history, 2, String((history[2] as { content?: unknown }).content), true);
   return history;
@@ -80,16 +83,18 @@ test('knownEditTargets: limit 生效且至少返回 1 条', () => {
 });
 
 test('executeToolOutcome: INVALID_ARGUMENTS 时追加 argumentErrorHint', async () => {
-  registerToolsExtension(EXT_SOURCE, [{
-    name: 'hint_probe',
-    description: 'probe tool for argument error hint tests',
-    parameters: {
-      type: 'object',
-      properties: { path: { type: 'string' } },
-      required: ['path'],
+  registerToolsExtension(EXT_SOURCE, [
+    {
+      name: 'hint_probe',
+      description: 'probe tool for argument error hint tests',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+      execute: async () => 'ok',
     },
-    execute: async () => 'ok',
-  }]);
+  ]);
 
   const hint = 'HINT: path=src/known.ts expected_hash=' + HASH_A;
 
@@ -105,7 +110,9 @@ test('executeToolOutcome: INVALID_ARGUMENTS 时追加 argumentErrorHint', async 
 
 test('executeToolOutcome: 参数合法时正常执行,不泄露 hint', async () => {
   const hint = 'HINT: must not leak on success';
-  const ok = await executeToolOutcome('hint_probe', JSON.stringify({ path: 'x.ts' }), undefined, { argumentErrorHint: hint });
+  const ok = await executeToolOutcome('hint_probe', JSON.stringify({ path: 'x.ts' }), undefined, {
+    argumentErrorHint: hint,
+  });
   assert.equal(ok.status, 'success');
   assert.ok(!ok.output.includes(hint));
 });

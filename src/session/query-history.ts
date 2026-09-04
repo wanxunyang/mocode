@@ -30,10 +30,7 @@ export interface CollectOpts {
   maxEntries?: number;
 }
 
-export function collectQueryHistory(
-  current: readonly string[],
-  opts: CollectOpts = {},
-): HistoryEntry[] {
+export function collectQueryHistory(current: readonly string[], opts: CollectOpts = {}): HistoryEntry[] {
   const maxSessions = Math.max(0, opts.maxSessions ?? 20);
   const maxEntries = Math.max(1, opts.maxEntries ?? 500);
   const seen = new Set<string>();

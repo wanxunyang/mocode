@@ -26,7 +26,7 @@ function windowInputVis(
   cursorCol: number,
   cols: number,
   promptW: number,
-  rows: number
+  rows: number,
 ): {
   visRows: string[];
   visLine: number;
@@ -67,10 +67,7 @@ function windowInputVis(
   const maxInputRows = Math.max(1, Math.floor(rows * 0.4));
   let startVis = 0;
   if (totalVis > maxInputRows) {
-    startVis = Math.max(
-      0,
-      Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows)
-    );
+    startVis = Math.max(0, Math.min(curAbs - maxInputRows + 1, totalVis - maxInputRows));
   }
   const showCount = Math.min(maxInputRows, totalVis);
   return {
@@ -155,14 +152,7 @@ export function paintInput(view: InputView): void {
         inputRows: 1,
         startVis: 0,
       }
-    : windowInputVis(
-        view.lines,
-        view.cursorLine,
-        view.cursorCol,
-        preGeo.cols,
-        promptW,
-        preGeo.rows
-      );
+    : windowInputVis(view.lines, view.cursorLine, view.cursorCol, preGeo.cols, promptW, preGeo.rows);
   const needFooterH = 5 + vis.inputRows + (state.planRows - 1); // 1 虚拟空 + 1 spinner 行 + 1 上线 + 输入行 + 1 下线 + 1 model 行 + plan 多出的行数
   let g = preGeo;
   if (needFooterH !== state.footerH) {
@@ -309,12 +299,7 @@ export function paintInput(view: InputView): void {
  * 输入行在 RUNNING 期间只被按键回显重画(流式/spinner 不碰这行),故画上去的光标能稳住。
  * 内容截断到 cols-promptW-1(留 ❯ 与光标各 1 cell),防超长软折行写穿下线。
  */
-function renderDimInputRow(
-  prompt: string,
-  text: string,
-  placeholder: string,
-  cols: number
-): string {
+function renderDimInputRow(prompt: string, text: string, placeholder: string, cols: number): string {
   const promptW = displayWidth(prompt);
   // dim 态(运行中打字):不画反白块——反白块视觉占位是 INPUT 态真光标的旧版,这里真光标本
   // 就被隐起来(IME 锚定需要,见 contentMode),在 dim 文本后硬塞个反白空格会"白块闪烁"。
@@ -343,8 +328,14 @@ function windowSingleLine(text: string, cursor: number, contentW: number): { sho
   let j = cursor;
   let w = 0;
   const cw = (idx: number) => charWidth(text.codePointAt(idx) ?? 0);
-  while (i > 0 && w + cw(i - 1) <= contentW - 1) { w += cw(i - 1); i--; }
-  while (j < n && w + cw(j) <= contentW - 1) { w += cw(j); j++; }
+  while (i > 0 && w + cw(i - 1) <= contentW - 1) {
+    w += cw(i - 1);
+    i--;
+  }
+  while (j < n && w + cw(j) <= contentW - 1) {
+    w += cw(j);
+    j++;
+  }
   return { shown: text.slice(i, j), curDisp: displayWidth(text.slice(i, cursor)) };
 }
 

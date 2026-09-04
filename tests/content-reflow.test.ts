@@ -43,11 +43,7 @@ describe('content markdown resize reflow', () => {
 
     content.reflowMarkdown(80, renderMarkdown);
 
-    assert.deepEqual(snapshot(), [
-      ...renderMarkdown(first, 80),
-      `·${RESET}`,
-      ...renderMarkdown(second, 80),
-    ]);
+    assert.deepEqual(snapshot(), [...renderMarkdown(first, 80), `·${RESET}`, ...renderMarkdown(second, 80)]);
   });
 
   it('重排已提交段时保留末尾当前待写行', () => {

@@ -89,12 +89,7 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     const { startRepl } = await import('./repl/index.js');
-    await startRepl(
-      loaded.history,
-      loaded.id,
-      sandboxRootOverride,
-      loaded.queryHistory,
-    );
+    await startRepl(loaded.history, loaded.id, sandboxRootOverride, loaded.queryHistory);
   } else {
     const { startRepl } = await import('./repl/index.js');
     await startRepl(undefined, undefined, sandboxRootOverride);

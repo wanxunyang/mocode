@@ -7,11 +7,18 @@ test('识别各家 provider 的上下文超长报错', () => {
   const cases: Array<{ name: string; err: unknown }> = [
     {
       name: 'OpenAI 标准 code',
-      err: { status: 400, code: 'context_length_exceeded', message: 'This model\'s maximum context length is 128000 tokens.' },
+      err: {
+        status: 400,
+        code: 'context_length_exceeded',
+        message: "This model's maximum context length is 128000 tokens.",
+      },
     },
     {
       name: 'OpenAI 无 code,靠 message',
-      err: { status: 400, message: 'This model\'s maximum context length is 8192 tokens, however you requested 10000 tokens.' },
+      err: {
+        status: 400,
+        message: "This model's maximum context length is 8192 tokens, however you requested 10000 tokens.",
+      },
     },
     {
       name: 'Anthropic 措辞',

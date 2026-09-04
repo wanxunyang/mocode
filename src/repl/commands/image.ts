@@ -43,7 +43,10 @@ export const imageCommands: CommandHandler[] = [
       }
       return next();
     }
-    const arg = line.slice('/image'.length).trim().replace(/^["']|["']$/g, '');
+    const arg = line
+      .slice('/image'.length)
+      .trim()
+      .replace(/^["']|["']$/g, '');
     if (!arg) {
       layout.contentWrite(`${ui.dim}用法: /image <path>${ui.reset}\n`);
       return next();

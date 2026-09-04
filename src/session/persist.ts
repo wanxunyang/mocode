@@ -1,11 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { config, getActiveModel } from '../config/index.js';
 import type { ChatMessage } from '../llm/index.js';
@@ -40,7 +33,7 @@ export function newSessionId(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(
-    d.getHours()
+    d.getHours(),
   )}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
@@ -64,7 +57,9 @@ function toText(content: unknown): string {
 function firstUserOf(history: ChatMessage[]): string {
   for (const m of history) {
     if (m.role === 'user') {
-      const text = toText((m as any).content).replace(/\n/g, ' ').trim();
+      const text = toText((m as any).content)
+        .replace(/\n/g, ' ')
+        .trim();
       return truncateDisplay(text, 40);
     }
   }
@@ -76,11 +71,7 @@ function sessionPath(id: string): string {
 }
 
 /** 保存会话到磁盘。全新且没有 query 的会话不创建文件；已有会话即使回滚为空也必须覆盖旧记录。 */
-export function saveSession(
-  history: ChatMessage[],
-  id: string,
-  queryHistory: readonly string[] = [],
-): SessionMeta {
+export function saveSession(history: ChatMessage[], id: string, queryHistory: readonly string[] = []): SessionMeta {
   const meta: SessionMeta = {
     id,
     createdAt: idToIso(id),
@@ -92,12 +83,7 @@ export function saveSession(
   };
   const currentPath = sessionPath(id);
   const legacyPath = path.join(config.sessionDir, `${id}.json`);
-  if (
-    history.length <= 1 &&
-    queryHistory.length === 0 &&
-    !existsSync(currentPath) &&
-    !existsSync(legacyPath)
-  ) {
+  if (history.length <= 1 && queryHistory.length === 0 && !existsSync(currentPath) && !existsSync(legacyPath)) {
     return meta;
   }
   const dir = path.join(config.sessionDir, id);

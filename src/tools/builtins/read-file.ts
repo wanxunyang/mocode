@@ -26,7 +26,8 @@ export const readFileTool: Tool = {
       offset: { type: 'integer', description: 'Start line, 1-based (default 1).' },
       limit: {
         type: 'integer',
-        description: 'Max lines to read (default 300, hard cap 2000). Keep ranges modest (e.g. 80-300); for files ≤500 lines you may read the whole file in one call.',
+        description:
+          'Max lines to read (default 300, hard cap 2000). Keep ranges modest (e.g. 80-300); for files ≤500 lines you may read the whole file in one call.',
       },
     },
     required: ['path'],

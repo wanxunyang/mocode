@@ -80,9 +80,7 @@ function collapseImportBlocks(text: string): { text: string; collapsed: number }
     i = j;
   }
   const result = out.join('\n');
-  return result.length < text.length
-    ? { text: result, collapsed }
-    : { text, collapsed: 0 };
+  return result.length < text.length ? { text: result, collapsed } : { text, collapsed: 0 };
 }
 
 interface LexState {
@@ -134,7 +132,9 @@ function isFunctionStart(content: string): boolean {
   return (
     /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function(?:\s+[\w$]+)?\s*\(/.test(content) ||
     /^\s*(?:export\s+)?(?:const|let|var)\s+[\w$]+\s*=.*=>\s*\{\s*$/.test(content) ||
-    /^\s*(?:(?:public|private|protected|static|abstract|override|async|get|set)\s+)*(?:constructor|[\w$]+)\s*\([^;]*\)\s*(?::[^={]+)?\s*\{\s*$/.test(content)
+    /^\s*(?:(?:public|private|protected|static|abstract|override|async|get|set)\s+)*(?:constructor|[\w$]+)\s*\([^;]*\)\s*(?::[^={]+)?\s*\{\s*$/.test(
+      content,
+    )
   );
 }
 
@@ -177,9 +177,7 @@ function collapseFunctionBodies(text: string): { text: string; collapsed: number
     }
   }
   const result = out.join('\n');
-  return result.length < text.length
-    ? { text: result, collapsed }
-    : { text, collapsed: 0 };
+  return result.length < text.length ? { text: result, collapsed } : { text, collapsed: 0 };
 }
 
 export const codeEncoder: ContextEncoder = {

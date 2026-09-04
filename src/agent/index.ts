@@ -6,24 +6,13 @@
 import type { ChatMessage, ChatUsage, ToolCallRef } from '../llm/index.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
-import {
-  summarizeToolCall,
-  summarizeToolResult,
-  truncateDisplay,
-  fmtElapsed,
-} from '../ui/render.js';
+import { summarizeToolCall, summarizeToolResult, truncateDisplay, fmtElapsed } from '../ui/render.js';
 import { renderFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
 import * as batch from '../ui/batch.js';
 import { beginTurn } from '../rollback/index.js';
 import { config } from '../config/index.js';
-import {
-  runAgentCore,
-  isMutationTool,
-  type AgentHooks,
-  type AgentRunResult,
-  type ContentPart,
-} from './core.js';
+import { runAgentCore, isMutationTool, type AgentHooks, type AgentRunResult, type ContentPart } from './core.js';
 import { createPetHooks } from '../pet/state.js';
 import { t } from '../i18n/index.js';
 import { isToolErrorOutput } from '../tools/result.js';
@@ -64,10 +53,11 @@ function lineDelta(oldText: string | null, newText: string): { added: number; re
   while (head < before.length && head < after.length && before[head] === after[head]) head++;
   let tail = 0;
   while (
-    tail < before.length - head
-    && tail < after.length - head
-    && before[before.length - 1 - tail] === after[after.length - 1 - tail]
-  ) tail++;
+    tail < before.length - head &&
+    tail < after.length - head &&
+    before[before.length - 1 - tail] === after[after.length - 1 - tail]
+  )
+    tail++;
   return { added: after.length - head - tail, removed: before.length - head - tail };
 }
 
@@ -153,7 +143,7 @@ function writeToolHeader(tc: ToolCallRef): void {
     batch.showLiveBatch(id, layout);
   } else {
     // 普通工具合并到 currentBatchId；同轮并行或连续无正文的工具轮次共享一个摘要行。
-    const id = currentBatchId ??= batch.beginBatch();
+    const id = (currentBatchId ??= batch.beginBatch());
     // 结果按 tool_call id 归位：并行执行时 currentBatchId 会漂移，只按“当前批”回填会漏填，
     // 摘要行就永远停在 ◇（用户实测：子 agent 跑完主侧菱形没变成实心圆）。
     batch.bindCall(tc.id, id);
@@ -197,13 +187,8 @@ function writeToolResult(
     diff = renderFileChange({
       path: String(parsed.path ?? ''),
       kind: tc.name === 'edit_file' ? 'edit' : 'write',
-      oldStr:
-        tc.name === 'edit_file'
-          ? String(parsed.old_string ?? '')
-          : preWriteOld,
-      newStr: String(
-        (tc.name === 'edit_file' ? parsed.new_string : parsed.content) ?? '',
-      ),
+      oldStr: tc.name === 'edit_file' ? String(parsed.old_string ?? '') : preWriteOld,
+      newStr: String((tc.name === 'edit_file' ? parsed.new_string : parsed.content) ?? ''),
       startLine: tc.name === 'edit_file' ? editStartLine : 1,
     });
     turnFileChanges.push({
@@ -427,7 +412,7 @@ export async function runAgent(
     onMaxSteps: () => {
       flushToolBatch();
       layout.contentWrite(
-        `  ${ui.accent}●${ui.reset} ${ui.yellow}${t('agent.maxSteps', { count: config.maxSteps })}${ui.reset}\n`
+        `  ${ui.accent}●${ui.reset} ${ui.yellow}${t('agent.maxSteps', { count: config.maxSteps })}${ui.reset}\n`,
       );
     },
     onAbort: () => {
@@ -442,7 +427,7 @@ export async function runAgent(
       writeChangeOverview();
       const tok = formatTurnTokens(usage);
       layout.contentWrite(
-        `  ${ui.bold}${ui.accent}●${ui.reset} ${t('agent.complete')}  ${fmtElapsed(elapsedMs)}${tok}\n`
+        `  ${ui.bold}${ui.accent}●${ui.reset} ${t('agent.complete')}  ${fmtElapsed(elapsedMs)}${tok}\n`,
       );
       // 内容区触底时，DECSTBM 增量滚屏可能只推进物理终端，未把 Worked 前已在
       // buffer 中的空行完整画出来；用户滚动/点击触发 repaint 后才“突然”出现。

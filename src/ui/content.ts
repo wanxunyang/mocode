@@ -225,10 +225,7 @@ export function setLines(lines: string[], source?: string): void {
  * 每个 change 的 start 都是应用前面 change 后的当前绝对行坐标，调用方可据此逐段修正
  * batch/选区等物理行索引。普通 contentWrite 行仍保持原物理行语义，不参与重排。
  */
-export function reflowMarkdown(
-  cols: number,
-  render: (source: string, cols: number) => string[],
-): ReflowChange[] {
+export function reflowMarkdown(cols: number, render: (source: string, cols: number) => string[]): ReflowChange[] {
   const width = Math.max(1, Math.floor(cols));
   const changes: ReflowChange[] = [];
   for (const segment of [...reflowSegments].sort((a, b) => a.start - b.start)) {
@@ -284,9 +281,7 @@ export function commitSegment(): void {
 
 /** 快照(已提交行 + 当前行若有)。viewport 取行窗用。 */
 function snapshot(): string[] {
-  return hasCurrent
-    ? [...rows, rowStartSgr + curRaw + '\x1B[0m']
-    : rows;
+  return hasCurrent ? [...rows, rowStartSgr + curRaw + '\x1B[0m'] : rows;
 }
 /** 距尾 offset 行、取 count 行的窗口(映射到屏 1..count)。offset=0 即尾窗。 */
 export function sliceFromEnd(offset: number, count: number): string[] {
@@ -334,8 +329,7 @@ export function normalizeTrailingBlankRows(count: number): void {
   if (hasCurrent) {
     rows.push(rowStartSgr + curRaw + '\x1B[0m');
   }
-  const isBlank = (line: string): boolean =>
-    line.replace(/\x1b\[[0-9;]*m/g, '').trim().length === 0;
+  const isBlank = (line: string): boolean => line.replace(/\x1b\[[0-9;]*m/g, '').trim().length === 0;
   while (rows.length > 0 && isBlank(rows[rows.length - 1])) rows.pop();
   for (let i = 0; i < Math.max(0, count); i++) rows.push('\x1B[0m');
   curSgr = '';
@@ -500,15 +494,13 @@ export function replaceHead(startIdx: number, lines: string[]): void {
   const committed = rows.length;
   if (startIdx >= committed) {
     throw new Error(
-      `replaceHead: startIdx=${startIdx} 超出已 commit 行数 ${committed}(调用方必须保证等长替换且 startIdx 在 buffer 内)`
+      `replaceHead: startIdx=${startIdx} 超出已 commit 行数 ${committed}(调用方必须保证等长替换且 startIdx 在 buffer 内)`,
     );
   }
   const end = Math.min(startIdx + lines.length, committed);
   const actualOld = end - startIdx;
   if (actualOld !== lines.length) {
-    throw new Error(
-      `replaceHead: 行数不匹配(startIdx=${startIdx},新区间 ${actualOld} 行 ≠ 新行 ${lines.length} 行)`
-    );
+    throw new Error(`replaceHead: 行数不匹配(startIdx=${startIdx},新区间 ${actualOld} 行 ≠ 新行 ${lines.length} 行)`);
   }
   // splice 等长替换:rows.length 不变,segMark 若在区间前方不受影响,区间内被覆盖时平移到 startIdx
   rows.splice(startIdx, lines.length, ...lines);

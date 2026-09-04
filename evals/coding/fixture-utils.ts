@@ -6,11 +6,20 @@ const verifier = (checks: string[]): FileFixture => ({
 });
 
 export const task = (
-  id: string, title: string, group: BenchmarkGroup, goal: string,
-  files: FileFixture[], checks: string[], expectedFiles: string[],
+  id: string,
+  title: string,
+  group: BenchmarkGroup,
+  goal: string,
+  files: FileFixture[],
+  checks: string[],
+  expectedFiles: string[],
   difficulty: BenchmarkDifficulty = 'basic',
 ): CodingTaskFixture => ({
-  id, title, group, difficulty, goal: `${goal} Never modify verify.mjs.`,
+  id,
+  title,
+  group,
+  difficulty,
+  goal: `${goal} Never modify verify.mjs.`,
   files: [...files, verifier(checks)],
   verificationCommand: 'node verify.mjs',
   timeoutMs: 120_000,

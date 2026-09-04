@@ -137,9 +137,7 @@ const norm = (s: string): string => s.trim().toLowerCase();
 function findEntityIn(g: GraphFile, name: string): GraphEntity | undefined {
   const q = norm(name);
   if (!q) return undefined;
-  return g.entities.find(
-    (e) => e.id === q || norm(e.name) === q || e.aliases.some((a) => norm(a) === q),
-  );
+  return g.entities.find((e) => e.id === q || norm(e.name) === q || e.aliases.some((a) => norm(a) === q));
 }
 
 /** 全局找实体(两 scope,project 优先——项目事实比全局更具体)。 */
@@ -252,9 +250,7 @@ export function addTriple(input: TripleInput): AddTripleResult {
 
   const g = loadScopeGraph(scope);
   const fact = (input.fact ?? '').trim();
-  const clash = g.edges.find(
-    (e) => !e.invalidAt && e.src === s.id && e.dst === d.id && e.relation === relation,
-  );
+  const clash = g.edges.find((e) => !e.invalidAt && e.src === s.id && e.dst === d.id && e.relation === relation);
   if (clash) {
     if (!fact || clash.fact === fact) {
       return { ok: true, edgeId: clash.id, superseded: 0, duplicate: true };
@@ -313,9 +309,7 @@ export function searchGraph(query: string, limit: number = 8): GraphSearchResult
     .sort((a, b) => b.sc - a.sc)
     .slice(0, Math.max(1, Math.min(limit, 20)));
   const hitIds = new Set(scored.map((x) => x.e.id));
-  const edges = g.edges.filter(
-    (e) => !e.invalidAt && (hitIds.has(e.src) || hitIds.has(e.dst)),
-  );
+  const edges = g.edges.filter((e) => !e.invalidAt && (hitIds.has(e.src) || hitIds.has(e.dst)));
   return { entities: scored.map((x) => x.e), edges };
 }
 
@@ -347,11 +341,7 @@ function buildAdjacency(g: GraphFile, relation?: string): Adjacency {
  * 邻居遍历:depth 1-3(BFS + 邻接表 O(V+E)),只看 active 边,边数封顶 40 防图爆炸。
  * relation 可选:只沿该类型的边走(深跳聚焦用,如沿 depends_on 链追踪)。
  */
-export function neighborsOf(
-  nameOrId: string,
-  depth: number = 1,
-  relation?: string,
-): NeighborResult {
+export function neighborsOf(nameOrId: string, depth: number = 1, relation?: string): NeighborResult {
   const g = loadAllGraph();
   const center = findEntityIn(g, nameOrId) ?? g.entities.find((e) => e.id === nameOrId);
   if (!center) return { center: null, entities: [], edges: [], truncated: false };

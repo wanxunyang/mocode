@@ -1,12 +1,5 @@
 import { config, getActiveModel } from '../../config/index.js';
-import type {
-  ChatMessage,
-  ChatResult,
-  ChatTool,
-  ChatUsage,
-  StreamHandlers,
-  ToolCallRef,
-} from '../index.js';
+import type { ChatMessage, ChatResult, ChatTool, ChatUsage, StreamHandlers, ToolCallRef } from '../index.js';
 
 type JsonObject = Record<string, unknown>;
 type AnthropicRole = 'user' | 'assistant';
@@ -25,9 +18,7 @@ function parseJsonObject(value: string): JsonObject {
   if (!value.trim()) return {};
   try {
     const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? parsed as JsonObject
-      : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as JsonObject) : {};
   } catch {
     return {};
   }
@@ -127,13 +118,18 @@ export function encodeAnthropicMessages(
       continue;
     }
     if (message.role === 'tool') {
-      appendMessage(messages, 'user', [{
-        type: 'tool_result',
-        tool_use_id: message.tool_call_id ?? '',
-        content: typeof message.content === 'string'
-          ? message.content
-          : JSON.stringify(message.content ?? ''),
-      }], cacheCandidates);
+      appendMessage(
+        messages,
+        'user',
+        [
+          {
+            type: 'tool_result',
+            tool_use_id: message.tool_call_id ?? '',
+            content: typeof message.content === 'string' ? message.content : JSON.stringify(message.content ?? ''),
+          },
+        ],
+        cacheCandidates,
+      );
     }
   }
 
@@ -172,10 +168,7 @@ function endpoint(baseURL: string): string {
   return `${base}/v1/messages`;
 }
 
-export function buildAnthropicRequest(
-  messages: ChatMessage[],
-  tools: readonly ChatTool[],
-): JsonObject {
+export function buildAnthropicRequest(messages: ChatMessage[], tools: readonly ChatTool[]): JsonObject {
   const encoded = encodeAnthropicMessages(messages);
   const anthropicTools = encodeAnthropicTools(tools);
   return {
@@ -217,7 +210,10 @@ async function throwResponseError(response: Response): Promise<never> {
   throw new AnthropicHttpError(response.status, message, response.headers, code);
 }
 
-interface SseRecord { event: string; data: string }
+interface SseRecord {
+  event: string;
+  data: string;
+}
 
 function decodeSseRecord(record: string): SseRecord | null {
   let event = '';
@@ -275,11 +271,12 @@ function addLiveCount(text: string, state: { cjk: number; other: number }): void
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
     if (
-      (cp >= 0x4e00 && cp <= 0x9fff)
-      || (cp >= 0x3400 && cp <= 0x4dbf)
-      || (cp >= 0x3040 && cp <= 0x30ff)
-      || (cp >= 0xac00 && cp <= 0xd7a3)
-    ) state.cjk++;
+      (cp >= 0x4e00 && cp <= 0x9fff) ||
+      (cp >= 0x3400 && cp <= 0x4dbf) ||
+      (cp >= 0x3040 && cp <= 0x30ff) ||
+      (cp >= 0xac00 && cp <= 0xd7a3)
+    )
+      state.cjk++;
     else state.other++;
   }
 }
@@ -342,17 +339,14 @@ export async function anthropicChatOnce(
         handlers.onText?.(block.text);
         reportLive();
       } else if (block?.type === 'tool_use') {
-        const initialInput = block.input && typeof block.input === 'object'
-          ? block.input as Record<string, unknown>
-          : undefined;
+        const initialInput =
+          block.input && typeof block.input === 'object' ? (block.input as Record<string, unknown>) : undefined;
         const call: ToolCallRef = {
           id: typeof block.id === 'string' ? block.id : '',
           name: typeof block.name === 'string' ? block.name : '',
           // 流式 tool_use 通常以 input:{} 开始，真正 JSON 紧随 input_json_delta；
           // 只有非空 input 才直接采用，避免累加成 `{}{...}`。
-          arguments: initialInput && Object.keys(initialInput).length > 0
-            ? JSON.stringify(initialInput)
-            : '',
+          arguments: initialInput && Object.keys(initialInput).length > 0 ? JSON.stringify(initialInput) : '',
         };
         toolAcc.set(index, call);
         if (call.name) handlers.onToolCall?.(call.name);

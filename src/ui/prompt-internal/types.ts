@@ -45,10 +45,7 @@ export interface PromptOpts {
 /** emitKeypressEvents 后 stdin 会发 'keypress',但该事件不在 ReadStream 类型里,单独声明。 */
 export interface KeypressEmitter {
   on(event: 'keypress', listener: (str: string, key: Key) => void): this;
-  removeListener(
-    event: 'keypress',
-    listener: (str: string, key: Key) => void
-  ): this;
+  removeListener(event: 'keypress', listener: (str: string, key: Key) => void): this;
 }
 
 export interface SessionPickerItem {

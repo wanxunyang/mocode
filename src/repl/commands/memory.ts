@@ -24,12 +24,12 @@ export const memoryCommands: CommandHandler[] = [
     );
     if (Object.keys(byType).length) {
       layout.contentWrite(
-        `${ui.dim}按类:${Object.entries(byType).map(([t, n]) => `${t} ${n}`).join('  ')}${ui.reset}\n`,
+        `${ui.dim}按类:${Object.entries(byType)
+          .map(([t, n]) => `${t} ${n}`)
+          .join('  ')}${ui.reset}\n`,
       );
     }
-    const recent = [...active]
-      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
-      .slice(0, 10);
+    const recent = [...active].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || '')).slice(0, 10);
     for (const e of recent) {
       layout.contentWrite(`  ${ui.accent}${e.id}${ui.reset}  ${ui.dim}${e.name} — ${e.summary}${ui.reset}\n`);
     }
@@ -42,9 +42,7 @@ export const memoryCommands: CommandHandler[] = [
     if (ctx.line !== '/reflect') return unhandled();
     // 记忆子系统总开关关闭时反思无意义(kickoffReflection 内部也会短路),直接提示,不误导用户"已触发"。
     if (!isMemoryEnabled()) {
-      layout.contentWrite(
-        `${ui.dim}(记忆子系统已关闭,/reflect 无效。用 /memory_switch 打开后再试)${ui.reset}\n`,
-      );
+      layout.contentWrite(`${ui.dim}(记忆子系统已关闭,/reflect 无效。用 /memory_switch 打开后再试)${ui.reset}\n`);
       return next();
     }
     // 手动触发后台反思 pass(不等;完成后下次 INPUT 态显摘要)。

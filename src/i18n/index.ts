@@ -117,7 +117,8 @@ const zhCN = {
   'prompt.confirmSendHint': '再按一次 Enter 发送 · 其它键继续编辑',
   'composer.title': '输入面板',
   'composer.pos': '{row}/{total} 行 · {col} 列 · {chars} 字',
-  'composer.hint': 'Enter 换行 · Ctrl+S 回填 · Esc 取消 · Ctrl+Z 撤销 · Ctrl+C/X/V 复制/剪切/粘贴 · Ctrl+A 全选 · Shift+方向键 选择',
+  'composer.hint':
+    'Enter 换行 · Ctrl+S 回填 · Esc 取消 · Ctrl+Z 撤销 · Ctrl+C/X/V 复制/剪切/粘贴 · Ctrl+A 全选 · Shift+方向键 选择',
   'history.hint': '输入过滤 · ↑↓ 选择 · Enter 填入输入框 · Ctrl+Enter 直接发送 · Esc 取消',
   'history.empty': '（无匹配的历史输入）',
   'welcome.ideNotice': ' 在电脑原生终端运行 mocode 可获得比IDE集成终端更佳的操作体验',
@@ -219,7 +220,8 @@ const zhCN = {
   'repl.visionUnsupported': '当前模型 {model} 不支持视觉输入。',
   'repl.originalError': '原始:{message}',
   'repl.visionHint': '提示:运行 /model 切换到支持视觉的模型（如 gpt-4o / claude-3.5-sonnet / gemini-1.5-pro）。',
-  'repl.llmAuthError': '认证失败：API key 无效或未配置。输入 /model 配置 baseURL / apiKey，或退出后在 .env、~/.mocode/config 设置 MOCODE_LLM_API_KEY（参考 .env.example）。',
+  'repl.llmAuthError':
+    '认证失败：API key 无效或未配置。输入 /model 配置 baseURL / apiKey，或退出后在 .env、~/.mocode/config 设置 MOCODE_LLM_API_KEY（参考 .env.example）。',
   'repl.llmQuotaError': '请求被限流或配额不足（429）。稍等片刻重试，或输入 /model switch 切换其他模型。',
   'repl.llmTimeoutError': '请求超时：模型服务响应过慢。可重试，或输入 /model switch 换一个模型。',
   'repl.llmNetworkError': '网络错误：无法连接 {base}。检查网络连接，或输入 /model 核对 baseURL 配置。',
@@ -231,7 +233,8 @@ const zhCN = {
   'permission.dangerTitle': '⚠ 高风险操作: {tool}',
   'permission.confirmTitle': '确认执行: {tool}',
   'permission.dangerWarning': '⚠ 此操作可能产生不可逆副作用，请谨慎确认。',
-  'permission.firstTimeHint': '说明：面板按工具风险等级弹出。「允许」仅放行本次操作；选择会话级/项目级选项后，同类命令不再重复询问。',
+  'permission.firstTimeHint':
+    '说明：面板按工具风险等级弹出。「允许」仅放行本次操作；选择会话级/项目级选项后，同类命令不再重复询问。',
   'permission.confirmExecute': '确认执行',
   'permission.allowForever': '以后不再询问此工具',
   'permission.deny': '拒绝',
@@ -290,17 +293,20 @@ const zhCN = {
   'upgrade.hasUpdate': '发现新版本：当前 v{current} → 最新 v{latest}',
   'upgrade.checkHint': '运行 /upgrade 即可升级到该版本。',
   'upgrade.upgradeStarted': '已启动后台升级 → {version}',
-  'upgrade.upgradeHint': '后台升级进程已启动。当前 mocode 进程退出后才会执行 npm install -g mocode-ai@latest，完成后下次启动即生效。日志：~/.mocode/upgrade.log',
+  'upgrade.upgradeHint':
+    '后台升级进程已启动。当前 mocode 进程退出后才会执行 npm install -g mocode-ai@latest，完成后下次启动即生效。日志：~/.mocode/upgrade.log',
   'upgrade.begin': '开始升级 mocode-ai → {version}',
   'upgrade.completed': '升级完成，mocode 即将退出，请重新启动以使用新版本。',
   'upgrade.failedWithCode': '升级失败（退出码 {code}）。',
   'upgrade.manualHint': '可尝试退出 mocode 后手动运行：npm install -g mocode-ai@latest',
-  'upgrade.etargetHint': '（npm 找不到该版本，可能是 registry 镜像缓存未同步，建议稍后再试或手动指定源：npm install -g mocode-ai@latest --registry=https://registry.npmjs.org/）',
+  'upgrade.etargetHint':
+    '（npm 找不到该版本，可能是 registry 镜像缓存未同步，建议稍后再试或手动指定源：npm install -g mocode-ai@latest --registry=https://registry.npmjs.org/）',
   'upgrade.devSkip': '当前为开发运行(tsx)，已跳过真实 npm install，避免误改全局包。',
   'upgrade.fetchFailed': '无法获取最新版本（请检查网络或 npm registry）。',
   'upgrade.pkgName': '包名：mocode-ai',
   'upgrade.failed': '[upgrade] 失败：{message}',
-  'upgrade.usage': '/upgrade 用法：\n  /upgrade              升级到最新版本\n  /upgrade now          同 /upgrade\n  /upgrade check        检查当前版本与最新版本差异\n  /upgrade status       显示当前本地版本',
+  'upgrade.usage':
+    '/upgrade 用法：\n  /upgrade              升级到最新版本\n  /upgrade now          同 /upgrade\n  /upgrade check        检查当前版本与最新版本差异\n  /upgrade status       显示当前本地版本',
   'assistant.languageInstruction': 'Reply to the user in Chinese.',
 } as const;
 
@@ -418,14 +424,17 @@ const en: Record<TranslationKey, string> = {
   'prompt.revertFiles': 'Revert file changes{detail}',
   'prompt.revertDetail': ' ({count} files restored to before the rollback)',
   'prompt.messagesOnly': 'Roll back messages only; keep file changes',
-  'prompt.emptyPlaceholder': 'Type what you need, press Enter to get started; or press Ctrl+G to open the composer panel and edit your request',
+  'prompt.emptyPlaceholder':
+    'Type what you need, press Enter to get started; or press Ctrl+G to open the composer panel and edit your request',
   'prompt.confirmSendHint': 'Press Enter again to send · any other key keeps editing',
   'composer.title': 'Composer',
   'composer.pos': '{row}/{total} lines · col {col} · {chars} chars',
-  'composer.hint': 'Enter Newline · Ctrl+S Fill input · Esc Cancel · Ctrl+Z Undo · Ctrl+C/X/V Copy/Cut/Paste · Ctrl+A Select all · Shift+Arrows Select',
+  'composer.hint':
+    'Enter Newline · Ctrl+S Fill input · Esc Cancel · Ctrl+Z Undo · Ctrl+C/X/V Copy/Cut/Paste · Ctrl+A Select all · Shift+Arrows Select',
   'history.hint': 'Type to filter · ↑↓ Select · Enter Fill input · Ctrl+Enter Send · Esc Cancel',
   'history.empty': '(no matching history)',
-  'welcome.ideNotice': 'Running mocode in a native terminal provides a better experience than an IDE integrated terminal',
+  'welcome.ideNotice':
+    'Running mocode in a native terminal provides a better experience than an IDE integrated terminal',
   'welcome.gettingStarted': 'Getting started',
   'welcome.start1': 'Type a message and press Enter; Shift+Tab toggles auto / plan mode',
   'welcome.start2': 'Type / for the command menu; /help lists all commands',
@@ -446,7 +455,8 @@ const en: Record<TranslationKey, string> = {
   'repl.noValue': '(none)',
   'repl.historyCleared': '(history cleared; system prompt kept)',
   'repl.planAlready': '(already in plan mode)',
-  'repl.planChanged': '(switched to plan mode: read-only research and planning; approval returns to auto. Use /auto or Shift+Tab to switch back)',
+  'repl.planChanged':
+    '(switched to plan mode: read-only research and planning; approval returns to auto. Use /auto or Shift+Tab to switch back)',
   'repl.autoAlready': '(already in auto mode)',
   'repl.autoChanged': '(switched to auto mode: all tools enabled)',
   'repl.noImages': '(no pending images)',
@@ -523,11 +533,16 @@ const en: Record<TranslationKey, string> = {
   'repl.errorLabel': '[Error]',
   'repl.visionUnsupported': 'The current model, {model}, does not support vision input.',
   'repl.originalError': 'Original: {message}',
-  'repl.visionHint': 'Tip: run /model and switch to a vision-capable model (for example, gpt-4o, claude-3.5-sonnet, or gemini-1.5-pro).',
-  'repl.llmAuthError': 'Authentication failed: the API key is invalid or not configured. Run /model to set baseURL / apiKey, or set MOCODE_LLM_API_KEY in .env or ~/.mocode/config (see .env.example).',
-  'repl.llmQuotaError': 'Rate limited or quota exhausted (429). Retry in a moment, or run /model switch to use another model.',
-  'repl.llmTimeoutError': 'Request timed out: the model service responded too slowly. Retry, or run /model switch to use another model.',
-  'repl.llmNetworkError': 'Network error: cannot reach {base}. Check your connection, or run /model to verify the baseURL.',
+  'repl.visionHint':
+    'Tip: run /model and switch to a vision-capable model (for example, gpt-4o, claude-3.5-sonnet, or gemini-1.5-pro).',
+  'repl.llmAuthError':
+    'Authentication failed: the API key is invalid or not configured. Run /model to set baseURL / apiKey, or set MOCODE_LLM_API_KEY in .env or ~/.mocode/config (see .env.example).',
+  'repl.llmQuotaError':
+    'Rate limited or quota exhausted (429). Retry in a moment, or run /model switch to use another model.',
+  'repl.llmTimeoutError':
+    'Request timed out: the model service responded too slowly. Retry, or run /model switch to use another model.',
+  'repl.llmNetworkError':
+    'Network error: cannot reach {base}. Check your connection, or run /model to verify the baseURL.',
   'repl.llmContextError': 'Context too long: run /compact to compress the session, then retry.',
   'permission.path': 'Path: {value}',
   'permission.command': 'Command: {value}',
@@ -536,7 +551,8 @@ const en: Record<TranslationKey, string> = {
   'permission.dangerTitle': '⚠ High-risk operation: {tool}',
   'permission.confirmTitle': 'Confirm execution: {tool}',
   'permission.dangerWarning': '⚠ This operation may have irreversible side effects. Confirm carefully.',
-  'permission.firstTimeHint': "Note: this panel appears based on each tool's risk level. 'Allow' approves only this action; session/project options stop repeated prompts for the same command.",
+  'permission.firstTimeHint':
+    "Note: this panel appears based on each tool's risk level. 'Allow' approves only this action; session/project options stop repeated prompts for the same command.",
   'permission.confirmExecute': 'Confirm and run',
   'permission.allowForever': 'Always allow this tool',
   'permission.deny': 'Deny',
@@ -544,13 +560,15 @@ const en: Record<TranslationKey, string> = {
   'permission.allowSession': 'Always allow this tool for this session',
   'permission.allowSessionResource': 'Allow this command/resource for this session',
   'permission.allowProjectResource': 'Always allow this command/resource for this project',
-  'askHuman.cancelled': 'The user cancelled the choice. Consider an alternative that does not require user input, or ask from a different angle.',
+  'askHuman.cancelled':
+    'The user cancelled the choice. Consider an alternative that does not require user input, or ask from a different angle.',
   'askHuman.submitted': 'User response: {value}',
   'askHuman.selected': 'User selected: {value}',
   'task.missingPrompt': 'Error: missing prompt (sub-task instruction).',
   'task.disabled': 'Error: sub-agents are disabled. Run /subagent on first if needed.',
   'task.interrupted': 'The sub-agent was interrupted before completion.',
-  'task.noSummary': 'The sub-agent completed without a text summary (it may only have used tools or reached its step limit).',
+  'task.noSummary':
+    'The sub-agent completed without a text summary (it may only have used tools or reached its step limit).',
   'task.summaryTruncated': '…(sub-agent summary truncated by {count} characters)',
   'subagent.running': 'Sub-agent running',
   'subagent.complete': 'Sub-agent complete',
@@ -568,19 +586,24 @@ const en: Record<TranslationKey, string> = {
   'fe.status': 'Frontend tools: {state}',
   'fe.stateOn': 'enabled',
   'fe.stateOff': 'disabled',
-  'fe.changedOn': 'Frontend tools enabled; browser / dev_server / screenshot / view_image will be available from the next model request.',
-  'fe.changedOff': 'Frontend tools disabled; browser / dev_server / screenshot / view_image have been removed from the model tool list.',
+  'fe.changedOn':
+    'Frontend tools enabled; browser / dev_server / screenshot / view_image will be available from the next model request.',
+  'fe.changedOff':
+    'Frontend tools disabled; browser / dev_server / screenshot / view_image have been removed from the model tool list.',
   'fe.usage': 'Usage: /fe on|off|status',
   'mcp.status': 'MCP services: {state}',
   'mcp.stateOn': 'enabled',
   'mcp.stateOff': 'disabled',
-  'mcp.changedOn': 'MCP enabled; services have been connected from the current configuration and the tool list refreshed.',
+  'mcp.changedOn':
+    'MCP enabled; services have been connected from the current configuration and the tool list refreshed.',
   'mcp.changedOff': 'MCP disabled; connections have been closed and MCP tools removed from the tool list.',
   'mcp.usage': 'Usage: /mcp on|off|status',
   'mcp.unchanged': 'MCP is already {state}; no change made.',
-  'mcp.restartHint': 'This setting is saved to the configuration file; future startups use it to decide whether to connect MCP.',
+  'mcp.restartHint':
+    'This setting is saved to the configuration file; future startups use it to decide whether to connect MCP.',
   'plan.ready': 'Plan ready',
-  'plan.approvalDetail': 'Switch to auto mode and execute the plan above? (Plan mode is read-only; execution requires auto mode.)',
+  'plan.approvalDetail':
+    'Switch to auto mode and execute the plan above? (Plan mode is read-only; execution requires auto mode.)',
   'plan.execute': 'Switch to auto and execute',
   'plan.refine': 'Stay in plan and refine',
   'plan.running': 'Execute',
@@ -595,17 +618,20 @@ const en: Record<TranslationKey, string> = {
   'upgrade.hasUpdate': 'New version available: v{current} → v{latest}',
   'upgrade.checkHint': 'Run /upgrade to install it.',
   'upgrade.upgradeStarted': 'Background upgrade started → {version}',
-  'upgrade.upgradeHint': 'Background upgrade process started. npm install -g mocode-ai@latest will run after you exit mocode. Log: ~/.mocode/upgrade.log',
+  'upgrade.upgradeHint':
+    'Background upgrade process started. npm install -g mocode-ai@latest will run after you exit mocode. Log: ~/.mocode/upgrade.log',
   'upgrade.begin': 'Starting upgrade mocode-ai → {version}',
   'upgrade.completed': 'Upgrade complete. mocode will exit now; please restart to use the new version.',
   'upgrade.failedWithCode': 'Upgrade failed (exit code {code}).',
   'upgrade.manualHint': 'Try exiting mocode and run: npm install -g mocode-ai@latest',
-  'upgrade.etargetHint': '(npm cannot find this version, possibly due to registry mirror cache lag. Retry later or use the source registry: npm install -g mocode-ai@latest --registry=https://registry.npmjs.org/)',
+  'upgrade.etargetHint':
+    '(npm cannot find this version, possibly due to registry mirror cache lag. Retry later or use the source registry: npm install -g mocode-ai@latest --registry=https://registry.npmjs.org/)',
   'upgrade.devSkip': 'Running in dev mode (tsx); skipped real npm install to avoid touching the global package.',
   'upgrade.fetchFailed': 'Unable to fetch the latest version (check network or npm registry).',
   'upgrade.pkgName': 'Package: mocode-ai',
   'upgrade.failed': '[upgrade] failed: {message}',
-  'upgrade.usage': 'Usage: /upgrade\n  /upgrade              Upgrade to latest\n  /upgrade now          Same as /upgrade\n  /upgrade check        Check current vs latest\n  /upgrade status       Show current local version',
+  'upgrade.usage':
+    'Usage: /upgrade\n  /upgrade              Upgrade to latest\n  /upgrade now          Same as /upgrade\n  /upgrade check        Check current vs latest\n  /upgrade status       Show current local version',
   'assistant.languageInstruction': 'Reply to the user in English.',
 };
 

@@ -376,7 +376,7 @@ function renderTable(header: string[], aligns: Align[], rows: string[][], cols: 
       `${ui.dim}│${ui.reset}${cells
         .map((c, i) => ' ' + padAnsi(c, widths[i], align[i]) + ' ')
         .join(`${ui.dim}│${ui.reset}`)}${ui.dim}│${ui.reset}`,
-      cols
+      cols,
     );
   // 田字格横线:顶 ┌─┬─┐ / 行间(含表头下) ├─┼─┤ / 底 └─┴─┘ —— 每 cell 四周皆边框
   const topLine = (widths: number[]): string =>
@@ -391,7 +391,12 @@ function renderTable(header: string[], aligns: Align[], rows: string[][], cols: 
     const wrapped = wrap ? cells.map((c, i) => wrapAnsiString(c, widths[i])) : cells.map((c) => [c]);
     const lines = Math.max(1, ...wrapped.map((w) => w.length));
     for (let k = 0; k < lines; k++) {
-      out.push(rowLine(wrapped.map((w) => w[k] ?? ''), widths));
+      out.push(
+        rowLine(
+          wrapped.map((w) => w[k] ?? ''),
+          widths,
+        ),
+      );
     }
   };
 
@@ -571,10 +576,7 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
       const headerCells = parseTableRow(line);
       if (headerCells.length >= 2 && i + 1 < src.length) {
         const sepCells = parseTableRow(src[i + 1]);
-        if (
-          sepCells.length === headerCells.length &&
-          sepCells.every((c) => /^:?-+:?$/.test(c.trim()))
-        ) {
+        if (sepCells.length === headerCells.length && sepCells.every((c) => /^:?-+:?$/.test(c.trim()))) {
           flushPara();
           const aligns = parseAlign(sepCells);
           i += 2;

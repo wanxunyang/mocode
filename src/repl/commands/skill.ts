@@ -30,9 +30,7 @@ export const skillCommands: CommandHandler[] = [
           badges.push(isSkillTrusted(s) ? 'trusted' : 'untrusted');
         }
         const badgeStr = badges.length ? ` ${ui.dim}[${badges.join('|')}]${ui.reset}` : '';
-        layout.contentWrite(
-          `  ${ui.accent}${s.name}${ui.reset}${badgeStr}  ${ui.dim}${s.description}${ui.reset}\n`,
-        );
+        layout.contentWrite(`  ${ui.accent}${s.name}${ui.reset}${badgeStr}  ${ui.dim}${s.description}${ui.reset}\n`);
         if (s.allowedTools?.length) {
           layout.contentWrite(`    ${ui.dim}allowed: ${s.allowedTools.join(', ')}${ui.reset}\n`);
         }

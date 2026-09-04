@@ -41,9 +41,9 @@ export function discoverPackageValidationCommands(
   profile: ProjectProfile,
   packageProfile: PackageProfile,
 ): ValidationCommand[] {
-  return LAYERED_ORDER
-    .filter((script) => typeof packageProfile.scripts[script] === 'string')
-    .map((script) => commandFor(profile, packageProfile, script));
+  return LAYERED_ORDER.filter((script) => typeof packageProfile.scripts[script] === 'string').map((script) =>
+    commandFor(profile, packageProfile, script),
+  );
 }
 
 /** Compatibility API retained for callers that intentionally want one command. */

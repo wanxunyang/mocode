@@ -2,12 +2,7 @@
 // It never deletes messages or changes tool_call_id pairing; only tool content is stubbed.
 
 import type { ChatMessage } from '../llm/index.js';
-import {
-  canonicalizePath,
-  extractPath,
-  isToolResultSuccess,
-  toText,
-} from './utils.js';
+import { canonicalizePath, extractPath, isToolResultSuccess, toText } from './utils.js';
 
 type AnyMessage = ChatMessage & { content?: unknown; tool_call_id?: string };
 
@@ -29,9 +24,7 @@ const READ_STUB_REASON = '同 path 已有新 read / 已被 mutation 覆写';
 function parseArgs(raw: string): Record<string, unknown> | null {
   try {
     const parsed = raw.trim() ? JSON.parse(raw) : {};
-    return parsed && typeof parsed === 'object'
-      ? parsed as Record<string, unknown>
-      : null;
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
   } catch {
     return null;
   }

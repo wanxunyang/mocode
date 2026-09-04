@@ -1,0 +1,37 @@
+# 构建与依赖产物
+dist/
+dist-tests/
+node_modules/
+coverage/
+*.tsbuildinfo
+
+# 本地脚本沙盒与 agent 产物(见 .gitignore 同名条目)
+# /scripts/ 必须锚定到根,否则会吞掉 packages/*/scripts(与 .gitignore 同一理由)
+/scripts/
+demo-plan/
+task_management/
+.mocode/
+.claude/
+.agents/
+.codegraph/
+.trae/
+.kiro/
+.workbuddy/
+tmp/
+
+# Rust 前端实验区(路径 A):独立于 TS 主工程,自带 rustfmt 约定
+rust/
+
+# 子包(各有独立构建链与风格,后续单独接入)
+packages/
+
+# 非代码资产
+assets/
+prompt_image/
+docs/
+evals/results/
+*.md
+*.json
+*.svg
+*.png
+*.log

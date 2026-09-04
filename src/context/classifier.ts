@@ -51,10 +51,7 @@ function classifyByShape(output: string): ContextKind {
   if (/^\[退出码 \d+\]/m.test(output)) return 'log';
   // 路径列表:多行都是含分隔符的相对路径(glob 风格)
   const lines = output.split('\n').filter((l) => l.trim().length > 0);
-  if (
-    lines.length >= 3 &&
-    lines.every((l) => /^[\w.\-\\/ ]+$/.test(l.trim()) && /[\\/]/.test(l))
-  ) {
+  if (lines.length >= 3 && lines.every((l) => /^[\w.\-\\/ ]+$/.test(l.trim()) && /[\\/]/.test(l))) {
     return 'tree';
   }
   // JSON 结构化(web_fetch 的 JSON 响应等)→ doc 渲染
@@ -73,11 +70,7 @@ function classifyByShape(output: string): ContextKind {
  * @param output 工具原始输出(形状启发用;有 BY_NAME 时不读)
  * @param _args 已解析参数(预留:未来 read_file 的 offset/limit 可影响 code 编码策略;Phase 1 不用)
  */
-export function classify(
-  toolName: string,
-  output: string,
-  _args: Record<string, unknown> | null,
-): ContextKind {
+export function classify(toolName: string, output: string, _args: Record<string, unknown> | null): ContextKind {
   const byName = BY_NAME[toolName];
   if (byName) return byName;
   return classifyByShape(output);

@@ -25,6 +25,8 @@
     "typecheck": "tsc --noEmit && tsc -p tests/tsconfig.json && tsc -p evals/tsconfig.json",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "eval:smoke": "tsx evals/smoke.ts && tsx evals/coding/smoke.ts && tsx evals/work-discipline.ts",
     "eval:coding": "tsx evals/coding/runner.ts",
     "eval:coding:list": "tsx evals/coding/runner.ts --list",
@@ -45,6 +47,7 @@
     "eslint": "^9.39.5",
     "fast-check": "3.23.1",
     "globals": "^15.15.0",
+    "prettier": "3.6.2",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
     "typescript-eslint": "^8.69.0"

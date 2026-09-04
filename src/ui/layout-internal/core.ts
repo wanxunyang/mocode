@@ -25,17 +25,76 @@ import { t } from '../../i18n/index.js';
 import type { StatusBarData } from '../layout-types.js';
 import { state } from './state.js';
 import { esc, cup, getGeo, setRegion, runningCaretPos, contentMode } from './screen.js';
-import { normalizeSelection, normalizeInputSelection, extractSelectionText, extractInputSelectionText, isInputRow, pasteIntoInput, inputScreenToInputPos } from './selection.js';
+import {
+  normalizeSelection,
+  normalizeInputSelection,
+  extractSelectionText,
+  extractInputSelectionText,
+  isInputRow,
+  pasteIntoInput,
+  inputScreenToInputPos,
+} from './selection.js';
 import { composePlanLines, drawStatusBar, startTurnTimer, stopTurnTimer } from './statusbar.js';
 import { paintInput, repaint } from './input-paint.js';
-import { WHEEL_LINES, screenRowToAbsLine, repaintViewport, scrollBy, scrollWheel, resetScroll, lockScrollToBottom } from './scroll.js';
-import { contentWrite, contentInsertAfter, contentDeleteFrom, contentReplaceLine, reflowContentForResize } from './content-write.js';
+import {
+  WHEEL_LINES,
+  screenRowToAbsLine,
+  repaintViewport,
+  scrollBy,
+  scrollWheel,
+  resetScroll,
+  lockScrollToBottom,
+} from './scroll.js';
+import {
+  contentWrite,
+  contentInsertAfter,
+  contentDeleteFrom,
+  contentReplaceLine,
+  reflowContentForResize,
+} from './content-write.js';
 
 export { isTuiActive, getGeo, setRegion, contentMode, isStreamingPaused } from './screen.js';
-export { drawStatusBar, setStatus, stopTurnTimer, startTurnTimerIfRunning, paintLiveAtCursor, clearLiveAtCursor, setLiveUsage, setStatusBase } from './statusbar.js';
+export {
+  drawStatusBar,
+  setStatus,
+  stopTurnTimer,
+  startTurnTimerIfRunning,
+  paintLiveAtCursor,
+  clearLiveAtCursor,
+  setLiveUsage,
+  setStatusBase,
+} from './statusbar.js';
 export { paintInput, paintRunningInput, repaint } from './input-paint.js';
-export { isScrolled, repaintViewport, scrollBy, scrollWheel, resetScroll, lockScrollToBottom, unlockScroll, isScrollLocked } from './scroll.js';
-export { contentWrite, writeBanner, rewriteBanner, bannerHeight, contentWriteMd, contentWriteMdOnce, clearContent, rewindContent, writeWelcomeBlock, dismissWelcomeBlock, contentInsertAfter, contentDeleteFrom, totalRows, isLastContentRowBlank, normalizeMutationBoundary, normalizeInputBoundary, contentReplaceLine, notifyContentReset } from './content-write.js';
+export {
+  isScrolled,
+  repaintViewport,
+  scrollBy,
+  scrollWheel,
+  resetScroll,
+  lockScrollToBottom,
+  unlockScroll,
+  isScrollLocked,
+} from './scroll.js';
+export {
+  contentWrite,
+  writeBanner,
+  rewriteBanner,
+  bannerHeight,
+  contentWriteMd,
+  contentWriteMdOnce,
+  clearContent,
+  rewindContent,
+  writeWelcomeBlock,
+  dismissWelcomeBlock,
+  contentInsertAfter,
+  contentDeleteFrom,
+  totalRows,
+  isLastContentRowBlank,
+  normalizeMutationBoundary,
+  normalizeInputBoundary,
+  contentReplaceLine,
+  notifyContentReset,
+} from './content-write.js';
 
 // ── 裸 console 防御 ──
 // 第三方库(如 openai SDK)可能用 console.log 直写 stdout,在 RUNNING 态会落到光标所在的底栏
@@ -56,9 +115,7 @@ function routeConsoleToContent(method: 'log' | 'error' | 'warn' | 'info'): void 
     if (state.active && ui.isTTY) {
       let s: string;
       try {
-        s = args
-          .map((a) => (typeof a === 'string' ? a : inspect(a, { depth: 4 })))
-          .join(' ');
+        s = args.map((a) => (typeof a === 'string' ? a : inspect(a, { depth: 4 }))).join(' ');
       } catch {
         s = String(args[0]);
       }
@@ -379,7 +436,10 @@ export function enterInputMode(status: string = t('repl.idle')): void {
   state.frameRow = 0; // 轮末:清 spinner 帧位置(防下轮残留)
   state.frameCol = 0;
   // 运行态若有未 flush 的缓冲内容(用户打字暂停了流式写),切回 INPUT 前重画内容区显示之,免丢内容
-  if (state.flushTimer) { clearTimeout(state.flushTimer); state.flushTimer = null; }
+  if (state.flushTimer) {
+    clearTimeout(state.flushTimer);
+    state.flushTimer = null;
+  }
   if (state.userActiveUntil) {
     state.userActiveUntil = 0;
     if (state.active) repaintViewport();
@@ -387,7 +447,7 @@ export function enterInputMode(status: string = t('repl.idle')): void {
   if (state.active && state.base) {
     // 先按当前 base.planSummary 重算 planRows(可能从上次会话残留 stale 值),再据此 setRegion
     // 撑出正确脚栏高;否则 plan 撑 2 行时 setRegion(6) 会把 spinner 挤到 plan 第 2 行位置。
-    composePlanLines(state.base as StatusBarData, (getGeo()).cols);
+    composePlanLines(state.base as StatusBarData, getGeo().cols);
     setRegion(4 + state.planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
     paintInput({
       prompt: '❯ ',
@@ -411,7 +471,7 @@ export function enterRunningMode(status: string, placeholder: string): void {
   if (state.active && state.base) {
     // 先按当前 base.planSummary 重算 planRows(可能从上次会话残留 stale 值),再据此 setRegion
     // 撑出正确脚栏高;否则 plan 撑 2 行时 setRegion(6) 会把 spinner 挤到 plan 第 2 行位置。
-    composePlanLines(state.base as StatusBarData, (getGeo()).cols);
+    composePlanLines(state.base as StatusBarData, getGeo().cols);
     setRegion(4 + state.planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
     paintInput({
       prompt: '❯ ',
@@ -442,7 +502,7 @@ export function enterAltScreen(): void {
   mouse.setHandler(handleMouseEvent);
   // 进入 alt screen 前 base 可能已设了 planSummary;按当前 planSummary 重算 planRows,
   // 让首次 setRegion 撑出正确脚栏高(否则 plan 撑 2 行时会被 spinner 行覆盖)。
-  if (state.base) composePlanLines(state.base as StatusBarData, (getGeo()).cols);
+  if (state.base) composePlanLines(state.base as StatusBarData, getGeo().cols);
   setRegion(4 + state.planRows + 1); // 1 虚拟空 + 1 spinner行 + 1 上线 + 1 输入 + 1 下线 + 1 model行 + plan 多出的行
   state.contentRow = 1;
   state.contentCol = 1;

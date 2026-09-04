@@ -36,12 +36,7 @@ function onRunningKey(_str: string, key?: Key): void {
   if (mouse.swallow(key.sequence ?? '')) return;
   // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页,↑/↓ 每次 5 行(键盘)。
   // 运行态无输入光标,↑/↓ 无其他用途,直接作滚动。
-  if (
-    key.name === 'pageup' ||
-    key.name === 'pagedown' ||
-    key.name === 'up' ||
-    key.name === 'down'
-  ) {
+  if (key.name === 'pageup' || key.name === 'pagedown' || key.name === 'up' || key.name === 'down') {
     const pageH = layout.getGeo().contentBottom;
     if (key.name === 'pageup') layout.scrollBy(pageH);
     else if (key.name === 'pagedown') layout.scrollBy(-pageH);
@@ -69,10 +64,26 @@ function onRunningKey(_str: string, key?: Key): void {
   }
   const s = key.sequence ?? '';
   // 光标移动(单行 typeahead,光标可任意位置,与空闲态一致)
-  if (key.name === 'left') { runningCursor = Math.max(0, runningCursor - 1); layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder); return; }
-  if (key.name === 'right') { runningCursor = Math.min(runningInput.length, runningCursor + 1); layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder); return; }
-  if (key.name === 'home' || (key.ctrl && key.name === 'a')) { runningCursor = 0; layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder); return; }
-  if (key.name === 'end' || (key.ctrl && key.name === 'e')) { runningCursor = runningInput.length; layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder); return; }
+  if (key.name === 'left') {
+    runningCursor = Math.max(0, runningCursor - 1);
+    layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
+    return;
+  }
+  if (key.name === 'right') {
+    runningCursor = Math.min(runningInput.length, runningCursor + 1);
+    layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
+    return;
+  }
+  if (key.name === 'home' || (key.ctrl && key.name === 'a')) {
+    runningCursor = 0;
+    layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
+    return;
+  }
+  if (key.name === 'end' || (key.ctrl && key.name === 'e')) {
+    runningCursor = runningInput.length;
+    layout.paintRunningInput(runningInput, runningCursor, runningPlaceholder);
+    return;
+  }
   if (key.name === 'backspace') {
     if (runningCursor > 0) {
       runningInput = runningInput.slice(0, runningCursor - 1) + runningInput.slice(runningCursor);
@@ -95,11 +106,7 @@ function onRunningKey(_str: string, key?: Key): void {
     return;
   }
   // Enter / Ctrl+J:运行中 no-op(单行 typeahead;agent 结束后预填,用户在 INPUT 态按 Enter 提交)
-  if (
-    key.name === 'return' ||
-    key.name === 'enter' ||
-    (key.ctrl && key.name === 'j')
-  ) {
+  if (key.name === 'return' || key.name === 'enter' || (key.ctrl && key.name === 'j')) {
     return;
   }
   // 可打印字符(>= 空格,非 ctrl/meta)→ 光标处插入 + 非 dim 回显(与空闲态一致)

@@ -38,9 +38,7 @@ export function mapSkillToolName(token: string): string | null {
 
 /** 把 allowed-tools / disallowed-tools 的 token 列表映射为 mocode 工具名集合;
  * 未知 token 收集到 unknown 返回,供调用方记 warning。返回 null 表示未声明(不约束)。 */
-export function mapSkillTools(
-  tokens: string[] | undefined,
-): { tools: string[] | null; unknown: string[] } {
+export function mapSkillTools(tokens: string[] | undefined): { tools: string[] | null; unknown: string[] } {
   if (!tokens || tokens.length === 0) return { tools: null, unknown: [] };
   const tools: string[] = [];
   const unknown: string[] = [];

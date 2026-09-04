@@ -15,14 +15,10 @@ export interface TraceMetrics {
 }
 
 function countAskHumanCalls(events: readonly AgentTraceEvent[]): number {
-  return events.filter((event) =>
-    event.type === 'ask_human_call' && event.data.status === 'success'
-  ).length;
+  return events.filter((event) => event.type === 'ask_human_call' && event.data.status === 'success').length;
 }
 
-export function reduceTraceMetrics(
-  events: readonly AgentTraceEvent[],
-): TraceMetrics {
+export function reduceTraceMetrics(events: readonly AgentTraceEvent[]): TraceMetrics {
   const ends = events.filter((event) => event.type === 'tool_call_end');
   let recovered = false;
   let hadFailure = false;
@@ -69,9 +65,12 @@ export function readTraceEvents(file: string): AgentTraceEvent[] {
     try {
       const value = JSON.parse(line) as Partial<AgentTraceEvent>;
       if (
-        value.schemaVersion === 1 && typeof value.type === 'string' &&
-        typeof value.sessionId === 'string' && typeof value.turnId === 'number' &&
-        value.data && typeof value.data === 'object'
+        value.schemaVersion === 1 &&
+        typeof value.type === 'string' &&
+        typeof value.sessionId === 'string' &&
+        typeof value.turnId === 'number' &&
+        value.data &&
+        typeof value.data === 'object'
       ) {
         events.push(value as AgentTraceEvent);
       }

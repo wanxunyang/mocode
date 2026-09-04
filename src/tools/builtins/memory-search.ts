@@ -34,17 +34,11 @@ export const memorySearchTool: Tool = {
     if (!query) return '错误:缺少 query。';
     const r = searchEntries(query, {
       type: typeof args.type === 'string' ? (args.type as MemoryType) : undefined,
-      status:
-        typeof args.status === 'string'
-          ? (args.status as MemoryStatus | 'any')
-          : undefined,
+      status: typeof args.status === 'string' ? (args.status as MemoryStatus | 'any') : undefined,
       limit: typeof args.limit === 'number' ? args.limit : undefined,
     });
     const entryText = r
-      .map(
-        (e) =>
-          `# [${e.id}] ${e.name} (${e.type}, recalled ${e.recallCount})\nsummary: ${e.summary}\n\n${e.body}`,
-      )
+      .map((e) => `# [${e.id}] ${e.name} (${e.type}, recalled ${e.recallCount})\nsummary: ${e.summary}\n\n${e.body}`)
       .join('\n\n---\n\n');
 
     // 知识图谱事实段:命中实体的 active 边(容错:图坏了不连累条目搜索)。
@@ -55,7 +49,10 @@ export const memorySearchTool: Tool = {
         const lines = g.edges
           .slice(0, GRAPH_FACTS_LIMIT)
           .map((e) => `${e.src} --[${e.relation}]--> ${e.dst}${e.fact ? ` (${e.fact})` : ''}`);
-        const more = g.edges.length > GRAPH_FACTS_LIMIT ? `\n…(共 ${g.edges.length} 条,其余用 memory_graph action=neighbors 展开)` : '';
+        const more =
+          g.edges.length > GRAPH_FACTS_LIMIT
+            ? `\n…(共 ${g.edges.length} 条,其余用 memory_graph action=neighbors 展开)`
+            : '';
         graphText = `\n\n## 知识图谱事实\n${lines.join('\n')}${more}`;
       }
     } catch {

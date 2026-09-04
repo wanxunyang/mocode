@@ -43,15 +43,20 @@ function uniquePresetName(
 ): string | null {
   const existing = listPresets();
   const sameEntry = existing.find(
-    (p) => p.provider === provider && p.baseURL === baseURL && p.apiKey === apiKey
-      && p.model === model && p.contextWindow === contextWindow
-      && p.anthropicPromptCache === anthropicPromptCache,
+    (p) =>
+      p.provider === provider &&
+      p.baseURL === baseURL &&
+      p.apiKey === apiKey &&
+      p.model === model &&
+      p.contextWindow === contextWindow &&
+      p.anthropicPromptCache === anthropicPromptCache,
   );
   if (sameEntry) return null;
-  const sanitized = desired
-    .replace(/[^a-zA-Z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 32) || 'preset';
+  const sanitized =
+    desired
+      .replace(/[^a-zA-Z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 32) || 'preset';
   const base = isValidPresetName(sanitized) ? sanitized : 'preset';
   if (!existing.some((p) => p.name === base)) return base;
   for (let i = 2; i < 1000; i++) {
@@ -97,7 +102,11 @@ export const modelCommands: CommandHandler[] = [
       });
       reconfigureClient();
       // 记为激活预设:让上下文窗口等配置从此跟随该预设文件(下次启动也用它,不再回退 config 裸键)。
-      try { setActivePresetName(target.name); } catch { /* 指针写失败不阻断切换 */ }
+      try {
+        setActivePresetName(target.name);
+      } catch {
+        /* 指针写失败不阻断切换 */
+      }
       ctx.refreshStatusBase(history);
       layout.clearContent();
       if (history.some((m) => m.role === 'user')) {
@@ -105,10 +114,11 @@ export const modelCommands: CommandHandler[] = [
       } else {
         layout.writeBanner(bannerLines(ctx.banner()));
       }
-      const cacheLabel = target.provider === 'anthropic'
-        ? ` · Prompt Cache ${target.anthropicPromptCache ? 'on' : 'off'}`
-        : '';
-      layout.contentWrite(`${ui.dim}(已切换到预设 “${target.name}” → ${target.model} · ${target.provider}${cacheLabel} · 窗口 ${target.contextWindow} @ ${target.baseURL})${ui.reset}\n`);
+      const cacheLabel =
+        target.provider === 'anthropic' ? ` · Prompt Cache ${target.anthropicPromptCache ? 'on' : 'off'}` : '';
+      layout.contentWrite(
+        `${ui.dim}(已切换到预设 “${target.name}” → ${target.model} · ${target.provider}${cacheLabel} · 窗口 ${target.contextWindow} @ ${target.baseURL})${ui.reset}\n`,
+      );
       if (config.llmKeysFromShell.length > 0) {
         layout.contentWrite(
           `${ui.dim}(shell 环境变量已设 ${config.llmKeysFromShell.join(' / ')},优先级最高,下次启动会盖掉预设的对应字段;预设仍记为激活,取消 shell 设置后恢复跟随)${ui.reset}\n`,
@@ -123,7 +133,7 @@ export const modelCommands: CommandHandler[] = [
         layout.contentWrite(`${ui.dim}(还没有预设;先跑 /model 添加一个)${ui.reset}\n`);
         return next();
       }
-      const isCurrent = (p: typeof presets[number]): boolean =>
+      const isCurrent = (p: (typeof presets)[number]): boolean =>
         p.provider === config.provider &&
         p.baseURL === config.baseURL &&
         p.apiKey === config.apiKey &&
@@ -131,7 +141,7 @@ export const modelCommands: CommandHandler[] = [
         p.contextWindow === config.contextWindowTokens &&
         p.anthropicPromptCache === (config.provider === 'anthropic' && config.anthropicPromptCache);
       const cols = layout.getGeo().cols;
-      const labelFor = (p: typeof presets[number]): string => {
+      const labelFor = (p: (typeof presets)[number]): string => {
         const tag = isCurrent(p) ? ' ★current' : '';
         const cache = p.provider === 'anthropic' ? ` · cache ${p.anthropicPromptCache ? 'on' : 'off'}` : '';
         const right = `${p.provider}${cache} · ${p.model} @ ${p.baseURL}`;
@@ -166,12 +176,13 @@ export const modelCommands: CommandHandler[] = [
       }
       layout.contentWrite(`${ui.dim}已配置 ${ps.length} 个预设:${ui.reset}\n`);
       for (const p of ps) {
-        const current = p.provider === config.provider
-          && p.baseURL === config.baseURL
-          && p.apiKey === config.apiKey
-          && p.model === config.model
-          && p.contextWindow === config.contextWindowTokens
-          && p.anthropicPromptCache === (config.provider === 'anthropic' && config.anthropicPromptCache);
+        const current =
+          p.provider === config.provider &&
+          p.baseURL === config.baseURL &&
+          p.apiKey === config.apiKey &&
+          p.model === config.model &&
+          p.contextWindow === config.contextWindowTokens &&
+          p.anthropicPromptCache === (config.provider === 'anthropic' && config.anthropicPromptCache);
         const star = current ? ' ★' : '';
         const cache = p.provider === 'anthropic' ? ` · cache ${p.anthropicPromptCache ? 'on' : 'off'}` : '';
         layout.contentWrite(
@@ -191,7 +202,9 @@ export const modelCommands: CommandHandler[] = [
       layout.contentWrite(`  ${ui.accent}model   ${ui.reset}  ${config.model}\n`);
       layout.contentWrite(`  ${ui.accent}窗口    ${ui.reset}  ${config.contextWindowTokens} tokens\n`);
       if (config.provider === 'anthropic') {
-        layout.contentWrite(`  ${ui.accent}缓存    ${ui.reset}  Prompt Cache ${config.anthropicPromptCache ? 'on' : 'off'}\n`);
+        layout.contentWrite(
+          `  ${ui.accent}缓存    ${ui.reset}  Prompt Cache ${config.anthropicPromptCache ? 'on' : 'off'}\n`,
+        );
       }
       layout.contentWrite(`${ui.dim}(配置文件: ${CONFIG_PATH})${ui.reset}\n`);
       return next();
@@ -256,7 +269,7 @@ export const modelCommands: CommandHandler[] = [
     //   切换 / 查看 / 删除已配置预设改用显式子命令:/model switch · /model list · /model delete <name>。
 
     // 1) 选 provider 预设(预填 baseURL,后续仍可逐项改)。
-    let preset: typeof MODEL_PRESETS[number];
+    let preset: (typeof MODEL_PRESETS)[number];
     try {
       const res = await promptIntervention({
         type: 'choice',
@@ -264,9 +277,13 @@ export const modelCommands: CommandHandler[] = [
         detail: '选一个会预填 baseURL/model/窗口,之后逐项确认。选「自定义」全部手填。',
         options: MODEL_PRESETS.map((p) => p.label),
       });
-      if (res.action === 'cancelled') { return next(); }
+      if (res.action === 'cancelled') {
+        return next();
+      }
       const idx = MODEL_PRESETS.findIndex((p) => p.label === res.value);
-      if (idx === -1) { return next(); }
+      if (idx === -1) {
+        return next();
+      }
       preset = MODEL_PRESETS[idx];
     } catch {
       return next(); // Ctrl+C
@@ -286,7 +303,9 @@ export const modelCommands: CommandHandler[] = [
           options: ['直接应用', '逐项修改'],
           allowCustom: false,
         });
-        if (res.action === 'cancelled') { return next(); }
+        if (res.action === 'cancelled') {
+          return next();
+        }
         if (res.action === 'selected' && res.value === '直接应用') {
           quickApply = true;
         }
@@ -316,7 +335,9 @@ export const modelCommands: CommandHandler[] = [
           detail: 'OpenAI 兼容 API 端点。回车采纳预填值。',
           seed: preset.baseURL || config.baseURL,
         });
-        if (res.action === 'cancelled') { return next(); }
+        if (res.action === 'cancelled') {
+          return next();
+        }
         baseURL = (res.value ?? '').trim() || preset.baseURL || config.baseURL;
       }
       if (!baseURL) {
@@ -332,7 +353,9 @@ export const modelCommands: CommandHandler[] = [
           detail: `回车保留当前 ${maskKey(config.apiKey)};输入新值则覆盖。`,
           seed: '',
         });
-        if (res.action === 'cancelled') { return next(); }
+        if (res.action === 'cancelled') {
+          return next();
+        }
         const v = (res.value ?? '').trim();
         apiKey = v || config.apiKey;
       }
@@ -349,7 +372,9 @@ export const modelCommands: CommandHandler[] = [
           detail: '模型名(须支持 function calling)。回车采纳预填值。',
           seed: preset.model || config.model,
         });
-        if (res.action === 'cancelled') { return next(); }
+        if (res.action === 'cancelled') {
+          return next();
+        }
         model = (res.value ?? '').trim() || preset.model || config.model;
       }
       if (!model) {
@@ -365,7 +390,9 @@ export const modelCommands: CommandHandler[] = [
           detail: '模型上下文窗口，全局默认 256k；如需不同窗口可手动覆盖。回车采纳预填值。',
           seed: String(preset.window || config.contextWindowTokens),
         });
-        if (res.action === 'cancelled') { return next(); }
+        if (res.action === 'cancelled') {
+          return next();
+        }
         const v = (res.value ?? '').trim();
         const n = Number(v);
         if (!v || !Number.isFinite(n) || n <= 0) {
@@ -401,15 +428,7 @@ export const modelCommands: CommandHandler[] = [
     // 3.5) 自动存为命名预设；协议与缓存策略也是去重键的一部分。
     let savedName: string | null = null;
     try {
-      const finalName = uniquePresetName(
-        model,
-        provider,
-        baseURL,
-        apiKey,
-        model,
-        window,
-        anthropicPromptCache,
-      );
+      const finalName = uniquePresetName(model, provider, baseURL, apiKey, model, window, anthropicPromptCache);
       if (finalName) {
         savePreset({
           name: finalName,
@@ -424,7 +443,11 @@ export const modelCommands: CommandHandler[] = [
       }
       // 记为激活预设(新存或复用同名都记),让窗口跟随该预设文件。
       if (savedName) {
-        try { setActivePresetName(savedName); } catch { /* 指针写失败不阻断 */ }
+        try {
+          setActivePresetName(savedName);
+        } catch {
+          /* 指针写失败不阻断 */
+        }
       }
     } catch (e) {
       layout.contentWrite(`${ui.red}保存预设失败: ${(e as Error).message}${ui.reset}\n`);
@@ -438,9 +461,7 @@ export const modelCommands: CommandHandler[] = [
     } else {
       layout.writeBanner(bannerLines(ctx.banner()));
     }
-    const cacheLabel = provider === 'anthropic'
-      ? ` · Prompt Cache ${anthropicPromptCache ? 'on' : 'off'}`
-      : '';
+    const cacheLabel = provider === 'anthropic' ? ` · Prompt Cache ${anthropicPromptCache ? 'on' : 'off'}` : '';
     layout.contentWrite(`${ui.dim}(已切换模型 → ${model} · ${provider}${cacheLabel} @ ${baseURL})${ui.reset}\n`);
     if (savedName) {
       layout.contentWrite(`${ui.dim}(已保存为预设 “${savedName}”,下次 /model use ${savedName} 一键切回)${ui.reset}\n`);

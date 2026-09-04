@@ -16,7 +16,14 @@ import type { BenchmarkTaskResult, CodingTaskFixture } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
-interface CliOptions { selection: string; outDir: string; updateBaseline: boolean; list: boolean; keep: boolean; timeoutMs?: number }
+interface CliOptions {
+  selection: string;
+  outDir: string;
+  updateBaseline: boolean;
+  list: boolean;
+  keep: boolean;
+  timeoutMs?: number;
+}
 
 export function parseBenchmarkArgs(args: string[]): CliOptions {
   const value = (name: string, fallback: string) => {
@@ -53,17 +60,25 @@ async function verify(root: string, command: string, timeoutMs = 15_000): Promis
   try {
     await execFileAsync(program, args, { cwd: root, timeout: timeoutMs, windowsHide: true });
     return true;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 function promptHash(): string {
   return createHash('sha256').update(config.systemPrompt).digest('hex').slice(0, 16);
 }
 
-async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverride?: number): Promise<BenchmarkTaskResult> {
+async function runTask(
+  fixture: CodingTaskFixture,
+  keep: boolean,
+  timeoutOverride?: number,
+): Promise<BenchmarkTaskResult> {
   const root = mkdtempSync(path.join(tmpdir(), `mocode-eval-${fixture.id}-`));
   materialize(root, fixture);
-  const verifierHash = createHash('sha256').update(readFileSync(path.join(root, 'verify.mjs'))).digest('hex');
+  const verifierHash = createHash('sha256')
+    .update(readFileSync(path.join(root, 'verify.mjs')))
+    .digest('hex');
   const previousCwd = process.cwd();
   const previousRoot = setSandboxRoot(root);
   const previousPermission = config.permissionEnabled;
@@ -78,8 +93,11 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
   try {
     process.chdir(root);
     result = await runAgentCore({
-      history: [], userInput: fixture.goal, signal: controller.signal, hooks: {},
-      onTraceEvent: event => traceEvents.push(event),
+      history: [],
+      userInput: fixture.goal,
+      signal: controller.signal,
+      hooks: {},
+      onTraceEvent: (event) => traceEvents.push(event),
       traceContext: { sessionId: `eval-${fixture.id}`, turnId },
     });
     const finalVerified = await verify(root, fixture.verificationCommand);
@@ -87,12 +105,18 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
     const expectedChanged = fixture.expected.files ?? [];
     const changed = result.changedFiles ?? [];
     const traceMetrics = reduceTraceMetrics(traceEvents);
-    const expectedFilesTouched = expectedChanged.every(f => changed.some(c => c.replace(/\\/g, '/').endsWith(f)));
-    const verifierUnchanged = createHash('sha256').update(readFileSync(path.join(root, 'verify.mjs'))).digest('hex') === verifierHash;
+    const expectedFilesTouched = expectedChanged.every((f) => changed.some((c) => c.replace(/\\/g, '/').endsWith(f)));
+    const verifierUnchanged =
+      createHash('sha256')
+        .update(readFileSync(path.join(root, 'verify.mjs')))
+        .digest('hex') === verifierHash;
     const timedOut = controller.signal.aborted;
     const verified = finalVerified && expectedFilesTouched && verifierUnchanged && !timedOut;
     return {
-      id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
+      id: fixture.id,
+      title: fixture.title,
+      group: fixture.group,
+      difficulty: fixture.difficulty,
       status: timedOut ? 'timeout' : verified ? 'passed' : 'failed',
       finalVerifiedSuccess: verified,
       regression,
@@ -108,8 +132,12 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
   } catch (error) {
     const traceMetrics = reduceTraceMetrics(traceEvents);
     return {
-      id: fixture.id, title: fixture.title, group: fixture.group, difficulty: fixture.difficulty,
-      status: controller.signal.aborted ? 'timeout' : 'error', finalVerifiedSuccess: false,
+      id: fixture.id,
+      title: fixture.title,
+      group: fixture.group,
+      difficulty: fixture.difficulty,
+      status: controller.signal.aborted ? 'timeout' : 'error',
+      finalVerifiedSuccess: false,
       regression: false,
       toolRecovery: traceMetrics.toolRecovery,
       toolCalls: traceMetrics.toolCalls,
@@ -117,7 +145,8 @@ async function runTask(fixture: CodingTaskFixture, keep: boolean, timeoutOverrid
       firstSuccessRate: traceMetrics.firstSuccessRate,
       tokens: traceMetrics.tokens,
       durationMs: traceMetrics.durationMs || Date.now() - started,
-      changedFiles: [], error: error instanceof Error ? error.message : String(error),
+      changedFiles: [],
+      error: error instanceof Error ? error.message : String(error),
       askHumanCount: traceMetrics.askHumanCount,
     };
   } finally {
@@ -145,10 +174,17 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     results.push(result);
     console.log(result.status);
   }
-  const report = createReport({
-    schemaVersion: 2, runId: randomUUID(), generatedAt: new Date().toISOString(),
-    model: config.model, promptHash: promptHash(), selection: opts.selection,
-  }, results);
+  const report = createReport(
+    {
+      schemaVersion: 2,
+      runId: randomUUID(),
+      generatedAt: new Date().toISOString(),
+      model: config.model,
+      promptHash: promptHash(),
+      selection: opts.selection,
+    },
+    results,
+  );
   mkdirSync(opts.outDir, { recursive: true });
   const stamp = report.generatedAt.replace(/[:.]/g, '-');
   const jsonPath = path.join(opts.outDir, `${stamp}.json`);
@@ -163,5 +199,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (report.summary.passed !== report.summary.tasks) process.exitCode = 1;
 }
 
-const invoked = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1'));
-if (invoked) main().catch(error => { console.error(error); process.exitCode = 1; });
+const invoked =
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname.replace(/^\/(.:)/, '$1'));
+if (invoked)
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

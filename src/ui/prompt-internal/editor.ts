@@ -8,20 +8,8 @@ import * as mouse from '../mouse.js';
 import { t } from '../../i18n/index.js';
 import { promptComposer } from '../composer.js';
 import { promptHistorySearch } from '../history-picker.js';
-import {
-  CONFIRM_SEND_MS,
-  LONG_INPUT_CHARS,
-  confirmSendMode,
-  ensurePasteDetector,
-  pasteState,
-} from './paste.js';
-import type {
-  KeypressEmitter,
-  PromptOpts,
-  Seg,
-  SlashCommand,
-  SlashMenuItem,
-} from './types.js';
+import { CONFIRM_SEND_MS, LONG_INPUT_CHARS, confirmSendMode, ensurePasteDetector, pasteState } from './paste.js';
+import type { KeypressEmitter, PromptOpts, Seg, SlashCommand, SlashMenuItem } from './types.js';
 
 /** 非 TTY / 未进 alt screen 时退化为普通 readline 行输入(无菜单、单行)。 */
 function questionFallback(prompt: string): Promise<string> {
@@ -46,9 +34,7 @@ function questionFallback(prompt: string): Promise<string> {
  * 渲染全归 layout(prompt 只持有编辑状态:lines / 光标 / 菜单),prompt 不直接发 ANSI 区域控制,
  * 避免 readline 光标错位与区域越界——颜色仅用在菜单行字符串里(由 layout 原样贴入)。
  */
-export async function promptWithSlashMenu(
-  opts: PromptOpts
-): Promise<string[] | null> {
+export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | null> {
   if (!layout.isActive()) {
     const a = await questionFallback(opts.prompt);
     return [a];
@@ -279,9 +265,7 @@ export async function promptWithSlashMenu(
     let nodes = opts.commands;
     let prefix = '';
     while (true) {
-      const branch = nodes.find(
-        (node) => node.children?.length && input.startsWith(`${prefix}${node.name} `),
-      );
+      const branch = nodes.find((node) => node.children?.length && input.startsWith(`${prefix}${node.name} `));
       if (!branch?.children) return { nodes, prefix };
       prefix = `${prefix}${branch.name} `;
       nodes = branch.children;
@@ -574,8 +558,7 @@ export async function promptWithSlashMenu(
 
     // 二次确认已武装:任何非「提交键」都解除武装(继续编辑 / 换行 / 删除都算放弃这次提交)。
     if (confirmArmedUntil) {
-      const isSubmitKey =
-        (key.name === 'return' || key.name === 'enter') && !key.shift && !key.meta && !key.ctrl;
+      const isSubmitKey = (key.name === 'return' || key.name === 'enter') && !key.shift && !key.meta && !key.ctrl;
       if (!isSubmitKey) {
         confirmArmedUntil = 0;
         redraw();
@@ -619,11 +602,7 @@ export async function promptWithSlashMenu(
 
     // 滚动回看键(优先;不触发回尾):PgUp/PgDn 翻页，Ctrl+↑/↓ 每次 5 行。
     // 裸 ↑/↓ 优先给斜杠菜单与多行光标，二者都不适用时按滚轮量滚动回看(与鼠标滚轮同一入口)。
-    if (
-      key.name === 'pageup' ||
-      key.name === 'pagedown' ||
-      (key.ctrl && (key.name === 'up' || key.name === 'down'))
-    ) {
+    if (key.name === 'pageup' || key.name === 'pagedown' || (key.ctrl && (key.name === 'up' || key.name === 'down'))) {
       const pageH = layout.getGeo().contentBottom;
       if (key.name === 'pageup') layout.scrollBy(pageH);
       else if (key.name === 'pagedown') layout.scrollBy(-pageH);
@@ -745,7 +724,8 @@ export async function promptWithSlashMenu(
           redraw();
         } else if (curSeg < segs.length - 1) {
           const next = segs[curSeg + 1];
-          if (next.frozen) segs.splice(curSeg + 1, 1); // 并掉下一个粘贴块
+          if (next.frozen)
+            segs.splice(curSeg + 1, 1); // 并掉下一个粘贴块
           else {
             segs[curSeg].text += next.text;
             segs.splice(curSeg + 1, 1);
@@ -944,7 +924,7 @@ export async function promptWithSlashMenu(
       // isTTY 但 setRawMode 失败(罕见):退化为 readline,不注册 setPasteHandler(不走 cleanup,防泄漏)
       questionFallback(opts.prompt).then(
         (a) => res([a]),
-        (e) => rej(e)
+        (e) => rej(e),
       );
       return;
     }

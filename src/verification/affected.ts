@@ -7,13 +7,7 @@ export type AffectedReasonKind =
   | 'workspace_config_change'
   | 'dependent_change';
 
-export type ChangedPathClassification =
-  | 'source'
-  | 'test'
-  | 'generated'
-  | 'vendor'
-  | 'fixture'
-  | 'other';
+export type ChangedPathClassification = 'source' | 'test' | 'generated' | 'vendor' | 'fixture' | 'other';
 
 export interface AffectedReason {
   kind: AffectedReasonKind;
@@ -42,10 +36,7 @@ export interface AffectedPackagesResult {
 
 export interface AffectedPackageOptions {
   changedFilesBase: string;
-  expandDependents?: (
-    directPackages: readonly PackageProfile[],
-    profile: ProjectProfile,
-  ) => readonly PackageProfile[];
+  expandDependents?: (directPackages: readonly PackageProfile[], profile: ProjectProfile) => readonly PackageProfile[];
 }
 
 interface CanonicalPath {
@@ -56,8 +47,14 @@ interface CanonicalPath {
 
 const isWindows = process.platform === 'win32';
 const ROOT_CONFIG_NAMES = new Set([
-  'package.json', 'pnpm-workspace.yaml', 'pnpm-workspace.yml',
-  'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb',
+  'package.json',
+  'pnpm-workspace.yaml',
+  'pnpm-workspace.yml',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
 ]);
 
 function comparisonKey(value: string): string {
@@ -74,11 +71,7 @@ function toNativeSeparators(value: string): string {
   return value.replace(/[\\/]/g, path.sep);
 }
 
-function canonicalize(
-  profile: ProjectProfile,
-  input: string,
-  base: string,
-): CanonicalPath | RejectedChangedFile {
+function canonicalize(profile: ProjectProfile, input: string, base: string): CanonicalPath | RejectedChangedFile {
   if (!input.trim() || input.includes('\0')) return { input, reason: 'invalid_path' };
   try {
     const absolute = path.resolve(base, toNativeSeparators(input));
@@ -111,11 +104,13 @@ function rootConfigReason(profile: ProjectProfile, file: CanonicalPath): Affecte
   const workspaceKeys = new Set(profile.workspaceConfigPaths.map(comparisonKey));
   if (workspaceKeys.has(file.key)) return 'workspace_config_change';
   const rootPackage = profile.packages.find((item) => comparisonKey(item.root) === comparisonKey(profile.root));
-  const configKeys = new Set([
-    ...(rootPackage?.tsconfigPaths ?? []),
-    ...(rootPackage?.testConfigPaths ?? []),
-    ...(rootPackage?.lintConfigPaths ?? []),
-  ].map(comparisonKey));
+  const configKeys = new Set(
+    [
+      ...(rootPackage?.tsconfigPaths ?? []),
+      ...(rootPackage?.testConfigPaths ?? []),
+      ...(rootPackage?.lintConfigPaths ?? []),
+    ].map(comparisonKey),
+  );
   if (configKeys.has(file.key)) return 'root_config_change';
   if (comparisonKey(path.dirname(file.absolute)) !== comparisonKey(profile.root)) return null;
   const name = path.basename(file.absolute).toLowerCase();
@@ -136,10 +131,14 @@ function addReason(
     selected = { package: packageProfile, reasons: [] };
     selections.set(key, selected);
   }
-  if (!selected.reasons.some((item) =>
-    item.kind === reason.kind
-    && item.changedPath === reason.changedPath
-    && item.sourcePackage === reason.sourcePackage)) {
+  if (
+    !selected.reasons.some(
+      (item) =>
+        item.kind === reason.kind &&
+        item.changedPath === reason.changedPath &&
+        item.sourcePackage === reason.sourcePackage,
+    )
+  ) {
     selected.reasons.push(reason);
   }
 }
@@ -159,8 +158,9 @@ export function resolveAffectedPackages(
   }
 
   const canonical = [...canonicalByKey.values()];
-  const packageByDepth = [...profile.packages].sort((left, right) =>
-    comparisonKey(right.root).length - comparisonKey(left.root).length);
+  const packageByDepth = [...profile.packages].sort(
+    (left, right) => comparisonKey(right.root).length - comparisonKey(left.root).length,
+  );
   const selections = new Map<string, AffectedPackage>();
   const unmatchedFiles: string[] = [];
   let affectsAll = false;

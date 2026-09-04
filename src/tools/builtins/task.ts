@@ -38,16 +38,21 @@ export const subAgentTool: Tool = {
           'Optional loop-safety override. By default the worker uses the same step ceiling as the main agent; this is not a token budget.',
       },
       mode: {
-        type: 'string', enum: ['read', 'write'],
-        description: 'read tasks may run in parallel; write tasks use an isolated overlay and are merged by the coordinator.',
+        type: 'string',
+        enum: ['read', 'write'],
+        description:
+          'read tasks may run in parallel; write tasks use an isolated overlay and are merged by the coordinator.',
       },
       writeSet: {
-        type: 'array', items: { type: 'string' },
-        description: 'Known workspace-relative paths this task may write. Unknown write sets conservatively use the workspace lock.',
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Known workspace-relative paths this task may write. Unknown write sets conservatively use the workspace lock.',
       },
       context: {
         type: 'string',
-        description: 'Concise facts already learned by the main agent. Passing this avoids duplicate repository exploration.',
+        description:
+          'Concise facts already learned by the main agent. Passing this avoids duplicate repository exploration.',
       },
     },
     required: ['prompt'],
@@ -57,20 +62,24 @@ export const subAgentTool: Tool = {
     const prompt = String(args.prompt ?? '');
     if (!prompt) return t('task.missingPrompt');
 
-    const tools = Array.isArray(args.tools)
-      ? args.tools.map((t) => String(t))
-      : undefined;
-    const maxSteps =
-      typeof args.maxSteps === 'number' && args.maxSteps > 0
-        ? Math.floor(args.maxSteps)
-        : undefined;
+    const tools = Array.isArray(args.tools) ? args.tools.map((t) => String(t)) : undefined;
+    const maxSteps = typeof args.maxSteps === 'number' && args.maxSteps > 0 ? Math.floor(args.maxSteps) : undefined;
     const mode = args.mode === 'write' ? 'write' : 'read';
     const writeSet = Array.isArray(args.writeSet) ? args.writeSet.map(String) : undefined;
     const context = typeof args.context === 'string' ? args.context.slice(0, 4000) : undefined;
 
     // 透传主 agent 的 abort signal:主 Ctrl+C 树杀子 agent(chat abort + 工具 abort)。
     // callId 透传:子 agent 实时渲染据此挂靠主侧对应批次(并行派发时各行归位)。
-    const result = await spawnAgent({ prompt, tools, maxSteps, signal: ctx?.signal, mode, writeSet, context, callId: ctx?.callId });
+    const result = await spawnAgent({
+      prompt,
+      tools,
+      maxSteps,
+      signal: ctx?.signal,
+      mode,
+      writeSet,
+      context,
+      callId: ctx?.callId,
+    });
 
     let output: string;
     if (!result.completed) {
@@ -78,22 +87,27 @@ export const subAgentTool: Tool = {
     } else if (!result.summary) {
       output = t('task.noSummary');
     } else {
-    // 摘要可能很长,截到 MAX_OUTPUT 保主 history 不爆。
+      // 摘要可能很长,截到 MAX_OUTPUT 保主 history 不爆。
       const summary = [
         result.summary,
         `\n[SubAgentResult status=${result.status} tokens=${result.usage.totalTokens} prompt=${result.usage.promptTokens} completion=${result.usage.completionTokens} cached=${result.usage.cachedTokens} readSet=${JSON.stringify(result.readSet)} changeSet=${result.changeSet?.id ?? 'none'} verification=deferred-to-coordinator]`,
-      ].filter(Boolean).join('\n');
-      output = summary.length > MAX_OUTPUT ? (
-        summary.slice(0, MAX_OUTPUT) +
-        `\n\n${t('task.summaryTruncated', { count: summary.length - MAX_OUTPUT })}`
-      ) : summary;
+      ]
+        .filter(Boolean)
+        .join('\n');
+      output =
+        summary.length > MAX_OUTPUT
+          ? summary.slice(0, MAX_OUTPUT) + `\n\n${t('task.summaryTruncated', { count: summary.length - MAX_OUTPUT })}`
+          : summary;
     }
 
-    const code: ToolOutcomeCode = result.status === 'aborted'
-      ? 'ABORTED'
-      : result.status === 'conflict'
-        ? 'CHANGE_CONFLICT'
-        : result.completed ? 'OK' : 'EXECUTION_ERROR';
+    const code: ToolOutcomeCode =
+      result.status === 'aborted'
+        ? 'ABORTED'
+        : result.status === 'conflict'
+          ? 'CHANGE_CONFLICT'
+          : result.completed
+            ? 'OK'
+            : 'EXECUTION_ERROR';
     const outcome: ToolOutcome = {
       status: result.status === 'aborted' ? 'aborted' : result.completed ? 'success' : 'error',
       code,

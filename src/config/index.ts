@@ -7,12 +7,7 @@ import { getNotesFilePath, extractActiveNotesSections } from '../session/notes.j
 import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-discipline.js';
 import { buildValidationCommandsSection } from '../verification/prompt.js';
 import { getActivePresetName, readPreset } from './presets.js';
-import {
-  detectLanguage,
-  setLanguage,
-  t,
-  type Language,
-} from '../i18n/index.js';
+import { detectLanguage, setLanguage, t, type Language } from '../i18n/index.js';
 
 /**
  * 按优先级加载配置文件并回填 process.env:
@@ -24,8 +19,8 @@ import {
  */
 function loadEnvFiles(): void {
   const candidates = [
-    path.join(process.cwd(), '.env'),              // 兼容旧用法,优先级最低
-    path.join(os.homedir(), '.mocode', 'config'),  // 全局(/model 与 mocode config 写此)
+    path.join(process.cwd(), '.env'), // 兼容旧用法,优先级最低
+    path.join(os.homedir(), '.mocode', 'config'), // 全局(/model 与 mocode config 写此)
     path.join(process.cwd(), '.mocode', 'config'), // 项目级覆盖,优先级最高
   ];
   const fromFiles: Record<string, string> = {};
@@ -47,7 +42,14 @@ export const languageFromShell = process.env.MOCODE_LANGUAGE !== undefined;
 // 在 loadEnvFiles 回填前捕获:哪些 LLM 键由 shell 设置(决定 /model 写文件是否下次启动生效)。
 // 仿 themeFromShell 模式:shell export 的环境变量在 loadEnvFiles 中不被回填(优先级最高),
 // 故 /model 写入 ~/.mocode/config 的同名键下次启动会被 shell 值覆盖——据此给 dim 警告。
-const LLM_ENV_KEYS = ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS', 'ANTHROPIC_PROMPT_CACHE'] as const;
+const LLM_ENV_KEYS = [
+  'LLM_PROVIDER',
+  'LLM_BASE_URL',
+  'LLM_API_KEY',
+  'LLM_MODEL',
+  'CONTEXT_WINDOW_TOKENS',
+  'ANTHROPIC_PROMPT_CACHE',
+] as const;
 export const DEFAULT_CONTEXT_WINDOW_TOKENS = 256000;
 const llmKeysFromShell = LLM_ENV_KEYS.filter((k) => process.env[k] !== undefined);
 loadEnvFiles();
@@ -236,8 +238,9 @@ export function buildNotepadSection(sessionId = getCurrentSessionId()): string {
     if (!content) return '';
 
     // 1) 提取 ## 标题行（最多 15 个，按文件出现顺序保留）
-    const headers = content.split('\n')
-      .filter(l => /^##\s/.test(l))
+    const headers = content
+      .split('\n')
+      .filter((l) => /^##\s/.test(l))
       .slice(0, 15);
 
     // 2) 分桶：Done: 开头 → archived；其余 → active
@@ -256,11 +259,11 @@ export function buildNotepadSection(sessionId = getCurrentSessionId()): string {
       '',
       `## Session Notepad index (${totalCount} section${totalCount === 1 ? '' : 's'} — read \`.mocode/sessions/${sessionId}/notes.md\` to recover full context; surviving compact is the whole point of this file)`,
       `Active (${active.length}):`,
-      ...(active.length ? active.map(h => `  - ${h.replace(/^##\s+/, '')}`) : ['  - (none)']),
+      ...(active.length ? active.map((h) => `  - ${h.replace(/^##\s+/, '')}`) : ['  - (none)']),
     ];
     if (archived.length) {
       lines.push(`Done (${archived.length}):`);
-      lines.push(...archived.map(h => `  - ${h.replace(/^##\s+/, '')}`));
+      lines.push(...archived.map((h) => `  - ${h.replace(/^##\s+/, '')}`));
     }
     lines.push('');
     return lines.join('\n');
@@ -298,9 +301,7 @@ const ACTIVE_PLAN_MARKER = '\n\n<!-- mocode:active-plan -->\n';
  * 若 notes.md 有活跃 plan，则覆盖旧标记块写入最新内容；若无，则清掉残留标记块。
  * 直接改 history[0].content（compact 不破坏 index 0），幂等，返回是否改动。
  */
-export function reinjectActivePlanIntoSystem(
-  history: { role: string; content?: unknown }[],
-): boolean {
+export function reinjectActivePlanIntoSystem(history: { role: string; content?: unknown }[]): boolean {
   const sys = history[0];
   if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return false;
   let content = sys.content;
@@ -328,9 +329,7 @@ const NOTES_BODY_MARKER = '\n\n<!-- mocode:session-notes -->\n';
  * 则覆盖旧标记块写入最新内容;若无,则清掉残留标记块。直接改 history[0].content,
  * 幂等,返回是否改动。与 reinjectActivePlanIntoSystem 独立:plan 段由后者管,笔记段由本函数管。
  */
-export function reinjectSessionNotesIntoSystem(
-  history: { role: string; content?: unknown }[],
-): boolean {
+export function reinjectSessionNotesIntoSystem(history: { role: string; content?: unknown }[]): boolean {
   const sys = history[0];
   if (!sys || sys.role !== 'system' || typeof sys.content !== 'string') return false;
   let content = sys.content;
@@ -357,9 +356,7 @@ export function reinjectSessionNotesIntoSystem(
  *   {@link buildSessionStateReminder} 的 ephemeral system 消息:模型看到的信息等价,
  *   但变动落在前缀末端。本函数仅留给外部集成 / 旧测试,新增调用点请勿使用。
  */
-export function reinjectSessionStateIntoSystem(
-  history: { role: string; content?: unknown }[],
-): boolean {
+export function reinjectSessionStateIntoSystem(history: { role: string; content?: unknown }[]): boolean {
   const planChanged = reinjectActivePlanIntoSystem(history);
   const notesChanged = reinjectSessionNotesIntoSystem(history);
   return planChanged || notesChanged;
@@ -376,9 +373,7 @@ export function reinjectSessionStateIntoSystem(
  *
  * 纯读函数:不改 history,也不写文件。notes.md 不存在 / 无活跃内容时返回 ''(零开销)。
  */
-export function buildSessionStateReminder(
-  sessionId = getCurrentSessionId(),
-): string {
+export function buildSessionStateReminder(sessionId = getCurrentSessionId()): string {
   const plan = extractActivePlanSection(sessionId);
   const notes = extractActiveNotesSections(undefined, sessionId);
   if (!plan && !notes) return '';
@@ -442,9 +437,7 @@ function buildMemoryPromptSection(): string {
  * 没索引时干脆不提,避免 LLM 调出失败。函数化(非 const)以便在 buildPlanModeSuffix 里现拼。
  */
 function buildPlanResearchRules(): string {
-  const cg = hasCodegraphIndex()
-    ? ' Prefer the available codegraph skill for call paths and blast radius.'
-    : '';
+  const cg = hasCodegraphIndex() ? ' Prefer the available codegraph skill for call paths and blast radius.' : '';
   return `
 - Locate relevant code and conventions without repeating retrieved work.${cg}
 - Return an actionable plan with affected files, ordered steps, edge cases, and verification.
@@ -529,22 +522,22 @@ ${t('assistant.languageInstruction')}`;
   // 会话级私有尾段(子 agent 切片会丢弃):Session state 说明无条件注入在前,Project context 按需在后。
   dynamicParts.push(
     `## Session state (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
-    'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
-    'Record and update the execution plan with the `plan_update` tool (preferred over editing checkboxes by hand); it keeps at most one active plan as a `## Plan:` section:\n' +
-    '```\n' +
-    '## Plan: <title>\n' +
-    'Goal: <outcome>\n' +
-    '### Steps\n' +
-    '- [ ] 1. <self-contained step: target file/symbol, the change, and how to verify>\n' +
-    '### Progress\n' +
-    '- <completed/total>\n' +
-    '```\n' +
-    'Keep at most one step in_progress, and mark a step completed as soon as its work is done — do not batch updates to the end of the turn. ' +
-    'Write each step so a teammate who lost the conversation could pick it up cold: name the file or symbol, the exact change, and the verification, so the plan survives context compaction. ' +
-    'plan_update creates notes.md for you when the task warrants it; read_file the full notes.md whenever you need to recover context after compaction. ' +
-    'When every step is completed, plan_update settles the plan to `## Done:` automatically. Keep other notes concise and session-specific; use memory for stable cross-session facts.\n' +
-    '## Session notes (resident memory)\n' +
-    'For non-obvious, lasting-value discoveries — subtle constraints, decisions with downstream impact, open questions blocking a choice, or risks affecting later steps — call `note_append` IMMEDIATELY when you make the discovery. The note is written to the same notes.md and its body is re-injected into the prompt automatically (within a 5k-token budget), surviving compaction so you keep remembering what you found/decided this session. Do NOT use it for routine progress (that is the plan) or stable cross-session facts (that is memory_save). Each call appends one item.',
+      'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
+      'Record and update the execution plan with the `plan_update` tool (preferred over editing checkboxes by hand); it keeps at most one active plan as a `## Plan:` section:\n' +
+      '```\n' +
+      '## Plan: <title>\n' +
+      'Goal: <outcome>\n' +
+      '### Steps\n' +
+      '- [ ] 1. <self-contained step: target file/symbol, the change, and how to verify>\n' +
+      '### Progress\n' +
+      '- <completed/total>\n' +
+      '```\n' +
+      'Keep at most one step in_progress, and mark a step completed as soon as its work is done — do not batch updates to the end of the turn. ' +
+      'Write each step so a teammate who lost the conversation could pick it up cold: name the file or symbol, the exact change, and the verification, so the plan survives context compaction. ' +
+      'plan_update creates notes.md for you when the task warrants it; read_file the full notes.md whenever you need to recover context after compaction. ' +
+      'When every step is completed, plan_update settles the plan to `## Done:` automatically. Keep other notes concise and session-specific; use memory for stable cross-session facts.\n' +
+      '## Session notes (resident memory)\n' +
+      'For non-obvious, lasting-value discoveries — subtle constraints, decisions with downstream impact, open questions blocking a choice, or risks affecting later steps — call `note_append` IMMEDIATELY when you make the discovery. The note is written to the same notes.md and its body is re-injected into the prompt automatically (within a 5k-token budget), surviving compaction so you keep remembering what you found/decided this session. Do NOT use it for routine progress (that is the plan) or stable cross-session facts (that is memory_save). Each call appends one item.',
   );
 
   const ctxContent = `${agentsImportSection}${memorySection}${notepadSection}`.trimEnd();
@@ -608,7 +601,7 @@ export const config: Config = {
     ? requireEnv('LLM_API_KEY')
     : (__activePreset?.apiKey ?? requireEnv('LLM_API_KEY')),
   model: llmKeysFromShell.includes('LLM_MODEL')
-    ? (process.env.LLM_MODEL || 'gpt-4o-mini')
+    ? process.env.LLM_MODEL || 'gpt-4o-mini'
     : (__activePreset?.model ?? process.env.LLM_MODEL ?? 'gpt-4o-mini'),
   maxTokens: process.env.MAX_TOKENS ? Number(process.env.MAX_TOKENS) : undefined,
   // 用 getter 而非 buildBasePrompt() 立即求值:因为本对象字面量求值时 buildBasePrompt 读 config.memoryEnabled,
@@ -617,12 +610,12 @@ export const config: Config = {
     return buildBasePrompt();
   },
   contextWindowTokens: llmKeysFromShell.includes('CONTEXT_WINDOW_TOKENS')
-    ? (Number(process.env.CONTEXT_WINDOW_TOKENS) || DEFAULT_CONTEXT_WINDOW_TOKENS)
-    : (__activePreset?.contextWindow
-        // 必须用 ||:Number() 永不返回 null/undefined,?? 的右支是死代码;
-        // 且环境变量写成非数字时 Number() 得 NaN,?? 会把 NaN 直接放行到 contextWindow。
-        || Number(process.env.CONTEXT_WINDOW_TOKENS)
-        || DEFAULT_CONTEXT_WINDOW_TOKENS),
+    ? Number(process.env.CONTEXT_WINDOW_TOKENS) || DEFAULT_CONTEXT_WINDOW_TOKENS
+    : __activePreset?.contextWindow ||
+      // 必须用 ||:Number() 永不返回 null/undefined,?? 的右支是死代码;
+      // 且环境变量写成非数字时 Number() 得 NaN,?? 会把 NaN 直接放行到 contextWindow。
+      Number(process.env.CONTEXT_WINDOW_TOKENS) ||
+      DEFAULT_CONTEXT_WINDOW_TOKENS,
   includeUsage: process.env.LLM_STREAM_USAGE !== 'false',
   anthropicPromptCache: llmKeysFromShell.includes('ANTHROPIC_PROMPT_CACHE')
     ? process.env.ANTHROPIC_PROMPT_CACHE !== 'false'
@@ -644,9 +637,7 @@ export const config: Config = {
   searchApiKey: process.env.ANYSEARCH_API_KEY,
   sandboxRoot: process.env.SANDBOX_ROOT || undefined,
   searchBaseUrl: process.env.ANYSEARCH_BASE_URL || 'https://api.anysearch.com',
-  maxImageBytes: process.env.MOCODE_MAX_IMAGE_BYTES
-    ? Number(process.env.MOCODE_MAX_IMAGE_BYTES)
-    : undefined,
+  maxImageBytes: process.env.MOCODE_MAX_IMAGE_BYTES ? Number(process.env.MOCODE_MAX_IMAGE_BYTES) : undefined,
   theme: process.env.MOCODE_THEME || 'default',
   themeFromShell,
   llmKeysFromShell,

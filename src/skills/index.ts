@@ -6,12 +6,7 @@
 // 项目级最后扫描,自然在 Map 中胜出)。同名用户 skill 完全替换内置版。
 
 import { existsSync, readFileSync } from 'node:fs';
-import {
-  discoverSkills,
-  parseFrontmatter,
-  skillsScanSignature,
-  type Skill,
-} from './discover.js';
+import { discoverSkills, parseFrontmatter, skillsScanSignature, type Skill } from './discover.js';
 import { builtinSkills } from './builtin-skills.js';
 
 export type { Skill };

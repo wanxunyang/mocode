@@ -151,10 +151,7 @@ export function spawnPetProcess(): Promise<void> {
  *   - reject(err) 表示所有尝试均失败,err 汇总最后一次失败原因。
  * 循环不变量:每次尝试前 attempts < retryDelaysMs.length;每次失败后 attempts 严格 +1。
  */
-export async function connectWithBackoff(
-  port: number,
-  retryDelaysMs: number[] = RETRY_DELAYS_MS,
-): Promise<WebSocket> {
+export async function connectWithBackoff(port: number, retryDelaysMs: number[] = RETRY_DELAYS_MS): Promise<WebSocket> {
   let lastErr: Error = new Error('连接失败');
   for (let attempts = 0; attempts < retryDelaysMs.length; attempts++) {
     await sleep(retryDelaysMs[attempts]);

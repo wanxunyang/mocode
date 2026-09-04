@@ -25,7 +25,9 @@ export function buildSlashCommands(): SlashCommand[] {
     { name: '/sessions', desc: d('commands.sessionBrowse') },
     { name: '/rollback', desc: d('commands.sessionRollback') },
     {
-      name: '/memory', desc: d('commands.memory'), children: [
+      name: '/memory',
+      desc: d('commands.memory'),
+      children: [
         { name: 'overview', value: '/memory', desc: d('commands.memoryOverview') },
         { name: 'toggle', value: '/memory_switch', desc: d('commands.memoryToggle') },
         { name: 'on', value: '/memory_switch on', desc: d('commands.memoryOn') },
@@ -36,21 +38,27 @@ export function buildSlashCommands(): SlashCommand[] {
     },
     { name: '/init', desc: d('commands.memoryInit') },
     {
-      name: '/subagent', desc: d('commands.subagent'), children: [
+      name: '/subagent',
+      desc: d('commands.subagent'),
+      children: [
         { name: 'on', value: '/subagent on', desc: d('commands.subagentOn') },
         { name: 'off', value: '/subagent off', desc: d('commands.subagentOff') },
         { name: 'status', value: '/subagent status', desc: d('commands.subagentStatus') },
       ],
     },
     {
-      name: '/fe', desc: d('commands.fe'), children: [
+      name: '/fe',
+      desc: d('commands.fe'),
+      children: [
         { name: 'on', value: '/fe on', desc: d('commands.feOn') },
         { name: 'off', value: '/fe off', desc: d('commands.feOff') },
         { name: 'status', value: '/fe status', desc: d('commands.feStatus') },
       ],
     },
     {
-      name: '/mcp', desc: d('commands.mcp'), children: [
+      name: '/mcp',
+      desc: d('commands.mcp'),
+      children: [
         { name: 'on', value: '/mcp on', desc: d('commands.mcpOn') },
         { name: 'off', value: '/mcp off', desc: d('commands.mcpOff') },
         { name: 'status', value: '/mcp status', desc: d('commands.mcpStatus') },
@@ -58,7 +66,9 @@ export function buildSlashCommands(): SlashCommand[] {
     },
     { name: '/theme', desc: d('commands.theme') },
     {
-      name: '/model', desc: d('commands.model'), children: [
+      name: '/model',
+      desc: d('commands.model'),
+      children: [
         { name: 'configure', value: '/model', desc: d('commands.modelConfigure') },
         { name: 'switch', value: '/model switch', desc: d('commands.modelSwitch') },
         { name: 'list', value: '/model list', desc: d('commands.modelList') },
@@ -68,33 +78,43 @@ export function buildSlashCommands(): SlashCommand[] {
       ],
     },
     {
-      name: '/mode', desc: d('commands.mode'), children: [
+      name: '/mode',
+      desc: d('commands.mode'),
+      children: [
         { name: 'plan', value: '/plan', desc: d('commands.modePlan') },
         { name: 'auto', value: '/auto', desc: d('commands.modeAuto') },
       ],
     },
     {
-      name: '/pet', desc: d('commands.pet'), children: [
+      name: '/pet',
+      desc: d('commands.pet'),
+      children: [
         { name: 'toggle', value: '/pet', desc: d('commands.petToggle') },
         { name: 'skin', value: '/pet skin', desc: d('commands.petSkin') },
         { name: 'quit', value: '/pet quit', desc: d('commands.petQuit') },
       ],
     },
     {
-      name: '/image', desc: d('commands.image'), children: [
+      name: '/image',
+      desc: d('commands.image'),
+      children: [
         { name: 'attach <path>', value: '/image ', submit: false, desc: d('commands.imageAttach') },
         { name: 'list', value: '/image list', desc: d('commands.imageList') },
         { name: 'clear', value: '/image clear', desc: d('commands.imageClear') },
       ],
     },
     {
-      name: '/language', desc: d('commands.language'), children: [
+      name: '/language',
+      desc: d('commands.language'),
+      children: [
         { name: 'zh-CN', value: '/language zh-CN', desc: d('commands.languageZh') },
         { name: 'en', value: '/language en', desc: d('commands.languageEn') },
       ],
     },
     {
-      name: '/upgrade', desc: d('commands.upgrade'), children: [
+      name: '/upgrade',
+      desc: d('commands.upgrade'),
+      children: [
         { name: 'now', value: '/upgrade', desc: d('commands.upgradeNow') },
         { name: 'check', value: '/upgrade check', desc: d('commands.upgradeCheck') },
         { name: 'status', value: '/upgrade status', desc: d('commands.upgradeStatus') },
@@ -104,11 +124,7 @@ export function buildSlashCommands(): SlashCommand[] {
 }
 
 /** 从菜单树递归生成 /help 内容；叶子 value 与菜单路径不同则同时展示真实命令。 */
-export function slashHelpLines(
-  nodes: SlashCommand[] = buildSlashCommands(),
-  parentPath = '',
-  depth = 0,
-): string[] {
+export function slashHelpLines(nodes: SlashCommand[] = buildSlashCommands(), parentPath = '', depth = 0): string[] {
   const lines: string[] = [];
   for (const node of nodes) {
     const menuPath = parentPath ? `${parentPath} ${node.name}` : node.name;
@@ -137,7 +153,10 @@ export const LLM_ERROR_HINT_KEYS: Record<ChatErrorKind, TranslationKey> = {
 export const HELP_GROUPS: { key: TranslationKey; names: string[] }[] = [
   { key: 'help.groupFrequent', names: ['/help', '/clear', '/context', '/compact', '/resume', '/model'] },
   { key: 'help.groupSession', names: ['/sessions', '/rollback', '/memory', '/skills', '/skill', '/init'] },
-  { key: 'help.groupConfig', names: ['/mode', '/subagent', '/fe', '/mcp', '/theme', '/pet', '/image', '/language', '/upgrade'] },
+  {
+    key: 'help.groupConfig',
+    names: ['/mode', '/subagent', '/fe', '/mcp', '/theme', '/pet', '/image', '/language', '/upgrade'],
+  },
 ];
 
 /**
@@ -210,10 +229,22 @@ export function suggestCommand(input: string): string | null {
 /** 主题名 → 本地化描述。 */
 export function themeDescription(name: string): string {
   const key = `theme.${name}` as TranslationKey;
-  return name in {
-    default: 1, light: 1, solarized: 1, gruvbox: 1, nord: 1, orange: 1,
-    rose: 1, emerald: 1, amber: 1, lavender: 1, sunset: 1,
-  } ? t(key) : '';
+  return name in
+    {
+      default: 1,
+      light: 1,
+      solarized: 1,
+      gruvbox: 1,
+      nord: 1,
+      orange: 1,
+      rose: 1,
+      emerald: 1,
+      amber: 1,
+      lavender: 1,
+      sunset: 1,
+    }
+    ? t(key)
+    : '';
 }
 
 /** /model 预设后端：同时声明原生协议；旧服务继续走 OpenAI-compatible。 */
@@ -225,16 +256,72 @@ export const MODEL_PRESETS: {
   window: number;
   anthropicPromptCache: boolean;
 }[] = [
-  { label: 'Anthropic Claude', provider: 'anthropic', baseURL: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', window: 200000, anthropicPromptCache: true },
-  { label: 'GLM(智谱)', provider: 'openai', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
-  { label: 'DeepSeek', provider: 'openai', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
-  { label: 'Qwen(阿里)', provider: 'openai', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
+  {
+    label: 'Anthropic Claude',
+    provider: 'anthropic',
+    baseURL: 'https://api.anthropic.com',
+    model: 'claude-sonnet-4-5',
+    window: 200000,
+    anthropicPromptCache: true,
+  },
+  {
+    label: 'GLM(智谱)',
+    provider: 'openai',
+    baseURL: 'https://open.bigmodel.cn/api/v3',
+    model: 'glm-4.6',
+    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    anthropicPromptCache: false,
+  },
+  {
+    label: 'DeepSeek',
+    provider: 'openai',
+    baseURL: 'https://api.deepseek.com',
+    model: 'deepseek-chat',
+    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    anthropicPromptCache: false,
+  },
+  {
+    label: 'Qwen(阿里)',
+    provider: 'openai',
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen-plus',
+    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    anthropicPromptCache: false,
+  },
   // MiniMax OpenAI 兼容端点(https://platform.minimax.io/docs/api-reference/text-openai-api)。
   // MiniMax-M3 为唯一支持图片/视频输入的模型;M2 系列纯文本(见 llm/capabilities.ts KNOWN_TEXT_ONLY_PREFIXES)。
-  { label: 'MiniMax', provider: 'openai', baseURL: 'https://api.minimax.io/v1', model: 'MiniMax-M3', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
-  { label: '本地 Ollama', provider: 'openai', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
-  { label: '本地 vLLM', provider: 'openai', baseURL: 'http://localhost:8000/v1', model: 'default', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
-  { label: '自定义 base_url', provider: 'openai', baseURL: '', model: '', window: DEFAULT_CONTEXT_WINDOW_TOKENS, anthropicPromptCache: false },
+  {
+    label: 'MiniMax',
+    provider: 'openai',
+    baseURL: 'https://api.minimax.io/v1',
+    model: 'MiniMax-M3',
+    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    anthropicPromptCache: false,
+  },
+  {
+    label: '本地 Ollama',
+    provider: 'openai',
+    baseURL: 'http://localhost:11434/v1',
+    model: 'qwen2.5:7b',
+    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    anthropicPromptCache: false,
+  },
+  {
+    label: '本地 vLLM',
+    provider: 'openai',
+    baseURL: 'http://localhost:8000/v1',
+    model: 'default',
+    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    anthropicPromptCache: false,
+  },
+  {
+    label: '自定义 base_url',
+    provider: 'openai',
+    baseURL: '',
+    model: '',
+    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    anthropicPromptCache: false,
+  },
 ];
 
 /** apiKey 脱敏:只露末 4 位,前面打星号(显示用,绝不把明文 key 写进内容区)。 */

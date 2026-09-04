@@ -22,8 +22,9 @@ function check(name: string, cond: boolean, extra?: string): void {
   }
 }
 
-const { addTriple, upsertEntity, findEntity, searchGraph, neighborsOf, pathBetween, graphStats } =
-  await import('../src/memory/graph.js');
+const { addTriple, upsertEntity, findEntity, searchGraph, neighborsOf, pathBetween, graphStats } = await import(
+  '../src/memory/graph.js'
+);
 
 // 1. 基本三元组(含 CJK 实体名 → slug 兜底)
 const r1 = addTriple({ src: 'mocode', relation: 'depends_on', dst: 'JSONL 存储', fact: '记忆用 JSONL 落盘' });
@@ -39,16 +40,27 @@ check('冲突边 superseded=1', r3.ok === true && r3.superseded === 1, JSON.stri
 
 // 4. search:命中实体 + 只返 active 边(新 fact)
 const s1 = searchGraph('mocode');
-check('search 命中实体', s1.entities.some((e: { name: string }) => e.name === 'mocode'));
+check(
+  'search 命中实体',
+  s1.entities.some((e: { name: string }) => e.name === 'mocode'),
+);
 check('search 只返 active 边', s1.edges.length === 1 && s1.edges[0].fact === '已迁移 SQLite', JSON.stringify(s1.edges));
 
 // 5. 链式图: A→B→C,neighbors depth 1 / 2
 addTriple({ src: 'agent-core', relation: 'calls', dst: 'executeTool' });
 addTriple({ src: 'executeTool', relation: 'dispatches', dst: 'registry' });
 const n1 = neighborsOf('agent-core', 1);
-check('neighbors depth1 一跳', n1.entities.length === 1 && n1.edges.length === 1, JSON.stringify({ e: n1.entities.length, ed: n1.edges.length }));
+check(
+  'neighbors depth1 一跳',
+  n1.entities.length === 1 && n1.edges.length === 1,
+  JSON.stringify({ e: n1.entities.length, ed: n1.edges.length }),
+);
 const n2 = neighborsOf('agent-core', 2);
-check('neighbors depth2 两跳', n2.entities.length === 2 && n2.edges.length === 2, JSON.stringify({ e: n2.entities.length, ed: n2.edges.length }));
+check(
+  'neighbors depth2 两跳',
+  n2.entities.length === 2 && n2.edges.length === 2,
+  JSON.stringify({ e: n2.entities.length, ed: n2.edges.length }),
+);
 
 // 6. 别名匹配 + upsert 合并
 upsertEntity('mocode', { alias: 'MoCode' });
@@ -91,7 +103,10 @@ check(
     nRel.entities.some((e: { name: string }) => e.name === 'chain-c') &&
     !nRel.entities.some((e: { name: string }) => e.name === 'chain-d') &&
     nRel.edges.every((e: { relation: string }) => e.relation === 'calls'),
-  JSON.stringify({ e: nRel.entities.map((x: { name: string }) => x.name), rel: nRel.edges.map((x: { relation: string }) => x.relation) }),
+  JSON.stringify({
+    e: nRel.entities.map((x: { name: string }) => x.name),
+    rel: nRel.edges.map((x: { relation: string }) => x.relation),
+  }),
 );
 
 // 8d. pathBetween:最短路径 / 同实体 / 不存在端点 / 不走失效边

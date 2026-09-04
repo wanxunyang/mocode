@@ -71,16 +71,12 @@ export function deriveState(event: AgentHookEventName, args?: DeriveStateArgs): 
  * 后置条件:返回的 AgentHooks 对象的每个方法都是纯粹的"状态推导 + 转发",
  *   不修改 core.ts 的任何行为、不影响现有 TUI hooks 的调用结果。
  */
-export function createPetHooks(
-  sender: { sendState: typeof bridge.sendState } = bridge,
-): AgentHooks {
+export function createPetHooks(sender: { sendState: typeof bridge.sendState } = bridge): AgentHooks {
   return {
     onStepStart: () => sender.sendState(deriveState('onStepStart')),
     onText: () => sender.sendState(deriveState('onText')),
-    onToolCall: (name) =>
-      sender.sendState(deriveState('onToolCall', { toolName: name }), { toolName: name }),
-    onToolStart: (name) =>
-      sender.sendState(deriveState('onToolStart', { toolName: name }), { toolName: name }),
+    onToolCall: (name) => sender.sendState(deriveState('onToolCall', { toolName: name }), { toolName: name }),
+    onToolStart: (name) => sender.sendState(deriveState('onToolStart', { toolName: name }), { toolName: name }),
     onToolResult: (tc: ToolCallRef, output: string) => {
       const state = deriveState('onToolResult', { toolOutput: output });
       if (state === 'error') {

@@ -63,9 +63,7 @@ export const webFetchTool: Tool = {
       }
 
       const isHtml =
-        /html/i.test(contentType) ||
-        /^\s*<!doctype html/i.test(text) ||
-        /<html[\s>]/i.test(text.slice(0, 1000));
+        /html/i.test(contentType) || /^\s*<!doctype html/i.test(text) || /<html[\s>]/i.test(text.slice(0, 1000));
       const body = isHtml ? htmlToText(text) : text;
 
       const ct = contentType.split(';')[0].trim();
@@ -127,7 +125,7 @@ function htmlToText(html: string): string {
   s = s.replace(/<form[\s\S]*?<\/form>/gi, '');
   s = s.replace(
     /<\/(p|div|li|tr|h[1-6]|section|article|header|footer|nav|aside|ul|ol|table|blockquote|pre|br)>/gi,
-    '\n'
+    '\n',
   );
   s = s.replace(/<br\b[^>]*>/gi, '\n');
   s = s.replace(/<li\b[^>]*>/gi, '\n');

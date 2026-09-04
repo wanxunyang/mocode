@@ -31,11 +31,13 @@ function messages(): ChatMessage[] {
     {
       role: 'assistant',
       content: null,
-      tool_calls: [{
-        id: 'call-1',
-        type: 'function',
-        function: { name: 'read_file', arguments: '{"path":"a.ts"}' },
-      }],
+      tool_calls: [
+        {
+          id: 'call-1',
+          type: 'function',
+          function: { name: 'read_file', arguments: '{"path":"a.ts"}' },
+        },
+      ],
     },
     { role: 'tool', tool_call_id: 'call-1', content: 'file content' },
     { role: 'system', content: 'dynamic reminder' },
@@ -47,24 +49,28 @@ test('旧预设默认使用 OpenAI，新 Anthropic 预设规范化缓存配置',
   assert.equal(normalizeLlmProvider('OPENAI'), 'openai');
   assert.equal(normalizeLlmProvider('Anthropic'), 'anthropic');
 
-  const legacy = parsePreset(JSON.stringify({
-    name: 'legacy',
-    baseURL: 'https://example.test/v1',
-    apiKey: 'key',
-    model: 'legacy-model',
-    contextWindow: 1000,
-  }));
+  const legacy = parsePreset(
+    JSON.stringify({
+      name: 'legacy',
+      baseURL: 'https://example.test/v1',
+      apiKey: 'key',
+      model: 'legacy-model',
+      contextWindow: 1000,
+    }),
+  );
   assert.equal(legacy.provider, 'openai');
   assert.equal(legacy.anthropicPromptCache, false);
 
-  const anthropic = parsePreset(JSON.stringify({
-    name: 'claude',
-    provider: 'anthropic',
-    baseURL: 'https://api.anthropic.com',
-    apiKey: 'key',
-    model: 'claude-test',
-    contextWindow: 200000,
-  }));
+  const anthropic = parsePreset(
+    JSON.stringify({
+      name: 'claude',
+      provider: 'anthropic',
+      baseURL: 'https://api.anthropic.com',
+      apiKey: 'key',
+      model: 'claude-test',
+      contextWindow: 200000,
+    }),
+  );
   assert.equal(anthropic.provider, 'anthropic');
   assert.equal(anthropic.anthropicPromptCache, true);
 });
@@ -73,10 +79,12 @@ test('Anthropic 请求转换工具调用、结果、图片和 Prompt Cache 断�
   const input = messages();
   input.splice(2, 0, {
     role: 'user',
-    content: [{
-      type: 'image_url',
-      image_url: { url: 'data:image/png;base64,aGVsbG8=' },
-    }],
+    content: [
+      {
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,aGVsbG8=' },
+      },
+    ],
   } as ChatMessage);
 
   const encoded = encodeAnthropicMessages(input, true);
@@ -125,14 +133,37 @@ test('Anthropic SSE 拼接工具参数并映射 cache usage', async () => {
   config.anthropicPromptCache = true;
 
   const records = [
-    ['message_start', { type: 'message_start', message: { usage: { input_tokens: 10, cache_read_input_tokens: 20, cache_creation_input_tokens: 30, output_tokens: 0 } } }],
-    ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'read_file', input: {} } }],
-    ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"' } }],
-    ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'a.ts"}' } }],
+    [
+      'message_start',
+      {
+        type: 'message_start',
+        message: {
+          usage: { input_tokens: 10, cache_read_input_tokens: 20, cache_creation_input_tokens: 30, output_tokens: 0 },
+        },
+      },
+    ],
+    [
+      'content_block_start',
+      {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 'tool-1', name: 'read_file', input: {} },
+      },
+    ],
+    [
+      'content_block_delta',
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"path":"' } },
+    ],
+    [
+      'content_block_delta',
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'a.ts"}' } },
+    ],
     ['content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'text', text: 'done' } }],
     ['message_delta', { type: 'message_delta', usage: { output_tokens: 4 } }],
     ['message_stop', { type: 'message_stop' }],
-  ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join('');
+  ]
+    .map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    .join('');
 
   let requestUrl = '';
   let requestInit: RequestInit | undefined;
