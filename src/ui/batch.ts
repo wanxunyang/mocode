@@ -725,6 +725,11 @@ export function expandSingleEntryFully(
   expandedBatches.add(id);
   b.expandedEntries.add(0);
   b.entries[0].renderedDigest = entryLineDigest(b.entries[0]);
+  // 修复：与 expand() 一致设置 renderedCount=entries.length，否则 collapse 计算 lineCount
+  // 时漏算第一层 entry 行 → 折叠后 entry 行残留在屏上，下次展开时再插一遍，
+  // 多出来的 entry 行下面的 details 截断提示就出现两行（用户报告：mutation 工具块
+  // 「关闭又打开后…(还有 N 行未显示)重复两行」）。
+  b.renderedCount = b.entries.length;
   absLineToEntry.set(b.summaryAbsIdx + 1, { batchId: id, entryIndex: 0 });
 }
 
