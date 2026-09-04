@@ -86,9 +86,10 @@ export interface CommandContext {
 /**
  * 命令执行结果。替代原 if 链里的 `continue` / `break` / fall-through。
  *
- * - `unhandled`:这条命令不归我管,registry 继续往下找。
- *   增量迁移期间必需——handler 自己判断是否匹配,能 100% 保持原语义,
- *   包括 `/pet quit` 必须排在 `/pet` 之前这类顺序依赖。
+ * - `unhandled`:这条命令不归我管,registry 继续往下问。
+ *   handler 自己判断是否匹配 line,能 100% 保持顺序语义,
+ *   包括 `/pet quit` 必须排在 `/pet` 之前这类组内优先级。
+ *   全部 unhandled 时 runtime.ts 走未知命令兜底(suggestCommand)。
  * - `next`:回 INPUT 态(对应 `continue`,绝大多数命令)。
  * - `exit`:退出主循环(对应 `break`,只有 /exit /quit)。
  * - `forward`:改写输入后当普通消息发给 agent(对应 fall-through + forwardToAgent,如 /init)。
