@@ -113,3 +113,11 @@ test('isFileMutationTool: 真实 builtin 中 write_file/edit_file 为 mutation',
   // 但 registry 热路径以 !delegatesResourceLocks 前置排除,不按 path 记 rollback。
   assert.equal(isFileMutationTool('sub-agent'), true);
 });
+
+test('memory_graph: 写能力至少要求 confirm 风险审批', async () => {
+  const { getToolRisk } = await import('../src/permissions/index.js');
+  const tool = findTool('memory_graph');
+  assert.ok(tool);
+  assert.equal(getToolCapabilities(tool).effect, 'write');
+  assert.equal(getToolRisk(tool), 'confirm');
+});

@@ -63,7 +63,12 @@ export const useSkillTool: Tool = {
       return `# Skill: ${name} · ${args.file}\n\n${content}`;
     }
 
-    const body = await renderSkillBody(skill, args.args as Record<string, unknown> | undefined, ctx?.signal);
+    const body = await renderSkillBody(
+      skill,
+      args.args as Record<string, unknown> | undefined,
+      ctx?.signal,
+      ctx?.allowedToolNames,
+    );
     if (body === null) return `错误:未找到 skill "${name}" 的正文。用 /skills 查看可用 skill 列表。`;
 
     // 激活 inline skill 的工具面约束(allowed/disallowed),本轮内生效。

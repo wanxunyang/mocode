@@ -76,14 +76,14 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **自主多步推进** — 一次对话里连续多步:读代码、改代码、跑测试、根据报错再改……agent 自己决定下一步,中途不用你反复催。遇到卡点会调 `ask_human` 弹面板问你(阻塞到回应)。
 - **只读工具并行执行** — 一轮里连续的只读操作(读文件、grep、glob、codegraph、联网搜索/抓取)自动并发跑,总耗时 ≈ 最慢一个,而不是逐个排队。写文件 / 改文件这类有副作用的操作仍串行,保快照顺序与数据安全。
 - **子 agent 分而治之** — 复杂任务可派生拥有独立历史与受限工具集的子 agent。只读 worker 可并行扇出；写 worker 在私有文件系统 overlay 中运行，返回的 ChangeSet 经过 expected hash 校验与规范化资源锁后才合并。主线只接收结构化发现，不接收过程噪声。
-- **计划 / 执行双模式** — `plan` 模式下只读探查(读代码、查索引、搜索,绝不写盘、不跑命令、不派生子 agent),产出计划;`auto` 模式全量工具放开。agent 还能在两者间自切换——先把陌生代码库摸清,再动手改。
+- **计划 / 执行双模式** — `plan` 模式下只读探查(读代码、查索引、搜索,绝不写盘、不跑命令、不派生子 agent),产出计划；`auto` 模式允许执行，但不是静态“全工具”模式：每个真实用户轮先由轻量 LLM router 选择最小充分工具簇，主模型需要时可在后续 step 追加能力。
 - **统一压力驱动压缩** — 正常 history 保留完整工具证据；达到 80% 后由一次调度事件运行所有已启用的清理，并始终继续 history 摘要。`/context` 显示实时用量，`/compact` 仍是用户显式覆盖。
 - **跨会话长期记忆** — agent 能把项目架构、约定、踩过的坑存成长期记忆,下次会话自动加载;后台还会定期从对话里反思挖掘值得记住的事。记忆可增删改、带召回衰减。
 - **会话记事本(notes.md)** — 复杂多步任务(≥3 处文件改动 / ≥5 步工具调用)时,agent 在 `.mocode/sessions/<sessionId>/notes.md` 维护一个工作记事本(落盘抗压缩),可记录中间发现、设计决策、待验证问题和结构化计划。执行计划由专用 `plan_update` 工具维护——三态步骤机(`pending`/`in_progress`/`completed`,同一时刻至多一个 `in_progress`),全部完成自动结算为 `## Done:`。活跃 plan 在压缩后重注入系统提示、notes.md 一变就重同步进上下文,若连续多步未更新还会有温和提醒。TUI 状态栏实时显示进度 chip:`plan: [标题] (3/7) ▸ [当前步]`。
 - **可中断、可回滚** — Ctrl+C 随时打断当前轮次(树杀子进程,历史还原到本轮开始前,不留残半的工具调用);`/rollback` 按轮次快照恢复文件改动,逐个文件「保留/撤销」,不依赖 git。
 - **输入安全网** — 长 prompt 不再怕误按 Enter:`Ctrl+G` 弹出 TUI 内「输入面板」(记事本式编辑,Enter=换行、软换行、选区、复制/剪切/粘贴、撤销,Ctrl+S 填回输入框不自动发送);`Ctrl+R`/`Ctrl+P` 模糊搜索历史输入(Enter 只回填不发送);长文本误发后撤回窗口自动放宽到 2 秒且任意键可撤回。
 - **沙箱防护** — 文件读写经沙箱拦截,挡掉越界路径(`../../`、绝对外圈、软链出圈等),不碰工作目录之外的文件。
-- **Computer Use(默认关闭,高危)** — `/cu on` 开启后 `computer` 工具可直接向 OS 注入鼠标/键盘事件并回灌截图,爆炸半径远超任何写工具:它绕过了文件沙箱,能点到屏幕上的一切。**强烈建议只在 VM / 沙箱 / 专用测试机里开启**,不要在日常主力机上常驻。每个动作仍走权限门(按动作粒度授权,`type`/`key` 命中 URL/密码/支付关键词时强制逐次确认,不给会话级放行);plan 模式永远屏蔽。Windows 首发(PowerShell 注入),macOS/Linux 待接入。设计见 `docs/computer-use-design.md`。
+- **Computer Use(高危，仅明确 GUI 意图时路由)** — 请求确实需要真实鼠标/键盘交互时，router 才可暴露 `computer-control`，并把每次动作后的截图回灌模型。`/cu off`（或 `MOCODE_COMPUTER_USE_ENABLED=false`）是硬否决；`/cu on` 仅允许按需路由，不会让工具常驻。它会绕过文件沙箱，**强烈建议只在 VM / 沙箱 / 专用测试机里使用**。每个动作仍走权限门，plan 模式永远屏蔽。Windows 首发，macOS/Linux 待接入。设计见 `docs/computer-use-design.md`。
 
 ## 特性
 
@@ -148,10 +148,10 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 
 常见后端 `base_url`:
 
-| 后端        | base\_url                                           |
-| --------- | --------------------------------------------------- |
+| 后端        | base_url                                            |
+| ----------- | --------------------------------------------------- |
 | GLM(智谱)   | `https://open.bigmodel.cn/api/v3`                   |
-| DeepSeek  | `https://api.deepseek.com`                          |
+| DeepSeek    | `https://api.deepseek.com`                          |
 | Qwen(阿里)  | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | 本地 Ollama | `http://localhost:11434/v1`                         |
 | 本地 vLLM   | `http://localhost:8000/v1`                          |
@@ -160,26 +160,28 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 
 ### 可选配置
 
-| 环境变量                    | 说明                                         | 默认值                         |
-| ----------------------- | ------------------------------------------ | --------------------------- |
-| `MAX_TOKENS`            | 单次回复最大 token                               | 不限                          |
-| `CONTEXT_WINDOW_TOKENS` | 模型上下文窗口,须对齐真实模型                            | `256000`                    |
-| `LLM_STREAM_USAGE`      | 流式请求带 `stream_options.include_usage` 拿真实用量 | `true`                      |
-| `AUTO_COMPACT`          | 最终 history compact 安全保护                          | `true`                      |
-| `AUTO_REFLECT`          | 后台反思 pass（默认关闭，需要时显式开启）                    | `false`                     |
-| `REFLECT_EVERY_N`       | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞)              | `5`                         |
-| `ANYSEARCH_API_KEY`     | 联网搜索 API key(不配走匿名免费额度)                    | 无                           |
-| `ANYSEARCH_BASE_URL`    | 搜索 API 端点                                  | `https://api.anysearch.com` |
-| `SKILLS_DIRS`           | 覆盖默认 skill 扫描目录(平台分隔符)                     | 三目录自动扫描                     |
-| `MOCODE_CONTEXT_OPTIMIZE` | 仅在真实 pressure 下编码 Cold 日志/搜索（显式开启）       | `false`                     |
-| `MOCODE_CONTEXT_RELPRUNE` | 仅在真实 pressure 下裁剪精确 superseded 证据（显式开启） | `false`                     |
-| `MOCODE_LIFECYCLE`      | 只维护 provenance 元数据，不按次数改写正文                | `true`                      |
-| `MAX_STEPS`             | 每轮 Agent 循环最大步数（仅防无限循环）                 | `1000`                      |
-| `SUB_AGENT_MAX_STEPS`   | 子 Agent 循环安全上限，默认与主 Agent 一致             | `1000`                      |
-| `SANDBOX_ROOT`          | 沙箱根目录(文件操作边界;未配则用 cwd 兜底)                | 无                           |
-| `MOCODE_MODE`           | 启动工具模式:`coding`(默认)/ `frontend` / `computer-use` / `research` / `full`;运行时用 `/profile <name>` 热切换 | `coding` |
-| `MOCODE_COMPUTER_USE_ENABLED` | Computer Use 桌面操控(`computer` 工具;运行时用 `/cu on\|off` 切换) | `false`                |
-| `MOCODE_THEME`          | 颜色主题(default/dark/light…;shell 设置优先于文件)      | `default`                   |
+| 环境变量                        | 说明                                                                         | 默认值                      |
+| ------------------------------- | ---------------------------------------------------------------------------- | --------------------------- |
+| `MAX_TOKENS`                    | 单次回复最大 token                                                           | 不限                        |
+| `CONTEXT_WINDOW_TOKENS`         | 模型上下文窗口,须对齐真实模型                                                | `256000`                    |
+| `LLM_STREAM_USAGE`              | 流式请求带 `stream_options.include_usage` 拿真实用量                         | `true`                      |
+| `AUTO_COMPACT`                  | 最终 history compact 安全保护                                                | `true`                      |
+| `AUTO_REFLECT`                  | 后台反思 pass（默认关闭，需要时显式开启）                                    | `false`                     |
+| `REFLECT_EVERY_N`               | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞)                                | `5`                         |
+| `ANYSEARCH_API_KEY`             | 联网搜索 API key(不配走匿名免费额度)                                         | 无                          |
+| `ANYSEARCH_BASE_URL`            | 搜索 API 端点                                                                | `https://api.anysearch.com` |
+| `SKILLS_DIRS`                   | 覆盖默认 skill 扫描目录(平台分隔符)                                          | 三目录自动扫描              |
+| `MOCODE_CONTEXT_OPTIMIZE`       | 仅在真实 pressure 下编码 Cold 日志/搜索（显式开启）                          | `false`                     |
+| `MOCODE_CONTEXT_RELPRUNE`       | 仅在真实 pressure 下裁剪精确 superseded 证据（显式开启）                     | `false`                     |
+| `MOCODE_LIFECYCLE`              | 只维护 provenance 元数据，不按次数改写正文                                   | `true`                      |
+| `MAX_STEPS`                     | 每轮 Agent 循环最大步数（仅防无限循环）                                      | `1000`                      |
+| `SUB_AGENT_MAX_STEPS`           | 子 Agent 循环安全上限，默认与主 Agent 一致                                   | `1000`                      |
+| `SANDBOX_ROOT`                  | 沙箱根目录(文件操作边界;未配则用 cwd 兜底)                                   | 无                          |
+| `MOCODE_SUBAGENT_ENABLED`       | 设 `false` 硬禁用 `orchestration`；unset/`true` 允许按需路由                 | 未设置                      |
+| `MOCODE_FRONTEND_TOOLS_ENABLED` | 设 `false` 硬禁用 `browser-debug` / `desktop-observe`；unset/`true` 允许路由 | 未设置                      |
+| `MOCODE_COMPUTER_USE_ENABLED`   | 设 `false` 硬禁用高危 `computer-control`；unset/`true` 允许明确意图时路由    | 未设置                      |
+| `MEMORY_ENABLED`                | 设 `false` 硬禁用 memory 簇；`true` 还会启用 Memory Index                    | 未设置                      |
+| `MOCODE_THEME`                  | 颜色主题(default/dark/light…;shell 设置优先于文件)                           | `default`                   |
 
 ## 运行
 
@@ -198,32 +200,33 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 
 ## 工具
 
-| 工具              | 作用                                                       |
-| --------------- | -------------------------------------------------------- |
-| `read_file`     | 读文本文件,带行号,支持 `offset` / `limit`                          |
-| `view_image`    | 读取已有 PNG/JPEG/GIF/WebP 图片并作为视觉输入回灌模型(最大 4 MiB)          |
-| `screenshot`    | 经用户确认后截取主显示器或整个桌面,保存 PNG 并立即交给视觉模型分析                   |
-| `write_file`    | 创建/覆盖文件,自动建父目录                                           |
-| `edit_file`     | 精确字符串替换(`old_string` 须唯一匹配)                              |
-| `run_command`   | 执行 shell 命令,合并 stdout+stderr,默认 120s 超时                  |
-| `dev_server`    | 启动/查看/读日志/停止常驻后台进程(dev server),跨工具调用存活           |
-| `browser`       | Playwright 驱动真实 Chromium:导航 / 点击 / 填表 / 取文本 / 截图 / 控制台诊断 |
-| `glob`          | 按 glob 模式找文件(排除 node\_modules/.git)                      |
-| `grep`          | 内容正则搜索,纯 JS 实现,不依赖 `rg`                                  |
-| `codegraph`     | 已建 `.codegraph/` 索引时,查代码符号源码与调用链(比 read\_file/grep 更准更省) |
-| `web_search`    | 联网搜索(AnySearch),返回标题/URL/摘要/正文                           |
-| `web_fetch`     | 抓取指定 URL,HTML 清洗成纯文本                                     |
-| `use_skill`     | 加载某 skill 的完整 SKILL.md 指令                                |
-| `ask_human`     | 决策点弹终端问答面板,用户选预设项或自由输入(阻塞至回应)                            |
-| `plan_update`   | 记录/更新会话执行计划(notes.md 的 `## Plan:` 段);三态步骤机,同一时刻至多一个 in_progress,全部完成自动结算为 `## Done:` |
-| `switch_mode`   | 在 `plan`(只读规划)与 `auto`(全量执行)间切换;agent 可自行调用,先探查再动手       |
-| `sub-agent`     | 派生具备完整能力的隔离子 Agent；只读任务可并发，写任务通过 overlay + ChangeSet 安全合并 |
+每个真实用户轮都会先经过受约束的 LLM router。十个公共工具始终可用（`read_file`、`view_image`、`glob`、`grep`、`web_search`、`web_fetch`、`plan_update`、`note_append`、`ask_human`、`use_skill`）；写文件、shell 调试、浏览器调试、桌面观察/控制、记忆、编排和 MCP 作为可组合工具簇按需选择。初始能力不足时，主模型必须单独调用 `add_tool_groups`，新增 schema 从下一 step 生效。路由失败只继承上一轮工具簇（或仅公共工具），绝不回退到全工具。
 
-| `memory_save`   | 存一条跨会话长期记忆(标题进索引,正文按需取)                                  |
-| `memory_search` | 按关键词搜记忆正文,命中即提升召回计数(影响遗忘衰减)                              |
-| `memory_list`   | 列记忆索引(id/标题/摘要,无正文)                                      |
-| `memory_update` | 原地改一条记忆(id 不变;纠正过时事实 / 改摘要 / 改 pin)                      |
-| `memory_forget` | 遗忘记忆:默认归档(可复活),`mode=delete` 硬删(pinned 拒删)               |
+| 工具          | 作用                                                                                                                   |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `read_file`   | 读文本文件,带行号,支持 `offset` / `limit`                                                                              |
+| `view_image`  | 读取已有 PNG/JPEG/GIF/WebP 图片并作为视觉输入回灌模型(最大 4 MiB)                                                      |
+| `screenshot`  | 经用户确认后截取主显示器或整个桌面,保存 PNG 并立即交给视觉模型分析                                                     |
+| `write_file`  | 创建/覆盖文件,自动建父目录                                                                                             |
+| `edit_file`   | 精确字符串替换(`old_string` 须唯一匹配)                                                                                |
+| `run_command` | 执行 shell 命令,合并 stdout+stderr,默认 120s 超时                                                                      |
+| `dev_server`  | 启动/查看/读日志/停止常驻后台进程(dev server),跨工具调用存活                                                           |
+| `browser`     | Playwright 驱动真实 Chromium:导航 / 点击 / 填表 / 取文本 / 截图 / 控制台诊断                                           |
+| `glob`        | 按 glob 模式找文件(排除 node_modules/.git)                                                                             |
+| `grep`        | 内容正则搜索,纯 JS 实现,不依赖 `rg`                                                                                    |
+| `codegraph`   | 已建 `.codegraph/` 索引时,查代码符号源码与调用链(比 read_file/grep 更准更省)                                           |
+| `web_search`  | 联网搜索(AnySearch),返回标题/URL/摘要/正文                                                                             |
+| `web_fetch`   | 抓取指定 URL,HTML 清洗成纯文本                                                                                         |
+| `use_skill`   | 加载某 skill 的完整 SKILL.md 指令                                                                                      |
+| `ask_human`   | 决策点弹终端问答面板,用户选预设项或自由输入(阻塞至回应)                                                                |
+| `plan_update` | 记录/更新会话执行计划(notes.md 的 `## Plan:` 段);三态步骤机,同一时刻至多一个 in_progress,全部完成自动结算为 `## Done:` |
+| `sub-agent`   | 派生工具权限不超过父级 snapshot 的隔离子 Agent；只读任务可并发，写任务通过 overlay + ChangeSet 安全合并                |
+
+| `memory_save` | 存一条跨会话长期记忆(标题进索引,正文按需取) |
+| `memory_search` | 按关键词搜记忆正文,命中即提升召回计数(影响遗忘衰减) |
+| `memory_list` | 列记忆索引(id/标题/摘要,无正文) |
+| `memory_update` | 原地改一条记忆(id 不变;纠正过时事实 / 改摘要 / 改 pin) |
+| `memory_forget` | 遗忘记忆:默认归档(可复活),`mode=delete` 硬删(pinned 拒删) |
 
 ### 前端 / UI 闭环
 
@@ -241,34 +244,36 @@ dev_server stop   id=srv-xxxx
 - 两者在 plan 模式下均被禁用;mocode 退出时会树杀后台进程并关闭浏览器。
 - 浏览器二进制不随 npm 包分发,首次使用前需 `npx playwright install chromium`。
 
-这 4 个前端工具 —— `browser`、`dev_server`、`screenshot`、`view_image` —— **默认关闭**(依赖 Playwright 二进制、会拉起长驻进程或截取桌面)。运行时用 `/fe on` 整体开启,开启后模型才看得到;用 `/fe on|off|status` 切换。
+前端能力按用途拆分：`browser` + `dev_server` 属于 `browser-debug`，整桌面截图 `screenshot` 属于 `desktop-observe`，`view_image` 则始终是公共只读工具。任务同时需要结构化网页诊断与真实桌面交互时，router 可再组合 `computer-control`。`/fe off` 是硬否决，不是手动 profile 选择器。
 
-6 个 `memory_*` 工具受 `MEMORY_ENABLED=true` 总开关控制;运行时切换用 `/memory_switch`(热切换,无需重启)。工具可见性已并入统一模式 `/profile`(`MOCODE_MODE` 设启动默认);memory_* 含在 `research`/`full` 模式中(见下「项目记忆」小节区分 Tier-1 / Tier-2)。
+6 个 `memory_*` 工具拆成 `memory-read` 与 `memory-write`。只有 router 选择对应簇时才出现；`MEMORY_ENABLED=false` 会硬禁用两簇，`true` 还会把紧凑 Memory Index 注入 prompt。`/memory_switch` 同时管理这个兼容 gate 与 Index 状态。
 
 ## 斜杠命令
 
-| 命令              | 作用                                                 |
-| --------------- | -------------------------------------------------- |
-| `/exit` `/quit` | 退出 mocode                                          |
-| `/clear`        | 清空历史(保留系统提示)+ 清屏                                   |
-| `/image`        | 附加本地图片到下一条消息；支持 `list` / `clear`                    |
-| `/context`      | 显示上下文用量条(token / 消息数 / 估算或实测)                      |
-| `/skills`       | 列出已发现的 skill                                       |
-| `/compact`      | 压缩历史(可带焦点 `/compact …`)                            |
-| `/resume`       | 续接已保存的会话                                           |
-| `/rollback`     | 菜单选轮次回滚(↑↓ · Enter)                                |
-| `/memory`       | 看记忆库:条目数 + 近期索引                                    |
-| `/memory_switch` | 切换 Tier-2 记忆开关(需重启 REPL,刻意为之)                  |
-| `/reflect`      | 手动触发一次后台记忆反思 pass                                   |
-| `/model`        | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
-| `/init`         | 扫描项目生成 `AGENTS.md` 项目记忆(发给 agent 执行)               |
-| `/theme`        | 切换颜色主题(↑↓ · Enter,或 `/theme <name>` 直切)            |
-| `/plan`         | 切到 plan 模式(只读探查 + 产出计划,审批后切 auto 执行)              |
-| `/auto`         | 切回 auto 模式(全量工具执行)                                  |
-| `/pet`          | 开关桌宠(独立悬浮窗,镜像 agent 状态动画)                          |
-| `/fe`           | 切换前端工具簇 `browser` / `dev_server` / `screenshot` / `view_image` 的开关(默认关闭) |
-| `/pet skin`     | 选桌宠皮肤(↑↓ · Enter)                                  |
-| `/pet quit`     | 完全关闭桌宠进程(而非仅断开本连接)                                 |
+| 命令             | 作用                                                                |
+| ---------------- | ------------------------------------------------------------------- |
+| `/exit` `/quit`  | 退出 mocode                                                         |
+| `/clear`         | 清空历史(保留系统提示)+ 清屏                                        |
+| `/image`         | 附加本地图片到下一条消息；支持 `list` / `clear`                     |
+| `/context`       | 显示上下文用量条(token / 消息数 / 估算或实测)                       |
+| `/skills`        | 列出已发现的 skill                                                  |
+| `/compact`       | 压缩历史(可带焦点 `/compact …`)                                     |
+| `/resume`        | 续接已保存的会话                                                    |
+| `/rollback`      | 菜单选轮次回滚(↑↓ · Enter)                                          |
+| `/memory`        | 看记忆库:条目数 + 近期索引                                          |
+| `/memory_switch` | 允许/禁止 memory 自动路由并切换 Memory Index；下一真实用户轮生效    |
+| `/reflect`       | 手动触发一次后台记忆反思 pass                                       |
+| `/model`         | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
+| `/init`          | 扫描项目生成 `AGENTS.md` 项目记忆(发给 agent 执行)                  |
+| `/theme`         | 切换颜色主题(↑↓ · Enter,或 `/theme <name>` 直切)                    |
+| `/plan`          | 切到 plan 模式(只读探查 + 产出计划,审批后切 auto 执行)              |
+| `/auto`          | 切回可执行模式；工具按任务自动路由                                  |
+| `/pet`           | 开关桌宠(独立悬浮窗,镜像 agent 状态动画)                            |
+| `/fe`            | 允许/禁止自动路由 `browser-debug` 与 `desktop-observe`              |
+| `/cu`            | 允许/禁止自动路由高危 `computer-control`                            |
+| `/subagent`      | 允许/禁止自动路由 `orchestration`                                   |
+| `/pet skin`      | 选桌宠皮肤(↑↓ · Enter)                                              |
+| `/pet quit`      | 完全关闭桌宠进程(而非仅断开本连接)                                  |
 
 输入 `/` 触发下拉菜单,继续打字过滤;Esc 取消。
 
@@ -305,7 +310,7 @@ system prompt 提供轻量建议而不是框架硬门：只检查支持下一步
 mocode 的**双层记忆**模型,跟 Skills 是两件事:
 
 - **Tier-1 — `AGENTS.md`(每轮自动加载):** Markdown 项目记忆,每轮拼进 system prompt。发现路径:`~/.mocode/AGENTS.md` → 从 cwd 往上逐级 `AGENTS.md`(远→近拼接,近的覆盖更突出);超长截断并标注原始文件。运行 `/init` 生成或刷新,纯 Markdown,可手写,无 schema。agent 自己推得的「下次要记住的事实」(架构/约定/坑位)也写在这里。
-- **Tier-2 — `memory_*` 工具库(agent 主导,需启用):** 离散带标签条目(`decision` / `fact` / `pitfall` / `reference` / `feedback`),按召回计数衰减(30 天 → archived,90 天 → 硬删 GC)。agent 用工具存 / 搜 / 改 / 删;索引(标题)进系统提示(≤50 条),正文按需 `memory_search` 取。默认关(`coding` 模式不含);启动 `MEMORY_ENABLED=true` 或 REPL 内 `/memory_switch`(热切换,无需重启),亦可 `/profile research|full` 切入含记忆的模式。
+- **Tier-2 — `memory_*` 工具库(agent 主导,按需路由):** 离散带标签条目(`decision` / `fact` / `pitfall` / `reference` / `feedback`),按召回计数衰减(30 天 → archived,90 天 → 硬删 GC)。agent 用 `memory-read` 召回，用 `memory-write` 处理明确的持久化意图；保存前先搜索，已有条目优先更新而非重复创建。`MEMORY_ENABLED=false` 会硬禁用两簇，`true` 还会注入紧凑 Memory Index；可在 REPL 内用 `/memory_switch` 管理。
 
 ## 类型检查
 

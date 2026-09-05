@@ -2,7 +2,7 @@ import type { Tool, ToolOutcome, ToolOutcomeCode } from '../types.js';
 import { spawnAgent } from '../../agent/spawn.js';
 import { MAX_OUTPUT } from '../constants.js';
 import { t } from '../../i18n/index.js';
-import { isSubAgentEnabled } from '../../config/index.js';
+import { isSubAgentHardDisabled } from '../../config/index.js';
 
 // ---------- task ----------
 // 派生子 agent 执行独立子任务。子 agent 有独立 history(不污染主对话),
@@ -58,7 +58,7 @@ export const subAgentTool: Tool = {
     required: ['prompt'],
   },
   async execute(args, ctx) {
-    if (!isSubAgentEnabled()) return t('task.disabled');
+    if (isSubAgentHardDisabled()) return t('task.disabled');
     const prompt = String(args.prompt ?? '');
     if (!prompt) return t('task.missingPrompt');
 
@@ -79,6 +79,7 @@ export const subAgentTool: Tool = {
       writeSet,
       context,
       callId: ctx?.callId,
+      parentAllowedToolNames: ctx?.allowedToolNames,
     });
 
     let output: string;

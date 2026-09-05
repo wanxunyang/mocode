@@ -15,7 +15,8 @@
 
 import type OpenAI from 'openai';
 import { chatTools, type ChatMessage } from '../llm/index.js';
-import { buildMocodeCorePrompt, config, isSubAgentEnabled } from '../config/index.js';
+import { buildMocodeCorePrompt, config, isSubAgentHardDisabled } from '../config/index.js';
+import { getToolChatSchema } from '../tools/policy.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { ui } from '../ui/theme.js';
 import * as layout from '../ui/layout.js';
@@ -50,8 +51,10 @@ export interface SpawnOptions {
   prompt: string;
   /** 附加系统提示(角色/约束),拼在 SUBAGENT_SUFFIX 后。 */
   systemPromptSuffix?: string;
-  /** 允许的工具名白名单(可选)。无 = 全量工具;给则从 chatTools 过滤。 */
+  /** 调用方进一步缩小的工具白名单。undefined=不额外限制；显式 []=零工具。 */
   tools?: string[];
+  /** 产生 sub-agent/run_skill 调用的父 step 不可变授权上限；子执行面只能与其求交。 */
+  parentAllowedToolNames?: readonly string[];
   /** 步数上限；仍受 fast/standard profile cap 限制。 */
   maxSteps?: number;
   /** 主 agent 的 abort signal(可选)。透传给子 runAgentCore → chat/executeTool,
@@ -96,11 +99,11 @@ export interface SpawnResult extends SubAgentResult {
  * 子 agent 跑在主 signal 下,主 abort 即子 abort;子 agent 的 abortRestore 还原子 history + 模式。
  */
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
-  if (!isSubAgentEnabled()) {
+  if (isSubAgentHardDisabled()) {
     return {
       summary: null,
       completed: false,
-      transcript: 'Sub-agent execution is disabled. Enable it with /subagent on.',
+      transcript: 'Sub-agent execution is disabled by MOCODE_SUBAGENT_ENABLED=false.',
       status: 'failed',
       findings: [],
       readSet: [],
@@ -122,9 +125,13 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     ? `Task context (authoritative; do not rediscover):\n${opts.context.slice(0, 4000)}\n\nSub-task:\n${opts.prompt}`
     : opts.prompt;
 
-  // 写 worker 保留主 Agent 的完整能力；只读 mode 仅按调用契约移除副作用工具。
+  // 子 worker 只能在父 step 的不可变 capability 上限内进一步缩小。没有父快照的 legacy/直接调用
+  // 以当前 chatTools 为 baseline；显式 tools:[] 必须保持零工具，不能误当成“未限制”。
   const mode = opts.mode ?? 'read';
-  const requested = opts.tools?.length ? new Set(opts.tools) : null;
+  const parentNames = opts.parentAllowedToolNames
+    ? [...new Set(opts.parentAllowedToolNames)]
+    : chatTools.map((tool) => tool.function.name);
+  const requested = opts.tools === undefined ? null : new Set(opts.tools);
   const readOnly = new Set([
     'read_file',
     'glob',
@@ -135,16 +142,21 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     'memory_search',
     'memory_list',
   ]);
-  const toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] = chatTools.filter(
-    (tool) =>
-      tool.function.name !== 'sub-agent' &&
+  const effectiveNames = parentNames.filter(
+    (name) =>
+      name !== 'sub-agent' &&
       // run_skill 会再次 spawn,禁止递归(避免 fork skill 里又 run_skill 套娃)。
-      tool.function.name !== 'run_skill' &&
-      // plan_update 直写主会话 notes.md(不走 overlay),子代理不应改动主计划——统一排除。
-      tool.function.name !== 'plan_update' &&
-      (!requested || requested.has(tool.function.name)) &&
-      (mode === 'write' || readOnly.has(tool.function.name)),
+      name !== 'run_skill' &&
+      // plan_update 直写主会话 notes.md(不走 overlay),子代理不应改动主计划。
+      name !== 'plan_update' &&
+      (!requested || requested.has(name)) &&
+      (mode === 'write' || readOnly.has(name)),
   );
+  const toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] = effectiveNames.flatMap((name) => {
+    const schema = getToolChatSchema(name);
+    return schema ? [schema] : [];
+  });
+  const runtimeAllowedToolNames = new Set(toolsOverride.map((tool) => tool.function.name));
 
   // 独立 history(子 agent 自己持有,不共享主对话)。
   // 只塞 system;user 消息由 runAgentCore 的 userInput 参数 push(与主 agent 一致)。
@@ -323,6 +335,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       hooks,
       maxSteps,
       toolsOverride,
+      runtimeAllowedToolNames,
       contextState: localContextState,
       suppressOpeningAnalysis: true, // 子代理不注入「开场分析」:仅主线面对用户的首次响应用
       // 子代理不注入主会话「会话状态」(plan + 笔记):systemPrompt 已用

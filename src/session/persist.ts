@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFile
 import path from 'node:path';
 import { config, getActiveModel } from '../config/index.js';
 import type { ChatMessage } from '../llm/index.js';
+import { isToolRouteGroupName, type ToolRouteGroupName } from '../config/profiles.js';
 import { truncateDisplay } from '../ui/render.js';
 
 /**
@@ -20,6 +21,8 @@ export interface SessionRecord extends SessionMeta {
   history: ChatMessage[];
   /** 用户实际确认提交的 query；可选以兼容旧 session 文件。 */
   queryHistory?: string[];
+  /** 上一真实用户 turn 最终激活的工具簇；旧 session 缺失时回退 common-only。 */
+  lastToolGroups?: ToolRouteGroupName[];
 }
 
 /** 会话目录(确保存在)。 */
@@ -71,7 +74,12 @@ function sessionPath(id: string): string {
 }
 
 /** 保存会话到磁盘。全新且没有 query 的会话不创建文件；已有会话即使回滚为空也必须覆盖旧记录。 */
-export function saveSession(history: ChatMessage[], id: string, queryHistory: readonly string[] = []): SessionMeta {
+export function saveSession(
+  history: ChatMessage[],
+  id: string,
+  queryHistory: readonly string[] = [],
+  lastToolGroups: readonly ToolRouteGroupName[] = [],
+): SessionMeta {
   const meta: SessionMeta = {
     id,
     createdAt: idToIso(id),
@@ -88,7 +96,12 @@ export function saveSession(history: ChatMessage[], id: string, queryHistory: re
   }
   const dir = path.join(config.sessionDir, id);
   mkdirSync(dir, { recursive: true });
-  const record: SessionRecord = { ...meta, history, queryHistory: [...queryHistory] };
+  const record: SessionRecord = {
+    ...meta,
+    history,
+    queryHistory: [...queryHistory],
+    lastToolGroups: [...lastToolGroups],
+  };
   writeFileSync(currentPath, JSON.stringify(record), 'utf8');
   // 一旦写入新式目录，删除旧式扁平副本，避免已回滚消息仍残留在磁盘。
   if (existsSync(legacyPath)) unlinkSync(legacyPath);
@@ -116,6 +129,7 @@ export function loadSession(id: string): SessionRecord | null {
       queryHistory: Array.isArray(rec.queryHistory)
         ? rec.queryHistory.filter((query): query is string => typeof query === 'string')
         : undefined,
+      lastToolGroups: Array.isArray(rec.lastToolGroups) ? rec.lastToolGroups.filter(isToolRouteGroupName) : undefined,
     };
   } catch {
     return null;

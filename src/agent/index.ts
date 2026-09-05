@@ -17,6 +17,7 @@ import { createPetHooks } from '../pet/state.js';
 import { t } from '../i18n/index.js';
 import { isToolErrorOutput } from '../tools/result.js';
 import { appendCurrentSessionTraceEvent } from '../session/index.js';
+import type { ToolPolicyController } from '../tools/policy.js';
 
 /** 当前 turn 的 batch id(runAgent 内闭包变量;一条 turn 一轮 tool batch 结束即清空)。 */
 let currentBatchId: string | null = null;
@@ -268,6 +269,10 @@ export async function runAgent(
   signal?: AbortSignal,
   /** 每步 chat() 返回后回调:repl 据此重算并重画状态行 context 用量条(运行中实时刷新,不冻结在轮首)。 */
   onContextUpdate?: () => void,
+  /** 本用户 turn 的自动路由工具策略。 */
+  toolPolicy?: ToolPolicyController,
+  /** 仅真实用户 turn 传入；合成 plan 执行轮继承 policy 但不重复记录初始路由。 */
+  initialToolRoute?: Record<string, unknown>,
 ): Promise<AgentRunResult> {
   // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
   beginTurn(truncateDisplay(firstLineOf(userInput), 40));
@@ -450,6 +455,8 @@ export async function runAgent(
       signal,
       onContextUpdate,
       hooks: combinedHooks,
+      toolPolicy,
+      initialToolRoute,
       onTraceEvent: appendCurrentSessionTraceEvent,
     });
   } finally {

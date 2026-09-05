@@ -6,6 +6,11 @@ export interface ToolContext {
   signal?: AbortSignal;
   /** 本次调用的 tool_call id(编排型工具用,如 sub-agent 把主侧批次与子 agent 关联渲染)。 */
   callId?: string;
+  /**
+   * 产生本次 tool_call 时的 effective allow-list（step policy/父上限/skill deny 的交集）。
+   * 编排器/skill 只能据此缩小子执行面，不能读取后来扩容后的全局状态。未由 Agent 调用时缺省 undefined。
+   */
+  allowedToolNames?: readonly string[];
 }
 
 /** 工具风险等级(权限系统用)。 */

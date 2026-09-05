@@ -96,7 +96,7 @@ static MODEL_CHILDREN: &[SlashCommand] = &[
 // ── /mode 子菜单 ──
 static MODE_CHILDREN: &[SlashCommand] = &[
     SlashCommand::leaf_val("plan", "/plan", "只读探查并产出计划"),
-    SlashCommand::leaf_val("auto", "/auto", "全工具自动执行"),
+    SlashCommand::leaf_val("auto", "/auto", "按任务能力自动执行"),
 ];
 
 // ── /pet 子菜单 ──

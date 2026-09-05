@@ -157,6 +157,8 @@ export interface ToolExecutionOptions {
   onLockAcquired?: (args: Record<string, unknown>) => void;
   /** 本次调用的 tool_call id,透传给工具 ctx(编排型工具关联渲染用)。 */
   callId?: string;
+  /** 产生调用时的 effective allow-list；仅用于子执行面求交和 skill 命令注入门禁。 */
+  allowedToolNames?: readonly string[];
   /** 参数校验失败(INVALID_ARGUMENTS)时追加到报错文案末尾的恢复提示。
    * 由 agent 注入系统已知的候选(如最近 read_file 的 path/hash),
    * 让模型照抄而非凭长上下文记忆复述。仅在参数校验失败时使用。 */
@@ -232,7 +234,11 @@ async function executeToolOnce(
 
       let raw: ToolExecuteResult;
       try {
-        raw = await tool.execute(args, { signal, callId: opts?.callId });
+        raw = await tool.execute(args, {
+          signal,
+          callId: opts?.callId,
+          allowedToolNames: opts?.allowedToolNames,
+        });
       } finally {
         if (pathCapture) endPathMutation(pathCapture, tool.name);
         if (workspaceCapture) await endWorkspaceMutation(workspaceCapture, tool.name);

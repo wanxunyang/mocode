@@ -19,6 +19,8 @@ import type { ChatMessage, ChatUsage } from '../../llm/index.js';
 import type { ContextState } from '../../session/compact.js';
 import type { ImageAttachment } from '../../attachments/image.js';
 import type { SessionPickerItem } from '../../ui/prompt.js';
+import type { ToolPolicyController } from '../../tools/policy.js';
+import type { ToolRouteGroupName } from '../../config/profiles.js';
 
 /** startRepl 闭包中命令需要的可写标量。访问器形式,保证写回原变量。 */
 export interface MutableReplState {
@@ -29,6 +31,8 @@ export interface MutableReplState {
   turnCount: number;
   /** 输入历史(↑↓ 回溯用)。/resume 会整个换掉。 */
   queryHistory: string[];
+  /** 上一真实用户 turn 的最终工具簇；/clear 与 /resume 会替换。 */
+  lastToolGroups: ToolRouteGroupName[];
 }
 
 /** 命令 handler 拿到的一切依赖。 */
@@ -75,8 +79,13 @@ export interface CommandContext {
   /** auto ↔ plan 循环切换。 */
   readonly cycleMode: () => void;
 
-  /** 跑一轮 agent。返回是否成功(未中断 / 未抛错)。 */
-  readonly runTurn: (input: string, planMode: boolean, placeholder: string) => Promise<boolean>;
+  /** 跑一轮 agent。真实 turn 新路由；inheritedToolPolicy 用于 plan 审批后的合成执行轮。 */
+  readonly runTurn: (
+    input: string,
+    planMode: boolean,
+    placeholder: string,
+    inheritedToolPolicy?: ToolPolicyController,
+  ) => Promise<{ ok: boolean; toolPolicy?: ToolPolicyController }>;
   /** 把 picker 选中的会话加载进 REPL(/resume /sessions 共用)。 */
   readonly resumeFromPick: (pick: SessionPickerItem | null) => Promise<void>;
   /** /rollback 交互流程(选轮次 → 选文件 → 回滚)。 */

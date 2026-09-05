@@ -24,7 +24,7 @@ test('provider: 自定义 provider 注册后被 chat() 选用', async () => {
   const fake: ChatResult = { content: 'custom-provider-reply', toolCalls: [] };
   registerModelProvider({
     name: 'acme-custom',
-    chatOnce: (messages, handlers, signal, tools) => {
+    chatOnce: (messages, handlers, _signal, _tools) => {
       calls.push('invoked');
       handlers.onText?.('custom-provider-reply');
       return Promise.resolve(fake);

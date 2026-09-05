@@ -76,7 +76,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Autonomous multi-step execution** — In a single conversation, the agent chains multiple steps on its own: read code, edit code, run tests, fix based on errors, and so on. It decides the next step without you nagging it. When it hits a decision point, it calls `ask_human` to pop up a panel and ask you (blocking until you respond).
 - **Parallel read-only tools** — Consecutive read-only operations in a turn (reading files, grep, glob, codegraph, web search/fetch) run concurrently, so total time is roughly the slowest single call instead of the sum of all of them. Operations with side effects (writing/editing files) stay sequential to preserve snapshot ordering and data safety.
 - **Sub-agents divide and conquer** — Complex tasks can spawn independent sub-agents with isolated histories and scoped toolsets. Read-only workers can fan out concurrently; writer workers run in private filesystem overlays and return ChangeSets that are merged under expected-hash checks and canonical resource locks. Only structured findings return to the main thread.
-- **Plan / Auto dual mode** — In `plan` mode the agent is read-only (reads code, queries indexes, searches — never writes to disk, runs commands, or spawns sub-agents) and produces a plan; `auto` mode unlocks the full toolset. The agent can switch between the two on its own — scope out an unfamiliar codebase first, then start making changes.
+- **Plan / Auto dual mode** — In `plan` mode the agent is read-only (reads code, queries indexes, searches — never writes to disk, runs commands, or spawns sub-agents) and produces a plan; `auto` mode permits execution. Tool capabilities are not a static “full” mode: a lightweight LLM router selects the minimum sufficient groups for each real user turn, and the main model may add groups on a later step when needed.
 - **Pressure-driven context compression** — Normal history keeps full tool evidence. At 80% occupancy, one scheduler event runs all enabled cleanup and always follows with a history summary. `/context` shows live usage and `/compact` remains an explicit manual override.
 - **Cross-session long-term memory** — The agent can save project architecture, conventions, and lessons learned as long-term memory, auto-loaded in future sessions. A background process periodically reflects on conversations to mine things worth remembering. Memories can be created, searched, updated, and forgotten, with recall-based decay.
 - **Project context (`AGENTS.md`)** — A single project-level memory file at `AGENTS.md` captures both static facts (project description, commands, module list, directory tree) and human/AI-written insights (conventions, architectural decisions, pitfalls). Generate it once with `/init`, then keep it up to date by hand or by asking the agent to refresh it. Loaded automatically into the system prompt on every turn.
@@ -84,7 +84,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Interruptible and reversible** — Ctrl+C interrupts the current turn at any time (kills child processes recursively, rolls history back to before the turn started, leaves no half-finished tool calls). `/rollback` restores file changes from per-turn snapshots, with a per-file keep/undo choice — no git dependency required.
 - **Input safety net** — Long prompts no longer fear a stray Enter: `Ctrl+G` opens an in-TUI composer popup (notepad-style editing — Enter inserts a newline, with soft wrap, selection, copy/cut/paste and undo; Ctrl+S fills the text back into the input box without sending). `Ctrl+R`/`Ctrl+P` fuzzy-search your input history (Enter only fills it back), and the post-send recall window widens to 2 seconds with any-key recall for long inputs.
 - **Sandbox protection** — File reads/writes go through a sandbox that blocks out-of-bounds paths (`../../`, absolute paths outside the root, symlink escapes, etc.), so the agent never touches files outside your working directory.
-- **Computer Use (disabled by default, high-risk)** — After `/cu on`, the `computer` tool injects real mouse/keyboard events into the OS and feeds screenshots back to the model. Its blast radius far exceeds any file tool: it bypasses the file sandbox and can click anything on screen. **Strongly recommended to enable only inside a VM / sandbox / dedicated test machine**, not on your daily driver. Every action still passes the permission gate (per-action grants; `type`/`key` text matching URL/password/payment patterns forces per-action approval with no session-wide option); plan mode always blocks it. Windows first (PowerShell injection); macOS/Linux pending. See `docs/computer-use-design.md`.
+- **Computer Use (high-risk, routed only for explicit GUI intent)** — When the request genuinely requires real mouse/keyboard interaction, the router can expose the `computer-control` group and feed each resulting screenshot back to the model. `/cu off` (or `MOCODE_COMPUTER_USE_ENABLED=false`) is a hard veto; `/cu on` merely allows routing and does not keep the tool permanently visible. The blast radius exceeds file tools because OS input bypasses the file sandbox. **Use a VM / sandbox / dedicated test machine**, not a daily driver. Every action still passes the permission gate, and plan mode always blocks it. Windows first; macOS/Linux pending. See `docs/computer-use-design.md`.
 
 ## Features
 
@@ -149,8 +149,8 @@ LLM_MODEL=glm-4.6                              # swap in your model name
 
 Common backend `base_url` values:
 
-| Backend        | base\_url                                           |
-| -------------- | ---------------------------------------------------- |
+| Backend        | base_url                                            |
+| -------------- | --------------------------------------------------- |
 | GLM (Zhipu)    | `https://open.bigmodel.cn/api/v3`                   |
 | DeepSeek       | `https://api.deepseek.com`                          |
 | Qwen (Alibaba) | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
@@ -161,26 +161,28 @@ Common backend `base_url` values:
 
 ### Optional configuration
 
-| Environment variable       | Description                                                          | Default                     |
-| --------------------------- | ---------------------------------------------------------------------- | --------------------------- |
-| `MAX_TOKENS`                | Max tokens per response                                               | unlimited                   |
-| `CONTEXT_WINDOW_TOKENS`     | Model context window; must match the real model                      | `256000`                    |
-| `LLM_STREAM_USAGE`          | Include `stream_options.include_usage` on streaming requests for real usage | `true`                |
-| `AUTO_COMPACT`               | Final history-compaction safety fallback                                | `true`                       |
-| `AUTO_REFLECT`               | Background reflection pass (opt-in; periodically mines memories from conversations) | `false`  |
-| `REFLECT_EVERY_N`            | Trigger a background reflection every N turns (runs alongside the agent, non-blocking) | `5`      |
-| `ANYSEARCH_API_KEY`         | Web search API key (falls back to anonymous free quota if unset)      | none                         |
-| `ANYSEARCH_BASE_URL`        | Search API endpoint                                                    | `https://api.anysearch.com` |
-| `SKILLS_DIRS`               | Override the default skill scan directories (platform path separator) | three default directories   |
-| `MOCODE_CONTEXT_OPTIMIZE`   | Opt-in typed encoding of Cold logs/searches, only under real pressure | `false` |
-| `MOCODE_CONTEXT_RELPRUNE`   | Opt-in exact superseded-evidence pruning, only under real pressure    | `false` |
-| `MOCODE_LIFECYCLE`          | Provenance metadata tracking; never ages or rewrites content          | `true`  |
-| `MAX_STEPS`                 | Max agent loop steps per turn (infinite-loop safety only)             | `1000`                       |
-| `SUB_AGENT_MAX_STEPS`       | Sub-agent loop safety ceiling; defaults to the main-agent value       | `1000`                       |
-| `SANDBOX_ROOT`               | Sandbox root directory (file operation boundary; falls back to cwd if unset) | none                  |
-| `MOCODE_MODE`                | Startup tool profile: `coding` (default) / `frontend` / `computer-use` / `research` / `full`; switch at runtime with `/profile <name>` | `coding` |
-| `MOCODE_COMPUTER_USE_ENABLED` | Computer Use desktop control (the `computer` tool; toggle at runtime with `/cu on\|off`) | `false`      |
-| `MOCODE_THEME`               | Color theme (default/dark/light…; shell env takes precedence over file) | `default`                   |
+| Environment variable            | Description                                                                                   | Default                     |
+| ------------------------------- | --------------------------------------------------------------------------------------------- | --------------------------- |
+| `MAX_TOKENS`                    | Max tokens per response                                                                       | unlimited                   |
+| `CONTEXT_WINDOW_TOKENS`         | Model context window; must match the real model                                               | `256000`                    |
+| `LLM_STREAM_USAGE`              | Include `stream_options.include_usage` on streaming requests for real usage                   | `true`                      |
+| `AUTO_COMPACT`                  | Final history-compaction safety fallback                                                      | `true`                      |
+| `AUTO_REFLECT`                  | Background reflection pass (opt-in; periodically mines memories from conversations)           | `false`                     |
+| `REFLECT_EVERY_N`               | Trigger a background reflection every N turns (runs alongside the agent, non-blocking)        | `5`                         |
+| `ANYSEARCH_API_KEY`             | Web search API key (falls back to anonymous free quota if unset)                              | none                        |
+| `ANYSEARCH_BASE_URL`            | Search API endpoint                                                                           | `https://api.anysearch.com` |
+| `SKILLS_DIRS`                   | Override the default skill scan directories (platform path separator)                         | three default directories   |
+| `MOCODE_CONTEXT_OPTIMIZE`       | Opt-in typed encoding of Cold logs/searches, only under real pressure                         | `false`                     |
+| `MOCODE_CONTEXT_RELPRUNE`       | Opt-in exact superseded-evidence pruning, only under real pressure                            | `false`                     |
+| `MOCODE_LIFECYCLE`              | Provenance metadata tracking; never ages or rewrites content                                  | `true`                      |
+| `MAX_STEPS`                     | Max agent loop steps per turn (infinite-loop safety only)                                     | `1000`                      |
+| `SUB_AGENT_MAX_STEPS`           | Sub-agent loop safety ceiling; defaults to the main-agent value                               | `1000`                      |
+| `SANDBOX_ROOT`                  | Sandbox root directory (file operation boundary; falls back to cwd if unset)                  | none                        |
+| `MOCODE_SUBAGENT_ENABLED`       | Set `false` to veto the `orchestration` route group; unset/`true` allows on-demand routing    | unset                       |
+| `MOCODE_FRONTEND_TOOLS_ENABLED` | Set `false` to veto `browser-debug` and `desktop-observe`; unset/`true` allows routing        | unset                       |
+| `MOCODE_COMPUTER_USE_ENABLED`   | Set `false` to veto high-risk `computer-control`; unset/`true` allows explicit-intent routing | unset                       |
+| `MEMORY_ENABLED`                | Set `false` to veto memory groups; `true` also enables the Memory Index                       | unset                       |
+| `MOCODE_THEME`                  | Color theme (default/dark/light…; shell env takes precedence over file)                       | `default`                   |
 
 ## Usage
 
@@ -199,32 +201,33 @@ The agent operates in **the working directory it was launched from** — to have
 
 ## Tools
 
-| Tool             | Purpose                                                                  |
-| ---------------- | ------------------------------------------------------------------------- |
-| `read_file`       | Read a file with line numbers; supports `offset` / `limit`               |
-| `write_file`      | Create/overwrite a file, auto-creating parent directories                |
-| `edit_file`       | Precise string replacement (`old_string` must match uniquely)            |
-| `run_command`     | Run a shell command, merging stdout+stderr, 120s default timeout         |
-| `glob`            | Find files by glob pattern (excludes node\_modules/.git)                 |
-| `grep`            | Regex content search, pure JS implementation, no `rg` dependency         |
-| `codegraph`       | With a `.codegraph/` index built, query symbol source and call chains (more accurate and cheaper than read\_file/grep) |
-| `web_search`      | Web search (AnySearch), returns title/URL/snippet/body                   |
-| `web_fetch`       | Fetch a URL, cleaning HTML into plain text                                |
-| `use_skill`       | Load the full SKILL.md instructions for a given skill                    |
-| `ask_human`        | Pop up a Q&A panel at decision points; user picks a preset or types freely (blocks until answered) |
-| `plan_update`      | Record/update the session execution plan (the `## Plan:` block in notes.md); three-state steps, at most one in_progress, auto-settles to `## Done:` when all complete |
-| `switch_mode`      | Switch between `plan` (read-only planning) and `auto` (full execution); the agent can call this itself to explore before acting |
-| `sub-agent`        | Spawn a capable isolated worker; read tasks can run concurrently and writes use overlay + ChangeSet safe merge |
+Every real user turn first goes through a constrained LLM router. Ten common tools are always available (`read_file`, `view_image`, `glob`, `grep`, `web_search`, `web_fetch`, `plan_update`, `note_append`, `ask_human`, `use_skill`); additional capabilities are selected as composable groups for writing, shell debugging, browser debugging, desktop observation/control, memory, orchestration, and MCP. If the initial set is insufficient, the main model must call `add_tool_groups` alone; the expanded schemas appear on the next model step. A routing failure reuses the previous turn’s groups (or common-only), never the full toolset.
 
-| `memory_save`      | Save a piece of cross-session long-term memory (title indexed, body fetched on demand) |
-| `memory_search`    | Search memory bodies by keyword; hits boost the recall count (affects forgetting decay) |
-| `memory_list`       | List the memory index (id/title/summary, no body)                        |
-| `memory_update`     | Edit a memory in place (id unchanged; correct stale facts / update summary / toggle pin) |
-| `memory_forget`     | Forget a memory: archived by default (recoverable), `mode=delete` for a hard delete (pinned memories can't be deleted) |
+| Tool          | Purpose                                                                                                                                                               |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `read_file`   | Read a file with line numbers; supports `offset` / `limit`                                                                                                            |
+| `write_file`  | Create/overwrite a file, auto-creating parent directories                                                                                                             |
+| `edit_file`   | Precise string replacement (`old_string` must match uniquely)                                                                                                         |
+| `run_command` | Run a shell command, merging stdout+stderr, 120s default timeout                                                                                                      |
+| `glob`        | Find files by glob pattern (excludes node_modules/.git)                                                                                                               |
+| `grep`        | Regex content search, pure JS implementation, no `rg` dependency                                                                                                      |
+| `codegraph`   | With a `.codegraph/` index built, query symbol source and call chains (more accurate and cheaper than read_file/grep)                                                 |
+| `web_search`  | Web search (AnySearch), returns title/URL/snippet/body                                                                                                                |
+| `web_fetch`   | Fetch a URL, cleaning HTML into plain text                                                                                                                            |
+| `use_skill`   | Load the full SKILL.md instructions for a given skill                                                                                                                 |
+| `ask_human`   | Pop up a Q&A panel at decision points; user picks a preset or types freely (blocks until answered)                                                                    |
+| `plan_update` | Record/update the session execution plan (the `## Plan:` block in notes.md); three-state steps, at most one in_progress, auto-settles to `## Done:` when all complete |
+| `sub-agent`   | Spawn a capable isolated worker; read tasks can run concurrently and writes use overlay + ChangeSet safe merge                                                        |
 
-The six `memory_*` tools are gated on `MEMORY_ENABLED=true` at startup; toggle at runtime with `/memory_switch` (hot-swapped, no restart). See Skills section for the difference between Tier-1 `AGENTS.md` and Tier-2 memory. Tool visibility is unified under profiles (`/profile`, `MOCODE_MODE`); `memory_*` ships in the `research`/`full` profiles.
+| `memory_save` | Save a piece of cross-session long-term memory (title indexed, body fetched on demand) |
+| `memory_search` | Search memory bodies by keyword; hits boost the recall count (affects forgetting decay) |
+| `memory_list` | List the memory index (id/title/summary, no body) |
+| `memory_update` | Edit a memory in place (id unchanged; correct stale facts / update summary / toggle pin) |
+| `memory_forget` | Forget a memory: archived by default (recoverable), `mode=delete` for a hard delete (pinned memories can't be deleted) |
 
-The four frontend tools — `browser`, `dev_server`, `screenshot`, `view_image` — are **off by default** (they depend on the Playwright binary, spawn long-lived processes, or capture the desktop). Enable the whole cluster at runtime with `/fe on`; the model only sees them once enabled. Toggle with `/fe on|off|status`.
+The six `memory_*` tools are split into `memory-read` and `memory-write` route groups. They appear only when the router selects them; `MEMORY_ENABLED=false` vetoes both groups, while `MEMORY_ENABLED=true` also enables the compact Memory Index in the prompt. `/memory_switch` manages that compatibility gate.
+
+Frontend capabilities are also split by purpose: `browser` + `dev_server` form `browser-debug`, while whole-desktop `screenshot` is `desktop-observe`; `view_image` remains a common read tool. The router may combine these groups with `computer-control` when a task genuinely needs both structured web diagnostics and real desktop interaction. `/fe off` is a hard veto, not a manual profile selector.
 
 ### Frontend / UI loop
 
@@ -244,28 +247,30 @@ dev_server stop   id=srv-xxxx
 
 ## Slash commands
 
-| Command           | Purpose                                                              |
-| ------------------ | ----------------------------------------------------------------------- |
-| `/exit` `/quit`     | Exit MoCode                                                          |
-| `/clear`            | Clear history (keeps the system prompt) + clear screen               |
-| `/image`            | Attach a local image to the next message; supports `attach <path>` / `list` / `clear` |
-| `/context`          | Show a context usage bar (tokens / message count, estimated or measured) |
-| `/skills`           | List discovered skills                                               |
-| `/compact`          | Compress history (optionally with a focus hint: `/compact …`)        |
-| `/resume`           | Resume a saved session                                                |
-| `/rollback`         | Menu to pick a turn to roll back to (↑↓ · Enter)                     |
-| `/memory`           | Show memory library: entry count + recent index                       |
-| `/memory_switch`   | Toggle Tier-2 memory on/off (REPL restart required — by design)       |
-| `/reflect`          | Manually trigger a background memory reflection pass                  |
-| `/model`            | Configure the LLM (baseURL / apiKey / model / context window), applied immediately + persisted |
-| `/init`             | Scan the project and generate `AGENTS.md` project memory (dispatched to the agent) |
-| `/theme`            | Switch color theme (↑↓ · Enter, or `/theme <name>` directly)         |
-| `/plan`             | Switch to plan mode (read-only exploration + plan output, approve to switch to auto) |
-| `/auto`             | Switch back to auto mode (full toolset execution)                     |
-| `/pet`              | Toggle the optional desktop pet (floating window mirroring agent state) |
-| `/fe`               | Toggle the frontend tool cluster `browser` / `dev_server` / `screenshot` / `view_image` on/off (off by default) |
-| `/pet skin`         | Pick a pet skin (↑↓ · Enter)                                          |
-| `/pet quit`         | Fully shut down the pet process (not just disconnect)                 |
+| Command          | Purpose                                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------------------- |
+| `/exit` `/quit`  | Exit MoCode                                                                                    |
+| `/clear`         | Clear history (keeps the system prompt) + clear screen                                         |
+| `/image`         | Attach a local image to the next message; supports `attach <path>` / `list` / `clear`          |
+| `/context`       | Show a context usage bar (tokens / message count, estimated or measured)                       |
+| `/skills`        | List discovered skills                                                                         |
+| `/compact`       | Compress history (optionally with a focus hint: `/compact …`)                                  |
+| `/resume`        | Resume a saved session                                                                         |
+| `/rollback`      | Menu to pick a turn to roll back to (↑↓ · Enter)                                               |
+| `/memory`        | Show memory library: entry count + recent index                                                |
+| `/memory_switch` | Allow/block memory routing and toggle the Memory Index; effective next real user turn          |
+| `/reflect`       | Manually trigger a background memory reflection pass                                           |
+| `/model`         | Configure the LLM (baseURL / apiKey / model / context window), applied immediately + persisted |
+| `/init`          | Scan the project and generate `AGENTS.md` project memory (dispatched to the agent)             |
+| `/theme`         | Switch color theme (↑↓ · Enter, or `/theme <name>` directly)                                   |
+| `/plan`          | Switch to plan mode (read-only exploration + plan output, approve to switch to auto)           |
+| `/auto`          | Switch back to executable mode; tools are routed per task                                      |
+| `/pet`           | Toggle the optional desktop pet (floating window mirroring agent state)                        |
+| `/fe`            | Allow/block automatic routing of `browser-debug` and `desktop-observe`                         |
+| `/cu`            | Allow/block automatic routing of high-risk `computer-control`                                  |
+| `/subagent`      | Allow/block automatic routing of `orchestration`                                               |
+| `/pet skin`      | Pick a pet skin (↑↓ · Enter)                                                                   |
+| `/pet quit`      | Fully shut down the pet process (not just disconnect)                                          |
 
 Type `/` to trigger the dropdown menu, keep typing to filter; Esc to cancel.
 
@@ -302,7 +307,7 @@ The system prompt provides lightweight guidance rather than a framework gate: in
 MoCode has a **two-tier memory** model distinct from skills:
 
 - **Tier-1 — `AGENTS.md` (auto-loaded every session):** Markdown project memory that gets concatenated into the system prompt on every turn. Discovery walks `~/.mocode/AGENTS.md` → every `AGENTS.md` from the cwd up to the filesystem root (far→near, near wins). On overflow the body is truncated with a marker pointing back at the files. Generate or refresh one with `/init`, or write it by hand — it's plain Markdown, no schema. `AGENTS.md` is also where the agent itself persists "next-session facts" it deduces (architecture, conventions, pitfalls).
-- **Tier-2 — `memory_*` tool library (agent-driven, opt-in):** Discrete tagged records (`decision` / `fact` / `pitfall` / `reference` / `feedback`) with recall-count-based decay (30-day → archived; 90-day → GC). The agent saves / searches / updates / forgets via tools; titles go in the system-prompt index (≤50), bodies fetched on demand via `memory_search`. Off by default (not in the `coding` profile); toggle with `MEMORY_ENABLED=true` at startup or `/memory_switch` (hot-swapped, no restart), or switch to the `research`/`full` profile via `/profile`.
+- **Tier-2 — `memory_*` tool library (agent-driven, routed on demand):** Discrete tagged records (`decision` / `fact` / `pitfall` / `reference` / `feedback`) with recall-count-based decay (30-day → archived; 90-day → GC). The LLM router selects `memory-read` for retrieval and `memory-write` only for explicit persistence intent. Set `MEMORY_ENABLED=false` to veto both groups; `true` additionally injects the compact Memory Index. The agent searches before saving and updates existing entries rather than duplicating them.
 
 ## Type checking
 

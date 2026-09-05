@@ -4,8 +4,8 @@
  * 把 `agentMode` 从 repl 的模块变量提到这里,让三方都能用、且不破坏依赖单向:
  *  - `repl/index.ts` 读写它 + 注册 onModeChange 监听器(做 applyMode 重写 history[0] +
  *    refreshStatusBase 刷状态行 modeTag),并通过 /plan / /auto / Shift+Tab(c cycleMode) 触发切换。
- *  - `agent/index.ts` 每步读它(getAgentMode)——决定 chat() 用全量 chatTools 还是 planChatTools 只读子集,
- *    以及串行分支的 plan 防御 backstop。这样切换模式后,下一次 chat() 立即看到新工具集。
+ *  - `agent/index.ts` 每步读取模式：PLAN 只暴露只读能力；AUTO 允许执行，但实际工具面由
+ *    每个真实用户 turn 的 ToolPolicy 路由并可在后续 step 单向扩容。
  *  - 模型不再持有 switch_mode 工具(已砍):模式切换只能由用户面触发。
  *
  * 依赖方向无环:本模块不 import 任何业务模块。
@@ -21,7 +21,7 @@ export type AgentMode = 'auto' | 'plan';
 let currentMode: AgentMode = 'auto';
 let listener: ((m: AgentMode) => void) | null = null;
 
-/** 当前 agent 模式。auto=全工具执行;plan=只读探查 + 产出计划(写盘/命令/记忆写入工具被 schema 剔除)。 */
+/** 当前 agent 模式。auto=按任务路由能力并执行；plan=只读探查 + 产出计划。 */
 export function getAgentMode(): AgentMode {
   return currentMode;
 }

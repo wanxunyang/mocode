@@ -382,10 +382,9 @@ export function gcMemories(): GcResult {
  * 封顶 MAX_INDEX_ENTRIES;尾部标 hidden 数量,引导用 memory_list/memory_search 兜底。
  * 真正「陈旧」被滤掉时也明示(让 LLM 知道有内容存在但被策略隐藏,而不是误以为空)。
  *
- * memoryEnabled=false 时(记忆子系统总开关关闭)直接返空串:Memory Index 段
- * 不进系统提示,LLM 看不到工具使用提示;配合 tools/builtins 屏蔽 memory_* 工具,
- * 实现「关闭时零侵入」(默认行为)。传参由 repl 的 buildSystemMessage 在拼装前调
- * isMemoryEnabled() 注入(本文件是叶子,避免直接引 config 起环)。
+ * memoryEnabled=false 时直接返空串，使 Memory Index 零注入；memory 工具仍在 registry 中，
+ * 但官方主 Agent 是否看见它们由独立的 per-turn ToolPolicy route gate 决定。传参由 repl
+ * 在拼装 system message 前调用 isMemoryEnabled() 得到(本文件保持叶子依赖)。
  */
 export function buildMemoryIndexSection(memoryEnabled: boolean = true): string {
   if (!memoryEnabled) return '';

@@ -16,12 +16,14 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runAgentCore, type AgentHooks } from '../src/agent/core.js';
+import { defaultAgentRuntimeContext } from '../src/agent/runtime-context.js';
 import { __setChatCreateImpl, type ChatMessage } from '../src/llm/index.js';
 import { setSandboxRoot } from '../src/sandbox/root.js';
+import { ToolPolicyController } from '../src/tools/policy.js';
 // 装配官方默认工具包(提供本测试真执行的 read_file):registry 不再顶层 import builtins,须显式装配。
 import '../src/tools/builtins/index.js';
 
@@ -106,6 +108,7 @@ test('runAgentCore: 单 tool_call → 文本回复,history 与 hooks 字节级�
       history,
       userInput: 'hi',
       hooks,
+      toolPolicy: new ToolPolicyController({ id: 'core-read-fixture', maxExpansions: 0 }),
       // 禁用真实权限弹窗;read_file 是 safe 不会走到,但显式传一个更稳。
       permissionPrompt: () => Promise.resolve({ action: 'cancelled' }),
     });
@@ -261,5 +264,385 @@ test('runAgentCore: 自定义 runtimeContext 生效(参数化可用,非仅绑定
     assert.equal(modelStart.data.model, 'custom-model-abc', 'model_start.model 应来自自定义 context');
   } finally {
     __setChatCreateImpl(null);
+  }
+});
+
+interface CapturedAgentRequest {
+  tools?: Array<{ function: { name: string } }>;
+}
+
+function capturedToolNames(request: CapturedAgentRequest): string[] {
+  return request.tools?.map((tool) => tool.function.name) ?? [];
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+test('runAgentCore: add_tool_groups 单独形成 step 屏障，新增 schema 只在下一 step 出现', async () => {
+  const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
+  delete process.env.MOCODE_TOOL_POLICY;
+  const requests: CapturedAgentRequest[] = [];
+  let call = 0;
+  __setChatCreateImpl(async (body) => {
+    requests.push(body as unknown as CapturedAgentRequest);
+    call++;
+    if (call === 1) {
+      return sseStream([
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'expand-1',
+                function: {
+                  name: 'add_tool_groups',
+                  arguments: '{"groups":["workspace-write"],"reason":"need to edit files"}',
+                },
+              },
+            ],
+          },
+        },
+      ]);
+    }
+    return sseStream([{ delta: { content: 'expanded done' } }]);
+  });
+
+  const policy = new ToolPolicyController({ id: 'core-expand', maxExpansions: 2 });
+  const outcomes: Array<{ tool: string; status: string; code: string }> = [];
+  const traces: Array<{ type: string; data: Record<string, unknown> }> = [];
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'implement this',
+      hooks: {},
+      maxSteps: 2,
+      toolPolicy: policy,
+      runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+      onToolOutcome: (tool, _args, outcome) => outcomes.push({ tool, status: outcome.status, code: outcome.code }),
+      onTraceEvent: (event) => traces.push({ type: event.type, data: event.data }),
+    });
+
+    assert.equal(result.completed, true);
+    assert.equal(result.finalText, 'expanded done');
+    assert.equal(requests.length, 2);
+    const firstNames = capturedToolNames(requests[0]);
+    const secondNames = capturedToolNames(requests[1]);
+    assert.ok(firstNames.includes('add_tool_groups'));
+    assert.ok(!firstNames.includes('write_file') && !firstNames.includes('edit_file'));
+    assert.ok(secondNames.includes('write_file') && secondNames.includes('edit_file'));
+    assert.deepEqual(outcomes, [{ tool: 'add_tool_groups', status: 'success', code: 'OK' }]);
+    assert.equal(policy.snapshot(false).version, 2);
+
+    assert.equal(history.length, 5);
+    const toolResult = history[3] as { role: string; tool_call_id?: string; content?: string };
+    assert.equal(toolResult.role, 'tool');
+    assert.equal(toolResult.tool_call_id, 'expand-1');
+    assert.match(toolResult.content ?? '', /next model step/);
+
+    const expansionTrace = traces.find((event) => event.type === 'tool_route_expand');
+    assert.ok(expansionTrace);
+    assert.equal(expansionTrace.data.fromVersion, 1);
+    assert.equal(expansionTrace.data.toVersion, 2);
+    assert.deepEqual(expansionTrace.data.addedGroups, ['workspace-write']);
+  } finally {
+    __setChatCreateImpl(null);
+    restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
+  }
+});
+
+test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call 配对结果', async () => {
+  const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
+  delete process.env.MOCODE_TOOL_POLICY;
+  const requests: CapturedAgentRequest[] = [];
+  let call = 0;
+  __setChatCreateImpl(async (body) => {
+    requests.push(body as unknown as CapturedAgentRequest);
+    call++;
+    if (call === 1) {
+      return sseStream([
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'mixed-read',
+                function: { name: 'read_file', arguments: '{"path":"must-not-run.txt"}' },
+              },
+              {
+                index: 1,
+                id: 'mixed-expand',
+                function: {
+                  name: 'add_tool_groups',
+                  arguments: '{"groups":["workspace-write"],"reason":"need writes"}',
+                },
+              },
+            ],
+          },
+        },
+      ]);
+    }
+    return sseStream([{ delta: { content: 'mixed handled' } }]);
+  });
+
+  const policy = new ToolPolicyController({ id: 'core-mixed' });
+  const started: string[] = [];
+  const outcomes: Array<{ tool: string; status: string; code: string }> = [];
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'read then edit',
+      maxSteps: 2,
+      toolPolicy: policy,
+      runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+      hooks: { onToolStart: (name) => started.push(name) },
+      onToolOutcome: (tool, _args, outcome) => outcomes.push({ tool, status: outcome.status, code: outcome.code }),
+    });
+
+    assert.equal(result.completed, true);
+    assert.equal(result.finalText, 'mixed handled');
+    assert.deepEqual(started, [], 'mixed-call 屏障不得启动任何普通工具');
+    assert.deepEqual(outcomes, [
+      { tool: 'read_file', status: 'denied', code: 'TOOL_DISABLED' },
+      { tool: 'add_tool_groups', status: 'denied', code: 'INVALID_ARGUMENTS' },
+    ]);
+    assert.equal(policy.snapshot(false).version, 1);
+    assert.ok(!policy.snapshot(false).allowedNames.has('write_file'));
+    assert.ok(!capturedToolNames(requests[1]).includes('write_file'));
+
+    assert.equal(history.length, 6);
+    const assistant = history[2] as { tool_calls?: Array<{ id: string }> };
+    assert.deepEqual(
+      assistant.tool_calls?.map((toolCall) => toolCall.id),
+      ['mixed-read', 'mixed-expand'],
+    );
+    const firstResult = history[3] as { role: string; tool_call_id?: string; content?: string };
+    const secondResult = history[4] as { role: string; tool_call_id?: string; content?: string };
+    assert.equal(firstResult.role, 'tool');
+    assert.equal(firstResult.tool_call_id, 'mixed-read');
+    assert.match(firstResult.content ?? '', /未执行/);
+    assert.equal(secondResult.role, 'tool');
+    assert.equal(secondResult.tool_call_id, 'mixed-expand');
+    assert.match(secondResult.content ?? '', /必须在一个独立的 model step/);
+  } finally {
+    __setChatCreateImpl(null);
+    restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
+  }
+});
+
+test('runAgentCore: runtimeAllowedToolNames 与 schema 同源拒绝伪造调用且不产生副作用', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mocode-agent-policy-deny-'));
+  const previousRoot = setSandboxRoot(root);
+  const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
+  delete process.env.MOCODE_TOOL_POLICY;
+  const requests: CapturedAgentRequest[] = [];
+  let call = 0;
+  __setChatCreateImpl(async (body) => {
+    requests.push(body as unknown as CapturedAgentRequest);
+    call++;
+    if (call === 1) {
+      return sseStream([
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'denied-write',
+                function: { name: 'write_file', arguments: '{"path":"blocked.txt","content":"no"}' },
+              },
+            ],
+          },
+        },
+      ]);
+    }
+    return sseStream([{ delta: { content: 'deny handled' } }]);
+  });
+
+  const policy = new ToolPolicyController({ id: 'core-runtime-deny', groups: ['workspace-write'] });
+  const parentAllowed = new Set(policy.snapshot(false).allowedNames);
+  parentAllowed.delete('write_file');
+  let permissionPrompts = 0;
+  const started: string[] = [];
+  const traces: Array<{ type: string; data: Record<string, unknown> }> = [];
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'write a file',
+      maxSteps: 2,
+      toolPolicy: policy,
+      runtimeAllowedToolNames: parentAllowed,
+      runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+      hooks: { onToolStart: (name) => started.push(name) },
+      permissionPrompt: async () => {
+        permissionPrompts++;
+        return { action: 'cancelled' };
+      },
+      onTraceEvent: (event) => traces.push({ type: event.type, data: event.data }),
+    });
+
+    assert.equal(result.completed, true);
+    assert.equal(result.finalText, 'deny handled');
+    assert.ok(!capturedToolNames(requests[0]).includes('write_file'));
+    assert.deepEqual(started, []);
+    assert.equal(permissionPrompts, 0);
+    assert.equal(existsSync(join(root, 'blocked.txt')), false);
+
+    const resultMessage = history[3] as { role: string; tool_call_id?: string };
+    assert.equal(resultMessage.role, 'tool');
+    assert.equal(resultMessage.tool_call_id, 'denied-write');
+    const deniedTrace = traces.find((event) => event.type === 'tool_call_end' && event.data.tool === 'write_file');
+    assert.ok(deniedTrace);
+    assert.equal(deniedTrace.data.status, 'denied');
+    assert.equal(deniedTrace.data.code, 'TOOL_DISABLED');
+  } finally {
+    __setChatCreateImpl(null);
+    setSandboxRoot(previousRoot);
+    restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('runAgentCore: inline skill deny 同批生效并统一收窄 schema 与后代 allow-list', async () => {
+  const { mkdirSync } = await import('node:fs');
+  const { invalidateSkillsCache } = await import('../src/skills/index.js');
+  const { clearSkillActivation } = await import('../src/skills/activation.js');
+  const { registerToolsExtension, clearToolsExtension } = await import('../src/tools/registry.js');
+
+  const root = mkdtempSync(join(tmpdir(), 'mocode-agent-skill-deny-'));
+  const previousDirs = process.env.SKILLS_DIRS;
+  const previousMcp = process.env.MOCODE_MCP_ENABLED;
+  const extensionSource = 'test-agent-core-skill-effective-list';
+  process.env.SKILLS_DIRS = root;
+  process.env.MOCODE_MCP_ENABLED = 'true';
+
+  const writeDenySkill = (name: string, disallowedTool: string): void => {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'SKILL.md'),
+      [
+        '---',
+        `name: ${name}`,
+        `description: deny ${disallowedTool} for policy regression`,
+        `disallowed-tools: ${disallowedTool}`,
+        '---',
+        `Follow the ${name} workflow.`,
+      ].join('\n'),
+      'utf8',
+    );
+  };
+  writeDenySkill('deny-read', 'Read');
+  writeDenySkill('deny-web', 'WebFetch');
+  invalidateSkillsCache();
+  clearSkillActivation();
+
+  let descendantAllowed: string[] | undefined;
+  registerToolsExtension(extensionSource, [
+    {
+      name: 'mcp__capture_effective_allow_list',
+      description: 'Capture the effective parent allow-list for a regression test.',
+      parameters: { type: 'object', properties: {} },
+      capabilities: { effect: 'read', concurrency: 'parallel' },
+      async execute(_args, ctx) {
+        descendantAllowed = [...(ctx?.allowedToolNames ?? [])];
+        return 'captured';
+      },
+    },
+  ]);
+
+  const requests: CapturedAgentRequest[] = [];
+  let call = 0;
+  __setChatCreateImpl(async (body) => {
+    requests.push(body as unknown as CapturedAgentRequest);
+    call++;
+    if (call === 1) {
+      return sseStream([
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'activate-read-deny',
+                function: { name: 'use_skill', arguments: '{"name":"deny-read"}' },
+              },
+              {
+                index: 1,
+                id: 'activate-web-deny',
+                function: { name: 'use_skill', arguments: '{"name":"deny-web"}' },
+              },
+              {
+                index: 2,
+                id: 'capture-effective-list',
+                function: { name: 'mcp__capture_effective_allow_list', arguments: '{}' },
+              },
+              {
+                index: 3,
+                id: 'skill-denied-read',
+                function: { name: 'read_file', arguments: '{"path":"blocked.txt"}' },
+              },
+              {
+                index: 4,
+                id: 'skill-denied-web',
+                function: { name: 'web_fetch', arguments: '{"url":"https://example.invalid"}' },
+              },
+            ],
+          },
+        },
+      ]);
+    }
+    return sseStream([{ delta: { content: 'skill deny handled' } }]);
+  });
+
+  const started: string[] = [];
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const policy = new ToolPolicyController({
+      id: 'core-skill-effective-list',
+      groups: ['mcp'],
+      maxExpansions: 0,
+    });
+    const result = await runAgentCore({
+      history,
+      userInput: 'load both skills then continue',
+      maxSteps: 2,
+      toolPolicy: policy,
+      runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+      hooks: { onToolStart: (name) => started.push(name) },
+    });
+
+    assert.equal(result.completed, true);
+    assert.equal(result.finalText, 'skill deny handled');
+    assert.ok(capturedToolNames(requests[0]).includes('read_file'));
+    assert.ok(capturedToolNames(requests[0]).includes('web_fetch'));
+    assert.ok(!capturedToolNames(requests[1]).includes('read_file'));
+    assert.ok(!capturedToolNames(requests[1]).includes('web_fetch'));
+    assert.ok(descendantAllowed);
+    assert.ok(!descendantAllowed.includes('read_file'));
+    assert.ok(!descendantAllowed.includes('web_fetch'));
+    assert.deepEqual(started, ['use_skill', 'use_skill', 'mcp__capture_effective_allow_list']);
+
+    const toolResults = history.filter(
+      (message): message is ChatMessage & { role: 'tool'; tool_call_id: string; content: string } =>
+        message.role === 'tool',
+    );
+    for (const id of ['skill-denied-read', 'skill-denied-web']) {
+      const denied = toolResults.find((message) => message.tool_call_id === id);
+      assert.ok(denied, `${id} 应有配对 tool result`);
+      assert.ok(denied.content.length > 0, `${id} 的拒绝结果不应为空`);
+    }
+  } finally {
+    __setChatCreateImpl(null);
+    clearToolsExtension(extensionSource);
+    clearSkillActivation();
+    if (previousDirs === undefined) delete process.env.SKILLS_DIRS;
+    else process.env.SKILLS_DIRS = previousDirs;
+    if (previousMcp === undefined) delete process.env.MOCODE_MCP_ENABLED;
+    else process.env.MOCODE_MCP_ENABLED = previousMcp;
+    invalidateSkillsCache();
+    rmSync(root, { recursive: true, force: true });
   }
 });

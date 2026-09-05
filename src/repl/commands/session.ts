@@ -30,6 +30,7 @@ export const sessionCommands: CommandHandler[] = [
     ctx.contextState.lifecycleStats = undefined;
     ctx.contextState.ephemeralText = undefined;
     ctx.state.lastTurnUsage = undefined; // 清空旧轮的 token 累计
+    ctx.state.lastToolGroups = []; // 新会话不得继承旧会话的路由回退
     ctx.attachments.clear(); // 一并清空待发图片
     layout.clearContent();
     layout.writeBanner(bannerLines(ctx.banner()));

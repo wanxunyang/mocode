@@ -249,8 +249,9 @@ export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 export const planChatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 
 export function refreshChatTools(): void {
-  // 工具可见性由当前模式(profile)统一控制(docs/tool-profiles-design.md):profile 不含的簇
-  // 一律不进模型 schema;MCP 等外部扩展工具(getProfileDisabledTools 不含)不受 profile 限制。
+  // Legacy fallback for callers that do not pass a per-turn ToolPolicy. Official TUI/stdio requests
+  // build schemas from ToolPolicy snapshots instead; keep this stable array for old embeddings and budgets.
+  // MCP extensions are not part of the static profile map and remain visible on this compatibility path.
   const profileDisabled = getProfileDisabledTools();
   const visibleTools = tools.filter((tool) => !profileDisabled.has(tool.name));
   const next = visibleTools.map((t) => ({

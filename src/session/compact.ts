@@ -61,7 +61,7 @@ export interface CompactOptions {
    *  默认 manual=false / force=false(自动路径行为完全不变)。 */
   manual?: boolean;
   force?: boolean;
-  /** 本次主请求实际发送的工具集合；缺省为全量工具。 */
+  /** 本次主请求实际发送的工具集合；缺省使用调用方的兼容工具集合。 */
   tools?: readonly ChatTool[];
   /** 本次 agent 运行独享的上下文统计状态；缺省使用主 agent 全局状态。 */
   contextState?: ContextState;

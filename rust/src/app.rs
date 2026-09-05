@@ -837,7 +837,7 @@ impl App {
             self.entries.push(Entry::Blank);
             self.mode_tag = "Auto".to_string();
             self.entries.push(Entry::System {
-                text: "已切换到 Auto 模式（全工具自动执行）".to_string(),
+                text: "已切换到 Auto 模式（按任务能力自动执行）".to_string(),
                 tone: Tone::Accent,
             });
             self.entries.push(Entry::Blank);

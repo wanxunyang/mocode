@@ -16,6 +16,8 @@ export type TraceEventType =
   | 'model_end'
   | 'tool_call_start'
   | 'tool_call_end'
+  | 'tool_route'
+  | 'tool_route_expand'
   | 'permission'
   | 'compact'
   | 'abort'
@@ -79,7 +81,7 @@ export function appendCurrentSessionTraceEvent(event: AgentTraceEvent): void {
 
 /** Records events initiated outside runAgentCore, such as Ctrl+C, /compact, and /rollback. */
 export function appendCurrentSessionRuntimeEvent(
-  type: Extract<TraceEventType, 'compact' | 'abort' | 'rollback'>,
+  type: Extract<TraceEventType, 'compact' | 'abort' | 'rollback' | 'tool_route' | 'tool_route_expand'>,
   data: Record<string, unknown>,
   turnId = getCurrentTurnId(),
 ): void {

@@ -30,10 +30,9 @@ import { computerTool } from './computer.js';
  * 所有内置工具,按注册顺序排列。
  * 加新工具:在本目录新建 `xxx.ts` 导出一个 Tool,再在下面数组里加一行。无需改 agent / llm。
  *
- * 记忆子系统可见性现由统一模式(profile)控制(docs/tool-profiles-design.md):
- * memory_* 工具始终注册进 builtinTools(懒加载 JSONL,无常驻开销),只是默认 coding 模式下
- * 不可见——由 refreshChatTools 按当前 profile 过滤。/mode 热切换即时生效,无需重启 REPL
- * (旧实现是模块初始化快照,曾要求重启;已随 profile 系统破除)。
+ * memory_* 始终注册进 registry（JSONL store 仍为懒加载）；主 Agent 是否看见它们由每 turn
+ * ToolPolicy 的 memory-read / memory-write 簇决定，MEMORY_ENABLED=false 可作 capability veto。
+ * 未传 ToolPolicy 的旧嵌入调用仍走 legacy profile 过滤。
  */
 
 const pathResource = (args: Record<string, unknown>): string[] =>

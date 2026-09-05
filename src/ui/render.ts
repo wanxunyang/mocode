@@ -314,7 +314,7 @@ export interface BannerInfo {
   baseURL: string;
   cwd: string;
   tools: string;
-  /** 记忆子系统开关:由 config.isMemoryEnabled() 喂入,关闭时 banner 显示「关闭」 */
+  /** Memory Index / 反思状态；路由 gate 另由 per-turn ToolPolicy 管理。 */
   memoryEnabled: boolean;
 }
 

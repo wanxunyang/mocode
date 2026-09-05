@@ -98,19 +98,29 @@ export async function renderSkillBody(
   skill: Skill,
   args: Record<string, unknown> | undefined,
   signal?: AbortSignal,
+  parentAllowedToolNames?: readonly string[],
 ): Promise<string | null> {
   const raw = getSkillBody(skill.name);
   if (raw === null) return null;
   let body = substituteArgs(raw, args, skill.dir);
   if (/!`[^`]+`/.test(body)) {
-    // 非 project 恒信任;project 依次查信任记录、再弹一次性确认。
-    // ensureSkillTrust 的 true 覆盖 'trusted'(已记录)与 'once'(仅本次)两种,直接据此注入。
-    const trusted = skill.origin !== 'project' || isSkillTrusted(skill) || (await ensureSkillTrust(skill));
-    if (trusted) {
-      body = await injectCommands(body, skill.dir, signal);
+    const allowed = mapSkillTools(skill.allowedTools).tools;
+    const disallowed = new Set(mapSkillTools(skill.disallowedTools).tools ?? []);
+    const parentAllowsShell = parentAllowedToolNames?.includes('run_command') === true;
+    const skillAllowsShell = (allowed === null || allowed.includes('run_command')) && !disallowed.has('run_command');
+    if (!parentAllowsShell || !skillAllowsShell) {
+      // Trust 只证明 skill 来源，不授予 capability；隐藏命令必须受产生 use_skill/run_skill
+      // 调用的父 step 快照约束，且不能借未声明/未知 allowed-tools 扩权。
+      body = body.replace(/!`[^`]+`/g, '_(command injection skipped: run_command not allowed by tool policy)_');
     } else {
-      // 未信任:清掉注入标记,避免把未授权命令留在提示里。
-      body = body.replace(/!`[^`]+`/g, '_(command injection skipped: skill not trusted)_');
+      // 非 project 恒信任;project 依次查信任记录、再弹一次性确认。
+      const trusted = skill.origin !== 'project' || isSkillTrusted(skill) || (await ensureSkillTrust(skill));
+      if (trusted) {
+        body = await injectCommands(body, skill.dir, signal);
+      } else {
+        // 未信任:清掉注入标记,避免把未授权命令留在提示里。
+        body = body.replace(/!`[^`]+`/g, '_(command injection skipped: skill not trusted)_');
+      }
     }
   }
   return body;
@@ -156,8 +166,8 @@ const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'run_command']);
 
 /**
  * fork 子 agent 模式:`agent:` 显式声明优先;否则按工具面推断——
- * 未声明 allowed-tools(完整工具集)或白名单含写工具 → 'write',纯只读白名单 → 'read'。
- * 避免写类 skill 因缺省字段被静默降级为只读。
+ * 未声明 allowed-tools（继承父 snapshot 的可用工具）或白名单含写工具 → 'write'，
+ * 纯只读白名单 → 'read'。避免写类 skill 因缺省字段被静默降级为只读。
  */
 export function resolveSpawnMode(skill: Skill, tools: string[] | null): 'read' | 'write' {
   if (skill.agentMode) return skill.agentMode;
@@ -189,7 +199,7 @@ export async function runSkill(a: RunSkillArgs, ctx?: ToolContext): Promise<Tool
       output: `拒绝:skill "${name}" 未获信任,已取消执行。`,
     };
   }
-  let body = await renderSkillBody(skill, a.args, ctx?.signal);
+  let body = await renderSkillBody(skill, a.args, ctx?.signal, ctx?.allowedToolNames);
   if (body === null) {
     return { status: 'error', code: 'UNKNOWN_TOOL', retryable: false, output: `错误:未找到 skill "${name}" 的正文。` };
   }
@@ -208,6 +218,7 @@ export async function runSkill(a: RunSkillArgs, ctx?: ToolContext): Promise<Tool
     systemPromptSuffix: `You are executing the "${skill.name}" skill. SKILL_DIR=${skill.dir}`,
     quiet: true, // fork skill 是 opaque workflow,不产可展开 batch
     quietLabel: `执行 ${skill.name}…`,
+    parentAllowedToolNames: ctx?.allowedToolNames,
   });
   return toOutcome(res);
 }

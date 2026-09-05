@@ -39,7 +39,8 @@ export function mapSkillToolName(token: string): string | null {
 /** 把 allowed-tools / disallowed-tools 的 token 列表映射为 mocode 工具名集合;
  * 未知 token 收集到 unknown 返回,供调用方记 warning。返回 null 表示未声明(不约束)。 */
 export function mapSkillTools(tokens: string[] | undefined): { tools: string[] | null; unknown: string[] } {
-  if (!tokens || tokens.length === 0) return { tools: null, unknown: [] };
+  if (tokens === undefined) return { tools: null, unknown: [] };
+  if (tokens.length === 0) return { tools: [], unknown: [] };
   const tools: string[] = [];
   const unknown: string[] = [];
   for (const tk of tokens) {
@@ -50,5 +51,6 @@ export function mapSkillTools(tokens: string[] | undefined): { tools: string[] |
       unknown.push(tk);
     }
   }
-  return { tools: tools.length ? tools : null, unknown };
+  // 显式声明但全是未知 token 时保持零工具，绝不回退成 unrestricted。
+  return { tools, unknown };
 }

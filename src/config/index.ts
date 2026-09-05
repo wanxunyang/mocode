@@ -56,13 +56,14 @@ const llmKeysFromShell = LLM_ENV_KEYS.filter((k) => process.env[k] !== undefined
 loadEnvFiles();
 
 /**
- * 当前工具模式(内存态):启动默认取 MOCODE_MODE,/mode 运行时热切换(不写盘)。
- * 旧布尔开关 env(MEMORY_ENABLED / MOCODE_FRONTEND_TOOLS_ENABLED / MOCODE_COMPUTER_USE_ENABLED /
- * MOCODE_SUBAGENT_ENABLED)若显式设置则覆盖模式推导结果(向后兼容,一个版本周期后移除)。
+ * 旧 profile 兼容状态：仅供未传 ToolPolicy 的嵌入调用与迁移测试。官方 TUI/stdio
+ * 每个真实用户 turn 都使用 LLM route，且不再提供 /profile 用户命令。
  */
 let activeProfile: ProfileName = isProfileName(process.env.MOCODE_MODE) ? process.env.MOCODE_MODE : 'coding';
 if (process.env.MOCODE_MODE !== undefined && !isProfileName(process.env.MOCODE_MODE)) {
-  console.warn(`[mocode] 未知 MOCODE_MODE="${process.env.MOCODE_MODE}",回退 coding(可选: coding|frontend|computer-use|research|full)`);
+  console.warn(
+    `[mocode] 未知 MOCODE_MODE="${process.env.MOCODE_MODE}",回退 coding(可选: coding|frontend|computer-use|research|full)`,
+  );
 }
 
 /**
@@ -116,23 +117,20 @@ export interface Config {
   /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
   autoReflect: boolean;
   /**
-   * 记忆子系统总开关。关闭时:5 个 memory_* 工具不进工具表,buildSystemPrompt
-   * 里的 Memory Index 段 + memory_* 工具使用说明整段不出现,plan 模式提示词里的
-   * 工具名也跟着消失。运行时 /memory_switch 改;持久化 MEMORY_ENABLED。
-   * 默认 false:新用户零侵入,想用记忆功能显式打开。
+   * Memory Index / 后台反思开关。`true` 时把紧凑索引注入 prompt；`false` 时不注入。
+   * memory 工具是否可被自动路由由 MEMORY_ENABLED capability gate 单独判定：仅显式
+   * `false` 才禁止，unset 仍可按需路由。/memory_switch 同时设置两者。
    */
   memoryEnabled: boolean;
   /** 每 N 个轮次触发一次后台反思 pass(与 agent 并发,不阻塞)。默认 5。 */
   reflectEveryN: number;
   /** 每轮 agent 循环最大步数(防无限循环)。默认 25。 */
   maxSteps: number;
-  /** 子 Agent 总开关。默认关闭；/subagent on|off 运行时切换并刷新模型工具表。 */
+  /** orchestration 的兼容配置镜像；官方主路径以 MOCODE_SUBAGENT_ENABLED capability gate + ToolPolicy 为准。 */
   subAgentEnabled: boolean;
-  /** 前端工具簇总开关(browser / dev_server / screenshot / view_image)。默认关闭；
-   *  /fe on|off 运行时切换并刷新模型工具表;这些工具依赖 playwright 二进制或抓取桌面,隐私/资源面大,默认不暴露。 */
+  /** browser-debug / desktop-observe 的兼容配置镜像；不会让工具常驻 schema。 */
   frontendToolsEnabled: boolean;
-  /** Computer Use 总开关(computer 桌面操控工具)。默认关闭;
-   *  /cu on|off 运行时切换并刷新模型工具表;该工具直接向 OS 注入鼠标键盘事件,爆炸半径最大,默认不暴露。 */
+  /** computer-control 的兼容配置镜像；不会让高危工具常驻 schema。 */
   computerUseEnabled: boolean;
   /** MCP 总开关。默认开启；关闭时启动不读取 MCP 配置、不连接服务。/mcp on|off 改写下次启动状态。 */
   mcpEnabled: boolean;
@@ -229,11 +227,6 @@ function buildVoiceSection(): string {
   return readPersonaFile() || DEFAULT_VOICE;
 }
 
-/**
- * 基础系统提示的"记忆段落":开 isMemoryEnabled() 时才拼。
- * 默认关(新用户零侵入):这段 + 工具表里的 5 个 memory_* + 系统提示尾部的 Memory Index
- * 都不出现;打开 /memory_switch 后下一次新建 system message 才注入。
- */
 /**
  * Session notepad 段落：读取 .mocode/sessions/<sessionId>/notes.md，只注入 ## 标题行作为目录摘要。
  * Agent 用 write_file/edit_file/read_file 维护此文件，抗 compact（在 context window 之外）。
@@ -400,18 +393,6 @@ export function buildSessionStateReminder(sessionId = getCurrentSessionId()): st
   return parts.join('\n\n');
 }
 
-const SYSTEM_PROMPT_MEMORY_SECTION = `
-## Memory (cross-session facts)
-- The prompt may contain a title/summary index; retrieve details with memory_search or inspect all with memory_list. memory_search also surfaces knowledge-graph facts (relations between entities) alongside entry bodies.
-- Save only stable, non-obvious cross-session facts. Search before saving; update an existing entry instead of duplicating it, and archive stale entries.
-- A knowledge-graph layer links entities across memories: explore relations/neighbors with memory_graph (neighbors/add/stats), and attach meaningful links via the links parameter of memory_save when saving.`;
-
-const SYSTEM_PROMPT_COMPUTER_USE_SECTION = `
-## Computer Use (desktop GUI control)
-- The \`computer\` tool drives the real desktop: move/click the mouse, type text, press keys, scroll, zoom into a screen region. Every action returns a fresh screenshot as a visual attachment — inspect it before the next action and self-correct.
-- Coordinates use a normalized 0-1000 grid (x right, y down) over the current screen; you never need the physical resolution. Call \`zoom\` with a tight region before clicking small or dense UI elements.
-- Destructive or sensitive targets (form submit, payment, credentials, delete/send buttons) require explicit user intent — ask first, never infer. Every action passes the permission gate; do not retry a denied action without new user instruction.`;
-
 /** AGENTS.md 自动导入正文上限:system 位于 history[0] 且 compactHistory 不压缩 system,超长需截断防占窗口(见 memory/README.md)。 */
 const MAX_AGENTS_IMPORT_CHARS = 20000;
 
@@ -437,33 +418,12 @@ function buildAgentsImportSection(): string {
 }
 
 /**
- * Memory 检索指导段(与 AGENTS.md 导入无关):开 isMemoryEnabled() 时才拼,
- * 注入 memory_search/list/graph 的使用指导。默认关(新用户零侵入)。
- */
-function buildMemoryPromptSection(): string {
-  if (!isMemoryEnabled()) return '';
-  return SYSTEM_PROMPT_MEMORY_SECTION;
-}
-
-/**
- * Computer Use 使用约束段:开 isComputerUseEnabled() 时才拼,
- * 注入 computer 工具的坐标网格 / zoom 优先 / 敏感操作先问人 指导。默认关(零侵入)。
- */
-function buildComputerUseSection(): string {
-  if (!isComputerUseEnabled()) return '';
-  return SYSTEM_PROMPT_COMPUTER_USE_SECTION;
-}
-
-/**
  * plan 模式追加到系统提示末尾的指令(切到 plan 模式时由 repl 拼进 history[0])。
  * 与 SYSTEM_PROMPT 同语种(英文),指示:只读探查、产出步骤化计划、不执行、审批后回 auto。
  *
- * memoryEnabled=false 时:memory_save/update/forget 三个写工具名字 + "memory-write tools" 这
- * 句都不出现,且 read-only 列表里的 memory_search/memory_list 也移除——避免提示词里出现
- * 根本不存在的工具名引起 LLM 调不到。
+ * 工具名不在这里静态枚举；plan snapshot 会从当前自动路由结果中剔除所有写入/执行能力。
  *
- * .codegraph/ 存在性也动态决定:有索引时引导 LLM 优先用 codegraph skill(免去逐文件扫);
- * 没索引时干脆不提,避免 LLM 调出失败。函数化(非 const)以便在 buildPlanModeSuffix 里现拼。
+ * .codegraph/ 存在性动态决定是否提示 codegraph skill。
  */
 function buildPlanResearchRules(): string {
   const cg = hasCodegraphIndex() ? ' Prefer the available codegraph skill for call paths and blast radius.' : '';
@@ -484,8 +444,6 @@ ${buildPlanResearchRules()}`;
 /** 兼容旧名字:repl 的 buildSystemMessage 仍引 PLAN_MODE_SUFFIX(变量)。运行时按需现拼。 */
 export function buildBasePrompt(sessionId = getCurrentSessionId()): string {
   const agentsImportSection = buildAgentsImportSection();
-  const memorySection = buildMemoryPromptSection();
-  const computerUseSection = buildComputerUseSection();
   const notepadSection = buildNotepadSection(sessionId);
 
   // 静态主体:稳定段落集中在前,让支持 prompt caching 的后端能命中前缀缓存(#12)。
@@ -543,10 +501,9 @@ ${buildVoiceSection()}
 - Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.
 ${t('assistant.languageInstruction')}`;
 
-  // 动态段(置于末尾):AGENTS.md 项目记忆(无条件) + memory 索引(按开关) + notepad 索引 + notepad 使用说明。
+  // 动态段(置于末尾):AGENTS.md 项目记忆 + notepad 索引/说明。工具簇特定指导由
+  // ToolPolicyController.reminder() 按当前 turn 的 route 注入，避免旧全局 profile 与真实 schema 分裂。
   // 按需注入(#13):有内容的索引才拼对应标题,避免空标题噪声。
-  //   - "## Project context" 仅当 agentsImportSection/memorySection/notepadSection 任一非空(notepad 索引依赖 notes.md 存在);
-  //   - "## Session state" 使用说明**无条件**注入(放在动态尾段首位):否则会陷入"说明依赖 notes.md 存在 → 模型不知要建 → 文件永不存在"的鸡生蛋循环,功能对模型不可见。动态段在静态前缀之后,不影响 prompt 缓存。
   const dynamicParts: string[] = [];
 
   // 会话级私有尾段(子 agent 切片会丢弃):Session state 说明无条件注入在前,Project context 按需在后。
@@ -571,12 +528,7 @@ ${t('assistant.languageInstruction')}`;
       'For non-obvious, lasting-value discoveries — subtle constraints, decisions with downstream impact, open questions blocking a choice, or risks affecting later steps — call `note_append` IMMEDIATELY when you make the discovery. The note is written to the same notes.md and its body is re-injected into the prompt automatically (within a 5k-token budget), surviving compaction so you keep remembering what you found/decided this session. Do NOT use it for routine progress (that is the plan) or stable cross-session facts (that is memory_save). Each call appends one item.',
   );
 
-  const computerUse = computerUseSection.trim();
-  if (computerUse) {
-    dynamicParts.push(computerUse);
-  }
-
-  const ctxContent = `${agentsImportSection}${memorySection}${notepadSection}`.trimEnd();
+  const ctxContent = `${agentsImportSection}${notepadSection}`.trimEnd();
   if (ctxContent) {
     dynamicParts.push(`## Project context\n${ctxContent}`);
   }
@@ -613,14 +565,8 @@ export function buildMocodeCorePrompt(): string {
 }
 
 /**
- * plan 模式追加到系统提示末尾的指令。
- * 历史曾是 `export const PLAN_MODE_SUFFIX`(顶层字面量);现改为按 isMemoryEnabled()
- * 动态拼:false 时不出现 memory_* 工具名,避免 LLM 想调不存在的工具。
- *
- * 注意:已改为 getter(每次访问现拼),让运行时切 /memory_switch 后立即生效。
- * 旧 import `PLAN_MODE_SUFFIX` 路径不变;repl 推荐改用 getPlanModeSuffix()(语义更清晰)。
- * 不能直接 `export const PLAN_MODE_SUFFIX = buildPlanModeSuffix()`:
- * 该表达式在模块初始化时立即求值,而 buildPlanModeSuffix 内部读 config,config 还未求值 → TDZ。
+ * plan 模式追加到系统提示末尾的指令。真实工具集合由当前 ToolPolicy snapshot 与
+ * PLAN_DISABLED_TOOLS 求交；本 getter 只描述只读行为，不枚举可能不存在的工具名。
  */
 export function getPlanModeSuffix(): string {
   return buildPlanModeSuffix();
@@ -640,8 +586,8 @@ export const config: Config = {
     ? process.env.LLM_MODEL || 'gpt-4o-mini'
     : (__activePreset?.model ?? process.env.LLM_MODEL ?? 'gpt-4o-mini'),
   maxTokens: process.env.MAX_TOKENS ? Number(process.env.MAX_TOKENS) : undefined,
-  // 用 getter 而非 buildBasePrompt() 立即求值:因为本对象字面量求值时 buildBasePrompt 读 config.memoryEnabled,
-  // 而 config 还没完成初始化(TDZ)。Getter 让每次访问都现拼,运行时 /memory_switch 立即生效。
+  // 用 getter 而非 buildBasePrompt() 立即求值：对象字面量初始化期间 buildBasePrompt 会读取
+  // config.model 等字段，直接调用会触发 TDZ。Getter 也让语言、persona 等运行时变化在下一轮生效。
   get systemPrompt(): string {
     return buildBasePrompt();
   },
@@ -745,55 +691,79 @@ export function updateModelConfig(opts: {
   }
 }
 
-/** 当前激活工具模式(内存态)。 */
+/** legacy 嵌入路径的 profile 查询；官方主 Agent 不读取。 */
 export function getActiveProfile(): ProfileName {
   return activeProfile;
 }
 
-/**
- * 切换激活工具模式(/mode 调用)。内存态,不写盘;非法名抛错。
- * 切换后由 REPL 调 refreshChatTools + 重写系统提示/横幅生效。
- */
+/** legacy 嵌入/测试用 profile setter；不再暴露对应 REPL 命令。 */
 export function setActiveProfile(p: ProfileName): void {
   if (!isProfileName(p)) throw new Error(`unknown profile: ${String(p)}`);
   activeProfile = p;
 }
 
+/** 自动路由 capability gate：只有显式字符串 false 才是硬否决；unset/true 均允许按需选择。 */
+function isRouteCapabilityAllowed(envName: string): boolean {
+  return process.env[envName] !== 'false';
+}
+
+export function isSubAgentRouteAllowed(): boolean {
+  return isRouteCapabilityAllowed('MOCODE_SUBAGENT_ENABLED');
+}
+
+export function isFrontendRouteAllowed(): boolean {
+  return isRouteCapabilityAllowed('MOCODE_FRONTEND_TOOLS_ENABLED');
+}
+
+export function isComputerUseRouteAllowed(): boolean {
+  return isRouteCapabilityAllowed('MOCODE_COMPUTER_USE_ENABLED');
+}
+
+/** memory-read / memory-write 的自动路由 gate；与 Memory Index 是否注入分开显示。 */
+export function isMemoryRouteAllowed(): boolean {
+  return isRouteCapabilityAllowed('MEMORY_ENABLED');
+}
+
 /**
- * 子 Agent 总开关:派生查询 = 当前模式含 subagent 簇,或被旧 env MOCODE_SUBAGENT_ENABLED 显式覆盖。
+ * 子 Agent legacy 可见性：仅供没有 ToolPolicy 的兼容路径。官方 TUI/stdio 使用
+ * isSubAgentRouteAllowed() + 每 turn ToolPolicy，不再由 activeProfile 决定。
  */
 export function isSubAgentEnabled(): boolean {
   if (process.env.MOCODE_SUBAGENT_ENABLED !== undefined) return process.env.MOCODE_SUBAGENT_ENABLED === 'true';
   return profileHasGroup(activeProfile, 'subagent');
 }
 
-/** 兼容旧命令(/subagent):写 config 字段 + env。新逻辑以模式为准,此函数仅为旧调用点保留。 */
+/** 自动工具路由执行面的硬否决；未设置或 true 时由当前 ToolPolicy 决定是否暴露 orchestration。 */
+export function isSubAgentHardDisabled(): boolean {
+  return !isSubAgentRouteAllowed();
+}
+
+/** /subagent 的持久化写入口：更新兼容字段与 capability gate；不会把 orchestration 常驻 schema。 */
 export function updateSubAgentConfig(enabled: boolean): void {
   config.subAgentEnabled = enabled;
   process.env.MOCODE_SUBAGENT_ENABLED = enabled ? 'true' : 'false';
 }
 
-/** 前端工具簇开关:派生查询 = 当前模式含 frontend 簇,或被旧 env 显式覆盖。 */
+/** 前端工具簇的 legacy 可见性；官方自动路由使用 isFrontendRouteAllowed()。 */
 export function isFrontendToolsEnabled(): boolean {
   if (process.env.MOCODE_FRONTEND_TOOLS_ENABLED !== undefined)
     return process.env.MOCODE_FRONTEND_TOOLS_ENABLED === 'true';
   return profileHasGroup(activeProfile, 'frontend');
 }
 
-/** 兼容旧命令(/fe)。 */
+/** /fe 的持久化写入口；官方路径把 false 当硬否决，true 仅允许按需路由。 */
 export function updateFrontendToolsConfig(enabled: boolean): void {
   config.frontendToolsEnabled = enabled;
   process.env.MOCODE_FRONTEND_TOOLS_ENABLED = enabled ? 'true' : 'false';
 }
 
-/** Computer Use 开关:派生查询 = 当前模式含 computer 簇,或被旧 env 显式覆盖。 */
+/** Computer Use 的 legacy 可见性；官方自动路由使用 isComputerUseRouteAllowed()。 */
 export function isComputerUseEnabled(): boolean {
-  if (process.env.MOCODE_COMPUTER_USE_ENABLED !== undefined)
-    return process.env.MOCODE_COMPUTER_USE_ENABLED === 'true';
+  if (process.env.MOCODE_COMPUTER_USE_ENABLED !== undefined) return process.env.MOCODE_COMPUTER_USE_ENABLED === 'true';
   return profileHasGroup(activeProfile, 'computer');
 }
 
-/** 兼容旧命令(/cu)。 */
+/** /cu 的持久化写入口；官方路径把 false 当硬否决，true 仅允许按需路由。 */
 export function updateComputerUseConfig(enabled: boolean): void {
   config.computerUseEnabled = enabled;
   process.env.MOCODE_COMPUTER_USE_ENABLED = enabled ? 'true' : 'false';
@@ -811,9 +781,9 @@ export function updateMcpConfig(enabled: boolean): void {
 }
 
 /**
- * 记忆子系统总开关:单一来源。/memory_switch、/memory_status、buildSystemPrompt、
- * tools/builtins/index.ts、tools/constants.ts 的 plan-mode 列表都从这里查。
- * 默认 false(新用户零侵入)。
+ * Memory Index / 反思开关。它不等于自动路由 gate：官方 ToolPolicy 通过
+ * isMemoryRouteAllowed() 判定 memory-read / memory-write 是否可选；这里决定索引和反思是否启用。
+ * legacy profile fallback 仍保留给未传 ToolPolicy 的嵌入调用。
  */
 export function isMemoryEnabled(): boolean {
   if (process.env.MEMORY_ENABLED !== undefined) return process.env.MEMORY_ENABLED === 'true';
@@ -847,15 +817,9 @@ export function buildCodegraphSection(): string {
 }
 
 /**
- * 切换记忆子系统开关(/memory_switch on|off 调)。
- * - 更新 config 单例字段(其它模块下次调 isMemoryEnabled() 即拿新值)。
- * - 同步 process.env.MEMORY_ENABLED(下次启动 loadEnvFiles 不被文件回填)。
- * 持久化(写 ~/.mocode/config 的 MEMORY_ENABLED 键)由调用方走 writeConfigKeys。
- *
- * 注:开关切换对当前会话的 tool list / 已拼好的 systemPrompt 不会自动重算 —
- * 工具表在 REPL 启动时构建,systemPrompt 在每轮 chat() 拼时按 isMemoryEnabled()
- * 现查现拼(关掉时该轮拼出来的 prompt 即不带 memory_* 段)。所以切换在「下一轮
- * agent 调用」起即时生效,本轮已发出的请求不会回滚。
+ * /memory_switch 的写入口：同步 Memory Index 状态与自动路由 capability gate。
+ * 内置 memory_* 工具始终注册但默认不暴露；当前已发出的 immutable policy snapshot 不变，
+ * 下一真实用户 turn 会按新 gate 重路由并重建系统提示。持久化由调用方写 MEMORY_ENABLED。
  */
 export function updateMemoryConfig(enabled: boolean): void {
   config.memoryEnabled = enabled;

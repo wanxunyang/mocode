@@ -66,15 +66,15 @@ export const MAX_GRAPH_EDGES = 2000;
 // grep/glob 扫它无意义且会产出数 KB 的超长「行」,污染 TUI 展开渲染。
 export const IGNORE = ['**/node_modules/**', '**/.git/**', '**/.codegraph/**'];
 
-// ── 前端 / Computer Use 工具簇(现由统一模式 profile 控制,见 docs/tool-profiles-design.md)──
-// 集合成员与 config/profiles.ts 的 TOOL_GROUPS 对齐;保留导出名以兼容 llm/index.ts 等现有引用。
+// ── legacy profile fallback（官方 TUI/stdio 已由 ToolPolicy 控制）────────────────
+// 保留导出名以兼容未传 ToolPolicy 的嵌入调用与旧测试。
 export const FRONTEND_TOOLS: ReadonlySet<string> = new Set(TOOL_GROUPS.frontend);
 export const COMPUTER_TOOLS: ReadonlySet<string> = new Set(TOOL_GROUPS.computer);
 
 /**
- * 当前模式(profile)应屏蔽的工具名集合 = 全部已知内置工具名 − 当前模式包含的簇。
- * 再按派生开关(isXxxEnabled,含旧 env 显式覆盖)修正各功能簇,保证与系统提示段、
- * banner 等消费方看到的可见性完全一致。
+ * Legacy profile fallback 的屏蔽集合。仅供未传 ToolPolicy 的嵌入调用；官方 TUI/stdio
+ * 从每 turn snapshot 构造 schema 并以同一 allow-list 做运行时校验。旧 env 查询在这里
+ * 仍保留原有 true/false 覆盖语义，避免破坏兼容调用方。
  */
 export function getProfileDisabledTools(): Set<string> {
   const all = new Set<string>(Object.values(TOOL_GROUPS).flat());
@@ -117,10 +117,9 @@ export const PLAN_DISABLED_TOOLS = new Set([
 ]);
 
 /**
- * 按当前 isMemoryEnabled() 现算 plan 模式应屏蔽的工具。
- * memoryEnabled=false 时记忆工具本就不在模型可见集里,plan 屏蔽集里也无须再列 ——
- * 反之留着只是死名字。统一过滤,避免 Set 里残留与已下架工具不一致的概念性冗余。
- * 调用方(agent/core 串行分支、llm/planChatTools)每次 chat 时调本函数拿当前值。
+ * Legacy plan schema 的动态清理：Memory Index 关闭时从旧 profile 屏蔽集删除不存在于该
+ * 兼容 schema 的写工具名。自动路由主路径直接对 ToolPolicy snapshot 与 PLAN_DISABLED_TOOLS
+ * 求交，不使用本函数决定 memory route eligibility。
  */
 export function getPlanDisabledTools(): Set<string> {
   const next = new Set<string>(PLAN_DISABLED_TOOLS);
@@ -132,17 +131,23 @@ export function getPlanDisabledTools(): Set<string> {
   return next;
 }
 
-/**
- * auto/plan 共用的运行时功能开关防线；即使模型幻觉调用也不得执行。
- * 当前模式(profile)不含的工具簇一律屏蔽,再叠加 sub-agent 幂等开关与 skill disallowed。
- */
-export function getRuntimeDisabledTools(): Set<string> {
-  const disabled = getProfileDisabledTools();
-  if (!isSubAgentEnabled()) disabled.add('sub-agent');
-  // inline skill 激活态的 disallowed-tools:即便模型幻觉调用也执行不了(设计 §3.6)。
+/** inline skill 的 disallowed-tools；自动路由 policy 在此基础上继续求交。 */
+export function getSkillRuntimeDisabledTools(): Set<string> {
+  const disabled = new Set<string>();
   const active = getActiveSkill();
   if (active?.disallowed) {
     for (const name of active.disallowed) disabled.add(name);
   }
+  return disabled;
+}
+
+/**
+ * 旧 profile 兼容路径的运行时功能开关防线。自动路由主路径改由 AgentRunOptions.toolPolicy
+ * 提供同源 snapshot；这里只服务尚未迁移的嵌入调用。
+ */
+export function getRuntimeDisabledTools(): Set<string> {
+  const disabled = getProfileDisabledTools();
+  if (!isSubAgentEnabled()) disabled.add('sub-agent');
+  for (const name of getSkillRuntimeDisabledTools()) disabled.add(name);
   return disabled;
 }

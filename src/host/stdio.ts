@@ -6,11 +6,21 @@ import { buildBasePrompt, config } from '../config/index.js';
 import { refreshChatTools, estimateMessagesTokens, type ChatMessage } from '../llm/index.js';
 import { initializeAllMcp, getMcpTools, getMcpWarnings, closeAllMcp } from '../mcp/index.js';
 import { setSandboxRoot } from '../sandbox/index.js';
-import { createContextState, loadSession, newSessionId, saveSession } from '../session/index.js';
+import {
+  appendCurrentSessionTraceEvent,
+  createContextState,
+  loadSession,
+  newSessionId,
+  saveSession,
+} from '../session/index.js';
 import { setCurrentSessionId } from '../session/state.js';
 import { manualCompact } from '../session/scheduler.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
+import { clearSkillActivation } from '../skills/activation.js';
 import { registerToolsExtension } from '../tools/registry.js';
+import { ToolPolicyController } from '../tools/policy.js';
+import { routeToolGroups } from '../tools/router.js';
+import type { ToolRouteGroupName } from '../config/profiles.js';
 // 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),host 入口须显式装配。
 import '../tools/builtins/index.js';
 import type { InterventionRequest, InterventionResult } from '../ui/intervention.js';
@@ -26,6 +36,7 @@ let activeRun: { id: string; controller: AbortController } | null = null;
 let sessionId = '';
 let history: ChatMessage[] = [];
 let queryHistory: string[] = [];
+let lastToolGroups: ToolRouteGroupName[] = [];
 let contextState = createContextState();
 const approvals = new Map<string, ApprovalWaiter>();
 
@@ -67,6 +78,7 @@ function createSession(): void {
   setAgentMode('auto');
   history = [{ role: 'system', content: systemMessage() }];
   queryHistory = [];
+  lastToolGroups = [];
   contextState = createContextState();
 }
 
@@ -80,6 +92,7 @@ function restoreSession(id: string): boolean {
   if (history[0]?.role === 'system') history[0] = { role: 'system', content: systemMessage() };
   else history.unshift({ role: 'system', content: systemMessage() });
   queryHistory = [...(loaded.queryHistory ?? [])];
+  lastToolGroups = [...(loaded.lastToolGroups ?? [])];
   contextState = createContextState();
   return true;
 }
@@ -124,10 +137,13 @@ function hooksFor(runId: string): AgentHooks {
 async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void> {
   if (activeRun) return error('An agent run is already active for this project.', command.id);
   if (!command.prompt.trim()) return;
+  let toolPolicy: ToolPolicyController | undefined;
   try {
     await initializeRuntime();
     const resumed = prepareSession(command.sessionId);
     if (resumed === null) return error(`Session ${command.sessionId} could not be restored.`, command.id);
+    // 每个被接受的 stdio run 都是真实用户 turn；在路由与 Agent 执行前清除上一轮 skill deny。
+    clearSkillActivation();
     const controller = new AbortController();
     activeRun = { id: command.id, controller };
     queryHistory.push(command.prompt);
@@ -152,15 +168,47 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       },
       command.id,
     );
+    const previousGroups = [...lastToolGroups];
+    const decision = await routeToolGroups({
+      input: command.prompt,
+      previousGroups,
+      planMode: false,
+      attachmentNames: command.attachments?.map((attachment) => attachment.name),
+      signal: controller.signal,
+    });
+    toolPolicy = new ToolPolicyController({
+      groups: decision.groups,
+      reason: decision.reason,
+      confidence: decision.confidence,
+    });
+    lastToolGroups = toolPolicy.groupNames;
+    const initialToolRoute = {
+      policyId: toolPolicy.id,
+      groups: toolPolicy.groupNames,
+      previousGroups,
+      inheritPrevious: decision.inheritPrevious,
+      confidence: decision.confidence,
+      reason: decision.reason,
+      latencyMs: decision.latencyMs,
+      fallback: decision.fallback,
+      planMode: false,
+    };
+    emit('tool_route', initialToolRoute, command.id);
+    const turnId = queryHistory.length;
     const result = await runAgentCore({
       history,
       userInput,
       signal: controller.signal,
       hooks: hooksFor(command.id),
       contextState,
+      toolPolicy,
+      initialToolRoute,
+      traceContext: { sessionId, turnId },
+      onTraceEvent: appendCurrentSessionTraceEvent,
       permissionPrompt: (request) => waitForApproval(command.id, request),
     });
-    saveSession(history, sessionId, queryHistory);
+    lastToolGroups = toolPolicy.groupNames;
+    saveSession(history, sessionId, queryHistory, lastToolGroups);
     emit(
       'run_completed',
       {
@@ -178,12 +226,17 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
     );
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
+    if (toolPolicy) lastToolGroups = toolPolicy.groupNames;
     try {
-      if (sessionId) saveSession(history, sessionId, queryHistory);
+      if (sessionId) saveSession(history, sessionId, queryHistory, lastToolGroups);
     } catch {
       /* Preserve the runtime error. */
     }
-    emit('run_failed', { message }, command.id);
+    if (activeRun?.id === command.id && activeRun.controller.signal.aborted) {
+      emit('run_aborted', {}, command.id);
+    } else {
+      emit('run_failed', { message }, command.id);
+    }
   } finally {
     for (const [approvalId, waiter] of approvals) {
       if (waiter.runId === command.id) {
@@ -221,7 +274,7 @@ async function compact(command: Extract<HostCommand, { type: 'compact' }>): Prom
     if (!sessionId) createSession();
     emit('status', { value: 'compacting' }, command.id);
     const log = await manualCompact(history, command.focus, { force: true });
-    saveSession(history, sessionId, queryHistory);
+    saveSession(history, sessionId, queryHistory, lastToolGroups);
     const pct = contextUsagePercent();
     emit(
       'compact_done',

@@ -18,16 +18,12 @@ import {
   type ChatUsage,
   type ToolCallRef,
 } from '../llm/index.js';
-import {
-  executeToolOutcome,
-  findTool,
-  getToolCapabilities,
-  isFileMutationTool,
-  type ToolOutcome,
-} from '../tools/registry.js';
+import { executeToolOutcome, findTool, isFileMutationTool, type ToolOutcome } from '../tools/registry.js';
 import { checkPermission } from '../permissions/index.js';
 import { validateToolArguments } from '../tools/validation.js';
-import { getPlanDisabledTools, getRuntimeDisabledTools } from '../tools/constants.js';
+import { getPlanDisabledTools, getRuntimeDisabledTools, getSkillRuntimeDisabledTools } from '../tools/constants.js';
+import { ADD_TOOL_GROUPS_TOOL_NAME } from '../config/profiles.js';
+import type { ToolPolicyController } from '../tools/policy.js';
 import { defaultAgentRuntimeContext, type AgentRuntimeContext } from './runtime-context.js';
 import {
   parseArgs,
@@ -41,9 +37,9 @@ import {
 } from './tool-helpers.js';
 import { maybeCompact, contextState, summarizeToolArguments } from '../session/index.js';
 import { TurnTraceState } from './trace-state.js';
-import { capToolResultForHistory, type ContextState } from '../session/compact.js';
+import type { ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
-import { recordArtifact, invalidateArtifacts, rehydrateArtifacts } from '../context/index.js';
+import { invalidateArtifacts, rehydrateArtifacts } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
 import { t } from '../i18n/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
@@ -139,9 +135,19 @@ export interface AgentRunOptions {
   hooks: AgentHooks;
   /** 步数上限;缺省 = config.maxSteps。子 agent 可传更低值。 */
   maxSteps?: number;
-  /** 工具 schema 覆盖;plan 模式传 planChatTools(只读子集)。子 agent 可传受限子集。
-   *  缺省 = 按 getAgentMode() 自动选(auto=全量 / plan=只读)。 */
+  /** 工具 schema 覆盖。子 agent 可传受限子集；未传时由 toolPolicy 或旧模式工具表提供。 */
   toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[];
+  /**
+   * 当前用户 turn 独享的版本化工具策略。每个模型 step 捕获不可变 snapshot；执行中扩容
+   * 只影响下一 step，确保发送给模型的 schema 与运行时 backstop 始终同源。
+   */
+  toolPolicy?: ToolPolicyController;
+  /** Host 侧本轮初始路由决策；core 用自己的 session/turn id 写入统一 trace。 */
+  initialToolRoute?: Record<string, unknown>;
+  /**
+   * 父 Agent 授予的工具上限。子 Agent/skill 只能与自己的 schema 求交，不能借由全局工具表扩权。
+   */
+  runtimeAllowedToolNames?: ReadonlySet<string>;
   /** 本 agent 独享的上下文统计状态；缺省为主 agent 全局 contextState。 */
   contextState?: ContextState;
   /**
@@ -238,6 +244,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
     ids: Partial<Pick<AgentTraceEvent, 'step' | 'stepId' | 'toolCallId' | 'providerToolCallId'>> = {},
   ): void => traceState.emit(type, data, ids);
   emitTrace('turn_start', { mode: ctx.getAgentMode() });
+  if (opts.initialToolRoute) emitTrace('tool_route', opts.initialToolRoute);
   let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
   let traceStatus: AgentTurnTrace['status'] = 'error';
   // A+B(plan 可靠性):跨步计数"执行了工具但没改动 notes.md"的连续步数。
@@ -305,8 +312,29 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
           traceStatus = 'aborted';
           return traceState.buildAbortedResult(ctx.getCurrentTurnMutationState());
         }
-        // 本步只计算一次实际工具集合，调度、请求和 usage 校准必须使用完全相同的 schema。
-        const activeTools = opts.toolsOverride ?? (ctx.getAgentMode() === 'plan' ? planChatTools : chatTools);
+        // 本步只捕获一次不可变 policy snapshot。即便 add_tool_groups 在执行阶段扩容，
+        // 本次模型响应仍必须按旧 snapshot 校验；新工具只在下一 step 的 schema 中出现。
+        const planMode = ctx.getAgentMode() === 'plan';
+        const policySnapshot = opts.toolPolicy?.snapshot(planMode);
+        const configuredTools = opts.toolsOverride ?? policySnapshot?.tools ?? (planMode ? planChatTools : chatTools);
+        const policyAllowedTools = opts.runtimeAllowedToolNames
+          ? configuredTools.filter((tool) => opts.runtimeAllowedToolNames?.has(tool.function.name))
+          : configuredTools;
+        const skillDisabledTools = getSkillRuntimeDisabledTools();
+        const legacyDisabledTools =
+          opts.toolPolicy || opts.runtimeAllowedToolNames ? new Set<string>() : getRuntimeDisabledTools();
+        // schema、runtime backstop 与后代权限都从同一 effective allow-list 派生。
+        // policy snapshot 是本 step 的不可扩张上限；skill deny 可在同批 use_skill 后继续动态收窄。
+        const activeTools = policyAllowedTools.filter(
+          (tool) => !skillDisabledTools.has(tool.function.name) && !legacyDisabledTools.has(tool.function.name),
+        );
+        const stepAllowedNames = new Set(activeTools.map((tool) => tool.function.name));
+        const currentAllowedToolNames = (): string[] => {
+          const currentSkillDisabledTools = getSkillRuntimeDisabledTools();
+          return [...stepAllowedNames].filter((name) => !currentSkillDisabledTools.has(name));
+        };
+        const isToolDeniedForStep = (name: string): boolean =>
+          !stepAllowedNames.has(name) || getSkillRuntimeDisabledTools().has(name);
         const requestBaseURL = ctx.config.baseURL;
         const requestModel = ctx.getActiveModel();
         const storedCalibration = ctx.getTokenCalibration(requestBaseURL, requestModel, activeTools);
@@ -415,6 +443,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         // 不计,让 bar 用会让两条线再错开几百 token。
         const buildRequestHistory = (): ChatMessage[] => {
           const ephemeralReminder = [
+            opts.toolPolicy?.reminder(planMode) ?? '',
             !opts.suppressOpeningAnalysis && step === 0
               ? '## Opening analysis\nBegin your FIRST response of this turn with a brief analysis of the request and your planned approach (1-3 sentences, no filler), THEN start tool calls. This opening is the only place where pre-tool prose is expected; after it, work quietly with no narration between tool calls.'
               : '',
@@ -670,10 +699,114 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               },
             );
           };
-          let i = 0;
+          const hasToolRouteBarrier = calls.some((tc) => tc.name === ADD_TOOL_GROUPS_TOOL_NAME);
+          if (hasToolRouteBarrier) {
+            const mixedCall = calls.length !== 1;
+            for (let index = 0; index < calls.length; index++) {
+              const tc = calls[index];
+              hooks.onToolHeader?.(tc);
+              const parsed = parseArgs(tc.arguments);
+              let outcome: ToolOutcome;
+
+              if (mixedCall) {
+                const isControl = tc.name === ADD_TOOL_GROUPS_TOOL_NAME;
+                outcome = {
+                  status: 'denied',
+                  code: isControl ? 'INVALID_ARGUMENTS' : 'TOOL_DISABLED',
+                  retryable: false,
+                  output: isControl
+                    ? '错误:add_tool_groups 必须在一个独立的 model step 中单独调用；本次没有扩容。'
+                    : `错误:同一响应包含 add_tool_groups，工具 ${tc.name} 未执行。请等待扩容结果后在下一 step 重试。`,
+                  changedFiles: [],
+                  durationMs: 0,
+                };
+              } else if (isToolDeniedForStep(tc.name)) {
+                outcome = {
+                  status: 'denied',
+                  code: 'TOOL_DISABLED',
+                  retryable: false,
+                  output: `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`,
+                  changedFiles: [],
+                  durationMs: 0,
+                };
+              } else if (!opts.toolPolicy) {
+                outcome = {
+                  status: 'denied',
+                  code: 'TOOL_DISABLED',
+                  retryable: false,
+                  output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
+                  changedFiles: [],
+                  durationMs: 0,
+                };
+              } else if (
+                !parsed ||
+                !Array.isArray(parsed.groups) ||
+                parsed.groups.length === 0 ||
+                typeof parsed.reason !== 'string' ||
+                !parsed.reason.trim()
+              ) {
+                outcome = {
+                  status: 'error',
+                  code: 'INVALID_ARGUMENTS',
+                  retryable: false,
+                  output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
+                  changedFiles: [],
+                  durationMs: 0,
+                };
+              } else {
+                const expansion = opts.toolPolicy.expand(parsed.groups, parsed.reason);
+                const succeeded = expansion.added.length > 0;
+                const details = [
+                  succeeded
+                    ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
+                    : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
+                  expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
+                  succeeded ? 'The added tool schemas become available on the next model step.' : '',
+                ]
+                  .filter(Boolean)
+                  .join('\n');
+                outcome = {
+                  status: succeeded ? 'success' : 'error',
+                  code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
+                  retryable: false,
+                  output: details,
+                  changedFiles: [],
+                  durationMs: 0,
+                };
+                emitTrace('tool_route_expand', {
+                  policyId: expansion.snapshot.id,
+                  fromVersion: policySnapshot?.version,
+                  toVersion: expansion.snapshot.version,
+                  requestedGroups: parsed.groups.map(String),
+                  addedGroups: expansion.added,
+                  rejected: expansion.rejected,
+                  reason: parsed.reason,
+                  status: outcome.status,
+                });
+              }
+
+              opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
+              hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+              pushToolResult(
+                history,
+                tc,
+                outcome.output,
+                relprune,
+                lifecycle,
+                scheduler,
+                runtimeContextState,
+                outcome.status === 'success',
+              );
+              traceToolEnd(tc, index, outcome);
+            }
+          }
+
+          // add_tool_groups 是 step 屏障：只要本响应出现该控制调用，本批所有普通工具都不执行。
+          // 但上面仍为每个 provider tool_call 写入了配对 tool_result，保持 OpenAI 协议完整。
+          let i = hasToolRouteBarrier ? calls.length : 0;
           while (i < calls.length) {
             const currentCall = calls[i];
-            if (getRuntimeDisabledTools().has(currentCall.name)) {
+            if (isToolDeniedForStep(currentCall.name)) {
               hooks.onToolHeader?.(currentCall);
               const error = t('task.disabled');
               const outcome: ToolOutcome = {
@@ -697,11 +830,16 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               // 已经完成；若先 started.map，用户只能在工具完成后才看到摘要与其前面的换行。
               // 异步工具(web_fetch 等)并发跑、总耗时 ≈ 最慢一个;同步工具(glob/grep)map 时已顺序跑完,await 即返。
               let j = i;
-              while (j < calls.length && isParallelTool(calls[j].name)) j++;
+              while (j < calls.length && isParallelTool(calls[j].name) && !isToolDeniedForStep(calls[j].name)) j++;
               const batch = calls.slice(i, j);
               for (const tc of batch) hooks.onToolHeader?.(tc);
               hooks.onToolStart?.(batch[0].name);
-              const started = batch.map((tc) => executeToolOutcome(tc.name, tc.arguments, signal, { callId: tc.id }));
+              const started = batch.map((tc) =>
+                executeToolOutcome(tc.name, tc.arguments, signal, {
+                  callId: tc.id,
+                  allowedToolNames: currentAllowedToolNames(),
+                }),
+              );
               for (let k = 0; k < batch.length; k++) {
                 const tc = batch[k];
                 const outcome = await started[k];
@@ -745,7 +883,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               while (
                 j < calls.length &&
                 isResourceLockedCall(calls[j]) &&
-                !getRuntimeDisabledTools().has(calls[j].name) &&
+                !isToolDeniedForStep(calls[j].name) &&
                 !(ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(calls[j].name))
               )
                 j++;
@@ -798,6 +936,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
                 const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
                 return executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
                   callId: entry.tc.id,
+                  allowedToolNames: currentAllowedToolNames(),
                   ...(hint ? { argumentErrorHint: hint } : {}),
                   onLockAcquired: (lockedArgs) => {
                     entry.diff = readDiffContext(entry.tc, lockedArgs);
@@ -910,6 +1049,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               const serialHint = argumentErrorHint(tc.name, runtimeContextState);
               const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, {
                 callId: tc.id,
+                allowedToolNames: currentAllowedToolNames(),
                 ...(serialHint ? { argumentErrorHint: serialHint } : {}),
                 onLockAcquired: (lockedArgs) => {
                   if (mutationParsed) diff = readDiffContext(tc, lockedArgs);

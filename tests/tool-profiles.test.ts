@@ -1,12 +1,7 @@
 /**
- * 统一工具模式(profile)单测(docs/tool-profiles-design.md):
- * - profiles.ts 纯函数:5 个预置模式的工具簇组成、getProfileToolNames、isProfileName;
- * - config 派生开关:isMemoryEnabled/isComputerUseEnabled/isFrontendToolsEnabled/isSubAgentEnabled
- *   随 setActiveProfile 变化;旧 env 显式设置时覆盖模式推导;
- * - constants:getProfileDisabledTools / getRuntimeDisabledTools / getPlanDisabledTools;
- * - llm refreshChatTools:切模式后 chatTools / planChatTools 名单正确。
- *
- * 派生查询运行时读 process.env,测试里显式清理/恢复相关 env 保证确定性。
+ * Legacy 静态 profile 兼容层测试：官方 TUI/stdio 已改为 per-turn ToolPolicy；这里仅锁定
+ * 未迁移嵌入调用仍依赖的 profile/env fallback，并确保用户命令树不再暴露 /profile。
+ * 自动路由主路径见 tool-policy.test.ts 与 tool-router.test.ts。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -28,6 +23,7 @@ import {
 import { getProfileDisabledTools, getPlanDisabledTools, getRuntimeDisabledTools } from '../src/tools/constants.js';
 import '../src/tools/builtins/index.js';
 import { refreshChatTools, chatTools, planChatTools } from '../src/llm/index.js';
+import { buildSlashCommands, knownCommandNames } from '../src/repl/commands.js';
 
 const OVERRIDE_ENVS = [
   'MEMORY_ENABLED',
@@ -218,4 +214,9 @@ test('refreshChatTools: 按当前 profile 过滤模型可见工具;plan 再叠 p
   } finally {
     restore();
   }
+});
+
+test('/profile 不再出现在 slash menu 或命令纠错候选中', () => {
+  assert.ok(!buildSlashCommands().some((command) => command.name === '/profile'));
+  assert.ok(!knownCommandNames().includes('/profile'));
 });

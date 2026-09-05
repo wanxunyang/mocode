@@ -24,7 +24,7 @@ import { registerToolsExtension } from '../tools/registry.js';
 // 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),REPL 入口须显式装配。
 import '../tools/builtins/index.js';
 import { initializeAllMcp, getMcpTools, closeAllMcp } from '../mcp/index.js';
-import { refreshChatTools, chatTools, classifyChatError, type ChatMessage, type ChatUsage } from '../llm/index.js';
+import { refreshChatTools, classifyChatError, type ChatMessage, type ChatUsage } from '../llm/index.js';
 import { renderChip, type ImageAttachment } from '../attachments/image.js';
 import type { ContentPart } from '../agent/core.js';
 import {
@@ -56,6 +56,9 @@ import {
 } from '../memory/index.js';
 import { setCurrentSessionId } from '../session/state.js';
 import { collectQueryHistory } from '../session/query-history.js';
+import { ToolPolicyController } from '../tools/policy.js';
+import { routeToolGroups } from '../tools/router.js';
+import type { ToolRouteGroupName } from '../config/profiles.js';
 
 // ── 已拆分的子模块 ──
 import { PROMPT, buildSlashCommands, LLM_ERROR_HINT_KEYS, isCommandShape, suggestCommand } from './commands.js';
@@ -108,7 +111,7 @@ function recallWindowMs(input: string[]): number {
   return Number.isFinite(env) && env >= 0 ? env : PENDING_RECALL_LONG_MS;
 }
 let pendingTimer: NodeJS.Timeout | null = null;
-// agent 模式状态已提到 src/agent/mode.ts(共享叶子:switch_mode 工具可写、agent 每步读、repl 注册 onModeChange 监听器)。
+// agent 模式状态已提到 src/agent/mode.ts（共享叶子；仅用户面可切换，agent 每步读取）。
 
 /** 多模态 user 输入的附件状态。pending = 本轮尚未提交的待发图片;messageAttachments = 已 push 进 history 的图片元数据
  *  (供 renderHistory 复显文件名——base64 不可逆地塞进 history 后,只能从侧 channel 拿原文件名)。
@@ -217,6 +220,7 @@ export async function startRepl(
   sessionId?: string,
   sandboxRootOverride?: string,
   initialQueryHistory?: readonly string[],
+  initialLastToolGroups?: readonly ToolRouteGroupName[],
 ): Promise<void> {
   // 模式重置:agentMode 不落盘,每个 REPL 会话从 auto 开始(/resume / --resume 亦重置)。
   setAgentMode('auto');
@@ -253,6 +257,8 @@ export async function startRepl(
     initialHistory && initialHistory.length ? initialHistory : [{ role: 'system', content: buildSystemMessage(false) }];
   // 新 session 使用独立输入历史；旧 session 没有该字段时从 user 消息兼容回填一次。
   let queryHistory: string[] = initialQueryHistory ? [...initialQueryHistory] : queryHistoryFromMessages(history);
+  /** 上一真实用户 turn 的最终工具簇；仅作为下一次 LLM 路由失败/续接时的回退。 */
+  let lastToolGroups: ToolRouteGroupName[] = [...(initialLastToolGroups ?? [])];
   if (initialHistory && initialHistory.length && history[0]?.role === 'system') {
     history[0] = { role: 'system', content: buildSystemMessage(false) };
   }
@@ -269,7 +275,10 @@ export async function startRepl(
     model: config.model,
     baseURL: config.baseURL,
     cwd: process.cwd(),
-    tools: chatTools.map((tool) => tool.function.name).join(' · '),
+    tools: new ToolPolicyController({ groups: lastToolGroups, maxExpansions: 0 })
+      .snapshot(getAgentMode() === 'plan')
+      .tools.map((tool) => tool.function.name)
+      .join(' · '),
     memoryEnabled: isMemoryEnabled(),
   });
 
@@ -378,9 +387,9 @@ export async function startRepl(
     // Shift+Tab 只有 chip 变化,新手可能没感知:内容区补一行确认(与 /plan / /auto 同文案,复用不新造键)。
     layout.contentWrite(`${ui.dim}${t(prev === 'plan' ? 'repl.autoChanged' : 'repl.planChanged')}${ui.reset}\n`);
   };
-  // 注册模式变更监听器:switch_mode 工具 / cycleMode / /plan / /auto / runTurn 调 setAgentMode 时同步触发,
-  // 重写 history[0] 系统提示(切 plan 追加 PLAN_MODE_SUFFIX)+ 刷状态行 modeTag。
-  // 不调 drawStatusBar:INPUT 态靠 prompt.ts redraw 画 chip;RUNNING 态(switch_mode 中途切)靠 200ms turnTimer 兜底。
+  // 注册模式变更监听器：cycleMode、/plan、/auto 与 runTurn 调 setAgentMode 时同步触发，
+  // 重写 history[0] 系统提示（切 plan 追加 PLAN_MODE_SUFFIX）并刷新状态行 modeTag。
+  // 不调 drawStatusBar：INPUT 态由 prompt.ts redraw 画 chip，RUNNING 态由 200ms turnTimer 兜底。
   onModeChange((m) => {
     applyMode(m === 'plan');
     refreshStatusBase(history);
@@ -444,6 +453,8 @@ export async function startRepl(
     const rolledBackFromTurnId = getCurrentTurnId();
     const turnCountBeforeRollback = listTurns().length;
     const rollbackResult = applyRollback(plan, history, revertPaths);
+    // 被撤销轮次的最终 route 无法再作为可靠 continuation 基线；下一真实 turn 重新由 LLM 选择。
+    lastToolGroups = [];
     if (!currentSessionId) currentSessionId = newSessionId();
     setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
     appendCurrentSessionRuntimeEvent(
@@ -497,7 +508,12 @@ export async function startRepl(
    * 无图时保持 string(向后兼容,且 messageTokens 走 estimateTokens 不走 IMAGE_TOKEN_COST)。
    * side channel 记录本轮 msg 在 history 的 index → attachments,供 renderHistory 复显文件名。
    */
-  const runTurn = async (input: string, planMode: boolean, placeholder: string): Promise<boolean> => {
+  const runTurn = async (
+    input: string,
+    planMode: boolean,
+    placeholder: string,
+    inheritedToolPolicy?: ToolPolicyController,
+  ): Promise<{ ok: boolean; toolPolicy?: ToolPolicyController }> => {
     const imgs = pendingAttachments;
     pendingAttachments = []; // 入口即清,即使后续抛错也不留陈旧附件
     const userInput: string | ContentPart[] =
@@ -517,19 +533,60 @@ export async function startRepl(
     const msgIndex = history.length; // runAgent push 后 = 这个 index
     if (imgs.length) messageAttachments.set(msgIndex, imgs);
     let ok = false;
+    let signal: AbortSignal | undefined;
+    let toolPolicy = inheritedToolPolicy;
+    let initialToolRoute: Record<string, unknown> | undefined;
     try {
-      const signal = startRunningListener(placeholder);
-      // 入口设定本轮初始模式(合成执行轮传 false→auto;用户轮传当前 mode)。
-      // setAgentMode 触发 listener 重写 history[0];LLM 可在轮中调 switch_mode 切模式,runAgent 每步读实时值。
+      signal = startRunningListener(placeholder);
+      // 入口设定本轮初始模式（合成执行轮传 false→auto；用户轮传当前 mode）。
+      // setAgentMode 触发 listener 重写 history[0]；模式只由用户面切换，runAgent 每步读取当前值。
       setAgentMode(planMode ? 'plan' : 'auto');
-      // 新用户轮开始:清除上一轮 inline skill 的激活态(允许/disallowed 约束一 turn 有效)。
-      clearSkillActivation();
+      // 仅真实用户轮清除上一轮 inline skill 激活态。plan 审批后的合成执行轮继承
+      // 同一 controller 与 skill deny，避免审批边界意外扩权。
+      if (!inheritedToolPolicy) clearSkillActivation();
+      // 每个真实用户 turn 强制由轻量 LLM 选择最小工具簇。plan 审批后的合成执行轮
+      // 传 inheritedToolPolicy，复用同一个 controller/version，不做第二次路由。
+      if (!toolPolicy) {
+        const previousGroups = [...lastToolGroups];
+        const decision = await routeToolGroups({
+          input,
+          previousGroups,
+          planMode,
+          attachmentNames: imgs.map((image) => image.name),
+          signal,
+        });
+        toolPolicy = new ToolPolicyController({
+          groups: decision.groups,
+          reason: decision.reason,
+          confidence: decision.confidence,
+        });
+        lastToolGroups = toolPolicy.groupNames;
+        initialToolRoute = {
+          policyId: toolPolicy.id,
+          groups: toolPolicy.groupNames,
+          previousGroups,
+          inheritPrevious: decision.inheritPrevious,
+          confidence: decision.confidence,
+          reason: decision.reason,
+          latencyMs: decision.latencyMs,
+          fallback: decision.fallback,
+          planMode,
+        };
+      }
       // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
       // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
-      const result = await runAgent(history, userInput, signal, () => {
-        refreshStatusBase(history);
-        layout.drawStatusBar();
-      });
+      const result = await runAgent(
+        history,
+        userInput,
+        signal,
+        () => {
+          refreshStatusBase(history);
+          layout.drawStatusBar();
+        },
+        toolPolicy,
+        initialToolRoute,
+      );
+      if (toolPolicy) lastToolGroups = toolPolicy.groupNames;
       // 本轮 token 累计(底栏模式 chip 右边显示)。undefined = 后端不开 include_usage。
       // 状态栏统一在 finally 刷新，确保正常、中断、异常都经过同一 plan 收尾路径。
       lastTurnUsage = result.usage;
@@ -538,7 +595,7 @@ export async function startRepl(
       if (!currentSessionId) currentSessionId = newSessionId();
       setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
       try {
-        saveSession(history, currentSessionId, queryHistory);
+        saveSession(history, currentSessionId, queryHistory, lastToolGroups);
       } catch {
         // 落盘失败不阻断 REPL
       }
@@ -551,11 +608,12 @@ export async function startRepl(
       }
     } catch (e) {
       ok = false;
+      if (toolPolicy) lastToolGroups = toolPolicy.groupNames;
       // 请求失败也保存已确认提交的 query，确保立即退出后仍可通过 ↑ 或 resume 找回。
       if (!currentSessionId) currentSessionId = newSessionId();
       setCurrentSessionId(currentSessionId, process.cwd());
       try {
-        saveSession(history, currentSessionId, queryHistory);
+        saveSession(history, currentSessionId, queryHistory, lastToolGroups);
       } catch {
         // 落盘失败不覆盖原始请求错误
       }
@@ -609,7 +667,7 @@ export async function startRepl(
       layout.drawStatusBar();
     }
     layout.contentWrite('\n'); // 轮次之间空行
-    return ok;
+    return { ok, toolPolicy };
   };
 
   /** 把 picker 选中的会话加载进 REPL(刷 history + 重建 snapshots + 重画)。/resume / /sessions 共用。 */
@@ -629,6 +687,7 @@ export async function startRepl(
     history.length = 0;
     history.push(...loaded.history);
     queryHistory = loaded.queryHistory ? [...loaded.queryHistory] : queryHistoryFromMessages(loaded.history);
+    lastToolGroups = [...(loaded.lastToolGroups ?? [])];
     setAgentMode('auto'); // 续接重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
     // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
     if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
@@ -745,6 +804,12 @@ export async function startRepl(
           set queryHistory(v) {
             queryHistory = v;
           },
+          get lastToolGroups() {
+            return lastToolGroups;
+          },
+          set lastToolGroups(v) {
+            lastToolGroups = v;
+          },
         },
         attachments: {
           list: () => pendingAttachments,
@@ -813,11 +878,11 @@ export async function startRepl(
     // 只记录已过撤回窗口的真实用户 query；slash 命令和合成执行轮不会走到这里。
     queryHistory.push(joined);
     const initialPlan = getAgentMode() === 'plan'; // 轮首模式(在 runTurn 之前读)
-    const ok = await runTurn(joined, initialPlan, placeholder);
+    const turn = await runTurn(joined, initialPlan, placeholder);
     // plan 轮正常结束(未中断 / 未抛错)→ 看轮末模式决定:
     //  - 仍 plan:模型只产计划就 STOP(模型已无 switch_mode 工具)→ 弹审批面板(原行为)。
     //  - 已 auto:本轮被切到 auto 模式(用户用 /auto 触发的合成执行轮)→ 跳过审批,不重复打扰。
-    if (initialPlan && ok && getAgentMode() === 'plan') {
+    if (initialPlan && turn.ok && getAgentMode() === 'plan') {
       // 桌宠:计划审批面板弹出期间广播 waiting_human(红灯闪烁);面板不在 runAgent/hooks 体系内,
       // 需在此单独广播——用户响应后由下一次 /pet 状态事件(或 idle 兜底)覆盖。
       sendState('waiting_human');
@@ -832,7 +897,7 @@ export async function startRepl(
       if (res.action === 'selected' && res.value === executePlanOption) {
         // setAgentMode('auto') 由 runTurn 入口做(listener 重写 history[0] 回 auto);这里只切运行态 + 合成执行轮。
         layout.enterRunningMode(t('plan.running'), t('plan.executing'));
-        await runTurn(t('plan.executePrompt'), false, t('plan.executing'));
+        await runTurn(t('plan.executePrompt'), false, t('plan.executing'), turn.toolPolicy);
       }
     }
   }

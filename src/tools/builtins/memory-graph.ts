@@ -21,6 +21,7 @@ function fmtEntities(entities: { id: string; name: string; summary: string; scop
 
 export const memoryGraphTool: Tool = {
   name: 'memory_graph',
+  risk: 'confirm',
   description:
     'Maintain/explore the knowledge-graph memory layer (entities + temporal triples). Keyword search lives in memory_search. ' +
     'action=neighbors: BFS 1-3 hops around an entity (optional relation filter to follow one edge type); ' +
