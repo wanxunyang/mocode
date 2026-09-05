@@ -16,21 +16,6 @@ import { spawnAgent, type SpawnResult } from '../agent/spawn.js';
 import { runCommandRaw } from '../tools/builtins/run-command.js';
 import type { Skill } from './discover.js';
 import type { ToolOutcome, ToolContext } from '../tools/types.js';
-import type { ChangeSet, ChangeSetSummary } from '../changeset/types.js';
-
-/** 把 raw ChangeSet 折成 ToolOutcome 需要的 ChangeSetSummary(哈希缺失位填 null,仅用于展示)。 */
-function toChangeSetSummary(cs: ChangeSet): ChangeSetSummary {
-  return {
-    id: cs.id,
-    changedFiles: cs.changes.map((c) => c.path),
-    changes: cs.changes.map((c) => ({
-      path: c.path,
-      operation: c.operation,
-      beforeHash: null,
-      afterHash: null,
-    })),
-  };
-}
 
 const MAX_INJECTIONS = 4;
 const MAX_INJECTION_OUTPUT = 4096;
@@ -126,7 +111,8 @@ export async function renderSkillBody(
   return body;
 }
 
-/** 把 SpawnResult 转成 ToolOutcome,汇总/计费/变更集透传,不丢回滚信息。 */
+/** 把 SpawnResult 转成 ToolOutcome。子 agent 与主 agent 同权、直接写工作区,其文件修改已由
+ *  主 agent 当前轮次的回滚事务追踪,因此这里不再需要单独透传变更集。 */
 function toOutcome(res: SpawnResult): ToolOutcome {
   const status: ToolOutcome['status'] =
     res.status === 'completed' ? 'success' : res.status === 'aborted' ? 'aborted' : 'error';
@@ -135,7 +121,6 @@ function toOutcome(res: SpawnResult): ToolOutcome {
     code: res.status === 'completed' ? 'OK' : res.status === 'aborted' ? 'ABORTED' : 'EXECUTION_ERROR',
     retryable: false,
     output: res.summary ?? (res.status === 'failed' ? '(skill failed with no output)' : ''),
-    changeSet: res.changeSet ? toChangeSetSummary(res.changeSet) : undefined,
     usage: res.usage,
   };
 }
@@ -161,26 +146,14 @@ export function readSkillFile(skill: Skill, file: string, maxBytes: number): str
   }
 }
 
-/** 能产生副作用的 mocode 工具;用于在未显式声明 agent: 时推断 fork 子 agent 的模式。 */
-const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'run_command']);
-
 /**
- * fork 子 agent 模式:`agent:` 显式声明优先;否则按工具面推断——
- * 未声明 allowed-tools（继承父 snapshot 的可用工具）或白名单含写工具 → 'write'，
- * 纯只读白名单 → 'read'。避免写类 skill 因缺省字段被静默降级为只读。
- */
-export function resolveSpawnMode(skill: Skill, tools: string[] | null): 'read' | 'write' {
-  if (skill.agentMode) return skill.agentMode;
-  if (tools === null || tools.some((t) => WRITE_TOOLS.has(t))) return 'write';
-  return 'read';
-}
-
-/**
- * 执行一个 skill(无论 inline 还是 fork 都走隔离子 agent,保证「可执行」语义统一):
+ * 执行一个 skill(无论 inline 还是 fork 都走子 agent,保证「可执行」语义统一):
  *  - 找不到 → UNKNOWN_TOOL 语义 error
  *  - 执行面门禁(ensureSkillTrust)未过 → denied
- *  - 渲染正文 → spawnAgent(白名单工具 / mode / maxSteps / signal)
+ *  - 渲染正文 → spawnAgent(白名单工具 / maxSteps / signal)
  *  - 子 agent 摘要回灌为 output,usage / changeSet 透传
+ *
+ * fork 子 agent 与主 agent 同源同权,只有 allowed-tools 是 skill 作者声明的特化收缩。
  */
 export async function runSkill(a: RunSkillArgs, ctx?: ToolContext): Promise<ToolOutcome> {
   const name = String(a.name ?? '').trim();
@@ -211,7 +184,6 @@ export async function runSkill(a: RunSkillArgs, ctx?: ToolContext): Promise<Tool
   const res = await spawnAgent({
     prompt: SKILL_PROTOCOL_HEADER + '\n\n' + body,
     tools: tools ?? undefined,
-    mode: resolveSpawnMode(skill, tools),
     maxSteps: skill.maxSteps,
     signal: ctx?.signal,
     context: a.context,
@@ -219,6 +191,7 @@ export async function runSkill(a: RunSkillArgs, ctx?: ToolContext): Promise<Tool
     quiet: true, // fork skill 是 opaque workflow,不产可展开 batch
     quietLabel: `执行 ${skill.name}…`,
     parentAllowedToolNames: ctx?.allowedToolNames,
+    delegation: ctx?.delegation,
   });
   return toOutcome(res);
 }

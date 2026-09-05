@@ -13,7 +13,6 @@ import { builtinSkillNames } from './builtin-skills.js';
 
 export type SkillOrigin = 'builtin' | 'user' | 'project';
 export type SkillContext = 'inline' | 'fork';
-export type SkillAgentMode = 'read' | 'write';
 
 export interface Skill {
   name: string;
@@ -27,8 +26,7 @@ export interface Skill {
   // ── 执行面 / 封装控制(开放标准字段;缺省保守)──
   /** `context: fork` 或兼容别名 `mode: fork` → 'fork';其余 'inline'。 */
   context: SkillContext;
-  /** `agent:` 映射到 mocode 的 read/write 双态;缺省 undefined(运行期按 read/write 默认)。 */
-  agentMode?: SkillAgentMode;
+
   /** 归一化后的工具名列表(数组 / 方括号 / 空格分隔串统一于此)。 */
   allowedTools?: string[];
   /** 禁用工具名列表(语义同 allowed-tools 的对立面)。 */
@@ -134,21 +132,12 @@ function resolveContext(meta: Record<string, FrontmatterValue>): SkillContext {
   return 'inline';
 }
 
-/** `agent:` 映射到 mocode 的 read/write 双态;未知值记 warning 并保守按 read。 */
-function resolveAgentMode(meta: Record<string, FrontmatterValue>, warnings: string[]): SkillAgentMode | undefined {
-  const a = scalar(meta, 'agent');
-  if (!a) return undefined;
-  const low = a.toLowerCase();
-  if (['explore', 'plan', 'research', 'read'].includes(low)) return 'read';
-  if (['general-purpose', 'write'].includes(low)) return 'write';
-  warnings.push(`未知 agent 值 "${a}",按 read(只读,保守)处理`);
-  return 'read';
-}
-
-/** 收集本轮不支持、已忽略的字段,用于 /skills 提示(不阻断加载)。 */
+/** 收集本轮不支持、已忽略的字段,用于 /skills 提示(不阻断加载)。
+ *  `agent:` 曾在旧 read/write 双模式下决定子 agent 工具面;子 agent 现与主 agent 同权,
+ *  该字段不再产生任何效果,按"已忽略"提示作者,避免其误以为仍有限权语义。 */
 function collectWarnings(meta: Record<string, FrontmatterValue>): string[] {
   const warnings: string[] = [];
-  for (const k of ['hooks', 'model', 'effort', 'paths']) {
+  for (const k of ['hooks', 'model', 'effort', 'paths', 'agent']) {
     if (k in meta) warnings.push(`字段 "${k}" 当前不支持,已忽略`);
   }
   return warnings;
@@ -293,7 +282,6 @@ export function discoverSkills(): Skill[] {
           skillMdPath,
           // body 留空:用户/项目 skill 由 getSkillBody 走文件读取(保留热重载语义)。
           context: resolveContext(meta),
-          agentMode: resolveAgentMode(meta, warnings),
           allowedTools: asArray(meta, 'allowed-tools'),
           disallowedTools: asArray(meta, 'disallowed-tools'),
           modelInvocable: !truthy(meta, 'disable-model-invocation'),

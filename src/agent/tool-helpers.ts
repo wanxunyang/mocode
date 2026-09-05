@@ -67,11 +67,9 @@ export function isResourceLockedTool(name: string): boolean {
 }
 
 export function isResourceLockedCall(call: ToolCallRef): boolean {
-  if (!isResourceLockedTool(call.name)) return false;
-  if (call.name !== 'sub-agent') return true;
-  const args = parseArgs(call.arguments);
-  // Unknown write sets stay on the serial path. Read tasks and known disjoint write sets may batch.
-  return args?.mode !== 'write' || (Array.isArray(args.writeSet) && args.writeSet.length > 0);
+  // sub-agent 是长时全域操作(嵌套 agent 与主 agent 同权,可写任意文件/跑任意命令),
+  // 不进 mutation 并发批:逐个串行执行,避免两个子 agent 同时改工作区。
+  return call.name !== 'sub-agent' && isResourceLockedTool(call.name);
 }
 
 /** 权限拒绝时的结构化 ToolOutcome(供调度器统一回灌,不抛错中断循环)。 */

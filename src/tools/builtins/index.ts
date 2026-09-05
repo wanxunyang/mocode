@@ -77,16 +77,12 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   // computer 桌面操控:桌面状态全局唯一,任何两个 computer 调用都不允许并发;
   // effect=process(不写工作区文件,不触发 rollback/diff 追踪),supportsAbort 中断长 wait/拖拽。
   computer: { effect: 'process', concurrency: 'serial', resources: () => ['desktop'], supportsAbort: true },
-  // sub-agent 动态协调：只读任务无锁并行；写任务在 overlay 中执行，merge 时由 ChangeSet 持 canonical lock。
+  // sub-agent 与主 agent 同权,直接写工作区(无 overlay)。编排器本身不持锁——锁由嵌套工具
+  // 各自获取,否则子 agent 内的 run_command 会等父持有的 workspace 锁而自锁。
+  // 并发批排除见 tool-helpers.isResourceLockedCall:多个子 agent 逐个串行,不同时改工作区。
   'sub-agent': {
     effect: 'write',
     concurrency: 'resource-locked',
-    resources: (args) =>
-      args.mode === 'write' && Array.isArray(args.writeSet) && args.writeSet.length
-        ? args.writeSet.map((item) => `file:${String(item)}`)
-        : args.mode === 'write'
-          ? ['workspace']
-          : [],
     delegatesResourceLocks: true,
     supportsAbort: true,
   },

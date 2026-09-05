@@ -1,4 +1,6 @@
 /** 工具执行时收到的运行时上下文(可选)。不用的工具可忽略。 */
+import type OpenAI from 'openai';
+
 export interface ToolContext {
   /** agent 循环的 abort signal(用户 Ctrl+C 中断当前轮)。长任务工具(run_command/web_fetch)
    * 挂监听:abort 即取消(杀子进程 / 取消 fetch),让中断跟手而非等命令跑完或超时。
@@ -11,6 +13,16 @@ export interface ToolContext {
    * 编排器/skill 只能据此缩小子执行面，不能读取后来扩容后的全局状态。未由 Agent 调用时缺省 undefined。
    */
   allowedToolNames?: readonly string[];
+  /**
+   * 委派给编排工具的父 agent 前缀上下文：调用 sub-agent/run_skill 那一刻主 agent 的完整
+   * 消息历史（含首条 system，尾于产生本次调用的 assistant tool_call 之前）+ 父 step 的
+   * 不可变工具 schema。子 agent 直接以它为前缀、只在尾部追加委派消息，使命中前缀缓存、
+   * 不再重复探索。仅在 Agent 调用编排工具时注入；普通工具忽略。
+   */
+  delegation?: {
+    history: readonly OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+    tools: readonly OpenAI.Chat.Completions.ChatCompletionTool[];
+  };
 }
 
 /** 工具风险等级(权限系统用)。 */

@@ -3,6 +3,7 @@ import { config, getActiveModel } from '../config/index.js';
 import { tools } from '../tools/registry.js';
 import { getPlanDisabledTools, getProfileDisabledTools } from '../tools/constants.js';
 import { ThinkTagFilter } from './think-filter.js';
+import { sanitizeToolSchemas } from './tool-schema.js';
 import { anthropicChatOnce } from './providers/anthropic.js';
 import { registerModelProvider, getModelProvider, listModelProviders } from './provider.js';
 
@@ -534,7 +535,9 @@ async function chatOnce(
           body as unknown as Parameters<typeof client.chat.completions.create>[0],
           opts as unknown as Parameters<typeof client.chat.completions.create>[1],
         );
-  const activeTools = toolsOverride ?? chatTools;
+  // transport 边界消毒:剔除部分后端(kimi-k3@dashscope 实测)整请求 400 拒绝的
+  // uniqueItems 关键字。无需改写时返回原引用,前缀缓存逐字节稳定不受影响。
+  const activeTools = sanitizeToolSchemas(toolsOverride ?? chatTools);
   const stream = await create(
     {
       model: getActiveModel(),

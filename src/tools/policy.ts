@@ -98,8 +98,10 @@ function addToolGroupsSchema(groups: readonly ToolRouteGroupName[]): ChatTool {
             type: 'array',
             items: { type: 'string', enum: [...groups] },
             minItems: 1,
-            uniqueItems: true,
-            description: 'Additional capability groups needed to complete the current task.',
+            // 不用 uniqueItems:kimi-k3@dashscope 等服务端对含该关键字的工具 schema 整请求 400
+            // (InternalError.Algo: Invalid request parameters)。去重语义写进 description,
+            // 且 expand() 本身对重复组幂等(已激活的直接 rejected),不依赖 schema 约束。
+            description: 'Additional capability groups needed to complete the current task. Do not repeat a group.',
           },
           reason: {
             type: 'string',

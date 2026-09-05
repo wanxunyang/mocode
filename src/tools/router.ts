@@ -40,8 +40,10 @@ function routeSelectorTool(groups: readonly ToolRouteGroupName[]): OpenAI.Chat.C
           groups: {
             type: 'array',
             items: { type: 'string', enum: [...groups] },
-            uniqueItems: true,
-            description: 'Capability groups required in addition to the always-available common tools.',
+            // 不用 uniqueItems:部分兼容后端(kimi-k3@dashscope 实测)对含该关键字的工具
+            // schema 整请求 400。去重语义写进 description;parseDecision 用 Set 合并,天然幂等。
+            description:
+              'Capability groups required in addition to the always-available common tools. Do not repeat a group.',
           },
           inheritPrevious: {
             type: 'boolean',

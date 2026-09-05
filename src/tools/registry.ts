@@ -1,3 +1,4 @@
+import type OpenAI from 'openai';
 import type { Tool, ToolCapabilities, ToolOutcome, ToolExecuteResult } from './types.js';
 // 注意:不顶层 import builtins——会构成 registry → builtins → task(sub-agent) → agent/spawn
 // → agent/core → registry 的模块循环。官方默认工具包由 builtins/index.ts 经 installBuiltinTools 自注册。
@@ -159,6 +160,11 @@ export interface ToolExecutionOptions {
   callId?: string;
   /** 产生调用时的 effective allow-list；仅用于子执行面求交和 skill 命令注入门禁。 */
   allowedToolNames?: readonly string[];
+  /** 父 agent 委派前缀：编排工具(sub-agent/run_skill)据此让子 agent 复用主上下文命中缓存。 */
+  delegation?: {
+    history: readonly OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+    tools: readonly OpenAI.Chat.Completions.ChatCompletionTool[];
+  };
   /** 参数校验失败(INVALID_ARGUMENTS)时追加到报错文案末尾的恢复提示。
    * 由 agent 注入系统已知的候选(如最近 read_file 的 path/hash),
    * 让模型照抄而非凭长上下文记忆复述。仅在参数校验失败时使用。 */
@@ -238,6 +244,7 @@ async function executeToolOnce(
           signal,
           callId: opts?.callId,
           allowedToolNames: opts?.allowedToolNames,
+          delegation: opts?.delegation,
         });
       } finally {
         if (pathCapture) endPathMutation(pathCapture, tool.name);

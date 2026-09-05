@@ -168,15 +168,14 @@ export interface AgentRunOptions {
   onTraceEvent?: (event: AgentTraceEvent) => void;
   /** EVAL/嵌入方可提供稳定 ID；主进程默认读取当前 session/rollback turn。 */
   traceContext?: { sessionId?: string; turnId?: number };
-  /** Structured observer used by sub-agent coordinators to build read/write provenance. */
+  /** 子 agent 用它记录 readSet 等执行 provenance。 */
   onToolOutcome?: (tool: string, args: Record<string, unknown>, outcome: ToolOutcome) => void;
   /** 子代理传 true:不注入「开场分析」动态段(该指令仅用于主线面对用户的首次响应)。 */
   suppressOpeningAnalysis?: boolean;
   /**
    * 子代理传 true:不注入主会话的「会话状态」提醒(活跃 plan + 笔记正文)。
-   * 子 worker 的系统提示本就用 buildMocodeCorePrompt() 切掉了会话私有尾段(见 spawn.ts),
-   * 且其工具表排除 plan_update(不应改动主计划);若把主会话 plan/笔记灌进去,
-   * 窄 worker 会被无关上下文干扰,也白付这部分 token。
+   * 那是主 agent 的工作面,委派消息已带齐子任务所需上下文;共享前缀模式下它还会被追加到
+   * 请求末尾,与父 step 已发送的内容不一致,注入即白付 token 且拉低前缀缓存命中。
    */
   suppressSessionState?: boolean;
 }
@@ -335,6 +334,23 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         };
         const isToolDeniedForStep = (name: string): boolean =>
           !stepAllowedNames.has(name) || getSkillRuntimeDisabledTools().has(name);
+        // 委派给编排工具(sub-agent/run_skill)的父前缀快照:去掉历史末尾「产生本次调用的
+        // assistant tool_call 消息」(协议上它必须紧跟 tool_result,不能出现在子 history),
+        // 只保留其前的主前缀。子 agent 以它为前缀、尾部追加委派消息 → 与主 agent 已发送
+        // 前缀逐字节一致,命中前缀缓存。tools 直接用本步 activeTools:子 agent 与主 agent
+        // 同权同 schema,不做任何裁剪,也没有额外的执行层禁用集合。
+        const delegationForOrchestrator = (): {
+          history: ChatMessage[];
+          tools: OpenAI.Chat.Completions.ChatCompletionTool[];
+        } => {
+          let k = history.length - 1;
+          while (k > 0) {
+            const m = history[k] as { role?: string; tool_calls?: unknown };
+            if (m.role === 'assistant' && Array.isArray(m.tool_calls)) break;
+            k--;
+          }
+          return { history: history.slice(0, k > 0 ? k : history.length), tools: activeTools };
+        };
         const requestBaseURL = ctx.config.baseURL;
         const requestModel = ctx.getActiveModel();
         const storedCalibration = ctx.getTokenCalibration(requestBaseURL, requestModel, activeTools);
@@ -838,6 +854,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
                 executeToolOutcome(tc.name, tc.arguments, signal, {
                   callId: tc.id,
                   allowedToolNames: currentAllowedToolNames(),
+                  delegation: delegationForOrchestrator(),
                 }),
               );
               for (let k = 0; k < batch.length; k++) {
@@ -937,6 +954,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
                 return executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
                   callId: entry.tc.id,
                   allowedToolNames: currentAllowedToolNames(),
+                  delegation: delegationForOrchestrator(),
                   ...(hint ? { argumentErrorHint: hint } : {}),
                   onLockAcquired: (lockedArgs) => {
                     entry.diff = readDiffContext(entry.tc, lockedArgs);
@@ -1050,6 +1068,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, {
                 callId: tc.id,
                 allowedToolNames: currentAllowedToolNames(),
+                delegation: delegationForOrchestrator(),
                 ...(serialHint ? { argumentErrorHint: serialHint } : {}),
                 onLockAcquired: (lockedArgs) => {
                   if (mutationParsed) diff = readDiffContext(tc, lockedArgs);

@@ -1,17 +1,15 @@
-// 子 agent 封装:runAgentCore + (TUI 激活时)实时渲染 hooks。独立 history / 可受限工具子集 / 低步数上限。
+// 子 agent 封装:runAgentCore + (TUI 激活时)实时渲染 hooks。
 // 供 task 工具(主 agent 派生子任务)调用——子 agent 的最终摘要回灌主 history。
 //
-// 与主 agent 的区别:
-//  - 主屏渲染可选:全屏 TUI 激活时(layout.isTuiActive()),把子 agent 内部工具调用实时写入
-//    主内容区并复用 batch 折叠机制(运行态逐条展开,执行完自动折叠回单行摘要,鼠标可点开查看);
-//    TUI 未激活(host 嵌入 / 非 TTY)时保持纯静默——中间过程只缓冲进 transcript,不写主屏。
-//  - 独立 history:不共享主对话,避免子任务的工具噪声污染主上下文。
-//  - 紧凑系统提示:不复制主 agent 的 memory/skills/项目快照；由 context 传入已知事实。
-//  - 工具子集:写任务默认继承主 Agent 工具（仅禁止递归 task）；只读模式按安全语义移除写工具。
-//  - 不调 beginTurn：子 agent 共享主 agent 当前轮次；其文件修改进入同一回滚事务。
-//  - 步数默认与主 Agent 相同，只作为无限循环保险，不以 token 配额提前终止有效任务。
-//  - 中断透传:opts.signal(主 agent 的 abort signal)透传给 runAgentCore → chat/executeTool,
-//    主 Ctrl+C 树杀子 agent(chat 流式 abort + run_command/web_fetch 即时取消)。
+// 子 agent 与主 agent 完全同源(无任何能力裁剪):
+//  - 同一份系统提示、同一份工具 schema、同一份对话前缀(delegation 命中前缀缓存);
+//  - 写操作直接落在工作区,进入主 agent 当前轮次的同一回滚事务(spawn 不调 beginTurn);
+//  - 步数默认与主 agent 相同,只作为无限循环保险,不以 token 配额提前终止有效任务;
+//  - 中断透传:opts.signal 透传给 runAgentCore → chat/executeTool,主 Ctrl+C 树杀子 agent。
+// 与主 agent 的唯一差别是渲染与 history 归属:
+//  - 主屏渲染可选:TUI 激活时把子 agent 内部工具调用实时写入主内容区并复用 batch 折叠;
+//    TUI 未激活(host 嵌入 / 非 TTY)时纯静默,中间过程只缓冲进 transcript。
+//  - 独立 history 分支:子任务的工具噪声不回灌主对话,只有最终摘要回灌。
 
 import type OpenAI from 'openai';
 import { chatTools, type ChatMessage } from '../llm/index.js';
@@ -27,23 +25,21 @@ import { runAgentCore, type AgentHooks } from './core.js';
 import { summarizeToolCall, summarizeToolResult, truncateDisplay } from '../ui/render.js';
 import { t } from '../i18n/index.js';
 import { createContextState } from '../session/compact.js';
-import { inOverlay, mergeSubAgentChangeSet, type SubAgentResult } from '../agents/coordinator.js';
+import { type SubAgentResult, type SubAgentStatus } from '../agents/coordinator.js';
 
-/** 子 agent 系统提示后缀:角色与约束。 */
+/** 子 agent 系统提示后缀(仅 legacy 直接调用路径用;共享前缀路径的系统提示直接复用父 agent)。 */
 const SUBAGENT_SUFFIX = `
 
 ## ⛯ SUB-AGENT MODE (you are a sub-agent)
-You are a sub-agent spawned by the main agent to handle an isolated sub-task. You have your own conversation history (independent of the main thread).
-- Focus solely on the assigned sub-task. Do NOT attempt to call the "sub-agent" tool (no recursive spawning).
-- Use the tools available to you to complete the sub-task.
-- When done, your final text reply will be returned to the main agent as a summary — make it concise and actionable: what you did, key findings, files changed, and any issues. The main agent will decide the next step based on your summary.`;
+You are a sub-agent spawned by the main agent to handle a delegated sub-task, with the same tools and full capabilities as the main agent.
+- Focus on the assigned sub-task and see it through to completion.
+- When done, your final text reply is returned to the main agent as the result — concise and actionable: what you did, key findings, files changed, blockers.`;
 
 const SUBAGENT_ROLE = `## Sub-agent execution
-You are executing one delegated sub-task with the same engineering standards and capabilities as mocode.
+You are executing one delegated sub-task with the same engineering standards and full capabilities as the main agent.
 - Treat Task context as authoritative facts already established by the main agent; do not rediscover them without evidence they are stale.
 - Focus on the delegated scope, but continue until it is genuinely complete. Do not stop to save tokens.
-- Do not recursively call sub-agent. A write task runs in an isolated overlay; the coordinator merges it safely.
-- Return concise findings, changes, checks you chose to run, and blockers to the coordinator.`;
+- Return concise findings, changes, checks you chose to run, and blockers to the main agent.`;
 
 /** 子 agent 运行选项。 */
 export interface SpawnOptions {
@@ -55,15 +51,20 @@ export interface SpawnOptions {
   tools?: string[];
   /** 产生 sub-agent/run_skill 调用的父 step 不可变授权上限；子执行面只能与其求交。 */
   parentAllowedToolNames?: readonly string[];
+  /**
+   * 父 agent 委派前缀(官方 TUI/stdio 经 task 工具派发时由 core 注入)。提供后子 agent 的
+   * 系统提示/工具 schema/对话历史前缀与父 step 逐字节一致,委派消息只追加在尾部——
+   * 命中主 agent 已缓存的前缀缓存,子 agent 不再重复探索。缺省(直接调用/测试)回退紧凑上下文。
+   */
+  delegation?: {
+    history: readonly OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+    tools: readonly OpenAI.Chat.Completions.ChatCompletionTool[];
+  };
   /** 步数上限；仍受 fast/standard profile cap 限制。 */
   maxSteps?: number;
   /** 主 agent 的 abort signal(可选)。透传给子 runAgentCore → chat/executeTool,
    *  主 Ctrl+C 树杀子 agent(chat 流式 abort + run_command/web_fetch 即时取消)。 */
   signal?: AbortSignal;
-  /** Read tasks share the workspace; write tasks execute in an isolated overlay. */
-  mode?: 'read' | 'write';
-  /** Declared write set, used for provenance and resource scheduling by the task tool. */
-  writeSet?: string[];
   /** Small coordinator-produced facts to reuse instead of rediscovering main-agent context. */
   context?: string;
   /** 主侧 sub-agent 调用的 tool_call id。实时渲染据此反查主侧批次,
@@ -112,55 +113,75 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     };
   }
   const maxSteps = opts.maxSteps ?? config.subAgentMaxSteps;
-
-  // 构造窄 worker prompt；主 Agent 已知事实只通过有界 context 注入，避免重复探索与重复计费。
-  const systemPrompt = effectiveSystemPrompt(
-    buildMocodeCorePrompt() +
-      '\n\n' +
-      SUBAGENT_ROLE +
-      SUBAGENT_SUFFIX +
-      (opts.systemPromptSuffix ? `\n\n${opts.systemPromptSuffix}` : ''),
-  );
-  const taskPrompt = opts.context?.trim()
-    ? `Task context (authoritative; do not rediscover):\n${opts.context.slice(0, 4000)}\n\nSub-task:\n${opts.prompt}`
-    : opts.prompt;
-
-  // 子 worker 只能在父 step 的不可变 capability 上限内进一步缩小。没有父快照的 legacy/直接调用
-  // 以当前 chatTools 为 baseline；显式 tools:[] 必须保持零工具，不能误当成“未限制”。
-  const mode = opts.mode ?? 'read';
-  const parentNames = opts.parentAllowedToolNames
-    ? [...new Set(opts.parentAllowedToolNames)]
-    : chatTools.map((tool) => tool.function.name);
   const requested = opts.tools === undefined ? null : new Set(opts.tools);
-  const readOnly = new Set([
-    'read_file',
-    'glob',
-    'grep',
-    'web_search',
-    'web_fetch',
-    'use_skill',
-    'memory_search',
-    'memory_list',
-  ]);
-  const effectiveNames = parentNames.filter(
-    (name) =>
-      name !== 'sub-agent' &&
-      // run_skill 会再次 spawn,禁止递归(避免 fork skill 里又 run_skill 套娃)。
-      name !== 'run_skill' &&
-      // plan_update 直写主会话 notes.md(不走 overlay),子代理不应改动主计划。
-      name !== 'plan_update' &&
-      (!requested || requested.has(name)) &&
-      (mode === 'write' || readOnly.has(name)),
-  );
-  const toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] = effectiveNames.flatMap((name) => {
-    const schema = getToolChatSchema(name);
-    return schema ? [schema] : [];
-  });
-  const runtimeAllowedToolNames = new Set(toolsOverride.map((tool) => tool.function.name));
 
-  // 独立 history(子 agent 自己持有,不共享主对话)。
-  // 只塞 system;user 消息由 runAgentCore 的 userInput 参数 push(与主 agent 一致)。
-  const history: ChatMessage[] = [{ role: 'system', content: systemPrompt }];
+  const shared =
+    opts.delegation && opts.delegation.history.length > 0 && opts.delegation.history[0]?.role === 'system'
+      ? opts.delegation
+      : null;
+
+  let toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[];
+  let runtimeAllowedToolNames: Set<string> | undefined;
+  let history: ChatMessage[];
+  let userInput: string;
+
+  if (shared) {
+    // ── 共享前缀模式(官方 TUI/stdio 派发路径)──
+    // 系统提示 = 父 history[0](含 skills 段),工具 schema = 父 step activeTools,
+    // history = 父前缀(上游已去掉尾部「产生本次调用的 assistant tool_call 消息」)。
+    // 整条前缀与主 agent 已发送内容逐字节一致 → 命中前缀缓存;子 agent 直接看到
+    // 主 agent 已读过的文件与结论,不再重复探索。
+    // 不做任何裁剪:子 agent 的工具面就是父 step 的工具面。
+    let tools = [...shared.tools];
+    if (requested) {
+      // 显式 tools 白名单是调用方主动的特化收缩(skill allowed-tools),可裁 schema。
+      tools = tools.filter((tool) => requested.has(tool.function.name));
+    }
+    toolsOverride = tools;
+    // schema 即上限。显式给 runtimeAllowedToolNames 可让 core 跳过 legacy profile 防线,
+    // 否则旧 profile 会误删父 policy 已授予的工具(如 memory-*)——子代理必须与父同源。
+    runtimeAllowedToolNames = new Set(tools.map((tool) => tool.function.name));
+    history = [...shared.history];
+    userInput = [
+      '[Sub-agent delegation] The main agent delegated a sub-task to you. The conversation above is the shared working context — treat facts already established there as ground truth; do NOT redo exploration that is already done.',
+      opts.context?.trim() ? `Task context (authoritative; do not rediscover):\n${opts.context.slice(0, 4000)}` : '',
+      `Sub-task:\n${opts.prompt}`,
+      [
+        "You have the same tools and the same full capabilities as the main agent. Your file writes land directly in the workspace and belong to the main agent's current rollback transaction.",
+        'Your final text reply is returned to the main agent as the result — concise and actionable: what you did, key findings, files changed, blockers.',
+      ].join('\n'),
+      opts.systemPromptSuffix ?? '',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  } else {
+    // ── legacy 紧凑上下文(直接调用 / 未迁移嵌入 / 测试)──
+    // 没有父前缀可复用时自建 worker 上下文;能力面仍以父 step 上限为准,不额外收缩。
+    const systemPrompt = effectiveSystemPrompt(
+      buildMocodeCorePrompt() +
+        '\n\n' +
+        SUBAGENT_ROLE +
+        SUBAGENT_SUFFIX +
+        (opts.systemPromptSuffix ? `\n\n${opts.systemPromptSuffix}` : ''),
+    );
+    // 子 worker 只能在父 step 的不可变 capability 上限内进一步缩小。没有父快照时以当前
+    // chatTools 为 baseline；显式 tools:[] 必须保持零工具，不能误当成"未限制"。
+    const parentNames = opts.parentAllowedToolNames
+      ? [...new Set(opts.parentAllowedToolNames)]
+      : chatTools.map((tool) => tool.function.name);
+    const effectiveNames = parentNames.filter((name) => !requested || requested.has(name));
+    toolsOverride = effectiveNames.flatMap((name) => {
+      const schema = getToolChatSchema(name);
+      return schema ? [schema] : [];
+    });
+    runtimeAllowedToolNames = new Set(toolsOverride.map((tool) => tool.function.name));
+    // 独立 history(子 agent 自己持有,不共享主对话)。
+    // 只塞 system;user 消息由 runAgentCore 的 userInput 参数 push(与主 agent 一致)。
+    history = [{ role: 'system', content: systemPrompt }];
+    userInput = opts.context?.trim()
+      ? `Task context (authoritative; do not rediscover):\n${opts.context.slice(0, 4000)}\n\nSub-task:\n${opts.prompt}`
+      : opts.prompt;
+  }
 
   // 静默 hooks:缓冲中间过程到 transcript,不写主屏。
   let transcript = '';
@@ -272,8 +293,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       const preview = summarizeToolResult(tc.name, output);
       if (preview) writeBuf(`  ↳ ${preview}\n`);
       if (liveBatchId) {
-        // 子 agent 批无 diff(写任务走 overlay,最终由主 agent 合并);空 preview 用占位
-        // 标记 entry 已完成,避免折叠后摘要仍显示"运行中"。
+        // 子 agent 批不展示 diff(其写入已直接落工作区,由主 agent 的当前回滚事务统一追踪);
+        // 空 preview 用占位标记 entry 已完成,避免折叠后摘要仍显示"运行中"。
         batch.recordResult(
           liveBatchId,
           tc.name,
@@ -327,51 +348,34 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // save/restore 会竞态，且 lastEstimate / schedulerLog 仍会污染主 agent。
   const localContextState = createContextState();
   const readSet = new Set<string>();
-  const run = () =>
-    runAgentCore({
-      history,
-      userInput: taskPrompt,
-      signal: opts.signal,
-      hooks,
-      maxSteps,
-      toolsOverride,
-      runtimeAllowedToolNames,
-      contextState: localContextState,
-      suppressOpeningAnalysis: true, // 子代理不注入「开场分析」:仅主线面对用户的首次响应用
-      // 子代理不注入主会话「会话状态」(plan + 笔记):systemPrompt 已用
-      // buildMocodeCorePrompt() 切掉会话私有尾段,工具表也排除了 plan_update——
-      // 灌主计划只会干扰窄 worker 并白付 token。
-      suppressSessionState: true,
-      onToolOutcome: (tool, args) => {
-        if (tool === 'read_file' && typeof args.path === 'string') readSet.add(args.path);
-        else if (['glob', 'grep'].includes(tool)) readSet.add('workspace');
-      },
-    });
-  let result;
-  let changeSet = null;
-  let mergeStatus: 'committed' | 'conflict' | 'failed' = 'committed';
-  if (opts.mode === 'write') {
-    const isolated = await inOverlay(run);
-    result = isolated.value;
-    changeSet = isolated.changeSet;
-    const declared = new Set((opts.writeSet ?? []).map((item) => item.replaceAll('\\', '/').toLowerCase()));
-    const outsideDeclaration =
-      declared.size > 0 &&
-      changeSet?.changes.some((change) => !declared.has(change.path.replaceAll('\\', '/').toLowerCase()));
-    if (!result.completed || outsideDeclaration) mergeStatus = 'failed';
-    else mergeStatus = await mergeSubAgentChangeSet(changeSet, opts.signal);
-  } else {
-    result = await run();
-  }
+  // 与主 agent 完全同源:写操作直接落在工作区,进入主 agent 当前轮次的同一回滚事务
+  // (spawn 不调 beginTurn)。没有 overlay 拷贝/ChangeSet 合并这一步——那是旧 read/write
+  // 双模式的产物,子 agent 不再受限,也就不需要"先隔离再合并"。
+  const result = await runAgentCore({
+    history,
+    userInput,
+    signal: opts.signal,
+    hooks,
+    maxSteps,
+    toolsOverride,
+    runtimeAllowedToolNames,
+    contextState: localContextState,
+    suppressOpeningAnalysis: true, // 子代理不注入「开场分析」:仅主线面对用户的首次响应用
+    // 子代理不注入主会话「会话状态」(plan + 笔记):那是主 agent 的工作面,委派消息已带齐
+    // 子任务所需上下文,重复注入只白付 token。
+    suppressSessionState: true,
+    onToolOutcome: (tool, args) => {
+      if (tool === 'read_file' && typeof args.path === 'string') readSet.add(args.path);
+      else if (['glob', 'grep'].includes(tool)) readSet.add('workspace');
+    },
+  });
 
-  const status =
+  const status: SubAgentStatus =
     opts.signal?.aborted || result.terminationReason === 'aborted'
       ? 'aborted'
-      : mergeStatus === 'conflict'
-        ? 'conflict'
-        : mergeStatus === 'failed' || !result.completed
-          ? 'failed'
-          : 'completed';
+      : result.completed
+        ? 'completed'
+        : 'failed';
 
   return {
     summary: result.finalText,
@@ -380,7 +384,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     status,
     findings: result.finalText ? [result.finalText] : [],
     readSet: [...readSet].sort(),
-    changeSet,
+    changeSet: null,
     usage: {
       promptTokens: result.usage?.promptTokens ?? 0,
       completionTokens: result.usage?.completionTokens ?? 0,
