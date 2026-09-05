@@ -45,7 +45,7 @@ npm run eval:coding
 建议先用单题确认模型和环境配置正常：
 
 ```powershell
-npm run eval:coding -- --task single-01
+npm run eval:coding -- -- --task single-01
 ```
 
 其他任务 ID 可以通过 `npm run eval:coding:list` 查看。
@@ -55,7 +55,7 @@ npm run eval:coding -- --task single-01
 例如运行 monorepo 任务：
 
 ```powershell
-npm run eval:coding -- --group monorepo
+npm run eval:coding -- -- --group monorepo
 ```
 
 可用分组包括：
@@ -74,19 +74,19 @@ npm run eval:coding -- --group monorepo
 运行 21 道基础题：
 
 ```powershell
-npm run eval:coding -- --group basic
+npm run eval:coding -- -- --group basic
 ```
 
 运行 20 道困难题：
 
 ```powershell
-npm run eval:coding -- --group hard
+npm run eval:coding -- -- --group hard
 ```
 
 运行 20 道高级题：
 
 ```powershell
-npm run eval:coding -- --group advanced
+npm run eval:coding -- -- --group advanced
 ```
 
 建议分开运行三个难度，避免一次评测消耗过多 token，也便于分别比较各难度成功率。
@@ -94,7 +94,7 @@ npm run eval:coding -- --group advanced
 复杂题默认单题超时为 120 秒。需要给困难题更多时间时，可以覆盖为 300 秒（单位是毫秒）：
 
 ```powershell
-npm run eval:coding -- --group hard --timeout 300000
+npm run eval:coding -- -- --group hard --timeout 300000
 ```
 
 超时任务即使留下的代码能够通过 verifier，也仍按超时失败计算，因为它没有在规定预算内完成 Agent 回合。
@@ -104,13 +104,13 @@ npm run eval:coding -- --group hard --timeout 300000
 任务 ID 使用英文逗号分隔：
 
 ```powershell
-npm run eval:coding -- --task single-01,multi-01,types-01
+npm run eval:coding -- -- --task single-01,multi-01,types-01
 ```
 
 ## 运行全部 61 个任务
 
 ```powershell
-npm run eval:coding -- --task all
+npm run eval:coding -- -- --task all
 ```
 
 全量运行会执行 61 个真实 Agent 任务，可能产生较高的耗时和 token 消耗。建议先分别运行 `basic`、`hard` 和 `advanced`。
@@ -156,7 +156,7 @@ F:\mocode\evals\results\
 也可以用 `--out` 指定报告目录：
 
 ```powershell
-npm run eval:coding -- --task single-01 --out F:\mocode\tmp\eval-report
+npm run eval:coding -- -- --task single-01 --out F:\mocode\tmp\eval-report
 ```
 
 ## 固化当前 baseline
@@ -164,7 +164,7 @@ npm run eval:coding -- --task single-01 --out F:\mocode\tmp\eval-report
 确认当前模型和 Prompt 是你想作为对照的版本后，运行完整测试并更新 baseline：
 
 ```powershell
-npm run eval:coding -- --task all --update-baseline
+npm run eval:coding -- -- --task all --update-baseline
 ```
 
 `--update-baseline` 必须与 `--task all` 同时使用；runner 会在任何付费任务开始前校验这一点。Baseline 通过同目录临时文件原子替换，并显式保存 schema、61 个任务、模型、Prompt hash 和退化阈值。
@@ -183,8 +183,8 @@ F:\mocode\evals\baseline.json
 cd F:\mocode
 npm run eval:smoke
 npm run eval:coding:list
-npm run eval:coding -- --task single-01
-npm run eval:coding -- --group types
+npm run eval:coding -- -- --task single-01
+npm run eval:coding -- -- --group types
 ```
 
 确认单题和各难度结果正常后，再决定是否运行全部 61 题并更新 baseline。

@@ -3,6 +3,11 @@ import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { runAgentCore } from '../../src/agent/core.js';
+import { getAgentMode, setAgentMode } from '../../src/agent/mode.js';
+import { __setChatCreateImpl } from '../../src/llm/index.js';
+import { getCurrentSessionId, setCurrentSessionId } from '../../src/session/state.js';
+import { clearSkillActivation } from '../../src/skills/activation.js';
 import {
   compareBenchmarkPreflight,
   compareBenchmarkReport,
@@ -14,6 +19,7 @@ import {
 import { codingTasks, selectTasks } from './fixtures.js';
 import { createReport, renderSummary } from './report.js';
 import { createFirstPatchCapture, parseBenchmarkArgs, validateBenchmarkOptions } from './runner.js';
+import { assembleCodingEvalTurn, buildCodingEvalSystemPrompt } from './runtime.js';
 import type { BenchmarkTaskResult } from './types.js';
 
 assert.equal(codingTasks.length, 61);
@@ -43,15 +49,19 @@ assert.deepEqual(
   );
 }
 assert.equal(parseBenchmarkArgs(['--group', 'types']).selection, 'types');
+assert.equal(parseBenchmarkArgs(['single-01']).selection, 'single-01');
+assert.equal(parseBenchmarkArgs(['single-01']).selectionSource, 'positional');
 assert.equal(parseBenchmarkArgs([]).selection, '');
 assert.equal(parseBenchmarkArgs(['--timeout', '300000']).timeoutMs, 300000);
 assert.throws(() => parseBenchmarkArgs(['--timeout', '0']), /positive/);
 assert.throws(() => parseBenchmarkArgs(['--task']), /requires a value/);
+assert.throws(() => parseBenchmarkArgs(['single-01', 'multi-01']), /Unknown argument/);
 assert.throws(() => parseBenchmarkArgs(['--typo']), /Unknown argument/);
 assert.throws(
   () => validateBenchmarkOptions(parseBenchmarkArgs(['--task', 'single-01', '--update-baseline'])),
   /requires --task all/,
 );
+assert.throws(() => validateBenchmarkOptions(parseBenchmarkArgs(['all', '--update-baseline'])), /requires --task all/);
 assert.throws(
   () => validateBenchmarkOptions(parseBenchmarkArgs(['--group', 'all', '--update-baseline'])),
   /requires --task all/,
@@ -231,4 +241,80 @@ const timeoutReport = createReport(
 );
 assert.equal(timeoutReport.summary.passed, 0);
 assert.equal(timeoutReport.summary.toolRecoveryRate, null);
-console.log(`coding benchmark smoke: passed (${codingTasks.length} fixtures checked, incl. baseline v3 contract)`);
+
+// Headless eval assembly must preserve the production system prefix and expose routed tools to the main provider call.
+{
+  interface CapturedRequest {
+    messages?: Array<{ role: string; content?: unknown }>;
+    tools?: Array<{ function: { name: string } }>;
+  }
+
+  const previousMode = getAgentMode();
+  const previousSessionId = getCurrentSessionId();
+  let capturedRequest: CapturedRequest | null = null;
+  let routeRequest: { input: string; previousGroups?: readonly string[]; planMode?: boolean } | null = null;
+  const systemPrompt = buildCodingEvalSystemPrompt('coding-eval');
+
+  try {
+    const turn = await assembleCodingEvalTurn('Fix the implementation and run its verifier.', undefined, systemPrompt, {
+      route: async (request) => {
+        routeRequest = request;
+        return {
+          groups: ['workspace-write', 'shell-debug'],
+          inheritPrevious: false,
+          confidence: 0.95,
+          reason: 'The task requires editing files and running verification.',
+          latencyMs: 1,
+          fallback: false,
+        };
+      },
+    });
+
+    assert.equal(turn.history[0]?.role, 'system');
+    assert.equal(turn.history[0]?.content, systemPrompt);
+    assert.match(systemPrompt, /^## Identity/);
+    const routed = routeRequest as { previousGroups?: readonly string[]; planMode?: boolean } | null;
+    assert.ok(routed, 'tool router must be called');
+    assert.deepEqual(routed.previousGroups, []);
+    assert.equal(routed.planMode, false);
+
+    const policyNames = turn.toolPolicy.snapshot(false).tools.map((tool) => tool.function.name);
+    for (const name of ['read_file', 'write_file', 'edit_file', 'run_command']) {
+      assert.ok(policyNames.includes(name), `coding eval policy must expose ${name}`);
+    }
+
+    __setChatCreateImpl(async (body) => {
+      capturedRequest = body as unknown as CapturedRequest;
+      return (async function* () {
+        yield { choices: [{ delta: { content: 'done' } }] };
+      })();
+    });
+    await runAgentCore({
+      history: turn.history,
+      userInput: 'Fix the implementation and run its verifier.',
+      hooks: {},
+      maxSteps: 1,
+      toolPolicy: turn.toolPolicy,
+      initialToolRoute: turn.initialToolRoute,
+    });
+
+    const request = capturedRequest as CapturedRequest | null;
+    assert.ok(request, 'main provider request must be captured');
+    assert.equal(request.messages?.[0]?.role, 'system');
+    assert.equal(request.messages?.[0]?.content, systemPrompt);
+    const requestToolNames = request.tools?.map((tool) => tool.function.name) ?? [];
+    assert.ok(requestToolNames.length > 0, 'main provider request must include tools');
+    for (const name of ['read_file', 'write_file', 'edit_file', 'run_command']) {
+      assert.ok(requestToolNames.includes(name), `main provider request must include ${name}`);
+    }
+  } finally {
+    __setChatCreateImpl(null);
+    clearSkillActivation();
+    setCurrentSessionId(previousSessionId, process.cwd());
+    setAgentMode(previousMode);
+  }
+}
+
+console.log(
+  `coding benchmark smoke: passed (${codingTasks.length} fixtures checked, incl. baseline v3 + runtime assembly)`,
+);

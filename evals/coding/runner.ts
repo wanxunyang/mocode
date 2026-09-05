@@ -5,13 +5,16 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { runAgentCore } from '../../src/agent/core.js';
+import { getAgentMode, setAgentMode } from '../../src/agent/mode.js';
 // 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),eval runner 须显式装配。
 import '../../src/tools/builtins/index.js';
 import { config } from '../../src/config/index.js';
 import { beginTurn, getCurrentTurnMutationState, resetState } from '../../src/rollback/index.js';
 import { setSandboxRoot } from '../../src/sandbox/root.js';
+import { getCurrentSessionId, setCurrentSessionId } from '../../src/session/state.js';
 import type { AgentTraceEvent } from '../../src/session/trace.js';
 import { reduceTraceMetrics } from '../../src/session/trace-metrics.js';
+import { clearSkillActivation } from '../../src/skills/activation.js';
 import {
   compareBenchmarkPreflight,
   compareBenchmarkReport,
@@ -22,13 +25,14 @@ import {
 } from './baseline.js';
 import { codingTasks, selectTasks } from './fixtures.js';
 import { createReport, renderSummary, writeReport } from './report.js';
+import { assembleCodingEvalTurn, buildCodingEvalSystemPrompt, CODING_EVAL_SESSION_ID } from './runtime.js';
 import type { BenchmarkBaseline, BenchmarkTaskResult, CodingTaskFixture } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
 export interface CliOptions {
   selection: string;
-  selectionSource: 'task' | 'group' | null;
+  selectionSource: 'task' | 'group' | 'positional' | null;
   outDir: string;
   baselinePath: string;
   updateBaseline: boolean;
@@ -46,6 +50,7 @@ function requiredValue(args: string[], index: number, flag: string): string {
 export function parseBenchmarkArgs(args: string[]): CliOptions {
   let taskSelection = '';
   let groupSelection = '';
+  let positionalSelection = '';
   let outDir = 'evals/results';
   let baselinePath = 'evals/baseline.json';
   let updateBaseline = false;
@@ -69,12 +74,14 @@ export function parseBenchmarkArgs(args: string[]): CliOptions {
     } else if (arg === '--update-baseline') updateBaseline = true;
     else if (arg === '--list') list = true;
     else if (arg === '--keep-workspaces') keep = true;
+    else if (!arg.startsWith('-') && !positionalSelection) positionalSelection = arg;
     else throw new Error(`Unknown argument: ${arg}`);
   }
 
+  const selection = taskSelection || groupSelection || positionalSelection;
   return {
-    selection: taskSelection || groupSelection,
-    selectionSource: taskSelection ? 'task' : groupSelection ? 'group' : null,
+    selection,
+    selectionSource: taskSelection ? 'task' : groupSelection ? 'group' : positionalSelection ? 'positional' : null,
     outDir: path.resolve(outDir),
     baselinePath: path.resolve(baselinePath),
     updateBaseline,
@@ -129,8 +136,31 @@ async function evaluateFirstPatch(
   return verify(snapshotRoot, fixture.verificationCommand);
 }
 
-function promptHash(): string {
-  return createHash('sha256').update(config.systemPrompt).digest('hex').slice(0, 16);
+export function codingEvalPromptHash(systemPrompt: string): string {
+  return createHash('sha256').update(systemPrompt).digest('hex').slice(0, 16);
+}
+
+function fixtureSystemPrompt(fixture: CodingTaskFixture): string {
+  const root = mkdtempSync(path.join(tmpdir(), `mocode-eval-prompt-${fixture.id}-`));
+  const previousCwd = process.cwd();
+  try {
+    materialize(root, fixture);
+    process.chdir(root);
+    return buildCodingEvalSystemPrompt(CODING_EVAL_SESSION_ID);
+  } finally {
+    process.chdir(previousCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function selectedPromptHash(fixtures: readonly CodingTaskFixture[]): string {
+  const hashes = new Set(fixtures.map((fixture) => codingEvalPromptHash(fixtureSystemPrompt(fixture))));
+  if (hashes.size !== 1) {
+    throw new Error(
+      'Coding eval system prompt varies across selected fixtures; one report promptHash cannot represent the run.',
+    );
+  }
+  return [...hashes][0];
 }
 
 export interface FirstPatchCaptureDependencies {
@@ -193,6 +223,7 @@ export function createFirstPatchCapture(
 async function runTask(
   fixture: CodingTaskFixture,
   keep: boolean,
+  expectedPromptHash: string,
   timeoutOverride?: number,
 ): Promise<BenchmarkTaskResult> {
   const root = mkdtempSync(path.join(tmpdir(), `mocode-eval-${fixture.id}-`));
@@ -201,6 +232,8 @@ async function runTask(
   if (!originalVerifierHash) throw new Error(`Fixture ${fixture.id} has no readable verify.mjs`);
   const previousCwd = process.cwd();
   const previousRoot = setSandboxRoot(root);
+  const previousMode = getAgentMode();
+  const previousSessionId = getCurrentSessionId();
   const previousPermission = config.permissionEnabled;
   config.permissionEnabled = false; // isolated disposable fixture only
   resetState();
@@ -214,10 +247,20 @@ async function runTask(
 
   try {
     process.chdir(root);
+    const systemPrompt = buildCodingEvalSystemPrompt(CODING_EVAL_SESSION_ID);
+    const actualPromptHash = codingEvalPromptHash(systemPrompt);
+    if (actualPromptHash !== expectedPromptHash) {
+      throw new Error(
+        `Coding eval prompt hash drifted before ${fixture.id}: expected ${expectedPromptHash}, got ${actualPromptHash}`,
+      );
+    }
+    const turn = await assembleCodingEvalTurn(fixture.goal, controller.signal, systemPrompt);
     result = await runAgentCore({
-      history: [],
+      history: turn.history,
       userInput: fixture.goal,
       signal: controller.signal,
+      toolPolicy: turn.toolPolicy,
+      initialToolRoute: turn.initialToolRoute,
       hooks: {
         onToolBatchEnd: () => firstPatchCapture.capture(getCurrentTurnMutationState().changedFiles.length > 0),
       },
@@ -284,6 +327,9 @@ async function runTask(
     process.chdir(previousCwd);
     setSandboxRoot(previousRoot);
     config.permissionEnabled = previousPermission;
+    clearSkillActivation();
+    setCurrentSessionId(previousSessionId, previousCwd);
+    setAgentMode(previousMode);
     resetState();
     firstPatchCapture.dispose();
     if (!keep && root.startsWith(path.join(tmpdir(), 'mocode-eval-'))) rmSync(root, { recursive: true, force: true });
@@ -303,7 +349,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const identity = {
     schemaVersion: 3 as const,
     model: config.model,
-    promptHash: promptHash(),
+    promptHash: selectedPromptHash(selected),
     taskIds: selected.map((task) => task.id),
   };
   let baseline: BenchmarkBaseline | undefined;
@@ -316,7 +362,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const results: BenchmarkTaskResult[] = [];
   for (const fixture of selected) {
     process.stdout.write(`[eval] ${fixture.id} ${fixture.title} ... `);
-    const result = await runTask(fixture, options.keep, options.timeoutMs);
+    const result = await runTask(fixture, options.keep, identity.promptHash, options.timeoutMs);
     results.push(result);
     console.log(result.status);
   }
