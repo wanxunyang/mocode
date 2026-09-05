@@ -2,7 +2,7 @@
 // 核心:resolve(root, input) → realpath(解软链)→ 前缀校验。
 // 新文件(目标不存在)走「最近存在祖先 realpath 再拼回剩余分量」,同样挡住「祖先是出圈软链」。
 import { realpathSync, existsSync } from 'node:fs';
-import { resolve, relative, isAbsolute, dirname, basename, join } from 'node:path';
+import { resolve, relative, isAbsolute, dirname, basename, join, posix, win32 } from 'node:path';
 import { getSandboxRoot } from './root.js';
 
 const isWin = process.platform === 'win32';
@@ -61,13 +61,13 @@ export function jailResolve(input: string): string {
 }
 
 /**
- * glob pattern 校验:拒绝对路径(平台相关的 isAbsolute)与含 `..` 段的 pattern。
+ * glob pattern 校验:同时拒绝 POSIX/Windows 绝对路径与含 `..` 段的 pattern。
  * 返 null = 通过;返 string = 拒绝原因。形如 *.ts 的正常 pattern 放行。
  */
 export function jailGlobPattern(pattern: string): string | null {
   const p = String(pattern ?? '').trim();
   if (!p) return '空 pattern';
-  if (isAbsolute(p)) return `不得为绝对路径: ${pattern}`;
+  if (posix.isAbsolute(p) || win32.isAbsolute(p)) return `不得为绝对路径: ${pattern}`;
   const segs = p.split(/[\\/]/);
   if (segs.includes('..')) return `不得含 .. 段: ${pattern}`;
   return null;
