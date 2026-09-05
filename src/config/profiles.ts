@@ -23,8 +23,9 @@ export type ProfileName = 'coding' | 'frontend' | 'computer-use' | 'research' | 
 
 /**
  * 工具簇 → 工具名。新增工具时归到对应簇;一个工具只属一个簇。
- * view_image 在 core-read(截图/computer 回灌的图靠它看,不能锁进默认关闭的 frontend)。
- * screenshot 留 frontend(抓整个桌面,隐私敏感,主要服务前端联调)。
+ * view_image 放 core-read,保证所有模式都能读取已有本地图片;工具产生的即时视觉结果通过
+ * modelAttachments 直接回灌,不依赖 view_image。screenshot 留 frontend(抓整个桌面,隐私敏感,
+ * 主要服务前端联调)。
  */
 export const TOOL_GROUPS: Record<ToolGroup, readonly string[]> = {
   'core-read': ['read_file', 'view_image', 'glob', 'grep'],
@@ -39,13 +40,13 @@ export const TOOL_GROUPS: Record<ToolGroup, readonly string[]> = {
 
 /** 模式 → 包含的工具簇。 */
 export const PROFILE_GROUPS: Record<ProfileName, readonly ToolGroup[]> = {
-  // 默认:纯写码,无浏览器/桌面/记忆,最省 token。
-  coding: ['core-read', 'core-write', 'agent-meta'],
-  // 前端联调:coding + 联网 + 起 dev_server / browser 截图。
+  // 默认:写码 + 联网检索,无浏览器自动化/桌面/记忆,兼顾日常效率与 token 成本。
+  coding: ['core-read', 'core-write', 'agent-meta', 'web'],
+  // 前端联调:coding 能力 + 结构化 browser/dev_server/独立 screenshot。
   frontend: ['core-read', 'core-write', 'agent-meta', 'web', 'frontend'],
-  // 桌面 GUI 操控:coding + 联网 + computer(危险簇,显式进)。
+  // 通用桌面 GUI 操控:coding 能力 + 自带视觉闭环的 computer;不等价包含 frontend。
   'computer-use': ['core-read', 'core-write', 'agent-meta', 'web', 'computer'],
-  // 只读调研:能查网、能记笔记,不能写盘/跑命令。
+  // 项目源码只读调研:不直接暴露 core-write;仍可写 session note/memory,skill 有独立执行语义。
   research: ['core-read', 'agent-meta', 'web', 'memory'],
   // 全量:所有簇。
   full: ['core-read', 'core-write', 'agent-meta', 'web', 'frontend', 'computer', 'memory', 'subagent'],

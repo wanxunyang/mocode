@@ -25,15 +25,16 @@ import {
   isFrontendToolsEnabled,
   isSubAgentEnabled,
 } from '../src/config/index.js';
-import {
-  getProfileDisabledTools,
-  getPlanDisabledTools,
-  getRuntimeDisabledTools,
-} from '../src/tools/constants.js';
+import { getProfileDisabledTools, getPlanDisabledTools, getRuntimeDisabledTools } from '../src/tools/constants.js';
 import '../src/tools/builtins/index.js';
 import { refreshChatTools, chatTools, planChatTools } from '../src/llm/index.js';
 
-const OVERRIDE_ENVS = ['MEMORY_ENABLED', 'MOCODE_FRONTEND_TOOLS_ENABLED', 'MOCODE_COMPUTER_USE_ENABLED', 'MOCODE_SUBAGENT_ENABLED'];
+const OVERRIDE_ENVS = [
+  'MEMORY_ENABLED',
+  'MOCODE_FRONTEND_TOOLS_ENABLED',
+  'MOCODE_COMPUTER_USE_ENABLED',
+  'MOCODE_SUBAGENT_ENABLED',
+];
 
 /** 清掉四个旧开关 env(派生查询运行时读),返回恢复函数。 */
 function clearOverrideEnvs(): () => void {
@@ -52,16 +53,20 @@ function clearOverrideEnvs(): () => void {
 
 const ALL_KNOWN_TOOLS = new Set(Object.values(TOOL_GROUPS).flat());
 
-test('profiles: 预置 5 模式,coding 为省 token 默认(无 web/frontend/computer/memory/subagent)', () => {
+test('profiles: 预置 5 模式,coding 默认含 web(无 frontend/computer/memory/subagent)', () => {
   assert.deepEqual(PROFILE_NAMES, ['coding', 'frontend', 'computer-use', 'research', 'full']);
   const coding = getProfileToolNames('coding');
-  // 核心读写 + agent-meta 全在
-  assert.ok(coding.has('read_file') && coding.has('write_file') && coding.has('run_command') && coding.has('edit_file'));
+  // 核心读写 + agent-meta + web 全在
+  assert.ok(
+    coding.has('read_file') && coding.has('write_file') && coding.has('run_command') && coding.has('edit_file'),
+  );
   assert.ok(coding.has('plan_update') && coding.has('ask_human'));
-  // view_image 必须在 core-read(截图/computer 回灌靠它看)
+  assert.ok(coding.has('web_search') && coding.has('web_fetch'));
+  assert.equal(coding.size, 14);
+  // view_image 常驻 core-read,用于读取已有本地图片
   assert.ok(coding.has('view_image'));
-  // 省 token:不装浏览器/桌面/记忆/联网/子代理
-  for (const t of ['browser', 'dev_server', 'screenshot', 'computer', 'memory_search', 'web_search', 'sub-agent']) {
+  // 省 token/权限面:不装浏览器自动化、桌面、记忆、子代理
+  for (const t of ['browser', 'dev_server', 'screenshot', 'computer', 'memory_search', 'sub-agent']) {
     assert.ok(!coding.has(t), `coding should not include ${t}`);
   }
 });
@@ -77,6 +82,7 @@ test('profiles: full 模式 = 全部已知工具;research 只读(无写盘/命�
 test('profiles: isProfileName 校验;profileHasGroup 派生簇归属', () => {
   assert.ok(isProfileName('coding') && isProfileName('full'));
   assert.ok(!isProfileName('nope') && !isProfileName(42));
+  assert.ok(profileHasGroup('coding', 'web'));
   assert.ok(profileHasGroup('computer-use', 'computer'));
   assert.ok(!profileHasGroup('computer-use', 'memory'));
   assert.ok(profileHasGroup('frontend', 'frontend') && profileHasGroup('frontend', 'web'));
@@ -123,16 +129,17 @@ test('config 派生开关:旧 env 显式设置时覆盖模式推导', () => {
   }
 });
 
-test('getProfileDisabledTools: coding 屏蔽非核心簇;full 不屏蔽任何已知工具', () => {
+test('getProfileDisabledTools: coding 屏蔽非默认簇;full 不屏蔽任何已知工具', () => {
   const restore = clearOverrideEnvs();
   try {
     const prev = getActiveProfile();
     setActiveProfile('coding');
     const disabled = getProfileDisabledTools();
-    for (const t of ['browser', 'dev_server', 'screenshot', 'computer', 'memory_save', 'web_search', 'web_fetch', 'sub-agent']) {
+    for (const t of ['browser', 'dev_server', 'screenshot', 'computer', 'memory_save', 'sub-agent']) {
       assert.ok(disabled.has(t), `coding should disable ${t}`);
     }
     assert.ok(!disabled.has('read_file') && !disabled.has('write_file'));
+    assert.ok(!disabled.has('web_search') && !disabled.has('web_fetch'));
     setActiveProfile('full');
     const fullDisabled = getProfileDisabledTools();
     for (const t of ALL_KNOWN_TOOLS) assert.ok(!fullDisabled.has(t), `full should not disable ${t}`);
@@ -163,7 +170,7 @@ test('getRuntimeDisabledTools: 并入 profile 屏蔽集;getPlanDisabledTools 按
     setActiveProfile('coding');
     const rt = getRuntimeDisabledTools();
     assert.ok(rt.has('computer') && rt.has('browser') && rt.has('memory_save') && rt.has('sub-agent'));
-    assert.ok(!rt.has('write_file'), 'coding 模式 auto 下 write_file 不该被运行时屏蔽');
+    assert.ok(!rt.has('write_file') && !rt.has('web_search'), 'coding auto 下 write_file/web_search 不该被运行时屏蔽');
     // plan:memory off 时写工具名不在屏蔽集(死名字清理)
     const planOff = getPlanDisabledTools();
     assert.ok(!planOff.has('memory_save') && !planOff.has('memory_update'));
@@ -184,8 +191,14 @@ test('refreshChatTools: 按当前 profile 过滤模型可见工具;plan 再叠 p
     setActiveProfile('coding');
     refreshChatTools();
     const names = chatTools.map((t) => t.function.name);
-    assert.ok(names.includes('read_file') && names.includes('write_file') && names.includes('view_image'));
-    for (const t of ['browser', 'computer', 'memory_search', 'web_search', 'sub-agent']) {
+    assert.ok(
+      names.includes('read_file') &&
+        names.includes('write_file') &&
+        names.includes('view_image') &&
+        names.includes('web_search') &&
+        names.includes('web_fetch'),
+    );
+    for (const t of ['browser', 'computer', 'memory_search', 'sub-agent']) {
       assert.ok(!names.includes(t), `coding chatTools should not include ${t}`);
     }
     setActiveProfile('full');
