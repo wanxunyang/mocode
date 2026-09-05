@@ -31,6 +31,7 @@ export interface SchedulerRunLog {
   actions: ScheduleAction[];
   pressure: PressureCompressionLog;
   compactHistoryCalled: boolean;
+  historyMutation: 'none' | 'content' | 'rebuild';
   ts: number;
 }
 
@@ -119,10 +120,13 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
       const actions = scheduleActions(report);
       let compactHistoryCalled = false;
       let historyRebuilt = false;
+      let contentMutated =
+        pressure.superseded > 0 || pressure.staleArtifacts > 0 || pressure.encodedLogsAndSearches > 0;
       for (const _action of actions) {
         const result = await maybeCompact(history, report, undefined, state, activeTools, signal);
         compactHistoryCalled = true;
         historyRebuilt ||= result?.historyRebuilt === true;
+        contentMutated ||= result?.compacted === true;
       }
 
       const log: SchedulerRunLog = {
@@ -131,6 +135,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
         actions,
         pressure,
         compactHistoryCalled,
+        historyMutation: historyRebuilt ? 'rebuild' : contentMutated ? 'content' : 'none',
         ts: Date.now(),
       };
       scheduler.lastRunLog = log;
@@ -175,6 +180,7 @@ export async function manualCompact(
       actions: [{ kind: 'compact_history', focus }],
       pressure: emptyPressure(report),
       compactHistoryCalled: true,
+      historyMutation: result.historyRebuilt ? 'rebuild' : result.compacted ? 'content' : 'none',
       ts: Date.now(),
       compactDetail: {
         reason: result.reason,
@@ -198,6 +204,7 @@ export async function manualCompact(
   }
 
   let compactHistoryCalled = false;
+  let historyMutation: SchedulerRunLog['historyMutation'] = 'none';
   let compactDetail: CompactHistoryDetail | undefined;
   for (const action of actions) {
     if (action.kind !== 'compact_history') continue;
@@ -215,6 +222,7 @@ export async function manualCompact(
     );
     compactHistoryCalled = true;
     if (result) {
+      historyMutation = result.historyRebuilt ? 'rebuild' : result.compacted ? 'content' : historyMutation;
       compactDetail = {
         reason: result.reason,
         estimateBefore: result.estimateBefore,
@@ -232,6 +240,7 @@ export async function manualCompact(
     actions,
     pressure: emptyPressure(report),
     compactHistoryCalled,
+    historyMutation,
     ts: Date.now(),
     compactDetail,
   };

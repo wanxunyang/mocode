@@ -7,7 +7,6 @@
 
 import type OpenAI from 'openai';
 import {
-  chat,
   estimatePromptTokens,
   estimateTokens,
   isContextLengthError,
@@ -35,8 +34,15 @@ import {
   readDiffContext,
   pushToolResult,
 } from './tool-helpers.js';
-import { maybeCompact, contextState, summarizeToolArguments } from '../session/index.js';
-import { TurnTraceState } from './trace-state.js';
+import { contextState, createTraceEvent, summarizeToolArguments } from '../session/index.js';
+import {
+  createLegacyCancellationLifecycle,
+  createLegacyTraceSink,
+  createLegacyUsageMeter,
+  createStagedCancellationLifecycle,
+  createStagedTraceSink,
+  createStagedUsageMeter,
+} from './trace-state.js';
 import type { ContextState } from '../session/compact.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
 import { invalidateArtifacts, rehydrateArtifacts } from '../context/index.js';
@@ -46,6 +52,19 @@ import { createLifecycleEngine } from '../context/lifecycle.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
 import type { AgentTraceEvent, AgentTurnTrace, TraceEventType } from '../session/trace.js';
+import { createAgentPipelineAssembly } from './pipeline.js';
+import type { AgentPipeline, AgentStageImplementation, AgentStageName, HistoryManager } from './stages/contracts.js';
+import type { LegacyStageAdapters } from './stages/legacy-adapters.js';
+import { createLegacyModelRunner, createStagedModelRunner } from './stages/model-runner.js';
+import { createLegacyContextTrimmer, createStagedContextTrimmer } from './stages/context-trimmer.js';
+import { createLegacyToolDispatcher, createStagedToolDispatcher } from './stages/tool-dispatcher.js';
+import type { ToolDispatchEvent } from './stages/contracts.js';
+import {
+  createLegacyCapabilityResolver,
+  createLegacyTerminationPolicy,
+  createStagedCapabilityResolver,
+  createStagedTerminationPolicy,
+} from './stages/run-policy.js';
 
 /** nag 提醒阈值:连续 N 个"执行了工具但没更新 notes.md"的步后提醒一次(对齐 Claude Code TodoWrite 的 3 轮)。 */
 const PLAN_NAG_THRESHOLD = 3;
@@ -127,6 +146,10 @@ export interface AgentHooks {
 /** runAgentCore 的运行选项。 */
 export interface AgentRunOptions {
   history: ChatMessage[];
+  /** Stage migration seam. Defaults to legacy; staged selects all extracted ports. */
+  pipeline?: AgentPipeline;
+  /** Per-stage rollback seam. Overrides the pipeline default for this run only. */
+  stageOverrides?: Partial<Record<AgentStageName, AgentStageImplementation>>;
   /** 纯文本字符串,或多模态 parts 数组(OpenAI content 数组,text + image_url)。 */
   userInput: string | ContentPart[];
   signal?: AbortSignal;
@@ -216,7 +239,11 @@ export interface AgentRunResult {
  *  但 core 仍依赖 ui/render.ts 的纯函数(summarizeToolCall / truncateDisplay / fmtElapsed)——
  *  这些是纯字符串格式化,无副作用,共享安全。
  */
-export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResult> {
+async function runAgentCoreLegacy(
+  opts: AgentRunOptions,
+  historyManager: HistoryManager,
+  stages: LegacyStageAdapters,
+): Promise<AgentRunResult> {
   const { history, userInput, signal, onContextUpdate, hooks } = opts;
   const ctx: AgentRuntimeContext = opts.runtimeContext ?? defaultAgentRuntimeContext;
   const runtimeContextState = opts.contextState ?? contextState;
@@ -228,20 +255,37 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
   const savedMode = ctx.getAgentMode();
   // 本轮计时:从入口到完毕(正常 return / 达上限),供 finally 打 ✻ Worked for 摘要行。
   const t0 = Date.now();
-  // trace / token-usage 状态聚合(2.0 步骤2 深拆第一刀):emit/addUsage/turnUsage 收敛进
-  // TurnTraceState,事件 payload 与 hooks 序列保持字节级不变。
-  const traceState = new TurnTraceState({
-    sessionId: opts.traceContext?.sessionId ?? ctx.getCurrentSessionId() ?? `ephemeral-${process.pid}`,
-    turnId: opts.traceContext?.turnId ?? ctx.getCurrentTurnId(),
-    onTraceEvent: opts.onTraceEvent,
-  });
-  const traceSessionId = traceState.sessionId;
-  const traceTurnId = traceState.turnId;
+  const traceSessionId = opts.traceContext?.sessionId ?? ctx.getCurrentSessionId() ?? `ephemeral-${process.pid}`;
+  const traceTurnId = opts.traceContext?.turnId ?? ctx.getCurrentTurnId();
+  const traceSink =
+    stages.trace.implementation === 'staged'
+      ? createStagedTraceSink({ onTraceEvent: opts.onTraceEvent })
+      : createLegacyTraceSink({ onTraceEvent: opts.onTraceEvent });
+  const usageMeter = stages.usage.implementation === 'staged' ? createStagedUsageMeter() : createLegacyUsageMeter();
+  let currentTraceStep: number | undefined;
+  let toolCallCount = 0;
   const emitTrace = (
     type: TraceEventType,
     data: Record<string, unknown> = {},
     ids: Partial<Pick<AgentTraceEvent, 'step' | 'stepId' | 'toolCallId' | 'providerToolCallId'>> = {},
-  ): void => traceState.emit(type, data, ids);
+  ): void => {
+    if (traceTurnId === undefined) return;
+    traceSink.emit(
+      createTraceEvent({
+        sessionId: traceSessionId,
+        turnId: traceTurnId,
+        type,
+        ...(currentTraceStep === undefined
+          ? {}
+          : {
+              step: currentTraceStep,
+              stepId: `${traceTurnId}:step:${currentTraceStep}`,
+            }),
+        ...ids,
+        data,
+      }),
+    );
+  };
   emitTrace('turn_start', { mode: ctx.getAgentMode() });
   if (opts.initialToolRoute) emitTrace('tool_route', opts.initialToolRoute);
   let done = false; // 正常完毕 / 达上限 true;中断 false(不显摘要)
@@ -250,18 +294,12 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
   // 本步写了 notes.md(plan_update 或直接 write/edit)→ 清零并重同步 history[0];
   // 否则累计,达阈值则在当前步 tool_result 前注入 nag 提醒。
   let stepsSincePlanTouch = 0;
-  // 本轮 token 累计在 traceState.turnUsage(每步 chat() 返回后 addUsage),供 onDone 摘要行 + AgentRunResult.usage
-  // 透传给 repl(显示在底栏模式 chip 右边)。未开启 include_usage 或全失败时为 undefined。
   // 实时 chip ↻ 估算用:上一步 chat 实测 prompt(前缀缓存下当前步命中 ≈ 它)+ 后端是否报过 cache 命中
   // (从不报 cache 的后端不估算,避免虚显 ↻)。
   let lastStepPromptTokens = 0;
   let providerCacheSeen = false;
-  history.push({ role: 'user', content: userInput });
-  // 中断回滚快照:push 用户消息后整段浅拷贝。abort 时 length=0;push(...saved) 还原。
-  // 这样中断时至少保留用户消息(及之前的历史);每步工具全部执行完毕后刷新快照,
-  // 保留已完成的 assistant+tool_calls+tool 结果,只丢弃当前未完成步骤的消息。
-  // 用 slice() 而非 length:maybeCompact 会原地重建(length=0;push(...rebuilt)),savedLen 会失效。
-  let savedHistory = history.slice();
+  historyManager.appendUserTurn(userInput);
+  // The initial cancellation checkpoint is captured after the user turn and before any model/tool work.
   // Relevance and lifecycle collect provenance during normal work. Neither path
   // rewrites history; exact supersession is applied only by the pressure scheduler.
   const relprune = ctx.config.contextRelprune ? createRelevancePruner() : null;
@@ -273,6 +311,27 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
   // contextBudget=false keeps only the infrastructure compact fallback.
   const scheduler: BudgetScheduler | null =
     ctx.config.contextBudget !== false ? createBudgetScheduler(runtimeContextState) : null;
+  const modelRunner = stages.model.implementation === 'staged' ? createStagedModelRunner() : createLegacyModelRunner();
+  const toolDispatcher =
+    stages.tools.implementation === 'staged' ? createStagedToolDispatcher() : createLegacyToolDispatcher();
+  const capabilityResolver =
+    stages.capabilities.implementation === 'staged'
+      ? createStagedCapabilityResolver()
+      : createLegacyCapabilityResolver();
+  const terminationPolicy =
+    stages.termination.implementation === 'staged' ? createStagedTerminationPolicy() : createLegacyTerminationPolicy();
+  const trimmerInit = { historyManager, scheduler, contextState: runtimeContextState };
+  const contextTrimmer =
+    stages.context.implementation === 'staged'
+      ? createStagedContextTrimmer(trimmerInit)
+      : createLegacyContextTrimmer(trimmerInit);
+  const rebuildHistoryIndexes = (): void => {
+    if (lifecycle) {
+      lifecycle = createLifecycleEngine(history);
+      runtimeContextState.lifecycleStats = lifecycle.stats();
+    }
+    rehydrateArtifacts(runtimeContextState, history);
+  };
   // 本轮流式状态:首个正文 token 到达即停 spinner(思考期间 spinner 持续转「思考中…」,不写思考内容)。
   let mode: 'idle' | 'text' = 'idle';
   let gotText = false;
@@ -295,39 +354,65 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
     hooks.onToolCall?.(name); // 主 agent:spinner.start(`生成 ${name}…`)
   };
 
-  // 中断还原:停 spinner + 补换行 + (已中断)提示 + history 还原到本 turn 前 + 模式还原。
-  // 两处共用:① await chat() 抛 AbortError 的 catch;② 工具被 abort 杀后循环顶检查。
-  // 实现已收敛进 TurnTraceState.abortRestore;savedHistory/savedMode 是函数级 let,此处闭包现读。
-  const abortRestore = (): void => traceState.abortRestore({ hooks, history, savedHistory, ctx, savedMode });
+  const cancellationInit = {
+    historyManager,
+    onObserved: () => emitTrace('abort', { phase: 'observed', reason: 'signal' }),
+    onAbort: () => hooks.onAbort?.(),
+    onHistoryRestored: rebuildHistoryIndexes,
+    restoreMode: () => ctx.setAgentMode(savedMode),
+  };
+  const cancellationLifecycle =
+    stages.cancellation.implementation === 'staged'
+      ? createStagedCancellationLifecycle(cancellationInit)
+      : createLegacyCancellationLifecycle(cancellationInit);
+  cancellationLifecycle.checkpoint();
+  const buildAbortedResult = (): AgentRunResult => {
+    const mutation = ctx.getCurrentTurnMutationState();
+    return {
+      completed: false,
+      terminationReason: 'aborted',
+      finalText: null,
+      usage: usageMeter.snapshot(),
+      changedFiles: mutation.changedFiles.map((item) => item.path),
+    };
+  };
   try {
     for (let step = 0; step < maxSteps; step++) {
-      traceState.currentTraceStep = step;
+      currentTraceStep = step;
       const stepStartedAt = Date.now();
       emitTrace('step_start', { ordinal: step });
       try {
         // 上一步工具被 abort 杀(run_command/web_fetch 等)→ signal.aborted,直接还原退出,不等 maybeCompact + chat()
-        if (signal?.aborted) {
-          abortRestore();
+        const startDecision = terminationPolicy.decide({
+          phase: 'step_start',
+          step,
+          maxSteps,
+          aborted: signal?.aborted === true,
+        });
+        if (startDecision.kind === 'aborted') {
+          cancellationLifecycle.restore();
           traceStatus = 'aborted';
-          return traceState.buildAbortedResult(ctx.getCurrentTurnMutationState());
+          return buildAbortedResult();
         }
         // 本步只捕获一次不可变 policy snapshot。即便 add_tool_groups 在执行阶段扩容，
         // 本次模型响应仍必须按旧 snapshot 校验；新工具只在下一 step 的 schema 中出现。
         const planMode = ctx.getAgentMode() === 'plan';
         const policySnapshot = opts.toolPolicy?.snapshot(planMode);
-        const configuredTools = opts.toolsOverride ?? policySnapshot?.tools ?? (planMode ? planChatTools : chatTools);
-        const policyAllowedTools = opts.runtimeAllowedToolNames
-          ? configuredTools.filter((tool) => opts.runtimeAllowedToolNames?.has(tool.function.name))
-          : configuredTools;
-        const skillDisabledTools = getSkillRuntimeDisabledTools();
-        const legacyDisabledTools =
-          opts.toolPolicy || opts.runtimeAllowedToolNames ? new Set<string>() : getRuntimeDisabledTools();
+        const runPolicy = capabilityResolver.resolve({
+          mode: ctx.getAgentMode(),
+          toolsOverride: opts.toolsOverride,
+          toolPolicy: policySnapshot,
+          defaultTools: planMode ? planChatTools : chatTools,
+          runtimeAllowedToolNames: opts.runtimeAllowedToolNames,
+          skillDisabledToolNames: getSkillRuntimeDisabledTools(),
+          legacyDisabledToolNames: getRuntimeDisabledTools(),
+          useLegacyDisabledFallback: !opts.toolPolicy && !opts.runtimeAllowedToolNames,
+          reminder: opts.toolPolicy?.reminder(planMode) ?? '',
+        });
         // schema、runtime backstop 与后代权限都从同一 effective allow-list 派生。
         // policy snapshot 是本 step 的不可扩张上限；skill deny 可在同批 use_skill 后继续动态收窄。
-        const activeTools = policyAllowedTools.filter(
-          (tool) => !skillDisabledTools.has(tool.function.name) && !legacyDisabledTools.has(tool.function.name),
-        );
-        const stepAllowedNames = new Set(activeTools.map((tool) => tool.function.name));
+        const activeTools = runPolicy.tools.slice();
+        const stepAllowedNames = runPolicy.allowedToolNames;
         const currentAllowedToolNames = (): string[] => {
           const currentSkillDisabledTools = getSkillRuntimeDisabledTools();
           return [...stepAllowedNames].filter((name) => !currentSkillDisabledTools.has(name));
@@ -374,58 +459,42 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         runtimeContextState.ephemeralText = sessionStateText || undefined;
         onContextUpdate?.();
 
-        // 步前:五区 Budget Scheduler 在当前完整 history 上决策；开关关闭时退化回 maybeCompact 路径。
-        // 此时 spinner 已停,通知行干净。
+        // 步前 ContextTrimmer 统一承接 scheduler/fallback，保留触发与 trace 差异。
         let historyRebuilt = false;
         /** 本步是否已因「后端报上下文超长」压过一轮(限一次,防压缩↔重试死循环)。 */
         let overflowRetried = false;
         const compactStartedAt = Date.now();
-        if (scheduler) {
-          historyRebuilt = await scheduler.runStep(
-            history,
-            step,
-            activeTools,
-            sessionStateText ? estimateTokens(sessionStateText) : 0,
-            // signal 透传:压缩的 LLM 摘要是几十秒的调用,不串进来 Ctrl+C 掐不断。
-            signal,
-          );
-          if (scheduler.lastRunLog?.compactHistoryCalled) {
-            emitTrace('compact', {
-              source: 'automatic',
-              reason: 'scheduled',
-              historyRebuilt,
-              durationMs: Date.now() - compactStartedAt,
-            });
-          }
-        } else {
-          const compactResult = await maybeCompact(
-            history,
-            undefined,
-            undefined,
-            runtimeContextState,
-            activeTools,
-            signal,
-          );
-          historyRebuilt = compactResult?.historyRebuilt === true;
-          if (compactResult) {
-            emitTrace('compact', {
-              source: 'automatic_fallback',
-              reason: compactResult.reason,
-              compacted: compactResult.compacted,
-              historyRebuilt,
-              estimateBefore: compactResult.estimateBefore,
-              estimateAfter: compactResult.estimateAfter,
-              durationMs: Date.now() - compactStartedAt,
-            });
-          }
+        const trimResult = await contextTrimmer.trim({
+          mode: scheduler ? 'scheduled' : 'fallback',
+          history: historyManager.snapshot(),
+          step,
+          tools: activeTools,
+          ephemeralTokens: sessionStateText ? estimateTokens(sessionStateText) : 0,
+          signal,
+        });
+        historyRebuilt = trimResult.kind === 'rebuild';
+        const trimStats = trimResult.kind === 'aborted' ? {} : trimResult.stats;
+        if (scheduler && trimStats.compactHistoryCalled) {
+          emitTrace('compact', {
+            source: 'automatic',
+            reason: 'scheduled',
+            historyRebuilt,
+            durationMs: Date.now() - compactStartedAt,
+          });
+        } else if (!scheduler && trimResult.kind !== 'aborted' && trimStats.reason) {
+          emitTrace('compact', {
+            source: 'automatic_fallback',
+            reason: trimStats.reason,
+            compacted: trimStats.compacted,
+            historyRebuilt,
+            estimateBefore: trimStats.estimateBefore,
+            estimateAfter: trimStats.estimateAfter,
+            durationMs: Date.now() - compactStartedAt,
+          });
         }
         // compact 用新消息数组原地重建 history 后，所有按消息位置恢复的状态都需重建。
         if (historyRebuilt) {
-          if (lifecycle) {
-            lifecycle = createLifecycleEngine(history);
-            runtimeContextState.lifecycleStats = lifecycle.stats();
-          }
-          rehydrateArtifacts(runtimeContextState, history);
+          rebuildHistoryIndexes();
           // 压缩可能刚把进度快照固结进 notes.md(P2)→ 重取,让本步 requestHistory
           // 末尾就带上最新 Compaction Snapshot,不必等下一步。bar 口径对应的
           // ephemeralText 仍用触发时旧值(见 buildRequestHistory 注释),仅差这一段。
@@ -459,7 +528,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         // 不计,让 bar 用会让两条线再错开几百 token。
         const buildRequestHistory = (): ChatMessage[] => {
           const ephemeralReminder = [
-            opts.toolPolicy?.reminder(planMode) ?? '',
+            runPolicy.reminder,
             !opts.suppressOpeningAnalysis && step === 0
               ? '## Opening analysis\nBegin your FIRST response of this turn with a brief analysis of the request and your planned approach (1-3 sentences, no filler), THEN start tool calls. This opening is the only place where pre-tool prose is expected; after it, work quietly with no narration between tool calls.'
               : '',
@@ -488,11 +557,20 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         // 那一次才是解释「为什么要压」的。
         onContextUpdate?.();
 
-        // 实时用量:当前步 prompt 估算(含校准系数)+ 流式累计 completion 估算,
-        // 叠上已完成步的实测 turnUsage(traceState 内累加,每次调用读最新值),经 onLiveUsage 推给底栏实时 chip。
+        // 实时用量:当前步 prompt 估算(含校准系数)+ 流式累计 completion 估算，
+        // 叠上 UsageMeter 中已完成步骤的实测值。onLiveUsage 保持原有抛错语义。
         let stepPromptEst = estimatePromptTokens(requestHistory, activeTools, runtimeContextState.correction);
-        const reportLive = (p: { completionTokens: number; promptTokens?: number; cachedTokens?: number }): void =>
-          traceState.reportLive(hooks, stepPromptEst, lastStepPromptTokens, providerCacheSeen, p);
+        const reportLive = (p: { completionTokens: number; promptTokens?: number; cachedTokens?: number }): void => {
+          const completedUsage = usageMeter.snapshot();
+          const curPrompt = p.promptTokens ?? stepPromptEst;
+          const curCached = p.cachedTokens ?? (providerCacheSeen ? Math.min(lastStepPromptTokens, curPrompt) : 0);
+          hooks.onLiveUsage?.({
+            promptTokens: (completedUsage?.promptTokens ?? 0) + curPrompt,
+            completionTokens: (completedUsage?.completionTokens ?? 0) + p.completionTokens,
+            totalTokens: (completedUsage?.totalTokens ?? 0) + curPrompt + p.completionTokens,
+            cachedTokens: (completedUsage?.cachedTokens ?? 0) + curCached,
+          });
+        };
         reportLive({ completionTokens: 0 }); // 思考阶段先显 ↑ prompt 估算,首 token 到达后 ↓ 开始涨
         // 单一 chat 入口:错误侧的 model_end 埋点只写一处(重试也会记,不丢失败轨迹)。
         const chatHandlers = {
@@ -511,7 +589,10 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         };
         const runChatOnce = async (): Promise<ChatResult> => {
           try {
-            return await chat(requestHistory, chatHandlers, signal, activeTools);
+            return await modelRunner.run(
+              { history: requestHistory, handlers: chatHandlers, tools: activeTools },
+              signal,
+            );
           } catch (err) {
             const errorValue =
               err && typeof err === 'object' ? (err as { status?: number; code?: string; name?: string }) : undefined;
@@ -534,9 +615,9 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
           // 中断(用户运行中 Ctrl+C):chat() 抛 AbortError(signal.aborted)→ 还原 history + 模式 + return(不抛)。
           // 工具执行现已串 signal:run_command/web_fetch 被 abort 即时杀,循环顶检查兜底(不会留未配对 tool_call_id)。
           if (signal?.aborted || (e instanceof Error && (e.name === 'AbortError' || e.name === 'APIUserAbortError'))) {
-            abortRestore();
+            cancellationLifecycle.restore();
             traceStatus = 'aborted';
-            return traceState.buildAbortedResult(ctx.getCurrentTurnMutationState());
+            return buildAbortedResult();
           }
           // 后端实测拒绝了 prompt(上下文超长):本地估算对该 provider 系统性偏低时,
           // 压力线压不住,这是唯一可信的触发。强压一轮后重试一次;仍失败才抛(限一次,防循环)。
@@ -558,30 +639,27 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
               runtimeContextState.correction = cal.correction;
               runtimeContextState.calibrationSamples = cal.samples;
             }
-            const overflowResult = await maybeCompact(
-              history,
-              undefined,
-              { manual: true, force: true },
-              runtimeContextState,
-              activeTools,
+            const overflowResult = await contextTrimmer.trim({
+              mode: 'overflow',
+              history: historyManager.snapshot(),
+              step,
+              tools: activeTools,
+              ephemeralTokens: sessionStateText ? estimateTokens(sessionStateText) : 0,
               signal,
-            );
+            });
+            const overflowStats = overflowResult.kind === 'aborted' ? {} : overflowResult.stats;
             emitTrace('compact', {
               source: 'overflow_retry',
-              reason: overflowResult?.reason ?? 'noop',
-              compacted: overflowResult?.compacted === true,
-              estimateBefore: overflowResult?.estimateBefore,
-              estimateAfter: overflowResult?.estimateAfter,
+              reason: overflowStats.reason ?? 'noop',
+              compacted: overflowStats.compacted === true,
+              estimateBefore: overflowStats.estimateBefore,
+              estimateAfter: overflowStats.estimateAfter,
               durationMs: Date.now() - modelStartedAt,
             });
-            if (!overflowResult?.compacted) throw e; // 压不动:没法救,原样抛
-            if (overflowResult.historyRebuilt) {
+            if (overflowResult.kind === 'none' || overflowResult.kind === 'aborted') throw e;
+            if (overflowResult.kind === 'rebuild') {
               historyRebuilt = true;
-              if (lifecycle) {
-                lifecycle = createLifecycleEngine(history);
-                runtimeContextState.lifecycleStats = lifecycle.stats();
-              }
-              rehydrateArtifacts(runtimeContextState, history);
+              rebuildHistoryIndexes();
             }
             requestHistory = buildRequestHistory();
             stepPromptEst = estimatePromptTokens(requestHistory, activeTools, runtimeContextState.correction);
@@ -602,7 +680,7 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
           reasoningTokens: result.usage?.reasoningTokens,
         });
         runtimeContextState.lastUsage = result.usage; // 供 /context 与状态行显示实测 token
-        traceState.addUsage(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
+        usageMeter.add(result.usage); // 本轮累计:onDone 摘要行 + AgentRunResult.usage 透传
         if (result.usage) {
           lastStepPromptTokens = result.usage.promptTokens; // 下一步流式期 ↻ 估算的前缀基准
           if (result.usage.cachedTokens > 0) providerCacheSeen = true;
@@ -625,8 +703,15 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         // lastUsage 已更新:触发状态行 context 用量条重算+重画,运行中不再冻结在轮首。
         onContextUpdate?.();
 
-        if (result.toolCalls.length > 0) {
-          traceState.toolCallCount += result.toolCalls.length;
+        const modelDecision = terminationPolicy.decide({
+          phase: 'model_result',
+          step,
+          maxSteps,
+          aborted: signal?.aborted === true,
+          modelResult: result,
+        });
+        if (modelDecision.kind === 'continue') {
+          toolCallCount += result.toolCalls.length;
           // 若 content 只是 Claude 式 "Tool results:" 噪声，清空它：不补换行、不写入 history，
           // 避免污染后续轮次上下文并在 TUI 泄露为孤立行。
           if (result.content && isToolResultsNoise(result.content)) {
@@ -637,413 +722,317 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
           }
           // 流式正文末尾补换行(若 onToolCall 已补则 lastChar='\n',此处 no-op);防 ● 行黏在正文行尾
           if (mode !== 'idle' && lastChar !== '\n') hooks.onTextEnd?.();
-          // 带工具调用的 assistant 消息原样回灌(OpenAI 格式要求)
-          history.push({
-            role: 'assistant',
-            content: result.content,
-            tool_calls: result.toolCalls.map((tc) => ({
-              id: tc.id,
-              type: 'function' as const,
-              function: { name: tc.name, arguments: tc.arguments },
-            })),
-          } as ChatMessage);
-          // A+B:记录本步第一条 tool_result 的下标 + 执行前 notes.md 的 mtime,
-          // 工具全部执行完后据此判断"本步是否改动了 notes.md"(重同步 / nag)。
-          const toolResultStartIdx = history.length;
-          const notesMtimeBefore = ctx.getNotesMtime();
+          // 带工具调用的 assistant 消息先公开写入；tool results 在 batch transaction 中组装。
+          historyManager.appendAssistantTurn({ content: result.content, toolCalls: result.toolCalls });
+          const toolBatch = historyManager.beginToolBatch(result.toolCalls);
+          // Migration-only shadow/direct view: existing dispatcher metadata code keeps its exact index semantics.
+          const history = toolBatch.workingMessages;
+          try {
+            // A+B:记录本步第一条 tool_result 的下标 + 执行前 notes.md 的 mtime,
+            // 工具全部执行完后据此判断"本步是否改动了 notes.md"(重同步 / nag)。
+            const toolResultStartIdx = history.length;
+            const notesMtimeBefore = ctx.getNotesMtime();
 
-          // Record interstitial narration for observability only. It never changes tool output
-          // or injects instructions back into the model context.
-          const narration = result.content?.trim() ?? '';
-          if (narration) {
-            emitTrace('narration', {
-              chars: [...narration].length,
-              toolCalls: result.toolCalls.length,
-              step,
-            });
-          }
-
-          // 工具分组执行(保 tool_calls 原顺序)：safe parallel 工具照常并发；连续
-          // resource-locked mutation 先按序完成权限预检，再按 canonical resource lock 启动。
-          // registry 对所有真实资源访问统一持锁，所以不同 Agent 间的 read/write/process 也不会竞态。
-          // 串行工具仍是本调用列表内的屏障；渲染/history 回灌始终按原 tool_calls 顺序。
-          // executeToolOutcome 永不抛错，失败通过结构化 status/code 返回。
-          const calls = result.toolCalls;
-          const modelAttachments: NonNullable<ToolOutcome['modelAttachments']> = [];
-          const tracedCalls = calls.map((tc, index) => ({
-            toolCallId: `${traceTurnId}:step:${step}:tool:${index}`,
-            args: summarizeToolArguments(tc.arguments),
-          }));
-          for (let index = 0; index < calls.length; index++) {
-            const tc = calls[index];
-            const traceCall = tracedCalls[index];
-            emitTrace(
-              'tool_call_start',
-              {
-                tool: tc.name,
-                argumentHash: traceCall.args.sha256,
-                arguments: traceCall.args,
-              },
-              {
-                toolCallId: traceCall.toolCallId,
-                ...(tc.id ? { providerToolCallId: tc.id } : {}),
-              },
-            );
-          }
-          const traceToolEnd = (tc: ToolCallRef, index: number, outcome: ToolOutcome): void => {
-            if (outcome.status === 'success' && outcome.modelAttachments?.length) {
-              modelAttachments.push(...outcome.modelAttachments);
-            }
-            const traceCall = tracedCalls[index];
-            emitTrace(
-              'tool_call_end',
-              {
-                tool: tc.name,
-                argumentHash: traceCall.args.sha256,
-                status: outcome.status,
-                code: outcome.code,
-                retryable: outcome.retryable,
-                durationMs: outcome.durationMs ?? 0,
-                changedFiles: outcome.changedFiles ?? [],
-                staleFiles: outcome.staleFiles ?? [],
-                ...(outcome.changeSet ? { changeSet: outcome.changeSet } : {}),
-                ...(outcome.usage ? { nestedUsage: outcome.usage } : {}),
-              },
-              {
-                toolCallId: traceCall.toolCallId,
-                ...(tc.id ? { providerToolCallId: tc.id } : {}),
-              },
-            );
-          };
-          const hasToolRouteBarrier = calls.some((tc) => tc.name === ADD_TOOL_GROUPS_TOOL_NAME);
-          if (hasToolRouteBarrier) {
-            const mixedCall = calls.length !== 1;
-            for (let index = 0; index < calls.length; index++) {
-              const tc = calls[index];
-              hooks.onToolHeader?.(tc);
-              const parsed = parseArgs(tc.arguments);
-              let outcome: ToolOutcome;
-
-              if (mixedCall) {
-                const isControl = tc.name === ADD_TOOL_GROUPS_TOOL_NAME;
-                outcome = {
-                  status: 'denied',
-                  code: isControl ? 'INVALID_ARGUMENTS' : 'TOOL_DISABLED',
-                  retryable: false,
-                  output: isControl
-                    ? '错误:add_tool_groups 必须在一个独立的 model step 中单独调用；本次没有扩容。'
-                    : `错误:同一响应包含 add_tool_groups，工具 ${tc.name} 未执行。请等待扩容结果后在下一 step 重试。`,
-                  changedFiles: [],
-                  durationMs: 0,
-                };
-              } else if (isToolDeniedForStep(tc.name)) {
-                outcome = {
-                  status: 'denied',
-                  code: 'TOOL_DISABLED',
-                  retryable: false,
-                  output: `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`,
-                  changedFiles: [],
-                  durationMs: 0,
-                };
-              } else if (!opts.toolPolicy) {
-                outcome = {
-                  status: 'denied',
-                  code: 'TOOL_DISABLED',
-                  retryable: false,
-                  output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
-                  changedFiles: [],
-                  durationMs: 0,
-                };
-              } else if (
-                !parsed ||
-                !Array.isArray(parsed.groups) ||
-                parsed.groups.length === 0 ||
-                typeof parsed.reason !== 'string' ||
-                !parsed.reason.trim()
-              ) {
-                outcome = {
-                  status: 'error',
-                  code: 'INVALID_ARGUMENTS',
-                  retryable: false,
-                  output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
-                  changedFiles: [],
-                  durationMs: 0,
-                };
-              } else {
-                const expansion = opts.toolPolicy.expand(parsed.groups, parsed.reason);
-                const succeeded = expansion.added.length > 0;
-                const details = [
-                  succeeded
-                    ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
-                    : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
-                  expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
-                  succeeded ? 'The added tool schemas become available on the next model step.' : '',
-                ]
-                  .filter(Boolean)
-                  .join('\n');
-                outcome = {
-                  status: succeeded ? 'success' : 'error',
-                  code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
-                  retryable: false,
-                  output: details,
-                  changedFiles: [],
-                  durationMs: 0,
-                };
-                emitTrace('tool_route_expand', {
-                  policyId: expansion.snapshot.id,
-                  fromVersion: policySnapshot?.version,
-                  toVersion: expansion.snapshot.version,
-                  requestedGroups: parsed.groups.map(String),
-                  addedGroups: expansion.added,
-                  rejected: expansion.rejected,
-                  reason: parsed.reason,
-                  status: outcome.status,
-                });
-              }
-
-              opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
-              hooks.onToolResult?.(tc, outcome.output, null, null, 1);
-              pushToolResult(
-                history,
-                tc,
-                outcome.output,
-                relprune,
-                lifecycle,
-                scheduler,
-                runtimeContextState,
-                outcome.status === 'success',
-              );
-              traceToolEnd(tc, index, outcome);
-            }
-          }
-
-          // add_tool_groups 是 step 屏障：只要本响应出现该控制调用，本批所有普通工具都不执行。
-          // 但上面仍为每个 provider tool_call 写入了配对 tool_result，保持 OpenAI 协议完整。
-          let i = hasToolRouteBarrier ? calls.length : 0;
-          while (i < calls.length) {
-            const currentCall = calls[i];
-            if (isToolDeniedForStep(currentCall.name)) {
-              hooks.onToolHeader?.(currentCall);
-              const error = t('task.disabled');
-              const outcome: ToolOutcome = {
-                status: 'denied',
-                code: 'TOOL_DISABLED',
-                retryable: false,
-                output: error,
-                changedFiles: [],
-                durationMs: 0,
-              };
-              hooks.onToolResult?.(currentCall, error, null, null, 1);
-              pushToolResult(history, currentCall, error, relprune, lifecycle, scheduler, runtimeContextState, false);
-              traceToolEnd(currentCall, i, outcome);
-              i++;
-              continue;
-            }
-            if (isParallelTool(currentCall.name)) {
-              // 收集连续只读组(≥1),并发执行:先渲染所有 header，再一次性启动所有
-              // (executeTool 调用即开始 I/O)，最后按原顺序逐个 await + 回灌。
-              // 必须先 header 后 execute：grep 等同步快速工具会在 executeTool 返回 Promise 前
-              // 已经完成；若先 started.map，用户只能在工具完成后才看到摘要与其前面的换行。
-              // 异步工具(web_fetch 等)并发跑、总耗时 ≈ 最慢一个;同步工具(glob/grep)map 时已顺序跑完,await 即返。
-              let j = i;
-              while (j < calls.length && isParallelTool(calls[j].name) && !isToolDeniedForStep(calls[j].name)) j++;
-              const batch = calls.slice(i, j);
-              for (const tc of batch) hooks.onToolHeader?.(tc);
-              hooks.onToolStart?.(batch[0].name);
-              const started = batch.map((tc) =>
-                executeToolOutcome(tc.name, tc.arguments, signal, {
-                  callId: tc.id,
-                  allowedToolNames: currentAllowedToolNames(),
-                  delegation: delegationForOrchestrator(),
-                }),
-              );
-              for (let k = 0; k < batch.length; k++) {
-                const tc = batch[k];
-                const outcome = await started[k];
-                traceState.addUsage(outcome.usage);
-                opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
-                traceToolEnd(tc, i + k, outcome);
-                const output = outcome.output;
-                hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
-                if (tc.name === 'ask_human' && outcome.status === 'success') {
-                  askHumanCountThisTurn += 1;
-                  emitTrace(
-                    'ask_human_call',
-                    {
-                      tool: tc.name,
-                      status: outcome.status,
-                      perTurnCount: askHumanCountThisTurn,
-                    },
-                    tc.id ? { providerToolCallId: tc.id } : {},
-                  );
-                }
-                pushToolResult(
-                  history,
-                  tc,
-                  output,
-                  relprune,
-                  lifecycle,
-                  scheduler,
-                  runtimeContextState,
-                  outcome.status === 'success',
-                );
-              }
-              hooks.onToolDone?.();
-              i = j;
-            } else if (
-              isResourceLockedCall(currentCall) &&
-              !(ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(currentCall.name))
-            ) {
-              // 连续文件 mutation：权限确认仍严格按原序进行；全部 preflight 完成后再启动。
-              // 每个执行在 registry 内按 canonical path 获取锁，不同文件可并发，同文件别名会排队。
-              let j = i;
-              while (
-                j < calls.length &&
-                isResourceLockedCall(calls[j]) &&
-                !isToolDeniedForStep(calls[j].name) &&
-                !(ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(calls[j].name))
-              )
-                j++;
-              const batch = calls.slice(i, j);
-              const entries: Array<{
-                tc: ToolCallRef;
-                parsed: Record<string, unknown> | null;
-                diff: { preWriteOld: string | null; editStartLine: number };
-                denied?: ToolOutcome;
-              }> = [];
-
-              for (let k = 0; k < batch.length; k++) {
-                const tc = batch[k];
-                const parsed = parseArgs(tc.arguments);
-                const tool = findTool(tc.name);
-                const argumentsValid = tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
-                let denied: ToolOutcome | undefined;
-                if (tool && argumentsValid) {
-                  const perm = await checkPermission(tool, parsed ?? {}, signal, {
-                    prompt: opts.permissionPrompt,
-                  });
-                  emitTrace(
-                    'permission',
-                    {
-                      source: 'agent_tool',
-                      tool: tc.name,
-                      decision: perm,
-                      argumentHash: tracedCalls[i + k].args.sha256,
-                    },
-                    {
-                      toolCallId: tracedCalls[i + k].toolCallId,
-                      ...(tc.id ? { providerToolCallId: tc.id } : {}),
-                    },
-                  );
-                  if (perm === 'deny') denied = deniedOutcome(tc.name);
-                }
-                entries.push({
-                  tc,
-                  parsed,
-                  diff: { preWriteOld: null, editStartLine: 1 },
-                  ...(denied ? { denied } : {}),
-                });
-              }
-
-              for (const entry of entries) hooks.onToolHeader?.(entry.tc);
-              const firstAllowed = entries.find((entry) => !entry.denied);
-              if (firstAllowed) hooks.onToolStart?.(firstAllowed.tc.name);
-              const started = entries.map((entry) => {
-                if (entry.denied) return Promise.resolve(entry.denied);
-                const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
-                return executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
-                  callId: entry.tc.id,
-                  allowedToolNames: currentAllowedToolNames(),
-                  delegation: delegationForOrchestrator(),
-                  ...(hint ? { argumentErrorHint: hint } : {}),
-                  onLockAcquired: (lockedArgs) => {
-                    entry.diff = readDiffContext(entry.tc, lockedArgs);
-                  },
-                });
+            // Record interstitial narration for observability only. It never changes tool output
+            // or injects instructions back into the model context.
+            const narration = result.content?.trim() ?? '';
+            if (narration) {
+              emitTrace('narration', {
+                chars: [...narration].length,
+                toolCalls: result.toolCalls.length,
+                step,
               });
+            }
 
-              for (let k = 0; k < entries.length; k++) {
-                const entry = entries[k];
-                const outcome = await started[k];
-                traceState.addUsage(outcome.usage);
-                opts.onToolOutcome?.(entry.tc.name, entry.parsed ?? {}, outcome);
-                traceToolEnd(entry.tc, i + k, outcome);
-                hooks.onToolResult?.(
-                  entry.tc,
-                  outcome.output,
-                  entry.denied ? null : entry.parsed,
-                  entry.diff.preWriteOld,
-                  entry.diff.editStartLine,
-                );
-                pushToolResult(
-                  history,
-                  entry.tc,
-                  outcome.output,
-                  relprune,
-                  lifecycle,
-                  scheduler,
-                  runtimeContextState,
-                  outcome.status === 'success',
-                );
-                const invalidatedFiles = [...new Set([...(outcome.changedFiles ?? []), ...(outcome.staleFiles ?? [])])];
-                if (invalidatedFiles.length > 0) {
-                  for (const changedFile of invalidatedFiles) {
-                    relprune?.observeMutation(history, changedFile);
-                    lifecycle?.pushMutation(history, history.length - 1, changedFile);
+            // 工具分组执行(保 tool_calls 原顺序)：safe parallel 工具照常并发；连续
+            // resource-locked mutation 先按序完成权限预检，再按 canonical resource lock 启动。
+            // registry 对所有真实资源访问统一持锁，所以不同 Agent 间的 read/write/process 也不会竞态。
+            // 串行工具仍是本调用列表内的屏障；渲染/history 回灌始终按原 tool_calls 顺序。
+            // executeToolOutcome 永不抛错，失败通过结构化 status/code 返回。
+            const modelAttachments: NonNullable<ToolOutcome['modelAttachments']> = [];
+            if (stages.tools.implementation === 'staged') {
+              const handleDispatchEvent = (event: ToolDispatchEvent): void => {
+                switch (event.type) {
+                  case 'call_start': {
+                    const toolCallId = `${traceTurnId}:step:${step}:tool:${event.callIndex}`;
+                    emitTrace(
+                      'tool_call_start',
+                      {
+                        tool: event.call.name,
+                        argumentHash: event.argumentSummary.sha256,
+                        arguments: event.argumentSummary,
+                      },
+                      {
+                        toolCallId,
+                        ...(event.call.id ? { providerToolCallId: event.call.id } : {}),
+                      },
+                    );
+                    break;
                   }
-                  invalidateArtifacts(runtimeContextState, history, invalidatedFiles);
-                  runtimeContextState.lifecycleStats = lifecycle?.stats();
+                  case 'permission': {
+                    const args = summarizeToolArguments(event.call.arguments);
+                    emitTrace(
+                      'permission',
+                      {
+                        source: 'agent_tool',
+                        tool: event.call.name,
+                        decision: event.decision,
+                        argumentHash: args.sha256,
+                      },
+                      {
+                        toolCallId: `${traceTurnId}:step:${step}:tool:${event.callIndex}`,
+                        ...(event.call.id ? { providerToolCallId: event.call.id } : {}),
+                      },
+                    );
+                    break;
+                  }
+                  case 'route_expand':
+                    emitTrace('tool_route_expand', {
+                      policyId: event.expansion.snapshot.id,
+                      fromVersion: event.fromVersion,
+                      toVersion: event.expansion.snapshot.version,
+                      requestedGroups: event.requestedGroups.map(String),
+                      addedGroups: event.expansion.added,
+                      rejected: event.expansion.rejected,
+                      reason: event.reason,
+                      status: event.status,
+                    });
+                    break;
+                  case 'header':
+                    hooks.onToolHeader?.(event.call);
+                    break;
+                  case 'start':
+                    hooks.onToolStart?.(event.tool);
+                    break;
+                  case 'done':
+                    hooks.onToolDone?.();
+                    break;
+                  case 'usage':
+                    usageMeter.add(event.usage);
+                    break;
+                  case 'host_outcome':
+                    opts.onToolOutcome?.(event.call.name, event.parsed, event.outcome);
+                    break;
+                  case 'trace_end': {
+                    const { outcome, call } = event;
+                    emitTrace(
+                      'tool_call_end',
+                      {
+                        tool: call.name,
+                        argumentHash: event.argumentSummary.sha256,
+                        status: outcome.status,
+                        code: outcome.code,
+                        retryable: outcome.retryable,
+                        durationMs: outcome.durationMs ?? 0,
+                        changedFiles: outcome.changedFiles ?? [],
+                        staleFiles: outcome.staleFiles ?? [],
+                        ...(outcome.changeSet ? { changeSet: outcome.changeSet } : {}),
+                        ...(outcome.usage ? { nestedUsage: outcome.usage } : {}),
+                      },
+                      {
+                        toolCallId: `${traceTurnId}:step:${step}:tool:${event.callIndex}`,
+                        ...(call.id ? { providerToolCallId: call.id } : {}),
+                      },
+                    );
+                    break;
+                  }
+                  case 'result':
+                    hooks.onToolResult?.(
+                      event.call,
+                      event.outcome.output,
+                      event.parsed,
+                      event.diff.preWriteOld,
+                      event.diff.editStartLine,
+                    );
+                    if (event.call.name === 'ask_human' && event.outcome.status === 'success') {
+                      askHumanCountThisTurn += 1;
+                      emitTrace(
+                        'ask_human_call',
+                        {
+                          tool: event.call.name,
+                          status: event.outcome.status,
+                          perTurnCount: askHumanCountThisTurn,
+                        },
+                        event.call.id ? { providerToolCallId: event.call.id } : {},
+                      );
+                    }
+                    if (event.includeContextState) {
+                      pushToolResult(
+                        history,
+                        event.call,
+                        event.outcome.output,
+                        relprune,
+                        lifecycle,
+                        scheduler,
+                        runtimeContextState,
+                        event.succeeded,
+                      );
+                    } else {
+                      pushToolResult(history, event.call, event.outcome.output, relprune, lifecycle, scheduler);
+                    }
+                    break;
+                  case 'invalidate':
+                    for (const changedFile of event.files) {
+                      relprune?.observeMutation(history, changedFile);
+                      lifecycle?.pushMutation(history, history.length - 1, changedFile);
+                    }
+                    invalidateArtifacts(runtimeContextState, history, event.files);
+                    runtimeContextState.lifecycleStats = lifecycle?.stats();
+                    break;
                 }
-              }
-              if (firstAllowed) hooks.onToolDone?.();
-              i = j;
+              };
+              const dispatchResult = await toolDispatcher.dispatch({
+                calls: result.toolCalls,
+                policy: runPolicy,
+                signal,
+                permissionPrompt: opts.permissionPrompt,
+                isDenied: isToolDeniedForStep,
+                currentAllowedToolNames,
+                delegation: delegationForOrchestrator,
+                argumentErrorHint: (name) => argumentErrorHint(name, runtimeContextState),
+                ...(opts.toolPolicy
+                  ? {
+                      expandToolGroups: (groups: readonly unknown[], reason: string) =>
+                        opts.toolPolicy!.expand(groups, reason),
+                    }
+                  : {}),
+                onEvent: handleDispatchEvent,
+              });
+              modelAttachments.push(...dispatchResult.modelAttachments);
             } else {
-              // 单步串行(mutation / run_command / use_skill)——逐个执行,保快照序
-              const tc = calls[i];
-              // plan 模式防御 backstop:schema 已剔除这些工具,正常不会进这里;防后端幻觉调用——
-              // 不执行,直接返错回灌(让模型看到「plan 模式禁用」并停止),绝不写盘 / 跑命令。
-              if (ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(tc.name)) {
-                hooks.onToolHeader?.(tc);
-                const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
-                const outcome: ToolOutcome = {
-                  status: 'denied',
-                  code: 'MODE_DENIED',
-                  retryable: false,
-                  output: err,
-                  changedFiles: [],
-                  durationMs: 0,
-                };
-                hooks.onToolResult?.(tc, err, null, null, 1);
-                pushToolResult(history, tc, err, relprune, lifecycle, scheduler);
-                traceToolEnd(tc, i, outcome);
-                i++;
-                continue;
-              }
-              // 权限预检查:在渲染 ● 头之前弹确认面板(体验:先问再执行,而非执行完再问)。
-              // 拒绝时只渲染拒绝结果,不渲染执行头;放行则继续走 header → start → executeTool 流程。
-              const parsed = parseArgs(tc.arguments);
-              const tool = findTool(tc.name);
-              const argumentsValid = tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
-              if (tool && argumentsValid) {
-                const perm = await checkPermission(tool, parsed ?? {}, signal, {
-                  prompt: opts.permissionPrompt,
-                });
+              const calls = result.toolCalls;
+              const tracedCalls = calls.map((tc, index) => ({
+                toolCallId: `${traceTurnId}:step:${step}:tool:${index}`,
+                args: summarizeToolArguments(tc.arguments),
+              }));
+              for (let index = 0; index < calls.length; index++) {
+                const tc = calls[index];
+                const traceCall = tracedCalls[index];
                 emitTrace(
-                  'permission',
+                  'tool_call_start',
                   {
-                    source: 'agent_tool',
                     tool: tc.name,
-                    decision: perm,
-                    argumentHash: tracedCalls[i].args.sha256,
+                    argumentHash: traceCall.args.sha256,
+                    arguments: traceCall.args,
                   },
                   {
-                    toolCallId: tracedCalls[i].toolCallId,
+                    toolCallId: traceCall.toolCallId,
                     ...(tc.id ? { providerToolCallId: tc.id } : {}),
                   },
                 );
-                if (perm === 'deny') {
+              }
+              const traceToolEnd = (tc: ToolCallRef, index: number, outcome: ToolOutcome): void => {
+                if (outcome.status === 'success' && outcome.modelAttachments?.length) {
+                  modelAttachments.push(...outcome.modelAttachments);
+                }
+                const traceCall = tracedCalls[index];
+                emitTrace(
+                  'tool_call_end',
+                  {
+                    tool: tc.name,
+                    argumentHash: traceCall.args.sha256,
+                    status: outcome.status,
+                    code: outcome.code,
+                    retryable: outcome.retryable,
+                    durationMs: outcome.durationMs ?? 0,
+                    changedFiles: outcome.changedFiles ?? [],
+                    staleFiles: outcome.staleFiles ?? [],
+                    ...(outcome.changeSet ? { changeSet: outcome.changeSet } : {}),
+                    ...(outcome.usage ? { nestedUsage: outcome.usage } : {}),
+                  },
+                  {
+                    toolCallId: traceCall.toolCallId,
+                    ...(tc.id ? { providerToolCallId: tc.id } : {}),
+                  },
+                );
+              };
+              const hasToolRouteBarrier = calls.some((tc) => tc.name === ADD_TOOL_GROUPS_TOOL_NAME);
+              if (hasToolRouteBarrier) {
+                const mixedCall = calls.length !== 1;
+                for (let index = 0; index < calls.length; index++) {
+                  const tc = calls[index];
                   hooks.onToolHeader?.(tc);
-                  const outcome = deniedOutcome(tc.name);
+                  const parsed = parseArgs(tc.arguments);
+                  let outcome: ToolOutcome;
+
+                  if (mixedCall) {
+                    const isControl = tc.name === ADD_TOOL_GROUPS_TOOL_NAME;
+                    outcome = {
+                      status: 'denied',
+                      code: isControl ? 'INVALID_ARGUMENTS' : 'TOOL_DISABLED',
+                      retryable: false,
+                      output: isControl
+                        ? '错误:add_tool_groups 必须在一个独立的 model step 中单独调用；本次没有扩容。'
+                        : `错误:同一响应包含 add_tool_groups，工具 ${tc.name} 未执行。请等待扩容结果后在下一 step 重试。`,
+                      changedFiles: [],
+                      durationMs: 0,
+                    };
+                  } else if (isToolDeniedForStep(tc.name)) {
+                    outcome = {
+                      status: 'denied',
+                      code: 'TOOL_DISABLED',
+                      retryable: false,
+                      output: `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`,
+                      changedFiles: [],
+                      durationMs: 0,
+                    };
+                  } else if (!opts.toolPolicy) {
+                    outcome = {
+                      status: 'denied',
+                      code: 'TOOL_DISABLED',
+                      retryable: false,
+                      output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
+                      changedFiles: [],
+                      durationMs: 0,
+                    };
+                  } else if (
+                    !parsed ||
+                    !Array.isArray(parsed.groups) ||
+                    parsed.groups.length === 0 ||
+                    typeof parsed.reason !== 'string' ||
+                    !parsed.reason.trim()
+                  ) {
+                    outcome = {
+                      status: 'error',
+                      code: 'INVALID_ARGUMENTS',
+                      retryable: false,
+                      output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
+                      changedFiles: [],
+                      durationMs: 0,
+                    };
+                  } else {
+                    const expansion = opts.toolPolicy.expand(parsed.groups, parsed.reason);
+                    const succeeded = expansion.added.length > 0;
+                    const details = [
+                      succeeded
+                        ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
+                        : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
+                      expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
+                      succeeded ? 'The added tool schemas become available on the next model step.' : '',
+                    ]
+                      .filter(Boolean)
+                      .join('\n');
+                    outcome = {
+                      status: succeeded ? 'success' : 'error',
+                      code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
+                      retryable: false,
+                      output: details,
+                      changedFiles: [],
+                      durationMs: 0,
+                    };
+                    emitTrace('tool_route_expand', {
+                      policyId: expansion.snapshot.id,
+                      fromVersion: policySnapshot?.version,
+                      toVersion: expansion.snapshot.version,
+                      requestedGroups: parsed.groups.map(String),
+                      addedGroups: expansion.added,
+                      rejected: expansion.rejected,
+                      reason: parsed.reason,
+                      status: outcome.status,
+                    });
+                  }
+
+                  opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
                   hooks.onToolResult?.(tc, outcome.output, null, null, 1);
                   pushToolResult(
                     history,
@@ -1053,131 +1042,409 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
                     lifecycle,
                     scheduler,
                     runtimeContextState,
+                    outcome.status === 'success',
+                  );
+                  traceToolEnd(tc, index, outcome);
+                }
+              }
+
+              // add_tool_groups 是 step 屏障：只要本响应出现该控制调用，本批所有普通工具都不执行。
+              // 但上面仍为每个 provider tool_call 写入了配对 tool_result，保持 OpenAI 协议完整。
+              let i = hasToolRouteBarrier ? calls.length : 0;
+              while (i < calls.length) {
+                const currentCall = calls[i];
+                if (isToolDeniedForStep(currentCall.name)) {
+                  hooks.onToolHeader?.(currentCall);
+                  const error = t('task.disabled');
+                  const outcome: ToolOutcome = {
+                    status: 'denied',
+                    code: 'TOOL_DISABLED',
+                    retryable: false,
+                    output: error,
+                    changedFiles: [],
+                    durationMs: 0,
+                  };
+                  hooks.onToolResult?.(currentCall, error, null, null, 1);
+                  pushToolResult(
+                    history,
+                    currentCall,
+                    error,
+                    relprune,
+                    lifecycle,
+                    scheduler,
+                    runtimeContextState,
                     false,
                   );
-                  traceToolEnd(tc, i, outcome);
+                  traceToolEnd(currentCall, i, outcome);
                   i++;
                   continue;
                 }
-              }
-              hooks.onToolHeader?.(tc);
-              const mutationParsed = isMutationTool(tc.name) ? parsed : null;
-              let diff = readDiffContext(tc, mutationParsed);
-              hooks.onToolStart?.(tc.name);
-              const serialHint = argumentErrorHint(tc.name, runtimeContextState);
-              const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, {
-                callId: tc.id,
-                allowedToolNames: currentAllowedToolNames(),
-                delegation: delegationForOrchestrator(),
-                ...(serialHint ? { argumentErrorHint: serialHint } : {}),
-                onLockAcquired: (lockedArgs) => {
-                  if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
-                },
-              });
-              traceState.addUsage(outcome.usage);
-              opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
-              traceToolEnd(tc, i, outcome);
-              const output = outcome.output;
-              hooks.onToolDone?.();
-              hooks.onToolResult?.(tc, output, mutationParsed, diff.preWriteOld, diff.editStartLine);
-              if (tc.name === 'ask_human' && outcome.status === 'success') {
-                askHumanCountThisTurn += 1;
-                emitTrace(
-                  'ask_human_call',
-                  {
-                    tool: tc.name,
-                    status: outcome.status,
-                    perTurnCount: askHumanCountThisTurn,
-                  },
-                  tc.id ? { providerToolCallId: tc.id } : {},
-                );
-              }
-              pushToolResult(
-                history,
-                tc,
-                output,
-                relprune,
-                lifecycle,
-                scheduler,
-                runtimeContextState,
-                outcome.status === 'success',
-              );
-              const invalidatedFiles = [...new Set([...(outcome.changedFiles ?? []), ...(outcome.staleFiles ?? [])])];
-              if (invalidatedFiles.length > 0) {
-                for (const changedFile of invalidatedFiles) {
-                  relprune?.observeMutation(history, changedFile);
-                  lifecycle?.pushMutation(history, history.length - 1, changedFile);
-                }
-                invalidateArtifacts(runtimeContextState, history, invalidatedFiles);
-                runtimeContextState.lifecycleStats = lifecycle?.stats();
-              }
-              i++;
-            }
-          }
-          // A(计划触碰计数):本步若改动了 notes.md 则清零计数。会话状态本身无需在此重注入——
-          // 每步都会由 buildSessionStateReminder() 在 requestHistory 末尾重建最新副本(见上方注入点),
-          // 所以模型下一步看到的必然是当前勾选态。只保留计数,避免多余的 history 改写(prompt 缓存)。
-          // B(nag 提醒):连续 N 步有工具活动但没更新 plan,在当前步第一条 tool_result 前注入提醒。
-          const notesMtimeAfter = ctx.getNotesMtime();
-          if (notesMtimeAfter !== notesMtimeBefore) {
-            stepsSincePlanTouch = 0;
-          } else {
-            stepsSincePlanTouch += 1;
-            if (stepsSincePlanTouch >= PLAN_NAG_THRESHOLD) {
-              const activePlan = ctx.extractActivePlanSection();
-              const firstToolMsg = history[toolResultStartIdx];
-              if (
-                activePlan &&
-                firstToolMsg &&
-                firstToolMsg.role === 'tool' &&
-                typeof firstToolMsg.content === 'string'
-              ) {
-                firstToolMsg.content = `${PLAN_NAG_TEXT}\n\n${firstToolMsg.content}`;
-              }
-              stepsSincePlanTouch = 0;
-            }
-          }
+                if (isParallelTool(currentCall.name)) {
+                  // 收集连续只读组(≥1),并发执行:先渲染所有 header，再一次性启动所有
+                  // (executeTool 调用即开始 I/O)，最后按原顺序逐个 await + 回灌。
+                  // 必须先 header 后 execute：grep 等同步快速工具会在 executeTool 返回 Promise 前
+                  // 已经完成；若先 started.map，用户只能在工具完成后才看到摘要与其前面的换行。
+                  // 异步工具(web_fetch 等)并发跑、总耗时 ≈ 最慢一个;同步工具(glob/grep)map 时已顺序跑完,await 即返。
+                  let j = i;
+                  while (j < calls.length && isParallelTool(calls[j].name) && !isToolDeniedForStep(calls[j].name)) j++;
+                  const batch = calls.slice(i, j);
+                  for (const tc of batch) hooks.onToolHeader?.(tc);
+                  hooks.onToolStart?.(batch[0].name);
+                  const started = batch.map((tc) =>
+                    executeToolOutcome(tc.name, tc.arguments, signal, {
+                      callId: tc.id,
+                      allowedToolNames: currentAllowedToolNames(),
+                      delegation: delegationForOrchestrator(),
+                    }),
+                  );
+                  for (let k = 0; k < batch.length; k++) {
+                    const tc = batch[k];
+                    const outcome = await started[k];
+                    usageMeter.add(outcome.usage);
+                    opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
+                    traceToolEnd(tc, i + k, outcome);
+                    const output = outcome.output;
+                    hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
+                    if (tc.name === 'ask_human' && outcome.status === 'success') {
+                      askHumanCountThisTurn += 1;
+                      emitTrace(
+                        'ask_human_call',
+                        {
+                          tool: tc.name,
+                          status: outcome.status,
+                          perTurnCount: askHumanCountThisTurn,
+                        },
+                        tc.id ? { providerToolCallId: tc.id } : {},
+                      );
+                    }
+                    pushToolResult(
+                      history,
+                      tc,
+                      output,
+                      relprune,
+                      lifecycle,
+                      scheduler,
+                      runtimeContextState,
+                      outcome.status === 'success',
+                    );
+                  }
+                  hooks.onToolDone?.();
+                  i = j;
+                } else if (
+                  isResourceLockedCall(currentCall) &&
+                  !(ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(currentCall.name))
+                ) {
+                  // 连续文件 mutation：权限确认仍严格按原序进行；全部 preflight 完成后再启动。
+                  // 每个执行在 registry 内按 canonical path 获取锁，不同文件可并发，同文件别名会排队。
+                  let j = i;
+                  while (
+                    j < calls.length &&
+                    isResourceLockedCall(calls[j]) &&
+                    !isToolDeniedForStep(calls[j].name) &&
+                    !(ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(calls[j].name))
+                  )
+                    j++;
+                  const batch = calls.slice(i, j);
+                  const entries: Array<{
+                    tc: ToolCallRef;
+                    parsed: Record<string, unknown> | null;
+                    diff: { preWriteOld: string | null; editStartLine: number };
+                    denied?: ToolOutcome;
+                  }> = [];
 
-          if (modelAttachments.length > 0) {
-            const names = modelAttachments.map((attachment) => attachment.name).join(', ');
-            const content: ContentPart[] = [
-              {
-                type: 'text',
-                text: `The view_image tool loaded the following visual input: ${names}. Analyze the attached image content directly.`,
-              },
-              ...modelAttachments.map(
-                (attachment): ContentPart => ({
-                  type: 'image_url',
-                  image_url: {
-                    url: attachment.dataUrl,
-                    // 不默认补 auto: OpenAI 省略时等同 auto，但 MiniMax 仅接受 low/default/high。
-                    // 让各 provider 采用默认枚举；仅保留工具明确请求的 low/high。
-                    ...(attachment.detail === 'low' || attachment.detail === 'high'
-                      ? { detail: attachment.detail }
-                      : {}),
-                  },
-                }),
-              ),
-            ];
-            // OpenAI tool-call protocol requires every tool result to immediately follow the
-            // assistant tool_calls message; append visual input only after the full batch.
-            history.push({ role: 'user', content } as ChatMessage);
+                  for (let k = 0; k < batch.length; k++) {
+                    const tc = batch[k];
+                    const parsed = parseArgs(tc.arguments);
+                    const tool = findTool(tc.name);
+                    const argumentsValid = tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
+                    let denied: ToolOutcome | undefined;
+                    if (tool && argumentsValid) {
+                      const perm = await checkPermission(tool, parsed ?? {}, signal, {
+                        prompt: opts.permissionPrompt,
+                      });
+                      emitTrace(
+                        'permission',
+                        {
+                          source: 'agent_tool',
+                          tool: tc.name,
+                          decision: perm,
+                          argumentHash: tracedCalls[i + k].args.sha256,
+                        },
+                        {
+                          toolCallId: tracedCalls[i + k].toolCallId,
+                          ...(tc.id ? { providerToolCallId: tc.id } : {}),
+                        },
+                      );
+                      if (perm === 'deny') denied = deniedOutcome(tc.name);
+                    }
+                    entries.push({
+                      tc,
+                      parsed,
+                      diff: { preWriteOld: null, editStartLine: 1 },
+                      ...(denied ? { denied } : {}),
+                    });
+                  }
+
+                  for (const entry of entries) hooks.onToolHeader?.(entry.tc);
+                  const firstAllowed = entries.find((entry) => !entry.denied);
+                  if (firstAllowed) hooks.onToolStart?.(firstAllowed.tc.name);
+                  const started = entries.map((entry) => {
+                    if (entry.denied) return Promise.resolve(entry.denied);
+                    const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
+                    return executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
+                      callId: entry.tc.id,
+                      allowedToolNames: currentAllowedToolNames(),
+                      delegation: delegationForOrchestrator(),
+                      ...(hint ? { argumentErrorHint: hint } : {}),
+                      onLockAcquired: (lockedArgs) => {
+                        entry.diff = readDiffContext(entry.tc, lockedArgs);
+                      },
+                    });
+                  });
+
+                  for (let k = 0; k < entries.length; k++) {
+                    const entry = entries[k];
+                    const outcome = await started[k];
+                    usageMeter.add(outcome.usage);
+                    opts.onToolOutcome?.(entry.tc.name, entry.parsed ?? {}, outcome);
+                    traceToolEnd(entry.tc, i + k, outcome);
+                    hooks.onToolResult?.(
+                      entry.tc,
+                      outcome.output,
+                      entry.denied ? null : entry.parsed,
+                      entry.diff.preWriteOld,
+                      entry.diff.editStartLine,
+                    );
+                    pushToolResult(
+                      history,
+                      entry.tc,
+                      outcome.output,
+                      relprune,
+                      lifecycle,
+                      scheduler,
+                      runtimeContextState,
+                      outcome.status === 'success',
+                    );
+                    const invalidatedFiles = [
+                      ...new Set([...(outcome.changedFiles ?? []), ...(outcome.staleFiles ?? [])]),
+                    ];
+                    if (invalidatedFiles.length > 0) {
+                      for (const changedFile of invalidatedFiles) {
+                        relprune?.observeMutation(history, changedFile);
+                        lifecycle?.pushMutation(history, history.length - 1, changedFile);
+                      }
+                      invalidateArtifacts(runtimeContextState, history, invalidatedFiles);
+                      runtimeContextState.lifecycleStats = lifecycle?.stats();
+                    }
+                  }
+                  if (firstAllowed) hooks.onToolDone?.();
+                  i = j;
+                } else {
+                  // 单步串行(mutation / run_command / use_skill)——逐个执行,保快照序
+                  const tc = calls[i];
+                  // plan 模式防御 backstop:schema 已剔除这些工具,正常不会进这里;防后端幻觉调用——
+                  // 不执行,直接返错回灌(让模型看到「plan 模式禁用」并停止),绝不写盘 / 跑命令。
+                  if (ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(tc.name)) {
+                    hooks.onToolHeader?.(tc);
+                    const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
+                    const outcome: ToolOutcome = {
+                      status: 'denied',
+                      code: 'MODE_DENIED',
+                      retryable: false,
+                      output: err,
+                      changedFiles: [],
+                      durationMs: 0,
+                    };
+                    hooks.onToolResult?.(tc, err, null, null, 1);
+                    pushToolResult(history, tc, err, relprune, lifecycle, scheduler);
+                    traceToolEnd(tc, i, outcome);
+                    i++;
+                    continue;
+                  }
+                  // 权限预检查:在渲染 ● 头之前弹确认面板(体验:先问再执行,而非执行完再问)。
+                  // 拒绝时只渲染拒绝结果,不渲染执行头;放行则继续走 header → start → executeTool 流程。
+                  const parsed = parseArgs(tc.arguments);
+                  const tool = findTool(tc.name);
+                  const argumentsValid = tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
+                  if (tool && argumentsValid) {
+                    const perm = await checkPermission(tool, parsed ?? {}, signal, {
+                      prompt: opts.permissionPrompt,
+                    });
+                    emitTrace(
+                      'permission',
+                      {
+                        source: 'agent_tool',
+                        tool: tc.name,
+                        decision: perm,
+                        argumentHash: tracedCalls[i].args.sha256,
+                      },
+                      {
+                        toolCallId: tracedCalls[i].toolCallId,
+                        ...(tc.id ? { providerToolCallId: tc.id } : {}),
+                      },
+                    );
+                    if (perm === 'deny') {
+                      hooks.onToolHeader?.(tc);
+                      const outcome = deniedOutcome(tc.name);
+                      hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+                      pushToolResult(
+                        history,
+                        tc,
+                        outcome.output,
+                        relprune,
+                        lifecycle,
+                        scheduler,
+                        runtimeContextState,
+                        false,
+                      );
+                      traceToolEnd(tc, i, outcome);
+                      i++;
+                      continue;
+                    }
+                  }
+                  hooks.onToolHeader?.(tc);
+                  const mutationParsed = isMutationTool(tc.name) ? parsed : null;
+                  let diff = readDiffContext(tc, mutationParsed);
+                  hooks.onToolStart?.(tc.name);
+                  const serialHint = argumentErrorHint(tc.name, runtimeContextState);
+                  const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, {
+                    callId: tc.id,
+                    allowedToolNames: currentAllowedToolNames(),
+                    delegation: delegationForOrchestrator(),
+                    ...(serialHint ? { argumentErrorHint: serialHint } : {}),
+                    onLockAcquired: (lockedArgs) => {
+                      if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
+                    },
+                  });
+                  usageMeter.add(outcome.usage);
+                  opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
+                  traceToolEnd(tc, i, outcome);
+                  const output = outcome.output;
+                  hooks.onToolDone?.();
+                  hooks.onToolResult?.(tc, output, mutationParsed, diff.preWriteOld, diff.editStartLine);
+                  if (tc.name === 'ask_human' && outcome.status === 'success') {
+                    askHumanCountThisTurn += 1;
+                    emitTrace(
+                      'ask_human_call',
+                      {
+                        tool: tc.name,
+                        status: outcome.status,
+                        perTurnCount: askHumanCountThisTurn,
+                      },
+                      tc.id ? { providerToolCallId: tc.id } : {},
+                    );
+                  }
+                  pushToolResult(
+                    history,
+                    tc,
+                    output,
+                    relprune,
+                    lifecycle,
+                    scheduler,
+                    runtimeContextState,
+                    outcome.status === 'success',
+                  );
+                  const invalidatedFiles = [
+                    ...new Set([...(outcome.changedFiles ?? []), ...(outcome.staleFiles ?? [])]),
+                  ];
+                  if (invalidatedFiles.length > 0) {
+                    for (const changedFile of invalidatedFiles) {
+                      relprune?.observeMutation(history, changedFile);
+                      lifecycle?.pushMutation(history, history.length - 1, changedFile);
+                    }
+                    invalidateArtifacts(runtimeContextState, history, invalidatedFiles);
+                    runtimeContextState.lifecycleStats = lifecycle?.stats();
+                  }
+                  i++;
+                }
+              }
+            }
+            // A(计划触碰计数):本步若改动了 notes.md 则清零计数。会话状态本身无需在此重注入——
+            // 每步都会由 buildSessionStateReminder() 在 requestHistory 末尾重建最新副本(见上方注入点),
+            // 所以模型下一步看到的必然是当前勾选态。只保留计数,避免多余的 history 改写(prompt 缓存)。
+            // B(nag 提醒):连续 N 步有工具活动但没更新 plan,在当前步第一条 tool_result 前注入提醒。
+            const notesMtimeAfter = ctx.getNotesMtime();
+            if (notesMtimeAfter !== notesMtimeBefore) {
+              stepsSincePlanTouch = 0;
+            } else {
+              stepsSincePlanTouch += 1;
+              if (stepsSincePlanTouch >= PLAN_NAG_THRESHOLD) {
+                const activePlan = ctx.extractActivePlanSection();
+                const firstToolMsg = history[toolResultStartIdx];
+                if (
+                  activePlan &&
+                  firstToolMsg &&
+                  firstToolMsg.role === 'tool' &&
+                  typeof firstToolMsg.content === 'string'
+                ) {
+                  firstToolMsg.content = `${PLAN_NAG_TEXT}\n\n${firstToolMsg.content}`;
+                }
+                stepsSincePlanTouch = 0;
+              }
+            }
+
+            let attachmentMessage: ChatMessage | undefined;
+            if (modelAttachments.length > 0) {
+              const names = modelAttachments.map((attachment) => attachment.name).join(', ');
+              const content: ContentPart[] = [
+                {
+                  type: 'text',
+                  text: `The view_image tool loaded the following visual input: ${names}. Analyze the attached image content directly.`,
+                },
+                ...modelAttachments.map(
+                  (attachment): ContentPart => ({
+                    type: 'image_url',
+                    image_url: {
+                      url: attachment.dataUrl,
+                      // 不默认补 auto: OpenAI 省略时等同 auto，但 MiniMax 仅接受 low/default/high。
+                      // 让各 provider 采用默认枚举；仅保留工具明确请求的 low/high。
+                      ...(attachment.detail === 'low' || attachment.detail === 'high'
+                        ? { detail: attachment.detail }
+                        : {}),
+                    },
+                  }),
+                ),
+              ];
+              // OpenAI tool-call protocol requires every tool result to immediately follow the
+              // assistant tool_calls message; publish visual input only after the complete result batch.
+              attachmentMessage = { role: 'user', content } as ChatMessage;
+            }
+            toolBatch.commit(attachmentMessage);
+          } catch (error) {
+            // staged 可能已基于 shadow 登记 artifact/lifecycle；失败时必须按 persistent backing 重建。
+            // legacy rollback 只结算 transaction，不删除 direct-view 消息，保留既有异常路径语义。
+            toolBatch.rollback();
+            rebuildHistoryIndexes();
+            throw error;
           }
           // 工具步末尾补一空行:与下一轮的思考 / 正文分隔(否则 ↳ 后紧接 ▎ 思考,无空行不好看;
           // 与正文→● 的 1 空行对称)。工具结果已以 \n 收尾,此处再补 \n 恰好 1 空行。
           hooks.onToolBatchEnd?.();
           // 刷新中断快照:工具全部执行完毕后,history 处于一致状态(assistant+tool_calls+tool 结果完整),
           // 此时中断可安全保留这些已完成的消息,只丢弃下一轮未完成的 chat() 响应。
-          savedHistory = history.slice();
+          cancellationLifecycle.checkpoint();
+          const batchDecision = terminationPolicy.decide({
+            phase: 'tool_batch_committed',
+            step,
+            maxSteps,
+            aborted: signal?.aborted === true,
+            modelResult: result,
+          });
+          if (batchDecision.kind !== 'continue') {
+            throw new Error(`Unexpected termination after committed tool batch: ${batchDecision.kind}.`);
+          }
           continue; // 带着工具结果再调一次 LLM
         }
 
+        if (modelDecision.kind !== 'completed') {
+          throw new Error(`Unexpected model termination decision: ${modelDecision.kind}.`);
+        }
         if (mode !== 'idle' && lastChar !== '\n') hooks.onTextEnd?.(); // 流式末尾补换行
 
         // 没有工具调用：接受 agent 的完成判断。框架不自动运行测试、构建或完成门，
         // 也不因缺少验证证据强制追加模型轮次；agent 仍可自行调用工具验证。
         if (!gotText) hooks.onNoReply?.();
-        history.push({ role: 'assistant', content: result.content } as ChatMessage);
+        historyManager.appendAssistantTurn({ content: result.content, toolCalls: [] });
 
         const finalMutation = ctx.getCurrentTurnMutationState();
         done = true;
@@ -1185,8 +1452,8 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         return {
           completed: true,
           terminationReason: 'completed',
-          finalText: result.content,
-          usage: traceState.turnUsage,
+          finalText: modelDecision.finalText,
+          usage: usageMeter.snapshot(),
           changedFiles: finalMutation.changedFiles.map((item) => item.path),
         };
       } finally {
@@ -1197,6 +1464,15 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
       }
     }
 
+    const exhaustedDecision = terminationPolicy.decide({
+      phase: 'loop_exhausted',
+      step: maxSteps,
+      maxSteps,
+      aborted: signal?.aborted === true,
+    });
+    if (exhaustedDecision.kind !== 'max_steps') {
+      throw new Error(`Unexpected loop exhaustion decision: ${exhaustedDecision.kind}.`);
+    }
     hooks.onMaxSteps?.();
     done = true;
     traceStatus = 'max_steps';
@@ -1205,18 +1481,18 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
       completed: false,
       terminationReason: 'max_steps',
       finalText: null,
-      usage: traceState.turnUsage,
+      usage: usageMeter.snapshot(),
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
     };
   } finally {
     const finalMutation = ctx.getCurrentTurnMutationState();
-    traceState.currentTraceStep = undefined;
+    currentTraceStep = undefined;
     emitTrace('turn_end', {
       status: traceStatus,
       durationMs: Date.now() - t0,
-      toolCalls: traceState.toolCallCount,
+      toolCalls: toolCallCount,
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
-      totalTokens: traceState.turnUsage?.totalTokens,
+      totalTokens: usageMeter.snapshot()?.totalTokens,
     });
     try {
       opts.onTrace?.({
@@ -1225,18 +1501,31 @@ export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResul
         turnId: traceTurnId,
         status: traceStatus,
         durationMs: Date.now() - t0,
-        toolCalls: traceState.toolCallCount,
+        toolCalls: toolCallCount,
         changedFiles: finalMutation.changedFiles.map((item) => item.path),
-        usage: traceState.turnUsage,
+        usage: usageMeter.snapshot(),
       });
     } catch {
       // Trace is best-effort and must not change the turn result.
     }
     // 跑完(正常 / 达上限)在回复末尾打耗时摘要行;中断 done=false 不打。
     if (done) {
-      hooks.onDone?.(Date.now() - t0, traceState.turnUsage);
+      hooks.onDone?.(Date.now() - t0, usageMeter.snapshot());
     }
   }
+}
+
+/**
+ * Public entry point. Per-run assembly selects the HistoryManager implementation; the complete legacy coordinator
+ * remains the sole executor, so choosing staged cannot duplicate model calls or tool side effects.
+ */
+export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResult> {
+  const assembly = createAgentPipelineAssembly({
+    pipeline: opts.pipeline,
+    stageOverrides: opts.stageOverrides,
+    runLegacy: runAgentCoreLegacy,
+  });
+  return assembly.run(opts);
 }
 
 // ── 导出共享辅助(主 agent 的 TUI hooks 实现要用)──────────────────────────
