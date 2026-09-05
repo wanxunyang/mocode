@@ -646,3 +646,243 @@ test('runAgentCore: inline skill deny 同批生效并统一收窄 schema 与后�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('runAgentCore: max_steps 只在完整工具批次后终止并调用 onDone', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mocode-agent-max-steps-'));
+  writeFileSync(join(root, 'fixture.txt'), 'complete-batch', 'utf8');
+  const previousRoot = setSandboxRoot(root);
+  __setChatCreateImpl(async () =>
+    sseStream([
+      {
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: 'max-step-read',
+              function: { name: 'read_file', arguments: '{"path":"fixture.txt"}' },
+            },
+          ],
+        },
+      },
+    ]),
+  );
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const events: string[] = [];
+    const result = await runAgentCore({
+      history,
+      userInput: 'read once',
+      maxSteps: 1,
+      toolPolicy: new ToolPolicyController({ id: 'core-max-steps', maxExpansions: 0 }),
+      hooks: {
+        onToolBatchEnd: () => events.push('batch_end'),
+        onMaxSteps: () => events.push('max_steps'),
+        onDone: () => events.push('done'),
+      },
+    });
+
+    assert.equal(result.completed, false);
+    assert.equal(result.terminationReason, 'max_steps');
+    assert.equal(result.finalText, null);
+    assert.deepEqual(events, ['batch_end', 'max_steps', 'done']);
+    assert.equal(history.length, 4);
+    assert.equal(history[2].role, 'assistant');
+    assert.equal(history[3].role, 'tool');
+    assert.equal((history[3] as { tool_call_id?: string }).tool_call_id, 'max-step-read');
+  } finally {
+    __setChatCreateImpl(null);
+    setSandboxRoot(previousRoot);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('runAgentCore: 空模型回复保持 completed 与 onNoReply 语义', async () => {
+  __setChatCreateImpl(async () => sseStream([]));
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const events: string[] = [];
+    const result = await runAgentCore({
+      history,
+      userInput: 'say nothing',
+      hooks: {
+        onChatDone: () => events.push('chat_done'),
+        onNoReply: () => events.push('no_reply'),
+        onDone: () => events.push('done'),
+      },
+    });
+
+    assert.equal(result.completed, true);
+    assert.equal(result.terminationReason, 'completed');
+    assert.equal(result.finalText, null);
+    assert.deepEqual(events, ['chat_done', 'no_reply', 'done']);
+    assert.equal(history.length, 3);
+    assert.equal(history[2].role, 'assistant');
+    assert.equal((history[2] as { content?: string | null }).content, null);
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('runAgentCore: model stream 中止会丢弃半步内容并恢复到 turn 初始快照', async () => {
+  const controller = new AbortController();
+  __setChatCreateImpl(async () =>
+    (async function* () {
+      yield { choices: [{ delta: { content: 'partial' } }] };
+      controller.abort();
+      throw new DOMException('cancelled by test', 'AbortError');
+    })(),
+  );
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const hooks: string[] = [];
+    const traces: Array<{ type: string; status?: unknown }> = [];
+    const result = await runAgentCore({
+      history,
+      userInput: 'abort while streaming',
+      signal: controller.signal,
+      hooks: {
+        onText: (text) => hooks.push(`text:${text}`),
+        onAbort: () => hooks.push('abort'),
+        onDone: () => hooks.push('done'),
+      },
+      traceContext: { sessionId: 'abort-stream', turnId: 101 },
+      onTraceEvent: (event) => traces.push({ type: event.type, status: event.data.status }),
+    });
+
+    assert.equal(result.completed, false);
+    assert.equal(result.terminationReason, 'aborted');
+    assert.deepEqual(hooks, ['text:partial', 'abort']);
+    assert.deepEqual(
+      history.map((message) => message.role),
+      ['system', 'user'],
+    );
+    assert.equal(traces.filter((event) => event.type === 'abort').length, 1);
+    assert.equal(traces.find((event) => event.type === 'model_end')?.status, 'aborted');
+    assert.equal(traces.find((event) => event.type === 'turn_end')?.status, 'aborted');
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('runAgentCore: 下一 model step 中止时保留上一完整工具批次', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mocode-agent-abort-after-tool-'));
+  writeFileSync(join(root, 'fixture.txt'), 'preserved-tool-result', 'utf8');
+  const previousRoot = setSandboxRoot(root);
+  const controller = new AbortController();
+  let call = 0;
+  __setChatCreateImpl(async () => {
+    call++;
+    if (call === 1) {
+      return sseStream([
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'preserved-read',
+                function: { name: 'read_file', arguments: '{"path":"fixture.txt"}' },
+              },
+            ],
+          },
+        },
+      ]);
+    }
+    return (async function* () {
+      yield { choices: [{ delta: { content: 'discard me' } }] };
+      controller.abort();
+      throw new DOMException('cancelled after completed batch', 'AbortError');
+    })();
+  });
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'read then abort',
+      signal: controller.signal,
+      toolPolicy: new ToolPolicyController({ id: 'core-abort-after-tool', maxExpansions: 0 }),
+      hooks: {},
+    });
+
+    assert.equal(result.terminationReason, 'aborted');
+    assert.equal(call, 2);
+    assert.deepEqual(
+      history.map((message) => message.role),
+      ['system', 'user', 'assistant', 'tool'],
+    );
+    const assistant = history[2] as { tool_calls?: Array<{ id: string }> };
+    const toolResult = history[3] as { tool_call_id?: string; content?: string };
+    assert.equal(assistant.tool_calls?.[0]?.id, 'preserved-read');
+    assert.equal(toolResult.tool_call_id, 'preserved-read');
+    assert.match(toolResult.content ?? '', /preserved-tool-result/);
+    assert.ok(!history.some((message) => message.role === 'assistant' && message.content === 'discard me'));
+  } finally {
+    __setChatCreateImpl(null);
+    setSandboxRoot(previousRoot);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('runAgentCore: 普通 model error 原样抛出并以 error trace 收尾', async () => {
+  const modelError = new Error('model exploded');
+  __setChatCreateImpl(async () => {
+    throw modelError;
+  });
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const hooks: string[] = [];
+    const traces: Array<{ type: string; status?: unknown }> = [];
+    await assert.rejects(
+      runAgentCore({
+        history,
+        userInput: 'fail normally',
+        hooks: { onDone: () => hooks.push('done') },
+        traceContext: { sessionId: 'model-error', turnId: 102 },
+        onTraceEvent: (event) => traces.push({ type: event.type, status: event.data.status }),
+      }),
+      (error) => error === modelError,
+    );
+
+    assert.deepEqual(hooks, []);
+    assert.equal(traces.find((event) => event.type === 'model_end')?.status, 'error');
+    assert.ok(traces.some((event) => event.type === 'step_end'));
+    assert.equal(traces.find((event) => event.type === 'turn_end')?.status, 'error');
+    assert.deepEqual(
+      history.map((message) => message.role),
+      ['system', 'user'],
+    );
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('runAgentCore: trace sinks 抛错不改变成功结果', async () => {
+  __setChatCreateImpl(async () => sseStream([{ delta: { content: 'trace-safe' } }]));
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'ignore trace sink errors',
+      hooks: {},
+      traceContext: { sessionId: 'trace-sink-error', turnId: 103 },
+      onTraceEvent: () => {
+        throw new Error('event sink failed');
+      },
+      onTrace: () => {
+        throw new Error('summary sink failed');
+      },
+    });
+
+    assert.equal(result.completed, true);
+    assert.equal(result.finalText, 'trace-safe');
+    assert.equal(history.at(-1)?.role, 'assistant');
+    assert.equal(history.at(-1)?.content, 'trace-safe');
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});

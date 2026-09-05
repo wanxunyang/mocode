@@ -1,34 +1,44 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import {
+  compareBenchmarkPreflight,
+  compareBenchmarkReport,
+  createRecordedBaseline,
+  parseBenchmarkBaseline,
+  readBenchmarkBaseline,
+  writeBenchmarkBaseline,
+} from './baseline.js';
 import { codingTasks, selectTasks } from './fixtures.js';
 import { createReport, renderSummary } from './report.js';
-import { parseBenchmarkArgs } from './runner.js';
+import { createFirstPatchCapture, parseBenchmarkArgs, validateBenchmarkOptions } from './runner.js';
+import type { BenchmarkTaskResult } from './types.js';
 
 assert.equal(codingTasks.length, 61);
-assert.equal(new Set(codingTasks.map((t) => t.id)).size, 61);
-assert.ok(codingTasks.every((t) => t.files.length >= 2 && t.verificationCommand && t.goal));
+assert.equal(new Set(codingTasks.map((task) => task.id)).size, 61);
+assert.ok(codingTasks.every((task) => task.files.length >= 2 && task.verificationCommand && task.goal));
 assert.equal(selectTasks('monorepo').length, 4);
+assert.equal(selectTasks('basic').length, 21);
 assert.equal(selectTasks('hard').length, 20);
 assert.equal(selectTasks('advanced').length, 20);
 assert.deepEqual(
-  selectTasks('single-01,multi-01').map((t) => t.id),
+  selectTasks('single-01,multi-01').map((task) => task.id),
   ['single-01', 'multi-01'],
 );
 
 // multifile-boundary-01: fixture 内含多文件 / 边界条件 bug。
 {
-  const t = codingTasks.find((t) => t.id === 'multifile-boundary-01');
-  assert.ok(t, 'multifile-boundary-01 fixture exists');
+  const task = codingTasks.find((item) => item.id === 'multifile-boundary-01');
+  assert.ok(task, 'multifile-boundary-01 fixture exists');
   assert.equal(
-    t.files.filter((f) => f.path.endsWith('.js')).length,
+    task.files.filter((file) => file.path.endsWith('.js')).length,
     2,
     'multifile-boundary fixture has 2 source files',
   );
   assert.ok(
-    /boundary/i.test(t.goal) || /zero|neg/i.test(t.verificationCommand),
+    /boundary/i.test(task.goal) || /zero|neg/i.test(task.verificationCommand),
     'multifile-boundary goal mentions boundary',
   );
 }
@@ -36,6 +46,17 @@ assert.equal(parseBenchmarkArgs(['--group', 'types']).selection, 'types');
 assert.equal(parseBenchmarkArgs([]).selection, '');
 assert.equal(parseBenchmarkArgs(['--timeout', '300000']).timeoutMs, 300000);
 assert.throws(() => parseBenchmarkArgs(['--timeout', '0']), /positive/);
+assert.throws(() => parseBenchmarkArgs(['--task']), /requires a value/);
+assert.throws(() => parseBenchmarkArgs(['--typo']), /Unknown argument/);
+assert.throws(
+  () => validateBenchmarkOptions(parseBenchmarkArgs(['--task', 'single-01', '--update-baseline'])),
+  /requires --task all/,
+);
+assert.throws(
+  () => validateBenchmarkOptions(parseBenchmarkArgs(['--group', 'all', '--update-baseline'])),
+  /requires --task all/,
+);
+validateBenchmarkOptions(parseBenchmarkArgs(['--task', 'all', '--update-baseline']));
 
 const fixtureRoot = mkdtempSync(path.join(tmpdir(), 'mocode-fixture-smoke-'));
 try {
@@ -56,50 +77,158 @@ try {
   rmSync(fixtureRoot, { recursive: true, force: true });
 }
 
+const taskResult: BenchmarkTaskResult = {
+  id: 'x',
+  title: 'x',
+  group: 'tests',
+  difficulty: 'basic',
+  status: 'passed',
+  finalVerifiedSuccess: true,
+  firstPatchPass: true,
+  regression: false,
+  toolRecovery: true,
+  toolRecoveryAttempts: 1,
+  toolRecoveries: 1,
+  toolCalls: 2,
+  tokens: 10,
+  durationMs: 20,
+  changedFiles: ['x.js'],
+  askHumanCount: 0,
+};
 const report = createReport(
-  { schemaVersion: 2, runId: 'test', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'all' },
-  [
-    {
-      id: 'x',
-      title: 'x',
-      group: 'tests',
-      difficulty: 'basic',
-      status: 'passed',
-      finalVerifiedSuccess: true,
-      regression: false,
-      toolRecovery: false,
-      toolCalls: 2,
-      tokens: 10,
-      durationMs: 20,
-      changedFiles: ['x.js'],
-      askHumanCount: 0,
-    },
-  ],
+  { schemaVersion: 3, runId: 'test', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'all' },
+  [taskResult],
 );
 assert.equal(report.summary.finalVerifiedSuccessRate, 1);
+assert.equal(report.summary.firstPatchPassRate, 1);
+assert.equal(report.summary.toolRecoveryRate, 1);
 assert.match(renderSummary(report), /1\/1 passed/);
 assert.equal(report.summary.askHumanCount, 0);
+const baseline = createRecordedBaseline(report);
+assert.equal(parseBenchmarkBaseline(baseline).status, 'recorded');
+assert.equal(compareBenchmarkReport(report, baseline).status, 'passed');
+assert.equal(
+  compareBenchmarkPreflight(
+    { schemaVersion: 3, model: report.model, promptHash: report.promptHash, taskIds: ['x'] },
+    baseline,
+  ).status,
+  'passed',
+);
+assert.equal(
+  compareBenchmarkPreflight(
+    { schemaVersion: 3, model: 'different-model', promptHash: report.promptHash, taskIds: ['x'] },
+    baseline,
+  ).status,
+  'failed',
+);
+
+const malformedBaseline = JSON.parse(JSON.stringify(baseline)) as Record<string, unknown>;
+const malformedReport = malformedBaseline.report as Record<string, unknown>;
+const malformedSummary = malformedReport.summary as Record<string, unknown>;
+malformedSummary.toolRecoveryRate = null;
+assert.throws(() => parseBenchmarkBaseline(malformedBaseline), /toolRecoveryRate contradicts task results/);
+const malformedStatus = JSON.parse(JSON.stringify(baseline)) as Record<string, unknown>;
+const malformedTasks = (malformedStatus.report as Record<string, unknown>).tasks as Array<Record<string, unknown>>;
+malformedTasks[0].status = 'garbage';
+assert.throws(() => parseBenchmarkBaseline(malformedStatus), /status is unknown/);
+const contradictoryTask = JSON.parse(JSON.stringify(baseline)) as Record<string, unknown>;
+const contradictoryTasks = (contradictoryTask.report as Record<string, unknown>).tasks as Array<
+  Record<string, unknown>
+>;
+contradictoryTasks[0].status = 'failed';
+assert.throws(() => parseBenchmarkBaseline(contradictoryTask), /status contradicts finalVerifiedSuccess/);
+const impossibleRecovery = JSON.parse(JSON.stringify(baseline)) as Record<string, unknown>;
+const impossibleTasks = (impossibleRecovery.report as Record<string, unknown>).tasks as Array<Record<string, unknown>>;
+impossibleTasks[0].toolRecoveryAttempts = 3;
+assert.throws(() => parseBenchmarkBaseline(impossibleRecovery), /toolRecoveryAttempts exceeds toolCalls/);
+
+const baselineRoot = mkdtempSync(path.join(tmpdir(), 'mocode-baseline-smoke-'));
+try {
+  const baselinePath = path.join(baselineRoot, 'baseline.json');
+  writeFileSync(
+    baselinePath,
+    `${JSON.stringify({ schemaVersion: 3, status: 'not-recorded', suiteSize: 1, description: 'placeholder' })}\n`,
+  );
+  writeBenchmarkBaseline(baselinePath, baseline);
+  assert.equal(readBenchmarkBaseline(baselinePath).status, 'recorded');
+  assert.deepEqual(
+    readdirSync(baselineRoot).filter((name) => name.endsWith('.tmp')),
+    [],
+    'atomic replacement must not leave temporary files',
+  );
+} finally {
+  rmSync(baselineRoot, { recursive: true, force: true });
+}
+
+let copyAttempts = 0;
+let removals = 0;
+const failedCapture = createFirstPatchCapture('workspace', 'copy-failure', {
+  createContainer: () => 'container',
+  copyWorkspace: () => {
+    copyAttempts++;
+    throw new Error('copy failed');
+  },
+  removeContainer: () => {
+    removals++;
+    throw new Error('cleanup failed');
+  },
+});
+failedCapture.capture(false);
+failedCapture.capture(true);
+failedCapture.capture(true);
+assert.equal(copyAttempts, 1, 'a failed first snapshot must not retry on later mutation batches');
+assert.equal(removals, 1);
+assert.equal(failedCapture.snapshotRoot(), undefined);
+failedCapture.dispose();
+const cleanupFailureCapture = createFirstPatchCapture('workspace', 'cleanup-failure', {
+  createContainer: () => 'container',
+  copyWorkspace: () => undefined,
+  removeContainer: () => {
+    throw new Error('cleanup failed');
+  },
+});
+cleanupFailureCapture.capture(true);
+assert.doesNotThrow(() => cleanupFailureCapture.dispose(), 'snapshot cleanup must be fail-soft');
+
+const regressedReport = createReport(
+  {
+    schemaVersion: 3,
+    runId: 'regressed',
+    generatedAt: report.generatedAt,
+    model: report.model,
+    promptHash: report.promptHash,
+    selection: report.selection,
+  },
+  [{ ...taskResult, status: 'failed', finalVerifiedSuccess: false, firstPatchPass: false, toolRecoveries: 0 }],
+);
+const comparison = compareBenchmarkReport(regressedReport, baseline);
+assert.equal(comparison.status, 'failed');
+assert.ok(comparison.issues.some((issue) => issue.metric === 'passed'));
+assert.ok(comparison.issues.some((issue) => issue.metric === 'firstPatchPass'));
+assert.ok(comparison.issues.some((issue) => issue.metric === 'toolRecovery'));
+
 const timeoutReport = createReport(
-  { schemaVersion: 2, runId: 'timeout', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'hard' },
+  { schemaVersion: 3, runId: 'timeout', generatedAt: 'now', model: 'test', promptHash: 'abc', selection: 'hard' },
   [
     {
+      ...taskResult,
       id: 'late',
       title: 'late',
       group: 'resilience',
       difficulty: 'hard',
       status: 'timeout',
       finalVerifiedSuccess: false,
-      regression: false,
+      firstPatchPass: false,
       toolRecovery: false,
+      toolRecoveryAttempts: 0,
+      toolRecoveries: 0,
       toolCalls: 1,
       tokens: 1,
       durationMs: 10,
       changedFiles: [],
-      askHumanCount: 0,
     },
   ],
 );
 assert.equal(timeoutReport.summary.passed, 0);
-console.log(
-  `coding benchmark smoke: 16/16 passed (${codingTasks.length} fixtures checked, incl. multifile-boundary-01)`,
-);
+assert.equal(timeoutReport.summary.toolRecoveryRate, null);
+console.log(`coding benchmark smoke: passed (${codingTasks.length} fixtures checked, incl. baseline v3 contract)`);

@@ -4,7 +4,12 @@ import type { AgentTraceEvent } from './trace.js';
 export interface TraceMetrics {
   toolCalls: number;
   toolFailures: number;
+  /** Whether at least one failed tool name succeeded in a later model step. */
   toolRecovery: boolean;
+  /** Distinct tool names that produced a failure. */
+  toolRecoveryAttempts: number;
+  /** Distinct failed tool names that later produced a success. */
+  toolRecoveries: number;
   firstSuccessRate: number;
   modelRetries: number;
   retries: number;
@@ -20,18 +25,27 @@ function countAskHumanCalls(events: readonly AgentTraceEvent[]): number {
 
 export function reduceTraceMetrics(events: readonly AgentTraceEvent[]): TraceMetrics {
   const ends = events.filter((event) => event.type === 'tool_call_end');
-  let recovered = false;
-  let hadFailure = false;
+  const failedTools = new Set<string>();
+  const earliestFailureStep = new Map<string, number>();
+  const recoveredTools = new Set<string>();
   let successes = 0;
   let tokens = 0;
   let hasTokens = false;
   for (const event of ends) {
+    const tool = typeof event.data.tool === 'string' ? event.data.tool : '';
     const status = String(event.data.status ?? 'error');
     if (status === 'success') {
       successes++;
-      if (hadFailure) recovered = true;
-    } else {
-      hadFailure = true;
+      const failedStep = earliestFailureStep.get(tool);
+      if (tool && failedStep !== undefined && event.step !== undefined && event.step > failedStep) {
+        recoveredTools.add(tool);
+      }
+    } else if (tool) {
+      failedTools.add(tool);
+      if (event.step !== undefined) {
+        const previousStep = earliestFailureStep.get(tool);
+        if (previousStep === undefined || event.step < previousStep) earliestFailureStep.set(tool, event.step);
+      }
     }
   }
   for (const event of events) {
@@ -47,7 +61,9 @@ export function reduceTraceMetrics(events: readonly AgentTraceEvent[]): TraceMet
   return {
     toolCalls: events.filter((event) => event.type === 'tool_call_start').length,
     toolFailures: ends.length - successes,
-    toolRecovery: recovered,
+    toolRecovery: recoveredTools.size > 0,
+    toolRecoveryAttempts: failedTools.size,
+    toolRecoveries: recoveredTools.size,
     firstSuccessRate: ends.length ? successes / ends.length : 1,
     modelRetries,
     retries: modelRetries,

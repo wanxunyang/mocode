@@ -35,8 +35,15 @@ export interface BenchmarkTaskResult {
   difficulty: BenchmarkDifficulty;
   status: 'passed' | 'failed' | 'timeout' | 'aborted' | 'error';
   finalVerifiedSuccess: boolean;
+  /** Whether the workspace snapshot after the first mutating tool batch passed the independent verifier. */
+  firstPatchPass: boolean;
   regression: boolean;
+  /** Whether at least one failed tool name succeeded in a later model step. */
   toolRecovery: boolean;
+  /** Distinct tool names that produced a failure. */
+  toolRecoveryAttempts: number;
+  /** Distinct failed tool names that later produced a success. */
+  toolRecoveries: number;
   toolCalls: number;
   /** Trace-derived model request retry count. */
   retries?: number;
@@ -51,7 +58,7 @@ export interface BenchmarkTaskResult {
 }
 
 export interface BenchmarkReport {
-  schemaVersion: 2;
+  schemaVersion: 3;
   runId: string;
   generatedAt: string;
   model: string;
@@ -61,8 +68,12 @@ export interface BenchmarkReport {
     tasks: number;
     passed: number;
     finalVerifiedSuccessRate: number;
+    firstPatchPassRate: number;
     regressionRate: number;
-    toolRecoveryRate: number;
+    /** Recovery ratio across distinct failed tool names; null means the run had no recovery opportunity. */
+    toolRecoveryRate: number | null;
+    toolRecoveryAttempts: number;
+    toolRecoveries: number;
     toolCalls: number;
     retries: number;
     firstSuccessRate: number;
@@ -73,3 +84,27 @@ export interface BenchmarkReport {
   };
   tasks: BenchmarkTaskResult[];
 }
+
+export interface BenchmarkThresholds {
+  maxPassedTaskDrop: number;
+  maxFirstPatchPassRateDrop: number;
+  maxToolRecoveryRateDrop: number;
+  maxRegressionRateIncrease: number;
+}
+
+export interface UnrecordedBaseline {
+  schemaVersion: 3;
+  status: 'not-recorded';
+  suiteSize: number;
+  description: string;
+}
+
+export interface RecordedBaseline {
+  schemaVersion: 3;
+  status: 'recorded';
+  suiteSize: number;
+  thresholds: BenchmarkThresholds;
+  report: BenchmarkReport;
+}
+
+export type BenchmarkBaseline = UnrecordedBaseline | RecordedBaseline;
