@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import * as content from '../src/ui/content.js';
 import * as batch from '../src/ui/batch.js';
+import { ansiDisplayWidth, stripAnsi } from '../src/ui/render.js';
 import { ui } from '../src/ui/theme.js';
 
 const RESET = '\x1B[0m';
@@ -176,11 +177,7 @@ describe('batch mutation 工具块折叠/重开', () => {
     // 修复前：expandSingleEntryFully 未传 keepViewport=false → 默认 true → 视口锚定，
     // scrollOffset 被顶到插入行数（40 行）→ 后续 contentWriteMd 见 offset>0 只喂缓冲不物理写，
     // 表现为「edit_file 后不自动滚动，得手动拉到底」。
-    assert.equal(
-      layout.state.scrollOffset,
-      0,
-      'mutation 自动展开属新内容，视口必须跟随屏底（scrollOffset 保持 0）',
-    );
+    assert.equal(layout.state.scrollOffset, 0, 'mutation 自动展开属新内容，视口必须跟随屏底（scrollOffset 保持 0）');
   });
 
   it('用户点击展开仍锚定视口（keepViewport 语义不被自动展开改动波及）', () => {
@@ -201,5 +198,131 @@ describe('batch mutation 工具块折叠/重开', () => {
     batch.toggleEntry(id, 0, layout);
 
     assert.ok(layout.state.scrollOffset > 0, '用户点击展开应锚定视口，不自动跳到详情底部');
+  });
+});
+
+describe('batch 纯渲染 helper', () => {
+  it('sanitizeRow 保留 SGR、替换控制字符并钳制物理行宽', () => {
+    const row = batch.sanitizeRow(`${ui.red}ab\tcd\x00${'界'.repeat(20)}${ui.reset}`, 12);
+
+    assert.ok(row.includes(ui.red), 'SGR 颜色序列应保留');
+    assert.ok(stripAnsi(row).includes('·'), '裸控制字符应替换为可见字符');
+    assert.equal(/[\x00-\x09\x0b-\x1f\x7f]/.test(stripAnsi(row)), false);
+    assert.ok(ansiDisplayWidth(row) <= 12, '缓冲一行不得触发终端自动折行');
+    assert.ok(row.endsWith(RESET), '每条物理行必须以 reset 收尾');
+  });
+
+  it('buildExpandedLines 的 fromIndex 只渲染尚未输出的 entry', () => {
+    const entries: batch.BatchEntry[] = [
+      { name: 'read_file', callSummary: 'first.ts', resultSummary: '1 line', diffBlock: null },
+      { name: 'grep', callSummary: 'needle', resultSummary: '2 matches', diffBlock: null },
+      { name: 'glob', callSummary: '**/*.ts', resultSummary: '3 files', diffBlock: null },
+    ];
+
+    const lines = batch.buildExpandedLines({ entries, expandedEntries: new Set<number>() }, '', 1, 120);
+    const visible = lines.map(stripAnsi);
+
+    assert.equal(lines.length, 2);
+    assert.equal(
+      visible.some((line) => line.includes('first.ts')),
+      false,
+    );
+    assert.match(visible[0], /grep.*needle/);
+    assert.match(visible[1], /glob.*\*\*\/\*\.ts/);
+  });
+});
+
+describe('batch renderedCount 不变量', () => {
+  it('一级展开后折叠会删除全部 entry 行并保留下游正文', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'read_file', 'first.ts');
+    batch.recordResult(id, 'read_file', 'Read 1 line', null);
+    batch.recordCall(id, 'grep', 'unique-needle');
+    batch.recordResult(id, 'grep', 'Found 1 match', null);
+    batch.endBatch(id, layout);
+
+    batch.expandBatch(id, layout);
+    layout.contentWrite('sentinel-after-batch\n');
+    assert.deepEqual(batch.findEntryByAbsLine(1), { batchId: id, entryIndex: 0 });
+    assert.deepEqual(batch.findEntryByAbsLine(2), { batchId: id, entryIndex: 1 });
+
+    batch.toggleBatch(id, layout);
+    const visible = content.sliceFromEnd(0, content.totalRows()).map(stripAnsi);
+
+    assert.equal(
+      visible.some((line) => line.includes('first.ts')),
+      false,
+    );
+    assert.equal(
+      visible.some((line) => line.includes('unique-needle')),
+      false,
+    );
+    assert.equal(
+      visible.some((line) => line.includes('sentinel-after-batch')),
+      true,
+    );
+  });
+
+  it('运行态增量刷新不重复旧 entry，重复 refresh 为 no-op', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'read_file', 'first-only.ts');
+    batch.showLiveBatch(id, layout);
+    batch.expandBatch(id, layout, true);
+
+    batch.recordCall(id, 'grep', 'second-only');
+    batch.refreshBatchExpanded(id, layout);
+    const afterFirstRefresh = content.sliceFromEnd(0, content.totalRows());
+    batch.refreshBatchExpanded(id, layout);
+    const afterSecondRefresh = content.sliceFromEnd(0, content.totalRows());
+
+    assert.deepEqual(afterSecondRefresh, afterFirstRefresh, 'renderedCount 推进后重复 refresh 必须为 no-op');
+    const visible = afterSecondRefresh.map(stripAnsi);
+    assert.equal(visible.filter((line) => line.includes('first-only.ts')).length, 1);
+    assert.equal(visible.filter((line) => line.includes('second-only')).length, 1);
+    assert.deepEqual(batch.findEntryByAbsLine(2), { batchId: id, entryIndex: 1 });
+
+    batch.toggleBatch(id, layout);
+    const collapsed = content.sliceFromEnd(0, content.totalRows()).map(stripAnsi);
+    assert.equal(
+      collapsed.some((line) => line.includes('first-only.ts')),
+      false,
+    );
+    assert.equal(
+      collapsed.some((line) => line.includes('second-only')),
+      false,
+    );
+  });
+});
+
+// 运行态可能已记录新调用但尚未来得及把它插入 buffer；折叠只能按 renderedCount 删除。
+describe('batch renderedCount 未追平 entries', () => {
+  it('未渲染 entry 不得让折叠多删相邻正文', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'read_file', 'rendered-entry.ts');
+    batch.showLiveBatch(id, layout);
+    batch.expandBatch(id, layout, true);
+
+    batch.recordCall(id, 'grep', 'recorded-but-not-rendered');
+    layout.contentWrite('sentinel-must-survive\n');
+
+    batch.toggleBatch(id, layout);
+    const visible = content.sliceFromEnd(0, content.totalRows()).map(stripAnsi);
+
+    assert.equal(
+      visible.some((line) => line.includes('rendered-entry.ts')),
+      false,
+    );
+    assert.equal(
+      visible.some((line) => line.includes('recorded-but-not-rendered')),
+      false,
+    );
+    assert.equal(
+      visible.some((line) => line.includes('sentinel-must-survive')),
+      true,
+      '折叠必须只删除 renderedCount 条一级行，不能按 entries.length 多删正文',
+    );
   });
 });

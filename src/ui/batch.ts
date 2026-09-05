@@ -116,13 +116,11 @@ function visibleControl(s: string): string {
     .join('');
 }
 
-/** 自洽行统一收尾:行宽钳到 maxCols + 行末补 reset。
- *  超宽行若直接入 rows[],repaintViewport 逐行 cup+clearLine 直出时终端会
- *  auto-wrap 成多条物理行,把后续所有行的屏位打乱(用户报告:展开含超长行的
- *  工具输出后整屏错乱)。truncateAnsi 保留行内 SGR 且断尾补 reset,再统一 \x1B[0m 收尾。 */
-function sanitizeRow(s: string): string {
+/** 自洽行统一收尾:行宽钳到 cols + 行末补 reset。
+ *  纯函数导出供行宽/控制字符不变量测试；生产渲染默认传模块当前 maxCols。 */
+export function sanitizeRow(s: string, cols = maxCols): string {
   const cleaned = visibleControl(s);
-  return truncateAnsi(cleaned, maxCols) + '\x1B[0m';
+  return truncateAnsi(cleaned, cols) + '\x1B[0m';
 }
 
 export function isMutationToolName(name: string): boolean {
@@ -400,21 +398,33 @@ function entryCaret(e: BatchEntry, expanded: boolean): string {
  * 单条第一层明细行。三角由 entry 自身的详情展开态决定(▸ 可展开 / ▾ 已展开 / 空白占位),
  * 不再依赖 isLast —— 兄弟条目间没有嵌套语义,画分支符(├─/└─)纯属误导且引入宽度歧义。
  */
-function buildEntryLine(b: BatchRecord, index: number, extraIndent = ''): string {
+export interface BatchExpandedRenderInput {
+  entries: readonly BatchEntry[];
+  expandedEntries: ReadonlySet<number>;
+}
+
+function buildEntryLine(b: BatchExpandedRenderInput, index: number, extraIndent = '', cols = maxCols): string {
   const e = b.entries[index];
   const result = e.resultSummary ? `  ${ui.gray}↳ ${e.resultSummary}${ui.reset}` : '';
   const caret = entryCaret(e, b.expandedEntries.has(index));
   const failure = e.failed ? `${ui.red}×${ui.reset} ` : '';
   return sanitizeRow(
     `${extraIndent}    ${caret}${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`,
+    cols,
   );
 }
 
 /** 第一层只展示有哪些调用及其简短结果，不展开完整输出。extraIndent 供子批嵌套加深缩进。
  *  fromIndex:运行态追加渲染时只产出 entries[fromIndex, ...) 的行(已渲染的不能重复输出)。 */
-function buildExpandedLines(b: BatchRecord, extraIndent = '', fromIndex = 0): string[] {
+export function buildExpandedLines(
+  b: BatchExpandedRenderInput,
+  extraIndent = '',
+  fromIndex = 0,
+  cols = maxCols,
+): string[] {
   const out: string[] = [];
-  for (let i = fromIndex; i < b.entries.length; i++) out.push(buildEntryLine(b, i, extraIndent));
+  const start = Math.max(0, Math.min(b.entries.length, Math.floor(fromIndex)));
+  for (let i = start; i < b.entries.length; i++) out.push(buildEntryLine(b, i, extraIndent, cols));
   return out;
 }
 

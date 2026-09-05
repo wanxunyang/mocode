@@ -29,6 +29,7 @@ AGENTS.md
 .agents/
 .workbuddy/
 dist-tests/
+semantic-review/
 
 # 打包与覆盖率产物
 *.tgz

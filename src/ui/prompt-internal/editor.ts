@@ -9,6 +9,13 @@ import { t } from '../../i18n/index.js';
 import { promptComposer } from '../composer.js';
 import { promptHistorySearch } from '../history-picker.js';
 import { CONFIRM_SEND_MS, LONG_INPUT_CHARS, confirmSendMode, ensurePasteDetector, pasteState } from './paste.js';
+import {
+  deleteBackwardAt,
+  deleteForwardAt,
+  deleteToLineEndAt,
+  deleteToLineStartAt,
+  insertTextAt,
+} from './editor-operations.js';
 import type { KeypressEmitter, PromptOpts, Seg, SlashCommand, SlashMenuItem } from './types.js';
 
 /** 非 TTY / 未进 alt screen 时退化为普通 readline 行输入(无菜单、单行)。 */
@@ -214,9 +221,9 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
   }
   /** 在光标处插入文本(含换行则落进当前可编辑段,原样保留)。供短粘贴与可打印字符共用。 */
   function insertText(text: string): void {
-    const s = segs[curSeg].text;
-    segs[curSeg].text = s.slice(0, curOff) + text + s.slice(curOff);
-    curOff += text.length;
+    const edit = insertTextAt(segs[curSeg].text, curOff, text);
+    segs[curSeg].text = edit.text;
+    curOff = edit.cursor;
   }
   /** 落一段粘贴文本:长粘贴 → 在此处插入一个只读 chip(把当前可编辑段从光标切开成「前段 + chip + 后段」),
    *  短粘贴 → 作为可编辑文本插入。连续长粘贴会产生相邻 chip,各自独立;两次粘贴之间敲的字是可编辑段,
@@ -477,25 +484,20 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
 
   /** Ctrl+U:删到行首(当前可编辑段内的当前行;已在行首则 no-op,不跨入相邻粘贴块)。 */
   function deleteToLineStart(): void {
-    const s = segs[curSeg].text;
-    const ls = s.lastIndexOf('\n', curOff - 1) + 1;
-    if (ls === curOff) return;
-    segs[curSeg].text = s.slice(0, ls) + s.slice(curOff);
-    curOff = ls;
+    const edit = deleteToLineStartAt(segs[curSeg].text, curOff);
+    if (edit.text === segs[curSeg].text && edit.cursor === curOff) return;
+    segs[curSeg].text = edit.text;
+    curOff = edit.cursor;
     computeFiltered();
     redraw();
   }
 
   /** Ctrl+K:删到行尾(当前可编辑段内的当前行;已在行尾则 no-op,不跨入相邻粘贴块)。 */
   function deleteToLineEnd(): void {
-    const s = segs[curSeg].text;
-    const ne = s.indexOf('\n', curOff);
-    if (ne < 0) {
-      if (curOff === s.length) return;
-      segs[curSeg].text = s.slice(0, curOff);
-    } else {
-      segs[curSeg].text = s.slice(0, curOff) + s.slice(ne + 1);
-    }
+    const edit = deleteToLineEndAt(segs[curSeg].text, curOff);
+    if (edit.text === segs[curSeg].text && edit.cursor === curOff) return;
+    segs[curSeg].text = edit.text;
+    curOff = edit.cursor;
     computeFiltered();
     redraw();
   }
@@ -690,10 +692,10 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
 
     switch (key.name) {
       case 'backspace': {
-        const s = segs[curSeg].text;
-        if (curOff > 0) {
-          segs[curSeg].text = s.slice(0, curOff - 1) + s.slice(curOff);
-          curOff--;
+        const edit = deleteBackwardAt(segs[curSeg].text, curOff);
+        if (edit.cursor !== curOff) {
+          segs[curSeg].text = edit.text;
+          curOff = edit.cursor;
           computeFiltered();
           redraw();
         } else if (curSeg > 0) {
@@ -717,9 +719,9 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
         return;
       }
       case 'delete': {
-        const s = segs[curSeg].text;
-        if (curOff < s.length) {
-          segs[curSeg].text = s.slice(0, curOff) + s.slice(curOff + 1);
+        const edit = deleteForwardAt(segs[curSeg].text, curOff);
+        if (edit.text !== segs[curSeg].text) {
+          segs[curSeg].text = edit.text;
           computeFiltered();
           redraw();
         } else if (curSeg < segs.length - 1) {
