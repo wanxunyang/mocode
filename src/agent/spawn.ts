@@ -12,7 +12,7 @@
 //  - 独立 history 分支:子任务的工具噪声不回灌主对话,只有最终摘要回灌。
 
 import type OpenAI from 'openai';
-import { chatTools, type ChatMessage } from '../llm/index.js';
+import { chatTools, type ChatMessage, type ChatUsage } from '../llm/index.js';
 import { buildMocodeCorePrompt, config, isSubAgentHardDisabled } from '../config/index.js';
 import { getToolChatSchema } from '../tools/policy.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
@@ -25,7 +25,6 @@ import { runAgentCore, type AgentHooks } from './core.js';
 import { summarizeToolCall, summarizeToolResult, truncateDisplay } from '../ui/render.js';
 import { t } from '../i18n/index.js';
 import { createContextState } from '../session/compact.js';
-import { type SubAgentResult, type SubAgentStatus } from '../agents/coordinator.js';
 
 /** 子 agent 系统提示后缀(仅 legacy 直接调用路径用;共享前缀路径的系统提示直接复用父 agent)。 */
 const SUBAGENT_SUFFIX = `
@@ -77,14 +76,16 @@ export interface SpawnOptions {
   quietLabel?: string;
 }
 
-/** 子 agent 运行结果。 */
-export interface SpawnResult extends SubAgentResult {
+/** 子 agent 运行结果。自包含声明(原 `SubAgentResult` 基类随 overlay coordinator 一并删除)。 */
+export interface SpawnResult {
+  status: 'completed' | 'failed' | 'aborted';
   /** 子 agent 最终文本回复;中断或无回复为 null。 */
   summary: string | null;
   /** 正常完毕 true;中断 false。 */
   completed: boolean;
   /** 子 agent 中间过程的人类可读日志(工具调用 + 结果摘要 + 流式正文片段)。主 agent 通常不看,调试用。 */
   transcript: string;
+  usage: ChatUsage;
 }
 
 /**
@@ -106,9 +107,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       completed: false,
       transcript: 'Sub-agent execution is disabled by MOCODE_SUBAGENT_ENABLED=false.',
       status: 'failed',
-      findings: [],
-      readSet: [],
-      changeSet: null,
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0 },
     };
   }
@@ -347,7 +345,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // 每个子 agent 独享统计/预算状态。不能保存再恢复模块级单例：多个 task 并发时
   // save/restore 会竞态，且 lastEstimate / schedulerLog 仍会污染主 agent。
   const localContextState = createContextState();
-  const readSet = new Set<string>();
   // 与主 agent 完全同源:写操作直接落在工作区,进入主 agent 当前轮次的同一回滚事务
   // (spawn 不调 beginTurn)。没有 overlay 拷贝/ChangeSet 合并这一步——那是旧 read/write
   // 双模式的产物,子 agent 不再受限,也就不需要"先隔离再合并"。
@@ -364,13 +361,9 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     // 子代理不注入主会话「会话状态」(plan + 笔记):那是主 agent 的工作面,委派消息已带齐
     // 子任务所需上下文,重复注入只白付 token。
     suppressSessionState: true,
-    onToolOutcome: (tool, args) => {
-      if (tool === 'read_file' && typeof args.path === 'string') readSet.add(args.path);
-      else if (['glob', 'grep'].includes(tool)) readSet.add('workspace');
-    },
   });
 
-  const status: SubAgentStatus =
+  const status: SpawnResult['status'] =
     opts.signal?.aborted || result.terminationReason === 'aborted'
       ? 'aborted'
       : result.completed
@@ -382,9 +375,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     completed: result.completed && status === 'completed',
     transcript: truncateDisplay(transcript, 20000), // 防过大;调试用,回灌主 history 的是 summary 不是 transcript
     status,
-    findings: result.finalText ? [result.finalText] : [],
-    readSet: [...readSet].sort(),
-    changeSet: null,
     usage: {
       promptTokens: result.usage?.promptTokens ?? 0,
       completionTokens: result.usage?.completionTokens ?? 0,

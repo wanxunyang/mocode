@@ -24,6 +24,7 @@
     "test": "tsc -p tsconfig.test-build.json && node --test --experimental-test-isolation=none \"dist-tests/tests/*.test.js\"",
     "typecheck": "tsc --noEmit && tsc -p tests/tsconfig.json && tsc -p evals/tsconfig.json",
     "lint": "eslint .",
+    "lint:check": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

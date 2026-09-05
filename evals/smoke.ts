@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,8 +13,7 @@ import { resolveAffectedPackages } from '../src/verification/affected.js';
 import { runCommandRaw, runCommandTool } from '../src/tools/builtins/run-command.js';
 import { askHumanTool } from '../src/tools/builtins/ask-human.js';
 import { validateToolArguments } from '../src/tools/validation.js';
-import { getSandboxRoot, setSandboxRoot } from '../src/sandbox/index.js';
-import { inOverlay, mergeSubAgentChangeSet } from '../src/agents/coordinator.js';
+import { setSandboxRoot } from '../src/sandbox/index.js';
 import {
   checkPermission,
   clearSessionPermissionGrants,
@@ -463,44 +461,6 @@ const cases: SmokeCase[] = [
       assert.match(prompt, /## Reporting/);
       assert.doesNotMatch(prompt, /## Project context/);
       assert.doesNotMatch(prompt, /## Session state/);
-    },
-  },
-  {
-    name: 'merges an isolated sub-agent ChangeSet without writing through the overlay',
-    async run() {
-      const root = fixture();
-      const previous = setSandboxRoot(root);
-      try {
-        writeFileSync(path.join(root, 'a.txt'), 'before', 'utf8');
-        const isolated = await inOverlay(async () => {
-          await writeFile(path.join(getSandboxRoot()!, 'a.txt'), 'after', 'utf8');
-        });
-        assert.equal(readFileSync(path.join(root, 'a.txt'), 'utf8'), 'before');
-        assert.equal(await mergeSubAgentChangeSet(isolated.changeSet), 'committed');
-        assert.equal(readFileSync(path.join(root, 'a.txt'), 'utf8'), 'after');
-      } finally {
-        setSandboxRoot(previous);
-        removeFixture(root);
-      }
-    },
-  },
-  {
-    name: 'rejects a stale sub-agent ChangeSet instead of overwriting external edits',
-    async run() {
-      const root = fixture();
-      const previous = setSandboxRoot(root);
-      try {
-        writeFileSync(path.join(root, 'a.txt'), 'before', 'utf8');
-        const isolated = await inOverlay(async () => {
-          await writeFile(path.join(getSandboxRoot()!, 'a.txt'), 'agent', 'utf8');
-        });
-        writeFileSync(path.join(root, 'a.txt'), 'user', 'utf8');
-        assert.equal(await mergeSubAgentChangeSet(isolated.changeSet), 'conflict');
-        assert.equal(readFileSync(path.join(root, 'a.txt'), 'utf8'), 'user');
-      } finally {
-        setSandboxRoot(previous);
-        removeFixture(root);
-      }
     },
   },
   {
