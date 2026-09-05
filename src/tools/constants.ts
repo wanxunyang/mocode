@@ -1,5 +1,12 @@
 /** 工具共享的截断 / 上限 / 忽略规则。 */
-import { isMemoryEnabled, isSubAgentEnabled, isFrontendToolsEnabled } from '../config/index.js';
+import {
+  getActiveProfile,
+  isMemoryEnabled,
+  isSubAgentEnabled,
+  isFrontendToolsEnabled,
+  isComputerUseEnabled,
+} from '../config/index.js';
+import { getProfileToolNames, TOOL_GROUPS } from '../config/profiles.js';
 import { getActiveSkill } from '../skills/activation.js';
 
 export const MAX_FILE_LINES = 2000;
@@ -59,13 +66,31 @@ export const MAX_GRAPH_EDGES = 2000;
 // grep/glob 扫它无意义且会产出数 KB 的超长「行」,污染 TUI 展开渲染。
 export const IGNORE = ['**/node_modules/**', '**/.git/**', '**/.codegraph/**'];
 
-// ── 前端工具簇(默认关闭,显式开启)─────────────────────────────────────────
+// ── 前端 / Computer Use 工具簇(现由统一模式 profile 控制,见 docs/tool-profiles-design.md)──
+// 集合成员与 config/profiles.ts 的 TOOL_GROUPS 对齐;保留导出名以兼容 llm/index.ts 等现有引用。
+export const FRONTEND_TOOLS: ReadonlySet<string> = new Set(TOOL_GROUPS.frontend);
+export const COMPUTER_TOOLS: ReadonlySet<string> = new Set(TOOL_GROUPS.computer);
+
 /**
- * 前端开发相关工具簇:browser / dev_server 依赖 playwright 二进制且拉起长驻进程,
- * screenshot 抓整个桌面(隐私敏感),view_image 仅视觉模型有用。这 4 个默认不进入
- * 模型工具表,由 isFrontendToolsEnabled() 单一来源控制;/fe on|off 切换。
+ * 当前模式(profile)应屏蔽的工具名集合 = 全部已知内置工具名 − 当前模式包含的簇。
+ * 再按派生开关(isXxxEnabled,含旧 env 显式覆盖)修正各功能簇,保证与系统提示段、
+ * banner 等消费方看到的可见性完全一致。
  */
-export const FRONTEND_TOOLS = new Set(['browser', 'dev_server', 'screenshot', 'view_image']);
+export function getProfileDisabledTools(): Set<string> {
+  const all = new Set<string>(Object.values(TOOL_GROUPS).flat());
+  for (const name of getProfileToolNames(getActiveProfile())) all.delete(name);
+  const reconcile = (enabled: boolean, names: readonly string[]): void => {
+    for (const n of names) {
+      if (enabled) all.delete(n);
+      else all.add(n);
+    }
+  };
+  reconcile(isMemoryEnabled(), TOOL_GROUPS.memory);
+  reconcile(isFrontendToolsEnabled(), TOOL_GROUPS.frontend);
+  reconcile(isComputerUseEnabled(), TOOL_GROUPS.computer);
+  reconcile(isSubAgentEnabled(), TOOL_GROUPS.subagent);
+  return all;
+}
 
 // ── plan 模式(只读规划,不执行)──────────────────────────────────────────────
 /**
@@ -88,38 +113,32 @@ export const PLAN_DISABLED_TOOLS = new Set([
   'memory_graph', // 混合工具(add 写图),plan 只读模式整体屏蔽
   'sub-agent',
   'run_skill', // fork 子 agent 执行面;plan 模式不应派生子工作流
+  'computer', // 桌面操控:plan 只读模式无论开关状态都永远屏蔽
 ]);
 
 /**
  * 按当前 isMemoryEnabled() 现算 plan 模式应屏蔽的工具。
- * memoryEnabled=false 时记忆工具整体不在 builtinTools 里,plan 屏蔽集里也无须再列 ——
+ * memoryEnabled=false 时记忆工具本就不在模型可见集里,plan 屏蔽集里也无须再列 ——
  * 反之留着只是死名字。统一过滤,避免 Set 里残留与已下架工具不一致的概念性冗余。
  * 调用方(agent/core 串行分支、llm/planChatTools)每次 chat 时调本函数拿当前值。
  */
 export function getPlanDisabledTools(): Set<string> {
-  const next = isMemoryEnabled()
-    ? new Set<string>(PLAN_DISABLED_TOOLS)
-    : (() => {
-        const n = new Set<string>(PLAN_DISABLED_TOOLS);
-        n.delete('memory_save');
-        n.delete('memory_update');
-        n.delete('memory_forget');
-        return n;
-      })();
-  // 前端工具簇关闭时,plan 模式 schema 也一并剔除(与 auto 模式一致)。
-  if (!isFrontendToolsEnabled()) {
-    for (const name of FRONTEND_TOOLS) next.add(name);
+  const next = new Set<string>(PLAN_DISABLED_TOOLS);
+  if (!isMemoryEnabled()) {
+    next.delete('memory_save');
+    next.delete('memory_update');
+    next.delete('memory_forget');
   }
   return next;
 }
 
-/** auto/plan 共用的运行时功能开关防线；关闭时即使模型幻觉调用也不得执行。 */
+/**
+ * auto/plan 共用的运行时功能开关防线；即使模型幻觉调用也不得执行。
+ * 当前模式(profile)不含的工具簇一律屏蔽,再叠加 sub-agent 幂等开关与 skill disallowed。
+ */
 export function getRuntimeDisabledTools(): Set<string> {
-  const disabled = new Set<string>();
+  const disabled = getProfileDisabledTools();
   if (!isSubAgentEnabled()) disabled.add('sub-agent');
-  if (!isFrontendToolsEnabled()) {
-    for (const name of FRONTEND_TOOLS) disabled.add(name);
-  }
   // inline skill 激活态的 disallowed-tools:即便模型幻觉调用也执行不了(设计 §3.6)。
   const active = getActiveSkill();
   if (active?.disallowed) {

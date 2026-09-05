@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
-import { config, getActiveModel, isSubAgentEnabled, isFrontendToolsEnabled } from '../config/index.js';
+import { config, getActiveModel } from '../config/index.js';
 import { tools } from '../tools/registry.js';
-import { getPlanDisabledTools, FRONTEND_TOOLS } from '../tools/constants.js';
+import { getPlanDisabledTools, getProfileDisabledTools } from '../tools/constants.js';
 import { ThinkTagFilter } from './think-filter.js';
 import { anthropicChatOnce } from './providers/anthropic.js';
 import { registerModelProvider, getModelProvider, listModelProviders } from './provider.js';
@@ -249,12 +249,10 @@ export const chatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 export const planChatTools: OpenAI.Chat.Completions.ChatCompletionTool[] = [];
 
 export function refreshChatTools(): void {
-  // sub-agent 与前端工具簇常驻内部 registry，运行时开关只控制模型可见 schema，因而 on/off 可即时生效。
-  const visibleTools = tools.filter((tool) => {
-    if (tool.name === 'sub-agent') return isSubAgentEnabled();
-    if (FRONTEND_TOOLS.has(tool.name)) return isFrontendToolsEnabled();
-    return true;
-  });
+  // 工具可见性由当前模式(profile)统一控制(docs/tool-profiles-design.md):profile 不含的簇
+  // 一律不进模型 schema;MCP 等外部扩展工具(getProfileDisabledTools 不含)不受 profile 限制。
+  const profileDisabled = getProfileDisabledTools();
+  const visibleTools = tools.filter((tool) => !profileDisabled.has(tool.name));
   const next = visibleTools.map((t) => ({
     type: 'function' as const,
     function: {

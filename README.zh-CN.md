@@ -83,6 +83,7 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **可中断、可回滚** — Ctrl+C 随时打断当前轮次(树杀子进程,历史还原到本轮开始前,不留残半的工具调用);`/rollback` 按轮次快照恢复文件改动,逐个文件「保留/撤销」,不依赖 git。
 - **输入安全网** — 长 prompt 不再怕误按 Enter:`Ctrl+G` 弹出 TUI 内「输入面板」(记事本式编辑,Enter=换行、软换行、选区、复制/剪切/粘贴、撤销,Ctrl+S 填回输入框不自动发送);`Ctrl+R`/`Ctrl+P` 模糊搜索历史输入(Enter 只回填不发送);长文本误发后撤回窗口自动放宽到 2 秒且任意键可撤回。
 - **沙箱防护** — 文件读写经沙箱拦截,挡掉越界路径(`../../`、绝对外圈、软链出圈等),不碰工作目录之外的文件。
+- **Computer Use(默认关闭,高危)** — `/cu on` 开启后 `computer` 工具可直接向 OS 注入鼠标/键盘事件并回灌截图,爆炸半径远超任何写工具:它绕过了文件沙箱,能点到屏幕上的一切。**强烈建议只在 VM / 沙箱 / 专用测试机里开启**,不要在日常主力机上常驻。每个动作仍走权限门(按动作粒度授权,`type`/`key` 命中 URL/密码/支付关键词时强制逐次确认,不给会话级放行);plan 模式永远屏蔽。Windows 首发(PowerShell 注入),macOS/Linux 待接入。设计见 `docs/computer-use-design.md`。
 
 ## 特性
 
@@ -176,6 +177,8 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 | `MAX_STEPS`             | 每轮 Agent 循环最大步数（仅防无限循环）                 | `1000`                      |
 | `SUB_AGENT_MAX_STEPS`   | 子 Agent 循环安全上限，默认与主 Agent 一致             | `1000`                      |
 | `SANDBOX_ROOT`          | 沙箱根目录(文件操作边界;未配则用 cwd 兜底)                | 无                           |
+| `MOCODE_MODE`           | 启动工具模式:`coding`(默认)/ `frontend` / `computer-use` / `research` / `full`;运行时用 `/profile <name>` 热切换 | `coding` |
+| `MOCODE_COMPUTER_USE_ENABLED` | Computer Use 桌面操控(`computer` 工具;运行时用 `/cu on\|off` 切换) | `false`                |
 | `MOCODE_THEME`          | 颜色主题(default/dark/light…;shell 设置优先于文件)      | `default`                   |
 
 ## 运行
@@ -240,7 +243,7 @@ dev_server stop   id=srv-xxxx
 
 这 4 个前端工具 —— `browser`、`dev_server`、`screenshot`、`view_image` —— **默认关闭**(依赖 Playwright 二进制、会拉起长驻进程或截取桌面)。运行时用 `/fe on` 整体开启,开启后模型才看得到;用 `/fe on|off|status` 切换。
 
-5 个 `memory_*` 工具受启动时 `MEMORY_ENABLED=true` 总开关控制;运行时切换用 `/memory_switch`(需重启 REPL,刻意为之,见下「项目记忆」小节区分 Tier-1 / Tier-2)。
+6 个 `memory_*` 工具受 `MEMORY_ENABLED=true` 总开关控制;运行时切换用 `/memory_switch`(热切换,无需重启)。工具可见性已并入统一模式 `/profile`(`MOCODE_MODE` 设启动默认);memory_* 含在 `research`/`full` 模式中(见下「项目记忆」小节区分 Tier-1 / Tier-2)。
 
 ## 斜杠命令
 
@@ -302,7 +305,7 @@ system prompt 提供轻量建议而不是框架硬门：只检查支持下一步
 mocode 的**双层记忆**模型,跟 Skills 是两件事:
 
 - **Tier-1 — `AGENTS.md`(每轮自动加载):** Markdown 项目记忆,每轮拼进 system prompt。发现路径:`~/.mocode/AGENTS.md` → 从 cwd 往上逐级 `AGENTS.md`(远→近拼接,近的覆盖更突出);超长截断并标注原始文件。运行 `/init` 生成或刷新,纯 Markdown,可手写,无 schema。agent 自己推得的「下次要记住的事实」(架构/约定/坑位)也写在这里。
-- **Tier-2 — `memory_*` 工具库(agent 主导,需启用):** 离散带标签条目(`decision` / `fact` / `pitfall` / `reference` / `feedback`),按召回计数衰减(30 天 → archived,90 天 → 硬删 GC)。agent 用工具存 / 搜 / 改 / 删;索引(标题)进系统提示(≤50 条),正文按需 `memory_search` 取。默认关,启动 `MEMORY_ENABLED=true` 或 REPL 内 `/memory_switch`(需重启 REPL,刻意为之)。
+- **Tier-2 — `memory_*` 工具库(agent 主导,需启用):** 离散带标签条目(`decision` / `fact` / `pitfall` / `reference` / `feedback`),按召回计数衰减(30 天 → archived,90 天 → 硬删 GC)。agent 用工具存 / 搜 / 改 / 删;索引(标题)进系统提示(≤50 条),正文按需 `memory_search` 取。默认关(`coding` 模式不含);启动 `MEMORY_ENABLED=true` 或 REPL 内 `/memory_switch`(热切换,无需重启),亦可 `/profile research|full` 切入含记忆的模式。
 
 ## 类型检查
 

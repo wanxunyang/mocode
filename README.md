@@ -84,6 +84,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Interruptible and reversible** — Ctrl+C interrupts the current turn at any time (kills child processes recursively, rolls history back to before the turn started, leaves no half-finished tool calls). `/rollback` restores file changes from per-turn snapshots, with a per-file keep/undo choice — no git dependency required.
 - **Input safety net** — Long prompts no longer fear a stray Enter: `Ctrl+G` opens an in-TUI composer popup (notepad-style editing — Enter inserts a newline, with soft wrap, selection, copy/cut/paste and undo; Ctrl+S fills the text back into the input box without sending). `Ctrl+R`/`Ctrl+P` fuzzy-search your input history (Enter only fills it back), and the post-send recall window widens to 2 seconds with any-key recall for long inputs.
 - **Sandbox protection** — File reads/writes go through a sandbox that blocks out-of-bounds paths (`../../`, absolute paths outside the root, symlink escapes, etc.), so the agent never touches files outside your working directory.
+- **Computer Use (disabled by default, high-risk)** — After `/cu on`, the `computer` tool injects real mouse/keyboard events into the OS and feeds screenshots back to the model. Its blast radius far exceeds any file tool: it bypasses the file sandbox and can click anything on screen. **Strongly recommended to enable only inside a VM / sandbox / dedicated test machine**, not on your daily driver. Every action still passes the permission gate (per-action grants; `type`/`key` text matching URL/password/payment patterns forces per-action approval with no session-wide option); plan mode always blocks it. Windows first (PowerShell injection); macOS/Linux pending. See `docs/computer-use-design.md`.
 
 ## Features
 
@@ -177,6 +178,8 @@ Common backend `base_url` values:
 | `MAX_STEPS`                 | Max agent loop steps per turn (infinite-loop safety only)             | `1000`                       |
 | `SUB_AGENT_MAX_STEPS`       | Sub-agent loop safety ceiling; defaults to the main-agent value       | `1000`                       |
 | `SANDBOX_ROOT`               | Sandbox root directory (file operation boundary; falls back to cwd if unset) | none                  |
+| `MOCODE_MODE`                | Startup tool profile: `coding` (default) / `frontend` / `computer-use` / `research` / `full`; switch at runtime with `/profile <name>` | `coding` |
+| `MOCODE_COMPUTER_USE_ENABLED` | Computer Use desktop control (the `computer` tool; toggle at runtime with `/cu on\|off`) | `false`      |
 | `MOCODE_THEME`               | Color theme (default/dark/light…; shell env takes precedence over file) | `default`                   |
 
 ## Usage
@@ -219,7 +222,7 @@ The agent operates in **the working directory it was launched from** — to have
 | `memory_update`     | Edit a memory in place (id unchanged; correct stale facts / update summary / toggle pin) |
 | `memory_forget`     | Forget a memory: archived by default (recoverable), `mode=delete` for a hard delete (pinned memories can't be deleted) |
 
-The five `memory_*` tools are gated on `MEMORY_ENABLED=true` at startup; toggle at runtime with `/memory_switch` (REPL restart required, by design — see Skills section for the difference between Tier-1 `AGENTS.md` and Tier-2 memory).
+The six `memory_*` tools are gated on `MEMORY_ENABLED=true` at startup; toggle at runtime with `/memory_switch` (hot-swapped, no restart). See Skills section for the difference between Tier-1 `AGENTS.md` and Tier-2 memory. Tool visibility is unified under profiles (`/profile`, `MOCODE_MODE`); `memory_*` ships in the `research`/`full` profiles.
 
 The four frontend tools — `browser`, `dev_server`, `screenshot`, `view_image` — are **off by default** (they depend on the Playwright binary, spawn long-lived processes, or capture the desktop). Enable the whole cluster at runtime with `/fe on`; the model only sees them once enabled. Toggle with `/fe on|off|status`.
 
@@ -299,7 +302,7 @@ The system prompt provides lightweight guidance rather than a framework gate: in
 MoCode has a **two-tier memory** model distinct from skills:
 
 - **Tier-1 — `AGENTS.md` (auto-loaded every session):** Markdown project memory that gets concatenated into the system prompt on every turn. Discovery walks `~/.mocode/AGENTS.md` → every `AGENTS.md` from the cwd up to the filesystem root (far→near, near wins). On overflow the body is truncated with a marker pointing back at the files. Generate or refresh one with `/init`, or write it by hand — it's plain Markdown, no schema. `AGENTS.md` is also where the agent itself persists "next-session facts" it deduces (architecture, conventions, pitfalls).
-- **Tier-2 — `memory_*` tool library (agent-driven, opt-in):** Discrete tagged records (`decision` / `fact` / `pitfall` / `reference` / `feedback`) with recall-count-based decay (30-day → archived; 90-day → GC). The agent saves / searches / updates / forgets via tools; titles go in the system-prompt index (≤50), bodies fetched on demand via `memory_search`. Off by default; toggle with `MEMORY_ENABLED=true` at startup or `/memory_switch` (REPL restart required).
+- **Tier-2 — `memory_*` tool library (agent-driven, opt-in):** Discrete tagged records (`decision` / `fact` / `pitfall` / `reference` / `feedback`) with recall-count-based decay (30-day → archived; 90-day → GC). The agent saves / searches / updates / forgets via tools; titles go in the system-prompt index (≤50), bodies fetched on demand via `memory_search`. Off by default (not in the `coding` profile); toggle with `MEMORY_ENABLED=true` at startup or `/memory_switch` (hot-swapped, no restart), or switch to the `research`/`full` profile via `/profile`.
 
 ## Type checking
 

@@ -20,15 +20,20 @@ import { bannerLines } from '../../ui/render.js';
 import { t } from '../../i18n/index.js';
 import {
   config,
+  getActiveProfile,
+  setActiveProfile,
   isSubAgentEnabled,
   updateSubAgentConfig,
   isFrontendToolsEnabled,
   updateFrontendToolsConfig,
+  isComputerUseEnabled,
+  updateComputerUseConfig,
   isMcpEnabled,
   updateMcpConfig,
   isMemoryEnabled,
   updateMemoryConfig,
 } from '../../config/index.js';
+import { PROFILE_GROUPS, PROFILE_NAMES, getProfileToolNames, isProfileName } from '../../config/profiles.js';
 import { updateConfigKey, CONFIG_PATH } from '../../config/file.js';
 import { getAgentMode } from '../../agent/mode.js';
 import { refreshChatTools } from '../../llm/index.js';
@@ -37,6 +42,41 @@ import { initializeAllMcp, getMcpTools, closeAllMcp } from '../../mcp/index.js';
 import { unhandled, next, type CommandHandler } from './types.js';
 
 export const toolGroupCommands: CommandHandler[] = [
+  // /profile [name|status] — 统一工具模式(预设工具簇组合,docs/tool-profiles-design.md)。
+  // 无参/status 列出全部模式并高亮当前;有参切换。内存态热切换,不写盘。
+  // 注:不能用 /mode——它已被 agent 工作模式(auto/plan,src/repl/commands/mode.ts)占用。
+  (ctx) => {
+    const { line } = ctx;
+    if (line !== '/profile' && !line.startsWith('/profile ')) return unhandled();
+    const arg = line.startsWith('/profile ') ? line.slice('/profile '.length).trim().toLowerCase() : '';
+    const current = getActiveProfile();
+    if (arg === '' || arg === 'status') {
+      layout.contentWrite(`${ui.accent}${t('profile.current', { name: current })}${ui.reset}\n`);
+      layout.contentWrite(`${ui.dim}${t('profile.listHeader')}${ui.reset}\n`);
+      for (const name of PROFILE_NAMES) {
+        const toolCount = getProfileToolNames(name).size;
+        const groups = PROFILE_GROUPS[name].join(' + ');
+        const marker = name === current ? `${ui.green}▶ ` : '  ';
+        layout.contentWrite(`${marker}${ui.accent}${name}${ui.reset}${ui.dim} (${toolCount})  ${groups}${ui.reset}\n`);
+      }
+      return next();
+    }
+    if (!isProfileName(arg)) {
+      layout.contentWrite(`${ui.yellow}${t('profile.unknown', { name: arg, list: PROFILE_NAMES.join(' | ') })}${ui.reset}\n`);
+      return next();
+    }
+    if (arg === current) {
+      layout.contentWrite(`${ui.dim}${t('profile.unchanged', { name: arg })}${ui.reset}\n`);
+      return next();
+    }
+    setActiveProfile(arg);
+    refreshChatTools();
+    ctx.history[0] = { role: 'system', content: ctx.buildSystemMessage(getAgentMode() === 'plan') };
+    layout.rewriteBanner(bannerLines(ctx.banner()));
+    layout.contentWrite(`${ui.green}${t('profile.changed', { name: arg })}${ui.reset}\n`);
+    return next();
+  },
+
   // /subagent [status|on|off]
   (ctx) => {
     const { line } = ctx;
@@ -66,6 +106,7 @@ export const toolGroupCommands: CommandHandler[] = [
     layout.contentWrite(
       `${enabled ? ui.green : ui.yellow}${t(enabled ? 'subagent.changedOn' : 'subagent.changedOff')}${ui.reset}\n`,
     );
+    layout.contentWrite(`${ui.dim}${t('profile.deprecatedAlias')}${ui.reset}\n`);
     return next();
   },
 
@@ -109,6 +150,53 @@ export const toolGroupCommands: CommandHandler[] = [
     layout.contentWrite(
       `${enabled ? ui.green : ui.yellow}${t(enabled ? 'fe.changedOn' : 'fe.changedOff')}${ui.reset}\n`,
     );
+    layout.contentWrite(`${ui.dim}${t('profile.deprecatedAlias')}${ui.reset}\n`);
+    return next();
+  },
+
+  // /cu|/computer [status|on|off] — Computer Use 总开关(computer 桌面操控工具)。
+  // 设计同 /fe:单一来源 isComputerUseEnabled();关闭时 computer 不进模型 schema
+  // (refreshChatTools 过滤)、运行时 getRuntimeDisabledTools 兜底拦截;plan 模式
+  // 无论开关状态都常驻 PLAN_DISABLED_TOOLS 屏蔽(plan 只读)。默认 false。
+  // 与 /fe 唯一语义差异:computer 是高危(dangerous)能力,只控制 schema 可见性,
+  // 每个动作仍需权限门逐次确认(见 docs/computer-use-design.md)。
+  (ctx) => {
+    const { line } = ctx;
+    const isCu = line === '/cu' || line.startsWith('/cu ') || line === '/computer' || line.startsWith('/computer ');
+    if (!isCu) return unhandled();
+    const raw = line.startsWith('/cu ')
+      ? line.slice('/cu '.length)
+      : line.startsWith('/computer ')
+        ? line.slice('/computer '.length)
+        : line === '/computer'
+          ? ''
+          : line.slice('/cu'.length);
+    const arg = raw.trim().toLowerCase();
+    if (arg === '' || arg === 'status') {
+      const enabled = isComputerUseEnabled();
+      const state = t(enabled ? 'cu.stateOn' : 'cu.stateOff');
+      layout.contentWrite(
+        `${ui.accent}${t('cu.status', { state })}${ui.reset}\n` +
+          `${ui.dim}MOCODE_COMPUTER_USE_ENABLED=${enabled ? 'true' : 'false'} · ${CONFIG_PATH}${ui.reset}\n`,
+      );
+      return next();
+    }
+    if (arg !== 'on' && arg !== 'off') {
+      layout.contentWrite(`${ui.yellow}${t('cu.usage')}${ui.reset}\n`);
+      return next();
+    }
+    const enabled = arg === 'on';
+    if (enabled !== isComputerUseEnabled()) {
+      updateComputerUseConfig(enabled);
+      updateConfigKey('MOCODE_COMPUTER_USE_ENABLED', enabled ? 'true' : 'false');
+      refreshChatTools();
+      ctx.history[0] = { role: 'system', content: ctx.buildSystemMessage(getAgentMode() === 'plan') };
+      layout.rewriteBanner(bannerLines(ctx.banner()));
+    }
+    layout.contentWrite(
+      `${enabled ? ui.green : ui.yellow}${t(enabled ? 'cu.changedOn' : 'cu.changedOff')}${ui.reset}\n`,
+    );
+    layout.contentWrite(`${ui.dim}${t('profile.deprecatedAlias')}${ui.reset}\n`);
     return next();
   },
 
@@ -183,7 +271,7 @@ export const toolGroupCommands: CommandHandler[] = [
             `plan-mode 提示词里也不出现 memory_* 工具名。${ui.reset}\n`,
         );
         layout.contentWrite(
-          `${ui.dim}  切换后下次新建 system message 即时反映;当前会话工具表需重启 REPL 才完整重算。${ui.reset}\n`,
+          `${ui.dim}  切换后即时热生效(refreshChatTools 现算);统一模式入口:/profile status。${ui.reset}\n`,
         );
         return next();
       }
@@ -212,11 +300,14 @@ export const toolGroupCommands: CommandHandler[] = [
       updateMemoryConfig(nextEnabled);
       // 写盘:mode 文件 values,/~/.mocode/config;writeConfigKeys 不会动其它键(主题 / 模型等)
       updateConfigKey('MEMORY_ENABLED', nextEnabled ? 'true' : 'false');
+      // profile 系统下 memory_* 始终注册,refreshChatTools 现算可见性——热生效,无需重启。
+      refreshChatTools();
+      ctx.history[0] = { role: 'system', content: ctx.buildSystemMessage(getAgentMode() === 'plan') };
       const note = nextEnabled
         ? `${ui.green}已开启记忆子系统${ui.reset} — memory_save/search/list/update/forget/graph 进入工具表;` +
-          `Memory Index 段会在下次拼 system message 时注入。工具表本身的快照需要重启 REPL 才完整刷新。`
-        : `${ui.yellow}已关闭记忆子系统${ui.reset} — 六个 memory_* 工具将在下次拼 system message 时从工具表过滤;` +
-          `Memory Index 段不再出现;plan-mode 提示词里的 memory_* 字样消失。重启 REPL 后工具表完全不出现。`;
+          `Memory Index 段随系统提示即时注入。`
+        : `${ui.yellow}已关闭记忆子系统${ui.reset} — 六个 memory_* 工具已从模型工具表移除;` +
+          `Memory Index 段不再出现;plan-mode 提示词里的 memory_* 字样消失。`;
       layout.contentWrite(`${note}\n`);
       layout.contentWrite(
         `${ui.dim}(写入 ${CONFIG_PATH}:MEMORY_ENABLED=${nextEnabled ? 'true' : 'false'};${ui.reset}` +
@@ -224,6 +315,7 @@ export const toolGroupCommands: CommandHandler[] = [
             ? `${ui.dim}同 session shell 未 export,文件写入即时生效)${ui.reset}\n`
             : `${ui.dim}下次启动仍生效)${ui.reset}\n`),
       );
+      layout.contentWrite(`${ui.dim}${t('profile.deprecatedAlias')}${ui.reset}\n`);
       // 即时刷 banner(原地替换顶部 bannerH 行,不留副本):banner() 闭包实时读
       // isMemoryEnabled(),无需重启 REPL。buffer 中 bannerH 之下的对话历史位置不动。
       layout.rewriteBanner(bannerLines(ctx.banner()));

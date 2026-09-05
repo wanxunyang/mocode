@@ -8,6 +8,7 @@ import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-disc
 import { buildValidationCommandsSection } from '../verification/prompt.js';
 import { getActivePresetName, readPreset } from './presets.js';
 import { detectLanguage, setLanguage, t, type Language } from '../i18n/index.js';
+import { isProfileName, profileHasGroup, type ProfileName } from './profiles.js';
 
 /**
  * 按优先级加载配置文件并回填 process.env:
@@ -53,6 +54,16 @@ const LLM_ENV_KEYS = [
 export const DEFAULT_CONTEXT_WINDOW_TOKENS = 256000;
 const llmKeysFromShell = LLM_ENV_KEYS.filter((k) => process.env[k] !== undefined);
 loadEnvFiles();
+
+/**
+ * 当前工具模式(内存态):启动默认取 MOCODE_MODE,/mode 运行时热切换(不写盘)。
+ * 旧布尔开关 env(MEMORY_ENABLED / MOCODE_FRONTEND_TOOLS_ENABLED / MOCODE_COMPUTER_USE_ENABLED /
+ * MOCODE_SUBAGENT_ENABLED)若显式设置则覆盖模式推导结果(向后兼容,一个版本周期后移除)。
+ */
+let activeProfile: ProfileName = isProfileName(process.env.MOCODE_MODE) ? process.env.MOCODE_MODE : 'coding';
+if (process.env.MOCODE_MODE !== undefined && !isProfileName(process.env.MOCODE_MODE)) {
+  console.warn(`[mocode] 未知 MOCODE_MODE="${process.env.MOCODE_MODE}",回退 coding(可选: coding|frontend|computer-use|research|full)`);
+}
 
 /**
  * 激活预设覆盖:若用户曾用 /model 激活过预设,启动时让上下文窗口等配置**跟随该预设文件**,
@@ -120,6 +131,9 @@ export interface Config {
   /** 前端工具簇总开关(browser / dev_server / screenshot / view_image)。默认关闭；
    *  /fe on|off 运行时切换并刷新模型工具表;这些工具依赖 playwright 二进制或抓取桌面,隐私/资源面大,默认不暴露。 */
   frontendToolsEnabled: boolean;
+  /** Computer Use 总开关(computer 桌面操控工具)。默认关闭;
+   *  /cu on|off 运行时切换并刷新模型工具表;该工具直接向 OS 注入鼠标键盘事件,爆炸半径最大,默认不暴露。 */
+  computerUseEnabled: boolean;
   /** MCP 总开关。默认开启；关闭时启动不读取 MCP 配置、不连接服务。/mcp on|off 改写下次启动状态。 */
   mcpEnabled: boolean;
   /** 子 Agent 默认步数上限，只防止无限循环；调用方可按任务提高。 */
@@ -392,6 +406,12 @@ const SYSTEM_PROMPT_MEMORY_SECTION = `
 - Save only stable, non-obvious cross-session facts. Search before saving; update an existing entry instead of duplicating it, and archive stale entries.
 - A knowledge-graph layer links entities across memories: explore relations/neighbors with memory_graph (neighbors/add/stats), and attach meaningful links via the links parameter of memory_save when saving.`;
 
+const SYSTEM_PROMPT_COMPUTER_USE_SECTION = `
+## Computer Use (desktop GUI control)
+- The \`computer\` tool drives the real desktop: move/click the mouse, type text, press keys, scroll, zoom into a screen region. Every action returns a fresh screenshot as a visual attachment — inspect it before the next action and self-correct.
+- Coordinates use a normalized 0-1000 grid (x right, y down) over the current screen; you never need the physical resolution. Call \`zoom\` with a tight region before clicking small or dense UI elements.
+- Destructive or sensitive targets (form submit, payment, credentials, delete/send buttons) require explicit user intent — ask first, never infer. Every action passes the permission gate; do not retry a denied action without new user instruction.`;
+
 /** AGENTS.md 自动导入正文上限:system 位于 history[0] 且 compactHistory 不压缩 system,超长需截断防占窗口(见 memory/README.md)。 */
 const MAX_AGENTS_IMPORT_CHARS = 20000;
 
@@ -426,6 +446,15 @@ function buildMemoryPromptSection(): string {
 }
 
 /**
+ * Computer Use 使用约束段:开 isComputerUseEnabled() 时才拼,
+ * 注入 computer 工具的坐标网格 / zoom 优先 / 敏感操作先问人 指导。默认关(零侵入)。
+ */
+function buildComputerUseSection(): string {
+  if (!isComputerUseEnabled()) return '';
+  return SYSTEM_PROMPT_COMPUTER_USE_SECTION;
+}
+
+/**
  * plan 模式追加到系统提示末尾的指令(切到 plan 模式时由 repl 拼进 history[0])。
  * 与 SYSTEM_PROMPT 同语种(英文),指示:只读探查、产出步骤化计划、不执行、审批后回 auto。
  *
@@ -456,6 +485,7 @@ ${buildPlanResearchRules()}`;
 export function buildBasePrompt(sessionId = getCurrentSessionId()): string {
   const agentsImportSection = buildAgentsImportSection();
   const memorySection = buildMemoryPromptSection();
+  const computerUseSection = buildComputerUseSection();
   const notepadSection = buildNotepadSection(sessionId);
 
   // 静态主体:稳定段落集中在前,让支持 prompt caching 的后端能命中前缀缓存(#12)。
@@ -540,6 +570,11 @@ ${t('assistant.languageInstruction')}`;
       '## Session notes (resident memory)\n' +
       'For non-obvious, lasting-value discoveries — subtle constraints, decisions with downstream impact, open questions blocking a choice, or risks affecting later steps — call `note_append` IMMEDIATELY when you make the discovery. The note is written to the same notes.md and its body is re-injected into the prompt automatically (within a 5k-token budget), surviving compaction so you keep remembering what you found/decided this session. Do NOT use it for routine progress (that is the plan) or stable cross-session facts (that is memory_save). Each call appends one item.',
   );
+
+  const computerUse = computerUseSection.trim();
+  if (computerUse) {
+    dynamicParts.push(computerUse);
+  }
 
   const ctxContent = `${agentsImportSection}${memorySection}${notepadSection}`.trimEnd();
   if (ctxContent) {
@@ -633,6 +668,7 @@ export const config: Config = {
   subAgentEnabled: process.env.MOCODE_SUBAGENT_ENABLED === 'true',
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || Number(process.env.MAX_STEPS) || 1000,
   frontendToolsEnabled: process.env.MOCODE_FRONTEND_TOOLS_ENABLED === 'true',
+  computerUseEnabled: process.env.MOCODE_COMPUTER_USE_ENABLED === 'true',
   mcpEnabled: process.env.MOCODE_MCP_ENABLED !== 'false',
   sessionDir: path.join(process.cwd(), '.mocode', 'sessions'),
   searchApiKey: process.env.ANYSEARCH_API_KEY,
@@ -709,26 +745,58 @@ export function updateModelConfig(opts: {
   }
 }
 
-/** 子 Agent 总开关；默认 false，关闭时 sub-agent 不进入模型工具表。 */
-export function isSubAgentEnabled(): boolean {
-  return config.subAgentEnabled;
+/** 当前激活工具模式(内存态)。 */
+export function getActiveProfile(): ProfileName {
+  return activeProfile;
 }
 
-/** 运行时切换子 Agent；工具 schema 刷新与持久化由 REPL 调用方完成。 */
+/**
+ * 切换激活工具模式(/mode 调用)。内存态,不写盘;非法名抛错。
+ * 切换后由 REPL 调 refreshChatTools + 重写系统提示/横幅生效。
+ */
+export function setActiveProfile(p: ProfileName): void {
+  if (!isProfileName(p)) throw new Error(`unknown profile: ${String(p)}`);
+  activeProfile = p;
+}
+
+/**
+ * 子 Agent 总开关:派生查询 = 当前模式含 subagent 簇,或被旧 env MOCODE_SUBAGENT_ENABLED 显式覆盖。
+ */
+export function isSubAgentEnabled(): boolean {
+  if (process.env.MOCODE_SUBAGENT_ENABLED !== undefined) return process.env.MOCODE_SUBAGENT_ENABLED === 'true';
+  return profileHasGroup(activeProfile, 'subagent');
+}
+
+/** 兼容旧命令(/subagent):写 config 字段 + env。新逻辑以模式为准,此函数仅为旧调用点保留。 */
 export function updateSubAgentConfig(enabled: boolean): void {
   config.subAgentEnabled = enabled;
   process.env.MOCODE_SUBAGENT_ENABLED = enabled ? 'true' : 'false';
 }
 
-/** 前端工具簇总开关；默认 false，关闭时 browser/dev_server/screenshot/view_image 不进入模型工具表。 */
+/** 前端工具簇开关:派生查询 = 当前模式含 frontend 簇,或被旧 env 显式覆盖。 */
 export function isFrontendToolsEnabled(): boolean {
-  return config.frontendToolsEnabled;
+  if (process.env.MOCODE_FRONTEND_TOOLS_ENABLED !== undefined)
+    return process.env.MOCODE_FRONTEND_TOOLS_ENABLED === 'true';
+  return profileHasGroup(activeProfile, 'frontend');
 }
 
-/** 运行时切换前端工具簇；工具 schema 刷新与持久化由 REPL 调用方完成。 */
+/** 兼容旧命令(/fe)。 */
 export function updateFrontendToolsConfig(enabled: boolean): void {
   config.frontendToolsEnabled = enabled;
   process.env.MOCODE_FRONTEND_TOOLS_ENABLED = enabled ? 'true' : 'false';
+}
+
+/** Computer Use 开关:派生查询 = 当前模式含 computer 簇,或被旧 env 显式覆盖。 */
+export function isComputerUseEnabled(): boolean {
+  if (process.env.MOCODE_COMPUTER_USE_ENABLED !== undefined)
+    return process.env.MOCODE_COMPUTER_USE_ENABLED === 'true';
+  return profileHasGroup(activeProfile, 'computer');
+}
+
+/** 兼容旧命令(/cu)。 */
+export function updateComputerUseConfig(enabled: boolean): void {
+  config.computerUseEnabled = enabled;
+  process.env.MOCODE_COMPUTER_USE_ENABLED = enabled ? 'true' : 'false';
 }
 
 /** MCP 总开关；关闭时下次启动跳过 MCP 配置读取与服务连接。 */
@@ -748,7 +816,8 @@ export function updateMcpConfig(enabled: boolean): void {
  * 默认 false(新用户零侵入)。
  */
 export function isMemoryEnabled(): boolean {
-  return config.memoryEnabled;
+  if (process.env.MEMORY_ENABLED !== undefined) return process.env.MEMORY_ENABLED === 'true';
+  return profileHasGroup(activeProfile, 'memory');
 }
 
 /**

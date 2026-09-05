@@ -24,24 +24,17 @@ import { memoryUpdateTool } from './memory-update.js';
 import { memoryForgetTool } from './memory-forget.js';
 import { memoryGraphTool } from './memory-graph.js';
 import { subAgentTool } from './task.js';
+import { computerTool } from './computer.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
  * 加新工具:在本目录新建 `xxx.ts` 导出一个 Tool,再在下面数组里加一行。无需改 agent / llm。
  *
- * 记忆子系统总开关(MEMORY_ENABLED !== 'true'):6 个 memory_* 工具整体不进 builtinTools,
- * 进而不进 LLM 的工具表(模型根本看不到、也不会想着去调)。运行时通过 /memory_switch 切;
- * 切换对当前会话的 tool list 不重算(取的是模块初始化时的快照),所以需要重启 REPL 才生效
- * —— 这是有意为之,避免切开关瞬间把已发出请求的工具列表打乱。
- *
- * 注:这里直接读 env(MEMORY_ENABLED)而不是调 config.isMemoryEnabled(),因为本模块可能在
- * config 单例尚未初始化时被其它模块拉起(import 链路:tools/registry → builtinTools,
- * config 单例字段 getter 在 getPlanDisabledTools 等调用链路上 lazy 求值)。
+ * 记忆子系统可见性现由统一模式(profile)控制(docs/tool-profiles-design.md):
+ * memory_* 工具始终注册进 builtinTools(懒加载 JSONL,无常驻开销),只是默认 coding 模式下
+ * 不可见——由 refreshChatTools 按当前 profile 过滤。/mode 热切换即时生效,无需重启 REPL
+ * (旧实现是模块初始化快照,曾要求重启;已随 profile 系统破除)。
  */
-const _memoryEnabledAtBoot = process.env.MEMORY_ENABLED === 'true';
-const _memoryTools = _memoryEnabledAtBoot
-  ? [memorySaveTool, memorySearchTool, memoryListTool, memoryUpdateTool, memoryForgetTool, memoryGraphTool]
-  : [];
 
 const pathResource = (args: Record<string, unknown>): string[] =>
   typeof args.path === 'string' && args.path ? [`file:${args.path}`] : ['workspace'];
@@ -82,6 +75,9 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   memory_forget: { effect: 'write', concurrency: 'serial', resources: memoryResource },
   // memory_graph:search/neighbors/stats 只读、add 写,统一按写处理走串行(调用不频繁,简化)。
   memory_graph: { effect: 'write', concurrency: 'serial', resources: memoryResource },
+  // computer 桌面操控:桌面状态全局唯一,任何两个 computer 调用都不允许并发;
+  // effect=process(不写工作区文件,不触发 rollback/diff 追踪),supportsAbort 中断长 wait/拖拽。
+  computer: { effect: 'process', concurrency: 'serial', resources: () => ['desktop'], supportsAbort: true },
   // sub-agent 动态协调：只读任务无锁并行；写任务在 overlay 中执行，merge 时由 ChangeSet 持 canonical lock。
   'sub-agent': {
     effect: 'write',
@@ -115,8 +111,14 @@ const rawBuiltinTools: Tool[] = [
   askHumanTool,
   planUpdateTool,
   noteAppendTool,
-  ..._memoryTools,
+  memorySaveTool,
+  memorySearchTool,
+  memoryListTool,
+  memoryUpdateTool,
+  memoryForgetTool,
+  memoryGraphTool,
   subAgentTool,
+  computerTool,
 ];
 
 /** 所有内置工具均携带显式能力；新增工具遗漏声明时 registry 会保守串行。 */

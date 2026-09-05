@@ -56,6 +56,27 @@ export function buildSlashCommands(): SlashCommand[] {
       ],
     },
     {
+      name: '/profile',
+      desc: d('commands.profile'),
+      children: [
+        { name: 'status', value: '/profile', desc: d('commands.profileStatus') },
+        { name: 'coding', value: '/profile coding', desc: 'coding' },
+        { name: 'frontend', value: '/profile frontend', desc: 'frontend' },
+        { name: 'computer-use', value: '/profile computer-use', desc: 'computer-use' },
+        { name: 'research', value: '/profile research', desc: 'research' },
+        { name: 'full', value: '/profile full', desc: 'full' },
+      ],
+    },
+    {
+      name: '/cu',
+      desc: d('commands.cu'),
+      children: [
+        { name: 'on', value: '/cu on', desc: d('commands.cuOn') },
+        { name: 'off', value: '/cu off', desc: d('commands.cuOff') },
+        { name: 'status', value: '/cu status', desc: d('commands.cuStatus') },
+      ],
+    },
+    {
       name: '/mcp',
       desc: d('commands.mcp'),
       children: [
