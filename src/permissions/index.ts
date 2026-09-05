@@ -51,7 +51,7 @@ function canonicalProjectRoot(root: string): string {
 }
 
 /**
- * computer 工具的 type/key 文本内容审查(docs/computer-use-design.md §1.3):
+ * computer 工具的 type/key 文本内容审查:
  * 命中 URL / 密码形态 / 支付关键词时,无论是否已授权都强制 once 级确认——
  * 这类文本是「把内容敲进任意应用」的载体,不能因 session/项目授权而放行后续所有输入。
  * 纯函数,独立可单测。
@@ -73,7 +73,7 @@ export function permissionFingerprint(tool: Tool, args: Record<string, unknown>)
     subject = { command: args.command.trim() };
   } else if (tool.name === 'computer') {
     // computer:坐标/文本每次不同,进指纹会让每次点击都弹窗(功能上等同不可用)。
-    // 按动作粒度授权:允许一次 left_click = 本会话允许任意坐标的左键(docs/computer-use-design.md §3.6)。
+    // 按动作粒度授权:允许一次 left_click = 本会话允许任意坐标的左键。
     subject = { computer: typeof args.action === 'string' ? args.action : 'unknown' };
   } else {
     let resources: string[] | undefined;
@@ -186,7 +186,7 @@ export async function checkPermission(
 
   // computer 的 type/key 命中敏感内容(URL/密码/支付)时强制 once 级确认:
   // 不看任何授权缓存,也不提供 session/项目/永久授权选项——这类文本是「敲进任意应用」的载体,
-  // 一旦放行不该沿用到下一次输入(docs/computer-use-design.md §1.3/§3.6)。
+  // 一旦放行不该沿用到下一次输入。
   const forceOnce =
     tool.name === 'computer' &&
     (args.action === 'type' || args.action === 'key') &&

@@ -22,7 +22,6 @@ export default tseslint.config(
       'packages/**',
       'assets/**',
       'tmp/**',
-      'demo-plan/**',
       'evals/results/**',
       // 运行时产物与本地脚手架(均已在 .gitignore 内):会话落盘、probe 输出、临时任务页。
       '.mocode/**',

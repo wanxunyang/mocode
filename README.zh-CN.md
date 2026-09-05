@@ -83,7 +83,7 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **可中断、可回滚** — Ctrl+C 随时打断当前轮次(树杀子进程,历史还原到本轮开始前,不留残半的工具调用);`/rollback` 按轮次快照恢复文件改动,逐个文件「保留/撤销」,不依赖 git。
 - **输入安全网** — 长 prompt 不再怕误按 Enter:`Ctrl+G` 弹出 TUI 内「输入面板」(记事本式编辑,Enter=换行、软换行、选区、复制/剪切/粘贴、撤销,Ctrl+S 填回输入框不自动发送);`Ctrl+R`/`Ctrl+P` 模糊搜索历史输入(Enter 只回填不发送);长文本误发后撤回窗口自动放宽到 2 秒且任意键可撤回。
 - **沙箱防护** — 文件读写经沙箱拦截,挡掉越界路径(`../../`、绝对外圈、软链出圈等),不碰工作目录之外的文件。
-- **Computer Use(高危，仅明确 GUI 意图时路由)** — 请求确实需要真实鼠标/键盘交互时，router 才可暴露 `computer-control`，并把每次动作后的截图回灌模型。`/cu off`（或 `MOCODE_COMPUTER_USE_ENABLED=false`）是硬否决；`/cu on` 仅允许按需路由，不会让工具常驻。它会绕过文件沙箱，**强烈建议只在 VM / 沙箱 / 专用测试机里使用**。每个动作仍走权限门，plan 模式永远屏蔽。Windows 首发，macOS/Linux 待接入。设计见 `docs/computer-use-design.md`。
+- **Computer Use(高危，仅明确 GUI 意图时路由)** — 请求确实需要真实鼠标/键盘交互时，router 才可暴露 `computer-control`，并把每次动作后的截图回灌模型。`/cu off`（或 `MOCODE_COMPUTER_USE_ENABLED=false`）是硬否决；`/cu on` 仅允许按需路由，不会让工具常驻。它会绕过文件沙箱，**强烈建议只在 VM / 沙箱 / 专用测试机里使用**。每个动作仍走权限门，plan 模式永远屏蔽。Windows 首发，macOS/Linux 待接入。
 
 ## 特性
 

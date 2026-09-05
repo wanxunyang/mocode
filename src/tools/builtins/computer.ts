@@ -1,5 +1,5 @@
 /**
- * computer 工具:桌面 GUI 操控闭环(设计 docs/computer-use-design.md)。
+ * computer 工具:桌面 GUI 操控闭环。
  *
  * 结构:校验(纯函数,可单测) → 动作前截屏(拿物理分辨率做 norm1000 换算) →
  * InputInjector 注入动作 → 动作后重截屏 → 缩放 → modelAttachments 回灌。

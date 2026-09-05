@@ -4,7 +4,7 @@
  * 架构:InputInjector 接口与实现解耦——
  * - 阶段一(MVP,本文件):PowerShell 常驻子进程,stdin 收 NDJSON 动作、stdout 回 NDJSON 结果,
  *   P/Invoke user32.dll(SendInput / SetCursorPos / GetCursorPos / mouse_event)。零新依赖。
- * - 阶段二(终态,docs/computer-use-design.md P4,本轮不做):rust/ enigo 二进制,同协议替换。
+ * - 阶段二(终态,本轮不做):rust/ enigo 二进制,同协议替换。
  *
  * 非 Windows 平台 MVP 显式抛错(诚实降级),不静默假装支持。
  * 键名映射接受 Anthropic 风格键名(Return / Alt_L / ctrl+s),在 TS 侧映射成 VK 码,

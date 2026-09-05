@@ -8,7 +8,6 @@ coverage/
 # 本地脚本沙盒与 agent 产物(见 .gitignore 同名条目)
 # /scripts/ 必须锚定到根,否则会吞掉 packages/*/scripts(与 .gitignore 同一理由)
 /scripts/
-demo-plan/
 task_management/
 .mocode/
 .claude/
