@@ -63,10 +63,14 @@ export function renderHistory(history: ChatMessage[]): void {
   // 普通工具可跨 assistant 步聚合；mutation 各自占一个 group，并切断前后普通工具。
   let pendingBatches: batch.BatchEntry[][] = [];
   let normalBatch: batch.BatchEntry[] | null = null;
-  const flushBatch = (): void => {
+  const flushBatch = (): boolean => {
+    if (pendingBatches.length === 0) return false;
+    // 气泡/正文 → 摘要行边界:尾部视觉空行幂等收成 1 条(与实时 writeToolHeader 同语义)。
+    layout.normalizeMutationBoundary();
     for (const entries of pendingBatches) batch.writeSummaryOnly(entries, layout);
     pendingBatches = [];
     normalBatch = null;
+    return true;
   };
   for (let idx = 0; idx < history.length; idx++) {
     const m = history[idx];

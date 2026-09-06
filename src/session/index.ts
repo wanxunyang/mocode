@@ -23,6 +23,8 @@ export type { BudgetScheduler, SchedulerRunLog } from './scheduler.js';
 
 export { newSessionId, saveSession, loadSession, listSessions, sessionDir } from './persist.js';
 export type { SessionMeta, SessionRecord } from './persist.js';
+export { SessionStore, defaultSessionStore, getActiveSessionStore, withSessionStore } from './store.js';
+export type { SessionStoreOptions } from './store.js';
 
 export {
   appendCurrentSessionTrace,

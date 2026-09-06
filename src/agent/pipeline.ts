@@ -1,4 +1,4 @@
-import type { AgentRunOptions, AgentRunResult } from './core.js';
+import type { AgentRunOptions, AgentRunResult } from './run-contracts.js';
 import {
   AGENT_STAGE_NAMES,
   type AgentPipeline,

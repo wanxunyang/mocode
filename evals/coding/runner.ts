@@ -4,13 +4,10 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { runAgentCore } from '../../src/agent/core.js';
-import { createAgentRuntimeContext } from '../../src/agent/runtime-context.js';
+import { createRuntime } from '../../src/runtime/index.js';
 // 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),eval runner 须显式装配。
 import '../../src/tools/builtins/index.js';
 import { config } from '../../src/config/index.js';
-import { resetState } from '../../src/rollback/index.js';
-import { getCurrentSessionId, setCurrentSessionId } from '../../src/session/state.js';
 import type { AgentTraceEvent } from '../../src/session/trace.js';
 import { reduceTraceMetrics } from '../../src/session/trace-metrics.js';
 import { clearSkillActivation } from '../../src/skills/activation.js';
@@ -230,19 +227,17 @@ async function runTask(
   const originalVerifierHash = verifierHash(root);
   if (!originalVerifierHash) throw new Error(`Fixture ${fixture.id} has no readable verify.mjs`);
   const previousCwd = process.cwd();
-  const previousSessionId = getCurrentSessionId();
-  const runtimeContext = createAgentRuntimeContext({
+  const runtime = createRuntime({
     sandboxRoot: root,
     configOverrides: { permissionEnabled: false },
     initialMode: 'auto',
   });
-  resetState();
-  const turnId = runtimeContext.beginTurn(fixture.goal);
+  const runtimeContext = runtime.context;
   const traceEvents: AgentTraceEvent[] = [];
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutOverride ?? fixture.timeoutMs ?? 120_000);
-  let result: Awaited<ReturnType<typeof runAgentCore>> | undefined;
+  let result: Awaited<ReturnType<typeof runtime.run>> | undefined;
   const firstPatchCapture = createFirstPatchCapture(root, fixture.id);
 
   try {
@@ -255,19 +250,20 @@ async function runTask(
       );
     }
     const turn = await assembleCodingEvalTurn(fixture.goal, controller.signal, systemPrompt, { runtimeContext });
-    result = await runAgentCore({
+    result = await runtime.run({
+      turn: 'new',
+      turnLabel: fixture.goal,
       history: turn.history,
       userInput: fixture.goal,
       signal: controller.signal,
       toolPolicy: turn.toolPolicy,
-      runtimeContext,
       initialToolRoute: turn.initialToolRoute,
       hooks: {
         onToolBatchEnd: () =>
           firstPatchCapture.capture(runtimeContext.getCurrentTurnMutationState().changedFiles.length > 0),
       },
       onTraceEvent: (event) => traceEvents.push(event),
-      traceContext: { sessionId: `eval-${fixture.id}`, turnId },
+      traceContext: { sessionId: `eval-${fixture.id}` },
     });
     const finalVerified = await verify(root, fixture.verificationCommand);
     const firstPatchPass = await evaluateFirstPatch(firstPatchCapture.snapshotRoot(), fixture, originalVerifierHash);
@@ -326,10 +322,9 @@ async function runTask(
     };
   } finally {
     clearTimeout(timer);
+    await runtime.close();
     process.chdir(previousCwd);
     clearSkillActivation();
-    setCurrentSessionId(previousSessionId, previousCwd);
-    resetState();
     firstPatchCapture.dispose();
     if (!keep && root.startsWith(path.join(tmpdir(), 'mocode-eval-'))) rmSync(root, { recursive: true, force: true });
   }

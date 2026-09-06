@@ -14,6 +14,10 @@
       "types": "./src/host.ts",
       "default": "./dist/host.js"
     },
+    "./persistence": {
+      "types": "./src/persistence.ts",
+      "default": "./dist/persistence.js"
+    },
     "./runtime": {
       "types": "./src/runtime.ts",
       "default": "./dist/runtime.js"

@@ -25,7 +25,7 @@ import {
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
 import * as layout from '../ui/layout.js';
-import { pruneAfterCompaction } from '../rollback/index.js';
+import { defaultRollbackStore, type RollbackStore } from '../rollback/index.js';
 import { toText } from '../context/utils.js';
 import { DEFAULT_BUDGET_POLICY } from '../context/budget.js';
 import { collectArtifactRefs } from '../context/artifacts.js';
@@ -54,10 +54,15 @@ export interface CompactionRuntime {
     'contextWindowTokens' | 'autoCompact' | 'contextBudget' | 'contextRelprune' | 'contextOptimize'
   >;
   readonly modelTransport: ChatTransport;
+  readonly rollbackStore?: Pick<RollbackStore, 'pruneAfterCompaction'>;
 }
 
 /** 默认兼容依赖：旧调用方继续读取进程级 config/chat。 */
-export const defaultCompactionRuntime: CompactionRuntime = { config, modelTransport: chat };
+export const defaultCompactionRuntime: CompactionRuntime = {
+  config,
+  modelTransport: chat,
+  rollbackStore: defaultRollbackStore,
+};
 
 export interface CompactOptions {
   window: number;
@@ -814,7 +819,7 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
     const rebuilt: ChatMessage[] = [systemMsg, summaryMsg, ...flattenGroups(kept)];
     history.length = 0;
     history.push(...rebuilt);
-    pruneAfterCompaction(history); // 摘要删了旧轮次 → 按存活轮次裁剪回滚日志
+    (opts.runtime?.rollbackStore ?? defaultRollbackStore).pruneAfterCompaction(history);
     const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
     state.lastEstimate = estimateAfter;
     state.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用校正估算

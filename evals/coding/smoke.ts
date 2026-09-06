@@ -3,10 +3,8 @@ import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { runAgentCore } from '../../src/agent/core.js';
-import { getAgentMode, setAgentMode } from '../../src/agent/mode.js';
-import { __setChatCreateImpl } from '../../src/llm/index.js';
-import { getCurrentSessionId, setCurrentSessionId } from '../../src/session/state.js';
+import { createRuntime } from '../../src/runtime/index.js';
+import { __setChatCreateImpl, chat } from '../../src/llm/index.js';
 import { clearSkillActivation } from '../../src/skills/activation.js';
 import {
   compareBenchmarkPreflight,
@@ -249,14 +247,14 @@ assert.equal(timeoutReport.summary.toolRecoveryRate, null);
     tools?: Array<{ function: { name: string } }>;
   }
 
-  const previousMode = getAgentMode();
-  const previousSessionId = getCurrentSessionId();
+  const runtime = createRuntime({ initialMode: 'auto', modelTransport: chat });
   let capturedRequest: CapturedRequest | null = null;
   let routeRequest: { input: string; previousGroups?: readonly string[]; planMode?: boolean } | null = null;
   const systemPrompt = buildCodingEvalSystemPrompt('coding-eval');
 
   try {
     const turn = await assembleCodingEvalTurn('Fix the implementation and run its verifier.', undefined, systemPrompt, {
+      runtimeContext: runtime.context,
       route: async (request) => {
         routeRequest = request;
         return {
@@ -289,7 +287,8 @@ assert.equal(timeoutReport.summary.toolRecoveryRate, null);
         yield { choices: [{ delta: { content: 'done' } }] };
       })();
     });
-    await runAgentCore({
+    await runtime.run({
+      turn: 'new',
       history: turn.history,
       userInput: 'Fix the implementation and run its verifier.',
       hooks: {},
@@ -310,8 +309,7 @@ assert.equal(timeoutReport.summary.toolRecoveryRate, null);
   } finally {
     __setChatCreateImpl(null);
     clearSkillActivation();
-    setCurrentSessionId(previousSessionId, process.cwd());
-    setAgentMode(previousMode);
+    await runtime.close();
   }
 }
 

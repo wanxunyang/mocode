@@ -11,7 +11,8 @@ import { renderFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
 import * as batch from '../ui/batch.js';
 import { config } from '../config/index.js';
-import { runAgentCore, isMutationTool, type AgentHooks, type AgentRunResult, type ContentPart } from './core.js';
+import { isMutationTool, type AgentHooks, type AgentRunResult, type ContentPart } from './core.js';
+import { createRuntime, defaultRuntime, Runtime } from '../runtime/index.js';
 import { createPetHooks } from '../pet/state.js';
 import { defaultAgentRuntimeContext, type AgentRuntimeContext } from './runtime-context.js';
 import { t } from '../i18n/index.js';
@@ -110,6 +111,8 @@ function writeToolHeader(tc: ToolCallRef, toolRuntime: AgentRuntimeContext['tool
       // 首个 sub-agent 调用前：若前面已经有一个普通工具批在跑，先收口它并补分隔空行，
       // 避免普通批摘要行与 sub-agent 组摘要行粘在一起。
       if (currentBatchId) flushToolBatch();
+      // 气泡/正文 → 组摘要行边界:尾部视觉空行幂等收成 1 条(见 mutation 分支同注释)。
+      layout.normalizeMutationBoundary();
       // 首个 sub-agent 调用：建组容器批(顶层)。label 缺省=「探索」,entries 累计各 sub-agent 调用。
       subAgentGroupId = batch.beginBatch(undefined, { groupParent: true });
       batch.recordCall(subAgentGroupId, tc.name, summarizeToolCall(tc.name, tc.arguments), tc.id);
@@ -137,6 +140,11 @@ function writeToolHeader(tc: ToolCallRef, toolRuntime: AgentRuntimeContext['tool
   if (isMutationTool(tc.name, toolRuntime)) {
     // mutation 永远独占一批（diff 要紧跟调用行）。先收口当前普通批。
     if (currentBatchId) flushToolBatch();
+    // 气泡/正文 → 首摘要行边界:尾部视觉空行幂等收成恰好 1 条。
+    // 气泡 trailingBlank、轮次分隔 \n、flush 补行等各路写入都可能让尾部留 2+ 条空行,
+    // 首摘要落屏前统一归一,与正文 → mutation 的 onToolHeader normalize 同语义(此处覆盖
+    // 无前置正文的 turn 首工具;有前置正文时 toolBatchFollowsText 分支也会归一,幂等无副作用)。
+    layout.normalizeMutationBoundary();
     const id = batch.beginBatch();
     currentBatchId = id;
     batch.bindCall(tc.id, id);
@@ -144,7 +152,10 @@ function writeToolHeader(tc: ToolCallRef, toolRuntime: AgentRuntimeContext['tool
     batch.showLiveBatch(id, layout);
   } else {
     // 普通工具合并到 currentBatchId；同轮并行或连续无正文的工具轮次共享一个摘要行。
+    const isNewBatch = currentBatchId == null;
     const id = (currentBatchId ??= batch.beginBatch());
+    // 新建批 = 新摘要行落屏:同 mutation 分支,边界空行归一(复用已有批时不碰,避免打断批内续行)。
+    if (isNewBatch) layout.normalizeMutationBoundary();
     // 结果按 tool_call id 归位：并行执行时 currentBatchId 会漂移，只按“当前批”回填会漏填，
     // 摘要行就永远停在 ◇（用户实测：子 agent 跑完主侧菱形没变成实心圆）。
     batch.bindCall(tc.id, id);
@@ -274,11 +285,15 @@ export async function runAgent(
   toolPolicy?: ToolPolicyController,
   /** 仅真实用户 turn 传入；合成 plan 执行轮继承 policy 但不重复记录初始路由。 */
   initialToolRoute?: Record<string, unknown>,
-  /** TUI composition root 显式绑定的 runtime；缺省保留全局兼容行为。 */
-  runtimeContext: AgentRuntimeContext = defaultAgentRuntimeContext,
+  /** TUI composition root 绑定的 Runtime；旧调用传 AgentRuntimeContext 仍兼容。 */
+  runtimeOrContext: Runtime | AgentRuntimeContext = defaultRuntime,
 ): Promise<AgentRunResult> {
-  // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
-  runtimeContext.beginTurn(truncateDisplay(firstLineOf(userInput), 40));
+  const runtime =
+    runtimeOrContext instanceof Runtime
+      ? runtimeOrContext
+      : runtimeOrContext === defaultAgentRuntimeContext
+        ? defaultRuntime
+        : createRuntime({ context: runtimeOrContext });
   layout.contentMode(); // 防御性:运行态光标归输入框光标位供 IME 锚定(enterRunningMode 已置,这里兜底)
   currentBatchId = null; // 新 turn 清旧 batch id(防上 turn 残留)
   subAgentGroupId = null;
@@ -323,6 +338,10 @@ export async function runAgent(
     // 正文是工具批次边界：只有“连续且中间没有正文”的工具调用才合并。
     // 一旦模型开始解释阶段结果，立即收尾当前摘要；后续工具重新建立批次。
     if (visible) flushToolBatch();
+    // 工具块 → 正文边界幂等归一:无论 flush/expand 路径漏出几条空行(历史 bug 实测最多 6 条),
+    // 落正文前把尾部视觉空行收成恰好 1 条。与正文 → mutation 的 normalizeMutationBoundary 对称。
+    // 仅首 chunk(followsToolBatch)做:后续 chunk 属同一段流式正文,归一会截断 md 段。
+    if (followsToolBatch && visible) layout.normalizeMutationBoundary();
     spinner.stop(); // 任何正文 token 都停 spinner(首 token 停「思考中」;onToolCall 重启后若又来文本则停「生成中」)。未旋转时 stop 为 no-op。
     layout.contentWriteMd(visible); // 正文走 markdown 渲染(代码块高亮 / 标题 / 列表 / 行内 …),见 ui/markdown.ts
     if (visible) {
@@ -400,16 +419,16 @@ export async function runAgent(
     onToolHeader: (tc) => {
       // mutation 的自动展开会把 current/committed 空行状态互相转换；在首摘要真正
       // 落屏前按视觉行归一，避免同样的文本→edit 边界偶发 1 行或 2 行。
-      if (toolBatchFollowsText && isMutationTool(tc.name, runtimeContext.toolRuntime)) {
+      if (toolBatchFollowsText && isMutationTool(tc.name, runtime.context.toolRuntime)) {
         layout.normalizeMutationBoundary();
       }
       toolBatchFollowsText = false;
-      writeToolHeader(tc, runtimeContext.toolRuntime);
+      writeToolHeader(tc, runtime.context.toolRuntime);
     },
     onToolStart: (name) => spinner.start(t('agent.executing', { tool: name })),
     onToolDone: () => spinner.stop(),
     onToolResult: (tc, output, parsed, preWriteOld, editStartLine) =>
-      writeToolResult(tc, output, parsed, preWriteOld, editStartLine, runtimeContext.toolRuntime),
+      writeToolResult(tc, output, parsed, preWriteOld, editStartLine, runtime.context.toolRuntime),
     onToolBatchEnd: () => {
       // 一次工具轮次结束不再切 UI batch；下一轮若仍无正文，继续复用 currentBatchId。
     },
@@ -452,7 +471,9 @@ export async function runAgent(
 
   let result: AgentRunResult | undefined;
   try {
-    result = await runAgentCore({
+    result = await runtime.run({
+      turn: 'new',
+      turnLabel: truncateDisplay(firstLineOf(userInput), 40),
       history,
       userInput,
       signal,
@@ -460,7 +481,6 @@ export async function runAgent(
       hooks: combinedHooks,
       toolPolicy,
       initialToolRoute,
-      runtimeContext,
       onTraceEvent: appendCurrentSessionTraceEvent,
     });
   } finally {

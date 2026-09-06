@@ -21,6 +21,7 @@ import type { ImageAttachment } from '../../attachments/image.js';
 import type { SessionPickerItem } from '../../ui/prompt.js';
 import type { ToolPolicyController } from '../../tools/policy.js';
 import type { ToolRouteGroupName } from '../../config/profiles.js';
+import type { Runtime } from '../../runtime/index.js';
 
 /** startRepl 闭包中命令需要的可写标量。访问器形式,保证写回原变量。 */
 export interface MutableReplState {
@@ -46,6 +47,8 @@ export interface CommandContext {
 
   /** 对话历史。**原地 mutate**(length 截断 / [0] 替换 / push),不要重新赋值。 */
   readonly history: ChatMessage[];
+  /** 统一生命周期门面；命令不得绕过它切换 session/rollback/compact。 */
+  readonly runtime: Runtime;
   /** 上下文状态单例(runtime 与命令共享同一对象)。 */
   readonly contextState: ContextState;
 

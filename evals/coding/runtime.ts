@@ -3,7 +3,6 @@ import { buildBasePrompt, isMemoryEnabled } from '../../src/config/index.js';
 import type { ToolRouteGroupName } from '../../src/config/profiles.js';
 import { type ChatMessage } from '../../src/llm/index.js';
 import { buildMemoryIndexSection } from '../../src/memory/index.js';
-import { setCurrentSessionId } from '../../src/session/state.js';
 import { clearSkillActivation } from '../../src/skills/activation.js';
 import { effectiveSystemPrompt } from '../../src/skills/index.js';
 import { ToolPolicyController } from '../../src/tools/policy.js';
@@ -40,7 +39,7 @@ export async function assembleCodingEvalTurn(
 ): Promise<CodingEvalTurnAssembly> {
   const runtimeContext = dependencies.runtimeContext ?? defaultAgentRuntimeContext;
   runtimeContext.setAgentMode('auto');
-  setCurrentSessionId(CODING_EVAL_SESSION_ID, process.cwd());
+  runtimeContext.sessionStore.setCurrentSessionId(CODING_EVAL_SESSION_ID);
   clearSkillActivation();
 
   const previousGroups: ToolRouteGroupName[] = [];

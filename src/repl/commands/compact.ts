@@ -12,7 +12,7 @@
 import * as layout from '../../ui/layout.js';
 import { ui } from '../../ui/theme.js';
 import { t } from '../../i18n/index.js';
-import { manualCompact, appendCurrentSessionRuntimeEvent, hashTraceValue } from '../../session/index.js';
+import { appendCurrentSessionRuntimeEvent, hashTraceValue } from '../../session/index.js';
 import { startRunningListener, stopRunningListener } from '../running-input.js';
 import { unhandled, next, type CommandHandler } from './types.js';
 
@@ -35,7 +35,7 @@ export const compactCommands: CommandHandler[] = [
     const log = await (async () => {
       const signal = startRunningListener(t('running.compacting'));
       try {
-        return await manualCompact(ctx.history, focus, { force, signal });
+        return await ctx.runtime.compact(ctx.history, { focus, force, signal, contextState: ctx.contextState });
       } finally {
         stopRunningListener();
       }

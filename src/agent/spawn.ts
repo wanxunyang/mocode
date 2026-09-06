@@ -21,7 +21,8 @@ import * as layout from '../ui/layout.js';
 import { isTuiActive } from '../ui/layout.js';
 import * as batch from '../ui/batch.js';
 import { isToolErrorOutput } from '../tools/result.js';
-import { runAgentCore, type AgentHooks } from './core.js';
+import { type AgentHooks } from './core.js';
+import { createRuntime, getActiveRuntime, type Runtime } from '../runtime/index.js';
 import { summarizeToolCall, summarizeToolResult, truncateDisplay } from '../ui/render.js';
 import { t } from '../i18n/index.js';
 import { createContextState } from '../session/compact.js';
@@ -74,7 +75,9 @@ export interface SpawnOptions {
   /** 主侧 sub-agent 调用的 tool_call id。实时渲染据此反查主侧批次,
    *  把本子 agent 的摘要行 + 工具明细挂到对应的调用行下面(并行派发时各归各行)。 */
   callId?: string;
-  /** 显式父 runtime；Agent 工具调用缺省通过 AsyncLocalStorage 自动继承当前父 runtime。 */
+  /** 显式父 Runtime facade；缺省通过 AsyncLocalStorage 自动继承当前父 runtime。 */
+  runtime?: Runtime;
+  /** 旧兼容：显式父 context；无 facade 时会围绕它创建 borrowed Runtime。 */
   runtimeContext?: AgentRuntimeContext;
   /** 静默模式(供 run_skill 等 opaque workflow 用):TUI 下不产可展开 batch,
    *  只写一行 spinner → 完成后替换为单行结果摘要。 */
@@ -108,7 +111,11 @@ export interface SpawnResult {
  * 子 agent 跑在主 signal 下,主 abort 即子 abort;子 agent 的 abortRestore 还原子 history + 模式。
  */
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
-  const runtimeContext = opts.runtimeContext ?? getActiveAgentRuntimeContext() ?? defaultAgentRuntimeContext;
+  const activeRuntime = opts.runtime ?? getActiveRuntime();
+  const runtimeContext =
+    opts.runtimeContext ?? activeRuntime?.context ?? getActiveAgentRuntimeContext() ?? defaultAgentRuntimeContext;
+  const runtime =
+    activeRuntime?.context === runtimeContext ? activeRuntime : createRuntime({ context: runtimeContext });
   if (isSubAgentHardDisabled()) {
     return {
       summary: null,
@@ -356,7 +363,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // 与主 agent 完全同源:写操作直接落在工作区,进入主 agent 当前轮次的同一回滚事务
   // (spawn 不调 beginTurn)。没有 overlay 拷贝/ChangeSet 合并这一步——那是旧 read/write
   // 双模式的产物,子 agent 不再受限,也就不需要"先隔离再合并"。
-  const result = await runAgentCore({
+  const result = await runtime.run({
+    turn: 'inherit',
     history,
     userInput,
     signal: opts.signal,
@@ -365,7 +373,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     toolsOverride,
     runtimeAllowedToolNames,
     contextState: localContextState,
-    runtimeContext,
     suppressOpeningAnalysis: true, // 子代理不注入「开场分析」:仅主线面对用户的首次响应用
     // 子代理不注入主会话「会话状态」(plan + 笔记):那是主 agent 的工作面,委派消息已带齐
     // 子任务所需上下文,重复注入只白付 token。

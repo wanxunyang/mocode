@@ -492,6 +492,9 @@ export function isLastContentRowBlank(): boolean {
 /** 正文→mutation 首摘要前，把尾部间距强制归一为一条视觉空行。 */
 export function normalizeMutationBoundary(): void {
   if (!state.active || !ui.isTTY) return;
+  // 空缓冲(turn 首工具且此前无任何内容)不归一:normalizeTrailingBlankRows 会凭空
+  // push 一条空行,导致屏顶多一条空白(首条摘要前多一空行)。
+  if (content.committedRows() === 0 && content.currentRowRaw() === null) return;
   if (state.mdActive) commitMd();
   const totalBefore = content.totalRows();
   content.normalizeTrailingBlankRows(1);

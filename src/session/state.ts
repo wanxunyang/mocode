@@ -1,20 +1,26 @@
-// session/state.ts - 会话状态跟踪模块
-// 提供当前活跃会话 ID 的全局访问点，供 config/buildNotepadSection 等读取会话级 notes.md。
-// 避免 repl/index.ts ↔ config/index.ts 循环依赖。
+import { AsyncLocalStorage } from 'node:async_hooks';
 
-let currentSessionId: string | undefined;
+// Default-runtime session identity stays free of config/store imports to avoid initialization cycles.
+let defaultCurrentSessionId: string | undefined;
+const activeSessionIdProviders = new AsyncLocalStorage<() => string | undefined>();
 
-/** 获取当前活跃会话 ID(供 buildNotepadSection 等使用)。 */
+/** 获取当前异步 runtime 的会话 ID；无 scope 时读取默认进程 runtime。 */
 export function getCurrentSessionId(): string | undefined {
-  return currentSessionId;
+  return activeSessionIdProviders.getStore()?.() ?? defaultCurrentSessionId;
 }
 
-/**
- * 设置当前活跃会话 ID。notes.md 由 agent 按需创建；这里不能预建空文件，
- * 否则 write_file(expected_hash=null) 的首次创建会必然冲突。
- * 由 repl/index.ts 在会话启动 / /resume 切换时调用。
- */
+/** SessionStore 默认兼容实例专用：绕过异步 scope，避免 provider 自递归。 */
+export function getDefaultCurrentSessionId(): string | undefined {
+  return defaultCurrentSessionId;
+}
+
+/** 设置默认进程 runtime 的当前活跃会话 ID。 */
 export function setCurrentSessionId(id: string | undefined, cwd: string): void {
-  currentSessionId = id;
+  defaultCurrentSessionId = id;
   void cwd;
+}
+
+/** 让 notes/config 等旧读取入口在异步 runtime 树内看到实例会话身份。 */
+export function withCurrentSessionIdProvider<T>(provider: () => string | undefined, run: () => Promise<T>): Promise<T> {
+  return activeSessionIdProviders.run(provider, run);
 }

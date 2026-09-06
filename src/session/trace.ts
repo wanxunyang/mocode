@@ -1,10 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync } from 'node:fs';
-import path from 'node:path';
-import { config } from '../config/index.js';
 import type { ChatUsage } from '../llm/index.js';
 import { getCurrentTurnId } from '../rollback/index.js';
-import { getCurrentSessionId } from './state.js';
+import { getActiveSessionStore } from './store.js';
 
 export type TraceEventType =
   | 'turn_start'
@@ -63,18 +60,12 @@ export function createTraceEvent(input: TraceEventInput): AgentTraceEvent {
 }
 
 function appendTraceLine(sessionId: string, value: unknown): void {
-  try {
-    const dir = path.join(config.sessionDir, sessionId);
-    mkdirSync(dir, { recursive: true });
-    appendFileSync(path.join(dir, 'trace.jsonl'), `${JSON.stringify(value)}\n`, 'utf8');
-  } catch {
-    // Observability is best-effort and cannot block coding work.
-  }
+  getActiveSessionStore().appendTrace(sessionId, value);
 }
 
 /** Persists a typed event in the current session's append-only black-box log. */
 export function appendCurrentSessionTraceEvent(event: AgentTraceEvent): void {
-  const sessionId = getCurrentSessionId();
+  const sessionId = getActiveSessionStore().getCurrentSessionId();
   if (!sessionId) return;
   appendTraceLine(sessionId, { ...event, sessionId });
 }
@@ -85,14 +76,14 @@ export function appendCurrentSessionRuntimeEvent(
   data: Record<string, unknown>,
   turnId = getCurrentTurnId(),
 ): void {
-  const sessionId = getCurrentSessionId();
+  const sessionId = getActiveSessionStore().getCurrentSessionId();
   if (!sessionId) return;
   appendTraceLine(sessionId, createTraceEvent({ sessionId, turnId, type, data }));
 }
 
 /** Legacy turn-summary sink retained for API compatibility. New production code writes events. */
 export function appendCurrentSessionTrace(trace: AgentTurnTrace): void {
-  const sessionId = getCurrentSessionId();
+  const sessionId = getActiveSessionStore().getCurrentSessionId();
   if (!sessionId) return;
   appendTraceLine(sessionId, { ...trace, sessionId });
 }

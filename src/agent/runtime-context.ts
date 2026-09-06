@@ -27,16 +27,21 @@ import {
 } from '../llm/index.js';
 import { checkPermission, createPermissionChecker, type PermissionCheckOptions } from '../permissions/index.js';
 import type { Tool } from '../tools/types.js';
-import { beginTurn, getCurrentTurnId, getCurrentTurnMutationState } from '../rollback/index.js';
+import {
+  defaultRollbackStore,
+  RollbackStore,
+  withRollbackStore,
+  type CurrentTurnMutationState,
+} from '../rollback/index.js';
 import { getSandboxRoot, jailResolve, withSandboxRoot } from '../sandbox/index.js';
 import { getNotesMtime } from '../session/notes.js';
-import { getCurrentSessionId } from '../session/state.js';
+import { defaultSessionStore, SessionStore, withSessionStore } from '../session/store.js';
 import { safeProviderId } from '../session/trace-sanitize.js';
 import { defaultToolRuntime, ToolRuntime } from '../tools/registry.js';
 import { getAgentMode, setAgentMode, type AgentMode } from './mode.js';
 
-/** runAgentCore 观察到的当前轮文件 mutation 状态(getCurrentTurnMutationState 的返回形状)。 */
-export type TurnMutationState = ReturnType<typeof getCurrentTurnMutationState>;
+/** runAgentCore 观察到的当前轮文件 mutation 状态。 */
+export type TurnMutationState = CurrentTurnMutationState;
 
 /** token 校准样本(token-calibration.ts 的两个函数签名)。 */
 export type TokenCalibrationResult = ReturnType<typeof getTokenCalibration>;
@@ -47,6 +52,8 @@ export interface AgentRuntimeContext {
   readonly config: Config;
   readonly toolRuntime: ToolRuntime;
   readonly modelTransport: ChatTransport;
+  readonly sessionStore: SessionStore;
+  readonly rollbackStore: RollbackStore;
   readonly sandboxRoot: string;
   /** 在本 runtime 的 AsyncLocalStorage 沙箱根中执行，支持并发 runtime 互不串根。 */
   runInScope<T>(fn: () => Promise<T>): Promise<T>;
@@ -132,6 +139,10 @@ export interface AgentRuntimeContextInit {
   configOverrides?: Partial<Config>;
   /** 直接采用已有工具 runtime；与 tools 二选一。 */
   toolRuntime?: ToolRuntime;
+  /** runtime-local session persistence and identity store. */
+  sessionStore?: SessionStore;
+  /** runtime-local rollback journal and checkpoint store. */
+  rollbackStore?: RollbackStore;
   /** 独立 runtime 的 builtin 工具列表；缺省复制 defaultToolRuntime 当前已安装的 builtins。 */
   tools?: readonly Tool[];
   /** 独立模型客户端的底层实现覆盖，常用于嵌入宿主和测试。 */
@@ -156,7 +167,34 @@ export function createAgentRuntimeContext(init: AgentRuntimeContextInit = {}): A
   }
 
   const runtimeConfig = createConfigSnapshot(init.configOverrides, init.config ?? config);
-  const runtimeToolRuntime = init.toolRuntime ?? new ToolRuntime();
+  const runtimeSandboxRoot = resolve(
+    init.sandboxRoot ?? runtimeConfig.sandboxRoot ?? getSandboxRoot() ?? process.cwd(),
+  );
+  const hasExplicitSessionsRoot = init.config !== undefined || init.configOverrides?.sessionDir !== undefined;
+  const runtimeSessionsRoot = hasExplicitSessionsRoot
+    ? runtimeConfig.sessionDir
+    : resolve(runtimeSandboxRoot, '.mocode', 'sessions');
+  if (!hasExplicitSessionsRoot) runtimeConfig.sessionDir = runtimeSessionsRoot;
+  const services = init.services ?? {};
+  const runtimeGetActiveModel = services.getActiveModel ?? (() => runtimeConfig.model);
+  const runtimeSessionStore =
+    init.sessionStore ??
+    new SessionStore({
+      sessionsRoot: runtimeSessionsRoot,
+      workspaceRoot: runtimeSandboxRoot,
+      getModel: runtimeGetActiveModel,
+    });
+  const runtimeRollbackStore =
+    init.rollbackStore ?? new RollbackStore(runtimeSandboxRoot, runtimeSessionStore.sessionsRoot);
+  const runtimeToolRuntime =
+    init.toolRuntime ??
+    new ToolRuntime({
+      beginPathMutation: runtimeRollbackStore.beginPathMutation.bind(runtimeRollbackStore),
+      endPathMutation: runtimeRollbackStore.endPathMutation.bind(runtimeRollbackStore),
+      beginWorkspaceMutation: runtimeRollbackStore.beginWorkspaceMutation.bind(runtimeRollbackStore),
+      endWorkspaceMutation: runtimeRollbackStore.endWorkspaceMutation.bind(runtimeRollbackStore),
+      getCurrentTurnMutationState: runtimeRollbackStore.getCurrentTurnMutationState.bind(runtimeRollbackStore),
+    });
   if (!init.toolRuntime) {
     runtimeToolRuntime.installBuiltinTools([...(init.tools ?? defaultToolRuntime.builtinTools)]);
   }
@@ -169,8 +207,6 @@ export function createAgentRuntimeContext(init: AgentRuntimeContextInit = {}): A
     return previous;
   };
 
-  const services = init.services ?? {};
-  const runtimeGetActiveModel = services.getActiveModel ?? (() => runtimeConfig.model);
   const runtimeModelTransport =
     init.modelTransport ??
     createChatTransport({
@@ -178,27 +214,35 @@ export function createAgentRuntimeContext(init: AgentRuntimeContextInit = {}): A
       getModel: runtimeGetActiveModel,
       clientState: createChatClientState(runtimeConfig, init.modelClientOverrides),
     });
-  const runtimeSandboxRoot = resolve(
-    init.sandboxRoot ?? runtimeConfig.sandboxRoot ?? getSandboxRoot() ?? process.cwd(),
-  );
 
   return {
     config: runtimeConfig,
     toolRuntime: runtimeToolRuntime,
     modelTransport: runtimeModelTransport,
+    sessionStore: runtimeSessionStore,
+    rollbackStore: runtimeRollbackStore,
     sandboxRoot: runtimeSandboxRoot,
-    runInScope: <T>(fn: () => Promise<T>): Promise<T> => withSandboxRoot(runtimeSandboxRoot, fn),
+    runInScope: <T>(fn: () => Promise<T>): Promise<T> =>
+      withSessionStore(runtimeSessionStore, () =>
+        withRollbackStore(runtimeRollbackStore, () => withSandboxRoot(runtimeSandboxRoot, fn)),
+      ),
     checkPermission: services.checkPermission ?? createPermissionChecker(runtimeConfig, runtimeSandboxRoot),
     getActiveModel: runtimeGetActiveModel,
     getAgentMode: services.getAgentMode ?? localGetAgentMode,
     setAgentMode: services.setAgentMode ?? localSetAgentMode,
-    beginTurn: services.beginTurn ?? beginTurn,
-    getCurrentSessionId: services.getCurrentSessionId ?? getCurrentSessionId,
-    getCurrentTurnId: services.getCurrentTurnId ?? getCurrentTurnId,
-    getCurrentTurnMutationState: services.getCurrentTurnMutationState ?? getCurrentTurnMutationState,
-    buildSessionStateReminder: services.buildSessionStateReminder ?? buildSessionStateReminder,
-    extractActivePlanSection: services.extractActivePlanSection ?? extractActivePlanSection,
-    getNotesMtime: services.getNotesMtime ?? getNotesMtime,
+    beginTurn: services.beginTurn ?? runtimeRollbackStore.beginTurn.bind(runtimeRollbackStore),
+    getCurrentSessionId:
+      services.getCurrentSessionId ?? runtimeSessionStore.getCurrentSessionId.bind(runtimeSessionStore),
+    getCurrentTurnId: services.getCurrentTurnId ?? runtimeRollbackStore.getCurrentTurnId.bind(runtimeRollbackStore),
+    getCurrentTurnMutationState:
+      services.getCurrentTurnMutationState ??
+      runtimeRollbackStore.getCurrentTurnMutationState.bind(runtimeRollbackStore),
+    buildSessionStateReminder:
+      services.buildSessionStateReminder ??
+      (() => buildSessionStateReminder(runtimeSessionStore.getCurrentSessionId())),
+    extractActivePlanSection:
+      services.extractActivePlanSection ?? (() => extractActivePlanSection(runtimeSessionStore.getCurrentSessionId())),
+    getNotesMtime: services.getNotesMtime ?? (() => getNotesMtime(runtimeSessionStore.getCurrentSessionId())),
     jailResolve: services.jailResolve ?? jailResolve,
     getTokenCalibration: services.getTokenCalibration ?? getTokenCalibration,
     updateTokenCalibration: services.updateTokenCalibration ?? updateTokenCalibration,
@@ -218,18 +262,23 @@ export const defaultAgentRuntimeContext: AgentRuntimeContext = {
   config,
   toolRuntime: defaultToolRuntime,
   modelTransport: chat,
+  sessionStore: defaultSessionStore,
+  rollbackStore: defaultRollbackStore,
   get sandboxRoot(): string {
     return currentGlobalSandboxRoot();
   },
-  runInScope: <T>(fn: () => Promise<T>): Promise<T> => withSandboxRoot(currentGlobalSandboxRoot(), fn),
+  runInScope: <T>(fn: () => Promise<T>): Promise<T> =>
+    withSessionStore(defaultSessionStore, () =>
+      withRollbackStore(defaultRollbackStore, () => withSandboxRoot(currentGlobalSandboxRoot(), fn)),
+    ),
   checkPermission,
   getActiveModel,
   getAgentMode,
   setAgentMode,
-  beginTurn,
-  getCurrentSessionId,
-  getCurrentTurnId,
-  getCurrentTurnMutationState,
+  beginTurn: defaultRollbackStore.beginTurn.bind(defaultRollbackStore),
+  getCurrentSessionId: defaultSessionStore.getCurrentSessionId.bind(defaultSessionStore),
+  getCurrentTurnId: defaultRollbackStore.getCurrentTurnId.bind(defaultRollbackStore),
+  getCurrentTurnMutationState: defaultRollbackStore.getCurrentTurnMutationState.bind(defaultRollbackStore),
   buildSessionStateReminder,
   extractActivePlanSection,
   getNotesMtime,

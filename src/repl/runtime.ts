@@ -11,7 +11,7 @@ import {
 import { t } from '../i18n/index.js';
 import { listPresets, migrateCurrentToPreset } from '../config/presets.js';
 import { runAgent } from '../agent/index.js';
-import { defaultAgentRuntimeContext } from '../agent/runtime-context.js';
+import { defaultRuntime } from '../runtime/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
@@ -28,22 +28,7 @@ import { initializeAllMcp, getMcpTools, closeAllMcp } from '../mcp/index.js';
 import { refreshChatTools, classifyChatError, type ChatMessage, type ChatUsage } from '../llm/index.js';
 import { renderChip, type ImageAttachment } from '../attachments/image.js';
 import type { ContentPart } from '../agent/core.js';
-import {
-  contextState,
-  newSessionId,
-  saveSession,
-  loadSession,
-  appendCurrentSessionRuntimeEvent,
-} from '../session/index.js';
-import {
-  listTurns,
-  planRollback,
-  applyRollback,
-  persistSnapshots,
-  loadSnapshots,
-  rebuildFromHistory,
-  getCurrentTurnId,
-} from '../rollback/index.js';
+import { contextState, appendCurrentSessionRuntimeEvent } from '../session/index.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { clearSkillActivation } from '../skills/activation.js';
 import {
@@ -55,7 +40,6 @@ import {
   snapshotTranscript,
   formatReflectResult,
 } from '../memory/index.js';
-import { setCurrentSessionId } from '../session/state.js';
 import { collectQueryHistory } from '../session/query-history.js';
 import { ToolPolicyController } from '../tools/policy.js';
 import { routeToolGroups } from '../tools/router.js';
@@ -230,15 +214,17 @@ export async function startRepl(
   // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
   // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
-  const runtimeContext = defaultAgentRuntimeContext;
+  const runtime = defaultRuntime;
+  await runtime.start();
+  const runtimeContext = runtime.context;
   // MCP 在工具表和 LLM schema 创建前连接；失败的单个 server 只给提示，不阻断 REPL。
   const mcpReport = await initializeAllMcp();
   registerToolsExtension('mcp', getMcpTools());
   refreshChatTools();
   // --resume:读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
   let currentSessionId: string | undefined = sessionId;
-  if (!currentSessionId) currentSessionId = newSessionId(); // 新会话立即分配 ID,确保 prompt 里有正确路径
-  setCurrentSessionId(currentSessionId, process.cwd()); // 必须在 buildBasePrompt() 之前,让 prompt 能读到 sessionId
+  if (!currentSessionId) currentSessionId = runtime.session.create();
+  else runtime.session.resume(currentSessionId);
 
   // 构造系统提示:auto 用 base;plan 在 base 后追加按当前开关现拼的 plan suffix。
   // 切模式时 applyMode 重算 history[0](history[0] 恒 system,compaction 保它,不破坏)。
@@ -263,9 +249,6 @@ export async function startRepl(
   let lastToolGroups: ToolRouteGroupName[] = [...(initialLastToolGroups ?? [])];
   if (initialHistory && initialHistory.length && history[0]?.role === 'system') {
     history[0] = { role: 'system', content: buildSystemMessage(false) };
-  }
-  if (sessionId && initialHistory && initialHistory.length) {
-    if (!loadSnapshots(sessionId)) rebuildFromHistory(history);
   }
   // 反思 cadence 计数:每 reflectEveryN 轮 fire-and-forget 一次后台反思 pass。
   let turnCount = 0;
@@ -407,7 +390,7 @@ export async function startRepl(
    * 撤销文件 / 只撤销消息)。选轮 + 方式菜单均走 raw mode。预填经 pendingPrefill 注入下轮 INPUT。
    */
   const rollbackFlow = async (): Promise<void> => {
-    const turnList = listTurns();
+    const turnList = runtime.rollback.list();
     if (turnList.length < 1) {
       layout.contentWrite(`${ui.dim}(没有可回滚的轮次)${ui.reset}\n`);
       return;
@@ -427,7 +410,7 @@ export async function startRepl(
     if (picked === null) return; // Esc 取消
     // picked(0-based)= 第 (picked+1) 轮:删该轮及之后(planRollback(picked) 保 1..picked),预填该轮 user 输入
     const prefillText = userTexts[picked] ?? '';
-    const plan = planRollback(picked, history);
+    const plan = runtime.rollback.plan(picked, history);
     // 清屏(擦选轮菜单 + /rollback 回显)+ 复位 lastView(dim 空),给文件询问一个干净、resize 安全的画面
     layout.clearContent();
     layout.paintInput({
@@ -456,13 +439,12 @@ export async function startRepl(
     if (revertFiles) {
       for (const c of revertable) revertPaths.add(c.path);
     }
-    const rolledBackFromTurnId = getCurrentTurnId();
-    const turnCountBeforeRollback = listTurns().length;
-    const rollbackResult = applyRollback(plan, history, revertPaths);
+    const rolledBackFromTurnId = runtimeContext.getCurrentTurnId();
+    const turnCountBeforeRollback = runtime.rollback.list().length;
+    const rollbackResult = runtime.rollback.apply(plan, history, revertPaths);
     // 被撤销轮次的最终 route 无法再作为可靠 continuation 基线；下一真实 turn 重新由 LLM 选择。
     lastToolGroups = [];
-    if (!currentSessionId) currentSessionId = newSessionId();
-    setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
+    if (!currentSessionId) currentSessionId = runtime.session.create();
     appendCurrentSessionRuntimeEvent(
       'rollback',
       {
@@ -479,11 +461,10 @@ export async function startRepl(
       plan.cutoffTurnId,
     );
     try {
-      saveSession(history, currentSessionId, queryHistory);
+      runtime.session.save(history, currentSessionId, queryHistory);
     } catch {
       // 落盘失败不阻断
     }
-    persistSnapshots(currentSessionId);
     // 复显剩余对话(无提示行),输入框预填该轮 user 输入 → 下轮 Enter 重新跑
     layout.clearContent();
     renderHistory(history);
@@ -510,8 +491,12 @@ export async function startRepl(
    * plan 模式传 planMode=true(runAgent 用 planChatTools 只读子集)。返 ok=正常结束(未中断 / 未抛错),
    * 供调用方决定是否弹审批面板。execute 轮的合成输入也走这里。
    *
-   * 多模态:把 pendingAttachments flush 进 userInput:有图时构造 ContentPart[] 数组;
-   * 无图时保持 string(向后兼容,且 messageTokens 走 estimateTokens 不走 IMAGE_TOKEN_COST)。
+   * routedCancel=true 表示 LLM 预路由阶段被 Ctrl+C 撤回(路由还没跑完、runAgent 未启动):
+   * 不报错不落盘,主循环擦气泡 + pendingPrefill 回填输入框(与 500ms 撤回窗口同语义)。
+   *
+   * 多模态:路由完成后才把 pendingAttachments flush 进 userInput(延迟到路由之后——路由阶段
+   * 撤回保留附件且 side channel 不错位);有图时构造 ContentPart[] 数组,无图时保持 string
+   * (向后兼容,且 messageTokens 走 estimateTokens 不走 IMAGE_TOKEN_COST)。
    * side channel 记录本轮 msg 在 history 的 index → attachments,供 renderHistory 复显文件名。
    */
   const runTurn = async (
@@ -519,29 +504,15 @@ export async function startRepl(
     planMode: boolean,
     placeholder: string,
     inheritedToolPolicy?: ToolPolicyController,
-  ): Promise<{ ok: boolean; toolPolicy?: ToolPolicyController }> => {
-    const imgs = pendingAttachments;
-    pendingAttachments = []; // 入口即清,即使后续抛错也不留陈旧附件
-    const userInput: string | ContentPart[] =
-      imgs.length === 0
-        ? input
-        : [
-            { type: 'text' as const, text: input },
-            // detail 故意不设(留 undefined,JSON.stringify 时被丢弃):OpenAI 认 'auto'/'low'/'high',
-            // 但 MiniMax 只认 'low'/'default'/'high'——'auto' 不是合法枚举值,某些后端会 400。
-            // 不传 detail 让各 provider 用自己的默认值(OpenAI 默认视为 auto,MiniMax 默认 default),
-            // 是唯一在两边都不出错的写法。
-            ...imgs.map((a) => ({
-              type: 'image_url' as const,
-              image_url: { url: a.dataUrl },
-            })),
-          ];
-    const msgIndex = history.length; // runAgent push 后 = 这个 index
-    if (imgs.length) messageAttachments.set(msgIndex, imgs);
+  ): Promise<{ ok: boolean; toolPolicy?: ToolPolicyController; routedCancel: boolean }> => {
     let ok = false;
+    let routedCancel = false;
     let signal: AbortSignal | undefined;
     let toolPolicy = inheritedToolPolicy;
     let initialToolRoute: Record<string, unknown> | undefined;
+    // 继承 toolPolicy 的合成执行轮没有独立路由;真实用户轮在 await routeToolGroups 完成后置 true。
+    // 路由完成前 Ctrl+C = 撤回本轮消息(routedCancel),之后才是"中断 agent 执行"(原 abort 语义)。
+    let routingDone = toolPolicy != null;
     try {
       signal = startRunningListener(placeholder);
       // 入口设定本轮初始模式（合成执行轮传 false→auto；用户轮传当前 mode）。
@@ -552,17 +523,29 @@ export async function startRepl(
       if (!inheritedToolPolicy) clearSkillActivation();
       // 每个真实用户 turn 强制由轻量 LLM 选择最小工具簇。plan 审批后的合成执行轮
       // 传 inheritedToolPolicy，复用同一个 controller/version，不做第二次路由。
+      // 路由 await 期间 Ctrl+C（signal.aborted=true）→ 撤回本轮。两条路径都覆盖:
+      //   (a) routeToolGroups 抛 abort(流读取中途 abort)→ 下方 catch 分支;
+      //   (b) OpenAI 流式在响应接近读完时 abort 会正常 resolve 而非 reject
+      //       (trace 实测:Ctrl+C 后 8ms 路由仍返回)→ 返回后必须显式查 signal.aborted。
       if (!toolPolicy) {
         const previousGroups = [...lastToolGroups];
         const decision = await routeToolGroups({
           input,
           previousGroups,
           planMode,
-          attachmentNames: imgs.map((image) => image.name),
+          attachmentNames: pendingAttachments.map((image) => image.name),
           signal,
           transport: runtimeContext.modelTransport,
           tools: runtimeContext.toolRuntime.tools,
         });
+        // 路由期间用户按了 Ctrl+C（signal 已 abort）→ 撤回,丢弃路由结果。
+        // 关键:即使 routeToolGroups 因流已读完而"成功"返回,也必须据此撤回,
+        // 否则 routingDone 被误置 true → 进 runAgent → 普通 abort(不回填)。
+        if (signal?.aborted) {
+          routedCancel = true;
+          return { ok: false, toolPolicy: undefined, routedCancel: true };
+        }
+        routingDone = true; // 路由完成且未被中断 → Ctrl+C 回归"中断执行"语义
         toolPolicy = new ToolPolicyController({
           groups: decision.groups,
           reason: decision.reason,
@@ -582,6 +565,26 @@ export async function startRepl(
           planMode,
         };
       }
+      // 路由完成后才 flush 附件:路由阶段撤回(routedCancel)保留 pendingAttachments,
+      // 回填后用户再发随消息一起带走;side channel 也不会在未 push user msg 时错写 index。
+      const imgs = pendingAttachments;
+      pendingAttachments = [];
+      const userInput: string | ContentPart[] =
+        imgs.length === 0
+          ? input
+          : [
+              { type: 'text' as const, text: input },
+              // detail 故意不设(留 undefined,JSON.stringify 时被丢弃):OpenAI 认 'auto'/'low'/'high',
+              // 但 MiniMax 只认 'low'/'default'/'high'——'auto' 不是合法枚举值,某些后端会 400。
+              // 不传 detail 让各 provider 用自己的默认值(OpenAI 默认视为 auto,MiniMax 默认 default),
+              // 是唯一在两边都不出错的写法。
+              ...imgs.map((a) => ({
+                type: 'image_url' as const,
+                image_url: { url: a.dataUrl },
+              })),
+            ];
+      const msgIndex = history.length; // runAgent push 后 = 这个 index
+      if (imgs.length) messageAttachments.set(msgIndex, imgs);
       // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
       // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
       const result = await runAgent(
@@ -594,7 +597,7 @@ export async function startRepl(
         },
         toolPolicy,
         initialToolRoute,
-        runtimeContext,
+        runtime,
       );
       if (toolPolicy) lastToolGroups = toolPolicy.groupNames;
       // 本轮 token 累计(底栏模式 chip 右边显示)。undefined = 后端不开 include_usage。
@@ -602,14 +605,12 @@ export async function startRepl(
       lastTurnUsage = result.usage;
       ok = !signal.aborted; // 中断(Ctrl+C)→ runAgent 已还原 history,ok=false 不弹审批
       // 成功轮次自动落盘(崩溃也保住上一轮);新会话首轮分配 id
-      if (!currentSessionId) currentSessionId = newSessionId();
-      setCurrentSessionId(currentSessionId, process.cwd()); // 同步到 session/state,确保 notes.md 存在
+      if (!currentSessionId) currentSessionId = runtime.session.create();
       try {
-        saveSession(history, currentSessionId, queryHistory, lastToolGroups);
+        runtime.session.save(history, currentSessionId, queryHistory, lastToolGroups);
       } catch {
         // 落盘失败不阻断 REPL
       }
-      persistSnapshots(currentSessionId); // 随会话落盘回滚快照(/resume 后仍可撤销)
       // 后台反思:每 reflectEveryN 轮 fire-and-forget 一次(与下一轮 agent 并发,不阻塞)。
       // 已有在飞任务 / autoReflect 关 → kickoff 内部自守卫。快照同步取(避免下一轮 mutate history 竞态)。
       turnCount++;
@@ -619,11 +620,17 @@ export async function startRepl(
     } catch (e) {
       ok = false;
       if (toolPolicy) lastToolGroups = toolPolicy.groupNames;
+      // 路由阶段 Ctrl+C = 撤回本轮消息(非"中断执行"):query 未进 queryHistory、无 user msg
+      // 进 history,故不报错不落盘;finally 结算状态栏后早退,主循环擦气泡 + pendingPrefill
+      // 回填输入框(与 500ms 撤回窗口同语义)。e 为 routeToolGroups rethrow 的 abort,不消费、不打印。
+      if (!routingDone && signal?.aborted) {
+        routedCancel = true;
+        return { ok: false, toolPolicy: undefined, routedCancel: true };
+      }
       // 请求失败也保存已确认提交的 query，确保立即退出后仍可通过 ↑ 或 resume 找回。
-      if (!currentSessionId) currentSessionId = newSessionId();
-      setCurrentSessionId(currentSessionId, process.cwd());
+      if (!currentSessionId) currentSessionId = runtime.session.create();
       try {
-        saveSession(history, currentSessionId, queryHistory, lastToolGroups);
+        runtime.session.save(history, currentSessionId, queryHistory, lastToolGroups);
       } catch {
         // 落盘失败不覆盖原始请求错误
       }
@@ -676,21 +683,20 @@ export async function startRepl(
       refreshStatusBase(history, lastTurnUsage);
       layout.drawStatusBar();
     }
-    layout.contentWrite('\n'); // 轮次之间空行
-    return { ok, toolPolicy };
+    if (!routedCancel) layout.contentWrite('\n'); // 轮次之间空行(路由撤回由主循环 rewindContent 擦除,不补空行)
+    return { ok, toolPolicy, routedCancel };
   };
 
   /** 把 picker 选中的会话加载进 REPL(刷 history + 重建 snapshots + 重画)。/resume / /sessions 共用。 */
   async function resumeFromPick(pick: SessionPickerItem | null): Promise<void> {
     if (!pick) return; // Esc / Ctrl+D 取消
-    const loaded = loadSession(pick.id);
+    const loaded = runtime.session.resume(pick.id);
     if (!loaded || !loaded.history.length) {
       layout.contentWrite(`${ui.yellow}${t('repl.loadFailed')}${ui.reset}\n`);
       return;
     }
     // Bind before rebuilding the prompt, or it can retain the previous session's notes path.
     currentSessionId = loaded.id;
-    setCurrentSessionId(loaded.id, process.cwd());
     if (loaded.history[0]?.role === 'system') {
       loaded.history[0] = { role: 'system', content: buildSystemMessage(false) };
     }
@@ -699,8 +705,6 @@ export async function startRepl(
     queryHistory = loaded.queryHistory ? [...loaded.queryHistory] : queryHistoryFromMessages(loaded.history);
     lastToolGroups = [...(loaded.lastToolGroups ?? [])];
     setAgentMode('auto'); // 续接重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
-    // 读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
-    if (!loadSnapshots(loaded.id)) rebuildFromHistory(history);
     contextState.lastUsage = undefined;
     contextState.lifecycleStats = undefined;
     contextState.ephemeralText = undefined;
@@ -788,6 +792,7 @@ export async function startRepl(
         inputLines: input,
         history,
         contextState,
+        runtime,
         // 访问器暴露闭包 `let`:命令会写它们(/clear 换 session id、/resume 换整个会话),传值会丢写回。
         state: {
           get currentSessionId() {
@@ -889,6 +894,17 @@ export async function startRepl(
     queryHistory.push(joined);
     const initialPlan = getAgentMode() === 'plan'; // 轮首模式(在 runTurn 之前读)
     const turn = await runTurn(joined, initialPlan, placeholder);
+    if (turn.routedCancel) {
+      // 路由阶段 Ctrl+C 撤回:与 500ms 撤回窗口同语义——气泡擦掉 + 行回填输入框
+      // (下轮 promptWithSlashMenu 经 initialLines 消费)+ 切回 INPUT 视觉。
+      // queryHistory 在 runTurn 前已 push,撤回的 query 未真正执行,撤销;
+      // pendingAttachments 保留(路由完成前未 flush),再发时随消息一起带走。
+      queryHistory.pop();
+      layout.rewindContent(bubbleRows);
+      pendingPrefill = input;
+      layout.enterInputMode(t('repl.idle'));
+      continue;
+    }
     // plan 轮正常结束(未中断 / 未抛错)→ 看轮末模式决定:
     //  - 仍 plan:模型只产计划就 STOP(模型已无 switch_mode 工具)→ 弹审批面板(原行为)。
     //  - 已 auto:本轮被切到 auto 模式(用户用 /auto 触发的合成执行轮)→ 跳过审批,不重复打扰。
@@ -914,6 +930,7 @@ export async function startRepl(
 
   // 退出前等在飞反思收尾(Ctrl+C 走 SIGINT 直退不等;fire-and-forget 不承诺中断时完成)。
   await drainMemoryBackground();
+  await runtime.close();
   await closeAllMcp();
   layout.exitAltScreen();
 }
