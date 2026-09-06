@@ -10,10 +10,10 @@ import { summarizeToolCall, summarizeToolResult, truncateDisplay, fmtElapsed } f
 import { renderFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
 import * as batch from '../ui/batch.js';
-import { beginTurn } from '../rollback/index.js';
 import { config } from '../config/index.js';
 import { runAgentCore, isMutationTool, type AgentHooks, type AgentRunResult, type ContentPart } from './core.js';
 import { createPetHooks } from '../pet/state.js';
+import { defaultAgentRuntimeContext, type AgentRuntimeContext } from './runtime-context.js';
 import { t } from '../i18n/index.js';
 import { isToolErrorOutput } from '../tools/result.js';
 import { appendCurrentSessionTraceEvent } from '../session/index.js';
@@ -100,7 +100,7 @@ function firstLineOf(ui: string | ContentPart[]): string {
 /** 工具调用 ● 头:工具名 + 参数摘要(按 tool_calls 原顺序打印,让用户看到本轮跑哪些工具)。
  *  重构后改为累积到 BatchRenderer,onToolBatchEnd 时统一打摘要行;
  *  展开/折叠由 BatchRenderer + 鼠标 release 决定,本函数不再直接写屏。 */
-function writeToolHeader(tc: ToolCallRef): void {
+function writeToolHeader(tc: ToolCallRef, toolRuntime: AgentRuntimeContext['toolRuntime']): void {
   if (tc.name === SUB_AGENT_TOOL) {
     // sub-agent：同一轮并行派发的多个 sub-agent 合并进同一个「组容器批」——
     // 顶层只有一个 ● 探索 N ... sub-agent N 摘要行,下面按 └─ sub-agent {...} 逐条
@@ -134,7 +134,7 @@ function writeToolHeader(tc: ToolCallRef): void {
     flushToolBatch();
   }
 
-  if (isMutationTool(tc.name)) {
+  if (isMutationTool(tc.name, toolRuntime)) {
     // mutation 永远独占一批（diff 要紧跟调用行）。先收口当前普通批。
     if (currentBatchId) flushToolBatch();
     const id = batch.beginBatch();
@@ -162,6 +162,7 @@ function writeToolResult(
   parsed: Record<string, unknown> | null,
   preWriteOld: string | null,
   editStartLine: number,
+  toolRuntime: AgentRuntimeContext['toolRuntime'],
 ): void {
   // 优先按 tool_call id 反查所属批（并行 / sub-agent 组时 currentBatchId 已不是它）。
   const batchId = batch.batchIdForCall(tc.id) ?? currentBatchId;
@@ -202,7 +203,7 @@ function writeToolResult(
   batch.recordResult(batchId, tc.name, preview, diff, output, isToolErrorOutput(output));
   batch.showLiveBatch(batchId, layout);
   // mutation 结果（成功 diff 或错误输出）立即可见，并阻止后续普通工具并入这一批。
-  if (isMutationTool(tc.name)) finishStandaloneBatch(batchId, true);
+  if (isMutationTool(tc.name, toolRuntime)) finishStandaloneBatch(batchId, true);
 }
 
 /** 收尾一个独占批（mutation / sub-agent）。按 id 收尾而不是按 currentBatchId：
@@ -273,9 +274,11 @@ export async function runAgent(
   toolPolicy?: ToolPolicyController,
   /** 仅真实用户 turn 传入；合成 plan 执行轮继承 policy 但不重复记录初始路由。 */
   initialToolRoute?: Record<string, unknown>,
+  /** TUI composition root 显式绑定的 runtime；缺省保留全局兼容行为。 */
+  runtimeContext: AgentRuntimeContext = defaultAgentRuntimeContext,
 ): Promise<AgentRunResult> {
   // 开新轮次(回滚用):首行截断 40,供 /rollback 轮次菜单展示。
-  beginTurn(truncateDisplay(firstLineOf(userInput), 40));
+  runtimeContext.beginTurn(truncateDisplay(firstLineOf(userInput), 40));
   layout.contentMode(); // 防御性:运行态光标归输入框光标位供 IME 锚定(enterRunningMode 已置,这里兜底)
   currentBatchId = null; // 新 turn 清旧 batch id(防上 turn 残留)
   subAgentGroupId = null;
@@ -397,16 +400,16 @@ export async function runAgent(
     onToolHeader: (tc) => {
       // mutation 的自动展开会把 current/committed 空行状态互相转换；在首摘要真正
       // 落屏前按视觉行归一，避免同样的文本→edit 边界偶发 1 行或 2 行。
-      if (toolBatchFollowsText && isMutationTool(tc.name)) {
+      if (toolBatchFollowsText && isMutationTool(tc.name, runtimeContext.toolRuntime)) {
         layout.normalizeMutationBoundary();
       }
       toolBatchFollowsText = false;
-      writeToolHeader(tc);
+      writeToolHeader(tc, runtimeContext.toolRuntime);
     },
     onToolStart: (name) => spinner.start(t('agent.executing', { tool: name })),
     onToolDone: () => spinner.stop(),
     onToolResult: (tc, output, parsed, preWriteOld, editStartLine) =>
-      writeToolResult(tc, output, parsed, preWriteOld, editStartLine),
+      writeToolResult(tc, output, parsed, preWriteOld, editStartLine, runtimeContext.toolRuntime),
     onToolBatchEnd: () => {
       // 一次工具轮次结束不再切 UI batch；下一轮若仍无正文，继续复用 currentBatchId。
     },
@@ -457,6 +460,7 @@ export async function runAgent(
       hooks: combinedHooks,
       toolPolicy,
       initialToolRoute,
+      runtimeContext,
       onTraceEvent: appendCurrentSessionTraceEvent,
     });
   } finally {

@@ -11,6 +11,7 @@ import {
 import { t } from '../i18n/index.js';
 import { listPresets, migrateCurrentToPreset } from '../config/presets.js';
 import { runAgent } from '../agent/index.js';
+import { defaultAgentRuntimeContext } from '../agent/runtime-context.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
@@ -229,6 +230,7 @@ export async function startRepl(
   // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
   // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
+  const runtimeContext = defaultAgentRuntimeContext;
   // MCP 在工具表和 LLM schema 创建前连接；失败的单个 server 只给提示，不阻断 REPL。
   const mcpReport = await initializeAllMcp();
   registerToolsExtension('mcp', getMcpTools());
@@ -275,7 +277,11 @@ export async function startRepl(
     model: config.model,
     baseURL: config.baseURL,
     cwd: process.cwd(),
-    tools: new ToolPolicyController({ groups: lastToolGroups, maxExpansions: 0 })
+    tools: new ToolPolicyController({
+      groups: lastToolGroups,
+      maxExpansions: 0,
+      tools: runtimeContext.toolRuntime.tools,
+    })
       .snapshot(getAgentMode() === 'plan')
       .tools.map((tool) => tool.function.name)
       .join(' · '),
@@ -554,11 +560,14 @@ export async function startRepl(
           planMode,
           attachmentNames: imgs.map((image) => image.name),
           signal,
+          transport: runtimeContext.modelTransport,
+          tools: runtimeContext.toolRuntime.tools,
         });
         toolPolicy = new ToolPolicyController({
           groups: decision.groups,
           reason: decision.reason,
           confidence: decision.confidence,
+          tools: runtimeContext.toolRuntime.tools,
         });
         lastToolGroups = toolPolicy.groupNames;
         initialToolRoute = {
@@ -585,6 +594,7 @@ export async function startRepl(
         },
         toolPolicy,
         initialToolRoute,
+        runtimeContext,
       );
       if (toolPolicy) lastToolGroups = toolPolicy.groupNames;
       // 本轮 token 累计(底栏模式 chip 右边显示)。undefined = 后端不开 include_usage。

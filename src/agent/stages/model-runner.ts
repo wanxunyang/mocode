@@ -1,31 +1,34 @@
-import { chat } from '../../llm/index.js';
+import { chat, type ChatTransport } from '../../llm/index.js';
 import type { ModelRequest, ModelRunner } from './contracts.js';
 
 class ChatModelRunner implements ModelRunner {
-  constructor(readonly implementation: 'legacy' | 'staged') {}
+  constructor(
+    readonly implementation: 'legacy' | 'staged',
+    private readonly transport: ChatTransport,
+  ) {}
 
   run(request: ModelRequest, signal?: AbortSignal) {
-    return chat(request.history.slice(), request.handlers, signal, request.tools.slice());
+    return this.transport(request.history.slice(), request.handlers, signal, request.tools.slice());
   }
 }
 
 class LegacyChatModelRunner extends ChatModelRunner {
-  constructor() {
-    super('legacy');
+  constructor(transport: ChatTransport) {
+    super('legacy', transport);
   }
 }
 
 class StagedChatModelRunner extends ChatModelRunner {
-  constructor() {
-    super('staged');
+  constructor(transport: ChatTransport) {
+    super('staged', transport);
   }
 }
 
 /** Legacy and staged bindings are separate rollback seams over the same frozen single-call transport contract. */
-export function createLegacyModelRunner(): ModelRunner {
-  return new LegacyChatModelRunner();
+export function createLegacyModelRunner(transport: ChatTransport = chat): ModelRunner {
+  return new LegacyChatModelRunner(transport);
 }
 
-export function createStagedModelRunner(): ModelRunner {
-  return new StagedChatModelRunner();
+export function createStagedModelRunner(transport: ChatTransport = chat): ModelRunner {
+  return new StagedChatModelRunner(transport);
 }

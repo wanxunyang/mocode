@@ -10,6 +10,7 @@ import {
 } from '../config/profiles.js';
 import { PLAN_DISABLED_TOOLS } from './constants.js';
 import { tools } from './registry.js';
+import type { Tool } from './types.js';
 
 export type ChatTool = OpenAI.Chat.Completions.ChatCompletionTool;
 
@@ -36,6 +37,10 @@ export interface ToolPolicyInit {
   confidence?: number;
   id?: string;
   maxExpansions?: number;
+  /** Runtime-local tool catalog; defaults to the compatibility registry. */
+  tools?: readonly Tool[];
+  /** Runtime-local capability gate; defaults to process.env legacy semantics. */
+  gateAllows?: (environmentName: string | undefined) => boolean;
 }
 
 const clampConfidence = (value: number): number => (Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0);
@@ -44,25 +49,31 @@ function envGateAllows(name: string | undefined): boolean {
   return !name || process.env[name] !== 'false';
 }
 
-function registeredNames(): string[] {
-  return tools.map((tool) => tool.name);
+function registeredNames(catalog: readonly Tool[] = tools): string[] {
+  return catalog.map((tool) => tool.name);
 }
 
-/** 当前进程真正可路由的簇；旧 env=false 只作为硬 veto，不再强制把簇常驻 schema。 */
-export function getAvailableToolRouteGroups(): ToolRouteGroupName[] {
-  const names = registeredNames();
+/** 当前 runtime 真正可路由的簇；旧 env=false 只作为硬 veto，不再强制把簇常驻 schema。 */
+export function getAvailableToolRouteGroups(
+  catalog: readonly Tool[] = tools,
+  gateAllows: (environmentName: string | undefined) => boolean = envGateAllows,
+): ToolRouteGroupName[] {
+  const names = registeredNames(catalog);
   const registered = new Set(names);
   return TOOL_ROUTE_GROUP_NAMES.filter((group) => {
     const definition = TOOL_ROUTE_GROUPS[group];
-    if (!envGateAllows(definition.gateEnv)) return false;
+    if (!gateAllows(definition.gateEnv)) return false;
     const groupNames = getToolRouteGroupNames(group, names);
     if (group === 'mcp') return groupNames.length > 0;
     return groupNames.length > 0 && groupNames.every((name) => registered.has(name));
   });
 }
 
-export function toolRouteCatalog(groups: readonly ToolRouteGroupName[] = getAvailableToolRouteGroups()): string {
-  const names = registeredNames();
+export function toolRouteCatalog(
+  groups: readonly ToolRouteGroupName[] = getAvailableToolRouteGroups(),
+  catalog: readonly Tool[] = tools,
+): string {
+  const names = registeredNames(catalog);
   return groups
     .map((group) => {
       const members = getToolRouteGroupNames(group, names);
@@ -71,8 +82,8 @@ export function toolRouteCatalog(groups: readonly ToolRouteGroupName[] = getAvai
     .join('\n');
 }
 
-export function getToolChatSchema(name: string): ChatTool | null {
-  const tool = tools.find((candidate) => candidate.name === name);
+export function getToolChatSchema(name: string, catalog: readonly Tool[] = tools): ChatTool | null {
+  const tool = catalog.find((candidate) => candidate.name === name);
   if (!tool) return null;
   return {
     type: 'function',
@@ -129,13 +140,17 @@ export class ToolPolicyController {
   private confidence: number;
   private autoCache: ToolPolicySnapshot | null = null;
   private planCache: ToolPolicySnapshot | null = null;
+  private readonly catalog: readonly Tool[];
+  private readonly gateAllows: (environmentName: string | undefined) => boolean;
 
   constructor(init: ToolPolicyInit = {}) {
+    this.catalog = init.tools ?? tools;
+    this.gateAllows = init.gateAllows ?? envGateAllows;
     this.id = init.id ?? `route-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.maxExpansions = Math.max(0, init.maxExpansions ?? 3);
     this.reason = init.reason?.trim() || 'LLM router selected common tools only.';
     this.confidence = clampConfidence(init.confidence ?? 0);
-    const available = new Set(getAvailableToolRouteGroups());
+    const available = new Set(getAvailableToolRouteGroups(this.catalog, this.gateAllows));
     const requested = process.env.MOCODE_TOOL_POLICY === 'full' ? available : new Set(init.groups ?? []);
     for (const group of requested) {
       if (available.has(group)) this.selected.add(group);
@@ -151,7 +166,7 @@ export class ToolPolicyController {
   }
 
   remainingGroups(): ToolRouteGroupName[] {
-    const available = new Set(getAvailableToolRouteGroups());
+    const available = new Set(getAvailableToolRouteGroups(this.catalog, this.gateAllows));
     return TOOL_ROUTE_GROUP_NAMES.filter((group) => available.has(group) && !this.selected.has(group));
   }
 
@@ -170,7 +185,7 @@ export class ToolPolicyController {
     for (const name of COMMON_TOOL_NAMES) append(name);
     const remaining = this.canExpand ? this.remainingGroups() : [];
     if (remaining.length > 0) append(ADD_TOOL_GROUPS_TOOL_NAME);
-    const registered = registeredNames();
+    const registered = registeredNames(this.catalog);
     for (const group of TOOL_ROUTE_GROUP_NAMES) {
       if (!this.selected.has(group)) continue;
       for (const name of getToolRouteGroupNames(group, registered)) append(name);
@@ -183,7 +198,7 @@ export class ToolPolicyController {
       : orderedNames;
     const chatTools = visibleNames.flatMap((name) => {
       if (name === ADD_TOOL_GROUPS_TOOL_NAME) return [addToolGroupsSchema(remaining)];
-      const schema = getToolChatSchema(name);
+      const schema = getToolChatSchema(name, this.catalog);
       return schema ? [schema] : [];
     });
     const snapshot: ToolPolicySnapshot = {
@@ -211,7 +226,7 @@ export class ToolPolicyController {
         snapshot: this.snapshot(false),
       };
     }
-    const available = new Set(getAvailableToolRouteGroups());
+    const available = new Set(getAvailableToolRouteGroups(this.catalog, this.gateAllows));
     for (const value of rawGroups) {
       if (!isToolRouteGroupName(value)) {
         rejected.push(`${String(value)}: unknown group`);

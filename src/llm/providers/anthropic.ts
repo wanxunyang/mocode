@@ -1,17 +1,22 @@
 import { config, getActiveModel } from '../../config/index.js';
 import type { ChatMessage, ChatResult, ChatTool, ChatUsage, StreamHandlers, ToolCallRef } from '../index.js';
+import type { AnthropicFetchImpl, ModelProviderRuntime } from '../runtime.js';
 
 type JsonObject = Record<string, unknown>;
 type AnthropicRole = 'user' | 'assistant';
 type AnthropicBlock = Record<string, unknown> & { type: string };
 type AnthropicMessage = { role: AnthropicRole; content: AnthropicBlock[] };
-type FetchImpl = (input: string, init: RequestInit) => Promise<Response>;
 
-let fetchImplOverride: FetchImpl | null = null;
+let fetchImplOverride: AnthropicFetchImpl | null = null;
 
 /** 仅供单测注入；生产路径使用 Node 18+ 全局 fetch。 */
-export function __setAnthropicFetchImpl(impl: FetchImpl | null): void {
+export function __setAnthropicFetchImpl(impl: AnthropicFetchImpl | null): void {
   fetchImplOverride = impl;
+}
+
+/** Default runtime keeps the historical process-level test override behavior. */
+export function defaultAnthropicFetch(input: string, init: RequestInit): Promise<Response> {
+  return (fetchImplOverride ?? fetch)(input, init);
 }
 
 function parseJsonObject(value: string): JsonObject {
@@ -168,12 +173,17 @@ function endpoint(baseURL: string): string {
   return `${base}/v1/messages`;
 }
 
-export function buildAnthropicRequest(messages: ChatMessage[], tools: readonly ChatTool[]): JsonObject {
-  const encoded = encodeAnthropicMessages(messages);
-  const anthropicTools = encodeAnthropicTools(tools);
+export function buildAnthropicRequest(
+  messages: ChatMessage[],
+  tools: readonly ChatTool[],
+  runtime?: Pick<ModelProviderRuntime, 'config' | 'getModel'>,
+): JsonObject {
+  const runtimeConfig = runtime?.config ?? config;
+  const encoded = encodeAnthropicMessages(messages, runtimeConfig.anthropicPromptCache);
+  const anthropicTools = encodeAnthropicTools(tools, runtimeConfig.anthropicPromptCache);
   return {
-    model: getActiveModel(),
-    max_tokens: config.maxTokens ?? 8192,
+    model: runtime?.getModel() ?? getActiveModel(),
+    max_tokens: runtimeConfig.maxTokens ?? 8192,
     stream: true,
     system: encoded.system,
     messages: encoded.messages,
@@ -287,17 +297,19 @@ export async function anthropicChatOnce(
   handlers: StreamHandlers,
   signal: AbortSignal | undefined,
   tools: readonly ChatTool[],
+  runtime?: ModelProviderRuntime,
 ): Promise<ChatResult> {
-  const fetchImpl = fetchImplOverride ?? fetch;
-  const response = await fetchImpl(endpoint(config.baseURL), {
+  const runtimeConfig = runtime?.config ?? config;
+  const fetchImpl = runtime?.clientState.anthropicFetchImpl ?? defaultAnthropicFetch;
+  const response = await fetchImpl(endpoint(runtimeConfig.baseURL), {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       accept: 'text/event-stream',
-      'x-api-key': config.apiKey,
+      'x-api-key': runtimeConfig.apiKey,
       'anthropic-version': process.env.ANTHROPIC_VERSION || '2023-06-01',
     },
-    body: JSON.stringify(buildAnthropicRequest(messages, tools)),
+    body: JSON.stringify(buildAnthropicRequest(messages, tools, runtime)),
     signal,
   });
   if (!response.ok) await throwResponseError(response);

@@ -3,12 +3,13 @@ import {
   chatTools,
   type ChatMessage,
   type ChatTool,
+  type ChatTransport,
   type ChatUsage,
   correctTokenEstimate,
   estimatePromptTokens,
   estimateTokens,
 } from '../llm/index.js';
-import { config } from '../config/index.js';
+import { config, type Config } from '../config/index.js';
 import {
   MAX_HISTORY_RESULT,
   MAX_MEMORY_RESULT,
@@ -47,6 +48,17 @@ import { writeCompactionSnapshot } from './notes.js';
  *    叙述段随旧区照常滚动压缩——否则每代压缩都对上一代摘要再摘要一遍(递归衰减)。
  */
 
+export interface CompactionRuntime {
+  readonly config: Pick<
+    Config,
+    'contextWindowTokens' | 'autoCompact' | 'contextBudget' | 'contextRelprune' | 'contextOptimize'
+  >;
+  readonly modelTransport: ChatTransport;
+}
+
+/** 默认兼容依赖：旧调用方继续读取进程级 config/chat。 */
+export const defaultCompactionRuntime: CompactionRuntime = { config, modelTransport: chat };
+
 export interface CompactOptions {
   window: number;
   threshold: number;
@@ -65,6 +77,8 @@ export interface CompactOptions {
   tools?: readonly ChatTool[];
   /** 本次 agent 运行独享的上下文统计状态；缺省使用主 agent 全局状态。 */
   contextState?: ContextState;
+  /** 压缩所用的 config/model transport；缺省保持进程级兼容行为。 */
+  runtime?: CompactionRuntime;
   /** 主 agent 的 abort signal(Ctrl+C)。摘要是几十秒的 LLM 调用,不串进来 Ctrl+C 就
    *  只能干等到它跑完——用户视角就是「压缩中取消不了」。abort 时 compactHistory 会
    *  把 AbortError 冒泡给 runAgentCore 走 abortRestore,而不是降级成微压缩继续干活。 */
@@ -543,7 +557,12 @@ function buildTranscript(stripped: ChatMessage[], scale: number): string {
     .join('\n');
 }
 
-async function defaultSummarize(older: ChatMessage[], focus?: string, signal?: AbortSignal): Promise<string | null> {
+async function defaultSummarize(
+  older: ChatMessage[],
+  focus?: string,
+  signal?: AbortSignal,
+  runtime: CompactionRuntime = defaultCompactionRuntime,
+): Promise<string | null> {
   // 已中断就别白拼转录了(几千 token 的字符串拼接 + 一去不回的 LLM 请求)。
   if (signal?.aborted) {
     throw new DOMException('This operation was aborted', 'AbortError');
@@ -555,13 +574,13 @@ async function defaultSummarize(older: ChatMessage[], focus?: string, signal?: A
   // 不需要"先压一遍再摘要"。封顶策略:先按满额封顶;总量仍超窗口 55% 预算时等比缩小
   // 配额重拼(优先保条数/每轮都有代表,其次保单条长度);再超才整段中截兜底(罕见)。
   let transcript = buildTranscript(stripped, 1);
-  const tokenBudget = Math.floor(config.contextWindowTokens * SUMMARY_TRANSCRIPT_WINDOW_RATIO);
+  const tokenBudget = Math.floor(runtime.config.contextWindowTokens * SUMMARY_TRANSCRIPT_WINDOW_RATIO);
   let tokens = estimateTokens(transcript);
   if (tokens > tokenBudget) {
     transcript = buildTranscript(stripped, tokenBudget / tokens);
     tokens = estimateTokens(transcript);
-    if (tokens > Math.floor(config.contextWindowTokens * 0.6)) {
-      transcript = truncateMid(transcript, Math.floor(config.contextWindowTokens * 0.5));
+    if (tokens > Math.floor(runtime.config.contextWindowTokens * 0.6)) {
+      transcript = truncateMid(transcript, Math.floor(runtime.config.contextWindowTokens * 0.5));
     }
   }
 
@@ -596,7 +615,7 @@ async function defaultSummarize(older: ChatMessage[], focus?: string, signal?: A
     // signal 必须透传:摘要是几十秒的 LLM 调用,不串进来 Ctrl+C 只能干等它跑完。
     // 空 handlers:不打印、不外显流式;tools=[] 不带工具表——摘要纯文本任务,
     // 全量工具 schema 白占几千 token 窗口,还诱导幻觉工具调用。
-    const r = await chat([sysMsg, userMsg], {}, signal, []);
+    const r = await runtime.modelTransport([sysMsg, userMsg], {}, signal, []);
     // 推理模型可能只返 reasoning_content(content 为 null),或幻觉出 tool_calls → 视为失败
     if (r.toolCalls.length > 0 || !r.content) return null;
     return capSummaryOutput(r.content);
@@ -755,7 +774,10 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
       ...older,
     ];
   }
-  const summarizeFn = opts.summarize ?? defaultSummarize;
+  const summarizeFn =
+    opts.summarize ??
+    ((older: ChatMessage[], focus?: string, signal?: AbortSignal) =>
+      defaultSummarize(older, focus, signal, opts.runtime ?? defaultCompactionRuntime));
   let summary: string | null = null;
   try {
     summary = await summarizeFn(older, opts.focus, opts.signal);
@@ -882,8 +904,9 @@ export async function maybeCompact(
   manualOpts?: { manual?: boolean; force?: boolean; focus?: string },
   state: ContextState = contextState,
   activeTools: readonly ChatTool[] = chatTools,
-  /** 主 agent 的 abort signal;透传给 compactHistory → 摘要器 → chat()。 */
+  /** 主 agent 的 abort signal;透传给 compactHistory → 摘要器 → model transport。 */
   signal?: AbortSignal,
+  runtime: CompactionRuntime = defaultCompactionRuntime,
 ): Promise<CompactResult | void> {
   const est = estimatePromptTokens(history, activeTools, state.correction);
   state.lastEstimate = est;
@@ -898,7 +921,7 @@ export async function maybeCompact(
 
   // 手动路径:旁路 autoCompact / report / 总阈三重门
   if (!isManual) {
-    if (!hardCap && !config.autoCompact) return;
+    if (!hardCap && !runtime.config.autoCompact) return;
     if (report) {
       // Scheduler mode: the shared pressure report is the sole automatic trigger.
       const needsCompact = hardCap || report.totalOver;
@@ -906,14 +929,14 @@ export async function maybeCompact(
     } else {
       // Fallback mode uses the same threshold; there is no second compact gate.
       const raw = estimatePromptTokens(history, activeTools, 1);
-      hardCap = raw >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * config.contextWindowTokens;
-      const pressureLine = DEFAULT_BUDGET_POLICY.pressureTriggerRatio * config.contextWindowTokens;
+      hardCap = raw >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio * runtime.config.contextWindowTokens;
+      const pressureLine = DEFAULT_BUDGET_POLICY.pressureTriggerRatio * runtime.config.contextWindowTokens;
       if (!hardCap && est < pressureLine) return;
     }
   }
 
   const r = await compactHistory(history, {
-    window: config.contextWindowTokens,
+    window: runtime.config.contextWindowTokens,
     threshold: DEFAULT_BUDGET_POLICY.pressureTriggerRatio,
     focus: manualOpts?.focus,
     manual: isManual,
@@ -921,6 +944,7 @@ export async function maybeCompact(
     force: manualOpts?.force === true || hardCap,
     tools: activeTools,
     contextState: state,
+    runtime,
     signal,
   });
   return r;

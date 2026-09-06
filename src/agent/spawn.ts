@@ -12,8 +12,8 @@
 //  - 独立 history 分支:子任务的工具噪声不回灌主对话,只有最终摘要回灌。
 
 import type OpenAI from 'openai';
-import { chatTools, type ChatMessage, type ChatUsage } from '../llm/index.js';
-import { buildMocodeCorePrompt, config, isSubAgentHardDisabled } from '../config/index.js';
+import { type ChatMessage, type ChatUsage } from '../llm/index.js';
+import { buildMocodeCorePrompt, isSubAgentHardDisabled } from '../config/index.js';
 import { getToolChatSchema } from '../tools/policy.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { ui } from '../ui/theme.js';
@@ -25,6 +25,11 @@ import { runAgentCore, type AgentHooks } from './core.js';
 import { summarizeToolCall, summarizeToolResult, truncateDisplay } from '../ui/render.js';
 import { t } from '../i18n/index.js';
 import { createContextState } from '../session/compact.js';
+import {
+  defaultAgentRuntimeContext,
+  getActiveAgentRuntimeContext,
+  type AgentRuntimeContext,
+} from './runtime-context.js';
 
 /** 子 agent 系统提示后缀(仅 legacy 直接调用路径用;共享前缀路径的系统提示直接复用父 agent)。 */
 const SUBAGENT_SUFFIX = `
@@ -69,6 +74,8 @@ export interface SpawnOptions {
   /** 主侧 sub-agent 调用的 tool_call id。实时渲染据此反查主侧批次,
    *  把本子 agent 的摘要行 + 工具明细挂到对应的调用行下面(并行派发时各归各行)。 */
   callId?: string;
+  /** 显式父 runtime；Agent 工具调用缺省通过 AsyncLocalStorage 自动继承当前父 runtime。 */
+  runtimeContext?: AgentRuntimeContext;
   /** 静默模式(供 run_skill 等 opaque workflow 用):TUI 下不产可展开 batch,
    *  只写一行 spinner → 完成后替换为单行结果摘要。 */
   quiet?: boolean;
@@ -101,6 +108,7 @@ export interface SpawnResult {
  * 子 agent 跑在主 signal 下,主 abort 即子 abort;子 agent 的 abortRestore 还原子 history + 模式。
  */
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
+  const runtimeContext = opts.runtimeContext ?? getActiveAgentRuntimeContext() ?? defaultAgentRuntimeContext;
   if (isSubAgentHardDisabled()) {
     return {
       summary: null,
@@ -110,7 +118,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0 },
     };
   }
-  const maxSteps = opts.maxSteps ?? config.subAgentMaxSteps;
+  const maxSteps = opts.maxSteps ?? runtimeContext.config.subAgentMaxSteps;
   const requested = opts.tools === undefined ? null : new Set(opts.tools);
 
   const shared =
@@ -166,10 +174,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     // chatTools 为 baseline；显式 tools:[] 必须保持零工具，不能误当成"未限制"。
     const parentNames = opts.parentAllowedToolNames
       ? [...new Set(opts.parentAllowedToolNames)]
-      : chatTools.map((tool) => tool.function.name);
+      : runtimeContext.toolRuntime.tools.map((tool) => tool.name);
     const effectiveNames = parentNames.filter((name) => !requested || requested.has(name));
     toolsOverride = effectiveNames.flatMap((name) => {
-      const schema = getToolChatSchema(name);
+      const schema = getToolChatSchema(name, runtimeContext.toolRuntime.tools);
       return schema ? [schema] : [];
     });
     runtimeAllowedToolNames = new Set(toolsOverride.map((tool) => tool.function.name));
@@ -357,6 +365,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     toolsOverride,
     runtimeAllowedToolNames,
     contextState: localContextState,
+    runtimeContext,
     suppressOpeningAnalysis: true, // 子代理不注入「开场分析」:仅主线面对用户的首次响应用
     // 子代理不注入主会话「会话状态」(plan + 笔记):那是主 agent 的工作面,委派消息已带齐
     // 子任务所需上下文,重复注入只白付 token。

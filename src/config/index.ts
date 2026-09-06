@@ -629,6 +629,21 @@ export const config: Config = {
 };
 
 /**
+ * 创建一份独立 Config 快照，不重新读取环境变量、配置文件或 preset。
+ *
+ * `source.systemPrompt` 若是 getter（全局 config 即如此）会在创建时求值并物化为字符串，
+ * 使快照不会继续隐式依赖全局 config；调用方也可通过 overrides 显式替换它。
+ * 当前 Config 的可变容器字段 llmKeysFromShell 始终复制，避免 runtime 间共享数组引用。
+ */
+export function createConfigSnapshot(overrides: Partial<Config> = {}, source: Config = config): Config {
+  const snapshot = { ...source, ...overrides };
+  return {
+    ...snapshot,
+    llmKeysFromShell: [...snapshot.llmKeysFromShell],
+  };
+}
+
+/**
  * 会话钉死模型：窗口/会话启动时由 pinSessionModel() 捕获一次。
  * 运行中 agent 一律经 getActiveModel() 取模型，而非热切的 config.model——
  * 这样某窗口 /model switch 改写全局 config 后，其它【已经打开】的窗口的

@@ -20,9 +20,9 @@
   },
   "scripts": {
     "start": "tsx src/index.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "npm run build --workspace @mocode/protocol && tsc -p tsconfig.build.json",
     "test": "tsc -p tsconfig.test-build.json && node --test --experimental-test-isolation=none \"dist-tests/tests/*.test.js\"",
-    "typecheck": "tsc --noEmit && tsc -p tests/tsconfig.json && tsc -p evals/tsconfig.json",
+    "typecheck": "npm run typecheck --workspace @mocode/protocol && tsc --noEmit && tsc -p tests/tsconfig.json && tsc -p evals/tsconfig.json",
     "lint": "eslint .",
     "lint:check": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -43,6 +43,7 @@
     "ws": "8.21.0"
   },
   "devDependencies": {
+    "@mocode/protocol": "0.0.0",
     "@types/node": "^22.0.0",
     "@types/ws": "8.5.13",
     "eslint": "^9.39.5",

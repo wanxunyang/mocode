@@ -1,9 +1,10 @@
 import { ADD_TOOL_GROUPS_TOOL_NAME } from '../../config/profiles.js';
 import { t } from '../../i18n/index.js';
-import { checkPermission } from '../../permissions/index.js';
+import { checkPermission as defaultCheckPermission, type PermissionCheckOptions } from '../../permissions/index.js';
+import { jailResolve as defaultJailResolve } from '../../sandbox/index.js';
 import { summarizeToolArguments } from '../../session/index.js';
 import { getPlanDisabledTools } from '../../tools/constants.js';
-import { executeToolOutcome, findTool, isFileMutationTool, type ToolOutcome } from '../../tools/registry.js';
+import { defaultToolRuntime, type ToolOutcome, type ToolRuntime } from '../../tools/registry.js';
 import { validateToolArguments } from '../../tools/validation.js';
 import { deniedOutcome, isParallelTool, isResourceLockedCall, parseArgs, readDiffContext } from '../tool-helpers.js';
 import type {
@@ -14,6 +15,23 @@ import type {
   ToolDispatcher,
 } from './contracts.js';
 
+export interface ToolDispatcherDependencies {
+  toolRuntime: ToolRuntime;
+  checkPermission: (
+    tool: NonNullable<ReturnType<ToolRuntime['findTool']>>,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    options?: PermissionCheckOptions,
+  ) => Promise<'allow' | 'deny'>;
+  jailResolve: (path: string) => string;
+}
+
+const DEFAULT_DEPENDENCIES: ToolDispatcherDependencies = {
+  toolRuntime: defaultToolRuntime,
+  checkPermission: defaultCheckPermission,
+  jailResolve: defaultJailResolve,
+};
+
 interface ResourceEntry {
   call: ToolDispatchRequest['calls'][number];
   parsed: Record<string, unknown> | null;
@@ -22,9 +40,17 @@ interface ResourceEntry {
 }
 
 class LegacyCompatibleToolDispatcher implements ToolDispatcher {
-  constructor(readonly implementation: 'legacy' | 'staged') {}
+  private readonly dependencies: ToolDispatcherDependencies;
+
+  constructor(
+    readonly implementation: 'legacy' | 'staged',
+    dependencies: Partial<ToolDispatcherDependencies> = {},
+  ) {
+    this.dependencies = { ...DEFAULT_DEPENDENCIES, ...dependencies };
+  }
 
   async dispatch(request: ToolDispatchRequest): Promise<ToolDispatchResult> {
+    const { toolRuntime, checkPermission, jailResolve } = this.dependencies;
     const calls = request.calls;
     const argumentSummaries = calls.map((call) => summarizeToolArguments(call.arguments));
     const orderedResults: Array<OrderedToolCallResult | undefined> = new Array(calls.length);
@@ -51,7 +77,7 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
       hint?: string,
       onLockAcquired?: (args: Record<string, unknown>) => void,
     ) =>
-      executeToolOutcome(call.name, call.arguments, request.signal, {
+      toolRuntime.executeToolOutcome(call.name, call.arguments, request.signal, {
         callId: call.id,
         allowedToolNames: request.currentAllowedToolNames(),
         delegation: request.delegation(),
@@ -205,9 +231,10 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         continue;
       }
 
-      if (isParallelTool(current.name)) {
+      if (isParallelTool(current.name, toolRuntime)) {
         let end = index;
-        while (end < calls.length && isParallelTool(calls[end].name) && !request.isDenied(calls[end].name)) end++;
+        while (end < calls.length && isParallelTool(calls[end].name, toolRuntime) && !request.isDenied(calls[end].name))
+          end++;
         const batch = calls.slice(index, end);
         for (const call of batch) request.onEvent({ type: 'header', call });
         request.onEvent({ type: 'start', tool: batch[0].name });
@@ -225,13 +252,13 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
       }
 
       if (
-        isResourceLockedCall(current) &&
+        isResourceLockedCall(current, toolRuntime) &&
         !(request.policy.mode === 'plan' && getPlanDisabledTools().has(current.name))
       ) {
         let end = index;
         while (
           end < calls.length &&
-          isResourceLockedCall(calls[end]) &&
+          isResourceLockedCall(calls[end], toolRuntime) &&
           !request.isDenied(calls[end].name) &&
           !(request.policy.mode === 'plan' && getPlanDisabledTools().has(calls[end].name))
         )
@@ -242,7 +269,7 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         for (let offset = 0; offset < batch.length; offset++) {
           const call = batch[offset];
           const parsed = parseArgs(call.arguments);
-          const tool = findTool(call.name);
+          const tool = toolRuntime.findTool(call.name);
           const argumentsValid = tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
           let denied: ToolOutcome | undefined;
           if (tool && argumentsValid) {
@@ -266,7 +293,7 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         const started = entries.map((entry) => {
           if (entry.denied) return Promise.resolve(entry.denied);
           return execute(entry.call, request.argumentErrorHint(entry.call.name), (lockedArgs) => {
-            entry.diff = readDiffContext(entry.call, lockedArgs);
+            entry.diff = readDiffContext(entry.call, lockedArgs, jailResolve);
           });
         });
 
@@ -304,7 +331,7 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
       }
 
       const parsed = parseArgs(call.arguments);
-      const tool = findTool(call.name);
+      const tool = toolRuntime.findTool(call.name);
       const argumentsValid = tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
       if (tool && argumentsValid) {
         const decision = await checkPermission(tool, parsed ?? {}, request.signal, {
@@ -323,11 +350,11 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
       }
 
       request.onEvent({ type: 'header', call });
-      const mutationParsed = isFileMutationTool(call.name) ? parsed : null;
-      let diff = readDiffContext(call, mutationParsed);
+      const mutationParsed = toolRuntime.isFileMutationTool(call.name) ? parsed : null;
+      let diff = readDiffContext(call, mutationParsed, jailResolve);
       request.onEvent({ type: 'start', tool: call.name });
       const outcome = await execute(call, request.argumentErrorHint(call.name), (lockedArgs) => {
-        if (mutationParsed) diff = readDiffContext(call, lockedArgs);
+        if (mutationParsed) diff = readDiffContext(call, lockedArgs, jailResolve);
       });
       record(index, outcome);
       executionEvents(index, parsed, outcome);
@@ -349,21 +376,21 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
 }
 
 class LegacyToolDispatcher extends LegacyCompatibleToolDispatcher {
-  constructor() {
-    super('legacy');
+  constructor(dependencies: Partial<ToolDispatcherDependencies> = {}) {
+    super('legacy', dependencies);
   }
 }
 
 class StagedToolDispatcher extends LegacyCompatibleToolDispatcher {
-  constructor() {
-    super('staged');
+  constructor(dependencies: Partial<ToolDispatcherDependencies> = {}) {
+    super('staged', dependencies);
   }
 }
 
-export function createLegacyToolDispatcher(): ToolDispatcher {
-  return new LegacyToolDispatcher();
+export function createLegacyToolDispatcher(dependencies: Partial<ToolDispatcherDependencies> = {}): ToolDispatcher {
+  return new LegacyToolDispatcher(dependencies);
 }
 
-export function createStagedToolDispatcher(): ToolDispatcher {
-  return new StagedToolDispatcher();
+export function createStagedToolDispatcher(dependencies: Partial<ToolDispatcherDependencies> = {}): ToolDispatcher {
+  return new StagedToolDispatcher(dependencies);
 }

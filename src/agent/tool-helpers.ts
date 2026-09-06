@@ -11,7 +11,7 @@
 
 import { readFileSync } from 'node:fs';
 import type { ChatMessage, ToolCallRef } from '../llm/index.js';
-import { findTool, getToolCapabilities, type ToolOutcome } from '../tools/registry.js';
+import { defaultToolRuntime, type ToolOutcome, type ToolRuntime } from '../tools/registry.js';
 import { jailResolve } from '../sandbox/index.js';
 import { contextState, type ContextState } from '../session/compact.js';
 import { capToolResultForHistory } from '../session/compact.js';
@@ -55,21 +55,21 @@ export function isToolResultsNoise(content: string): boolean {
 }
 
 /** 只有显式声明 parallel 且无需权限确认的工具才进入普通并发组。 */
-export function isParallelTool(name: string): boolean {
-  const tool = findTool(name);
-  return !!tool && (tool.risk ?? 'safe') === 'safe' && getToolCapabilities(tool).concurrency === 'parallel';
+export function isParallelTool(name: string, toolRuntime: ToolRuntime = defaultToolRuntime): boolean {
+  const tool = toolRuntime.findTool(name);
+  return !!tool && (tool.risk ?? 'safe') === 'safe' && toolRuntime.getToolCapabilities(tool).concurrency === 'parallel';
 }
 
 /** resource-locked 工具先顺序完成权限预检，再依赖 canonical resource lock 并发执行。 */
-export function isResourceLockedTool(name: string): boolean {
-  const tool = findTool(name);
-  return !!tool && getToolCapabilities(tool).concurrency === 'resource-locked';
+export function isResourceLockedTool(name: string, toolRuntime: ToolRuntime = defaultToolRuntime): boolean {
+  const tool = toolRuntime.findTool(name);
+  return !!tool && toolRuntime.getToolCapabilities(tool).concurrency === 'resource-locked';
 }
 
-export function isResourceLockedCall(call: ToolCallRef): boolean {
+export function isResourceLockedCall(call: ToolCallRef, toolRuntime: ToolRuntime = defaultToolRuntime): boolean {
   // sub-agent 是长时全域操作(嵌套 agent 与主 agent 同权,可写任意文件/跑任意命令),
   // 不进 mutation 并发批:逐个串行执行,避免两个子 agent 同时改工作区。
-  return call.name !== 'sub-agent' && isResourceLockedTool(call.name);
+  return call.name !== 'sub-agent' && isResourceLockedTool(call.name, toolRuntime);
 }
 
 /** 权限拒绝时的结构化 ToolOutcome(供调度器统一回灌,不抛错中断循环)。 */
@@ -88,6 +88,7 @@ export function deniedOutcome(name: string): ToolOutcome {
 export function readDiffContext(
   tc: ToolCallRef,
   parsed: Record<string, unknown> | null,
+  resolvePath: (path: string) => string = jailResolve,
 ): { preWriteOld: string | null; editStartLine: number } {
   if (!parsed) return { preWriteOld: null, editStartLine: 1 };
   const p = String(parsed.path ?? '');
@@ -95,7 +96,7 @@ export function readDiffContext(
   if (tc.name === 'write_file') {
     try {
       // jailResolve:沙箱越界(../../、绝对外圈、软链出圈)抛错 → catch 兜底返 null,不泄露牢外内容(TOCTOU)
-      return { preWriteOld: readFileSync(jailResolve(p), 'utf8'), editStartLine: 1 };
+      return { preWriteOld: readFileSync(resolvePath(p), 'utf8'), editStartLine: 1 };
     } catch {
       return { preWriteOld: null, editStartLine: 1 }; // 文件不存在(新建)、不可读 或 沙箱越界(不泄露)
     }
@@ -108,7 +109,7 @@ export function readDiffContext(
       .replace(/\r/g, '\n');
     try {
       // jailResolve:同上,沙箱越界抛错 → catch 兜底,不泄露牢外内容
-      const raw = readFileSync(jailResolve(p), 'utf8');
+      const raw = readFileSync(resolvePath(p), 'utf8');
       const data = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
       const idx = oldStr ? data.indexOf(oldStr) : -1;
       return {

@@ -5,12 +5,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { runAgentCore } from '../../src/agent/core.js';
-import { getAgentMode, setAgentMode } from '../../src/agent/mode.js';
+import { createAgentRuntimeContext } from '../../src/agent/runtime-context.js';
 // 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),eval runner 须显式装配。
 import '../../src/tools/builtins/index.js';
 import { config } from '../../src/config/index.js';
-import { beginTurn, getCurrentTurnMutationState, resetState } from '../../src/rollback/index.js';
-import { setSandboxRoot } from '../../src/sandbox/root.js';
+import { resetState } from '../../src/rollback/index.js';
 import { getCurrentSessionId, setCurrentSessionId } from '../../src/session/state.js';
 import type { AgentTraceEvent } from '../../src/session/trace.js';
 import { reduceTraceMetrics } from '../../src/session/trace-metrics.js';
@@ -231,13 +230,14 @@ async function runTask(
   const originalVerifierHash = verifierHash(root);
   if (!originalVerifierHash) throw new Error(`Fixture ${fixture.id} has no readable verify.mjs`);
   const previousCwd = process.cwd();
-  const previousRoot = setSandboxRoot(root);
-  const previousMode = getAgentMode();
   const previousSessionId = getCurrentSessionId();
-  const previousPermission = config.permissionEnabled;
-  config.permissionEnabled = false; // isolated disposable fixture only
+  const runtimeContext = createAgentRuntimeContext({
+    sandboxRoot: root,
+    configOverrides: { permissionEnabled: false },
+    initialMode: 'auto',
+  });
   resetState();
-  const turnId = beginTurn(fixture.goal);
+  const turnId = runtimeContext.beginTurn(fixture.goal);
   const traceEvents: AgentTraceEvent[] = [];
   const started = Date.now();
   const controller = new AbortController();
@@ -254,15 +254,17 @@ async function runTask(
         `Coding eval prompt hash drifted before ${fixture.id}: expected ${expectedPromptHash}, got ${actualPromptHash}`,
       );
     }
-    const turn = await assembleCodingEvalTurn(fixture.goal, controller.signal, systemPrompt);
+    const turn = await assembleCodingEvalTurn(fixture.goal, controller.signal, systemPrompt, { runtimeContext });
     result = await runAgentCore({
       history: turn.history,
       userInput: fixture.goal,
       signal: controller.signal,
       toolPolicy: turn.toolPolicy,
+      runtimeContext,
       initialToolRoute: turn.initialToolRoute,
       hooks: {
-        onToolBatchEnd: () => firstPatchCapture.capture(getCurrentTurnMutationState().changedFiles.length > 0),
+        onToolBatchEnd: () =>
+          firstPatchCapture.capture(runtimeContext.getCurrentTurnMutationState().changedFiles.length > 0),
       },
       onTraceEvent: (event) => traceEvents.push(event),
       traceContext: { sessionId: `eval-${fixture.id}`, turnId },
@@ -325,11 +327,8 @@ async function runTask(
   } finally {
     clearTimeout(timer);
     process.chdir(previousCwd);
-    setSandboxRoot(previousRoot);
-    config.permissionEnabled = previousPermission;
     clearSkillActivation();
     setCurrentSessionId(previousSessionId, previousCwd);
-    setAgentMode(previousMode);
     resetState();
     firstPatchCapture.dispose();
     if (!keep && root.startsWith(path.join(tmpdir(), 'mocode-eval-'))) rmSync(root, { recursive: true, force: true });

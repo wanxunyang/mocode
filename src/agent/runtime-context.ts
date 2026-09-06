@@ -1,30 +1,39 @@
 /**
  * AgentRuntimeContext:runAgentCore 的运行时依赖注入接缝。
  *
- * 2.0 框架化第一步(Context 参数化):把 core.ts 直读的模块级单例(config / agentMode /
- * sessionId / sandboxRoot / token 校准 / notes mtime)收敛成一个显式接口。默认实现
- * defaultAgentRuntimeContext 原样绑定全局单例,行为与改造前完全一致;宿主(TUI / stdio host /
- * 子 agent / 未来多 runtime)可注入自定义实现,在同一进程内获得互不干扰的运行时视图。
- *
- * 本模块是叶子:只依赖各单例所在模块,不反向 import core.ts,依赖方向无环。
- *
- * 取舍说明:
- *  - 用方法(getter)而非裸值字段:config.model 等会被 /model 热切,方法保证每次读取取最新值,
- *    与改造前「每次直读全局」的语义一致。
- *  - jailResolve / getCurrentTurnMutationState 等涉及真实 I/O 或可变返回,保持函数形态原样透传。
- *  - 暂未覆盖 executeToolOutcome / findTool(tools registry 单例)与 checkPermission:它们属
- *    工具系统(步骤 4 抽包时处理),本轮只收敛 agent 运行时自身的单例。
+ * 独立 runtime 通过 createAgentRuntimeContext 装配自己的 config、工具表、模型 transport、
+ * mode 与 sandbox scope；默认上下文则继续显式绑定进程级单例，保持现有 TUI/host 行为。
+ * 本模块不 import builtins：默认工具包只从 defaultToolRuntime.builtinTools 复制，避免
+ * registry → builtins → core → runtime-context 的模块循环。
  */
 
-import { config, getActiveModel, extractActivePlanSection, buildSessionStateReminder } from '../config/index.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { resolve } from 'node:path';
+import {
+  buildSessionStateReminder,
+  config,
+  createConfigSnapshot,
+  extractActivePlanSection,
+  getActiveModel,
+} from '../config/index.js';
 import type { Config } from '../config/index.js';
-import { getAgentMode, setAgentMode, type AgentMode } from './mode.js';
-import { getCurrentSessionId } from '../session/state.js';
-import { getCurrentTurnId, getCurrentTurnMutationState } from '../rollback/index.js';
-import { getNotesMtime } from '../session/notes.js';
-import { jailResolve } from '../sandbox/index.js';
 import { getTokenCalibration, updateTokenCalibration } from '../context/token-calibration.js';
+import {
+  chat,
+  createChatClientState,
+  createChatTransport,
+  type ChatClientOverrides,
+  type ChatTransport,
+} from '../llm/index.js';
+import { checkPermission, createPermissionChecker, type PermissionCheckOptions } from '../permissions/index.js';
+import type { Tool } from '../tools/types.js';
+import { beginTurn, getCurrentTurnId, getCurrentTurnMutationState } from '../rollback/index.js';
+import { getSandboxRoot, jailResolve, withSandboxRoot } from '../sandbox/index.js';
+import { getNotesMtime } from '../session/notes.js';
+import { getCurrentSessionId } from '../session/state.js';
 import { safeProviderId } from '../session/trace-sanitize.js';
+import { defaultToolRuntime, ToolRuntime } from '../tools/registry.js';
+import { getAgentMode, setAgentMode, type AgentMode } from './mode.js';
 
 /** runAgentCore 观察到的当前轮文件 mutation 状态(getCurrentTurnMutationState 的返回形状)。 */
 export type TurnMutationState = ReturnType<typeof getCurrentTurnMutationState>;
@@ -32,39 +41,44 @@ export type TurnMutationState = ReturnType<typeof getCurrentTurnMutationState>;
 /** token 校准样本(token-calibration.ts 的两个函数签名)。 */
 export type TokenCalibrationResult = ReturnType<typeof getTokenCalibration>;
 
-/**
- * agent 运行时的全部外部可变依赖。每个成员对应 core.ts 改造前的一处模块级单例直读。
- * 全部可选读取集中在构造点之后、循环之中——实现必须保证每次调用返回当前最新值。
- */
+/** Agent 一次运行所需的完整、显式 runtime 视图。 */
 export interface AgentRuntimeContext {
-  // ── config(只读快照 + 热切模型)──
-  /** 完整配置对象引用(与全局 config 同一引用,字段仍可读;改造前行为不变)。 */
+  // ── runtime-owned infrastructure ──
   readonly config: Config;
-  /** 当前活跃模型(钉死会话模型优先,见 config/index.ts getActiveModel)。 */
-  getActiveModel(): string;
+  readonly toolRuntime: ToolRuntime;
+  readonly modelTransport: ChatTransport;
+  readonly sandboxRoot: string;
+  /** 在本 runtime 的 AsyncLocalStorage 沙箱根中执行，支持并发 runtime 互不串根。 */
+  runInScope<T>(fn: () => Promise<T>): Promise<T>;
+  /** 使用本 runtime 配置和 sandbox root 进行权限判定。 */
+  checkPermission(
+    tool: Tool,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    options?: PermissionCheckOptions,
+  ): Promise<'allow' | 'deny'>;
 
-  // ── agent 模式(auto / plan)──
+  // ── config / mode ──
+  getActiveModel(): string;
   getAgentMode(): AgentMode;
   /** 设置模式并返回之前的值(abort 还原用)。同模式 no-op。 */
   setAgentMode(mode: AgentMode): AgentMode;
 
-  // ── 会话 / 轮次身份(trace 埋点用)──
+  // ── 会话 / 轮次身份(trace 与 rollback 用)──
+  beginTurn(firstLine: string): number;
   getCurrentSessionId(): string | undefined;
   getCurrentTurnId(): number;
-  /** 当前轮真实磁盘 mutation 观察(changedFiles 列表来源)。 */
   getCurrentTurnMutationState(): TurnMutationState;
 
-  // ── 会话状态提醒 / plan 摘要(system prompt 尾部动态段)──
+  // ── 会话状态提醒 / plan 摘要 ──
   buildSessionStateReminder(): string;
   extractActivePlanSection(): string | null;
-
-  // ── notes.md mtime(plan nag 计数器用)──
   getNotesMtime(): number | null;
 
-  // ── 沙箱路径解析(工具 diff 预读取用;越界抛错由调用方 catch)──
+  // ── 沙箱路径解析 ──
   jailResolve(path: string): string;
 
-  // ── token 估算自校准(provider/model/tool-set 维度持久化)──
+  // ── token 估算自校准 ──
   getTokenCalibration(baseURL: string, model: string, tools: readonly unknown[]): TokenCalibrationResult;
   updateTokenCalibration(
     baseURL: string,
@@ -74,19 +88,145 @@ export interface AgentRuntimeContext {
     actualPromptTokens: number,
   ): TokenCalibrationResult;
 
-  // ── trace 辅助(把 baseURL 归一成稳定 provider 标识)──
+  // ── trace 辅助 ──
   safeProviderId(baseURL: string): string;
 }
 
+const activeRuntimeContexts = new AsyncLocalStorage<AgentRuntimeContext>();
+
+/** 当前异步 agent 树绑定的 RuntimeContext；编排工具据此让子 agent 继承父 runtime。 */
+export function getActiveAgentRuntimeContext(): AgentRuntimeContext | undefined {
+  return activeRuntimeContexts.getStore();
+}
+
+/** 仅由 agent composition root 调用；嵌套异步任务自动继承且并发树互不污染。 */
+export function withAgentRuntimeContext<T>(runtimeContext: AgentRuntimeContext, run: () => Promise<T>): Promise<T> {
+  return activeRuntimeContexts.run(runtimeContext, run);
+}
+
+export type AgentRuntimeServiceOverrides = Partial<
+  Pick<
+    AgentRuntimeContext,
+    | 'getActiveModel'
+    | 'checkPermission'
+    | 'getAgentMode'
+    | 'setAgentMode'
+    | 'beginTurn'
+    | 'getCurrentSessionId'
+    | 'getCurrentTurnId'
+    | 'getCurrentTurnMutationState'
+    | 'buildSessionStateReminder'
+    | 'extractActivePlanSection'
+    | 'getNotesMtime'
+    | 'jailResolve'
+    | 'getTokenCalibration'
+    | 'updateTokenCalibration'
+    | 'safeProviderId'
+  >
+>;
+
+export interface AgentRuntimeContextInit {
+  /** 完整源配置；工厂仍会快照它，避免调用方随后修改原对象。缺省使用全局 config 作为源。 */
+  config?: Config;
+  /** 应用在源配置之上的字段覆盖。 */
+  configOverrides?: Partial<Config>;
+  /** 直接采用已有工具 runtime；与 tools 二选一。 */
+  toolRuntime?: ToolRuntime;
+  /** 独立 runtime 的 builtin 工具列表；缺省复制 defaultToolRuntime 当前已安装的 builtins。 */
+  tools?: readonly Tool[];
+  /** 独立模型客户端的底层实现覆盖，常用于嵌入宿主和测试。 */
+  modelClientOverrides?: ChatClientOverrides;
+  /** 完全替换模型 transport；提供时不创建默认 client state。 */
+  modelTransport?: ChatTransport;
+  /** 独立沙箱根；缺省依次取快照配置、当前全局根、process.cwd()。 */
+  sandboxRoot?: string;
+  /** runtime-local mode 初值。 */
+  initialMode?: AgentMode;
+  /** session/rollback/token/notes 等既有服务的定向覆写。 */
+  services?: AgentRuntimeServiceOverrides;
+}
+
 /**
- * 默认运行时上下文:原样绑定全局单例,与改造前 runAgentCore 的直读行为完全一致。
- * 每个方法都是对应单例函数的透传;config 是同一对象引用(字段读取热生效)。
+ * 创建一个基础独立 runtime。构造过程不读取 env/config 文件，不加载 builtins 模块，
+ * 也不修改全局 mode、sandbox root、工具表或模型客户端。
+ */
+export function createAgentRuntimeContext(init: AgentRuntimeContextInit = {}): AgentRuntimeContext {
+  if (init.toolRuntime && init.tools) {
+    throw new TypeError('toolRuntime and tools are mutually exclusive');
+  }
+
+  const runtimeConfig = createConfigSnapshot(init.configOverrides, init.config ?? config);
+  const runtimeToolRuntime = init.toolRuntime ?? new ToolRuntime();
+  if (!init.toolRuntime) {
+    runtimeToolRuntime.installBuiltinTools([...(init.tools ?? defaultToolRuntime.builtinTools)]);
+  }
+
+  let runtimeMode = init.initialMode ?? 'auto';
+  const localGetAgentMode = (): AgentMode => runtimeMode;
+  const localSetAgentMode = (mode: AgentMode): AgentMode => {
+    const previous = runtimeMode;
+    runtimeMode = mode;
+    return previous;
+  };
+
+  const services = init.services ?? {};
+  const runtimeGetActiveModel = services.getActiveModel ?? (() => runtimeConfig.model);
+  const runtimeModelTransport =
+    init.modelTransport ??
+    createChatTransport({
+      config: runtimeConfig,
+      getModel: runtimeGetActiveModel,
+      clientState: createChatClientState(runtimeConfig, init.modelClientOverrides),
+    });
+  const runtimeSandboxRoot = resolve(
+    init.sandboxRoot ?? runtimeConfig.sandboxRoot ?? getSandboxRoot() ?? process.cwd(),
+  );
+
+  return {
+    config: runtimeConfig,
+    toolRuntime: runtimeToolRuntime,
+    modelTransport: runtimeModelTransport,
+    sandboxRoot: runtimeSandboxRoot,
+    runInScope: <T>(fn: () => Promise<T>): Promise<T> => withSandboxRoot(runtimeSandboxRoot, fn),
+    checkPermission: services.checkPermission ?? createPermissionChecker(runtimeConfig, runtimeSandboxRoot),
+    getActiveModel: runtimeGetActiveModel,
+    getAgentMode: services.getAgentMode ?? localGetAgentMode,
+    setAgentMode: services.setAgentMode ?? localSetAgentMode,
+    beginTurn: services.beginTurn ?? beginTurn,
+    getCurrentSessionId: services.getCurrentSessionId ?? getCurrentSessionId,
+    getCurrentTurnId: services.getCurrentTurnId ?? getCurrentTurnId,
+    getCurrentTurnMutationState: services.getCurrentTurnMutationState ?? getCurrentTurnMutationState,
+    buildSessionStateReminder: services.buildSessionStateReminder ?? buildSessionStateReminder,
+    extractActivePlanSection: services.extractActivePlanSection ?? extractActivePlanSection,
+    getNotesMtime: services.getNotesMtime ?? getNotesMtime,
+    jailResolve: services.jailResolve ?? jailResolve,
+    getTokenCalibration: services.getTokenCalibration ?? getTokenCalibration,
+    updateTokenCalibration: services.updateTokenCalibration ?? updateTokenCalibration,
+    safeProviderId: services.safeProviderId ?? safeProviderId,
+  };
+}
+
+function currentGlobalSandboxRoot(): string {
+  return resolve(getSandboxRoot() ?? config.sandboxRoot ?? process.cwd());
+}
+
+/**
+ * 默认运行时上下文：显式绑定全部旧全局单例。sandboxRoot 使用 getter，确保 REPL 在模块加载后
+ * 调用 setSandboxRoot 仍能即时生效；runInScope 在每次调用时捕获当前全局根。
  */
 export const defaultAgentRuntimeContext: AgentRuntimeContext = {
   config,
+  toolRuntime: defaultToolRuntime,
+  modelTransport: chat,
+  get sandboxRoot(): string {
+    return currentGlobalSandboxRoot();
+  },
+  runInScope: <T>(fn: () => Promise<T>): Promise<T> => withSandboxRoot(currentGlobalSandboxRoot(), fn),
+  checkPermission,
   getActiveModel,
   getAgentMode,
   setAgentMode,
+  beginTurn,
   getCurrentSessionId,
   getCurrentTurnId,
   getCurrentTurnMutationState,

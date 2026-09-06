@@ -10,8 +10,13 @@ import {
   type ScheduleAction,
 } from '../context/budget.js';
 import { chatTools, type ChatMessage, type ChatTool } from '../llm/index.js';
-import { config } from '../config/index.js';
-import { maybeCompact, contextState, type ContextState } from './compact.js';
+import {
+  defaultCompactionRuntime,
+  maybeCompact,
+  contextState,
+  type CompactionRuntime,
+  type ContextState,
+} from './compact.js';
 import { pruneStaleArtifacts, refreshArtifactFreshness } from '../context/artifacts.js';
 import { pruneSuperseded } from '../context/relevance.js';
 import { createAgeAwareEncodingState } from '../context/age-aware.js';
@@ -82,14 +87,17 @@ function emptyPressure(report: BudgetReport): PressureCompressionLog {
 }
 
 /** One scheduler instance is owned by one agent run. */
-export function createBudgetScheduler(state: ContextState = contextState): BudgetScheduler {
+export function createBudgetScheduler(
+  state: ContextState = contextState,
+  runtime: CompactionRuntime = defaultCompactionRuntime,
+): BudgetScheduler {
   const evaluate = (
     history: ChatMessage[],
     step: number,
     activeTools: readonly ChatTool[],
     ephemeralTokens: number,
   ): BudgetReport =>
-    evaluateBudget(history, config.contextWindowTokens, step, state.correction, activeTools, ephemeralTokens);
+    evaluateBudget(history, runtime.config.contextWindowTokens, step, state.correction, activeTools, ephemeralTokens);
 
   const scheduler: BudgetScheduler = {
     lastRunLog: null,
@@ -104,11 +112,11 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
         // A single 80% pressure event owns every history rewrite. Run all enabled
         // low-cost cleanup first, then always compact; do not introduce per-stage
         // thresholds or stop early when one stage happens to cross below 80%.
-        if (config.contextRelprune) {
+        if (runtime.config.contextRelprune) {
           pressure.superseded = pruneSuperseded(history, report.hotBoundary);
         }
         pressure.staleArtifacts = pruneStaleArtifacts(state, history, report.hotBoundary);
-        if (config.contextOptimize) {
+        if (runtime.config.contextOptimize) {
           const ageAware = createAgeAwareEncodingState(history);
           pressure.encodedLogsAndSearches = ageAware.sweepPressure(history, report.hotBoundary);
         }
@@ -123,7 +131,7 @@ export function createBudgetScheduler(state: ContextState = contextState): Budge
       let contentMutated =
         pressure.superseded > 0 || pressure.staleArtifacts > 0 || pressure.encodedLogsAndSearches > 0;
       for (const _action of actions) {
-        const result = await maybeCompact(history, report, undefined, state, activeTools, signal);
+        const result = await maybeCompact(history, report, undefined, state, activeTools, signal, runtime);
         compactHistoryCalled = true;
         historyRebuilt ||= result?.historyRebuilt === true;
         contentMutated ||= result?.compacted === true;
@@ -151,29 +159,42 @@ export async function runScheduler(
   step: number,
   state: ContextState = contextState,
   activeTools: readonly ChatTool[] = chatTools,
+  runtime: CompactionRuntime = defaultCompactionRuntime,
 ): Promise<boolean> {
-  return createBudgetScheduler(state).runStep(history, step, activeTools);
+  return createBudgetScheduler(state, runtime).runStep(history, step, activeTools);
 }
 
 /** User-requested compaction bypasses automatic pressure gating. */
 export async function manualCompact(
   history: ChatMessage[],
   focus?: string,
-  opts?: { force?: boolean; signal?: AbortSignal },
+  opts?: {
+    force?: boolean;
+    signal?: AbortSignal;
+    contextState?: ContextState;
+    activeTools?: readonly ChatTool[];
+    runtime?: CompactionRuntime;
+  },
 ): Promise<SchedulerRunLog & { compactDetail?: CompactHistoryDetail }> {
   const signal = opts?.signal;
-  if (config.contextBudget === false) {
+  const runtime = opts?.runtime ?? defaultCompactionRuntime;
+  const state = opts?.contextState ?? contextState;
+  const activeTools = opts?.activeTools ?? chatTools;
+  if (runtime.config.contextBudget === false) {
     const result = await import('./compact.js').then(({ compactHistory }) =>
       compactHistory(history, {
-        window: config.contextWindowTokens,
+        window: runtime.config.contextWindowTokens,
         threshold: DEFAULT_BUDGET_POLICY.pressureTriggerRatio,
         focus,
         manual: true,
         force: opts?.force,
+        tools: activeTools,
+        contextState: state,
+        runtime,
         signal,
       }),
     );
-    const report = evaluateBudget(history, config.contextWindowTokens, -1, contextState.correction);
+    const report = evaluateBudget(history, runtime.config.contextWindowTokens, -1, state.correction, activeTools);
     const log: SchedulerRunLog & { compactDetail: CompactHistoryDetail } = {
       step: -1,
       report,
@@ -191,11 +212,11 @@ export async function manualCompact(
         focus,
       },
     };
-    contextState.schedulerLog = log;
+    state.schedulerLog = log;
     return log;
   }
 
-  const report = evaluateBudget(history, config.contextWindowTokens, -1, contextState.correction);
+  const report = evaluateBudget(history, runtime.config.contextWindowTokens, -1, state.correction, activeTools);
   let actions = scheduleActions(report);
   if (!actions.some((action) => action.kind === 'compact_history')) {
     actions = [...actions, { kind: 'compact_history', focus }];
@@ -216,9 +237,10 @@ export async function manualCompact(
         force: opts?.force,
         focus: action.focus,
       },
-      contextState,
-      chatTools,
+      state,
+      activeTools,
       signal,
+      runtime,
     );
     compactHistoryCalled = true;
     if (result) {
@@ -244,7 +266,7 @@ export async function manualCompact(
     ts: Date.now(),
     compactDetail,
   };
-  contextState.schedulerLog = log;
+  state.schedulerLog = log;
   return log;
 }
 

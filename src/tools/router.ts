@@ -1,5 +1,6 @@
 import type OpenAI from 'openai';
-import { chat, type ChatMessage } from '../llm/index.js';
+import { chat, type ChatMessage, type ChatTransport } from '../llm/index.js';
+import type { Tool } from './types.js';
 import {
   COMMON_TOOL_NAMES,
   TOOL_ROUTE_GROUPS,
@@ -17,6 +18,10 @@ export interface ToolRouteRequest {
   planMode?: boolean;
   attachmentNames?: readonly string[];
   signal?: AbortSignal;
+  /** Runtime-local model transport and tool catalog. */
+  transport?: ChatTransport;
+  tools?: readonly Tool[];
+  gateAllows?: (environmentName: string | undefined) => boolean;
 }
 
 export interface ToolRouteDecision {
@@ -124,7 +129,7 @@ function parseDecision(
  */
 export async function routeToolGroups(request: ToolRouteRequest): Promise<ToolRouteDecision> {
   const startedAt = Date.now();
-  const availableGroups = getAvailableToolRouteGroups();
+  const availableGroups = getAvailableToolRouteGroups(request.tools, request.gateAllows);
   const available = new Set(availableGroups);
   const previousGroups = (request.previousGroups ?? []).filter((group) => available.has(group));
   if (availableGroups.length === 0) {
@@ -137,7 +142,7 @@ Select the minimum sufficient set of capability groups for the user's NEXT agent
 Always-available common tools: ${COMMON_TOOL_NAMES.join(', ')}.
 
 Available groups:
-${toolRouteCatalog(availableGroups)}
+${request.tools ? toolRouteCatalog(availableGroups, request.tools) : toolRouteCatalog(availableGroups)}
 
 Routing rules:
 - You MUST call ${ROUTER_TOOL_NAME} exactly once and emit no prose.
@@ -166,7 +171,9 @@ Routing rules:
   ];
 
   try {
-    const result = await chat(messages, {}, request.signal, [routeSelectorTool(availableGroups)]);
+    const result = await (request.transport ?? chat)(messages, {}, request.signal, [
+      routeSelectorTool(availableGroups),
+    ]);
     const call = result.toolCalls.find((toolCall) => toolCall.name === ROUTER_TOOL_NAME);
     const parsed = call ? parseDecision(call.arguments, available, previousGroups, startedAt) : null;
     if (parsed) return parsed;

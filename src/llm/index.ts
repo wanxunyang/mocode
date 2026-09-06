@@ -4,8 +4,23 @@ import { tools } from '../tools/registry.js';
 import { getPlanDisabledTools, getProfileDisabledTools } from '../tools/constants.js';
 import { ThinkTagFilter } from './think-filter.js';
 import { sanitizeToolSchemas } from './tool-schema.js';
-import { anthropicChatOnce } from './providers/anthropic.js';
+import { defaultAnthropicFetch, anthropicChatOnce } from './providers/anthropic.js';
 import { registerModelProvider, getModelProvider, listModelProviders } from './provider.js';
+import type {
+  AnthropicFetchImpl,
+  ChatClientState,
+  ChatCreateImpl,
+  ModelProviderRuntime,
+  ModelRuntimeConfig,
+} from './runtime.js';
+
+export type {
+  AnthropicFetchImpl,
+  ChatClientState,
+  ChatCreateImpl,
+  ModelProviderRuntime,
+  ModelRuntimeConfig,
+} from './runtime.js';
 
 // 强制关闭第三方调试日志泄漏:openai SDK 在 process.env.DEBUG === 'true' 时用裸
 // console.log 把请求/响应直写 stdout,会污染 TUI 输入框(并泄露 headers/URL)。
@@ -36,11 +51,42 @@ const RETRY_JITTER = 0.2;
  * 与 OpenAI 兼容协议的独立 `reasoning_content` 字段不同,这些模型把 thinking 直接嵌进 content
  * 字符串,期间不调 onText(spinner 持续转 ⠹ 思考中…),也不写入可见 content(history 不被思考段污染)。
  */
-let client = new OpenAI({
-  baseURL: config.baseURL,
-  apiKey: config.apiKey,
-  maxRetries: 0,
-});
+function newOpenAIClient(runtimeConfig: ModelRuntimeConfig): OpenAI {
+  return new OpenAI({
+    baseURL: runtimeConfig.baseURL,
+    apiKey: runtimeConfig.apiKey,
+    maxRetries: 0,
+  });
+}
+
+export interface ChatClientOverrides {
+  openAICreateImpl?: ChatCreateImpl;
+  anthropicFetchImpl?: AnthropicFetchImpl;
+}
+
+/** Build mutable client state owned by one runtime; no module-global overrides are consulted. */
+export function createChatClientState(
+  runtimeConfig: ModelRuntimeConfig,
+  overrides: ChatClientOverrides = {},
+): ChatClientState {
+  return {
+    openAI: newOpenAIClient(runtimeConfig),
+    openAICreateImpl: overrides.openAICreateImpl ?? null,
+    anthropicFetchImpl: overrides.anthropicFetchImpl ?? fetch,
+  };
+}
+
+/** Rebuild only the OpenAI SDK client while preserving runtime-local test/transport overrides. */
+export function reconfigureChatClient(state: ChatClientState, runtimeConfig: ModelRuntimeConfig): void {
+  state.openAI = newOpenAIClient(runtimeConfig);
+}
+
+const defaultClientState = createChatClientState(config, { anthropicFetchImpl: defaultAnthropicFetch });
+const defaultProviderRuntime: ModelProviderRuntime = {
+  config,
+  getModel: getActiveModel,
+  clientState: defaultClientState,
+};
 
 /**
  * 运行时重建 OpenAI 客户端(/model 切换 baseURL/apiKey 后调)。
@@ -49,11 +95,7 @@ let client = new OpenAI({
  * 子 agent 复用本模块 chat(),故只此一处重建即全链路生效。
  */
 export function reconfigureClient(): void {
-  client = new OpenAI({
-    baseURL: config.baseURL,
-    apiKey: config.apiKey,
-    maxRetries: 0,
-  });
+  reconfigureChatClient(defaultClientState, config);
 }
 
 // ── 重试 helper(纯函数 + sleep,被 chat() 调用;亦可单测导入验证)──────
@@ -227,16 +269,9 @@ function logRetry(attempt: number, err: unknown, waitMs: number): void {
   );
 }
 
-type CreateImpl = (
-  body: Record<string, unknown>,
-  opts: { signal?: AbortSignal } | undefined,
-) => Promise<AsyncIterable<unknown>>;
-
-let createImplOverride: CreateImpl | null = null;
-
 /** 仅供单测用:覆盖 chat() 内部实际调用的 create 桩。生产代码不要碰。 */
-export function __setChatCreateImpl(impl: CreateImpl | null): void {
-  createImplOverride = impl;
+export function __setChatCreateImpl(impl: ChatCreateImpl | null): void {
+  defaultClientState.openAICreateImpl = impl;
 }
 
 export type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -284,11 +319,12 @@ export function refreshChatTools(): void {
 // 新增 provider 只需 registerModelProvider,不必改 chat()。
 registerModelProvider({
   name: 'openai',
-  chatOnce: (messages, handlers, signal, tools) => chatOnce(messages, handlers, signal, tools),
+  chatOnce: (messages, handlers, signal, tools, runtime) => chatOnce(messages, handlers, signal, tools, runtime),
 });
 registerModelProvider({
   name: 'anthropic',
-  chatOnce: (messages, handlers, signal, tools) => anthropicChatOnce(messages, handlers, signal, tools ?? chatTools),
+  chatOnce: (messages, handlers, signal, tools, runtime) =>
+    anthropicChatOnce(messages, handlers, signal, tools ?? chatTools, runtime),
 });
 
 export interface ToolCallRef {
@@ -426,12 +462,35 @@ function retryErrorCode(error: unknown): string {
  * 包了一层重试:429/5xx/timeout/网络错按指数退避重试(默认 4 次),400/401/用户中断立即抛。
  * 重试由 chat() 统一管,chatOnce() 只负责单次请求,职责单一便于单测。
  */
-export async function chat(
+export type ChatTransport = (
+  messages: ChatMessage[],
+  handlers?: StreamHandlers,
+  signal?: AbortSignal,
+  toolsOverride?: ChatTool[],
+) => Promise<ChatResult>;
+
+/** Bind chat dispatch, retries and built-in providers to one explicit runtime. */
+export function createChatTransport(runtime: ModelProviderRuntime): ChatTransport {
+  return (messages, handlers = {}, signal, toolsOverride) =>
+    chatWithRuntime(runtime, messages, handlers, signal, toolsOverride);
+}
+
+export function chat(
   messages: ChatMessage[],
   handlers: StreamHandlers = {},
   signal?: AbortSignal,
   /** 覆盖默认工具 schema;plan 模式传 planChatTools(只读子集),缺省=全量 chatTools。 */
   toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[],
+): Promise<ChatResult> {
+  return chatWithRuntime(defaultProviderRuntime, messages, handlers, signal, toolsOverride);
+}
+
+async function chatWithRuntime(
+  runtime: ModelProviderRuntime,
+  messages: ChatMessage[],
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+  toolsOverride?: ChatTool[],
 ): Promise<ChatResult> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
@@ -439,12 +498,14 @@ export async function chat(
       throw new DOMException('This operation was aborted', 'AbortError');
     }
     try {
-      const provider = getModelProvider(config.provider);
+      const provider = getModelProvider(runtime.config.provider);
       if (!provider) {
         // 未注册的 provider:给出可用名单,避免悄悄落到错误实现。
-        throw new Error(`未知的 LLM provider "${config.provider}";已注册:${listModelProviders().join(', ') || '(空)'}`);
+        throw new Error(
+          `未知的 LLM provider "${runtime.config.provider}";已注册:${listModelProviders().join(', ') || '(空)'}`,
+        );
       }
-      return await provider.chatOnce(messages, handlers, signal, toolsOverride);
+      return await provider.chatOnce(messages, handlers, signal, toolsOverride, runtime);
     } catch (err) {
       lastErr = err;
       if (attempt >= RETRY_MAX_ATTEMPTS || !isRetryableError(err, signal)) {
@@ -508,6 +569,7 @@ async function chatOnce(
   handlers: StreamHandlers,
   signal: AbortSignal | undefined,
   toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined,
+  runtime: ModelProviderRuntime = defaultProviderRuntime,
 ): Promise<ChatResult> {
   // 防御:messages 必须至少含一条非空 user 消息,否则 OpenAI/Anthropic 都会 400。
   // compact force 分支曾把所有 user 丢进摘要 → 重建 history 无 user → 下一轮 400。
@@ -527,20 +589,22 @@ async function chatOnce(
     throw new Error('messages must contain at least one non-empty user message');
   }
   // signal 透传给 SDK 第二参(RequestOptions);abort 后 for await 抛错,chat 不 catch,透传 runAgent 处理。
-  // createImplOverride 的 body 类型故意宽成 Record(测试桩用),生产走 client 分支时由 OpenAI 自己的类型守门。
-  const create = createImplOverride
-    ? createImplOverride
+  // openAICreateImpl 的 body 类型故意宽成 Record(测试桩用),生产走 client 分支时由 OpenAI 自己的类型守门。
+  const runtimeConfig = runtime.config;
+  const runtimeClientState = runtime.clientState;
+  const create = runtimeClientState.openAICreateImpl
+    ? runtimeClientState.openAICreateImpl
     : (body: Record<string, unknown>, opts: { signal?: AbortSignal } | undefined) =>
-        client.chat.completions.create(
-          body as unknown as Parameters<typeof client.chat.completions.create>[0],
-          opts as unknown as Parameters<typeof client.chat.completions.create>[1],
+        runtimeClientState.openAI.chat.completions.create(
+          body as unknown as Parameters<typeof runtimeClientState.openAI.chat.completions.create>[0],
+          opts as unknown as Parameters<typeof runtimeClientState.openAI.chat.completions.create>[1],
         );
   // transport 边界消毒:剔除部分后端(kimi-k3@dashscope 实测)整请求 400 拒绝的
   // uniqueItems 关键字。无需改写时返回原引用,前缀缓存逐字节稳定不受影响。
   const activeTools = sanitizeToolSchemas(toolsOverride ?? chatTools);
   const stream = await create(
     {
-      model: getActiveModel(),
+      model: runtime.getModel(),
       messages: normalizeImageDetail(messages),
       stream: true,
       // 空工具表(如摘要请求)不发 tools 字段——部分网关拒绝空数组。
@@ -552,8 +616,8 @@ async function chatOnce(
             parallel_tool_calls: true,
           }
         : {}),
-      ...(config.maxTokens ? { max_tokens: config.maxTokens } : {}),
-      ...(config.includeUsage ? { stream_options: { include_usage: true } } : {}),
+      ...(runtimeConfig.maxTokens ? { max_tokens: runtimeConfig.maxTokens } : {}),
+      ...(runtimeConfig.includeUsage ? { stream_options: { include_usage: true } } : {}),
     },
     signal ? { signal } : undefined,
   );

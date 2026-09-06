@@ -10,6 +10,7 @@
  */
 
 import type { ChatMessage, ChatResult, ChatTool, StreamHandlers } from './index.js';
+import type { ModelProviderRuntime } from './runtime.js';
 
 /** 单次流式 LLM 请求的 provider 实现(无重试;重试由 chat() 外层统一负责)。 */
 export interface ModelProvider {
@@ -24,6 +25,8 @@ export interface ModelProvider {
     handlers: StreamHandlers,
     signal: AbortSignal | undefined,
     tools: ChatTool[] | undefined,
+    /** Built-ins consume this explicit context; existing custom providers may ignore it. */
+    runtime?: ModelProviderRuntime,
   ): Promise<ChatResult>;
 }
 

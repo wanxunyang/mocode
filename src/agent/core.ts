@@ -10,20 +10,17 @@ import {
   estimatePromptTokens,
   estimateTokens,
   isContextLengthError,
-  planChatTools,
-  chatTools,
   type ChatMessage,
   type ChatResult,
   type ChatUsage,
   type ToolCallRef,
 } from '../llm/index.js';
-import { executeToolOutcome, findTool, isFileMutationTool, type ToolOutcome } from '../tools/registry.js';
-import { checkPermission } from '../permissions/index.js';
+import { defaultToolRuntime, type ToolOutcome, type ToolRuntime } from '../tools/registry.js';
 import { validateToolArguments } from '../tools/validation.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools, getSkillRuntimeDisabledTools } from '../tools/constants.js';
 import { ADD_TOOL_GROUPS_TOOL_NAME } from '../config/profiles.js';
 import type { ToolPolicyController } from '../tools/policy.js';
-import { defaultAgentRuntimeContext, type AgentRuntimeContext } from './runtime-context.js';
+import { defaultAgentRuntimeContext, withAgentRuntimeContext, type AgentRuntimeContext } from './runtime-context.js';
 import {
   parseArgs,
   argumentErrorHint,
@@ -79,7 +76,8 @@ const PLAN_NAG_TEXT =
 // 已提取至 ./tool-helpers.ts——它们不依赖本循环的局部状态,只接受显式参数,故可安全模块化。
 
 /** 文件 mutation 由 capability metadata 判定，供 diff、回滚与上下文失效共用。 */
-const isMutationTool = (name: string): boolean => isFileMutationTool(name);
+const isMutationTool = (name: string, toolRuntime: ToolRuntime = defaultToolRuntime): boolean =>
+  toolRuntime.isFileMutationTool(name);
 
 /** 工具调用 ● 头所需信息(交给 hooks 渲染;core 不直接写屏)。 */
 export interface ToolCallView {
@@ -246,6 +244,18 @@ async function runAgentCoreLegacy(
 ): Promise<AgentRunResult> {
   const { history, userInput, signal, onContextUpdate, hooks } = opts;
   const ctx: AgentRuntimeContext = opts.runtimeContext ?? defaultAgentRuntimeContext;
+  const runtimeToolSchemas: OpenAI.Chat.Completions.ChatCompletionTool[] = ctx.toolRuntime.tools.map((tool) => ({
+    type: 'function',
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters as OpenAI.FunctionParameters,
+    },
+  }));
+  const planDisabledTools = getPlanDisabledTools();
+  const runtimePlanToolSchemas = runtimeToolSchemas.filter(
+    (tool) => !tool.function.name.startsWith('mcp__') && !planDisabledTools.has(tool.function.name),
+  );
   const runtimeContextState = opts.contextState ?? contextState;
   /** 本轮 ask_human 成功调用次数，仅用于 trace 观测，不影响工具执行或模型上下文。 */
   let askHumanCountThisTurn = 0;
@@ -310,17 +320,27 @@ async function runAgentCoreLegacy(
   // superseded → stale artifact → old logs/search → compact at real pressure.
   // contextBudget=false keeps only the infrastructure compact fallback.
   const scheduler: BudgetScheduler | null =
-    ctx.config.contextBudget !== false ? createBudgetScheduler(runtimeContextState) : null;
-  const modelRunner = stages.model.implementation === 'staged' ? createStagedModelRunner() : createLegacyModelRunner();
+    ctx.config.contextBudget !== false ? createBudgetScheduler(runtimeContextState, ctx) : null;
+  const modelRunner =
+    stages.model.implementation === 'staged'
+      ? createStagedModelRunner(ctx.modelTransport)
+      : createLegacyModelRunner(ctx.modelTransport);
+  const dispatcherDependencies = {
+    toolRuntime: ctx.toolRuntime,
+    checkPermission: ctx.checkPermission,
+    jailResolve: ctx.jailResolve,
+  };
   const toolDispatcher =
-    stages.tools.implementation === 'staged' ? createStagedToolDispatcher() : createLegacyToolDispatcher();
+    stages.tools.implementation === 'staged'
+      ? createStagedToolDispatcher(dispatcherDependencies)
+      : createLegacyToolDispatcher(dispatcherDependencies);
   const capabilityResolver =
     stages.capabilities.implementation === 'staged'
       ? createStagedCapabilityResolver()
       : createLegacyCapabilityResolver();
   const terminationPolicy =
     stages.termination.implementation === 'staged' ? createStagedTerminationPolicy() : createLegacyTerminationPolicy();
-  const trimmerInit = { historyManager, scheduler, contextState: runtimeContextState };
+  const trimmerInit = { historyManager, scheduler, contextState: runtimeContextState, runtime: ctx };
   const contextTrimmer =
     stages.context.implementation === 'staged'
       ? createStagedContextTrimmer(trimmerInit)
@@ -402,7 +422,7 @@ async function runAgentCoreLegacy(
           mode: ctx.getAgentMode(),
           toolsOverride: opts.toolsOverride,
           toolPolicy: policySnapshot,
-          defaultTools: planMode ? planChatTools : chatTools,
+          defaultTools: planMode ? runtimePlanToolSchemas : runtimeToolSchemas,
           runtimeAllowedToolNames: opts.runtimeAllowedToolNames,
           skillDisabledToolNames: getSkillRuntimeDisabledTools(),
           legacyDisabledToolNames: getRuntimeDisabledTools(),
@@ -1079,19 +1099,24 @@ async function runAgentCoreLegacy(
                   i++;
                   continue;
                 }
-                if (isParallelTool(currentCall.name)) {
+                if (isParallelTool(currentCall.name, ctx.toolRuntime)) {
                   // 收集连续只读组(≥1),并发执行:先渲染所有 header，再一次性启动所有
                   // (executeTool 调用即开始 I/O)，最后按原顺序逐个 await + 回灌。
                   // 必须先 header 后 execute：grep 等同步快速工具会在 executeTool 返回 Promise 前
                   // 已经完成；若先 started.map，用户只能在工具完成后才看到摘要与其前面的换行。
                   // 异步工具(web_fetch 等)并发跑、总耗时 ≈ 最慢一个;同步工具(glob/grep)map 时已顺序跑完,await 即返。
                   let j = i;
-                  while (j < calls.length && isParallelTool(calls[j].name) && !isToolDeniedForStep(calls[j].name)) j++;
+                  while (
+                    j < calls.length &&
+                    isParallelTool(calls[j].name, ctx.toolRuntime) &&
+                    !isToolDeniedForStep(calls[j].name)
+                  )
+                    j++;
                   const batch = calls.slice(i, j);
                   for (const tc of batch) hooks.onToolHeader?.(tc);
                   hooks.onToolStart?.(batch[0].name);
                   const started = batch.map((tc) =>
-                    executeToolOutcome(tc.name, tc.arguments, signal, {
+                    ctx.toolRuntime.executeToolOutcome(tc.name, tc.arguments, signal, {
                       callId: tc.id,
                       allowedToolNames: currentAllowedToolNames(),
                       delegation: delegationForOrchestrator(),
@@ -1131,17 +1156,17 @@ async function runAgentCoreLegacy(
                   hooks.onToolDone?.();
                   i = j;
                 } else if (
-                  isResourceLockedCall(currentCall) &&
-                  !(ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(currentCall.name))
+                  isResourceLockedCall(currentCall, ctx.toolRuntime) &&
+                  !(ctx.getAgentMode() === 'plan' && planDisabledTools.has(currentCall.name))
                 ) {
                   // 连续文件 mutation：权限确认仍严格按原序进行；全部 preflight 完成后再启动。
                   // 每个执行在 registry 内按 canonical path 获取锁，不同文件可并发，同文件别名会排队。
                   let j = i;
                   while (
                     j < calls.length &&
-                    isResourceLockedCall(calls[j]) &&
+                    isResourceLockedCall(calls[j], ctx.toolRuntime) &&
                     !isToolDeniedForStep(calls[j].name) &&
-                    !(ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(calls[j].name))
+                    !(ctx.getAgentMode() === 'plan' && planDisabledTools.has(calls[j].name))
                   )
                     j++;
                   const batch = calls.slice(i, j);
@@ -1155,11 +1180,11 @@ async function runAgentCoreLegacy(
                   for (let k = 0; k < batch.length; k++) {
                     const tc = batch[k];
                     const parsed = parseArgs(tc.arguments);
-                    const tool = findTool(tc.name);
+                    const tool = ctx.toolRuntime.findTool(tc.name);
                     const argumentsValid = tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
                     let denied: ToolOutcome | undefined;
                     if (tool && argumentsValid) {
-                      const perm = await checkPermission(tool, parsed ?? {}, signal, {
+                      const perm = await ctx.checkPermission(tool, parsed ?? {}, signal, {
                         prompt: opts.permissionPrompt,
                       });
                       emitTrace(
@@ -1191,13 +1216,13 @@ async function runAgentCoreLegacy(
                   const started = entries.map((entry) => {
                     if (entry.denied) return Promise.resolve(entry.denied);
                     const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
-                    return executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
+                    return ctx.toolRuntime.executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
                       callId: entry.tc.id,
                       allowedToolNames: currentAllowedToolNames(),
                       delegation: delegationForOrchestrator(),
                       ...(hint ? { argumentErrorHint: hint } : {}),
                       onLockAcquired: (lockedArgs) => {
-                        entry.diff = readDiffContext(entry.tc, lockedArgs);
+                        entry.diff = readDiffContext(entry.tc, lockedArgs, ctx.jailResolve);
                       },
                     });
                   });
@@ -1244,7 +1269,7 @@ async function runAgentCoreLegacy(
                   const tc = calls[i];
                   // plan 模式防御 backstop:schema 已剔除这些工具,正常不会进这里;防后端幻觉调用——
                   // 不执行,直接返错回灌(让模型看到「plan 模式禁用」并停止),绝不写盘 / 跑命令。
-                  if (ctx.getAgentMode() === 'plan' && getPlanDisabledTools().has(tc.name)) {
+                  if (ctx.getAgentMode() === 'plan' && planDisabledTools.has(tc.name)) {
                     hooks.onToolHeader?.(tc);
                     const err = `错误:计划模式下禁用工具 ${tc.name}(仅读探查,不改动文件 / 不跑命令)`;
                     const outcome: ToolOutcome = {
@@ -1264,10 +1289,10 @@ async function runAgentCoreLegacy(
                   // 权限预检查:在渲染 ● 头之前弹确认面板(体验:先问再执行,而非执行完再问)。
                   // 拒绝时只渲染拒绝结果,不渲染执行头;放行则继续走 header → start → executeTool 流程。
                   const parsed = parseArgs(tc.arguments);
-                  const tool = findTool(tc.name);
+                  const tool = ctx.toolRuntime.findTool(tc.name);
                   const argumentsValid = tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
                   if (tool && argumentsValid) {
-                    const perm = await checkPermission(tool, parsed ?? {}, signal, {
+                    const perm = await ctx.checkPermission(tool, parsed ?? {}, signal, {
                       prompt: opts.permissionPrompt,
                     });
                     emitTrace(
@@ -1303,17 +1328,17 @@ async function runAgentCoreLegacy(
                     }
                   }
                   hooks.onToolHeader?.(tc);
-                  const mutationParsed = isMutationTool(tc.name) ? parsed : null;
-                  let diff = readDiffContext(tc, mutationParsed);
+                  const mutationParsed = ctx.toolRuntime.isFileMutationTool(tc.name) ? parsed : null;
+                  let diff = readDiffContext(tc, mutationParsed, ctx.jailResolve);
                   hooks.onToolStart?.(tc.name);
                   const serialHint = argumentErrorHint(tc.name, runtimeContextState);
-                  const outcome = await executeToolOutcome(tc.name, tc.arguments, signal, {
+                  const outcome = await ctx.toolRuntime.executeToolOutcome(tc.name, tc.arguments, signal, {
                     callId: tc.id,
                     allowedToolNames: currentAllowedToolNames(),
                     delegation: delegationForOrchestrator(),
                     ...(serialHint ? { argumentErrorHint: serialHint } : {}),
                     onLockAcquired: (lockedArgs) => {
-                      if (mutationParsed) diff = readDiffContext(tc, lockedArgs);
+                      if (mutationParsed) diff = readDiffContext(tc, lockedArgs, ctx.jailResolve);
                     },
                   });
                   usageMeter.add(outcome.usage);
@@ -1520,12 +1545,15 @@ async function runAgentCoreLegacy(
  * remains the sole executor, so choosing staged cannot duplicate model calls or tool side effects.
  */
 export async function runAgentCore(opts: AgentRunOptions): Promise<AgentRunResult> {
+  const runtimeContext = opts.runtimeContext ?? defaultAgentRuntimeContext;
   const assembly = createAgentPipelineAssembly({
     pipeline: opts.pipeline,
     stageOverrides: opts.stageOverrides,
     runLegacy: runAgentCoreLegacy,
   });
-  return assembly.run(opts);
+  return withAgentRuntimeContext(runtimeContext, () =>
+    runtimeContext.runInScope(() => assembly.run({ ...opts, runtimeContext })),
+  );
 }
 
 // ── 导出共享辅助(主 agent 的 TUI hooks 实现要用)──────────────────────────

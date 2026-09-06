@@ -1,5 +1,5 @@
 import { maybeCompact } from '../../session/index.js';
-import type { ContextState } from '../../session/compact.js';
+import { defaultCompactionRuntime, type CompactionRuntime, type ContextState } from '../../session/compact.js';
 import type { BudgetScheduler } from '../../session/scheduler.js';
 import type { ContextTrimRequest, ContextTrimResult, ContextTrimmer, HistoryManager, TrimStats } from './contracts.js';
 
@@ -7,6 +7,7 @@ export interface ContextTrimmerInit {
   historyManager: HistoryManager;
   scheduler: BudgetScheduler | null;
   contextState: ContextState;
+  runtime?: CompactionRuntime;
 }
 
 class LegacyCompatibleContextTrimmer implements ContextTrimmer {
@@ -26,6 +27,7 @@ class LegacyCompatibleContextTrimmer implements ContextTrimmer {
         this.init.contextState,
         request.tools,
         request.signal,
+        this.init.runtime ?? defaultCompactionRuntime,
       ),
     );
     if (!result) return { kind: 'none', stats: {} };

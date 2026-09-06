@@ -1,15 +1,18 @@
 /** compactHistory 单元测试(从 scripts/core-tests/compact.test.ts 迁移到 node:test)。 */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { ChatMessage } from '../src/llm/index.js';
+import type { ChatMessage, ChatTransport } from '../src/llm/index.js';
 import {
   compactHistory,
   createContextState,
   extractProgressSnapshot,
   keyFactsBudgetChars,
   mergeKeyFacts,
+  maybeCompact,
   splitSummaryText,
+  type CompactionRuntime,
 } from '../src/session/compact.js';
+import { manualCompact } from '../src/session/scheduler.js';
 import { SUMMARY_KEYFACTS_MAX_CHARS, SUMMARY_KEYFACTS_MIN_CHARS } from '../src/tools/constants.js';
 import { appendTool, contentAt, system } from './helpers.js';
 
@@ -174,6 +177,60 @@ test('compactHistory 原地摘要并保持尾部 tool-call group 完整', async 
   assert.ok(!history.some((message) => (message as { tool_call_id?: string }).tool_call_id === 'old-read'));
   assertToolCallsHaveProducers(history);
   assert.equal(state.correction, 1);
+});
+
+test('automatic and manual compaction use the injected runtime config and transport', async () => {
+  const calls: Array<{ signal: AbortSignal | undefined; tools: unknown }> = [];
+  const transport: ChatTransport = async (_messages, _handlers, signal, tools) => {
+    calls.push({ signal, tools });
+    return { content: '## Completed\nruntime-local summary', toolCalls: [] };
+  };
+  const runtime: CompactionRuntime = {
+    config: {
+      contextWindowTokens: 100,
+      autoCompact: true,
+      contextBudget: true,
+      contextRelprune: false,
+      contextOptimize: false,
+    },
+    modelTransport: transport,
+  };
+  const controller = new AbortController();
+
+  const automatic = compactableHistory();
+  const automaticState = createContextState();
+  const automaticResult = await maybeCompact(
+    automatic.history,
+    {
+      layers: { history: { overBudget: true } },
+      totalOver: true,
+      rawTotal: 100,
+      window: 100,
+    },
+    undefined,
+    automaticState,
+    [],
+    controller.signal,
+    runtime,
+  );
+  assert.equal(automaticResult?.reason, 'summarize');
+
+  const manual = compactableHistory();
+  const manualState = createContextState();
+  const manualResult = await manualCompact(manual.history, undefined, {
+    force: true,
+    signal: controller.signal,
+    contextState: manualState,
+    activeTools: [],
+    runtime,
+  });
+  assert.equal(manualResult.compactDetail?.reason, 'summarize');
+  assert.equal(manualState.schedulerLog, manualResult);
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.equal(call.signal, controller.signal);
+    assert.deepEqual(call.tools, [], 'summary transport must never inherit the main request tool schemas');
+  }
 });
 
 test('压缩中 Ctrl+C:signal 透传摘要器,AbortError 冒泡而非降级微压缩', async () => {

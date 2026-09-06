@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import { runAgentCore, type AgentHooks, type ContentPart } from '../agent/core.js';
-import { setAgentMode } from '../agent/mode.js';
-import { buildBasePrompt, config } from '../config/index.js';
-import { refreshChatTools, estimateMessagesTokens, type ChatMessage } from '../llm/index.js';
+import { createAgentRuntimeContext, type AgentRuntimeContext } from '../agent/runtime-context.js';
+import { buildBasePrompt } from '../config/index.js';
+import { estimateMessagesTokens, type ChatMessage } from '../llm/index.js';
 import { initializeAllMcp, getMcpTools, getMcpWarnings, closeAllMcp } from '../mcp/index.js';
-import { setSandboxRoot } from '../sandbox/index.js';
 import {
   appendCurrentSessionTraceEvent,
   createContextState,
@@ -17,7 +16,6 @@ import { setCurrentSessionId } from '../session/state.js';
 import { manualCompact } from '../session/scheduler.js';
 import { effectiveSystemPrompt } from '../skills/index.js';
 import { clearSkillActivation } from '../skills/activation.js';
-import { registerToolsExtension } from '../tools/registry.js';
 import { ToolPolicyController } from '../tools/policy.js';
 import { routeToolGroups } from '../tools/router.js';
 import type { ToolRouteGroupName } from '../config/profiles.js';
@@ -32,6 +30,7 @@ interface ApprovalWaiter {
 }
 
 let initialized: Promise<void> | null = null;
+let runtimeContext: AgentRuntimeContext | null = null;
 let activeRun: { id: string; controller: AbortController } | null = null;
 let sessionId = '';
 let history: ChatMessage[] = [];
@@ -39,6 +38,11 @@ let queryHistory: string[] = [];
 let lastToolGroups: ToolRouteGroupName[] = [];
 let contextState = createContextState();
 const approvals = new Map<string, ApprovalWaiter>();
+
+function runtime(): AgentRuntimeContext {
+  if (!runtimeContext) throw new Error('Runtime is not initialized.');
+  return runtimeContext;
+}
 
 function write(envelope: HostEnvelope): void {
   process.stdout.write(`${JSON.stringify(envelope)}\n`);
@@ -53,15 +57,14 @@ function error(message: string, requestId?: string): void {
 async function initializeRuntime(): Promise<void> {
   if (initialized) return initialized;
   initialized = (async () => {
-    setSandboxRoot(process.cwd());
-    setAgentMode('auto');
     await initializeAllMcp();
-    registerToolsExtension('mcp', getMcpTools());
-    refreshChatTools();
+    runtimeContext = createAgentRuntimeContext({ sandboxRoot: process.cwd(), initialMode: 'auto' });
+    runtimeContext.toolRuntime.registerToolsExtension('mcp', getMcpTools());
+    const runtimeConfig = runtimeContext.config;
     emit('runtime_ready', {
-      projectRoot: process.cwd(),
-      provider: config.provider,
-      promptCache: config.provider === 'anthropic' && config.anthropicPromptCache,
+      projectRoot: runtimeContext.sandboxRoot,
+      provider: runtimeConfig.provider,
+      promptCache: runtimeConfig.provider === 'anthropic' && runtimeConfig.anthropicPromptCache,
       warnings: getMcpWarnings(),
     });
   })();
@@ -75,7 +78,7 @@ function systemMessage(): string {
 function createSession(): void {
   sessionId = newSessionId();
   setCurrentSessionId(sessionId, process.cwd());
-  setAgentMode('auto');
+  runtime().setAgentMode('auto');
   history = [{ role: 'system', content: systemMessage() }];
   queryHistory = [];
   lastToolGroups = [];
@@ -87,7 +90,7 @@ function restoreSession(id: string): boolean {
   if (!loaded?.history.length) return false;
   sessionId = loaded.id;
   setCurrentSessionId(sessionId, process.cwd());
-  setAgentMode('auto');
+  runtime().setAgentMode('auto');
   history = [...loaded.history];
   if (history[0]?.role === 'system') history[0] = { role: 'system', content: systemMessage() };
   else history.unshift({ role: 'system', content: systemMessage() });
@@ -162,8 +165,8 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
         sessionId,
         projectRoot: process.cwd(),
         resumed,
-        provider: config.provider,
-        promptCache: config.provider === 'anthropic' && config.anthropicPromptCache,
+        provider: runtime().config.provider,
+        promptCache: runtime().config.provider === 'anthropic' && runtime().config.anthropicPromptCache,
         attachments: command.attachments?.map((attachment) => attachment.name) ?? [],
       },
       command.id,
@@ -175,11 +178,14 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       planMode: false,
       attachmentNames: command.attachments?.map((attachment) => attachment.name),
       signal: controller.signal,
+      transport: runtime().modelTransport,
+      tools: runtime().toolRuntime.tools,
     });
     toolPolicy = new ToolPolicyController({
       groups: decision.groups,
       reason: decision.reason,
       confidence: decision.confidence,
+      tools: runtime().toolRuntime.tools,
     });
     lastToolGroups = toolPolicy.groupNames;
     const initialToolRoute = {
@@ -194,13 +200,14 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       planMode: false,
     };
     emit('tool_route', initialToolRoute, command.id);
-    const turnId = queryHistory.length;
+    const turnId = runtime().beginTurn(command.prompt.split('\n')[0]?.slice(0, 40) ?? command.prompt.slice(0, 40));
     const result = await runAgentCore({
       history,
       userInput,
       signal: controller.signal,
       hooks: hooksFor(command.id),
       contextState,
+      runtimeContext: runtime(),
       toolPolicy,
       initialToolRoute,
       traceContext: { sessionId, turnId },
@@ -217,10 +224,10 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
         terminationReason: result.terminationReason,
         changedFiles: result.changedFiles ?? [],
         usage: result.usage,
-        provider: config.provider,
-        promptCache: config.provider === 'anthropic' && config.anthropicPromptCache,
+        provider: runtime().config.provider,
+        promptCache: runtime().config.provider === 'anthropic' && runtime().config.anthropicPromptCache,
         usagePercent: Math.round(contextUsagePercent() * 100),
-        contextWindow: config.contextWindowTokens,
+        contextWindow: runtime().config.contextWindowTokens,
       },
       command.id,
     );
@@ -264,7 +271,7 @@ function cancel(command: Extract<HostCommand, { type: 'cancel' }>): void {
 function contextUsagePercent(): number {
   const dialog = history.filter((m) => m.role !== 'system');
   const est = estimateMessagesTokens(dialog);
-  return Math.min(1, est / config.contextWindowTokens);
+  return Math.min(1, est / runtime().config.contextWindowTokens);
 }
 
 async function compact(command: Extract<HostCommand, { type: 'compact' }>): Promise<void> {
@@ -273,7 +280,20 @@ async function compact(command: Extract<HostCommand, { type: 'compact' }>): Prom
     await initializeRuntime();
     if (!sessionId) createSession();
     emit('status', { value: 'compacting' }, command.id);
-    const log = await manualCompact(history, command.focus, { force: true });
+    const activeRuntime = runtime();
+    const log = await manualCompact(history, command.focus, {
+      force: true,
+      contextState,
+      activeTools: activeRuntime.toolRuntime.tools.map((tool) => ({
+        type: 'function' as const,
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        },
+      })),
+      runtime: activeRuntime,
+    });
     saveSession(history, sessionId, queryHistory, lastToolGroups);
     const pct = contextUsagePercent();
     emit(
@@ -283,7 +303,7 @@ async function compact(command: Extract<HostCommand, { type: 'compact' }>): Prom
         beforeTokens: log.compactDetail?.estimateBefore,
         afterTokens: log.compactDetail?.estimateAfter,
         usagePercent: Math.round(pct * 100),
-        contextWindow: config.contextWindowTokens,
+        contextWindow: runtime().config.contextWindowTokens,
       },
       command.id,
     );

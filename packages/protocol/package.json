@@ -1,0 +1,32 @@
+{
+  "name": "@mocode/protocol",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./host": {
+      "types": "./src/host.ts",
+      "default": "./dist/host.js"
+    },
+    "./runtime": {
+      "types": "./src/runtime.ts",
+      "default": "./dist/runtime.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

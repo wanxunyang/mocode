@@ -1,7 +1,7 @@
-import { setAgentMode } from '../../src/agent/mode.js';
+import { defaultAgentRuntimeContext, type AgentRuntimeContext } from '../../src/agent/runtime-context.js';
 import { buildBasePrompt, isMemoryEnabled } from '../../src/config/index.js';
 import type { ToolRouteGroupName } from '../../src/config/profiles.js';
-import { refreshChatTools, type ChatMessage } from '../../src/llm/index.js';
+import { type ChatMessage } from '../../src/llm/index.js';
 import { buildMemoryIndexSection } from '../../src/memory/index.js';
 import { setCurrentSessionId } from '../../src/session/state.js';
 import { clearSkillActivation } from '../../src/skills/activation.js';
@@ -20,6 +20,7 @@ export interface CodingEvalTurnAssembly {
 
 export interface CodingEvalTurnDependencies {
   route?: (request: ToolRouteRequest) => Promise<ToolRouteDecision>;
+  runtimeContext?: AgentRuntimeContext;
 }
 
 /** Build the exact AUTO-mode system prefix sent by the coding benchmark. */
@@ -37,11 +38,10 @@ export async function assembleCodingEvalTurn(
   systemPrompt = buildCodingEvalSystemPrompt(),
   dependencies: CodingEvalTurnDependencies = {},
 ): Promise<CodingEvalTurnAssembly> {
-  setAgentMode('auto');
+  const runtimeContext = dependencies.runtimeContext ?? defaultAgentRuntimeContext;
+  runtimeContext.setAgentMode('auto');
   setCurrentSessionId(CODING_EVAL_SESSION_ID, process.cwd());
   clearSkillActivation();
-  // Keep the legacy chat-tool arrays initialized for any nested/compatibility path. The main turn uses toolPolicy below.
-  refreshChatTools();
 
   const previousGroups: ToolRouteGroupName[] = [];
   const decision = await (dependencies.route ?? routeToolGroups)({
@@ -49,11 +49,14 @@ export async function assembleCodingEvalTurn(
     previousGroups,
     planMode: false,
     signal,
+    transport: runtimeContext.modelTransport,
+    tools: runtimeContext.toolRuntime.tools,
   });
   const toolPolicy = new ToolPolicyController({
     groups: decision.groups,
     reason: decision.reason,
     confidence: decision.confidence,
+    tools: runtimeContext.toolRuntime.tools,
   });
   const initialToolRoute = {
     policyId: toolPolicy.id,

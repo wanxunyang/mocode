@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { Tool, ToolRisk } from '../tools/types.js';
 import { promptIntervention, type InterventionResult } from '../ui/intervention.js';
 import { config } from '../config/index.js';
+import type { Config } from '../config/index.js';
 import { readConfigFile, updateConfigKey } from '../config/file.js';
 import { getSandboxRoot } from '../sandbox/index.js';
 import { t } from '../i18n/index.js';
@@ -172,13 +173,22 @@ function matches(grant: PermissionGrant, tool: string, fingerprint: string, proj
   );
 }
 
-export async function checkPermission(
+export type PermissionChecker = (
+  tool: Tool,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+  options?: PermissionCheckOptions,
+) => Promise<'allow' | 'deny'>;
+
+async function checkPermissionWithSessionGrants(
+  runtimeConfig: Pick<Config, 'permissionEnabled' | 'permissionNonInteractiveAllow'>,
+  runtimeSessionGrants: PermissionGrant[],
   tool: Tool,
   args: Record<string, unknown>,
   signal?: AbortSignal,
   options: PermissionCheckOptions = {},
 ): Promise<'allow' | 'deny'> {
-  if (!config.permissionEnabled || getToolRisk(tool) === 'safe') return 'allow';
+  if (!runtimeConfig.permissionEnabled || getToolRisk(tool) === 'safe') return 'allow';
   if (signal?.aborted) return 'deny';
 
   loadPermanent();
@@ -196,12 +206,12 @@ export async function checkPermission(
   const fingerprint = permissionFingerprint(tool, args);
   const projectRoot = canonicalProjectRoot(options.projectRoot ?? getSandboxRoot() ?? process.cwd());
   if (!forceOnce) {
-    if (sessionGrants.some((grant) => matches(grant, tool.name, fingerprint, projectRoot))) return 'allow';
+    if (runtimeSessionGrants.some((grant) => matches(grant, tool.name, fingerprint, projectRoot))) return 'allow';
     if (permanentGrants.some((grant) => matches(grant, tool.name, fingerprint, projectRoot))) return 'allow';
   }
 
   // CI/pipes must fail closed. Operators can deliberately restore unattended behavior.
-  if (!process.stdin.isTTY && !config.permissionNonInteractiveAllow && !options.prompt) return 'deny';
+  if (!process.stdin.isTTY && !runtimeConfig.permissionNonInteractiveAllow && !options.prompt) return 'deny';
   if (signal?.aborted) return 'deny';
 
   const onceOption = t('permission.allow');
@@ -243,7 +253,7 @@ export async function checkPermission(
   if (signal?.aborted || result.action === 'cancelled' || result.value === denyOption) return 'deny';
 
   if (result.value === sessionOption) {
-    sessionGrants.push({ tool: tool.name, fingerprint, scope: 'session' });
+    runtimeSessionGrants.push({ tool: tool.name, fingerprint, scope: 'session' });
   } else if (result.value === projectOption) {
     const grant: PermissionGrant = { tool: tool.name, fingerprint, scope: 'project', projectRoot };
     permanentGrants = permanentGrants.filter((item) => !matches(item, tool.name, fingerprint, projectRoot));
@@ -254,6 +264,40 @@ export async function checkPermission(
     if (options.persistProjectGrant !== false) savePermanent();
   }
   return 'allow';
+}
+
+/** 兼容入口：显式 config 仍共享进程级 session grants。 */
+export function checkPermissionWithConfig(
+  runtimeConfig: Pick<Config, 'permissionEnabled' | 'permissionNonInteractiveAllow'>,
+  tool: Tool,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+  options: PermissionCheckOptions = {},
+): Promise<'allow' | 'deny'> {
+  return checkPermissionWithSessionGrants(runtimeConfig, sessionGrants, tool, args, signal, options);
+}
+
+/** 为独立 RuntimeContext 创建私有 session grants；项目/永久授权仍按原语义进程共享。 */
+export function createPermissionChecker(
+  runtimeConfig: Pick<Config, 'permissionEnabled' | 'permissionNonInteractiveAllow'>,
+  defaultProjectRoot: string,
+): PermissionChecker {
+  const runtimeSessionGrants: PermissionGrant[] = [];
+  return (tool, args, signal, options = {}) =>
+    checkPermissionWithSessionGrants(runtimeConfig, runtimeSessionGrants, tool, args, signal, {
+      ...options,
+      projectRoot: options.projectRoot ?? defaultProjectRoot,
+    });
+}
+
+/** 默认兼容入口：继续读取进程级 config。独立 RuntimeContext 使用 checkPermissionWithConfig。 */
+export function checkPermission(
+  tool: Tool,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+  options: PermissionCheckOptions = {},
+): Promise<'allow' | 'deny'> {
+  return checkPermissionWithConfig(config, tool, args, signal, options);
 }
 
 export function revokePermanentAllow(toolName: string, fingerprint?: string): void {
