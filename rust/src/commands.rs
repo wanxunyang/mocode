@@ -48,7 +48,11 @@ impl SlashCommand {
             children: &[],
         }
     }
-    const fn branch(name: &'static str, desc: &'static str, children: &'static [SlashCommand]) -> Self {
+    const fn branch(
+        name: &'static str,
+        desc: &'static str,
+        children: &'static [SlashCommand],
+    ) -> Self {
         Self {
             name,
             desc,
@@ -165,24 +169,13 @@ pub struct MenuItem {
 }
 
 /// 菜单状态。由 `App` 持有，渲染层据此画向上展开的菜单行。
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SlashMenu {
     pub open: bool,
     pub filtered: Vec<MenuItem>,
     pub selected: usize,
     /// 菜单窗口顶部在 filtered 中的索引。
     pub top: usize,
-}
-
-impl Default for SlashMenu {
-    fn default() -> Self {
-        Self {
-            open: false,
-            filtered: Vec::new(),
-            selected: 0,
-            top: 0,
-        }
-    }
 }
 
 /// 菜单最多可见行数（向上展开进内容区底）。
@@ -304,16 +297,20 @@ impl SlashMenu {
         // 回到父级：去掉末尾的 ` name `
         let trimmed = prefix.trim_end();
         // 去掉最后一个 name 段
-        let parent = trimmed.rsplit_once(' ').map(|(p, _)| p).unwrap_or("").to_string();
+        let parent = trimmed
+            .rsplit_once(' ')
+            .map(|(p, _)| p)
+            .unwrap_or("")
+            .to_string();
         Some(parent)
     }
 
     /// 渲染菜单行（预计算带色文本，由调用方贴入内容区底）。
     /// 对齐 TS `menuLines()`：选中项 cyan+bold + ▸，未选中项 dim。
     pub fn render_lines(&self, cols: usize) -> Vec<ratatui::text::Line<'static>> {
+        use crate::wrap::{display_width, truncate_width};
         use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
-        use crate::wrap::{display_width, truncate_width};
 
         if !self.open || self.filtered.is_empty() {
             return Vec::new();
@@ -325,7 +322,9 @@ impl SlashMenu {
 
         let max_name = window
             .iter()
-            .map(|item| display_width(item.node.name) + if item.node.children.is_empty() { 0 } else { 2 })
+            .map(|item| {
+                display_width(item.node.name) + if item.node.children.is_empty() { 0 } else { 2 }
+            })
             .max()
             .unwrap_or(0);
 
@@ -335,7 +334,11 @@ impl SlashMenu {
             .map(|(i, item)| {
                 let global_idx = self.top + i;
                 let is_sel = global_idx == self.selected;
-                let branch_suffix = if item.node.children.is_empty() { "" } else { " ›" };
+                let branch_suffix = if item.node.children.is_empty() {
+                    ""
+                } else {
+                    " ›"
+                };
                 let name_str = format!("{}{}", item.node.name, branch_suffix);
                 let padded = {
                     let w = display_width(&name_str);
@@ -362,12 +365,16 @@ impl SlashMenu {
 
                 let marker_str = if is_sel { "▸" } else { " " };
                 let style = if is_sel {
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     theme::dim()
                 };
                 let marker_style = if is_sel {
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };

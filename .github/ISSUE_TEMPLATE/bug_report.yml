@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a reproducible Mocode defect
+title: '[Bug]: '
+labels: ['bug']
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - CLI / TUI
+        - Agent / model provider
+        - Tools / permissions / sandbox
+        - Session / rollback / memory
+        - Coding eval
+        - Upgrade / installation
+        - work-app (Electron)
+        - pet-app (Electron)
+        - Rust TUI (Experimental)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version and installation method
+      placeholder: 'mocode-ai 1.4.2 via npm, npx, or source checkout'
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS build, Node/npm, terminal and shell, window size, install cwd/sandbox root, provider/model name. Never include API keys.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Numbered steps and smallest input/project that reproduces the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and last visible status
+      description: Include whether Ctrl+C worked and whether an approval/model/tool was pending.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Optional stderr, session ID, or minimal trace excerpt. Remove secrets, private paths/source, prompts and user data.
+      render: shell
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy checklist
+      options:
+        - label: I removed API keys, Authorization headers, URL query secrets and tokens.
+          required: true
+        - label: I did not upload an entire config, session, trace, private repository, or user document.
+          required: true

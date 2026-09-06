@@ -30,7 +30,10 @@ pub struct Row {
 
 impl Row {
     pub fn plain(line: Line<'static>) -> Self {
-        Self { line, bubble: false }
+        Self {
+            line,
+            bubble: false,
+        }
     }
     pub fn bubble(line: Line<'static>) -> Self {
         Self { line, bubble: true }
@@ -42,7 +45,11 @@ impl Row {
 /// 在 `wrap_lines` 之上多做一件事:`bubble` 行按 `width` 补满底色。这与 TS 的顺序一致
 /// —— TS 先把整行 pad 到 cols 再交给 content buffer 折行,所以气泡的**每一条**视觉行
 /// 都是满宽底色,而不是只有最后一行。
-pub fn wrap_rows(rows: &[Row], width: usize, bubble_bg: ratatui::style::Color) -> Vec<Line<'static>> {
+pub fn wrap_rows(
+    rows: &[Row],
+    width: usize,
+    bubble_bg: ratatui::style::Color,
+) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::with_capacity(rows.len());
     for row in rows {
         if !row.bubble {
@@ -355,7 +362,7 @@ mod tests {
         // (要么截断字符丢内容,要么接受超宽 —— 后者是唯一不丢信息的选择)。
         // 真实终端宽度恒 ≥ 2,故不变量的有效域就是 [2, +∞)。
         for width in 2..=20usize {
-            let out = wrap_lines(&[line.clone()], width);
+            let out = wrap_lines(std::slice::from_ref(&line), width);
             for l in &out {
                 assert!(
                     line_width_of(l) <= width,
@@ -472,7 +479,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn hard_break_preserves_span_styles() {
         let line = Line::from(vec![
@@ -499,12 +505,17 @@ mod tests {
     #[test]
     fn count_rows_matches_wrap_lines() {
         // count_rows 用于预留输入框高度,必须与真实折行行数逐例一致。
-        for text in ["", "a", "a\nb", "a\n", "中文中文中文", "abc\n中文abc", "a\n\n\nb"] {
+        for text in [
+            "",
+            "a",
+            "a\nb",
+            "a\n",
+            "中文中文中文",
+            "abc\n中文abc",
+            "a\n\n\nb",
+        ] {
             for width in 3..=12usize {
-                let logical = Line::from(vec![
-                    Span::from("❯ "),
-                    Span::from(text.to_string()),
-                ]);
+                let logical = Line::from(vec![Span::from("❯ "), Span::from(text.to_string())]);
                 let expect = wrap_lines(&[logical], width).len();
                 assert_eq!(
                     count_rows(text, width, 2),

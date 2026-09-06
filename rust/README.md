@@ -1,7 +1,14 @@
-# rust/ — mocode 的 Rust TUI 前端(增量重构路径 A)
+# rust/ — 实验性 Rust TUI 前端
 
-> 本目录**已被 `.gitignore` 忽略**,是独立于 TS 主工程的实验区。
-> 目标是验证「用 Rust 重写 TUI 前端」的可行性,**TS 侧代码零改动**。
+> **状态：Experimental · 非生产关键路径 · 当前不发布**
+>
+> **Owner：`@wanxunyang` · 晋升/归档截止：2026-10-31**
+>
+> 决策与退出条件见 [ADR-0001](../docs/adr/0001-multi-stack-status-and-rust-gate.md) 和 [技术栈状态](../docs/architecture/stack-status.md)。
+
+本 crate 已受 Git 跟踪；仅 `rust/target*` 构建产物被忽略。它用于验证“Rust TUI 是否能以可量化性能收益替代部分前端职责”，不实现 Agent、工具、权限、session 等核心逻辑，也不进入 `mocode-ai` 默认构建或发布链。
+
+决策日前只接受现有功能/安全修复、CI/测试/协议工作和指标采集。没有 Owner、milestone 与闸门指标的新产品功能不应合并；到期未满足全部晋升条件时按 ADR 归档。
 
 ## 它是什么
 
@@ -32,7 +39,7 @@ npm run build
 cd rust
 cargo build --release
 
-# 3. 运行(须在项目根目录启动,沙箱 root 取 cwd)
+# 3. 运行实验 TUI
 cd ..
 ./rust/target/release/mocode-tui
 
@@ -40,8 +47,9 @@ cd ..
 cargo run --release --manifest-path rust/Cargo.toml
 ```
 
-产物:`target/release/mocode-tui.exe`,**849 KB 单文件**,`strip` 过,无外部 DLL 依赖
-(除系统库)。
+> 当前 Host 定位仍可能从 `mocode-ai` 安装位置推导工作目录；“从任意用户项目 cwd 启动且 sandbox root 正确”是 ADR-0001 的晋升条件，尚未完成。不要把本实验当作生产 CLI 的安全边界。
+
+产物示例：`target/release/mocode-tui.exe`。实际大小和系统依赖应以当前平台的 CI/构建记录为准，不把单机历史结果作为发布承诺。
 
 ### Windows + 无 MSVC / 无 MinGW 的环境(本机实测)
 
@@ -204,8 +212,17 @@ Rust 侧缺字段走默认值、未知事件落到 `HostEvent::Unknown` 进诊�
 cd rust && cargo test
 ```
 
-覆盖 `wrap.rs`(折行宽度不变量、逐宽度扫描 + 中日韩宽字符 + 样式保持、光标定位一致性)
-与 `ipc.rs`(verbatim 前缀剥离)。**12 个测试全绿。**
+覆盖 `wrap.rs`（折行宽度不变量、逐宽度扫描、中日韩宽字符、样式保持、光标定位一致性）与 `ipc.rs`（verbatim 前缀剥离）。提交前还必须运行：
+
+```bash
+cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+cargo clippy --manifest-path rust/Cargo.toml --all-targets --locked -- -D warnings
+cargo test --manifest-path rust/Cargo.toml --locked
+cargo build --manifest-path rust/Cargo.toml --release --locked
+cargo run --manifest-path rust/Cargo.toml --locked --example smoke
+```
+
+默认 smoke 不调用模型；`--full` 会调用真实后端，不属于普通 CI。部分 render 测试在 Host 不可用时会跳过，因此 `cargo test` 不能替代 Host smoke。
 
 ## 冒烟测试:验证协议真的通
 

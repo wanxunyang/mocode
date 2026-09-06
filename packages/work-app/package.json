@@ -11,11 +11,15 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/node": "22.0.0",
     "electron": "43.0.0",
-    "typescript": "5.7.2",
-    "@types/node": "22.0.0"
+    "typescript": "5.7.2"
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@mocode/runtime": "0.1.0",
+    "dotenv": "16.0.0"
   }
 }

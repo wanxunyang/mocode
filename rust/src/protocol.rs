@@ -279,7 +279,10 @@ impl HostEvent {
 // 协议字段缺失/类型漂移时返回默认值而非 panic —— TUI 绝不能因为一个字段就白屏。
 
 fn str_at(v: &Value, key: &str) -> String {
-    v.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+    v.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn bool_at(v: &Value, key: &str) -> bool {

@@ -1,11 +1,17 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, shell } from 'electron';
-import { spawn, execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import {
+  AgentHostClient,
+  resolveMocodeHostLaunchSpec,
+  type HostCommand,
+  type HostEnvelope,
+} from '@mocode/runtime/host';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
@@ -182,65 +188,6 @@ function switchModel(name: string): { ok: boolean; message: string; model?: Mode
 }
 
 
-/**
- * 解析用来跑 Agent Host 的 node 可执行文件。
- *
- * 背景:Electron 自带的 node(ELECTRON_RUN_AS_NODE 模式)内嵌的 fetch/undici 在处理
- * OpenAI 兼容的流式响应(SSE chunked)时会提前抛 "Premature close" —— LLM 明明正常返回了
- * 文本,流却被 Electron 的网络栈判为异常断开,导致 host emit run_failed,任务永远跑不完一轮。
- *
- * 用系统 node(v18+)跑同一个 host 则完整跑通(已对照验证)。因此优先探测系统 node;
- * 找不到才 fallback 回 Electron 自带 node,并经 host_log 告知用户——后者可能遭遇流式中断。
- *
- * 探测顺序:env 覆盖 → which/where → 常见安装路径 → process.execPath(fallback)。
- * 缓存首次结果:resolveHostNode 在一个 app 生命周期内最多探测一次。
- */
-let hostNodeCache: { exe: string; isElectron: boolean } | null = null;
-function resolveHostNode(): { exe: string; isElectron: boolean } {
-  if (hostNodeCache) return hostNodeCache;
-  const tryPaths: string[] = [];
-  if (process.env.MOCODE_HOST_NODE) tryPaths.push(process.env.MOCODE_HOST_NODE);
-  tryPaths.push('node'); // PATH 上的 node(which/where)
-  if (process.platform === 'win32') {
-    tryPaths.push('C:\\Program Files\\nodejs\\node.exe', 'D:\\nodejs\\node.exe');
-    const local = path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'node.exe');
-    tryPaths.push(local);
-    // WorkBuddy 托管的 Node.js（PATH 上不一定有，需要显式探测）
-    const wbNodeDir = path.join(os.homedir(), '.workbuddy', 'binaries', 'node', 'versions');
-    try {
-      if (existsSync(wbNodeDir)) {
-        const versions = readdirSync(wbNodeDir).filter((d) => /^\d/.test(d)).sort().reverse();
-        for (const v of versions) {
-          const wbExe = path.join(wbNodeDir, v, 'node.exe');
-          if (existsSync(wbExe)) tryPaths.push(wbExe);
-        }
-      }
-    } catch { /* skip */ }
-  } else {
-    tryPaths.push('/usr/local/bin/node', '/usr/bin/node', '/opt/homebrew/bin/node');
-  }
-  for (const candidate of tryPaths) {
-    try {
-      // 对 'node'(无路径)用 execFileSync -v 探测 PATH;对绝对路径直接 existsSync。
-      if (candidate === 'node') {
-        const version = execFileSync(candidate, ['-v'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 4000 }).trim();
-        if (/^v(\d+)\./.test(version) && Number(RegExp.$1) >= 18) {
-          hostNodeCache = { exe: candidate, isElectron: false };
-          return hostNodeCache;
-        }
-      } else if (existsSync(candidate)) {
-        const version = execFileSync(candidate, ['-v'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 4000 }).trim();
-        if (/^v(\d+)\./.test(version) && Number(RegExp.$1) >= 18) {
-          hostNodeCache = { exe: candidate, isElectron: false };
-          return hostNodeCache;
-        }
-      }
-    } catch { /* 该候选不可用,继续 */ }
-  }
-  hostNodeCache = { exe: process.execPath, isElectron: true };
-  return hostNodeCache;
-}
-
 function runCommand(root: string, executable: string, args: string[]): Promise<CommandResult> {
   return new Promise((resolve) => execFile(executable, args, { cwd: root, windowsHide: true, maxBuffer: 1_024 * 1_024 }, (error, stdout, stderr) => {
     resolve({ ok: !error, stdout: String(stdout).trim(), stderr: String(stderr).trim() });
@@ -364,7 +311,7 @@ async function pullRequests(project: Project): Promise<Record<string, unknown>> 
   catch { return { available: false, message: 'GitHub CLI 返回了无法读取的数据。' }; }
 }
 
-function updateTaskFromAgent(envelope: Record<string, unknown>): void {
+function updateTaskFromAgent(envelope: HostEnvelope): void {
   const requestId = typeof envelope.requestId === 'string' ? envelope.requestId : activeTaskId ?? undefined;
   const task = taskById(requestId);
   if (!task) return;
@@ -386,109 +333,111 @@ function updateTaskFromAgent(envelope: Record<string, unknown>): void {
 }
 
 class LocalAgent {
-  private child: ReturnType<typeof spawn> | null = null;
-  private buffer = '';
+  private readonly client = new AgentHostClient();
   private currentProject: Project | null = null;
   private starting: Promise<void> | null = null;
-  // host 连续崩超过这个次数就不再自动重启,避免配置错误时刷屏 + 死循环
   private crashStreak = 0;
   private static MAX_CRASH_STREAK = 3;
 
+  constructor() {
+    this.client.onEvent((envelope) => this.receive(envelope));
+    this.client.onDiagnostic((message) =>
+      this.receive({ type: 'event', event: 'host_log', payload: { message } }),
+    );
+    this.client.onExit(({ code, expected }) => {
+      this.receive({ type: 'event', event: 'host_exit', payload: { code } });
+      const project = this.currentProject;
+      if (!expected && project && this.crashStreak < LocalAgent.MAX_CRASH_STREAK) {
+        this.crashStreak += 1;
+        void this.start(project);
+      }
+    });
+  }
+
   /** 当前 host 进程所在的工作目录 id（普通任务是 __scratch__），用于避免不必要的重启。 */
-  get projectId(): string | null { return this.currentProject?.id ?? null; }
+  get projectId(): string | null {
+    return this.currentProject?.id ?? null;
+  }
 
   async start(project: Project): Promise<void> {
     this.currentProject = project;
-    // 每次切换项目 / 启动 host 前,把 mocode 配置回填到 process.env(host 通过 {...process.env} 继承)。
     const { loaded, missing } = loadMocodeConfig(project.root);
     if (loaded.length) {
-      pushRenderer('work:agent-event', { type: 'event', event: 'host_log', payload: { message: `[mocode-work] 已加载 mocode 配置: ${loaded.join(', ')}` } });
+      this.receive({
+        type: 'event',
+        event: 'host_log',
+        payload: { message: `[mocode-work] 已加载 mocode 配置: ${loaded.join(', ')}` },
+      });
     }
     if (missing.length) {
-      pushRenderer('work:agent-event', { type: 'event', event: 'host_log', payload: { message: `[mocode-work] mocode 配置缺少 ${missing.join(', ')}，请先在终端跑 mocode /model 配好模型再启动任务。` } });
-    }
-
-    this.stop();
-    const hostFile = process.env.MOCODE_HOST_PATH ?? path.resolve(__dirname, '..', '..', '..', 'dist', 'host', 'stdio.js');
-    if (!existsSync(hostFile)) {
-      this.crashStreak = LocalAgent.MAX_CRASH_STREAK;
-      return this.receive({ type: 'error', error: `Agent Host 未构建：${hostFile}` });
-    }
-    const hostNode = resolveHostNode();
-    const hostEnv: NodeJS.ProcessEnv = { ...process.env, NODE_NO_WARNINGS: '1' };
-    if (hostNode.isElectron) hostEnv.ELECTRON_RUN_AS_NODE = '1';
-    pushRenderer('work:agent-event', { type: 'event', event: 'host_log', payload: { message: hostNode.isElectron ? `[mocode-work] 未找到系统 node，用 Electron 内置 node 跑 host —— 流式响应可能中途断开，建议安装 Node.js ≥18。` : `[mocode-work] 用系统 node 跑 host：${hostNode.exe}` } });
-    const child = spawn(hostNode.exe, [hostFile], {
-      cwd: project.root, windowsHide: true, env: hostEnv, stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    this.child = child;
-    this.starting = new Promise<void>((resolve) => {
-      let settled = false;
-      const settle = (): void => { if (settled) return; settled = true; resolve(); };
-      child.stdout?.setEncoding('utf8');
-      child.stdout?.on('data', (chunk: string) => { this.read(chunk); settle(); });
-      child.stderr?.setEncoding('utf8');
-      child.stderr?.on('data', (message: string) => this.receive({ type: 'event', event: 'host_log', payload: { message } }));
-      child.once('exit', (code) => {
-        this.receive({ type: 'event', event: 'host_exit', payload: { code } });
-        this.child = null;
-        settle();
-        // host 崩了:如果项目还在,就静默拉一个,避免下次 send 又回 "尚未就绪"
-        if (this.currentProject && this.crashStreak < LocalAgent.MAX_CRASH_STREAK) {
-          this.crashStreak += 1;
-          this.start(this.currentProject).catch(() => undefined);
-        }
+      this.receive({
+        type: 'event',
+        event: 'host_log',
+        payload: { message: `[mocode-work] mocode 配置缺少 ${missing.join(', ')}，请先在终端跑 mocode /model 配好模型再启动任务。` },
       });
+    }
+
+    let spec;
+    try {
+      spec = resolveMocodeHostLaunchSpec();
+    } catch (cause) {
+      this.crashStreak = LocalAgent.MAX_CRASH_STREAK;
+      this.receive({ type: 'error', error: cause instanceof Error ? cause.message : String(cause) });
+      return;
+    }
+    this.receive({
+      type: 'event',
+      event: 'host_log',
+      payload: {
+        message: spec.usesElectronNode
+          ? '[mocode-work] 未找到系统 node，用 Electron 内置 node 跑 host —— 流式响应可能中途断开，建议安装 Node.js ≥18。'
+          : `[mocode-work] 用系统 node 跑 host：${spec.command}`,
+      },
     });
+    const starting = this.client.start(spec, {
+      cwd: project.root,
+      env: { ...process.env, NODE_NO_WARNINGS: '1' },
+    });
+    this.starting = starting;
+    try {
+      await starting;
+    } catch (cause) {
+      this.receive({ type: 'error', error: cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      if (this.starting === starting) this.starting = null;
+    }
   }
 
-  /** 等到 host 的 stdout 至少有首个 chunk(说明子进程已就绪并进入 readline 循环),或者已退出。 */
-  async waitReady(): Promise<void> {
-    if (this.starting) await this.starting;
-  }
-
-  async send(value: Record<string, unknown>): Promise<void> {
-    if (!this.child?.stdin?.writable) {
-      // host 没起 / 死了:有项目就拉一个,等就绪后再写
-      if (this.currentProject) {
-        if (this.crashStreak >= LocalAgent.MAX_CRASH_STREAK) {
-          this.receive({ type: 'error', error: 'Agent Host 连续崩溃，已停止自动重启。请在终端确认 mocode 配置后重试。' });
-          return;
-        }
-        await this.start(this.currentProject);
-      } else {
+  async send(value: HostCommand): Promise<void> {
+    if (!this.client.isRunning) {
+      const project = this.currentProject;
+      if (!project) {
         this.receive({ type: 'error', error: 'Agent Host 尚未就绪。' });
         return;
       }
+      if (this.crashStreak >= LocalAgent.MAX_CRASH_STREAK) {
+        this.receive({ type: 'error', error: 'Agent Host 连续崩溃，已停止自动重启。请在终端确认 mocode 配置后重试。' });
+        return;
+      }
+      await this.start(project);
     }
-    await this.waitReady();
-    if (!this.child?.stdin?.writable) {
-      this.receive({ type: 'error', error: 'Agent Host 尚未就绪。' });
-      return;
+    if (this.starting) await this.starting.catch(() => undefined);
+    if (!this.client.isRunning) return;
+    try {
+      await this.client.send(value);
+      this.crashStreak = 0;
+    } catch (cause) {
+      this.receive({ type: 'error', error: cause instanceof Error ? cause.message : String(cause) });
     }
-    this.crashStreak = 0; // 成功写入 stdin 说明 host 还活着,重置崩溃计数
-    this.child.stdin.write(`${JSON.stringify(value)}\n`);
   }
 
   stop(): void {
-    this.child?.kill();
-    this.child = null;
+    this.currentProject = null;
     this.starting = null;
-    this.buffer = '';
+    void this.client.stop();
   }
 
-  private read(chunk: string): void {
-    this.buffer += chunk;
-    let newline = this.buffer.indexOf('\n');
-    while (newline >= 0) {
-      const line = this.buffer.slice(0, newline).trim();
-      this.buffer = this.buffer.slice(newline + 1);
-      if (line) { try { this.receive(JSON.parse(line) as Record<string, unknown>); } catch { this.receive({ type: 'error', error: `Agent Host 输出格式错误：${line}` }); } }
-      newline = this.buffer.indexOf('\n');
-    }
-  }
-
-  private receive(envelope: Record<string, unknown>): void {
+  private receive(envelope: HostEnvelope): void {
     if (envelope.type === 'event') updateTaskFromAgent(envelope);
     pushRenderer('work:agent-event', envelope);
   }
@@ -723,7 +672,7 @@ function installIpc(): void {
   ipcMain.on('work:agent-send', (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' ? value.id : randomUUID();
     if (value.type === 'run') { activeTaskId = id; const task = taskById(id); if (task) { task.status = 'running'; task.updatedAt = new Date().toISOString(); saveState(); broadcastState(); } }
-    void agent?.send({ ...value, id });
+    void agent?.send({ ...value, id } as HostCommand);
   });
 }
 

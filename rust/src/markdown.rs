@@ -367,7 +367,9 @@ fn render_table(header: &[String], rows: &[Vec<String>]) -> Vec<Line<'static>> {
         }
         spans.push(Span::styled(
             pad(cell, widths[i]),
-            Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     out.push(Line::from(spans));
@@ -382,7 +384,7 @@ fn render_table(header: &[String], rows: &[Vec<String>]) -> Vec<Line<'static>> {
     // 数据行
     for row in rows {
         let mut spans = vec![Span::styled("  ", Style::default())];
-        for i in 0..cols {
+        for (i, width) in widths.iter().enumerate().take(cols) {
             if i > 0 {
                 spans.push(Span::styled(" │ ", theme::dim()));
             }
@@ -390,7 +392,7 @@ fn render_table(header: &[String], rows: &[Vec<String>]) -> Vec<Line<'static>> {
             // 单元格内容本身可带内联样式(如 `code`),但要先补齐宽度再解析会破坏对齐,
             // 故这里按纯文本对齐 —— 表格里的强调标记按字面量显示。
             spans.push(Span::styled(
-                pad(cell, widths[i]),
+                pad(cell, *width),
                 Style::default().fg(theme::TEXT),
             ));
         }
@@ -506,7 +508,11 @@ fn parse_inline(chars: &[char], base: Style, out: &mut Vec<Span<'static>>) {
             if let Some(close) = find_char(chars, '*', i + 1) {
                 if close > i + 1 {
                     flush!();
-                    parse_inline(&chars[i + 1..close], base.add_modifier(Modifier::ITALIC), out);
+                    parse_inline(
+                        &chars[i + 1..close],
+                        base.add_modifier(Modifier::ITALIC),
+                        out,
+                    );
                     i = close + 1;
                     continue;
                 }
@@ -782,8 +788,10 @@ mod tests {
         assert!(t[2].contains('1') && t[2].contains('2'));
         // 列宽对齐:表头与数据行的分隔符落在同一列。
         assert_eq!(
-            t[0].find('│').map(|_| display_width(&t[0][..t[0].find('│').unwrap()])),
-            t[2].find('│').map(|_| display_width(&t[2][..t[2].find('│').unwrap()])),
+            t[0].find('│')
+                .map(|_| display_width(&t[0][..t[0].find('│').unwrap()])),
+            t[2].find('│')
+                .map(|_| display_width(&t[2][..t[2].find('│').unwrap()])),
         );
     }
 

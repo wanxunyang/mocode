@@ -54,9 +54,14 @@ pub struct DiffLine {
 /// 折叠后的正文单元:连续不变行会被压成一条 `Ellipsis`。
 #[derive(Clone, Debug)]
 enum Item {
-    Line { op: Op, text: String },
+    Line {
+        op: Op,
+        text: String,
+    },
     /// `count` 行不变被折叠。
-    Ellipsis { count: usize },
+    Ellipsis {
+        count: usize,
+    },
 }
 
 /// 文件改动的种类。
@@ -81,7 +86,11 @@ pub fn render_file_change(
     new_text: &str,
     start_line: usize,
 ) -> Vec<Line<'static>> {
-    let verb = if old_text.is_none() { "Create" } else { "Update" };
+    let verb = if old_text.is_none() {
+        "Create"
+    } else {
+        "Update"
+    };
     let mut out = vec![head_line(verb, path)];
 
     // 新建:整个文件都是新增行,不需要跑 LCS。
@@ -121,7 +130,9 @@ fn head_line(verb: &str, path: &str) -> Line<'static> {
         Span::styled("  ", Style::default()),
         Span::styled(
             verb.to_string(),
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("(", theme::dim()),
         Span::styled(path.to_string(), Style::default().fg(theme::ACCENT)),

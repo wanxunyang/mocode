@@ -1,0 +1,58 @@
+name: Feature request
+description: Propose a scoped, verifiable improvement
+title: '[Feature]: '
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and user scenario
+      description: Describe the problem, not only the desired implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome and acceptance criteria
+      description: Give observable, testable criteria.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals and alternatives considered
+    validations:
+      required: true
+  - type: dropdown
+    id: stack
+    attributes:
+      label: Primary stack
+      options:
+        - TypeScript CLI / Runtime
+        - work-app (Electron, Incubating)
+        - pet-app (Electron, Optional)
+        - Rust TUI (Experimental)
+        - Protocol / multiple stacks
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility, security and privacy impact
+      description: Note protocol/config/session/public API changes and migration needs.
+    validations:
+      required: true
+  - type: textarea
+    id: governance
+    attributes:
+      label: Owner, milestone and exit criteria for new maintenance surface
+      description: Required for Rust, Electron, a new package, provider or technology stack.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I checked the stack status and existing ADRs.
+          required: true
+        - label: This request does not depend on importing another package's src/ or internal dist/ layout.
+          required: true

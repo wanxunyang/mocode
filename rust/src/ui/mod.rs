@@ -111,7 +111,11 @@ fn banner_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let label_w = labels.iter().map(|l| display_width(l)).max().unwrap_or(4) + 2;
     let value_w = width.saturating_sub(LOGO_W + label_w);
 
-    let memory_label = if app.memory_enabled { "开启" } else { "关闭" };
+    let memory_label = if app.memory_enabled {
+        "开启"
+    } else {
+        "关闭"
+    };
     let memory_style = if app.memory_enabled {
         Style::default().fg(theme::ACCENT)
     } else {
@@ -128,7 +132,10 @@ fn banner_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         title,
         Line::from(vec![
             Span::styled(pad_end(labels[0], label_w), theme::banner_label()),
-            Span::styled(truncate_width(app.display_model(), value_w), theme::banner_value()),
+            Span::styled(
+                truncate_width(app.display_model(), value_w),
+                theme::banner_value(),
+            ),
         ]),
         Line::from(vec![
             Span::styled(pad_end(labels[1], label_w), theme::banner_label()),
@@ -208,7 +215,6 @@ fn draw_content(f: &mut Frame, app: &mut App, area: Rect, prefix: Vec<Line<'stat
     }
 }
 
-
 // ────────────────────────────── 脚栏 ──────────────────────────────
 
 fn footer_height(input_rows: u16, total_h: u16) -> u16 {
@@ -266,7 +272,9 @@ fn draw_status_line(f: &mut Frame, app: &mut App, area: Rect) {
         "●".to_string()
     };
     let symbol_style = if app.running {
-        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD)
     } else {
         theme::status_dot()
     };
@@ -327,7 +335,10 @@ fn draw_model_line(f: &mut Frame, app: &mut App, area: Rect) {
 
     if !app.mode_tag.is_empty() {
         let tag = app.mode_tag.clone();
-        left_spans.push(Span::styled(tag.clone(), Style::default().fg(theme::ACCENT)));
+        left_spans.push(Span::styled(
+            tag.clone(),
+            Style::default().fg(theme::ACCENT),
+        ));
         left_w += display_width(&tag);
 
         let hint = " Shift+Tab 切换";
@@ -349,7 +360,10 @@ fn draw_model_line(f: &mut Frame, app: &mut App, area: Rect) {
     let ctx_bar = context_bar(app.usage_percent, app.context_window);
     let cwd = truncate_width(&app.project_root, 40);
     let right_spans: Vec<Span<'static>> = vec![
-        Span::styled(ctx_bar.clone(), Style::default().fg(usage_color(app.usage_percent))),
+        Span::styled(
+            ctx_bar.clone(),
+            Style::default().fg(usage_color(app.usage_percent)),
+        ),
         Span::styled("  ", Style::default()),
         Span::styled(cwd, theme::dim()),
     ];
@@ -358,7 +372,10 @@ fn draw_model_line(f: &mut Frame, app: &mut App, area: Rect) {
     let min_gap = 2usize;
     let mut spans = left_spans;
     if left_w + right_w + min_gap <= width {
-        spans.push(Span::styled(" ".repeat(width - left_w - right_w), Style::default()));
+        spans.push(Span::styled(
+            " ".repeat(width - left_w - right_w),
+            Style::default(),
+        ));
         spans.extend(right_spans);
     } else {
         // 太窄:优先保留右段(context/cwd),左段截断。
@@ -379,7 +396,10 @@ fn draw_model_line(f: &mut Frame, app: &mut App, area: Rect) {
         }
         let used: usize = trimmed.iter().map(|s| display_width(&s.content)).sum();
         if used + right_w < width {
-            trimmed.push(Span::styled(" ".repeat(width - used - right_w), Style::default()));
+            trimmed.push(Span::styled(
+                " ".repeat(width - used - right_w),
+                Style::default(),
+            ));
         }
         trimmed.extend(right_spans);
         spans = trimmed;
@@ -449,7 +469,10 @@ fn draw_separator(f: &mut Frame, area: Rect) {
     }
     let line = "─".repeat(area.width as usize);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(line, Style::default().fg(theme::ACCENT)))),
+        Paragraph::new(Line::from(Span::styled(
+            line,
+            Style::default().fg(theme::ACCENT),
+        ))),
         area,
     );
 }
@@ -458,12 +481,7 @@ fn draw_separator(f: &mut Frame, area: Rect) {
 
 /// 斜杠菜单作为浮层向上展开到内容区底部,不受输入框高度限制。
 /// 对齐 TS `promptWithSlashMenu`:菜单行覆盖在内容区上、输入框上方。
-fn draw_slash_menu_overlay(
-    f: &mut Frame,
-    app: &mut App,
-    _full_area: Rect,
-    chunks: &[Rect],
-) {
+fn draw_slash_menu_overlay(f: &mut Frame, app: &mut App, _full_area: Rect, chunks: &[Rect]) {
     let term_w = f.area().width as usize;
     if term_w == 0 {
         return;
@@ -571,7 +589,6 @@ fn draw_input_body(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-
 // ────────────────────────────── 审批浮层 ──────────────────────────────
 
 fn draw_approval(f: &mut Frame, app: &mut App, area: Rect) {
@@ -592,7 +609,9 @@ fn draw_approval(f: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .title(Span::styled(
             format!(" {title} "),
-            Style::default().fg(theme::WARN).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::WARN)
+                .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(theme::STATUS_BG));
     let inner = block.inner(popup);
@@ -611,14 +630,13 @@ fn draw_approval(f: &mut Frame, app: &mut App, area: Rect) {
     for (i, opt) in options.iter().enumerate() {
         let marker = if i == selected { "▸" } else { " " };
         let style = if i == selected {
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD)
         } else {
             theme::dim()
         };
-        lines.push(Line::from(Span::styled(
-            format!("{marker} {opt}"),
-            style,
-        )));
+        lines.push(Line::from(Span::styled(format!("{marker} {opt}"), style)));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -632,7 +650,9 @@ fn draw_approval(f: &mut Frame, app: &mut App, area: Rect) {
 // ────────────────────────────── 诊断浮层 ──────────────────────────────
 
 fn draw_diagnostics(f: &mut Frame, app: &mut App, area: Rect) {
-    let box_h = (area.height * 40 / 100).max(5).min(area.height.saturating_sub(2));
+    let box_h = (area.height * 40 / 100)
+        .max(5)
+        .min(area.height.saturating_sub(2));
     let box_w = area.width.saturating_sub(4).max(20);
     let popup = centered_rect(box_w, box_h, area);
 
@@ -641,7 +661,9 @@ fn draw_diagnostics(f: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .title(Span::styled(
             " agent-host 诊断(stderr) ",
-            Style::default().fg(theme::WARN).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::WARN)
+                .add_modifier(Modifier::BOLD),
         ))
         .style(Style::default().bg(theme::STATUS_BG));
     let inner = block.inner(popup);

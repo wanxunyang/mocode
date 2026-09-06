@@ -10,10 +10,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
-    name: Typecheck, lint, and test
+  stack:
+    name: Build / ${{ matrix.stack }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [typescript, electron, rust]
 
     steps:
       - name: Checkout repository
@@ -24,15 +28,76 @@ jobs:
         with:
           node-version: 22.12.0
           cache: npm
+          cache-dependency-path: package-lock.json
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install workspace dependencies
+        run: npm ci --ignore-scripts
 
-      - name: Typecheck
+      - name: Set up Rust
+        if: matrix.stack == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+
+      - name: Build TypeScript CLI, protocol, and runtime
+        if: matrix.stack == 'typescript' || matrix.stack == 'rust'
+        run: npm run build
+
+      - name: Typecheck TypeScript
+        if: matrix.stack == 'typescript'
         run: npm run typecheck
 
-      - name: Lint
+      - name: Lint TypeScript
+        if: matrix.stack == 'typescript'
         run: npm run lint:check
 
-      - name: Test
+      - name: Test TypeScript
+        if: matrix.stack == 'typescript'
         run: npm test
+
+      - name: Run offline eval smoke
+        if: matrix.stack == 'typescript'
+        run: npm run eval:smoke
+
+      - name: Build public runtime boundary
+        if: matrix.stack == 'electron'
+        run: npm run build
+
+      - name: Check Electron package boundaries
+        if: matrix.stack == 'electron'
+        run: npm run check:electron-boundary
+
+      - name: Typecheck and build work-app
+        if: matrix.stack == 'electron'
+        run: npm run typecheck --workspace mocode-work && npm run build --workspace mocode-work
+
+      - name: Typecheck and build pet-app
+        if: matrix.stack == 'electron'
+        run: npm run typecheck --workspace mocode-pet-app && npm run build --workspace mocode-pet-app
+
+      - name: Smoke public Runtime/Host boundary
+        if: matrix.stack == 'electron'
+        run: npm run smoke:runtime-host
+
+      - name: Check Rust formatting
+        if: matrix.stack == 'rust'
+        run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+
+      - name: Lint Rust
+        if: matrix.stack == 'rust'
+        run: cargo clippy --manifest-path rust/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: Test Rust
+        if: matrix.stack == 'rust'
+        run: cargo test --manifest-path rust/Cargo.toml --locked
+
+      - name: Build Rust release binary
+        if: matrix.stack == 'rust'
+        run: cargo build --manifest-path rust/Cargo.toml --release --locked
+
+      - name: Smoke Rust/TypeScript Host protocol
+        if: matrix.stack == 'rust'
+        env:
+          MOCODE_HOST: ${{ github.workspace }}/bin/mocode-agent-host.js
+        run: cargo run --manifest-path rust/Cargo.toml --locked --example smoke

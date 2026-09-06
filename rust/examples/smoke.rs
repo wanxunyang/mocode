@@ -88,7 +88,10 @@ fn main() -> anyhow::Result<()> {
         unreachable!("已用 matches! 过滤")
     };
 
-    println!("\n[runtime_ready] 收到于 +{:.1}s", t0.elapsed().as_secs_f32());
+    println!(
+        "\n[runtime_ready] 收到于 +{:.1}s",
+        t0.elapsed().as_secs_f32()
+    );
     println!("  project_root : {project_root}");
     println!("  provider     : {provider}");
     println!("  prompt_cache : {prompt_cache}");
@@ -147,7 +150,10 @@ fn run_one_turn(host: &ipc::AgentHost) -> anyhow::Result<()> {
 
     while !done {
         if Instant::now() > deadline {
-            bail!("150s 内未收到 run_completed(已收到正文 {} 字)", text.chars().count());
+            bail!(
+                "150s 内未收到 run_completed(已收到正文 {} 字)",
+                text.chars().count()
+            );
         }
         let Some(msg) = host.recv_timeout(Duration::from_millis(500)) else {
             continue;
@@ -202,7 +208,9 @@ fn run_one_turn(host: &ipc::AgentHost) -> anyhow::Result<()> {
                 }
                 HostEvent::RunFailed { message } => bail!("run_failed: {message}"),
                 // 权限审批:本 prompt 不该触发,真触发就取消掉,避免流程悬挂。
-                HostEvent::ApprovalRequested { approval_id, title, .. } => {
+                HostEvent::ApprovalRequested {
+                    approval_id, title, ..
+                } => {
                     println!("  [approval] {title} → 自动取消");
                     host.send(HostCommand::Approval {
                         id: host.next_id(),

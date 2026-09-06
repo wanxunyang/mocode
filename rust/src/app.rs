@@ -40,19 +40,10 @@ use crate::wrap::Row;
 
 /// 从项目根 `.env` 读几个展示用配置项(模型名、记忆开关)。
 /// 与 TS 侧 config 单例不同,这里只读用于 UI 展示,不参与业务。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UiConfig {
     pub model: String,
     pub memory_enabled: bool,
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        Self {
-            model: String::new(),
-            memory_enabled: false,
-        }
-    }
 }
 
 impl UiConfig {
@@ -474,8 +465,11 @@ impl App {
             .map(|i| i + 1)
             .unwrap_or(0);
         let remove_bytes = self.byte_at(self.cursor) - line_start;
-        let remove_chars = self.input[line_start..line_start + remove_bytes].chars().count();
-        self.input.replace_range(line_start..line_start + remove_bytes, "");
+        let remove_chars = self.input[line_start..line_start + remove_bytes]
+            .chars()
+            .count();
+        self.input
+            .replace_range(line_start..line_start + remove_bytes, "");
         self.cursor -= remove_chars;
         self.recompute_menu();
     }
@@ -639,9 +633,7 @@ impl App {
             .map(|i| i + 1)
             .unwrap_or(0);
         self.cursor = self.input[..line_start].chars().count()
-            + self.input[line_start..byte_pos]
-                .char_indices()
-                .count();
+            + self.input[line_start..byte_pos].char_indices().count();
     }
 
     /// End / Ctrl+E:移到行尾。
@@ -675,7 +667,11 @@ impl App {
                 }
             }
             // 叶子:用补全后的命令文本替换输入,继续走下方斜杠命令处理。
-            self.input = self.slash_menu.apply_selected().map(|(t, _)| t).unwrap_or(raw.clone());
+            self.input = self
+                .slash_menu
+                .apply_selected()
+                .map(|(t, _)| t)
+                .unwrap_or(raw.clone());
             self.slash_menu.close();
         }
 
@@ -714,7 +710,9 @@ impl App {
         let id = self.host.next_id();
         let session = self.session_id.clone();
 
-        self.entries.push(Entry::User { text: prompt.clone() });
+        self.entries.push(Entry::User {
+            text: prompt.clone(),
+        });
         self.entries.push(Entry::Blank);
         self.content_dirty = true;
         self.input.clear();
@@ -760,7 +758,9 @@ impl App {
 
         // ── /help ──
         if cmd == "help" || cmd == "h" || cmd == "?" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.show_help();
             self.content_dirty = true;
@@ -778,7 +778,9 @@ impl App {
             self.entries.clear();
             self.tool_index.clear();
             self.pending_batch = None;
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.entries.push(Entry::System {
                 text: "历史已清空".to_string(),
@@ -791,7 +793,9 @@ impl App {
 
         // ── /context ──
         if cmd == "context" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.show_context();
             self.content_dirty = true;
@@ -800,7 +804,9 @@ impl App {
 
         // ── /compact [focus] ──
         if cmd == "compact" || cmd.starts_with("compact ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             // `/compact 保留接口约定` 的焦点要透传给 agent-host,不能丢。
             let focus = cmd
@@ -821,7 +827,9 @@ impl App {
 
         // ── /plan /auto /mode ──
         if cmd == "plan" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.mode_tag = "Plan".to_string();
             self.entries.push(Entry::System {
@@ -833,7 +841,9 @@ impl App {
             return;
         }
         if cmd == "auto" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.mode_tag = "Auto".to_string();
             self.entries.push(Entry::System {
@@ -845,7 +855,9 @@ impl App {
             return;
         }
         if cmd == "mode" || cmd == "mode plan" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.mode_tag = "Plan".to_string();
             self.entries.push(Entry::System {
@@ -857,7 +869,9 @@ impl App {
             return;
         }
         if cmd == "mode auto" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.mode_tag = "Auto".to_string();
             self.entries.push(Entry::System {
@@ -871,7 +885,9 @@ impl App {
 
         // ── /skills ── 列出已发现的 skill 目录
         if cmd == "skills" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.list_skills();
             self.content_dirty = true;
@@ -880,7 +896,9 @@ impl App {
 
         // ── /skill <name> [args] ── 转发给 agent-host 作为普通 prompt
         if cmd == "skill" || cmd.starts_with("skill ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.forward_to_agent(&full_cmd);
             return;
@@ -892,7 +910,9 @@ impl App {
         // 下一条消息发出去时随 Run 一起带上。
         if let Some(rest) = cmd.strip_prefix("resume ") {
             let id = rest.trim();
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.resume_session(id);
             self.content_dirty = true;
@@ -901,7 +921,9 @@ impl App {
 
         // ── /sessions /resume ── 列出已保存会话
         if cmd == "sessions" || cmd == "resume" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.list_sessions(cmd == "sessions");
             self.content_dirty = true;
@@ -910,7 +932,9 @@ impl App {
 
         // ── /memory [overview|toggle|on|off|status|reflect] ──
         if cmd == "memory" || cmd.starts_with("memory ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.handle_memory(cmd);
             self.content_dirty = true;
@@ -919,7 +943,9 @@ impl App {
 
         // ── /fe [on|off|status] / /frontend ──
         if cmd == "fe" || cmd.starts_with("fe ") || cmd == "frontend" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.handle_feature_toggle("fe", cmd);
             self.content_dirty = true;
@@ -928,7 +954,9 @@ impl App {
 
         // ── /subagent [on|off|status] ──
         if cmd == "subagent" || cmd.starts_with("subagent ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.handle_feature_toggle("subagent", cmd);
             self.content_dirty = true;
@@ -937,7 +965,9 @@ impl App {
 
         // ── /model [configure|switch|list|show|use|delete] ──
         if cmd == "model" || cmd.starts_with("model ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.handle_model(cmd);
             self.content_dirty = true;
@@ -946,7 +976,9 @@ impl App {
 
         // ── /init ── 转发 init prompt 给 agent（TS 同款 fall-through）
         if cmd == "init" {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.forward_to_agent("你是一个专业代码助手。请扫描当前项目目录，生成 AGENTS.md 项目记忆文件，包含：项目概述、构建/测试命令、目录结构、代码约定、扩展点。");
             return;
@@ -954,7 +986,9 @@ impl App {
 
         // ── /image [attach <path>|list|clear] ──
         if cmd == "image" || cmd.starts_with("image ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.handle_image(cmd);
             self.content_dirty = true;
@@ -963,7 +997,9 @@ impl App {
 
         // ── /theme ──
         if cmd == "theme" || cmd.starts_with("theme ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.entries.push(Entry::System {
                 text: "Rust TUI 暂不支持运行时切换主题。当前固定使用 orange 主题（深暖棕黑底 + 南瓜橙）。".to_string(),
@@ -976,10 +1012,13 @@ impl App {
 
         // ── /pet [toggle|skin|quit] ──
         if cmd == "pet" || cmd.starts_with("pet ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.entries.push(Entry::System {
-                text: "Rust TUI 不支持桌宠。请使用 TS 版 mocode (`npm start`) 使用桌宠功能。".to_string(),
+                text: "Rust TUI 不支持桌宠。请使用 TS 版 mocode (`npm start`) 使用桌宠功能。"
+                    .to_string(),
                 tone: Tone::Warn,
             });
             self.entries.push(Entry::Blank);
@@ -989,10 +1028,13 @@ impl App {
 
         // ── /language [zh-CN|en] ──
         if cmd == "language" || cmd.starts_with("language ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.entries.push(Entry::System {
-                text: "Rust TUI 固定使用中文界面。如需英文，请使用 TS 版 mocode (`npm start`)。".to_string(),
+                text: "Rust TUI 固定使用中文界面。如需英文，请使用 TS 版 mocode (`npm start`)。"
+                    .to_string(),
                 tone: Tone::Warn,
             });
             self.entries.push(Entry::Blank);
@@ -1002,7 +1044,9 @@ impl App {
 
         // ── /upgrade [now|check|status] ──
         if cmd == "upgrade" || cmd.starts_with("upgrade ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.entries.push(Entry::System {
                 text: "升级请使用 npm: `npm update -g mocode-ai` 或 `npm run build`。Rust TUI 不支持自动升级。".to_string(),
@@ -1015,7 +1059,9 @@ impl App {
 
         // ── /rollback ──
         if cmd == "rollback" || cmd.starts_with("rollback ") {
-            self.entries.push(Entry::User { text: full_cmd.clone() });
+            self.entries.push(Entry::User {
+                text: full_cmd.clone(),
+            });
             self.entries.push(Entry::Blank);
             self.entries.push(Entry::System {
                 text: "回滚轮次需要交互式菜单选择，Rust TUI 暂不支持。请使用 TS 版 mocode (`npm start`) 使用 /rollback。".to_string(),
@@ -1027,7 +1073,9 @@ impl App {
         }
 
         // ── 未知命令 ──
-        self.entries.push(Entry::User { text: full_cmd.clone() });
+        self.entries.push(Entry::User {
+            text: full_cmd.clone(),
+        });
         self.entries.push(Entry::Blank);
         self.entries.push(Entry::System {
             text: format!("未知命令 /{cmd}"),
@@ -1082,9 +1130,13 @@ impl App {
         let mut found: Vec<(String, String)> = Vec::new(); // (name, origin)
 
         for dir in &dirs {
-            let origin = if dir.contains(".claude") { "user(claude)" }
-                else if dir.ends_with(".mocode/skills") || dir.ends_with(".mocode\\skills") { "project" }
-                else { "user" };
+            let origin = if dir.contains(".claude") {
+                "user(claude)"
+            } else if dir.ends_with(".mocode/skills") || dir.ends_with(".mocode\\skills") {
+                "project"
+            } else {
+                "user"
+            };
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
@@ -1130,7 +1182,8 @@ impl App {
         if let Ok(env) = std::env::var("SKILLS_DIRS") {
             if !env.trim().is_empty() {
                 let delim = if cfg!(windows) { ';' } else { ':' };
-                return env.split(delim)
+                return env
+                    .split(delim)
                     .map(|d| d.trim().to_string())
                     .filter(|d| !d.is_empty())
                     .collect();
@@ -1138,11 +1191,17 @@ impl App {
         }
 
         // 2. 默认三目录:~/.claude/skills → ~/.mocode/skills → <cwd>/.mocode/skills
-        if let Some(home) = std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok()) {
+        if let Some(home) = std::env::var("HOME")
+            .ok()
+            .or_else(|| std::env::var("USERPROFILE").ok())
+        {
             dirs.push(format!("{}/.claude/skills", home.replace('\\', "/")));
             dirs.push(format!("{}/.mocode/skills", home.replace('\\', "/")));
         }
-        dirs.push(format!("{}/.mocode/skills", self.project_root.replace('\\', "/")));
+        dirs.push(format!(
+            "{}/.mocode/skills",
+            self.project_root.replace('\\', "/")
+        ));
 
         dirs
     }
@@ -1166,7 +1225,11 @@ impl App {
                     continue;
                 }
 
-                let id = if is_file { name_str.trim_end_matches(".json") } else { name_str };
+                let id = if is_file {
+                    name_str.trim_end_matches(".json")
+                } else {
+                    name_str
+                };
                 // 会话 id 形如 `YYYYMMDD-HHMMSS`:只含数字与 `-`,且至少 8 位。
                 // 目录里的其它内容(notes.md、临时文件等)据此排除。
                 let digits = id.chars().filter(char::is_ascii_digit).count();
@@ -1193,11 +1256,15 @@ impl App {
                         } else {
                             let hist = v.get("history").and_then(|h| h.as_array());
                             hist.and_then(|arr| {
-                                arr.iter().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                                arr.iter()
+                                    .find(|m| {
+                                        m.get("role").and_then(|r| r.as_str()) == Some("user")
+                                    })
                                     .and_then(|m| m.get("content"))
                                     .and_then(|c| c.as_str())
                                     .map(|s| s.chars().take(60).collect::<String>())
-                            }).unwrap_or_default()
+                            })
+                            .unwrap_or_default()
                         }
                     } else {
                         String::new()
@@ -1223,7 +1290,15 @@ impl App {
             });
         } else {
             self.entries.push(Entry::System {
-                text: format!("已保存会话 ({}{}):", sessions.len(), if !all && sessions.len() == 10 { ", 仅最近 10 条" } else { "" }),
+                text: format!(
+                    "已保存会话 ({}{}):",
+                    sessions.len(),
+                    if !all && sessions.len() == 10 {
+                        ", 仅最近 10 条"
+                    } else {
+                        ""
+                    }
+                ),
                 tone: Tone::Accent,
             });
             for (id, preview) in &sessions {
@@ -1299,25 +1374,46 @@ impl App {
                 let mem_dir = format!("{}/.mocode/memory", self.project_root.replace('\\', "/"));
                 let mut count = 0;
                 if let Ok(entries) = std::fs::read_dir(&mem_dir) {
-                    count = entries.filter(|e| {
-                        e.as_ref().ok()
-                            .and_then(|e| e.file_name().to_str().map(|s| s.to_string()))
-                            .map(|s| s.ends_with(".md"))
-                            .unwrap_or(false)
-                    }).count();
+                    count = entries
+                        .filter(|e| {
+                            e.as_ref()
+                                .ok()
+                                .and_then(|e| e.file_name().to_str().map(|s| s.to_string()))
+                                .map(|s| s.ends_with(".md"))
+                                .unwrap_or(false)
+                        })
+                        .count();
                 }
                 self.entries.push(Entry::System {
                     text: format!("记忆库: {} 个文件  目录: {}", count, mem_dir),
                     tone: Tone::Info,
                 });
                 self.entries.push(Entry::System {
-                    text: format!("记忆子系统: {}", if self.memory_enabled { "已开启" } else { "已关闭" }),
-                    tone: if self.memory_enabled { Tone::Success } else { Tone::Dim },
+                    text: format!(
+                        "记忆子系统: {}",
+                        if self.memory_enabled {
+                            "已开启"
+                        } else {
+                            "已关闭"
+                        }
+                    ),
+                    tone: if self.memory_enabled {
+                        Tone::Success
+                    } else {
+                        Tone::Dim
+                    },
                 });
             }
             "status" => {
                 self.entries.push(Entry::System {
-                    text: format!("记忆子系统: {}", if self.memory_enabled { "已开启" } else { "已关闭" }),
+                    text: format!(
+                        "记忆子系统: {}",
+                        if self.memory_enabled {
+                            "已开启"
+                        } else {
+                            "已关闭"
+                        }
+                    ),
                     tone: Tone::Info,
                 });
                 self.entries.push(Entry::System {
@@ -1378,7 +1474,12 @@ impl App {
             }
             "on" | "off" => {
                 self.entries.push(Entry::System {
-                    text: format!("{}开关需修改 .env 的 {}={} 并重启 mocode", label, env_key, if sub == "on" { "true" } else { "false" }),
+                    text: format!(
+                        "{}开关需修改 .env 的 {}={} 并重启 mocode",
+                        label,
+                        env_key,
+                        if sub == "on" { "true" } else { "false" }
+                    ),
                     tone: Tone::Warn,
                 });
             }
@@ -1406,7 +1507,14 @@ impl App {
                     tone: Tone::Info,
                 });
                 self.entries.push(Entry::System {
-                    text: format!("  Provider: {}", if self.provider.is_empty() { "(未知)" } else { &self.provider }),
+                    text: format!(
+                        "  Provider: {}",
+                        if self.provider.is_empty() {
+                            "(未知)"
+                        } else {
+                            &self.provider
+                        }
+                    ),
                     tone: Tone::Info,
                 });
                 self.entries.push(Entry::System {
@@ -1416,7 +1524,15 @@ impl App {
             }
             "show" => {
                 self.entries.push(Entry::System {
-                    text: format!("模型: {}  Provider: {}", self.display_model(), if self.provider.is_empty() { "(未知)" } else { &self.provider }),
+                    text: format!(
+                        "模型: {}  Provider: {}",
+                        self.display_model(),
+                        if self.provider.is_empty() {
+                            "(未知)"
+                        } else {
+                            &self.provider
+                        }
+                    ),
                     tone: Tone::Info,
                 });
             }
@@ -1507,7 +1623,7 @@ impl App {
             }
             _ => {
                 self.entries.push(Entry::System {
-                    text: format!("用法: /image attach <路径> | /image list | /image clear"),
+                    text: "用法: /image attach <路径> | /image list | /image clear".to_string(),
                     tone: Tone::Dim,
                 });
             }
@@ -1522,13 +1638,18 @@ impl App {
             return Err(format!("文件不存在: {}", path));
         }
         let data = std::fs::read(&p).map_err(|e| format!("读取失败: {}", e))?;
-        let name = p.file_name()
+        let name = p
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("image")
             .to_string();
 
         // 检测 MIME
-        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
         let mime = match ext.as_str() {
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
@@ -1540,11 +1661,19 @@ impl App {
 
         // base64 编码
         const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut encoded = String::with_capacity((data.len() + 2) / 3 * 4);
+        let mut encoded = String::with_capacity(data.len().div_ceil(3) * 4);
         for chunk in data.chunks(3) {
             let b0 = chunk[0] as usize;
-            let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-            let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+            let b1 = if chunk.len() > 1 {
+                chunk[1] as usize
+            } else {
+                0
+            };
+            let b2 = if chunk.len() > 2 {
+                chunk[2] as usize
+            } else {
+                0
+            };
             encoded.push(CHARS[b0 >> 2] as char);
             encoded.push(CHARS[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
             if chunk.len() > 1 {
@@ -1598,10 +1727,7 @@ impl App {
         let pct = self.usage_percent;
         let window = self.context_window;
         let current = window * pct as u64 / 100;
-        let text = format!(
-            "上下文: {} / {} tokens ({}%)",
-            current, window, pct
-        );
+        let text = format!("上下文: {} / {} tokens ({}%)", current, window, pct);
         self.entries.push(Entry::System {
             text,
             tone: Tone::Info,
@@ -1710,10 +1836,15 @@ impl App {
 
     fn on_event(&mut self, event: HostEvent) -> bool {
         match event {
-            HostEvent::RuntimeReady { provider, warnings, .. } => {
+            HostEvent::RuntimeReady {
+                provider, warnings, ..
+            } => {
                 self.provider = provider;
                 for w in warnings {
-                    self.entries.push(Entry::System { text: w, tone: Tone::Warn });
+                    self.entries.push(Entry::System {
+                        text: w,
+                        tone: Tone::Warn,
+                    });
                 }
                 true
             }
@@ -1743,7 +1874,11 @@ impl App {
                 }
                 true
             }
-            HostEvent::ToolStarted { id, name, arguments } => {
+            HostEvent::ToolStarted {
+                id,
+                name,
+                arguments,
+            } => {
                 self.on_tool_started(id, name, arguments);
                 true
             }
@@ -1781,7 +1916,9 @@ impl App {
 
                 // 文件变更概览 —— TS `writeChangeOverview`(带尾部空行)。
                 if !changed_files.is_empty() {
-                    self.entries.push(Entry::ChangeOverview { files: changed_files });
+                    self.entries.push(Entry::ChangeOverview {
+                        files: changed_files,
+                    });
                     self.entries.push(Entry::Blank);
                 }
 
@@ -1807,7 +1944,10 @@ impl App {
                 self.running = false;
                 self.status = RunStatus::Idle;
                 self.turn_start = None;
-                self.entries.push(Entry::System { text: message, tone: Tone::Error });
+                self.entries.push(Entry::System {
+                    text: message,
+                    tone: Tone::Error,
+                });
                 self.entries.push(Entry::Blank);
                 true
             }
@@ -1846,11 +1986,19 @@ impl App {
                     _ if compacted => "压缩完成".to_string(),
                     _ => "无需压缩".to_string(),
                 };
-                self.entries.push(Entry::System { text, tone: Tone::Success });
+                self.entries.push(Entry::System {
+                    text,
+                    tone: Tone::Success,
+                });
                 self.entries.push(Entry::Blank);
                 true
             }
-            HostEvent::ApprovalRequested { approval_id, title, detail, options } => {
+            HostEvent::ApprovalRequested {
+                approval_id,
+                title,
+                detail,
+                options,
+            } => {
                 // 默认落最后一项 —— TS 侧惯例是把"拒绝/取消"放最后,避免误批准。
                 let selected = options.len().saturating_sub(1);
                 self.pending_approval = Some(PendingApproval {
@@ -1968,7 +2116,8 @@ impl App {
     }
 
     fn begin_tool_batch(&mut self, standalone: bool) -> usize {
-        self.entries.push(Entry::ToolBatch(ToolBatch::new(standalone)));
+        self.entries
+            .push(Entry::ToolBatch(ToolBatch::new(standalone)));
         self.content_dirty = true;
         self.entries.len() - 1
     }
@@ -2095,11 +2244,8 @@ impl App {
 
             for row in &rows {
                 let tag = row.1;
-                let visual = crate::wrap::wrap_rows(
-                    std::slice::from_ref(&row.0),
-                    width,
-                    theme::USER_BG,
-                );
+                let visual =
+                    crate::wrap::wrap_rows(std::slice::from_ref(&row.0), width, theme::USER_BG);
                 for _ in 0..visual.len() {
                     tags.push(tag);
                 }
@@ -2154,7 +2300,10 @@ impl App {
                     out.push((Row::plain(Line::from("")), RowTag::Plain));
                 }
                 Entry::ToolBatch(b) => {
-                    out.push((Row::plain(batch_summary_line(b, self.running)), RowTag::BatchSummary(idx)));
+                    out.push((
+                        Row::plain(batch_summary_line(b, self.running)),
+                        RowTag::BatchSummary(idx),
+                    ));
                     if b.expanded {
                         for (i, item) in b.items.iter().enumerate() {
                             out.push((
@@ -2174,7 +2323,12 @@ impl App {
                     out.push((
                         Row::plain(Line::from(vec![
                             Span::styled("  ● ", theme::status_dot()),
-                            Span::styled("文件变更", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                "文件变更",
+                                Style::default()
+                                    .fg(theme::ACCENT)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(format!("  {} 个文件", files.len()), theme::dim()),
                         ])),
                         RowTag::Plain,
@@ -2248,7 +2402,12 @@ fn batch_summary_line(b: &ToolBatch, running: bool) -> Line<'static> {
     if b.items.is_empty() {
         return Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled("◇", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "◇",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" 正在探索", Style::default().fg(theme::DIM)),
         ]);
     }
@@ -2291,7 +2450,10 @@ fn batch_summary_line(b: &ToolBatch, running: bool) -> Line<'static> {
 
     Line::from(vec![
         Span::styled("  ", Style::default()),
-        Span::styled(symbol, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            symbol,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!(" {label}"), Style::default().fg(color)),
         Span::styled(progress, theme::dim()),
         Span::styled(elapsed, theme::dim()),
@@ -2358,7 +2520,11 @@ fn batch_detail_lines(b: &ToolBatch, item: &ToolItem, index: usize) -> Vec<Line<
     }
     let raw: Vec<&str> = output.lines().collect();
     let truncated = raw.len() > MAX_EXPAND_LINES;
-    let shown = if truncated { &raw[..MAX_EXPAND_LINES] } else { &raw[..] };
+    let shown = if truncated {
+        &raw[..MAX_EXPAND_LINES]
+    } else {
+        &raw[..]
+    };
     let mut out: Vec<Line<'static>> = shown
         .iter()
         .map(|l| Line::from(Span::styled(format!("{indent}{l}"), style)))
@@ -2438,7 +2604,12 @@ pub fn summarize_tool_call(name: &str, args_raw: &str) -> String {
     let Some(args) = args else {
         return truncate_display(args_raw, 80);
     };
-    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let s = |k: &str| {
+        args.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
 
     let raw = match name {
         "read_file" | "write_file" | "edit_file" => {
@@ -2448,7 +2619,14 @@ pub fn summarize_tool_call(name: &str, args_raw: &str) -> String {
                 truncate_display(args_raw, 80)
             }
         }
-        "run_command" => truncate_display(&if s("command").is_empty() { args_raw.to_string() } else { s("command") }, 100),
+        "run_command" => truncate_display(
+            &if s("command").is_empty() {
+                args_raw.to_string()
+            } else {
+                s("command")
+            },
+            100,
+        ),
         "dev_server" => {
             let action = s("action");
             let detail = if !s("command").is_empty() {

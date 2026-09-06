@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -168,10 +168,7 @@ impl AgentHost {
 
     /// 非阻塞取一条消息 —— 渲染循环每帧调用,绝不阻塞 UI。
     pub fn try_recv(&self) -> Option<IpcMessage> {
-        match self.rx.try_recv() {
-            Ok(msg) => Some(msg),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        self.rx.try_recv().ok()
     }
 
     /// 带超时取一条消息。用于"等待 runtime_ready"这类启动握手。
@@ -269,7 +266,8 @@ fn spawn_stderr_reader(stderr: ChildStderr, tx: Sender<IpcMessage>) {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
                         let trimmed = line.trim_end().to_string();
-                        if !trimmed.is_empty() && tx.send(IpcMessage::Diagnostics(trimmed)).is_err() {
+                        if !trimmed.is_empty() && tx.send(IpcMessage::Diagnostics(trimmed)).is_err()
+                        {
                             break;
                         }
                     }

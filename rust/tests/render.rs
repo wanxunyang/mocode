@@ -10,13 +10,13 @@
 
 use std::path::PathBuf;
 
-use mocode_tui::app::{App, Entry, RunStatus, ToolBatch, ToolItem, Tone};
+use mocode_tui::app::{App, Entry, RunStatus, Tone, ToolBatch, ToolItem};
 use mocode_tui::ipc::{self, IpcMessage};
 use mocode_tui::protocol::HostEvent;
 use mocode_tui::ui;
-use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::Terminal;
 
 fn project_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -53,9 +53,7 @@ fn fill(app: &mut App) {
                 name: "grep".into(),
                 summary: "src/**/*.ts 中搜索 repaintViewport".into(),
                 result_summary: "40 处匹配".into(),
-                output: Some(
-                    "src/ui/layout.ts:914:  fn repaintViewport(&mut self) {\n".repeat(40),
-                ),
+                output: Some("src/ui/layout.ts:914:  fn repaintViewport(&mut self) {\n".repeat(40)),
                 failed: false,
                 done: true,
                 arguments: r#"{"pattern":"repaintViewport"}"#.into(),
@@ -81,19 +79,17 @@ fn fill(app: &mut App) {
     }));
     // 运行中的批:还有一条没拿到结果,摘要行应停在"正在探索"。
     app.entries.push(Entry::ToolBatch(ToolBatch {
-        items: vec![
-            ToolItem {
-                id: "c3".into(),
-                name: "run_command".into(),
-                summary: "npm test".into(),
-                result_summary: String::new(),
-                output: None,
-                failed: false,
-                done: false,
-                arguments: r#"{"command":"npm test"}"#.into(),
-                diff_block: None,
-            },
-        ],
+        items: vec![ToolItem {
+            id: "c3".into(),
+            name: "run_command".into(),
+            summary: "npm test".into(),
+            result_summary: String::new(),
+            output: None,
+            failed: false,
+            done: false,
+            arguments: r#"{"command":"npm test"}"#.into(),
+            diff_block: None,
+        }],
         expanded: false,
         detail_expanded: Vec::new(),
         standalone: false,
@@ -207,7 +203,10 @@ fn banner_scrolls_away_with_chat_history() {
     let mut fresh_term = Terminal::new(TestBackend::new(80, 24)).unwrap();
     fresh_term.draw(|f| ui::draw(f, &mut fresh)).unwrap();
     let fresh_rows = rendered_rows(fresh_term.backend().buffer()).join("\n");
-    assert!(fresh_rows.contains("MoCode"), "初始视图缺少 banner:\n{fresh_rows}");
+    assert!(
+        fresh_rows.contains("MoCode"),
+        "初始视图缺少 banner:\n{fresh_rows}"
+    );
 
     // 贴底时，足够多的历史应把 banner 一起顶出内容视口；它不应再固定在屏幕顶部。
     let mut app = App::hollow();
@@ -221,7 +220,10 @@ fn banner_scrolls_away_with_chat_history() {
     term.draw(|f| ui::draw(f, &mut app)).unwrap();
     let rows = rendered_rows(term.backend().buffer()).join("\n");
 
-    assert!(!rows.contains("MoCode"), "贴底时 banner 仍被固定显示:\n{rows}");
+    assert!(
+        !rows.contains("MoCode"),
+        "贴底时 banner 仍被固定显示:\n{rows}"
+    );
     let rows_without_spaces = rows.replace(' ', "");
     assert!(
         rows_without_spaces.contains("历史行23"),
@@ -244,11 +246,19 @@ fn user_message_has_one_blank_row_before_assistant_reply() {
     let lines = &app.content(80).lines;
     let user_row = lines
         .iter()
-        .position(|line| line.spans.iter().any(|span| span.content.contains("用户消息")))
+        .position(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("用户消息"))
+        })
         .expect("用户消息未渲染");
     let assistant_row = lines
         .iter()
-        .position(|line| line.spans.iter().any(|span| span.content.contains("助手回复")))
+        .position(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("助手回复"))
+        })
         .expect("助手回复未渲染");
 
     assert_eq!(
@@ -275,30 +285,49 @@ fn tool_calls_are_grouped_into_one_batch_with_blank_separators() {
     term.draw(|f| ui::draw(f, &mut app)).unwrap();
     let rows = rendered_rows(term.backend().buffer());
     // TestBackend 对 CJK 字符插空格做 continuation,断言时去掉所有空格再比对。
-    let all_squeezed: String = rows.iter().map(|r| r.replace(' ', "")).collect::<Vec<_>>().join("\n");
+    let all_squeezed: String = rows
+        .iter()
+        .map(|r| r.replace(' ', ""))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // 1. 用户消息存在(气泡行)。
-    assert!(all_squeezed.contains('❯'), "用户气泡行缺失:\n{all_squeezed}");
+    assert!(
+        all_squeezed.contains('❯'),
+        "用户气泡行缺失:\n{all_squeezed}"
+    );
 
     // 2. 多条工具调用聚成一条摘要行,而不是各占一行。
     //    TestBackend 把 CJK 拆成 char+space,所以"探索"变成"探 索";
     //    去掉空格后应能匹配。
-    assert!(all_squeezed.contains("探索"), "工具批摘要行缺失:\n{all_squeezed}");
+    assert!(
+        all_squeezed.contains("探索"),
+        "工具批摘要行缺失:\n{all_squeezed}"
+    );
     assert!(
         all_squeezed.contains("grep") && all_squeezed.contains("read_file"),
         "摘要行未合并工具:\n{all_squeezed}"
     );
 
     // 3. 展开后逐条用树枝线缩进,且末条用 └─(视觉上是一个整体块)。
-    assert!(all_squeezed.contains("├─"), "明细行缺少 ├─ 树枝线:\n{all_squeezed}");
-    assert!(all_squeezed.contains("└─"), "明细行缺少 └─ 树枝线:\n{all_squeezed}");
+    assert!(
+        all_squeezed.contains("├─"),
+        "明细行缺少 ├─ 树枝线:\n{all_squeezed}"
+    );
+    assert!(
+        all_squeezed.contains("└─"),
+        "明细行缺少 └─ 树枝线:\n{all_squeezed}"
+    );
 
     // 4. 助手正文与工具块之间有空行(不能紧贴)。
     let has_blank = rows.iter().any(|r| r.trim().is_empty());
     assert!(has_blank, "内容区完全没有空行分隔:\n{all_squeezed}");
 
     // 5. 文件变更概览:概览行 + 缩进的条目行。
-    assert!(all_squeezed.contains("文件变更"), "文件变更概览缺失:\n{all_squeezed}");
+    assert!(
+        all_squeezed.contains("文件变更"),
+        "文件变更概览缺失:\n{all_squeezed}"
+    );
 }
 
 #[test]
@@ -697,11 +726,7 @@ fn text_delta_flushes_open_tool_batch() {
         .buffer()
         .content
         .chunks(80)
-        .map(|row| {
-            row.iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>()
-        })
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
         .collect();
     let has_blank = rows.iter().any(|r| r.trim().is_empty());
     assert!(has_blank, "渲染输出缺少空行分隔");

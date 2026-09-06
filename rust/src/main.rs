@@ -235,13 +235,13 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
     }
 
     // Alt+Enter / Shift+Enter:插入换行。
-    if key.code == KeyCode::Enter && !key.modifiers.contains(KeyModifiers::CONTROL) {
-        if key.modifiers.contains(KeyModifiers::ALT)
-            || key.modifiers.contains(KeyModifiers::SHIFT)
-        {
-            app.insert_newline();
-            return;
-        }
+    if key.code == KeyCode::Enter
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && (key.modifiers.contains(KeyModifiers::ALT)
+            || key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        app.insert_newline();
+        return;
     }
 
     // Enter:提交(菜单打开时先应用选中项)。

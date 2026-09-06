@@ -110,7 +110,7 @@ npm install -g mocode-ai
 
 This gives you the `mocode` command. Prefer not to install globally? Run it directly with `npx mocode-ai`.
 
-> MoCode checks for new versions on startup and self-updates in the background via `npm i -g mocode-ai@latest` — the update takes effect on the next launch, with zero startup delay and silent failure if offline. This is skipped in dev mode (`npm start`, running via tsx).
+> MoCode does not contact the registry on startup. Use `/upgrade check`, `/upgrade status`, or `/upgrade now` explicitly when you want to check or install an update. Real installation is disabled in source/tsx development mode.
 
 ### Run from source (development / contributing)
 
@@ -122,6 +122,18 @@ npm start
 ```
 
 Source runs directly via tsx, no build step. After changing code, restart `npm start` for changes to take effect (tsx loads modules at startup, no hot reload). Runtime dependencies: `openai`, `dotenv`, `fast-glob`; dev dependencies: `tsx`, `typescript`, `@types/node`.
+
+### Repository stacks and contributing
+
+The production path is the TypeScript CLI. `packages/work-app` is incubating, `packages/pet-app` is optional, and `rust/` is an experimental, non-critical-path TUI with a mandatory promotion/archive deadline. See:
+
+- [stack status and owners](docs/architecture/stack-status.md)
+- [architecture decisions](docs/adr/README.md)
+- [contribution guide](CONTRIBUTING.md)
+- [maintainer and troubleshooting runbooks](docs/runbooks/README.md)
+- [Rust experiment status](rust/README.md)
+
+Do not import another package's `src/` or internal `dist/` layout. Applications consume package exports and the public `mocode-agent-host` bin contract.
 
 ## Configuration
 

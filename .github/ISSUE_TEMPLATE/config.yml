@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage documentation
+    url: https://github.com/wanxunyang/mocode/blob/main/docs/usage.md
+    about: Check commands and configuration before filing a bug.
+  - name: Troubleshooting runbooks
+    url: https://github.com/wanxunyang/mocode/tree/main/docs/runbooks
+    about: TUI recovery, coding eval, and release procedures.
+  - name: Private security report
+    url: https://github.com/wanxunyang/mocode/security/advisories/new
+    about: Report vulnerabilities or credential exposure privately.
