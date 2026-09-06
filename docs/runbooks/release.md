@@ -52,7 +52,7 @@ git diff -- package.json package-lock.json
 
 ## 4. Tarball 检查与临时安装
 
-先查看文件清单：
+先查看文件清单。`npm pack` 会通过 `prepack` 在完整源码仓库中构建；registry/tarball 安装阶段只消费已打包的 `dist`，不得再次运行 monorepo build：
 
 ```powershell
 npm pack --dry-run
@@ -73,6 +73,16 @@ $hostBin = Join-Path $smoke "node_modules\mocode-ai\bin\mocode-agent-host.js"
 ```
 
 POSIX 可用 `mktemp -d` 和对应路径。裸 `--resume` 无需模型配置，会列 session 或提示为空后退出。Host stdin 关闭 smoke 应正常退出。
+
+还要用隔离 prefix 覆盖全局安装语义，防止 npm 的 global 配置被生命周期脚本误当成 workspace 构建上下文：
+
+```powershell
+$globalSmoke = Join-Path $env:TEMP "mocode-global-install-smoke"
+npm install --global --prefix $globalSmoke "F:\path\to\mocode-ai-X.Y.Z.tgz"
+& "$globalSmoke\mocode.cmd" --resume
+```
+
+此安装不得出现 `Workspaces not supported for global packages`，也不应执行 `npm run build`。
 
 删除本地 `.tgz` 和临时目录前先保留 dry-run 输出到发布 PR；不要提交 tarball。
 

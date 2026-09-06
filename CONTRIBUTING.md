@@ -41,7 +41,7 @@ npm run eval:coding:list
 - registry 工具数组使用原地 `splice` 重建；不要替换共享引用。
 - `MEMORY_ENABLED` 决定启动时工具快照，运行中切换需要重启。
 - 测试写在 `tests/*.test.ts`，由 test tsconfig 编译后运行，不用 tsx 直跑。
-- 不把 lint/format 接入 `test` 或 `prepare`；它们是独立护栏。
+- 不把 lint/format 接入 `test` 或 `prepack`；它们是独立护栏。
 
 常用验证：
 

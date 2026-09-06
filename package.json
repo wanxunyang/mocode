@@ -34,7 +34,7 @@
     "eval:smoke": "tsx evals/smoke.ts && tsx evals/coding/smoke.ts && tsx evals/quality-metrics.ts && tsx evals/work-discipline.ts",
     "eval:coding": "tsx evals/coding/runner.ts",
     "eval:coding:list": "tsx evals/coding/runner.ts --list",
-    "prepare": "npm run build"
+    "prepack": "npm run build"
   },
   "dependencies": {
     "ajv": "8.20.0",
