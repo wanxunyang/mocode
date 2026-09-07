@@ -77,6 +77,9 @@ export interface ToolRouteGroupDefinition {
  * 可组合工具簇目录。路由器选择的是簇而不是单个工具；一个 turn 内只允许追加、不允许缩减。
  * doing/debug/computer 场景刻意拆开文件写入、命令执行、浏览器调试和桌面控制，避免为完成
  * 一个窄任务直接暴露 full 工具集。
+ *
+ * 注意:router.ts 的 Routing rules 里有一份逐组启发式(本文件 description 的强化版),
+ * 修改/新增组的语义时两处需同步维护。
  */
 export const TOOL_ROUTE_GROUPS: Record<ToolRouteGroupName, ToolRouteGroupDefinition> = {
   'workspace-write': {

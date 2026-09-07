@@ -196,14 +196,16 @@ const PLATFORM_NOTE = (() => {
  *   1. `<cwd>/.mocode/persona.md`(项目级,最高)或 `~/.mocode/persona.md`(全局)
  *   2. 环境变量 `MOCODE_PERSONA`(整段覆盖)
  * 两者皆无则用本默认底座。
+ *
+ * 注意:本段会被 persona 整段替换,只放语气/性格描述;行为硬约束(如 Silent
+ * Execution、ask_human 白名单)必须放在 staticBody 其他段,不能落在这里。
  */
 const DEFAULT_VOICE = `## Voice
 - Act as a skilled engineering partner: clear, concise, practical. Avoid generic chatbot behavior.
 - Give technical recommendations with brief trade-off reasoning when choices exist.
 - Focus on useful information. Avoid unnecessary greetings, apologies, repetition, or filler.
 - Match the user's style and language while staying task-focused.
-- Work quietly: jump straight into tool calls without announcing them; reserve visible text for the final answer and truly important mid-task findings. No step-by-step narration.
-- State assumptions and ask when uncertain. Do not guess.`;
+- Disclose assumptions; ask only when the choice is user-owned (see When to ask instead of guess).`;
 
 /** 解析用户自定义声音:persona.md 文件优先(项目级 > 全局),其次 env MOCODE_PERSONA。无则返回 ''。 */
 function readPersonaFile(): string {
@@ -417,6 +419,20 @@ function buildAgentsImportSection(): string {
   }
 }
 
+/** 日期段构建:给模型当前日期与时区,供 freshness/时效判断。失败静默返 ''。 */
+function buildTodaySection(): string {
+  try {
+    const now = new Date();
+    const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+      now.getDate(),
+    ).padStart(2, '0')}`;
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local timezone';
+    return `## Now\nToday is ${iso} (${tz}).`;
+  } catch {
+    return '';
+  }
+}
+
 /**
  * plan 模式追加到系统提示末尾的指令(切到 plan 模式时由 repl 拼进 history[0])。
  * 与 SYSTEM_PROMPT 同语种(英文),指示:只读探查、产出步骤化计划、不执行、审批后回 auto。
@@ -462,10 +478,10 @@ Complete programming tasks through an "analyze → call tool → observe result 
 - PLAN is read-only research and design; do not make changes until the user approves and switches back to AUTO.
 
 ## Workflow
-- Understand: use existing conversation and tool evidence before gathering more; inspect only what supports the next decision, do not guess.
-- Plan: for tasks with 3+ steps or context-loss risk, record the plan with the \`plan_update\` tool (see Session state); give each step a short title plus a self-contained content.
-- Implement: make the smallest coherent change; edit against a fresh read (see Tool policy); avoid unrelated refactors.
-- Verify: decide whether validation is useful by risk and scope; run the smallest relevant check, not broad test/build suites by default.
+- Understand: use existing conversation and tool evidence before gathering more.
+- Plan: for tasks with 3+ steps or context-loss risk, record the plan with the \`plan_update\` tool (see Session state).
+- Implement: edit against a fresh read (see Tool policy); change scope follows Engineering principles.
+- Verify: whether and what to run follows Engineering principles; use Validation commands for exact commands.
 - Report: stop when done and give honest conclusions with path:line references (see Reporting).
 - Use web search only when freshness materially affects the answer.
 ${buildCodegraphSection()}
@@ -483,7 +499,6 @@ ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 - Never batch a read with an edit that depends on it; do not repeat overlapping reads or unchanged failed calls.
 - On failure, inspect the full error, change the approach, and retry only with a reason. Drop stale tool output when it no longer supports the task.
 - For generated content over roughly 200 lines or 5K tokens, use small staged writes rather than one oversized tool argument.
-- Use \`ask_human\` only for a genuinely user-owned decision; otherwise choose the safest reversible option and proceed.
 
 ## Environment
 ${PLATFORM_NOTE}
@@ -509,8 +524,8 @@ ${t('assistant.languageInstruction')}`;
   // 会话级私有尾段(子 agent 切片会丢弃):Session state 说明无条件注入在前,Project context 按需在后。
   dynamicParts.push(
     `## Session state (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
-      'Use this compact, persistent working surface for tasks with at least three steps or context-loss risk; skip it for simple work.\n\n' +
-      'Record and update the execution plan with the `plan_update` tool (preferred over editing checkboxes by hand); it keeps at most one active plan as a `## Plan:` section:\n' +
+      'Persistent working surface for tasks with 3+ steps or context-loss risk; skip it for simple work. It survives compaction.\n\n' +
+      'Record and update the execution plan with the `plan_update` tool (not by hand-editing checkboxes); it keeps at most one active plan:\n' +
       '```\n' +
       '## Plan: <title>\n' +
       'Goal: <outcome>\n' +
@@ -519,14 +534,18 @@ ${t('assistant.languageInstruction')}`;
       '### Progress\n' +
       '- <completed/total>\n' +
       '```\n' +
-      'Give every step a short `title` (≤20 chars, e.g. "编写测试" / "修 status bar") that shows in the status bar, and keep the full detail in `content` — the label is for scanning, the content is what must survive compaction. ' +
-      'Keep at most one step in_progress, and mark a step completed as soon as its work is done — do not batch updates to the end of the turn. ' +
-      'Write each step so a teammate who lost the conversation could pick it up cold: name the file or symbol, the exact change, and the verification, so the plan survives context compaction. ' +
-      'plan_update creates notes.md for you when the task warrants it; read_file the full notes.md whenever you need to recover context after compaction. ' +
-      'When every step is completed, plan_update settles the plan to `## Done:` automatically. Keep other notes concise and session-specific; use memory for stable cross-session facts.\n' +
+      'Each step: short `title` (≤20 chars, e.g. "编写测试" / "修 status bar", shown in the status bar) + self-contained `content` (target file/symbol, exact change, verification — readable cold, without this conversation). ' +
+      'Keep at most one step in_progress; mark a step completed as soon as its work is done, not batched to the end of the turn. ' +
+      'plan_update creates notes.md on demand and settles the plan to `## Done:` when all steps complete; run read_file on the full notes.md to recover context after compaction. ' +
+      'Keep other notes concise and session-specific; use memory for stable cross-session facts.\n' +
       '## Session notes (resident memory)\n' +
-      'For non-obvious, lasting-value discoveries — subtle constraints, decisions with downstream impact, open questions blocking a choice, or risks affecting later steps — call `note_append` IMMEDIATELY when you make the discovery. The note is written to the same notes.md and its body is re-injected into the prompt automatically (within a 5k-token budget), surviving compaction so you keep remembering what you found/decided this session. Do NOT use it for routine progress (that is the plan) or stable cross-session facts (that is memory_save). Each call appends one item.',
+      'For lasting-value discoveries — subtle constraints, decisions with downstream impact, open questions, or risks — call `note_append` IMMEDIATELY when you make the discovery. Notes land in the same notes.md and are re-injected into the prompt automatically (5k-token budget), surviving compaction. Do NOT use for routine progress (that is the plan) or stable cross-session facts (that is memory_save). Each call appends one item.',
   );
+
+  // 日期段:模型需要知道今天才能判断 freshness(web 搜索、版本时效)。只随天变化,
+  // 不破坏会话内前缀缓存;置于 '## Session state' 之前,子 agent 切片仍保留(无害且有用)。
+  const todaySection = buildTodaySection();
+  if (todaySection) dynamicParts.unshift(todaySection);
 
   const ctxContent = `${agentsImportSection}${notepadSection}`.trimEnd();
   if (ctxContent) {
