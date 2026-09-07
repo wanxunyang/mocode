@@ -8,6 +8,18 @@ A terminal coding agent: give it a goal, and it **completes it autonomously** �
 
 MoCode explores your code, reads/writes/edits files, runs shell commands, and searches the web on its own, driving the task forward through a loop of "think → call a tool → observe the result → think again." It works with any OpenAI-compatible endpoint (GLM, DeepSeek, Qwen, local Ollama / vLLM, etc.), runs as a full-screen TUI with streaming output and visible reasoning.
 
+## Demo
+
+See mocode complete real tasks autonomously:
+
+**Fixing documentation drift in its own codebase** — mocode counts the actual built-in tools, finds the mismatch with `package.json` and `AGENTS.md`, and rewrites them so all three sources agree.
+
+<p align="center"><img src="./assets/demo-doc-fix.gif" alt="mocode autonomously fixes documentation drift" width="100%"></p>
+
+**Building a web app from scratch, with visual self-verification** — mocode creates a complete Pomodoro timer (HTML/CSS/JS, no third-party libs, Web Audio API), then uses `dev_server` + `browser` + `screenshot` to inspect its own render and iterate until the layout looks right.
+
+<p align="center"><img src="./assets/demo-build-pomodoro.gif" alt="mocode builds a Pomodoro web app and self-verifies via browser screenshots" width="100%"></p>
+
 ## Engineering discipline
 
 MoCode keeps code-level control light and leaves task strategy to the agent:

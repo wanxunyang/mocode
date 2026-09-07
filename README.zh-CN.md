@@ -8,6 +8,18 @@
 
 mocode 自己探索代码、读写改文件、执行命令、联网查资料,以「思考 → 调用工具 → 观察结果 → 再思考」的循环一步步把任务推进到完成。接任意 OpenAI 兼容接口(GLM、DeepSeek、Qwen、本地 Ollama / vLLM 等),全屏 TUI 交互,流式输出、思考过程可见。
 
+## 演示
+
+看 mocode 自主完成真实任务：
+
+**修自己仓库的文档漂移** —— mocode 逐个数清 `src/tools/builtins/index.ts` 里的实际工具数，发现 `package.json` 和 `AGENTS.md` 的描述不一致，自动改齐并跑测试验证。
+
+<p align="center"><img src="./assets/demo-doc-fix.gif" alt="mocode 自主修复文档漂移" width="100%"></p>
+
+**从零做一个网页应用，自己截图反复改到满意** —— mocode 用原生 HTML/CSS/JS（不引第三方库）+ Web Audio API 完成一个番茄钟，再调用 `dev_server` + `browser` + `screenshot` 检查渲染效果，发现布局问题就改代码再截图，直到满意。
+
+<p align="center"><img src="./assets/demo-build-pomodoro.gif" alt="mocode 从零搭建番茄钟并通过浏览器截图自检" width="100%"></p>
+
 ## 架构
 
 MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，内核通过受控能力平面执行真实操作，持久化认知层则让长任务和跨会话工作保持连贯。
