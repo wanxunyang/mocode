@@ -42,6 +42,18 @@ export const SUMMARY_KEYFACTS_MIN_CHARS = 1200;
 /** 大窗口下的绝对上限:Key Facts 是索引不是正文,不该无限膨胀。 */
 export const SUMMARY_KEYFACTS_MAX_CHARS = 8000;
 
+// ── user 意图结构化保护(见 compact.ts compactHistory / extractUserDirectives)──
+/** user 逐字保留通道占窗口比例:user 意图是任务之根,摘要转述只是尽力而为
+ *  (COMPINT 实测摘要器平均只保留 17% 的用户会话约束);给专属逐字预算绕过摘要器,
+ *  预算内的 user 原文直接进保留区,不依赖任何模型自觉。 */
+export const COMPACT_USER_VERBATIM_WINDOW_RATIO = 0.1;
+/** user 逐字通道绝对上限(token):对齐 Codex CLI 的 20k user 逐字预算。 */
+export const COMPACT_USER_VERBATIM_MAX_TOKENS = 20_000;
+/** 意图/约束账本:单条意图行截断(字符)。 */
+export const USER_DIRECTIVE_MAX_CHARS = 160;
+/** 意图/约束账本:单条 user 消息最多抽取的约束行数(防长消息刷爆账本)。 */
+export const USER_DIRECTIVE_MAX_CONSTRAINTS = 3;
+
 // ── 记忆(Tier-2 JSONL 工具库)──────────────────────────────────────────────
 /** 单条记忆 body 上限(字符)。进 history 前 memory_search 结果另有 MAX_MEMORY_RESULT 兜底。 */
 export const MAX_MEMORY_ENTRY = 4000;

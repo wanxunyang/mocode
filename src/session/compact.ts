@@ -11,6 +11,8 @@ import {
 } from '../llm/index.js';
 import { config, type Config } from '../config/index.js';
 import {
+  COMPACT_USER_VERBATIM_MAX_TOKENS,
+  COMPACT_USER_VERBATIM_WINDOW_RATIO,
   MAX_HISTORY_RESULT,
   MAX_MEMORY_RESULT,
   MAX_OLD_TOOL_STUB,
@@ -21,6 +23,8 @@ import {
   SUMMARY_MSG_MAX_CHARS,
   SUMMARY_OUTPUT_MAX_CHARS,
   SUMMARY_TRANSCRIPT_WINDOW_RATIO,
+  USER_DIRECTIVE_MAX_CHARS,
+  USER_DIRECTIVE_MAX_CONSTRAINTS,
 } from '../tools/constants.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
@@ -38,6 +42,13 @@ import { writeCompactionSnapshot } from './notes.js';
  *             触发压缩时旧区 ≤80% 窗口、与摘要器共享窗口,封顶后即装得下——
  *             不预截断,否则等于把摘要模型弄瞎。
  *          ③ 微压缩(兜底):仅在摘要失败后对旧区原地截短(保 tool_call_id,无 LLM 调用)。
+ *
+ *  user 意图结构化保护(不依赖摘要模型自觉的两条硬通道):
+ *  - 逐字通道:压缩切分时给 user group 专属预算(min(20k token, 10% 窗口)),从新到旧
+ *    把旧区 user 原文直接移进保留区,绕过摘要器(Codex CLI 同款策略)。
+ *  - 意图/约束账本:extractUserDirectives 用确定性规则从旧区 user 消息抽意图行与约束行,
+ *    并入 Key Facts 钉住段跨代累积——摘要器漏写也不丢(COMPINT: 摘要器平均只保留
+ *    17% 的用户会话约束,独立抽取器可到 90%+)。
  *
  *  不变量:
  *  - 原地修改:用 history.length=0; push(...) 重建,repl 持有同一引用。
@@ -109,6 +120,8 @@ export interface CompactResult {
   protectedRatio?: number;
   /** 调试字段:旧区可压组数,供 UI 显示。 */
   oldGroupCount?: number;
+  /** 调试字段:逐字通道捞进保留区的 user group 数(绕过摘要器的原话条数)。 */
+  userVerbatimCount?: number;
 }
 
 /** 跨模块共享的上下文状态:agent 写 lastUsage,compact 写 lastEstimate,repl 的 /context 读。
@@ -371,16 +384,24 @@ export function extractProgressSnapshot(summaryRest: string): string | null {
 }
 
 /**
- * 合并跨代 Key Facts:按行去重(老 → 新),超预算时丢较新条目。
+ * 合并跨代 Key Facts:按行去重(老 → 新,blocks 参数顺序即优先级),超预算时丢较新条目。
  *
  * 丢新不丢旧的理由:最老那几条通常是首轮用户约束(不可重建,丢了就永远没了);
  * 较新的事实通常在本代叙述段或保留区里还有副本。
+ *
+ * 签名为尾参可变元组:既有两路调用 mergeKeyFacts(prev, next, max) 不变,
+ * 压缩主路径三路合并 mergeKeyFacts(pinned, directives, parsed, max)——
+ * 钉住段(最老)> 抽取器产出 > 摘要器新写的,截断时按此顺序牺牲靠后的。
  */
-export function mergeKeyFacts(prev: string | undefined, next: string | undefined, maxChars: number): string {
+export function mergeKeyFacts(
+  ...args: [...blocks: Array<string | undefined>, maxChars: number]
+): string {
+  const maxChars = args[args.length - 1] as number;
+  const blocks = args.slice(0, -1) as Array<string | undefined>;
   const lines: string[] = [];
   const seen = new Set<string>();
-  for (const block of [prev ?? '', next ?? '']) {
-    for (const rawLine of block.split('\n')) {
+  for (const block of blocks) {
+    for (const rawLine of (block ?? '').split('\n')) {
       const line = rawLine.trim();
       if (!line) continue;
       const key = factKey(line);
@@ -410,6 +431,70 @@ export function mergeKeyFacts(prev: string | undefined, next: string | undefined
 function isUserGroup(g: Group): boolean {
   const a = g.assistant as { role?: string; content?: unknown } | null;
   return !!a && a.role === 'user' && toText(a.content).trim().length > 0;
+}
+
+// ── 意图/约束账本:确定性抽取,不依赖摘要模型自觉 ──────────────────────────
+//
+// 背景:COMPINT(PSU, 2026)实测各家摘要器平均只保留 17% 的用户会话约束
+// ("删除前必须先确认"这类 Session Constraints)——prompt 写得再好模型也不保证听话。
+// 与把摘要器改得更聪明相比,独立的确定性抽取器是结构保证:规则命中就一定进 Key Facts
+// 钉住段,跨代累积,永不重摘要。
+//
+// 职责划分:抽取器管「用户说过什么」(意图行 + 约束行,扫 user 原文);
+// 摘要器管「技术事实」(路径/符号/失败结论,需理解推理)。Key Facts 段由两路供给。
+
+/** 账本行前缀:与摘要器写的行区分;固定前缀保证跨代 factKey 去重稳定。 */
+const USER_INTENT_PREFIX = '用户请求: ';
+const USER_CONSTRAINT_PREFIX = '用户约束: ';
+/** 平凡消息黑名单:continue/ok 等迭代噪音不值得占账本一行。 */
+const TRIVIAL_USER_RE = /^(?:继续|继续吧|好的|好|嗯|行|ok|okay|go|go on|next|continue|proceed)\s*[.!。!]?$/i;
+/** 强约束行模式(中英):Session Constraints 的典型措辞。宁漏勿滥——误报会污染钉住段。 */
+const CONSTRAINT_LINE_RE =
+  /不要|不能|千万别|禁止|务必|别动|必须|保持|确保|只用|只能|未经.{0,12}(?:确认|允许)|先.{0,20}(?:再|后才)|\b(?:never|always|must\b|do not|don't|make sure|ensure|only use|without (?:my |user )?(?:confirmation|approval)|before you)\b/i;
+
+/** 账本行截断:超长行(贴文档/贴日志)保头部,约束与意图几乎都在前半句。 */
+function capDirectiveLine(line: string): string {
+  if (line.length <= USER_DIRECTIVE_MAX_CHARS) return line;
+  return `${line.slice(0, USER_DIRECTIVE_MAX_CHARS - 1)}…`;
+}
+
+/**
+ * 从旧区 user 消息抽取意图/约束账本行。
+ *
+ * 规则:每条非平凡 user 消息取首个非平凡行作意图行(用户的请求几乎总在开头);
+ * 消息内任意位置命中强约束模式的行另记为约束行(约束常在消息中后部,如
+ * "帮我重构 X。另外:不要动 tests/ 目录")。代码块与引用行跳过。
+ * 调用方传的 older 已不含逐字通道捞走的 user——它们原文进了保留区,无需账本行。
+ */
+export function extractUserDirectives(older: ChatMessage[]): string[] {
+  const out: string[] = [];
+  for (const m of older) {
+    if (m.role !== 'user') continue;
+    const text = toText((m as { content?: unknown }).content).trim();
+    if (!text || TRIVIAL_USER_RE.test(text)) continue;
+    const lines = text.split('\n');
+    let intentTaken = false;
+    let constraintsTaken = 0;
+    let inFence = false;
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (line.startsWith('```')) {
+        inFence = !inFence;
+        continue;
+      }
+      if (inFence || !line || line.startsWith('>')) continue;
+      if (constraintsTaken < USER_DIRECTIVE_MAX_CONSTRAINTS && CONSTRAINT_LINE_RE.test(line)) {
+        out.push(USER_CONSTRAINT_PREFIX + capDirectiveLine(line));
+        constraintsTaken++;
+        continue;
+      }
+      if (!intentTaken && line.length >= 4) {
+        out.push(USER_INTENT_PREFIX + capDirectiveLine(line));
+        intentTaken = true;
+      }
+    }
+  }
+  return out;
 }
 
 /** 摘要 group 判定:非 history[0] 的 system 消息,以 `# 会话摘要` 开头,且不带 tool_calls。 */
@@ -599,7 +684,7 @@ async function defaultSummarize(
       '## Completed — what is already done: files created/modified (exact paths), key change per file, commands run and their outcomes (pass/fail, key numbers), decisions made and why.\n' +
       '## In Progress — what is being worked on right now and exactly where it stopped (e.g. "edit applied to foo.ts, test not yet run").\n' +
       '## Next Steps — the concrete next actions in order.\n' +
-      '## Key Facts — only what later steps cannot work without: exact paths, symbols/API shapes, artifact IDs/hashes, constraints, open questions, failed approaches and errors to avoid repeating.\n' +
+      '## Key Facts — only what later steps cannot work without: exact paths, symbols/API shapes, artifact IDs/hashes, open questions, failed approaches and errors to avoid repeating. User requests and constraints are pinned verbatim by the system from the raw user messages — do not duplicate them here; you own the technical facts.\n' +
       'What counts as important (keep): user requests and constraints; final state of each modified file; conclusions and results, not the steps that led there; decisions with reasons; precise references (paths, symbols, hashes, commands) that later steps must cite; failures and what was tried, so mistakes are not repeated.\n' +
       'What to drop: verbatim file contents and tool-output dumps, step-by-step recaps, exploration dead-ends that led nowhere, polite chatter, anything re-derivable by re-reading files.\n' +
       'Rules: total ≤ 400 words. State conclusions and locations (path:line where useful), never paste content. ' +
@@ -696,6 +781,7 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
   //  无 user → 下一轮 chat() 被后端拒绝。保最早 user(而非最后一个)因为它是最原始的
   //  请求上下文,摘要器已覆盖后续交互。用 isUserGroup(非空判定)而非只看 role:
   //  空 content 的 user 同样过不了 hasNonEmptyUser 守卫。
+  let forceRebuilt = false;
   if (oldGroups.length === 0 && opts.force && groups.length >= 2) {
     kept.length = 0;
     const lastIdx = groups.length - 1;
@@ -706,6 +792,43 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
     } else {
       kept.push(groups[lastIdx]);
       oldGroups = groups.slice(0, groups.length - 1);
+    }
+    forceRebuilt = true;
+  }
+
+  // ── user 逐字通道(Codex 式):user 意图是任务之根,摘要转述只是尽力而为 ────
+  // 给 user group 专属预算 min(20k token, 10% 窗口),从新到旧把旧区 user 原文移进
+  // 保留区——绕过摘要器,不依赖模型自觉。单条超预算的跳过(通常是贴了文档的长消息,
+  // 走摘要 + 账本行兜底),预算耗尽即停。
+  // 捞空保护:若捞完旧区一条不剩(全 user 的罕见旧区),全部还原走摘要——压缩至少
+  // 要做点事,且全 noop 掉会让上层误判"无可压"。
+  let userVerbatimCount = 0;
+  {
+    let verbatimBudget = Math.min(
+      Math.floor(opts.window * COMPACT_USER_VERBATIM_WINDOW_RATIO),
+      COMPACT_USER_VERBATIM_MAX_TOKENS,
+    );
+    const collected: Group[] = [];
+    for (let i = oldGroups.length - 1; i >= 0; i--) {
+      const g = oldGroups[i];
+      if (!isUserGroup(g)) continue;
+      const t = correctTokenEstimate(groupTokens(g), state.correction);
+      if (t > verbatimBudget) continue;
+      collected.push(g);
+      oldGroups.splice(i, 1);
+      verbatimBudget -= t;
+    }
+    if (collected.length > 0) {
+      if (oldGroups.length === 0) {
+        oldGroups.push(...collected.slice().reverse());
+      } else {
+        collected.reverse(); // 从新到旧收集 → 从旧到新插入,保持时序
+        // force 重建时 kept[0] 是最早 user 组:捞回的 user 时序都在它之后、尾部组之前,
+        // 插在 index 1;其余情况(含 force 但全 history 无 user 的极端形态)unshift 最老位。
+        if (forceRebuilt && kept.length > 0 && isUserGroup(kept[0])) kept.splice(1, 0, ...collected);
+        else kept.unshift(...collected);
+        userVerbatimCount = collected.length;
+      }
     }
   }
 
@@ -800,7 +923,15 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
     // 钉住的 Key Facts 拼在段尾:单条 system 消息里尾部注意力最强,老事实不会被"读漏"。
     // 恒为单条——并排多条 system 摘要会触发近因效应,早期摘要形同虚设。
     const parsed = splitSummaryText(summary);
-    const pinnedFacts = mergeKeyFacts(pinned?.keyFacts, parsed.keyFacts, keyFactsBudgetChars(opts.window));
+    // 三路供给,优先级 = 截断牺牲顺序:钉住段(最老,丢新保旧)> 抽取器账本行(确定性,
+    // 摘要器漏写也不丢)> 摘要器本代新写(尽力而为)。older 已不含逐字通道捞走的 user。
+    const directives = extractUserDirectives(older);
+    const pinnedFacts = mergeKeyFacts(
+      pinned?.keyFacts,
+      directives.length > 0 ? directives.join('\n') : undefined,
+      parsed.keyFacts,
+      keyFactsBudgetChars(opts.window),
+    );
     // P2:把 Objective/In Progress/Next Steps 固结到 notes.md——压缩那一刻
     // notes.md 就有当前进度的权威副本,压缩后恢复提示据此续工,不再只依赖
     // 模型自觉 plan_update。仅主 agent(共享 contextState)写;子 agent 独立
@@ -842,6 +973,7 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
       estimateBefore,
       estimateAfter,
       reason: 'summarize',
+      userVerbatimCount,
     };
   }
 

@@ -6,6 +6,7 @@ import {
   compactHistory,
   createContextState,
   extractProgressSnapshot,
+  extractUserDirectives,
   keyFactsBudgetChars,
   mergeKeyFacts,
   maybeCompact,
@@ -478,4 +479,161 @@ test('compactHistory 摘要成功后把进度快照固结进 notes.md(仅主 age
   setCurrentSessionId(undefined, tmpRoot);
   setSandboxRoot(prevRoot);
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+// ── user 意图结构化保护:逐字通道 + 意图/约束账本 ──────────────────────────
+
+test('extractUserDirectives:意图行/约束行/平凡过滤/fence 与引用跳过', () => {
+  const older: ChatMessage[] = [
+    { role: 'user', content: '帮我修复登录 bug' } as ChatMessage,
+    { role: 'user', content: '继续' } as ChatMessage, // 平凡迭代噪音:过滤
+    {
+      role: 'user',
+      content: '重构解析器\n```\n必须不出现在 fence 里\n```\n> 引用里的不要动配置\n另外:删除前必须先确认',
+    } as ChatMessage,
+    { role: 'assistant', content: '必须 保持' } as ChatMessage, // 非 user:忽略
+    { role: 'user', content: 'Never delete the migrations folder' } as ChatMessage, // 英文约束
+  ];
+  assert.deepEqual(extractUserDirectives(older), [
+    '用户请求: 帮我修复登录 bug',
+    '用户请求: 重构解析器',
+    '用户约束: 另外:删除前必须先确认',
+    '用户约束: Never delete the migrations folder',
+  ]);
+});
+
+test('extractUserDirectives:约束在首行时以约束行钉住(不重复出意图行)', () => {
+  const older: ChatMessage[] = [
+    { role: 'user', content: '帮我重构 X。另外不要动 tests/ 目录' } as ChatMessage,
+  ];
+  const lines = extractUserDirectives(older);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0]!, /^用户约束: 帮我重构 X/);
+  assert.ok(lines[0]!.includes('不要动 tests/'));
+});
+
+test('mergeKeyFacts 三路合并:超预算时按 钉住段 > 账本 > 摘要器新写 的顺序牺牲', () => {
+  const pinned = '- 首轮约束:不要用 Any';
+  const ledger = '用户约束: 未经确认不得删除文件';
+  const model = '- src/a.ts:42 是入口\n- 模型新写的技术事实';
+  // 预算只容得下 pinned + ledger:摘要器写的整段牺牲
+  const cap = pinned.length + ledger.length + 2;
+  const merged = mergeKeyFacts(pinned, ledger, model, cap);
+  assert.ok(merged.includes('不要用 Any'), '钉住段(最老)优先保留');
+  assert.ok(merged.includes('未经确认不得删除'), '账本行次优先保留');
+  assert.ok(!merged.includes('模型新写的技术事实'), '摘要器新写的先被牺牲');
+});
+
+test('user 逐字通道:预算内 user 原文绕过摘要器进保留区', async () => {
+  // 旧区混排:老约束 user + 大 tool 结果 + 新请求 user;keepBudget 小,尾部只保得住最后一组。
+  // 直字通道应把两条 user 原文捞进保留区,摘要器只看得到 tool 组。
+  const history: ChatMessage[] = [system()];
+  history.push({ role: 'user', content: '不要动 tests/ 目录' } as ChatMessage);
+  appendTool(history, 'read_file', 'old-1', { path: 'a.ts' }, 'x'.repeat(8_000));
+  history.push({ role: 'user', content: '帮我重构 src/compact.ts' } as ChatMessage);
+  appendTool(history, 'read_file', 'old-2', { path: 'b.ts' }, 'y'.repeat(8_000));
+  appendTool(history, 'read_file', 'latest', { path: 'c.ts' }, 'ok');
+  let olderText = '';
+  const result = await compactHistory(history, {
+    window: 8_000, // keepBudget=1200(尾部只保 latest 组);verbatim 预算=800
+    threshold: 100,
+    contextState: createContextState(),
+    summarize: async (older) => {
+      olderText = older.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n');
+      return '## Completed\n读文件';
+    },
+  });
+  assert.equal(result.reason, 'summarize');
+  assert.ok((result.userVerbatimCount ?? 0) >= 1, '至少一条 user 经逐字通道捞回');
+  // 两条 user 原文必须逐字在重建后的 history 里(保留区),而不是只活在摘要转述里
+  assert.ok(
+    history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === '不要动 tests/ 目录'),
+  );
+  assert.ok(
+    history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === '帮我重构 src/compact.ts'),
+  );
+  // 摘要器看不到被捞走的 user 原文(绕过摘要 = 结构保证,不依赖 prompt 自觉)
+  assert.ok(!olderText.includes('不要动 tests/'));
+  assert.ok(!olderText.includes('帮我重构'));
+  assertToolCallsHaveProducers(history);
+});
+
+test('user 逐字通道:旧区全 user 时整体还原走摘要(不误判 noop)', async () => {
+  // 旧区只剩 user 组(尾部被超长 user 吃满 keepBudget):全捞走会让 oldGroups 空 →
+  // 上层误判"无可压"。捞空保护应把 user 还原进旧区,照常摘要。
+  const history: ChatMessage[] = [system()];
+  history.push({ role: 'user', content: '第一个请求' } as ChatMessage);
+  history.push({ role: 'user', content: '第二个请求' } as ChatMessage);
+  history.push({ role: 'user', content: '第三个请求' } as ChatMessage);
+  history.push({ role: 'user', content: 'z'.repeat(4_000) } as ChatMessage); // 超长:吃满 keepBudget
+  let olderRoles: string[] = [];
+  const result = await compactHistory(history, {
+    window: 6_000,
+    threshold: 100,
+    contextState: createContextState(),
+    summarize: async (older) => {
+      olderRoles = older.map((m) => m.role);
+      return '## Completed\n合并请求';
+    },
+  });
+  assert.equal(result.reason, 'summarize', '旧区全 user 被还原后必须仍走摘要');
+  assert.equal(result.userVerbatimCount, 0);
+  assert.ok(olderRoles.filter((r) => r === 'user').length >= 3, 'user 原文进入摘要转录');
+});
+
+test('意图/约束账本:摘要器漏写 Key Facts 时用户请求/约束仍被钉住', async () => {
+  // 模拟最差摘要器:完全不写 Key Facts 段(COMPINT 实测摘要器平均只保留 17% 用户约束)。
+  // 第一条 user 是贴了长文档的消息(超逐字预算,留旧区)——意图/约束只能靠账本兜底。
+  const longBody = 'x'.repeat(3_000);
+  const history: ChatMessage[] = [system()];
+  history.push({
+    role: 'user',
+    content: `帮我重构压缩模块\n${longBody}\n不要动 tests/ 目录\n必须保持公开 API 不变`,
+  } as ChatMessage);
+  appendTool(history, 'read_file', 'r1', { path: 'a.ts' }, 'x'.repeat(6_000));
+  history.push({ role: 'user', content: '跑一下测试看看' } as ChatMessage);
+  appendTool(history, 'read_file', 'r2', { path: 'b.ts' }, 'y'.repeat(6_000));
+  const result = await compactHistory(history, {
+    window: 6_000,
+    threshold: 100,
+    contextState: createContextState(),
+    summarize: async () => '## Completed\n读文件', // 无 Key Facts 段:模拟摘要器漏写
+  });
+  assert.equal(result.reason, 'summarize');
+  const summaryText = contentAt(history, 1);
+  assert.ok(summaryText.includes('用户请求: 帮我重构压缩模块'), '意图行由抽取器钉住');
+  assert.ok(summaryText.includes('用户约束: 不要动 tests/ 目录'), '约束行由抽取器钉住');
+  assert.ok(summaryText.includes('必须保持公开 API 不变'), '第二条约束也钉住');
+  // 短 user 走逐字通道:原文进保留区,不依赖账本
+  assert.ok(
+    history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === '跑一下测试看看'),
+  );
+});
+
+test('意图/约束账本:跨代钉住,抽取行不再进摘要器', async () => {
+  // 连续两代压缩:第一代账本钉住的约束行,第二代不得被再摘要(否则又回到递归衰减)。
+  // 首条约束消息贴长文档(超逐字预算 600 token)→ 留旧区,只能靠账本行钉住。
+  const longBody = 'x'.repeat(3_000);
+  const history: ChatMessage[] = [system()];
+  history.push({ role: 'user', content: `未经确认不得删除任何文件\n${longBody}` } as ChatMessage);
+  appendTool(history, 'read_file', 'r1', { path: 'a.ts' }, 'x'.repeat(5_000));
+  const transcripts: string[] = [];
+  for (let gen = 1; gen <= 2; gen++) {
+    history.push({ role: 'user', content: `round ${gen}` } as ChatMessage);
+    appendTool(history, 'read_file', `r-${gen}`, { path: `f${gen}.ts` }, 'y'.repeat(5_000));
+    const result = await compactHistory(history, {
+      window: 6_000,
+      threshold: 100,
+      contextState: createContextState(),
+      summarize: async (older) => {
+        transcripts.push(older.map((m) => (typeof m.content === 'string' ? m.content : '')).join('\n'));
+        return '## Completed\nwork'; // 每代都不写 Key Facts:全靠账本
+      },
+    });
+    assert.equal(result.reason, 'summarize', `第 ${gen} 代走摘要`);
+    assertToolCallsHaveProducers(history);
+  }
+  const summaryText = contentAt(history, 1);
+  assert.ok(summaryText.includes('未经确认不得删除任何文件'), '约束行两代后仍钉在 Key Facts');
+  assert.ok(!transcripts[1]!.includes('未经确认'), '已钉住的抽取行不再喂给摘要器');
 });
