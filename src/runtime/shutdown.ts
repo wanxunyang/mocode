@@ -14,6 +14,18 @@ export async function shutdownRuntime(): Promise<void> {
   asyncDone = true;
   stopAllDevServersSync();
   try {
+    // 动态 import:未用过 computer 工具时不该把这两个常驻进程拉进来。
+    // 常驻 PowerShell 进程不随主进程自动退出,必须显式回收(否则每次会话留一组孤儿)。
+    const [{ disposeInputInjector }, { disposeCaptureService }] = await Promise.all([
+      import('./input-injector.js'),
+      import('./screen-capture-service.js'),
+    ]);
+    await disposeInputInjector();
+    await disposeCaptureService();
+  } catch {
+    // 从未启动过:忽略。
+  }
+  try {
     // 动态 import:未用过 browser 工具时不该把 playwright 拉进进程。
     const { closeAllBrowsers } = await import('./browser-manager.js');
     await closeAllBrowsers();

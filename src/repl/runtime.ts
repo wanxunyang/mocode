@@ -92,7 +92,11 @@ function recallWindowMs(input: string[]): number {
   const joined = input.join('\n');
   const long = input.length >= 2 || [...joined].length >= LONG_INPUT_CHARS;
   if (!long) return PENDING_RECALL_MS;
-  const env = Number(process.env.MOCODE_RECALL_MS);
+  // 空串必须显式回落:Number('') === 0 且能通过下面的 >= 0 校验,
+  // 结果是撤回窗口变成 0(等于没有撤回窗口),而用户只是想清空这个配置。
+  const rawEnv = process.env.MOCODE_RECALL_MS;
+  if (rawEnv === undefined || rawEnv.trim() === '') return PENDING_RECALL_LONG_MS;
+  const env = Number(rawEnv);
   return Number.isFinite(env) && env >= 0 ? env : PENDING_RECALL_LONG_MS;
 }
 let pendingTimer: NodeJS.Timeout | null = null;

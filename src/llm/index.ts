@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { config, getActiveModel } from '../config/index.js';
 import { tools } from '../tools/registry.js';
 import { getPlanDisabledTools, getProfileDisabledTools } from '../tools/constants.js';
+import { imageSizeFromDataUrl } from '../attachments/image.js';
 import { ThinkTagFilter } from './think-filter.js';
 import { sanitizeToolSchemas } from './tool-schema.js';
 import { defaultAnthropicFetch, anthropicChatOnce } from './providers/anthropic.js';
@@ -785,15 +786,37 @@ function contentToText(content: unknown): string {
   }
 }
 
-/** OpenAI 视觉模型单图固定 token(低细节 / auto 模式);高细节更大但属罕见路径,保守按 85 计。 */
-const IMAGE_TOKEN_COST = 85;
+/**
+ * 解析不出尺寸时的兜底(OpenAI 低细节单图)。
+ * 真实的视觉 token 是按**像素面积**计费的:Claude 口径 ≈ w*h/750,OpenAI 系按 512 tile 分块、
+ * 同量级。按 85 估会把一张 1568×878 的截图(≈1835 token)低估 20 倍 —— 后果不是数字不好看,
+ * 而是 80% 上下文压力线长期不触发,prompt 实际早已超出才 compact,表现为「模型突然抽风」。
+ */
+const IMAGE_TOKEN_FALLBACK = 85;
+const TOKENS_PER_PIXEL = 1 / 750;
 
-/** 单个 content part 的 token:text part 走 estimateTokens,image_url part 固定 85。+2 结构开销。 */
+function imageTokens(dataUrl: unknown): number {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return IMAGE_TOKEN_FALLBACK;
+  const size = imageSizeFromDataUrl(dataUrl);
+  if (!size) return IMAGE_TOKEN_FALLBACK;
+  return Math.max(IMAGE_TOKEN_FALLBACK, Math.round(size.width * size.height * TOKENS_PER_PIXEL));
+}
+
+/** 单个 content part 的 token:text part 走 estimateTokens,image_url part 按像素面积估。+2 结构开销。 */
 function partTokens(part: unknown): number {
   if (!part || typeof part !== 'object') return 0;
   const p = part as { type?: string; text?: string; image_url?: unknown };
   if (p.type === 'text') return 2 + estimateTokens(p.text ?? '');
-  if (p.type === 'image_url') return 2 + IMAGE_TOKEN_COST;
+  if (p.type === 'image_url') {
+    const iu = p.image_url as { url?: unknown } | string | undefined;
+    const url =
+      typeof iu === 'string'
+        ? iu
+        : typeof (iu as { url?: unknown })?.url === 'string'
+          ? (iu as { url: string }).url
+          : '';
+    return 2 + imageTokens(url);
+  }
   return 2;
 }
 

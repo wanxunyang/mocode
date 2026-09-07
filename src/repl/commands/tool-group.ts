@@ -106,7 +106,7 @@ export const toolGroupCommands: CommandHandler[] = [
 
   // /cu|/computer [status|on|off] — computer-control 的高危 capability gate。
   // on 仅允许 router 在用户明确要求 GUI 操作时选择；每个动作仍经过权限门，plan 永远过滤。
-  (ctx) => {
+  async (ctx) => {
     const { line } = ctx;
     const isCu = line === '/cu' || line.startsWith('/cu ') || line === '/computer' || line.startsWith('/computer ');
     if (!isCu) return unhandled();
@@ -125,6 +125,21 @@ export const toolGroupCommands: CommandHandler[] = [
         `${ui.accent}${t('cu.status', { state })}${ui.reset}\n` +
           `${ui.dim}MOCODE_COMPUTER_USE_ENABLED=${enabled ? 'true' : 'false'} · ${CONFIG_PATH}${ui.reset}\n`,
       );
+      // 埋点基线:优化前后都要能报出 p50/p95,否则「快了」只是感觉。
+      try {
+        const { getComputerMetrics } = await import('../../tools/builtins/computer.js');
+        const s = getComputerMetrics();
+        if (s.count > 0) {
+          const kb = (s.avgBytes / 1024).toFixed(0);
+          layout.contentWrite(
+            `${ui.dim}${s.count} calls · total p50 ${s.totalP50}ms / p95 ${s.totalP95}ms · ` +
+              `capture p50 ${s.captureP50}ms · ${kb}KB/frame · ` +
+              `dedup ${(s.skippedRatio * 100).toFixed(0)}%${ui.reset}\n`,
+          );
+        }
+      } catch {
+        // 埋点不可用时不影响状态输出。
+      }
       return next();
     }
     if (arg !== 'on' && arg !== 'off') {
@@ -138,6 +153,22 @@ export const toolGroupCommands: CommandHandler[] = [
       refreshChatTools();
       ctx.history[0] = { role: 'system', content: ctx.buildSystemMessage(getAgentMode() === 'plan') };
       layout.rewriteBanner(bannerLines(ctx.banner()));
+    }
+    if (!enabled) {
+      // 常驻 PowerShell 进程(注入 / 抓屏)不会随主进程自动退出(Windows 尤其),关开关时必须
+      // 显式回收,否则每次 /cu off 都留一组孤儿进程。差分基准帧与几何缓存也一并清掉。
+      try {
+        const [{ disposeInputInjector }, { disposeCaptureService }, { resetComputerState }] = await Promise.all([
+          import('../../runtime/input-injector.js'),
+          import('../../runtime/screen-capture-service.js'),
+          import('../../tools/builtins/computer.js'),
+        ]);
+        await disposeInputInjector();
+        await disposeCaptureService();
+        resetComputerState();
+      } catch {
+        // 从未启动过常驻进程:dispose 是空操作,忽略。
+      }
     }
     layout.contentWrite(
       `${enabled ? ui.green : ui.yellow}${t(enabled ? 'cu.changedOn' : 'cu.changedOff')}${ui.reset}\n`,

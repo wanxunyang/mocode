@@ -12,6 +12,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { filterEnv } from '../sandbox/index.js';
+import { IdleGuard, envInt } from './idle-guard.js';
 
 export interface InputInjector {
   /** 绑定当前动作批次的 abort signal(每次 computer.execute 调用前设置)。 */
@@ -33,18 +34,66 @@ export interface InputInjector {
 // ── Anthropic 键名 → Windows VK 码 ─────────────────────────────────────
 
 const VK_NAMED: Record<string, number> = {
-  return: 0x0d, enter: 0x0d, escape: 0x1b, esc: 0x1b, tab: 0x09, space: 0x20,
-  backspace: 0x08, delete: 0x2e, insert: 0x2d, home: 0x24, end: 0x23,
-  page_up: 0x21, pageup: 0x21, page_down: 0x22, pagedown: 0x22, prior: 0x21, next: 0x22,
-  left: 0x25, up: 0x26, right: 0x27, down: 0x28,
-  arrowleft: 0x25, arrowup: 0x26, arrowright: 0x27, arrowdown: 0x28,
-  ctrl: 0x11, control: 0x11, control_l: 0xa2, ctrl_l: 0xa2, control_r: 0xa3, ctrl_r: 0xa3,
-  alt: 0x12, alt_l: 0xa4, alt_r: 0xa5, option: 0x12,
-  shift: 0x10, shift_l: 0xa0, shift_r: 0xa1,
-  super_l: 0x5b, super: 0x5b, meta: 0x5b, win: 0x5b, cmd: 0x5b, command: 0x5b,
-  caps_lock: 0x14, num_lock: 0x90, scroll_lock: 0x91, print_screen: 0x2c, snapshot: 0x2c,
-  minus: 0xbd, equals: 0xbb, comma: 0xbc, period: 0xbe, slash: 0xbf,
-  semicolon: 0xba, quote: 0xde, bracketleft: 0xdb, bracketright: 0xdd, backslash: 0xdc, backquote: 0xc0,
+  return: 0x0d,
+  enter: 0x0d,
+  escape: 0x1b,
+  esc: 0x1b,
+  tab: 0x09,
+  space: 0x20,
+  backspace: 0x08,
+  delete: 0x2e,
+  insert: 0x2d,
+  home: 0x24,
+  end: 0x23,
+  page_up: 0x21,
+  pageup: 0x21,
+  page_down: 0x22,
+  pagedown: 0x22,
+  prior: 0x21,
+  next: 0x22,
+  left: 0x25,
+  up: 0x26,
+  right: 0x27,
+  down: 0x28,
+  arrowleft: 0x25,
+  arrowup: 0x26,
+  arrowright: 0x27,
+  arrowdown: 0x28,
+  ctrl: 0x11,
+  control: 0x11,
+  control_l: 0xa2,
+  ctrl_l: 0xa2,
+  control_r: 0xa3,
+  ctrl_r: 0xa3,
+  alt: 0x12,
+  alt_l: 0xa4,
+  alt_r: 0xa5,
+  option: 0x12,
+  shift: 0x10,
+  shift_l: 0xa0,
+  shift_r: 0xa1,
+  super_l: 0x5b,
+  super: 0x5b,
+  meta: 0x5b,
+  win: 0x5b,
+  cmd: 0x5b,
+  command: 0x5b,
+  caps_lock: 0x14,
+  num_lock: 0x90,
+  scroll_lock: 0x91,
+  print_screen: 0x2c,
+  snapshot: 0x2c,
+  minus: 0xbd,
+  equals: 0xbb,
+  comma: 0xbc,
+  period: 0xbe,
+  slash: 0xbf,
+  semicolon: 0xba,
+  quote: 0xde,
+  bracketleft: 0xdb,
+  bracketright: 0xdd,
+  backslash: 0xdc,
+  backquote: 0xc0,
 };
 
 for (let i = 1; i <= 12; i++) VK_NAMED[`f${i}`] = 0x6f + i;
@@ -64,7 +113,22 @@ export function mapKeyComboToVk(combo: string): number[] {
       const c = key.charCodeAt(0);
       if (c >= 0x61 && c <= 0x7a) return c - 0x20; // a-z → 0x41-0x5A
       if (c >= 0x30 && c <= 0x39) return c; // 0-9
-      const punct = VK_NAMED[{ '-': 'minus', '=': 'equals', ',': 'comma', '.': 'period', '/': 'slash', ';': 'semicolon', "'": 'quote', '[': 'bracketleft', ']': 'bracketright', '\\': 'backslash', '`': 'backquote' }[key] ?? ''];
+      const punct =
+        VK_NAMED[
+          {
+            '-': 'minus',
+            '=': 'equals',
+            ',': 'comma',
+            '.': 'period',
+            '/': 'slash',
+            ';': 'semicolon',
+            "'": 'quote',
+            '[': 'bracketleft',
+            ']': 'bracketright',
+            '\\': 'backslash',
+            '`': 'backquote',
+          }[key] ?? ''
+        ];
       if (punct !== undefined) return punct;
     }
     throw new Error(`unknown key name: "${part}" in combo "${combo}"`);
@@ -86,6 +150,8 @@ const PS_INJECTOR_SCRIPT = [
   '  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);',
   '  [DllImport("user32.dll")] public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);',
   '  [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, int dwData, UIntPtr dwExtraInfo);',
+  '  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);',
+  '  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();',
   '  public struct POINT { public int X; public int Y; }',
   '  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public INPUTUNION U; }',
   '  [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }',
@@ -93,6 +159,10 @@ const PS_INJECTOR_SCRIPT = [
   '  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public UIntPtr dwExtraInfo; }',
   '}',
   '"@',
+  // DPI 感知:SetCursorPos/GetCursorPos 始终按物理像素解释,而进程默认 DPI UNAWARE。
+  // 声明 PER_MONITOR_AWARE_V2(失败回落 SYSTEM_AWARE)后 GetCursorPos 与调用方的物理坐标口径一致,
+  // 避免 cursor_position 读回的坐标与主屏物理分辨率不同源。
+  'try { if (-not [Inject]::SetProcessDpiAwarenessContext([IntPtr](-4))) { [void][Inject]::SetProcessDPIAware() } } catch { }',
   'function Send-VkCombo([int[]]$vks) {',
   '  $size = [Runtime.InteropServices.Marshal]::SizeOf([type]"Inject+INPUT")',
   '  foreach ($vk in $vks) {',
@@ -188,6 +258,18 @@ class PowerShellInjector implements InputInjector {
   private pending = new Map<number, PendingOp>();
   private stdoutBuf = '';
   private lastError = '';
+  /**
+   * 空闲回收:注入器同样是惰性启动的常驻进程,`/cu off` 之前会一直挂着。
+   * 用户开了 /cu 之后去做别的事(写代码、看 diff),不该白留一个 PowerShell。
+   * 回收只是 kill 子进程 —— 鼠标按下状态是 OS 级的,不随进程消失,下次调用惰性重建。
+   */
+  private idle: IdleGuard;
+
+  constructor(idleMs: number) {
+    this.idle = new IdleGuard(idleMs, () => {
+      void this.dispose();
+    });
+  }
 
   private ensureProcess(): ChildProcess {
     if (this.child && this.child.exitCode === null && !this.child.killed) return this.child;
@@ -202,7 +284,9 @@ class PowerShellInjector implements InputInjector {
     this.child.stderr!.on('data', (chunk: Buffer) => {
       this.lastError = (this.lastError + chunk.toString('utf8')).slice(-2000);
     });
-    this.child.on('exit', () => this.failAll(new Error(`injector process exited${this.lastError ? `: ${this.lastError.trim()}` : ''}`)));
+    this.child.on('exit', () =>
+      this.failAll(new Error(`injector process exited${this.lastError ? `: ${this.lastError.trim()}` : ''}`)),
+    );
     this.child.on('error', (err) => this.failAll(err));
     return this.child;
   }
@@ -276,6 +360,7 @@ class PowerShellInjector implements InputInjector {
       if (resp.ok !== true) {
         throw new Error(`injector op "${op}" failed: ${String(resp.detail ?? 'unknown error')}`);
       }
+      this.idle.touch();
       return resp;
     });
   }
@@ -316,11 +401,15 @@ class PowerShellInjector implements InputInjector {
     return { x: Number(resp.x) || 0, y: Number(resp.y) || 0 };
   }
   async dispose(): Promise<void> {
+    this.idle.stop();
     this.failAll(new Error('injector disposed'));
   }
 }
 
 let singleton: PowerShellInjector | null = null;
+
+/** 常驻注入进程空闲多久自动回收(可配;0 = 只靠显式 dispose)。 */
+const DEFAULT_INJECTOR_IDLE_MS = 3 * 60 * 1000;
 
 /**
  * 取当前平台的 InputInjector。Windows 用 PowerShell 常驻进程(惰性启动);
@@ -333,7 +422,7 @@ export function createInputInjector(): InputInjector {
         '(Windows MVP via PowerShell; Rust enigo injector is the planned cross-platform path).',
     );
   }
-  singleton ??= new PowerShellInjector();
+  singleton ??= new PowerShellInjector(envInt('MOCODE_CU_INJECTOR_IDLE_MS', DEFAULT_INJECTOR_IDLE_MS));
   return singleton;
 }
 

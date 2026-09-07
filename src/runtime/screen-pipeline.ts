@@ -21,6 +21,20 @@ export interface PngImage {
 
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+/**
+ * 只读 IHDR 拿宽高,不做 inflate / 反滤镜。
+ * 抓屏图 4K 时全量 decodePng 要吃满 14MB 像素缓冲 + 逐字节反滤镜循环,而宽高在文件头 24 字节里就有。
+ * 非 Windows 平台(macOS screencapture / Linux)拿不到 CaptureGeometry,靠这条路径避免整图解开销。
+ */
+export function readPngSize(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 24 || !buf.subarray(0, 8).equals(PNG_SIG)) return null;
+  if (buf.toString('ascii', 12, 16) !== 'IHDR') return null;
+  const width = buf.readUInt32BE(16);
+  const height = buf.readUInt32BE(20);
+  if (!width || !height) return null;
+  return { width, height };
+}
+
 function paeth(a: number, b: number, c: number): number {
   const p = a + b - c;
   const pa = Math.abs(p - a);
@@ -75,12 +89,23 @@ export function decodePng(buf: Buffer): PngImage {
       const c = x >= bpp && y > 0 ? out[rowOut + x - stride - bpp] : 0;
       let v: number;
       switch (f) {
-        case 0: v = cur; break;
-        case 1: v = cur + a; break;
-        case 2: v = cur + b; break;
-        case 3: v = cur + ((a + b) >> 1); break;
-        case 4: v = cur + paeth(a, b, c); break;
-        default: throw new Error(`bad PNG filter ${f}`);
+        case 0:
+          v = cur;
+          break;
+        case 1:
+          v = cur + a;
+          break;
+        case 2:
+          v = cur + b;
+          break;
+        case 3:
+          v = cur + ((a + b) >> 1);
+          break;
+        case 4:
+          v = cur + paeth(a, b, c);
+          break;
+        default:
+          throw new Error(`bad PNG filter ${f}`);
       }
       out[rowOut + x] = v & 0xff;
     }
@@ -117,8 +142,14 @@ function chunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([len, body, crc]);
 }
 
-/** 编码 RGBA → PNG(colorType 6,filter 0)。 */
-export function encodePng(img: PngImage): Buffer {
+/**
+ * 编码 RGBA → PNG(colorType 6,filter 0)。
+ *
+ * `level` 默认 1(而非 zlib 默认的 6):截图是高频噪声图,压缩率对等级极不敏感
+ * (实测体积差 <10%),但 level 6 在 4K 图上要多花数倍 CPU。图片 token 按**像素**计费、
+ * 与字节数无关,所以「压得小」在 LLM 侧没有任何收益 —— 这里只买速度。
+ */
+export function encodePng(img: PngImage, opts?: { level?: number }): Buffer {
   const { width, height, data } = img;
   const stride = width * 4;
   const raw = Buffer.alloc((stride + 1) * height);
@@ -137,7 +168,7 @@ export function encodePng(img: PngImage): Buffer {
   return Buffer.concat([
     PNG_SIG,
     chunk('IHDR', ihdr),
-    chunk('IDAT', deflateSync(raw)),
+    chunk('IDAT', deflateSync(raw, { level: opts?.level ?? 1 })),
     chunk('IEND', Buffer.alloc(0)),
   ]);
 }
@@ -194,6 +225,54 @@ export function crop(img: PngImage, x: number, y: number, w: number, h: number):
     img.data.copy(out, row * cw * 4, s, s + cw * 4);
   }
   return { width: cw, height: ch, data: out };
+}
+
+// ── 帧间差分 ───────────────────────────────────────────────────────────
+
+/**
+ * 把任意尺寸图降采样成 grid×grid 的灰度块均值(box average,非最近邻 —— 4K → 64 时
+ * 最近邻会严重走样,块均值才对「有没有变」这个问题敏感)。
+ */
+function grayGrid(img: PngImage, grid: number): Float64Array {
+  const out = new Float64Array(grid * grid);
+  const { width, height, data } = img;
+  for (let gy = 0; gy < grid; gy++) {
+    const y0 = Math.floor((gy * height) / grid);
+    const y1 = Math.max(y0 + 1, Math.floor(((gy + 1) * height) / grid));
+    for (let gx = 0; gx < grid; gx++) {
+      const x0 = Math.floor((gx * width) / grid);
+      const x1 = Math.max(x0 + 1, Math.floor(((gx + 1) * width) / grid));
+      let sum = 0;
+      let n = 0;
+      for (let y = y0; y < y1; y++) {
+        const row = y * width;
+        for (let x = x0; x < x1; x++) {
+          const i = (row + x) * 4;
+          // Rec.601 亮度;alpha 视为不透明(截图不透明)。
+          sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          n++;
+        }
+      }
+      out[gy * grid + gx] = n ? sum / n : 0;
+    }
+  }
+  return out;
+}
+
+/**
+ * 两帧的差异比例(0..1):各网格块灰度差的平均值 / 255。
+ * 典型值:完全静止 ≈ 0;光标移动或抗锯齿抖动 < 0.005;局部区域重绘 0.01-0.1;整屏切换 > 0.2。
+ * 输入必须同尺寸(调用方负责保证),否则抛错 —— 尺寸不同意味着显示器配置变了,不该静默比。
+ */
+export function diffRatio(a: PngImage, b: PngImage, grid = 64): number {
+  if (a.width !== b.width || a.height !== b.height) {
+    throw new Error(`diffRatio size mismatch: ${a.width}×${a.height} vs ${b.width}×${b.height}`);
+  }
+  const ga = grayGrid(a, grid);
+  const gb = grayGrid(b, grid);
+  let sum = 0;
+  for (let i = 0; i < ga.length; i++) sum += Math.abs(ga[i] - gb[i]);
+  return sum / ga.length / 255;
 }
 
 // ── norm1000 坐标换算 ──────────────────────────────────────────────────

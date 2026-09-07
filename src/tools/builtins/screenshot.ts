@@ -1,10 +1,14 @@
-import { mkdir } from 'node:fs/promises';
-import { dirname, extname } from 'node:path';
+import { mkdir, readFile } from 'node:fs/promises';
+import { basename, dirname, extname } from 'node:path';
 import { loadImageAttachment, MAX_INLINE_BYTES_DEFAULT } from '../../attachments/image.js';
 import { jailResolve } from '../../sandbox/index.js';
 // 平台捕获逻辑已抽到 runtime/screen-capture.ts(computer 工具闭环共用),本文件只做薄封装。
 import { captureDesktop } from '../../runtime/screen-capture.js';
+import { decodePng, downscale, encodePng } from '../../runtime/screen-pipeline.js';
 import type { Tool, ToolOutcome } from '../types.js';
+
+/** 原图超过内联上限时降级缩放的长边(对齐主流视觉模型的原生分辨率)。 */
+const FALLBACK_MAX_EDGE = 1568;
 
 export const screenshotTool: Tool = {
   name: 'screenshot',
@@ -71,16 +75,45 @@ export const screenshotTool: Tool = {
     const loaded = await loadImageAttachment(outputPath, {
       maxBytes: MAX_INLINE_BYTES_DEFAULT,
     });
+    const detail = args.detail === 'low' || args.detail === 'auto' ? args.detail : 'high';
+
+    // 高分屏(尤其 DPI aware 后抓到物理分辨率)的 PNG 可能超过内联上限:
+    // 原图仍留在磁盘上,回灌改用缩放版本,不让工具因此失败。
     if (!loaded.ok) {
-      return {
-        status: 'error',
-        code: 'EXECUTION_ERROR',
-        retryable: false,
-        output: `Screenshot saved to ${requestedPath}, but it could not be attached: ${loaded.reason}`,
-      };
+      try {
+        const png = decodePng(await readFile(outputPath));
+        const { img } = downscale(png, FALLBACK_MAX_EDGE);
+        const buf = encodePng(img);
+        return {
+          status: 'success',
+          code: 'OK',
+          retryable: false,
+          output:
+            `Captured ${target} display to ${requestedPath} (${png.width}×${png.height}); ` +
+            `it exceeded the inline limit, so the attached copy was resized to ${img.width}×${img.height}.`,
+          modelAttachments: [
+            {
+              type: 'image',
+              name: basename(outputPath),
+              mime: 'image/png',
+              dataUrl: `data:image/png;base64,${buf.toString('base64')}`,
+              detail,
+            },
+          ],
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          status: 'error',
+          code: 'EXECUTION_ERROR',
+          retryable: false,
+          output: `Screenshot saved to ${requestedPath}, but it could not be attached: ${loaded.reason}${
+            message ? ` (resize fallback failed: ${message})` : ''
+          }`,
+        };
+      }
     }
 
-    const detail = args.detail === 'low' || args.detail === 'auto' ? args.detail : 'high';
     const { att } = loaded;
     return {
       status: 'success',
