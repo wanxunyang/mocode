@@ -36,7 +36,7 @@ const principlesIdx = prompt.indexOf('## Engineering principles');
 assert(workflowIdx > 0 && principlesIdx > workflowIdx, 'engineering principles must follow the workflow');
 assert(prompt.includes(section), 'base prompt must embed the advisory discipline verbatim');
 assert(
-  prompt.includes('Verify: decide whether validation is useful by risk and scope'),
+  prompt.includes('Verify: whether and what to run follows Engineering principles'),
   'workflow must preserve agent choice over validation',
 );
 
