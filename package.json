@@ -10,7 +10,9 @@
   "files": [
     "dist",
     "bin",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md",
+    "docs/usage.md"
   ],
   "workspaces": [
     "packages/*"
