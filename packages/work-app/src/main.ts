@@ -114,9 +114,20 @@ interface ModelDescriptor {
   isActive: boolean;
 }
 
+/**
+ * 读 ~/.mocode/models/.active —— mocode 用来记录"当前激活预设"的指针文件。
+ * 注意它存的是**预设文件名**，与 config 里的 LLM_MODEL（真实 API model 名）不是一回事：
+ * 预设 deepseek-v4-1-flash 的 model 字段是 deepseek-v4.1-flash，两者拼写不同。
+ * 判定"哪个预设是激活项"必须看这个指针，不能拿 LLM_MODEL 去比文件名。
+ */
+function readActivePreset(): string {
+  try { return readFileSync(path.join(modelsDir(), '.active'), 'utf8').trim(); } catch { return ''; }
+}
+
 /** 扫描 ~/.mocode/models/*.json,返回所有模型描述 + 当前激活标记。 */
 function listModels(): ModelDescriptor[] {
-  const active = process.env.LLM_MODEL || readUserConfig().LLM_MODEL || '';
+  const activeName = readActivePreset();
+  const activeModel = process.env.LLM_MODEL || readUserConfig().LLM_MODEL || '';
   const dir = modelsDir();
   let entries: string[] = [];
   try { entries = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return []; }
@@ -137,7 +148,8 @@ function listModels(): ModelDescriptor[] {
         promptCache,
         baseURL: maskUrl(baseURL),
         contextWindow,
-        isActive: name === active,
+        // 优先按 .active 指针判定；指针缺失（老配置 / 从没用过 /model）时退回比对真实 model 名。
+        isActive: activeName ? name === activeName : model === activeModel,
       });
     } catch { /* 跳过解析失败的文件 */ }
   }
@@ -147,8 +159,42 @@ function listModels(): ModelDescriptor[] {
 }
 
 /**
+ * 让运行环境遵循 mocode 的「激活预设」语义:`.active` 指针指向哪个预设,就用哪个预设的
+ * LLM 四键(config 里的裸键只在没有激活预设时才作数)。
+ *
+ * 为什么必须做:loadMocodeConfig 会把 ~/.mocode/config 的裸 LLM 键灌进 process.env,
+ * 而 mocode core 的优先级规则是「shell 显式设的 env > .active 预设 > config 裸键」——
+ * 一旦我们把 config 裸键提前塞进 process.env,host 进程就会把它当成"shell 设的"，
+ * 从而**跳过 .active 预设覆盖**。此时若 config 里的 LLM_MODEL 是个过时/写错的值
+ * (例如历史版本误写成预设文件名 deepseek-v4-1-flash,而非真实 model deepseek-v4.1-flash),
+ * host 就会拿这个错值去请求,得到 `404 The model ... does not exist`。
+ */
+function applyActivePreset(): void {
+  const name = readActivePreset();
+  if (!name) return;
+  try {
+    const raw = JSON.parse(readFileSync(path.join(modelsDir(), `${name}.json`), 'utf8')) as Record<string, unknown>;
+    if (typeof raw.baseURL === 'string' && raw.baseURL) process.env.LLM_BASE_URL = raw.baseURL;
+    if (typeof raw.apiKey === 'string' && raw.apiKey) process.env.LLM_API_KEY = raw.apiKey;
+    // 写真实 API model 名(预设里的 model 字段),不是预设文件名。
+    if (typeof raw.model === 'string' && raw.model) process.env.LLM_MODEL = raw.model;
+    if (raw.provider === 'anthropic' || raw.provider === 'openai') process.env.LLM_PROVIDER = raw.provider;
+    const contextWindow = Number(raw.contextWindow ?? 0);
+    if (contextWindow > 0) process.env.CONTEXT_WINDOW_TOKENS = String(contextWindow);
+    const promptCache = raw.provider === 'anthropic' && raw.anthropicPromptCache !== false;
+    process.env.ANTHROPIC_PROMPT_CACHE = promptCache ? 'true' : 'false';
+  } catch { /* 预设文件损坏:保持 config 裸键,别让切换把整个应用拖垮 */ }
+}
+
+/**
  * 把指定模型切为当前激活:读目标 .json,把所有相关键写入 ~/.mocode/config 与 process.env。
- * 同时取消正在运行的任务(host 进程下一次 send 时会自动重启并加载新配置)。
+ * 同时取消正在运行的任务 —— host 子进程持有自己的一份 config 快照,必须显式停掉它,
+ * 下次 run 时 send() 会重建进程并读到新配置(见 LocalAgent.restart)。
+ *
+ * **关键**:LLM_MODEL 必须写预设里的真实 API model 名(如 deepseek-v4.1-flash),
+ * 绝不能写预设文件名(deepseek-v4-1-flash)。两者拼写常常不同(点号 vs 连字符),
+ * 写错会让 host 拿一个后端不存在的模型名去请求,得到
+ * `404 The model ... does not exist`。真正"当前激活预设"的身份由 .active 指针文件承载。
  */
 function switchModel(name: string): { ok: boolean; message: string; model?: ModelDescriptor } {
   const target = path.join(modelsDir(), `${name}.json`);
@@ -167,19 +213,24 @@ function switchModel(name: string): { ok: boolean; message: string; model?: Mode
     LLM_PROVIDER: provider,
     LLM_BASE_URL: baseURL,
     LLM_API_KEY: apiKey,
-    LLM_MODEL: name,
+    LLM_MODEL: model, // 真实 API model 名,不是预设文件名
     ANTHROPIC_PROMPT_CACHE: promptCache ? 'true' : 'false',
   };
   if (contextWindow) patch.CONTEXT_WINDOW_TOKENS = String(contextWindow);
   try { writeUserConfig(patch); }
   catch (error) { return { ok: false, message: `写入配置失败: ${(error as Error).message}` }; }
+  // 同步 .active 指针,否则下次启动 config/index.ts 会用指针指向的旧预设覆盖刚写的键。
+  try { writeFileSync(path.join(modelsDir(), '.active'), `${name}\n`, 'utf8'); }
+  catch { /* 指针写失败不阻断切换 */ }
   process.env.LLM_PROVIDER = provider;
   process.env.LLM_BASE_URL = baseURL;
   process.env.LLM_API_KEY = apiKey;
-  process.env.LLM_MODEL = name;
+  process.env.LLM_MODEL = model;
   process.env.ANTHROPIC_PROMPT_CACHE = promptCache ? 'true' : 'false';
   if (contextWindow) process.env.CONTEXT_WINDOW_TOKENS = String(contextWindow);
   if (activeTaskId) { void agent?.send({ type: 'cancel', id: activeTaskId }); activeTaskId = null; }
+  // 停掉 host:它下次 send 会重建进程并读到刚写入的新配置(否则仍拿着旧模型跑)。
+  void agent?.restart();
   return {
     ok: true,
     message: `已切换到 ${name} (${provider}${promptCache ? ' · cache on' : ''})`,
@@ -336,6 +387,8 @@ class LocalAgent {
   private readonly client = new AgentHostClient();
   private currentProject: Project | null = null;
   private starting: Promise<void> | null = null;
+  /** 正在执行的 stop() promise。restart 后立刻 send 必须等它,否则会发给正在退出的旧 host。 */
+  private restarting: Promise<void> | null = null;
   private crashStreak = 0;
   private static MAX_CRASH_STREAK = 3;
 
@@ -409,6 +462,9 @@ class LocalAgent {
   }
 
   async send(value: HostCommand): Promise<void> {
+    // 先等正在进行的 restart 收尾:client.stop() 只发了 kill,子进程尚未退出时
+    // isRunning 仍为 true,若直接发会落到正在死掉的旧进程上(切换模型后最易踩)。
+    if (this.restarting) await this.restarting;
     if (!this.client.isRunning) {
       const project = this.currentProject;
       if (!project) {
@@ -435,6 +491,23 @@ class LocalAgent {
     this.currentProject = null;
     this.starting = null;
     void this.client.stop();
+  }
+
+  /**
+   * 停掉当前 host 但**保留 currentProject** —— 下次 send 会走 send() 里的
+   * `!this.client.isRunning` 分支自动重启并读最新配置。
+   * /model 切换后必须调它:host 子进程启动时就固化了 config 快照,
+   * 不重启的话新选的模型不会生效(仍按旧模型发请求)。
+   * 若 host 本来就没在跑,是空操作。
+   */
+  restart(): void {
+    this.starting = null;
+    this.crashStreak = 0;
+    const stopping = this.client.stop();
+    this.restarting = stopping.catch(() => undefined);
+    void this.restarting.finally(() => {
+      if (this.restarting === stopping) this.restarting = null;
+    });
   }
 
   private receive(envelope: HostEnvelope): void {
@@ -684,7 +757,14 @@ app.whenReady().then(async () => {
     { id: 'help', label: '帮助', submenu: [{ label: 'Mocode Work', enabled: false }] },
   ]);
   Menu.setApplicationMenu(null);
-  state = await loadState(); agent = new LocalAgent(); installIpc(); createWindow(); await agent.start(selectedProject());
+  state = await loadState();
+  // 启动时先让 .active 预设覆盖 config 裸键 —— 必须在 agent.start() 之前，
+  // 否则 host 会带着 config 里那个可能已过时的 LLM_MODEL 启动。
+  applyActivePreset();
+  agent = new LocalAgent();
+  installIpc();
+  createWindow();
+  await agent.start(selectedProject());
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => { agent?.stop(); if (process.platform !== 'darwin') app.quit(); });

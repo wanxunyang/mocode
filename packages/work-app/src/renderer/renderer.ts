@@ -287,22 +287,7 @@ function renderTasks(): void {
   $('#usage').textContent = total ? `${total} 任务${running ? ` · ${running} 运行中` : ''}` : '0%';
 }
 
-function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); refreshComposerContext(); renderEmptyChips(); }
-
-/** 根据当前选中的任务，更新输入框上方的「任务」上下文条。*/
-function refreshComposerContext(): void {
-  const task = selectedTask();
-  const bar = $('#composer-task'); const nameBtn = $('#composer-task-name') as HTMLButtonElement | null;
-  if (task && bar && nameBtn) {
-    bar.classList.remove('hidden');
-    nameBtn.textContent = task.title;
-    nameBtn.title = `任务：${task.title}（点击重命名）`;
-    promptInput.placeholder = `为「${task.title}」继续输入指令…`;
-  } else {
-    bar?.classList.add('hidden');
-    promptInput.placeholder = '描述你想做的事…';
-  }
-}
+function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); renderEmptyChips(); }
 function clearWorkspace(): void { conversation.innerHTML = ''; emptyState.classList.remove('hidden'); activeAssistant = null; activeRunId = null; attachments = []; renderAttachments(); }
 
 function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
@@ -599,6 +584,54 @@ function ensureCheatsheet(): HTMLElement {
 function showCheatsheet(): void { ensureCheatsheet()!.classList.remove('hidden'); }
 function hideCheatsheet(): void { cheatsheetEl?.classList.add('hidden'); }
 
+/* ── 图片附件：拖入 / 粘贴共用同一套入队逻辑 ───────────── */
+const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
+
+/** 把一张图片加入待发送附件。非图片或超限会提示并跳过，返回是否入队成功。 */
+async function addImageFile(file: File, fallbackName = '图片'): Promise<boolean> {
+  const label = file.name || fallbackName;
+  if (file.type && !/^image\//.test(file.type)) { showToast('warn', `${label} 不是图片,已跳过`); return false; }
+  if (file.size > MAX_ATTACHMENT_BYTES) { showToast('error', `${label} 超过 4MB 限制`); return false; }
+  try {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    attachments.push({ name: label, dataUrl });
+    return true;
+  } catch {
+    showToast('error', `${label} 读取失败`);
+    return false;
+  }
+}
+
+/** 粘贴图片（Ctrl/⌘+V）—— 剪贴板里的位图没有文件名,按时间戳生成一个。 */
+function setupPasteImage(): void {
+  promptInput.addEventListener('paste', (event) => {
+    const files = Array.from(event.clipboardData?.items ?? [])
+      .filter((item) => item.kind === 'file' && /^image\//.test(item.type))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => !!file);
+    // 没有图片就走浏览器默认粘贴(纯文本),不拦截
+    if (files.length === 0) return;
+    event.preventDefault();
+    const now = new Date();
+    const stamp = [now.getHours(), now.getMinutes(), now.getSeconds()]
+      .map((n) => String(n).padStart(2, '0')).join('');
+    void (async () => {
+      let added = 0;
+      for (const file of files) if (await addImageFile(file, `粘贴图片-${stamp}.png`)) added += 1;
+      if (added === 0) return;
+      renderAttachments();
+      promptInput.focus();
+      showToast('info', `已添加 ${added} 张图片`);
+    })();
+  });
+}
+setupPasteImage();
+
 /* ── Drag & drop files into composer ──────────────────── */
 function setupDragDrop(): void {
   const composer = $('.composer');
@@ -621,18 +654,7 @@ function setupDragDrop(): void {
     event.preventDefault();
     depth = 0;
     composer.classList.remove('composer-drag');
-    const files = Array.from(event.dataTransfer.files);
-    for (const file of files) {
-      if (file.size > 4 * 1024 * 1024) { showToast('error', `${file.name} 超过 4MB 限制`); continue; }
-      if (!/^image\//.test(file.type)) { showToast('warn', `${file.name} 不是图片,已跳过`); continue; }
-      const reader = new FileReader();
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(file);
-      });
-      attachments.push({ name: file.name, dataUrl });
-    }
+    for (const file of Array.from(event.dataTransfer.files)) await addImageFile(file);
     renderAttachments();
     promptInput.focus();
   });
@@ -971,8 +993,6 @@ $('#task-name-input')?.addEventListener('keydown', (event) => {
 $('#task-goal-input')?.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submitTaskModal(); }
 });
-$('#composer-task-name')?.addEventListener('click', () => { const t = selectedTask(); if (t) void startTaskRename(t.id); });
-$('#composer-task-edit')?.addEventListener('click', () => { const t = selectedTask(); if (t) void startTaskRename(t.id); });
 $('#add-attachment').addEventListener('click', async () => { const attachment = await window.mocodeWork.pickAttachment(); if (attachment) { attachments.push(attachment); renderAttachments(); } });
 $('#compact-button').addEventListener('click', () => {
   window.mocodeWork.send({ type: 'compact', id: crypto.randomUUID() });
@@ -1172,7 +1192,7 @@ let modelList: ModelItem[] = [];
 
 function shortModelName(text: string): string {
   if (!text) return '未配置模型';
-  return text.length > 18 ? `${text.slice(0, 17)}…` : text;
+  return text.length > 24 ? `${text.slice(0, 23)}…` : text;
 }
 
 function setModeButton(config: ModelConfig): void {
@@ -1180,10 +1200,11 @@ function setModeButton(config: ModelConfig): void {
   if (!button) return;
   const display = config.label || config.model;
   const label = config.model ? shortModelName(display) : '未配置模型';
+  // 按钮上只留模型名（+ anthropic 的 cache 标记）；协议/openai 之类的信息挪进 title 与下拉列表，别占按钮宽度。
   const cacheBadge = config.provider === 'anthropic' && config.promptCache
     ? '<span class="model-picker-cache">cache</span>'
     : '';
-  button.innerHTML = `<span class="mode-label">${escapeHtml(label)}</span><span class="model-picker-provider">${config.provider}</span>${cacheBadge}<svg class="icon icon-inline" data-icon="chevron-down"></svg>`;
+  button.innerHTML = `<span class="mode-label">${escapeHtml(label)}</span>${cacheBadge}<svg class="icon icon-inline" data-icon="chevron-down"></svg>`;
   mountIcons(button);
   const detail = [
     config.model ? `别名: ${config.model}` : null,
@@ -1256,9 +1277,32 @@ function renderModelPicker(): void {
   });
 }
 
+/* 把下拉锚定在**模型按钮**正上方，而不是 .composer-area 那一整条。CSS 的
+ * `right: 0; bottom: calc(100% + 6px)` 只能贴着 area 的右内沿（= 窗口右边缘，
+ * 因为 .composer-area 横向 padding 是 --gutter-x），于是面板会飘到输入卡右外侧。
+ * 这里按按钮实测 rect 反算偏移：绝对定位的基准是包含块(.composer-area)的 padding box，
+ * 无边框时其右/下沿就等于 areaRect.right/bottom。
+ * 不写成 CSS 常量是因为空态那条输入卡走 --empty-col-w 居中，右边界随窗口宽变化。 */
+const PICKER_ANCHOR_GAP = 6;
+function positionModelPicker(): void {
+  const el = ensureModelPicker();
+  const button = $('#mode-button') as HTMLElement | null;
+  const area = el.parentElement;
+  if (!button || !area) return;
+  const btnRect = button.getBoundingClientRect();
+  const areaRect = area.getBoundingClientRect();
+  el.style.right = `${Math.max(0, areaRect.right - btnRect.right)}px`;
+  const bottom = areaRect.bottom - btnRect.top + PICKER_ANCHOR_GAP;
+  el.style.bottom = `${Math.max(0, bottom)}px`;
+  // 上方空间不够时收窄面板，避免顶出窗口（空态输入卡在视口中央时尤其要注意）。
+  const room = Math.max(140, btnRect.top - PICKER_ANCHOR_GAP - 12);
+  el.style.maxHeight = `${Math.min(320, room)}px`;
+}
+
 function showModelPicker(): void {
   const el = ensureModelPicker();
   el.classList.remove('hidden');
+  positionModelPicker();
   $('#mode-button')?.setAttribute('aria-expanded', 'true');
   requestAnimationFrame(() => el.classList.add('model-picker-in'));
 }
@@ -1273,6 +1317,7 @@ $('#mode-button')?.addEventListener('click', async (event) => {
   event.stopPropagation();
   const el = ensureModelPicker();
   if (!el.classList.contains('hidden')) { hideModelPicker(); return; }
+  hideWorkspacePicker();
   await refreshModelList();
   renderModelPicker();
   showModelPicker();
@@ -1298,6 +1343,9 @@ searchPanel.addEventListener('click', (event) => { if (event.target === searchPa
 sendButton.addEventListener('click', () => void submit());
 promptInput.addEventListener('input', resizePrompt);
 promptInput.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } });
+window.addEventListener('resize', () => {
+  if (modelPickerEl && !modelPickerEl.classList.contains('hidden')) positionModelPicker();
+});
 window.addEventListener('keydown', (event) => {
   const cmd = event.ctrlKey || event.metaKey;
   // ? 打开 cheatsheet(Shift + / 在大多数键盘上是 ?)
@@ -1360,54 +1408,96 @@ document.querySelectorAll<HTMLButtonElement>('.empty-hint').forEach((button) => 
 // 末尾再 mount 一次,覆盖在 init 中通过 innerHTML 注入的 [data-icon](例如动态插的 SVG 占位)。
 mountIcons();
 
-/* ── 空状态下的 3 个 chip：项目 / 分支 / 模型 ─────────────── */
+/* ── 空状态 chip：工作空间下拉（选已有空间 / 打开新空间） ── */
+let workspacePickerEl: HTMLElement | null = null;
+
 function renderEmptyChips(): void {
   const project = state?.projects.find((p) => p.id === state?.selectedProjectId) ?? state?.projects[0];
-  const projectLabel = $('#empty-chip-project .empty-chip-label');
-  const branchLabel = $('#empty-chip-branch .empty-chip-label');
-  const modelLabel = $('#empty-chip-model .empty-chip-label');
-  if (projectLabel) projectLabel.textContent = project?.name ?? '选择项目';
-  if (branchLabel) branchLabel.textContent = project?.branch && project.branch !== '本地' ? project.branch : '—';
-  // 模型来自 getConfig；异步,首次为空时显示占位
-  void window.mocodeWork.getConfig().then((cfg) => {
-    if (modelLabel) modelLabel.textContent = cfg.label || cfg.model || '未配置';
-  }).catch(() => { if (modelLabel) modelLabel.textContent = '未配置'; });
+  const label = $('#empty-chip-project .empty-chip-label');
+  if (label) label.textContent = project?.name ?? '选择工作空间';
 }
 
-$('#empty-chip-project')?.addEventListener('click', async () => {
-  try {
-    const next = await window.mocodeWork.pickProject();
-    if (next) { updateState(next); showToast('success', '已切换项目'); }
-  } catch (error) { showToast('error', (error as Error).message); }
-});
+function workspacePicker(): HTMLElement | null {
+  if (!workspacePickerEl) workspacePickerEl = $('#workspace-picker') as HTMLElement | null;
+  return workspacePickerEl;
+}
 
-$('#empty-chip-branch')?.addEventListener('click', async () => {
-  try {
-    const res = await window.mocodeWork.listBranches();
-    if (!res.ok) { showToast('warn', res.message || '无法读取分支'); return; }
-    if (res.branches.length === 0) { showToast('warn', '当前项目无 git 分支'); return; }
-    // 简易选择：用 prompt；若需要更花哨的 picker 后续可换 modal
-    const choice = window.prompt('切换到哪个分支？\n\n' + res.branches.map((b: string, i: number) => `${i + 1}. ${b}${b === res.current ? ' (当前)' : ''}`).join('\n') + '\n\n输入编号或名称：', res.current);
-    if (!choice) return;
-    const target = /^\d+$/.test(choice) ? res.branches[Number(choice) - 1] : choice;
-    if (!target) { showToast('warn', '无效选择'); return; }
-    const sw = await window.mocodeWork.switchBranch(target);
-    if (sw.ok) showToast('success', sw.message);
-    else showToast('error', sw.message);
-  } catch (error) { showToast('error', (error as Error).message); }
-});
+function renderWorkspacePicker(): void {
+  const el = workspacePicker();
+  if (!el) return;
+  const projects = state?.projects ?? [];
+  const currentId = state?.selectedProjectId;
+  const items = projects.length
+    ? projects.map((project) => `
+        <button class="chip-picker-item ${project.id === currentId ? 'active' : ''}" data-workspace="${escapeHtml(project.id)}" role="option" aria-selected="${project.id === currentId}">
+          <span class="chip-picker-check">${project.id === currentId ? icon('check') : ''}</span>
+          <span class="chip-picker-body">
+            <span class="chip-picker-name">${escapeHtml(project.name)}</span>
+            <span class="chip-picker-path" title="${escapeHtml(project.root)}">${escapeHtml(project.root)}</span>
+          </span>
+        </button>`).join('')
+    : '<div class="chip-picker-empty">还没有工作空间，先打开一个文件夹。</div>';
+  el.innerHTML = `
+    <div class="chip-picker-head"><span>工作空间</span><span class="chip-picker-count">${projects.length} 个</span></div>
+    <div class="chip-picker-list" role="listbox">${items}</div>
+    <div class="chip-picker-foot">
+      <button class="chip-picker-item chip-picker-new" data-workspace-open>
+        <span class="chip-picker-check">${icon('folder')}</span>
+        <span class="chip-picker-body">
+          <span class="chip-picker-name">打开新的工作空间…</span>
+          <span class="chip-picker-path">选择一个本地文件夹</span>
+        </span>
+      </button>
+    </div>
+  `;
+  el.querySelectorAll<HTMLButtonElement>('[data-workspace]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.workspace;
+      hideWorkspacePicker();
+      if (!id || id === currentId) return;
+      try {
+        const next = await window.mocodeWork.selectProject(id);
+        if (next) { updateState(next); showToast('success', '已切换工作空间'); }
+      } catch (error) { showToast('error', (error as Error).message); }
+    });
+  });
+  el.querySelector<HTMLButtonElement>('[data-workspace-open]')?.addEventListener('click', async () => {
+    hideWorkspacePicker();
+    try {
+      const next = await window.mocodeWork.pickProject();
+      if (next) { updateState(next); showToast('success', '已打开新的工作空间'); }
+    } catch (error) { showToast('error', (error as Error).message); }
+  });
+}
 
-$('#empty-chip-model')?.addEventListener('click', async () => {
-  try {
-    const models = await window.mocodeWork.listModels();
-    if (models.length === 0) { showToast('warn', '未配置任何模型'); return; }
-    const active = models.find((m: { isActive: boolean }) => m.isActive)?.name ?? models[0].name;
-    const choice = window.prompt('切换到哪个模型？\n\n' + models.map((m: { name: string }, i: number) => `${i + 1}. ${m.name}${m.name === active ? ' (当前)' : ''}`).join('\n') + '\n\n输入编号或名称：', active);
-    if (!choice) return;
-    const target = /^\d+$/.test(choice) ? models[Number(choice) - 1]?.name : choice;
-    if (!target) { showToast('warn', '无效选择'); return; }
-    const sw = await window.mocodeWork.switchModel(target);
-    if (sw.ok) { showToast('success', sw.message); renderEmptyChips(); }
-    else showToast('error', sw.message);
-  } catch (error) { showToast('error', (error as Error).message); }
+function showWorkspacePicker(): void {
+  const el = workspacePicker();
+  if (!el) return;
+  el.classList.remove('hidden');
+  $('#empty-chip-project')?.setAttribute('aria-expanded', 'true');
+  requestAnimationFrame(() => el.classList.add('chip-picker-in'));
+}
+function hideWorkspacePicker(): void {
+  const el = workspacePicker();
+  if (!el || el.classList.contains('hidden')) return;
+  el.classList.remove('chip-picker-in');
+  el.classList.add('hidden');
+  $('#empty-chip-project')?.setAttribute('aria-expanded', 'false');
+}
+
+$('#empty-chip-project')?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  const el = workspacePicker();
+  if (!el) return;
+  if (!el.classList.contains('hidden')) { hideWorkspacePicker(); return; }
+  hideModelPicker();
+  renderWorkspacePicker();
+  showWorkspacePicker();
+});
+document.addEventListener('click', (event) => {
+  const el = workspacePicker();
+  if (!el || el.classList.contains('hidden')) return;
+  const target = event.target as Node;
+  if (el.contains(target) || $('#empty-chip-project')?.contains(target)) return;
+  hideWorkspacePicker();
 });
