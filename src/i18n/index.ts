@@ -697,7 +697,14 @@ const resources: Record<Language, Record<TranslationKey, string>> = {
   en,
 };
 
-let currentLanguage: Language = 'zh-CN';
+/**
+ * 未显式配置语言时的默认值。刻意固定为 en 而**不**探测系统 locale：
+ * 中文 Windows 的 `Intl.DateTimeFormat().resolvedOptions().locale` 为 zh-CN，
+ * 会让新装用户一开就是中文界面。要中文须显式 /language zh-CN 或 MOCODE_LANGUAGE=zh-CN。
+ */
+export const DEFAULT_LANGUAGE: Language = 'en';
+
+let currentLanguage: Language = DEFAULT_LANGUAGE;
 
 export function normalizeLanguage(value?: string | null): Language | null {
   const normalized = value?.trim().toLowerCase().replace('_', '-');
@@ -707,13 +714,12 @@ export function normalizeLanguage(value?: string | null): Language | null {
   return null;
 }
 
+/**
+ * 解析生效语言：只认显式配置（MOCODE_LANGUAGE / ~/.mocode/config / 项目级 config），
+ * 无法识别或未配置时落 DEFAULT_LANGUAGE（en）。不再回退系统 locale。
+ */
 export function detectLanguage(preferred?: string | null): Language {
-  const explicit = normalizeLanguage(preferred);
-  if (explicit) return explicit;
-  const system = normalizeLanguage(
-    process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG || Intl.DateTimeFormat().resolvedOptions().locale,
-  );
-  return system ?? 'zh-CN';
+  return normalizeLanguage(preferred) ?? DEFAULT_LANGUAGE;
 }
 
 export function setLanguage(language: Language): void {
