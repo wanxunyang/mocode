@@ -5,6 +5,7 @@ import { getPlanDisabledTools, getProfileDisabledTools } from '../tools/constant
 import { imageSizeFromDataUrl } from '../attachments/image.js';
 import { ThinkTagFilter } from './think-filter.js';
 import { sanitizeToolSchemas } from './tool-schema.js';
+import { isMarkedStreamInterrupted } from './stream-interrupt.js';
 import { defaultAnthropicFetch, anthropicChatOnce } from './providers/anthropic.js';
 import { registerModelProvider, getModelProvider, listModelProviders } from './provider.js';
 import type {
@@ -46,6 +47,13 @@ const RETRY_MAX_ATTEMPTS = 10;
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 30000;
 const RETRY_JITTER = 0.2;
+
+/**
+ * 「流中途故障」(见 isStreamInterruptedError)单独的重试预算,不共享 HTTP 层的 10 次。
+ * 这类错误绝大多数是推理后端瞬时故障,重试两次足够;若它其实是永久故障,10 次指数退避
+ * (封顶 30s)会让用户干等近两分钟,代价远大于收益。
+ */
+const STREAM_RETRY_MAX_ATTEMPTS = 2;
 
 /**
  * 流式响应里出现的推理模型自创 `think` 标签(DeepSeek R1 / Qwen3 / 部分自训模型):
@@ -166,6 +174,74 @@ export function isRetryableError(err: unknown, signal?: AbortSignal): boolean {
 }
 
 /**
+ * 「传输/协议层的流中断」判据:连接被掐断、响应提前结束、cause 里藏着 errno。
+ *
+ * 实测(Node 22 + openai SDK + 服务端 destroy socket):HTTP 200 建连并已吐出 chunk 后
+ * 连接被掐,抛的是 `Error: Premature close`(code `ERR_STREAM_PREMATURE_CLOSE`)——
+ * 既不是 APIError 也没有 status,`isRetryableError` 一条都不命中。网关超时、NAT 回收、
+ * 推理进程 OOM 被杀、k8s pod 重启都属于这一类,是线上最常见的「半路断流」。
+ *
+ * undici 还会把底层 errno 藏在 `cause` 里(`TypeError: fetch failed` → cause
+ * `SocketError: other side closed` / `read ECONNRESET`),只看顶层必然漏,故沿 cause 链找。
+ */
+const STREAM_BREAK_CODES = new Set([
+  'ERR_STREAM_PREMATURE_CLOSE',
+  'ERR_STREAM_DESTROYED',
+  'ERR_STREAM_UNABLE_TO_PIPE',
+  'ERR_HTTP2_STREAM_CANCEL',
+  'UND_ERR_SOCKET',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ERR_SOCKET_CONNECTION_TIMEOUT',
+]);
+
+const STREAM_BREAK_MESSAGE =
+  /premature close|other side closed|socket hang up|\bterminated\b|stream (?:closed|ended) (?:prematurely|unexpectedly)|econnreset|econnaborted/i;
+
+/** 沿 cause 链(≤3 层)找「连接被掐断」的信号;命中即认为响应流非正常结束。 */
+function hasStreamBreakSignal(err: unknown, depth = 0): boolean {
+  if (!err || typeof err !== 'object' || depth > 3) return false;
+  const e = err as { code?: unknown; message?: unknown; cause?: unknown };
+  if (typeof e.code === 'string' && STREAM_BREAK_CODES.has(e.code)) return true;
+  if (typeof e.message === 'string' && STREAM_BREAK_MESSAGE.test(e.message)) return true;
+  return hasStreamBreakSignal(e.cause, depth + 1);
+}
+
+/**
+ * 判定「服务端在响应流中途报错 / 流被中途掐断」——HTTP 层已建连并开始流式返回(状态码 200),
+ * 失败发生在流内部。两条命中路径:
+ *
+ * ① **SSE error chunk**:SDK 的两条流内抛错路径(node_modules/openai/streaming.mjs:41 / :57)
+ *    都构造 `new APIError(undefined, data.error, …)`:status 为 undefined,code/message 取自
+ *    负载,例如 DashScope 的 `ClientError` + `Backend buffer overflow.`。
+ * ② **传输层断流**:见 hasStreamBreakSignal;或 provider 显式打了标记
+ *    (`providers/anthropic.ts` 的 SSE `event: error`,由 markStreamInterrupted 标注)。
+ *
+ * 为什么要单独识别:isRetryableError 只认 status(429 / 5xx)、Node errno 白名单与 timeout 字样,
+ * 这三类都不沾 → 被当成「不可重试的客户端请求错」一次即抛,整轮 run 直接终止。但它们的真实语义
+ * 是「服务端/链路在生成到一半时挂了」,属瞬时故障,重试是正确处置(已实测同一会话更大 prompt 可成功)。
+ *
+ * 只认 APIError 本身,不认子类:APIConnectionError / APIConnectionTimeoutError 已由
+ * isRetryableError 的 name 分支覆盖,而 APIUserAbortError 是用户中断、绝不能重试。
+ * 判据用构造器名而非 instanceof:同进程若存在 openai 的多份模块实例(ESM/CJS 混载),
+ * instanceof 会失配。
+ *
+ * 注意:这里只判定「类别」;能否真的重试还要看调用方的「本次尝试零产出」前提。
+ */
+export function isStreamInterruptedError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { status?: unknown; name?: string; constructor?: { name?: string } };
+  if (e.name === 'AbortError' || e.name === 'APIUserAbortError') return false;
+  if (isMarkedStreamInterrupted(err)) return true;
+  // 有 HTTP 状态码 = 建连阶段失败,交由 isRetryableError 既有规则处理。
+  if (typeof e.status === 'number') return false;
+  if ((e.constructor?.name ?? '') === 'APIError') return true;
+  return hasStreamBreakSignal(err);
+}
+
+/**
  * 判定一次失败是否是「请求上下文超长」(后端实测拒绝了我们的 prompt)。
  *
  * 与压力线(本地启发式估算)的区别:这是**实测**信号。估算对某些 provider 会系统性偏低
@@ -200,7 +276,7 @@ export function isContextLengthError(err: unknown): boolean {
  * 返回 null = 认不出的错误,展示层保留原始 provider 诊断(方便准确修复,不瞎猜)。
  * 供 repl 的错误出口翻译成中文引导(配 key / 切模型 / 压缩会话等)。
  */
-export type ChatErrorKind = 'auth' | 'quota' | 'timeout' | 'network' | 'context';
+export type ChatErrorKind = 'auth' | 'quota' | 'timeout' | 'network' | 'context' | 'server';
 
 export function classifyChatError(msg: string): ChatErrorKind | null {
   const m = (msg || '').toLowerCase();
@@ -229,6 +305,17 @@ export function classifyChatError(msg: string): ChatErrorKind | null {
     /无法连接|网络(?:错误|异常|不可用)|域名解析/.test(msg)
   )
     return 'network';
+  // 服务端在生成中途故障(流内报错,无 HTTP 状态码):推理后端崩溃 / 网关缓冲溢出等瞬时故障。
+  // 已实测 DashScope compatible-mode 会回 `code=ClientError` + `message="Backend buffer overflow."`。
+  // 走到这里说明重试预算已用尽(或已有半截输出不能重试),给「直接重发」的引导而非裸报错。
+  if (
+    /backend\s+buffer|buffer\s+overflow|engine\s+(?:crash|error|failed|aborted)|internal\s+server\s+error|server\s+(?:overloaded|busy|unavailable)/.test(
+      m,
+    ) ||
+    /premature close|other side closed/.test(m) ||
+    /后端.{0,10}(?:溢出|崩溃|异常)|服务(?:端|器)(?:内部)?(?:错误|异常|繁忙|不可用)/.test(msg)
+  )
+    return 'server';
   return null;
 }
 
@@ -494,10 +581,28 @@ async function chatWithRuntime(
   toolsOverride?: ChatTool[],
 ): Promise<ChatResult> {
   let lastErr: unknown;
+  // 本次尝试是否已向调用方产出过内容(可见文本 / 工具名)。用于判断「流中途故障可否安全重试」:
+  // 重试会从请求头重放,已流出并显示在内容区的半截文本会再写一遍(history 因异常未落,倒是不脏)。
+  // 用包装 handler 而非改各 provider 内部,OpenAI / Anthropic 两条路径统一生效。
+  let producedOutput = false;
+  const guardedHandlers: StreamHandlers = {
+    ...handlers,
+    onText: (text) => {
+      producedOutput = true;
+      handlers.onText?.(text);
+    },
+    onToolCall: (name) => {
+      producedOutput = true;
+      handlers.onToolCall?.(name);
+    },
+  };
+  // 流中途故障用独立计数,避免与 HTTP 层共享 10 次预算(理由见 STREAM_RETRY_MAX_ATTEMPTS)。
+  let streamRetries = 0;
   for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
     if (signal?.aborted) {
       throw new DOMException('This operation was aborted', 'AbortError');
     }
+    producedOutput = false;
     try {
       const provider = getModelProvider(runtime.config.provider);
       if (!provider) {
@@ -506,12 +611,21 @@ async function chatWithRuntime(
           `未知的 LLM provider "${runtime.config.provider}";已注册:${listModelProviders().join(', ') || '(空)'}`,
         );
       }
-      return await provider.chatOnce(messages, handlers, signal, toolsOverride, runtime);
+      return await provider.chatOnce(messages, guardedHandlers, signal, toolsOverride, runtime);
     } catch (err) {
       lastErr = err;
-      if (attempt >= RETRY_MAX_ATTEMPTS || !isRetryableError(err, signal)) {
+      // 流中途故障的额外可重试窗口:仅当本次尝试零产出(否则重试会重放半截文本)、用户没有中断、
+      // 且未超它的独立预算。HTTP 层规则(isRetryableError)保持原样,两条判定取并集。
+      // 用户中断必须显式排除:undici 在 abort 时也可能抛「连接被掐断」形态的错,只看错误本身会误判。
+      const streamRetryable =
+        !signal?.aborted &&
+        isStreamInterruptedError(err) &&
+        !producedOutput &&
+        streamRetries < STREAM_RETRY_MAX_ATTEMPTS;
+      if (attempt >= RETRY_MAX_ATTEMPTS || (!isRetryableError(err, signal) && !streamRetryable)) {
         throw err;
       }
+      if (streamRetryable) streamRetries++;
       const wait = computeBackoff(attempt, getRetryAfterMs(err));
       const retry = {
         attempt,

@@ -230,6 +230,8 @@ const zhCN = {
   'repl.llmTimeoutError': '请求超时：模型服务响应过慢。可重试，或输入 /model switch 换一个模型。',
   'repl.llmNetworkError': '网络错误：无法连接 {base}。检查网络连接，或输入 /model 核对 baseURL 配置。',
   'repl.llmContextError': '上下文超长：输入 /compact 压缩会话后重试。',
+  'repl.llmServerError':
+    '模型服务端在生成中途中断（错误来自响应流内部，非 HTTP 层）。该轮未写入会话历史，直接重发即可；若反复出现，用 /model switch 换模型或 /compact 压缩会话。',
   'permission.path': '路径: {value}',
   'permission.command': '命令: {value}',
   'permission.task': '任务: {value}',
@@ -576,6 +578,8 @@ const en: Record<TranslationKey, string> = {
   'repl.llmNetworkError':
     'Network error: cannot reach {base}. Check your connection, or run /model to verify the baseURL.',
   'repl.llmContextError': 'Context too long: run /compact to compress the session, then retry.',
+  'repl.llmServerError':
+    'The model backend aborted mid-stream (the error came from inside the response stream). This turn was not written to session history — just resend it. If it repeats, run /model switch or /compact.',
   'permission.path': 'Path: {value}',
   'permission.command': 'Command: {value}',
   'permission.task': 'Task: {value}',

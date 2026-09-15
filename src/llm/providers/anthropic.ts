@@ -1,6 +1,7 @@
 import { config, getActiveModel } from '../../config/index.js';
 import type { ChatMessage, ChatResult, ChatTool, ChatUsage, StreamHandlers, ToolCallRef } from '../index.js';
 import type { AnthropicFetchImpl, ModelProviderRuntime } from '../runtime.js';
+import { markStreamInterrupted } from '../stream-interrupt.js';
 
 type JsonObject = Record<string, unknown>;
 type AnthropicRole = 'user' | 'assistant';
@@ -335,6 +336,11 @@ export async function anthropicChatOnce(
       const error = event.error as { message?: unknown; type?: unknown } | undefined;
       const thrown = new Error(typeof error?.message === 'string' ? error.message : 'Anthropic stream error');
       thrown.name = typeof error?.type === 'string' ? error.type : 'AnthropicStreamError';
+      // 打「流中途中断」标记:HTTP 层已 200 建连说明请求本身被接受了,流内报错必然是服务端侧
+      // (overloaded_error / api_error 等瞬时故障)。没有这个标记,它就是个无 status 的普通
+      // Error → isRetryableError 一条都不命中 → 整轮 run 直接终止、一次都不重试。
+      // 真正的重试门槛由 chatWithRuntime 的「本次尝试零产出」前提把关。
+      markStreamInterrupted(thrown);
       throw thrown;
     }
     if (type === 'message_start') {

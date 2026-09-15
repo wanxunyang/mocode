@@ -156,6 +156,7 @@ export const LLM_ERROR_HINT_KEYS: Record<ChatErrorKind, TranslationKey> = {
   timeout: 'repl.llmTimeoutError',
   network: 'repl.llmNetworkError',
   context: 'repl.llmContextError',
+  server: 'repl.llmServerError',
 };
 
 /** /help 的分组:按使用场景归组,组内保持菜单树顺序。未列入的顶层命令兜底进「其他」。 */
