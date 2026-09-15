@@ -9,6 +9,12 @@
  * ② **传输层断流**:HTTP 200 建连后连接被掐(网关超时/NAT 回收/推理进程被杀)。
  *    实测抛 `Error: Premature close`(code ERR_STREAM_PREMATURE_CLOSE),同样无 status。
  *    下文的 errno 用例、cause 链用例与 Anthropic 流内 error 用例覆盖这一类。
+ * ③ **建连阶段失败**:DNS / 连接被拒 / TLS / 半路断,SDK 包成 `APIConnectionError`
+ *    (默认文案 'Connection error.',status 与 code 均 undefined)。线上实测(trace:
+ *    model_end code="Error"、全 trace 无 model_retry)发现它同样被漏判 —— 因为
+ *    `isRetryableError` 写的是 `err.name === 'APIConnectionError'`,而 SDK 的 APIError 家族
+ *    **从不设 this.name**(`err.name` 恒为 'Error')→ 该分支是死代码,一次即抛、整轮终止。
+ *    文件末尾两个用例锁住这条路径。
  *
  * 未覆盖(已知取舍,非本文件的 bug):零 chunk 的空响应体被 SSE 解析器静默丢弃,按「模型无回复」
  * 收尾;见最后一个用例的说明。
@@ -20,6 +26,7 @@ import {
   __setChatCreateImpl,
   chat,
   classifyChatError,
+  isRetryableError,
   isStreamInterruptedError,
   type ChatMessage,
 } from '../src/llm/index.js';
@@ -42,6 +49,21 @@ function prematureClose(): Error {
 function fetchFailedCause(): Error {
   const cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
   return Object.assign(new TypeError('fetch failed'), { cause });
+}
+
+/**
+ * 建连失败的实测形态:SDK 的 `core.mjs` 在 fetch 失败后抛
+ * `new APIConnectionError({ cause })` → 默认文案 'Connection error.'、
+ * `name === 'Error'`(SDK 从不设 this.name)、status/code 均 undefined。
+ */
+function connectionError(cause?: Error): InstanceType<typeof OpenAI.APIConnectionError> {
+  return new OpenAI.APIConnectionError({ message: undefined, cause });
+}
+
+/** undici 多层包装:DNS 解析失败时真实 errno 在最内层。 */
+function dnsCause(): Error {
+  const inner = Object.assign(new Error('getaddrinfo ENOTFOUND dashscope.aliyuncs.com'), { code: 'ENOTFOUND' });
+  return Object.assign(new TypeError('fetch failed'), { cause: inner });
 }
 
 /** 空流(`create()` 成功建连、第一个 chunk 就失败——即 SDK 的流内抛错形态)。 */
@@ -87,7 +109,7 @@ test('isStreamInterruptedError:只认「无 status 的 SDK APIError」', () => {
   assert.equal(
     isStreamInterruptedError(new OpenAI.APIConnectionError({ message: 'x' })),
     false,
-    'APIConnectionError 由 isRetryableError 的 name 分支覆盖,不靠流中断判据',
+    'APIConnectionError 是建连失败,归 isRetryableError 的构造器名分支,不靠流中断判据',
   );
   assert.equal(isStreamInterruptedError(new OpenAI.APIUserAbortError()), false, '用户中断绝不重试');
   assert.equal(isStreamInterruptedError(new Error('messages must contain at least one non-empty user message')), false);
@@ -272,6 +294,71 @@ test('本地校验错误(普通 Error)不会被误当服务端故障重试', asy
   try {
     await assert.rejects(() => chat(messages, {}));
     assert.equal(createCalls, 1, '普通 Error 不重试');
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('isRetryableError:建连失败(APIConnectionError)必须可重试', () => {
+  const err = connectionError(dnsCause());
+  // 证词:SDK 的 APIError 家族不设 this.name —— 旧代码的 `e.name === 'APIConnectionError'`
+  // 分支永远为假,于是这类错误被当成「不可重试」一次即抛。
+  assert.equal(err.name, 'Error');
+  assert.equal(err.status, undefined);
+  assert.equal(err.code, undefined);
+  assert.equal(err.message, 'Connection error.');
+
+  assert.equal(isRetryableError(err), true, '建连失败属瞬时网络故障');
+  assert.equal(isRetryableError(new OpenAI.APIConnectionTimeoutError()), true, '请求超时同样可重试');
+  assert.equal(
+    isRetryableError(
+      Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), { code: 'ECONNREFUSED' }),
+      }),
+    ),
+    true,
+    'errno 藏在 cause 里(旧实现只看顶层 e.code,必然是 undefined)',
+  );
+  assert.equal(isRetryableError(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })), true);
+  assert.equal(isRetryableError(new TypeError('fetch failed')), true, 'fetch failed 文案兜底');
+
+  // 不能因为「加宽网络错判定」把该判死的也捞进来。
+  assert.equal(isRetryableError(new OpenAI.APIError(400, { message: 'bad' }, undefined, undefined)), false, '4xx');
+  assert.equal(isRetryableError(new OpenAI.APIUserAbortError()), false, '用户中断');
+  const controller = new AbortController();
+  controller.abort();
+  assert.equal(isRetryableError(connectionError(), controller.signal), false, 'signal 已中断一律不重试');
+
+  // 证书 / 协议不匹配是永久故障:必须判死,否则新加的宽兜底会让它白等满 10 次退避(≈两分钟)。
+  assert.equal(
+    isRetryableError(
+      connectionError(
+        Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error('unable to verify the first certificate'), {
+            code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+          }),
+        }),
+      ),
+    ),
+    false,
+  );
+  assert.equal(isRetryableError(connectionError(new Error('wrong version number'))), false);
+});
+
+test('建连失败:零产出自动重试,第二次成功(trace code="Error" 那次的形态)', async () => {
+  let createCalls = 0;
+  const retries: Array<{ attempt: number; code: string }> = [];
+  __setChatCreateImpl(async () => {
+    createCalls++;
+    if (createCalls === 1) throw connectionError(dnsCause());
+    return okStream('recovered');
+  });
+  try {
+    const result = await chat(messages, { onRetry: (r) => retries.push({ attempt: r.attempt, code: r.code }) });
+    assert.equal(result.content, 'recovered', '建连失败后重发应拿到完整回复');
+    assert.equal(createCalls, 2, '应重发一次');
+    assert.equal(retries.length, 1, '应告知宿主一次重试');
+    assert.equal(retries[0]?.code, 'APIConnectionError', '重试码报构造器名,而不是无信息量的 Error');
   } finally {
     __setChatCreateImpl(null);
   }

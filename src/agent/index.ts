@@ -407,6 +407,9 @@ export async function runAgent(
     },
     onStepStart: () => spinner.start(t('agent.thinking')),
     onChatDone: () => spinner.stop(),
+    // 退避重试要在状态行可见:否则用户面对的是几十秒到几分钟的静止 spinner,与卡死无异。
+    onModelRetry: (r) =>
+      spinner.start(t('agent.retrying', { seconds: Math.max(1, Math.round(r.waitMs / 1000)), attempt: r.attempt })),
     // 流式实时用量 → 底栏 context 进度条左侧 chip;轮末由 repl 清空。
     onLiveUsage: (u) => layout.setLiveUsage(u),
     onTextEnd: () => {

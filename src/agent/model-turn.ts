@@ -46,6 +46,22 @@ export interface ModelTurnInput {
   rebuildHistoryIndexes(): void;
 }
 
+/**
+ * 沿 cause 链(≤3 层)取第一个 errno,供 trace 取证。
+ * undici 把底层 errno 挂在 cause 上(`TypeError: fetch failed` → cause `read ECONNRESET`),
+ * openai SDK 再包一层 APIConnectionError 后,顶层 code 恒为 undefined;不留这一项,
+ * 事后只能看到一个 'Error',无法区分 DNS 失败 / 连接被拒 / TLS 握手失败。
+ */
+function traceCauseCode(err: unknown): string | undefined {
+  let cur: unknown = err;
+  for (let depth = 0; depth <= 3 && cur && typeof cur === 'object'; depth++) {
+    const e = cur as { code?: unknown; cause?: unknown };
+    if (typeof e.code === 'string') return e.code;
+    cur = e.cause;
+  }
+  return undefined;
+}
+
 /** Executes context preparation plus exactly one model step, including the single overflow retry path. */
 export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutcome> {
   const {
@@ -179,7 +195,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     onText,
     onToolCall,
     onProgress: reportLive,
-    onRetry: (retry: { attempt: number; nextAttempt: number; waitMs: number; code: string }) =>
+    onRetry: (retry: { attempt: number; nextAttempt: number; waitMs: number; code: string }) => {
       emitTrace('model_retry', {
         model: requestModel,
         provider,
@@ -187,14 +203,20 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
         nextAttempt: retry.nextAttempt,
         waitMs: retry.waitMs,
         code: retry.code,
-      }),
+      });
+      // 退避最长可到 30s、最坏累计数分钟。只写 trace 的话用户看到的就是「卡住不动」,
+      // 与「直接报错终止」一样不可解释 —— 所以同时转达给宿主做可见反馈。
+      hooks.onModelRetry?.(retry);
+    },
   };
   const runChatOnce = async (): Promise<ChatResult> => {
     try {
       return await modelRunner.run({ history: requestHistory, handlers: chatHandlers, tools: activeTools }, signal);
     } catch (error) {
       const errorValue =
-        error && typeof error === 'object' ? (error as { status?: number; code?: string; name?: string }) : undefined;
+        error && typeof error === 'object'
+          ? (error as { status?: number; code?: string; name?: string; message?: string; cause?: unknown })
+          : undefined;
       emitTrace('model_end', {
         model: requestModel,
         provider,
@@ -202,7 +224,16 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
         code:
           typeof errorValue?.status === 'number'
             ? `HTTP_${errorValue.status}`
-            : (errorValue?.code ?? errorValue?.name ?? 'MODEL_ERROR'),
+            : // 构造器名优先于 `name`:SDK 的 APIError 家族 err.name 恒为 'Error'(无信息量),
+              // 构造器名才分得出 APIConnectionError(建连失败)/ APIError(流内报错)。
+              (errorValue?.code ??
+              (error as { constructor?: { name?: string } } | undefined)?.constructor?.name ??
+              errorValue?.name ??
+              'MODEL_ERROR'),
+        // 取证用:错误文案与 cause 链上的 errno。没有这两项时,trace 只留一个 'Error',
+        // 事后无法判断到底是 DNS 失败、连接被拒还是 TLS 握手失败(实测踩过)。
+        message: typeof errorValue?.message === 'string' ? errorValue.message.slice(0, 300) : undefined,
+        causeCode: traceCauseCode(error),
         durationMs: Date.now() - modelStartedAt,
       });
       throw error;

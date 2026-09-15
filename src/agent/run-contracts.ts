@@ -27,6 +27,9 @@ export interface AgentHooks {
     cachedTokens?: number;
   }) => void;
   onChatDone?: () => void;
+  /** 一次 chat 失败后即将退避重试(429/5xx/网络错/流中途故障)。宿主可据此给出可见反馈,
+   *  否则用户面对的是长达数十秒的「无解释等待」。 */
+  onModelRetry?: (info: { attempt: number; nextAttempt: number; waitMs: number; code: string }) => void;
   onTextEnd?: () => void;
   onToolHeader?: (tc: ToolCallRef) => void;
   onToolStart?: (name: string) => void;

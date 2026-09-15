@@ -143,8 +143,11 @@ export function isRetryableError(err: unknown, signal?: AbortSignal): boolean {
     status?: number;
     code?: string;
     message?: string;
+    constructor?: { name?: string };
   };
-  if (e.name === 'AbortError' || e.name === 'APIUserAbortError') return false;
+  // SDK 的 APIError 家族不设 this.name(见下),判类别一律用构造器名。
+  const ctor = e.constructor?.name ?? '';
+  if (e.name === 'AbortError' || e.name === 'APIUserAbortError' || ctor === 'APIUserAbortError') return false;
   // OpenAI SDK APIError 走 status 分支(覆盖 4xx/5xx/429)
   const status = e.status;
   if (typeof status === 'number') {
@@ -152,24 +155,27 @@ export function isRetryableError(err: unknown, signal?: AbortSignal): boolean {
     if (status >= 500 && status < 600) return true;
     return false;
   }
-  // Node 网络错 code(APIConnectionError 内部也会带一个)
-  const code = e.code;
+  // 证书 / 协议层不匹配是**永久性**错误,重试只会白等满退避(10 次≈两分钟)。
+  // 必须先于下面的宽兜底判定:fetch failed / cause 里的证书错文案都会被宽兜底捞走。
   if (
-    code === 'ETIMEDOUT' ||
-    code === 'ECONNRESET' ||
-    code === 'ENOTFOUND' ||
-    code === 'EAI_AGAIN' ||
-    code === 'ECONNREFUSED' ||
-    code === 'EPIPE'
-  ) {
-    return true;
-  }
-  // OpenAI SDK 的网络错类(无 status)
-  if (e.name === 'APIConnectionError' || e.name === 'APIConnectionTimeoutError') return true;
-  // 兜底:错误信息里出现 timeout 字样(部分代理把错误折叠成普通 Error)
-  if (typeof e.message === 'string' && /\btime(d|ed)?\s*out\b|ETIMEDOUT/i.test(e.message)) {
-    return true;
-  }
+    causeChainFrames(err).some(
+      (f) =>
+        (!!f.code && FATAL_TRANSPORT_CODE.test(f.code)) || (!!f.message && FATAL_TRANSPORT_MESSAGE.test(f.message)),
+    )
+  )
+    return false;
+  // Node 网络错 errno:顶层没有就沿 cause 链找(undici 把 errno 藏在 cause 里)。
+  if (causeChainFrames(err).some((f) => !!f.code && RETRYABLE_ERRNO.has(f.code))) return true;
+  // OpenAI SDK 的网络错类(无 status)。必须用**构造器名**:SDK 的 APIError 家族只做
+  // `super(message)`,从不设 this.name(`err.name` 恒为 'Error')—— 旧代码这里写
+  // `e.name === 'APIConnectionError'` 是永不命中的死分支,于是建连失败(DNS / 连接被拒 /
+  // TLS 握手 / 半路断流)一次即抛、整轮 run 直接终止(trace 里 model_end.code 只剩 'Error')。
+  if (ctor === 'APIConnectionError' || ctor === 'APIConnectionTimeoutError') return true;
+  // 兜底:文案。部分代理把错误折叠成普通 Error;SDK 的 APIConnectionError 默认文案就是
+  // 'Connection error.'(负载里没有任何细节,`code` 也为 undefined,只能靠文案兜)。
+  const msg = typeof e.message === 'string' ? e.message : '';
+  if (/\btime(d|ed)?\s*out\b|ETIMEDOUT/i.test(msg)) return true;
+  if (/^connection error\.?$/i.test(msg.trim()) || /\bfetch failed\b/i.test(msg)) return true;
   return false;
 }
 
@@ -200,13 +206,58 @@ const STREAM_BREAK_CODES = new Set([
 const STREAM_BREAK_MESSAGE =
   /premature close|other side closed|socket hang up|\bterminated\b|stream (?:closed|ended) (?:prematurely|unexpectedly)|econnreset|econnaborted/i;
 
-/** 沿 cause 链(≤3 层)找「连接被掐断」的信号;命中即认为响应流非正常结束。 */
-function hasStreamBreakSignal(err: unknown, depth = 0): boolean {
-  if (!err || typeof err !== 'object' || depth > 3) return false;
-  const e = err as { code?: unknown; message?: unknown; cause?: unknown };
-  if (typeof e.code === 'string' && STREAM_BREAK_CODES.has(e.code)) return true;
-  if (typeof e.message === 'string' && STREAM_BREAK_MESSAGE.test(e.message)) return true;
-  return hasStreamBreakSignal(e.cause, depth + 1);
+/**
+ * 「连接层」可重试 errno。与 STREAM_BREAK_CODES 的区别:这些在**建连/发请求**阶段就失败
+ * (DNS 解析、拒绝连接、路由不可达、连接超时),压根没有响应流可言,但处置一样 —— 重试。
+ * 旧实现只在顶层 `err.code` 上查,而 undici 把 errno 埋在 cause 里,永远查不到。
+ */
+const RETRYABLE_ERRNO = new Set([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'EPIPE',
+  'ECONNABORTED',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ERR_SOCKET_CONNECTION_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+/** 证书 / TLS 协议不匹配:重试必然再错,判死以免白等退避。 */
+const FATAL_TRANSPORT_CODE = /^(?:ERR_SSL|ERR_TLS|ERR_OSSL|UNABLE_TO_VERIFY|DEPTH_ZERO|SELF_SIGNED|CERT_|EPROTO)/;
+const FATAL_TRANSPORT_MESSAGE = /certificate|self[- ]signed|\bEPROTO\b|wrong version number|unsupported protocol/i;
+
+/**
+ * 沿错误自身与 cause 链(≤3 层)收集每层的 code / message。
+ *
+ * 为什么必须看 cause:undici 把底层 errno 挂在 cause 上(`TypeError: fetch failed` →
+ * cause `Error: read ECONNRESET`,code 在 cause 里),openai SDK 又把那次 fetch 失败再包一层
+ * `APIConnectionError({ cause })`(`core.mjs` 的 catch 分支)。只看顶层 `err.code` / `err.message`
+ * 永远是 undefined / 'Connection error.' —— 这正是这类故障长期无法被识别、无法重试的根因。
+ */
+function causeChainFrames(err: unknown): Array<{ code?: string; message?: string }> {
+  const frames: Array<{ code?: string; message?: string }> = [];
+  let cur: unknown = err;
+  for (let depth = 0; depth <= 3; depth++) {
+    if (!cur || typeof cur !== 'object') break;
+    const e = cur as { code?: unknown; message?: unknown; cause?: unknown };
+    frames.push({
+      code: typeof e.code === 'string' ? e.code : undefined,
+      message: typeof e.message === 'string' ? e.message : undefined,
+    });
+    cur = e.cause;
+  }
+  return frames;
+}
+
+/** 错误链(含 cause)上是否存在「连接被掐断」的信号。 */
+function hasStreamBreakSignal(err: unknown): boolean {
+  return causeChainFrames(err).some(
+    (f) => (!!f.code && STREAM_BREAK_CODES.has(f.code)) || (!!f.message && STREAM_BREAK_MESSAGE.test(f.message)),
+  );
 }
 
 /**
@@ -223,8 +274,9 @@ function hasStreamBreakSignal(err: unknown, depth = 0): boolean {
  * 这三类都不沾 → 被当成「不可重试的客户端请求错」一次即抛,整轮 run 直接终止。但它们的真实语义
  * 是「服务端/链路在生成到一半时挂了」,属瞬时故障,重试是正确处置(已实测同一会话更大 prompt 可成功)。
  *
- * 只认 APIError 本身,不认子类:APIConnectionError / APIConnectionTimeoutError 已由
- * isRetryableError 的 name 分支覆盖,而 APIUserAbortError 是用户中断、绝不能重试。
+ * 只认 APIError 本身,不认子类:APIConnectionError / APIConnectionTimeoutError 是**建连阶段**
+ * 失败,归 isRetryableError 的构造器名分支(它有 10 次 HTTP 层预算,更合适);而 APIUserAbortError
+ * 是用户中断,绝不能重试。
  * 判据用构造器名而非 instanceof:同进程若存在 openai 的多份模块实例(ESM/CJS 混载),
  * instanceof 会失配。
  *
@@ -537,9 +589,11 @@ export interface StreamHandlers {
 
 function retryErrorCode(error: unknown): string {
   if (!error || typeof error !== 'object') return 'RETRYABLE_ERROR';
-  const value = error as { status?: number; code?: string; name?: string };
+  const value = error as { status?: number; code?: string; name?: string; constructor?: { name?: string } };
   if (typeof value.status === 'number') return `HTTP_${value.status}`;
-  return value.code ?? value.name ?? 'RETRYABLE_ERROR';
+  // 优先构造器名:SDK 的 APIError 家族 `err.name` 恒为 'Error'(无信息量),
+  // 构造器名才区分得出是 APIConnectionError(建连失败)还是流内 APIError。
+  return value.code ?? value.constructor?.name ?? value.name ?? 'RETRYABLE_ERROR';
 }
 
 /**
@@ -547,7 +601,7 @@ function retryErrorCode(error: unknown): string {
  * tool_calls 跨 chunk 按 index 累加(id / name / arguments 拼接)。
  * include_usage 时末尾 chunk 携带 usage,先读再 continue(末尾 chunk 无 delta)。
  *
- * 包了一层重试:429/5xx/timeout/网络错按指数退避重试(默认 4 次),400/401/用户中断立即抛。
+ * 包了一层重试:429/5xx/timeout/网络错按指数退避重试(RETRY_MAX_ATTEMPTS 次),400/401/用户中断立即抛。
  * 重试由 chat() 统一管,chatOnce() 只负责单次请求,职责单一便于单测。
  */
 export type ChatTransport = (
