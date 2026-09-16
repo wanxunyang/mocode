@@ -446,10 +446,12 @@ textarea::placeholder { color: var(--color-subtle); }
 .tool-group.tool-group-running .tool-kind { color: var(--color-running); }
 .tool-group .tool-name { color: var(--color-ink-soft); }
 /* 展开区:左细线示意"这些行是一组",内部工具卡保持原样但行距收紧 */
-.tool-group-body { margin: 2px 0 var(--space-2xs) 21px; padding-left: var(--space-sm); border-left: 1px solid var(--color-rule); display: flex; flex-direction: column; }
+.tool-group-body { margin: 2px 0 var(--space-2xs) 0; padding-left: 21px; display: flex; flex-direction: column; }
 .tool-group-body .tool-entry { margin: 2px 0; }
 .tool-group .tool-chevron { color: var(--color-subtle); }
-.tool-group[open] .tool-chevron { transform: rotate(90deg); }
+/* 只旋转集合行自己的 chevron —— 后代选择器会误伤组内二级工具行的箭头,
+   导致它们在集合展开期间永远朝下(无论自身开合)。 */
+.tool-group[open] > summary .tool-chevron { transform: rotate(90deg); }
 
 /* ── Task item (sidebar) ─────────────────────────────── */
 .task-item { width: 100%; height: 32px; display: flex; align-items: center; border-radius: var(--radius-sm); background: transparent; color: var(--color-muted); transition: background var(--dur-micro) var(--ease-out); padding-right: var(--space-2xs); }

@@ -573,9 +573,36 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   }
   smartScrollToBottom();
 }
+/* ── 流式 markdown 渲染 ─────────────────────────────────
+   流式期间不再展示裸 markdown 源码:文字段每 120ms 节流重渲染一次,
+   结束时 finalizeTurn 再做最终渲染。原始文本存 WeakMap —— innerHTML
+   渲染会丢掉 markdown 语法,不能再用 textContent 当数据源。 */
+const MD_RENDER_INTERVAL = 120;
+let mdRenderTimer: ReturnType<typeof setTimeout> | null = null;
+const textBlockRaw = new WeakMap<HTMLElement, string>();
+const pendingMdBlocks = new Set<HTMLElement>();
+
+/** 补齐未闭合的围栏代码:流式输出经常在 ``` 中途截断,不补会导致代码块整段渲染不出来。 */
+function closeOpenFence(text: string): string {
+  const fences = text.match(/^[ \t]{0,3}(```|~~~)/gm) ?? [];
+  return fences.length % 2 === 1 ? `${text}\n\`\`\`` : text;
+}
+/** 按块调度渲染 —— 工具事件可能在定时器触发前把 activeTextBlock 置空,所以要捕获块本身。 */
+function scheduleMdRender(block: HTMLElement): void {
+  pendingMdBlocks.add(block);
+  if (mdRenderTimer !== null) return;
+  mdRenderTimer = setTimeout(() => {
+    mdRenderTimer = null;
+    for (const pending of pendingMdBlocks) {
+      if (pending.isConnected) renderMessageBody(pending, closeOpenFence(textBlockRaw.get(pending) ?? ''));
+    }
+    pendingMdBlocks.clear();
+  }, MD_RENDER_INTERVAL);
+}
 function appendText(text: string): void {
   const block = ensureTextBlock();
-  block.textContent = `${block.textContent ?? ''}${text}`;
+  textBlockRaw.set(block, (textBlockRaw.get(block) ?? '') + text);
+  scheduleMdRender(block);
   smartScrollToBottom();
 }
 function renderHistory(history: HistoryItem[]): void {
@@ -592,7 +619,9 @@ function renderHistory(history: HistoryItem[]): void {
     // 模块级 let 在本函数内被赋过 null 后 TS 会收窄成 never,统一走 currentTurn()。
     if (!currentTurn()) startAssistantTurn();
     if (item.role === 'assistant') {
-      ensureTextBlock().textContent = item.text;
+      const block = ensureTextBlock();
+      textBlockRaw.set(block, item.text);
+      block.textContent = item.text;
       activeTextBlock = null;
     } else {
       addTool({ name: item.name ?? 'tool', arguments: item.arguments ?? '', output: item.text }, true);
@@ -608,7 +637,7 @@ function renderHistory(history: HistoryItem[]): void {
  */
 function renderMessageBody(body: HTMLElement, text: string): void {
   body.classList.add('md-rendered');
-  body.innerHTML = renderMarkdown(text);
+  body.innerHTML = renderMarkdown(closeOpenFence(text));
   enhanceCodeBlocks(body);
 }
 
@@ -619,9 +648,12 @@ function renderMessageBody(body: HTMLElement, text: string): void {
 function finalizeTurn(message: HTMLElement | null): void {
   if (!message) return;
   message.classList.remove('is-streaming');
+  // 待执行的节流渲染不再需要 —— 下面马上做最终渲染
+  if (mdRenderTimer !== null) { clearTimeout(mdRenderTimer); mdRenderTimer = null; pendingMdBlocks.clear(); }
   const parts: string[] = [];
   for (const block of Array.from(message.querySelectorAll<HTMLElement>('.message-body'))) {
-    const text = block.textContent ?? '';
+    // textContent 在 md 渲染后会丢 markdown 语法,原始文本以 WeakMap 为准
+    const text = textBlockRaw.get(block) ?? block.textContent ?? '';
     if (!text.trim()) { block.remove(); continue; }
     parts.push(text);
     renderMessageBody(block, text);
@@ -647,6 +679,7 @@ async function deleteTask(taskId: string): Promise<void> {
   const deletingSelectedTask = state?.selectedTaskId === taskId;
   const next = await window.mocodeWork.deleteTask(taskId);
   if (!next) return;
+  streams.delete(taskId);
   updateState(next);
   if (deletingSelectedTask && next.selectedTaskId !== taskId) clearWorkspace();
   showToast('info', '已删除任务');
@@ -1065,13 +1098,21 @@ function finish(): void {
 function notifyBackground(taskId: string, note: string): void {
   if (viewingTaskId() === taskId) return;
   const task = state?.tasks.find((item) => item.id === taskId);
-  showToast('info', `「${taskTitle(task ?? ({} as Task))}」${note}`, 3200);
+  showToast('info', `「${task ? taskTitle(task) : '后台任务'}」${note}`, 3200);
 }
 
 function handleAgentEvent(envelope: AgentEnvelope): void {
   if (envelope.type === 'error') {
+    // 无 requestId 的错误来自 host 层(未就绪/启动失败):归属于正在查看的那个任务。
     const message = humanizeError(envelope.error ?? '');
     if (message) { console.error('[Agent]', message); showToast('error', message); }
+    const viewing = viewingTaskId();
+    const stream = viewing ? streams.get(viewing) : undefined;
+    if (viewing && stream?.running) {
+      stream.items.push({ kind: 'error', message: message ?? '运行出错，请重试。' });
+      endTaskRun(viewing);
+      finish();
+    }
     return;
   }
   const payload = envelope.payload ?? {};
@@ -1203,8 +1244,9 @@ function switchToTask(taskId: string, history?: HistoryItem[]): void {
     renderHistory(history);
     updateContextUsage(null);
   }
-  // 切换任务清空附件草稿 —— 附件属于「当前正在编辑的这条消息」,不属于任务。
+  // 切换任务清空附件草稿 —— 附件属于「当前正在编辑的这条消息」，不属于任务。
   attachments = []; renderAttachments();
+  emptyState.classList.toggle('hidden', conversation.querySelector('.message') != null);
   promptInput.focus();
 }
 
