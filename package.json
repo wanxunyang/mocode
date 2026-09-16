@@ -63,6 +63,22 @@
     "type": "git",
     "url": "git+https://github.com/wanxunyang/mocode.git"
   },
+  "homepage": "https://github.com/wanxunyang/mocode",
+  "keywords": [
+    "ai-agent",
+    "coding-agent",
+    "terminal",
+    "cli",
+    "llm",
+    "agent",
+    "tui",
+    "mcp",
+    "ollama",
+    "deepseek",
+    "evals",
+    "memory",
+    "typescript"
+  ],
   "author": "wxy",
   "license": "MIT"
 }
