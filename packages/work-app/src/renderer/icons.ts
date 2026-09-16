@@ -71,6 +71,10 @@ export const ICONS: Record<string, string> = {
   'panel-left-open': `<svg ${SVG_ATTRS}><rect x="2" y="2" width="16" height="16" rx="2"/><path d="M8 2v16M12 8l3 3-3 3"/></svg>`,
   'panel-right-close': `<svg ${SVG_ATTRS}><rect x="2" y="2" width="16" height="16" rx="2"/><line x1="12" y1="2" x2="12" y2="18"/><path d="M8 7l-3 3 3 3"/></svg>`,
   'panel-right-open': `<svg ${SVG_ATTRS}><rect x="2" y="2" width="16" height="16" rx="2"/><line x1="12" y1="2" x2="12" y2="18"/><path d="M10 7l3 3-3 3"/></svg>`,
+
+  // 工具行(tool-entry)专用
+  'terminal': `<svg ${SVG_ATTRS}><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M6 8l2.5 2.5L6 13"/><path d="M10.5 13H14"/></svg>`,
+  'wrench': `<svg ${SVG_ATTRS}><path d="M13.5 6.5a3.5 3.5 0 0 0-4.6 4.6L4 15.9 6.1 18l4.8-4.9a3.5 3.5 0 0 0 4.6-4.6l-2.6 2.6-2.4-2.4 2.6-2.6z"/></svg>`,
 };
 
 /**

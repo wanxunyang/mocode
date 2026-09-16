@@ -13,7 +13,7 @@ type Project = { id: string; name: string; root: string; branch: string };
 type Task = { id: string; projectId: string; title: string; status: TaskStatus; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string };
 type WorkState = { version: 1; projects: Project[]; selectedProjectId: string; tasks: Task[]; selectedTaskId?: string };
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
-type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string };
+type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string };
 type Attachment = { name: string; dataUrl: string };
 type LlmProvider = 'openai' | 'anthropic';
 type ModelConfig = { model: string; label: string; provider: LlmProvider; promptCache: boolean; baseUrl: string; contextWindow: number | null; language: string; theme: string };
@@ -59,17 +59,42 @@ const inspectorTitle = $('#inspector-title'); const attachmentList = $('#attachm
 const contextUsageEl = $('#context-usage');
 
 let state: WorkState | null = null;
-let activeRunId: string | null = null;
 let collapsedProjects: Set<string> = new Set();
 let collapsedSections: Set<string> = new Set();
 let activeAssistant: HTMLElement | null = null;
+let activeTextBlock: HTMLElement | null = null;
 let attachments: Attachment[] = [];
 let activeInspectorTab: 'overview' | 'files' | 'prs' = 'overview';
+
+/* ── 多任务并行:每个任务一份事件流缓冲,后台任务照常累积,随时切换查看 ── */
+type StreamItem =
+  | { kind: 'user'; text: string }
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; id: string; name: string; args: string; output: string; done: boolean }
+  | { kind: 'error'; message: string };
+interface TaskStream {
+  items: StreamItem[];
+  running: boolean;
+  usagePercent: number | null;
+  pendingApproval: Record<string, unknown> | null;
+}
+const streams = new Map<string, TaskStream>();
+
+function streamFor(taskId: string): TaskStream {
+  let stream = streams.get(taskId);
+  if (!stream) { stream = { items: [], running: false, usagePercent: null, pendingApproval: null }; streams.set(taskId, stream); }
+  return stream;
+}
+function isRunning(taskId: string | undefined): boolean { return !!taskId && streams.get(taskId)?.running === true; }
+/** 当前正在查看的任务 id(= 选中任务),事件与渲染按它路由。 */
+function viewingTaskId(): string | undefined { return state?.selectedTaskId; }
 
 function selectedProject(): Project | undefined { return state?.projects.find((project) => project.id === state?.selectedProjectId); }
 function selectedTask(): Task | undefined { return state?.tasks.find((task) => task.id === state?.selectedTaskId); }
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]!)); }
 function statusText(status: TaskStatus): string { return ({ queued: '等待开始', running: '正在运行', waiting: '等待确认', completed: '已完成', failed: '运行失败', cancelled: '已停止' })[status]; }
+/** 未命名的任务（新建后还没发第一条指令）在侧栏显示占位标题。 */
+function taskTitle(task: Task): string { return task.title.trim() || '新任务'; }
 
 /** 更新输入栏的上下文占比显示。pct=null 表示未知/无会话。 */
 function updateContextUsage(pct: number | null): void {
@@ -143,7 +168,7 @@ function renderTasks(): void {
     const id = escapeHtml(task.id);
     const isRunning = task.status === 'running' || task.status === 'waiting';
     const meta = isRunning ? `<span class="task-spinner">${icon('loader')}</span>` : `<small data-always="1">${timeAgo(task.updatedAt)}</small>`;
-    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(task.title)}"><span class="task-title" title="双击重命名">${escapeHtml(task.title)}</span><span class="task-meta">${meta}</span></button><button class="task-menu-btn" data-task-menu="${id}" aria-label="任务菜单" title="更多操作">${icon('more')}</button></div>`;
+    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(taskTitle(task))}"><span class="task-title" title="双击重命名">${escapeHtml(taskTitle(task))}</span><span class="task-meta">${meta}</span></button><button class="task-menu-btn" data-task-menu="${id}" aria-label="任务菜单" title="更多操作">${icon('more')}</button></div>`;
   };
 
   const tasksCollapsed = collapsedSections.has('tasks');
@@ -275,7 +300,8 @@ function renderTasks(): void {
       if (action === 'open-folder') {
         await window.mocodeWork.openFolder(pid);
       } else if (action === 'remove') {
-        if (activeRunId) { showToast('warn', '有任务运行中，无法移除空间'); return; }
+        const hasRunning = (state?.tasks ?? []).some((task) => task.projectId === pid && (task.status === 'running' || task.status === 'waiting'));
+        if (hasRunning) { showToast('warn', '该空间下有任务运行中，无法移除'); return; }
         const result = await window.mocodeWork.removeProject(pid);
         if (result) { updateState(result.state); clearWorkspace(); showToast('info', `已移除空间 "${result.removed}"`); }
       }
@@ -288,7 +314,43 @@ function renderTasks(): void {
 }
 
 function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); renderEmptyChips(); }
-function clearWorkspace(): void { conversation.innerHTML = ''; emptyState.classList.remove('hidden'); activeAssistant = null; activeRunId = null; attachments = []; renderAttachments(); }
+function clearWorkspace(): void { conversation.innerHTML = ''; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); }
+
+/**
+ * 一轮 assistant 输出 = 一条 message 内的**有序 block 流**:
+ *   .message-body.text-block   ← 模型文字段
+ *   details.tool-entry         ← 工具调用(默认折叠)
+ *   .message-body.text-block   ← 工具之后继续说的话,新开一段
+ *   …
+ * 文字与工具都 append 进 .message-content,谁先发生谁在前 —— 即 Claude Code / Cursor /
+ * Codex 那种「正文与工具按时间顺序交织」的展示,而不是把工具统一挂在正文前或正文后。
+ */
+function startAssistantTurn(): HTMLElement {
+  activeAssistant = addMessage('assistant');
+  activeAssistant.classList.add('is-streaming');
+  activeToolGroup = null;
+  return activeAssistant;
+}
+
+/** 当前仍在文档里的助手轮次;没有则 null。(包成函数,避免调用点被 TS 收窄成 never。) */
+function currentTurn(): HTMLElement | null {
+  const turn: HTMLElement | null = activeAssistant;
+  return turn && turn.isConnected ? turn : null;
+}
+
+/** 当前可写入的文字段。若最后一个 block 已不是文字段(刚插入了工具行),新开一段。 */
+function ensureTextBlock(): HTMLElement {
+  const current = currentTurn() ?? startAssistantTurn();
+  const content = current.querySelector('.message-content') as HTMLElement | null;
+  if (activeTextBlock?.isConnected && content?.lastElementChild === activeTextBlock) return activeTextBlock;
+  const block = document.createElement('div');
+  block.className = 'message-body text-block';
+  (content ?? current).append(block);
+  activeTextBlock = block;
+  // 文字打断工具集合:之后到来的工具另起一个新集合。
+  activeToolGroup = null;
+  return block;
+}
 
 function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
   emptyState.classList.add('hidden');
@@ -302,6 +364,7 @@ function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
     label.innerHTML = '<div class="message-actions"></div>';
     wrapper.append(body, label);
     message.append(wrapper);
+    activeTextBlock = null;
   } else {
     const label = 'Mocode';
     const avatarIcon = '<img class="app-avatar" src="../assets/icon.png" alt="Mocode">';
@@ -309,92 +372,234 @@ function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
     const body = message.querySelector('.message-body') as HTMLElement;
     // 助手消息流式时只放纯文本,完成后再走 markdown 渲染,避免每 chunk 重排版。
     body.textContent = text;
+    activeTextBlock = body;
   }
   conversation.append(message);
   smartScrollToBottom();
   return message;
 }
 const activeTools = new Map<string, HTMLDetailsElement>();
+/** 工具 id → 开始时间,用于完成后显示耗时。 */
+const toolStartTimes = new Map<string, number>();
+/** 文件编辑类工具不进「工具调用集合」:改了什么必须让用户第一眼看到,不能埋进组里。 */
+const STANDALONE_TOOLS = new Set(['write_file', 'edit_file']);
+
+/** 工具名 → 折叠行上的中文动词 + 图标。让"这一行在干什么"一眼可读。 */
+const TOOL_META: Record<string, { label: string; icon: string }> = {
+  read_file: { label: '读取文件', icon: 'files' },
+  write_file: { label: '写入文件', icon: 'edit' },
+  edit_file: { label: '编辑文件', icon: 'edit' },
+  run_command: { label: '运行命令', icon: 'terminal' },
+  grep: { label: '搜索代码', icon: 'search' },
+  glob: { label: '查找文件', icon: 'search' },
+  web_search: { label: '联网搜索', icon: 'globe' },
+  web_fetch: { label: '抓取网页', icon: 'globe' },
+  browser: { label: '浏览器', icon: 'layout' },
+  computer: { label: '电脑操作', icon: 'layout' },
+  screenshot: { label: '截图', icon: 'image' },
+  view_image: { label: '查看图片', icon: 'image' },
+  'sub-agent': { label: '子任务', icon: 'spark-bot' },
+  use_skill: { label: '使用技能', icon: 'sparkles' },
+  run_skill: { label: '运行技能', icon: 'sparkles' },
+  plan_update: { label: '更新计划', icon: 'check' },
+  note_append: { label: '记录笔记', icon: 'edit' },
+  ask_human: { label: '向你提问', icon: 'user' },
+  dev_server: { label: '开发服务器', icon: 'loader' },
+};
+/** 每个工具最有信息量的那个入参 key —— 折叠行上展示的值。 */
+const TOOL_ARG_KEYS: Record<string, string[]> = {
+  read_file: ['path', 'file_path', 'file'],
+  write_file: ['path', 'file_path', 'file'],
+  edit_file: ['path', 'file_path', 'file'],
+  run_command: ['command'],
+  grep: ['pattern'],
+  glob: ['pattern'],
+  web_search: ['query'],
+  web_fetch: ['url'],
+};
+
+function toolMeta(name: string): { label: string; icon: string } {
+  return TOOL_META[name] ?? (name.startsWith('memory_') ? { label: '记忆', icon: 'sparkles' } : { label: name, icon: 'wrench' });
+}
+function clip(value: string, max: number): string {
+  const flat = value.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+/** 折叠行上的"对象"文本:路径 / 命令 / 关键词等,让工具行不只是一个工具名。 */
+function toolTargetText(name: string, args: string): string {
+  const raw = args.trim();
+  if (!raw) return '';
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (value && typeof value === 'object' && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+  } catch { /* 非 JSON 入参按纯文本处理 */ }
+  if (parsed) {
+    for (const key of TOOL_ARG_KEYS[name] ?? ['path', 'file', 'filePath', 'command', 'query', 'pattern', 'url', 'name', 'target']) {
+      const value = parsed[key];
+      if (typeof value === 'string' && value) return clip(value, 120);
+    }
+    const first = Object.values(parsed).find((value) => typeof value === 'string' && value);
+    if (typeof first === 'string' && first) return clip(first, 120);
+  }
+  return clip(raw, 120);
+}
 
 function toolText(value: unknown): string {
   if (typeof value === 'string') return value;
   if (value == null) return '';
   try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
-function toolCallSummary(value: unknown): string {
-  const raw = toolText(value).trim();
-  if (!raw) return '';
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const hint = ['path', 'file', 'command', 'query', 'pattern'].map((key) => parsed[key]).find((item) => typeof item === 'string');
-    if (typeof hint === 'string') return hint.length > 100 ? `${hint.slice(0, 99)}…` : hint;
-  } catch { /* Non-JSON arguments are summarized as plain text. */ }
-  const compact = raw.replace(/\s+/g, ' ');
-  return compact.length > 100 ? `${compact.slice(0, 99)}…` : compact;
+
+let activeToolGroup: HTMLElement | null = null;
+/** 有效的当前工具组:必须在文档里,且仍是消息内容区的最后一个 block(被文字打断后即失效)。 */
+function currentToolGroup(content: HTMLElement): HTMLElement | null {
+  return activeToolGroup?.isConnected && content.lastElementChild === activeToolGroup ? activeToolGroup : null;
 }
+/**
+ * 连续的工具调用折叠成两级集合(对齐 mocode 终端的做法):
+ * 外层一行「执行了 N 个工具调用」,展开后是原来的单行工具卡;
+ * 智能体输出文字会把集合打断 —— 文字之后的新工具另起一个集合。
+ */
+function ensureToolGroup(content: HTMLElement): HTMLElement {
+  const existing = currentToolGroup(content);
+  if (existing) return existing;
+  const group = document.createElement('details');
+  group.className = 'tool-group';
+  group.innerHTML = '<summary></summary><div class="tool-group-body"></div>';
+  content.append(group);
+  activeToolGroup = group;
+  refreshToolGroup(group);
+  return group;
+}
+/** 重算集合行:名称(执行中/完成)、工具类型短语(读取文件 ×2 · 运行命令 ×3)、进度与总耗时。 */
+function refreshToolGroup(group: HTMLElement): void {
+  const entries = Array.from(group.querySelectorAll<HTMLDetailsElement>(':scope > .tool-group-body > details.tool-entry'));
+  if (!entries.length) return;
+  const running = entries.filter((entry) => entry.classList.contains('tool-running'));
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    const label = entry.dataset.toolLabel ?? '工具';
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const phrase = clip([...counts].map(([label, n]) => (n > 1 ? `${label} ×${n}` : label)).join(' · '), 64);
+  const current = running.find((entry) => entry.dataset.toolLabel);
+  let meta: string;
+  if (running.length) {
+    meta = `<span class="tool-dot"></span>${entries.length - running.length}/${entries.length} · ${escapeHtml(current?.dataset.toolLabel ?? '工具')}…`;
+  } else {
+    const startedAt = Number(group.dataset.startTime ?? 0);
+    const elapsed = startedAt && group.dataset.hadRunning === '1' ? Date.now() - startedAt : null;
+    const timing = elapsed !== null && elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s · ` : '';
+    meta = `${timing}${entries.length} 项`;
+  }
+  const summary = group.querySelector('summary') as HTMLElement;
+  summary.innerHTML = `<span class="tool-chevron" data-icon="chevron-right"></span>
+  <span class="tool-kind" data-icon="wrench"></span>
+  <span class="tool-name">${running.length ? '正在执行工具' : `执行了 ${entries.length} 个工具调用`}</span>
+  ${phrase ? `<span class="tool-target" title="${escapeHtml(phrase)}">${escapeHtml(phrase)}</span>` : ''}
+  <span class="tool-meta">${meta}</span>`;
+  mountIcons(summary);
+  group.classList.toggle('tool-group-running', running.length > 0);
+}
+
+/**
+ * 追加 / 更新一条工具行。
+ * - 工具行一律 append 到当前助手轮次的末尾 —— 顺序 = 发生顺序;
+ * - 默认折叠(details 关闭),只显示「动词 + 对象 + 状态/耗时」一行;
+ * - 同一 id 的 tool_started → tool_completed 原地更新,不新增行。
+ */
 function addTool(payload: Record<string, unknown>, completed = false): void {
   emptyState.classList.add('hidden');
-  // 工具事件可能早于首个文字到达：先确保存在活跃的助手消息，工具调用要挂在其内容区内部
-  if (!activeAssistant || !activeAssistant.isConnected) {
-    activeAssistant = addMessage('assistant');
-    activeAssistant.classList.add('is-streaming');
-  }
+  // 工具事件可能早于首个文字到达：先确保存在活跃的助手消息，工具行挂在其内容区内部
+  const current = currentTurn() ?? startAssistantTurn();
   const id = payload.id == null ? '' : String(payload.id);
-  const existing = completed && id ? activeTools.get(id) : undefined;
+  const existing = id ? activeTools.get(id) : undefined;
   const entry = existing?.isConnected ? existing : document.createElement('details');
   const isNew = !entry.isConnected;
   const name = String(payload.name ?? 'tool');
   const args = toolText(payload.arguments ?? entry.dataset.toolArguments).trim();
   const output = toolText(payload.output).trim();
   if (!completed && args) entry.dataset.toolArguments = args;
-  const summary = toolCallSummary(args);
+  const meta = toolMeta(name);
+  const target = toolTargetText(name, args);
+  const startedAt = id ? toolStartTimes.get(id) : undefined;
+  const elapsed = completed && startedAt !== undefined ? Date.now() - startedAt : null;
+  const lines = output ? output.split('\n').length : 0;
+  const status = completed ? (lines > 1 ? `${lines} 行` : '完成') : '执行中';
+  const timing = elapsed !== null && elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s · ` : '';
   const detail = [
-    args ? `<section><span>调用</span><pre>${escapeHtml(args.slice(0, 6000))}</pre></section>` : '',
-    output ? `<section><span>结果</span><pre>${escapeHtml(output.slice(0, 12000))}</pre></section>` : '',
+    args ? `<section><span>参数</span><pre>${escapeHtml(args.slice(0, 2000))}</pre></section>` : '',
+    output ? `<section><span>结果</span><pre>${escapeHtml(output.slice(0, 6000))}${output.length > 6000 ? '\n…（输出过长已截断）' : ''}</pre></section>` : '',
   ].join('');
 
   entry.className = `tool-entry ${completed ? 'tool-done' : 'tool-running'}${detail ? '' : ' tool-empty'}`;
-  entry.innerHTML = `<summary><span class="tool-state">${completed ? '●' : '◇'}</span><span class="tool-name">${escapeHtml(name)}</span>${summary ? `<span class="tool-summary">${escapeHtml(summary)}</span>` : ''}<span class="tool-meta">${completed ? '完成' : '执行中'}</span></summary>${detail ? `<div class="tool-detail">${detail}</div>` : ''}`;
+  entry.dataset.toolLabel = meta.label;
+  entry.innerHTML = `<summary>
+  <span class="tool-chevron" data-icon="chevron-right"></span>
+  <span class="tool-kind" data-icon="${escapeHtml(meta.icon)}"></span>
+  <span class="tool-name">${escapeHtml(meta.label)}</span>
+  ${target ? `<span class="tool-target" title="${escapeHtml(target)}">${escapeHtml(target)}</span>` : ''}
+  <span class="tool-meta">${completed ? '' : '<span class="tool-dot"></span>'}${timing}${status}</span>
+</summary>${detail ? `<div class="tool-detail">${detail}</div>` : ''}`;
+  mountIcons(entry);
+  // 折叠优先：完成即收起。运行中的行也默认收起（用户手动展开过则保留其状态）。
   if (completed) entry.open = false;
-  if (isNew) {
-    // 工具调用始终挂进当前助手消息的 content 内部：正文还空时放正文上方，已有正文时接在下方（保持时间顺序）
-    const body = activeAssistant.querySelector('.message-body') as HTMLElement;
-    if (body && !body.textContent?.trim()) body.before(entry);
-    else if (body) body.after(entry);
-    else conversation.append(entry);
+  if (id) {
+    if (completed) { activeTools.delete(id); toolStartTimes.delete(id); }
+    else if (isNew) { activeTools.set(id, entry); toolStartTimes.set(id, Date.now()); }
   }
-  if (id) completed ? activeTools.delete(id) : activeTools.set(id, entry);
+  if (isNew) {
+    const content = (current.querySelector('.message-content') ?? current) as HTMLElement;
+    if (STANDALONE_TOOLS.has(name)) {
+      // 文件编辑独立成行展示(不进集合):编辑内容用户必须能直接找到。
+      content.append(entry);
+      activeToolGroup = null;
+    } else {
+      const group = ensureToolGroup(content);
+      (group.querySelector('.tool-group-body') as HTMLElement).append(entry);
+      if (!completed) {
+        group.dataset.hadRunning = '1';
+        if (!group.dataset.startTime) group.dataset.startTime = String(Date.now());
+      }
+      refreshToolGroup(group);
+    }
+    // 工具之后的文字必须排在工具行下面 —— 强制下一段文字新开一个 block
+    activeTextBlock = null;
+  } else {
+    // 原地更新(运行中 → 完成):同步刷新所属集合行的进度/耗时。
+    const group = entry.closest<HTMLElement>('.tool-group');
+    if (group) refreshToolGroup(group);
+  }
   smartScrollToBottom();
 }
 function appendText(text: string): void {
-  // 复用当前助手气泡；若尚不存在则创建（工具事件也可能先到）
-  if (!activeAssistant || !activeAssistant.isConnected) {
-    activeAssistant = addMessage('assistant');
-    activeAssistant.classList.add('is-streaming');
-  }
-  const body = activeAssistant.querySelector('.message-body') as HTMLElement;
-  body.textContent = `${body.textContent ?? ''}${text}`;
+  const block = ensureTextBlock();
+  block.textContent = `${block.textContent ?? ''}${text}`;
   smartScrollToBottom();
 }
 function renderHistory(history: HistoryItem[]): void {
-  conversation.innerHTML = ''; activeAssistant = null;
+  conversation.innerHTML = ''; activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
   if (!history.length) { emptyState.classList.remove('hidden'); return; }
-  // 连续的 assistant 文字段视为同一轮输出:仅首段带头像,后续段标记为续接(隐藏 ✦Mocode)。
-  let prevRole: HistoryItem['role'] | null = null;
+  // 一条 user 消息之后的所有 assistant / tool 片段归为同一轮,按原始顺序铺成 block 流。
   for (const item of history) {
-    if (item.role === 'tool') { addTool({ name: '工具结果', output: item.text }, true); }
-    else {
-      const el = addMessage(item.role, item.text);
-      // 历史消息(已结束)直接走 markdown 渲染
-      if (item.role === 'assistant') {
-        el.classList.remove('is-streaming');
-        renderMessageBody(el.querySelector('.message-body') as HTMLElement, item.text);
-        wireMessageActions(el, item.text);
-      }
-      if (item.role === 'assistant' && prevRole === 'assistant') el.dataset.continued = '1';
+    if (item.role === 'user') {
+      finalizeTurn(activeAssistant);
+      activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
+      addMessage('user', item.text);
+      continue;
     }
-    prevRole = item.role;
+    // 模块级 let 在本函数内被赋过 null 后 TS 会收窄成 never,统一走 currentTurn()。
+    if (!currentTurn()) startAssistantTurn();
+    if (item.role === 'assistant') {
+      ensureTextBlock().textContent = item.text;
+      activeTextBlock = null;
+    } else {
+      addTool({ name: item.name ?? 'tool', arguments: item.arguments ?? '', output: item.text }, true);
+    }
   }
+  finalizeTurn(activeAssistant);
+  activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
 }
 
 /**
@@ -407,17 +612,36 @@ function renderMessageBody(body: HTMLElement, text: string): void {
   enhanceCodeBlocks(body);
 }
 
+/**
+ * 一轮输出收尾:逐段渲染 markdown(一段文字 = 一个 block,中间的折叠工具行保持不变),
+ * 丢掉空文字段,最后挂上复制 / 重新生成。
+ */
+function finalizeTurn(message: HTMLElement | null): void {
+  if (!message) return;
+  message.classList.remove('is-streaming');
+  const parts: string[] = [];
+  for (const block of Array.from(message.querySelectorAll<HTMLElement>('.message-body'))) {
+    const text = block.textContent ?? '';
+    if (!text.trim()) { block.remove(); continue; }
+    parts.push(text);
+    renderMessageBody(block, text);
+  }
+  wireMessageActions(message, parts.join('\n\n'));
+}
+
 async function openTask(taskId: string): Promise<void> {
   const workspace = await window.mocodeWork.selectTask(taskId);
   if (!workspace) return;
-  updateState(workspace.state); renderHistory(workspace.history); attachments = []; renderAttachments(); promptInput.focus();
+  updateState(workspace.state);
+  // 运行中/本周期跑过的任务用事件缓冲重放;旧任务(重启后)用 session 历史回放。
+  switchToTask(taskId, workspace.history);
 }
 
 async function deleteTask(taskId: string): Promise<void> {
   const task = state?.tasks.find((item) => item.id === taskId);
   // 非运行中任务加一个轻量二次确认
   if (task && task.status !== 'running' && task.status !== 'waiting') {
-    const ok = window.confirm(`删除任务 “${task.title}”?此操作不可撤销。`);
+    const ok = window.confirm(`删除任务 “${taskTitle(task)}”?此操作不可撤销。`);
     if (!ok) return;
   }
   const deletingSelectedTask = state?.selectedTaskId === taskId;
@@ -428,15 +652,19 @@ async function deleteTask(taskId: string): Promise<void> {
   showToast('info', '已删除任务');
 }
 
-function showApproval(payload: Record<string, unknown>): void {
+function showApproval(taskId: string, payload: Record<string, unknown>): void {
   const approvalId = String(payload.approvalId ?? ''); const options = Array.isArray(payload.options) ? payload.options.map(String) : [];
   approvalPanel.classList.remove('hidden');
   const buttons = options.length ? options.map((option, index) => `<button data-approval="${escapeHtml(option)}" class="${index === 0 ? 'approve' : ''}">${escapeHtml(option)}</button>`).join('') : `<button data-approval="approve" class="approve">${icon('check')}确认</button>`;
   approvalPanel.innerHTML = `<div class="approval-title">${icon('warn')}<span>需要你的确认</span></div><p>${escapeHtml(String(payload.title ?? '允许此操作？'))}</p><pre>${escapeHtml(String(payload.detail ?? ''))}</pre><div class="approval-actions">${buttons}<button data-cancel>${icon('close')}拒绝</button></div>`;
-  approvalPanel.querySelectorAll<HTMLButtonElement>('[data-approval]').forEach((button) => button.addEventListener('click', () => {
-    window.mocodeWork.send({ type: 'approval', approvalId, action: 'selected', value: button.dataset.approval }); approvalPanel.classList.add('hidden');
-  }));
-  approvalPanel.querySelector<HTMLButtonElement>('[data-cancel]')?.addEventListener('click', () => { window.mocodeWork.send({ type: 'approval', approvalId, action: 'cancelled' }); approvalPanel.classList.add('hidden'); });
+  const resolve = (value: Record<string, unknown>): void => {
+    window.mocodeWork.send({ type: 'approval', id: taskId, approvalId, ...value });
+    approvalPanel.classList.add('hidden');
+    const stream = streams.get(taskId);
+    if (stream) stream.pendingApproval = null;
+  };
+  approvalPanel.querySelectorAll<HTMLButtonElement>('[data-approval]').forEach((button) => button.addEventListener('click', () => resolve({ action: 'selected', value: button.dataset.approval })));
+  approvalPanel.querySelector<HTMLButtonElement>('[data-cancel]')?.addEventListener('click', () => resolve({ action: 'cancelled' }));
 }
 function setRunning(running: boolean): void { sendButton.innerHTML = icon(running ? 'square' : 'paper-airplane'); sendButton.classList.toggle('stop', running); sendButton.title = running ? '停止运行 (⌘.)' : '发送 (⌘⏎)'; sendButton.setAttribute('aria-label', running ? '停止运行' : '发送'); }
 function resizePrompt(): void { promptInput.style.height = 'auto'; promptInput.style.height = `${Math.min(promptInput.scrollHeight, 128)}px`; }
@@ -493,7 +721,8 @@ function wireMessageActions(message: HTMLElement, text: string): void {
  * 删掉本条及之后的所有 assistant/tool 消息,重发。
  */
 async function regenerate(): Promise<void> {
-  if (activeRunId) { showToast('warn', '当前还有任务在跑,请先停止。'); return; }
+  const viewing = viewingTaskId();
+  if (isRunning(viewing)) { showToast('warn', '当前还有任务在跑,请先停止。'); return; }
   const task = selectedTask();
   if (!task?.sessionId) { showToast('warn', '这条消息没有可用的会话,无法重新生成。'); return; }
   const messages = Array.from(conversation.querySelectorAll<HTMLElement>('.message'));
@@ -508,8 +737,13 @@ async function regenerate(): Promise<void> {
   const userText = messages[userIndex]!.querySelector('.message-body')?.textContent ?? '';
   // 删 target 起所有后续消息(包括本条)
   for (let i = messages.length - 1; i >= index; i -= 1) messages[i]!.remove();
-  // 直接重发(不再 addMessage,user 消息已经存在)
-  activeRunId = task.id;
+  // 直接重发(不再 addMessage,user 消息已经存在);缓冲里同样截掉被重发之后的段。
+  if (viewing) {
+    const stream = streamFor(viewing);
+    const lastUser = [...stream.items].map((item, i) => ({ item, i })).filter(({ item }) => item.kind === 'user').pop();
+    if (lastUser) stream.items.length = lastUser.i + 1;
+    stream.running = true;
+  }
   setRunning(true);
   window.mocodeWork.send({ type: 'run', id: task.id, prompt: userText, sessionId: task.sessionId, attachments: [] });
   showToast('info', '已重新生成');
@@ -756,95 +990,222 @@ function closeConvSearch(): void {
   searchOverlay.querySelectorAll<HTMLElement>('.conv-search-current').forEach((el) => el.classList.remove('conv-search-current'));
 }
 
+// 只剥「帮我」这类不会构成实词的引导语；「请」不动（请求体…会被切坏）。
+const TITLE_FILLERS = [/^(?:请帮我|请帮忙|麻烦帮我|麻烦你|帮忙|帮我看一下|帮我看下|帮我看看|帮我分析一下|帮我分析|帮我改一下|帮我|我想让你|我需要你)/];
+/** CJK / 全角字符按 2 个宽度计，与侧栏实际显示宽度一致。 */
+function charWidth(char: string): number { return /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]/.test(char) ? 2 : 1; }
+function truncateByWidth(text: string, maxWidth: number): string {
+  let width = 0;
+  for (let i = 0; i < text.length; i++) {
+    width += charWidth(text.charAt(i));
+    if (width <= maxWidth) continue;
+    return `${text.slice(0, i).trimEnd()}…`;
+  }
+  return text;
+}
+/**
+ * 用第一条指令自动生成任务标题：取首行有效内容 → 去掉 Markdown 噪声和「帮我/请」这类
+ * 引导词 → 按显示宽度截断。纯本地规则，不额外消耗一次模型调用。
+ */
+function summarizePrompt(prompt: string, maxWidth = 40): string {
+  const firstLine = prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? '';
+  let text = firstLine
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^[-*+]\s+/, '')
+    .replace(/^>\s*/, '')
+    .replace(/^\d+[.)]\s*/, '')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/\*\*([^*]*)\*\*/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  for (let round = 0; round < 2; round++) {
+    for (const filler of TITLE_FILLERS) {
+      const next = text.replace(filler, '').trim();
+      if (next && next !== text) { text = next; break; }
+    }
+  }
+  text = text.replace(/[。！？!?；;，,、:：~～\s]+$/, '');
+  if (!text) text = prompt.replace(/\s+/g, ' ').trim();
+  return text ? truncateByWidth(text, maxWidth) : '新任务';
+}
 async function submit(): Promise<void> {
-  if (activeRunId) { window.mocodeWork.send({ type: 'cancel', id: activeRunId }); return; }
+  const viewing = viewingTaskId();
+  // 正在查看的任务在跑:点击 = 停止它(其它后台任务不受影响)。
+  if (isRunning(viewing)) { window.mocodeWork.send({ type: 'cancel', id: viewing }); return; }
   const prompt = promptInput.value.trim(); if (!prompt) return;
   let task = selectedTask();
-  // 只有在完全没有选中的任务时才新建；若已选中（含弹窗预建的 queued 任务，尚无 session），直接续用，避免重复建任务。
+  // 只有在完全没有选中的任务时才新建；若已选中（含「新建任务」预建的 queued 任务，尚无 session），直接续用，避免重复建任务。
   if (!task) {
-    const created = await window.mocodeWork.createTask(prompt.replace(/\s+/g, ' ').slice(0, 160)); updateState(created.state); task = created.task; conversation.innerHTML = ''; activeAssistant = null;
+    const created = await window.mocodeWork.createTask(''); updateState(created.state); task = created.task;
   }
-  activeRunId = task.id; addMessage('user', prompt); promptInput.value = ''; resizePrompt(); setRunning(true);
+  // 标题自动摘要：新建后还没命名的任务，用这一条指令就地命名（用户手动改过就不动）。
+  if (!task.title.trim() && !task.sessionId) {
+    const next = await window.mocodeWork.renameTask(task.id, summarizePrompt(prompt));
+    if (next) updateState(next);
+  }
+  const stream = streamFor(task.id);
+  stream.items.push({ kind: 'user', text: prompt });
+  stream.running = true;
+  addMessage('user', prompt); promptInput.value = ''; resizePrompt(); setRunning(true);
   window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments }); attachments = []; renderAttachments();
 }
 
-function finish(): void {
-  if (activeAssistant) {
-    activeAssistant.classList.remove('is-streaming');
-    const body = activeAssistant.querySelector('.message-body') as HTMLElement;
-    const raw = body.textContent ?? '';
-    renderMessageBody(body, raw);
-    wireMessageActions(activeAssistant, raw);
-  }
-  activeRunId = null; activeAssistant = null; setRunning(false);
+function endTaskRun(taskId: string): void {
+  const stream = streams.get(taskId);
+  if (stream) stream.running = false;
+  if (viewingTaskId() === taskId) setRunning(false);
 }
+
+function finish(): void {
+  finalizeTurn(activeAssistant);
+  activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false);
+}
+
+/** 后台任务结束时的轻提示（不在前台也能知道它跑完了）。 */
+function notifyBackground(taskId: string, note: string): void {
+  if (viewingTaskId() === taskId) return;
+  const task = state?.tasks.find((item) => item.id === taskId);
+  showToast('info', `「${taskTitle(task ?? ({} as Task))}」${note}`, 3200);
+}
+
 function handleAgentEvent(envelope: AgentEnvelope): void {
   if (envelope.type === 'error') {
     const message = humanizeError(envelope.error ?? '');
     if (message) { console.error('[Agent]', message); showToast('error', message); }
-    finish();
     return;
   }
   const payload = envelope.payload ?? {};
-  if (envelope.requestId && activeRunId && envelope.requestId !== activeRunId) return;
+  const taskId = envelope.requestId;
+  // host_log 等无归属事件走全局通道
+  if (!taskId) {
+    if (envelope.event === 'host_log') handleHostLog(payload);
+    return;
+  }
+  const stream = streamFor(taskId);
+  const viewing = viewingTaskId() === taskId;
   switch (envelope.event) {
-    case 'text_delta': appendText(String(payload.text ?? '')); break;
-    case 'tool_started': addTool(payload); break;
-    case 'tool_completed': addTool(payload, true); break;
-    case 'approval_requested': showApproval(payload); break;
-    case 'run_aborted': finish(); break;
+    case 'text_delta': {
+      const text = String(payload.text ?? '');
+      const last = stream.items[stream.items.length - 1];
+      if (last && last.kind === 'text') last.text += text;
+      else stream.items.push({ kind: 'text', text });
+      if (viewing) appendText(text);
+      break;
+    }
+    case 'tool_started':
+    case 'tool_completed': {
+      const completed = envelope.event === 'tool_completed';
+      const id = payload.id == null ? '' : String(payload.id);
+      const args = toolText(payload.arguments).trim();
+      const output = toolText(payload.output).trim();
+      const existing = id ? [...stream.items].reverse().find((item) => item.kind === 'tool' && item.id === id) : undefined;
+      if (existing && existing.kind === 'tool') {
+        existing.done = completed;
+        if (output) existing.output = output;
+        if (args) existing.args = args;
+      } else {
+        stream.items.push({ kind: 'tool', id, name: String(payload.name ?? 'tool'), args, output, done: completed });
+      }
+      if (viewing) addTool(payload, completed);
+      break;
+    }
+    case 'approval_requested': {
+      stream.pendingApproval = payload;
+      if (viewing) showApproval(taskId, payload);
+      else notifyBackground(taskId, '在等待你确认操作');
+      break;
+    }
+    case 'run_aborted':
+      endTaskRun(taskId);
+      if (viewing) finish();
+      break;
     case 'run_completed': {
-      if (typeof payload.usagePercent === 'number') updateContextUsage(payload.usagePercent);
-      const usage = payload.usage && typeof payload.usage === 'object'
-        ? payload.usage as Record<string, unknown>
-        : null;
+      if (typeof payload.usagePercent === 'number') stream.usagePercent = payload.usagePercent;
+      const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : null;
       const created = typeof usage?.cacheCreationTokens === 'number' ? usage.cacheCreationTokens : 0;
       const cached = typeof usage?.cachedTokens === 'number' ? usage.cachedTokens : 0;
-      if (created > 0 || cached > 0) {
+      if ((created > 0 || cached > 0) && viewing) {
         const details = [
           created > 0 ? `创建 ${Math.round(created).toLocaleString()} tokens` : null,
           cached > 0 ? `命中 ${Math.round(cached).toLocaleString()} tokens` : null,
         ].filter(Boolean).join(' · ');
         showToast('success', `Prompt Cache: ${details}`, 3500);
       }
-      finish();
+      endTaskRun(taskId);
+      if (viewing) { updateContextUsage(stream.usagePercent); finish(); }
+      else notifyBackground(taskId, '已完成');
       break;
     }
     case 'compact_done': {
       const pct = typeof payload.usagePercent === 'number' ? payload.usagePercent : null;
-      updateContextUsage(pct);
+      if (pct !== null) stream.usagePercent = pct;
       const before = typeof payload.beforeTokens === 'number' ? Math.round(payload.beforeTokens / 1000) : '?';
       const after = typeof payload.afterTokens === 'number' ? Math.round(payload.afterTokens / 1000) : '?';
       showToast('success', `上下文已压缩: ${before}k → ${after}k tokens${pct !== null ? ` (${pct}%)` : ''}`, 4000);
+      if (viewing) updateContextUsage(pct);
       break;
     }
-    case 'host_log': {
-      const raw = String(payload.message ?? '').trim();
-      if (!raw) break;
-      // 内部日志只进开发者控制台，绝不进入用户对话。
-      if (/^\(?node:\d+\)? \[DEP\d{4}\]/.test(raw)) break;
-      console.debug('[Agent Host]', raw);
-      // 关键启动 / 配置提示用 toast 提示用户(避免淹没在控制台)
-      if (/Agent Host 未构建|配置缺少|连续崩溃|未找到系统 node/.test(raw)) {
-        showToast('warn', raw.replace(/^\[mocode-work\]\s*/, ''), 6000);
-      }
+    case 'host_log':
+      handleHostLog(payload);
       break;
-    }
     case 'run_failed': {
-      const message = humanizeError(String(payload.message ?? '运行失败。'));
-      if (message) { console.error('[Agent]', message); showToast('error', message, 5000); }
-      finish();
+      const message = humanizeError(String(payload.message ?? '运行失败。')) ?? '运行失败。';
+      stream.items.push({ kind: 'error', message });
+      endTaskRun(taskId);
+      if (viewing) { console.error('[Agent]', message); showToast('error', message, 5000); finish(); }
+      else { console.error('[Agent]', message); notifyBackground(taskId, '运行失败'); }
       break;
     }
     case 'host_exit': {
-      if (activeRunId) {
-        const code = typeof payload.code === 'number' ? payload.code : null;
-        console.error(`[Agent Host] 已退出（退出码 ${code ?? '?'}）`);
-        finish();
-      }
+      if (!stream.running) break;
+      const code = typeof payload.code === 'number' ? payload.code : null;
+      console.error(`[Agent Host] 已退出（退出码 ${code ?? '?'}）`);
+      stream.items.push({ kind: 'error', message: `Agent Host 意外退出（退出码 ${code ?? '?'}），请重试。` });
+      endTaskRun(taskId);
+      if (viewing) finish();
       break;
     }
   }
+}
+function handleHostLog(payload: Record<string, unknown>): void {
+  const raw = String(payload.message ?? '').trim();
+  if (!raw) return;
+  // 内部日志只进开发者控制台，绝不进入用户对话。
+  if (/^\(?node:\d+\)? \[DEP\d{4}\]/.test(raw)) return;
+  console.debug('[Agent Host]', raw);
+  // 关键启动 / 配置提示用 toast 提示用户(避免淹没在控制台)
+  if (/Agent Host 未构建|配置缺少|连续崩溃|未找到系统 node/.test(raw)) {
+    showToast('warn', raw.replace(/^\[mocode-work\]\s*/, ''), 6000);
+  }
+}
+
+/**
+ * 切换查看的任务。三种来源,渲染优先级:
+ * 1. 本周期内跑过(streams 里有缓冲) → 从事件缓冲全量重建,顺序与实时渲染一致;
+ * 2. 否则用 select-task 返回的 session 历史(重启后打开旧任务)。
+ */
+function switchToTask(taskId: string, history?: HistoryItem[]): void {
+  conversation.innerHTML = '';
+  activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
+  const stream = streams.get(taskId);
+  if (stream && stream.items.length) {
+    for (const item of stream.items) {
+      if (item.kind === 'user') addMessage('user', item.text);
+      else if (item.kind === 'text') appendText(item.text);
+      else if (item.kind === 'tool') addTool({ id: item.id, name: item.name, arguments: item.args, output: item.output }, item.done);
+      else if (item.kind === 'error') showToast('error', item.message, 5000);
+    }
+    if (!stream.running) finish();
+    else setRunning(true);
+    updateContextUsage(stream.usagePercent);
+    if (stream.running && stream.pendingApproval) showApproval(taskId, stream.pendingApproval);
+  } else if (history) {
+    renderHistory(history);
+    updateContextUsage(null);
+  }
+  // 切换任务清空附件草稿 —— 附件属于「当前正在编辑的这条消息」,不属于任务。
+  attachments = []; renderAttachments();
+  promptInput.focus();
 }
 
 function openInspector(tab: 'overview' | 'files' | 'prs'): void {
@@ -881,7 +1242,7 @@ function refreshSearch(query = ''): void {
   if (!state) return; const needle = query.trim().toLocaleLowerCase();
   const projects = state.projects.filter((project) => project.name.toLocaleLowerCase().includes(needle)); const tasks = state.tasks.filter((task) => task.title.toLocaleLowerCase().includes(needle));
   const projectResults = projects.map((project) => `<button data-search-project="${escapeHtml(project.id)}">项目 · ${escapeHtml(project.name)}</button>`).join('');
-  const taskResults = tasks.map((task) => `<button data-search-task="${escapeHtml(task.id)}">任务 · ${escapeHtml(task.title)}</button>`).join('');
+  const taskResults = tasks.map((task) => `<button data-search-task="${escapeHtml(task.id)}">任务 · ${escapeHtml(taskTitle(task))}</button>`).join('');
   $('#search-results').innerHTML = projectResults || taskResults ? `${projectResults}${taskResults}` : '<p>无匹配结果</p>';
   document.querySelectorAll<HTMLButtonElement>('[data-search-project]').forEach((button) => button.addEventListener('click', async () => { updateState(await window.mocodeWork.selectProject(button.dataset.searchProject!)); searchPanel.classList.add('hidden'); }));
   document.querySelectorAll<HTMLButtonElement>('[data-search-task]').forEach((button) => button.addEventListener('click', () => { searchPanel.classList.add('hidden'); void openTask(button.dataset.searchTask!); }));
@@ -897,105 +1258,74 @@ $('#add-project').addEventListener('click', async () => {
   const project = selectedProject();
   if (project && project.id !== before) showToast('success', `已切换到项目「${project.name}」`);
 });
-$('#new-task').addEventListener('click', () => openTaskModal('create'));
+$('#new-task').addEventListener('click', () => void startNewTask());
 
-/* ── Task modal (新建任务 / 重命名任务) ─────────────── */
-type TaskModalMode = 'create' | 'rename';
+/**
+ * 新建任务：不弹窗、不填表。直接建一个空任务（标题留空 → 侧栏显示「新任务」），
+ * 工作区清空并把焦点交给输入框；标题等用户发出第一条指令后由 summarizePrompt 自动生成。
+ */
+async function startNewTask(): Promise<void> {
+  // 并行友好:别的任务在后台跑也可以继续开新任务。
+  const current = selectedTask();
+  // 已经有一个「刚新建、还没发过消息」的任务时直接续用，避免连点堆出一串空任务。
+  if (current && !current.sessionId && !conversation.querySelector('.message')) { promptInput.focus(); return; }
+  const created = await window.mocodeWork.createTask('');
+  updateState(created.state);
+  clearWorkspace();
+  promptInput.value = ''; resizePrompt(); updateContextUsage(null);
+  promptInput.focus();
+}
+
+/* ── 重命名任务弹窗（侧栏双击任务标题触发） ─────────────── */
 let taskModalEl: HTMLElement | null = null;
-let taskModalMode: TaskModalMode = 'create';
-let taskModalTaskId: string | undefined;
+let renameTaskId: string | undefined;
 
 function ensureTaskModal(): HTMLElement {
   if (taskModalEl) return taskModalEl;
   taskModalEl = $('#task-modal');
   return taskModalEl!;
 }
-function openTaskModal(mode: TaskModalMode, taskId?: string): void {
+function openRenameModal(taskId: string): void {
+  const task = state?.tasks.find((item) => item.id === taskId);
+  if (!task) return;
   const el = ensureTaskModal();
-  taskModalMode = mode; taskModalTaskId = taskId;
-  const titleEl = $('#task-modal-title');
+  renameTaskId = taskId;
+  ($('#task-modal-title') as HTMLElement).textContent = '重命名任务';
+  ($('#task-modal-create') as HTMLButtonElement).textContent = '保存';
   const nameInput = $('#task-name-input') as HTMLInputElement;
-  const goalField = $('#task-goal-field');
-  const goalInput = $('#task-goal-input') as HTMLTextAreaElement;
-  const spaceField = $('#task-space-field');
-  const spaceSelect = $('#task-space-select') as HTMLSelectElement | null;
-  const createBtn = $('#task-modal-create') as HTMLButtonElement;
-  if (mode === 'rename') {
-    const task = state?.tasks.find((item) => item.id === taskId);
-    if (!task) return;
-    titleEl.textContent = '重命名任务';
-    createBtn.textContent = '保存';
-    spaceField?.classList.add('hidden');
-    goalField.classList.add('hidden'); goalInput.value = '';
-    nameInput.value = task.title;
-  } else {
-    titleEl.textContent = '新建任务';
-    createBtn.textContent = '创建任务';
-    spaceField?.classList.remove('hidden');
-    goalField.classList.remove('hidden');
-    // 归属：普通任务（不加入空间）或某个项目文件夹。默认跟随当前上下文 ——
-    // 当前选中的任务归哪就默认建到哪；没选任务时用当前项目。
-    const currentTask = selectedTask();
-    const defaultSpace = currentTask ? currentTask.projectId : (state?.selectedProjectId ?? '');
-    if (spaceSelect) {
-      spaceSelect.innerHTML = `<option value="">普通任务（不加入空间）</option>${(state?.projects ?? []).map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join('')}`;
-      spaceSelect.value = defaultSpace;
-      if (spaceSelect.selectedIndex < 0) spaceSelect.selectedIndex = 0;
-    }
-    nameInput.value = ''; goalInput.value = '';
-    // 新建前先清空当前工作区，确保从干净状态开始
-    if (state) updateState({ ...state, selectedTaskId: undefined });
-    clearWorkspace();
-  }
+  nameInput.value = task.title;
   el.classList.remove('hidden');
   requestAnimationFrame(() => { nameInput.focus(); nameInput.select(); });
 }
-function closeTaskModal(): void { ensureTaskModal().classList.add('hidden'); }
-async function submitTaskModal(): Promise<void> {
+function closeTaskModal(): void { ensureTaskModal().classList.add('hidden'); renameTaskId = undefined; }
+async function submitRenameModal(): Promise<void> {
   const nameInput = $('#task-name-input') as HTMLInputElement;
-  const goalInput = $('#task-goal-input') as HTMLTextAreaElement;
   const name = nameInput.value.trim();
   if (!name) { nameInput.classList.remove('shake'); void nameInput.offsetWidth; nameInput.classList.add('shake'); nameInput.focus(); return; }
-  if (taskModalMode === 'rename' && taskModalTaskId) {
-    const next = await window.mocodeWork.renameTask(taskModalTaskId, name.slice(0, 160));
+  if (renameTaskId) {
+    const next = await window.mocodeWork.renameTask(renameTaskId, name.slice(0, 160));
     if (next) updateState(next);
     showToast('success', `已重命名为「${name}」`);
-    closeTaskModal();
-    return;
   }
-  const goal = goalInput.value.trim();
-  const spaceId = ($('#task-space-select') as HTMLSelectElement | null)?.value ?? '';
-  const created = await window.mocodeWork.createTask(name.slice(0, 160), spaceId);
-  updateState(created.state);
-  if (goal) { promptInput.value = goal; resizePrompt(); }
   closeTaskModal();
-  promptInput.focus();
-  showToast('success', `已创建任务「${name}」`);
 }
-// 侧栏双击任务标题 → 打开重命名弹窗（复用上面的 modal）
-async function startTaskRename(taskId: string): Promise<void> {
-  const task = state?.tasks.find((item) => item.id === taskId);
-  if (!task) return;
-  openTaskModal('rename', taskId);
-}
+// 侧栏双击任务标题 → 打开重命名弹窗
+function startTaskRename(taskId: string): void { openRenameModal(taskId); }
 
-// 弹窗交互：创建/保存、关闭、遮罩点击、回车快捷键
-$('#task-modal-create')?.addEventListener('click', () => void submitTaskModal());
+// 弹窗交互：保存、关闭、遮罩点击、回车快捷键
+$('#task-modal-create')?.addEventListener('click', () => void submitRenameModal());
 ensureTaskModal().querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeTaskModal));
 ensureTaskModal().addEventListener('click', (event) => { if (event.target === ensureTaskModal()) closeTaskModal(); });
 $('#task-name-input')?.addEventListener('keydown', (event) => {
   if (event.key !== 'Enter') return;
   event.preventDefault();
-  const goal = $('#task-goal-input') as HTMLTextAreaElement;
-  if (taskModalMode === 'create' && !goal.value.trim()) goal.focus();
-  else void submitTaskModal();
-});
-$('#task-goal-input')?.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submitTaskModal(); }
+  void submitRenameModal();
 });
 $('#add-attachment').addEventListener('click', async () => { const attachment = await window.mocodeWork.pickAttachment(); if (attachment) { attachments.push(attachment); renderAttachments(); } });
 $('#compact-button').addEventListener('click', () => {
-  window.mocodeWork.send({ type: 'compact', id: crypto.randomUUID() });
+  const viewing = viewingTaskId();
+  if (!viewing) return;
+  window.mocodeWork.send({ type: 'compact', id: viewing });
 });
 $('#toggle-inspector').addEventListener('click', () => inspector.classList.contains('hidden') ? openInspector('overview') : inspector.classList.add('hidden'));
 $('#show-files').addEventListener('click', () => openInspector('files'));
@@ -1360,13 +1690,13 @@ window.addEventListener('keydown', (event) => {
   if (cmd && event.key.toLowerCase() === 'k') { event.preventDefault(); searchPanel.classList.remove('hidden'); searchInput.value = ''; searchInput.focus(); refreshSearch(); return; }
   if (cmd && event.key.toLowerCase() === '/') {
     event.preventDefault();
-    if (activeRunId) { showToast('warn', '当前还有任务在跑,无法切换。'); return; }
     showToast('info', '助手模式: Mocode Agent (暂未开放多模型切换)');
     return;
   }
   if (cmd && event.key === '.') {
     event.preventDefault();
-    if (activeRunId) { window.mocodeWork.send({ type: 'cancel', id: activeRunId }); showToast('info', '已停止当前任务'); }
+    const viewing = viewingTaskId();
+    if (isRunning(viewing)) { window.mocodeWork.send({ type: 'cancel', id: viewing }); showToast('info', '已停止当前任务'); }
     return;
   }
   if (cmd && event.key.toLowerCase() === 'f') {
@@ -1382,8 +1712,7 @@ window.addEventListener('keydown', (event) => {
   }
   if (cmd && event.shiftKey && event.key.toLowerCase() === 'n') {
     event.preventDefault();
-    if (activeRunId) { showToast('warn', '当前还有任务在跑，无法新建。'); return; }
-    openTaskModal('create');
+    void startNewTask();
     return;
   }
 });

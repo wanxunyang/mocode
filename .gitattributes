@@ -1,0 +1,11 @@
+# 统一换行体制:仓库层强制 LF(与 Linux CI 及 npm 发布内容一致)。
+#
+# 背景:本机 core.autocrlf=true 时,git 依赖「自动探测」决定工作区换行。
+# 一旦某些写入路径产出另一种换行,就会出现混合换行 —— 表现为 git status 显示
+# modified 但 diff 为空(幽灵修改)、prettier --check 报错、以及 blame/diff 噪声。
+# 在仓库层固定 eol 后,git 归一行为不再依赖本地 git config。
+* text=auto eol=lf
+
+# Windows 批处理脚本必须保持 CRLF,否则 cmd.exe 可能解析异常。
+*.bat text eol=crlf
+*.cmd text eol=crlf

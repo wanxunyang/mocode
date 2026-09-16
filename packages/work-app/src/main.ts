@@ -70,8 +70,11 @@ interface CommandResult { ok: boolean; stdout: string; stderr: string; }
 let windowRef: BrowserWindow | null = null;
 let appMenu: Menu | null = null;
 let state: StoredState;
-let agent: LocalAgent | null = null;
-let activeTaskId: string | null = null;
+/**
+ * 多任务并行：每个任务一个独立的 agent host 子进程（各自 cwd / 各自会话），
+ * 互不干扰。renderer 随时切换查看的任务，后台任务的事件照常流入对应实例。
+ */
+const agents = new Map<string, LocalAgent>();
 
 function statePath(): string { return path.join(app.getPath('userData'), 'work-projects.json'); }
 function modelsDir(): string { return path.join(os.homedir(), '.mocode', 'models'); }
@@ -228,9 +231,12 @@ function switchModel(name: string): { ok: boolean; message: string; model?: Mode
   process.env.LLM_MODEL = model;
   process.env.ANTHROPIC_PROMPT_CACHE = promptCache ? 'true' : 'false';
   if (contextWindow) process.env.CONTEXT_WINDOW_TOKENS = String(contextWindow);
-  if (activeTaskId) { void agent?.send({ type: 'cancel', id: activeTaskId }); activeTaskId = null; }
-  // 停掉 host:它下次 send 会重建进程并读到刚写入的新配置(否则仍拿着旧模型跑)。
-  void agent?.restart();
+  // 切模型 = 换 host 的 config 快照：先停掉所有在跑的任务,再让全部 host 下次 send 时按新配置重启。
+  for (const [id, agent] of agents) {
+    const task = taskById(id);
+    if (task && (task.status === 'running' || task.status === 'waiting')) void agent.send({ type: 'cancel', id });
+    agent.restart();
+  }
   return {
     ok: true,
     message: `已切换到 ${name} (${provider}${promptCache ? ' · cache on' : ''})`,
@@ -279,6 +285,14 @@ function saveState(): void {
 }
 function selectedProject(): Project { return state.projects.find((item) => item.id === state.selectedProjectId) ?? state.projects[0]; }
 function taskById(id?: string): TaskRecord | undefined { return state.tasks.find((item) => item.id === id); }
+/**
+ * 「新建任务」只建壳子（标题留空、尚未发出第一条指令）。这类任务在用户切换工作空间时
+ * 应当跟着迁到新的归属，否则先建任务、再在主页挑工作空间的流程就断了。
+ */
+function pendingTask(): TaskRecord | undefined {
+  const task = taskById(state.selectedTaskId);
+  return task && task.status === 'queued' && !task.sessionId ? task : undefined;
+}
 
 /**
  * 普通任务（无项目文件夹）的 pseudo-project：agent host 需要一个 cwd 跑子进程、
@@ -304,25 +318,60 @@ function contentText(value: unknown): string {
   return value == null ? '' : JSON.stringify(value);
 }
 
-function sessionHistory(project: Project, sessionId?: string): Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> {
+/**
+ * 会话历史 → 渲染用的有序片段流。
+ * 顺序即时间顺序:user 一条,assistant 正文一条,随后每个 tool 结果一条(带上工具名与入参,
+ * 这样渲染端能把工具行折叠成「编辑文件 · src/foo.ts」这种一行摘要)。
+ * assistant 消息里的 tool_calls 只登记 id → (name, arguments) 映射,真正的工具行在
+ * 读到对应 role=tool 结果时才产出 —— 保证与真实执行顺序一致。
+ */
+function sessionHistory(project: Project, sessionId?: string): HistoryItem[] {
   if (!sessionId) return [];
   const candidates = [path.join(project.root, '.mocode', 'sessions', sessionId, 'session.json'), path.join(project.root, '.mocode', 'sessions', `${sessionId}.json`)];
   for (const candidate of candidates) {
     try {
       const record = JSON.parse(readFileSync(candidate, 'utf8')) as { history?: Array<Record<string, unknown>> };
       if (!Array.isArray(record.history)) continue;
-      return record.history.flatMap((message) => {
-        const role = message.role;
-        if (role !== 'user' && role !== 'assistant' && role !== 'tool') return [];
-        const text = contentText(message.content);
-        if (text) return [{ role, text }];
-        if (role !== 'assistant' || !Array.isArray(message.tool_calls)) return [];
-        const names = message.tool_calls.map((call) => String((call as { function?: { name?: string } }).function?.name ?? 'tool'));
-        return names.length ? [{ role: 'tool' as const, text: `调用工具：${names.join(', ')}` }] : [];
-      });
+      return flattenHistory(record.history);
     } catch { /* Try old session layout. */ }
   }
   return [];
+}
+
+type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string };
+
+function flattenHistory(messages: Array<Record<string, unknown>>): HistoryItem[] {
+  const items: HistoryItem[] = [];
+  const calls = new Map<string, { name: string; arguments: string }>();
+  for (const message of messages) {
+    const role = message.role;
+    if (role === 'user' || role === 'assistant') {
+      const text = contentText(message.content);
+      if (text) items.push({ role, text });
+      if (role !== 'assistant' || !Array.isArray(message.tool_calls)) continue;
+      for (const call of message.tool_calls) {
+        const entry = call as { id?: unknown; function?: { name?: unknown; arguments?: unknown } };
+        const id = typeof entry.id === 'string' ? entry.id : '';
+        if (!id) continue;
+        const rawArgs = entry.function?.arguments;
+        calls.set(id, {
+          name: String(entry.function?.name ?? 'tool'),
+          arguments: typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs ?? {}),
+        });
+      }
+      continue;
+    }
+    if (role !== 'tool') continue;
+    const id = typeof message.tool_call_id === 'string' ? message.tool_call_id : '';
+    const call = calls.get(id);
+    items.push({
+      role: 'tool',
+      text: contentText(message.content),
+      name: call?.name ?? 'tool',
+      arguments: call?.arguments ?? '',
+    });
+  }
+  return items;
 }
 
 function listFiles(root: string, directory = root, entries: string[] = []): string[] {
@@ -363,7 +412,7 @@ async function pullRequests(project: Project): Promise<Record<string, unknown>> 
 }
 
 function updateTaskFromAgent(envelope: HostEnvelope): void {
-  const requestId = typeof envelope.requestId === 'string' ? envelope.requestId : activeTaskId ?? undefined;
+  const requestId = typeof envelope.requestId === 'string' ? envelope.requestId : undefined;
   const task = taskById(requestId);
   if (!task) return;
   const event = envelope.event;
@@ -372,11 +421,10 @@ function updateTaskFromAgent(envelope: HostEnvelope): void {
   if (event === 'approval_requested') task.status = 'waiting';
   if (event === 'status') task.status = 'running';
   if (event === 'run_aborted') task.status = 'cancelled';
-  if (event === 'run_failed') { task.status = 'failed'; task.lastError = String(payload.message ?? '运行失败'); activeTaskId = null; }
+  if (event === 'run_failed') { task.status = 'failed'; task.lastError = String(payload.message ?? '运行失败'); }
   if (event === 'run_completed') {
     task.changedFiles = Array.isArray(payload.changedFiles) ? payload.changedFiles.filter((item): item is string => typeof item === 'string') : [];
     task.status = payload.terminationReason === 'aborted' ? 'cancelled' : payload.terminationReason === 'completed' ? 'completed' : 'failed';
-    activeTaskId = null;
   }
   task.updatedAt = new Date().toISOString();
   saveState();
@@ -555,6 +603,21 @@ function currentTaskWorkspace(task: TaskRecord): Record<string, unknown> {
   return { task, history: project ? sessionHistory(project, task.sessionId) : [] };
 }
 
+/**
+ * 任务级 agent 实例：懒创建,创建即预热 host（异步,不阻塞 IPC 返回）。
+ * 每个任务独享一个 host 子进程 —— 并行任务互不抢 cwd / 会话。
+ */
+function ensureAgent(task: TaskRecord): LocalAgent {
+  let agent = agents.get(task.id);
+  if (!agent) {
+    agent = new LocalAgent();
+    agents.set(task.id, agent);
+    const workspace = workspaceForTask(task);
+    if (workspace) void agent.start(workspace);
+  }
+  return agent;
+}
+
 function maskUrl(raw: string): string {
   if (!raw) return '';
   try { const url = new URL(raw); return `${url.protocol}//${url.host}`; } catch { return ''; }
@@ -575,14 +638,23 @@ function installIpc(): void {
   ipcMain.handle('work:pick-project', async () => {
     const result = await dialog.showOpenDialog(windowRef!, { properties: ['openDirectory', 'createDirectory'] });
     if (result.canceled || !result.filePaths[0]) return null;
+    const pending = pendingTask();
     const project = await projectFor(result.filePaths[0]);
     const existing = state.projects.find((item) => item.id === project.id);
     if (existing) Object.assign(existing, project); else state.projects.push(project);
-    state.selectedProjectId = project.id; state.selectedTaskId = undefined; saveState(); broadcastState(); await agent?.start(project); return state;
+    state.selectedProjectId = project.id;
+    // 还没开始的新任务跟随迁移到新空间；已开始的任务则清空选中，避免串到别的项目里。
+    if (pending) { pending.projectId = project.id; pending.updatedAt = new Date().toISOString(); }
+    else state.selectedTaskId = undefined;
+    saveState(); broadcastState(); return state;
   });
   ipcMain.handle('work:select-project', async (_event, projectId: string) => {
-    if (!state.projects.some((item) => item.id === projectId) || activeTaskId) return state;
-    state.selectedProjectId = projectId; state.selectedTaskId = undefined; saveState(); broadcastState(); await agent?.start(selectedProject()); return state;
+    if (!state.projects.some((item) => item.id === projectId)) return state;
+    const pending = pendingTask();
+    state.selectedProjectId = projectId;
+    if (pending) { pending.projectId = projectId; pending.updatedAt = new Date().toISOString(); }
+    else state.selectedTaskId = undefined;
+    saveState(); broadcastState(); return state;
   });
   // projectId 传 '' = 普通任务（不进任何空间）；传项目 id = 归入对应空间；不传 = 当前选中项目（兼容旧调用）。
   ipcMain.handle('work:create-task', async (_event, title: string, projectId?: string) => {
@@ -597,19 +669,18 @@ function installIpc(): void {
     state.tasks.unshift(task); state.selectedTaskId = task.id;
     if (targetProjectId) state.selectedProjectId = targetProjectId;
     saveState(); broadcastState();
-    // agent 的工作目录跟随任务归属（普通任务 → scratch 目录）
-    const workspace = workspaceForTask(task);
-    if (workspace && agent && agent.projectId !== workspace.id) await agent.start(workspace);
+    ensureAgent(task);
     return { state, task };
   });
   ipcMain.handle('work:select-task', async (_event, taskId: string) => {
-    const task = taskById(taskId); if (!task || (activeTaskId && activeTaskId !== taskId)) return null;
-    const project = workspaceForTask(task); if (!project) return null;
+    const task = taskById(taskId); if (!task) return null;
     state.selectedTaskId = task.id;
     // 普通任务不改变当前选中的项目（空间高亮保持不变）
-    if (task.projectId) state.selectedProjectId = project.id;
+    if (task.projectId) {
+      const project = workspaceForTask(task);
+      if (project) state.selectedProjectId = project.id;
+    }
     saveState(); broadcastState();
-    if (agent && agent.projectId !== project.id) await agent.start(project);
     return { state, ...currentTaskWorkspace(task) };
   });
   ipcMain.handle('work:delete-task', (_event, taskId: string) => {
@@ -617,10 +688,8 @@ function installIpc(): void {
     const task = taskById(taskId);
     // 普通任务（projectId 为空）不受当前选中项目限制
     if (!task || (task.projectId && task.projectId !== state.selectedProjectId)) return null;
-    if (task.id === activeTaskId) {
-      void agent?.send({ type: 'cancel', id: task.id });
-      activeTaskId = null;
-    }
+    const agent = agents.get(taskId);
+    if (agent) { void agent.send({ type: 'cancel', id: taskId }); agent.stop(); agents.delete(taskId); }
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
     if (state.selectedTaskId === taskId) state.selectedTaskId = undefined;
     saveState(); broadcastState(); return state;
@@ -628,7 +697,10 @@ function installIpc(): void {
   ipcMain.handle('work:clear-tasks', (_event, projectId?: string) => {
     const targetProjectId = projectId ?? state.selectedProjectId;
     const selectedTaskId = state.selectedTaskId;
-    state.tasks = state.tasks.filter((task) => task.projectId !== targetProjectId || task.id === activeTaskId || task.status === 'running' || task.status === 'waiting');
+    const removed = state.tasks.filter((task) => task.projectId === targetProjectId && task.status !== 'running' && task.status !== 'waiting');
+    for (const task of removed) { const agent = agents.get(task.id); if (agent) { agent.stop(); agents.delete(task.id); } }
+    const removedIds = new Set(removed.map((task) => task.id));
+    state.tasks = state.tasks.filter((task) => !removedIds.has(task.id));
     if (selectedTaskId && !state.tasks.some((task) => task.id === selectedTaskId)) state.selectedTaskId = undefined;
     saveState(); broadcastState(); return state;
   });
@@ -669,7 +741,11 @@ function installIpc(): void {
       state.selectedProjectId = state.projects[0]?.id ?? '';
       state.selectedTaskId = undefined;
     }
-    // 清理该项目的任务
+    // 清理该项目的任务与其 agent 实例
+    for (const task of state.tasks.filter((task) => task.projectId === projectId)) {
+      const agent = agents.get(task.id);
+      if (agent) { void agent.send({ type: 'cancel', id: task.id }); agent.stop(); agents.delete(task.id); }
+    }
     state.tasks = state.tasks.filter((task) => task.projectId !== projectId);
     saveState(); broadcastState();
     return { state, removed: removed.name };
@@ -744,8 +820,10 @@ function installIpc(): void {
   });
   ipcMain.on('work:agent-send', (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' ? value.id : randomUUID();
-    if (value.type === 'run') { activeTaskId = id; const task = taskById(id); if (task) { task.status = 'running'; task.updatedAt = new Date().toISOString(); saveState(); broadcastState(); } }
-    void agent?.send({ ...value, id } as HostCommand);
+    if (value.type === 'run') { const task = taskById(id); if (task) { task.status = 'running'; task.updatedAt = new Date().toISOString(); saveState(); broadcastState(); } }
+    const agent = agents.get(id);
+    if (!agent) return;
+    void agent.send({ ...value, id } as HostCommand);
   });
 }
 
@@ -758,13 +836,14 @@ app.whenReady().then(async () => {
   ]);
   Menu.setApplicationMenu(null);
   state = await loadState();
-  // 启动时先让 .active 预设覆盖 config 裸键 —— 必须在 agent.start() 之前，
+  // 启动时先让 .active 预设覆盖 config 裸键 —— 必须在 agent 启动之前，
   // 否则 host 会带着 config 里那个可能已过时的 LLM_MODEL 启动。
   applyActivePreset();
-  agent = new LocalAgent();
   installIpc();
   createWindow();
-  await agent.start(selectedProject());
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on('window-all-closed', () => { agent?.stop(); if (process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => {
+  for (const agent of agents.values()) agent.stop();
+  if (process.platform !== 'darwin') app.quit();
+});

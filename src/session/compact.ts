@@ -408,9 +408,7 @@ export function extractProgressSnapshot(summaryRest: string): string | null {
  * 压缩主路径三路合并 mergeKeyFacts(pinned, directives, parsed, max)——
  * 钉住段(最老)> 抽取器产出 > 摘要器新写的,截断时按此顺序牺牲靠后的。
  */
-export function mergeKeyFacts(
-  ...args: [...blocks: Array<string | undefined>, maxChars: number]
-): string {
+export function mergeKeyFacts(...args: [...blocks: Array<string | undefined>, maxChars: number]): string {
   const maxChars = args[args.length - 1] as number;
   const blocks = args.slice(0, -1) as Array<string | undefined>;
   const lines: string[] = [];

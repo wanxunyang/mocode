@@ -423,9 +423,10 @@ function buildAgentsImportSection(): string {
 function buildTodaySection(): string {
   try {
     const now = new Date();
-    const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
-      now.getDate(),
-    ).padStart(2, '0')}`;
+    const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(
+      2,
+      '0',
+    )}`;
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local timezone';
     return `## Now\nToday is ${iso} (${tz}).`;
   } catch {

@@ -55,7 +55,7 @@
         <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览"><svg class="icon" data-icon="layout"></svg></button><button id="show-files" title="浏览文件"><svg class="icon" data-icon="files"></svg></button></div>
           <section id="empty-state" class="empty-state">
           <h1>开始一个任务</h1>
-          <p>选好左侧项目，点「新建任务」给它起个名字，再描述要做的改动。Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。</p>
+          <p>直接描述你想做的事，回车就开工 —— 任务标题会按你的第一句话自动命名。Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。工作空间可在下方切换。</p>
         </section>
         <section id="conversation" class="conversation" aria-live="polite"></section>
         <section id="approval-panel" class="approval-panel hidden"></section>
@@ -86,11 +86,11 @@
       </main>
       </div>
 
-      <!-- 新建任务 / 重命名任务 弹窗 -->
+      <!-- 重命名任务 弹窗（新建任务不再弹窗，标题由首条指令自动摘要） -->
       <section id="task-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
         <div class="modal-card">
           <header class="modal-head">
-            <b id="task-modal-title">新建任务</b>
+            <b id="task-modal-title">重命名任务</b>
             <button class="modal-close icon-button muted" data-close title="关闭" aria-label="关闭"><svg class="icon" data-icon="close"></svg></button>
           </header>
           <div class="modal-body">
@@ -98,18 +98,10 @@
               <span class="field-label">任务名称</span>
               <input id="task-name-input" class="field-input" type="text" maxlength="120" autocomplete="off" placeholder="例如：给登录页加一个「记住我」选项" />
             </label>
-            <label class="field" id="task-goal-field">
-              <span class="field-label">第一条指令 <span class="field-optional">可选</span></span>
-              <textarea id="task-goal-input" class="field-input" rows="3" placeholder="想让 Mocode 先做点什么？留空也行，稍后直接在下方输入。"></textarea>
-            </label>
-            <label class="field" id="task-space-field">
-              <span class="field-label">归属</span>
-              <select id="task-space-select" class="field-input"></select>
-            </label>
           </div>
           <footer class="modal-foot">
             <button class="btn-ghost" data-close>取消</button>
-            <button class="btn-primary" id="task-modal-create">创建任务</button>
+            <button class="btn-primary" id="task-modal-create">保存</button>
           </footer>
         </div>
       </section>

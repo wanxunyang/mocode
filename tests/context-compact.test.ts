@@ -503,9 +503,7 @@ test('extractUserDirectives:意图行/约束行/平凡过滤/fence 与引用跳�
 });
 
 test('extractUserDirectives:约束在首行时以约束行钉住(不重复出意图行)', () => {
-  const older: ChatMessage[] = [
-    { role: 'user', content: '帮我重构 X。另外不要动 tests/ 目录' } as ChatMessage,
-  ];
+  const older: ChatMessage[] = [{ role: 'user', content: '帮我重构 X。另外不要动 tests/ 目录' } as ChatMessage];
   const lines = extractUserDirectives(older);
   assert.equal(lines.length, 1);
   assert.match(lines[0]!, /^用户约束: 帮我重构 X/);
@@ -546,9 +544,7 @@ test('user 逐字通道:预算内 user 原文绕过摘要器进保留区', async
   assert.equal(result.reason, 'summarize');
   assert.ok((result.userVerbatimCount ?? 0) >= 1, '至少一条 user 经逐字通道捞回');
   // 两条 user 原文必须逐字在重建后的 history 里(保留区),而不是只活在摘要转述里
-  assert.ok(
-    history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === '不要动 tests/ 目录'),
-  );
+  assert.ok(history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === '不要动 tests/ 目录'));
   assert.ok(
     history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === '帮我重构 src/compact.ts'),
   );
@@ -605,9 +601,7 @@ test('意图/约束账本:摘要器漏写 Key Facts 时用户请求/约束仍被
   assert.ok(summaryText.includes('用户约束: 不要动 tests/ 目录'), '约束行由抽取器钉住');
   assert.ok(summaryText.includes('必须保持公开 API 不变'), '第二条约束也钉住');
   // 短 user 走逐字通道:原文进保留区,不依赖账本
-  assert.ok(
-    history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === '跑一下测试看看'),
-  );
+  assert.ok(history.some((m) => m.role === 'user' && (m as { content?: unknown }).content === '跑一下测试看看'));
 });
 
 test('意图/约束账本:跨代钉住,抽取行不再进摘要器', async () => {
