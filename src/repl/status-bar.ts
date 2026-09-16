@@ -25,8 +25,21 @@ export function renderContextBar(history: ChatMessage[]): string {
   const W = 10;
   const filled = Math.round(pct * W);
   const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
-  const src = contextState.lastUsage ? t('status.measured') : t('status.estimated');
   const k = (n: number) => `${Math.round(n / 1000)}k`;
+  // 标签必须描述**这个数字**是什么:本条 bar 恒为「对话内容」估算(dialog-only,不含
+  // system prompt / 工具 schema),与底栏用量条、80% 压力线都不是同一个数。
+  // 旧实现只要 lastUsage 存在就打「实测」,而显示的仍是估算值 —— 标签与数字对不上,
+  // 用户拿它跟底栏对账只会更困惑。改为:数字照旧标「估算」,把 provider 真正测到的
+  // prompt 并列出来,两者差多少一眼可见(差值本身就是 provider 口径是否可信的证据)。
+  const src = t('status.estimated');
+  const measured = contextState.lastUsage?.promptTokens;
+  const measuredNote =
+    measured && measured > 0
+      ? ` · ${t('status.providerMeasured', {
+          tokens: k(measured),
+          pct: Math.round(Math.min(1, measured / win) * 100),
+        })}`
+      : '';
   const pctCol = pct >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio ? ui.yellow : ui.accent;
   const lifecycle = contextState.lifecycleStats;
   const archived = computePruneStats(history);
@@ -38,7 +51,7 @@ export function renderContextBar(history: ChatMessage[]): string {
     ? `\n  lifecycle · live ${lifecycle.live} · referenced ${lifecycle.referenced} · digested ${lifecycle.digested} · stubbed ${lifecycle.stubbed}`
     : '\n  lifecycle · no active snapshot (run a tool-enabled turn first)';
   const archiveLine = `\n  archived tool results · ${archived.stubbed}`;
-  return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${t('status.messages', { count: history.length })} (${src})${ui.reset}${artifactLine}${lifecycleLine}${archiveLine}`;
+  return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${t('status.messages', { count: history.length })} (${src})${measuredNote}${ui.reset}${artifactLine}${lifecycleLine}${archiveLine}`;
 }
 
 /** 状态行用量条(精简版,进底栏):[bar] pct% k/k。
@@ -48,6 +61,8 @@ export function renderContextBar(history: ChatMessage[]): string {
  * 触发器用 `Math.max(rawTotal, total) >= 0.8 * window`,bar 也照搬:校正后和校正前
  * 哪个大取哪个,确保不会因 correction<1 而低估。ephemeral 文本由 agent/core 每步写入
  * contextState.ephemeralText(避免在 bar 里再读一次 notes.md)。
+ * 压缩行(compact.ts 的 compactionLogLine)已统一到同一口径:数字取裸估算、后缀带窗口
+ * 百分比,两者可直接对账——「底栏 80% 而压缩行 40%」这类口径分裂不再出现。
  *
  * /context 命令仍是 dialog-only(见 renderContextBar):它的设计意图是"我说了多少"而非
  * "还剩多少空间",两条职责分开。 */

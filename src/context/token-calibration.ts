@@ -3,11 +3,28 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-const CACHE_VERSION = 1;
+// v2:引入 SUSPECT_* 可信区间。旧缓存里被口径不可比的 provider 砸到 MIN_CORRECTION
+// 下限、又被 clamp 住的条目(correction=0.5 且再不会有新样本去修正它)会永久打对折
+// 所有显示数字,只能整表作废——丢掉的是几十个样本,重学只要几步。
+const CACHE_VERSION = 2;
 const EWMA_ALPHA = 0.2;
 const MIN_CORRECTION = 0.5;
 const MAX_CORRECTION = 2;
 const MAX_ENTRIES = 64;
+
+/**
+ * 可信样本区间(actual / estimated)。超出即**不并入 EWMA**。
+ *
+ * 为什么需要这道闸:估算器的任务只是「别让请求溢出窗口」,它允许偏高;而 usage 是
+ * provider 报的账,两者本该同量级(本机 40+ 会话实测 est/actual 落在 0.33–1.66)。
+ * 一旦某个 gateway/model 的 usage 口径不可比(实测踩过:localhost 网关的 thinking 模型
+ * 报 20.8 chars/token,同机其它 provider 全是 1.3–3.3),ratio 会直接砸到 MIN_CORRECTION
+ * 下限并被 clamp 住——之后 correction 恒为 0.5,**每个乘以它的显示数字都被无谓地打对折**
+ * (压缩行 40% vs 底栏 80%,用户看到的两个数都不是真值)。这种样本学不出有用信息,
+ * 只会污染 UI;丢掉它,correction 保持上一次可用值(或 1)。
+ */
+const SUSPECT_MIN_RATIO = 0.3;
+const SUSPECT_MAX_RATIO = 3.5;
 
 interface CalibrationEntry {
   correction: number;
@@ -99,7 +116,8 @@ export function getTokenCalibration(baseURL: string, model: string, tools: reado
   return validEntry(entry) ? { correction: entry.correction, samples: entry.samples } : { correction: 1, samples: 0 };
 }
 
-/** 用一次真实 prompt usage 更新 EWMA；只落比例和样本数，不保存任何消息内容。 */
+/** 用一次真实 prompt usage 更新 EWMA；只落比例和样本数，不保存任何消息内容。
+ *  样本与估算器差到 SUSPECT_* 区间之外时判为 provider 口径异常，直接丢弃(不改 correction)。 */
 export function updateTokenCalibration(
   baseURL: string,
   model: string,
@@ -113,6 +131,11 @@ export function updateTokenCalibration(
     !Number.isFinite(estimatedTokens) ||
     !Number.isFinite(actualTokens)
   ) {
+    return getTokenCalibration(baseURL, model, tools);
+  }
+
+  const ratio = actualTokens / estimatedTokens;
+  if (ratio < SUSPECT_MIN_RATIO || ratio > SUSPECT_MAX_RATIO) {
     return getTokenCalibration(baseURL, model, tools);
   }
 

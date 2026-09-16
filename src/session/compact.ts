@@ -104,6 +104,8 @@ export interface CompactOptions {
 export interface CompactResult {
   compacted: boolean;
   summarized: boolean;
+  /** 压缩前后的上下文占用(token),**裸估算口径**(不乘 correction),与 80% 压力线同源。
+   *  可直接读作「窗口的百分之几」;校正值只在 compactHistory 内部用于保留区尺寸估算。 */
   estimateBefore: number;
   estimateAfter: number;
   reason:
@@ -717,14 +719,38 @@ async function defaultSummarize(
 // ── 对外:compactHistory / maybeCompact ───────────────────────────────────
 
 /**
+ * 用户可见的上下文占用口径:**裸估算**(不乘 correction)。
+ *
+ * 为什么必须裸估算:触发判定用的就是它——session/scheduler.ts 的 80% 压力线比
+ * `Math.max(report.rawTotal, report.total)`(context/budget.ts scheduleActions),
+ * repl 底栏用量条也取 `max(raw, corrected)`(repl/status-bar.ts)。压缩行若打印校正后的值,
+ * 同一时刻 TUI 上就同时存在三个都叫 token 的数字(provider 实测 / 校正后 / 触发用裸估),
+ * 用户无从判断哪条线会触发 —— 实测踩过:底栏 80%、压缩行 40%,看起来「没到线却压了」。
+ * correction 只服务内部保留区尺寸估算(见 correctTokenEstimate 调用点),不再外泄成占用读数。
+ */
+function rawPromptTokens(history: ChatMessage[], activeTools: readonly ChatTool[]): number {
+  return estimatePromptTokens(history, activeTools, 1);
+}
+
+/** 压缩行统一格式:`● 标签  205214 → 28614 tokens  (80% → 11%)`。
+ * 百分比与数字同源(裸估算 / 窗口),让「凭什么这时压」在行内自证,不必回头翻代码。 */
+function compactionLogLine(label: string, before: number, after: number, window: number): string {
+  const pct = (n: number): string => `${Math.round((n / Math.max(1, window)) * 100)}%`;
+  return (
+    `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}${label}${ui.reset}  ` +
+    `${ui.dim}${before} → ${after} tokens  (${pct(before)} → ${pct(after)})${ui.reset}\n`
+  );
+}
+
+/**
  * 压缩 history(原地)。手动 /compact 与自动 maybeCompact 都走这里。
  * 不检查阈值——调用方(maybeCompact)决定是否调;/compact 直接调以强制压缩。
  */
 export async function compactHistory(history: ChatMessage[], opts: CompactOptions): Promise<CompactResult> {
   const state = opts.contextState ?? contextState;
   const activeTools = opts.tools ?? chatTools;
-  const estimateBefore = estimatePromptTokens(history, activeTools, state.correction);
-  state.lastEstimate = estimateBefore;
+  const estimateBefore = rawPromptTokens(history, activeTools);
+  state.lastEstimate = estimatePromptTokens(history, activeTools, state.correction);
 
   // 调用前就已中断(用户在上一步末尾按的 Ctrl+C):一步都别做,直接冒泡。
   // 不做完再抛是为了保证 history 完全未被触碰——abortRestore 才还原得干净。
@@ -851,13 +877,11 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
       const single = groups[0];
       const userOnly = single.tools.length === 0 && (single.assistant as { role?: string } | null)?.role === 'user';
       if (!userOnly && microcompactGroup(single)) {
-        const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
-        state.lastEstimate = estimateAfter;
+        const estimateAfter = rawPromptTokens(history, activeTools);
+        state.lastEstimate = estimatePromptTokens(history, activeTools, state.correction);
         state.lastUsage = undefined;
         if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
-        layout.contentWrite(
-          `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}强制微压缩(单组)${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
-        );
+        layout.contentWrite(compactionLogLine('强制微压缩(单组)', estimateBefore, estimateAfter, opts.window));
         return {
           compacted: true,
           summarized: false,
@@ -951,15 +975,13 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
     history.length = 0;
     history.push(...rebuilt);
     (opts.runtime?.rollbackStore ?? defaultRollbackStore).pruneAfterCompaction(history);
-    const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
-    state.lastEstimate = estimateAfter;
-    state.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用校正估算
+    const estimateAfter = rawPromptTokens(history, activeTools);
+    state.lastEstimate = estimatePromptTokens(history, activeTools, state.correction);
+    state.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用估算
     // 压缩行与上一个工具批次摘要行之间补空行分隔(compact 在 core step 循环顶部触发,
     // 上一步的 batch 可能尚未 flush,缓冲末行仍是 ● 工具摘要行 → 两行黏在一起)。
     if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
-    layout.contentWrite(
-      `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}压缩上下文${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
-    );
+    layout.contentWrite(compactionLogLine('压缩上下文', estimateBefore, estimateAfter, opts.window));
     // 抖动保护:压缩后仍超阈 → 提示 /clear,不死循环
     if (estimateAfter >= opts.threshold * opts.window) {
       layout.contentWrite(
@@ -985,14 +1007,12 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
   for (const g of oldGroups) {
     if (microcompactGroup(g)) microcompactDone = true;
   }
-  const estimateAfter = estimatePromptTokens(history, activeTools, state.correction);
-  state.lastEstimate = estimateAfter;
+  const estimateAfter = rawPromptTokens(history, activeTools);
+  state.lastEstimate = estimatePromptTokens(history, activeTools, state.correction);
   state.lastUsage = undefined; // token 数已变,旧 usage 失效
   if (microcompactDone) {
     if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
-    layout.contentWrite(
-      `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}微压缩旧工具结果${ui.reset}  ${ui.dim}${estimateBefore} → ${estimateAfter} tokens${ui.reset}\n`,
-    );
+    layout.contentWrite(compactionLogLine('微压缩旧工具结果', estimateBefore, estimateAfter, opts.window));
     return {
       compacted: true,
       summarized: false,
