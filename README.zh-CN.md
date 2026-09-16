@@ -4,6 +4,11 @@
 
 # MoCode
 
+[![npm version](https://img.shields.io/npm/v/mocode-ai.svg)](https://www.npmjs.com/package/mocode-ai)
+[![npm downloads](https://img.shields.io/npm/dm/mocode-ai.svg)](https://www.npmjs.com/package/mocode-ai)
+[![CI](https://img.shields.io/github/actions/workflow/status/wanxunyang/mocode/ci.yml?label=CI)](https://github.com/wanxunyang/mocode/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/wanxunyang/mocode)](https://github.com/wanxunyang/mocode/blob/main/LICENSE)
+
 一个终端编码 agent:你给一个目标,它**自主完成**——不需要你逐步指挥。
 
 mocode 自己探索代码、读写改文件、执行命令、联网查资料,以「思考 → 调用工具 → 观察结果 → 再思考」的循环一步步把任务推进到完成。接任意 OpenAI 兼容接口(GLM、DeepSeek、Qwen、本地 Ollama / vLLM 等),全屏 TUI 交互,流式输出、思考过程可见。

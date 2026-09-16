@@ -4,6 +4,11 @@
 
 # MoCode
 
+[![npm version](https://img.shields.io/npm/v/mocode-ai.svg)](https://www.npmjs.com/package/mocode-ai)
+[![npm downloads](https://img.shields.io/npm/dm/mocode-ai.svg)](https://www.npmjs.com/package/mocode-ai)
+[![CI](https://img.shields.io/github/actions/workflow/status/wanxunyang/mocode/ci.yml?label=CI)](https://github.com/wanxunyang/mocode/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/wanxunyang/mocode)](https://github.com/wanxunyang/mocode/blob/main/LICENSE)
+
 A terminal coding agent: give it a goal, and it **completes it autonomously** — no step-by-step hand-holding required.
 
 MoCode explores your code, reads/writes/edits files, runs shell commands, and searches the web on its own, driving the task forward through a loop of "think → call a tool → observe the result → think again." It works with any OpenAI-compatible endpoint (GLM, DeepSeek, Qwen, local Ollama / vLLM, etc.), runs as a full-screen TUI with streaming output and visible reasoning.
