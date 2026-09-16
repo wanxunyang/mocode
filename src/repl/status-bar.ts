@@ -6,7 +6,13 @@ import { t } from '../i18n/index.js';
 import { config } from '../config/index.js';
 import { contextState } from '../session/index.js';
 import { DEFAULT_BUDGET_POLICY } from '../context/budget.js';
-import { estimateMessagesTokens, estimatePromptTokens, estimateTokens, chatTools } from '../llm/index.js';
+import {
+  chatTools,
+  correctTokenEstimate,
+  estimateMessagesTokens,
+  estimateToolSchemaTokens,
+  estimateTokens,
+} from '../llm/index.js';
 import { computePruneStats } from '../context/relevance.js';
 import { formatArtifactTokenSources } from '../context/artifacts.js';
 import { getAgentMode } from '../agent/mode.js';
@@ -55,7 +61,9 @@ export function renderContextBar(history: ChatMessage[]): string {
 }
 
 /** 状态行用量条(精简版,进底栏):[bar] pct% k/k。
- * 必须**用全 prompt 估算**(消息 + 工具 schema + 尾部 ephemeral 注入),与压缩触发器
+ * 空对话(只有 system 提示、还没发任何消息)恒显 0% 0/window:固定 system prompt + 工具
+ * schema 是每次请求的基础设施开销,不算用户占用的上下文,避免刚进 REPL 就显示十几 k。
+ * 有对话后必须**用全 prompt 估算**(消息 + 工具 schema + 尾部 ephemeral 注入),与压缩触发器
  * evaluateBudget 的 system+history+toolOld+toolRecent 总账对齐——任何一段漏算都会让
  * bar 与触发器口径不一致、看着没到 80% 实际已经在压。
  * 触发器用 `Math.max(rawTotal, total) >= 0.8 * window`,bar 也照搬:校正后和校正前
@@ -67,17 +75,51 @@ export function renderContextBar(history: ChatMessage[]): string {
  * /context 命令仍是 dialog-only(见 renderContextBar):它的设计意图是"我说了多少"而非
  * "还剩多少空间",两条职责分开。 */
 export function renderContextBarInline(history: ChatMessage[]): string {
-  const baseRaw = estimatePromptTokens(history, chatTools, 1);
-  const baseAdj = estimatePromptTokens(history, chatTools, contextState.correction);
-  const ephemeral = contextState.ephemeralText ? estimateTokens(contextState.ephemeralText) : 0;
-  // 与触发器同样的「取大」语义:correction<1 时 raw 更大,bar 不会假装很安全。
-  const est = Math.max(baseRaw, baseAdj) + ephemeral;
   const win = config.contextWindowTokens;
+  let est: number;
+  // 还没有任何真实对话(只有 system 提示)时显示 0:system prompt 与工具 schema 是每次请求
+  // 都要发的固定"基础设施开销",不属于用户对话占用的上下文——刚进 REPL 一句话没问就显示
+  // 十几 k 会让人误以为已经用掉了上下文。发送第一条消息后才计入。与 /context 的 dialog-only
+  // 口径一致;压缩触发器(evaluateBudget)不受影响,它只在真正发请求时按全量评估。
+  if (!history.some((m) => m.role !== 'system')) {
+    est = 0;
+  } else {
+    // schema 必须按「最近一步实际发送的工具集」估算(ToolPolicy 收窄后);缺省(尚未跑过任何
+    // 模型步)才回退到全量 chatTools。旧实现恒用全量,会把未路由的 MCP/写工具 schema 凭空计入,
+    // 导致底栏 ~16k 而本轮 API 实测只有 ~5k。
+    const activeTools = contextState.activeTools ?? chatTools;
+    const ephemeralRaw = contextState.ephemeralText ? estimateTokens(contextState.ephemeralText) : 0;
+    const fullRaw = estimateMessagesTokens(history) + estimateToolSchemaTokens(activeTools) + ephemeralRaw;
+
+    const anchor = contextState.promptAnchor;
+    // 锚点有效:锚定时 history 是当前 history 的严格前缀(同一长度或更长),工具集/ephemeral
+    // 未变,且此后未发生压缩(裸估算不小于锚点基线)。用「实测值 + 新增消息的裸估算」外推,
+    // 单步轮 history 未变时结果 == API 实测 promptTokens,与轮末行的 ↑ 数字精确一致。
+    if (
+      anchor &&
+      history.length >= anchor.historyLen &&
+      anchor.tools === activeTools &&
+      anchor.ephemeralText === (contextState.ephemeralText ?? '') &&
+      // 容差 4:锚点把 ephemeral 当独立 system 消息(3 priming + 结构开销),bar 把它单独相加,
+      // 同一快照下 fullRaw 可比 baseRaw 小 3;压缩后 fullRaw 会骤降数千 token,不会被该容差掩盖。
+      fullRaw >= anchor.baseRaw - 4
+    ) {
+      const anchorHistory = history.slice(0, anchor.historyLen);
+      const grownRaw = estimateMessagesTokens(history) - estimateMessagesTokens(anchorHistory);
+      est = anchor.measuredPromptTokens + Math.max(0, grownRaw);
+    } else {
+      // 无有效锚点(/clear 后、压缩后、工具集或 ephemeral 刚变化):走保守估算,
+      // 与触发器同样的「取大」语义——correction<1 时 raw 更大,bar 不会假装很安全。
+      const baseAdj = correctTokenEstimate(fullRaw, contextState.correction);
+      est = Math.max(fullRaw, baseAdj);
+    }
+  }
   const pct = Math.min(1, est / win);
   const W = 10;
   const filled = Math.round(pct * W);
   const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
-  const k = (n: number) => `${Math.round(n / 1000)}k`;
+  // 与轮末 token 行 formatTurnTokens 同一格式:<10k 保留一位小数,锚点生效时两处逐字一致(5.2k)。
+  const k = (n: number) => (n < 1000 ? `${Math.round(n)}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`);
   const pctCol = pct >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio ? ui.yellow : ui.accent;
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
 }

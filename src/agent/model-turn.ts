@@ -88,6 +88,9 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   const storedCalibration = ctx.getTokenCalibration(requestBaseURL, requestModel, activeTools);
   runtimeContextState.correction = storedCalibration.correction;
   runtimeContextState.calibrationSamples = storedCalibration.samples;
+  // 记录本步实际发送的工具集(policy 收窄后),底栏用量条按它估算 schema,
+  // 而不是全量 chatTools(含未路由的 MCP/写工具),避免凭空高估。
+  runtimeContextState.activeTools = activeTools;
 
   let sessionStateText = opts.suppressSessionState ? '' : ctx.buildSessionStateReminder();
   runtimeContextState.ephemeralText = sessionStateText || undefined;
@@ -323,6 +326,16 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     );
     runtimeContextState.correction = updated.correction;
     runtimeContextState.calibrationSamples = updated.samples;
+    // 钉住底栏用量条:此刻 requestHistory == 真实发出的请求,实测 promptTokens 是它的真实大小。
+    // 记录基线裸估算/history 长度/工具集/ephemeral,供底栏对随后增长的消息做精确外推。
+    const requestHistoryLen = requestHistory.length;
+    runtimeContextState.promptAnchor = {
+      measuredPromptTokens: result.usage.promptTokens,
+      baseRaw: estimated,
+      historyLen: sessionStateText ? requestHistoryLen - 1 : requestHistoryLen,
+      tools: activeTools,
+      ephemeralText: sessionStateText,
+    };
   }
   hooks.onChatDone?.();
   onContextUpdate?.();

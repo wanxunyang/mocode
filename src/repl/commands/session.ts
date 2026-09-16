@@ -20,6 +20,8 @@ export const sessionCommands: CommandHandler[] = [
     ctx.contextState.lastUsage = undefined;
     ctx.contextState.lifecycleStats = undefined;
     ctx.contextState.ephemeralText = undefined;
+    ctx.contextState.activeTools = undefined;
+    ctx.contextState.promptAnchor = undefined; // 新会话不得用旧会话的实测锚点外推
     ctx.state.lastTurnUsage = undefined; // 清空旧轮的 token 累计
     ctx.state.lastToolGroups = []; // 新会话不得继承旧会话的路由回退
     ctx.attachments.clear(); // 一并清空待发图片

@@ -156,6 +156,19 @@ export interface ContextState {
    * 压缩恢复段),供 repl 状态栏算「与触发器同口径」的全 prompt token。不写回 history、
    * 不跨 step 残留(每步 core 都会重建)。 */
   ephemeralText?: string;
+  /** 最近一个模型步实际发送的工具 schema(ToolPolicy snapshot 收窄后的集合,**不是**全量
+   * chatTools)。底栏用量条必须按它估算 schema,否则未路由的 MCP/写工具会被凭空计入。 */
+  activeTools?: readonly ChatTool[];
+  /** 最近一次「实测 prompt token」锚点:agent 在某步拿到 API usage 后,用当时的请求规模
+   * 与消息长度钉住底栏数字,使单步轮底栏 == 轮末行的 ↑ 值;history 之后增长的部分按裸估算
+   * 外推,下一步重新锚定。 */
+  promptAnchor?: {
+    measuredPromptTokens: number;
+    baseRaw: number;
+    historyLen: number;
+    tools: readonly ChatTool[];
+    ephemeralText: string;
+  };
 }
 
 export function createContextState(): ContextState {

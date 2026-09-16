@@ -712,6 +712,8 @@ export async function startRepl(
     contextState.lastUsage = undefined;
     contextState.lifecycleStats = undefined;
     contextState.ephemeralText = undefined;
+    contextState.activeTools = undefined;
+    contextState.promptAnchor = undefined; // 续接:旧会话的实测锚点不得外推到新 history
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
     // 锚点行:会话 id / 消息数 / 当前模型,给续接的会话一个定位起点(与 --resume 启动路径同文案)。
