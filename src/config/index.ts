@@ -464,9 +464,10 @@ export function buildBasePrompt(sessionId = getCurrentSessionId()): string {
 
   // 静态主体:稳定段落集中在前,让支持 prompt caching 的后端能命中前缀缓存(#12)。
   // 约束:staticBody 的前缀段(尤其 ## Identity 第一行)必须是纯静态文本,
-  // 不得嵌入会话级可变函数调用(如 t()/config.model)。否则 /language、/model
-  // 切换会让最敏感的前缀变化,破坏自动前缀缓存命中。可变值统一放到
-  // ## Reporting 段末尾(仍在切片边界之前,子 agent 仍能拿到)。
+  // 不得嵌入会话级可变函数调用(如 config.model)。否则 /model 切换会让最敏感的
+  // 前缀变化,破坏自动前缀缓存命中。
+  // 回复语言不写入提示词:模型按用户当轮提问语言自动识别(Voice 段的
+  // "Match the user's style and language" 已覆盖),/language 只切换终端 UI 文案。
   const staticBody = `## Identity
 You are mocode, a terminal coding agent.
 
@@ -513,8 +514,7 @@ ${buildVoiceSection()}
 - Stop immediately when no more tools are needed; give conclusions directly.
 - **Do not stop prematurely during exploration**: if you started investigating but haven't gathered enough information to answer the user's question, keep calling tools. Only stop when you have sufficient evidence or hit a dead end.
 - **No flattery / no preamble in conclusions**: skip "Sure", "好的", "我已经完成了" and similar no-information prefixes — jump straight to substance.
-- Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.
-${t('assistant.languageInstruction')}`;
+- Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.`;
 
   // 动态段(置于末尾):AGENTS.md 项目记忆 + notepad 索引/说明。工具簇特定指导由
   // ToolPolicyController.reminder() 按当前 turn 的 route 注入，避免旧全局 profile 与真实 schema 分裂。
@@ -860,7 +860,7 @@ export function updateMemoryConfig(enabled: boolean): void {
   process.env.MEMORY_ENABLED = enabled ? 'true' : 'false';
 }
 
-/** 切换界面与模型回复语言；持久化由 REPL 调用 config/file.ts 完成。 */
+/** 切换终端界面语言(回复语言不写入提示词,由模型按用户提问自动识别)；持久化由 REPL 调用 config/file.ts 完成。 */
 export function updateLanguageConfig(language: Language): void {
   setLanguage(language);
   process.env.MOCODE_LANGUAGE = language;

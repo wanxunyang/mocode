@@ -55,17 +55,15 @@ test('normalizeLanguage: 只认中英,其余返回 null', () => {
   assert.equal(normalizeLanguage(undefined), null);
 });
 
-test('setLanguage 后 UI 文案与 agent 回复语言指令同步切换', () => {
+test('setLanguage 后 UI 文案同步切换(回复语言不进提示词,由模型按用户提问自动识别)', () => {
   try {
     setLanguage('en');
     assert.equal(getLanguage(), 'en');
     assert.equal(t('language.changed'), 'Language switched to English.');
-    assert.equal(t('assistant.languageInstruction'), 'Reply to the user in English.');
 
     setLanguage('zh-CN');
     assert.equal(getLanguage(), 'zh-CN');
     assert.equal(t('language.changed'), '语言已切换为中文。');
-    assert.equal(t('assistant.languageInstruction'), 'Reply to the user in Chinese.');
   } finally {
     setLanguage(DEFAULT_LANGUAGE);
   }

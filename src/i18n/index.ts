@@ -57,7 +57,7 @@ const zhCN = {
   'commands.imageAttach': '附加本地图片',
   'commands.imageList': '列出待发送图片',
   'commands.imageClear': '清空待发送图片',
-  'commands.language': '切换界面与回复语言',
+  'commands.language': '切换界面语言',
   'commands.languageZh': '切换到中文',
   'commands.languageEn': 'Switch to English',
   'commands.upgrade': '升级 mocode 到最新版本',
@@ -339,7 +339,6 @@ const zhCN = {
   'upgrade.failed': '[upgrade] 失败：{message}',
   'upgrade.usage':
     '/upgrade 用法：\n  /upgrade              升级到最新版本\n  /upgrade now          同 /upgrade\n  /upgrade check        检查当前版本与最新版本差异\n  /upgrade status       显示当前本地版本',
-  'assistant.languageInstruction': 'Reply to the user in Chinese.',
 } as const;
 
 export type TranslationKey = keyof typeof zhCN;
@@ -400,7 +399,7 @@ const en: Record<TranslationKey, string> = {
   'commands.imageAttach': 'Attach a local image',
   'commands.imageList': 'List pending images',
   'commands.imageClear': 'Clear pending images',
-  'commands.language': 'Switch interface and reply language',
+  'commands.language': 'Switch interface language',
   'commands.languageZh': '切换到中文',
   'commands.languageEn': 'Switch to English',
   'commands.upgrade': 'Upgrade mocode to the latest version',
@@ -697,7 +696,6 @@ const en: Record<TranslationKey, string> = {
   'upgrade.failed': '[upgrade] failed: {message}',
   'upgrade.usage':
     'Usage: /upgrade\n  /upgrade              Upgrade to latest\n  /upgrade now          Same as /upgrade\n  /upgrade check        Check current vs latest\n  /upgrade status       Show current local version',
-  'assistant.languageInstruction': 'Reply to the user in English.',
 };
 
 const resources: Record<Language, Record<TranslationKey, string>> = {

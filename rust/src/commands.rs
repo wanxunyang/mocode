@@ -156,7 +156,7 @@ pub static COMMANDS: &[SlashCommand] = &[
     SlashCommand::branch("/mode", "切换 Agent 工作模式", MODE_CHILDREN),
     SlashCommand::branch("/pet", "桌宠控制", PET_CHILDREN),
     SlashCommand::branch("/image", "管理下一条消息的图片", IMAGE_CHILDREN),
-    SlashCommand::branch("/language", "切换界面与回复语言", LANGUAGE_CHILDREN),
+    SlashCommand::branch("/language", "切换界面语言", LANGUAGE_CHILDREN),
     SlashCommand::branch("/upgrade", "升级 mocode 到最新版本", UPGRADE_CHILDREN),
     SlashCommand::leaf("/frontend", "前端工具簇快捷开关"),
 ];
