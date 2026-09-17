@@ -5,10 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MoCode Work</title>
     <link rel="stylesheet" href="tokens.css" />
-    <link rel="stylesheet" href="fonts/misans/MiSans-Regular.min.css" />
-    <link rel="stylesheet" href="fonts/misans/MiSans-Medium.min.css" />
-    <link rel="stylesheet" href="fonts/misans/MiSans-Demibold.min.css" />
-    <link rel="stylesheet" href="fonts/misans/MiSans-Bold.min.css" />
     <link rel="stylesheet" href="style.css" />
     <script>
       // 首屏前同步应用主题，避免加载闪烁。优先级:localStorage > 系统偏好。
@@ -19,6 +15,8 @@
           var theme = saved || (systemDark ? 'dark' : 'light');
           var effectiveTheme = theme === 'system' ? (systemDark ? 'dark' : 'light') : theme;
           document.documentElement.dataset.theme = effectiveTheme;
+          // 主题色（accent）同样在首屏前落地：它是纯渲染层偏好，不需要走 IPC。
+          document.documentElement.dataset.accent = localStorage.getItem('mocode-work-accent') || 'moss';
           // 同步语言属性，避免首屏语言标记闪烁。
           document.documentElement.lang = localStorage.getItem('mocode-work-language') || 'zh-CN';
         } catch { /* localStorage 不可用时走默认浅色 */ }
@@ -33,7 +31,6 @@
         <header class="brand-row"><button class="icon-button muted" id="sidebar-toggle" data-sidebar-toggle data-i18n-title="sidebar.collapse" data-i18n-aria="sidebar.collapse" aria-pressed="false"><svg class="icon" data-icon="panel-left"></svg></button><div class="brand-actions"><button class="icon-button muted" id="add-project" data-i18n-title="sidebar.addProject" data-i18n-aria="sidebar.addProject"><svg class="icon" data-icon="plus"></svg></button><button class="icon-button muted" id="search-button" data-i18n-title="sidebar.search" data-i18n-aria="sidebar.search"><svg class="icon" data-icon="search"></svg></button><button class="icon-button muted" id="theme-toggle" data-i18n-title="sidebar.theme" data-i18n-aria="sidebar.theme"><svg class="icon" data-icon="moon"></svg><svg class="icon icon-swap" data-icon="sun"></svg></button></div></header>
         <nav class="primary-nav" aria-label="主导航" data-i18n-aria="a11y.primaryNav">
           <button class="nav-item active" id="new-task"><svg class="icon" data-icon="circle-plus"></svg><span data-i18n="nav.newTask">新建任务</span></button>
-          <button class="nav-item" id="pull-requests"><svg class="icon" data-icon="git-pull-request"></svg><span data-i18n="nav.pullRequests">拉取请求</span></button>
         </nav>
         <section class="sidebar-section tasks-section"><div id="task-list" class="task-list"><p class="empty-tasks" data-i18n="sidebar.emptyTasks">无任务</p></div></section>
         <button class="sidebar-footer" id="settings-button" data-i18n-title="settings.title" aria-haspopup="dialog" aria-expanded="false">
@@ -44,7 +41,7 @@
       </aside>
       <main class="workspace">
         <button class="sidebar-floating-toggle" id="sidebar-toggle-floating" data-sidebar-toggle data-i18n-title="sidebar.expand" data-i18n-aria="sidebar.expand"><svg class="icon" data-icon="panel-left"></svg></button>
-        <div class="workspace-actions" aria-label="视图操作" data-i18n-aria="a11y.viewActions"><button id="toggle-inspector" data-i18n-title="inspector.overview"><svg class="icon" data-icon="layout"></svg></button><button id="show-files" data-i18n-title="workspace.browseFiles"><svg class="icon" data-icon="files"></svg></button></div>
+        <div class="workspace-actions" aria-label="视图操作" data-i18n-aria="a11y.viewActions"><button id="show-files" data-i18n-title="workspace.browseFiles"><svg class="icon" data-icon="files"></svg></button></div>
           <section id="empty-state" class="empty-state">
           <h1 class="empty-lockup"><img class="empty-mark" src="../assets/icon-mark.png" alt="" aria-hidden="true" /><span class="empty-wordmark" data-i18n="app.emptyWordmark">让 MoCode 为你工作</span></h1>
         </section>
@@ -52,7 +49,7 @@
         <section id="approval-panel" class="approval-panel hidden"></section>
         <aside id="inspector" class="inspector hidden">
           <header class="inspector-header"><b id="inspector-title" data-i18n="inspector.overview">项目概览</b><button id="close-inspector" data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button></header>
-          <nav class="inspector-tabs"><button data-tab="overview" class="selected" data-i18n="inspector.tabOverview">概览</button><button data-tab="files" data-i18n="inspector.files">文件</button><button data-tab="prs" data-i18n="inspector.prs">拉取请求</button></nav>
+          <nav class="inspector-tabs"><button data-tab="overview" class="selected" data-i18n="inspector.tabOverview">概览</button><button data-tab="files" data-i18n="inspector.files">文件</button></nav>
           <div id="inspector-content" class="inspector-content"></div>
         </aside>
         <section id="search-panel" class="search-panel hidden"><div class="search-dialog"><input id="search-input" data-i18n-placeholder="search.placeholder" /><div id="search-results"></div></div></section>

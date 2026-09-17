@@ -10,7 +10,6 @@ export const zhCN = {
 
   // ── 侧栏导航 ──
   'nav.newTask': '新建任务',
-  'nav.pullRequests': '拉取请求',
   'sidebar.collapse': '折叠侧栏',
   'sidebar.expand': '展开侧栏',
   'sidebar.addProject': '添加项目',
@@ -78,6 +77,15 @@ export const zhCN = {
   'appearance.themeSystemHint': '跟随系统偏好设置',
   'appearance.language': '语言',
   'appearance.languageHint': '界面显示语言',
+  // ── 主题色(accent):与深浅主题相乘,共 2 × 6 套外观 ──
+  'appearance.accent': '主题色',
+  'appearance.accentHint': '按钮、选中态与强调元素都跟着变',
+  'appearance.accentMoss': '墨绿',
+  'appearance.accentIndigo': '靛蓝',
+  'appearance.accentOcean': '海蓝',
+  'appearance.accentClay': '陶土',
+  'appearance.accentViolet': '紫罗兰',
+  'appearance.accentGraphite': '石墨',
 
   // ── 设置：关于 ─
   'about.version': '版本',
@@ -256,12 +264,14 @@ export const zhCN = {
   'toast.removedSpace': '已移除空间 “{removed}”',
   'toast.cannotRemoveSpace': '该空间下有任务运行中，无法移除',
   'toast.themeSwitched': '已切换到{theme}主题',
+  'toast.accentApplied': '主题色已切换为{accent}',
   'toast.imageNotImage': '{label} 不是图片,已跳过',
   'toast.imageTooLarge': '{label} 超过 4MB 限制',
   'toast.imageReadFail': '{label} 读取失败',
   'toast.imageAdded': '已添加 {n} 张图片',
   'toast.regenerated': '已重新生成',
   'toast.rolledBack': '已回滚到这条消息之前',
+  'toast.rolledBackRefill': '已回滚,原文已放回输入框,改完可再发一次',
   'toast.cannotRollback': '这条消息找不到可回滚的位置。',
   'toast.cannotMoveTask': '无法移动任务',
   'toast.taskRunning': '当前还有任务在跑,请先停止。',
@@ -307,7 +317,6 @@ export const zhCN = {
   'composer.attachment': '移除',
 
   // ── 空状态 / 概览 / 文件 ──
-  'empty.githubUnavailable': 'GitHub CLI 不可用。',
   'empty.lastCommit': '尚无 Git 提交',
   'empty.project': '项目',
   'empty.draft': '新任务',
@@ -316,18 +325,17 @@ export const zhCN = {
   'inspector.overview': '项目概览',
   'inspector.tabOverview': '概览',
   'inspector.files': '文件',
-  'inspector.prs': '拉取请求',
   'inspector.loading': '正在读取…',
   'inspector.backToFiles': '← 文件',
   'inspector.gitDiff': 'Git Diff',
   'inspector.workChanges': '工作区变更',
   'inspector.recentFiles': '最近文件',
-  'inspector.unnamedPR': '未命名 PR',
+  'inspector.filesTruncated': '文件过多，仅列出前 5000 个。',
   'inspector.noWorkspace': '当前任务没有关联工作空间。',
   'inspector.noWorkspaceHint': '当前任务没有关联工作空间。<br />用输入框下方的 chip 选择一个目录后，这里会显示分支、变更与文件。',
   'inspector.clean': '工作区干净',
   'inspector.noFiles': '未发现可预览的文件',
-  'inspector.noPRs': '没有打开的拉取请求',
+  'inspector.fileCount': '共 {n} 个文件（已隐藏 node_modules / dist / target 等构建产物）',
 
   // ── 搜索面板 ──
   'search.placeholder': '搜索项目或任务',
@@ -436,8 +444,6 @@ export const zhCN = {
   'main.branches.fail': '无法读取分支列表: {msg}',
   'main.branch.switchFail': '切换失败: {msg}',
   'main.branch.switched': '已切换到 {branch}',
-  'main.pulls.unavailable': '未检测到 GitHub CLI 登录状态。',
-  'main.pulls.unreadable': 'GitHub CLI 返回了无法读取的数据。',
   'main.host.startTimeout': 'Agent 启动超时（超过 {s}s 没就绪），这一轮没有发出。请在终端跑一次 mocode 确认模型能对话，再重试。',
   'main.host.exitedEarly': 'Agent Host 一起来就退出了，这一轮没有发出。请在终端跑一次 mocode 看它报什么错，再重试。',
   'main.host.stoppedEarly': 'Agent Host 启动后立刻退出了，这一轮没有发出。请重试。',
@@ -490,7 +496,6 @@ export const enUS: Record<LocaleKey, string> = {
 
   // ── Sidebar nav ──
   'nav.newTask': 'New Task',
-  'nav.pullRequests': 'Pull Requests',
   'sidebar.collapse': 'Collapse sidebar',
   'sidebar.expand': 'Expand sidebar',
   'sidebar.addProject': 'Add Project',
@@ -558,6 +563,15 @@ export const enUS: Record<LocaleKey, string> = {
   'appearance.themeSystemHint': 'Follow system preference',
   'appearance.language': 'Language',
   'appearance.languageHint': 'Interface display language',
+  // ── Accent: multiplied with light/dark → 12 appearances ──
+  'appearance.accent': 'Accent',
+  'appearance.accentHint': 'Buttons, selection and highlights all follow it',
+  'appearance.accentMoss': 'Moss',
+  'appearance.accentIndigo': 'Indigo',
+  'appearance.accentOcean': 'Ocean',
+  'appearance.accentClay': 'Clay',
+  'appearance.accentViolet': 'Violet',
+  'appearance.accentGraphite': 'Graphite',
 
   // ── Settings: about ──
   'about.version': 'Version',
@@ -736,12 +750,14 @@ export const enUS: Record<LocaleKey, string> = {
   'toast.removedSpace': 'Removed space “{removed}”',
   'toast.cannotRemoveSpace': 'Cannot remove: a task is running in this space',
   'toast.themeSwitched': 'Switched to {theme} theme',
+  'toast.accentApplied': 'Accent set to {accent}',
   'toast.imageNotImage': '{label} is not an image, skipped',
   'toast.imageTooLarge': '{label} exceeds the 4MB limit',
   'toast.imageReadFail': 'Failed to read {label}',
   'toast.imageAdded': 'Added {n} image(s)',
   'toast.regenerated': 'Regenerating',
   'toast.rolledBack': 'Rolled back to before this message',
+  'toast.rolledBackRefill': 'Rolled back — the message is back in the composer, edit and resend',
   'toast.cannotRollback': 'Cannot find a rollback point for this message.',
   'toast.cannotMoveTask': 'Cannot move this task',
   'toast.taskRunning': 'A task is still running. Stop it first.',
@@ -787,7 +803,6 @@ export const enUS: Record<LocaleKey, string> = {
   'composer.attachment': 'Remove',
 
   // ── Empty state / inspector / files ──
-  'empty.githubUnavailable': 'GitHub CLI unavailable.',
   'empty.lastCommit': 'No Git commits yet',
   'empty.project': 'Project',
   'empty.draft': 'New Task',
@@ -796,18 +811,17 @@ export const enUS: Record<LocaleKey, string> = {
   'inspector.overview': 'Project Overview',
   'inspector.tabOverview': 'Overview',
   'inspector.files': 'Files',
-  'inspector.prs': 'Pull Requests',
   'inspector.loading': 'Loading…',
   'inspector.backToFiles': '← Files',
   'inspector.gitDiff': 'Git Diff',
   'inspector.workChanges': 'Working tree changes',
   'inspector.recentFiles': 'Recent files',
-  'inspector.unnamedPR': 'Untitled PR',
+  'inspector.filesTruncated': 'Too many files — only the first 5000 are listed.',
   'inspector.noWorkspace': 'The current task has no associated workspace.',
   'inspector.noWorkspaceHint': 'The current task has no associated workspace.<br />Select a directory using the chip below the input box to see branches, changes, and files.',
   'inspector.clean': 'Workspace clean',
   'inspector.noFiles': 'No previewable files found',
-  'inspector.noPRs': 'No open pull requests',
+  'inspector.fileCount': '{n} files (build output such as node_modules / dist / target is hidden)',
 
   // ── Search panel ──
   'search.placeholder': 'Search projects or tasks',
@@ -916,8 +930,6 @@ export const enUS: Record<LocaleKey, string> = {
   'main.branches.fail': 'Cannot read branch list: {msg}',
   'main.branch.switchFail': 'Switch failed: {msg}',
   'main.branch.switched': 'Switched to {branch}',
-  'main.pulls.unavailable': 'GitHub CLI login not detected.',
-  'main.pulls.unreadable': 'GitHub CLI returned unreadable data.',
   'main.host.startTimeout': 'Agent startup timed out (no readiness after {s}s); this round wasn’t sent. Run mocode once in the terminal to confirm the model responds, then retry.',
   'main.host.exitedEarly': 'The Agent Host exited immediately after starting; this round wasn’t sent. Run mocode in the terminal to see what it reports, then retry.',
   'main.host.stoppedEarly': 'The Agent Host exited right after starting; this round wasn’t sent. Please retry.',

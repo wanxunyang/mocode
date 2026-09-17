@@ -1,16 +1,18 @@
 /**
- * 整套 UI 图标 —— 1.5px 描边、20x20 viewBox、currentColor、stroke-linecap=round。
+ * 整套 UI 图标 —— 1.75px 描边、20x20 viewBox、currentColor、stroke-linecap=round。
  * 在 index.html / renderer.ts 里通过 data-icon="<name>" 占位,
  * renderer init 时调用 mountIcons() 把 SVG 字符串注入。
  * 加新图标只需在 ICONS 里加一项即可。
+ *
+ * 描边从 1.5 提到 1.75:图标实际渲染尺寸只有 16px(20 viewBox 缩到 16),
+ * 1.5/20×16 = 1.2px 实线太虚、凑在一起就显得毛糙;1.75 → 1.4px 才压得住界面重量。
  */
 
-const SVG_ATTRS = 'viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"';
+const SVG_ATTRS = 'viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"';
 
 export const ICONS: Record<string, string> = {
   // 导航 / sidebar
   'circle-plus': `<svg ${SVG_ATTRS}><circle cx="10" cy="10" r="6.5"/><path d="M10 7v6M7 10h6"/></svg>`,
-  'git-pull-request': `<svg ${SVG_ATTRS}><circle cx="6" cy="4" r="2"/><circle cx="6" cy="16" r="2"/><circle cx="14" cy="16" r="2"/><path d="M6 6v8"/><path d="M11 6a3 3 0 0 1 3 3v4.5"/></svg>`,
   'folder': `<svg ${SVG_ATTRS}><path d="M2.5 6.8a1 1 0 0 1 1-1h4l1.5 1.5h7.5a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V6.8z"/></svg>`,
   'folder-open': `<svg ${SVG_ATTRS}><path d="M2.5 6.8a1 1 0 0 1 1-1h4l1.5 1.5h7.5a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V6.8z"/><path d="M2 8h16"/></svg>`,
   'plus': `<svg ${SVG_ATTRS}><path d="M10 4v12M4 10h12"/></svg>`,
@@ -120,5 +122,10 @@ export function mountIcons(root: ParentNode = document.body): void {
 }
 
 export function icon(name: string): string {
-  return ICONS[name] ?? '';
+  const svg = ICONS[name] ?? '';
+  // innerHTML 注入的 SVG 没有占位元素可继承 class,必须自带 .icon,
+  // 否则所有 `.xxx .icon { width/height }` 的尺寸规则都命中不了 ——
+  // SVG 会按 width=20/height=20 属性原尺寸溢出容器,这就是设置页/消息操作
+  // 图标错位、顶到文字上的根因。
+  return svg ? svg.replace('<svg ', '<svg class="icon" ') : '';
 }

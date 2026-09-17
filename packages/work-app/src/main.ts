@@ -17,7 +17,13 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
-const IGNORED_DIRECTORIES = new Set(['.git', '.mocode', 'node_modules', 'dist', 'coverage', '.next', '.cache']);
+/**
+ * 不进文件树的目录：依赖、构建产物、缓存。
+ * `target` 是 Cargo/Maven/Gradle 的产物目录（mocode 仓库里它一家就占 7200 个 .o/.rlib，
+ * 不排除的话会把真实源码挤出列表——用户报「文件缺少」的真正大头）；`dist-tests` 同 `dist`，
+ * 是 tsc 测试编译的输出。
+ */
+const IGNORED_DIRECTORIES = new Set(['.git', '.mocode', 'node_modules', 'dist', 'dist-tests', 'target', 'coverage', '.next', '.cache']);
 
 /**
  * 复用 mocode 已配好的模型 / 沙箱 / 记忆 / 主题等配置。
@@ -633,19 +639,36 @@ function rollbackSession(task: TaskRecord, userIndex: number): { ok:boolean; mes
   return { ok: true };
 }
 
-function listFiles(root: string, directory = root, entries: string[] = []): string[] {
-  if (entries.length >= 180) return entries;
-  try {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.isDirectory() && IGNORED_DIRECTORIES.has(entry.name)) continue;
-      const absolute = path.join(directory, entry.name);
-      const relative = path.relative(root, absolute).replaceAll('\\', '/');
-      if (entry.isDirectory()) listFiles(root, absolute, entries);
-      else if (entry.isFile() && statSync(absolute).size <= 1_000_000) entries.push(relative);
-      if (entries.length >= 180) break;
-    }
-  } catch { /* Unreadable directories are omitted. */ }
-  return entries.sort((left, right) => left.localeCompare(right));
+/**
+ * 目录树的文件清单。
+ * 上限从 180 提到 5000：180 会让稍微大一点的项目**后半截整个消失**（用户报「文件缺少」），
+ * 而目录树默认折叠，五千个节点展开前并没有渲染压力。
+ * 排序只在最外层做一次（原来每层递归都 sort 一遍，白跑）。
+ * 返回 `truncated` 让渲染层能明说"还有更多"，而不是静默截断。
+ */
+const FILE_LIST_LIMIT = 5000;
+const FILE_PREVIEW_SIZE_LIMIT = 4_000_000;
+
+function listFiles(root: string): { files: string[]; truncated: boolean } {
+  const entries: string[] = [];
+  const walk = (directory: string): void => {
+    if (entries.length >= FILE_LIST_LIMIT) return;
+    try {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entries.length >= FILE_LIST_LIMIT) return;
+        // git 备份目录（`.git-corrupted-backup` 之类）内部是 objects/hooks 的二进制碎块，属于噪音。
+        // 只匹配 `.git` 本身与 `.git-<后缀>`：**不能**用 startsWith('.git')，那会把 `.github`
+        // （CI 工作流，是真实项目内容）一起误杀。
+        if (entry.isDirectory() && (IGNORED_DIRECTORIES.has(entry.name) || entry.name === '.git' || entry.name.startsWith('.git-'))) continue;
+        const absolute = path.join(directory, entry.name);
+        const relative = path.relative(root, absolute).replaceAll('\\', '/');
+        if (entry.isDirectory()) walk(absolute);
+        else if (entry.isFile() && statSync(absolute).size <= FILE_PREVIEW_SIZE_LIMIT) entries.push(relative);
+      }
+    } catch { /* Unreadable directories are omitted. */ }
+  };
+  walk(root);
+  return { files: entries.sort((left, right) => left.localeCompare(right)), truncated: entries.length >= FILE_LIST_LIMIT };
 }
 
 function resolvedProjectFile(project: Project, relativePath: string): string | null {
@@ -660,14 +683,8 @@ async function projectOverview(project: Project): Promise<Record<string, unknown
   ]);
   project.branch = branch;
   saveState();
-  return { project, branch, status: status.ok ? status.stdout.split('\n').filter(Boolean) : [], diffStat: diffStat.ok ? diffStat.stdout : '', lastCommit: commit.ok ? commit.stdout : '', files: listFiles(project.root) };
-}
-
-async function pullRequests(project: Project): Promise<Record<string, unknown>> {
-  const result = await runCommand(project.root, 'gh', ['pr', 'list', '--limit', '20', '--json', 'number,title,state,headRefName,url']);
-  if (!result.ok) return { available: false, message: result.stderr || tMain('main.pulls.unavailable') };
-  try { return { available: true, items: JSON.parse(result.stdout || '[]') }; }
-  catch { return { available: false, message: tMain('main.pulls.unreadable') }; }
+  const listing = listFiles(project.root);
+  return { project, branch, status: status.ok ? status.stdout.split('\n').filter(Boolean) : [], diffStat: diffStat.ok ? diffStat.stdout : '', lastCommit: commit.ok ? commit.stdout : '', files: listing.files, filesTruncated: listing.truncated };
 }
 
 /** 把仍在运行的任务就地收敛为 failed —— host 退出/启动失败时不会再有 run_completed 落盘，不收敛侧栏就永远转圈。 */
@@ -727,6 +744,8 @@ class LocalAgent {
   private starting: Promise<void> | null = null;
   /** 正在执行的 stop() promise。restart 后立刻 send 必须等它,否则会发给正在退出的旧 host。 */
   private restarting: Promise<void> | null = null;
+  /** stop() 后实例即报废:在飞的 send() 会被 client 换代顶掉,那是主动报废不是故障,静默即可。 */
+  private stopped = false;
   private crashStreak = 0;
   /** 最近一次启动失败的原因。start() 自己已经报过一次，send() 靠它避免同一条错误弹两遍。 */
   private lastStartError: string | null = null;
@@ -849,6 +868,9 @@ class LocalAgent {
   }
 
   async send(value: HostCommand): Promise<void> {
+    // stop() 之后实例已报废:任何未送达的指令本来就不再需要送达(调用方正在拆这个任务),
+    // 直接静默返回 —— 否则 client 换代会让在飞的 send 抛「was replaced」,炸出一条假故障 toast。
+    if (this.stopped) return;
     // 先等正在进行的 restart 收尾:client.stop() 只发了 kill,子进程尚未退出时
     // isRunning 仍为 true,若直接发会落到正在死掉的旧进程上(切换模型后最易踩)。
     if (this.restarting) await this.restarting;
@@ -887,6 +909,9 @@ class LocalAgent {
       await this.client.send(value);
       this.crashStreak = 0;
     } catch (cause) {
+      // 与入口的 stopped 检查同理:stop() 与在飞的 send 竞态胜出时,client 换代抛
+      // 「was replaced before the command could be sent」—— 这是主动报废,不该报给用户。
+      if (this.stopped) return;
       this.fail(tMain('main.host.sendFail', { raw: cause instanceof Error ? cause.message : String(cause) }));
     }
   }
@@ -897,9 +922,15 @@ class LocalAgent {
   }
 
   stop(): void {
+    this.stopped = true;
     this.currentProject = null;
     this.starting = null;
     void this.client.stop();
+  }
+
+  /** 实例是否已被 stop() 报废(ensureAgent 据此丢弃旧实例,绝不复用)。 */
+  get isStopped(): boolean {
+    return this.stopped;
   }
 
   /**
@@ -986,11 +1017,15 @@ function currentTaskWorkspace(task: TaskRecord): Record<string, unknown> {
 function ensureAgent(task: TaskRecord): LocalAgent {
   const workspace = workspaceForTask(task);
   const existing = agents.get(task.id);
-  if (existing) {
-    // 被 stop() 过的实例（回滚 / 删任务 / 切模型）还留在表里但没有 cwd：就地重新绑定，
+  // 被 stop() 报废的实例(回滚 / 删任务 / 退出)直接丢弃 —— stopped 是单向闸门,
+  // 它的 send() 会静默吞掉一切指令,复用它等于让这个任务永远哑掉。
+  if (existing?.isStopped) agents.delete(task.id);
+  const current = agents.get(task.id);
+  if (current) {
+    // start 失败等场景下实例还在表里但没有 cwd:就地重新绑定,
     // 否则下一次 send 会以「还没起来」失败。
-    if (!existing.projectId && workspace) void existing.start(workspace);
-    return existing;
+    if (!current.projectId && workspace) void current.start(workspace);
+    return current;
   }
   const agent = new LocalAgent(task.id);
   agents.set(task.id, agent);
@@ -1127,8 +1162,11 @@ function installIpc(): void {
     if (!task) return { ok: false, message: tMain('main.task.projectNotExist') };
     const rolled = rollbackSession(task, userIndex);
     if (!rolled.ok) return rolled;
+    // ⚠️ 这里**不能**先给 host 发 cancel 再 stop:cancel 若抢先送达,host 会「优雅收尾」,
+    // 在 turn 结束时把内存里的**旧历史全量写回**会话文件 —— 刚截断的回滚当场被覆盖。
+    // stop() 直接杀进程,内存态作废,截断才能保住。(在飞的 send 被 stop 顶掉也不会报错,见 LocalAgent.stopped)
     const agent = agents.get(taskId);
-    if (agent) { void agent.send({ type: 'cancel', id: taskId }); agent.stop(); agents.delete(taskId); }
+    if (agent) { agent.stop(); agents.delete(taskId); }
     if (task.status === 'running' || task.status === 'waiting') task.status = 'cancelled';
     task.lastError = undefined;
     task.updatedAt = new Date().toISOString();
@@ -1141,8 +1179,9 @@ function installIpc(): void {
     // 否则在「任务」分组里删空间任务（或反之）会被静默拒绝。
     const task = taskById(taskId);
     if (!task) return null;
+    // 任务整个删除,host 直接杀(发 cancel 毫无收益:进程反正要死,还可能与 stop 竞态炸假故障)。
     const agent = agents.get(taskId);
-    if (agent) { void agent.send({ type: 'cancel', id: taskId }); agent.stop(); agents.delete(taskId); }
+    if (agent) { agent.stop(); agents.delete(taskId); }
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
     if (state.selectedTaskId === taskId) state.selectedTaskId = undefined;
     saveState(); broadcastState(); return state;
@@ -1194,10 +1233,10 @@ function installIpc(): void {
       state.selectedProjectId = state.projects[0]?.id ?? '';
       state.selectedTaskId = undefined;
     }
-    // 清理该项目的任务与其 agent 实例
+    // 清理该项目的任务与其 agent 实例(直接杀,理由同 delete-task)
     for (const task of state.tasks.filter((task) => task.projectId === projectId)) {
       const agent = agents.get(task.id);
-      if (agent) { void agent.send({ type: 'cancel', id: task.id }); agent.stop(); agents.delete(task.id); }
+      if (agent) { agent.stop(); agents.delete(task.id); }
     }
     state.tasks = state.tasks.filter((task) => task.projectId !== projectId);
     saveState(); broadcastState();
@@ -1218,7 +1257,6 @@ function installIpc(): void {
     const target = resolvedProjectFile(selectedProject(), relativePath); if (!target) return { error: tMain('main.read.outside') };
     const result = await runCommand(selectedProject().root, 'git', ['diff', '--', relativePath]); return { path: relativePath, content: result.ok ? result.stdout || tMain('main.read.noDiff') : result.stderr };
   });
-  ipcMain.handle('work:pull-requests', async () => pullRequests(selectedProject()));
   ipcMain.handle('work:pick-attachment', async () => {
     const result = await dialog.showOpenDialog(windowRef!, { properties: ['openFile'], filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
     return result.canceled || !result.filePaths[0] ? null : attachmentFor(result.filePaths[0]);

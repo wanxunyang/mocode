@@ -87,7 +87,6 @@ declare global {
       projectOverview: () => Promise<Record<string, unknown>>;
       readFile: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
-      pullRequests: () => Promise<Record<string, unknown>>;
       pickAttachment: () => Promise<Attachment | null>;
       getConfig: () => Promise<ModelConfig>;
       listModels: () => Promise<ModelItem[]>;
@@ -121,7 +120,7 @@ let collapsedSections: Set<string> = new Set();
 let activeAssistant: HTMLElement | null = null;
 let activeTextBlock: HTMLElement | null = null;
 let attachments: Attachment[] = [];
-let activeInspectorTab: 'overview' | 'files' | 'prs' = 'overview';
+let activeInspectorTab: 'overview' | 'files' = 'overview';
 
 /* ── 多任务并行:每个任务一份事件流缓冲,后台任务照常累积,随时切换查看 ── */
 type StreamItem =
@@ -1129,6 +1128,9 @@ async function handleRollbackClick(message: HTMLElement, button: HTMLButtonEleme
   const viewing = viewingTaskId();
   const userIndex = Number(message.dataset.userIndex ?? '');
   if (!viewing || !Number.isInteger(userIndex)) { showToast('warn', t('toast.cannotRollback')); return; }
+  // 回滚会连这条用户消息一起抹掉 —— 先把原文捞出来,成功后回填输入框,改完就能直接重发。
+  // 用户消息是纯文本气泡(.message-body 的 textContent),没有 markdown 渲染,取到的就是原文。
+  const rolledBackText = (message.querySelector('.message-body')?.textContent ?? '').trim();
   const result = await window.mocodeWork.rollback({ id: viewing, userIndex });
   if (!result.ok) { showToast('error', result.message ?? t('toast.rollbackFail')); return; }
   // 本周期的事件缓冲已经不可信 —— 落盘的会话才是新真相,作废后按它重放。
@@ -1137,6 +1139,17 @@ async function handleRollbackClick(message: HTMLElement, button: HTMLButtonEleme
   if (result.state) updateState(result.state);
   setRunning(false);
   switchToTask(viewing, result.history ?? []);
+  if (rolledBackText) {
+    // 输入框已有草稿时**不覆盖**:把回滚的原文接在后面(空行隔开),两种意图都不丢。
+    const draft = promptInput.value.trim();
+    promptInput.value = draft ? `${draft}\n\n${rolledBackText}` : rolledBackText;
+    resizePrompt();
+    // 光标落到末尾,用户接着改就行。
+    promptInput.focus();
+    promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
+    showToast('info', t('toast.rolledBackRefill'));
+    return;
+  }
   showToast('info', t('toast.rolledBack'));
 }
 
@@ -1719,13 +1732,105 @@ function switchToTask(taskId: string, history?: HistoryItem[]): void {
   promptInput.focus();
 }
 
-function openInspector(tab: 'overview' | 'files' | 'prs'): void {
+function openInspector(tab: 'overview' | 'files'): void {
   activeInspectorTab = tab; inspector.classList.remove('hidden'); void refreshInspector();
 }
-function setInspectorTab(tab: 'overview' | 'files' | 'prs'): void {
+function setInspectorTab(tab: 'overview' | 'files'): void {
   activeInspectorTab = tab; document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => button.classList.toggle('selected', button.dataset.tab === tab));
 }
 function inspectorButton(label: string, action: string, path?: string): string { return `<button class="inspector-row" data-action="${action}"${path ? ` data-path="${escapeHtml(path)}"` : ''}>${escapeHtml(label)}<span>›</span></button>`; }
+
+/**
+ * 文件树的展开状态按 **项目根** 持久化在 localStorage。
+ * 必要性：每次 refreshInspector 都是整块 innerHTML 重建，没有这份状态的话，
+ * 面板一刷新（切 tab、预览文件后返回、任务切换回来）用户刚展开的目录会全部塌回去。
+ */
+const FILE_TREE_KEY = 'mocode-work-filetree';
+function fileTreeOpenSet(root: string): Set<string> {
+  try {
+    const raw = localStorage.getItem(`${FILE_TREE_KEY}:${root}`);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+  } catch { return new Set(); }
+}
+function saveFileTreeOpenSet(root: string, open: Set<string>): void {
+  try { localStorage.setItem(`${FILE_TREE_KEY}:${root}`, JSON.stringify([...open])); } catch { /* 隐私模式/配额：退化成不记忆 */ }
+}
+/** 当前文件树的归属根与展开集（模块级：折叠监听器只绑一次，必须读得到最新值）。 */
+let fileTreeRoot = '';
+let fileTreeOpen: Set<string> = new Set();
+// 原生 <details> 的 toggle 事件不冒泡，只能在容器上捕获；容器本身不重建，所以只绑一次。
+inspectorContent.addEventListener('toggle', (event) => {
+  const node = event.target as HTMLDetailsElement;
+  if (!node.classList.contains('tree-dir') || !fileTreeRoot) return;
+  const path = node.dataset.path ?? '';
+  if (!path) return;
+  if (node.open) fileTreeOpen.add(path); else fileTreeOpen.delete(path);
+  saveFileTreeOpenSet(fileTreeRoot, fileTreeOpen);
+}, true);
+
+/**
+ * 把后端拍平的相对路径列表重建成 IDE 风格目录树：
+ * 目录在前、文件在后，各自按名排序；同名「目录 / 文件」并存时目录优先。
+ * **目录默认折叠**（`<details>` 不带 open，与 VS Code 初始态一致）——全展开会把上千节点
+ * 糊在 280px 面板里；用户展开过的目录由 openPaths 还原。
+ * **单链压缩**：只有唯一子目录、且自己没有文件的目录链（如 `packages/work-app/src`）
+ * 合并成一行，省掉逐层点击，这是 VS Code 的文件树行为。
+ * 建树时把完整相对路径存到每个节点，点击/折叠都直接可用。
+ */
+function renderFileTree(files: string[], openPaths: Set<string>): string {
+  interface TreeNode { name: string; path: string; children: Map<string, TreeNode>; file: boolean; }
+  const root: TreeNode = { name: '', path: '', children: new Map(), file: false };
+  for (const file of files) {
+    let node = root;
+    const parts = file.split('/');
+    parts.forEach((part, index) => {
+      let next = node.children.get(part);
+      if (!next) {
+        const parentPath = node.path;
+        next = { name: part, path: parentPath ? `${parentPath}/${part}` : part, children: new Map(), file: index === parts.length - 1 };
+        node.children.set(part, next);
+      }
+      node = next;
+    });
+  }
+  const byName = (left: TreeNode, right: TreeNode): number => left.name.localeCompare(right.name);
+  /** 沿「唯一子目录且自身无文件」的链一路下潜，返回链条末端与合并后的显示名。 */
+  const compress = (node: TreeNode): { head: TreeNode; label: string } => {
+    let head = node; let label = node.name;
+    for (;;) {
+      const kids = [...head.children.values()];
+      const dirs = kids.filter((child) => !child.file);
+      if (dirs.length === 1 && dirs.length === kids.length) {
+        head = dirs[0];
+        label = label ? `${label}/${head.name}` : head.name;
+        continue;
+      }
+      break;
+    }
+    return { head, label };
+  };
+  const render = (node: TreeNode, depth: number): string => {
+    // 当前节点自己已经由调用方渲染成 <summary>，这里只负责它的**子项**。
+    const children = [...node.children.values()];
+    const dirs = children.filter((child) => !child.file).sort(byName);
+    const fileNodes = children.filter((child) => child.file).sort(byName);
+    let html = '';
+    for (const dir of dirs) {
+      const { head: tip, label } = compress(dir);
+      const open = openPaths.has(dir.path) ? ' open' : '';
+      html += `<details class="tree-dir"${open} data-path="${escapeHtml(dir.path)}" style="--depth:${depth}"><summary>${escapeHtml(label)}</summary>${render(tip, depth + 1)}</details>`;
+    }
+    for (const file of fileNodes) {
+      html += `<button class="inspector-row tree-file" data-action="file" data-path="${escapeHtml(file.path)}" style="--depth:${depth}">${escapeHtml(file.name)}</button>`;
+    }
+    return html;
+  };
+  const { head, label } = compress(root);
+  return label
+    ? `<details class="tree-dir" data-path="${escapeHtml(head.path)}" style="--depth:0"><summary>${escapeHtml(label)}</summary>${render(head, 1)}</details>`
+    : render(root, 0);
+}
 async function refreshInspector(): Promise<void> {
   setInspectorTab(activeInspectorTab); inspectorContent.innerHTML = `<p class="inspector-loading">${t('inspector.loading')}</p>`;
   if (activeInspectorTab === 'overview') {
@@ -1737,15 +1842,18 @@ async function refreshInspector(): Promise<void> {
     }
     const status = Array.isArray(overview.status) ? overview.status.map(String) : []; const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
     inspectorContent.innerHTML = `<section class="overview-card"><b>${escapeHtml(String(overview.branch || t('git.local')))}</b><span>${escapeHtml(String(overview.lastCommit ?? t('empty.lastCommit')))}</span></section><h3>${t('inspector.workChanges')}</h3>${status.length ? `<pre class="status-output">${escapeHtml(status.join('\n'))}</pre>` : `<p class="inspector-empty">${t('inspector.clean')}</p>`}${overview.diffStat ? `<pre class="status-output">${escapeHtml(String(overview.diffStat))}</pre>` : ''}<h3>${t('inspector.recentFiles')}</h3>${files.slice(0, 12).map((file) => inspectorButton(file, 'file', file)).join('') || `<p class="inspector-empty">${t('inspector.noFiles')}</p>`}`;
-  } else if (activeInspectorTab === 'files') {
+  } else {
     inspectorTitle.textContent = t('inspector.files'); const overview = await window.mocodeWork.projectOverview();
     if (overview.noWorkspace) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('inspector.noWorkspace')}</p>`; return; }
     const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
-    inspectorContent.innerHTML = files.map((file) => inspectorButton(file, 'file', file)).join('') || `<p class="inspector-empty">${t('inspector.noFiles')}</p>`;
-  } else {
-    inspectorTitle.textContent = t('nav.pullRequests'); const result = await window.mocodeWork.pullRequests();
-    const items = Array.isArray(result.items) ? result.items as Array<{ number?: number; title?: string; state?: string; headRefName?: string; url?: string }> : [];
-    inspectorContent.innerHTML = result.available ? (items.length ? items.map((item) => `<a class="pr-row" href="${escapeHtml(String(item.url ?? '#'))}"><b>#${item.number ?? ''} ${escapeHtml(String(item.title ?? t('inspector.unnamedPR')))}</b><span>${escapeHtml(String(item.state ?? ''))} · ${escapeHtml(String(item.headRefName ?? ''))}</span></a>`).join('') : `<p class="inspector-empty">${t('inspector.noPRs')}</p>`) : `<p class="inspector-empty">${escapeHtml(String(result.message ?? t('empty.githubUnavailable')))}</p>`;
+    // IDE 风格目录树：不是拍平的路径列表 —— 目录可折叠、文件按名落位、单链目录压缩。
+    // 触到后端上限时明说"还有更多"，别让截断看起来像"项目里没这些文件"。
+    const truncated = overview.filesTruncated === true;
+    const root = String((overview.project as { root?: string } | undefined)?.root ?? '');
+    const openPaths = fileTreeOpenSet(root);
+    fileTreeRoot = root; fileTreeOpen = openPaths;
+    inspectorContent.innerHTML = (files.length ? `<p class="tree-note">${escapeHtml(t('inspector.fileCount', { n: String(files.length) }))}</p>${renderFileTree(files, openPaths)}` : `<p class="inspector-empty">${t('inspector.noFiles')}</p>`)
+      + (truncated ? `<p class="inspector-empty">${t('inspector.filesTruncated')}</p>` : '');
   }
   inspectorContent.querySelectorAll<HTMLButtonElement>('[data-action="file"]').forEach((button) => button.addEventListener('click', () => void previewFile(button.dataset.path!)));
 }
@@ -1849,11 +1957,15 @@ $('#compact-button').addEventListener('click', () => {
   if (!viewing) return;
   window.mocodeWork.send({ type: 'compact', id: viewing });
 });
-$('#toggle-inspector').addEventListener('click', () => inspector.classList.contains('hidden') ? openInspector('overview') : inspector.classList.add('hidden'));
-$('#show-files').addEventListener('click', () => openInspector('files'));
+// 唯一的文件面板入口（原来 toggle-inspector/show-files 两个按钮开同一个面板，已合并）：
+// 关着 → 打开文件 tab；开着但在别的 tab → 切到文件；已在文件 tab → 收起面板。
+$('#show-files').addEventListener('click', () => {
+  if (inspector.classList.contains('hidden')) { openInspector('files'); return; }
+  if (activeInspectorTab !== 'files') { setInspectorTab('files'); void refreshInspector(); return; }
+  inspector.classList.add('hidden');
+});
 $('#close-inspector').addEventListener('click', () => inspector.classList.add('hidden'));
-$('#pull-requests').addEventListener('click', () => openInspector('prs'));
-document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => button.addEventListener('click', () => { activeInspectorTab = button.dataset.tab as 'overview' | 'files' | 'prs'; void refreshInspector(); }));
+document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => button.addEventListener('click', () => { activeInspectorTab = button.dataset.tab as 'overview' | 'files'; void refreshInspector(); }));
 $('#search-button').addEventListener('click', () => { searchPanel.classList.remove('hidden'); searchInput.value = ''; refreshSearch(); searchInput.focus(); });
 $('#theme-toggle').addEventListener('click', () => {
   const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -1875,6 +1987,46 @@ const settingsModal = $('#settings-modal');
 const settingsNav = settingsModal?.querySelector<HTMLElement>('.settings-nav') ?? null;
 const settingsSection = $('#settings-section');
 const settingsSectionTitle = $('#settings-section-title');
+
+/* ── 主题色(accent):与深浅主题正交 → 2 × 6 = 12 套外观 ─────────
+ * 这里只改 documentElement.dataset.accent,整套色板由 tokens.css 的 oklch 派生式换算
+ * (accent 系列色都写成 oklch(L C var(--brand-h))),新增一套主题色 = tokens 加一行 + 这里加一项。
+ * 与 theme 一样存 localStorage,首屏脚本(index.html)会先落地,避免加载闪色。 */
+type AccentId = 'moss' | 'indigo' | 'ocean' | 'clay' | 'violet' | 'graphite';
+const ACCENTS: Array<{ id: AccentId; labelKey: LocaleKey; hue: number; chroma: number }> = [
+  { id: 'moss', labelKey: 'appearance.accentMoss', hue: 158, chroma: 0.098 },
+  { id: 'indigo', labelKey: 'appearance.accentIndigo', hue: 272, chroma: 0.135 },
+  { id: 'ocean', labelKey: 'appearance.accentOcean', hue: 228, chroma: 0.115 },
+  { id: 'clay', labelKey: 'appearance.accentClay', hue: 48, chroma: 0.115 },
+  { id: 'violet', labelKey: 'appearance.accentViolet', hue: 322, chroma: 0.125 },
+  { id: 'graphite', labelKey: 'appearance.accentGraphite', hue: 265, chroma: 0.008 },
+];
+const ACCENT_KEY = 'mocode-work-accent';
+const DEFAULT_ACCENT: AccentId = 'moss';
+
+function currentAccent(): AccentId {
+  try {
+    const saved = localStorage.getItem(ACCENT_KEY);
+    if (saved && ACCENTS.some((item) => item.id === saved)) return saved as AccentId;
+  } catch { /* 无 localStorage 则走默认色 */ }
+  return DEFAULT_ACCENT;
+}
+
+function applyAccent(id: AccentId): void {
+  document.documentElement.dataset.accent = id;
+  try { localStorage.setItem(ACCENT_KEY, id); } catch { /* 无 localStorage 则仅本次生效 */ }
+  refreshAccentChips();
+}
+
+/** 色板选中态:选中的色点加 .selected(CSS 画一圈描边),aria-checked 只管无障碍。 */
+function refreshAccentChips(): void {
+  const current = currentAccent();
+  document.querySelectorAll<HTMLButtonElement>('.accent-chip').forEach((chip) => {
+    const active = chip.dataset.accent === current;
+    chip.setAttribute('aria-checked', String(active));
+    chip.classList.toggle('selected', active);
+  });
+}
 
 function currentSavedTheme(): 'light' | 'dark' | 'system' {
   try { return (localStorage.getItem('mocode-work-theme') as 'light' | 'dark' | 'system') || 'system'; }
@@ -2445,6 +2597,17 @@ function renderSettingsAppearanceSection(): void {
       </div>
     </div>
     <div class="settings-block">
+      <div class="settings-block-head"><b>${t('appearance.accent')}</b><span>${t('appearance.accentHint')}</span></div>
+      <div class="accent-grid" role="radiogroup" aria-label="${t('appearance.accent')}">
+        ${ACCENTS.map(({ id, labelKey, hue, chroma }) => `
+          <button class="accent-chip" data-accent="${id}" role="radio" aria-checked="false" title="${t(labelKey)}" aria-label="${t(labelKey)}">
+            <span class="accent-dot" style="--sw-h:${hue};--sw-c:${chroma}"></span>
+            <span class="accent-name">${t(labelKey)}</span>
+          </button>
+        `).join('')}
+      </div>
+    </div>
+    <div class="settings-block">
       <div class="settings-block-head"><b>${t('appearance.language')}</b><span>${t('appearance.languageHint')}</span></div>
       <div class="settings-list">
         ${languages.map(({ code, label, sub }) => `
@@ -2459,10 +2622,20 @@ function renderSettingsAppearanceSection(): void {
   `;
   refreshThemeSegmented();
   refreshLanguageSegmented();
+  refreshAccentChips();
   settingsSection.querySelectorAll<HTMLButtonElement>('.settings-theme').forEach((button) => {
     button.addEventListener('click', () => {
       applyTheme(button.dataset.theme as 'light' | 'dark' | 'system');
       refreshThemeSegmented();
+    });
+  });
+  settingsSection.querySelectorAll<HTMLButtonElement>('.accent-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const id = chip.dataset.accent as AccentId | undefined;
+      if (!id) return;
+      applyAccent(id);
+      const meta = ACCENTS.find((item) => item.id === id);
+      showToast('info', t('toast.accentApplied', { accent: meta ? t(meta.labelKey) : id }), 1600);
     });
   });
   settingsSection.querySelectorAll<HTMLButtonElement>('.settings-language').forEach((button) => {
@@ -2570,6 +2743,10 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && !settingsModal?.classList.contains('hidden')) closeSettings();
 });
 refreshThemeSegmented();
+// 主题色:index.html 的首屏脚本已按 localStorage 落过一次,这里再对齐一遍并刷新色板选中态。
+document.documentElement.dataset.accent = currentAccent();
+refreshAccentChips();
+
 /* ── Sidebar collapse ─────────────────────────────────── */
 // 关键:不依赖 #sidebar-toggle 引用,也不依赖 button 元素 —— 改用 data-attr + 事件代理 + 每次现查 DOM,
 // 这样即便 setIcon() 后续又把 button 替换成 svg (或任何原因 DOM 变了) 也不会失效。
@@ -2960,7 +3137,6 @@ document.querySelectorAll<HTMLButtonElement>('.empty-hint').forEach((button) => 
     switch (hint) {
       case 'new-task': $('#new-task').click(); break;
       case 'cheatsheet': showCheatsheet(); break;
-      case 'pr': $('#pull-requests').click(); break;
       case 'search': openConvSearch(); break;
     }
   });

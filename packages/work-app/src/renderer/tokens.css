@@ -1,78 +1,143 @@
-/* Hallmark · theme: Studio · genre: modern-minimal · anchor hue: leaf-green (145)
- * palette: oklch paper 100% (light) / 17% (dark) · ink 19% (light) / 95% (dark) · accent 52% 0.16 145
- * type: Fraunces (display, 600/700) + Geist (body, 400/500) + Geist Mono (outlier, 400/500)
- * space: 4pt base, 9 steps named by role
- * states: default · hover · focus · active · disabled · loading · error · success
- * contrast: pass (body 7:1, UI 4.5:1)
+/* MoCode Work · Design Tokens v2
+ * ─────────────────────────────────────────────────────────
+ * 结构: 字体 → 排版 → 品牌色相 → 语义色(面/字/边/状态) → 间距 → 圆角 → 阴影 → 动效 → 层级
+ * 维度: data-theme = light | dark        (明度, 由「外观 · 主题」切换)
+ *        data-accent = moss|indigo|...   (色相, 由「外观 · 主题色」切换)
+ *        → 2 × 6 = 12 套外观, 全部由下面 ~20 个变量派生, 不复制色板。
  *
- * 主题：默认浅色（纯白底）；document.documentElement.dataset.theme = 'dark' 切黑夜。 */
+ * 三条改之前必须先读的硬约束:
+ *  1. **中文不许出现伪粗体**。仓库只打包 Geist 400/500(latin 子集), 系统雅黑只有 400/700,
+ *     于是 `font-weight: 500/600` 的中文会命中**雅黑 Bold** —— 又黑又笨, 廉价感的最大来源。
+ *     解法: 自建 "MoHan" 家族, 400~700 四档全部指向同一 Regular 字体(见下方 @font-face),
+ *     再叠 `font-synthesis: none`, 中文恒定 Regular、Latin 也不再被描边加粗。
+ *     层级改用「字号 + 颜色 + 字距」表达, 而不是靠把字加粗。
+ *  2. **--font-display 不再指向衬线**。Fraunces 只有 latin-600/700 子集, 中文回退到
+ *     Noto Serif SC / Georgia → markdown 标题变宋体。display 与 body 现为同一家族。
+ *  3. **最小字号 11px**。9px/10px 的 mono 小字 + 大写 + 大字距是"开发者工具廉价风"的
+ *     典型特征, tokens 里已无 9/10 两档, 别再把它们写回具体规则。 */
+
+/* ── 中文去伪粗字族 ───────────────────────────────────────
+ * 四档字重指向同一 Regular: 系统字族里没有 Medium 时(雅黑 / PingFang 都只有 Regular+Bold),
+ * CSS 字重匹配会把 500/600 推到 Bold。这里用 @font-face 把每一档显式绑定到 Regular 文件,
+ * 让中文在任何字重下都保持常规笔画。local() 逐台机器取系统字体,不打包、离线可用;
+ * 全部 miss 时整个家族失效,自动落到 --font-sans 后面的系统兜底栈。 */
+@font-face { font-family: "MoHan"; font-style: normal; font-weight: 400; font-display: swap; src: local("PingFang SC"), local("Microsoft YaHei UI"), local("Microsoft YaHei"), local("微软雅黑"), local("HarmonyOS Sans SC"), local("Source Han Sans SC"), local("Noto Sans SC"); }
+@font-face { font-family: "MoHan"; font-style: normal; font-weight: 500; font-display: swap; src: local("PingFang SC"), local("Microsoft YaHei UI"), local("Microsoft YaHei"), local("微软雅黑"), local("HarmonyOS Sans SC"), local("Source Han Sans SC"), local("Noto Sans SC"); }
+@font-face { font-family: "MoHan"; font-style: normal; font-weight: 600; font-display: swap; src: local("PingFang SC"), local("Microsoft YaHei UI"), local("Microsoft YaHei"), local("微软雅黑"), local("HarmonyOS Sans SC"), local("Source Han Sans SC"), local("Noto Sans SC"); }
+@font-face { font-family: "MoHan"; font-style: normal; font-weight: 700; font-display: swap; src: local("PingFang SC"), local("Microsoft YaHei UI"), local("Microsoft YaHei"), local("微软雅黑"), local("HarmonyOS Sans SC"), local("Source Han Sans SC"), local("Noto Sans SC"); }
+
+/* 打包字体:Geist / Geist Mono 只含 latin 子集(仓库内 woff2),中文自动落到 MoHan。 */
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/geist-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Geist"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/geist-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/geist-mono-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Geist Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/geist-mono-latin-500-normal.woff2") format("woff2"); }
 
 :root {
-  /* ── Type ───────────────────────────────────────────── */
-  --font-display: "Fraunces", "MiSans", "Noto Serif SC", ui-serif, Georgia, serif;
-  --font-body:    "Geist", "MiSans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
-  --font-outlier: "Geist Mono", "MiSans", "Noto Sans Mono CJK SC", ui-monospace, SFMono-Regular, Consolas, monospace;
+  /* ── Type ───────────────────────────────────────────────
+   * 界面字体 = 系统 UI 字体的观感 + 打包字体的一致性:
+   *   Latin/数字 → Geist(打包, 400/500 两档真实字重)
+   *   中文       → MoHan(去伪粗) → 系统雅黑 UI / 苹方
+   * 这比"直接 system-ui"更可控,又比"纯打包字体"更贴近本机标准字体。 */
+  --font-sans: "Geist", "MoHan", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono: "Geist Mono", "MoHan", ui-monospace, "Cascadia Mono", "Sarasa Mono SC", Consolas, monospace;
+  /* display 与 sans 同族:没有打包 Fraunces 的 400 档,中文标题会掉进衬线(宋体)。
+     标题层级由字号/字距/颜色承担,不靠换字族。 */
+  --font-display: var(--font-sans);
+  --font-body: var(--font-sans);
+  --font-outlier: var(--font-mono);
 
-  /* ── Colour · Studio (light · 默认) ──────────────────── */
-  --color-paper:    oklch(100% 0 0);          /* 纯白主背景 */
-  --color-paper-2:  oklch(97.5% 0 0);         /* 侧栏 / 卡片 */
-  --color-paper-3:  oklch(94% 0 0);           /* hover / 强调面 */
-  --color-rule:     oklch(90% 0 0);
-  --color-rule-soft:oklch(94% 0 0);
-  --color-neutral:  oklch(55% 0 0);
-  --color-muted:    oklch(42% 0 0);
-  --color-subtle:   oklch(71% 0 0);
-  --color-ink:      oklch(19% 0 0);
-  --color-ink-soft: oklch(30% 0 0);
-  --color-accent:   oklch(32% 0 0);           /* 中性深灰强调 */
-  --color-accent-soft: oklch(93% 0 0);
-  --color-accent-ink:  oklch(22% 0 0);
-  --color-focus:    oklch(38% 0 0);
-  --color-fail-ink: oklch(46% 0.16 25);       /* fail 加深态 */
-  --color-scrim:    oklch(19% 0 0 / 0.35);    /* 模态遮罩 */
+  /* ── Brand hue · 主题色 ────────────────────────────────
+   * 只换色相与彩度,整套 accent 由这两个变量派生(data-accent 覆盖之)。 */
+  --brand-h: 158;
+  --brand-c: 0.098;
 
-  /* state colours — semantic */
-  --color-running:  oklch(58% 0.14 230);   /* cool blue, in-flight */
-  --color-success:  oklch(45% 0 0);        /* neutral grey, done */
-  --color-warn:     oklch(62% 0.15 75);    /* amber, waiting */
-  --color-fail:     oklch(56% 0.16 25);    /* warm red, error */
-  --color-idle:     oklch(68% 0 0);        /* grey, cancelled */
+  /* ── Colour · light(默认浅色) ───────────────────────── */
+  /* 面:content = 纸(主区), app = 框架(侧栏/顶栏), raised = 卡片, sunken = 凹陷(代码块) */
+  --surface-content: oklch(100% 0 0);
+  --surface-app: oklch(97.2% 0.004 var(--brand-h));
+  --surface-raised: oklch(100% 0 0);
+  --surface-sunken: oklch(97.4% 0.003 var(--brand-h));
+  --surface-hover: oklch(94.6% 0.006 var(--brand-h));
+  --surface-press: oklch(92.4% 0.008 var(--brand-h));
 
-  /* ── Space · 4pt base ──────────────────────────────── */
-  --space-3xs: 0.125rem; /* 2  */
-  --space-2xs: 0.25rem;  /* 4  */
-  --space-xs:  0.5rem;   /* 8  */
-  --space-sm:  0.75rem;  /* 12 */
-  --space-md:  1rem;     /* 16 */
-  --space-lg:  1.5rem;   /* 24 */
-  --space-xl:  2.25rem;  /* 36 */
-  --space-2xl: 3.5rem;   /* 56 */
-  --space-3xl: 5.5rem;   /* 88 */
+  /* 文字:四级就够,别再发明第五级 */
+  --text-strong: oklch(21% 0.01 var(--brand-h));
+  --text-default: oklch(33% 0.012 var(--brand-h));
+  --text-muted: oklch(50% 0.012 var(--brand-h));
+  --text-subtle: oklch(63% 0.01 var(--brand-h));
 
-  /* ── Type scale · major third 1.25 ─────────────────── */
-  --text-2xs: 0.6875rem; /* 11 */
-  --text-xs:  0.75rem;   /* 12 */
-  --text-sm:  0.875rem;  /* 14 */
-  --text-md:  1rem;      /* 16 */
-  --text-lg:  1.25rem;   /* 20 */
-  --text-xl:  1.5rem;    /* 24 */
-  --text-2xl: 2rem;      /* 32 */
-  --text-display-s: 2.5rem;  /* 40 */
+  /* 边:三档。subtle 用于面与面的分隔,default 用于控件描边 */
+  --border-subtle: oklch(93% 0.005 var(--brand-h));
+  --border-default: oklch(89.5% 0.006 var(--brand-h));
+  --border-strong: oklch(79% 0.01 var(--brand-h));
 
-  /* ── Motion ────────────────────────────────────────── */
+  /* 品牌色:accent 实底(按钮/指示), soft 浅底(选中态), ink 浅底上的文字 */
+  --color-accent: oklch(48% var(--brand-c) var(--brand-h));
+  --color-accent-hover: oklch(42% var(--brand-c) var(--brand-h));
+  --color-accent-ink: oklch(38% calc(var(--brand-c) * 0.9) var(--brand-h));
+  --color-accent-soft: oklch(96% 0.032 var(--brand-h));
+  --color-accent-ring: oklch(48% var(--brand-c) var(--brand-h) / 0.16);
+  --color-focus: oklch(48% var(--brand-c) var(--brand-h));
+  --color-scrim: oklch(20% 0.01 var(--brand-h) / 0.32);
+  --text-on-accent: oklch(99% 0 0);
+
+  /* 状态色:语义固定,不随主题色漂移 */
+  --color-running: oklch(56% 0.13 235);
+  --color-success: oklch(52% 0.09 158);
+  --color-warn: oklch(64% 0.13 72);
+  --color-fail: oklch(54% 0.16 25);
+  --color-fail-ink: oklch(44% 0.17 25);
+  --color-idle: oklch(66% 0 0);
+
+  /* ── Space · 4pt base ───────────────────────────────── */
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.25rem;
+  --space-2xl: 3.5rem;
+  --space-3xl: 5.5rem;
+
+  /* ── Type scale ───────────────────────────────────────
+   * 下限 11px:9/10px 的标签在任何 DPI 下都糊,且与正文拉不开层次。 */
+  --text-2xs: 0.6875rem; /* 11 · 元信息/角标 */
+  --text-xs: 0.75rem;    /* 12 · 次级说明 */
+  --text-sm: 0.8125rem;  /* 13 · 界面正文(侧栏/菜单/表单) */
+  --text-md: 0.9375rem;  /* 15 · 会话正文 */
+  --text-lg: 1.0625rem;  /* 17 */
+  --text-xl: 1.3125rem;  /* 21 */
+  --text-2xl: 1.625rem;  /* 26 */
+  --text-3xl: 2rem;      /* 32 */
+  --text-display-s: 2.125rem; /* 34 · 空态字标 */
+
+  /* 行高 */
+  --leading-tight: 1.3;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.7;
+
+  /* ── Motion ─────────────────────────────────────────── */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-in:  cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
   --dur-micro: 120ms;
-  --dur-short: 220ms;
-  --dur-long:  420ms;
+  --dur-short: 200ms;
+  --dur-long: 420ms;
 
-  /* ── Depth ─────────────────────────────────────────── */
+  /* ── Depth ────────────────────────────────────────────
+   * 三层阴影都带一层 1px 的"贴地"暗边 + 一层扩散,避免廉价的大面积灰块感。
+   * ⚠ hover 一律只换面/描边,**不做位移**(translateY):位移过的元素与它自己的
+   *   阴影/描边会错位,用户看到的就是"阴影脱离按钮"。 */
   --shadow-whisper: 0 1px 2px oklch(20% 0 0 / 0.05);
-  --shadow-soft:    0 4px 16px oklch(20% 0 0 / 0.06);
-  --shadow-raised:  0 8px 28px oklch(20% 0 0 / 0.09);
+  --shadow-soft: 0 1px 2px oklch(20% 0 0 / 0.04), 0 4px 12px -2px oklch(20% 0 0 / 0.07);
+  --shadow-raised: 0 1px 2px oklch(20% 0 0 / 0.04), 0 12px 32px -8px oklch(20% 0 0 / 0.14);
+  --shadow-1: var(--shadow-whisper);
+  --shadow-2: var(--shadow-soft);
+  --shadow-3: var(--shadow-raised);
+  --ring-focus: 0 0 0 3px var(--color-accent-ring);
 
-  /* ── Z-index ───────────────────────────────────────── */
+  /* ── Z-index ────────────────────────────────────────── */
   --z-base: 1;
   --z-raised: 10;
   --z-dropdown: 100;
@@ -81,56 +146,87 @@
   --z-toast: 500;
   --z-tooltip: 600;
 
-  /* ── Rules & radii ─────────────────────────────────── */
-  --rule-hair: 1px solid var(--color-rule);
-  --rule-soft: 1px solid var(--color-rule-soft);
-  --radius-sm: 6px;
-  --radius-md: 9px;
-  --radius-lg: 13px;
+  /* ── Rules & radii ──────────────────────────────────── */
+  --rule-hair: 1px solid var(--border-subtle);
+  --rule-soft: 1px solid var(--border-subtle);
+  --rule-strong: 1px solid var(--border-default);
+  --radius-xs: 4px;
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
   --radius-full: 999px;
 
-  /* legacy bridge — keep old var names alive for any untouched selectors */
-  --ink: var(--color-ink);
-  --muted: var(--color-muted);
-  --line: var(--color-rule);
+  /* ── legacy bridge ─────────────────────────────────────
+   * style.css 里大量旧名仍在用,这里统一映射到新语义层,避免两处改色。 */
+  --color-paper: var(--surface-content);
+  --color-paper-2: var(--surface-app);
+  --color-paper-3: var(--surface-hover);
+  --color-rule: var(--border-default);
+  --color-rule-soft: var(--border-subtle);
+  --color-neutral: var(--text-muted);
+  --color-muted: var(--text-muted);
+  --color-subtle: var(--text-subtle);
+  --color-ink: var(--text-strong);
+  --color-ink-soft: var(--text-default);
+  --ink: var(--text-strong);
+  --muted: var(--text-muted);
+  --line: var(--border-default);
   --blue: var(--color-accent);
   --shadow: var(--shadow-raised);
 }
 
-/* ── Colour · Studio (dark · 黑夜主题) ────────────────────
- * 深底 + 浅字，保持 leaf-green 145 色相锚点与设计层次。
- * 仅覆盖颜色与阴影；间距 / 字号 / 动效 / 层级继承自 :root。 */
+/* ── Accent · 主题色(6 套) ────────────────────────────────
+ * 只改色相与彩度,明度由 light/dark 各自的派生式决定,新增主题色加一行即可。 */
+:root[data-accent="moss"] { --brand-h: 158; --brand-c: 0.098; } /* 墨绿 · 默认,与品牌墨迹同调 */
+:root[data-accent="indigo"] { --brand-h: 272; --brand-c: 0.135; } /* 靛蓝 */
+:root[data-accent="ocean"] { --brand-h: 228; --brand-c: 0.115; } /* 海蓝 */
+:root[data-accent="clay"] { --brand-h: 48; --brand-c: 0.115; } /* 陶土 */
+:root[data-accent="violet"] { --brand-h: 322; --brand-c: 0.125; } /* 紫罗兰 */
+:root[data-accent="graphite"] { --brand-h: 265; --brand-c: 0.008; } /* 石墨 · 近中性 */
+
+/* ── Colour · dark ───────────────────────────────────────
+ * 深底:框架(侧栏)比主区更暗 —— 与浅色"框架比纸深"是同一条层次逻辑的反相,
+ * 保证两种明度下侧栏与主区都有可辨的面差。 */
 :root[data-theme="dark"] {
-  --color-paper:    oklch(17% 0 0);
-  --color-paper-2:  oklch(21% 0 0);
-  --color-paper-3:  oklch(26% 0 0);
-  --color-rule:     oklch(30% 0 0);
-  --color-rule-soft:oklch(24% 0 0);
-  --color-neutral:  oklch(62% 0 0);
-  --color-muted:    oklch(70% 0 0);
-  --color-subtle:   oklch(48% 0 0);
-  --color-ink:      oklch(95% 0 0);
-  --color-ink-soft: oklch(82% 0 0);
-  --color-accent:   oklch(82% 0 0);           /* 中性浅灰强调 */
-  --color-accent-soft: oklch(30% 0 0);
-  --color-accent-ink:  oklch(90% 0 0);
-  --color-focus:    oklch(70% 0 0);
-  --color-fail-ink: oklch(58% 0.16 25);
-  --color-scrim:    oklch(0% 0 0 / 0.55);
+  --surface-content: oklch(18.5% 0.006 var(--brand-h));
+  --surface-app: oklch(14.8% 0.008 var(--brand-h));
+  --surface-raised: oklch(21.5% 0.008 var(--brand-h));
+  --surface-sunken: oklch(13.5% 0.006 var(--brand-h));
+  --surface-hover: oklch(25% 0.012 var(--brand-h));
+  --surface-press: oklch(28% 0.014 var(--brand-h));
 
-  /* state colours — 提亮以适配深底 */
-  --color-running:  oklch(70% 0.14 230);
-  --color-success:  oklch(60% 0 0);
-  --color-warn:     oklch(72% 0.15 75);
-  --color-fail:     oklch(64% 0.16 25);
-  --color-idle:     oklch(50% 0 0);
+  --text-strong: oklch(97% 0 0);
+  --text-default: oklch(89% 0.006 var(--brand-h));
+  --text-muted: oklch(72% 0.008 var(--brand-h));
+  --text-subtle: oklch(58% 0.008 var(--brand-h));
 
-  /* 深底阴影更重，靠对比而非色相 */
-  --shadow-whisper: 0 1px 2px oklch(0% 0 0 / 0.30);
-  --shadow-soft:    0 4px 16px oklch(0% 0 0 / 0.35);
-  --shadow-raised:  0 8px 28px oklch(0% 0 0 / 0.45);
+  --border-subtle: oklch(27% 0.01 var(--brand-h));
+  --border-default: oklch(32% 0.012 var(--brand-h));
+  --border-strong: oklch(44% 0.014 var(--brand-h));
+
+  /* 深底上 accent 提亮,保证白字/深字都有对比 */
+  --color-accent: oklch(72% calc(var(--brand-c) * 0.95) var(--brand-h));
+  --color-accent-hover: oklch(78% calc(var(--brand-c) * 0.95) var(--brand-h));
+  --color-accent-ink: oklch(88% calc(var(--brand-c) * 0.6) var(--brand-h));
+  --color-accent-soft: oklch(28% 0.045 var(--brand-h));
+  --color-accent-ring: oklch(72% var(--brand-c) var(--brand-h) / 0.28);
+  --color-focus: oklch(78% calc(var(--brand-c) * 0.8) var(--brand-h));
+  --color-scrim: oklch(0% 0 0 / 0.55);
+  --text-on-accent: oklch(16% 0.02 var(--brand-h));
+
+  --color-running: oklch(74% 0.12 235);
+  --color-success: oklch(74% 0.1 158);
+  --color-warn: oklch(78% 0.13 72);
+  --color-fail: oklch(70% 0.15 25);
+  --color-fail-ink: oklch(78% 0.14 25);
+  --color-idle: oklch(58% 0 0);
+
+  --shadow-whisper: 0 1px 2px oklch(0% 0 0 / 0.3);
+  --shadow-soft: 0 1px 2px oklch(0% 0 0 / 0.28), 0 4px 14px -2px oklch(0% 0 0 / 0.4);
+  --shadow-raised: 0 1px 2px oklch(0% 0 0 / 0.3), 0 14px 36px -8px oklch(0% 0 0 / 0.55);
 }
 
-/* color-scheme: 让原生控件(滚动条/输入框光标等)跟随主题 */
+/* color-scheme: 让原生控件(滚动条 / 输入光标 / 表单)跟随主题 */
 :root[data-theme="light"] { color-scheme: light; }
-:root[data-theme="dark"]  { color-scheme: dark; }
+:root[data-theme="dark"] { color-scheme: dark; }
