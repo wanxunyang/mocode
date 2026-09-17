@@ -9,9 +9,9 @@
 
 :root {
   /* ── Type ───────────────────────────────────────────── */
-  --font-display: "Fraunces", "Noto Serif SC", ui-serif, Georgia, serif;
-  --font-body:    "Geist", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
-  --font-outlier: "Geist Mono", "Noto Sans Mono CJK SC", ui-monospace, SFMono-Regular, Consolas, monospace;
+  --font-display: "Fraunces", "MiSans", "Noto Serif SC", ui-serif, Georgia, serif;
+  --font-body:    "Geist", "MiSans", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
+  --font-outlier: "Geist Mono", "MiSans", "Noto Sans Mono CJK SC", ui-monospace, SFMono-Regular, Consolas, monospace;
 
   /* ── Colour · Studio (light · 默认) ──────────────────── */
   --color-paper:    oklch(100% 0 0);          /* 纯白主背景 */

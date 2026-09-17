@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mocode Work</title>
     <link rel="stylesheet" href="tokens.css" />
+    <link rel="stylesheet" href="fonts/misans/MiSans-Regular.min.css" />
+    <link rel="stylesheet" href="fonts/misans/MiSans-Medium.min.css" />
+    <link rel="stylesheet" href="fonts/misans/MiSans-Demibold.min.css" />
+    <link rel="stylesheet" href="fonts/misans/MiSans-Bold.min.css" />
     <link rel="stylesheet" href="style.css" />
     <script>
       // 首屏前同步应用主题，避免加载闪烁。优先级:localStorage > 系统偏好。
@@ -30,24 +34,10 @@
           <button class="nav-item" id="pull-requests"><svg class="icon" data-icon="git-pull-request"></svg>拉取请求</button>
         </nav>
         <section class="sidebar-section tasks-section"><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
-        <button class="sidebar-footer" id="settings-button" title="设置与帮助" aria-haspopup="true" aria-expanded="false">
+        <button class="sidebar-footer" id="settings-button" title="设置" aria-haspopup="dialog" aria-expanded="false">
           <span class="avatar">M</span>
           <span class="footer-brand">Mocode</span>
-          <span class="usage" id="usage">0%</span>
-          <svg class="icon footer-chevron" data-icon="chevron-down"></svg>
         </button>
-        <div class="settings-popover hidden" id="settings-popover" role="menu" aria-label="设置与帮助">
-          <div class="settings-group">
-            <span class="settings-label">外观</span>
-            <div class="settings-segmented" id="theme-segmented" role="group" aria-label="主题">
-              <button data-theme="light" role="menuitemradio" aria-checked="false">浅色</button>
-              <button data-theme="dark" role="menuitemradio" aria-checked="false">深色</button>
-              <button data-theme="system" role="menuitemradio" aria-checked="false">自动</button>
-            </div>
-          </div>
-          <button class="settings-item" id="settings-shortcuts" role="menuitem"><svg class="icon" data-icon="keyboard"></svg>键盘快捷键</button>
-          <button class="settings-item" id="settings-about" role="menuitem"><svg class="icon" data-icon="info"></svg>关于 Mocode Work</button>
-        </div>
         <div class="sidebar-resize" id="sidebar-resize" aria-label="拖动调整侧栏宽度" role="separator" aria-orientation="vertical"></div>
       </aside>
       <main class="workspace">
@@ -55,7 +45,7 @@
         <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览"><svg class="icon" data-icon="layout"></svg></button><button id="show-files" title="浏览文件"><svg class="icon" data-icon="files"></svg></button></div>
           <section id="empty-state" class="empty-state">
           <h1>开始一个任务</h1>
-          <p>直接描述你想做的事，回车就开工 —— 任务标题会按你的第一句话自动命名。Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。工作空间可在下方切换。</p>
+          <p>直接描述你想做的事，回车就开工 —— 任务标题会按你的第一句话自动命名。Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。想在某个目录里干活，就先用下方 chip 关联工作空间；纯聊天式的任务也可以不关联。</p>
         </section>
         <section id="conversation" class="conversation" aria-live="polite"></section>
         <section id="approval-panel" class="approval-panel hidden"></section>
@@ -85,6 +75,82 @@
         </footer>
       </main>
       </div>
+
+      <!-- 设置弹窗：左侧分类导航 + 右侧内容，分类列表化 -->
+      <section id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+        <div class="modal-card settings-card">
+          <aside class="settings-nav" role="tablist" aria-label="设置分类">
+            <b id="settings-modal-title" class="settings-nav-title">设置</b>
+          </aside>
+          <div class="settings-main">
+            <header class="settings-main-head">
+              <b id="settings-section-title">模型</b>
+              <button class="modal-close icon-button muted" id="settings-close" title="关闭" aria-label="关闭"><svg class="icon" data-icon="close"></svg></button>
+            </header>
+            <div id="settings-section" class="settings-section"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 模型预设编辑器：新增 / 编辑共用。字段与 ~/.mocode/models/<name>.json 一一对应 -->
+      <section id="model-form-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="model-form-title">
+        <div class="modal-card model-form-card">
+          <header class="modal-head">
+            <b id="model-form-title">添加模型</b>
+            <button class="modal-close icon-button muted" data-close title="关闭" aria-label="关闭"><svg class="icon" data-icon="close"></svg></button>
+          </header>
+          <div class="modal-body model-form-body">
+            <label class="field">
+              <span class="field-label">提供商预设</span>
+              <select id="model-form-template" class="field-input">
+                <option value="">自定义（全部手填）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">预设名 <span class="field-optional">保存为 ~/.mocode/models/&lt;名&gt;.json</span></span>
+              <input id="model-form-name" class="field-input" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="例如 my-deepseek（仅字母、数字、_ 和 -）" />
+            </label>
+            <label class="field">
+              <span class="field-label">接口协议</span>
+              <select id="model-form-provider" class="field-input">
+                <option value="openai">openai（OpenAI 兼容端点）</option>
+                <option value="anthropic">anthropic（Anthropic 原生）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">API 地址</span>
+              <input id="model-form-baseurl" class="field-input" type="text" autocomplete="off" spellcheck="false" placeholder="https://api.example.com/v1" />
+            </label>
+            <label class="field">
+              <span class="field-label">模型名 <span class="field-optional">须支持 function calling</span></span>
+              <input id="model-form-model" class="field-input" type="text" autocomplete="off" spellcheck="false" placeholder="例如 deepseek-chat" />
+            </label>
+            <label class="field">
+              <span class="field-label">API Key <span class="field-optional">仅本机保存</span></span>
+              <input id="model-form-apikey" class="field-input" type="password" autocomplete="off" spellcheck="false" placeholder="sk-..." />
+            </label>
+            <label class="field">
+              <span class="field-label">上下文窗口 <span class="field-optional">tokens</span></span>
+              <input id="model-form-window" class="field-input" type="number" min="1" step="1000" autocomplete="off" placeholder="256000" />
+            </label>
+            <button class="settings-row settings-toggle field-hidden" id="model-form-cache" role="switch" aria-checked="false">
+              <span class="settings-row-body"><span class="settings-row-title">Prompt Cache</span><span class="settings-row-sub">仅 anthropic 协议生效，可显著降低重复前缀成本</span></span>
+              <span class="settings-switch" aria-hidden="true"></span>
+            </button>
+            <button class="settings-row settings-toggle field-hidden" id="model-form-activate" role="switch" aria-checked="true">
+              <span class="settings-row-body"><span class="settings-row-title">保存后立即启用</span><span class="settings-row-sub">写入配置并重启后台 agent，后续任务用这个模型</span></span>
+              <span class="settings-switch" aria-hidden="true"></span>
+            </button>
+            <p class="model-form-error hidden" id="model-form-error"></p>
+          </div>
+          <footer class="modal-foot">
+            <button class="btn-ghost" id="model-form-delete" hidden>删除</button>
+            <span class="modal-foot-spacer"></span>
+            <button class="btn-ghost" data-close>取消</button>
+            <button class="btn-primary" id="model-form-save">保存</button>
+          </footer>
+        </div>
+      </section>
 
       <!-- 重命名任务 弹窗（新建任务不再弹窗，标题由首条指令自动摘要） -->
       <section id="task-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">

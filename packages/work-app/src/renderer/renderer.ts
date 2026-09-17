@@ -17,7 +17,9 @@ type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: s
 type Attachment = { name: string; dataUrl: string };
 type LlmProvider = 'openai' | 'anthropic';
 type ModelConfig = { model: string; label: string; provider: LlmProvider; promptCache: boolean; baseUrl: string; contextWindow: number | null; language: string; theme: string };
-type ModelItem = { name: string; label: string; provider: LlmProvider; promptCache: boolean; baseURL: string; contextWindow: number; isActive: boolean };
+type ModelItem = { name: string; label: string; provider: LlmProvider; promptCache: boolean; baseURL: string; providerHost: string; contextWindow: number; isActive: boolean };
+type ModelDraft = { provider: LlmProvider; baseURL: string; apiKey: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
+type ModelPresetDetail = ModelDraft & { name: string };
 
 declare global {
   interface Window {
@@ -26,6 +28,7 @@ declare global {
       pickProject: () => Promise<WorkState | null>;
       selectProject: (id: string) => Promise<WorkState>;
       createTask: (title: string, projectId?: string) => Promise<{ state: WorkState; task: Task }>;
+      setTaskProject: (id: string, projectId: string) => Promise<{ ok: boolean; message?: string; state?: WorkState; task?: Task }>;
       selectTask: (id: string) => Promise<{ state: WorkState; task: Task; history: HistoryItem[] } | null>;
       clearTasks: (projectId?: string) => Promise<WorkState>;
       deleteTask: (id: string) => Promise<WorkState | null>;
@@ -41,6 +44,11 @@ declare global {
       getConfig: () => Promise<ModelConfig>;
       listModels: () => Promise<ModelItem[]>;
       switchModel: (name: string) => Promise<{ ok: boolean; message: string }>;
+      getModel: (name: string) => Promise<{ ok: boolean; message?: string; preset?: ModelPresetDetail }>;
+      saveModel: (payload: { name: string; originalName?: string; draft: ModelDraft; activate?: boolean }) => Promise<{ ok: boolean; message: string; name?: string }>;
+      deleteModel: (name: string) => Promise<{ ok: boolean; message: string }>;
+      getSettings: () => Promise<Record<string, boolean>>;
+      setSettings: (patch: Record<string, boolean>) => Promise<Record<string, boolean>>;
       listBranches: () => Promise<{ ok: boolean; message: string; current: string; branches: string[] }>;
       switchBranch: (branch: string) => Promise<{ ok: boolean; message: string; branch?: string }>;
       setTheme: (theme: 'light' | 'dark' | 'system') => void;
@@ -173,12 +181,12 @@ function renderTasks(): void {
 
   const tasksCollapsed = collapsedSections.has('tasks');
   const spacesCollapsed = collapsedSections.has('spaces');
-  const sectionHeading = (key: string, title: string, count: number, collapsed: boolean): string =>
-    `<div class="sidebar-group-heading" data-toggle-section="${key}" title="点击展开 / 折叠" aria-expanded="${!collapsed}"><span class="sidebar-group-title">${title}</span><span class="sidebar-group-count">(${count})</span><span class="sidebar-group-chevron">${icon(collapsed ? 'chevron-right' : 'chevron-down')}</span></div>`;
+  const sectionHeading = (key: string, title: string, count: number, collapsed: boolean, action?: { kind: string; title: string; label: string }): string =>
+    `<div class="sidebar-group-heading" data-toggle-section="${key}" title="点击展开 / 折叠" aria-expanded="${!collapsed}"><span class="sidebar-group-title">${title}</span><span class="sidebar-group-count">(${count})</span><span class="sidebar-group-chevron">${icon(collapsed ? 'chevron-right' : 'chevron-down')}</span>${action ? `<button class="sidebar-group-action" data-group-action="${action.kind}" title="${action.title}" aria-label="${action.title}">${icon(action.label)}</button>` : ''}</div>`;
 
   taskList.innerHTML = `<div class="sidebar-group ${tasksCollapsed ? 'collapsed' : ''}">
-  ${sectionHeading('tasks', '任务', normalTasks.length, tasksCollapsed)}
-  <div class="sidebar-group-body">${normalTasks.map(taskItemHtml).join('')}</div>
+  ${sectionHeading('tasks', '任务', normalTasks.length, tasksCollapsed, { kind: 'new-task', title: '新建无空间的任务', label: 'plus' })}
+  <div class="sidebar-group-body">${normalTasks.length ? normalTasks.map(taskItemHtml).join('') : '<p class="empty-tasks">无任务</p>'}</div>
 </div>
 <div class="sidebar-group ${spacesCollapsed ? 'collapsed' : ''}">
   ${sectionHeading('spaces', '空间', spaces.length, spacesCollapsed)}
@@ -191,7 +199,7 @@ function renderTasks(): void {
     <span class="project-group-icon">${icon('folder')}</span>
     <span class="project-group-name" title="${escapeHtml(project.name)}">${escapeHtml(project.name)}</span>
     <span class="project-group-chevron">${icon(isCollapsed ? 'chevron-right' : 'chevron-down')}</span>
-    <span class="project-group-actions"><button class="project-menu-btn icon-button-square" data-project-menu="${projectId}" title="更多操作" aria-label="${escapeHtml(project.name)} 更多操作">${icon('more')}</button></span>
+    <span class="project-group-actions"><button class="project-menu-btn icon-button-square" data-new-task-project="${projectId}" title="在此空间新建任务" aria-label="在 ${escapeHtml(project.name)} 中新建任务">${icon('plus')}</button><button class="project-menu-btn icon-button-square" data-project-menu="${projectId}" title="更多操作" aria-label="${escapeHtml(project.name)} 更多操作">${icon('more')}</button></span>
   </div>
   <div class="project-group-tasks">${tasks.length ? tasks.map(taskItemHtml).join('') : '<p class="empty-tasks">无任务</p>'}</div>
 </div>`;
@@ -212,6 +220,13 @@ function renderTasks(): void {
     });
   });
 
+  // 分组标题右侧的快捷动作（目前只有「任务」分组的新建无空间任务）：
+  // 阻止冒泡，否则会连带触发整行的折叠/展开。
+  taskList.querySelectorAll<HTMLButtonElement>('[data-group-action]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (button.dataset.groupAction === 'new-task') void startNewTask('');
+  }));
+
   taskList.querySelectorAll<HTMLElement>('[data-toggle-project]').forEach((heading) => {
     const projectId = heading.dataset.toggleProject!;
     heading.addEventListener('click', () => {
@@ -230,25 +245,34 @@ function renderTasks(): void {
   taskList.querySelectorAll<HTMLButtonElement>('[data-task]').forEach((button) => {
     button.addEventListener('click', () => void openTask(button.dataset.task!));
     button.querySelector<HTMLElement>('.task-title')?.addEventListener('dblclick', (event) => { event.preventDefault(); event.stopPropagation(); void startTaskRename(button.dataset.task!); });
+    // 右键 = 「...」菜单:重命名/删除不用先去找 hover 才出现的小按钮
+    button.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openTaskMenu(button.dataset.task!, (event.target as HTMLElement).getBoundingClientRect());
+    });
   });
 
-  taskList.querySelectorAll<HTMLButtonElement>('[data-task-menu]').forEach((button) => button.addEventListener('click', (event) => {
-    event.stopPropagation();
+  const openTaskMenu = (taskId: string, anchor: DOMRect): void => {
     const existing = document.getElementById('task-context-menu');
     if (existing) existing.remove();
-    const taskId = button.dataset.taskMenu!;
     const task = state?.tasks.find((item) => item.id === taskId);
     if (!task) return;
     const isRunning = task.status === 'running' || task.status === 'waiting';
-    const rect = button.getBoundingClientRect();
+    // 归属只能在任务跑起来之前改（host cwd 固化 + 会话按目录落盘）。
+    const canMove = !task.sessionId && !isRunning;
+    const projects = state?.projects ?? [];
+    const moveItems = canMove && projects.length
+      ? `<div class="project-context-divider"></div><div class="project-context-label">移动到</div>${!task.projectId ? '' : `<button class="project-context-item" data-action="move" data-tid="${taskId}" data-target=""><span class="project-context-icon">${icon('folder')}</span>不使用工作空间</button>`}${projects.filter((p) => p.id !== task.projectId).map((p) => `<button class="project-context-item" data-action="move" data-tid="${taskId}" data-target="${escapeHtml(p.id)}"><span class="project-context-icon">${icon('folder')}</span>${escapeHtml(p.name)}</button>`).join('')}`
+      : '';
     const menu = document.createElement('div');
     menu.id = 'task-context-menu';
     menu.className = 'project-context-menu';
-    menu.innerHTML = `<button class="project-context-item" data-action="rename" data-tid="${taskId}"><span class="project-context-icon">${icon('edit')}</span>重命名</button><button class="project-context-item" data-action="delete" data-tid="${taskId}"${isRunning ? ' data-running="1"' : ''}><span class="project-context-icon">${icon('trash')}</span>${isRunning ? '停止并删除' : '删除'}</button>`;
+    menu.innerHTML = `<button class="project-context-item" data-action="rename" data-tid="${taskId}"><span class="project-context-icon">${icon('edit')}</span>重命名</button>${moveItems}<div class="project-context-divider"></div><button class="project-context-item" data-action="delete" data-tid="${taskId}"${isRunning ? ' data-running="1"' : ''}><span class="project-context-icon">${icon('trash')}</span>${isRunning ? '停止并删除' : '删除'}</button>`;
     document.body.appendChild(menu);
     const menuRect = menu.getBoundingClientRect();
-    let left = rect.right - menuRect.width;
-    let top = rect.bottom + 4;
+    let left = anchor.right - menuRect.width;
+    let top = anchor.bottom + 4;
     if (left < 4) left = 4;
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
@@ -263,8 +287,26 @@ function renderTasks(): void {
         void startTaskRename(tid);
       } else if (action === 'delete') {
         void deleteTask(tid);
+      } else if (action === 'move') {
+        const target = item.dataset.target ?? '';
+        const result = await window.mocodeWork.setTaskProject(tid, target);
+        if (!result.ok) { showToast('warn', result.message ?? '无法移动任务'); return; }
+        if (result.state) updateState(result.state);
+        const label = target ? state?.projects.find((p) => p.id === target)?.name ?? target : '无工作空间';
+        showToast('success', `已移动到「${label}」`);
       }
     }));
+  };
+
+  taskList.querySelectorAll<HTMLButtonElement>('[data-task-menu]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openTaskMenu(button.dataset.taskMenu!, button.getBoundingClientRect());
+  }));
+
+  // 空间行「+」：在该空间下新建任务（归属显式绑定，不再依赖"跟随当前选中空间"）。
+  taskList.querySelectorAll<HTMLButtonElement>('[data-new-task-project]').forEach((button) => button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    void startNewTask(button.dataset.newTaskProject!);
   }));
 
   // 项目行「...」菜单：打开文件夹 / 从列表移除
@@ -307,10 +349,6 @@ function renderTasks(): void {
       }
     }));
   }));
-
-  const running = current.tasks.filter((task) => task.status === 'running' || task.status === 'waiting').length;
-  const total = current.tasks.length;
-  $('#usage').textContent = total ? `${total} 任务${running ? ` · ${running} 运行中` : ''}` : '0%';
 }
 
 function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); renderEmptyChips(); }
@@ -593,10 +631,14 @@ function scheduleMdRender(block: HTMLElement): void {
   if (mdRenderTimer !== null) return;
   mdRenderTimer = setTimeout(() => {
     mdRenderTimer = null;
+    // 渲染前记录是否贴底:重渲染会让视口上方的块变高(代码块加头等),把底部推远,
+    // 渲染后再判断 isAtBottom 已经是 false —— 必须用渲染前的状态决定要不要跟上。
+    const pinned = isAtBottom();
     for (const pending of pendingMdBlocks) {
       if (pending.isConnected) renderMessageBody(pending, closeOpenFence(textBlockRaw.get(pending) ?? ''));
     }
     pendingMdBlocks.clear();
+    if (pinned) smartScrollToBottom(true);
   }, MD_RENDER_INTERVAL);
 }
 function appendText(text: string): void {
@@ -651,6 +693,8 @@ function finalizeTurn(message: HTMLElement | null): void {
   // 待执行的节流渲染不再需要 —— 下面马上做最终渲染
   if (mdRenderTimer !== null) { clearTimeout(mdRenderTimer); mdRenderTimer = null; pendingMdBlocks.clear(); }
   const parts: string[] = [];
+  // 同理:渲染前的贴底状态才算数(见 scheduleMdRender 注释)
+  const pinned = isAtBottom();
   for (const block of Array.from(message.querySelectorAll<HTMLElement>('.message-body'))) {
     // textContent 在 md 渲染后会丢 markdown 语法,原始文本以 WeakMap 为准
     const text = textBlockRaw.get(block) ?? block.textContent ?? '';
@@ -658,6 +702,7 @@ function finalizeTurn(message: HTMLElement | null): void {
     parts.push(text);
     renderMessageBody(block, text);
   }
+  if (pinned) smartScrollToBottom(true);
   wireMessageActions(message, parts.join('\n\n'));
 }
 
@@ -1069,7 +1114,8 @@ async function submit(): Promise<void> {
   let task = selectedTask();
   // 只有在完全没有选中的任务时才新建；若已选中（含「新建任务」预建的 queued 任务，尚无 session），直接续用，避免重复建任务。
   if (!task) {
-    const created = await window.mocodeWork.createTask(''); updateState(created.state); task = created.task;
+    // undefined 归属 = 跟随当前选中空间（全局默认）；纯任务走「任务」分组的 + 或 chip 解除关联。
+    const created = await window.mocodeWork.createTask('', undefined); updateState(created.state); task = created.task;
   }
   // 标题自动摘要：新建后还没命名的任务，用这一条指令就地命名（用户手动改过就不动）。
   if (!task.title.trim() && !task.sessionId) {
@@ -1244,6 +1290,8 @@ function switchToTask(taskId: string, history?: HistoryItem[]): void {
     renderHistory(history);
     updateContextUsage(null);
   }
+  // 切进任务一律落在最底部最新消息(回放/finalize 之后高度已定,强制校一次)
+  smartScrollToBottom(true);
   // 切换任务清空附件草稿 —— 附件属于「当前正在编辑的这条消息」，不属于任务。
   attachments = []; renderAttachments();
   emptyState.classList.toggle('hidden', conversation.querySelector('.message') != null);
@@ -1261,10 +1309,17 @@ async function refreshInspector(): Promise<void> {
   setInspectorTab(activeInspectorTab); inspectorContent.innerHTML = '<p class="inspector-loading">正在读取…</p>';
   if (activeInspectorTab === 'overview') {
     inspectorTitle.textContent = '项目概览'; const overview = await window.mocodeWork.projectOverview();
+    // 纯任务没有工作空间：明说，别让用户对着一堆"未发现文件"猜哪里出了问题。
+    if (overview.noWorkspace) {
+      inspectorContent.innerHTML = '<p class="inspector-empty">当前任务没有关联工作空间。<br />用输入框下方的 chip 选择一个目录后，这里会显示分支、变更与文件。</p>';
+      return;
+    }
     const status = Array.isArray(overview.status) ? overview.status.map(String) : []; const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
     inspectorContent.innerHTML = `<section class="overview-card"><b>${escapeHtml(String(overview.branch ?? '本地'))}</b><span>${escapeHtml(String(overview.lastCommit ?? '尚无 Git 提交'))}</span></section><h3>工作区变更</h3>${status.length ? `<pre class="status-output">${escapeHtml(status.join('\n'))}</pre>` : '<p class="inspector-empty">工作区干净</p>'}${overview.diffStat ? `<pre class="status-output">${escapeHtml(String(overview.diffStat))}</pre>` : ''}<h3>最近文件</h3>${files.slice(0, 12).map((file) => inspectorButton(file, 'file', file)).join('') || '<p class="inspector-empty">未发现可预览的文件</p>'}`;
   } else if (activeInspectorTab === 'files') {
-    inspectorTitle.textContent = '文件'; const overview = await window.mocodeWork.projectOverview(); const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
+    inspectorTitle.textContent = '文件'; const overview = await window.mocodeWork.projectOverview();
+    if (overview.noWorkspace) { inspectorContent.innerHTML = '<p class="inspector-empty">当前任务没有关联工作空间。</p>'; return; }
+    const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
     inspectorContent.innerHTML = files.map((file) => inspectorButton(file, 'file', file)).join('') || '<p class="inspector-empty">未发现可预览的文件</p>';
   } else {
     inspectorTitle.textContent = '拉取请求'; const result = await window.mocodeWork.pullRequests();
@@ -1305,13 +1360,17 @@ $('#new-task').addEventListener('click', () => void startNewTask());
 /**
  * 新建任务：不弹窗、不填表。直接建一个空任务（标题留空 → 侧栏显示「新任务」），
  * 工作区清空并把焦点交给输入框；标题等用户发出第一条指令后由 summarizePrompt 自动生成。
+ *
+ * projectId：'' = 纯任务（落「任务」分组）；项目 id = 归入该空间；undefined = 跟随当前选中空间。
  */
-async function startNewTask(): Promise<void> {
+async function startNewTask(projectId?: string): Promise<void> {
   // 并行友好:别的任务在后台跑也可以继续开新任务。
   const current = selectedTask();
-  // 已经有一个「刚新建、还没发过消息」的任务时直接续用，避免连点堆出一串空任务。
-  if (current && !current.sessionId && !conversation.querySelector('.message')) { promptInput.focus(); return; }
-  const created = await window.mocodeWork.createTask('');
+  // 已经有一个「刚新建、还没发过消息、且归属相同」的任务时直接续用，避免连点堆出一串空任务。
+  // 归属不同不能续用 —— 否则点了「任务」分组的 + 却复用了空间里的草稿，用户会以为按钮坏了。
+  const sameScope = current && (projectId === undefined || (current.projectId || '') === projectId);
+  if (current && sameScope && !current.sessionId && !conversation.querySelector('.message')) { promptInput.focus(); return; }
+  const created = await window.mocodeWork.createTask('', projectId);
   updateState(created.state);
   clearWorkspace();
   promptInput.value = ''; resizePrompt(); updateContextUsage(null);
@@ -1391,50 +1450,627 @@ function applyTheme(saved: 'light' | 'dark' | 'system'): void {
 }
 
 const settingsButton = $('#settings-button') as HTMLButtonElement | null;
-const settingsPopover = $('#settings-popover');
-const themeSegmented = $('#theme-segmented');
+const settingsModal = $('#settings-modal');
+const settingsNav = settingsModal?.querySelector<HTMLElement>('.settings-nav') ?? null;
+const settingsSection = $('#settings-section');
+const settingsSectionTitle = $('#settings-section-title');
 
+function currentSavedTheme(): 'light' | 'dark' | 'system' {
+  try { return (localStorage.getItem('mocode-work-theme') as 'light' | 'dark' | 'system') || 'system'; }
+  catch { return 'system'; }
+}
 function refreshThemeSegmented(): void {
-  let saved: string;
-  try { saved = localStorage.getItem('mocode-work-theme') || 'system'; } catch { saved = 'system'; }
-  themeSegmented?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
-    const active = button.dataset.theme === saved;
-    button.setAttribute('aria-checked', String(active));
+  const saved = currentSavedTheme();
+  document.querySelectorAll<HTMLButtonElement>('.settings-theme').forEach((button) => {
+    button.setAttribute('aria-checked', String(button.dataset.theme === saved));
   });
 }
 
-function toggleSettingsPopover(show?: boolean): void {
-  const next = show ?? settingsPopover?.classList.contains('hidden') ?? false;
-  settingsPopover?.classList.toggle('hidden', !next);
-  if (settingsButton) settingsButton.setAttribute('aria-expanded', String(next));
-  if (next) refreshThemeSegmented();
+/* ── 设置弹窗:左侧分类导航 + 右侧内容 ─────────────────────── */
+type SettingsSectionId = 'model' | 'behavior' | 'appearance' | 'about';
+const SETTINGS_SECTIONS: Array<{ id: SettingsSectionId; label: string; icon: string; desc: string }> = [
+  { id: 'model', label: '模型', icon: 'spark-bot', desc: '选择 Mocode 使用的模型预设' },
+  { id: 'behavior', label: '行为', icon: 'wrench', desc: '上下文、记忆与子代理开关' },
+  { id: 'appearance', label: '外观', icon: 'sun', desc: '主题与界面显示' },
+  { id: 'about', label: '关于', icon: 'info', desc: '版本与配置路径' },
+];
+let settingsActiveSection: SettingsSectionId = 'model';
+const SETTING_ITEMS: Array<{ key: string; label: string; hint: string }> = [
+  { key: 'autoCompact', label: '自动压缩上下文', hint: '上下文接近上限时自动压缩历史，避免超限失败' },
+  { key: 'memory', label: '跨会话记忆', hint: '跨会话记住项目偏好与约定（原 /memory_switch）' },
+  { key: 'subAgent', label: '子代理', hint: '允许 agent 派生子代理并行处理子任务' },
+  { key: 'autoReflect', label: '自动反思', hint: '任务结束后自动复盘并把经验写入记忆' },
+];
+let settingsState: Record<string, boolean> = {};
+
+/* ── 模型分组:按 API 地址归类到「提供商」 ────────────────────
+ * 预设文件的 provider 字段只有 openai/anthropic 两种协议名,无法区分
+ * DeepSeek / Kimi / 火山 这些真实厂商;而 baseURL 的 host 天然唯一标识厂商。
+ * 所以分组一律以 host 为准(main 侧已剥掉 api./www. 这类前缀保证同厂商同键)。 */
+const KNOWN_PROVIDERS: Array<{ match: RegExp; name: string }> = [
+  { match: /(^|\.)deepseek\.(com|cn)$/, name: 'DeepSeek' },
+  { match: /(^|\.)moonshot\.(cn|com)$/, name: 'Moonshot' },
+  { match: /(^|\.)anthropic\.com$/, name: 'Anthropic' },
+  { match: /(^|\.)openai\.com$/, name: 'OpenAI' },
+  { match: /(^|\.)siliconflow\.(cn|com)$/, name: 'SiliconFlow' },
+  { match: /(^|\.)(volces|volcengine)\.com$/, name: '火山方舟' },
+  { match: /(^|\.)dashscope\.aliyuncs\.com$/, name: '阿里云百炼' },
+  { match: /(^|\.)(bigmodel|zhipuai)\.cn$/, name: '智谱 AI' },
+  { match: /(^|\.)(qianfan|baidubce)\.com$/, name: '百度千帆' },
+  { match: /(^|\.)(hunyuan\.tencent|tencentcloudapi)\.com$/, name: '腾讯混元' },
+  { match: /(^|\.)minimax(chat)?\.(com|cn)$/, name: 'MiniMax' },
+  { match: /(^|\.)modelscope\.cn$/, name: 'ModelScope' },
+  { match: /(^|\.)openrouter\.ai$/, name: 'OpenRouter' },
+  { match: /(^|\.)groq\.com$/, name: 'Groq' },
+  { match: /^local(host)?$|^127\.0\.0\.1$|^0\.0\.0\.0$|^\[::1\]$/, name: '本地服务' },
+];
+
+/** host → 展示名。已知厂商给品牌名,未知则回退裸主机名。 */
+function providerNameOf(host: string): string {
+  const bare = (host || '').split(':')[0]!.toLowerCase();
+  if (!bare) return '未配置地址';
+  for (const item of KNOWN_PROVIDERS) if (item.match.test(bare)) return item.name;
+  return bare;
 }
 
-settingsButton?.addEventListener('click', () => toggleSettingsPopover());
+/** 稳定色相:同一个提供商任何时候都拿到同一个颜色,不随列表顺序漂移。 */
+/** 组头副标题：带上端口，避免两个自建网关都显示成 `localhost` 分不清。 */
+function displayHost(url: string): string {
+  return (url || '').replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/\/.*$/, '');
+}
 
-themeSegmented?.querySelectorAll<HTMLButtonElement>('button').forEach((button) => button.addEventListener('click', () => {
-  const theme = button.dataset.theme as 'light' | 'dark' | 'system';
-  applyTheme(theme);
-}));
+/** 未知厂商时组名就是裸主机名，再显示一遍 host 纯属噪声 —— 只在两者不同时才作为副标题。 */
+function groupHostLabel(group: ModelGroup): string {
+  return group.host && group.host !== group.name ? group.host : '';
+}
 
-$('#settings-shortcuts')?.addEventListener('click', () => {
-  toggleSettingsPopover(false);
-  showCheatsheet();
-});
+/** 未知厂商时用主机名首字母做标记,补足「一眼分辨哪一组」的诉求。 */
+function providerInitial(name: string): string {
+  const first = (name || '').trim()[0];
+  return first ? first.toUpperCase() : '•';
+}
 
-$('#settings-about')?.addEventListener('click', () => {
-  toggleSettingsPopover(false);
-  showToast('info', 'Mocode Work · 桌面客户端', 3000);
-});
+type ModelGroup = { key: string; name: string; host: string; items: ModelItem[] };
 
-// 点击外部或按 Esc 关闭设置浮层
-document.addEventListener('click', (event) => {
-  if (!settingsPopover?.classList.contains('hidden') && event.target instanceof Node && !settingsPopover?.contains(event.target) && !settingsButton?.contains(event.target)) {
-    toggleSettingsPopover(false);
+/** 按提供商分组:组内激活项置顶,其余按模型名排序;组间按名称排序。 */
+function groupModelsByProvider(list: ModelItem[]): ModelGroup[] {
+  const map = new Map<string, ModelGroup>();
+  for (const model of list) {
+    const key = (model.providerHost || '').toLowerCase() || '__none__';
+    let group = map.get(key);
+    if (!group) {
+      group = { key, name: providerNameOf(model.providerHost), host: displayHost(model.baseURL), items: [] };
+      map.set(key, group);
+    }
+    group.items.push(model);
   }
+  for (const group of map.values()) {
+    group.items.sort((a, b) => (a.isActive === b.isActive ? a.label.localeCompare(b.label) : a.isActive ? -1 : 1));
+  }
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** 设置页的模型行(分组内复用)。 */
+function settingsModelRow(model: ModelItem): string {
+  const meta = [
+    `预设 ${escapeHtml(model.name)}`,
+    model.provider === 'anthropic' ? 'anthropic' : null,
+    model.contextWindow ? `${(model.contextWindow / 1000).toFixed(0)}k` : null,
+    model.provider === 'anthropic' && model.promptCache ? 'cache' : null,
+  ].filter(Boolean).join(' · ');
+  return `
+    <div class="settings-row-wrap">
+      <button class="settings-row settings-model ${model.isActive ? 'active' : ''}" data-model="${escapeHtml(model.name)}" role="option" aria-selected="${model.isActive}">
+        <span class="settings-row-radio">${model.isActive ? icon('check') : ''}</span>
+        <span class="settings-row-body">
+          <span class="settings-row-title">${escapeHtml(model.label)}</span>
+          <span class="settings-row-sub">${meta}</span>
+        </span>
+        ${model.isActive ? '<span class="settings-row-tag">当前</span>' : ''}
+      </button>
+      <button class="settings-row-act icon-button muted" data-edit="${escapeHtml(model.name)}" title="编辑 ${escapeHtml(model.name)}" aria-label="编辑模型 ${escapeHtml(model.name)}">${icon('edit')}</button>
+    </div>`;
+}
+
+/** 「模型」分类：模型预设列表 + 当前生效配置摘要。 */
+async function renderSettingsModelSection(): Promise<void> {
+  if (!settingsSection) return;
+  // 空态也要能添加 —— 这正是「一个预设都没有」时用户最需要的那颗按钮。
+  if (!modelList.length) {
+    settingsSection.innerHTML = `
+      <div class="settings-block">
+        <div class="settings-empty">${icon('warn')}<div><b>还没有模型预设</b><p>可以点下面的「添加模型」填一个；也可以在终端跑 <code>mocode /model</code> 由向导生成。</p></div></div>
+        <button class="settings-add" id="model-add">
+          <span class="settings-add-icon">${icon('plus')}</span>
+          <span class="settings-row-body"><span class="settings-row-title">添加模型</span><span class="settings-row-sub">选择提供商预设快速填表，或全部手动填写</span></span>
+        </button>
+      </div>`;
+    settingsSection.querySelector<HTMLButtonElement>('#model-add')?.addEventListener('click', () => openModelForm());
+    return;
+  }
+  let config: ModelConfig | null = null;
+  try { config = await window.mocodeWork.getConfig(); } catch { /* 忽略 */ }
+  const active = modelList.find((m) => m.isActive) ?? null;
+  const provider = config?.provider ?? active?.provider ?? '';
+  const contextWindow = config?.contextWindow ?? (active?.contextWindow || null);
+  const kv: Array<[string, string]> = [
+    ['接口协议', provider || '未知'],
+    ['上下文窗口', contextWindow ? `${(contextWindow / 1000).toFixed(0)}k tokens` : '未声明'],
+    ['Prompt Cache', provider === 'anthropic' ? ((config?.promptCache ?? active?.promptCache) ? '已开启' : '已关闭') : '不适用'],
+    ['API 地址', config?.baseUrl || active?.baseURL || '未配置'],
+  ];
+  const groups = groupModelsByProvider(modelList);
+  settingsSection.innerHTML = `
+    <div class="settings-block">
+      <div class="settings-block-head">
+        <b>模型预设</b>
+        <span>${groups.length} 个提供商 · ${modelList.length} 个模型 · 切换后重开 agent 即刻生效</span>
+      </div>
+      <button class="settings-add" id="model-add">
+        <span class="settings-add-icon">${icon('plus')}</span>
+        <span class="settings-row-body"><span class="settings-row-title">添加模型</span><span class="settings-row-sub">选择提供商预设快速填表，或全部手动填写</span></span>
+      </button>
+      <div class="settings-providers">
+        ${groups.map((group) => `
+          <div class="settings-provider">
+            <div class="settings-provider-head">
+              <span class="settings-provider-avatar">${escapeHtml(providerInitial(group.name))}</span>
+              <b>${escapeHtml(group.name)}</b>
+              ${groupHostLabel(group) ? `<code title="${escapeHtml(group.host)}">${escapeHtml(groupHostLabel(group))}</code>` : ''}
+              <span class="settings-provider-count">${group.items.length} 个模型</span>
+            </div>
+            <div class="settings-list" role="listbox" aria-label="${escapeHtml(group.name)} 的模型">
+              ${group.items.map(settingsModelRow).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    <div class="settings-block">
+      <div class="settings-block-head"><b>当前配置</b><span>来自 ~/.mocode/config</span></div>
+      <div class="settings-kv">${kv.map(([k, v]) => `<div class="settings-kv-row"><span>${escapeHtml(k)}</span><b title="${escapeHtml(v)}">${escapeHtml(v)}</b></div>`).join('')}</div>
+    </div>
+  `;
+  settingsSection.querySelectorAll<HTMLButtonElement>('.settings-model').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const name = button.dataset.model;
+      if (!name || button.classList.contains('active')) return;
+      const result = await window.mocodeWork.switchModel(name);
+      if (!result.ok) { showToast('error', result.message); return; }
+      showToast('success', result.message);
+      await refreshModelList();
+      // 底部输入框上的模型按钮同步刷新
+      try { setModeButton(await window.mocodeWork.getConfig()); } catch { /* 忽略 */ }
+      await renderSettingsModelSection();
+    });
+  });
+  settingsSection.querySelectorAll<HTMLButtonElement>('.settings-row-act').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      // 编辑按钮与「切换」同行：必须拦掉冒泡，否则点编辑会顺手切成那个模型。
+      event.stopPropagation();
+      const name = button.dataset.edit;
+      if (name) openModelForm(name);
+    });
+  });
+  settingsSection.querySelector<HTMLButtonElement>('#model-add')?.addEventListener('click', () => openModelForm());
+}
+
+/* ── 模型预设编辑器（添加 / 编辑 / 删除） ─────────────────────
+ * 与 mocode 终端的 /model 向导等价，但表单化：字段一一对应
+ * ~/.mocode/models/<name>.json。写文件走主进程，renderer 只递草稿。 */
+
+/** 提供商预设模板 —— 与 src/repl/commands.ts 的 MODEL_PRESETS 同步。
+ *  选一个自动填 baseURL/model/window/provider，用户仍可逐项改。 */
+const MODEL_TEMPLATES: Array<{ label: string; provider: LlmProvider; baseURL: string; model: string; contextWindow: number; promptCache: boolean }> = [
+  { label: 'Anthropic Claude', provider: 'anthropic', baseURL: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', contextWindow: 200000, promptCache: true },
+  { label: 'DeepSeek', provider: 'openai', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', contextWindow: 256000, promptCache: false },
+  { label: 'GLM（智谱）', provider: 'openai', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', contextWindow: 256000, promptCache: false },
+  { label: 'Qwen（阿里云百炼）', provider: 'openai', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', contextWindow: 256000, promptCache: false },
+  { label: 'Kimi（Moonshot）', provider: 'openai', baseURL: 'https://api.moonshot.cn/v1', model: 'kimi-k2-turbo-preview', contextWindow: 256000, promptCache: false },
+  { label: 'MiniMax', provider: 'openai', baseURL: 'https://api.minimax.io/v1', model: 'MiniMax-M3', contextWindow: 256000, promptCache: false },
+  { label: '火山方舟（豆包）', provider: 'openai', baseURL: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-1-6', contextWindow: 256000, promptCache: false },
+  { label: 'OpenRouter', provider: 'openai', baseURL: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.5', contextWindow: 200000, promptCache: false },
+  { label: '本地 Ollama', provider: 'openai', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', contextWindow: 128000, promptCache: false },
+  { label: '本地 vLLM', provider: 'openai', baseURL: 'http://localhost:8000/v1', model: 'default', contextWindow: 256000, promptCache: false },
+];
+
+let modelFormEl: HTMLElement | null = null;
+/** 编辑态：被编辑预设的原始名。undefined = 新增。 */
+let modelFormEditing: string | undefined;
+/** 表单里新建时的默认「立即启用」值（沿用上次选择，避免每次都重新勾）。 */
+let modelFormActivate = true;
+
+const modelFormField = <T extends HTMLElement>(id: string): T => modelFormEl!.querySelector(`#${id}`) as T;
+
+function ensureModelForm(): HTMLElement {
+  if (modelFormEl) return modelFormEl;
+  const el = $('#model-form-modal') as HTMLElement;
+  modelFormEl = el;
+  // 模板下拉只建一次
+  const select = modelFormField<HTMLSelectElement>('model-form-template');
+  for (const [index, template] of MODEL_TEMPLATES.entries()) {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = `${template.label} · ${template.model}`;
+    select.append(option);
+  }
+  select.addEventListener('change', () => {
+    if (select.value === '') return;
+    const template = MODEL_TEMPLATES[Number(select.value)];
+    if (!template) return;
+    modelFormField<HTMLSelectElement>('model-form-provider').value = template.provider;
+    modelFormField<HTMLInputElement>('model-form-baseurl').value = template.baseURL;
+    modelFormField<HTMLInputElement>('model-form-model').value = template.model;
+    modelFormField<HTMLInputElement>('model-form-window').value = String(template.contextWindow);
+    setFormToggle('model-form-cache', template.promptCache);
+    syncFormVisibility();
+    // 只在用户没自己填过预设名时才带出建议名，避免覆盖手输内容。
+    const nameInput = modelFormField<HTMLInputElement>('model-form-name');
+    if (!nameInput.value.trim() || nameInput.dataset.auto === '1') {
+      nameInput.value = suggestPresetName(template.model);
+      nameInput.dataset.auto = '1';
+    }
+  });
+  modelFormField<HTMLInputElement>('model-form-name').addEventListener('input', (event) => {
+    (event.target as HTMLInputElement).dataset.auto = '0';
+  });
+  // 用户开始改任何一格就把上一次的报错收掉：错误提示挂着不动会让人以为还没修好。
+  el.querySelector('.model-form-body')?.addEventListener('input', () => clearFormError());
+  modelFormField<HTMLSelectElement>('model-form-provider').addEventListener('change', syncFormVisibility);
+  modelFormField<HTMLElement>('model-form-cache').addEventListener('click', () => {
+    setFormToggle('model-form-cache', modelFormField<HTMLElement>('model-form-cache').getAttribute('aria-checked') !== 'true');
+  });
+  modelFormField<HTMLElement>('model-form-activate').addEventListener('click', () => {
+    modelFormActivate = modelFormField<HTMLElement>('model-form-activate').getAttribute('aria-checked') !== 'true';
+    setFormToggle('model-form-activate', modelFormActivate);
+  });
+  $('#model-form-save')?.addEventListener('click', () => void submitModelForm());
+  el.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeModelForm));
+  el.addEventListener('click', (event) => { if (event.target === el) closeModelForm(); });
+  $('#model-form-delete')?.addEventListener('click', () => void deleteEditingModel());
+  el.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.target as HTMLElement).tagName !== 'TEXTAREA') { event.preventDefault(); void submitModelForm(); }
+  });
+  return el;
+}
+
+/** 模型名 → 合法预设名建议（点号/斜杠归一到连字符）。 */
+function suggestPresetName(model: string): string {
+  const sanitized = (model || '').replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
+  if (!sanitized) return '';
+  // 已存在同名预设时加 -2/-3 后缀，避免用户还没保存就先吃一个「已存在同名」。
+  const taken = new Set(modelList.map((item) => item.name));
+  if (!taken.has(sanitized)) return sanitized;
+  for (let i = 2; i < 1000; i += 1) {
+    const candidate = `${sanitized.slice(0, 32 - String(i).length - 1)}-${i}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return sanitized;
+}
+
+function setFormToggle(id: string, on: boolean): void {
+  const el = modelFormField<HTMLElement>(id);
+  el.setAttribute('aria-checked', on ? 'true' : 'false');
+}
+
+/** anthropic 才显示 Prompt Cache 开关（openai 下它无意义，core 也会落 false）。 */
+function syncFormVisibility(): void {
+  const isAnthropic = modelFormField<HTMLSelectElement>('model-form-provider').value === 'anthropic';
+  modelFormField<HTMLElement>('model-form-cache').classList.toggle('field-hidden', !isAnthropic);
+}
+
+function showFormError(message: string): void {
+  const el = modelFormField<HTMLElement>('model-form-error');
+  el.textContent = message;
+  el.classList.remove('hidden');
+}
+
+function clearFormError(): void {
+  const el = modelFormField<HTMLElement>('model-form-error');
+  el.textContent = '';
+  el.classList.add('hidden');
+  // shake 是「一次性」反馈：不清掉的话，下一次打开表单那个红框还挂着，看起来像仍在校验失败。
+  modelFormEl?.querySelectorAll('.field-input.shake').forEach((input) => input.classList.remove('shake'));
+}
+
+function clearModelFormFields(): void {
+  modelFormField<HTMLSelectElement>('model-form-template').value = '';
+  modelFormField<HTMLSelectElement>('model-form-template').disabled = false;
+  modelFormField<HTMLSelectElement>('model-form-provider').value = 'openai';
+  const nameInput = modelFormField<HTMLInputElement>('model-form-name');
+  nameInput.value = '';
+  nameInput.dataset.auto = '0';
+  modelFormField<HTMLInputElement>('model-form-baseurl').value = '';
+  modelFormField<HTMLInputElement>('model-form-model').value = '';
+  modelFormField<HTMLInputElement>('model-form-apikey').value = '';
+  modelFormField<HTMLInputElement>('model-form-window').value = '256000';
+  setFormToggle('model-form-cache', false);
+  syncFormVisibility();
+  clearFormError();
+  modelFormField<HTMLButtonElement>('model-form-save').disabled = false;
+}
+
+/** 打开编辑器。传 name = 编辑既有预设（回读完整字段含 apiKey）；不传 = 新增。 */
+function openModelForm(name?: string): void {
+  const el = ensureModelForm();
+  modelFormEditing = name;
+  const isEdit = !!name;
+  const title = el.querySelector('#model-form-title') as HTMLElement;
+  const saveButton = el.querySelector('#model-form-save') as HTMLButtonElement;
+  const deleteButton = el.querySelector('#model-form-delete') as HTMLButtonElement;
+  // 先按模式定好表单骨架，再清字段 —— clearModelFormFields 会重置 disabled，
+  // 顺序反了会让「编辑态禁用模板」被悄悄解开，用户一选模板就把正在编辑的预设冲掉。
+  deleteButton.dataset.armed = '0';
+  deleteButton.textContent = '删除';
+  deleteButton.hidden = !isEdit;
+  // 预设模板只在新增时有意义（编辑时清空字段是灾难）。
+  const templateSelect = modelFormField<HTMLSelectElement>('model-form-template');
+  modelFormField<HTMLElement>('model-form-activate').classList.toggle('field-hidden', isEdit);
+  title.textContent = isEdit ? '编辑模型' : '添加模型';
+  saveButton.textContent = '保存';
+  clearModelFormFields();
+  templateSelect.disabled = isEdit;
+  el.classList.remove('hidden');
+
+  if (!isEdit) {
+    modelFormField<HTMLInputElement>('model-form-name').focus();
+    return;
+  }
+  void (async () => {
+    const detail = await window.mocodeWork.getModel(name!);
+    if (!detail.ok || !detail.preset) {
+      deleteButton.hidden = true;
+      saveButton.disabled = true;
+      showFormError(detail.message ?? `无法读取预设 “${name}”`);
+      return;
+    }
+    saveButton.disabled = false;
+    const preset = detail.preset;
+    modelFormField<HTMLInputElement>('model-form-name').value = preset.name;
+    modelFormField<HTMLSelectElement>('model-form-provider').value = preset.provider;
+    modelFormField<HTMLInputElement>('model-form-baseurl').value = preset.baseURL;
+    modelFormField<HTMLInputElement>('model-form-model').value = preset.model;
+    modelFormField<HTMLInputElement>('model-form-apikey').value = preset.apiKey;
+    modelFormField<HTMLInputElement>('model-form-window').value = String(preset.contextWindow);
+    setFormToggle('model-form-cache', preset.anthropicPromptCache);
+    syncFormVisibility();
+    modelFormField<HTMLInputElement>('model-form-name').focus();
+  })();
+}
+
+function closeModelForm(): void {
+  modelFormEl?.classList.add('hidden');
+  modelFormEditing = undefined;
+}
+
+function collectModelDraft(): ModelDraft | null {
+  const nameInput = modelFormField<HTMLInputElement>('model-form-name');
+  const name = nameInput.value.trim();
+  if (!/^[a-zA-Z0-9_-]{1,32}$/.test(name)) {
+    nameInput.classList.remove('shake'); void nameInput.offsetWidth; nameInput.classList.add('shake');
+    showFormError('预设名只能包含字母、数字、_ 和 -，长度 1–32');
+    nameInput.focus();
+    return null;
+  }
+  const provider = modelFormField<HTMLSelectElement>('model-form-provider').value as LlmProvider;
+  const baseURL = modelFormField<HTMLInputElement>('model-form-baseurl').value.trim();
+  const apiKey = modelFormField<HTMLInputElement>('model-form-apikey').value.trim();
+  const model = modelFormField<HTMLInputElement>('model-form-model').value.trim();
+  const windowValue = modelFormField<HTMLInputElement>('model-form-window').value.trim();
+  const contextWindow = Number(windowValue);
+  // 每个失败分支都把红框打在对应输入框上 —— 只弹文字的话，用户还得自己找是哪一格错了。
+  const flag = (id: string, message: string): null => {
+    const el = modelFormField<HTMLInputElement>(id);
+    el.classList.remove('shake'); void el.offsetWidth; el.classList.add('shake');
+    showFormError(message);
+    el.focus();
+    return null;
+  };
+  if (!baseURL) return flag('model-form-baseurl', 'API 地址不能为空');
+  if (!apiKey) return flag('model-form-apikey', 'API Key 不能为空');
+  if (!model) return flag('model-form-model', '模型名不能为空');
+  if (!windowValue || !Number.isFinite(contextWindow) || contextWindow <= 0) return flag('model-form-window', '上下文窗口必须是正数');
+  return {
+    provider,
+    baseURL,
+    apiKey,
+    model,
+    contextWindow: Math.floor(contextWindow),
+    anthropicPromptCache: provider === 'anthropic' && modelFormField<HTMLElement>('model-form-cache').getAttribute('aria-checked') === 'true',
+  };
+}
+
+async function submitModelForm(): Promise<void> {
+  clearFormError();
+  const draft = collectModelDraft();
+  if (!draft) return;
+  const name = modelFormField<HTMLInputElement>('model-form-name').value.trim();
+  const saveButton = modelFormField<HTMLButtonElement>('model-form-save');
+  saveButton.disabled = true;
+  try {
+    const result = await window.mocodeWork.saveModel({
+      name,
+      originalName: modelFormEditing,
+      draft,
+      activate: modelFormEditing ? false : modelFormActivate,
+    });
+    if (!result.ok) { showFormError(result.message); return; }
+    showToast('success', result.message);
+    closeModelForm();
+    await refreshModelList();
+    try { setModeButton(await window.mocodeWork.getConfig()); } catch { /* 忽略 */ }
+    await renderSettingsModelSection();
+  } catch (error) {
+    showFormError(`保存失败: ${(error as Error).message}`);
+  } finally {
+    saveButton.disabled = false;
+  }
+}
+
+async function deleteEditingModel(): Promise<void> {
+  const name = modelFormEditing;
+  if (!name) return;
+  const button = modelFormField<HTMLButtonElement>('model-form-delete');
+  // 两步确认：预设里有 apiKey，误删后要重填，成本比多一次点击高。
+  if (button.dataset.armed !== '1') {
+    button.dataset.armed = '1';
+    button.textContent = '确认删除？';
+    setTimeout(() => { button.dataset.armed = '0'; button.textContent = '删除'; }, 3200);
+    return;
+  }
+  const result = await window.mocodeWork.deleteModel(name);
+  if (!result.ok) { showFormError(result.message); return; }
+  showToast('success', result.message);
+  closeModelForm();
+  await refreshModelList();
+  try { setModeButton(await window.mocodeWork.getConfig()); } catch { /* 忽略 */ }
+  await renderSettingsModelSection();
+}
+
+/** 「行为」分类：mocode 终端斜杠命令对应的开关。 */
+function renderSettingsBehaviorSection(): void {
+  if (!settingsSection) return;
+  settingsSection.innerHTML = `
+    <div class="settings-block">
+      <div class="settings-block-head"><b>Agent 行为</b><span>改动会重启后台 agent，对后续任务生效</span></div>
+      <div class="settings-list">
+        ${SETTING_ITEMS.map((item) => `
+          <button class="settings-row settings-toggle" data-setting="${item.key}" role="switch" aria-checked="${settingsState[item.key] ? 'true' : 'false'}">
+            <span class="settings-row-body"><span class="settings-row-title">${escapeHtml(item.label)}</span><span class="settings-row-sub">${escapeHtml(item.hint)}</span></span>
+            <span class="settings-switch" aria-hidden="true"></span>
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  `;
+  settingsSection.querySelectorAll<HTMLButtonElement>('.settings-toggle').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const key = button.dataset.setting;
+      if (!key) return;
+      const next = !settingsState[key];
+      try { settingsState = await window.mocodeWork.setSettings({ [key]: next }); }
+      catch (error) { console.error('[settings]', error); showToast('error', '设置保存失败'); return; }
+      renderSettingsBehaviorSection();
+      const hasRunning = (state?.tasks ?? []).some((task) => task.status === 'running' || task.status === 'waiting');
+      const label = SETTING_ITEMS.find((item) => item.key === key)?.label ?? key;
+      showToast('success', `${label} 已${next ? '开启' : '关闭'}${hasRunning ? '，在跑的任务已停止并按新设置重启' : ''}`);
+    });
+  });
+}
+
+/** 「外观」分类：主题选择。 */
+function renderSettingsAppearanceSection(): void {
+  if (!settingsSection) return;
+  const themes: Array<['light' | 'dark' | 'system', string, string, string]> = [
+    ['light', '浅色', 'sun', '始终使用浅色主题'],
+    ['dark', '深色', 'moon', '始终使用深色主题'],
+    ['system', '自动', 'layout', '跟随系统偏好设置'],
+  ];
+  settingsSection.innerHTML = `
+    <div class="settings-block">
+      <div class="settings-block-head"><b>主题</b><span>「自动」跟随系统深浅色</span></div>
+      <div class="settings-list">
+        ${themes.map(([value, label, iconName, hint]) => `
+          <button class="settings-row settings-theme" data-theme="${value}" role="radio" aria-checked="false">
+            <span class="settings-row-radio"></span>
+            <span class="settings-row-icon">${icon(iconName)}</span>
+            <span class="settings-row-body"><span class="settings-row-title">${label}</span><span class="settings-row-sub">${hint}</span></span>
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  `;
+  refreshThemeSegmented();
+  settingsSection.querySelectorAll<HTMLButtonElement>('.settings-theme').forEach((button) => {
+    button.addEventListener('click', () => {
+      applyTheme(button.dataset.theme as 'light' | 'dark' | 'system');
+      refreshThemeSegmented();
+    });
+  });
+}
+
+/** 「关于」分类：版本信息 + 快捷入口。 */
+function renderSettingsAboutSection(): void {
+  if (!settingsSection) return;
+  const kv: Array<[string, string]> = [
+    ['版本', '1.0.0'],
+    ['配置文件', '~/.mocode/config'],
+    ['模型预设', '~/.mocode/models'],
+    ['会话目录', '<工作区>/.mocode/sessions'],
+  ];
+  settingsSection.innerHTML = `
+    <div class="settings-block">
+      <div class="settings-block-head"><b>Mocode Work</b><span>桌面客户端</span></div>
+      <div class="settings-kv">${kv.map(([k, v]) => `<div class="settings-kv-row"><span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>`).join('')}</div>
+    </div>
+    <div class="settings-block">
+      <div class="settings-block-head"><b>快捷入口</b></div>
+      <div class="settings-list">
+        <button class="settings-row settings-link" data-action="shortcuts"><span class="settings-row-icon">${icon('keyboard')}</span><span class="settings-row-body"><span class="settings-row-title">键盘快捷键</span><span class="settings-row-sub">查看全部快捷键</span></span><span class="settings-row-chevron">${icon('chevron-right')}</span></button>
+      </div>
+    </div>
+  `;
+  settingsSection.querySelectorAll<HTMLButtonElement>('.settings-link').forEach((button) => {
+    button.addEventListener('click', () => { if (button.dataset.action === 'shortcuts') showCheatsheet(); });
+  });
+}
+
+async function renderSettingsSection(): Promise<void> {
+  if (!settingsSection) return;
+  const meta = SETTINGS_SECTIONS.find((item) => item.id === settingsActiveSection) ?? SETTINGS_SECTIONS[0]!;
+  if (settingsSectionTitle) settingsSectionTitle.textContent = meta.label;
+  settingsNav?.querySelectorAll<HTMLButtonElement>('.settings-nav-item').forEach((button) => {
+    const active = button.dataset.section === settingsActiveSection;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  // 按需渲染当前分类，避免一次性拉全部数据
+  if (settingsActiveSection === 'model') await renderSettingsModelSection();
+  else if (settingsActiveSection === 'behavior') renderSettingsBehaviorSection();
+  else if (settingsActiveSection === 'appearance') renderSettingsAppearanceSection();
+  else renderSettingsAboutSection();
+}
+
+/** 左侧分类导航只建一次。 */
+function ensureSettingsNav(): void {
+  if (!settingsNav || settingsNav.querySelector('.settings-nav-item')) return;
+  for (const section of SETTINGS_SECTIONS) {
+    const button = document.createElement('button');
+    button.className = 'settings-nav-item';
+    button.dataset.section = section.id;
+    button.setAttribute('role', 'tab');
+    button.innerHTML = `<span class="settings-nav-icon">${icon(section.icon)}</span><span>${section.label}</span>`;
+    button.title = section.desc;
+    button.addEventListener('click', () => { settingsActiveSection = section.id; void renderSettingsSection(); });
+    settingsNav.append(button);
+  }
+}
+
+function openSettings(section?: SettingsSectionId): void {
+  ensureSettingsNav();
+  if (section) settingsActiveSection = section;
+  settingsModal?.classList.remove('hidden');
+  settingsButton?.setAttribute('aria-expanded', 'true');
+  void (async () => {
+    await refreshModelList();
+    try { settingsState = await window.mocodeWork.getSettings(); }
+    catch (error) { console.error('[settings]', error); settingsState = {}; }
+    await renderSettingsSection();
+  })();
+}
+function closeSettings(): void {
+  settingsModal?.classList.add('hidden');
+  settingsButton?.setAttribute('aria-expanded', 'false');
+}
+
+settingsButton?.addEventListener('click', () => {
+  if (settingsModal?.classList.contains('hidden') ?? true) openSettings();
+  else closeSettings();
 });
+$('#settings-close')?.addEventListener('click', closeSettings);
+settingsModal?.addEventListener('click', (event) => { if (event.target === settingsModal) closeSettings(); });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !settingsPopover?.classList.contains('hidden')) toggleSettingsPopover(false);
+  if (event.key === 'Escape' && !settingsModal?.classList.contains('hidden')) closeSettings();
 });
 refreshThemeSegmented();
 /* ── Sidebar collapse ─────────────────────────────────── */
@@ -1601,33 +2237,67 @@ function ensureModelPicker(): HTMLElement {
   return el;
 }
 
+/* 下拉里的模型行：组头已经给了提供商，行内只留预设别名/上下文/cache，避免重复占宽。 */
+function modelPickerItem(model: ModelItem): string {
+  const meta = [
+    `<span class="model-picker-alias">预设 ${escapeHtml(model.name)}</span>`,
+    model.contextWindow ? `<span class="model-picker-ctx">${(model.contextWindow / 1000).toFixed(0)}k 上下文</span>` : '',
+    model.provider === 'anthropic' && model.promptCache ? '<span class="model-picker-cache">cache</span>' : '',
+  ].filter(Boolean).join('');
+  return `
+    <button class="model-picker-item ${model.isActive ? 'active' : ''}" data-model="${escapeHtml(model.name)}" role="option" aria-selected="${model.isActive}" title="${escapeHtml(model.label)}">
+      <span class="model-picker-radio">${model.isActive ? icon('check') : ''}</span>
+      <span class="model-picker-body">
+        <span class="model-picker-name">${escapeHtml(model.label)}</span>
+        <span class="model-picker-meta">${meta}</span>
+      </span>
+    </button>`;
+}
+
 function renderModelPicker(): void {
   const el = ensureModelPicker();
   if (!modelList.length) {
-    el.innerHTML = `<div class="model-picker-empty">${icon('warn')}<span>未发现模型配置</span></div><div class="model-picker-hint">在终端运行 <code>mocode /model</code> 添加模型</div>`;
+    el.innerHTML = `<div class="model-picker-empty">${icon('warn')}<span>还没有模型预设</span></div><div class="model-picker-hint">在终端运行 <code>mocode /model</code>，或直接在设置里添加</div><div class="model-picker-foot"><button class="model-picker-add" id="picker-add-model">${icon('plus')}<span>添加模型</span></button></div>`;
+    el.querySelector<HTMLButtonElement>('#picker-add-model')?.addEventListener('click', () => {
+      hideModelPicker();
+      openSettings('model');
+      openModelForm();
+    });
     return;
   }
+  const groups = groupModelsByProvider(modelList);
   el.innerHTML = `
     <div class="model-picker-head">
       <span>选择模型</span>
-      <span class="model-picker-count">${modelList.length} 个</span>
+      <span class="model-picker-count">${groups.length} 个提供商 · ${modelList.length} 个模型</span>
     </div>
     <div class="model-picker-list" role="listbox">
-      ${modelList.map((m) => `
-        <button class="model-picker-item ${m.isActive ? 'active' : ''}" data-model="${escapeHtml(m.name)}" role="option" aria-selected="${m.isActive}">
-          <span class="model-picker-radio">${m.isActive ? icon('check') : ''}</span>
-          <span class="model-picker-body">
-            <span class="model-picker-name">${escapeHtml(m.label)}</span>
-            <span class="model-picker-meta">
-              <span class="model-picker-provider">${m.provider}</span>
-              ${m.provider === 'anthropic' && m.promptCache ? '<span class="model-picker-cache">cache</span>' : ''}
-              ${m.contextWindow ? `<span class="model-picker-ctx">${(m.contextWindow / 1000).toFixed(0)}k 上下文</span>` : ''}
-            </span>
-          </span>
-        </button>
+      ${groups.map((group) => `
+        <div class="model-picker-group">
+          <div class="model-picker-group-head">
+            <span class="model-picker-group-mark">${escapeHtml(providerInitial(group.name))}</span>
+            <b>${escapeHtml(group.name)}</b>
+            ${groupHostLabel(group) ? `<span class="model-picker-group-host" title="${escapeHtml(group.host)}">${escapeHtml(groupHostLabel(group))}</span>` : ''}
+          </div>
+          ${group.items.map(modelPickerItem).join('')}
+        </div>
       `).join('')}
     </div>
+    <div class="model-picker-foot">
+      <button class="model-picker-add" id="picker-add-model">${icon('plus')}<span>添加模型</span></button>
+      <button class="model-picker-add" id="picker-manage-model">${icon('wrench')}<span>管理</span></button>
+    </div>
   `;
+  el.querySelector<HTMLButtonElement>('#picker-add-model')?.addEventListener('click', () => {
+    hideModelPicker();
+    openSettings('model');
+    openModelForm();
+  });
+  // 「管理」= 打开设置到模型页：那里有每个预设的编辑入口（下拉本身太窄，塞不下编辑按钮）。
+  el.querySelector<HTMLButtonElement>('#picker-manage-model')?.addEventListener('click', () => {
+    hideModelPicker();
+    openSettings('model');
+  });
   el.querySelectorAll<HTMLButtonElement>('.model-picker-item').forEach((button) => {
     button.addEventListener('click', async () => {
       const name = button.dataset.model;
@@ -1782,10 +2452,32 @@ mountIcons();
 /* ── 空状态 chip：工作空间下拉（选已有空间 / 打开新空间） ── */
 let workspacePickerEl: HTMLElement | null = null;
 
+/**
+ * chip 反映的是**当前任务**的归属，而非全局浏览上下文 ——
+ * 它挂在输入区正下方，用户读作「这个任务在哪个目录里干活」。
+ * 当前任务已开始运行（有 session）时不可改：host 的 cwd 与会话历史都已按旧目录固化。
+ */
+function chipTask(): Task | undefined { return selectedTask(); }
+function chipTaskFixed(): boolean {
+  const task = chipTask();
+  return !!task && (!!task.sessionId || task.status === 'running' || task.status === 'waiting');
+}
 function renderEmptyChips(): void {
-  const project = state?.projects.find((p) => p.id === state?.selectedProjectId) ?? state?.projects[0];
+  const task = chipTask();
+  const project = task?.projectId ? state?.projects.find((p) => p.id === task.projectId) : undefined;
   const label = $('#empty-chip-project .empty-chip-label');
-  if (label) label.textContent = project?.name ?? '选择工作空间';
+  const chip = $('#empty-chip-project');
+  // 无任务在编辑（例如刚启动、还没选中任务）→ 退化成全局浏览上下文的展示。
+  const fallback = state?.projects.find((p) => p.id === state?.selectedProjectId);
+  const name = task ? (project?.name ?? '无工作空间') : (fallback?.name ?? '选择工作空间');
+  if (label) label.textContent = name;
+  if (chip) {
+    chip.classList.toggle('is-noworkspace', !!task && !project);
+    chip.title = chipTaskFixed()
+      ? '任务已开始运行，工作空间不可更改'
+      : task ? '点击关联 / 解除当前任务的工作空间' : '点击选择工作空间';
+    chip.setAttribute('aria-disabled', chipTaskFixed() ? 'true' : 'false');
+  }
 }
 
 function workspacePicker(): HTMLElement | null {
@@ -1797,10 +2489,13 @@ function renderWorkspacePicker(): void {
   const el = workspacePicker();
   if (!el) return;
   const projects = state?.projects ?? [];
-  const currentId = state?.selectedProjectId;
+  const task = chipTask();
+  const currentId = task?.projectId ?? '';
+  const fixed = chipTaskFixed();
+  // 选中项 = 任务当前的归属空间；纯任务则选中「不使用工作空间」那一行。
   const items = projects.length
     ? projects.map((project) => `
-        <button class="chip-picker-item ${project.id === currentId ? 'active' : ''}" data-workspace="${escapeHtml(project.id)}" role="option" aria-selected="${project.id === currentId}">
+        <button class="chip-picker-item ${project.id === currentId ? 'active' : ''}" data-workspace="${escapeHtml(project.id)}" role="option" aria-selected="${project.id === currentId}"${fixed ? ' disabled' : ''}>
           <span class="chip-picker-check">${project.id === currentId ? icon('check') : ''}</span>
           <span class="chip-picker-body">
             <span class="chip-picker-name">${escapeHtml(project.name)}</span>
@@ -1808,29 +2503,56 @@ function renderWorkspacePicker(): void {
           </span>
         </button>`).join('')
     : '<div class="chip-picker-empty">还没有工作空间，先打开一个文件夹。</div>';
+  const noWorkspaceRow = task ? `
+      <button class="chip-picker-item ${currentId ? '' : 'active'}" data-workspace-clear role="option" aria-selected="${!currentId}"${fixed ? ' disabled' : ''}>
+        <span class="chip-picker-check">${currentId ? '' : icon('check')}</span>
+        <span class="chip-picker-body">
+          <span class="chip-picker-name">不使用工作空间</span>
+          <span class="chip-picker-path">纯任务，不改动任何目录</span>
+        </span>
+      </button>
+      ${projects.length ? '<div class="chip-picker-divider"></div>' : ''}` : '';
   el.innerHTML = `
-    <div class="chip-picker-head"><span>工作空间</span><span class="chip-picker-count">${projects.length} 个</span></div>
-    <div class="chip-picker-list" role="listbox">${items}</div>
+    <div class="chip-picker-head"><span>${task ? '任务的工作空间' : '工作空间'}</span><span class="chip-picker-count">${projects.length} 个</span></div>
+    <div class="chip-picker-list" role="listbox">${noWorkspaceRow}${items}</div>
     <div class="chip-picker-foot">
-      <button class="chip-picker-item chip-picker-new" data-workspace-open>
+      ${fixed
+        ? '<div class="chip-picker-note">任务已开始运行，工作空间不可更改。</div>'
+        : `<button class="chip-picker-item chip-picker-new" data-workspace-open>
         <span class="chip-picker-check">${icon('folder')}</span>
         <span class="chip-picker-body">
           <span class="chip-picker-name">打开新的工作空间…</span>
           <span class="chip-picker-path">选择一个本地文件夹</span>
         </span>
-      </button>
+      </button>`}
     </div>
   `;
+
+  /** 归属变更后重新拉起当前任务（新 cwd 的 host + 会话区重放）。 */
+  const applyProject = async (projectId: string, okMessage: string): Promise<void> => {
+    const current = chipTask();
+    if (!current) return;
+    const result = await window.mocodeWork.setTaskProject(current.id, projectId);
+    if (!result.ok) { showToast('warn', result.message ?? '无法更改工作空间'); return; }
+    if (result.state) updateState(result.state);
+    const selected = await window.mocodeWork.selectTask(current.id);
+    if (selected) { updateState(selected.state); switchToTask(selected.task.id, selected.history); }
+    showToast('success', okMessage);
+  };
+
   el.querySelectorAll<HTMLButtonElement>('[data-workspace]').forEach((button) => {
     button.addEventListener('click', async () => {
       const id = button.dataset.workspace;
       hideWorkspacePicker();
       if (!id || id === currentId) return;
-      try {
-        const next = await window.mocodeWork.selectProject(id);
-        if (next) { updateState(next); showToast('success', '已切换工作空间'); }
-      } catch (error) { showToast('error', (error as Error).message); }
+      const project = state?.projects.find((p) => p.id === id);
+      await applyProject(id, `已关联到「${project?.name ?? id}」`);
     });
+  });
+  el.querySelector<HTMLButtonElement>('[data-workspace-clear]')?.addEventListener('click', async () => {
+    hideWorkspacePicker();
+    if (!currentId) return;
+    await applyProject('', '已解除工作空间关联');
   });
   el.querySelector<HTMLButtonElement>('[data-workspace-open]')?.addEventListener('click', async () => {
     hideWorkspacePicker();

@@ -1,6 +1,6 @@
 import { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, shell } from 'electron';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
@@ -113,6 +113,7 @@ interface ModelDescriptor {
   provider: 'openai' | 'anthropic';
   promptCache: boolean;
   baseURL: string;       // 仅显示用(只返回 host,不泄漏完整 endpoint)
+  providerHost: string;  // 归一化后的提供商标识(剥掉 api./www. 等前缀),renderer 按它分组
   contextWindow: number; // tokens
   isActive: boolean;
 }
@@ -125,6 +126,19 @@ interface ModelDescriptor {
  */
 function readActivePreset(): string {
   try { return readFileSync(path.join(modelsDir(), '.active'), 'utf8').trim(); } catch { return ''; }
+}
+
+/**
+ * 读取 .active 预设的 baseURL（masked）。唯一用途：给「当前配置」摘要兜底 ——
+ * 老配置里 ~/.mocode/config 的 LLM_BASE_URL 可能为空，此时只能靠激活预设自己的 baseURL 填这一行。
+ */
+function activePresetBaseURL(): string {
+  const name = readActivePreset();
+  if (!name) return '';
+  try {
+    const raw = JSON.parse(readFileSync(path.join(modelsDir(), `${name}.json`), 'utf8')) as Record<string, unknown>;
+    return typeof raw.baseURL === 'string' ? maskUrl(raw.baseURL) : '';
+  } catch { return ''; }
 }
 
 /** 扫描 ~/.mocode/models/*.json,返回所有模型描述 + 当前激活标记。 */
@@ -150,8 +164,10 @@ function listModels(): ModelDescriptor[] {
         provider,
         promptCache,
         baseURL: maskUrl(baseURL),
+        providerHost: providerHostOf(baseURL),
         contextWindow,
-        // 优先按 .active 指针判定；指针缺失（老配置 / 从没用过 /model）时退回比对真实 model 名。
+        // 激活身份只看 .active 指针(它是 mocode 唯一的真相源);指针缺失时才退回比对真实 model 名。
+        // 绝不能拿 baseURL 反推激活项 —— 同一家提供商的多个预设主机名相同,会把整组都标成"当前"。
         isActive: activeName ? name === activeName : model === activeModel,
       });
     } catch { /* 跳过解析失败的文件 */ }
@@ -232,16 +248,205 @@ function switchModel(name: string): { ok: boolean; message: string; model?: Mode
   process.env.ANTHROPIC_PROMPT_CACHE = promptCache ? 'true' : 'false';
   if (contextWindow) process.env.CONTEXT_WINDOW_TOKENS = String(contextWindow);
   // 切模型 = 换 host 的 config 快照：先停掉所有在跑的任务,再让全部 host 下次 send 时按新配置重启。
+  restartAllAgents();
+  return {
+    ok: true,
+    message: `已切换到 ${name} (${provider}${promptCache ? ' · cache on' : ''})`,
+    model: { name, label: model, provider, promptCache, baseURL: maskUrl(baseURL), providerHost: providerHostOf(baseURL), contextWindow, isActive: true },
+  };
+}
+
+/* ── 预设文件读写（新增 / 编辑 / 重命名 / 删除） ──────────────────────
+ * 与 src/config/presets.ts 保持同语义：per-file JSON、name 只允许 [a-zA-Z0-9_-]{1,32}、
+ * `.active` 指针指向的预设若被改名/删除要同步跟随，否则下次启动回退 config 裸键丢窗口。 */
+
+/** 预设名规则与 core 的 config/presets.ts 一致（路径穿越防护的第一道）。 */
+const PRESET_NAME_RE = /^[a-zA-Z0-9_-]{1,32}$/;
+
+/** 磁盘上的完整预设（含 apiKey 明文）。只允许在主进程内流转，绝不整条发往 renderer。 */
+interface PresetFile {
+  name: string;
+  provider: 'openai' | 'anthropic';
+  baseURL: string;
+  apiKey: string;
+  model: string;
+  contextWindow: number;
+  anthropicPromptCache: boolean;
+}
+
+/** 用户可编辑的字段。name 单独处理（改名走 renamePresetFile）。 */
+interface PresetDraft {
+  provider: 'openai' | 'anthropic';
+  baseURL: string;
+  apiKey: string;
+  model: string;
+  contextWindow: number;
+  anthropicPromptCache: boolean;
+}
+
+function presetPathFor(name: string): string {
+  return path.join(modelsDir(), `${name}.json`);
+}
+
+/** 规范化一份草稿：校验必填项，把可选项归一到 core 读取时的形态。 */
+function normalizeDraft(input: Partial<PresetDraft>): { ok: true; value: PresetDraft } | { ok: false; message: string } {
+  const baseURL = String(input.baseURL ?? '').trim();
+  const apiKey = String(input.apiKey ?? '').trim();
+  const model = String(input.model ?? '').trim();
+  const window = Number(input.contextWindow ?? 0);
+  const provider = input.provider === 'anthropic' ? 'anthropic' : 'openai';
+  if (!baseURL) return { ok: false, message: 'API 地址不能为空' };
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(baseURL)) return { ok: false, message: 'API 地址需要以 http:// 或 https:// 开头' };
+  try { new URL(baseURL); } catch { return { ok: false, message: 'API 地址格式不合法' }; }
+  if (!apiKey) return { ok: false, message: 'API Key 不能为空' };
+  if (!model) return { ok: false, message: '模型名不能为空' };
+  if (!Number.isFinite(window) || window <= 0) return { ok: false, message: '上下文窗口必须是正数' };
+  return {
+    ok: true,
+    value: {
+      provider,
+      baseURL,
+      apiKey,
+      model,
+      contextWindow: Math.floor(window),
+      // core 的 parsePreset 只在 anthropic 下认这个键，openai 一律落 false。
+      anthropicPromptCache: provider === 'anthropic' && input.anthropicPromptCache !== false,
+    },
+  };
+}
+
+/** 原子写预设（写 tmp 再 rename），与 core 的 savePreset 同策略。 */
+function writePresetFile(name: string, draft: PresetDraft): void {
+  mkdirSync(modelsDir(), { recursive: true });
+  const dest = presetPathFor(name);
+  const payload: PresetFile = { name, ...draft };
+  const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
+  renameSync(tmp, dest);
+}
+
+/** 读一个预设文件为草稿；文件缺失/损坏返回 null。 */
+function readPresetFile(name: string): PresetFile | null {
+  try {
+    const raw = JSON.parse(readFileSync(presetPathFor(name), 'utf8')) as Record<string, unknown>;
+    const draft = normalizeDraft({
+      provider: raw.provider === 'anthropic' ? 'anthropic' : 'openai',
+      baseURL: typeof raw.baseURL === 'string' ? raw.baseURL : '',
+      apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : '',
+      model: typeof raw.model === 'string' ? raw.model : '',
+      contextWindow: Number(raw.contextWindow ?? 0) || 0,
+      anthropicPromptCache: raw.anthropicPromptCache !== false,
+    });
+    if (!draft.ok) return null;
+    return { name, ...draft.value };
+  } catch { return null; }
+}
+
+/** 把一个预设激活（写 config + .active + process.env），供新建/编辑后自动生效使用。 */
+function activatePreset(name: string, draft: PresetDraft): void {
+  const patch: Record<string, string> = {
+    LLM_PROVIDER: draft.provider,
+    LLM_BASE_URL: draft.baseURL,
+    LLM_API_KEY: draft.apiKey,
+    LLM_MODEL: draft.model,
+    ANTHROPIC_PROMPT_CACHE: draft.anthropicPromptCache ? 'true' : 'false',
+    CONTEXT_WINDOW_TOKENS: String(draft.contextWindow),
+  };
+  try { writeUserConfig(patch); } catch { /* 写 config 失败不阻断 .active */ }
+  try { writeFileSync(path.join(modelsDir(), '.active'), `${name}\n`, 'utf8'); } catch { /* 指针写失败不阻断 */ }
+  process.env.LLM_PROVIDER = draft.provider;
+  process.env.LLM_BASE_URL = draft.baseURL;
+  process.env.LLM_API_KEY = draft.apiKey;
+  process.env.LLM_MODEL = draft.model;
+  process.env.ANTHROPIC_PROMPT_CACHE = draft.anthropicPromptCache ? 'true' : 'false';
+  process.env.CONTEXT_WINDOW_TOKENS = String(draft.contextWindow);
+}
+
+/**
+ * 保存（新建或覆盖）一个预设。
+ * activate=true 时顺带切为当前 —— 新建模型后用户期待的下一步就是用它，
+ * 否则还要再点一次「切换」。编辑非激活预设时不打扰当前运行环境。
+ */
+function savePresetFromRenderer(input: {
+  name?: unknown;
+  originalName?: unknown;
+  draft?: unknown;
+  activate?: unknown;
+}): { ok: boolean; message: string; name?: string } {
+  const name = String(input.name ?? '').trim();
+  if (!PRESET_NAME_RE.test(name)) return { ok: false, message: '预设名只能包含字母、数字、_ 和 -，长度 1–32' };
+  const draft = normalizeDraft((input.draft ?? {}) as Partial<PresetDraft>);
+  if (!draft.ok) return { ok: false, message: draft.message };
+
+  const originalName = String(input.originalName ?? '').trim();
+  const renaming = !!originalName && originalName !== name;
+  if (renaming) {
+    if (!PRESET_NAME_RE.test(originalName)) return { ok: false, message: '原预设名不合法' };
+    if (existsSync(presetPathFor(name))) return { ok: false, message: `已存在同名预设 “${name}”` };
+    if (!existsSync(presetPathFor(originalName))) return { ok: false, message: `预设 “${originalName}” 不存在` };
+  }
+  try {
+    writePresetFile(name, draft.value);
+    if (renaming) {
+      // 先写新文件再删旧文件：中途失败也不会丢配置。
+      try { unlinkSync(presetPathFor(originalName)); } catch { /* 旧文件已被手动删掉 */ }
+      if (readActivePreset() === originalName) {
+        try { writeFileSync(path.join(modelsDir(), '.active'), `${name}\n`, 'utf8'); } catch { /* 忽略 */ }
+      }
+    }
+  } catch (error) {
+    return { ok: false, message: `写入预设失败: ${(error as Error).message}` };
+  }
+
+  const wasActive = readActivePreset() === name || readActivePreset() === originalName;
+  if (input.activate === true || wasActive) {
+    activatePreset(name, draft.value);
+    restartAllAgents();
+  }
+  return { ok: true, message: renaming ? `已重命名并保存 “${name}”` : `已保存预设 “${name}”`, name };
+}
+
+/** 删除一个预设；删的若是激活预设，顺带清掉指针（否则下次启动指向空文件）。 */
+function removePreset(name: string): { ok: boolean; message: string } {
+  if (!PRESET_NAME_RE.test(name)) return { ok: false, message: '预设名不合法' };
+  if (!existsSync(presetPathFor(name))) return { ok: false, message: `预设 “${name}” 不存在` };
+  const wasActive = readActivePreset() === name;
+  try { unlinkSync(presetPathFor(name)); }
+  catch (error) { return { ok: false, message: `删除失败: ${(error as Error).message}` }; }
+  if (wasActive) {
+    try { unlinkSync(path.join(modelsDir(), '.active')); } catch { /* 指针已不在 */ }
+  }
+  return { ok: true, message: `已删除预设 “${name}”${wasActive ? '（它正在被使用，请另选一个模型）' : ''}` };
+}
+
+/** 配置类变更（模型/行为开关）后统一走这里：停掉在跑任务，host 下次 send 时按新配置重启。 */
+function restartAllAgents(): void {
   for (const [id, agent] of agents) {
     const task = taskById(id);
     if (task && (task.status === 'running' || task.status === 'waiting')) void agent.send({ type: 'cancel', id });
     agent.restart();
   }
-  return {
-    ok: true,
-    message: `已切换到 ${name} (${provider}${promptCache ? ' · cache on' : ''})`,
-    model: { name, label: model, provider, promptCache, baseURL: maskUrl(baseURL), contextWindow, isActive: true },
-  };
+}
+
+/* ── 行为开关（设置浮层用，语义对齐 mocode 终端的斜杠命令） ──
+ * 读取顺序：process.env（host 启动时的快照来源）→ ~/.mocode/config → mocode 默认值。
+ * mocode 默认：AUTO_COMPACT 开（!== 'false'），其余显式 'true' 才开（=== 'true'）。 */
+const SETTING_TOGGLES = {
+  autoCompact: { env: 'AUTO_COMPACT', on: (v: string | undefined) => v !== 'false' },
+  memory: { env: 'MEMORY_ENABLED', on: (v: string | undefined) => v === 'true' },
+  subAgent: { env: 'MOCODE_SUBAGENT_ENABLED', on: (v: string | undefined) => v === 'true' },
+  autoReflect: { env: 'AUTO_REFLECT', on: (v: string | undefined) => v === 'true' },
+} as const;
+type SettingKey = keyof typeof SETTING_TOGGLES;
+
+function readSettings(): Record<SettingKey, boolean> {
+  const config = readUserConfig();
+  const out = {} as Record<SettingKey, boolean>;
+  for (const [key, def] of Object.entries(SETTING_TOGGLES)) {
+    const value = process.env[def.env] ?? config[def.env] ?? '';
+    out[key as SettingKey] = def.on(value || undefined);
+  }
+  return out;
 }
 
 
@@ -269,7 +474,19 @@ function normalizeState(value: unknown): StoredState | null {
     .map((item) => ({ ...item, name: item.name || path.basename(item.root), branch: item.branch || '本地' }));
   if (!projects.length) return null;
   const tasks = Array.isArray(raw.tasks) ? raw.tasks.filter((item): item is TaskRecord => !!item && typeof item.id === 'string' && typeof item.projectId === 'string')
-    .map((item) => ({ ...item, changedFiles: Array.isArray(item.changedFiles) ? item.changedFiles : [], status: item.status || 'completed' })) : [];
+    .map((item) => {
+      const status = item.status || 'completed';
+      // 上次会话结束时仍在 running/waiting 的任务，终态事件（run_completed/run_failed）不会落盘 ——
+      // 进程退出即失联。重启后一律收敛为 failed，否则侧栏永远转圈。
+      // draft 壳子（queued 且从未发过 run，pendingTask 依赖它）保留 queued。
+      const stale = status === 'running' || status === 'waiting';
+      return {
+        ...item,
+        changedFiles: Array.isArray(item.changedFiles) ? item.changedFiles : [],
+        status: (stale ? 'failed' : status) as TaskStatus,
+        lastError: stale && !item.lastError ? '上次运行未正常结束（应用重启）' : item.lastError,
+      };
+    }) : [];
   return { version: 1, projects, tasks, selectedProjectId: projects.some((item) => item.id === raw.selectedProjectId) ? raw.selectedProjectId! : projects[0].id, selectedTaskId: typeof raw.selectedTaskId === 'string' ? raw.selectedTaskId : undefined };
 }
 
@@ -285,14 +502,6 @@ function saveState(): void {
 }
 function selectedProject(): Project { return state.projects.find((item) => item.id === state.selectedProjectId) ?? state.projects[0]; }
 function taskById(id?: string): TaskRecord | undefined { return state.tasks.find((item) => item.id === id); }
-/**
- * 「新建任务」只建壳子（标题留空、尚未发出第一条指令）。这类任务在用户切换工作空间时
- * 应当跟着迁到新的归属，否则先建任务、再在主页挑工作空间的流程就断了。
- */
-function pendingTask(): TaskRecord | undefined {
-  const task = taskById(state.selectedTaskId);
-  return task && task.status === 'queued' && !task.sessionId ? task : undefined;
-}
 
 /**
  * 普通任务（无项目文件夹）的 pseudo-project：agent host 需要一个 cwd 跑子进程、
@@ -411,6 +620,17 @@ async function pullRequests(project: Project): Promise<Record<string, unknown>> 
   catch { return { available: false, message: 'GitHub CLI 返回了无法读取的数据。' }; }
 }
 
+/** 把仍在运行的任务就地收敛为 failed —— host 退出/启动失败时不会再有 run_completed 落盘，不收敛侧栏就永远转圈。 */
+function failTask(taskId: string, message: string): void {
+  const task = taskById(taskId);
+  if (!task || (task.status !== 'running' && task.status !== 'waiting')) return;
+  task.status = 'failed';
+  task.lastError = message;
+  task.updatedAt = new Date().toISOString();
+  saveState();
+  broadcastState();
+}
+
 function updateTaskFromAgent(envelope: HostEnvelope): void {
   const requestId = typeof envelope.requestId === 'string' ? envelope.requestId : undefined;
   const task = taskById(requestId);
@@ -433,6 +653,8 @@ function updateTaskFromAgent(envelope: HostEnvelope): void {
 
 class LocalAgent {
   private readonly client = new AgentHostClient();
+  /** 本实例服务的任务 id（ensureAgent 创建时绑定）。host 退出/报错时用它把任务收敛到终态。 */
+  private readonly taskId: string;
   private currentProject: Project | null = null;
   private starting: Promise<void> | null = null;
   /** 正在执行的 stop() promise。restart 后立刻 send 必须等它,否则会发给正在退出的旧 host。 */
@@ -440,13 +662,16 @@ class LocalAgent {
   private crashStreak = 0;
   private static MAX_CRASH_STREAK = 3;
 
-  constructor() {
+  constructor(taskId: string) {
+    this.taskId = taskId;
     this.client.onEvent((envelope) => this.receive(envelope));
     this.client.onDiagnostic((message) =>
       this.receive({ type: 'event', event: 'host_log', payload: { message } }),
     );
     this.client.onExit(({ code, expected }) => {
       this.receive({ type: 'event', event: 'host_exit', payload: { code } });
+      // host 退出（含正常 stop、崩溃、重启）后，本任务的 run 不会再有 run_completed —— 就地收敛。
+      failTask(this.taskId, expected ? 'Agent 进程已停止，任务中断' : `Agent 进程异常退出（code ${code}），任务中断`);
       const project = this.currentProject;
       if (!expected && project && this.crashStreak < LocalAgent.MAX_CRASH_STREAK) {
         this.crashStreak += 1;
@@ -560,6 +785,9 @@ class LocalAgent {
 
   private receive(envelope: HostEnvelope): void {
     if (envelope.type === 'event') updateTaskFromAgent(envelope);
+    // host 起不来 / send 失败（尚未就绪、连续崩溃、管道断开等）也必须收敛任务，
+    // 否则任务停在 running 等一个永远不会来的 run_completed。
+    if (envelope.type === 'error') failTask(this.taskId, envelope.error || 'Agent 通信失败，任务中断');
     pushRenderer('work:agent-event', envelope);
   }
 }
@@ -610,7 +838,7 @@ function currentTaskWorkspace(task: TaskRecord): Record<string, unknown> {
 function ensureAgent(task: TaskRecord): LocalAgent {
   let agent = agents.get(task.id);
   if (!agent) {
-    agent = new LocalAgent();
+    agent = new LocalAgent(task.id);
     agents.set(task.id, agent);
     const workspace = workspaceForTask(task);
     if (workspace) void agent.start(workspace);
@@ -618,9 +846,33 @@ function ensureAgent(task: TaskRecord): LocalAgent {
   return agent;
 }
 
+/**
+ * 归一化到可直接展示的 `host`。写预设时 baseURL 可能不带协议（如 `api.deepseek.com/v1`），
+ * 所以先补 https:// 再解析；仍然解析失败就退化成截掉路径的原始串，绝不返回空。
+ */
 function maskUrl(raw: string): string {
   if (!raw) return '';
-  try { const url = new URL(raw); return `${url.protocol}//${url.host}`; } catch { return ''; }
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const url = new URL(withScheme);
+    return url.host || '';
+  } catch {
+    return raw.split('/')[0] ?? '';
+  }
+}
+
+/**
+ * 提供商键：把 host 里的 `www.` / `api.` 这类常见前缀剥掉，让
+ * `api.deepseek.com`、`www.deepseek.com`、`platform.deepseek.com` 归到同一个提供商。
+ * 用作 renderer 分组的 key（同 key 必同组，不会出现同一家被拆成两栏）。
+ */
+function providerHostOf(raw: string): string {
+  const host = maskUrl(raw).toLowerCase();
+  if (!host) return '';
+  // 去掉端口再当分组键：同一台机器上不同端口的自建网关仍算同一家提供商。
+  const parts = (host.split(':')[0] ?? '').split('.');
+  while (parts.length > 2 && /^(www|api|platform|open|gateway)$/.test(parts[0]!)) parts.shift();
+  return parts.join('.');
 }
 
 function attachmentFor(filePath: string): { name: string; dataUrl: string } | null {
@@ -638,25 +890,23 @@ function installIpc(): void {
   ipcMain.handle('work:pick-project', async () => {
     const result = await dialog.showOpenDialog(windowRef!, { properties: ['openDirectory', 'createDirectory'] });
     if (result.canceled || !result.filePaths[0]) return null;
-    const pending = pendingTask();
     const project = await projectFor(result.filePaths[0]);
     const existing = state.projects.find((item) => item.id === project.id);
     if (existing) Object.assign(existing, project); else state.projects.push(project);
     state.selectedProjectId = project.id;
-    // 还没开始的新任务跟随迁移到新空间；已开始的任务则清空选中，避免串到别的项目里。
-    if (pending) { pending.projectId = project.id; pending.updatedAt = new Date().toISOString(); }
-    else state.selectedTaskId = undefined;
+    // 打开新空间只切换浏览器上下文，不动任何任务的归属 ——
+    // 归属变更走 work:set-task-project（chip / 任务菜单显式触发）。
+    state.selectedTaskId = undefined;
     saveState(); broadcastState(); return state;
   });
   ipcMain.handle('work:select-project', async (_event, projectId: string) => {
     if (!state.projects.some((item) => item.id === projectId)) return state;
-    const pending = pendingTask();
     state.selectedProjectId = projectId;
-    if (pending) { pending.projectId = projectId; pending.updatedAt = new Date().toISOString(); }
-    else state.selectedTaskId = undefined;
+    // 同上：切空间不清空当前查看的任务（任务保留在各自分组里，切回去还在）。
     saveState(); broadcastState(); return state;
   });
-  // projectId 传 '' = 普通任务（不进任何空间）；传项目 id = 归入对应空间；不传 = 当前选中项目（兼容旧调用）。
+  // projectId 显式传 '' = 纯任务（不进任何空间，落到 scratch 目录）；传项目 id = 归入对应空间；
+  // 不传 = 跟随当前选中的空间（兼容旧调用，renderer 已改为显式传参）。
   ipcMain.handle('work:create-task', async (_event, title: string, projectId?: string) => {
     const now = new Date().toISOString();
     let targetProjectId: string;
@@ -672,6 +922,31 @@ function installIpc(): void {
     ensureAgent(task);
     return { state, task };
   });
+  /**
+   * 关联 / 解除任务的工作空间 —— 「任务」与「空间」两个分组之间的唯一通路。
+   * projectId 传 '' = 纯任务（落到 userData/scratch）；传项目 id = 归入该空间。
+   *
+   * 只允许**从未跑过**的任务改归属：agent host 的 cwd 在启动时固化，会话历史也按
+   * <root>/.mocode/sessions 落盘，跑过之后再换目录会让历史与新目录错位（旧会话找不回）。
+   * 返回 { ok:false } 时 renderer 会拿 message 提示用户。
+   */
+  ipcMain.handle('work:set-task-project', async (_event, taskId: string, projectId: string) => {
+    const task = taskById(taskId);
+    if (!task || typeof projectId !== 'string') return { ok: false, message: '任务不存在。' };
+    if (task.sessionId || task.status === 'running' || task.status === 'waiting') {
+      return { ok: false, message: '任务已开始运行，不能再更改工作空间。' };
+    }
+    const target = projectId && state.projects.some((item) => item.id === projectId) ? projectId : '';
+    const agent = agents.get(task.id);
+    // cwd 变了 → 旧 host（按旧目录启动）作废，下次 send 按新目录重启。
+    if (agent) { agent.stop(); agents.delete(task.id); }
+    task.projectId = target;
+    task.updatedAt = new Date().toISOString();
+    if (target) state.selectedProjectId = target;
+    saveState(); broadcastState();
+    ensureAgent(task);
+    return { ok: true, state, task };
+  });
   ipcMain.handle('work:select-task', async (_event, taskId: string) => {
     const task = taskById(taskId); if (!task) return null;
     state.selectedTaskId = task.id;
@@ -685,9 +960,10 @@ function installIpc(): void {
   });
   ipcMain.handle('work:delete-task', (_event, taskId: string) => {
     if (typeof taskId !== 'string' || !taskId) return null;
+    // 任务 id 全局唯一，且「任务」「空间」两个分组都会展示任务 —— 不能再按 selectedProjectId 拦，
+    // 否则在「任务」分组里删空间任务（或反之）会被静默拒绝。
     const task = taskById(taskId);
-    // 普通任务（projectId 为空）不受当前选中项目限制
-    if (!task || (task.projectId && task.projectId !== state.selectedProjectId)) return null;
+    if (!task) return null;
     const agent = agents.get(taskId);
     if (agent) { void agent.send({ type: 'cancel', id: taskId }); agent.stop(); agents.delete(taskId); }
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
@@ -708,7 +984,7 @@ function installIpc(): void {
   ipcMain.handle('work:rename-task', (_event, taskId: string, title: string) => {
     if (typeof taskId !== 'string' || !taskId || typeof title !== 'string') return null;
     const task = taskById(taskId);
-    if (!task || (task.projectId && task.projectId !== state.selectedProjectId)) return null;
+    if (!task) return null;
     task.title = title.trim().slice(0, 160) || task.title;
     task.updatedAt = new Date().toISOString();
     saveState(); broadcastState();
@@ -750,7 +1026,13 @@ function installIpc(): void {
     saveState(); broadcastState();
     return { state, removed: removed.name };
   });
-  ipcMain.handle('work:project-overview', async () => projectOverview(selectedProject()));
+  ipcMain.handle('work:project-overview', async () => {
+    // 纯任务（无工作空间）没有 git 仓库可概览：返回一份空壳，避免 renderer 拿 scratch 目录
+    // 当成项目展示（那里只有聊天记录，没有代码）。
+    const task = taskById(state.selectedTaskId);
+    if (task && !task.projectId) return { project: null, branch: '', status: [], diffStat: '', lastCommit: '', files: [], noWorkspace: true };
+    return projectOverview(selectedProject());
+  });
   ipcMain.handle('work:read-file', (_event, relativePath: string) => {
     const target = resolvedProjectFile(selectedProject(), relativePath); if (!target) return { error: '不允许读取项目目录外的文件。' };
     try { return { path: relativePath, content: readFileSync(target, 'utf8').slice(0, 200_000) }; } catch { return { error: '文件不可读取或不是文本文件。' }; }
@@ -777,18 +1059,58 @@ function installIpc(): void {
       label: active?.label ?? process.env.LLM_MODEL ?? '',
       provider,
       promptCache,
-      baseUrl: active?.baseURL ?? maskUrl(process.env.LLM_BASE_URL ?? ''),
+      baseUrl: active?.baseURL || maskUrl(process.env.LLM_BASE_URL ?? '') || activePresetBaseURL(),
       contextWindow: active?.contextWindow ?? (Number(process.env.CONTEXT_WINDOW_TOKENS ?? 0) || null),
       language: process.env.MOCODE_LANGUAGE ?? '',
       theme: process.env.MOCODE_THEME ?? '',
     };
   });
   ipcMain.handle('work:list-models', () => listModels());
+  // 读单个预设的完整字段（含 apiKey）供「编辑」表单回填。
+  // 为什么必须回传明文 key：表单里 key 是 password 输入框，若用掩码当初始值，
+  // 用户只改「上下文窗口」也会把掩码串当成新 key 存回去 —— 静默毁掉配置。
+  // apiKey 只在主进程↔本应用渲染层之间流转，不落日志、不进 modal 之外的地方。
+  ipcMain.handle('work:get-model', (_event, name: string) => {
+    if (typeof name !== 'string' || !PRESET_NAME_RE.test(name)) return { ok: false, message: '预设名不合法' };
+    const preset = readPresetFile(name);
+    if (!preset) return { ok: false, message: `无法读取预设 “${name}”` };
+    return { ok: true, preset: { ...preset } };
+  });
+  ipcMain.handle('work:save-model', (_event, payload: Record<string, unknown>) => {
+    const result = savePresetFromRenderer(payload ?? {});
+    if (result.ok) { broadcastState(); return { ok: true, message: result.message, name: result.name }; }
+    return { ok: false, message: result.message };
+  });
+  ipcMain.handle('work:delete-model', (_event, name: string) => {
+    if (typeof name !== 'string' || !name) return { ok: false, message: '预设名为空' };
+    const result = removePreset(name);
+    if (result.ok) broadcastState();
+    return result;
+  });
   ipcMain.handle('work:switch-model', (_event, name: string) => {
     if (typeof name !== 'string' || !name) return { ok: false, message: '模型名为空' };
     const result = switchModel(name);
     if (result.ok) broadcastState();
     return { ok: result.ok, message: result.message };
+  });
+  ipcMain.handle('work:get-settings', () => readSettings());
+  ipcMain.handle('work:set-settings', (_event, patch: Record<string, unknown>) => {
+    if (!patch || typeof patch !== 'object') return readSettings();
+    const configPatch: Record<string, string> = {};
+    for (const [key, value] of Object.entries(patch)) {
+      const def = SETTING_TOGGLES[key as SettingKey];
+      if (!def || typeof value !== 'boolean') continue;
+      configPatch[def.env] = value ? 'true' : 'false';
+      process.env[def.env] = value ? 'true' : 'false';
+    }
+    if (Object.keys(configPatch).length) {
+      try { writeUserConfig(configPatch); }
+      catch (error) { console.error('[settings] 写入 ~/.mocode/config 失败:', error); }
+      // host 启动时固化了 env 快照 —— 与切模型同理，全员重启才能生效。
+      restartAllAgents();
+      broadcastState();
+    }
+    return readSettings();
   });
   ipcMain.handle('work:list-branches', async () => {
     const project = selectedProject();
