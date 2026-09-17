@@ -14,19 +14,47 @@
 export interface RenderOptions {
   /** 代码块超过这个行数时折叠到首屏;0 = 永不折叠。默认 12。 */
   collapseLines?: number;
-  /** Copy 按钮文案。默认 "复制"。 */
+  /** Copy 按钮文案。默认取 md.copy 译文。 */
   copyLabel?: string;
-  /** 折叠/展开按钮文案。默认 "展开 N 行" / "收起"。 */
+  /** 折叠/展开按钮文案。默认取 md.expand 译文。 */
   expandLabel?: (lineCount: number) => string;
   collapseLabel?: string;
 }
 
-const DEFAULTS: Required<RenderOptions> = {
-  collapseLines: 12,
-  copyLabel: '复制',
-  expandLabel: (n) => `展开 ${n} 行`,
-  collapseLabel: '收起',
+/**
+ * 默认文案（copy / expand / collapse）由宿主注入 —— markdown.ts 不直接依赖 i18n 运行时，
+ * 这样渲染器仍可在无 i18n 的场景下被单独使用。renderer 初始化时调一次
+ * `setMarkdownLabels`，切语言时再调一次即可。
+ */
+export interface MarkdownLabels {
+  copy: string;
+  copied: string;
+  copyFailed: string;
+  expand: (lineCount: number) => string;
+  collapse: string;
+}
+
+const FALLBACK_LABELS: MarkdownLabels = {
+  copy: 'Copy',
+  copied: 'Copied',
+  copyFailed: 'Copy failed',
+  expand: (n) => `Expand ${n} lines`,
+  collapse: 'Collapse',
 };
+
+let labels: MarkdownLabels = FALLBACK_LABELS;
+
+/** 代码块折叠阈值（未被 options 覆盖时的默认值）。 */
+const DEFAULT_COLLAPSE_LINES = 12;
+
+/** 注入代码块按钮文案（renderer 启动时 + 每次切语言各调一次）。 */
+export function setMarkdownLabels(next: MarkdownLabels): void {
+  labels = next;
+}
+
+function currentLabels(): MarkdownLabels {
+  return labels;
+}
 
 const ESCAPE: Record<string, string> = {
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -425,7 +453,13 @@ function scanString(line: string, i: number, quote: string): number {
 
 export function renderMarkdown(input: string, options: RenderOptions = {}): string {
   if (!input) return '';
-  const opts = { ...DEFAULTS, ...options };
+  const current = currentLabels();
+  const opts: Required<RenderOptions> = {
+    collapseLines: options.collapseLines ?? DEFAULT_COLLAPSE_LINES,
+    copyLabel: options.copyLabel ?? current.copy,
+    expandLabel: options.expandLabel ?? current.expand,
+    collapseLabel: options.collapseLabel ?? current.collapse,
+  };
   return parseBlocks(input, opts);
 }
 
@@ -447,12 +481,12 @@ export function enhanceCodeBlocks(root: ParentNode): void {
       const text = pre.textContent ?? '';
       try {
         await navigator.clipboard.writeText(text);
-        copyBtn.textContent = '已复制';
+        copyBtn.textContent = currentLabels().copied;
         copyBtn.classList.add('copied');
-        setTimeout(() => { copyBtn.textContent = DEFAULTS.copyLabel; copyBtn.classList.remove('copied'); }, 1500);
+        setTimeout(() => { copyBtn.textContent = currentLabels().copy; copyBtn.classList.remove('copied'); }, 1500);
       } catch {
-        copyBtn.textContent = '复制失败';
-        setTimeout(() => { copyBtn.textContent = DEFAULTS.copyLabel; }, 1500);
+        copyBtn.textContent = currentLabels().copyFailed;
+        setTimeout(() => { copyBtn.textContent = currentLabels().copy; }, 1500);
       }
     });
 

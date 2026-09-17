@@ -6,12 +6,21 @@
  *   · queryHistory —— core 用它做标题/摘要,与 user 消息一一对应,不截会残留被回滚掉的提问;
  *   · lastToolGroups —— 属于被回滚掉的那一轮,留着会让下一次请求沿用错误的工具范围;
  *   · firstUser —— 列表展示用的元信息,得跟着剩余的第一条 user 重算(可能已经没有 user 了)。
+ *
+ * 失败文案由调用方注入(`messages`),纯函数本身不依赖 i18n —— 这样它能脱离主进程单测,
+ * 又能让主进程按当前语言把提示本地化。
  */
 export interface RawSessionRecord {
   history: Array<Record<string, unknown>>;
   queryHistory?: string[];
   lastToolGroups?: unknown[];
   firstUser?: string;
+}
+
+/** 截断失败时的提示文案;缺省时回退到 key 名（仅用于无 i18n 的测试场景）。 */
+export interface TruncateMessages {
+  noHistory: string;
+  compacted: string;
 }
 
 function contentTextOf(message: Record<string, unknown>): string {
@@ -27,13 +36,13 @@ function contentTextOf(message: Record<string, unknown>): string {
  * 把会话砍到「第 userIndex 条用户消息」之前 —— 那条 user 本身以及它之后的一整轮都作废。
  * userIndex 是**用户消息序号**(不是 history 数组下标):中间夹着多少 tool / assistant 都不影响。
  */
-export function truncateSessionAtUser(record: RawSessionRecord, userIndex: number): { ok: boolean; message?: string } {
-  if (!record || !Array.isArray(record.history)) return { ok: false, message: '会话文件里没有历史记录。' };
+export function truncateSessionAtUser(record: RawSessionRecord, userIndex: number, messages: TruncateMessages): { ok: boolean; message?: string } {
+  if (!record || !Array.isArray(record.history)) return { ok: false, message: messages.noHistory };
   const userAt: number[] = [];
   record.history.forEach((message, index) => { if (message.role === 'user') userAt.push(index); });
   if (!Number.isInteger(userIndex) || userIndex < 0 || userIndex >= userAt.length) {
     // 上下文压缩会把老消息换成摘要 —— 那一刻起这条 user 已不在会话里,索引无从谈起。
-    return { ok: false, message: '这一步已经被上下文压缩掉了,回滚不到它。' };
+    return { ok: false, message: messages.compacted };
   }
   const remaining = record.history.slice(0, userAt[userIndex]!);
   record.history = remaining;

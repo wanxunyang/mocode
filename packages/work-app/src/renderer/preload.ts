@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   listBranches: (): Promise<{ ok: boolean; message: string; current: string; branches: string[] }> => ipcRenderer.invoke('work:list-branches'),
   switchBranch: (branch: string): Promise<{ ok: boolean; message: string; branch?: string }> => ipcRenderer.invoke('work:switch-branch', branch),
   setTheme: (theme: 'light' | 'dark' | 'system'): void => ipcRenderer.send('work:set-theme', theme),
+  setLanguage: (language: string): Promise<{ ok: boolean; language?: string; message?: string }> => ipcRenderer.invoke('work:set-language', language),
   // 回滚对话:把会话截断到指定用户消息之前(id + 该消息在当前会话里的序号)。
   rollback: (value: { id: string; userIndex: number }): Promise<{ ok: boolean; message?: string; state?: ProjectState; history?: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> }> => ipcRenderer.invoke('work:rollback', value.id, value.userIndex),
   send: (value: Record<string, unknown>): void => ipcRenderer.send('work:agent-send', value),

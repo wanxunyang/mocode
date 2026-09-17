@@ -104,6 +104,8 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .primary-nav { display: grid; gap: 1px; padding: var(--space-2xs) 0 var(--space-md); }
 .nav-item { height: 32px; width: 100%; display: flex; align-items: center; gap: var(--space-sm); padding: 0 var(--space-xs); border-radius: var(--radius-sm); text-align: left; font-size: var(--text-sm); color: var(--color-muted); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
 .nav-item .icon { width: 16px; height: 16px; flex: 0 0 16px; color: var(--color-subtle); }
+/* 文案单独包一层 span：applyStaticI18n 用 textContent 覆写，直接挂在按钮上会把里面的 SVG 一起抹掉。 */
+.nav-item > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-item:hover { background: var(--color-paper-3); color: var(--color-ink); }
 .sidebar-section { padding: 0 0 var(--space-md); }
 .tasks-section { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0; }

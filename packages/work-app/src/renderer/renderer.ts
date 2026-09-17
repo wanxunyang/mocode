@@ -1,10 +1,56 @@
-import { renderMarkdown, enhanceCodeBlocks } from './markdown.js';
+import { renderMarkdown, enhanceCodeBlocks, setMarkdownLabels } from './markdown.js';
 import { mountIcons, icon } from './icons.js';
+import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
 
 export {};
 
 // 尽早把 HTML 里所有 data-icon 占位替换为 SVG,避免 first paint 看到空 icon。
 mountIcons();
+
+/* ── i18n 引导 ─────────────────────────────────────────────
+ * 三步：①把 markdown 代码块按钮文案注入渲染器；②刷一遍 index.html 上的 data-i18n* 静态标记；
+ * ③订阅语言变更，切语言时重刷静态文案 + 重建依赖语言的缓存节点（cheatsheet / 模板下拉）。
+ * 动态渲染的部分（会话流、侧栏、设置页）由各 render 函数自行按当前语言生成 —— 切语言后
+ * 统一调 applyLanguage() 整体重绘一次即可，不必逐个改渲染函数。 */
+function syncMarkdownLabels(): void {
+  setMarkdownLabels({
+    copy: t('md.copy'),
+    copied: t('md.copied'),
+    copyFailed: t('md.copyFailed'),
+    expand: (n) => t('md.expand', { n: n }),
+    collapse: t('md.collapse'),
+  });
+}
+syncMarkdownLabels();
+applyStaticI18n();
+
+/**
+ * 切语言后整体重绘。凡是「按当前语言生成过一次就缓存住」的地方都必须在这里重建：
+ * cheatsheet 弹窗（缓存 DOM）、模型模板下拉（optgroup 文案）、模型列表缓存 label 不涉文案但分组名要重算。
+ */
+function applyLanguage(): void {
+  document.documentElement.lang = getLang();
+  syncMarkdownLabels();
+  applyStaticI18n();
+  // cheatsheet / 会话搜索浮层的 DOM 是懒建 + 缓存的，直接丢掉让下次重建。
+  if (cheatsheetEl) { cheatsheetEl.remove(); cheatsheetEl = null; }
+  if (searchOverlay) { searchOverlay.remove(); searchOverlay = null; }
+  if (modelFormEl) rebuildModelTemplates();
+  // 视图层整体按新语言重生成。
+  renderProjects();
+  renderTasks();
+  renderEmptyChips();
+  // 设置页自己会判断「没开着就跳过」—— 不能在这里用 modelList.length 当开关：
+  // 「外观」「关于」两个分类不依赖模型列表，一个预设都没配时也得跟着切语言。
+  renderSettingsSectionCacheOnLang();
+  renderModelPickerIfOpen();
+  setModeButtonFromCache();
+  // 会话流不重放（消息内容与语言无关），只重画状态行与输入区。
+  renderStatusCacheOnLang();
+  setRunning(isRunning(viewingTaskId()));
+  renderAttachments();
+}
+onLangChange(() => applyLanguage());
 
 
 
@@ -54,6 +100,7 @@ declare global {
       listBranches: () => Promise<{ ok: boolean; message: string; current: string; branches: string[] }>;
       switchBranch: (branch: string) => Promise<{ ok: boolean; message: string; branch?: string }>;
       setTheme: (theme: 'light' | 'dark' | 'system') => void;
+      setLanguage: (language: string) => Promise<{ ok: boolean; language?: string; message?: string }>;
       send: (value: Record<string, unknown>) => void;
       onAgentEvent: (callback: (event: AgentEnvelope) => void) => () => void;
       onState: (callback: (state: WorkState) => void) => () => void;
@@ -120,25 +167,34 @@ type AgentPhase = 'idle' | 'starting' | 'thinking' | 'tool' | 'speaking' | 'wait
 type StatusTone = 'idle' | 'busy' | 'ok' | 'warn' | 'fail';
 interface AgentStatusState {
   phase: AgentPhase;
-  /** 主文案:「思考中」「正在执行 联网搜索」。 */
+  /** 主文案:「思考中」「正在执行 联网搜索」。由 labelKey 渲染而来（切语言时可重算）。 */
   label: string;
   /** 弱化后缀:工具名等补充信息。 */
   detail: string;
   tone: StatusTone;
   /** busy 状态的计时起点(null = 不计时)。 */
   since: number | null;
+  /** 文案 key + 插值 —— 切语言时据此重算 label（否则缓存住的旧语言文案会留在界面上）。 */
+  labelKey?: LocaleKey;
+  labelVars?: Record<string, string | number>;
+}
+
+/** 按 key 重算状态行主文案（t() 读当前语言）。 */
+function relabelStatus(state: AgentStatusState): AgentStatusState {
+  if (!state.labelKey) return state;
+  return { ...state, label: t(state.labelKey, state.labelVars) };
 }
 
 /** 运行中状态:带计时起点,状态行每秒重绘一次,让"它还在动"肉眼可见。 */
-function busyStatus(phase: AgentPhase, label: string, detail = ''): AgentStatusState {
-  return { phase, label, detail, tone: 'busy', since: Date.now() };
+function busyStatus(phase: AgentPhase, labelKey: LocaleKey, labelVars?: Record<string, string | number>): AgentStatusState {
+  return { phase, labelKey, labelVars, label: t(labelKey, labelVars), detail: '', tone: 'busy', since: Date.now() };
 }
 /** 终态 / 空闲态:不计时。 */
-function settledStatus(phase: AgentPhase, label: string, tone: StatusTone, detail = ''): AgentStatusState {
-  return { phase, label, detail, tone, since: null };
+function settledStatus(phase: AgentPhase, labelKey: LocaleKey, tone: StatusTone, detail = ''): AgentStatusState {
+  return { phase, labelKey, label: t(labelKey), detail, tone, since: null };
 }
 
-const IDLE_STATUS: AgentStatusState = settledStatus('idle', '待命', 'idle');
+const IDLE_STATUS: AgentStatusState = settledStatus('idle', 'status.idle', 'idle');
 const STATUS_ICON: Record<StatusTone, string> = { idle: 'dot-running', busy: 'loader', ok: 'check', warn: 'warn', fail: 'fail' };
 /** 终态(已完成 / 运行失败)停留时长:够看清「用时 Ns」,又不至于赖着不走。 */
 const STATUS_LINGER_MS = 1500;
@@ -224,23 +280,32 @@ function applyStatus(stream: TaskStream, viewing: boolean, next: AgentStatusStat
   if (viewing) renderStatus(next);
 }
 
+/** 切语言后重画状态行（label 由 key 重算，detail / 计时起点保留）。 */
+function renderStatusCacheOnLang(): void {
+  agentStatus = relabelStatus(agentStatus);
+  const viewing = viewingTaskId();
+  const stream = viewing ? streams.get(viewing) : undefined;
+  if (stream?.status) stream.status = relabelStatus(stream.status);
+  if (statusRowEl) paintStatus();
+}
+
 /** host status 事件 → 状态行文案。取值清单见 src/host/stdio.ts 的 hooksFor()。 */
 function statusFromHostEvent(value: string, tool: string): AgentStatusState {
   const label = tool ? toolMeta(tool).label : '';
-  if (value === 'preparing_tool') return busyStatus('tool', label ? `正在准备 ${label}` : '正在准备工具');
-  if (value === 'running_tool') return busyStatus('tool', label ? `正在执行 ${label}` : '正在执行工具');
-  if (value === 'compacting') return busyStatus('compacting', '正在压缩上下文');
+  if (value === 'preparing_tool') return busyStatus('tool', label ? 'status.preparingTool' : 'status.preparingToolGeneric', label ? { tool: label } : {});
+  if (value === 'running_tool') return busyStatus('tool', label ? 'status.runningTool' : 'status.runningToolGeneric', label ? { tool: label } : undefined);
+  if (value === 'compacting') return busyStatus('compacting', 'status.compacting');
   // 'thinking' 及其它未认知取值:onStepStart 已触发,正文 / 工具调用都还没到。
-  return busyStatus('thinking', '思考中');
+  return busyStatus('thinking', 'status.thinking');
 }
 
 /** 没有事件缓冲时(重启后打开旧任务)按任务记录兜底一个状态文案。 */
 function statusFromTask(task: Task | undefined): AgentStatusState {
   if (!task) return IDLE_STATUS;
-  if (task.status === 'completed') return settledStatus('done', '已完成', 'ok');
-  if (task.status === 'failed') return settledStatus('failed', '运行失败', 'fail');
-  if (task.status === 'cancelled') return settledStatus('stopped', '已停止', 'idle');
-  if (task.status === 'running' || task.status === 'waiting') return busyStatus('starting', '正在运行');
+  if (task.status === 'completed') return settledStatus('done', 'status.completed', 'ok');
+  if (task.status === 'failed') return settledStatus('failed', 'status.failed', 'fail');
+  if (task.status === 'cancelled') return settledStatus('stopped', 'status.cancelled', 'idle');
+  if (task.status === 'running' || task.status === 'waiting') return busyStatus('starting', 'status.running');
   return IDLE_STATUS;
 }
 
@@ -248,7 +313,7 @@ function statusFromTask(task: Task | undefined): AgentStatusState {
 function elapsedDetail(startedAt: number | null): string {
   if (!startedAt) return '';
   const seconds = Math.round((Date.now() - startedAt) / 1000);
-  return seconds >= 1 ? `用时 ${seconds}s` : '';
+  return seconds >= 1 ? t('status.elapsed', { s: seconds }) : '';
 }
 
 /* ── 启动看门狗 ──────────────────────────────────────────
@@ -273,13 +338,13 @@ function armRunWatchdog(taskId: string): void {
       runStartTimers.delete(taskId);
       const stream = streams.get(taskId);
       if (!stream?.running) return;
-      const message = `Agent 启动超时（${RUN_START_TIMEOUT_MS / 1000}s 内没有任何响应），这一轮没有跑起来。请在终端跑一次 mocode 确认模型能对话，再点「重新生成」重试。`;
+      const message = t('status.startTimeout', { s: RUN_START_TIMEOUT_MS / 1000 });
       stream.items.push({ kind: 'error', message });
       const viewing = viewingTaskId() === taskId;
-      applyStatus(stream, viewing, settledStatus('failed', '启动失败', 'fail', elapsedDetail(stream.startedAt)));
+      applyStatus(stream, viewing, settledStatus('failed', 'status.startFailed', 'fail', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
       if (viewing) { console.error('[Agent]', message); showTurnError(message); showToast('error', message, 7000); finish(); }
-      else notifyBackground(taskId, '启动失败');
+      else notifyBackground(taskId, t('status.startFailed'));
     }, RUN_START_TIMEOUT_MS),
   );
 }
@@ -299,9 +364,20 @@ function showTurnError(message: string): void {
 function selectedProject(): Project | undefined { return state?.projects.find((project) => project.id === state?.selectedProjectId); }
 function selectedTask(): Task | undefined { return state?.tasks.find((task) => task.id === state?.selectedTaskId); }
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]!)); }
-function statusText(status: TaskStatus): string { return ({ queued: '等待开始', running: '正在运行', waiting: '等待确认', completed: '已完成', failed: '运行失败', cancelled: '已停止' })[status]; }
+function statusText(status: TaskStatus): string { return ({ queued: t('status.queued'), running: t('status.running'), waiting: t('status.waiting'), completed: t('status.completed'), failed: t('status.failed'), cancelled: t('status.cancelled') })[status]; }
 /** 未命名的任务（新建后还没发第一条指令）在侧栏显示占位标题。 */
-function taskTitle(task: Task): string { return task.title.trim() || '新任务'; }
+function taskTitle(task: Task): string { return task.title.trim() || t('empty.draft'); }
+
+/**
+ * 落盘的错误文案 → 当前语言。主进程存的是稳定标记（`__stale_run__` / `__run_failed__`），
+ * 因为 state 会写进 work-projects.json —— 存译文会让用户切语言后看到旧语言永久残留。
+ */
+function taskErrorText(task: Task): string {
+  const raw = task.lastError ?? '';
+  if (raw === '__stale_run__') return t('main.task.staleRun');
+  if (raw === '__run_failed__') return t('main.task.runFailed');
+  return raw;
+}
 
 /** 更新输入栏的上下文占比显示。pct=null 表示未知/无会话。 */
 function updateContextUsage(pct: number | null): void {
@@ -320,17 +396,19 @@ function humanizeError(raw: string): string | null {
   const text = raw.trim();
   if (!text) return null;
   if (/Premature close|ECONNRESET|ECONNREFUSED|socket hang up|ETIMEDOUT|ENOTFOUND|fetch failed|network/i.test(text)) {
-    return '与 AI 服务的连接中断了，请稍后重试或检查网络/模型配置。';
+    return t('err.connectionLost');
   }
-  if (/Invalid MoCode Work host command|Invalid JSON command|输出格式错误/.test(text)) {
-    return 'Agent Host 输出了无法识别的数据，请重试一次。';
+  if (/Invalid MoCode Work host command|Invalid JSON command/.test(text)) {
+    return t('err.unrecognized');
   }
-  if (/Session .* could not be restored/.test(text)) return `历史会话丢失，已开启新会话。`;
-  if (/already active/.test(text)) return '当前还有任务在跑，请先等它结束或点停止。';
-  if (/Approval request has expired/.test(text)) return '上一次的确认请求已过期，请重新发起任务。';
-  if (/Agent Host 未构建/.test(text)) return 'Agent Host 还没有构建，请先在 mocode 仓库根目录运行 npm run build。';
-  if (/Agent Host 尚未就绪/.test(text)) return 'Agent Host 还没准备好，请稍候再发。';
-  if (/LLM_BASE_URL|LLM_API_KEY|baseURL|apiKey/i.test(text)) return '模型未配置：请运行 /model 或设置 LLM_BASE_URL / LLM_API_KEY 后重试。';
+  if (/Session .* could not be restored/.test(text)) return t('err.sessionLost');
+  if (/already active/.test(text)) return t('err.alreadyActive');
+  if (/Approval request has expired/.test(text)) return t('err.approvalExpired');
+  // 这两条来自 @mocode/runtime 的 host-client（英文 en 文案），主进程与渲染层都不过手 ——
+  // 匹配裸英文，不要匹配本地化后的中文（本地化在 tMain 里做，原文永远是英文）。
+  if (/Agent Host does not exist|Cannot locate mocode-agent-host/.test(text)) return t('toast.hostNotBuilt');
+  if (/Agent Host has not been started|Agent Host is not writable/.test(text)) return t('err.hostNotReady');
+  if (/LLM_BASE_URL|LLM_API_KEY|baseURL|apiKey/i.test(text)) return t('err.modelNotConfigured');
   // 命中的是用户已经能看懂的原文,直接展示
   return text;
 }
@@ -339,26 +417,27 @@ function renderProjects(): void {
   const current = state; if (!current) return;
   const project = selectedProject();
   const ctx = $('#context-project');
-  if (ctx) ctx.innerHTML = `${icon('home')}<span>${escapeHtml(project?.name ?? '项目')}</span>`;
+  if (ctx) ctx.innerHTML = `${icon('home')}<span>${escapeHtml(project?.name ?? t('empty.project'))}</span>`;
   const branch = $('#context-branch');
-  if (branch) branch.innerHTML = `${icon('branch')}<span>${escapeHtml(project?.branch ?? '本地')}</span>`;
+  // branch 为空 = 非 git 仓库 / 无分支（主进程存空串，不存译文）。
+  if (branch) branch.innerHTML = `${icon('branch')}<span>${escapeHtml(project?.branch || t('git.local'))}</span>`;
 }
 
 function timeAgo(iso: string): string {
   const date = new Date(iso);
   const now = new Date();
   const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
-  if (seconds < 60) return '刚刚';
+  if (seconds < 60) return t('time.justNow');
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}分钟前`;
+  if (minutes < 60) return t('time.minutesAgo', { n: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}小时前`;
+  if (hours < 24) return t('time.hoursAgo', { n: hours });
   const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}天前`;
+  if (days < 30) return t('time.daysAgo', { n: days });
   const months = Math.floor(days / 30);
-  if (months < 12) return `${months}个月前`;
+  if (months < 12) return t('time.monthsAgo', { n: months });
   const years = Math.floor(months / 12);
-  return `${years}年前`;
+  return t('time.yearsAgo', { n: years });
 }
 
 function renderTasks(): void {
@@ -375,32 +454,35 @@ function renderTasks(): void {
     const id = escapeHtml(task.id);
     const isRunning = task.status === 'running' || task.status === 'waiting';
     const meta = isRunning ? `<span class="task-spinner">${icon('loader')}</span>` : `<small data-always="1">${timeAgo(task.updatedAt)}</small>`;
-    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"><button class="task-open" data-task="${id}" title="打开 ${escapeHtml(taskTitle(task))}"><span class="task-title" title="双击重命名">${escapeHtml(taskTitle(task))}</span><span class="task-meta">${meta}</span></button><button class="task-menu-btn" data-task-menu="${id}" aria-label="任务菜单" title="更多操作">${icon('more')}</button></div>`;
+    // 失败原因只挂在 title 上：侧栏一行放不下长文案，而 lastError 里存的是稳定标记，
+    // 必须过一层 taskErrorText 才能按当前语言显示。
+    const error = task.lastError ? ` title="${escapeHtml(taskErrorText(task))}"` : '';
+    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"${error}><button class="task-open" data-task="${id}" title="${t('task.open', { name: escapeHtml(taskTitle(task)) })}"><span class="task-title" title="${t('task.dblclickRename')}">${escapeHtml(taskTitle(task))}</span><span class="task-meta">${meta}</span></button><button class="task-menu-btn" data-task-menu="${id}" aria-label="${t('task.menu')}" title="${t('sidebar.moreActions')}">${icon('more')}</button></div>`;
   };
 
   const tasksCollapsed = collapsedSections.has('tasks');
   const spacesCollapsed = collapsedSections.has('spaces');
   const sectionHeading = (key: string, title: string, count: number, collapsed: boolean, action?: { kind: string; title: string; label: string }): string =>
-    `<div class="sidebar-group-heading" data-toggle-section="${key}" title="点击展开 / 折叠" aria-expanded="${!collapsed}"><span class="sidebar-group-title">${title}</span><span class="sidebar-group-count">(${count})</span><span class="sidebar-group-chevron">${icon(collapsed ? 'chevron-right' : 'chevron-down')}</span>${action ? `<button class="sidebar-group-action" data-group-action="${action.kind}" title="${action.title}" aria-label="${action.title}">${icon(action.label)}</button>` : ''}</div>`;
+    `<div class="sidebar-group-heading" data-toggle-section="${key}" title="${t('sidebar.toggleSection')}" aria-expanded="${!collapsed}"><span class="sidebar-group-title">${title}</span><span class="sidebar-group-count">(${count})</span><span class="sidebar-group-chevron">${icon(collapsed ? 'chevron-right' : 'chevron-down')}</span>${action ? `<button class="sidebar-group-action" data-group-action="${action.kind}" title="${action.title}" aria-label="${action.title}">${icon(action.label)}</button>` : ''}</div>`;
 
   taskList.innerHTML = `<div class="sidebar-group ${tasksCollapsed ? 'collapsed' : ''}">
-  ${sectionHeading('tasks', '任务', normalTasks.length, tasksCollapsed, { kind: 'new-task', title: '新建无空间的任务', label: 'plus' })}
-  <div class="sidebar-group-body">${normalTasks.length ? normalTasks.map(taskItemHtml).join('') : '<p class="empty-tasks">无任务</p>'}</div>
+  ${sectionHeading('tasks', t('sidebar.tasks'), normalTasks.length, tasksCollapsed, { kind: 'new-task', title: t('sidebar.newTaskNoSpace'), label: 'plus' })}
+  <div class="sidebar-group-body">${normalTasks.length ? normalTasks.map(taskItemHtml).join('') : `<p class="empty-tasks">${t('sidebar.emptyTasks')}</p>`}</div>
 </div>
 <div class="sidebar-group ${spacesCollapsed ? 'collapsed' : ''}">
-  ${sectionHeading('spaces', '空间', spaces.length, spacesCollapsed)}
+  ${sectionHeading('spaces', t('sidebar.spaces'), spaces.length, spacesCollapsed)}
   <div class="sidebar-group-body">${spaces.map(({ project, tasks }) => {
     const isSelectedProject = project.id === current.selectedProjectId;
     const projectId = escapeHtml(project.id);
     const isCollapsed = collapsedProjects.has(project.id);
     return `<div class="project-group ${isCollapsed ? 'collapsed' : ''}">
-  <div class="project-group-heading ${isSelectedProject ? 'selected' : ''}" data-toggle-project="${projectId}" title="点击展开 / 折叠" aria-expanded="${!isCollapsed}">
+  <div class="project-group-heading ${isSelectedProject ? 'selected' : ''}" data-toggle-project="${projectId}" title="${t('sidebar.toggleSection')}" aria-expanded="${!isCollapsed}">
     <span class="project-group-icon">${icon('folder')}</span>
     <span class="project-group-name" title="${escapeHtml(project.name)}">${escapeHtml(project.name)}</span>
     <span class="project-group-chevron">${icon(isCollapsed ? 'chevron-right' : 'chevron-down')}</span>
-    <span class="project-group-actions"><button class="project-menu-btn icon-button-square" data-new-task-project="${projectId}" title="在此空间新建任务" aria-label="在 ${escapeHtml(project.name)} 中新建任务">${icon('plus')}</button><button class="project-menu-btn icon-button-square" data-project-menu="${projectId}" title="更多操作" aria-label="${escapeHtml(project.name)} 更多操作">${icon('more')}</button></span>
+    <span class="project-group-actions"><button class="project-menu-btn icon-button-square" data-new-task-project="${projectId}" title="${t('sidebar.newTaskInSpace')}" aria-label="${t('sidebar.newTaskInProject', { name: escapeHtml(project.name) })}">${icon('plus')}</button><button class="project-menu-btn icon-button-square" data-project-menu="${projectId}" title="${t('sidebar.moreActions')}" aria-label="${t('sidebar.moreActionsFor', { name: escapeHtml(project.name) })}">${icon('more')}</button></span>
   </div>
-  <div class="project-group-tasks">${tasks.length ? tasks.map(taskItemHtml).join('') : '<p class="empty-tasks">无任务</p>'}</div>
+  <div class="project-group-tasks">${tasks.length ? tasks.map(taskItemHtml).join('') : `<p class="empty-tasks">${t('sidebar.emptyTasks')}</p>`}</div>
 </div>`;
   }).join('')}</div>
 </div>`;
@@ -462,12 +544,12 @@ function renderTasks(): void {
     const canMove = !task.sessionId && !isRunning;
     const projects = state?.projects ?? [];
     const moveItems = canMove && projects.length
-      ? `<div class="project-context-divider"></div><div class="project-context-label">移动到</div>${!task.projectId ? '' : `<button class="project-context-item" data-action="move" data-tid="${taskId}" data-target=""><span class="project-context-icon">${icon('folder')}</span>不使用工作空间</button>`}${projects.filter((p) => p.id !== task.projectId).map((p) => `<button class="project-context-item" data-action="move" data-tid="${taskId}" data-target="${escapeHtml(p.id)}"><span class="project-context-icon">${icon('folder')}</span>${escapeHtml(p.name)}</button>`).join('')}`
+      ? `<div class="project-context-divider"></div><div class="project-context-label">${t('menu.moveTo')}</div>${!task.projectId ? '' : `<button class="project-context-item" data-action="move" data-tid="${taskId}" data-target=""><span class="project-context-icon">${icon('folder')}</span>${t('menu.noWorkspace')}</button>`}${projects.filter((p) => p.id !== task.projectId).map((p) => `<button class="project-context-item" data-action="move" data-tid="${taskId}" data-target="${escapeHtml(p.id)}"><span class="project-context-icon">${icon('folder')}</span>${escapeHtml(p.name)}</button>`).join('')}`
       : '';
     const menu = document.createElement('div');
     menu.id = 'task-context-menu';
     menu.className = 'project-context-menu';
-    menu.innerHTML = `<button class="project-context-item" data-action="rename" data-tid="${taskId}"><span class="project-context-icon">${icon('edit')}</span>重命名</button>${moveItems}<div class="project-context-divider"></div><button class="project-context-item" data-action="delete" data-tid="${taskId}"${isRunning ? ' data-running="1"' : ''}><span class="project-context-icon">${icon('trash')}</span>${isRunning ? '停止并删除' : '删除'}</button>`;
+    menu.innerHTML = `<button class="project-context-item" data-action="rename" data-tid="${taskId}"><span class="project-context-icon">${icon('edit')}</span>${t('menu.rename')}</button>${moveItems}<div class="project-context-divider"></div><button class="project-context-item" data-action="delete" data-tid="${taskId}"${isRunning ? ' data-running="1"' : ''}><span class="project-context-icon">${icon('trash')}</span>${isRunning ? t('menu.stopAndDelete') : t('menu.delete')}</button>`;
     document.body.appendChild(menu);
     const menuRect = menu.getBoundingClientRect();
     let left = anchor.right - menuRect.width;
@@ -489,10 +571,10 @@ function renderTasks(): void {
       } else if (action === 'move') {
         const target = item.dataset.target ?? '';
         const result = await window.mocodeWork.setTaskProject(tid, target);
-        if (!result.ok) { showToast('warn', result.message ?? '无法移动任务'); return; }
+        if (!result.ok) { showToast('warn', result.message ?? t('toast.cannotMoveTask')); return; }
         if (result.state) updateState(result.state);
-        const label = target ? state?.projects.find((p) => p.id === target)?.name ?? target : '无工作空间';
-        showToast('success', `已移动到「${label}」`);
+        const label = target ? state?.projects.find((p) => p.id === target)?.name ?? target : t('menu.noWorkspace');
+        showToast('success', t('toast.movedTo', { label: label }));
       }
     }));
   };
@@ -520,7 +602,7 @@ function renderTasks(): void {
     const menu = document.createElement('div');
     menu.id = 'project-context-menu';
     menu.className = 'project-context-menu';
-    menu.innerHTML = `<button class="project-context-item" data-action="open-folder" data-pid="${projectId}"><span class="project-context-icon">${icon('folder-open')}</span>打开文件夹</button><button class="project-context-item" data-action="remove" data-pid="${projectId}"><span class="project-context-icon">${icon('close')}</span>从列表中移除</button>`;
+    menu.innerHTML = `<button class="project-context-item" data-action="open-folder" data-pid="${projectId}"><span class="project-context-icon">${icon('folder-open')}</span>${t('menu.openFolder')}</button><button class="project-context-item" data-action="remove" data-pid="${projectId}"><span class="project-context-icon">${icon('close')}</span>${t('menu.removeFromList')}</button>`;
     document.body.appendChild(menu);
     // 定位：按钮右下方弹出
     const menuRect = menu.getBoundingClientRect();
@@ -542,9 +624,9 @@ function renderTasks(): void {
         await window.mocodeWork.openFolder(pid);
       } else if (action === 'remove') {
         const hasRunning = (state?.tasks ?? []).some((task) => task.projectId === pid && (task.status === 'running' || task.status === 'waiting'));
-        if (hasRunning) { showToast('warn', '该空间下有任务运行中，无法移除'); return; }
+        if (hasRunning) { showToast('warn', t('toast.cannotRemoveSpace')); return; }
         const result = await window.mocodeWork.removeProject(pid);
-        if (result) { updateState(result.state); clearWorkspace(); showToast('info', `已移除空间 "${result.removed}"`); }
+        if (result) { updateState(result.state); clearWorkspace(); showToast('info', t('toast.removedSpace', { removed: result.removed })); }
       }
     }));
   }));
@@ -647,28 +729,20 @@ const toolStartTimes = new Map<string, number>();
 /** 文件编辑类工具不进「工具调用集合」:改了什么必须让用户第一眼看到,不能埋进组里。 */
 const STANDALONE_TOOLS = new Set(['write_file', 'edit_file']);
 
-/** 工具名 → 折叠行上的中文动词 + 图标。让"这一行在干什么"一眼可读。 */
-const TOOL_META: Record<string, { label: string; icon: string }> = {
-  read_file: { label: '读取文件', icon: 'files' },
-  write_file: { label: '写入文件', icon: 'edit' },
-  edit_file: { label: '编辑文件', icon: 'edit' },
-  run_command: { label: '运行命令', icon: 'terminal' },
-  grep: { label: '搜索代码', icon: 'search' },
-  glob: { label: '查找文件', icon: 'search' },
-  web_search: { label: '联网搜索', icon: 'globe' },
-  web_fetch: { label: '抓取网页', icon: 'globe' },
-  browser: { label: '浏览器', icon: 'layout' },
-  computer: { label: '电脑操作', icon: 'layout' },
-  screenshot: { label: '截图', icon: 'image' },
-  view_image: { label: '查看图片', icon: 'image' },
-  'sub-agent': { label: '子任务', icon: 'spark-bot' },
-  use_skill: { label: '使用技能', icon: 'sparkles' },
-  run_skill: { label: '运行技能', icon: 'sparkles' },
-  plan_update: { label: '更新计划', icon: 'check' },
-  note_append: { label: '记录笔记', icon: 'edit' },
-  ask_human: { label: '向你提问', icon: 'user' },
-  dev_server: { label: '开发服务器', icon: 'loader' },
+/** 工具名 → 折叠行上的图标。标签在调用时按当前语言实时翻译（见 toolMeta），保证切语言即时生效。 */
+const TOOL_ICONS: Record<string, string> = {
+  read_file: 'files', write_file: 'edit', edit_file: 'edit', run_command: 'terminal',
+  grep: 'search', glob: 'search', web_search: 'globe', web_fetch: 'globe',
+  browser: 'layout', computer: 'layout', screenshot: 'image', view_image: 'image',
+  'sub-agent': 'spark-bot', use_skill: 'sparkles', run_skill: 'sparkles',
+  plan_update: 'check', note_append: 'edit', ask_human: 'user', dev_server: 'loader',
 };
+/** 工具名 → 折叠行上的动词。标签随语言切换实时更新。 */
+function toolMeta(name: string): { label: string; icon: string } {
+  if (name.startsWith('memory_')) return { label: t('tool.memory'), icon: 'sparkles' };
+  if (name in TOOL_ICONS) return { label: t(`tool.${name}` as LocaleKey), icon: TOOL_ICONS[name]! };
+  return { label: name, icon: 'wrench' };
+}
 /** 每个工具最有信息量的那个入参 key —— 折叠行上展示的值。 */
 const TOOL_ARG_KEYS: Record<string, string[]> = {
   read_file: ['path', 'file_path', 'file'],
@@ -680,10 +754,6 @@ const TOOL_ARG_KEYS: Record<string, string[]> = {
   web_search: ['query'],
   web_fetch: ['url'],
 };
-
-function toolMeta(name: string): { label: string; icon: string } {
-  return TOOL_META[name] ?? (name.startsWith('memory_') ? { label: '记忆', icon: 'sparkles' } : { label: name, icon: 'wrench' });
-}
 function clip(value: string, max: number): string {
   const flat = value.replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
@@ -742,24 +812,24 @@ function refreshToolGroup(group: HTMLElement): void {
   const running = entries.filter((entry) => entry.classList.contains('tool-running'));
   const counts = new Map<string, number>();
   for (const entry of entries) {
-    const label = entry.dataset.toolLabel ?? '工具';
+    const label = entry.dataset.toolLabel ?? t('status.toolGeneric');
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const phrase = clip([...counts].map(([label, n]) => (n > 1 ? `${label} ×${n}` : label)).join(' · '), 64);
   const current = running.find((entry) => entry.dataset.toolLabel);
   let meta: string;
   if (running.length) {
-    meta = `<span class="tool-dot"></span>${entries.length - running.length}/${entries.length} · ${escapeHtml(current?.dataset.toolLabel ?? '工具')}…`;
+    meta = `<span class="tool-dot"></span>${entries.length - running.length}/${entries.length} · ${escapeHtml(current?.dataset.toolLabel ?? t('status.toolGeneric'))}…`;
   } else {
     const startedAt = Number(group.dataset.startTime ?? 0);
     const elapsed = startedAt && group.dataset.hadRunning === '1' ? Date.now() - startedAt : null;
     const timing = elapsed !== null && elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s · ` : '';
-    meta = `${timing}${entries.length} 项`;
+    meta = `${timing}${t('tool.groupItems', { n: entries.length })}`;
   }
   const summary = group.querySelector('summary') as HTMLElement;
   summary.innerHTML = `<span class="tool-chevron" data-icon="chevron-right"></span>
   <span class="tool-kind" data-icon="wrench"></span>
-  <span class="tool-name">${running.length ? '正在执行工具' : `执行了 ${entries.length} 个工具调用`}</span>
+  <span class="tool-name">${running.length ? t('status.runningToolGeneric') : t('status.ranTools', { n: entries.length })}</span>
   ${phrase ? `<span class="tool-target" title="${escapeHtml(phrase)}">${escapeHtml(phrase)}</span>` : ''}
   <span class="tool-meta">${meta}</span>`;
   mountIcons(summary);
@@ -789,11 +859,11 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   const startedAt = id ? toolStartTimes.get(id) : undefined;
   const elapsed = completed && startedAt !== undefined ? Date.now() - startedAt : null;
   const lines = output ? output.split('\n').length : 0;
-  const status = completed ? (lines > 1 ? `${lines} 行` : '完成') : '执行中';
+  const status = completed ? (lines > 1 ? t('tool.lines', { n: lines }) : t('tool.done')) : t('tool.running');
   const timing = elapsed !== null && elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s · ` : '';
   const detail = [
-    args ? `<section><span>参数</span><pre>${escapeHtml(args.slice(0, 2000))}</pre></section>` : '',
-    output ? `<section><span>结果</span><pre>${escapeHtml(output.slice(0, 6000))}${output.length > 6000 ? '\n…（输出过长已截断）' : ''}</pre></section>` : '',
+    args ? `<section><span>${t('tool.args')}</span><pre>${escapeHtml(args.slice(0, 2000))}</pre></section>` : '',
+    output ? `<section><span>${t('tool.result')}</span><pre>${escapeHtml(output.slice(0, 6000))}${output.length > 6000 ? `\n${t('tool.truncated')}` : ''}</pre></section>` : '',
   ].join('');
 
   entry.className = `tool-entry ${completed ? 'tool-done' : 'tool-running'}${detail ? '' : ' tool-empty'}`;
@@ -952,7 +1022,7 @@ async function deleteTask(taskId: string): Promise<void> {
   const task = state?.tasks.find((item) => item.id === taskId);
   // 非运行中任务加一个轻量二次确认
   if (task && task.status !== 'running' && task.status !== 'waiting') {
-    const ok = window.confirm(`删除任务 “${taskTitle(task)}”?此操作不可撤销。`);
+    const ok = window.confirm(t('confirm.deleteTask', { title: taskTitle(task) }));
     if (!ok) return;
   }
   const deletingSelectedTask = state?.selectedTaskId === taskId;
@@ -961,14 +1031,14 @@ async function deleteTask(taskId: string): Promise<void> {
   streams.delete(taskId);
   updateState(next);
   if (deletingSelectedTask && next.selectedTaskId !== taskId) clearWorkspace();
-  showToast('info', '已删除任务');
+  showToast('info', t('toast.deletedTask'));
 }
 
 function showApproval(taskId: string, payload: Record<string, unknown>): void {
   const approvalId = String(payload.approvalId ?? ''); const options = Array.isArray(payload.options) ? payload.options.map(String) : [];
   approvalPanel.classList.remove('hidden');
-  const buttons = options.length ? options.map((option, index) => `<button data-approval="${escapeHtml(option)}" class="${index === 0 ? 'approve' : ''}">${escapeHtml(option)}</button>`).join('') : `<button data-approval="approve" class="approve">${icon('check')}确认</button>`;
-  approvalPanel.innerHTML = `<div class="approval-title">${icon('warn')}<span>需要你的确认</span></div><p>${escapeHtml(String(payload.title ?? '允许此操作？'))}</p><pre>${escapeHtml(String(payload.detail ?? ''))}</pre><div class="approval-actions">${buttons}<button data-cancel>${icon('close')}拒绝</button></div>`;
+  const buttons = options.length ? options.map((option, index) => `<button data-approval="${escapeHtml(option)}" class="${index === 0 ? 'approve' : ''}">${escapeHtml(option)}</button>`).join('') : `<button data-approval="approve" class="approve">${icon('check')}${t('approval.confirm')}</button>`;
+  approvalPanel.innerHTML = `<div class="approval-title">${icon('warn')}<span>${t('approval.title')}</span></div><p>${escapeHtml(String(payload.title ?? t('approval.default')))}</p><pre>${escapeHtml(String(payload.detail ?? ''))}</pre><div class="approval-actions">${buttons}<button data-cancel>${icon('close')}${t('approval.reject')}</button></div>`;
   const resolve = (value: Record<string, unknown>): void => {
     window.mocodeWork.send({ type: 'approval', id: taskId, approvalId, ...value });
     approvalPanel.classList.add('hidden');
@@ -978,10 +1048,10 @@ function showApproval(taskId: string, payload: Record<string, unknown>): void {
   approvalPanel.querySelectorAll<HTMLButtonElement>('[data-approval]').forEach((button) => button.addEventListener('click', () => resolve({ action: 'selected', value: button.dataset.approval })));
   approvalPanel.querySelector<HTMLButtonElement>('[data-cancel]')?.addEventListener('click', () => resolve({ action: 'cancelled' }));
 }
-function setRunning(running: boolean): void { sendButton.innerHTML = icon(running ? 'square' : 'paper-airplane'); sendButton.classList.toggle('stop', running); sendButton.title = running ? '停止运行 (⌘.)' : '发送 (⌘⏎)'; sendButton.setAttribute('aria-label', running ? '停止运行' : '发送'); }
+function setRunning(running: boolean): void { sendButton.innerHTML = icon(running ? 'square' : 'paper-airplane'); sendButton.classList.toggle('stop', running); sendButton.title = running ? t('composer.stop') : t('composer.send'); sendButton.setAttribute('aria-label', running ? t('composer.stopAria') : t('composer.sendAria')); }
 function resizePrompt(): void { promptInput.style.height = 'auto'; promptInput.style.height = `${Math.min(promptInput.scrollHeight, 128)}px`; }
 function renderAttachments(): void {
-  attachmentList.innerHTML = attachments.map((attachment, index) => `<span class="attachment-chip">${icon('image')}<span class="attachment-name">${escapeHtml(attachment.name)}</span><button class="attachment-remove" data-attachment="${index}" title="移除" aria-label="移除附件"><svg class="icon" data-icon="close"></svg></button></span>`).join('');
+  attachmentList.innerHTML = attachments.map((attachment, index) => `<span class="attachment-chip">${icon('image')}<span class="attachment-name">${escapeHtml(attachment.name)}</span><button class="attachment-remove" data-attachment="${index}" title="${t('composer.attachment')}" aria-label="${t('composer.attachmentRemove')}"><svg class="icon" data-icon="close"></svg></button></span>`).join('');
   mountIcons(attachmentList);
   attachmentList.querySelectorAll<HTMLButtonElement>('[data-attachment]').forEach((button) => button.addEventListener('click', () => { attachments.splice(Number(button.dataset.attachment), 1); renderAttachments(); }));
 }
@@ -1008,11 +1078,11 @@ function wireMessageActions(message: HTMLElement, text: string): void {
   if (!actions || actions.childElementCount) return;
   const isAssistant = message.classList.contains('assistant');
   // 失败轮次可能只有一行错误、没有正文:那就没有可复制的东西,只留「重新生成」。
-  const copy = text.trim() ? `<button data-act="copy" title="复制内容" aria-label="复制内容">${icon('copy')}</button>` : '';
+  const copy = text.trim() ? `<button data-act="copy" title="${t('msg.copy')}" aria-label="${t('msg.copy')}">${icon('copy')}</button>` : '';
   if (isAssistant) {
-    actions.innerHTML = `${copy}<button data-act="regen" title="基于这条重新生成" aria-label="基于这条重新生成">${icon('regen')}</button>`;
+    actions.innerHTML = `${copy}<button data-act="regen" title="${t('msg.regenerate')}" aria-label="${t('msg.regenerate')}">${icon('regen')}</button>`;
   } else {
-    actions.innerHTML = `<button data-act="copy" title="复制内容" aria-label="复制内容">${icon('copy')}</button><button data-act="rollback" title="回滚到这条消息之前" aria-label="回滚到这条消息之前">${icon('rollback')}</button>`;
+    actions.innerHTML = `<button data-act="copy" title="${t('msg.copy')}" aria-label="${t('msg.copy')}">${icon('copy')}</button><button data-act="rollback" title="${t('msg.rollback')}" aria-label="${t('msg.rollback')}">${icon('rollback')}</button>`;
   }
   actions.addEventListener('click', async (event) => {
     const target = event.target as HTMLElement;
@@ -1020,8 +1090,8 @@ function wireMessageActions(message: HTMLElement, text: string): void {
     if (!button) return;
     const act = button.dataset.act;
     if (act === 'copy') {
-      try { await navigator.clipboard.writeText(text); showToast('info', '已复制到剪贴板'); }
-      catch { showToast('error', '复制失败'); }
+      try { await navigator.clipboard.writeText(text); showToast('info', t('msg.copied')); }
+      catch { showToast('error', t('msg.copyFailed')); }
       return;
     }
     if (act === 'regen') { void regenerate(); return; }
@@ -1049,7 +1119,7 @@ function armRollback(button: HTMLButtonElement): void {
   for (const other of Array.from(rollbackArmTimers.keys())) disarmRollback(other);
   button.dataset.armed = '1';
   button.classList.add('armed');
-  button.innerHTML = '<span class="armed-label">回滚?</span>';
+  button.innerHTML = `<span class="armed-label">${t('msg.rollbackArm')}</span>`;
   rollbackArmTimers.set(button, setTimeout(() => disarmRollback(button), ROLLBACK_ARM_MS));
 }
 
@@ -1058,16 +1128,16 @@ async function handleRollbackClick(message: HTMLElement, button: HTMLButtonEleme
   disarmRollback(button);
   const viewing = viewingTaskId();
   const userIndex = Number(message.dataset.userIndex ?? '');
-  if (!viewing || !Number.isInteger(userIndex)) { showToast('warn', '这条消息找不到可回滚的位置。'); return; }
+  if (!viewing || !Number.isInteger(userIndex)) { showToast('warn', t('toast.cannotRollback')); return; }
   const result = await window.mocodeWork.rollback({ id: viewing, userIndex });
-  if (!result.ok) { showToast('error', result.message ?? '回滚失败。'); return; }
+  if (!result.ok) { showToast('error', result.message ?? t('toast.rollbackFail')); return; }
   // 本周期的事件缓冲已经不可信 —— 落盘的会话才是新真相,作废后按它重放。
   streams.delete(viewing);
   approvalPanel.classList.add('hidden');
   if (result.state) updateState(result.state);
   setRunning(false);
   switchToTask(viewing, result.history ?? []);
-  showToast('info', '已回滚到这条消息之前');
+  showToast('info', t('toast.rolledBack'));
 }
 
 /**
@@ -1076,9 +1146,9 @@ async function handleRollbackClick(message: HTMLElement, button: HTMLButtonEleme
  */
 async function regenerate(): Promise<void> {
   const viewing = viewingTaskId();
-  if (isRunning(viewing)) { showToast('warn', '当前还有任务在跑,请先停止。'); return; }
+  if (isRunning(viewing)) { showToast('warn', t('toast.taskRunning')); return; }
   const task = selectedTask();
-  if (!task?.sessionId) { showToast('warn', '这条消息没有可用的会话,无法重新生成。'); return; }
+  if (!task?.sessionId) { showToast('warn', t('toast.noSession')); return; }
   const messages = Array.from(conversation.querySelectorAll<HTMLElement>('.message'));
   const target = activeMessage;
   if (!target) return;
@@ -1087,7 +1157,7 @@ async function regenerate(): Promise<void> {
   for (let i = index - 1; i >= 0; i -= 1) {
     if (messages[i]!.classList.contains('user')) { userIndex = i; break; }
   }
-  if (userIndex < 0) { showToast('warn', '找不到可重新生成的用户消息。'); return; }
+  if (userIndex < 0) { showToast('warn', t('toast.noUserMsg')); return; }
   const userText = messages[userIndex]!.querySelector('.message-body')?.textContent ?? '';
   // 删 target 起所有后续消息(包括本条)
   for (let i = messages.length - 1; i >= index; i -= 1) messages[i]!.remove();
@@ -1100,12 +1170,12 @@ async function regenerate(): Promise<void> {
     stream.startedAt = Date.now();
     // 与 submit 同:重发的这一轮也先把助手消息建出来(思考阶段就有头像/标签)。
     startAssistantTurn();
-    applyStatus(stream, true, busyStatus('starting', '正在启动 agent'));
+    applyStatus(stream, true, busyStatus('starting', 'status.starting'));
   }
   setRunning(true);
   armRunWatchdog(task.id);
   window.mocodeWork.send({ type: 'run', id: task.id, prompt: userText, sessionId: task.sessionId, attachments: [] });
-  showToast('info', '已重新生成');
+  showToast('info', t('toast.regenerated'));
 }
 
 function setActiveMessage(message: HTMLElement | null): void {
@@ -1152,22 +1222,22 @@ let cheatsheetEl: HTMLElement | null = null;
 function ensureCheatsheet(): HTMLElement {
   if (cheatsheetEl) return cheatsheetEl;
   const rows: Array<[string, string]> = [
-    ['⌘ K', '打开搜索'],
-    ['⌘ ⇧ N', '新建任务'],
-    ['⌘ /', '切换助手模式'],
-    ['⌘ ⏎', '发送消息'],
-    ['⇧ ⏎', '在输入框换行'],
-    ['⌘ .', '停止当前任务'],
-    ['⌘ F', '在对话中搜索'],
-    ['Esc', '关闭弹窗 / 取消输入焦点'],
-    ['?', '显示 / 隐藏此快捷键面板'],
+    ['⌘ K', t('cheatsheet.search')],
+    ['⌘ ⇧ N', t('nav.newTask')],
+    ['⌘ /', t('cheatsheet.toggleAssistant')],
+    ['⌘ ⏎', t('cheatsheet.send')],
+    ['⇧ ⏎', t('cheatsheet.newline')],
+    ['⌘ .', t('cheatsheet.stop')],
+    ['⌘ F', t('cheatsheet.searchConv')],
+    ['Esc', t('cheatsheet.esc')],
+    ['?', t('cheatsheet.help')],
   ];
   const overlay = document.createElement('div');
   overlay.className = 'cheatsheet hidden';
   overlay.innerHTML = `<div class="cheatsheet-card">
-    <header><b>快捷键</b><button data-close title="关闭">×</button></header>
+    <header><b>${t('cheatsheet.title')}</b><button data-close title="${t('cheatsheet.close')}">×</button></header>
     <div class="cheatsheet-grid">${rows.map(([key, desc]) => `<div class="cheatsheet-row"><kbd>${key}</kbd><span>${desc}</span></div>`).join('')}</div>
-    <footer>提示:大多数快捷键在 Mac 上是 ⌘,Windows/Linux 是 Ctrl。</footer>
+    <footer>${t('cheatsheet.footer')}</footer>
   </div>`;
   document.body.append(overlay);
   overlay.addEventListener('click', (e) => { if (e.target === overlay || (e.target as HTMLElement).dataset.close !== undefined) hideCheatsheet(); });
@@ -1181,10 +1251,10 @@ function hideCheatsheet(): void { cheatsheetEl?.classList.add('hidden'); }
 const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
 
 /** 把一张图片加入待发送附件。非图片或超限会提示并跳过，返回是否入队成功。 */
-async function addImageFile(file: File, fallbackName = '图片'): Promise<boolean> {
+async function addImageFile(file: File, fallbackName = t('composer.imageFallback')): Promise<boolean> {
   const label = file.name || fallbackName;
-  if (file.type && !/^image\//.test(file.type)) { showToast('warn', `${label} 不是图片,已跳过`); return false; }
-  if (file.size > MAX_ATTACHMENT_BYTES) { showToast('error', `${label} 超过 4MB 限制`); return false; }
+  if (file.type && !/^image\//.test(file.type)) { showToast('warn', t('toast.imageNotImage', { label: label })); return false; }
+  if (file.size > MAX_ATTACHMENT_BYTES) { showToast('error', t('toast.imageTooLarge', { label: label })); return false; }
   try {
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader();
@@ -1195,7 +1265,7 @@ async function addImageFile(file: File, fallbackName = '图片'): Promise<boolea
     attachments.push({ name: label, dataUrl });
     return true;
   } catch {
-    showToast('error', `${label} 读取失败`);
+    showToast('error', t('toast.imageReadFail', { label: label }));
     return false;
   }
 }
@@ -1215,11 +1285,11 @@ function setupPasteImage(): void {
       .map((n) => String(n).padStart(2, '0')).join('');
     void (async () => {
       let added = 0;
-      for (const file of files) if (await addImageFile(file, `粘贴图片-${stamp}.png`)) added += 1;
+      for (const file of files) if (await addImageFile(file, t('composer.pastedImage', { stamp: stamp }))) added += 1;
       if (added === 0) return;
       renderAttachments();
       promptInput.focus();
-      showToast('info', `已添加 ${added} 张图片`);
+      showToast('info', t('toast.imageAdded', { n: added }));
     })();
   });
 }
@@ -1261,11 +1331,11 @@ function ensureSearchOverlay(): HTMLElement {
   const overlay = document.createElement('div');
   overlay.className = 'conv-search hidden';
   overlay.innerHTML = `<div class="conv-search-bar">
-    <input type="text" placeholder="在当前对话中搜索…" />
+    <input type="text" placeholder="${t('search.convPlaceholder')}" />
     <span class="conv-search-status"></span>
-    <button data-prev title="上一个 (Shift+Enter)">↑</button>
-    <button data-next title="下一个 (Enter)">↓</button>
-    <button data-close title="关闭 (Esc)">×</button>
+    <button data-prev title="${t('search.prev')}">↑</button>
+    <button data-next title="${t('search.next')}">↓</button>
+    <button data-close title="${t('cheatsheet.close')} (Esc)">×</button>
   </div>`;
   document.body.append(overlay);
   searchOverlay = overlay;
@@ -1317,7 +1387,7 @@ function openConvSearch(): void {
         text.replaceWith(fragment);
       }
     });
-    if (!hits.length) { status.textContent = '无匹配'; return; }
+    if (!hits.length) { status.textContent = t('search.noMatch'); return; }
     status.textContent = `1 / ${hits.length}`;
     goTo(0);
   }
@@ -1385,7 +1455,7 @@ function summarizePrompt(prompt: string, maxWidth = 40): string {
   }
   text = text.replace(/[。！？!?；;，,、:：~～\s]+$/, '');
   if (!text) text = prompt.replace(/\s+/g, ' ').trim();
-  return text ? truncateByWidth(text, maxWidth) : '新任务';
+  return text ? truncateByWidth(text, maxWidth) : t('empty.draft');
 }
 async function submit(): Promise<void> {
   const viewing = viewingTaskId();
@@ -1412,7 +1482,7 @@ async function submit(): Promise<void> {
   startAssistantTurn();
   // 立刻上状态:此刻到首个 token 之间可能好几秒(工具组路由 + 首次 LLM 调用),
   // 状态行是这段时间里界面唯一的"收到了、在干活"证据。
-  applyStatus(stream, true, busyStatus('starting', '正在启动 agent'));
+  applyStatus(stream, true, busyStatus('starting', 'status.starting'));
   // 同时挂看门狗:好几秒可以，一直没有动静不行（见 armRunWatchdog）。
   armRunWatchdog(task.id);
   window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments }); attachments = []; renderAttachments();
@@ -1434,12 +1504,12 @@ function finish(): void {
 function notifyBackground(taskId: string, note: string): void {
   if (viewingTaskId() === taskId) return;
   const task = state?.tasks.find((item) => item.id === taskId);
-  showToast('info', `「${task ? taskTitle(task) : '后台任务'}」${note}`, 3200);
+  showToast('info', t('toast.backgroundNote', { name: task ? taskTitle(task) : t('toast.backgroundTask'), note: note }), 3200);
 }
 
 function handleAgentEvent(envelope: AgentEnvelope): void {
   if (envelope.type === 'error') {
-    const message = humanizeError(envelope.error ?? '') ?? 'Agent 通信失败，这一轮没有跑起来。';
+    const message = humanizeError(envelope.error ?? '') ?? t('err.agentCommsFailed');
     console.error('[Agent]', message);
     // 主进程的错误都带 requestId(= 任务 id)：按它归属，不再靠「当前在看哪个任务」猜
     // —— 切过任务时猜错，会把别处的失败写到当前这条会话上。
@@ -1455,7 +1525,7 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       return;
     }
     stream.items.push({ kind: 'error', message });
-    applyStatus(stream, viewing, settledStatus('failed', '运行失败', 'fail', elapsedDetail(stream.startedAt)));
+    applyStatus(stream, viewing, settledStatus('failed', 'status.failed', 'fail', elapsedDetail(stream.startedAt)));
     endTaskRun(taskId);
     if (viewing) { showTurnError(message); showToast('error', message, 6000); finish(); }
     else notifyBackground(taskId, message);
@@ -1475,10 +1545,10 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
   switch (envelope.event) {
     case 'run_started':
       // 「工具组路由」本身就是一次 LLM 调用 —— 首个 thinking 到来前的空窗必须有人交代。
-      applyStatus(stream, viewing, busyStatus('starting', '正在分析任务'));
+      applyStatus(stream, viewing, busyStatus('starting', 'status.analyzing'));
       break;
     case 'tool_route':
-      applyStatus(stream, viewing, busyStatus('thinking', '思考中'));
+      applyStatus(stream, viewing, busyStatus('thinking', 'status.thinking'));
       break;
     case 'status': {
       const tool = payload.tool ? String(payload.tool) : '';
@@ -1486,14 +1556,14 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       break;
     }
     case 'cancelling':
-      applyStatus(stream, viewing, busyStatus('stopping', '正在停止'));
+      applyStatus(stream, viewing, busyStatus('stopping', 'status.stopping'));
       break;
     case 'text_delta': {
       const text = String(payload.text ?? '');
       const last = stream.items[stream.items.length - 1];
       if (last && last.kind === 'text') last.text += text;
       else stream.items.push({ kind: 'text', text });
-      if (stream.status?.phase !== 'speaking') applyStatus(stream, viewing, busyStatus('speaking', '正在回复'));
+      if (stream.status?.phase !== 'speaking') applyStatus(stream, viewing, busyStatus('speaking', 'status.speaking'));
       if (viewing) appendText(text);
       break;
     }
@@ -1516,13 +1586,13 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     }
     case 'approval_requested': {
       stream.pendingApproval = payload;
-      applyStatus(stream, viewing, settledStatus('waiting', '等待你的确认', 'warn'));
+      applyStatus(stream, viewing, settledStatus('waiting', 'status.waitingLabel', 'warn'));
       if (viewing) showApproval(taskId, payload);
-      else notifyBackground(taskId, '在等待你确认操作');
+      else notifyBackground(taskId, t('status.approvalWait'));
       break;
     }
     case 'run_aborted':
-      applyStatus(stream, viewing, settledStatus('stopped', '已停止', 'idle'));
+      applyStatus(stream, viewing, settledStatus('stopped', 'status.cancelled', 'idle'));
       endTaskRun(taskId);
       if (viewing) finish();
       break;
@@ -1533,15 +1603,15 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       const cached = typeof usage?.cachedTokens === 'number' ? usage.cachedTokens : 0;
       if ((created > 0 || cached > 0) && viewing) {
         const details = [
-          created > 0 ? `创建 ${Math.round(created).toLocaleString()} tokens` : null,
-          cached > 0 ? `命中 ${Math.round(cached).toLocaleString()} tokens` : null,
+          created > 0 ? t('toast.cacheCreated', { n: Math.round(created).toLocaleString() }) : null,
+          cached > 0 ? t('toast.cacheHit', { n: Math.round(cached).toLocaleString() }) : null,
         ].filter(Boolean).join(' · ');
-        showToast('success', `Prompt Cache: ${details}`, 3500);
+        showToast('success', t('toast.promptCache', { details: details }), 3500);
       }
-      applyStatus(stream, viewing, settledStatus('done', '已完成', 'ok', elapsedDetail(stream.startedAt)));
+      applyStatus(stream, viewing, settledStatus('done', 'status.completed', 'ok', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
       if (viewing) { updateContextUsage(stream.usagePercent); finish(); }
-      else notifyBackground(taskId, '已完成');
+      else notifyBackground(taskId, t('status.completed'));
       break;
     }
     case 'compact_done': {
@@ -1549,7 +1619,7 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       if (pct !== null) stream.usagePercent = pct;
       const before = typeof payload.beforeTokens === 'number' ? Math.round(payload.beforeTokens / 1000) : '?';
       const after = typeof payload.afterTokens === 'number' ? Math.round(payload.afterTokens / 1000) : '?';
-      showToast('success', `上下文已压缩: ${before}k → ${after}k tokens${pct !== null ? ` (${pct}%)` : ''}`, 4000);
+      showToast('success', t('toast.compactDone', { before: before, after: after, pct: pct !== null ? ` (${pct}%)` : '' }), 4000);
       // 压缩不改变任务本身的终态,收尾回落到任务记录对应的状态。
       applyStatus(stream, viewing, statusFromTask(selectedTask()));
       if (viewing) updateContextUsage(pct);
@@ -1559,21 +1629,21 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       handleHostLog(payload);
       break;
     case 'run_failed': {
-      const message = humanizeError(String(payload.message ?? '运行失败。')) ?? '运行失败。';
+      const message = humanizeError(String(payload.message ?? t('err.runFailed'))) ?? t('err.runFailed');
       stream.items.push({ kind: 'error', message });
-      applyStatus(stream, viewing, settledStatus('failed', '运行失败', 'fail', elapsedDetail(stream.startedAt)));
+      applyStatus(stream, viewing, settledStatus('failed', 'status.failed', 'fail', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
       if (viewing) { console.error('[Agent]', message); showTurnError(message); showToast('error', message, 6000); finish(); }
-      else { console.error('[Agent]', message); notifyBackground(taskId, '运行失败'); }
+      else { console.error('[Agent]', message); notifyBackground(taskId, t('status.failed')); }
       break;
     }
     case 'host_exit': {
       if (!stream.running) break;
       const code = typeof payload.code === 'number' ? payload.code : null;
-      const message = `Agent Host 意外退出（退出码 ${code ?? '?'}），请重试。`;
+      const message = t('status.hostExit', { code: code ?? '?' });
       console.error('[Agent Host]', message);
       stream.items.push({ kind: 'error', message });
-      applyStatus(stream, viewing, settledStatus('failed', '运行失败', 'fail'));
+      applyStatus(stream, viewing, settledStatus('failed', 'status.failed', 'fail'));
       endTaskRun(taskId);
       if (viewing) { showTurnError(message); finish(); }
       break;
@@ -1584,6 +1654,13 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       break;
   }
 }
+/**
+ * 需要弹 toast 的 host_log 白名单（稳定 code，与语言无关）。
+ * 为什么不匹配文案：主进程按**当前语言**生成 message，用中文关键词去匹配，
+ * 用户切成英文后这几条关键提示（配置缺失 / 没找到 node / 连续崩溃）就再也不弹了。
+ */
+const HOST_LOG_CODES = new Set(['config_missing', 'host_electron_node']);
+
 function handleHostLog(payload: Record<string, unknown>): void {
   const raw = String(payload.message ?? '').trim();
   if (!raw) return;
@@ -1591,7 +1668,7 @@ function handleHostLog(payload: Record<string, unknown>): void {
   if (/^\(?node:\d+\)? \[DEP\d{4}\]/.test(raw)) return;
   console.debug('[Agent Host]', raw);
   // 关键启动 / 配置提示用 toast 提示用户(避免淹没在控制台)
-  if (/Agent Host 未构建|配置缺少|连续崩溃|未找到系统 node/.test(raw)) {
+  if (HOST_LOG_CODES.has(String(payload.code ?? ''))) {
     showToast('warn', raw.replace(/^\[mocode-work\]\s*/, ''), 6000);
   }
 }
@@ -1650,41 +1727,41 @@ function setInspectorTab(tab: 'overview' | 'files' | 'prs'): void {
 }
 function inspectorButton(label: string, action: string, path?: string): string { return `<button class="inspector-row" data-action="${action}"${path ? ` data-path="${escapeHtml(path)}"` : ''}>${escapeHtml(label)}<span>›</span></button>`; }
 async function refreshInspector(): Promise<void> {
-  setInspectorTab(activeInspectorTab); inspectorContent.innerHTML = '<p class="inspector-loading">正在读取…</p>';
+  setInspectorTab(activeInspectorTab); inspectorContent.innerHTML = `<p class="inspector-loading">${t('inspector.loading')}</p>`;
   if (activeInspectorTab === 'overview') {
-    inspectorTitle.textContent = '项目概览'; const overview = await window.mocodeWork.projectOverview();
+    inspectorTitle.textContent = t('inspector.overview'); const overview = await window.mocodeWork.projectOverview();
     // 纯任务没有工作空间：明说，别让用户对着一堆"未发现文件"猜哪里出了问题。
     if (overview.noWorkspace) {
-      inspectorContent.innerHTML = '<p class="inspector-empty">当前任务没有关联工作空间。<br />用输入框下方的 chip 选择一个目录后，这里会显示分支、变更与文件。</p>';
+      inspectorContent.innerHTML = `<p class="inspector-empty">${t('inspector.noWorkspaceHint')}</p>`;
       return;
     }
     const status = Array.isArray(overview.status) ? overview.status.map(String) : []; const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
-    inspectorContent.innerHTML = `<section class="overview-card"><b>${escapeHtml(String(overview.branch ?? '本地'))}</b><span>${escapeHtml(String(overview.lastCommit ?? '尚无 Git 提交'))}</span></section><h3>工作区变更</h3>${status.length ? `<pre class="status-output">${escapeHtml(status.join('\n'))}</pre>` : '<p class="inspector-empty">工作区干净</p>'}${overview.diffStat ? `<pre class="status-output">${escapeHtml(String(overview.diffStat))}</pre>` : ''}<h3>最近文件</h3>${files.slice(0, 12).map((file) => inspectorButton(file, 'file', file)).join('') || '<p class="inspector-empty">未发现可预览的文件</p>'}`;
+    inspectorContent.innerHTML = `<section class="overview-card"><b>${escapeHtml(String(overview.branch || t('git.local')))}</b><span>${escapeHtml(String(overview.lastCommit ?? t('empty.lastCommit')))}</span></section><h3>${t('inspector.workChanges')}</h3>${status.length ? `<pre class="status-output">${escapeHtml(status.join('\n'))}</pre>` : `<p class="inspector-empty">${t('inspector.clean')}</p>`}${overview.diffStat ? `<pre class="status-output">${escapeHtml(String(overview.diffStat))}</pre>` : ''}<h3>${t('inspector.recentFiles')}</h3>${files.slice(0, 12).map((file) => inspectorButton(file, 'file', file)).join('') || `<p class="inspector-empty">${t('inspector.noFiles')}</p>`}`;
   } else if (activeInspectorTab === 'files') {
-    inspectorTitle.textContent = '文件'; const overview = await window.mocodeWork.projectOverview();
-    if (overview.noWorkspace) { inspectorContent.innerHTML = '<p class="inspector-empty">当前任务没有关联工作空间。</p>'; return; }
+    inspectorTitle.textContent = t('inspector.files'); const overview = await window.mocodeWork.projectOverview();
+    if (overview.noWorkspace) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('inspector.noWorkspace')}</p>`; return; }
     const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
-    inspectorContent.innerHTML = files.map((file) => inspectorButton(file, 'file', file)).join('') || '<p class="inspector-empty">未发现可预览的文件</p>';
+    inspectorContent.innerHTML = files.map((file) => inspectorButton(file, 'file', file)).join('') || `<p class="inspector-empty">${t('inspector.noFiles')}</p>`;
   } else {
-    inspectorTitle.textContent = '拉取请求'; const result = await window.mocodeWork.pullRequests();
+    inspectorTitle.textContent = t('nav.pullRequests'); const result = await window.mocodeWork.pullRequests();
     const items = Array.isArray(result.items) ? result.items as Array<{ number?: number; title?: string; state?: string; headRefName?: string; url?: string }> : [];
-    inspectorContent.innerHTML = result.available ? (items.length ? items.map((item) => `<a class="pr-row" href="${escapeHtml(String(item.url ?? '#'))}"><b>#${item.number ?? ''} ${escapeHtml(String(item.title ?? '未命名 PR'))}</b><span>${escapeHtml(String(item.state ?? ''))} · ${escapeHtml(String(item.headRefName ?? ''))}</span></a>`).join('') : '<p class="inspector-empty">没有打开的拉取请求</p>') : `<p class="inspector-empty">${escapeHtml(String(result.message ?? 'GitHub CLI 不可用。'))}</p>`;
+    inspectorContent.innerHTML = result.available ? (items.length ? items.map((item) => `<a class="pr-row" href="${escapeHtml(String(item.url ?? '#'))}"><b>#${item.number ?? ''} ${escapeHtml(String(item.title ?? t('inspector.unnamedPR')))}</b><span>${escapeHtml(String(item.state ?? ''))} · ${escapeHtml(String(item.headRefName ?? ''))}</span></a>`).join('') : `<p class="inspector-empty">${t('inspector.noPRs')}</p>`) : `<p class="inspector-empty">${escapeHtml(String(result.message ?? t('empty.githubUnavailable')))}</p>`;
   }
   inspectorContent.querySelectorAll<HTMLButtonElement>('[data-action="file"]').forEach((button) => button.addEventListener('click', () => void previewFile(button.dataset.path!)));
 }
 async function previewFile(file: string): Promise<void> {
   const [content, diff] = await Promise.all([window.mocodeWork.readFile(file), window.mocodeWork.fileDiff(file)]); inspectorTitle.textContent = file;
-  inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">← 文件</button><button id="show-diff">Git Diff</button></div><pre class="file-preview">${escapeHtml(content.error ?? content.content ?? '')}</pre>`;
+  inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button><button id="show-diff">${t('inspector.gitDiff')}</button></div><pre class="file-preview">${escapeHtml(content.error ?? content.content ?? '')}</pre>`;
   $('#back-to-files').addEventListener('click', () => { activeInspectorTab = 'files'; void refreshInspector(); });
-  $('#show-diff').addEventListener('click', () => { inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">← 文件</button></div><pre class="file-preview diff-preview">${escapeHtml(diff.error ?? diff.content ?? '')}</pre>`; $('#back-to-files').addEventListener('click', () => void previewFile(file)); });
+  $('#show-diff').addEventListener('click', () => { inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button></div><pre class="file-preview diff-preview">${escapeHtml(diff.error ?? diff.content ?? '')}</pre>`; $('#back-to-files').addEventListener('click', () => void previewFile(file)); });
 }
 
 function refreshSearch(query = ''): void {
   if (!state) return; const needle = query.trim().toLocaleLowerCase();
   const projects = state.projects.filter((project) => project.name.toLocaleLowerCase().includes(needle)); const tasks = state.tasks.filter((task) => task.title.toLocaleLowerCase().includes(needle));
-  const projectResults = projects.map((project) => `<button data-search-project="${escapeHtml(project.id)}">项目 · ${escapeHtml(project.name)}</button>`).join('');
-  const taskResults = tasks.map((task) => `<button data-search-task="${escapeHtml(task.id)}">任务 · ${escapeHtml(taskTitle(task))}</button>`).join('');
-  $('#search-results').innerHTML = projectResults || taskResults ? `${projectResults}${taskResults}` : '<p>无匹配结果</p>';
+  const projectResults = projects.map((project) => `<button data-search-project="${escapeHtml(project.id)}">${t('search.project', { name: escapeHtml(project.name) })}</button>`).join('');
+  const taskResults = tasks.map((task) => `<button data-search-task="${escapeHtml(task.id)}">${t('sidebar.tasks')} · ${escapeHtml(taskTitle(task))}</button>`).join('');
+  $('#search-results').innerHTML = projectResults || taskResults ? `${projectResults}${taskResults}` : `<p>${t('search.noMatch')}</p>`;
   document.querySelectorAll<HTMLButtonElement>('[data-search-project]').forEach((button) => button.addEventListener('click', async () => { updateState(await window.mocodeWork.selectProject(button.dataset.searchProject!)); searchPanel.classList.add('hidden'); }));
   document.querySelectorAll<HTMLButtonElement>('[data-search-task]').forEach((button) => button.addEventListener('click', () => { searchPanel.classList.add('hidden'); void openTask(button.dataset.searchTask!); }));
 }
@@ -1693,11 +1770,11 @@ $('#add-project').addEventListener('click', async () => {
   const before = state?.selectedProjectId;
   let next: WorkState | null = null;
   try { next = await window.mocodeWork.pickProject(); }
-  catch { showToast('error', '无法打开项目选择器'); return; }
+  catch { showToast('error', t('toast.openProjectFailed')); return; }
   if (!next) return;
   updateState(next); clearWorkspace();
   const project = selectedProject();
-  if (project && project.id !== before) showToast('success', `已切换到项目「${project.name}」`);
+  if (project && project.id !== before) showToast('success', t('toast.switchedProject', { name: project.name }));
 });
 $('#new-task').addEventListener('click', () => void startNewTask());
 
@@ -1735,8 +1812,8 @@ function openRenameModal(taskId: string): void {
   if (!task) return;
   const el = ensureTaskModal();
   renameTaskId = taskId;
-  ($('#task-modal-title') as HTMLElement).textContent = '重命名任务';
-  ($('#task-modal-create') as HTMLButtonElement).textContent = '保存';
+  ($('#task-modal-title') as HTMLElement).textContent = t('taskModal.title');
+  ($('#task-modal-create') as HTMLButtonElement).textContent = t('modelForm.save');
   const nameInput = $('#task-name-input') as HTMLInputElement;
   nameInput.value = task.title;
   el.classList.remove('hidden');
@@ -1750,7 +1827,7 @@ async function submitRenameModal(): Promise<void> {
   if (renameTaskId) {
     const next = await window.mocodeWork.renameTask(renameTaskId, name.slice(0, 160));
     if (next) updateState(next);
-    showToast('success', `已重命名为「${name}」`);
+    showToast('success', t('taskModal.renamed', { name: name }));
   }
   closeTaskModal();
 }
@@ -1781,7 +1858,7 @@ $('#search-button').addEventListener('click', () => { searchPanel.classList.remo
 $('#theme-toggle').addEventListener('click', () => {
   const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
   applyTheme(next);
-  showToast('info', `已切换到${next === 'dark' ? '黑夜' : '浅色'}主题`, 1600);
+  showToast('info', t('toast.themeSwitched', { theme: next === 'dark' ? t('appearance.themeDark') : t('appearance.themeLight') }), 1600);
 });
 
 /** 应用并持久化主题。saved 可为 light/dark/system; dataset 始终写入实际生效的 light/dark。 */
@@ -1806,54 +1883,72 @@ function currentSavedTheme(): 'light' | 'dark' | 'system' {
 function refreshThemeSegmented(): void {
   const saved = currentSavedTheme();
   document.querySelectorAll<HTMLButtonElement>('.settings-theme').forEach((button) => {
-    button.setAttribute('aria-checked', String(button.dataset.theme === saved));
+    const active = button.dataset.theme === saved;
+    button.setAttribute('aria-checked', String(active));
+    // 视觉选中态靠 .active（radio 填充 + 文字加深），aria-checked 只管无障碍。
+    button.classList.toggle('active', active);
+  });
+}
+
+/** 语言行的选中态与主题行同理：切换后立刻反色，不必关掉设置再进来。 */
+function refreshLanguageSegmented(): void {
+  document.querySelectorAll<HTMLButtonElement>('.settings-language').forEach((button) => {
+    const active = button.dataset.lang === getLang();
+    button.setAttribute('aria-checked', String(active));
+    button.classList.toggle('active', active);
   });
 }
 
 /* ── 设置弹窗:左侧分类导航 + 右侧内容 ─────────────────────── */
 type SettingsSectionId = 'model' | 'behavior' | 'appearance' | 'about';
-const SETTINGS_SECTIONS: Array<{ id: SettingsSectionId; label: string; icon: string; desc: string }> = [
-  { id: 'model', label: '模型', icon: 'spark-bot', desc: '选择 MoCode 使用的模型预设' },
-  { id: 'behavior', label: '行为', icon: 'wrench', desc: '上下文、记忆与子代理开关' },
-  { id: 'appearance', label: '外观', icon: 'sun', desc: '主题与界面显示' },
-  { id: 'about', label: '关于', icon: 'info', desc: '版本与配置路径' },
+/** 分类元数据存 i18n key（不存译文）—— 模块级常量在启动时求值一次，存译文会锁死语言。 */
+const SETTINGS_SECTIONS: Array<{ id: SettingsSectionId; labelKey: LocaleKey; icon: string; descKey: LocaleKey }> = [
+  { id: 'model', labelKey: 'settings.model', icon: 'spark-bot', descKey: 'settings.modelDesc' },
+  { id: 'behavior', labelKey: 'settings.behavior', icon: 'wrench', descKey: 'settings.behaviorDesc' },
+  { id: 'appearance', labelKey: 'settings.appearance', icon: 'sun', descKey: 'settings.appearanceDesc' },
+  { id: 'about', labelKey: 'settings.about', icon: 'info', descKey: 'settings.aboutDesc' },
 ];
 let settingsActiveSection: SettingsSectionId = 'model';
-const SETTING_ITEMS: Array<{ key: string; label: string; hint: string }> = [
-  { key: 'autoCompact', label: '自动压缩上下文', hint: '上下文接近上限时自动压缩历史，避免超限失败' },
-  { key: 'memory', label: '跨会话记忆', hint: '跨会话记住项目偏好与约定（原 /memory_switch）' },
-  { key: 'subAgent', label: '子代理', hint: '允许 agent 派生子代理并行处理子任务' },
-  { key: 'autoReflect', label: '自动反思', hint: '任务结束后自动复盘并把经验写入记忆' },
+const SETTING_ITEMS: Array<{ key: string; labelKey: LocaleKey; hintKey: LocaleKey }> = [
+  { key: 'autoCompact', labelKey: 'setting.autoCompact', hintKey: 'setting.autoCompactHint' },
+  { key: 'memory', labelKey: 'setting.memory', hintKey: 'setting.memoryHint' },
+  { key: 'subAgent', labelKey: 'setting.subAgent', hintKey: 'setting.subAgentHint' },
+  { key: 'autoReflect', labelKey: 'setting.autoReflect', hintKey: 'setting.autoReflectHint' },
 ];
 let settingsState: Record<string, boolean> = {};
 
 /* ── 模型分组:按 API 地址归类到「提供商」 ────────────────────
  * 预设文件的 provider 字段只有 openai/anthropic 两种协议名,无法区分
  * DeepSeek / Kimi / 火山 这些真实厂商;而 baseURL 的 host 天然唯一标识厂商。
- * 所以分组一律以 host 为准(main 侧已剥掉 api./www. 这类前缀保证同厂商同键)。 */
-const KNOWN_PROVIDERS: Array<{ match: RegExp; name: string }> = [
-  { match: /(^|\.)deepseek\.(com|cn)$/, name: 'DeepSeek' },
-  { match: /(^|\.)moonshot\.(cn|com)$/, name: 'Moonshot' },
-  { match: /(^|\.)anthropic\.com$/, name: 'Anthropic' },
-  { match: /(^|\.)openai\.com$/, name: 'OpenAI' },
-  { match: /(^|\.)siliconflow\.(cn|com)$/, name: 'SiliconFlow' },
-  { match: /(^|\.)(volces|volcengine)\.com$/, name: '火山方舟' },
-  { match: /(^|\.)dashscope\.aliyuncs\.com$/, name: '阿里云百炼' },
-  { match: /(^|\.)(bigmodel|zhipuai)\.cn$/, name: '智谱 AI' },
-  { match: /(^|\.)(qianfan|baidubce)\.com$/, name: '百度千帆' },
-  { match: /(^|\.)(hunyuan\.tencent|tencentcloudapi)\.com$/, name: '腾讯混元' },
-  { match: /(^|\.)minimax(chat)?\.(com|cn)$/, name: 'MiniMax' },
-  { match: /(^|\.)modelscope\.cn$/, name: 'ModelScope' },
-  { match: /(^|\.)openrouter\.ai$/, name: 'OpenRouter' },
-  { match: /(^|\.)groq\.com$/, name: 'Groq' },
-  { match: /^local(host)?$|^127\.0\.0\.1$|^0\.0\.0\.0$|^\[::1\]$/, name: '本地服务' },
+ * 所以分组一律以 host 为准(main 侧已剥掉 api./www. 这类前缀保证同厂商同键)。
+ * 品牌名走 i18n：存 key 不存译文，切语言时组名随之更新。 */
+type ProviderRule = { match: RegExp; key?: LocaleKey; literal?: string };
+const KNOWN_PROVIDERS: ProviderRule[] = [
+  { match: /(^|\.)deepseek\.(com|cn)$/, literal: 'DeepSeek' },
+  { match: /(^|\.)moonshot\.(cn|com)$/, literal: 'Moonshot' },
+  { match: /(^|\.)anthropic\.com$/, literal: 'Anthropic' },
+  { match: /(^|\.)openai\.com$/, literal: 'OpenAI' },
+  { match: /(^|\.)siliconflow\.(cn|com)$/, literal: 'SiliconFlow' },
+  { match: /(^|\.)(volces|volcengine)\.com$/, key: 'provider.volcengine' },
+  { match: /(^|\.)dashscope\.aliyuncs\.com$/, key: 'provider.dashscope' },
+  { match: /(^|\.)(bigmodel|zhipuai)\.cn$/, key: 'provider.zhipu' },
+  { match: /(^|\.)(qianfan|baidubce)\.com$/, key: 'provider.qianfan' },
+  { match: /(^|\.)(hunyuan\.tencent|tencentcloudapi)\.com$/, key: 'provider.hunyuan' },
+  { match: /(^|\.)minimax(chat)?\.(com|cn)$/, literal: 'MiniMax' },
+  { match: /(^|\.)modelscope\.cn$/, literal: 'ModelScope' },
+  { match: /(^|\.)openrouter\.ai$/, literal: 'OpenRouter' },
+  { match: /(^|\.)groq\.com$/, literal: 'Groq' },
+  { match: /^local(host)?$|^127\.0\.0\.1$|^0\.0\.0\.0$|^\[::1\]$/, key: 'provider.local' },
 ];
 
 /** host → 展示名。已知厂商给品牌名,未知则回退裸主机名。 */
 function providerNameOf(host: string): string {
   const bare = (host || '').split(':')[0]!.toLowerCase();
-  if (!bare) return '未配置地址';
-  for (const item of KNOWN_PROVIDERS) if (item.match.test(bare)) return item.name;
+  if (!bare) return t('provider.unconfiguredHost');
+  for (const item of KNOWN_PROVIDERS) {
+    if (!item.match.test(bare)) continue;
+    return item.key ? t(item.key) : item.literal!;
+  }
   return bare;
 }
 
@@ -1897,7 +1992,7 @@ function groupModelsByProvider(list: ModelItem[]): ModelGroup[] {
 /** 设置页的模型行(分组内复用)。 */
 function settingsModelRow(model: ModelItem): string {
   const meta = [
-    `预设 ${escapeHtml(model.name)}`,
+    t('settings.presetOf', { name: escapeHtml(model.name) }),
     model.provider === 'anthropic' ? 'anthropic' : null,
     model.contextWindow ? `${(model.contextWindow / 1000).toFixed(0)}k` : null,
     model.provider === 'anthropic' && model.promptCache ? 'cache' : null,
@@ -1910,9 +2005,9 @@ function settingsModelRow(model: ModelItem): string {
           <span class="settings-row-title">${escapeHtml(model.label)}</span>
           <span class="settings-row-sub">${meta}</span>
         </span>
-        ${model.isActive ? '<span class="settings-row-tag">当前</span>' : ''}
+        ${model.isActive ? `<span class="settings-row-tag">${t('settings.current')}</span>` : ''}
       </button>
-      <button class="settings-row-act icon-button muted" data-edit="${escapeHtml(model.name)}" title="编辑 ${escapeHtml(model.name)}" aria-label="编辑模型 ${escapeHtml(model.name)}">${icon('edit')}</button>
+      <button class="settings-row-act icon-button muted" data-edit="${escapeHtml(model.name)}" title="${t('menu.edit')} ${escapeHtml(model.name)}" aria-label="${t('modelForm.edit')} ${escapeHtml(model.name)}">${icon('edit')}</button>
     </div>`;
 }
 
@@ -1923,10 +2018,10 @@ async function renderSettingsModelSection(): Promise<void> {
   if (!modelList.length) {
     settingsSection.innerHTML = `
       <div class="settings-block">
-        <div class="settings-empty">${icon('warn')}<div><b>还没有模型预设</b><p>可以点下面的「添加模型」填一个；也可以在终端跑 <code>mocode /model</code> 由向导生成。</p></div></div>
+        <div class="settings-empty">${icon('warn')}<div><b>${t('settings.noModelPresets')}</b><p>${t('settings.noModelPresetsHint')}</p></div></div>
         <button class="settings-add" id="model-add">
           <span class="settings-add-icon">${icon('plus')}</span>
-          <span class="settings-row-body"><span class="settings-row-title">添加模型</span><span class="settings-row-sub">选择提供商预设快速填表，或全部手动填写</span></span>
+          <span class="settings-row-body"><span class="settings-row-title">${t('settings.addModel')}</span><span class="settings-row-sub">${t('settings.addModelSub')}</span></span>
         </button>
       </div>`;
     settingsSection.querySelector<HTMLButtonElement>('#model-add')?.addEventListener('click', () => openModelForm());
@@ -1938,21 +2033,21 @@ async function renderSettingsModelSection(): Promise<void> {
   const provider = config?.provider ?? active?.provider ?? '';
   const contextWindow = config?.contextWindow ?? (active?.contextWindow || null);
   const kv: Array<[string, string]> = [
-    ['接口协议', provider || '未知'],
-    ['上下文窗口', contextWindow ? `${(contextWindow / 1000).toFixed(0)}k tokens` : '未声明'],
-    ['Prompt Cache', provider === 'anthropic' ? ((config?.promptCache ?? active?.promptCache) ? '已开启' : '已关闭') : '不适用'],
-    ['API 地址', config?.baseUrl || active?.baseURL || '未配置'],
+    [t('settings.kvProtocol'), provider || t('settings.kvUnknown')],
+    [t('settings.kvContext'), contextWindow ? `${(contextWindow / 1000).toFixed(0)}k tokens` : t('settings.kvUnset')],
+    [t('settings.kvPromptCache'), provider === 'anthropic' ? ((config?.promptCache ?? active?.promptCache) ? t('settings.toggleOn') : t('settings.toggleOff')) : t('settings.kvNA')],
+    [t('settings.kvApiUrl'), config?.baseUrl || active?.baseURL || t('settings.kvNotConfigured')],
   ];
   const groups = groupModelsByProvider(modelList);
   settingsSection.innerHTML = `
     <div class="settings-block">
       <div class="settings-block-head">
-        <b>模型预设</b>
-        <span>${groups.length} 个提供商 · ${modelList.length} 个模型 · 切换后重开 agent 即刻生效</span>
+        <b>${t('about.modelPresets')}</b>
+        <span>${t('picker.count', { groups: groups.length, models: modelList.length })} · ${t('picker.effectiveAfter')}</span>
       </div>
       <button class="settings-add" id="model-add">
         <span class="settings-add-icon">${icon('plus')}</span>
-        <span class="settings-row-body"><span class="settings-row-title">添加模型</span><span class="settings-row-sub">选择提供商预设快速填表，或全部手动填写</span></span>
+        <span class="settings-row-body"><span class="settings-row-title">${t('settings.addModel')}</span><span class="settings-row-sub">${t('settings.addModelSub')}</span></span>
       </button>
       <div class="settings-providers">
         ${groups.map((group) => `
@@ -1961,9 +2056,9 @@ async function renderSettingsModelSection(): Promise<void> {
               <span class="settings-provider-avatar">${escapeHtml(providerInitial(group.name))}</span>
               <b>${escapeHtml(group.name)}</b>
               ${groupHostLabel(group) ? `<code title="${escapeHtml(group.host)}">${escapeHtml(groupHostLabel(group))}</code>` : ''}
-              <span class="settings-provider-count">${group.items.length} 个模型</span>
+              <span class="settings-provider-count">${t('settings.providerCount', { n: group.items.length })}</span>
             </div>
-            <div class="settings-list" role="listbox" aria-label="${escapeHtml(group.name)} 的模型">
+            <div class="settings-list" role="listbox" aria-label="${t('settings.providerModels', { name: escapeHtml(group.name) })}">
               ${group.items.map(settingsModelRow).join('')}
             </div>
           </div>
@@ -1971,7 +2066,7 @@ async function renderSettingsModelSection(): Promise<void> {
       </div>
     </div>
     <div class="settings-block">
-      <div class="settings-block-head"><b>当前配置</b><span>来自 ~/.mocode/config</span></div>
+      <div class="settings-block-head"><b>${t('settings.currentConfig')}</b><span>${t('settings.fromConfig')}</span></div>
       <div class="settings-kv">${kv.map(([k, v]) => `<div class="settings-kv-row"><span>${escapeHtml(k)}</span><b title="${escapeHtml(v)}">${escapeHtml(v)}</b></div>`).join('')}</div>
     </div>
   `;
@@ -2004,19 +2099,25 @@ async function renderSettingsModelSection(): Promise<void> {
  * ~/.mocode/models/<name>.json。写文件走主进程，renderer 只递草稿。 */
 
 /** 提供商预设模板 —— 与 src/repl/commands.ts 的 MODEL_PRESETS 同步。
- *  选一个自动填 baseURL/model/window/provider，用户仍可逐项改。 */
+ *  选一个自动填 baseURL/model/window/provider，用户仍可逐项改。
+ *  label 为 i18n key（divider 等纯标识符除外），切语言后重建下拉即可更新。 */
 const MODEL_TEMPLATES: Array<{ label: string; provider: LlmProvider; baseURL: string; model: string; contextWindow: number; promptCache: boolean }> = [
   { label: 'Anthropic Claude', provider: 'anthropic', baseURL: 'https://api.anthropic.com', model: 'claude-sonnet-4-5', contextWindow: 200000, promptCache: true },
   { label: 'DeepSeek', provider: 'openai', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', contextWindow: 256000, promptCache: false },
-  { label: 'GLM（智谱）', provider: 'openai', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', contextWindow: 256000, promptCache: false },
-  { label: 'Qwen（阿里云百炼）', provider: 'openai', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', contextWindow: 256000, promptCache: false },
-  { label: 'Kimi（Moonshot）', provider: 'openai', baseURL: 'https://api.moonshot.cn/v1', model: 'kimi-k2-turbo-preview', contextWindow: 256000, promptCache: false },
+  { label: 'modelTemplate.glm', provider: 'openai', baseURL: 'https://open.bigmodel.cn/api/v3', model: 'glm-4.6', contextWindow: 256000, promptCache: false },
+  { label: 'modelTemplate.qwen', provider: 'openai', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', contextWindow: 256000, promptCache: false },
+  { label: 'modelTemplate.kimi', provider: 'openai', baseURL: 'https://api.moonshot.cn/v1', model: 'kimi-k2-turbo-preview', contextWindow: 256000, promptCache: false },
   { label: 'MiniMax', provider: 'openai', baseURL: 'https://api.minimax.io/v1', model: 'MiniMax-M3', contextWindow: 256000, promptCache: false },
-  { label: '火山方舟（豆包）', provider: 'openai', baseURL: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-1-6', contextWindow: 256000, promptCache: false },
+  { label: 'modelTemplate.volcengine', provider: 'openai', baseURL: 'https://ark.cn-beijing.volces.com/api/v3', model: 'doubao-seed-1-6', contextWindow: 256000, promptCache: false },
   { label: 'OpenRouter', provider: 'openai', baseURL: 'https://openrouter.ai/api/v1', model: 'anthropic/claude-sonnet-4.5', contextWindow: 200000, promptCache: false },
-  { label: '本地 Ollama', provider: 'openai', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', contextWindow: 128000, promptCache: false },
-  { label: '本地 vLLM', provider: 'openai', baseURL: 'http://localhost:8000/v1', model: 'default', contextWindow: 256000, promptCache: false },
+  { label: 'modelTemplate.ollama', provider: 'openai', baseURL: 'http://localhost:11434/v1', model: 'qwen2.5:7b', contextWindow: 128000, promptCache: false },
+  { label: 'modelTemplate.vllm', provider: 'openai', baseURL: 'http://localhost:8000/v1', model: 'default', contextWindow: 256000, promptCache: false },
 ];
+
+/** 模板名 → 当前语言展示名（非 key 的纯品牌名原样返回）。 */
+function templateLabel(label: string): string {
+  return label.startsWith('modelTemplate.') ? t(label as LocaleKey) : label;
+}
 
 let modelFormEl: HTMLElement | null = null;
 /** 编辑态：被编辑预设的原始名。undefined = 新增。 */
@@ -2026,18 +2127,31 @@ let modelFormActivate = true;
 
 const modelFormField = <T extends HTMLElement>(id: string): T => modelFormEl!.querySelector(`#${id}`) as T;
 
+/** 重建模板下拉（切语言时也要重建：选项文案是本地化的）。保留当前选中项。 */
+function rebuildModelTemplates(): void {
+  const select = modelFormField<HTMLSelectElement>('model-form-template');
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = '';
+  const custom = document.createElement('option');
+  custom.value = '';
+  custom.textContent = t('modelForm.custom');
+  select.append(custom);
+  for (const [index, template] of MODEL_TEMPLATES.entries()) {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = `${templateLabel(template.label)} · ${template.model}`;
+    select.append(option);
+  }
+  if (previous && select.querySelector(`option[value="${previous}"]`)) select.value = previous;
+}
+
 function ensureModelForm(): HTMLElement {
   if (modelFormEl) return modelFormEl;
   const el = $('#model-form-modal') as HTMLElement;
   modelFormEl = el;
-  // 模板下拉只建一次
+  rebuildModelTemplates();
   const select = modelFormField<HTMLSelectElement>('model-form-template');
-  for (const [index, template] of MODEL_TEMPLATES.entries()) {
-    const option = document.createElement('option');
-    option.value = String(index);
-    option.textContent = `${template.label} · ${template.model}`;
-    select.append(option);
-  }
   select.addEventListener('change', () => {
     if (select.value === '') return;
     const template = MODEL_TEMPLATES[Number(select.value)];
@@ -2127,7 +2241,7 @@ function clearModelFormFields(): void {
   modelFormField<HTMLInputElement>('model-form-baseurl').value = '';
   modelFormField<HTMLInputElement>('model-form-model').value = '';
   modelFormField<HTMLInputElement>('model-form-apikey').value = '';
-  modelFormField<HTMLInputElement>('model-form-window').value = '256000';
+  modelFormField<HTMLInputElement>('model-form-window').value = t('modelForm.contextWindowPlaceholder');
   setFormToggle('model-form-cache', false);
   syncFormVisibility();
   clearFormError();
@@ -2145,13 +2259,13 @@ function openModelForm(name?: string): void {
   // 先按模式定好表单骨架，再清字段 —— clearModelFormFields 会重置 disabled，
   // 顺序反了会让「编辑态禁用模板」被悄悄解开，用户一选模板就把正在编辑的预设冲掉。
   deleteButton.dataset.armed = '0';
-  deleteButton.textContent = '删除';
+  deleteButton.textContent = t('modelForm.delete');
   deleteButton.hidden = !isEdit;
   // 预设模板只在新增时有意义（编辑时清空字段是灾难）。
   const templateSelect = modelFormField<HTMLSelectElement>('model-form-template');
   modelFormField<HTMLElement>('model-form-activate').classList.toggle('field-hidden', isEdit);
-  title.textContent = isEdit ? '编辑模型' : '添加模型';
-  saveButton.textContent = '保存';
+  title.textContent = isEdit ? t('modelForm.edit') : t('settings.addModel');
+  saveButton.textContent = t('modelForm.save');
   clearModelFormFields();
   templateSelect.disabled = isEdit;
   el.classList.remove('hidden');
@@ -2165,7 +2279,7 @@ function openModelForm(name?: string): void {
     if (!detail.ok || !detail.preset) {
       deleteButton.hidden = true;
       saveButton.disabled = true;
-      showFormError(detail.message ?? `无法读取预设 “${name}”`);
+      showFormError(detail.message ?? t('modelForm.errorRead', { name: name }));
       return;
     }
     saveButton.disabled = false;
@@ -2192,7 +2306,7 @@ function collectModelDraft(): ModelDraft | null {
   const name = nameInput.value.trim();
   if (!/^[a-zA-Z0-9_-]{1,32}$/.test(name)) {
     nameInput.classList.remove('shake'); void nameInput.offsetWidth; nameInput.classList.add('shake');
-    showFormError('预设名只能包含字母、数字、_ 和 -，长度 1–32');
+    showFormError(t('modelForm.errorName'));
     nameInput.focus();
     return null;
   }
@@ -2210,10 +2324,10 @@ function collectModelDraft(): ModelDraft | null {
     el.focus();
     return null;
   };
-  if (!baseURL) return flag('model-form-baseurl', 'API 地址不能为空');
-  if (!apiKey) return flag('model-form-apikey', 'API Key 不能为空');
-  if (!model) return flag('model-form-model', '模型名不能为空');
-  if (!windowValue || !Number.isFinite(contextWindow) || contextWindow <= 0) return flag('model-form-window', '上下文窗口必须是正数');
+  if (!baseURL) return flag('model-form-baseurl', t('modelForm.errorBaseUrl'));
+  if (!apiKey) return flag('model-form-apikey', t('modelForm.errorApiKey'));
+  if (!model) return flag('model-form-model', t('modelForm.errorModel'));
+  if (!windowValue || !Number.isFinite(contextWindow) || contextWindow <= 0) return flag('model-form-window', t('modelForm.errorWindow'));
   return {
     provider,
     baseURL,
@@ -2245,7 +2359,7 @@ async function submitModelForm(): Promise<void> {
     try { setModeButton(await window.mocodeWork.getConfig()); } catch { /* 忽略 */ }
     await renderSettingsModelSection();
   } catch (error) {
-    showFormError(`保存失败: ${(error as Error).message}`);
+    showFormError(t('modelForm.saveFailed', { msg: (error as Error).message }));
   } finally {
     saveButton.disabled = false;
   }
@@ -2258,8 +2372,8 @@ async function deleteEditingModel(): Promise<void> {
   // 两步确认：预设里有 apiKey，误删后要重填，成本比多一次点击高。
   if (button.dataset.armed !== '1') {
     button.dataset.armed = '1';
-    button.textContent = '确认删除？';
-    setTimeout(() => { button.dataset.armed = '0'; button.textContent = '删除'; }, 3200);
+    button.textContent = t('modelForm.confirmDelete');
+    setTimeout(() => { button.dataset.armed = '0'; button.textContent = t('modelForm.delete'); }, 3200);
     return;
   }
   const result = await window.mocodeWork.deleteModel(name);
@@ -2276,11 +2390,11 @@ function renderSettingsBehaviorSection(): void {
   if (!settingsSection) return;
   settingsSection.innerHTML = `
     <div class="settings-block">
-      <div class="settings-block-head"><b>Agent 行为</b><span>改动会重启后台 agent，对后续任务生效</span></div>
+      <div class="settings-block-head"><b>${t('settings.agentBehavior')}</b><span>${t('settings.agentBehaviorHint')}</span></div>
       <div class="settings-list">
         ${SETTING_ITEMS.map((item) => `
           <button class="settings-row settings-toggle" data-setting="${item.key}" role="switch" aria-checked="${settingsState[item.key] ? 'true' : 'false'}">
-            <span class="settings-row-body"><span class="settings-row-title">${escapeHtml(item.label)}</span><span class="settings-row-sub">${escapeHtml(item.hint)}</span></span>
+            <span class="settings-row-body"><span class="settings-row-title">${escapeHtml(t(item.labelKey))}</span><span class="settings-row-sub">${escapeHtml(t(item.hintKey))}</span></span>
             <span class="settings-switch" aria-hidden="true"></span>
           </button>
         `).join('')}
@@ -2293,26 +2407,33 @@ function renderSettingsBehaviorSection(): void {
       if (!key) return;
       const next = !settingsState[key];
       try { settingsState = await window.mocodeWork.setSettings({ [key]: next }); }
-      catch (error) { console.error('[settings]', error); showToast('error', '设置保存失败'); return; }
+      catch (error) { console.error('[settings]', error); showToast('error', t('toast.settingsSaveFailed')); return; }
       renderSettingsBehaviorSection();
       const hasRunning = (state?.tasks ?? []).some((task) => task.status === 'running' || task.status === 'waiting');
-      const label = SETTING_ITEMS.find((item) => item.key === key)?.label ?? key;
-      showToast('success', `${label} 已${next ? '开启' : '关闭'}${hasRunning ? '，在跑的任务已停止并按新设置重启' : ''}`);
+      const item = SETTING_ITEMS.find((entry) => entry.key === key);
+      const label = item ? t(item.labelKey) : key;
+      const stateText = next ? t('settings.enableVerb') : t('settings.disableVerb');
+      showToast('success', `${t('settings.toggled', { label: label, state: stateText })}${hasRunning ? t('settings.restartNote') : ''}`);
     });
   });
 }
 
-/** 「外观」分类：主题选择。 */
+/** 「外观」分类：主题 + 界面语言。 */
 function renderSettingsAppearanceSection(): void {
   if (!settingsSection) return;
   const themes: Array<['light' | 'dark' | 'system', string, string, string]> = [
-    ['light', '浅色', 'sun', '始终使用浅色主题'],
-    ['dark', '深色', 'moon', '始终使用深色主题'],
-    ['system', '自动', 'layout', '跟随系统偏好设置'],
+    ['light', t('appearance.themeLight'), 'sun', t('appearance.themeLightHint')],
+    ['dark', t('appearance.themeDark'), 'moon', t('appearance.themeDarkHint')],
+    ['system', t('appearance.themeSystem'), 'layout', t('appearance.themeSystemHint')],
   ];
+  const languages: Array<{ code: SupportedLang; label: string; sub: string }> = SUPPORTED_LANGS.map((code) => ({
+    code,
+    label: LANG_NAMES[code] ?? code,
+    sub: code,
+  }));
   settingsSection.innerHTML = `
     <div class="settings-block">
-      <div class="settings-block-head"><b>主题</b><span>「自动」跟随系统深浅色</span></div>
+      <div class="settings-block-head"><b>${t('appearance.theme')}</b><span>${t('appearance.themeHint')}</span></div>
       <div class="settings-list">
         ${themes.map(([value, label, iconName, hint]) => `
           <button class="settings-row settings-theme" data-theme="${value}" role="radio" aria-checked="false">
@@ -2323,12 +2444,35 @@ function renderSettingsAppearanceSection(): void {
         `).join('')}
       </div>
     </div>
+    <div class="settings-block">
+      <div class="settings-block-head"><b>${t('appearance.language')}</b><span>${t('appearance.languageHint')}</span></div>
+      <div class="settings-list">
+        ${languages.map(({ code, label, sub }) => `
+          <button class="settings-row settings-language" data-lang="${code}" role="radio" aria-checked="${getLang() === code}">
+            <span class="settings-row-radio"></span>
+            <span class="settings-row-icon">${icon('globe')}</span>
+            <span class="settings-row-body"><span class="settings-row-title">${label}</span><span class="settings-row-sub">${sub}</span></span>
+          </button>
+        `).join('')}
+      </div>
+    </div>
   `;
   refreshThemeSegmented();
+  refreshLanguageSegmented();
   settingsSection.querySelectorAll<HTMLButtonElement>('.settings-theme').forEach((button) => {
     button.addEventListener('click', () => {
       applyTheme(button.dataset.theme as 'light' | 'dark' | 'system');
       refreshThemeSegmented();
+    });
+  });
+  settingsSection.querySelectorAll<HTMLButtonElement>('.settings-language').forEach((button) => {
+    button.addEventListener('click', () => {
+      const code = button.dataset.lang as SupportedLang | undefined;
+      if (!code || code === getLang()) return;
+      setLang(code);
+      // setLang 会触发 onLangChange → applyLanguage()，整页重绘时这句会被覆盖成新语言，
+      // 所以顺序上先切再提示，避免 toast 文案还是旧语言。
+      showToast('success', t('toast.languageSwitched', { lang: LANG_NAMES[code] ?? code }));
     });
   });
 }
@@ -2337,20 +2481,20 @@ function renderSettingsAppearanceSection(): void {
 function renderSettingsAboutSection(): void {
   if (!settingsSection) return;
   const kv: Array<[string, string]> = [
-    ['版本', '1.0.0'],
-    ['配置文件', '~/.mocode/config'],
-    ['模型预设', '~/.mocode/models'],
-    ['会话目录', '<工作区>/.mocode/sessions'],
+    [t('about.version'), '1.0.0'],
+    [t('about.configFile'), '~/.mocode/config'],
+    [t('about.modelPresets'), '~/.mocode/models'],
+    [t('about.sessionDir'), t('about.sessionDirValue')],
   ];
   settingsSection.innerHTML = `
     <div class="settings-block">
-      <div class="settings-block-head"><b>MoCode Work</b><span>桌面客户端</span></div>
+      <div class="settings-block-head"><b>${t('about.title')}</b><span>${t('about.subtitle')}</span></div>
       <div class="settings-kv">${kv.map(([k, v]) => `<div class="settings-kv-row"><span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>`).join('')}</div>
     </div>
     <div class="settings-block">
-      <div class="settings-block-head"><b>快捷入口</b></div>
+      <div class="settings-block-head"><b>${t('about.shortcuts')}</b></div>
       <div class="settings-list">
-        <button class="settings-row settings-link" data-action="shortcuts"><span class="settings-row-icon">${icon('keyboard')}</span><span class="settings-row-body"><span class="settings-row-title">键盘快捷键</span><span class="settings-row-sub">查看全部快捷键</span></span><span class="settings-row-chevron">${icon('chevron-right')}</span></button>
+        <button class="settings-row settings-link" data-action="shortcuts"><span class="settings-row-icon">${icon('keyboard')}</span><span class="settings-row-body"><span class="settings-row-title">${t('about.shortcutsTitle')}</span><span class="settings-row-sub">${t('about.shortcutsSub')}</span></span><span class="settings-row-chevron">${icon('chevron-right')}</span></button>
       </div>
     </div>
   `;
@@ -2359,10 +2503,19 @@ function renderSettingsAboutSection(): void {
   });
 }
 
+/** 切语言后重画设置页（当前分类的内容 + 左侧导航文案）。 */
+function renderSettingsSectionCacheOnLang(): void {
+  if (!settingsSection || settingsModal?.classList.contains('hidden')) return;
+  // 左侧导航分类名缓存翻译过，需重建（ensureSettingsNav 只在无节点时才建，这里先清空）。
+  settingsNav?.querySelectorAll('.settings-nav-item').forEach((item) => item.remove());
+  ensureSettingsNav();
+  void renderSettingsSection();
+}
+
 async function renderSettingsSection(): Promise<void> {
   if (!settingsSection) return;
   const meta = SETTINGS_SECTIONS.find((item) => item.id === settingsActiveSection) ?? SETTINGS_SECTIONS[0]!;
-  if (settingsSectionTitle) settingsSectionTitle.textContent = meta.label;
+  if (settingsSectionTitle) settingsSectionTitle.textContent = t(meta.labelKey);
   settingsNav?.querySelectorAll<HTMLButtonElement>('.settings-nav-item').forEach((button) => {
     const active = button.dataset.section === settingsActiveSection;
     button.classList.toggle('active', active);
@@ -2383,8 +2536,8 @@ function ensureSettingsNav(): void {
     button.className = 'settings-nav-item';
     button.dataset.section = section.id;
     button.setAttribute('role', 'tab');
-    button.innerHTML = `<span class="settings-nav-icon">${icon(section.icon)}</span><span>${section.label}</span>`;
-    button.title = section.desc;
+    button.innerHTML = `<span class="settings-nav-icon">${icon(section.icon)}</span><span>${t(section.labelKey)}</span>`;
+    button.title = t(section.descKey);
     button.addEventListener('click', () => { settingsActiveSection = section.id; void renderSettingsSection(); });
     settingsNav.append(button);
   }
@@ -2431,8 +2584,8 @@ function setSidebarCollapsed(collapsed: boolean, persist = true): void {
   // 每次重新查 —— 永远拿到当前 DOM 里真实的 button (即使是 setIcon 替换过的新 svg 也照样能找到)
   document.querySelectorAll<HTMLElement>(SIDEBAR_TOGGLE_SEL).forEach((btn) => {
     btn.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
-    btn.title = collapsed ? '展开侧栏' : '折叠侧栏';
-    btn.setAttribute('aria-label', collapsed ? '展开侧栏' : '折叠侧栏');
+    btn.title = collapsed ? t('sidebar.expand') : t('sidebar.collapse');
+    btn.setAttribute('aria-label', collapsed ? t('sidebar.expand') : t('sidebar.collapse'));
   });
   if (persist) { try { localStorage.setItem(SIDEBAR_KEY, collapsed ? '1' : '0'); } catch { /* 忽略 */ } }
 }
@@ -2541,17 +2694,20 @@ if (sidebarResize) {
 /* ── Model picker ─────────────────────────────────────── */
 let modelPickerEl: HTMLElement | null = null;
 let modelList: ModelItem[] = [];
+/** 最近一次 getConfig 的结果 —— 切语言时用它原地重画按钮（不再多发一次 IPC）。 */
+let lastModelConfig: ModelConfig | null = null;
 
 function shortModelName(text: string): string {
-  if (!text) return '未配置模型';
+  if (!text) return t('composer.noModel');
   return text.length > 24 ? `${text.slice(0, 23)}…` : text;
 }
 
 function setModeButton(config: ModelConfig): void {
+  lastModelConfig = config;
   const button = $('#mode-button');
   if (!button) return;
   const display = config.label || config.model;
-  const label = config.model ? shortModelName(display) : '未配置模型';
+  const label = config.model ? shortModelName(display) : t('composer.noModel');
   // 按钮上只留模型名（+ anthropic 的 cache 标记）；协议/openai 之类的信息挪进 title 与下拉列表，别占按钮宽度。
   const cacheBadge = config.provider === 'anthropic' && config.promptCache
     ? '<span class="model-picker-cache">cache</span>'
@@ -2559,14 +2715,27 @@ function setModeButton(config: ModelConfig): void {
   button.innerHTML = `<span class="mode-label">${escapeHtml(label)}</span>${cacheBadge}<svg class="icon icon-inline" data-icon="chevron-down"></svg>`;
   mountIcons(button);
   const detail = [
-    config.model ? `别名: ${config.model}` : null,
-    config.label && config.label !== config.model ? `模型: ${config.label}` : null,
-    `协议: ${config.provider}`,
-    config.provider === 'anthropic' ? `Prompt Cache: ${config.promptCache ? 'on' : 'off'}` : null,
+    config.model ? `${t('modelDetail.alias')}: ${config.model}` : null,
+    config.label && config.label !== config.model ? `${t('settings.model')}: ${config.label}` : null,
+    `${t('modelDetail.protocol')}: ${config.provider}`,
+    config.provider === 'anthropic' ? t('toast.promptCache', { details: config.promptCache ? 'on' : 'off' }) : null,
     config.baseUrl ? `API: ${config.baseUrl}` : null,
-    config.contextWindow ? `上下文: ${(config.contextWindow / 1000).toFixed(0)}k tokens` : null,
+    config.contextWindow ? `${t('modelDetail.context')}: ${(config.contextWindow / 1000).toFixed(0)}k tokens` : null,
   ].filter(Boolean).join('\n');
-  button.title = detail || '点击切换模型';
+  button.title = detail || t('composer.switchModel');
+}
+
+/** 切语言后原地重画模型按钮（title / 未配置文案都带语言）。 */
+function setModeButtonFromCache(): void {
+  if (lastModelConfig) setModeButton(lastModelConfig);
+}
+
+/** 下拉开着的话按新语言重画（分组名 / 行内元信息都本地化）。 */
+function renderModelPickerIfOpen(): void {
+  if (modelPickerEl && !modelPickerEl.classList.contains('hidden')) {
+    renderModelPicker();
+    positionModelPicker();
+  }
 }
 
 async function refreshModelList(): Promise<void> {
@@ -2584,8 +2753,8 @@ function ensureModelPicker(): HTMLElement {
 /* 下拉里的模型行：组头已经给了提供商，行内只留预设别名/上下文/cache，避免重复占宽。 */
 function modelPickerItem(model: ModelItem): string {
   const meta = [
-    `<span class="model-picker-alias">预设 ${escapeHtml(model.name)}</span>`,
-    model.contextWindow ? `<span class="model-picker-ctx">${(model.contextWindow / 1000).toFixed(0)}k 上下文</span>` : '',
+    `<span class="model-picker-alias">${t('picker.alias', { name: escapeHtml(model.name) })}</span>`,
+    model.contextWindow ? `<span class="model-picker-ctx">${(model.contextWindow / 1000).toFixed(0)}k ${t('modelDetail.context')}</span>` : '',
     model.provider === 'anthropic' && model.promptCache ? '<span class="model-picker-cache">cache</span>' : '',
   ].filter(Boolean).join('');
   return `
@@ -2601,7 +2770,7 @@ function modelPickerItem(model: ModelItem): string {
 function renderModelPicker(): void {
   const el = ensureModelPicker();
   if (!modelList.length) {
-    el.innerHTML = `<div class="model-picker-empty">${icon('warn')}<span>还没有模型预设</span></div><div class="model-picker-hint">在终端运行 <code>mocode /model</code>，或直接在设置里添加</div><div class="model-picker-foot"><button class="model-picker-add" id="picker-add-model">${icon('plus')}<span>添加模型</span></button></div>`;
+    el.innerHTML = `<div class="model-picker-empty">${icon('warn')}<span>${t('settings.noModelPresets')}</span></div><div class="model-picker-hint">${t('picker.hint')}</div><div class="model-picker-foot"><button class="model-picker-add" id="picker-add-model">${icon('plus')}<span>${t('settings.addModel')}</span></button></div>`;
     el.querySelector<HTMLButtonElement>('#picker-add-model')?.addEventListener('click', () => {
       hideModelPicker();
       openSettings('model');
@@ -2612,8 +2781,8 @@ function renderModelPicker(): void {
   const groups = groupModelsByProvider(modelList);
   el.innerHTML = `
     <div class="model-picker-head">
-      <span>选择模型</span>
-      <span class="model-picker-count">${groups.length} 个提供商 · ${modelList.length} 个模型</span>
+      <span>${t('picker.selectModel')}</span>
+      <span class="model-picker-count">${t('picker.count', { groups: groups.length, models: modelList.length })}</span>
     </div>
     <div class="model-picker-list" role="listbox">
       ${groups.map((group) => `
@@ -2628,8 +2797,8 @@ function renderModelPicker(): void {
       `).join('')}
     </div>
     <div class="model-picker-foot">
-      <button class="model-picker-add" id="picker-add-model">${icon('plus')}<span>添加模型</span></button>
-      <button class="model-picker-add" id="picker-manage-model">${icon('wrench')}<span>管理</span></button>
+      <button class="model-picker-add" id="picker-add-model">${icon('plus')}<span>${t('settings.addModel')}</span></button>
+      <button class="model-picker-add" id="picker-manage-model">${icon('wrench')}<span>${t('picker.manage')}</span></button>
     </div>
   `;
   el.querySelector<HTMLButtonElement>('#picker-add-model')?.addEventListener('click', () => {
@@ -2720,6 +2889,11 @@ document.addEventListener('click', (event) => {
 void (async () => {
   try {
     const config = await window.mocodeWork.getConfig();
+    // 语言来源优先级:localStorage(用户在本机切过) > ~/.mocode/config 的 MOCODE_LANGUAGE。
+    // 必须在 setModeButton 之前跑 —— 否则首屏会先用旧语言渲染一遍再做一次重绘。
+    initLangFromConfig(config.language);
+    document.documentElement.lang = getLang();
+    applyStaticI18n();
     setModeButton(config);
     await refreshModelList();
   } catch (error) { console.error('[config]', error); }
@@ -2746,18 +2920,18 @@ window.addEventListener('keydown', (event) => {
   if (cmd && event.key.toLowerCase() === 'k') { event.preventDefault(); searchPanel.classList.remove('hidden'); searchInput.value = ''; searchInput.focus(); refreshSearch(); return; }
   if (cmd && event.key.toLowerCase() === '/') {
     event.preventDefault();
-    showToast('info', '助手模式: MoCode Agent (暂未开放多模型切换)');
+    showToast('info', t('toast.assistantMode'));
     return;
   }
   if (cmd && event.key === '.') {
     event.preventDefault();
     const viewing = viewingTaskId();
-    if (isRunning(viewing)) { window.mocodeWork.send({ type: 'cancel', id: viewing }); showToast('info', '已停止当前任务'); }
+    if (isRunning(viewing)) { window.mocodeWork.send({ type: 'cancel', id: viewing }); showToast('info', t('toast.stoppedTask')); }
     return;
   }
   if (cmd && event.key.toLowerCase() === 'f') {
     event.preventDefault();
-    if (!conversation.querySelector('.message')) { showToast('info', '当前没有对话可搜索'); return; }
+    if (!conversation.querySelector('.message')) { showToast('info', t('toast.noConvSearch')); return; }
     openConvSearch();
     return;
   }
@@ -2815,13 +2989,13 @@ function renderEmptyChips(): void {
   const chip = $('#empty-chip-project');
   // 无任务在编辑（例如刚启动、还没选中任务）→ 退化成全局浏览上下文的展示。
   const fallback = state?.projects.find((p) => p.id === state?.selectedProjectId);
-  const name = task ? (project?.name ?? '无工作空间') : (fallback?.name ?? '选择工作空间');
+  const name = task ? (project?.name ?? t('workspace.none')) : (fallback?.name ?? t('workspace.selectSpace'));
   if (label) label.textContent = name;
   if (chip) {
     chip.classList.toggle('is-noworkspace', !!task && !project);
     chip.title = chipTaskFixed()
-      ? '任务已开始运行，工作空间不可更改'
-      : task ? '点击关联 / 解除当前任务的工作空间' : '点击选择工作空间';
+      ? t('workspace.fixedNote')
+      : task ? t('workspace.chipHint') : t('workspace.clickToSelect');
     chip.setAttribute('aria-disabled', chipTaskFixed() ? 'true' : 'false');
   }
 }
@@ -2848,27 +3022,27 @@ function renderWorkspacePicker(): void {
             <span class="chip-picker-path" title="${escapeHtml(project.root)}">${escapeHtml(project.root)}</span>
           </span>
         </button>`).join('')
-    : '<div class="chip-picker-empty">还没有工作空间，先打开一个文件夹。</div>';
+    : `<div class="chip-picker-empty">${t('workspace.noWorkspaces')}</div>`;
   const noWorkspaceRow = task ? `
       <button class="chip-picker-item ${currentId ? '' : 'active'}" data-workspace-clear role="option" aria-selected="${!currentId}"${fixed ? ' disabled' : ''}>
         <span class="chip-picker-check">${currentId ? '' : icon('check')}</span>
         <span class="chip-picker-body">
-          <span class="chip-picker-name">不使用工作空间</span>
-          <span class="chip-picker-path">纯任务，不改动任何目录</span>
+          <span class="chip-picker-name">${t('menu.noWorkspace')}</span>
+          <span class="chip-picker-path">${t('workspace.pureTask')}</span>
         </span>
       </button>
       ${projects.length ? '<div class="chip-picker-divider"></div>' : ''}` : '';
   el.innerHTML = `
-    <div class="chip-picker-head"><span>${task ? '任务的工作空间' : '工作空间'}</span><span class="chip-picker-count">${projects.length} 个</span></div>
+    <div class="chip-picker-head"><span>${task ? t('workspace.taskWorkspace') : t('workspace.title')}</span><span class="chip-picker-count">${t('workspace.count', { n: projects.length })}</span></div>
     <div class="chip-picker-list" role="listbox">${noWorkspaceRow}${items}</div>
     <div class="chip-picker-foot">
       ${fixed
-        ? '<div class="chip-picker-note">任务已开始运行，工作空间不可更改。</div>'
+        ? `<div class="chip-picker-note">${t('workspace.fixedNote')}</div>`
         : `<button class="chip-picker-item chip-picker-new" data-workspace-open>
         <span class="chip-picker-check">${icon('folder')}</span>
         <span class="chip-picker-body">
-          <span class="chip-picker-name">打开新的工作空间…</span>
-          <span class="chip-picker-path">选择一个本地文件夹</span>
+          <span class="chip-picker-name">${t('workspace.openNew')}</span>
+          <span class="chip-picker-path">${t('workspace.pickFolder')}</span>
         </span>
       </button>`}
     </div>
@@ -2879,7 +3053,7 @@ function renderWorkspacePicker(): void {
     const current = chipTask();
     if (!current) return;
     const result = await window.mocodeWork.setTaskProject(current.id, projectId);
-    if (!result.ok) { showToast('warn', result.message ?? '无法更改工作空间'); return; }
+    if (!result.ok) { showToast('warn', result.message ?? t('toast.cannotChangeWorkspace')); return; }
     if (result.state) updateState(result.state);
     const selected = await window.mocodeWork.selectTask(current.id);
     if (selected) { updateState(selected.state); switchToTask(selected.task.id, selected.history); }
@@ -2892,19 +3066,19 @@ function renderWorkspacePicker(): void {
       hideWorkspacePicker();
       if (!id || id === currentId) return;
       const project = state?.projects.find((p) => p.id === id);
-      await applyProject(id, `已关联到「${project?.name ?? id}」`);
+      await applyProject(id, t('toast.associated', { name: project?.name ?? id }));
     });
   });
   el.querySelector<HTMLButtonElement>('[data-workspace-clear]')?.addEventListener('click', async () => {
     hideWorkspacePicker();
     if (!currentId) return;
-    await applyProject('', '已解除工作空间关联');
+    await applyProject('', t('toast.unassociated'));
   });
   el.querySelector<HTMLButtonElement>('[data-workspace-open]')?.addEventListener('click', async () => {
     hideWorkspacePicker();
     try {
       const next = await window.mocodeWork.pickProject();
-      if (next) { updateState(next); showToast('success', '已打开新的工作空间'); }
+      if (next) { updateState(next); showToast('success', t('toast.openedWorkspace')); }
     } catch (error) { showToast('error', (error as Error).message); }
   });
 }

@@ -19,6 +19,8 @@
           var theme = saved || (systemDark ? 'dark' : 'light');
           var effectiveTheme = theme === 'system' ? (systemDark ? 'dark' : 'light') : theme;
           document.documentElement.dataset.theme = effectiveTheme;
+          // 同步语言属性，避免首屏语言标记闪烁。
+          document.documentElement.lang = localStorage.getItem('mocode-work-language') || 'zh-CN';
         } catch { /* localStorage 不可用时走默认浅色 */ }
       })();
     </script>
@@ -28,47 +30,47 @@
       <div class="titlebar"><span class="titlebar-brand"><img class="titlebar-brand-logo" src="../assets/icon.png" alt="MoCode" title="MoCode" /><span class="titlebar-brand-text">MoCode</span></span></div>
       <div class="app-body">
       <aside class="sidebar">
-        <header class="brand-row"><button class="icon-button muted" id="sidebar-toggle" data-sidebar-toggle title="折叠 / 展开侧栏" aria-label="折叠 / 展开侧栏" aria-pressed="false"><svg class="icon" data-icon="panel-left"></svg></button><div class="brand-actions"><button class="icon-button muted" id="add-project" title="添加项目" aria-label="添加项目"><svg class="icon" data-icon="plus"></svg></button><button class="icon-button muted" id="search-button" title="搜索 (⌘K)" aria-label="搜索"><svg class="icon" data-icon="search"></svg></button><button class="icon-button muted" id="theme-toggle" title="切换主题" aria-label="切换主题"><svg class="icon" data-icon="moon"></svg><svg class="icon icon-swap" data-icon="sun"></svg></button></div></header>
-        <nav class="primary-nav" aria-label="主导航">
-          <button class="nav-item active" id="new-task"><svg class="icon" data-icon="circle-plus"></svg>新建任务</button>
-          <button class="nav-item" id="pull-requests"><svg class="icon" data-icon="git-pull-request"></svg>拉取请求</button>
+        <header class="brand-row"><button class="icon-button muted" id="sidebar-toggle" data-sidebar-toggle data-i18n-title="sidebar.collapse" data-i18n-aria="sidebar.collapse" aria-pressed="false"><svg class="icon" data-icon="panel-left"></svg></button><div class="brand-actions"><button class="icon-button muted" id="add-project" data-i18n-title="sidebar.addProject" data-i18n-aria="sidebar.addProject"><svg class="icon" data-icon="plus"></svg></button><button class="icon-button muted" id="search-button" data-i18n-title="sidebar.search" data-i18n-aria="sidebar.search"><svg class="icon" data-icon="search"></svg></button><button class="icon-button muted" id="theme-toggle" data-i18n-title="sidebar.theme" data-i18n-aria="sidebar.theme"><svg class="icon" data-icon="moon"></svg><svg class="icon icon-swap" data-icon="sun"></svg></button></div></header>
+        <nav class="primary-nav" aria-label="主导航" data-i18n-aria="a11y.primaryNav">
+          <button class="nav-item active" id="new-task"><svg class="icon" data-icon="circle-plus"></svg><span data-i18n="nav.newTask">新建任务</span></button>
+          <button class="nav-item" id="pull-requests"><svg class="icon" data-icon="git-pull-request"></svg><span data-i18n="nav.pullRequests">拉取请求</span></button>
         </nav>
-        <section class="sidebar-section tasks-section"><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
-        <button class="sidebar-footer" id="settings-button" title="设置" aria-haspopup="dialog" aria-expanded="false">
+        <section class="sidebar-section tasks-section"><div id="task-list" class="task-list"><p class="empty-tasks" data-i18n="sidebar.emptyTasks">无任务</p></div></section>
+        <button class="sidebar-footer" id="settings-button" data-i18n-title="settings.title" aria-haspopup="dialog" aria-expanded="false">
           <span class="avatar">M</span>
           <span class="footer-brand">MoCode</span>
         </button>
-        <div class="sidebar-resize" id="sidebar-resize" aria-label="拖动调整侧栏宽度" role="separator" aria-orientation="vertical"></div>
+        <div class="sidebar-resize" id="sidebar-resize" aria-label="拖动调整侧栏宽度" data-i18n-aria="a11y.sidebarResize" role="separator" aria-orientation="vertical"></div>
       </aside>
       <main class="workspace">
-        <button class="sidebar-floating-toggle" id="sidebar-toggle-floating" data-sidebar-toggle title="展开侧栏" aria-label="展开侧栏"><svg class="icon" data-icon="panel-left"></svg></button>
-        <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览"><svg class="icon" data-icon="layout"></svg></button><button id="show-files" title="浏览文件"><svg class="icon" data-icon="files"></svg></button></div>
+        <button class="sidebar-floating-toggle" id="sidebar-toggle-floating" data-sidebar-toggle data-i18n-title="sidebar.expand" data-i18n-aria="sidebar.expand"><svg class="icon" data-icon="panel-left"></svg></button>
+        <div class="workspace-actions" aria-label="视图操作" data-i18n-aria="a11y.viewActions"><button id="toggle-inspector" data-i18n-title="inspector.overview"><svg class="icon" data-icon="layout"></svg></button><button id="show-files" data-i18n-title="workspace.browseFiles"><svg class="icon" data-icon="files"></svg></button></div>
           <section id="empty-state" class="empty-state">
-          <h1 class="empty-lockup"><img class="empty-mark" src="../assets/icon-mark.png" alt="" aria-hidden="true" /><span class="empty-wordmark">让 MoCode 为你工作</span></h1>
+          <h1 class="empty-lockup"><img class="empty-mark" src="../assets/icon-mark.png" alt="" aria-hidden="true" /><span class="empty-wordmark" data-i18n="app.emptyWordmark">让 MoCode 为你工作</span></h1>
         </section>
         <section id="conversation" class="conversation" aria-live="polite"></section>
         <section id="approval-panel" class="approval-panel hidden"></section>
         <aside id="inspector" class="inspector hidden">
-          <header class="inspector-header"><b id="inspector-title">项目概览</b><button id="close-inspector" title="关闭" aria-label="关闭"><svg class="icon" data-icon="close"></svg></button></header>
-          <nav class="inspector-tabs"><button data-tab="overview" class="selected">概览</button><button data-tab="files">文件</button><button data-tab="prs">拉取请求</button></nav>
+          <header class="inspector-header"><b id="inspector-title" data-i18n="inspector.overview">项目概览</b><button id="close-inspector" data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button></header>
+          <nav class="inspector-tabs"><button data-tab="overview" class="selected" data-i18n="inspector.tabOverview">概览</button><button data-tab="files" data-i18n="inspector.files">文件</button><button data-tab="prs" data-i18n="inspector.prs">拉取请求</button></nav>
           <div id="inspector-content" class="inspector-content"></div>
         </aside>
-        <section id="search-panel" class="search-panel hidden"><div class="search-dialog"><input id="search-input" placeholder="搜索项目或任务" /><div id="search-results"></div></div></section>
+        <section id="search-panel" class="search-panel hidden"><div class="search-dialog"><input id="search-input" data-i18n-placeholder="search.placeholder" /><div id="search-results"></div></div></section>
         <footer class="composer-area">
           <div class="composer">
             <div id="attachment-list" class="attachment-list"></div>
-            <textarea id="prompt" rows="1" placeholder="描述你想做的事，也可以把图片拖进来…"></textarea>
-            <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" title="添加图片 (也可拖入或直接粘贴)" aria-label="添加图片"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" title="压缩会话上下文"><svg class="icon icon-inline" data-icon="layers-compress"></svg>压缩</button><span class="context-usage" id="context-usage" title="上下文占用">--</span></div><div class="right-actions"><button id="mode-button" class="model-button" title="切换模型" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">MoCode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" title="发送 (⌘⏎)" aria-label="发送"><svg class="icon" data-icon="arrow-up"></svg></button></div></div>
+            <textarea id="prompt" rows="1" data-i18n-placeholder="composer.placeholder"></textarea>
+            <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" data-i18n-title="composer.addImage" data-i18n-aria="composer.addImage"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" data-i18n-title="composer.compactTitle"><svg class="icon icon-inline" data-icon="layers-compress"></svg><span data-i18n="composer.compact">压缩</span></button><span class="context-usage" id="context-usage" data-i18n-title="composer.contextUsage">--</span></div><div class="right-actions"><button id="mode-button" class="model-button" data-i18n-title="composer.switchModel" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">MoCode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" data-i18n-title="composer.send" data-i18n-aria="composer.sendAria"><svg class="icon" data-icon="arrow-up"></svg></button></div></div>
           </div>
           <!-- 模型下拉必须挂在 .composer 之外：.composer 有 overflow: hidden，且它并不是定位祖先，
                挂在里面时包含块会随状态漂移（空态 .composer-area 是 static → 包含块退化成 .workspace，
                bottom: 100%+6px 直接把面板顶到视口上方被裁掉）。挂在 .composer-area 下，
                只要 .composer-area 在两种状态下都是定位元素，锚点就恒定。 -->
-          <div id="model-picker" class="model-picker hidden" role="listbox" aria-label="选择模型"></div>
-          <div class="empty-chips" aria-label="会话上下文">
+          <div id="model-picker" class="model-picker hidden" role="listbox" data-i18n-aria="picker.selectModel"></div>
+          <div class="empty-chips" aria-label="会话上下文" data-i18n-aria="a11y.conversationContext">
             <div class="chip-menu-wrap">
-              <button class="empty-chip" type="button" id="empty-chip-project" title="切换工作空间" aria-haspopup="listbox" aria-expanded="false"><svg class="icon" data-icon="folder"></svg><span class="empty-chip-label">选择工作空间</span><svg class="icon" data-icon="chevron-down"></svg></button>
-              <div id="workspace-picker" class="chip-picker hidden" role="listbox" aria-label="选择工作空间"></div>
+              <button class="empty-chip" type="button" id="empty-chip-project" data-i18n-title="workspace.switchSpace" aria-haspopup="listbox" aria-expanded="false"><svg class="icon" data-icon="folder"></svg><span class="empty-chip-label" data-i18n="workspace.selectSpace">选择工作空间</span><svg class="icon" data-icon="chevron-down"></svg></button>
+              <div id="workspace-picker" class="chip-picker hidden" role="listbox" data-i18n-aria="workspace.selectSpace"></div>
             </div>
           </div>
         </footer>
@@ -78,13 +80,13 @@
       <!-- 设置弹窗：左侧分类导航 + 右侧内容，分类列表化 -->
       <section id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
         <div class="modal-card settings-card">
-          <aside class="settings-nav" role="tablist" aria-label="设置分类">
-            <b id="settings-modal-title" class="settings-nav-title">设置</b>
+          <aside class="settings-nav" role="tablist" aria-label="设置分类" data-i18n-aria="a11y.settingsNav">
+            <b id="settings-modal-title" class="settings-nav-title" data-i18n="settings.title">设置</b>
           </aside>
           <div class="settings-main">
             <header class="settings-main-head">
-              <b id="settings-section-title">模型</b>
-              <button class="modal-close icon-button muted" id="settings-close" title="关闭" aria-label="关闭"><svg class="icon" data-icon="close"></svg></button>
+              <b id="settings-section-title" data-i18n="settings.model">模型</b>
+              <button class="modal-close icon-button muted" id="settings-close" data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button>
             </header>
             <div id="settings-section" class="settings-section"></div>
           </div>
@@ -95,58 +97,58 @@
       <section id="model-form-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="model-form-title">
         <div class="modal-card model-form-card">
           <header class="modal-head">
-            <b id="model-form-title">添加模型</b>
-            <button class="modal-close icon-button muted" data-close title="关闭" aria-label="关闭"><svg class="icon" data-icon="close"></svg></button>
+            <b id="model-form-title" data-i18n="modelForm.add">添加模型</b>
+            <button class="modal-close icon-button muted" data-close data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button>
           </header>
           <div class="modal-body model-form-body">
             <label class="field">
-              <span class="field-label">提供商预设</span>
+              <span class="field-label" data-i18n="modelForm.providerPreset">提供商预设</span>
               <select id="model-form-template" class="field-input">
-                <option value="">自定义（全部手填）</option>
+                <option value="" data-i18n="modelForm.custom">自定义（全部手填）</option>
               </select>
             </label>
             <label class="field">
-              <span class="field-label">预设名 <span class="field-optional">保存为 ~/.mocode/models/&lt;名&gt;.json</span></span>
-              <input id="model-form-name" class="field-input" type="text" maxlength="32" autocomplete="off" spellcheck="false" placeholder="例如 my-deepseek（仅字母、数字、_ 和 -）" />
+              <span class="field-label"><span data-i18n="modelForm.name">预设名</span> <span class="field-optional" data-i18n="modelForm.nameOptional">保存为 ~/.mocode/models/&lt;名&gt;.json</span></span>
+              <input id="model-form-name" class="field-input" type="text" maxlength="32" autocomplete="off" spellcheck="false" data-i18n-placeholder="modelForm.namePlaceholder" />
             </label>
             <label class="field">
-              <span class="field-label">接口协议</span>
+              <span class="field-label" data-i18n="modelForm.protocol">接口协议</span>
               <select id="model-form-provider" class="field-input">
-                <option value="openai">openai（OpenAI 兼容端点）</option>
-                <option value="anthropic">anthropic（Anthropic 原生）</option>
+                <option value="openai" data-i18n="modelForm.protocolOpenai">openai（OpenAI 兼容端点）</option>
+                <option value="anthropic" data-i18n="modelForm.protocolAnthropic">anthropic（Anthropic 原生）</option>
               </select>
             </label>
             <label class="field">
-              <span class="field-label">API 地址</span>
-              <input id="model-form-baseurl" class="field-input" type="text" autocomplete="off" spellcheck="false" placeholder="https://api.example.com/v1" />
+              <span class="field-label" data-i18n="modelForm.baseUrl">API 地址</span>
+              <input id="model-form-baseurl" class="field-input" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="modelForm.baseUrlPlaceholder" />
             </label>
             <label class="field">
-              <span class="field-label">模型名 <span class="field-optional">须支持 function calling</span></span>
-              <input id="model-form-model" class="field-input" type="text" autocomplete="off" spellcheck="false" placeholder="例如 deepseek-chat" />
+              <span class="field-label"><span data-i18n="modelForm.modelName">模型名</span> <span class="field-optional" data-i18n="modelForm.modelNameOptional">须支持 function calling</span></span>
+              <input id="model-form-model" class="field-input" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="modelForm.modelNamePlaceholder" />
             </label>
             <label class="field">
-              <span class="field-label">API Key <span class="field-optional">仅本机保存</span></span>
-              <input id="model-form-apikey" class="field-input" type="password" autocomplete="off" spellcheck="false" placeholder="sk-..." />
+              <span class="field-label"><span data-i18n="modelForm.apiKey">API Key</span> <span class="field-optional" data-i18n="modelForm.apiKeyOptional">仅本机保存</span></span>
+              <input id="model-form-apikey" class="field-input" type="password" autocomplete="off" spellcheck="false" data-i18n-placeholder="modelForm.apiKeyPlaceholder" />
             </label>
             <label class="field">
-              <span class="field-label">上下文窗口 <span class="field-optional">tokens</span></span>
-              <input id="model-form-window" class="field-input" type="number" min="1" step="1000" autocomplete="off" placeholder="256000" />
+              <span class="field-label"><span data-i18n="modelForm.contextWindow">上下文窗口</span> <span class="field-optional" data-i18n="modelForm.contextWindowOptional">tokens</span></span>
+              <input id="model-form-window" class="field-input" type="number" min="1" step="1000" autocomplete="off" data-i18n-placeholder="modelForm.contextWindowPlaceholder" />
             </label>
             <button class="settings-row settings-toggle field-hidden" id="model-form-cache" role="switch" aria-checked="false">
-              <span class="settings-row-body"><span class="settings-row-title">Prompt Cache</span><span class="settings-row-sub">仅 anthropic 协议生效，可显著降低重复前缀成本</span></span>
+              <span class="settings-row-body"><span class="settings-row-title" data-i18n="modelForm.promptCache">Prompt Cache</span><span class="settings-row-sub" data-i18n="modelForm.promptCacheSub">仅 anthropic 协议生效，可显著降低重复前缀成本</span></span>
               <span class="settings-switch" aria-hidden="true"></span>
             </button>
             <button class="settings-row settings-toggle field-hidden" id="model-form-activate" role="switch" aria-checked="true">
-              <span class="settings-row-body"><span class="settings-row-title">保存后立即启用</span><span class="settings-row-sub">写入配置并重启后台 agent，后续任务用这个模型</span></span>
+              <span class="settings-row-body"><span class="settings-row-title" data-i18n="modelForm.activate">保存后立即启用</span><span class="settings-row-sub" data-i18n="modelForm.activateSub">写入配置并重启后台 agent，后续任务用这个模型</span></span>
               <span class="settings-switch" aria-hidden="true"></span>
             </button>
             <p class="model-form-error hidden" id="model-form-error"></p>
           </div>
           <footer class="modal-foot">
-            <button class="btn-ghost" id="model-form-delete" hidden>删除</button>
+            <button class="btn-ghost" id="model-form-delete" hidden data-i18n="modelForm.delete">删除</button>
             <span class="modal-foot-spacer"></span>
-            <button class="btn-ghost" data-close>取消</button>
-            <button class="btn-primary" id="model-form-save">保存</button>
+            <button class="btn-ghost" data-close data-i18n="taskModal.cancel">取消</button>
+            <button class="btn-primary" id="model-form-save" data-i18n="modelForm.save">保存</button>
           </footer>
         </div>
       </section>
@@ -155,18 +157,18 @@
       <section id="task-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
         <div class="modal-card">
           <header class="modal-head">
-            <b id="task-modal-title">重命名任务</b>
-            <button class="modal-close icon-button muted" data-close title="关闭" aria-label="关闭"><svg class="icon" data-icon="close"></svg></button>
+            <b id="task-modal-title" data-i18n="taskModal.title">重命名任务</b>
+            <button class="modal-close icon-button muted" data-close data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button>
           </header>
           <div class="modal-body">
             <label class="field">
-              <span class="field-label">任务名称</span>
-              <input id="task-name-input" class="field-input" type="text" maxlength="120" autocomplete="off" placeholder="例如：给登录页加一个「记住我」选项" />
+              <span class="field-label" data-i18n="taskModal.name">任务名称</span>
+              <input id="task-name-input" class="field-input" type="text" maxlength="120" autocomplete="off" data-i18n-placeholder="taskModal.placeholder" />
             </label>
           </div>
           <footer class="modal-foot">
-            <button class="btn-ghost" data-close>取消</button>
-            <button class="btn-primary" id="task-modal-create">保存</button>
+            <button class="btn-ghost" data-close data-i18n="taskModal.cancel">取消</button>
+            <button class="btn-primary" id="task-modal-create" data-i18n="taskModal.save">保存</button>
           </footer>
         </div>
       </section>

@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import { truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
+import { tMain } from './i18n/main.js';
 import {
   AgentHostClient,
   resolveMocodeHostLaunchSpec,
@@ -67,6 +68,14 @@ interface TaskRecord {
 }
 interface StoredState { version: 1; projects: Project[]; selectedProjectId: string; tasks: TaskRecord[]; selectedTaskId?: string; }
 interface CommandResult { ok: boolean; stdout: string; stderr: string; }
+
+/**
+ * 落盘用的「语言无关」错误标记。state 会写进 work-projects.json，
+ * 一旦把本地化文案写进去，用户切语言后旧语言的错误就会永久留在文件里 ——
+ * 所以这里只存稳定标识符，渲染层再按当前语言翻译（见 renderer 的 taskErrorText）。
+ */
+const STALE_RUN_MARKER = '__stale_run__';
+const RUN_FAILED_MARKER = '__run_failed__';
 
 let windowRef: BrowserWindow | null = null;
 let appMenu: Menu | null = null;
@@ -218,17 +227,17 @@ function applyActivePreset(): void {
  */
 function switchModel(name: string): { ok: boolean; message: string; model?: ModelDescriptor } {
   const target = path.join(modelsDir(), `${name}.json`);
-  if (!existsSync(target)) return { ok: false, message: `模型 ${name} 不存在` };
+  if (!existsSync(target)) return { ok: false, message: tMain('main.switchModel.exists', { name }) };
   let raw: Record<string, unknown>;
   try { raw = JSON.parse(readFileSync(target, 'utf8')) as Record<string, unknown>; }
-  catch { return { ok: false, message: `无法读取模型 ${name}` }; }
+  catch { return { ok: false, message: tMain('main.switchModel.cannotRead', { name }) }; }
   const baseURL = typeof raw.baseURL === 'string' ? raw.baseURL : '';
   const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey : '';
   const model = typeof raw.model === 'string' ? raw.model : name;
   const provider = raw.provider === 'anthropic' ? 'anthropic' : 'openai';
   const promptCache = provider === 'anthropic' && raw.anthropicPromptCache !== false;
   const contextWindow = Number(raw.contextWindow ?? 0) || 0;
-  if (!baseURL || !model) return { ok: false, message: `模型 ${name} 缺少 baseURL / model 字段` };
+  if (!baseURL || !model) return { ok: false, message: tMain('main.switchModel.missingFields', { name }) };
   const patch: Record<string, string> = {
     LLM_PROVIDER: provider,
     LLM_BASE_URL: baseURL,
@@ -238,7 +247,7 @@ function switchModel(name: string): { ok: boolean; message: string; model?: Mode
   };
   if (contextWindow) patch.CONTEXT_WINDOW_TOKENS = String(contextWindow);
   try { writeUserConfig(patch); }
-  catch (error) { return { ok: false, message: `写入配置失败: ${(error as Error).message}` }; }
+  catch (error) { return { ok: false, message: tMain('main.switchModel.writeFail', { msg: (error as Error).message }) }; }
   // 同步 .active 指针,否则下次启动 config/index.ts 会用指针指向的旧预设覆盖刚写的键。
   try { writeFileSync(path.join(modelsDir(), '.active'), `${name}\n`, 'utf8'); }
   catch { /* 指针写失败不阻断切换 */ }
@@ -252,7 +261,7 @@ function switchModel(name: string): { ok: boolean; message: string; model?: Mode
   restartAllAgents();
   return {
     ok: true,
-    message: `已切换到 ${name} (${provider}${promptCache ? ' · cache on' : ''})`,
+    message: tMain('main.switchModel.saved', { name, provider, cache: promptCache ? ' · cache on' : '' }),
     model: { name, label: model, provider, promptCache, baseURL: maskUrl(baseURL), providerHost: providerHostOf(baseURL), contextWindow, isActive: true },
   };
 }
@@ -296,12 +305,12 @@ function normalizeDraft(input: Partial<PresetDraft>): { ok: true; value: PresetD
   const model = String(input.model ?? '').trim();
   const window = Number(input.contextWindow ?? 0);
   const provider = input.provider === 'anthropic' ? 'anthropic' : 'openai';
-  if (!baseURL) return { ok: false, message: 'API 地址不能为空' };
-  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(baseURL)) return { ok: false, message: 'API 地址需要以 http:// 或 https:// 开头' };
-  try { new URL(baseURL); } catch { return { ok: false, message: 'API 地址格式不合法' }; }
-  if (!apiKey) return { ok: false, message: 'API Key 不能为空' };
-  if (!model) return { ok: false, message: '模型名不能为空' };
-  if (!Number.isFinite(window) || window <= 0) return { ok: false, message: '上下文窗口必须是正数' };
+  if (!baseURL) return { ok: false, message: tMain('modelForm.errorBaseUrl') };
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(baseURL)) return { ok: false, message: tMain('modelForm.errorBaseUrl') };
+  try { new URL(baseURL); } catch { return { ok: false, message: tMain('modelForm.errorBaseUrl') }; }
+  if (!apiKey) return { ok: false, message: tMain('modelForm.errorApiKey') };
+  if (!model) return { ok: false, message: tMain('modelForm.errorModel') };
+  if (!Number.isFinite(window) || window <= 0) return { ok: false, message: tMain('modelForm.errorWindow') };
   return {
     ok: true,
     value: {
@@ -375,16 +384,16 @@ function savePresetFromRenderer(input: {
   activate?: unknown;
 }): { ok: boolean; message: string; name?: string } {
   const name = String(input.name ?? '').trim();
-  if (!PRESET_NAME_RE.test(name)) return { ok: false, message: '预设名只能包含字母、数字、_ 和 -，长度 1–32' };
+  if (!PRESET_NAME_RE.test(name)) return { ok: false, message: tMain('main.preset.nameInvalid') };
   const draft = normalizeDraft((input.draft ?? {}) as Partial<PresetDraft>);
   if (!draft.ok) return { ok: false, message: draft.message };
 
   const originalName = String(input.originalName ?? '').trim();
   const renaming = !!originalName && originalName !== name;
   if (renaming) {
-    if (!PRESET_NAME_RE.test(originalName)) return { ok: false, message: '原预设名不合法' };
-    if (existsSync(presetPathFor(name))) return { ok: false, message: `已存在同名预设 “${name}”` };
-    if (!existsSync(presetPathFor(originalName))) return { ok: false, message: `预设 “${originalName}” 不存在` };
+    if (!PRESET_NAME_RE.test(originalName)) return { ok: false, message: tMain('main.preset.nameInvalid') };
+    if (existsSync(presetPathFor(name))) return { ok: false, message: tMain('main.preset.alreadyExists', { name }) };
+    if (!existsSync(presetPathFor(originalName))) return { ok: false, message: tMain('main.preset.notExist', { name: originalName }) };
   }
   try {
     writePresetFile(name, draft.value);
@@ -396,7 +405,7 @@ function savePresetFromRenderer(input: {
       }
     }
   } catch (error) {
-    return { ok: false, message: `写入预设失败: ${(error as Error).message}` };
+    return { ok: false, message: tMain('main.preset.writeFail', { msg: (error as Error).message }) };
   }
 
   const wasActive = readActivePreset() === name || readActivePreset() === originalName;
@@ -404,20 +413,20 @@ function savePresetFromRenderer(input: {
     activatePreset(name, draft.value);
     restartAllAgents();
   }
-  return { ok: true, message: renaming ? `已重命名并保存 “${name}”` : `已保存预设 “${name}”`, name };
+  return { ok: true, message: renaming ? tMain('main.preset.renamed', { name }) : tMain('main.preset.saved', { name }), name };
 }
 
 /** 删除一个预设；删的若是激活预设，顺带清掉指针（否则下次启动指向空文件）。 */
 function removePreset(name: string): { ok: boolean; message: string } {
-  if (!PRESET_NAME_RE.test(name)) return { ok: false, message: '预设名不合法' };
-  if (!existsSync(presetPathFor(name))) return { ok: false, message: `预设 “${name}” 不存在` };
+  if (!PRESET_NAME_RE.test(name)) return { ok: false, message: tMain('main.preset.nameInvalid') };
+  if (!existsSync(presetPathFor(name))) return { ok: false, message: tMain('main.preset.notExist', { name }) };
   const wasActive = readActivePreset() === name;
   try { unlinkSync(presetPathFor(name)); }
-  catch (error) { return { ok: false, message: `删除失败: ${(error as Error).message}` }; }
+  catch (error) { return { ok: false, message: tMain('main.preset.deleteFail', { msg: (error as Error).message }) }; }
   if (wasActive) {
     try { unlinkSync(path.join(modelsDir(), '.active')); } catch { /* 指针已不在 */ }
   }
-  return { ok: true, message: `已删除预设 “${name}”${wasActive ? '（它正在被使用，请另选一个模型）' : ''}` };
+  return { ok: true, message: tMain('main.preset.deleted', { name, active: wasActive ? tMain('main.preset.deletedActive') : '' }) };
 }
 
 /** 配置类变更（模型/行为开关）后统一走这里：停掉在跑任务，host 下次 send 时按新配置重启。 */
@@ -463,7 +472,9 @@ function runCommand(root: string, executable: string, args: string[]): Promise<C
 
 async function branchAt(root: string): Promise<string> {
   const result = await runCommand(root, 'git', ['branch', '--show-current']);
-  return result.ok ? (result.stdout || 'detached') : '本地';
+  // 空串 = 非 git 仓库 / 无分支，渲染层再按当前语言显示「本地」。
+  // 这里绝不能存本地化文案 —— state 会落盘，切语言后旧文案会永久留在侧栏。
+  return result.ok ? (result.stdout || 'detached') : '';
 }
 
 async function projectFor(root: string): Promise<Project> {
@@ -476,7 +487,7 @@ function normalizeState(value: unknown): StoredState | null {
   const raw = value as Partial<StoredState>;
   if (!Array.isArray(raw.projects) || raw.projects.length === 0) return null;
   const projects = raw.projects.filter((item): item is Project => !!item && typeof item.id === 'string' && typeof item.root === 'string')
-    .map((item) => ({ ...item, name: item.name || path.basename(item.root), branch: item.branch || '本地' }));
+    .map((item) => ({ ...item, name: item.name || path.basename(item.root), branch: typeof item.branch === 'string' ? item.branch : '' }));
   if (!projects.length) return null;
   const tasks = Array.isArray(raw.tasks) ? raw.tasks.filter((item): item is TaskRecord => !!item && typeof item.id === 'string' && typeof item.projectId === 'string')
     .map((item) => {
@@ -489,7 +500,7 @@ function normalizeState(value: unknown): StoredState | null {
         ...item,
         changedFiles: Array.isArray(item.changedFiles) ? item.changedFiles : [],
         status: (stale ? 'failed' : status) as TaskStatus,
-        lastError: stale && !item.lastError ? '上次运行未正常结束（应用重启）' : item.lastError,
+        lastError: stale && !item.lastError ? STALE_RUN_MARKER : item.lastError,
       };
     }) : [];
   return { version: 1, projects, tasks, selectedProjectId: projects.some((item) => item.id === raw.selectedProjectId) ? raw.selectedProjectId! : projects[0].id, selectedTaskId: typeof raw.selectedTaskId === 'string' ? raw.selectedTaskId : undefined };
@@ -518,7 +529,7 @@ function scratchProject(): Project {
   if (scratch) return scratch;
   const root = path.join(app.getPath('userData'), 'scratch');
   mkdirSync(root, { recursive: true });
-  scratch = { id: '__scratch__', name: '普通任务', root, branch: '' };
+  scratch = { id: '__scratch__', name: tMain('main.task.standalone'), root, branch: '' };
   return scratch;
 }
 /** 任务实际运行的 project：普通任务落到 scratch，其余按 projectId 找。 */
@@ -605,15 +616,15 @@ function sessionFileFor(project: Project, sessionId: string): string | null {
  * 的正文 / 工具记录一起作废。截断规则在 truncate-session.ts(纯函数,可独立验证)。
  * **只动对话** —— 磁盘上被 agent 改过的文件一律保留,回滚不该悄悄改代码。
  */
-function rollbackSession(task: TaskRecord, userIndex: number): { ok: boolean; message?: string } {
+function rollbackSession(task: TaskRecord, userIndex: number): { ok:boolean; message?: string } {
   const project = workspaceForTask(task);
-  if (!project) return { ok: false, message: '这个任务没有可用的工作空间。' };
-  if (!task.sessionId) return { ok: false, message: '这条消息还没落盘成会话,无法回滚。' };
+  if (!project) return { ok: false, message: tMain('main.rollback.noWorkspace') };
+  if (!task.sessionId) return { ok: false, message: tMain('main.rollback.noSession') };
   const file = sessionFileFor(project, task.sessionId);
-  if (!file) return { ok: false, message: '找不到这个任务的会话文件。' };
+  if (!file) return { ok: false, message: tMain('main.rollback.noFile') };
   let record: RawSessionRecord;
-  try { record = JSON.parse(readFileSync(file, 'utf8')) as RawSessionRecord; } catch { return { ok: false, message: '会话文件已损坏,无法回滚。' }; }
-  const result = truncateSessionAtUser(record, userIndex);
+  try { record = JSON.parse(readFileSync(file, 'utf8')) as RawSessionRecord; } catch { return { ok: false, message: tMain('main.rollback.corrupt') }; }
+  const result = truncateSessionAtUser(record, userIndex, { noHistory: tMain('main.rollback.noHistory'), compacted: tMain('main.rollback.compacted') });
   if (!result.ok) return result;
   // 原子写(tmp + rename):与 core 侧写 session 同策略,中途崩掉不会留下半个文件。
   const tmp = `${file}.rollback-tmp`;
@@ -654,9 +665,9 @@ async function projectOverview(project: Project): Promise<Record<string, unknown
 
 async function pullRequests(project: Project): Promise<Record<string, unknown>> {
   const result = await runCommand(project.root, 'gh', ['pr', 'list', '--limit', '20', '--json', 'number,title,state,headRefName,url']);
-  if (!result.ok) return { available: false, message: result.stderr || '未检测到 GitHub CLI 登录状态。' };
+  if (!result.ok) return { available: false, message: result.stderr || tMain('main.pulls.unavailable') };
   try { return { available: true, items: JSON.parse(result.stdout || '[]') }; }
-  catch { return { available: false, message: 'GitHub CLI 返回了无法读取的数据。' }; }
+  catch { return { available: false, message: tMain('main.pulls.unreadable') }; }
 }
 
 /** 把仍在运行的任务就地收敛为 failed —— host 退出/启动失败时不会再有 run_completed 落盘，不收敛侧栏就永远转圈。 */
@@ -680,7 +691,7 @@ function updateTaskFromAgent(envelope: HostEnvelope): void {
   if (event === 'approval_requested') task.status = 'waiting';
   if (event === 'status') task.status = 'running';
   if (event === 'run_aborted') task.status = 'cancelled';
-  if (event === 'run_failed') { task.status = 'failed'; task.lastError = String(payload.message ?? '运行失败'); }
+  if (event === 'run_failed') { task.status = 'failed'; task.lastError = String(payload.message ?? RUN_FAILED_MARKER); }
   if (event === 'run_completed') {
     task.changedFiles = Array.isArray(payload.changedFiles) ? payload.changedFiles.filter((item): item is string => typeof item === 'string') : [];
     task.status = payload.terminationReason === 'aborted' ? 'cancelled' : payload.terminationReason === 'completed' ? 'completed' : 'failed';
@@ -696,16 +707,16 @@ function updateTaskFromAgent(envelope: HostEnvelope): void {
  */
 const HOST_STARTUP_TIMEOUT_MS = 30_000;
 
-/** host 启动失败的英文原因 → 用户照着就能做的中文提示。 */
+/** host 启动失败的英文原因 → 用户照着就能做的本地化提示。 */
 function describeHostStartFailure(cause: unknown): string {
   const raw = cause instanceof Error ? cause.message : String(cause);
   if (/did not become ready within/i.test(raw)) {
-    return `Agent 启动超时（超过 ${Math.round(HOST_STARTUP_TIMEOUT_MS / 1000)}s 没就绪），这一轮没有发出。请在终端跑一次 mocode 确认模型能对话，再重试。`;
+    return tMain('main.host.startTimeout', { s: Math.round(HOST_STARTUP_TIMEOUT_MS / 1000) });
   }
   if (/exited before readiness/i.test(raw)) {
-    return 'Agent Host 一起来就退出了，这一轮没有发出。请在终端跑一次 mocode 看它报什么错，再重试。';
+    return tMain('main.host.exitedEarly');
   }
-  return `Agent 启动失败：${raw}`;
+  return tMain('main.host.startFail', { raw });
 }
 
 class LocalAgent {
@@ -740,7 +751,7 @@ class LocalAgent {
       }
       this.receive({ type: 'event', event: 'host_exit', payload: { code } });
       // 真崩了：本任务的 run 不会再有 run_completed，就地收敛 + 自动重启一次。
-      failTask(this.taskId, `Agent 进程异常退出（code ${code}），任务中断`);
+      failTask(this.taskId, tMain('main.host.crashed', { code: code ?? 'null' }));
       const project = this.currentProject;
       if (project && this.crashStreak < LocalAgent.MAX_CRASH_STREAK) {
         this.crashStreak += 1;
@@ -758,18 +769,20 @@ class LocalAgent {
   async start(project: Project): Promise<boolean> {
     this.currentProject = project;
     const { loaded, missing } = loadMocodeConfig(project.root);
+    // host_log 的 message 是**给人看**的（已按当前语言本地化），渲染层要据此决定弹不弹 toast。
+    // 拿中文关键词去匹配会在切成英文后失效，所以额外带一个稳定 code 让渲染层判定。
     if (loaded.length) {
       this.receive({
         type: 'event',
         event: 'host_log',
-        payload: { message: `[mocode-work] 已加载 mocode 配置: ${loaded.join(', ')}` },
+        payload: { code: 'config_loaded', message: `[mocode-work] ${tMain('toast.configLoaded', { loaded: loaded.join(', ') })}` },
       });
     }
     if (missing.length) {
       this.receive({
         type: 'event',
         event: 'host_log',
-        payload: { message: `[mocode-work] mocode 配置缺少 ${missing.join(', ')}，请先在终端跑 mocode /model 配好模型再启动任务。` },
+        payload: { code: 'config_missing', message: `[mocode-work] ${tMain('toast.configMissing', { missing: missing.join(', ') })}` },
       });
     }
 
@@ -778,16 +791,17 @@ class LocalAgent {
       spec = resolveMocodeHostLaunchSpec();
     } catch (cause) {
       this.crashStreak = LocalAgent.MAX_CRASH_STREAK;
-      this.fail(`找不到 mocode agent host 入口：${cause instanceof Error ? cause.message : String(cause)}`);
+      this.fail(tMain('main.host.noEntry', { raw: cause instanceof Error ? cause.message : String(cause) }));
       return false;
     }
     this.receive({
       type: 'event',
       event: 'host_log',
       payload: {
+        code: spec.usesElectronNode ? 'host_electron_node' : 'host_system_node',
         message: spec.usesElectronNode
-          ? '[mocode-work] 未找到系统 node，用 Electron 内置 node 跑 host —— 流式响应可能中途断开，建议安装 Node.js ≥18。'
-          : `[mocode-work] 用系统 node 跑 host：${spec.command}`,
+          ? `[mocode-work] ${tMain('main.host.electronNode')}`
+          : `[mocode-work] ${tMain('main.host.systemNode', { command: spec.command })}`,
       },
     });
     const starting = this.client.start(spec, {
@@ -818,7 +832,7 @@ class LocalAgent {
         return true;
       }
       // 后一次 start 自己已经报过这次失败，就不再重复弹一条。
-      if (this.errorSeq === reported) this.fail('Agent Host 启动后立刻退出了，这一轮没有发出。请重试。');
+      if (this.errorSeq === reported) this.fail(tMain('main.host.stoppedEarly'));
       return false;
     }
     this.lastStartError = null;
@@ -841,11 +855,11 @@ class LocalAgent {
     if (!this.client.isRunning) {
       const project = this.currentProject;
       if (!project) {
-        this.fail('Agent Host 还没起来，这一轮没有发出。请重试。');
+        this.fail(tMain('main.host.couldNotStart'));
         return;
       }
       if (this.crashStreak >= LocalAgent.MAX_CRASH_STREAK) {
-        this.fail('Agent Host 连续崩溃，已停止自动重启。请在终端确认 mocode 能正常对话，或新建一个任务再试。');
+        this.fail(tMain('main.host.continuousCrash'));
         return;
       }
       // 已经有一次 start 在飞（创建任务时的预热还没起完）→ **等它**，别再发一次：
@@ -858,7 +872,7 @@ class LocalAgent {
         if (!this.client.isRunning) {
           // start() 报过的具体原因就不再重复弹；没报过（并发早退等）也必须兜底一条。
           if (this.errorSeq === reportedErrors) {
-            this.fail(this.lastStartError ?? 'Agent Host 没能启动，这一轮没有发出。请重试。');
+            this.fail(this.lastStartError ?? tMain('main.host.couldNotStart'));
           }
           return;
         }
@@ -866,14 +880,14 @@ class LocalAgent {
     }
     if (this.starting) await this.starting.catch(() => undefined);
     if (!this.client.isRunning) {
-      this.fail('Agent Host 没能启动，这一轮没有发出。请重试。');
+      this.fail(tMain('main.host.couldNotStart'));
       return;
     }
     try {
       await this.client.send(value);
       this.crashStreak = 0;
     } catch (cause) {
-      this.fail(`指令没能送到 Agent：${cause instanceof Error ? cause.message : String(cause)}`);
+      this.fail(tMain('main.host.sendFail', { raw: cause instanceof Error ? cause.message : String(cause) }));
     }
   }
 
@@ -911,7 +925,7 @@ class LocalAgent {
       this.errorSeq += 1;
       // host 起不来 / send 失败（尚未就绪、连续崩溃、管道断开等）也必须收敛任务，
       // 否则任务停在 running 等一个永远不会来的 run_completed。
-      failTask(this.taskId, envelope.error || 'Agent 通信失败，任务中断');
+      failTask(this.taskId, envelope.error || tMain('main.host.commFailed'));
       // 一律补上 requestId(= 任务 id)：渲染层据此把失败归到正确的那条会话，
       // 而不是靠「当前正在看哪个任务」猜（切过任务就张冠李戴）。
       pushRenderer('work:agent-event', { ...envelope, requestId: envelope.requestId ?? this.taskId });
@@ -1075,9 +1089,9 @@ function installIpc(): void {
    */
   ipcMain.handle('work:set-task-project', async (_event, taskId: string, projectId: string) => {
     const task = taskById(taskId);
-    if (!task || typeof projectId !== 'string') return { ok: false, message: '任务不存在。' };
+    if (!task || typeof projectId !== 'string') return { ok: false, message: tMain('main.task.projectNotExist') };
     if (task.sessionId || task.status === 'running' || task.status === 'waiting') {
-      return { ok: false, message: '任务已开始运行，不能再更改工作空间。' };
+      return { ok: false, message: tMain('main.task.cannotChangeSpace') };
     }
     const target = projectId && state.projects.some((item) => item.id === projectId) ? projectId : '';
     const agent = agents.get(task.id);
@@ -1108,9 +1122,9 @@ function installIpc(): void {
   // 落盘之后必须重启该任务的 host —— 它内存里还留着被回滚掉的历史,继续用同一个进程会
   // 在下一轮结束时把旧历史全量写回磁盘,回滚当场失效(这就是为什么这里不要走 online 通道)。
   ipcMain.handle('work:rollback', (_event, taskId: string, userIndex: number) => {
-    if (typeof taskId !== 'string' || !taskId || typeof userIndex !== 'number') return { ok: false, message: '参数不合法。' };
+    if (typeof taskId !== 'string' || !taskId || typeof userIndex !== 'number') return { ok: false, message: tMain('main.rollback.invalidParam') };
     const task = taskById(taskId);
-    if (!task) return { ok: false, message: '任务不存在。' };
+    if (!task) return { ok: false, message: tMain('main.task.projectNotExist') };
     const rolled = rollbackSession(task, userIndex);
     if (!rolled.ok) return rolled;
     const agent = agents.get(taskId);
@@ -1197,12 +1211,12 @@ function installIpc(): void {
     return projectOverview(selectedProject());
   });
   ipcMain.handle('work:read-file', (_event, relativePath: string) => {
-    const target = resolvedProjectFile(selectedProject(), relativePath); if (!target) return { error: '不允许读取项目目录外的文件。' };
-    try { return { path: relativePath, content: readFileSync(target, 'utf8').slice(0, 200_000) }; } catch { return { error: '文件不可读取或不是文本文件。' }; }
+    const target = resolvedProjectFile(selectedProject(), relativePath); if (!target) return { error: tMain('main.read.outside') };
+    try { return { path: relativePath, content: readFileSync(target, 'utf8').slice(0, 200_000) }; } catch { return { error: tMain('main.read.unreadable') }; }
   });
   ipcMain.handle('work:file-diff', async (_event, relativePath: string) => {
-    const target = resolvedProjectFile(selectedProject(), relativePath); if (!target) return { error: '不允许读取项目目录外的文件。' };
-    const result = await runCommand(selectedProject().root, 'git', ['diff', '--', relativePath]); return { path: relativePath, content: result.ok ? result.stdout || '该文件没有已跟踪的 Git Diff。' : result.stderr };
+    const target = resolvedProjectFile(selectedProject(), relativePath); if (!target) return { error: tMain('main.read.outside') };
+    const result = await runCommand(selectedProject().root, 'git', ['diff', '--', relativePath]); return { path: relativePath, content: result.ok ? result.stdout || tMain('main.read.noDiff') : result.stderr };
   });
   ipcMain.handle('work:pull-requests', async () => pullRequests(selectedProject()));
   ipcMain.handle('work:pick-attachment', async () => {
@@ -1224,9 +1238,24 @@ function installIpc(): void {
       promptCache,
       baseUrl: active?.baseURL || maskUrl(process.env.LLM_BASE_URL ?? '') || activePresetBaseURL(),
       contextWindow: active?.contextWindow ?? (Number(process.env.CONTEXT_WINDOW_TOKENS ?? 0) || null),
-      language: process.env.MOCODE_LANGUAGE ?? '',
-      theme: process.env.MOCODE_THEME ?? '',
+      // 语言优先取 process.env（运行中已生效的值），回退到 config 文件 ——
+      // getConfig 可能在 loadMocodeConfig() 之前被调用（渲染层首屏就会问一次），
+      // 那时 env 还没回填，只看 env 会拿到空串、首屏语言回落到默认。
+      language: process.env.MOCODE_LANGUAGE ?? readUserConfig().MOCODE_LANGUAGE ?? '',
+      theme: process.env.MOCODE_THEME ?? readUserConfig().MOCODE_THEME ?? '',
     };
+  });
+  // 写入界面语言偏好（MOCODE_LANGUAGE）到 ~/.mocode/config，与主题/模型等配置同源。
+  // 主进程侧也读这个键来本地化系统提示，所以这里同步 process.env 让运行中即时生效。
+  // 原生菜单是主进程资源、不随渲染层重绘，切语言后必须在这里重建一次。
+  ipcMain.handle('work:set-language', (_event, lang: string) => {
+    const allowed = ['zh-CN', 'en-US'];
+    if (typeof lang !== 'string' || !allowed.includes(lang)) return { ok: false, message: tMain('main.lang.unsupported') };
+    try { writeUserConfig({ MOCODE_LANGUAGE: lang }); }
+    catch (error) { return { ok: false, message: tMain('main.lang.writeFail', { msg: (error as Error).message }) }; }
+    process.env.MOCODE_LANGUAGE = lang;
+    rebuildAppMenu();
+    return { ok: true, language: lang };
   });
   ipcMain.handle('work:list-models', () => listModels());
   // 读单个预设的完整字段（含 apiKey）供「编辑」表单回填。
@@ -1234,9 +1263,9 @@ function installIpc(): void {
   // 用户只改「上下文窗口」也会把掩码串当成新 key 存回去 —— 静默毁掉配置。
   // apiKey 只在主进程↔本应用渲染层之间流转，不落日志、不进 modal 之外的地方。
   ipcMain.handle('work:get-model', (_event, name: string) => {
-    if (typeof name !== 'string' || !PRESET_NAME_RE.test(name)) return { ok: false, message: '预设名不合法' };
+    if (typeof name !== 'string' || !PRESET_NAME_RE.test(name)) return { ok: false, message: tMain('main.preset.nameInvalid') };
     const preset = readPresetFile(name);
-    if (!preset) return { ok: false, message: `无法读取预设 “${name}”` };
+    if (!preset) return { ok: false, message: tMain('main.preset.readFail', { name }) };
     return { ok: true, preset: { ...preset } };
   });
   ipcMain.handle('work:save-model', (_event, payload: Record<string, unknown>) => {
@@ -1245,13 +1274,13 @@ function installIpc(): void {
     return { ok: false, message: result.message };
   });
   ipcMain.handle('work:delete-model', (_event, name: string) => {
-    if (typeof name !== 'string' || !name) return { ok: false, message: '预设名为空' };
+    if (typeof name !== 'string' || !name) return { ok: false, message: tMain('main.preset.nameFrom') };
     const result = removePreset(name);
     if (result.ok) broadcastState();
     return result;
   });
   ipcMain.handle('work:switch-model', (_event, name: string) => {
-    if (typeof name !== 'string' || !name) return { ok: false, message: '模型名为空' };
+    if (typeof name !== 'string' || !name) return { ok: false, message: tMain('main.switchModel.empty') };
     const result = switchModel(name);
     if (result.ok) broadcastState();
     return { ok: result.ok, message: result.message };
@@ -1268,7 +1297,7 @@ function installIpc(): void {
     }
     if (Object.keys(configPatch).length) {
       try { writeUserConfig(configPatch); }
-      catch (error) { console.error('[settings] 写入 ~/.mocode/config 失败:', error); }
+      catch (error) { console.error('[settings] failed to write ~/.mocode/config:', error); }
       // host 启动时固化了 env 快照 —— 与切模型同理，全员重启才能生效。
       restartAllAgents();
       broadcastState();
@@ -1278,21 +1307,21 @@ function installIpc(): void {
   ipcMain.handle('work:list-branches', async () => {
     const project = selectedProject();
     const res = await runCommand(project.root, 'git', ['branch', '--format', '%(refname:short)']);
-    if (!res.ok) return { ok: false, message: '无法读取分支列表: ' + (res.stderr || 'git 未安装或非 git 仓库'), current: project.branch, branches: [] };
+    if (!res.ok) return { ok: false, message: tMain('main.branches.fail', { msg: (res.stderr || tMain('git.unavailable')) }), current: project.branch, branches: [] };
     const branches = res.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
     return { ok: true, message: '', current: project.branch, branches };
   });
   ipcMain.handle('work:switch-branch', async (_event, branch: string) => {
-    if (typeof branch !== 'string' || !branch) return { ok: false, message: '分支名为空' };
+    if (typeof branch !== 'string' || !branch) return { ok: false, message: tMain('main.preset.nameFrom') };
     const project = selectedProject();
     const res = await runCommand(project.root, 'git', ['checkout', branch]);
-    if (!res.ok) return { ok: false, message: '切换失败: ' + (res.stderr || res.stdout) };
+    if (!res.ok) return { ok: false, message: tMain('main.branch.switchFail', { msg: (res.stderr || res.stdout) }) };
     const updated = { ...project, branch: await branchAt(project.root) };
     state.projects = state.projects.map((p) => (p.id === project.id ? updated : p));
     state.selectedProjectId = updated.id;
     saveState();
     broadcastState();
-    return { ok: true, message: `已切换到 ${updated.branch}`, branch: updated.branch };
+    return { ok: true, message: tMain('main.branch.switched', { branch: updated.branch }), branch: updated.branch };
   });
   ipcMain.on('work:set-theme', (_event, theme: 'light' | 'dark' | 'system') => applyThemeBackground(theme));
   ipcMain.on('work:show-menu', (event, menuId: string, clientX: number, clientY: number) => {
@@ -1306,7 +1335,7 @@ function installIpc(): void {
   ipcMain.on('work:agent-send', (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' ? value.id : randomUUID();
     const task = taskById(id);
-    if (!task) { reportTaskError(id, '这个任务已经不存在了，无法执行。'); return; }
+    if (!task) { reportTaskError(id, tMain('main.task.notExist')); return; }
     // 停止指令落到「还没有 agent 实例」的任务上：就地收敛成已停止并回一条 run_aborted，
     // 不为一条「停止」冷启动一个 host，也不能什么都不做（界面会一直停在运行态）。
     if (value.type === 'cancel' && !agents.has(id)) {
@@ -1330,18 +1359,31 @@ function installIpc(): void {
     // 关键：这条指令绝不能因为「表里没有实例」被丢掉。run / compact 就地补实例（懒启动 host）；
     // 只有 approval 必须打到原来那个 host 上（那个 host 才有等待中的审批）。
     const agent = agents.get(id) ?? (value.type === 'approval' ? null : ensureAgent(task));
-    if (!agent) { reportTaskError(id, 'Agent Host 不在运行，无法处理这次确认。请重新发起任务。'); return; }
+    if (!agent) { reportTaskError(id, tMain('main.task.notRunning')); return; }
     void agent.send({ ...value, id } as HostCommand);
   });
 }
 
-app.whenReady().then(async () => {
+/** 构建（或按当前语言重建）原生应用菜单。切语言后必须调一次 —— 菜单是主进程资源，不随渲染层重绘。 */
+function rebuildAppMenu(): void {
   appMenu = Menu.buildFromTemplate([
-    { id: 'file', label: '文件', submenu: [{ role: 'close', label: '关闭窗口' }] },
-    { id: 'edit', label: '编辑', submenu: [{ role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }] },
-    { id: 'view', label: '视图', submenu: [{ role: 'reload', label: '重新加载' }, { role: 'toggleDevTools', label: '开发者工具' }] },
-    { id: 'help', label: '帮助', submenu: [{ label: 'MoCode Work', enabled: false }] },
+    { id: 'file', label: tMain('menu.file'), submenu: [{ role: 'close', label: tMain('menu.closeWindow') }] },
+    { id: 'edit', label: tMain('menu.edit'), submenu: [{ role: 'undo', label: tMain('menu.undo') }, { role: 'redo', label: tMain('menu.redo') }] },
+    { id: 'view', label: tMain('menu.view'), submenu: [{ role: 'reload', label: tMain('menu.reload') }, { role: 'toggleDevTools', label: tMain('menu.devTools') }] },
+    { id: 'help', label: tMain('menu.help'), submenu: [{ label: 'MoCode Work', enabled: false }] },
   ]);
+}
+
+app.whenReady().then(async () => {
+  // 首屏之前先把界面语言/主题从 ~/.mocode/config 回填到 process.env：
+  // 原生菜单在 whenReady 里就构建了，而 loadMocodeConfig() 要到第一个任务启动才跑 ——
+  // 不提前回填的话，config 里写着 en-US 的用户每次重启都会先看到一屏中文菜单。
+  for (const key of ['MOCODE_LANGUAGE', 'MOCODE_THEME'] as const) {
+    if (process.env[key] !== undefined) continue;
+    const value = readUserConfig()[key];
+    if (value) process.env[key] = value;
+  }
+  rebuildAppMenu();
   Menu.setApplicationMenu(null);
   state = await loadState();
   // 启动时先让 .active 预设覆盖 config 裸键 —— 必须在 agent 启动之前，
