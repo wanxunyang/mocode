@@ -350,7 +350,7 @@ for await (const line of input) {
   try {
     const command = parseCommand(JSON.parse(line));
     if (!command) {
-      error('Invalid Mocode Work host command.');
+      error('Invalid MoCode Work host command.');
     } else {
       const pending = Promise.resolve(handle(command));
       pendingCommands.add(pending);

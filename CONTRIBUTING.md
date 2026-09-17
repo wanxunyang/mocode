@@ -1,4 +1,4 @@
-# Contributing to Mocode
+# Contributing to MoCode
 
 感谢贡献。目标是让新贡献者只依靠仓库文档完成“安装 → 免费 eval → 小修复 → Draft PR”，不依赖维护者口头信息。
 

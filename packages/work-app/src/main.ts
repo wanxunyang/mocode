@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import { truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
 import {
   AgentHostClient,
   resolveMocodeHostLaunchSpec,
@@ -423,7 +424,11 @@ function removePreset(name: string): { ok: boolean; message: string } {
 function restartAllAgents(): void {
   for (const [id, agent] of agents) {
     const task = taskById(id);
-    if (task && (task.status === 'running' || task.status === 'waiting')) void agent.send({ type: 'cancel', id });
+    // 只有真的在跑才值得发 cancel：host 还没起来时发 cancel 会顺带把预热好的进程换成新的，
+    // 白搭一次冷启动（这正是「刚发指令就报 Agent 进程已停止」的常见来源）。
+    if (task && (task.status === 'running' || task.status === 'waiting') && agent.isRunning) {
+      void agent.send({ type: 'cancel', id });
+    }
     agent.restart();
   }
 }
@@ -583,6 +588,40 @@ function flattenHistory(messages: Array<Record<string, unknown>>): HistoryItem[]
   return items;
 }
 
+/**
+ * 会话落盘文件的位置 —— 与 core 的 SessionStore 同格式(见 src/session/store.ts):
+ * `<root>/.mocode/sessions/<id>/session.json` 为主,`<id>.json` 只是读兜底(写一律落到新版位置)。
+ */
+function sessionFileFor(project: Project, sessionId: string): string | null {
+  const dir = path.join(project.root, '.mocode', 'sessions');
+  const modern = path.join(dir, sessionId, 'session.json');
+  if (existsSync(modern)) return modern;
+  const legacy = path.join(dir, `${sessionId}.json`);
+  return existsSync(legacy) ? legacy : null;
+}
+
+/**
+ * 回滚一段对话:会话历史截断到「第 userIndex 条用户消息之前」,这条用户消息本身与之后这一轮
+ * 的正文 / 工具记录一起作废。截断规则在 truncate-session.ts(纯函数,可独立验证)。
+ * **只动对话** —— 磁盘上被 agent 改过的文件一律保留,回滚不该悄悄改代码。
+ */
+function rollbackSession(task: TaskRecord, userIndex: number): { ok: boolean; message?: string } {
+  const project = workspaceForTask(task);
+  if (!project) return { ok: false, message: '这个任务没有可用的工作空间。' };
+  if (!task.sessionId) return { ok: false, message: '这条消息还没落盘成会话,无法回滚。' };
+  const file = sessionFileFor(project, task.sessionId);
+  if (!file) return { ok: false, message: '找不到这个任务的会话文件。' };
+  let record: RawSessionRecord;
+  try { record = JSON.parse(readFileSync(file, 'utf8')) as RawSessionRecord; } catch { return { ok: false, message: '会话文件已损坏,无法回滚。' }; }
+  const result = truncateSessionAtUser(record, userIndex);
+  if (!result.ok) return result;
+  // 原子写(tmp + rename):与 core 侧写 session 同策略,中途崩掉不会留下半个文件。
+  const tmp = `${file}.rollback-tmp`;
+  writeFileSync(tmp, JSON.stringify(record), 'utf8');
+  renameSync(tmp, file);
+  return { ok: true };
+}
+
 function listFiles(root: string, directory = root, entries: string[] = []): string[] {
   if (entries.length >= 180) return entries;
   try {
@@ -651,8 +690,26 @@ function updateTaskFromAgent(envelope: HostEnvelope): void {
   broadcastState();
 }
 
+/**
+ * host 冷启动上限。实测本机「空跑」启动 ≈8s（MCP 关闭），开 MCP / 慢盘 / 首启会更久 ——
+ * 原来的 15s 太贴脸：一旦超时就把 host 杀掉并把任务判失败（"Agent 进程已停止，任务中断"）。
+ */
+const HOST_STARTUP_TIMEOUT_MS = 30_000;
+
+/** host 启动失败的英文原因 → 用户照着就能做的中文提示。 */
+function describeHostStartFailure(cause: unknown): string {
+  const raw = cause instanceof Error ? cause.message : String(cause);
+  if (/did not become ready within/i.test(raw)) {
+    return `Agent 启动超时（超过 ${Math.round(HOST_STARTUP_TIMEOUT_MS / 1000)}s 没就绪），这一轮没有发出。请在终端跑一次 mocode 确认模型能对话，再重试。`;
+  }
+  if (/exited before readiness/i.test(raw)) {
+    return 'Agent Host 一起来就退出了，这一轮没有发出。请在终端跑一次 mocode 看它报什么错，再重试。';
+  }
+  return `Agent 启动失败：${raw}`;
+}
+
 class LocalAgent {
-  private readonly client = new AgentHostClient();
+  private readonly client = new AgentHostClient({ startupTimeoutMs: HOST_STARTUP_TIMEOUT_MS });
   /** 本实例服务的任务 id（ensureAgent 创建时绑定）。host 退出/报错时用它把任务收敛到终态。 */
   private readonly taskId: string;
   private currentProject: Project | null = null;
@@ -660,6 +717,10 @@ class LocalAgent {
   /** 正在执行的 stop() promise。restart 后立刻 send 必须等它,否则会发给正在退出的旧 host。 */
   private restarting: Promise<void> | null = null;
   private crashStreak = 0;
+  /** 最近一次启动失败的原因。start() 自己已经报过一次，send() 靠它避免同一条错误弹两遍。 */
+  private lastStartError: string | null = null;
+  /** 累计报过的错误条数：send() 用它判断「刚才那次 start() 到底报没报过」。 */
+  private errorSeq = 0;
   private static MAX_CRASH_STREAK = 3;
 
   constructor(taskId: string) {
@@ -669,11 +730,19 @@ class LocalAgent {
       this.receive({ type: 'event', event: 'host_log', payload: { message } }),
     );
     this.client.onExit(({ code, expected }) => {
+      // 预期内的退出全是**我们自己**发起的（stop / 切模型重启 / 被新一次 start 打断）：
+      // 这时任务要么马上会被重新拉起（重启后紧接着的那条 send），要么调用方已经自己收敛了状态
+      // （删任务 / 回滚 / 退出应用，见各自的 handler）。以前一律 failTask + 发 host_exit，会把
+      // 「重启后正常接着跑」的那一轮误报成「运行失败 / Agent 进程已停止」—— 用户看到的就是莫名的失败。
+      if (expected) {
+        pushRenderer('work:agent-event', { type: 'event', event: 'host_stopped', requestId: this.taskId, payload: { code } });
+        return;
+      }
       this.receive({ type: 'event', event: 'host_exit', payload: { code } });
-      // host 退出（含正常 stop、崩溃、重启）后，本任务的 run 不会再有 run_completed —— 就地收敛。
-      failTask(this.taskId, expected ? 'Agent 进程已停止，任务中断' : `Agent 进程异常退出（code ${code}），任务中断`);
+      // 真崩了：本任务的 run 不会再有 run_completed，就地收敛 + 自动重启一次。
+      failTask(this.taskId, `Agent 进程异常退出（code ${code}），任务中断`);
       const project = this.currentProject;
-      if (!expected && project && this.crashStreak < LocalAgent.MAX_CRASH_STREAK) {
+      if (project && this.crashStreak < LocalAgent.MAX_CRASH_STREAK) {
         this.crashStreak += 1;
         void this.start(project);
       }
@@ -685,7 +754,8 @@ class LocalAgent {
     return this.currentProject?.id ?? null;
   }
 
-  async start(project: Project): Promise<void> {
+  /** 启动 host。返回是否真的起来了 —— 调用方据此决定要不要报错，绝不允许「没起来还往下走」。 */
+  async start(project: Project): Promise<boolean> {
     this.currentProject = project;
     const { loaded, missing } = loadMocodeConfig(project.root);
     if (loaded.length) {
@@ -708,8 +778,8 @@ class LocalAgent {
       spec = resolveMocodeHostLaunchSpec();
     } catch (cause) {
       this.crashStreak = LocalAgent.MAX_CRASH_STREAK;
-      this.receive({ type: 'error', error: cause instanceof Error ? cause.message : String(cause) });
-      return;
+      this.fail(`找不到 mocode agent host 入口：${cause instanceof Error ? cause.message : String(cause)}`);
+      return false;
     }
     this.receive({
       type: 'event',
@@ -725,13 +795,43 @@ class LocalAgent {
       env: { ...process.env, NODE_NO_WARNINGS: '1' },
     });
     this.starting = starting;
+    let failure: string | null = null;
     try {
       await starting;
     } catch (cause) {
-      this.receive({ type: 'error', error: cause instanceof Error ? cause.message : String(cause) });
+      failure = describeHostStartFailure(cause);
     } finally {
       if (this.starting === starting) this.starting = null;
     }
+    if (failure) {
+      this.fail(failure);
+      return false;
+    }
+    if (!this.client.isRunning) {
+      // 并发第二次 start()（例如「预热还没起完，用户就发了指令」）会顶掉我们这次的生成号，
+      // 让我们的 startChild 直接 return、一个进程都没起 —— 那不是失败，是别人接手了。
+      // 不等它出结果，就会把「被接手」误报成「启动失败」，用户平白看到一个红色错误。
+      const reported = this.errorSeq;
+      if (this.starting) await this.starting.catch(() => undefined);
+      if (this.client.isRunning) {
+        this.lastStartError = null;
+        return true;
+      }
+      // 后一次 start 自己已经报过这次失败，就不再重复弹一条。
+      if (this.errorSeq === reported) this.fail('Agent Host 启动后立刻退出了，这一轮没有发出。请重试。');
+      return false;
+    }
+    this.lastStartError = null;
+    return true;
+  }
+
+  /**
+   * 「这一轮没法跑」的唯一出口：记下原因 + 带 requestId 报到渲染层。
+   * 所有失败路径都必须走这里 —— 静默 return 会让界面永远停在「正在启动 agent」。
+   */
+  private fail(message: string): void {
+    this.lastStartError = message;
+    this.receive({ type: 'error', error: message });
   }
 
   async send(value: HostCommand): Promise<void> {
@@ -741,23 +841,45 @@ class LocalAgent {
     if (!this.client.isRunning) {
       const project = this.currentProject;
       if (!project) {
-        this.receive({ type: 'error', error: 'Agent Host 尚未就绪。' });
+        this.fail('Agent Host 还没起来，这一轮没有发出。请重试。');
         return;
       }
       if (this.crashStreak >= LocalAgent.MAX_CRASH_STREAK) {
-        this.receive({ type: 'error', error: 'Agent Host 连续崩溃，已停止自动重启。请在终端确认 mocode 配置后重试。' });
+        this.fail('Agent Host 连续崩溃，已停止自动重启。请在终端确认 mocode 能正常对话，或新建一个任务再试。');
         return;
       }
-      await this.start(project);
+      // 已经有一次 start 在飞（创建任务时的预热还没起完）→ **等它**，别再发一次：
+      // 再发会让 AgentHostClient 顶掉生成号，把正在启动的那个 host 杀掉
+      // —— 用户看到的就是莫名其妙的「Agent 进程已停止」，还白搭一次冷启动。
+      if (this.starting) await this.starting.catch(() => undefined);
+      if (!this.client.isRunning) {
+        const reportedErrors = this.errorSeq;
+        await this.start(project);
+        if (!this.client.isRunning) {
+          // start() 报过的具体原因就不再重复弹；没报过（并发早退等）也必须兜底一条。
+          if (this.errorSeq === reportedErrors) {
+            this.fail(this.lastStartError ?? 'Agent Host 没能启动，这一轮没有发出。请重试。');
+          }
+          return;
+        }
+      }
     }
     if (this.starting) await this.starting.catch(() => undefined);
-    if (!this.client.isRunning) return;
+    if (!this.client.isRunning) {
+      this.fail('Agent Host 没能启动，这一轮没有发出。请重试。');
+      return;
+    }
     try {
       await this.client.send(value);
       this.crashStreak = 0;
     } catch (cause) {
-      this.receive({ type: 'error', error: cause instanceof Error ? cause.message : String(cause) });
+      this.fail(`指令没能送到 Agent：${cause instanceof Error ? cause.message : String(cause)}`);
     }
+  }
+
+  /** host 现在是否活着（正在跑）。用于判断「停止」有没有必要发出去。 */
+  get isRunning(): boolean {
+    return this.client.isRunning;
   }
 
   stop(): void {
@@ -785,9 +907,16 @@ class LocalAgent {
 
   private receive(envelope: HostEnvelope): void {
     if (envelope.type === 'event') updateTaskFromAgent(envelope);
-    // host 起不来 / send 失败（尚未就绪、连续崩溃、管道断开等）也必须收敛任务，
-    // 否则任务停在 running 等一个永远不会来的 run_completed。
-    if (envelope.type === 'error') failTask(this.taskId, envelope.error || 'Agent 通信失败，任务中断');
+    if (envelope.type === 'error') {
+      this.errorSeq += 1;
+      // host 起不来 / send 失败（尚未就绪、连续崩溃、管道断开等）也必须收敛任务，
+      // 否则任务停在 running 等一个永远不会来的 run_completed。
+      failTask(this.taskId, envelope.error || 'Agent 通信失败，任务中断');
+      // 一律补上 requestId(= 任务 id)：渲染层据此把失败归到正确的那条会话，
+      // 而不是靠「当前正在看哪个任务」猜（切过任务就张冠李戴）。
+      pushRenderer('work:agent-event', { ...envelope, requestId: envelope.requestId ?? this.taskId });
+      return;
+    }
     pushRenderer('work:agent-event', envelope);
   }
 }
@@ -797,7 +926,7 @@ function createWindow(): void {
   // 图标是 electron-builder 资源,需要打包时配 win.icon 才能换,这里管不到。
   const appIconPath = path.join(__dirname, 'assets', 'icon.png');
   windowRef = new BrowserWindow({
-    width: 1280, height: 820, minWidth: 980, minHeight: 620, title: 'Mocode Work', backgroundColor: '#ffffff', autoHideMenuBar: true,
+    width: 1280, height: 820, minWidth: 980, minHeight: 620, title: 'MoCode Work', backgroundColor: '#ffffff', autoHideMenuBar: true,
     ...(existsSync(appIconPath) ? { icon: appIconPath } : {}),
     ...(process.platform === 'win32' ? {
       titleBarStyle: 'hidden' as const,
@@ -834,16 +963,30 @@ function currentTaskWorkspace(task: TaskRecord): Record<string, unknown> {
 /**
  * 任务级 agent 实例：懒创建,创建即预热 host（异步,不阻塞 IPC 返回）。
  * 每个任务独享一个 host 子进程 —— 并行任务互不抢 cwd / 会话。
+ *
+ * **任何要用到 agent 的地方都必须走这里**（尤其是 agent-send）：
+ * agents 表是进程内内存，应用重启后只剩任务记录、没有 agent 实例；
+ * 早先只靠 create-task 建实例，于是「重启后打开旧任务 → 直接发指令」会查不到实例，
+ * 指令被静默丢掉 —— 界面就一直停在「正在启动 agent」。
  */
 function ensureAgent(task: TaskRecord): LocalAgent {
-  let agent = agents.get(task.id);
-  if (!agent) {
-    agent = new LocalAgent(task.id);
-    agents.set(task.id, agent);
-    const workspace = workspaceForTask(task);
-    if (workspace) void agent.start(workspace);
+  const workspace = workspaceForTask(task);
+  const existing = agents.get(task.id);
+  if (existing) {
+    // 被 stop() 过的实例（回滚 / 删任务 / 切模型）还留在表里但没有 cwd：就地重新绑定，
+    // 否则下一次 send 会以「还没起来」失败。
+    if (!existing.projectId && workspace) void existing.start(workspace);
+    return existing;
   }
+  const agent = new LocalAgent(task.id);
+  agents.set(task.id, agent);
+  if (workspace) void agent.start(workspace);
   return agent;
+}
+
+/** 把一条「无法执行」的失败送回渲染层（带任务 id，渲染层能归到正确的会话上）。 */
+function reportTaskError(taskId: string, message: string): void {
+  pushRenderer('work:agent-event', { type: 'error', requestId: taskId, error: message });
 }
 
 /**
@@ -956,7 +1099,27 @@ function installIpc(): void {
       if (project) state.selectedProjectId = project.id;
     }
     saveState(); broadcastState();
+    // 打开任务（含应用重启后恢复出来的旧任务）就预热 host：不然用户敲下第一条指令时才开始
+    // 冷启动（实测 ~8s，开 MCP 更久），且没有实例时指令会被丢掉。
+    ensureAgent(task);
     return { state, ...currentTaskWorkspace(task) };
+  });
+  // 回滚对话:截断会话到指定用户消息之前。
+  // 落盘之后必须重启该任务的 host —— 它内存里还留着被回滚掉的历史,继续用同一个进程会
+  // 在下一轮结束时把旧历史全量写回磁盘,回滚当场失效(这就是为什么这里不要走 online 通道)。
+  ipcMain.handle('work:rollback', (_event, taskId: string, userIndex: number) => {
+    if (typeof taskId !== 'string' || !taskId || typeof userIndex !== 'number') return { ok: false, message: '参数不合法。' };
+    const task = taskById(taskId);
+    if (!task) return { ok: false, message: '任务不存在。' };
+    const rolled = rollbackSession(task, userIndex);
+    if (!rolled.ok) return rolled;
+    const agent = agents.get(taskId);
+    if (agent) { void agent.send({ type: 'cancel', id: taskId }); agent.stop(); agents.delete(taskId); }
+    if (task.status === 'running' || task.status === 'waiting') task.status = 'cancelled';
+    task.lastError = undefined;
+    task.updatedAt = new Date().toISOString();
+    saveState(); broadcastState();
+    return { ok: true, state, ...currentTaskWorkspace(task) };
   });
   ipcMain.handle('work:delete-task', (_event, taskId: string) => {
     if (typeof taskId !== 'string' || !taskId) return null;
@@ -1142,9 +1305,32 @@ function installIpc(): void {
   });
   ipcMain.on('work:agent-send', (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' ? value.id : randomUUID();
-    if (value.type === 'run') { const task = taskById(id); if (task) { task.status = 'running'; task.updatedAt = new Date().toISOString(); saveState(); broadcastState(); } }
-    const agent = agents.get(id);
-    if (!agent) return;
+    const task = taskById(id);
+    if (!task) { reportTaskError(id, '这个任务已经不存在了，无法执行。'); return; }
+    // 停止指令落到「还没有 agent 实例」的任务上：就地收敛成已停止并回一条 run_aborted，
+    // 不为一条「停止」冷启动一个 host，也不能什么都不做（界面会一直停在运行态）。
+    if (value.type === 'cancel' && !agents.has(id)) {
+      if (task.status === 'running' || task.status === 'waiting') {
+        task.status = 'cancelled';
+        task.updatedAt = new Date().toISOString();
+        saveState();
+        broadcastState();
+      }
+      pushRenderer('work:agent-event', { type: 'event', event: 'run_aborted', requestId: id, payload: {} });
+      return;
+    }
+    if (value.type === 'run') {
+      task.status = 'running';
+      // 上一次的失败原因就此作废，否则侧栏会挂着「上次运行未正常结束」而状态却是正在运行。
+      task.lastError = undefined;
+      task.updatedAt = new Date().toISOString();
+      saveState();
+      broadcastState();
+    }
+    // 关键：这条指令绝不能因为「表里没有实例」被丢掉。run / compact 就地补实例（懒启动 host）；
+    // 只有 approval 必须打到原来那个 host 上（那个 host 才有等待中的审批）。
+    const agent = agents.get(id) ?? (value.type === 'approval' ? null : ensureAgent(task));
+    if (!agent) { reportTaskError(id, 'Agent Host 不在运行，无法处理这次确认。请重新发起任务。'); return; }
     void agent.send({ ...value, id } as HostCommand);
   });
 }
@@ -1154,7 +1340,7 @@ app.whenReady().then(async () => {
     { id: 'file', label: '文件', submenu: [{ role: 'close', label: '关闭窗口' }] },
     { id: 'edit', label: '编辑', submenu: [{ role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }] },
     { id: 'view', label: '视图', submenu: [{ role: 'reload', label: '重新加载' }, { role: 'toggleDevTools', label: '开发者工具' }] },
-    { id: 'help', label: '帮助', submenu: [{ label: 'Mocode Work', enabled: false }] },
+    { id: 'help', label: '帮助', submenu: [{ label: 'MoCode Work', enabled: false }] },
   ]);
   Menu.setApplicationMenu(null);
   state = await loadState();

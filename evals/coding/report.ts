@@ -42,7 +42,7 @@ export function renderSummary(report: BenchmarkReport): string {
   const nullablePct = (n: number | null) => (n === null ? 'n/a' : pct(n));
   const num = (n: number) => n.toFixed(2);
   const lines = [
-    `# Mocode coding benchmark`,
+    `# MoCode coding benchmark`,
     '',
     `- Run: ${report.runId}`,
     `- Model: ${report.model}`,

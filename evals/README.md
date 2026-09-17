@@ -1,6 +1,6 @@
 # Agent Coding Benchmark 使用说明
 
-EVAL-01 会让 Mocode 在一次性临时仓库中执行完整的编码任务，经过“模型分析 → 调用工具 → 修改文件 → agent 自主决定是否验证”的链路；任务结束后由 benchmark harness 独立运行 verifier 评分。它不是普通的函数单元测试。
+EVAL-01 会让 MoCode 在一次性临时仓库中执行完整的编码任务，经过“模型分析 → 调用工具 → 修改文件 → agent 自主决定是否验证”的链路；任务结束后由 benchmark harness 独立运行 verifier 评分。它不是普通的函数单元测试。
 
 固定测试集包含 61 个任务，分为三个难度层级：
 
@@ -24,7 +24,7 @@ EVAL-01 会让 Mocode 在一次性临时仓库中执行完整的编码任务，�
 cd F:\mocode
 ```
 
-确保 Mocode 已配置可用的模型。Benchmark 使用当前的 `LLM_MODEL`、`LLM_BASE_URL` 和 `LLM_API_KEY` 配置。
+确保 MoCode 已配置可用的模型。Benchmark 使用当前的 `LLM_MODEL`、`LLM_BASE_URL` 和 `LLM_API_KEY` 配置。
 
 注意：真正执行任务会调用模型并消耗 API token。仅列出任务和运行 smoke 不会调用模型。
 

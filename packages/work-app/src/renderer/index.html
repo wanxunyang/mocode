@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Mocode Work</title>
+    <title>MoCode Work</title>
     <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="fonts/misans/MiSans-Regular.min.css" />
     <link rel="stylesheet" href="fonts/misans/MiSans-Medium.min.css" />
@@ -25,7 +25,7 @@
   </head>
   <body>
     <div class="app-shell">
-      <div class="titlebar"><span class="titlebar-brand"><img class="titlebar-brand-logo" src="../assets/icon.png" alt="Mocode" title="Mocode" /><span class="titlebar-brand-text">Mocode</span></span></div>
+      <div class="titlebar"><span class="titlebar-brand"><img class="titlebar-brand-logo" src="../assets/icon.png" alt="MoCode" title="MoCode" /><span class="titlebar-brand-text">MoCode</span></span></div>
       <div class="app-body">
       <aside class="sidebar">
         <header class="brand-row"><button class="icon-button muted" id="sidebar-toggle" data-sidebar-toggle title="折叠 / 展开侧栏" aria-label="折叠 / 展开侧栏" aria-pressed="false"><svg class="icon" data-icon="panel-left"></svg></button><div class="brand-actions"><button class="icon-button muted" id="add-project" title="添加项目" aria-label="添加项目"><svg class="icon" data-icon="plus"></svg></button><button class="icon-button muted" id="search-button" title="搜索 (⌘K)" aria-label="搜索"><svg class="icon" data-icon="search"></svg></button><button class="icon-button muted" id="theme-toggle" title="切换主题" aria-label="切换主题"><svg class="icon" data-icon="moon"></svg><svg class="icon icon-swap" data-icon="sun"></svg></button></div></header>
@@ -36,7 +36,7 @@
         <section class="sidebar-section tasks-section"><div id="task-list" class="task-list"><p class="empty-tasks">无任务</p></div></section>
         <button class="sidebar-footer" id="settings-button" title="设置" aria-haspopup="dialog" aria-expanded="false">
           <span class="avatar">M</span>
-          <span class="footer-brand">Mocode</span>
+          <span class="footer-brand">MoCode</span>
         </button>
         <div class="sidebar-resize" id="sidebar-resize" aria-label="拖动调整侧栏宽度" role="separator" aria-orientation="vertical"></div>
       </aside>
@@ -44,8 +44,7 @@
         <button class="sidebar-floating-toggle" id="sidebar-toggle-floating" data-sidebar-toggle title="展开侧栏" aria-label="展开侧栏"><svg class="icon" data-icon="panel-left"></svg></button>
         <div class="workspace-actions" aria-label="视图操作"><button id="toggle-inspector" title="项目概览"><svg class="icon" data-icon="layout"></svg></button><button id="show-files" title="浏览文件"><svg class="icon" data-icon="files"></svg></button></div>
           <section id="empty-state" class="empty-state">
-          <h1>开始一个任务</h1>
-          <p>直接描述你想做的事，回车就开工 —— 任务标题会按你的第一句话自动命名。Mocode 会分析代码、调用工具、修改文件，每一步都显示在这里。想在某个目录里干活，就先用下方 chip 关联工作空间；纯聊天式的任务也可以不关联。</p>
+          <h1 class="empty-lockup"><img class="empty-mark" src="../assets/icon-mark.png" alt="" aria-hidden="true" /><span class="empty-wordmark">让 MoCode 为你工作</span></h1>
         </section>
         <section id="conversation" class="conversation" aria-live="polite"></section>
         <section id="approval-panel" class="approval-panel hidden"></section>
@@ -59,7 +58,7 @@
           <div class="composer">
             <div id="attachment-list" class="attachment-list"></div>
             <textarea id="prompt" rows="1" placeholder="描述你想做的事，也可以把图片拖进来…"></textarea>
-            <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" title="添加图片 (也可拖入或直接粘贴)" aria-label="添加图片"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" title="压缩会话上下文"><svg class="icon icon-inline" data-icon="layers-compress"></svg>压缩</button><span class="context-usage" id="context-usage" title="上下文占用">--</span></div><div class="right-actions"><button id="mode-button" class="model-button" title="切换模型" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">Mocode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" title="发送 (⌘⏎)" aria-label="发送"><svg class="icon" data-icon="arrow-up"></svg></button></div></div>
+            <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" title="添加图片 (也可拖入或直接粘贴)" aria-label="添加图片"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" title="压缩会话上下文"><svg class="icon icon-inline" data-icon="layers-compress"></svg>压缩</button><span class="context-usage" id="context-usage" title="上下文占用">--</span></div><div class="right-actions"><button id="mode-button" class="model-button" title="切换模型" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">MoCode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" title="发送 (⌘⏎)" aria-label="发送"><svg class="icon" data-icon="arrow-up"></svg></button></div></div>
           </div>
           <!-- 模型下拉必须挂在 .composer 之外：.composer 有 overflow: hidden，且它并不是定位祖先，
                挂在里面时包含块会随状态漂移（空态 .composer-area 是 static → 包含块退化成 .workspace，

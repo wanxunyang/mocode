@@ -1,6 +1,6 @@
 # MCP
 
-Mocode 内置 MCP client，可将 server 发现的工具注册进普通 agent 工具表，名称格式：
+MoCode 内置 MCP client，可将 server 发现的工具注册进普通 agent 工具表，名称格式：
 
 ```text
 mcp__<server>__<tool>

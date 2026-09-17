@@ -1,7 +1,7 @@
 {
   "name": "@mocode/runtime",
   "version": "0.1.0",
-  "description": "Stable host launch and NDJSON client boundary for Mocode applications.",
+  "description": "Stable host launch and NDJSON client boundary for MoCode applications.",
   "private": true,
   "type": "module",
   "main": "dist/index.js",

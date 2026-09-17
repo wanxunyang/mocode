@@ -56,6 +56,8 @@ export const ICONS: Record<string, string> = {
   // 消息操作
   'copy': `<svg ${SVG_ATTRS}><rect x="7" y="3" width="10" height="10" rx="1.5"/><path d="M13 17H5a1.5 1.5 0 0 1-1.5-1.5V6"/></svg>`,
   'regen': `<svg ${SVG_ATTRS}><path d="M4 10a6 6 0 0 1 10-4.5L16 7"/><path d="M16 3v4h-4"/><path d="M16 10a6 6 0 0 1-10 4.5L4 13"/><path d="M4 17v-4h4"/></svg>`,
+  // 逆时针箭头(回退到过去):用户消息右下角的「回滚」用它 —— 只回滚对话,不还原磁盘文件。
+  'rollback': `<svg ${SVG_ATTRS}><path d="M2.6 12.4A7.6 7.6 0 1 0 4.4 4.6L1.4 8.2"/><path d="M1.4 3.6v4.6h6"/></svg>`,
   'edit': `<svg ${SVG_ATTRS}><path d="M13 3l4 4-9 9H4v-4l9-9z"/><path d="M11 5l4 4"/></svg>`,
   'trash': `<svg ${SVG_ATTRS}><path d="M4 6h12M8 6V4h4v2M6 6l1 11h6l1-11"/></svg>`,
   'check': `<svg ${SVG_ATTRS}><path d="M4 10l4 4 8-8"/></svg>`,

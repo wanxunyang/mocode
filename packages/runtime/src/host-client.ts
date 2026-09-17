@@ -120,7 +120,7 @@ function resolveHostPath(options: MocodeHostLaunchOptions): string {
   const explicit = options.hostPath ?? options.env?.MOCODE_HOST_PATH ?? process.env.MOCODE_HOST_PATH;
   if (explicit) {
     const resolved = path.resolve(explicit);
-    if (!existsSync(resolved)) throw new Error(`Mocode Agent Host does not exist: ${resolved}`);
+    if (!existsSync(resolved)) throw new Error(`MoCode Agent Host does not exist: ${resolved}`);
     return resolved;
   }
   try {
@@ -230,7 +230,7 @@ export class AgentHostClient {
     this.readyState = { generation, child, promise: readyPromise };
     const timeoutMs = options.startupTimeoutMs ?? this.startupTimeoutMs;
     const timer = setTimeout(
-      () => failReady(new Error(`Mocode Agent Host did not become ready within ${timeoutMs}ms.`)),
+      () => failReady(new Error(`MoCode Agent Host did not become ready within ${timeoutMs}ms.`)),
       timeoutMs,
     );
 
@@ -251,7 +251,7 @@ export class AgentHostClient {
         this.child = null;
         this.readyState = null;
       }
-      failReady(new Error(`Mocode Agent Host exited before readiness (code ${code ?? 'null'}).`));
+      failReady(new Error(`MoCode Agent Host exited before readiness (code ${code ?? 'null'}).`));
       this.emit(this.exitListeners, { code, signal, expected });
     });
 
@@ -270,10 +270,10 @@ export class AgentHostClient {
 
   async send(command: HostCommand): Promise<void> {
     const state = this.readyState;
-    if (!state) throw new Error('Mocode Agent Host has not been started.');
+    if (!state) throw new Error('MoCode Agent Host has not been started.');
     await state.promise;
     this.assertReadyState(state);
-    if (!state.child.stdin.writable) throw new Error('Mocode Agent Host is not writable.');
+    if (!state.child.stdin.writable) throw new Error('MoCode Agent Host is not writable.');
     await new Promise<void>((resolve, reject) => {
       state.child.stdin.write(`${JSON.stringify(command)}\n`, (cause) => (cause ? reject(cause) : resolve()));
     });
@@ -281,7 +281,7 @@ export class AgentHostClient {
 
   private async getReadyState(): Promise<ReadyState> {
     const state = this.readyState;
-    if (!state) throw new Error('Mocode Agent Host has not been started.');
+    if (!state) throw new Error('MoCode Agent Host has not been started.');
     await state.promise;
     this.assertReadyState(state);
     return state;
@@ -294,7 +294,7 @@ export class AgentHostClient {
       this.generation !== state.generation ||
       state.child.exitCode !== null
     ) {
-      throw new Error('Mocode Agent Host was replaced before the command could be sent.');
+      throw new Error('MoCode Agent Host was replaced before the command could be sent.');
     }
   }
 
@@ -345,7 +345,7 @@ export class AgentHostClient {
         child.off('exit', finish);
         child.off('close', finish);
         child.off('error', finish);
-        throw new Error(`Unable to stop Mocode Agent Host process ${child.pid}.`);
+        throw new Error(`Unable to stop MoCode Agent Host process ${child.pid}.`);
       }
       await exited;
     }
@@ -367,7 +367,7 @@ export class AgentHostClient {
           this.emit(this.eventListeners, envelope);
           if (envelope.type === 'event' && envelope.event === 'runtime_ready') ready();
         } catch {
-          this.emit(this.diagnosticListeners, `Mocode Agent Host emitted invalid NDJSON: ${line}`);
+          this.emit(this.diagnosticListeners, `MoCode Agent Host emitted invalid NDJSON: ${line}`);
         }
       }
       newline = buffer.indexOf('\n');

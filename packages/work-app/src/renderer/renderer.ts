@@ -30,6 +30,8 @@ declare global {
       createTask: (title: string, projectId?: string) => Promise<{ state: WorkState; task: Task }>;
       setTaskProject: (id: string, projectId: string) => Promise<{ ok: boolean; message?: string; state?: WorkState; task?: Task }>;
       selectTask: (id: string) => Promise<{ state: WorkState; task: Task; history: HistoryItem[] } | null>;
+      /** 回滚对话:会话截断到「第 userIndex 条用户消息」之前。 */
+      rollback: (value: { id: string; userIndex: number }) => Promise<{ ok: boolean; message?: string; state?: WorkState; history?: HistoryItem[] }>;
       clearTasks: (projectId?: string) => Promise<WorkState>;
       deleteTask: (id: string) => Promise<WorkState | null>;
       renameTask: (id: string, title: string) => Promise<WorkState | null>;
@@ -85,17 +87,214 @@ interface TaskStream {
   running: boolean;
   usagePercent: number | null;
   pendingApproval: Record<string, unknown> | null;
+  /** 最近一次 agent 状态 —— 切回这个任务时状态行按它还原(见 renderStatus)。 */
+  status: AgentStatusState | null;
+  /** 本轮起点,用于终态里的「用时 Ns」。 */
+  startedAt: number | null;
 }
 const streams = new Map<string, TaskStream>();
 
 function streamFor(taskId: string): TaskStream {
   let stream = streams.get(taskId);
-  if (!stream) { stream = { items: [], running: false, usagePercent: null, pendingApproval: null }; streams.set(taskId, stream); }
+  if (!stream) { stream = { items: [], running: false, usagePercent: null, pendingApproval: null, status: null, startedAt: null }; streams.set(taskId, stream); }
   return stream;
 }
 function isRunning(taskId: string | undefined): boolean { return !!taskId && streams.get(taskId)?.running === true; }
 /** 当前正在查看的任务 id(= 选中任务),事件与渲染按它路由。 */
 function viewingTaskId(): string | undefined { return state?.selectedTaskId; }
+
+/* ── Agent 状态行 ─────────────────────────────────────────
+ * 单一真源:agentStatus。它是「agent 此刻在干什么」的现场指示,渲染在会话流**末尾**
+ * —— 即 agent 输出内容的最下面:内容往下长它就被顶下去,跟着一起滚(不是悬浮层,
+ * 不做 sticky,别把它变成盖在内容上的浮标)。
+ *
+ * 生命期严格绑在运行期上(见 renderStatus / clearStatusRow):
+ *   · tone 'busy'  —— 显示,一直更到本轮结束(1s 心跳,秒数在走 = 还活着);
+ *   · 运行终态     —— 「已完成 · 用时 Ns」/「运行失败」停一下让用户看清,然后淡出移除,
+ *                     任务完了就不该再有东西赖在输出下面;
+ *   · 等待确认 / 空闲 —— 不显示(审批卡本身就是更强的「等你」信号)。
+ *
+ * 存在的理由:按下发送到首个 token 之间隔着「工具组路由 + 首次 LLM 调用」两跳,
+ * 好几秒里界面原本毫无反应,用户无从判断指令发出去没有、agent 在不在干活。 */
+type AgentPhase = 'idle' | 'starting' | 'thinking' | 'tool' | 'speaking' | 'waiting' | 'compacting' | 'stopping' | 'done' | 'failed' | 'stopped';
+type StatusTone = 'idle' | 'busy' | 'ok' | 'warn' | 'fail';
+interface AgentStatusState {
+  phase: AgentPhase;
+  /** 主文案:「思考中」「正在执行 联网搜索」。 */
+  label: string;
+  /** 弱化后缀:工具名等补充信息。 */
+  detail: string;
+  tone: StatusTone;
+  /** busy 状态的计时起点(null = 不计时)。 */
+  since: number | null;
+}
+
+/** 运行中状态:带计时起点,状态行每秒重绘一次,让"它还在动"肉眼可见。 */
+function busyStatus(phase: AgentPhase, label: string, detail = ''): AgentStatusState {
+  return { phase, label, detail, tone: 'busy', since: Date.now() };
+}
+/** 终态 / 空闲态:不计时。 */
+function settledStatus(phase: AgentPhase, label: string, tone: StatusTone, detail = ''): AgentStatusState {
+  return { phase, label, detail, tone, since: null };
+}
+
+const IDLE_STATUS: AgentStatusState = settledStatus('idle', '待命', 'idle');
+const STATUS_ICON: Record<StatusTone, string> = { idle: 'dot-running', busy: 'loader', ok: 'check', warn: 'warn', fail: 'fail' };
+/** 终态(已完成 / 运行失败)停留时长:够看清「用时 Ns」,又不至于赖着不走。 */
+const STATUS_LINGER_MS = 1500;
+/** 淡出时长,与 style.css 的 .agent-status 过渡一致。 */
+const STATUS_FADE_MS = 160;
+
+let agentStatus: AgentStatusState = IDLE_STATUS;
+let statusRowEl: HTMLElement | null = null;
+let statusTicker: ReturnType<typeof setInterval> | null = null;
+let statusLingerTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 状态行 DOM:**按需创建**,每次创建 / 取出都保证它是会话流倒数第一 ——
+ * 内容之后又追加了消息的话,它会被重新挪回末尾,永远压在输出内容最下面。
+ */
+function ensureStatusRow(): HTMLElement {
+  if (!statusRowEl) {
+    statusRowEl = document.createElement('div');
+    statusRowEl.className = 'agent-status';
+    statusRowEl.setAttribute('role', 'status');
+    statusRowEl.setAttribute('aria-live', 'polite');
+    statusRowEl.innerHTML = '<span class="agent-status-icon"></span><span class="agent-status-label"></span><span class="agent-status-detail"></span>';
+  }
+  if (conversation.lastElementChild !== statusRowEl) conversation.append(statusRowEl);
+  return statusRowEl;
+}
+
+function paintStatus(): void {
+  const row = ensureStatusRow();
+  const { tone, label, detail, since } = agentStatus;
+  const seconds = tone === 'busy' && since !== null ? `${Math.max(1, Math.round((Date.now() - since) / 1000))}s` : '';
+  row.className = `agent-status status-${tone}`;
+  (row.querySelector('.agent-status-icon') as HTMLElement).innerHTML = icon(STATUS_ICON[tone]);
+  (row.querySelector('.agent-status-label') as HTMLElement).textContent = label;
+  (row.querySelector('.agent-status-detail') as HTMLElement).textContent = [detail, seconds].filter(Boolean).join(' · ');
+}
+
+/** 只有运行中需要心跳;空闲 / 终态一律停表,不留定时器。 */
+function syncStatusTicker(): void {
+  if (agentStatus.tone === 'busy') {
+    if (!statusTicker) statusTicker = setInterval(paintStatus, 1000);
+  } else if (statusTicker) {
+    clearInterval(statusTicker);
+    statusTicker = null;
+  }
+}
+
+/** 取消「终态停留」计时(新状态一来就作废)。淡出后的移除计时不可取消,否则会留下一个隐形空行。 */
+function cancelStatusLinger(): void {
+  if (statusLingerTimer) { clearTimeout(statusLingerTimer); statusLingerTimer = null; }
+}
+
+/** 撤掉状态行:淡出 → 从 DOM 摘掉 → 引用清空(下次要显示时重建)。 */
+function clearStatusRow(): void {
+  cancelStatusLinger();
+  if (statusTicker) { clearInterval(statusTicker); statusTicker = null; }
+  agentStatus = IDLE_STATUS;
+  const row = statusRowEl;
+  if (!row) return;
+  statusRowEl = null;
+  row.classList.add('is-leaving');
+  setTimeout(() => row.remove(), STATUS_FADE_MS);
+}
+
+/**
+ * 写入状态行(视图侧)。计时起点由状态本身携带 —— 不跨任务复用,秒数不会张冠李戴。
+ * 只有运行中(busy)常驻;终态闪一下再撤;等待确认 / 空闲根本不存在。
+ * 切任务时传 replay:连终态也不重现 —— 那一屏属于当时的现场,不属于现在的这一次。
+ */
+function renderStatus(next: AgentStatusState, options: { replay?: boolean } = {}): void {
+  cancelStatusLinger();
+  agentStatus = next;
+  syncStatusTicker();
+  const transient = next.tone === 'ok' || next.tone === 'fail';
+  if (next.tone !== 'busy' && !(transient && !options.replay)) { clearStatusRow(); return; }
+  paintStatus();
+  if (transient) statusLingerTimer = setTimeout(clearStatusRow, STATUS_LINGER_MS);
+}
+
+/** 状态事件的统一落点:写事件缓冲(切回来要还原)+ 写视图(仅当正在查看该任务)。 */
+function applyStatus(stream: TaskStream, viewing: boolean, next: AgentStatusState): void {
+  stream.status = next;
+  if (viewing) renderStatus(next);
+}
+
+/** host status 事件 → 状态行文案。取值清单见 src/host/stdio.ts 的 hooksFor()。 */
+function statusFromHostEvent(value: string, tool: string): AgentStatusState {
+  const label = tool ? toolMeta(tool).label : '';
+  if (value === 'preparing_tool') return busyStatus('tool', label ? `正在准备 ${label}` : '正在准备工具');
+  if (value === 'running_tool') return busyStatus('tool', label ? `正在执行 ${label}` : '正在执行工具');
+  if (value === 'compacting') return busyStatus('compacting', '正在压缩上下文');
+  // 'thinking' 及其它未认知取值:onStepStart 已触发,正文 / 工具调用都还没到。
+  return busyStatus('thinking', '思考中');
+}
+
+/** 没有事件缓冲时(重启后打开旧任务)按任务记录兜底一个状态文案。 */
+function statusFromTask(task: Task | undefined): AgentStatusState {
+  if (!task) return IDLE_STATUS;
+  if (task.status === 'completed') return settledStatus('done', '已完成', 'ok');
+  if (task.status === 'failed') return settledStatus('failed', '运行失败', 'fail');
+  if (task.status === 'cancelled') return settledStatus('stopped', '已停止', 'idle');
+  if (task.status === 'running' || task.status === 'waiting') return busyStatus('starting', '正在运行');
+  return IDLE_STATUS;
+}
+
+/** 本轮跑了多久 —— 终态文案里给个「用时 Ns」,用户据此确认"确实跑完了一轮"。 */
+function elapsedDetail(startedAt: number | null): string {
+  if (!startedAt) return '';
+  const seconds = Math.round((Date.now() - startedAt) / 1000);
+  return seconds >= 1 ? `用时 ${seconds}s` : '';
+}
+
+/* ── 启动看门狗 ──────────────────────────────────────────
+ * 提交到首个事件之间隔着重启 host 的冷启动（实测 ~8s，开 MCP 更久）—— 慢是正常的，
+ * 「永远没动静」不是。看门狗只认一件事：这一轮提交后有没有收到**任何**归属本任务的事件。
+ * 一条都没收到、又过了上限 → 就地判定失败、写进对话流、收掉状态行。
+ * 主进程侧已经做到「任何一条指令都不会被静默丢弃」（agent-send 会补 agent 实例、起不来必报错），
+ * 这一层是最后一道兜底：宁可多报一次，也不能让界面一直用一个走着的秒数骗人。 */
+const RUN_START_TIMEOUT_MS = 45_000;
+const runStartTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function clearRunWatchdog(taskId: string): void {
+  const timer = runStartTimers.get(taskId);
+  if (timer) { clearTimeout(timer); runStartTimers.delete(taskId); }
+}
+
+function armRunWatchdog(taskId: string): void {
+  clearRunWatchdog(taskId);
+  runStartTimers.set(
+    taskId,
+    setTimeout(() => {
+      runStartTimers.delete(taskId);
+      const stream = streams.get(taskId);
+      if (!stream?.running) return;
+      const message = `Agent 启动超时（${RUN_START_TIMEOUT_MS / 1000}s 内没有任何响应），这一轮没有跑起来。请在终端跑一次 mocode 确认模型能对话，再点「重新生成」重试。`;
+      stream.items.push({ kind: 'error', message });
+      const viewing = viewingTaskId() === taskId;
+      applyStatus(stream, viewing, settledStatus('failed', '启动失败', 'fail', elapsedDetail(stream.startedAt)));
+      endTaskRun(taskId);
+      if (viewing) { console.error('[Agent]', message); showTurnError(message); showToast('error', message, 7000); finish(); }
+      else notifyBackground(taskId, '启动失败');
+    }, RUN_START_TIMEOUT_MS),
+  );
+}
+
+/** 把失败写进**对话流**（不只是 3 秒 toast）：翻回来看得见，也能顺手点重新生成。 */
+function showTurnError(message: string): void {
+  const messageEl = activeAssistant;
+  const content = messageEl?.querySelector('.message-content');
+  if (!content || content.querySelector('.message-error')) return;
+  const block = document.createElement('div');
+  block.className = 'message-error';
+  block.textContent = message;
+  content.append(block);
+  if (isAtBottom()) smartScrollToBottom(true);
+}
 
 function selectedProject(): Project | undefined { return state?.projects.find((project) => project.id === state?.selectedProjectId); }
 function selectedTask(): Task | undefined { return state?.tasks.find((task) => task.id === state?.selectedTaskId); }
@@ -123,7 +322,7 @@ function humanizeError(raw: string): string | null {
   if (/Premature close|ECONNRESET|ECONNREFUSED|socket hang up|ETIMEDOUT|ENOTFOUND|fetch failed|network/i.test(text)) {
     return '与 AI 服务的连接中断了，请稍后重试或检查网络/模型配置。';
   }
-  if (/Invalid Mocode Work host command|Invalid JSON command|输出格式错误/.test(text)) {
+  if (/Invalid MoCode Work host command|Invalid JSON command|输出格式错误/.test(text)) {
     return 'Agent Host 输出了无法识别的数据，请重试一次。';
   }
   if (/Session .* could not be restored/.test(text)) return `历史会话丢失，已开启新会话。`;
@@ -352,7 +551,7 @@ function renderTasks(): void {
 }
 
 function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); renderEmptyChips(); }
-function clearWorkspace(): void { conversation.innerHTML = ''; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); }
+function clearWorkspace(): void { conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); }
 
 /**
  * 一轮 assistant 输出 = 一条 message 内的**有序 block 流**:
@@ -362,6 +561,11 @@ function clearWorkspace(): void { conversation.innerHTML = ''; emptyState.classL
  *   …
  * 文字与工具都 append 进 .message-content,谁先发生谁在前 —— 即 Claude Code / Cursor /
  * Codex 那种「正文与工具按时间顺序交织」的展示,而不是把工具统一挂在正文前或正文后。
+ *
+ * 创建时机:**run 一开始就建**(submit / regenerate / 切回运行中的任务),不等首个 token。
+ * 否则「工具组路由 + 首次 LLM 调用」那几秒里会话区只有用户气泡和状态行 —— 头像和
+ * "MoCode" 标签要等第一个 text_delta 才凭空冒出来,还会把状态行顶到它上面跳一次位。
+ * 代价:可能出现「一个字都没吐」的空轮次(失败 / 中止),由 finalizeTurn 负责收掉。
  */
 function startAssistantTurn(): HTMLElement {
   activeAssistant = addMessage('assistant');
@@ -390,10 +594,24 @@ function ensureTextBlock(): HTMLElement {
   return block;
 }
 
+/**
+ * 当前会话里已渲染的用户消息条数 —— 也就是下一条用户消息的序号。
+ * 主进程的回滚靠这个序号在会话文件里定位「第几条 user」(见 main.ts 的 rollbackSession),
+ * 所以它必须跟 DOM 同源:切任务 / 清空工作区重建会话时一并归零。
+ */
+let userTurnIndex = 0;
+
 function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
   emptyState.classList.add('hidden');
   const message = document.createElement('article'); message.className = `message ${kind}`;
   if (kind === 'user') {
+    // 一条用户消息 = 新一轮的起点：必须先闭合上一轮的助手消息。
+    // 否则后续 text / tool 会被 ensureTextBlock / addTool 挂回上一条 assistant 消息里
+    // （它们只认 activeAssistant）—— 症状是两轮 AI 输出并进同一条消息，
+    // 而新用户气泡被 append 到最底部，顺序错成 user, ai(两轮), user。
+    // 实时路径靠 finish() 天然闭合看不出来，切任务后的缓冲重放最容易踩。
+    finalizeTurn(activeAssistant);
+    activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
     // 用户消息：纯气泡，无头像/标签，灰色背景右对齐
     const wrapper = document.createElement('div'); wrapper.className = 'message-content';
     const body = document.createElement('div'); body.className = 'message-body';
@@ -402,11 +620,18 @@ function addMessage(kind: 'user' | 'assistant', text = ''): HTMLElement {
     label.innerHTML = '<div class="message-actions"></div>';
     wrapper.append(body, label);
     message.append(wrapper);
+    // 用户消息的「复制 + 回滚」:userIndex 是它在会话里的序号,回滚时靠它告诉主进程截到哪儿。
+    message.dataset.userIndex = String(userTurnIndex);
+    userTurnIndex += 1;
+    wireMessageActions(message, text);
     activeTextBlock = null;
   } else {
-    const label = 'Mocode';
-    const avatarIcon = '<img class="app-avatar" src="../assets/icon.png" alt="Mocode">';
-    message.innerHTML = `<div class="message-avatar">${avatarIcon}</div><div class="message-content"><div class="message-label"><span>${label}</span><div class="message-actions"></div></div><div class="message-body"></div></div>`;
+    const label = 'MoCode';
+    const avatarIcon = '<img class="app-avatar" src="../assets/icon.png" alt="MoCode">';
+    // 操作按钮(复制 / 重新生成)是 .message 的第二个 grid 行:落在正文下沿、左对齐(见 style.css)。
+    // 不能塞进 .message-content:那里最后一子元素必须是"正在写的文字段",
+    // 否则 ensureTextBlock 的 lastElementChild 判断会把每个 chunk 都当成新段。
+    message.innerHTML = `<div class="message-avatar">${avatarIcon}</div><div class="message-content"><div class="message-label"><span>${label}</span></div><div class="message-body"></div></div><div class="message-actions"></div>`;
     const body = message.querySelector('.message-body') as HTMLElement;
     // 助手消息流式时只放纯文本,完成后再走 markdown 渲染,避免每 chunk 重排版。
     body.textContent = text;
@@ -702,6 +927,15 @@ function finalizeTurn(message: HTMLElement | null): void {
     parts.push(text);
     renderMessageBody(block, text);
   }
+  // 空轮次:既没有文字、也没有工具行、也没有错误行（启动失败 / 被中止 / 一个 token 都没吐）。
+  // 助手消息是 run 一开始就建好的,不收掉就会留下一个只有头像和 "MoCode" 的空气泡；
+  // 但**带错误行时必须留着** —— 那行是唯一能在会话里看到失败的东西。
+  if (!parts.length && !message.querySelector('.tool-entry') && !message.querySelector('.message-error')) {
+    message.remove();
+    if (activeAssistant === message) { activeAssistant = null; activeTextBlock = null; activeToolGroup = null; }
+    if (pinned) smartScrollToBottom(true);
+    return;
+  }
   if (pinned) smartScrollToBottom(true);
   wireMessageActions(message, parts.join('\n\n'));
 }
@@ -768,16 +1002,17 @@ function smartScrollToBottom(force = false): void {
 conversation.addEventListener('scroll', () => { userScrolled = !isAtBottom(); }, { passive: true });
 let userScrolled = false;
 
-/* ── Per-message actions (copy / regenerate / edit-resend) ── */
+/* ── Per-message actions (copy / regenerate / rollback) ── */
 function wireMessageActions(message: HTMLElement, text: string): void {
   const actions = message.querySelector('.message-actions') as HTMLElement;
   if (!actions || actions.childElementCount) return;
   const isAssistant = message.classList.contains('assistant');
-  const isUser = message.classList.contains('user');
+  // 失败轮次可能只有一行错误、没有正文:那就没有可复制的东西,只留「重新生成」。
+  const copy = text.trim() ? `<button data-act="copy" title="复制内容" aria-label="复制内容">${icon('copy')}</button>` : '';
   if (isAssistant) {
-    actions.innerHTML = `<button data-act="copy" title="复制内容" aria-label="复制内容">${icon('copy')}</button><button data-act="regen" title="基于这条重新生成" aria-label="基于这条重新生成">${icon('regen')}</button>`;
-  } else if (isUser) {
-    actions.innerHTML = `<button data-act="copy" title="复制内容" aria-label="复制内容">${icon('copy')}</button><button data-act="edit" title="编辑并重新发送" aria-label="编辑并重新发送">${icon('edit')}</button>`;
+    actions.innerHTML = `${copy}<button data-act="regen" title="基于这条重新生成" aria-label="基于这条重新生成">${icon('regen')}</button>`;
+  } else {
+    actions.innerHTML = `<button data-act="copy" title="复制内容" aria-label="复制内容">${icon('copy')}</button><button data-act="rollback" title="回滚到这条消息之前" aria-label="回滚到这条消息之前">${icon('rollback')}</button>`;
   }
   actions.addEventListener('click', async (event) => {
     const target = event.target as HTMLElement;
@@ -790,8 +1025,49 @@ function wireMessageActions(message: HTMLElement, text: string): void {
       return;
     }
     if (act === 'regen') { void regenerate(); return; }
-    if (act === 'edit') { promptInput.value = text; resizePrompt(); promptInput.focus(); return; }
+    if (act === 'rollback') { void handleRollbackClick(message, button); return; }
   });
+}
+
+/** 「回滚?」的二次确认停留时长 —— 之后自动复位，避免按钮一直挂 Armed 态。 */
+const ROLLBACK_ARM_MS = 3500;
+const rollbackArmTimers = new Map<HTMLButtonElement, ReturnType<typeof setTimeout>>();
+
+function disarmRollback(button: HTMLButtonElement): void {
+  const timer = rollbackArmTimers.get(button);
+  if (timer) { clearTimeout(timer); rollbackArmTimers.delete(button); }
+  if (button.dataset.armed !== '1') return;
+  button.dataset.armed = '0';
+  button.classList.remove('armed');
+  button.innerHTML = icon('rollback');
+}
+
+/**
+ * 回滚会删掉这段对话,所以首次点击只进入确认态 —— 抹掉历史不该一鼠标就发生。
+ */
+function armRollback(button: HTMLButtonElement): void {
+  for (const other of Array.from(rollbackArmTimers.keys())) disarmRollback(other);
+  button.dataset.armed = '1';
+  button.classList.add('armed');
+  button.innerHTML = '<span class="armed-label">回滚?</span>';
+  rollbackArmTimers.set(button, setTimeout(() => disarmRollback(button), ROLLBACK_ARM_MS));
+}
+
+async function handleRollbackClick(message: HTMLElement, button: HTMLButtonElement): Promise<void> {
+  if (button.dataset.armed !== '1') { armRollback(button); return; }
+  disarmRollback(button);
+  const viewing = viewingTaskId();
+  const userIndex = Number(message.dataset.userIndex ?? '');
+  if (!viewing || !Number.isInteger(userIndex)) { showToast('warn', '这条消息找不到可回滚的位置。'); return; }
+  const result = await window.mocodeWork.rollback({ id: viewing, userIndex });
+  if (!result.ok) { showToast('error', result.message ?? '回滚失败。'); return; }
+  // 本周期的事件缓冲已经不可信 —— 落盘的会话才是新真相,作废后按它重放。
+  streams.delete(viewing);
+  approvalPanel.classList.add('hidden');
+  if (result.state) updateState(result.state);
+  setRunning(false);
+  switchToTask(viewing, result.history ?? []);
+  showToast('info', '已回滚到这条消息之前');
 }
 
 /**
@@ -821,8 +1097,13 @@ async function regenerate(): Promise<void> {
     const lastUser = [...stream.items].map((item, i) => ({ item, i })).filter(({ item }) => item.kind === 'user').pop();
     if (lastUser) stream.items.length = lastUser.i + 1;
     stream.running = true;
+    stream.startedAt = Date.now();
+    // 与 submit 同:重发的这一轮也先把助手消息建出来(思考阶段就有头像/标签)。
+    startAssistantTurn();
+    applyStatus(stream, true, busyStatus('starting', '正在启动 agent'));
   }
   setRunning(true);
+  armRunWatchdog(task.id);
   window.mocodeWork.send({ type: 'run', id: task.id, prompt: userText, sessionId: task.sessionId, attachments: [] });
   showToast('info', '已重新生成');
 }
@@ -1125,11 +1406,20 @@ async function submit(): Promise<void> {
   const stream = streamFor(task.id);
   stream.items.push({ kind: 'user', text: prompt });
   stream.running = true;
+  stream.startedAt = Date.now();
   addMessage('user', prompt); promptInput.value = ''; resizePrompt(); setRunning(true);
+  // 助手消息就地建好:思考阶段就能看到头像与 "MoCode",状态行也稳定落在这条消息下面。
+  startAssistantTurn();
+  // 立刻上状态:此刻到首个 token 之间可能好几秒(工具组路由 + 首次 LLM 调用),
+  // 状态行是这段时间里界面唯一的"收到了、在干活"证据。
+  applyStatus(stream, true, busyStatus('starting', '正在启动 agent'));
+  // 同时挂看门狗:好几秒可以，一直没有动静不行（见 armRunWatchdog）。
+  armRunWatchdog(task.id);
   window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments }); attachments = []; renderAttachments();
 }
 
 function endTaskRun(taskId: string): void {
+  clearRunWatchdog(taskId);
   const stream = streams.get(taskId);
   if (stream) stream.running = false;
   if (viewingTaskId() === taskId) setRunning(false);
@@ -1149,16 +1439,26 @@ function notifyBackground(taskId: string, note: string): void {
 
 function handleAgentEvent(envelope: AgentEnvelope): void {
   if (envelope.type === 'error') {
-    // 无 requestId 的错误来自 host 层(未就绪/启动失败):归属于正在查看的那个任务。
-    const message = humanizeError(envelope.error ?? '');
-    if (message) { console.error('[Agent]', message); showToast('error', message); }
-    const viewing = viewingTaskId();
-    const stream = viewing ? streams.get(viewing) : undefined;
-    if (viewing && stream?.running) {
-      stream.items.push({ kind: 'error', message: message ?? '运行出错，请重试。' });
-      endTaskRun(viewing);
-      finish();
+    const message = humanizeError(envelope.error ?? '') ?? 'Agent 通信失败，这一轮没有跑起来。';
+    console.error('[Agent]', message);
+    // 主进程的错误都带 requestId(= 任务 id)：按它归属，不再靠「当前在看哪个任务」猜
+    // —— 切过任务时猜错，会把别处的失败写到当前这条会话上。
+    const taskId = typeof envelope.requestId === 'string' && envelope.requestId ? envelope.requestId : viewingTaskId();
+    if (!taskId) { showToast('error', message, 5000); return; }
+    clearRunWatchdog(taskId);
+    const stream = streamFor(taskId);
+    const viewing = viewingTaskId() === taskId;
+    if (!stream.running) {
+      // 不是这一轮的事（例如手动压缩失败）：只提示，别把会话状态改成「运行失败」。
+      showToast('error', message, 5000);
+      if (viewing && stream.status?.tone === 'busy') applyStatus(stream, viewing, statusFromTask(selectedTask()));
+      return;
     }
+    stream.items.push({ kind: 'error', message });
+    applyStatus(stream, viewing, settledStatus('failed', '运行失败', 'fail', elapsedDetail(stream.startedAt)));
+    endTaskRun(taskId);
+    if (viewing) { showTurnError(message); showToast('error', message, 6000); finish(); }
+    else notifyBackground(taskId, message);
     return;
   }
   const payload = envelope.payload ?? {};
@@ -1168,14 +1468,32 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     if (envelope.event === 'host_log') handleHostLog(payload);
     return;
   }
+  // 收到任何一条归属本任务的事件 = 「它活着」，看门狗下岗。
+  clearRunWatchdog(taskId);
   const stream = streamFor(taskId);
   const viewing = viewingTaskId() === taskId;
   switch (envelope.event) {
+    case 'run_started':
+      // 「工具组路由」本身就是一次 LLM 调用 —— 首个 thinking 到来前的空窗必须有人交代。
+      applyStatus(stream, viewing, busyStatus('starting', '正在分析任务'));
+      break;
+    case 'tool_route':
+      applyStatus(stream, viewing, busyStatus('thinking', '思考中'));
+      break;
+    case 'status': {
+      const tool = payload.tool ? String(payload.tool) : '';
+      applyStatus(stream, viewing, statusFromHostEvent(String(payload.value ?? ''), tool));
+      break;
+    }
+    case 'cancelling':
+      applyStatus(stream, viewing, busyStatus('stopping', '正在停止'));
+      break;
     case 'text_delta': {
       const text = String(payload.text ?? '');
       const last = stream.items[stream.items.length - 1];
       if (last && last.kind === 'text') last.text += text;
       else stream.items.push({ kind: 'text', text });
+      if (stream.status?.phase !== 'speaking') applyStatus(stream, viewing, busyStatus('speaking', '正在回复'));
       if (viewing) appendText(text);
       break;
     }
@@ -1198,11 +1516,13 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     }
     case 'approval_requested': {
       stream.pendingApproval = payload;
+      applyStatus(stream, viewing, settledStatus('waiting', '等待你的确认', 'warn'));
       if (viewing) showApproval(taskId, payload);
       else notifyBackground(taskId, '在等待你确认操作');
       break;
     }
     case 'run_aborted':
+      applyStatus(stream, viewing, settledStatus('stopped', '已停止', 'idle'));
       endTaskRun(taskId);
       if (viewing) finish();
       break;
@@ -1218,6 +1538,7 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
         ].filter(Boolean).join(' · ');
         showToast('success', `Prompt Cache: ${details}`, 3500);
       }
+      applyStatus(stream, viewing, settledStatus('done', '已完成', 'ok', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
       if (viewing) { updateContextUsage(stream.usagePercent); finish(); }
       else notifyBackground(taskId, '已完成');
@@ -1229,6 +1550,8 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       const before = typeof payload.beforeTokens === 'number' ? Math.round(payload.beforeTokens / 1000) : '?';
       const after = typeof payload.afterTokens === 'number' ? Math.round(payload.afterTokens / 1000) : '?';
       showToast('success', `上下文已压缩: ${before}k → ${after}k tokens${pct !== null ? ` (${pct}%)` : ''}`, 4000);
+      // 压缩不改变任务本身的终态,收尾回落到任务记录对应的状态。
+      applyStatus(stream, viewing, statusFromTask(selectedTask()));
       if (viewing) updateContextUsage(pct);
       break;
     }
@@ -1238,20 +1561,27 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     case 'run_failed': {
       const message = humanizeError(String(payload.message ?? '运行失败。')) ?? '运行失败。';
       stream.items.push({ kind: 'error', message });
+      applyStatus(stream, viewing, settledStatus('failed', '运行失败', 'fail', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
-      if (viewing) { console.error('[Agent]', message); showToast('error', message, 5000); finish(); }
+      if (viewing) { console.error('[Agent]', message); showTurnError(message); showToast('error', message, 6000); finish(); }
       else { console.error('[Agent]', message); notifyBackground(taskId, '运行失败'); }
       break;
     }
     case 'host_exit': {
       if (!stream.running) break;
       const code = typeof payload.code === 'number' ? payload.code : null;
-      console.error(`[Agent Host] 已退出（退出码 ${code ?? '?'}）`);
-      stream.items.push({ kind: 'error', message: `Agent Host 意外退出（退出码 ${code ?? '?'}），请重试。` });
+      const message = `Agent Host 意外退出（退出码 ${code ?? '?'}），请重试。`;
+      console.error('[Agent Host]', message);
+      stream.items.push({ kind: 'error', message });
+      applyStatus(stream, viewing, settledStatus('failed', '运行失败', 'fail'));
       endTaskRun(taskId);
-      if (viewing) finish();
+      if (viewing) { showTurnError(message); finish(); }
       break;
     }
+    // host_stopped = 我们主动停的（切模型重启 / 被新一次启动打断），不是故障：不报错、不动会话，
+    // 那一轮要么马上被新 host 接着跑，要么调用方自己收敛了状态。
+    case 'host_stopped':
+      break;
   }
 }
 function handleHostLog(payload: Record<string, unknown>): void {
@@ -1273,6 +1603,8 @@ function handleHostLog(payload: Record<string, unknown>): void {
  */
 function switchToTask(taskId: string, history?: HistoryItem[]): void {
   conversation.innerHTML = '';
+  // 会话 DOM 重来一遍,用户消息序号跟着回到 0(回滚靠它对上会话文件里的第几条 user)。
+  userTurnIndex = 0;
   activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
   const stream = streams.get(taskId);
   if (stream && stream.items.length) {
@@ -1280,16 +1612,28 @@ function switchToTask(taskId: string, history?: HistoryItem[]): void {
       if (item.kind === 'user') addMessage('user', item.text);
       else if (item.kind === 'text') appendText(item.text);
       else if (item.kind === 'tool') addTool({ id: item.id, name: item.name, arguments: item.args, output: item.output }, item.done);
-      else if (item.kind === 'error') showToast('error', item.message, 5000);
+      else if (item.kind === 'error') {
+        // 失败行在会话里留痕(不只是 toast):这一轮没有正文(启动就失败)时,
+        // 就地补一条助手消息来承载它 —— 尾部 finish() 会照常给它挂上「重新生成」。
+        if (!currentTurn()) startAssistantTurn();
+        showTurnError(item.message);
+      }
     }
     if (!stream.running) finish();
-    else setRunning(true);
+    else {
+      setRunning(true);
+      // 运行中的任务切回来:重放完缓冲若还没有助手消息(还在思考阶段),补建一条 ——
+      // 与实时路径一致,首个 token 到达时不会再凭空插一条把状态行顶上去。
+      if (!currentTurn()) startAssistantTurn();
+    }
     updateContextUsage(stream.usagePercent);
     if (stream.running && stream.pendingApproval) showApproval(taskId, stream.pendingApproval);
   } else if (history) {
     renderHistory(history);
     updateContextUsage(null);
   }
+  // 还在跑的任务 → 恢复它的运行态状态行(压在输出最下面);已结束的 → 不重现终态。
+  renderStatus(stream?.status ?? statusFromTask(selectedTask()), { replay: true });
   // 切进任务一律落在最底部最新消息(回放/finalize 之后高度已定,强制校一次)
   smartScrollToBottom(true);
   // 切换任务清空附件草稿 —— 附件属于「当前正在编辑的这条消息」，不属于任务。
@@ -1469,7 +1813,7 @@ function refreshThemeSegmented(): void {
 /* ── 设置弹窗:左侧分类导航 + 右侧内容 ─────────────────────── */
 type SettingsSectionId = 'model' | 'behavior' | 'appearance' | 'about';
 const SETTINGS_SECTIONS: Array<{ id: SettingsSectionId; label: string; icon: string; desc: string }> = [
-  { id: 'model', label: '模型', icon: 'spark-bot', desc: '选择 Mocode 使用的模型预设' },
+  { id: 'model', label: '模型', icon: 'spark-bot', desc: '选择 MoCode 使用的模型预设' },
   { id: 'behavior', label: '行为', icon: 'wrench', desc: '上下文、记忆与子代理开关' },
   { id: 'appearance', label: '外观', icon: 'sun', desc: '主题与界面显示' },
   { id: 'about', label: '关于', icon: 'info', desc: '版本与配置路径' },
@@ -2000,7 +2344,7 @@ function renderSettingsAboutSection(): void {
   ];
   settingsSection.innerHTML = `
     <div class="settings-block">
-      <div class="settings-block-head"><b>Mocode Work</b><span>桌面客户端</span></div>
+      <div class="settings-block-head"><b>MoCode Work</b><span>桌面客户端</span></div>
       <div class="settings-kv">${kv.map(([k, v]) => `<div class="settings-kv-row"><span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b></div>`).join('')}</div>
     </div>
     <div class="settings-block">
@@ -2402,7 +2746,7 @@ window.addEventListener('keydown', (event) => {
   if (cmd && event.key.toLowerCase() === 'k') { event.preventDefault(); searchPanel.classList.remove('hidden'); searchInput.value = ''; searchInput.focus(); refreshSearch(); return; }
   if (cmd && event.key.toLowerCase() === '/') {
     event.preventDefault();
-    showToast('info', '助手模式: Mocode Agent (暂未开放多模型切换)');
+    showToast('info', '助手模式: MoCode Agent (暂未开放多模型切换)');
     return;
   }
   if (cmd && event.key === '.') {
@@ -2432,6 +2776,8 @@ window.addEventListener('keydown', (event) => {
 window.mocodeWork.onAgentEvent(handleAgentEvent);
 window.mocodeWork.onState((next) => updateState(next));
 void window.mocodeWork.getState().then(updateState);
+
+// 状态行按需出现:空闲时不存在,不预建占位节点(空态下 .conversation 也是隐藏的)。
 
 // Empty state hint chips
 document.querySelectorAll<HTMLButtonElement>('.empty-hint').forEach((button) => {

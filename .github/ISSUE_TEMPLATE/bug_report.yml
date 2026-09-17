@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible Mocode defect
+description: Report a reproducible MoCode defect
 title: '[Bug]: '
 labels: ['bug']
 body:

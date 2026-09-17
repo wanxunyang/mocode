@@ -230,7 +230,7 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
  * 想调宽窄只改 --gutter-x 一处:
  *   --space-sm 12px | --space-md 16px | --space-lg 24px | --space-xl 36px,也可以直接写 32px / 2.5rem。
  *
- * --empty-col-w 是**空状态专属**列宽("开始一个任务"那一屏):空态输入卡 + chip 行 + 快捷入口
+ * --empty-col-w 是**空状态专属**列宽(空态那一屏 h1 标语 + 输入卡 + chip 行):
  *   共用它,与会话态那条"尽可能宽"的输入卡解耦 —— 空态只有输入框,铺满整宽太散。
  *   想让空态更瘦/更宽只改这一处:660px(固定) / min(660px, 100%)(宽窗固定、窄窗跟着收) 都行。
  *   ⚠ min() 取的是两者中**较小**的那个:若百分比项一直小于像素项,像素值永远不会生效 */
@@ -242,8 +242,31 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 
 .empty-state { position: absolute; inset: 0 0 135px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0 var(--space-xl); transform: translateY(-6px); text-align: center; }
 .empty-state.hidden { display: none; }
-.empty-state h1 { margin: 0; font-family: var(--font-display); font-size: var(--text-2xl); font-weight: 600; letter-spacing: -0.03em; line-height: 1.1; color: var(--color-ink); }
-.empty-state p { margin: var(--space-sm) auto 0; max-width: 46ch; color: var(--color-neutral); font-size: var(--text-sm); line-height: 1.6; }
+/* 空态 = 图标 + 一句标语的**横向字标**(对齐用户给的参考:图标在左、大字在右、同一基线)。
+ * 旧的 `h1 标题 + p 副文案` 两行结构已废弃(用户:"开始一个任务那几个字去掉,把标语放上去,字体放大")。
+ *
+ * 三条实测出来的硬约束(改这里之前先读):
+ *   1. **不能用 display 字体栈(Fraunces)**:仓库只打包了 fraunces-latin-600/-700 两个 face,
+ *      没有 400 —— Latin 部分("MoCode")无论写多少字重都落回 600,即"中文变细、品牌名依旧粗",
+ *      观感割裂。所以改用 --font-body(Geist + MiSans),与界面其余文字同族。
+ *   2. **不能写 font-weight: 400**:MiSans 的字重刻度是非标准的 330/380/450/630,
+ *      按 CSS 字重匹配规则 desired=400 会向上命中 **450(Demibold)**,看起来还是"加粗"。
+ *      写 330(就是 MiSans-Regular 的声明值)才会命中真正的 Regular;
+ *      Geist 侧没有 330,自动落到 400(Regular),两边都是常规字重。
+ *   3. **图标尺寸按字号的 em 算**(当前 **1.8em** —— 2026-09-17 用户要求"图标再大一倍",
+ *      由 0.9em 提到 1.8em)。改字号时图标自动跟着缩放,不用手改 px。
+ *      图标比文字高,会把 h1 的行盒撑到 1.8em 高:这是**想要**的效果(标记作为视觉重心),
+ *      别顺手给 h1 加固定 height 去把它压回去。
+ *   4. 图标是 img 而非 SVG:笔刷 M 本身就是位图资产(icon-mark.png 由 icon.png 抽底裁紧得到),
+ *      走 img 不用重画路径;align-items:center 已足够对齐,若后续观感偏高/偏低只调 margin-top。 */
+.empty-state h1 { margin: 0; display: inline-flex; align-items: center; gap: 0.4em; font-family: var(--font-body); font-weight: 330; font-size: var(--text-display-s); letter-spacing: -0.03em; line-height: 1.15; color: var(--color-ink); }
+/* 笔刷 M 标记(assets/icon-mark.png,由 icon.png 抽掉白底板 + 裁紧墨迹得到):
+ * 纯黑墨迹 + alpha,所以深色主题直接 invert 反白,不用第二份资源。 */
+.empty-state .empty-mark { width: 1.8em; height: 1.8em; flex: 0 0 auto; display: block; object-fit: contain; -webkit-user-drag: none; user-select: none; }
+:root[data-theme="dark"] .empty-state .empty-mark { filter: invert(1); }
+.empty-state .empty-wordmark { display: block; }
+/* 基础里已无 p 子元素,这条只为防御:万一以后又插段落,别继承 display 字体导致中文衬线乱跳。 */
+.empty-state p { margin: var(--space-sm) auto 0; color: var(--color-muted); font-size: var(--text-lg); line-height: 1.6; }
 
 /* ── 空状态：标题 + 输入框一起在视口中央 ────────────────── */
 .workspace:has(> #empty-state:not(.hidden)) {
@@ -322,6 +345,11 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 }
 .workspace:has(> #empty-state:not(.hidden)) .composer {
   width: var(--empty-col-w);
+}
+/* 空态的横向字标:只保留 --gutter-x 呼吸位(与 .composer-area 同源),不再做"与输入卡同宽"的覆写;
+ * 字标很短,整组居中即可,不加 max-width。 */
+.workspace:has(> #empty-state:not(.hidden)) .empty-state {
+  width: 100%; padding: 0 var(--gutter-x);
 }
 
 /* 隐藏非空状态下也能用的元素 */
@@ -433,12 +461,34 @@ textarea::placeholder { color: var(--color-subtle); }
   word-break: break-word;
   overflow-wrap: anywhere;
 }
-/* 用户消息的操作按钮 hover 时显示在气泡上方 */
+/* 用户消息的操作按钮 hover 时显示在气泡下方 */
 .message.user .message-label { padding: var(--space-2xs) 0 0; }
 .message-avatar { width: 28px; height: 28px; flex: 0 0 28px; display: grid; place-items: center; border-radius: var(--radius-sm); color: var(--color-muted); overflow: hidden; }
 .message-avatar .icon { width: 16px; height: 16px; }
 .message-avatar .app-avatar { width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm); }
 .message.assistant .message-avatar { background: var(--color-accent-soft); color: var(--color-accent-ink); }
+/* 助手消息 = 头像 | 正文 两列 grid,操作按钮(复制/重新生成)独占第二行、左对齐 ——
+   悬停时出现在这段回答的左下角(与正文左边界齐),而不是顶部标签行右端。
+   用 grid 的行列而不是绝对定位:不必手写 calc(头像宽 + gap) 这类魔法值;
+   第二行靠 min-height 常驻 22px,hover 时不会突然凸起一行把下面所有消息顶下去。
+   (grid-template-columns 的 28px 必须与 .message-avatar 的宽度一致) */
+.message.assistant { display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: var(--space-md); row-gap: var(--space-2xs); align-items: start; margin-bottom: var(--space-2xs); }
+.message.assistant .message-avatar { grid-area: 1 / 1; }
+/* 助手消息的署名行:与头像**同高并垂直居中** —— 否则 11px 的标签贴在 28px 头像的顶端,
+   看着像浮在头像上方(28px 与 .message-avatar 的尺寸一致)。字号也比通用标签大一档:
+   它是这一轮输出的署名,不是脚注。margin-bottom 归零,由 min-height 撑出的下半留白补足间距。 */
+.message.assistant .message-label { min-height: 28px; display: flex; align-items: center; margin-bottom: 0; font-size: var(--text-sm); letter-spacing: 0.02em; }
+.message.assistant .message-content { grid-area: 1 / 2; }
+.message.assistant .message-actions { grid-area: 2 / 2; justify-self: start; min-height: 22px; }
+/* 运行期一律不占按钮行:运行中根本不会显示按钮(wireMessageActions 只在 finalizeTurn 调用),
+   那 22px 常驻高度 + grid 行距 4px 纯属虚占 —— 用户看到的就是「工具行跑完 → 状态行」之间空一大截。
+   finalizeTurn 摘掉 is-streaming 时自动恢复,与 hover 的 22px 常驻高度接得上,不会跳变。 */
+.message.assistant.is-streaming { row-gap: 0; }
+.message.assistant.is-streaming > .message-actions { min-height: 0; }
+/* 本轮一个字都还没吐(思考阶段):消息整块也不留底部 margin ——
+   此时它内部只有头像 + "MoCode" 标签,再往下垫一层就和状态行拉开一大截空白。
+   有正文或工具行之后这条不生效,间距交回 .message 的常规节奏。 */
+.message.assistant.is-streaming:not(:has(.tool-entry)):has(> .message-content > .message-body:empty) { margin-bottom: 0; }
 .message-content { min-width: 0; flex: 1; }
 /* 一轮里被工具行隔开的多个文字段之间留一点呼吸;首尾不留(由 .message 的 margin 统一管)。 */
 .message.assistant .message-content > .text-block + .text-block { margin-top: var(--space-sm); }
@@ -448,6 +498,9 @@ textarea::placeholder { color: var(--color-subtle); }
 /* 流式光标:只跟在"当前正在写的那段文字"后面 —— 也就是 .message-content 的最后一个
    block 是文字段时(工具行插进来后会自动成为 last-child,光标随之让位,符合直觉)。 */
 .message.assistant.is-streaming .message-content > .message-body:last-child::after { content: ""; display: inline-block; width: 7px; height: 1.05em; margin-left: 2px; vertical-align: -0.15em; background: var(--color-accent); animation: caret-blink 1s steps(2, end) infinite; }
+/* 还没吐出第一个 token 时不画光标:那段的高度是 0,光标会孤零零挂在 "MoCode" 标签下面,
+   和紧跟其后的状态行重复表达「在干活」。 */
+.message.assistant.is-streaming .message-content > .message-body:empty::after { content: none; }
 .message.assistant .stream-caret { display: none; }
 @keyframes caret-blink { 50% { opacity: 0; } }
 
@@ -540,6 +593,46 @@ textarea::placeholder { color: var(--color-subtle); }
    导致它们在集合展开期间永远朝下(无论自身开合)。 */
 .tool-group[open] > summary .tool-chevron { transform: rotate(90deg); }
 
+/* ── Agent 状态行 ────────────────────────────────────────
+ * 语义:agent「正在干什么」的现场指示,追加在 .conversation 的最后一个 block ——
+ * 即 **agent 输出内容的最下面**,内容往下长它就被顶下去,跟着一起滚。
+ * 不是悬浮层:没有 sticky、没有定位、不盖内容,所以也不需要实底背景。
+ * 生命期只覆盖运行期(busy)与结束态那一下(ok/fail 停留 1.5s 后淡出),
+ * 空闲时这个节点根本不存在 —— 逻辑见 renderer.ts 的 renderStatus/clearStatusRow。 */
+.agent-status {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 100%;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 紧贴上方内容:不带 margin-top —— 与上一行的分隔由 .message 自身的 margin-bottom 提供,
+     这里再加一层就成了用户看到的"空行"。padding-top 只留 4px 当最小呼吸位。 */
+  margin-top: 0;
+  padding: 4px 0;
+  color: var(--color-subtle);
+  font-family: var(--font-outlier);
+  font-size: var(--text-2xs);
+  line-height: 1.4;
+  opacity: 1;
+  transition: opacity var(--dur-short) var(--ease-out);
+}
+.agent-status.is-leaving { opacity: 0; }
+/* 状态行紧跟在助手消息后面时缩进到正文列(头像 28px + 列间距),让它读起来属于这一轮回答。
+   不是跟在助手消息之后(如手动压缩)就不缩 —— 那种情况它没有所属的消息。 */
+.message.assistant + .agent-status { padding-left: calc(28px + var(--space-md)); }
+.agent-status-icon { flex: 0 0 12px; display: grid; place-items: center; color: var(--color-subtle); }
+.agent-status-icon .icon { display: block; width: 12px; height: 12px; }
+.agent-status-label { flex: 0 0 auto; }
+.agent-status-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-status-detail:not(:empty)::before { content: '·'; margin-right: 6px; color: var(--color-rule); }
+.agent-status.status-busy { color: var(--color-ink-soft); }
+.agent-status.status-busy .agent-status-icon { color: var(--color-running); animation: spin 1s linear infinite; }
+.agent-status.status-warn, .agent-status.status-warn .agent-status-icon { color: var(--color-warn); }
+.agent-status.status-ok .agent-status-icon { color: var(--color-success); }
+.agent-status.status-fail, .agent-status.status-fail .agent-status-icon { color: var(--color-fail); }
+
 /* ── Task item (sidebar) ─────────────────────────────── */
 .task-item { width: 100%; height: 32px; display: flex; align-items: center; border-radius: var(--radius-sm); background: transparent; color: var(--color-muted); transition: background var(--dur-micro) var(--ease-out); padding-right: var(--space-2xs); }
 .task-item:hover { background: var(--color-paper-3); }
@@ -558,6 +651,8 @@ textarea::placeholder { color: var(--color-subtle); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Approval ─────────────────────────────────────────── */
+/* 审批卡是覆盖在会话区上的浮层(absolute),会压住会话底部的内容 —— 所以等待确认期间
+ * 状态行不显示(renderer.ts 里 warn 态直接 clearStatusRow),两者不会抢那 26px。 */
 .approval-panel { position: absolute; z-index: var(--z-modal); width: calc(100% - var(--gutter-x) * 2); bottom: 135px; left: 50%; transform: translateX(-50%) translateY(0); padding: var(--space-md); border: var(--rule-hair); border-radius: var(--radius-md); background: var(--color-paper); box-shadow: var(--shadow-raised); animation: approval-in var(--dur-short) var(--ease-out) both; }
 @keyframes approval-in { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 .approval-panel.hidden { display: none; }
@@ -702,6 +797,7 @@ textarea::placeholder { color: var(--color-subtle); }
   .message, .tool-entry, .approval-panel, .search-dialog, .search-panel, .toast, .cheatsheet-card { animation: none !important; opacity: 1; transform: none; }
   .message.assistant.is-streaming .message-body::after { animation: none; }
   .task-spinner { animation: none; }
+  .agent-status.status-busy .agent-status-icon { animation: none; }
 }
 
 /* ── Theme toggle ─────────────────────────────────────── */
@@ -722,6 +818,15 @@ textarea::placeholder { color: var(--color-subtle); }
 /* ── Markdown rendered message body ────────────────────── */
 .message-body { white-space: pre-wrap; line-height: 1.65; color: var(--color-ink); font-size: var(--text-sm); word-break: break-word; overflow-wrap: anywhere; }
 .message-body.md-rendered { white-space: normal; }
+
+/* 失败行:写在会话流里(只弹 3 秒 toast 的话,用户回来就什么都看不到了)。
+   底色走中性面 + fail 色左规,文字用 fail-ink —— 浅/深主题各自调过亮度,两边都能读。 */
+.message-error {
+  margin: var(--space-xs) 0 0; padding: var(--space-2xs) var(--space-md);
+  border-left: 2px solid var(--color-fail); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--color-paper-2); color: var(--color-fail-ink);
+  font-size: var(--text-xs); line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
 .message-body.md-rendered > *:first-child { margin-top: 0; }
 .message-body.md-rendered > *:last-child { margin-bottom: 0; }
 .message-body.md-rendered p { margin: var(--space-2xs) 0; line-height: 1.65; }
@@ -779,13 +884,22 @@ textarea::placeholder { color: var(--color-subtle); }
 :root[data-theme="dark"] .message-body.md-rendered .hl-s { color: oklch(70% 0.14 30); }
 :root[data-theme="dark"] .message-body.md-rendered .hl-n { color: oklch(74% 0.14 280); }
 
-/* ── Per-message actions (copy / regen / edit) ───────── */
+/* ── Per-message actions (copy / regen / edit) ─────────
+   助手消息:按钮在消息左下方(grid 第 2 行,见 .message.assistant 那组规则);
+   用户消息:按钮在气泡下方、右对齐(label 挂在气泡之后)。 */
 .message-label { color: var(--color-subtle); font-size: var(--text-2xs); margin: 0 0 var(--space-2xs); font-weight: 500; letter-spacing: 0.04em; font-family: var(--font-outlier); display: flex; align-items: center; justify-content: space-between; gap: var(--space-2xs); }
 .message-actions { display: flex; gap: 2px; opacity: 0; transition: opacity var(--dur-micro) var(--ease-out); }
 .message.is-active .message-actions, .message:hover .message-actions { opacity: 1; }
 .message-actions button { width: 22px; height: 22px; border-radius: var(--radius-sm); color: var(--color-subtle); display: grid; place-items: center; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
 .message-actions button .icon { width: 14px; height: 14px; }
 .message-actions button:hover { background: var(--color-paper-3); color: var(--color-ink); }
+/* 用户消息的「复制 + 回滚」常驻可见:它们本来就在 column + flex-end 的 content 尾端
+ * (= 气泡右下),这里只需要取消 hover 才现身。回滚是"回到这一步之前"的唯一入口,
+ * 藏起来等于没有 —— 助手那条「重新生成」同理保持了 hover 语义不冲突。 */
+.message.user .message-actions { opacity: 1; }
+/* 二次确认态:按钮变成「回滚?」,红色 + 自适应宽度。 */
+.message-actions button[data-act="rollback"].armed { width: auto; padding: 0 var(--space-2xs); background: var(--color-paper-3); color: var(--color-fail); }
+.message-actions .armed-label { font-family: var(--font-body); font-size: var(--text-2xs); white-space: nowrap; letter-spacing: 0; }
 
 /* ── Toast ────────────────────────────────────────────── */
 .toast-host { position: fixed; z-index: var(--z-toast); top: var(--space-md); left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: var(--space-2xs); pointer-events: none; }
@@ -829,9 +943,6 @@ textarea::placeholder { color: var(--color-subtle); }
 
 /* ── Composer drag state ──────────────────────────────── */
 .composer-drag { border-color: var(--color-accent) !important; box-shadow: 0 0 0 3px var(--color-accent-soft), var(--shadow-soft) !important; }
-
-/* ── Empty state polish ───────────────────────────────── */
-.empty-state h1 { font-size: var(--text-display-s); }
 
 /* ── Inline rename inputs (sidebar) ─────────────────── */
 .task-title { cursor: text; }

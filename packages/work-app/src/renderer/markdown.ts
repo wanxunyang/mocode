@@ -2,7 +2,7 @@
  * Zero-dependency Markdown renderer.
  *
  * 设计目标:覆盖 Agent 对话里常见的 markdown 子集,渲染质量高但体积小,
- * 与 Mocode Work 的"克制工具感"对齐。不引 marked / highlight.js / dompurify。
+ * 与 MoCode Work 的"克制工具感"对齐。不引 marked / highlight.js / dompurify。
  *
  * 特性:
  *  - 块级:标题 h1–h6 / 段落 / 引用 / 有序无序列表 / 任务列表 / 表格 / 水平线 / 围栏代码块
