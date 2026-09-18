@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import {
   ADD_TOOL_GROUPS_TOOL_NAME,
   COMMON_TOOL_NAMES,
+  DEFAULT_ROUTE_GROUPS,
   TOOL_ROUTE_GROUPS,
   type ToolRouteGroupName,
 } from '../src/config/profiles.js';
-import { ToolPolicyController, getAvailableToolRouteGroups } from '../src/tools/policy.js';
+import { ToolPolicyController, getAvailableToolRouteGroups, getRoutableToolRouteGroups } from '../src/tools/policy.js';
 import { clearToolsExtension, registerToolsExtension, tools } from '../src/tools/registry.js';
 import type { Tool } from '../src/tools/types.js';
 import '../src/tools/builtins/index.js';
@@ -54,7 +55,7 @@ const EXPECTED_COMMON = [
   'use_skill',
 ];
 
-test('ToolPolicy: common 集合精确且全部来自 registry，common-only snapshot 不泄露执行簇', () => {
+test('ToolPolicy: common 集合精确且全部来自 registry；默认快照 = common + 常驻组，不泄露高危簇', () => {
   const restore = isolateRouteEnv();
   try {
     assert.deepEqual([...COMMON_TOOL_NAMES], EXPECTED_COMMON);
@@ -65,15 +66,22 @@ test('ToolPolicy: common 集合精确且全部来自 registry，common-only snap
       for (const name of definition.tools) assert.ok(registered.has(name), `${group} 的工具未注册: ${name}`);
     }
 
-    const controller = new ToolPolicyController({ id: 'policy-common', maxExpansions: 3 });
+    const controller = new ToolPolicyController({ id: 'policy-default', maxExpansions: 3 });
     const names = schemaNames(controller);
+    // 常驻组不经过路由也必须在位:起手没有 write/run 会白付一个完整 step 去扩容。
+    assert.deepEqual(controller.groupNames, [...DEFAULT_ROUTE_GROUPS]);
     assert.deepEqual(
       names.filter((name) => name !== ADD_TOOL_GROUPS_TOOL_NAME),
-      EXPECTED_COMMON,
+      [...EXPECTED_COMMON, 'write_file', 'edit_file', 'run_command'],
     );
     assert.ok(names.includes(ADD_TOOL_GROUPS_TOOL_NAME));
-    for (const name of ['write_file', 'edit_file', 'run_command', 'browser', 'computer', 'memory_save']) {
-      assert.ok(!names.includes(name), `common-only 不应暴露 ${name}`);
+    for (const name of ['browser', 'computer', 'memory_save', 'screenshot', 'sub-agent']) {
+      assert.ok(!names.includes(name), `默认快照不应暴露 ${name}`);
+    }
+    // 常驻组不在可路由集合里(选了也无效)。
+    const routable = getRoutableToolRouteGroups();
+    for (const group of DEFAULT_ROUTE_GROUPS) {
+      assert.ok(!routable.includes(group), `${group} 是常驻组，不应出现在路由选项中`);
     }
   } finally {
     restore();
@@ -140,14 +148,15 @@ test('ToolPolicy: 扩容生成新版本且不改旧 snapshot，plan 始终与只
   try {
     const controller = new ToolPolicyController({
       id: 'policy-expand',
-      groups: ['shell-debug'],
-      reason: 'initial shell need',
+      groups: [],
+      reason: 'router: common only',
       confidence: 0.2,
       maxExpansions: 1,
     });
     const before = controller.snapshot(false);
     assert.equal(controller.snapshot(false), before, '未扩容时应复用 auto cache');
-    assert.ok(before.allowedNames.has('run_command'));
+    assert.ok(before.allowedNames.has('run_command'), '常驻组 shell-debug 必须在位');
+    assert.ok(before.allowedNames.has('write_file'), '常驻组 workspace-write 必须在位');
     assert.ok(before.allowedNames.has(ADD_TOOL_GROUPS_TOOL_NAME));
 
     const planBefore = controller.snapshot(true);
@@ -155,23 +164,23 @@ test('ToolPolicy: 扩容生成新版本且不改旧 snapshot，plan 始终与只
     assert.ok(!planBefore.allowedNames.has('run_command'));
     assert.ok(planBefore.allowedNames.has(ADD_TOOL_GROUPS_TOOL_NAME));
 
-    const expansion = controller.expand(['workspace-write'], 'need to edit files');
+    const expansion = controller.expand(['browser-debug'], 'need DOM inspection');
     const after = expansion.snapshot;
-    assert.deepEqual(expansion.added, ['workspace-write']);
+    assert.deepEqual(expansion.added, ['browser-debug']);
     assert.equal(after.version, 2);
-    assert.equal(after.reason, 'need to edit files');
+    assert.equal(after.reason, 'need DOM inspection');
     assert.equal(after.confidence, 0.8);
-    assert.ok(after.allowedNames.has('write_file') && after.allowedNames.has('edit_file'));
+    assert.ok(after.allowedNames.has('browser'));
     assert.ok(!after.allowedNames.has(ADD_TOOL_GROUPS_TOOL_NAME), '达到扩容上限后应移除控制工具');
     assert.equal(before.version, 1);
-    assert.ok(!before.allowedNames.has('write_file'), '旧 snapshot 不得被原地扩权');
+    assert.ok(!before.allowedNames.has('browser'), '旧 snapshot 不得被原地扩权');
     assert.notEqual(after, before);
 
     const planAfter = controller.snapshot(true);
-    for (const name of ['run_command', 'write_file', 'edit_file']) {
+    for (const name of ['run_command', 'write_file', 'edit_file', 'browser']) {
       assert.ok(!planAfter.allowedNames.has(name), `plan snapshot 不应暴露 ${name}`);
     }
-    const rejected = controller.expand(['browser-debug'], 'second expansion');
+    const rejected = controller.expand(['memory-write'], 'second expansion');
     assert.deepEqual(rejected.added, []);
     assert.deepEqual(rejected.rejected, ['expansion limit reached']);
     assert.equal(rejected.snapshot.version, 2);

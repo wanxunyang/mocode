@@ -2,6 +2,7 @@ import type OpenAI from 'openai';
 import {
   ADD_TOOL_GROUPS_TOOL_NAME,
   COMMON_TOOL_NAMES,
+  DEFAULT_ROUTE_GROUPS,
   TOOL_ROUTE_GROUP_NAMES,
   TOOL_ROUTE_GROUPS,
   getToolRouteGroupNames,
@@ -67,6 +68,17 @@ export function getAvailableToolRouteGroups(
     if (group === 'mcp') return groupNames.length > 0;
     return groupNames.length > 0 && groupNames.every((name) => registered.has(name));
   });
+}
+
+/**
+ * 需要 LLM 路由决定的簇 = 可用簇 − 常驻簇。router.ts 用它构造 selector schema 与 catalog,
+ * 常驻簇不出现在选项里(选了也无效,controller 已无条件激活)。
+ */
+export function getRoutableToolRouteGroups(
+  catalog: readonly Tool[] = tools,
+  gateAllows: (environmentName: string | undefined) => boolean = envGateAllows,
+): ToolRouteGroupName[] {
+  return getAvailableToolRouteGroups(catalog, gateAllows).filter((group) => !DEFAULT_ROUTE_GROUPS.includes(group));
 }
 
 export function toolRouteCatalog(
@@ -148,10 +160,15 @@ export class ToolPolicyController {
     this.gateAllows = init.gateAllows ?? envGateAllows;
     this.id = init.id ?? `route-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.maxExpansions = Math.max(0, init.maxExpansions ?? 3);
-    this.reason = init.reason?.trim() || 'LLM router selected common tools only.';
+    this.reason =
+      init.reason?.trim() || `Router selected common tools only; ${DEFAULT_ROUTE_GROUPS.join(', ')} always on.`;
     this.confidence = clampConfidence(init.confidence ?? 0);
     const available = new Set(getAvailableToolRouteGroups(this.catalog, this.gateAllows));
-    const requested = process.env.MOCODE_TOOL_POLICY === 'full' ? available : new Set(init.groups ?? []);
+    // 常驻簇无条件激活:路由漏判/失败都不会让主 Agent 起手就没有写文件或跑命令的能力。
+    const requested: Set<ToolRouteGroupName> =
+      process.env.MOCODE_TOOL_POLICY === 'full'
+        ? available
+        : new Set<ToolRouteGroupName>([...DEFAULT_ROUTE_GROUPS, ...(init.groups ?? [])]);
     for (const group of requested) {
       if (available.has(group)) this.selected.add(group);
     }

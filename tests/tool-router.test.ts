@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { __setChatCreateImpl } from '../src/llm/index.js';
-import { getAvailableToolRouteGroups } from '../src/tools/policy.js';
+import { getRoutableToolRouteGroups } from '../src/tools/policy.js';
+import { DEFAULT_ROUTE_GROUPS } from '../src/config/profiles.js';
 import { routeToolGroups } from '../src/tools/router.js';
 import '../src/tools/builtins/index.js';
 
@@ -91,38 +92,41 @@ test('routeToolGroups: 只暴露 selector schema，合法多标签决策可继�
   __setChatCreateImpl(async (body) => {
     captured = body as unknown as CapturedRequest;
     return selectorCall({
-      groups: ['workspace-write', 'workspace-write', 'unknown-group'],
+      groups: ['browser-debug', 'browser-debug', 'unknown-group'],
       inheritPrevious: true,
       confidence: 1.5,
-      reason: '  implementation continues  ',
+      reason: '  web debugging continues  ',
     });
   });
 
   try {
     const decision = await routeToolGroups({
       input: `${'x'.repeat(12_000)}TAIL_MUST_BE_TRUNCATED`,
-      previousGroups: ['shell-debug'],
+      previousGroups: ['memory-read'],
       planMode: true,
       attachmentNames: ['screen.png'],
     });
 
-    assert.deepEqual(decision.groups, ['shell-debug', 'workspace-write']);
+    assert.deepEqual(decision.groups, ['memory-read', 'browser-debug']);
     assert.equal(decision.inheritPrevious, true);
     assert.equal(decision.confidence, 1);
-    assert.equal(decision.reason, 'implementation continues');
+    assert.equal(decision.reason, 'web debugging continues');
     assert.equal(decision.fallback, false);
 
     assert.ok(captured);
     const request = captured as CapturedRequest;
     assert.equal(request.tools?.length, 1);
     assert.equal(request.tools?.[0]?.function.name, 'select_tool_groups');
-    assert.deepEqual(
-      request.tools?.[0]?.function.parameters?.properties?.groups?.items?.enum,
-      getAvailableToolRouteGroups(),
-    );
+    // 常驻组(workspace-write / shell-debug)不进路由选项:controller 已无条件激活它们。
+    const enumGroups = request.tools?.[0]?.function.parameters?.properties?.groups?.items?.enum;
+    const enumList: string[] = enumGroups ? [...enumGroups] : [];
+    assert.deepEqual(enumList, getRoutableToolRouteGroups());
+    for (const group of DEFAULT_ROUTE_GROUPS) {
+      assert.ok(!enumList.includes(group), `${group} 是常驻组，不应出现在 selector enum 里`);
+    }
     const userMessage = String(request.messages?.find((message) => message.role === 'user')?.content ?? '');
     assert.match(userMessage, /Current mode: PLAN/);
-    assert.match(userMessage, /Previous groups: shell-debug/);
+    assert.match(userMessage, /Previous groups: memory-read/);
     assert.match(userMessage, /Attachments: screen\.png/);
     assert.ok(!userMessage.includes('TAIL_MUST_BE_TRUNCATED'));
     assert.ok(userMessage.endsWith('x'.repeat(12_000)));
@@ -132,14 +136,14 @@ test('routeToolGroups: 只暴露 selector schema，合法多标签决策可继�
   }
 });
 
-test('routeToolGroups: 未知和被 gate 禁止的组会被过滤，不会借 previous 扩权', async () => {
-  const restore = isolateRouteEnv({ MEMORY_ENABLED: 'false' });
+test('routeToolGroups: 未知、被 gate 禁止与常驻的组都被过滤，不会借 previous 扩权', async () => {
+  const restore = isolateRouteEnv({ MEMORY_ENABLED: 'false', MOCODE_COMPUTER_USE_ENABLED: 'true' });
   __setChatCreateImpl(async () =>
     selectorCall({
-      groups: ['memory-write', 'workspace-write', 'not-real'],
+      groups: ['computer-control', 'workspace-write', 'not-real'],
       inheritPrevious: true,
       confidence: 0.6,
-      reason: 'edit without memory',
+      reason: 'drive the desktop app',
     }),
   );
   try {
@@ -147,7 +151,8 @@ test('routeToolGroups: 未知和被 gate 禁止的组会被过滤，不会借 pr
       input: 'continue editing',
       previousGroups: ['memory-read', 'shell-debug'],
     });
-    assert.deepEqual(decision.groups, ['shell-debug', 'workspace-write']);
+    // memory-read 被 gate 禁、shell-debug 是常驻组、workspace-write 是常驻组、not-real 不存在。
+    assert.deepEqual(decision.groups, ['computer-control']);
     assert.equal(decision.fallback, false);
   } finally {
     __setChatCreateImpl(null);
@@ -166,7 +171,7 @@ test('routeToolGroups: 缺失或损坏 selector 调用只回退 previous/common'
   try {
     const noCall = await routeToolGroups({ input: 'continue', previousGroups: ['workspace-write'] });
     assert.equal(noCall.fallback, true);
-    assert.deepEqual(noCall.groups, ['workspace-write']);
+    assert.deepEqual(noCall.groups, [], '常驻组不在可路由集合里，fallback 只回退真正可路由的组');
     assert.equal(noCall.confidence, 0);
 
     const malformed = await routeToolGroups({ input: 'continue', previousGroups: [] });
@@ -185,9 +190,9 @@ test('routeToolGroups: provider 普通错误 fallback，AbortError 必须继续�
     __setChatCreateImpl(async () => {
       throw Object.assign(new Error('router boom'), { status: 400 });
     });
-    const failed = await routeToolGroups({ input: 'do work', previousGroups: ['shell-debug'] });
+    const failed = await routeToolGroups({ input: 'do work', previousGroups: ['memory-read'] });
     assert.equal(failed.fallback, true);
-    assert.deepEqual(failed.groups, ['shell-debug']);
+    assert.deepEqual(failed.groups, ['memory-read']);
     assert.match(failed.reason, /Router failed \(router boom\)/);
 
     __setChatCreateImpl(async () => {

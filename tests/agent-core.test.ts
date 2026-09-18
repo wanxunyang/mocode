@@ -283,6 +283,9 @@ function restoreEnv(name: string, value: string | undefined): void {
 test('runAgentCore: add_tool_groups 单独形成 step 屏障，新增 schema 只在下一 step 出现', async () => {
   const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
   delete process.env.MOCODE_TOOL_POLICY;
+  // browser-debug 带 gateEnv，宿主环境可能把它关掉；显式开启，让扩容目标确定可路由。
+  const previousFrontend = process.env.MOCODE_FRONTEND_TOOLS_ENABLED;
+  process.env.MOCODE_FRONTEND_TOOLS_ENABLED = 'true';
   const requests: CapturedAgentRequest[] = [];
   let call = 0;
   __setChatCreateImpl(async (body) => {
@@ -298,7 +301,7 @@ test('runAgentCore: add_tool_groups 单独形成 step 屏障，新增 schema 只
                 id: 'expand-1',
                 function: {
                   name: 'add_tool_groups',
-                  arguments: '{"groups":["workspace-write"],"reason":"need to edit files"}',
+                  arguments: '{"groups":["browser-debug"],"reason":"need DOM debug"}',
                 },
               },
             ],
@@ -331,8 +334,9 @@ test('runAgentCore: add_tool_groups 单独形成 step 屏障，新增 schema 只
     const firstNames = capturedToolNames(requests[0]);
     const secondNames = capturedToolNames(requests[1]);
     assert.ok(firstNames.includes('add_tool_groups'));
-    assert.ok(!firstNames.includes('write_file') && !firstNames.includes('edit_file'));
-    assert.ok(secondNames.includes('write_file') && secondNames.includes('edit_file'));
+    // 扩容目标用非常驻组:workspace-write 现在每轮常驻,用它验证不了"下一 step 才生效"。
+    assert.ok(!firstNames.includes('browser') && !firstNames.includes('dev_server'));
+    assert.ok(secondNames.includes('browser') && secondNames.includes('dev_server'));
     assert.deepEqual(outcomes, [{ tool: 'add_tool_groups', status: 'success', code: 'OK' }]);
     assert.equal(policy.snapshot(false).version, 2);
 
@@ -346,16 +350,19 @@ test('runAgentCore: add_tool_groups 单独形成 step 屏障，新增 schema 只
     assert.ok(expansionTrace);
     assert.equal(expansionTrace.data.fromVersion, 1);
     assert.equal(expansionTrace.data.toVersion, 2);
-    assert.deepEqual(expansionTrace.data.addedGroups, ['workspace-write']);
+    assert.deepEqual(expansionTrace.data.addedGroups, ['browser-debug']);
   } finally {
     __setChatCreateImpl(null);
     restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
+    restoreEnv('MOCODE_FRONTEND_TOOLS_ENABLED', previousFrontend);
   }
 });
 
 test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call 配对结果', async () => {
   const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
   delete process.env.MOCODE_TOOL_POLICY;
+  const previousFrontend = process.env.MOCODE_FRONTEND_TOOLS_ENABLED;
+  process.env.MOCODE_FRONTEND_TOOLS_ENABLED = 'true';
   const requests: CapturedAgentRequest[] = [];
   let call = 0;
   __setChatCreateImpl(async (body) => {
@@ -376,7 +383,7 @@ test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call
                 id: 'mixed-expand',
                 function: {
                   name: 'add_tool_groups',
-                  arguments: '{"groups":["workspace-write"],"reason":"need writes"}',
+                  arguments: '{"groups":["browser-debug"],"reason":"need DOM debug"}',
                 },
               },
             ],
@@ -410,8 +417,8 @@ test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call
       { tool: 'add_tool_groups', status: 'denied', code: 'INVALID_ARGUMENTS' },
     ]);
     assert.equal(policy.snapshot(false).version, 1);
-    assert.ok(!policy.snapshot(false).allowedNames.has('write_file'));
-    assert.ok(!capturedToolNames(requests[1]).includes('write_file'));
+    assert.ok(!policy.snapshot(false).allowedNames.has('browser'));
+    assert.ok(!capturedToolNames(requests[1]).includes('browser'));
 
     assert.equal(history.length, 6);
     const assistant = history[2] as { tool_calls?: Array<{ id: string }> };
@@ -430,6 +437,7 @@ test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call
   } finally {
     __setChatCreateImpl(null);
     restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
+    restoreEnv('MOCODE_FRONTEND_TOOLS_ENABLED', previousFrontend);
   }
 });
 

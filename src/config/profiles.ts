@@ -129,6 +129,17 @@ export const TOOL_ROUTE_GROUPS: Record<ToolRouteGroupName, ToolRouteGroupDefinit
 
 export const TOOL_ROUTE_GROUP_NAMES = Object.keys(TOOL_ROUTE_GROUPS) as ToolRouteGroupName[];
 
+/**
+ * 常驻工具簇:每个 turn 无条件激活,不经过 LLM 路由(路由只需在「可用簇 − 常驻簇」里挑)。
+ * 入选标准:高频(coding agent 多数 turn 都要)+ 低暴露成本(工具少、schema 短)+ 漏判代价高
+ * (起手没有 write/run 会白付一个完整 model step 去 add_tool_groups,比路由本身还贵)。
+ * 高危/低频/不可自发现的簇(mcp、computer-control、memory-write、browser-debug、
+ * desktop-observe、orchestration)仍然必须走路由,不能进这里。
+ * PLAN 模式由 PLAN_DISABLED_TOOLS 剔除这些工具,只读语义不受影响。
+ * 注意:改这里要同步 router.ts 的 Routing rules / Examples(那两份是逐组启发式)。
+ */
+export const DEFAULT_ROUTE_GROUPS: readonly ToolRouteGroupName[] = ['workspace-write', 'shell-debug'];
+
 export function isToolRouteGroupName(value: unknown): value is ToolRouteGroupName {
   return typeof value === 'string' && (TOOL_ROUTE_GROUP_NAMES as string[]).includes(value);
 }
