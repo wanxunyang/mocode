@@ -98,24 +98,43 @@ export function validateNavigationUrl(input: string): URL {
   return url;
 }
 
+/**
+ * driver 解析链：全量 `playwright`（CLI 版随依赖装）→ `playwright-core`（桌面版只分发这个,
+ * 省 ~5MB 的浏览器下载器）。两者 API 同源,谁在先用谁 —— 桌面版因此不需要用户跑 `playwright install`。
+ */
+async function loadDriver(): Promise<typeof import('playwright')> {
+  const failures: string[] = [];
+  for (const spec of ['playwright', 'playwright-core']) {
+    try {
+      return (await import(spec)) as unknown as typeof import('playwright');
+    } catch (error) {
+      failures.push(`${spec}: ${errorMessage(error)}`);
+    }
+  }
+  throw new BrowserManagerError('EXECUTION_ERROR', `Playwright is not available (${failures.join('; ')}).`);
+}
+
+/**
+ * 可执行文件解析链：自带 Chromium → 系统 Edge → 系统 Chrome。
+ * 桌面版不打 Chromium 二进制,靠后两档命中(Win 自带 Edge,macOS/Linux 一般有 Chrome)。
+ */
+const BROWSER_CHANNELS: ReadonlyArray<string | undefined> = [undefined, 'msedge', 'chrome'];
+
 async function launchBrowser(headed: boolean): Promise<Browser> {
-  let playwright: typeof import('playwright');
-  try {
-    playwright = await import('playwright');
-  } catch (error) {
-    throw new BrowserManagerError(
-      'EXECUTION_ERROR',
-      `Playwright is not available: ${errorMessage(error)}. Run "npm install" first.`,
-    );
+  const playwright = await loadDriver();
+  const failures: string[] = [];
+  for (const channel of BROWSER_CHANNELS) {
+    try {
+      return await playwright.chromium.launch({ headless: !headed, ...(channel ? { channel } : {}) });
+    } catch (error) {
+      failures.push(`${channel ?? 'bundled chromium'}: ${errorMessage(error)}`);
+    }
   }
-  try {
-    return await playwright.chromium.launch({ headless: !headed });
-  } catch (error) {
-    throw new BrowserManagerError(
-      'EXECUTION_ERROR',
-      `Unable to launch Chromium: ${errorMessage(error)}. If the browser binary is missing, run "npx playwright install chromium".`,
-    );
-  }
+  throw new BrowserManagerError(
+    'EXECUTION_ERROR',
+    `Unable to launch a browser (${failures.join('; ')}). ` +
+      `Install Chrome or Edge, or run "npx playwright install chromium".`,
+  );
 }
 
 async function getBrowser(headed: boolean): Promise<Browser> {

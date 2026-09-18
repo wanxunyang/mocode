@@ -8,11 +8,18 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.preload.json && node copy-static.mjs",
     "start": "electron dist/main.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "stage:host": "node scripts/stage-host.mjs",
+    "pack:dir": "npm run build && npm run stage:host && electron-builder --dir",
+    "pack:win": "npm run build && npm run stage:host && electron-builder --win",
+    "pack:mac": "npm run build && npm run stage:host && electron-builder --mac",
+    "pack:linux": "npm run build && npm run stage:host && electron-builder --linux"
   },
   "devDependencies": {
     "@types/node": "22.0.0",
     "electron": "43.0.0",
+    "electron-builder": "^25.1.8",
+    "misans": "4.1.0",
     "typescript": "5.7.2"
   },
   "engines": {
@@ -20,7 +27,64 @@
   },
   "dependencies": {
     "@mocode/runtime": "0.1.0",
-    "dotenv": "16.0.0",
-    "misans": "4.1.0"
+    "dotenv": "16.0.0"
+  },
+  "build": {
+    "appId": "com.mocode.work",
+    "productName": "MoCode Work",
+    "copyright": "Copyright © MoCode",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/mocode-ai",
+        "to": "mocode-ai"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MoCode Work",
+      "artifactName": "${productName}-${version}-setup.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "${productName} ${version}"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "icon": "assets/icons",
+      "category": "Development",
+      "artifactName": "${productName}-${version}.${ext}"
+    }
   }
 }

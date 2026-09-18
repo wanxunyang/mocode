@@ -116,6 +116,18 @@ function findSourceWorkspaceHost(): string | null {
   }
 }
 
+/**
+ * Electron 打包形态：host 随安装包分发给到 resources/mocode-ai/，不在任何 node_modules 里，
+ * require.resolve 必然落空。只在 process.resourcesPath 存在（Electron 注入，纯 Node 下 undefined）
+ * 时探测这一个确定性位置，不放宽成任意路径搜索。
+ */
+function hostFromElectronResources(): string | null {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  if (!resourcesPath) return null;
+  const candidate = path.join(resourcesPath, 'mocode-ai', 'bin', 'mocode-agent-host.js');
+  return existsSync(candidate) ? candidate : null;
+}
+
 function resolveHostPath(options: MocodeHostLaunchOptions): string {
   const explicit = options.hostPath ?? options.env?.MOCODE_HOST_PATH ?? process.env.MOCODE_HOST_PATH;
   if (explicit) {
@@ -129,6 +141,8 @@ function resolveHostPath(options: MocodeHostLaunchOptions): string {
   } catch {
     // Source workspaces use the package manifest fallback below.
   }
+  const packaged = hostFromElectronResources();
+  if (packaged) return packaged;
   const workspace = findSourceWorkspaceHost();
   if (workspace) return workspace;
   throw new Error(

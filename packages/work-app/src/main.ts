@@ -512,9 +512,22 @@ function normalizeState(value: unknown): StoredState | null {
   return { version: 1, projects, tasks, selectedProjectId: projects.some((item) => item.id === raw.selectedProjectId) ? raw.selectedProjectId! : projects[0].id, selectedTaskId: typeof raw.selectedTaskId === 'string' ? raw.selectedTaskId : undefined };
 }
 
+/**
+ * 首次启动的默认项目根目录。
+ *  - 开发态：仓库根(work-app/dist → ../../..)，方便直接拿 mocode 自己的源码开工。
+ *  - 打包态：安装目录只读(Windows 在 Program Files/AppData\Programs 下)，往那儿写
+ *    `.mocode/sessions` 会直接 EPERM。改用 userData 下的 workspace 目录，可写且稳定。
+ */
+function defaultProjectRoot(): string {
+  if (!app.isPackaged) return path.join(__dirname, '..', '..', '..');
+  const root = path.join(app.getPath('userData'), 'workspace');
+  mkdirSync(root, { recursive: true });
+  return root;
+}
+
 async function loadState(): Promise<StoredState> {
   try { const loaded = normalizeState(JSON.parse(readFileSync(statePath(), 'utf8'))); if (loaded) return loaded; } catch { /* First launch. */ }
-  const project = await projectFor(path.resolve(process.env.MOCODE_WORK_PROJECT ?? path.join(__dirname, '..', '..', '..')));
+  const project = await projectFor(path.resolve(process.env.MOCODE_WORK_PROJECT ?? defaultProjectRoot()));
   return { version: 1, projects: [project], selectedProjectId: project.id, tasks: [] };
 }
 

@@ -33,6 +33,12 @@ semantic-review/
 *.tgz
 coverage/
 
+# Electron 打包产物：release* 是 electron-builder 的安装包输出（100MB+，含 win-unpacked/
+# 与临时验证目录 release-verify 等），build/ 是 stage-host.mjs 拼出来的 host 分发包，
+# 都由 `npm run pack:*` 现生成，不入库。
+packages/work-app/release*/
+packages/work-app/build/
+
 # Rust 增量重构实验区(路径 A:Rust TUI 前端,经 JSON-over-stdio 复用现有 TS agent-host)。
 # 独立于 TS 主工程、不入库,便于随时丢弃重来;成熟后再考虑提升为正式产物。
 /rust/target/
