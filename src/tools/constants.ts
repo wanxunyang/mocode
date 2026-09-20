@@ -76,7 +76,17 @@ export const MAX_GRAPH_EDGES = 2000;
 
 // .codegraph:codegraph 索引目录(codegraph.db 是 SQLite 二进制 + daemon.log),
 // grep/glob 扫它无意义且会产出数 KB 的超长「行」,污染 TUI 展开渲染。
-export const IGNORE = ['**/node_modules/**', '**/.git/**', '**/.codegraph/**'];
+// 构建产物目录同理:rust/(cargo target,数千个 .o/.rmeta 二进制)、dist/ 与 dist-tests/
+// (tsc 产物,与 src 的 .ts 一一对应的 .js,扫它们只会重复命中并拖慢全库 grep——
+// 实测无 glob 限定的 grep 扫全库耗时 205s,其中大半耗在这类目录)。
+export const IGNORE = [
+  '**/node_modules/**',
+  '**/.git/**',
+  '**/.codegraph/**',
+  '**/rust/**',
+  '**/dist/**',
+  '**/dist-tests/**',
+];
 
 // ── legacy profile fallback（官方 TUI/stdio 已由 ToolPolicy 控制）────────────────
 // 保留导出名以兼容未传 ToolPolicy 的嵌入调用与旧测试。
