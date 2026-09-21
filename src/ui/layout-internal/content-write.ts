@@ -328,6 +328,7 @@ export function clearContent(): void {
   // 欢迎引导块随 buffer 一起清掉(/clear / /resume 等路径),状态复位后可由 repl 重新写入。
   state.welcomeStart = -1;
   state.welcomeRows = 0;
+  state.welcomeSource = [];
   // 清内容区必须同时作废旧菜单擦除坐标:picker(/resume /rollback /theme)把菜单画在内容区底部,
   // 菜单行号缓存在 lastMenuStartRow/lastMenuRows;若不清零,后续 paintInput 会按旧坐标“擦菜单”,
   // 把刚 renderHistory/contentWrite 写好的内容(如“已续接会话”提示)清掉,导致用户要滚动一下才刷新。
@@ -365,14 +366,66 @@ export function rewindContent(rowsToRewind: number): void {
 // ── 欢迎引导块(新会话开场)──
 // 开场写在内容区(banner 之下),教用户怎么开始;首次提交任何输入(消息或斜杠命令)前
 // 由 dismissWelcomeBlock 整块从 buffer 撤掉——「一打开就能看见,开始干活就消失」。
+//
+// 居中在本层现算:调用方(runtime.welcomeLines)只产出**逻辑行**(带色、不带缩进),
+// 这里按写入当时的列宽补左缩进,并把逻辑行源记入 state.welcomeSource——终端 resize 后
+// reflowWelcomeBlockForResize 按新列宽重新居中/折行重排整块。否则块停留在旧宽度:
+// 缩窄后被 viewport 截断成「…」、放宽后仍偏在旧位置(「提示不随窗口变化」bug)。
 
-/** 写欢迎引导块(每行自洽带色、行宽须 ≤ cols,contentWrite 状态机兜底折行);已在屏上则跳过。 */
+/** 欢迎块逻辑行 → 待写物理行:按可见宽度(剥 ANSI、CJK 计 2)整行居中,余数归右。
+ *  空行原样;可见宽度 ≥ cols 的行不缩进,超宽部分由 contentWrite 状态机折行兜底。 */
+export function renderWelcomeRows(lines: readonly string[], cols: number): string[] {
+  return lines.map((line) => {
+    const w = ansiDisplayWidth(line);
+    if (w <= 0 || w >= cols) return line;
+    return ' '.repeat(Math.floor((cols - w) / 2)) + line;
+  });
+}
+
+/** 写欢迎引导块(逻辑行经 renderWelcomeRows 居中后写入,contentWrite 兜底折行);已在屏上则跳过。 */
 export function writeWelcomeBlock(lines: string[]): void {
   if (!state.active || !ui.isTTY || lines.length === 0) return;
   if (state.welcomeRows > 0) return; // 已在屏上,不重复写
+  state.welcomeSource = [...lines];
   state.welcomeStart = content.committedRows();
-  contentWrite(lines.join('\n') + '\n');
+  contentWrite(renderWelcomeRows(lines, getGeo().cols).join('\n') + '\n');
   state.welcomeRows = content.committedRows() - state.welcomeStart;
+}
+
+/**
+ * resize(列宽变化)后按新列宽重排欢迎引导块,返回 ReflowChange 供调用方统一迁移
+ * 选区 / batch / viewport 锚点;不可安全重排时返回 null,保持旧行不动。
+ *
+ * 前提:块可见期间它恒为缓冲尾(写入后、首次输入撤块前没有任何内容写在它后面;
+ * /clear 重写时同样在尾部)。据此用「删尾块 → 续写位回到块首 → 按新列宽重写」即可
+ * 原地重排,行数变化由 committedRows 差值重新记账。guard 拒绝例外场景:
+ *  - 滚动回看中 / md 流式段活跃:welcome 与二者不应共存(块在首次输入前就撤掉),
+ *    真发生时不动块,退回旧行为;
+ *  - 块后已有内容(不变式被破坏):重写会盖到后续内容,放弃。
+ */
+function reflowWelcomeBlockForResize(cols: number): content.ReflowChange | null {
+  const start = state.welcomeStart;
+  const n = state.welcomeRows;
+  const source = state.welcomeSource;
+  if (!source || source.length === 0 || n <= 0 || start < 0) return null;
+  if (state.scrollOffset > 0 || state.mdActive) return null;
+  if (start + n !== content.committedRows()) return null;
+  const oldLines: string[] = [];
+  for (let i = start; i < start + n; i++) oldLines.push(content.lineAt(i) ?? '');
+  // 用 content 层原语(而非 layout 包装 contentDeleteFrom):batch 索引平移由调用方对返回的
+  // ReflowChange 统一做 shiftBatchesForReflow,这里再 shiftBatchesAfter 会双重平移。
+  // segmentStartRow / scrollOffset 已被 guard 排除(mdActive / scrolled 均返回 null),无需维护。
+  content.deleteFrom(start, n);
+  // 块是缓冲尾 → 删后续写位 = 块首。显式重锚(contentWrite 入口的归一化在块曾溢出屏、
+  // contentRow 已被钳到 contentBottom 时算不准),contentWrite 入口会再归一化一次,两处一致。
+  const g = getGeo();
+  state.contentRow = Math.min(start + 1, g.contentBottom);
+  state.contentCol = 1;
+  contentWrite(renderWelcomeRows(source, cols).join('\n') + '\n');
+  state.welcomeRows = content.committedRows() - start;
+  const newLines: string[] = [];
+  for (let i = start; i < start + state.welcomeRows; i++) newLines.push(content.lineAt(i) ?? '');
+  return { start, oldCount: n, newCount: state.welcomeRows, delta: state.welcomeRows - n, oldLines, newLines };
 }
 
 /** 撤掉欢迎引导块:删 buffer 区间(若已被外部清空/裁掉则只复位状态)+ 续写位前移 + 钳位重画。 */
@@ -382,6 +435,7 @@ export function dismissWelcomeBlock(): void {
   const n = state.welcomeRows;
   state.welcomeRows = 0;
   state.welcomeStart = -1;
+  state.welcomeSource = [];
   if (start < 0 || start >= content.committedRows()) return; // 块已被 clear/trim,无需删
   content.deleteFrom(start, n);
   const g = getGeo();
@@ -545,13 +599,20 @@ function remapLineForReflow(line: number, change: content.ReflowChange): number 
   return change.start + Math.round(relative * Math.max(0, change.newCount - 1));
 }
 
-/** 终端尺寸变化后更新正文布局。列宽变化时重排 markdown；仅高度变化时只重算屏幕锚点。 */
+/** 终端尺寸变化后更新正文布局。列宽变化时先重排欢迎块、再重排 markdown 段;仅高度变化时只重算屏幕锚点。 */
 export function reflowContentForResize(cols: number, colsChanged: boolean): void {
   const oldTotal = content.totalRows();
   const oldViewportStart = viewportAbsStart();
   const oldViewportEnd = Math.max(oldViewportStart, oldTotal - state.scrollOffset - 1);
   let mappedViewportEnd = oldViewportEnd;
-  const changes = colsChanged ? content.reflowMarkdown(cols, renderMarkdown) : [];
+  const changes: content.ReflowChange[] = [];
+  if (colsChanged) {
+    // 欢迎块先于 markdown 段重排:它可见期间恒在缓冲头部区(banner 之后、任何 md 段之前),
+    // 其行数变化会平移后续段;先重排它,reflowMarkdown 报告的 start 才与它在同一坐标系。
+    const welcomeChange = reflowWelcomeBlockForResize(cols);
+    if (welcomeChange) changes.push(welcomeChange);
+    changes.push(...content.reflowMarkdown(cols, renderMarkdown));
+  }
   for (const change of changes) {
     shiftBatchesForReflow(change.start, change.oldCount, change.newCount);
     mappedViewportEnd = remapLineForReflow(mappedViewportEnd, change);

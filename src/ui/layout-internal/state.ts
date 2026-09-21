@@ -80,6 +80,9 @@ export const state = {
   bannerH: 0,
   welcomeStart: -1, // 块起点(content.committedRows 口径的绝对行索引)
   welcomeRows: 0, // 块行数(0 = 屏上无欢迎块)
+  /** 欢迎块逻辑行源(带色、不带居中缩进)。writeWelcomeBlock 记录,列宽变化后由
+   *  reflowWelcomeBlockForResize 按新列宽重新居中/折行重排;clear / dismiss 时清空。 */
+  welcomeSource: [] as string[],
 
   // ── 滚动与流式暂停(回看冻结 / 打字期停物理写) ──
   scrollOffset: 0, // 滚动回看距尾行数(0=尾,跟随新内容);>0 时 viewport 显历史、状态行显滚动指示

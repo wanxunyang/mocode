@@ -16,7 +16,7 @@ import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
 import { ui, setTheme } from '../ui/theme.js';
-import { bannerLines, displayWidth } from '../ui/render.js';
+import { bannerLines } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
 import { promptWithSlashMenu, promptTurnPicker, promptRevertChoice, type SessionPickerItem } from '../ui/prompt.js';
@@ -280,27 +280,26 @@ export async function startRepl(
    * 首次提交任何输入(消息或斜杠命令)前由 layout.dismissWelcomeBlock 整块撤掉——
    * 「一打开就能看见,开始干活就消失」。/clear 清空后重新写一次(回到空会话状态)。
    */
-  // 欢迎块整块按终端宽度居中:先按纯文本(displayWidth 不剥 ANSI)算左缩进,再套色;
-  // 余数列归左,与输入框提示行的居中策略一致;超宽行由 contentWrite 兜底折行。
+  // 这里只产出**逻辑行**(带色、不带缩进);整块按终端宽度居中由 layout.writeWelcomeBlock
+  // 按写入当时的列宽现算,并把逻辑行源记入 layout state——resize 后按新列宽重新居中/折行,
+  // 否则块停留在启动宽度,缩窄后被截断成「…」(「提示不随窗口变化」bug)。
   const welcomeLines = (): string[] => {
-    const cols = layout.getGeo().cols;
-    const pad = (plain: string): string => ' '.repeat(Math.max(0, Math.floor((cols - displayWidth(plain)) / 2)));
     const ideNotice = `⚠ ${t('welcome.ideNotice')}`;
     return [
       '',
-      `${pad(ideNotice)}${ui.yellow}${ui.bold}${ideNotice}${ui.reset}`,
+      `${ui.yellow}${ui.bold}${ideNotice}${ui.reset}`,
       '',
-      `${pad(t('welcome.gettingStarted'))}${ui.accent}${ui.bold}${t('welcome.gettingStarted')}${ui.reset}`,
-      `${pad(`· ${t('welcome.start1')}`)}${ui.dim}· ${t('welcome.start1')}${ui.reset}`,
-      `${pad(`· ${t('welcome.start2')}`)}${ui.dim}· ${t('welcome.start2')}${ui.reset}`,
-      `${pad(`· ${t('welcome.start3')}`)}${ui.dim}· ${t('welcome.start3')}${ui.reset}`,
+      `${ui.accent}${ui.bold}${t('welcome.gettingStarted')}${ui.reset}`,
+      `${ui.dim}· ${t('welcome.start1')}${ui.reset}`,
+      `${ui.dim}· ${t('welcome.start2')}${ui.reset}`,
+      `${ui.dim}· ${t('welcome.start3')}${ui.reset}`,
       '',
-      `${pad(t('welcome.capabilities'))}${ui.accent}${ui.bold}${t('welcome.capabilities')}${ui.reset}`,
-      `${pad(`· ${t('welcome.cap1')}`)}${ui.dim}· ${t('welcome.cap1')}${ui.reset}`,
-      `${pad(`· ${t('welcome.cap2')}`)}${ui.dim}· ${t('welcome.cap2')}${ui.reset}`,
-      `${pad(`· ${t('welcome.cap3')}`)}${ui.dim}· ${t('welcome.cap3')}${ui.reset}`,
+      `${ui.accent}${ui.bold}${t('welcome.capabilities')}${ui.reset}`,
+      `${ui.dim}· ${t('welcome.cap1')}${ui.reset}`,
+      `${ui.dim}· ${t('welcome.cap2')}${ui.reset}`,
+      `${ui.dim}· ${t('welcome.cap3')}${ui.reset}`,
       '',
-      `${pad(t('welcome.try'))}${ui.dim}${t('welcome.try')}${ui.reset}`,
+      `${ui.dim}${t('welcome.try')}${ui.reset}`,
       '',
     ];
   };
