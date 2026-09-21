@@ -9,6 +9,8 @@ import {
   type ToolRouteGroupName,
 } from '../config/profiles.js';
 import { getRoutableToolRouteGroups, toolRouteCatalog } from './policy.js';
+import { getRouterMode, getJevRouterConfig, isJevRouterConfigured } from '../config/index.js';
+import { askJev, type JevAskResult, type JevQuestion } from './jev-client.js';
 
 const ROUTER_TOOL_NAME = 'select_tool_groups';
 const MAX_ROUTER_INPUT_CHARS = 12_000;
@@ -126,8 +128,11 @@ function parseDecision(
 }
 
 /**
- * 每个真实用户 turn 强制执行一次无副作用 LLM 预路由。失败时沿用上一 turn 的簇；主 Agent
- * 仍可通过 add_tool_groups 自救，但绝不因路由失败直接暴露 full 工具集。
+ * 每个真实用户 turn 强制执行一次无副作用预路由。后端由 /router 选择:
+ *   - `llm`(默认):与主 Agent 同一后端,直出一个簇集合,无可调旋钮。
+ *   - `jev`:TypeSafe systemone,每组独立出 0~1 概率,按阈值出簇(阈值可调是选它的核心理由)。
+ * 两条路径失败都沿用上一 turn 的簇;主 Agent 仍可通过 add_tool_groups 自救,
+ * 但绝不因路由失败直接暴露 full 工具集。
  */
 export async function routeToolGroups(request: ToolRouteRequest): Promise<ToolRouteDecision> {
   const startedAt = Date.now();
@@ -144,6 +149,108 @@ export async function routeToolGroups(request: ToolRouteRequest): Promise<ToolRo
     );
   }
 
+  if (getRouterMode() === 'jev') {
+    return routeWithJev(request, availableGroups, available, previousGroups, startedAt);
+  }
+  return routeWithLlm(request, availableGroups, available, previousGroups, startedAt);
+}
+
+/**
+ * Jev(TypeSafe systemone)路由:每组独立问一个 noul 问题,拿到 0~1 概率后按阈值出簇。
+ *
+ * 与 LLM 路径的差别:LLM 直出一个集合、没有可调旋钮;Jev 出概率,阈值才是可调旋钮——
+ * 这正是值得接它的理由(可按 假阴:假阳 的代价比调 operating point)。
+ *
+ * 问题正文复用 TOOL_ROUTE_GROUPS[g].description(与 LLM 路径的 catalog 同一来源),
+ * 避免「组语义」在多处各写一份而漂移。
+ */
+async function routeWithJev(
+  request: ToolRouteRequest,
+  availableGroups: readonly ToolRouteGroupName[],
+  available: ReadonlySet<ToolRouteGroupName>,
+  previousGroups: readonly ToolRouteGroupName[],
+  startedAt: number,
+): Promise<ToolRouteDecision> {
+  if (!isJevRouterConfigured()) {
+    return fallbackDecision(
+      startedAt,
+      previousGroups,
+      'Jev router selected but MOCODE_ROUTER_JEV_API_KEY is unset; reused previous groups. Run /router key <key>.',
+    );
+  }
+  const jevConfig = getJevRouterConfig();
+  const questions: Record<string, JevQuestion> = {};
+  for (const group of availableGroups) {
+    questions[group] = {
+      type: 'noul',
+      instructions: `Does the next agent turn need this capability: ${TOOL_ROUTE_GROUPS[group].description}`,
+    };
+  }
+
+  let result: JevAskResult;
+  try {
+    result = await askJev({
+      task: request.input.slice(0, MAX_ROUTER_INPUT_CHARS),
+      questions,
+      mode: request.planMode ? 'PLAN' : 'AUTO',
+      previousGroups,
+      baseUrl: jevConfig.baseUrl,
+      apiKey: jevConfig.apiKey,
+      model: jevConfig.model,
+      signal: request.signal,
+    });
+  } catch (error) {
+    // 只有用户取消会抛(见 jev-client):与 LLM 路径一致地继续上抛,由 runtime 撤回本轮。
+    if (request.signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw error;
+    return fallbackDecision(
+      startedAt,
+      previousGroups,
+      `Jev router failed (${error instanceof Error ? error.message : String(error)}); reused previous groups.`,
+    );
+  }
+
+  if (!result.ok) {
+    return fallbackDecision(startedAt, previousGroups, `Jev router failed (${result.error}); reused previous groups.`);
+  }
+
+  const selected: ToolRouteGroupName[] = [];
+  for (const group of availableGroups) {
+    const probability = result.probabilities[group];
+    if (probability === undefined) continue;
+    // mcp 用更高门槛:实测它是系统性假阳性磁铁(对无关任务也给 0.5–0.7)。
+    const threshold = group === 'mcp' ? jevConfig.confidenceMinMcp : jevConfig.confidenceMin;
+    if (probability >= threshold) selected.push(group);
+  }
+  const inheritPrevious = (result.inheritPrevious ?? 0) >= 0.5;
+  const merged = new Set<ToolRouteGroupName>(inheritPrevious ? previousGroups : []);
+  for (const group of selected) merged.add(group);
+
+  // confidence 取「已选簇里最小的那个概率」:最弱一环决定整体可信度,且随阈值单调。
+  const selectedProbabilities = selected
+    .map((group) => result.probabilities[group])
+    .filter((value): value is number => value !== undefined);
+  const confidence = selectedProbabilities.length ? Math.min(...selectedProbabilities) : 0;
+
+  return {
+    groups: [...merged].filter((group) => available.has(group)),
+    inheritPrevious,
+    confidence,
+    reason: `Jev(${result.model ?? jevConfig.model}) selected ${
+      merged.size ? [...merged].join(', ') : 'no extra groups'
+    } at thresholds ${jevConfig.confidenceMin}/${jevConfig.confidenceMinMcp}.`,
+    latencyMs: Date.now() - startedAt,
+    fallback: false,
+  };
+}
+
+/** LLM 路由(默认路径):一次 select_tool_groups 工具调用,直出簇集合。 */
+async function routeWithLlm(
+  request: ToolRouteRequest,
+  availableGroups: readonly ToolRouteGroupName[],
+  available: ReadonlySet<ToolRouteGroupName>,
+  previousGroups: readonly ToolRouteGroupName[],
+  startedAt: number,
+): Promise<ToolRouteDecision> {
   // 路由规则与示例、profiles.ts 的 TOOL_ROUTE_GROUPS descriptions 是三源:逐组启发式和
   // Examples 是对 descriptions 的强化(对弱模型有真实价值),但组定义变更时三处需同步维护。
   const system = `You are mocode's capability router. You do not solve the task and you cannot execute tools.

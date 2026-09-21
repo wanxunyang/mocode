@@ -87,6 +87,16 @@ export function buildSlashCommands(): SlashCommand[] {
       ],
     },
     {
+      name: '/router',
+      desc: d('commands.router'),
+      children: [
+        { name: 'status', value: '/router', desc: d('commands.routerStatus') },
+        { name: 'llm', value: '/router llm', desc: d('commands.routerLlm') },
+        { name: 'jev', value: '/router jev', desc: d('commands.routerJev') },
+        { name: 'test', value: '/router test', desc: d('commands.routerTest') },
+      ],
+    },
+    {
       name: '/mode',
       desc: d('commands.mode'),
       children: [
@@ -165,7 +175,7 @@ export const HELP_GROUPS: { key: TranslationKey; names: string[] }[] = [
   { key: 'help.groupSession', names: ['/sessions', '/rollback', '/memory', '/skills', '/skill', '/init'] },
   {
     key: 'help.groupConfig',
-    names: ['/mode', '/subagent', '/fe', '/mcp', '/theme', '/pet', '/image', '/language', '/upgrade'],
+    names: ['/mode', '/subagent', '/fe', '/mcp', '/router', '/theme', '/pet', '/image', '/language', '/upgrade'],
   },
 ];
 

@@ -28,6 +28,7 @@ import { skillCommands } from './skill.js';
 import { compactCommands } from './compact.js';
 import { appearanceCommands } from './appearance.js';
 import { modelCommands } from './model.js';
+import { routerCommands } from './router.js';
 import { toolGroupCommands } from './tool-group.js';
 
 /**
@@ -48,6 +49,7 @@ export const commandHandlers: CommandHandler[] = [
   ...compactCommands,
   ...appearanceCommands,
   ...modelCommands,
+  ...routerCommands,
   ...toolGroupCommands,
 ];
 

@@ -46,6 +46,11 @@ const zhCN = {
   'commands.modelShow': '显示当前模型配置',
   'commands.modelUse': '按名称应用预设',
   'commands.modelDelete': '删除指定预设',
+  'commands.router': '工具预路由后端（LLM / Jev）',
+  'commands.routerStatus': '显示当前预路由后端与配置',
+  'commands.routerLlm': '用主 LLM 做预路由（默认）',
+  'commands.routerJev': '用 Jev systemone API 做预路由',
+  'commands.routerTest': '探测 Jev 端点连通性',
   'commands.mode': '切换 Agent 工作模式',
   'commands.modePlan': '只读探查并产出计划',
   'commands.modeAuto': '自动执行（工具按任务动态路由）',
@@ -339,6 +344,21 @@ const zhCN = {
   'upgrade.failed': '[upgrade] 失败：{message}',
   'upgrade.usage':
     '/upgrade 用法：\n  /upgrade              升级到最新版本\n  /upgrade now          同 /upgrade\n  /upgrade check        检查当前版本与最新版本差异\n  /upgrade status       显示当前本地版本',
+  'router.status': '工具预路由后端：{mode}',
+  'router.modeLlm': 'LLM（与主 Agent 同一后端，默认）',
+  'router.modeJev': 'Jev（TypeSafe systemone API）',
+  'router.jevConfig': '端点 {baseUrl} · 模型 {model} · key {key} · 阈值 {min}/{minMcp}',
+  'router.source': '来源 {env}（{path}）',
+  'router.usage':
+    '/router 用法：\n  /router                 显示当前后端与配置\n  /router llm             用主 LLM 做预路由（默认）\n  /router jev             用 Jev systemone API 做预路由\n  /router base <url>      设置 Jev 端点（本地兼容层可指向 localhost）\n  /router key <key>       设置 Jev API key\n  /router model <name>    设置 Jev 模型名（默认 jev-latest）\n  /router min <0-1>       设置通用出簇阈值（默认 0.65）\n  /router min-mcp <0-1>   设置 mcp 专用阈值（默认 0.85）\n  /router test            探测 Jev 端点连通性',
+  'router.changed': '已切换预路由后端 → {mode}（下一轮生效）',
+  'router.set': '已设置 {field} = {value}（下一轮生效）',
+  'router.invalid': '参数无效：{detail}',
+  'router.testRunning': '正在探测 Jev 端点…',
+  'router.testOk': 'Jev 端点可用：{latency}ms · 模型 {model}',
+  'router.testFail': 'Jev 端点不可用：{error}',
+  'router.saved': '已持久化到 {path}',
+  'router.needsKey': '尚未配置 Jev API key；请先运行 /router key <key>。',
 } as const;
 
 export type TranslationKey = keyof typeof zhCN;
@@ -388,6 +408,11 @@ const en: Record<TranslationKey, string> = {
   'commands.modelShow': 'Show current model configuration',
   'commands.modelUse': 'Apply a preset by name',
   'commands.modelDelete': 'Delete a preset',
+  'commands.router': 'Tool pre-routing backend (LLM / Jev)',
+  'commands.routerStatus': 'Show current pre-routing backend and config',
+  'commands.routerLlm': 'Route with the main LLM (default)',
+  'commands.routerJev': 'Route with the Jev systemone API',
+  'commands.routerTest': 'Probe Jev endpoint connectivity',
   'commands.mode': 'Switch Agent mode',
   'commands.modePlan': 'Read-only research and planning',
   'commands.modeAuto': 'Execute automatically with task-routed tools',
@@ -696,6 +721,21 @@ const en: Record<TranslationKey, string> = {
   'upgrade.failed': '[upgrade] failed: {message}',
   'upgrade.usage':
     'Usage: /upgrade\n  /upgrade              Upgrade to latest\n  /upgrade now          Same as /upgrade\n  /upgrade check        Check current vs latest\n  /upgrade status       Show current local version',
+  'router.status': 'Tool pre-routing backend: {mode}',
+  'router.modeLlm': 'LLM (same backend as the main agent; default)',
+  'router.modeJev': 'Jev (TypeSafe systemone API)',
+  'router.jevConfig': 'endpoint {baseUrl} · model {model} · key {key} · thresholds {min}/{minMcp}',
+  'router.source': 'Source {env} ({path})',
+  'router.usage':
+    'Usage: /router\n  /router                 Show backend and config\n  /router llm             Route with the main LLM (default)\n  /router jev             Route with the Jev systemone API\n  /router base <url>      Set the Jev endpoint (point at localhost for a local compat server)\n  /router key <key>       Set the Jev API key\n  /router model <name>    Set the Jev model name (default jev-latest)\n  /router min <0-1>       Set the general activation threshold (default 0.65)\n  /router min-mcp <0-1>   Set the mcp-specific threshold (default 0.85)\n  /router test            Probe Jev endpoint connectivity',
+  'router.changed': 'Pre-routing backend switched → {mode} (takes effect next turn)',
+  'router.set': 'Set {field} = {value} (takes effect next turn)',
+  'router.invalid': 'Invalid argument: {detail}',
+  'router.testRunning': 'Probing Jev endpoint…',
+  'router.testOk': 'Jev endpoint is reachable: {latency}ms · model {model}',
+  'router.testFail': 'Jev endpoint unreachable: {error}',
+  'router.saved': 'Persisted to {path}',
+  'router.needsKey': 'Jev API key is not configured yet; run /router key <key> first.',
 };
 
 const resources: Record<Language, Record<TranslationKey, string>> = {

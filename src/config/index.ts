@@ -9,6 +9,8 @@ import { buildValidationCommandsSection } from '../verification/prompt.js';
 import { getActivePresetName, readPreset } from './presets.js';
 import { detectLanguage, setLanguage, t, type Language } from '../i18n/index.js';
 import { isProfileName, profileHasGroup, type ProfileName } from './profiles.js';
+// 端点常量归协议实现方(jev-client.ts,纯叶子无 import,不引入环);此处只引用不重定义。
+import { DEFAULT_JEV_BASE_URL } from '../tools/jev-client.js';
 
 /**
  * 按优先级加载配置文件并回填 process.env:
@@ -865,4 +867,72 @@ export function updateMemoryConfig(enabled: boolean): void {
 export function updateLanguageConfig(language: Language): void {
   setLanguage(language);
   process.env.MOCODE_LANGUAGE = language;
+}
+
+// ── 工具预路由:后端模式(llm | jev)───────────────────────────────────────────
+//
+// 为什么直接读 process.env 而不进 Config 接口:
+// 与 isRouteCapabilityAllowed(见上)同一理由——路由模式可在 REPL 内用 /router 即时切换,
+// 且 loadEnvFiles 已把配置文件回填进 process.env。读取发生在每 turn 的 routeToolGroups
+// 调用点(非模块初始化),故改后下一真实用户 turn 立即生效,无需重启。
+// 若进 Config 单例,const config 在模块初始化时求值,反而拿不到 /router 的运行时切换。
+
+/** 工具预路由后端模式。llm = 与主 Agent 同一后端(默认,零额外依赖)；jev = TypeSafe systemone API。 */
+export type RouterMode = 'llm' | 'jev';
+
+/** 当前路由模式;未知值一律回退 llm(保守:保证有可用的路由后端)。 */
+export function getRouterMode(): RouterMode {
+  return process.env.MOCODE_ROUTER_MODE === 'jev' ? 'jev' : 'llm';
+}
+
+/** /router 的写入口;持久化由调用方写 MOCODE_ROUTER_MODE(见 config/file.ts)。 */
+export function updateRouterMode(mode: RouterMode): void {
+  process.env.MOCODE_ROUTER_MODE = mode;
+}
+
+export interface JevRouterConfig {
+  /** systemone 端点基址(不含 /v1/systemone 路径段)。本地兼容层(如 arbiter)指向 localhost。 */
+  baseUrl: string;
+  /** TypeSafe API key(仅经环境变量/配置文件,不入日志)。 */
+  apiKey: string;
+  model: string;
+  /** 通用出簇阈值:概率 ≥ 此值才激活该簇。默认 0.65(100 用例实测 operating point)。 */
+  confidenceMin: number;
+  /** mcp 专用阈值:实测 mcp 是系统性假阳性磁铁,需更高门槛。默认 0.85。 */
+  confidenceMinMcp: number;
+}
+
+function readNumberEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : fallback;
+}
+
+/** 读取 Jev 路由配置(每次调用实时读 env,支持 /router 即时改)。 */
+export function getJevRouterConfig(): JevRouterConfig {
+  return {
+    baseUrl: (process.env.MOCODE_ROUTER_JEV_BASE_URL || DEFAULT_JEV_BASE_URL).replace(/\/+$/, ''),
+    apiKey: process.env.MOCODE_ROUTER_JEV_API_KEY || '',
+    model: process.env.MOCODE_ROUTER_JEV_MODEL || 'jev-latest',
+    confidenceMin: readNumberEnv('MOCODE_ROUTER_CONFIDENCE_MIN', 0.65),
+    confidenceMinMcp: readNumberEnv('MOCODE_ROUTER_CONFIDENCE_MIN_MCP', 0.85),
+  };
+}
+
+/**
+ * /router 的写入口:把 patch 中的字段写进对应环境变量。
+ * 只改内存/进程环境;持久化由调用方写 ~/.mocode/config(见 config/file.ts)。
+ */
+export function updateJevRouterConfig(patch: Partial<JevRouterConfig>): void {
+  if (patch.baseUrl !== undefined) process.env.MOCODE_ROUTER_JEV_BASE_URL = patch.baseUrl;
+  if (patch.apiKey !== undefined) process.env.MOCODE_ROUTER_JEV_API_KEY = patch.apiKey;
+  if (patch.model !== undefined) process.env.MOCODE_ROUTER_JEV_MODEL = patch.model;
+  if (patch.confidenceMin !== undefined) process.env.MOCODE_ROUTER_CONFIDENCE_MIN = String(patch.confidenceMin);
+  if (patch.confidenceMinMcp !== undefined) process.env.MOCODE_ROUTER_CONFIDENCE_MIN_MCP = String(patch.confidenceMinMcp);
+}
+
+/** Jev 后端是否已具备最小可用配置(有 key 才可能成功)。 */
+export function isJevRouterConfigured(): boolean {
+  return getJevRouterConfig().apiKey.trim() !== '';
 }
