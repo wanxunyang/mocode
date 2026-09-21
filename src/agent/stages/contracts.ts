@@ -143,6 +143,8 @@ export interface ToolDispatchRequest {
   readonly delegation: () => ToolDelegationSnapshot;
   readonly argumentErrorHint: (name: string) => string | undefined;
   readonly expandToolGroups?: (groups: readonly unknown[], reason: string) => ToolPolicyExpansion;
+  /** 子 agent 等编排工具的并发上限覆写；缺省回落到全局 config.subAgentConcurrency。 */
+  readonly orchestrationConcurrency?: number;
   /** Synchronous live publication; throwing stops dispatch at the same point as the legacy hook. */
   readonly onEvent: (event: ToolDispatchEvent) => void;
 }

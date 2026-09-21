@@ -20,6 +20,7 @@ import {
   parseArgs,
   argumentErrorHint,
   isParallelTool,
+  isParallelOrchestrationCall,
   isResourceLockedCall,
   deniedOutcome,
   readDiffContext,
@@ -633,6 +634,125 @@ export async function runAgentCoreLegacy(
                       );
                     }
                     hooks.onToolDone?.();
+                    i = j;
+                  } else if (
+                    isParallelOrchestrationCall(currentCall.name, ctx.toolRuntime) &&
+                    !(ctx.getAgentMode() === 'plan' && planDisabledTools.has(currentCall.name))
+                  ) {
+                    // 连续编排调用(sub-agent)：按 subAgentConcurrency 分块,块内并发。
+                    // 权限确认仍严格按原序进行；全部 header 必须先于首个 execute 发出——渲染侧
+                    // 靠 header 建「组容器批」并逐条追加 └─ 子 agent 行,若边启动边发 header,
+                    // 先完成的 entry 会让组提前收口,后续 header 会另起一个新组。
+                    let j = i;
+                    while (
+                      j < calls.length &&
+                      isParallelOrchestrationCall(calls[j].name, ctx.toolRuntime) &&
+                      !isToolDeniedForStep(calls[j].name) &&
+                      !(ctx.getAgentMode() === 'plan' && planDisabledTools.has(calls[j].name))
+                    )
+                      j++;
+                    const batch = calls.slice(i, j);
+                    const entries: Array<{
+                      tc: ToolCallRef;
+                      parsed: Record<string, unknown> | null;
+                      diff: { preWriteOld: string | null; editStartLine: number };
+                      denied?: ToolOutcome;
+                    }> = [];
+
+                    for (let k = 0; k < batch.length; k++) {
+                      const tc = batch[k];
+                      const parsed = parseArgs(tc.arguments);
+                      const tool = ctx.toolRuntime.findTool(tc.name);
+                      const argumentsValid =
+                        tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
+                      let denied: ToolOutcome | undefined;
+                      if (tool && argumentsValid) {
+                        const perm = await ctx.checkPermission(tool, parsed ?? {}, signal, {
+                          prompt: opts.permissionPrompt,
+                        });
+                        emitTrace(
+                          'permission',
+                          {
+                            source: 'agent_tool',
+                            tool: tc.name,
+                            decision: perm,
+                            argumentHash: tracedCalls[i + k].args.sha256,
+                          },
+                          {
+                            toolCallId: tracedCalls[i + k].toolCallId,
+                            ...(tc.id ? { providerToolCallId: tc.id } : {}),
+                          },
+                        );
+                        if (perm === 'deny') denied = deniedOutcome(tc.name);
+                      }
+                      entries.push({
+                        tc,
+                        parsed,
+                        diff: { preWriteOld: null, editStartLine: 1 },
+                        ...(denied ? { denied } : {}),
+                      });
+                    }
+
+                    for (const entry of entries) hooks.onToolHeader?.(entry.tc);
+                    const firstAllowed = entries.find((entry) => !entry.denied);
+                    if (firstAllowed) hooks.onToolStart?.(firstAllowed.tc.name);
+
+                    const concurrency = Math.max(1, ctx.config.subAgentConcurrency);
+                    for (let chunkStart = 0; chunkStart < entries.length; chunkStart += concurrency) {
+                      const chunk = entries.slice(chunkStart, chunkStart + concurrency);
+                      // 块内同时启动(executeToolOutcome 调用即开始 I/O),再按原序 await + 回灌:
+                      // 完成顺序任意,history 与 trace 顺序始终是原调用序。
+                      const started = chunk.map((entry) => {
+                        if (entry.denied) return Promise.resolve(entry.denied);
+                        const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
+                        return ctx.toolRuntime.executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
+                          callId: entry.tc.id,
+                          allowedToolNames: currentAllowedToolNames(),
+                          delegation: delegationForOrchestrator(),
+                          ...(hint ? { argumentErrorHint: hint } : {}),
+                          onLockAcquired: (lockedArgs) => {
+                            entry.diff = readDiffContext(entry.tc, lockedArgs, ctx.jailResolve);
+                          },
+                        });
+                      });
+
+                      for (let k = 0; k < chunk.length; k++) {
+                        const entry = chunk[k];
+                        const outcome = await started[k];
+                        usageMeter.add(outcome.usage);
+                        opts.onToolOutcome?.(entry.tc.name, entry.parsed ?? {}, outcome);
+                        traceToolEnd(entry.tc, i + chunkStart + k, outcome);
+                        hooks.onToolResult?.(
+                          entry.tc,
+                          outcome.output,
+                          entry.denied ? null : entry.parsed,
+                          entry.diff.preWriteOld,
+                          entry.diff.editStartLine,
+                        );
+                        pushToolResult(
+                          history,
+                          entry.tc,
+                          outcome.output,
+                          relprune,
+                          lifecycle,
+                          scheduler,
+                          runtimeContextState,
+                          outcome.status === 'success',
+                        );
+                        const invalidatedFiles = [
+                          ...new Set([...(outcome.changedFiles ?? []), ...(outcome.staleFiles ?? [])]),
+                        ];
+                        if (invalidatedFiles.length > 0) {
+                          for (const changedFile of invalidatedFiles) {
+                            relprune?.observeMutation(history, changedFile);
+                            lifecycle?.pushMutation(history, history.length - 1, changedFile);
+                          }
+                          invalidateArtifacts(runtimeContextState, history, invalidatedFiles);
+                          runtimeContextState.lifecycleStats = lifecycle?.stats();
+                        }
+                      }
+                    }
+                    if (firstAllowed) hooks.onToolDone?.();
                     i = j;
                   } else if (
                     isResourceLockedCall(currentCall, ctx.toolRuntime) &&

@@ -1,4 +1,5 @@
 import { ADD_TOOL_GROUPS_TOOL_NAME } from '../../config/profiles.js';
+import { config } from '../../config/index.js';
 import { t } from '../../i18n/index.js';
 import { checkPermission as defaultCheckPermission, type PermissionCheckOptions } from '../../permissions/index.js';
 import { jailResolve as defaultJailResolve } from '../../sandbox/index.js';
@@ -6,7 +7,14 @@ import { summarizeToolArguments } from '../../session/index.js';
 import { getPlanDisabledTools } from '../../tools/constants.js';
 import { defaultToolRuntime, type ToolOutcome, type ToolRuntime } from '../../tools/registry.js';
 import { validateToolArguments } from '../../tools/validation.js';
-import { deniedOutcome, isParallelTool, isResourceLockedCall, parseArgs, readDiffContext } from '../tool-helpers.js';
+import {
+  deniedOutcome,
+  isParallelTool,
+  isParallelOrchestrationCall,
+  isResourceLockedCall,
+  parseArgs,
+  readDiffContext,
+} from '../tool-helpers.js';
 import type {
   OrderedToolCallResult,
   ToolDiffContext,
@@ -247,6 +255,74 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
           resultEvent(callIndex, outcome, null);
         }
         request.onEvent({ type: 'done' });
+        index = end;
+        continue;
+      }
+
+      if (
+        isParallelOrchestrationCall(current.name, toolRuntime) &&
+        !(request.policy.mode === 'plan' && getPlanDisabledTools().has(current.name))
+      ) {
+        // 连续编排调用(sub-agent)：按并发上限分块,块内并发。权限确认按原序;全部 header
+        // 必须先于首个 execute——渲染侧靠 header 建组容器批,先收口会让后续 header 另起新组。
+        const concurrency = Math.max(1, request.orchestrationConcurrency ?? config.subAgentConcurrency);
+        let end = index;
+        while (
+          end < calls.length &&
+          isParallelOrchestrationCall(calls[end].name, toolRuntime) &&
+          !request.isDenied(calls[end].name) &&
+          !(request.policy.mode === 'plan' && getPlanDisabledTools().has(calls[end].name))
+        )
+          end++;
+        const batch = calls.slice(index, end);
+        const entries: ResourceEntry[] = [];
+
+        for (let offset = 0; offset < batch.length; offset++) {
+          const call = batch[offset];
+          const parsed = parseArgs(call.arguments);
+          const tool = toolRuntime.findTool(call.name);
+          const argumentsValid = tool && parsed !== null ? validateToolArguments(tool, parsed).valid : false;
+          let denied: ToolOutcome | undefined;
+          if (tool && argumentsValid) {
+            const decision = await checkPermission(tool, parsed ?? {}, request.signal, {
+              prompt: request.permissionPrompt,
+            });
+            request.onEvent({ type: 'permission', call, callIndex: index + offset, decision });
+            if (decision === 'deny') denied = deniedOutcome(call.name);
+          }
+          entries.push({
+            call,
+            parsed,
+            diff: { preWriteOld: null, editStartLine: 1 },
+            ...(denied ? { denied } : {}),
+          });
+        }
+
+        for (const entry of entries) request.onEvent({ type: 'header', call: entry.call });
+        const firstAllowed = entries.find((entry) => !entry.denied);
+        if (firstAllowed) request.onEvent({ type: 'start', tool: firstAllowed.call.name });
+
+        for (let chunkStart = 0; chunkStart < entries.length; chunkStart += concurrency) {
+          const chunk = entries.slice(chunkStart, chunkStart + concurrency);
+          // 块内同时启动,再按原序 await + 回灌：完成顺序任意,history/trace 始终是原调用序。
+          const started = chunk.map((entry) => {
+            if (entry.denied) return Promise.resolve(entry.denied);
+            return execute(entry.call, request.argumentErrorHint(entry.call.name), (lockedArgs) => {
+              entry.diff = readDiffContext(entry.call, lockedArgs, jailResolve);
+            });
+          });
+
+          for (let k = 0; k < chunk.length; k++) {
+            const callIndex = index + chunkStart + k;
+            const entry = chunk[k];
+            const outcome = await started[k];
+            record(callIndex, outcome);
+            executionEvents(callIndex, entry.parsed, outcome);
+            resultEvent(callIndex, outcome, entry.denied ? null : entry.parsed, entry.diff);
+            invalidate(outcome);
+          }
+        }
+        if (firstAllowed) request.onEvent({ type: 'done' });
         index = end;
         continue;
       }

@@ -139,6 +139,8 @@ export interface Config {
   mcpEnabled: boolean;
   /** 子 Agent 默认步数上限，只防止无限循环；调用方可按任务提高。 */
   subAgentMaxSteps: number;
+  /** 同一轮内派发的多个子 agent 的并发上限(≥1)；1 即退化为逐个串行。 */
+  subAgentConcurrency: number;
   /** 会话落盘目录(cwd 下)。 */
   sessionDir: string;
   /** AnySearch 联网搜索 API key(可选)。不配则走匿名免费额度(按 IP 限流)。 */
@@ -642,6 +644,7 @@ export const config: Config = {
   maxSteps: Number(process.env.MAX_STEPS) || 1000,
   subAgentEnabled: process.env.MOCODE_SUBAGENT_ENABLED === 'true',
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || Number(process.env.MAX_STEPS) || 1000,
+  subAgentConcurrency: Math.max(1, Number(process.env.SUB_AGENT_CONCURRENCY) || 5),
   frontendToolsEnabled: process.env.MOCODE_FRONTEND_TOOLS_ENABLED === 'true',
   computerUseEnabled: process.env.MOCODE_COMPUTER_USE_ENABLED === 'true',
   mcpEnabled: process.env.MOCODE_MCP_ENABLED !== 'false',

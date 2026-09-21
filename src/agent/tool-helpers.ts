@@ -69,8 +69,18 @@ export function isResourceLockedTool(name: string, toolRuntime: ToolRuntime = de
 
 export function isResourceLockedCall(call: ToolCallRef, toolRuntime: ToolRuntime = defaultToolRuntime): boolean {
   // sub-agent 是长时全域操作(嵌套 agent 与主 agent 同权,可写任意文件/跑任意命令),
-  // 不进 mutation 并发批:逐个串行执行,避免两个子 agent 同时改工作区。
+  // 不进 mutation 并发批:那个批的语义是「同文件排队、异文件并发」。
   return call.name !== 'sub-agent' && isResourceLockedTool(call.name, toolRuntime);
+}
+
+/** 编排类工具(如 sub-agent)：同一轮内连续派发的多个调用按上限成批并行。
+ *  写冲突仍由子 agent 内层工具各自获取的资源锁保护(编排器本身不持锁)。 */
+export function isParallelOrchestrationCall(
+  name: string,
+  toolRuntime: ToolRuntime = defaultToolRuntime,
+): boolean {
+  const tool = toolRuntime.findTool(name);
+  return !!tool && toolRuntime.getToolCapabilities(tool).parallelOrchestration === true;
 }
 
 /** 权限拒绝时的结构化 ToolOutcome(供调度器统一回灌,不抛错中断循环)。 */

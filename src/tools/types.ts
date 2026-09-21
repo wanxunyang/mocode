@@ -40,6 +40,8 @@ export interface ToolCapabilities {
   resources?: (args: Record<string, unknown>) => string[];
   /** 编排器本身不持锁；其嵌套工具调用负责获取真实资源锁，避免父子自锁。 */
   delegatesResourceLocks?: boolean;
+  /** 编排类工具(如 sub-agent)：同一轮内按 subAgentConcurrency 成批并行，而非逐个串行。 */
+  parallelOrchestration?: boolean;
   supportsAbort?: boolean;
 }
 

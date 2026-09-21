@@ -24,6 +24,7 @@ import { defaultAgentRuntimeContext } from '../src/agent/runtime-context.js';
 import { __setChatCreateImpl, type ChatMessage } from '../src/llm/index.js';
 import { setSandboxRoot } from '../src/sandbox/root.js';
 import { ToolPolicyController } from '../src/tools/policy.js';
+import type { Tool } from '../src/tools/types.js';
 // 装配官方默认工具包(提供本测试真执行的 read_file):registry 不再顶层 import builtins,须显式装配。
 import '../src/tools/builtins/index.js';
 
@@ -892,5 +893,112 @@ test('runAgentCore: trace sinks 抛错不改变成功结果', async () => {
     assert.equal(history.at(-1)?.content, 'trace-safe');
   } finally {
     __setChatCreateImpl(null);
+  }
+});
+
+test('runAgentCore legacy: 同轮多个编排调用并发执行,结果按 provider 原序回灌', async () => {
+  // 覆盖生产默认路径(pipeline='legacy' 走 run-coordinator 内联循环,而非 staged dispatcher):
+  // 同轮两个 parallelOrchestration 调用必须在同一块内并发,且 history 回灌保持 provider 原序。
+  const { registerToolsExtension, clearToolsExtension } = await import('../src/tools/registry.js');
+  const source = 'agent-core-orchestration-parallel';
+  const log: string[] = [];
+  const makeOrchestrationTool = (name: string, waitMs: number): Tool => ({
+    name,
+    description: `${name} orchestration stub`,
+    risk: 'dangerous',
+    parameters: {
+      type: 'object',
+      properties: { prompt: { type: 'string' } },
+      required: ['prompt'],
+      additionalProperties: false,
+    },
+    capabilities: {
+      effect: 'write',
+      concurrency: 'resource-locked',
+      delegatesResourceLocks: true,
+      parallelOrchestration: true,
+    },
+    async execute(args) {
+      log.push(`start:${name}`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      log.push(`end:${name}`);
+      return `result:${String(args.prompt)}`;
+    },
+  });
+  registerToolsExtension(source, [
+    makeOrchestrationTool('mcp__orch_slow', 30),
+    makeOrchestrationTool('mcp__orch_fast', 1),
+  ]);
+
+  let call = 0;
+  __setChatCreateImpl(async () => {
+    call++;
+    if (call === 1) {
+      return sseStream([
+        {
+          delta: {
+            tool_calls: [
+              { index: 0, id: 'orch-slow', function: { name: 'mcp__orch_slow', arguments: '{"prompt":"slow"}' } },
+              { index: 1, id: 'orch-fast', function: { name: 'mcp__orch_fast', arguments: '{"prompt":"fast"}' } },
+            ],
+          },
+        },
+      ]);
+    }
+    return sseStream([{ delta: { content: 'orchestration done' } }]);
+  });
+
+  const orchestrationNames = ['mcp__orch_slow', 'mcp__orch_fast'] as const;
+  const orchestrationSchemas = orchestrationNames.map((name) => ({
+    type: 'function' as const,
+    function: {
+      name,
+      description: `${name} orchestration stub`,
+      parameters: {
+        type: 'object',
+        properties: { prompt: { type: 'string' } },
+        required: ['prompt'],
+      },
+    },
+  }));
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'run two orchestration tasks',
+      maxSteps: 2,
+      // 直供 schema + 白名单,绕开路由组装配:本用例验证的是调度分支本身,
+      // 而非 policy 的组暴露规则(扩展工具默认不进 common 组,会先被 isToolDeniedForStep 拦成 TOOL_DISABLED)。
+      toolsOverride: orchestrationSchemas,
+      runtimeAllowedToolNames: new Set<string>(orchestrationNames),
+      runtimeContext: {
+        ...defaultAgentRuntimeContext,
+        getAgentMode: () => 'auto' as const,
+        checkPermission: async () => 'allow' as const,
+      },
+      hooks: {},
+    });
+
+    assert.equal(result.completed, true);
+    assert.equal(result.finalText, 'orchestration done');
+    // 并行的判别式:慢调用结束前快调用已启动;若串行,log 必为 start:slow,end:slow,start:fast,end:fast。
+    assert.deepEqual(log, ['start:mcp__orch_slow', 'start:mcp__orch_fast', 'end:mcp__orch_fast', 'end:mcp__orch_slow']);
+
+    // 完成顺序与 provider 顺序相反,但 history 回灌必须仍是 provider 原序。
+    const toolResults = history.filter(
+      (message): message is ChatMessage & { role: 'tool'; tool_call_id: string } => message.role === 'tool',
+    );
+    assert.deepEqual(
+      toolResults.map((message) => message.tool_call_id),
+      ['orch-slow', 'orch-fast'],
+    );
+    assert.deepEqual(
+      toolResults.map((message) => message.content),
+      ['result:slow', 'result:fast'],
+    );
+  } finally {
+    __setChatCreateImpl(null);
+    clearToolsExtension(source);
   }
 });

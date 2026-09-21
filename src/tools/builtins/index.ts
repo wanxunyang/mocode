@@ -79,11 +79,14 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   computer: { effect: 'process', concurrency: 'serial', resources: () => ['desktop'], supportsAbort: true },
   // sub-agent 与主 agent 同权,直接写工作区(无 overlay)。编排器本身不持锁——锁由嵌套工具
   // 各自获取,否则子 agent 内的 run_command 会等父持有的 workspace 锁而自锁。
-  // 并发批排除见 tool-helpers.isResourceLockedCall:多个子 agent 逐个串行,不同时改工作区。
+  // parallelOrchestration:同一轮派发的多个子 agent 按 subAgentConcurrency 上限成批并行
+  // (调度见 tool-helpers.isParallelOrchestrationCall 与 run-coordinator 的编排批);
+  // isResourceLockedCall 仍显式排除 sub-agent,使其不混入 file-mutation 批。
   'sub-agent': {
     effect: 'write',
     concurrency: 'resource-locked',
     delegatesResourceLocks: true,
+    parallelOrchestration: true,
     supportsAbort: true,
   },
 };
