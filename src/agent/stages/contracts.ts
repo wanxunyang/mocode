@@ -66,6 +66,13 @@ export interface HistoryManager {
   appendAssistantTurn(turn: AssistantTurn): void;
   beginToolBatch(calls: readonly ToolCallRef[]): HistoryBatchTransaction;
   replaceAfterCompaction(result: CompactedHistory): void;
+  /**
+   * 视觉滑动窗口剪枝:把超出窗口的旧屏幕帧换成文本占位,抑制图像 token 的二次增长。
+   * 返回是否改动了 history(调用方据此 rebuildHistoryIndexes)。
+   * 放在 manager 里而非调用方直接改数组:staged 与 legacy 两条历史路径共享同一个 backing,
+   * 从 manager 进才不会漏。
+   */
+  pruneVisionWindow(opts: { keep: number; batch: number; step: number }): boolean;
   createCheckpoint(): HistoryCheckpoint;
   restore(checkpoint: HistoryCheckpoint): void;
   /** Narrow bridge for the legacy scheduler/compact implementation during staged migration. */

@@ -1,5 +1,6 @@
 import type OpenAI from 'openai';
 import type { ChatMessage, ToolCallRef } from '../../llm/index.js';
+import { applyVisionWindow, recordVisionWindowPrune } from '../../context/vision-window.js';
 import type {
   AssistantTurn,
   CompactedHistory,
@@ -182,6 +183,18 @@ class DefaultHistoryManager implements HistoryManager {
     this.assertNoActiveBatch('replace history after compaction');
     replaceMessages(this.backing, result.messages);
     this.revision++;
+  }
+
+  pruneVisionWindow(opts: { keep: number; batch: number; step: number }): boolean {
+    this.assertNoActiveBatch('prune vision window');
+    const result = applyVisionWindow(this.backing, opts);
+    if (!result.changed) return false;
+    replaceMessages(this.backing, result.messages);
+    // 累积埋点放在纯函数模块外部(HistoryManager 这层),单测可用 reset 隔离。
+    recordVisionWindowPrune(result.dropped);
+    // revision++ 必须:snapshot() 用 revision 标识版本,下游(compact / checkpoint)据此判断是否重建。
+    this.revision++;
+    return true;
   }
 
   createCheckpoint(): HistoryCheckpoint {

@@ -4,6 +4,7 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 import { getCurrentSessionId } from '../session/state.js';
 import { getNotesFilePath, extractActiveNotesSections } from '../session/notes.js';
+import { buildGuiActionsSection } from '../session/gui-actions.js';
 import { buildWorkDisciplineSection, inferModelFamily } from '../agent/work-discipline.js';
 import { buildValidationCommandsSection } from '../verification/prompt.js';
 import { getActivePresetName, readPreset } from './presets.js';
@@ -374,25 +375,31 @@ export function reinjectSessionStateIntoSystem(history: { role: string; content?
 }
 
 /**
- * 构造"会话状态提醒"正文(活跃 `## Plan:` 段 + 活跃笔记段正文),供 agent/core 每步
- * 拼进 requestHistory **末尾**的 ephemeral system 消息。
+ * 构造"会话状态提醒"正文(活跃 `## Plan:` 段 + 活跃笔记段 + GUI 动作台账),供 agent/core
+ * 每步拼进 requestHistory **末尾**的 ephemeral system 消息。
  *
  * 为什么在尾部而不是 history[0](prompt 缓存):plan_update / note_append 是设计上鼓励
  * 高频调用的工具,一旦它们改写系统提示,支持自动前缀缓存的后端(OpenAI / DeepSeek /
  * GLM / Qwen)就会从第一个 token 起全部 miss。放到历史末尾后,前面整段(系统提示 + 全部
- * 已有对话)保持逐字节稳定,只有尾部这一小条随 notes.md 变化。
+ * 已有对话)保持逐字节稳定,只有尾部这一小条随来源文件变化。
  *
- * 纯读函数:不改 history,也不写文件。notes.md 不存在 / 无活跃内容时返回 ''(零开销)。
+ * 台账段同样在尾部 → 抖动免费(anthropic provider 明确"动态 session reminder 不参与缓存
+ * 断点"),所以它可以每步都重写一遍,不需要像图片窗口那样成批淘汰。
+ *
+ * 纯读函数:不改 history,也不写文件。三者皆空时返回 ''(零开销)。
  */
 export function buildSessionStateReminder(sessionId = getCurrentSessionId()): string {
   const plan = extractActivePlanSection(sessionId);
   const notes = extractActiveNotesSections(undefined, sessionId);
-  if (!plan && !notes) return '';
+  const guiActions = buildGuiActionsSection(sessionId);
+  if (!plan && !notes && !guiActions) return '';
+  const sources = [notes || plan ? 'notes.md' : '', guiActions ? 'gui-actions.log' : ''].filter(Boolean).join(' + ');
   const parts = [
-    '## Session state (current, from notes.md)',
-    'This block mirrors the live session notepad and is refreshed every step; treat it as the authoritative plan/notes state, and ignore any older copy earlier in this conversation.',
+    `## Session state (current, from ${sources})`,
+    'This block mirrors the live session state and is refreshed every step; treat it as authoritative, and ignore any older copy earlier in this conversation.',
     ...(plan ? [plan] : []),
     ...(notes ? [notes] : []),
+    ...(guiActions ? [guiActions] : []),
   ];
   return parts.join('\n\n');
 }
@@ -806,6 +813,51 @@ export function updateComputerUseConfig(enabled: boolean): void {
   process.env.MOCODE_COMPUTER_USE_ENABLED = enabled ? 'true' : 'false';
 }
 
+// ── 视觉历史滑动窗口(Computer Use)───────────────────────────────────────
+//
+// 屏幕帧永驻 history 会让图像 token 二次增长(每次请求都要重发整个 history):
+// 20 步 ≈387k tk、50 步 ≈2.35M tk,长 GUI 任务必然中途 compact 并丢掉视觉 grounding。
+// 滑动窗口按「最近 keep 条 + 成批淘汰 batch 条」把旧帧换成文本占位。详见
+// design-notes/vision-window.md。
+//
+// 这里是 process.env 直读而非 Config 单例:与其它 CU 调优项(MOCODE_CU_MAX_EDGE 等)同款,
+// 每步都在调用点求值,改 .env 后立即生效,不需要重启 REPL。
+
+/** 窗口保留的屏幕帧条数默认值。 */
+export const DEFAULT_VISION_KEEP = 6;
+/** 单次淘汰条数默认值。1 = 严格窗口(token 最省 / 前缀最不稳)。 */
+export const DEFAULT_VISION_BATCH = 4;
+
+/**
+ * 保留最近多少条屏幕帧。**0 = 完全关闭窗口**(回退到现状,一键回滚)。
+ *
+ * 空串语义与 `MOCODE_CU_DIFF_THRESHOLD`(src/tools/builtins/computer.ts:49)一致:
+ * **未配置 / 空串 → 回落默认**;显式写 0 才是 0。`Number('') === 0`,直接 Number 判数值
+ * 会让"注释掉这个变量"静默变成关闭窗口。
+ */
+export function visionKeep(): number {
+  const raw = process.env.MOCODE_CU_VISION_KEEP;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_VISION_KEEP;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_VISION_KEEP;
+  return Math.round(parsed);
+}
+
+/**
+ * 一次淘汰多少条。>=1;非法值回落默认。
+ *
+ * batch 是 **token 与 prompt cache 的权衡**:batch 越大,"两次淘汰之间 history 前缀字节不变"
+ * 的窗口越长,前缀命中率越高,代价是在途多留几张图。判据见文档 §7.2:
+ * 显式 prompt cache(Anthropic 断点)取 6-8;隐式前缀缓存取 4;无缓存取 1。
+ */
+export function visionBatch(): number {
+  const raw = process.env.MOCODE_CU_VISION_BATCH;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_VISION_BATCH;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_VISION_BATCH;
+  return Math.round(parsed);
+}
+
 /** MCP 总开关；关闭时下次启动跳过 MCP 配置读取与服务连接。 */
 export function isMcpEnabled(): boolean {
   return config.mcpEnabled;
@@ -929,7 +981,8 @@ export function updateJevRouterConfig(patch: Partial<JevRouterConfig>): void {
   if (patch.apiKey !== undefined) process.env.MOCODE_ROUTER_JEV_API_KEY = patch.apiKey;
   if (patch.model !== undefined) process.env.MOCODE_ROUTER_JEV_MODEL = patch.model;
   if (patch.confidenceMin !== undefined) process.env.MOCODE_ROUTER_CONFIDENCE_MIN = String(patch.confidenceMin);
-  if (patch.confidenceMinMcp !== undefined) process.env.MOCODE_ROUTER_CONFIDENCE_MIN_MCP = String(patch.confidenceMinMcp);
+  if (patch.confidenceMinMcp !== undefined)
+    process.env.MOCODE_ROUTER_CONFIDENCE_MIN_MCP = String(patch.confidenceMinMcp);
 }
 
 /** Jev 后端是否已具备最小可用配置(有 key 才可能成功)。 */

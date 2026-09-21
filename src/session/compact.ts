@@ -700,6 +700,10 @@ async function defaultSummarize(
       '## Key Facts — only what later steps cannot work without: exact paths, symbols/API shapes, artifact IDs/hashes, open questions, failed approaches and errors to avoid repeating. User requests and constraints are pinned verbatim by the system from the raw user messages — do not duplicate them here; you own the technical facts.\n' +
       'What counts as important (keep): user requests and constraints; final state of each modified file; conclusions and results, not the steps that led there; decisions with reasons; precise references (paths, symbols, hashes, commands) that later steps must cite; failures and what was tried, so mistakes are not repeated.\n' +
       'What to drop: verbatim file contents and tool-output dumps, step-by-step recaps, exploration dead-ends that led nowhere, polite chatter, anything re-derivable by re-reading files.\n' +
+      // GUI 例外(§10.6):GUI 任务里动作序列本身就是状态——桌面上没有可回查的落点,压成散文
+      // 会导致'填过的字段被重填、点过的按钮被重点'。这条是依赖模型守规矩的兜底,硬保证是 L2
+      // 台账(gui-actions.log,每步写盘、跨 compact 存活)。
+      'GUI EXCEPTION to "step-by-step recaps": for computer/screen-control actions keep the SEQUENCE as an ordered list — one line per action: `N. <action> (<coordinates or target>) → <observed result, e.g. no visible change / re-captured diff X%>`. Never collapse it into prose ("clicked around the form") and never drop which attempts produced no visible change.\n' +
       'Rules: total ≤ 400 words. State conclusions and locations (path:line where useful), never paste content. ' +
       'The Key Facts section is carried forward verbatim into future summaries: write each fact as one self-contained line ' +
       '(no pronouns, no "as above", no cross-references), so it still reads correctly after later compactions. ' +

@@ -88,7 +88,9 @@ test('Anthropic 请求转换工具调用、结果、图片和 Prompt Cache 断�
   } as ChatMessage);
 
   const encoded = encodeAnthropicMessages(input, true);
-  assert.deepEqual(encoded.system, [{ type: 'text', text: 'stable system' }]);
+  // 缓存断点策略:system 1 + tools 1 + 最近若干 tool_result(总上限 4)。
+  // 以前只在"最后一个稳定块"打 1 个 —— 那通常是本轮刚回灌的内容,命中率极低。
+  assert.deepEqual(encoded.system, [{ type: 'text', text: 'stable system', cache_control: { type: 'ephemeral' } }]);
   assert.deepEqual(encoded.messages[0], {
     role: 'user',
     content: [

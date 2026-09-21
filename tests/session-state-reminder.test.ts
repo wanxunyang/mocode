@@ -18,6 +18,7 @@ import path from 'node:path';
 import { setSandboxRoot } from '../src/sandbox/root.js';
 import { setCurrentSessionId } from '../src/session/state.js';
 import { buildSessionStateReminder } from '../src/config/index.js';
+import { appendGuiAction } from '../src/session/gui-actions.js';
 
 const SESSION_ID = 'reminder-test-session';
 let tmpRoot = '';
@@ -100,6 +101,22 @@ test('buildSessionStateReminder: 无 notes.md / 空文件返回空串', () => {
     assert.equal(buildSessionStateReminder(), '', 'notes.md 不存在时应返空串');
     writeNotes('');
     assert.equal(buildSessionStateReminder(), '', '空 notes.md 应返空串');
+  } finally {
+    teardown();
+  }
+});
+
+test('buildSessionStateReminder: 只有 GUI 台账(无 notes.md)时也注入 §10.4', () => {
+  setup();
+  try {
+    appendGuiAction(
+      'left_click at (512, 300). No visible change on screen (frame diff 1.20% < 2.00% threshold) — no new screenshot is attached.',
+    );
+    const out = buildSessionStateReminder();
+    assert.match(out, /## GUI actions/);
+    assert.match(out, /left_click \(512, 300\)\s+→ no visible change, diff 1\.20%/);
+    assert.doesNotMatch(out, /from notes\.md/, '无 notes.md 时来源标注不应出现 notes.md');
+    assert.ok(!fs.existsSync(notesPath()), '注入是只读的,不得顺带创建 notes.md');
   } finally {
     teardown();
   }

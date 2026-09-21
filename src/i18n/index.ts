@@ -291,6 +291,9 @@ const zhCN = {
   'cu.changedOn': '已允许按需路由 computer-control；只有明确 GUI 操作意图才会选择，且每个动作仍需权限确认。',
   'cu.changedOff': '已禁止 computer-control；路由器和运行时都会拦截后续 computer 调用。',
   'cu.usage': '用法：/cu on|off|status',
+  'cu.visionWindow':
+    '视觉窗口 · {frames} 条帧消息 · history 内 {images} 张图 · 约 {tokens} 图像 token · keep {keep}/batch {batch} · 已淘汰 {dropped}',
+  'cu.actionLedger': '动作台账 · 已记录 {count} 条 GUI 动作',
   'mcp.status': 'MCP 服务：{state}',
   'mcp.stateOn': '开启',
   'mcp.stateOff': '关闭',
@@ -665,6 +668,9 @@ const en: Record<TranslationKey, string> = {
     'Automatic routing may now select computer-control for explicit GUI intent; every action still requires permission approval.',
   'cu.changedOff': 'Computer-control is blocked; both the router and runtime reject subsequent computer calls.',
   'cu.usage': 'Usage: /cu on|off|status',
+  'cu.visionWindow':
+    'vision window · {frames} frame msg(s) · {images} image(s) in history · ~{tokens} image tk · keep {keep}/batch {batch} · {dropped} dropped',
+  'cu.actionLedger': 'action ledger · {count} gui actions logged',
   'mcp.status': 'MCP services: {state}',
   'mcp.stateOn': 'enabled',
   'mcp.stateOff': 'disabled',

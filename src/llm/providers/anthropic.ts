@@ -139,12 +139,46 @@ export function encodeAnthropicMessages(
     }
   }
 
-  if (promptCache) {
-    // 最后一个稳定消息块形成会话前缀断点；动态 session reminder 明确不参与。
+  /** Anthropic 允许的最大 cache 断点数(硬上限,超出直接 400)。 */
+  const MAX_CACHE_BREAKPOINTS = 4;
+  /** tools 断点在 encodeAnthropicTools 里打;tool 列表通常恒非空,这里保守预留它那一份额度。 */
+  const TOOLS_BREAKPOINT_RESERVE = 1;
+  /** 文档建议「最近 3 个 tool_result」;实际额度受 MAX_CACHE_BREAKPOINTS 约束后通常是 2。 */
+  const MAX_TOOL_RESULT_BREAKPOINTS = 3;
+
+  /**
+   * 打 cache 断点。对齐 Anthropic computer use 官方实践:**system + tools + 最近若干 tool_result**。
+   *
+   * 以前只在"最后一个稳定消息块"打 1 个 —— 那通常是本轮刚回灌的 tool_result / 最新用户图,
+   * 每轮都不一样,既拍不到真正稳定的前缀,又浪费了额度。
+   *
+   * 前缀越长、命中率越高,所以断点优先给**靠后但仍稳定**的 tool_result(tool 结果一旦提交永不改)。
+   *
+   * 注意:断点打在**本函数新建的 block 对象**上,不会写回 history 的消息对象 →
+   * 天然"每轮清空",不存在跨轮累积超限的问题。
+   */
+  function markCacheBreakpoints(system: AnthropicBlock[], cacheCandidates: AnthropicBlock[]): void {
+    let used = TOOLS_BREAKPOINT_RESERVE;
+    if (system.length > 0) {
+      system[system.length - 1].cache_control = { type: 'ephemeral' };
+      used++;
+    }
+    const toolResults = cacheCandidates.filter((block) => block.type === 'tool_result');
+    const slots = Math.min(MAX_TOOL_RESULT_BREAKPOINTS, MAX_CACHE_BREAKPOINTS - used);
+    if (slots <= 0) return;
+    if (toolResults.length > 0) {
+      for (const block of toolResults.slice(-slots)) {
+        block.cache_control = { type: 'ephemeral' };
+      }
+      return;
+    }
+    // 纯对话(没有 tool_result)时退化到旧行为:最后一个稳定消息块。
     const last = cacheCandidates[cacheCandidates.length - 1];
     if (last) last.cache_control = { type: 'ephemeral' };
-    // 没有对话时仍缓存稳定 system prompt。
-    else if (system.length > 0) system[system.length - 1].cache_control = { type: 'ephemeral' };
+  }
+
+  if (promptCache) {
+    markCacheBreakpoints(system, cacheCandidates);
   }
   return { system, messages };
 }

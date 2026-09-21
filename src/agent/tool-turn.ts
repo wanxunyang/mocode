@@ -13,6 +13,13 @@ const PLAN_NAG_TEXT =
   'If you finished a step, call plan_update to check it off (keep at most one in_progress); ' +
   'if the whole plan is done, let plan_update settle it to ## Done:. If the plan changed scope, update it to match reality.';
 
+/**
+ * 工具附件消息的前言。单点常量:视觉滑动窗口(src/context/vision-window.ts)靠它区分
+ * 「工具回灌的屏幕帧」与「用户粘贴的图」——两边各写一份字符串会让识别规则悄悄失效。
+ * 新增附件产出点**必须**复用这一个前言。
+ */
+export const ATTACHMENT_PREAMBLE = 'The view_image tool loaded the following visual input: ';
+
 export interface ToolTurnPlanState {
   stepsSincePlanTouch: number;
 }
@@ -102,7 +109,7 @@ export async function runToolTurn(input: ToolTurnInput): Promise<void> {
       const content: ContentPart[] = [
         {
           type: 'text',
-          text: `The view_image tool loaded the following visual input: ${names}. Analyze the attached image content directly.`,
+          text: `${ATTACHMENT_PREAMBLE}${names}. Analyze the attached image content directly.`,
         },
         ...modelAttachments.map(
           (attachment): ContentPart => ({

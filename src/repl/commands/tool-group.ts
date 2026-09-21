@@ -22,6 +22,8 @@ import {
   isMemoryEnabled,
   isMemoryRouteAllowed,
   updateMemoryConfig,
+  visionKeep,
+  visionBatch,
 } from '../../config/index.js';
 import { updateConfigKey, CONFIG_PATH } from '../../config/file.js';
 import { getAgentMode } from '../../agent/mode.js';
@@ -139,6 +141,38 @@ export const toolGroupCommands: CommandHandler[] = [
         }
       } catch {
         // 埋点不可用时不影响状态输出。
+      }
+      // 视觉窗口:本地延时是线性项,图像二次增长才是长 GUI 任务的爆点,必须与延时分开暴露。
+      // 看点是「在途帧数停在 [keep, keep+batch-1] 不随步数涨」+「dropped 在涨(证明窗口真的在剪)」。
+      try {
+        const { visionWindowStats, getVisionWindowTelemetry } = await import('../../context/vision-window.js');
+        const vw = visionWindowStats(ctx.history);
+        if (vw.images > 0) {
+          const tel = getVisionWindowTelemetry();
+          layout.contentWrite(
+            `${ui.dim}${t('cu.visionWindow', {
+              frames: vw.frames,
+              images: vw.images,
+              tokens: vw.imageTokens,
+              keep: visionKeep(),
+              batch: visionBatch(),
+              dropped: tel.framesDropped,
+            })}${ui.reset}\n`,
+          );
+        }
+      } catch {
+        // 同上:面板指标不可用不影响状态输出。
+      }
+      // GUI 动作台账(L2):与窗口指标并列。台账是时间轴(做过什么),窗口是空间轴(最新几帧),
+      // 二者都不显示时说明本会话还没跑过 computer。
+      try {
+        const { countGuiActions } = await import('../../session/gui-actions.js');
+        const ledgerCount = countGuiActions();
+        if (ledgerCount > 0) {
+          layout.contentWrite(`${ui.dim}${t('cu.actionLedger', { count: ledgerCount })}${ui.reset}\n`);
+        }
+      } catch {
+        // 台账不可读不影响状态输出。
       }
       return next();
     }

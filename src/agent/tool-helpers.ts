@@ -20,6 +20,7 @@ import { createRelevancePruner } from '../context/relevance.js';
 import { isToolResultSuccess } from '../context/utils.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
+import { appendGuiAction } from '../session/gui-actions.js';
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
 export function parseArgs(raw: string): Record<string, unknown> | null {
@@ -152,4 +153,8 @@ export function pushToolResult(
   if (pruner) pruner.observePush(history, msg, succeeded);
   if (lifecycle) lifecycle.pushTool(history, messageIndex, succeeded);
   runtimeContextState.lifecycleStats = lifecycle?.stats();
+  // GUI 动作台账(L2):每个 computer 动作往会话目录的 gui-actions.log 追加一行。
+  // 放这里而不是工具内部,是因为工具不该持有会话目录与文件 I/O;写失败静默,
+  // 台账是可观测性,绝不能反过来改变动作结果。
+  if (tc.name === 'computer') appendGuiAction(output);
 }

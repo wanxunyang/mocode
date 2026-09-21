@@ -6,6 +6,7 @@ import {
   type ChatMessage,
   type ChatResult,
 } from '../llm/index.js';
+import { visionBatch, visionKeep } from '../config/index.js';
 import type { ContextState } from '../session/compact.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
 import type { AgentRunOptions, AgentRunResult } from './run-contracts.js';
@@ -98,6 +99,14 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
 
   let historyRebuilt = false;
   let overflowRetried = false;
+  // 视觉滑动窗口**必须剪在 trim 之前**:contextTrimmer.trim() 拿的是 historyManager.snapshot(),
+  // 若先 trim,预算口径还是未剪的旧数组,80% 压力线照旧被图像撑爆(design-notes/vision-window.md §2.1)。
+  // 只在这一个地方剪;下面的 overflow 重试路径读同一个 snapshot,会自动受益。
+  const visionKeepN = visionKeep();
+  if (visionKeepN > 0 && historyManager.pruneVisionWindow({ keep: visionKeepN, batch: visionBatch(), step })) {
+    rebuildHistoryIndexes();
+    onContextUpdate?.();
+  }
   const compactStartedAt = Date.now();
   const trimResult = await contextTrimmer.trim({
     mode: scheduler ? 'scheduled' : 'fallback',
@@ -163,7 +172,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
         ? '## Post-compaction recovery\n' +
           'Context was compacted before this request. Recover before doing anything else, in this order:\n' +
           '1. Read the session summary at the top of the history: `## Completed` is already done — do not redo or re-verify it. `## In Progress` / `## Next Steps` tell you exactly where work stopped and what is next.\n' +
-          '2. Read `## Session state` below (from notes.md, refreshed every step): the active plan is authoritative — `[x]` steps are finished, resume from the first `[ ]`. A `## Compaction Snapshot` section there is the progress checkpoint written at this compaction.\n' +
+          '2. Read `## Session state` below (refreshed every step from notes.md / gui-actions.log): the active plan is authoritative — `[x]` steps are finished, resume from the first `[ ]`. A `## Compaction Snapshot` section there is the progress checkpoint written at this compaction. A `## GUI actions` section lists every GUI action already performed with its observed result: do not repeat an action that appears there, unless the latest screenshot contradicts it (then the screenshot wins — treat that line as attempted but unverified).\n' +
           (sessionStateText
             ? ''
             : '(No active plan or snapshot was found in notes.md — reconstruct what is done purely from the summary and treat its `## Completed` as ground truth.)\n') +
