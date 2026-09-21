@@ -1440,6 +1440,12 @@ app.whenReady().then(async () => {
   // 启动时先让 .active 预设覆盖 config 裸键 —— 必须在 agent 启动之前，
   // 否则 host 会带着 config 里那个可能已过时的 LLM_MODEL 启动。
   applyActivePreset();
+  // 应用启动即预热上次选中的任务：renderer 启动只 getState 渲染侧栏、不触发 select-task，
+  // 不在这里预热的话，用户第一句话落到恢复的任务上时仍要现场冷启动 host（实测 ~8s，开 MCP 更久）。
+  // 只预热 selectedTaskId 这一个：没有选中任务时第一句话会新建任务，
+  // create-task handler 自己就会预热；猜「最近任务」去预热大概率白烧一个进程。
+  const bootTask = state.selectedTaskId ? taskById(state.selectedTaskId) : undefined;
+  if (bootTask) ensureAgent(bootTask);
   installIpc();
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
