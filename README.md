@@ -110,7 +110,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Session persistence** — Every turn is saved automatically; `--resume` / `/resume` picks up a past session.
 - **Skills system** — Scans directories like `~/.mocode/skills/` automatically; each skill's description is injected into the system prompt, and the model calls `use_skill` to load the full instructions only when relevant (progressive disclosure: skim the summary first, load the body only if needed).
 - **Optional desktop pet** — A small floating window (`/pet`) shows a stateful character that mirrors agent activity (idle / thinking / tool running / waiting for human). Works as a separate process over WebSocket; quit it with `/pet quit`. Sits beside the terminal, never blocks it.
-- **Slash commands** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`, with dropdown filtering as you type.
+- **Slash commands** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`, with dropdown filtering as you type.
 
 ## Documentation
 
@@ -280,6 +280,7 @@ dev_server stop   id=srv-xxxx
 | ---------------- | ---------------------------------------------------------------------------------------------- |
 | `/exit` `/quit`  | Exit MoCode                                                                                    |
 | `/clear`         | Clear history (keeps the system prompt) + clear screen                                         |
+| `/cd`            | Switch workspace (`/cd <path>`; bare `/cd` shows current, `/cd -` returns). Old session is saved to the old workspace, the new one starts like `/clear` |
 | `/image`         | Attach a local image to the next message; supports `attach <path>` / `list` / `clear`          |
 | `/context`       | Show a context usage bar (tokens / message count, estimated or measured)                       |
 | `/skills`        | List discovered skills                                                                         |

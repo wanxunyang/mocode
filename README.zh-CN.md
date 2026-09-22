@@ -109,7 +109,7 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **会话持久化** — 每轮自动落盘,`--resume` / `/resume` 续接历史会话
 - **Skills 系统** — 自动扫描 `~/.mocode/skills/` 等目录,description 注入系统提示,模型按需调 `use_skill` 加载完整指令(渐进式披露:先看简介,任务相关才加载正文)
 - **可选桌宠** — 独立悬浮窗(`/pet`)显示一个小角色,镜像 agent 活动(空闲 / 思考 / 跑工具 / 等人工),独立进程走 WebSocket,`/pet quit` 完全关闭。挂在终端外,绝不挡终端。
-- **斜杠命令** — `/exit` `/clear` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`,输入时下拉过滤
+- **斜杠命令** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`,输入时下拉过滤
 
 ## 使用文档
 
@@ -271,6 +271,7 @@ dev_server stop   id=srv-xxxx
 | ---------------- | ------------------------------------------------------------------- |
 | `/exit` `/quit`  | 退出 mocode                                                         |
 | `/clear`         | 清空历史(保留系统提示)+ 清屏                                        |
+| `/cd`            | 切换工作空间(`/cd <路径>`；`/cd` 看当前、`/cd -` 回上一个)。旧会话落盘到原工作区,新工作区按 /clear 重开 |
 | `/image`         | 附加本地图片到下一条消息；支持 `list` / `clear`                     |
 | `/context`       | 显示上下文用量条(token / 消息数 / 估算或实测)                       |
 | `/skills`        | 列出已发现的 skill                                                  |

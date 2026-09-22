@@ -17,6 +17,14 @@ export function buildSlashCommands(): SlashCommand[] {
     { name: '/help', desc: d('commands.help') },
     { name: '/exit', desc: d('commands.exit') },
     { name: '/clear', desc: d('commands.clear') },
+    {
+      name: '/cd',
+      desc: d('commands.cd'),
+      children: [
+        { name: '<path>', value: '/cd ', submit: false, desc: d('commands.cdTo') },
+        { name: '-', value: '/cd -', desc: d('commands.cdPrev') },
+      ],
+    },
     { name: '/context', desc: d('commands.context') },
     { name: '/skills', desc: d('commands.skills') },
     { name: '/skill', desc: '执行某个 skill(/skill <name> [args-json])' },
@@ -171,7 +179,7 @@ export const LLM_ERROR_HINT_KEYS: Record<ChatErrorKind, TranslationKey> = {
 
 /** /help 的分组:按使用场景归组,组内保持菜单树顺序。未列入的顶层命令兜底进「其他」。 */
 export const HELP_GROUPS: { key: TranslationKey; names: string[] }[] = [
-  { key: 'help.groupFrequent', names: ['/help', '/clear', '/context', '/compact', '/resume', '/model'] },
+  { key: 'help.groupFrequent', names: ['/help', '/clear', '/cd', '/context', '/compact', '/resume', '/model'] },
   { key: 'help.groupSession', names: ['/sessions', '/rollback', '/memory', '/skills', '/skill', '/init'] },
   {
     key: 'help.groupConfig',

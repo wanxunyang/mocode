@@ -18,6 +18,7 @@
 import type { CommandContext, CommandHandler, CommandOutcome } from './types.js';
 import { unhandled } from './types.js';
 import { systemCommands } from './system.js';
+import { workspaceCommands } from './workspace.js';
 import { modeCommands } from './mode.js';
 import { petCommands } from './pet.js';
 import { imageCommands } from './image.js';
@@ -39,6 +40,7 @@ import { toolGroupCommands } from './tool-group.js';
  */
 export const commandHandlers: CommandHandler[] = [
   ...systemCommands,
+  ...workspaceCommands,
   ...modeCommands,
   ...petCommands,
   ...imageCommands,

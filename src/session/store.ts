@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { config, getActiveModel } from '../config/index.js';
+import { getWorkspaceRoot } from '../workspace/index.js';
 import { isToolRouteGroupName, type ToolRouteGroupName } from '../config/profiles.js';
 import type { ChatMessage } from '../llm/index.js';
 import { truncateDisplay } from '../ui/render.js';
@@ -30,7 +31,8 @@ export interface SessionRecord extends SessionMeta {
 export interface SessionStoreOptions {
   /** 字符串会在构造时固定；provider 用于默认兼容 store 动态读取 config.sessionDir。 */
   sessionsRoot?: string | (() => string);
-  workspaceRoot?: string;
+  /** 会话归属的工作区根。字符串会在构造时固定；provider 让默认实例跟随 /cd 切换。 */
+  workspaceRoot?: string | (() => string);
   getModel?: () => string;
   getCurrentSessionId?: () => string | undefined;
   setCurrentSessionId?: (id: string | undefined) => void;
@@ -80,8 +82,15 @@ function firstUserOf(history: ChatMessage[]): string {
  * `<sessionsRoot>/<id>/session.json`, with `<sessionsRoot>/<id>.json` as a read fallback.
  */
 export class SessionStore {
-  readonly workspaceRoot: string;
+  /**
+   * 会话归属的工作区根。**动态**:默认实例用 provider 读 workspace root,
+   * 这样 /cd 切换工作区后不必重建 store(重建会丢 currentSessionId 等进程级绑定)。
+   */
+  get workspaceRoot(): string {
+    return this.workspaceRootProvider();
+  }
 
+  private readonly workspaceRootProvider: () => string;
   private readonly sessionsRootProvider: () => string;
   private readonly getModel: () => string;
   private readonly currentSessionIdProvider?: () => string | undefined;
@@ -89,7 +98,13 @@ export class SessionStore {
   private currentSessionId: string | undefined;
 
   constructor(options: SessionStoreOptions = {}) {
-    this.workspaceRoot = path.resolve(options.workspaceRoot ?? process.cwd());
+    if (typeof options.workspaceRoot === 'function') {
+      const provider = options.workspaceRoot;
+      this.workspaceRootProvider = () => path.resolve(provider());
+    } else {
+      const fixedWorkspace = path.resolve(options.workspaceRoot ?? process.cwd());
+      this.workspaceRootProvider = () => fixedWorkspace;
+    }
     if (typeof options.sessionsRoot === 'function') {
       const provider = options.sessionsRoot;
       this.sessionsRootProvider = () => path.resolve(provider());
@@ -240,7 +255,8 @@ export class SessionStore {
 /** 旧函数 API 的进程级兼容实例；session root 每次读取 config，保留测试和运行时切换语义。 */
 export const defaultSessionStore = new SessionStore({
   sessionsRoot: () => config.sessionDir,
-  workspaceRoot: process.cwd(),
+  // 动态读工作区根:/cd 切走后本实例仍归属新工作区(见 src/workspace/index.ts)。
+  workspaceRoot: () => getWorkspaceRoot(),
   getModel: getActiveModel,
   getCurrentSessionId: getDefaultCurrentSessionId,
   setCurrentSessionId: (id) => setDefaultCurrentSessionId(id, process.cwd()),

@@ -207,6 +207,8 @@ export function runningStateFor(cmd: string): { status: string; placeholder: str
       return { status: t('running.auto'), placeholder: '…' };
     case '/clear':
       return { status: t('running.clear'), placeholder: '…' };
+    case '/cd':
+      return { status: t('running.workspace'), placeholder: t('running.switching') };
     case '/theme':
       return { status: t('running.theme'), placeholder: t('running.chooseTheme') };
     case '/model':
