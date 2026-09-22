@@ -232,6 +232,158 @@ describe('batch 纯渲染 helper', () => {
   });
 });
 
+describe('batch 摘要行:结构与字形', () => {
+  /** 取 content 缓冲里最后一条摘要行(剥色)。摘要行是 endBatch 前 totalRows-2 那条。 */
+  function lastSummary(rowIdx: number): string {
+    return stripAnsi(content.lineAt(rowIdx) ?? '');
+  }
+
+  it('同类工具合并计数;单次调用不带计数(不再出现「run_command 1」)', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'run_command', 'npm run dev');
+    batch.showLiveBatch(id, layout);
+    const one = lastSummary(content.totalRows() - 2);
+    assert.match(one, /run_command/);
+    assert.doesNotMatch(one, /run_command\s+1\b/, '单次调用不应带冗余计数');
+  });
+
+  it('多次调用写 ×N', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'read_file', 'a.ts');
+    batch.recordCall(id, 'read_file', 'b.ts');
+    batch.recordCall(id, 'read_file', 'c.ts');
+    batch.showLiveBatch(id, layout);
+    assert.match(lastSummary(content.totalRows() - 2), /read_file ×3/);
+  });
+
+  it('符号与标签间距恒定 1 空格(防回归:曾误留 3 空格,符号读作孤立在左)', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'run_command', 'a');
+    batch.recordCall(id, 'run_command', 'b');
+    batch.showLiveBatch(id, layout);
+    const line = lastSummary(content.totalRows() - 2);
+    // 缩进 + 符号 + 恰好 1 空格 + 标签:运行态应为「◇ 正在探索」(前缀后无额外留白)。
+    assert.match(line, /◇ [^\s]/, '符号与标签之间应恰好 1 空格');
+    assert.doesNotMatch(line, /◇\s{2,}/, '符号后不应出现 2+ 空格');
+
+    batch.recordResult(id, 'run_command', 'ok', null, 'ok');
+    batch.recordResult(id, 'run_command', 'ok', null, 'ok');
+    batch.endBatch(id, layout);
+    const done = lastSummary(content.totalRows() - 2);
+    assert.doesNotMatch(done, /◆\s{2,}/, '收口态符号后同样不应出现 2+ 空格');
+  });
+
+  it('字形即进度:未回结果 → ◇,部分回 → 档位推进,收口 → ◆', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'run_command', 'a');
+    batch.recordCall(id, 'run_command', 'b');
+    batch.recordCall(id, 'run_command', 'c');
+    batch.recordCall(id, 'run_command', 'd');
+    batch.showLiveBatch(id, layout);
+    const rowIdx = content.totalRows() - 2;
+    assert.match(lastSummary(rowIdx), /◇/);
+
+    batch.recordResult(id, 'run_command', 'ok', null, 'ok');
+    batch.recordResult(id, 'run_command', 'ok', null, 'ok');
+    batch.showLiveBatch(id, layout);
+    const mid = lastSummary(rowIdx);
+    assert.match(mid, /[◔◑◕]/, '部分完成应落到中间档字形');
+    assert.doesNotMatch(mid, /◆/, '未收口不应出现实心 ◆');
+
+    batch.recordResult(id, 'run_command', 'ok', null, 'ok');
+    batch.recordResult(id, 'run_command', 'ok', null, 'ok');
+    batch.endBatch(id, layout);
+    assert.match(lastSummary(rowIdx), /◆/, '收口应落 ◆ 实心');
+  });
+
+  it('全失败用 ×,部分失败用 !', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'run_command', 'x');
+    batch.recordResult(id, 'run_command', 'Error', null, 'boom', true);
+    batch.endBatch(id, layout);
+    assert.match(lastSummary(content.totalRows() - 2), /×/);
+
+    const id2 = batch.beginBatch();
+    batch.recordCall(id2, 'run_command', 'y');
+    batch.recordCall(id2, 'read_file', 'z.ts');
+    batch.recordResult(id2, 'run_command', 'Error', null, 'boom', true);
+    batch.recordResult(id2, 'read_file', 'ok', null, 'ok');
+    batch.endBatch(id2, layout);
+    const all = content.sliceFromEnd(0, content.totalRows()).map(stripAnsi);
+    assert.ok(
+      all.some((l) => /!/.test(l)),
+      '部分失败应出现 !',
+    );
+  });
+
+  it('在飞态显实时耗时(而非等收尾才出数字)', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'run_command', 'sleep 30');
+    batch.showLiveBatch(id, layout);
+    const live = lastSummary(content.totalRows() - 2);
+    assert.match(live, /<\d|\d+(\.\d+)?s|m \d+s/, '在飞态应带耗时');
+    assert.match(live, /步|step/, '应带步数');
+  });
+});
+
+describe('sweepRender 可见宽度不变量(行宽钳制与 buffer 索引的前提)', () => {
+  const HI = '\x1B[38;2;130;225;240m';
+  const BASE = '\x1B[38;2;86;182;194m';
+
+  it('任意帧下可见字符序列与宽度都不变(仅 SGR 变化)', () => {
+    for (const label of ['正在探索', '子 Agent 运行中', 'Exploring', 'a', '']) {
+      const expect = [...label].join('');
+      for (let f = 0; f < 60; f++) {
+        const rendered = batch.sweepRender(label, BASE, HI, f);
+        assert.equal(stripAnsi(rendered), label, `帧 ${f}: 可见文本被改动`);
+        assert.equal([...stripAnsi(rendered)].join(''), expect);
+      }
+    }
+  });
+
+  it('高亮带在一个周期内扫过所有位置且不越界', () => {
+    const n = 4;
+    const seen = new Set<number>();
+    for (let f = 0; f < n * 2; f++) {
+      const [start, end] = batch.sweepBandRange(n, f);
+      assert.ok(start >= 0 && end <= n, `帧 ${f}: 区间 [${start},${end}) 越界`);
+      assert.ok(end > start, `帧 ${f}: 空带`);
+      for (let i = start; i < end; i++) seen.add(i);
+    }
+    assert.equal(seen.size, n, '一个周期内每个字符都应被扫到');
+  });
+
+  it('带宽不超过 SWEEP_BAND 且短文本自动收窄', () => {
+    for (const n of [1, 2, 3, 4, 11]) {
+      for (let f = 0; f < n * 2 + 2; f++) {
+        const [s, e] = batch.sweepBandRange(n, f);
+        assert.ok(e - s <= Math.min(3, n), `n=${n} 帧 ${f}: 带宽 ${e - s} 超限`);
+      }
+    }
+  });
+
+  it('帧号回环连续:周期末与周期首之间无空白帧', () => {
+    const n = 5;
+    const cycle = n * 2;
+    const a = batch.sweepBandRange(n, cycle - 1);
+    const b = batch.sweepBandRange(n, cycle);
+    assert.deepEqual(b, batch.sweepBandRange(n, 0));
+    assert.ok(a[1] > a[0] && b[1] > b[0]);
+  });
+
+  it('负数/超大帧号不抛错(帧号归一化)', () => {
+    assert.doesNotThrow(() => batch.sweepBandRange(4, -1));
+    assert.doesNotThrow(() => batch.sweepRender('测试', BASE, HI, -7));
+    assert.doesNotThrow(() => batch.sweepRender('测试', BASE, HI, 1e9));
+  });
+});
+
 describe('batch renderedCount 不变量', () => {
   it('一级展开后折叠会删除全部 entry 行并保留下游正文', () => {
     const layout = makeLayout();

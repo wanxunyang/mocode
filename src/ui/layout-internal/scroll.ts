@@ -39,6 +39,39 @@ export function screenRowToAbsLine(row: number): number {
 }
 
 /**
+ * 只重画**一条**已提交内容行(单行 CUP + clearLine + 行文本 + 光标归位)。
+ *
+ * 与 repaintViewport 的区别是「写多少」:后者把整个内容区 h 行全刷一遍。批量摘要行的
+ * 动态刷新(如扫光逐帧换 SGR)若走整屏重画,在 16fps 下会让运行中的列表持续闪 ——
+ * 这正是用户实测反馈的观感问题。单行重画只碰目标行,无闪烁且开销恒定。
+ *
+ * 前置条件:调用方保证该行**当前在视口内**(offset=0 的实时尾屏天然满足)且行宽已钳到
+ * cols(identity: 行内只换 SGR,可见宽度不变)。滚动回看态一律不走这里:那里应由上层
+ * 直接跳过刷新(冻结视口),而非在这里猜屏幕映射。
+ */
+export function repaintContentLine(absIdx: number, line: string): void {
+  if (!state.active) return;
+  const g = getGeo();
+  const row = absIdx - viewportAbsStart() + 1;
+  if (row < 1 || row > g.contentBottom) return; // 不在视口内:不猜映射,交由上层处理
+  // 已提交行自带完整 SGR 前缀(breakRow 落盘的是 `rowStartSgr + curRaw + reset`,见 content.ts),
+  // 故单行重画无需补前缀,只需按当前列宽钳宽(窄窗兜底,防 auto-wrap 破坏「一行=一物理行」)。
+  const text = truncateAnsi(line, g.cols);
+  let out = cup(row, 1) + esc.clearLine + text;
+  // 与 repaintViewport 同约定:运行态光标归输入框(供 IME 锚定),INPUT 态归续写位。
+  if (state.mode === 'running') {
+    const c = runningCaretPos();
+    out += cup(c.row, c.col);
+  } else {
+    out += cup(
+      state.scrollOffset === 0 ? state.contentRow : g.contentBottom,
+      state.scrollOffset === 0 ? state.contentCol : 1,
+    );
+  }
+  stdout.write(out);
+}
+
+/**
  * 重画内容区 viewport:按 scrollOffset 取缓冲尾窗,逐行 cup+clearline+rowtext 映射到屏 1..contentBottom。
  * offset=0 即尾窗(== 实时屏,resize / 回尾时用)。清行含 contentBottom——顺带擦 WT 边距漏影(状态行重复)。
  * 有活跃选区(鼠标拖拽中)时,对选中范围套反白——纯视觉,不影响缓冲内容。

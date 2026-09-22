@@ -14,7 +14,9 @@
 
 import { ui } from './theme.js';
 import { t } from '../i18n/index.js';
-import { truncateAnsi } from './render.js';
+import { truncateAnsi, fmtElapsed } from './render.js';
+import { isScrolled, repaintContentLine } from './layout-internal/scroll.js';
+import { replaceLine } from './content.js';
 
 /** 一条工具调用在批内的展示数据(由 agent 的 hooks 累积,endBatch 时收尾)。 */
 export interface BatchEntry {
@@ -70,12 +72,10 @@ interface BatchRecord {
    *  决定子批摘要行插入锚点(插到对应 └─ sub-agent 行下方)。 */
   groupChildIndex?: number;
   /** 运行态标志(子 agent 批用):即便已记录的 entry 全部完成,只要子 agent 还在跑,
-   *  摘要行就用「运行中」专属图标(而非 ●),与真正完成态区分。finishLiveBatch 收尾时清掉。 */
+   *  摘要行改用「在飞」专属字形(◇◔◑◕ 不进到满档),与真正完成态 ◆ 区分。
+   *  finishLiveBatch 收尾时清掉(STEP_GLYPHS 已取代旧的单一 ◐ 常量)。 */
   running?: boolean;
 }
-
-/** 子 agent 运行中的专属图标:与完成态的实心 ● 区分,也区别于父层「探索」运行态的 ◇。 */
-const RUNNING_GLYPH = '◐';
 
 const batches = new Map<string, BatchRecord>();
 /** 绝对行索引 → 所属 batch id(仅记录 summary 行;用于鼠标点击反查)。
@@ -135,6 +135,8 @@ export function reset(): void {
   expandedBatches.clear();
   callToBatch.clear();
   groupChildIndexByCall.clear();
+  // 扫光心跳随运行态批自停:batch 全清后 hasRunningBatch 必为 false。
+  syncSweepTimer();
 }
 
 /** 新建一个 batch(在 agent 拿到第一条 onToolHeader 时调)。返回 id。
@@ -167,6 +169,8 @@ export function beginBatch(
     groupChildIndex: opts?.groupChildIndex,
     running: opts?.running ?? false,
   });
+  // 运行态批 → 扫光心跳开始(在 beginBatch 就置 running 的路径也能启动)。
+  if (opts?.running) syncSweepTimer();
   return id;
 }
 
@@ -192,6 +196,8 @@ export function recordCall(id: string, name: string, callSummary: string, callId
   b.finishedAt = undefined;
   b.entries.push({ name, callSummary, resultSummary: '', diffBlock: null });
   if (callId && b.groupParent) groupChildIndexByCall.set(callId, b.entries.length - 1);
+  // 新增 entry = 本批重新「在飞」→ 扫光心跳起(此前收口时可能已停)。
+  syncSweepTimer();
 }
 
 /** 查询某 sub-agent 调用在所属组容器批 entries 中的序号(供 spawn.ts 建子批时定锚点)。 */
@@ -262,41 +268,235 @@ export function recordResult(
 
 // ── 摘要行文本生成 ──
 
-/** 把 entry 列表压缩成一行摘要。 */
+/**
+ * 运行态「符号即进度」字形:符号本身编码 completed/total,不必旁读数字。
+ *
+ * 全部取自 U+25A0–25FF Geometric Shapes——与 `●`(U+25CF)同块。本模块已实测记录过
+ * 「本机等宽字体对 Geometric Shapes 按 1 列渲染、对 Box Drawing 按 2 列」(见下方
+ * CARET_COLLAPSED 注释),故此族是本终端里唯一有实测依据的安全符号集。
+ * 按 1/4 档进阶:◇(0) ◔(1/4) ◑(1/2) ◕(3/4) ◆(满)。档位边界与 total 无关,
+ * 故 total 增长时档位不会回退(填满 3/5 与 3/9 同取 ◑)。
+ */
+const STEP_GLYPHS = ['◇', '◔', '◑', '◕', '◆'] as const;
+
+/** 收尾态字形:全成 ◆(实心=落定,与运行态的 ◇◔◑◕ 同族)、部分失败 !、全失败 ×。 */
+const DONE_GLYPH = '◆';
+const PARTIAL_FAIL_GLYPH = '!';
+const ALL_FAIL_GLYPH = '×';
+
+/** 耗时色阶(ms):≥30s 转黄(该留意),≥60s 转红(已超常规阈值)。 */
+const ELAPSED_WARN_MS = 30_000;
+const ELAPSED_ALERT_MS = 60_000;
+
+/** 扫光:高亮带宽度(字符数)。标签很短(4 字),带宽 3 既能看出"扫"又不整行同时亮。 */
+const SWEEP_BAND = 3;
+/** 扫光心跳间隔(ms):约 17fps,每拍推进 1 字符,4 字标签一个来回约 0.5s。 */
+const SWEEP_TICK_MS = 60;
+
+/**
+ * 运行态摘要行的扫光帧号。**逐帧只改前景 SGR,不增删字符**——可见宽度恒定,
+ * `sanitizeRow` / `truncateAnsi` 的列宽钳制与 buffer 行索引全部不受影响。
+ *
+ * 这是本方案能落在纯字符串层的前提:换成背景色块或增删字符都会让「一条逻辑行 =
+ * 一条物理行」的模型失效,进而打乱 repaintViewport 的 CUP 寻址。
+ */
+let _sweepFrame = 0;
+let _sweepTimer: NodeJS.Timeout | null = null;
+/**
+ * 最近一次 showLiveBatch 收到的 layout —— 仅用于**判断**当前是否有可用 UI 通道
+ * (`_sweepLayout != null`)。扫光落屏走 `content.replaceLine` + `repaintContentLine` 单行路径,
+ * 不走 layout 方法:contentWrite 那版末尾会整屏 repaintViewport,16fps 逐帧调会持续闪。
+ * 存 layout 而不自己 import 判断 TUI 是否激活,是沿用「agent 侧注入」的既有形态。
+ */
+let _sweepLayout: { contentReplaceLine(absIdx: number, line: string): void } | null = null;
+
+/**
+ * 批是否「在飞」(需要扫光与实时耗时)。判据是**已收口即落定**:
+ * `endBatch` 必设 finishedAt,故先看它 —— 否则任何「endBatch 了但 running 标志残留」
+ * 的路径会让扫光永远转下去(实测:探针手动置 running 后收口,扫光仍在写)。
+ * 收口标志优先于 running,是因为 running 在语义上只描述"这一批还没落定"。
+ * `recordCall` 会把 finishedAt 清回 undefined(允许累计探索后再追加工具),重新在飞时自然复活。
+ */
+function isBatchLive(b: BatchRecord): boolean {
+  if (b.finishedAt != null) return false;
+  if (b.running) return true;
+  return b.entries.length > 0 && !b.entries.every(isEntryDone);
+}
+
+/** 是否有在飞批——扫光只服务它们。 */
+function hasLiveBatch(): boolean {
+  for (const b of batches.values()) if (isBatchLive(b)) return true;
+  return false;
+}
+
+/** 扫光可用性:TUI(非 TTY 输出纯文本,不能塞动画转义)+ 有在飞批 + 有可写回的 layout。 */
+function sweepEnabled(): boolean {
+  return ui.isTTY && _sweepLayout != null && hasLiveBatch();
+}
+
+/**
+ * 同步扫光心跳开关(建批/收批时调)。心跳随最后一个运行态批结束自停,不常驻空转。
+ */
+export function syncSweepTimer(): void {
+  if (!sweepEnabled()) {
+    if (_sweepTimer) {
+      clearInterval(_sweepTimer);
+      _sweepTimer = null;
+    }
+    return;
+  }
+  _sweepTimer ??= (() => {
+    const timer = setInterval(() => {
+      if (!sweepEnabled()) {
+        syncSweepTimer();
+        return;
+      }
+      // 滚动回看时冻结视口:写回该行会画出不含最新帧的窗口、造成闪烁。帧号照常推进,回底后不跳帧。
+      if (isScrolled()) {
+        _sweepFrame++;
+        return;
+      }
+      _sweepFrame++;
+      const layout = _sweepLayout;
+      if (!layout) return;
+      for (const b of batches.values()) {
+        if (b.summaryAbsIdx < 0) continue;
+        if (!isBatchLive(b)) continue; // 已落定的批:耗时为定值,重画纯属浪费
+        const line = truncateAnsi(buildSummaryLine(b, true), maxCols);
+        // ① 直接写缓冲(不经过 layout.contentReplaceLine —— 那一版末尾会整屏 repaintViewport,
+        //    16fps 下让运行中的列表持续闪,正是用户反馈的观感问题);
+        // ② 只重画这一行。两步都是 O(1)-ish,与内容区长度无关。
+        replaceLine(b.summaryAbsIdx, line);
+        repaintContentLine(b.summaryAbsIdx, line);
+      }
+    }, SWEEP_TICK_MS);
+    timer.unref?.();
+    return timer;
+  })();
+}
+
+/**
+ * 计算本帧高亮带覆盖的字符区间 `[start, end)`(纯函数,导出供帧推进/带宽测试)。
+ *
+ * head 在一个周期内 0 → n → 0:扫进(0..n)后扫回(n..2n),使带子从右端出去、从左端
+ * 回来而无跳变(单向回绕会让"扫到底"瞬间跳回左边,读成闪烁)。
+ */
+export function sweepBandRange(charCount: number, frame: number, band = SWEEP_BAND): [number, number] {
+  if (charCount <= 0) return [0, 0];
+  const cycle = charCount * 2;
+  const pos = ((frame % cycle) + cycle) % cycle; // 帧号负数也安全(不要依赖调用方已归一)
+  const head = pos <= charCount ? pos : cycle - pos;
+  const w = Math.min(band, charCount);
+  // end 由 head 推得,而 head 可等于 charCount(带子探到串尾之外一格)。
+  // 必须钳到 charCount:否则本函数会返回越界区间,「每个字符都被扫到」等不变量随之失准。
+  return [Math.max(0, Math.min(head - w + 1, charCount - 1)), Math.min(head + 1, charCount)];
+}
+
+/**
+ * 按帧给文本套扫光(纯函数,导出供「可见宽度不变量」测试)。
+ *
+ * **只改前景 SGR、不增删字符**是硬约束:调用方(sanitizeRow / truncateAnsi)按字符列宽
+ * 钳制行宽,一旦这里动了可见字符,「一条逻辑行 = 一条物理行」的模型就会失效,
+ * 进而打乱 repaintViewport 的 CUP 寻址。故本函数只做 SGR 开合,输出宽度恒等于输入。
+ *
+ * 颜色只在**状态切换处**写出(连续同色字符共用一个 SGR),避免逐字符刷 SGR 撑大输出。
+ */
+export function sweepRender(text: string, base: string, hi: string, frame: number): string {
+  const chars = [...text];
+  const [start, end] = sweepBandRange(chars.length, frame);
+  let out = '';
+  let cur = '';
+  for (let i = 0; i < chars.length; i++) {
+    const want = i >= start && i < end ? hi : base;
+    if (want !== cur) {
+      out += want;
+      cur = want;
+    }
+    out += chars[i];
+  }
+  // 收尾回常态色:调用方随后会补 reset,但这里显式闭合可让本函数的输出自成一段
+  // (测试/history 回放等直接消费返回值的场景不必再关心尾色)。
+  return cur === base ? out : `${out}${base}`;
+}
+
+/**
+ * 给标签文本渲染扫光高亮。`base` 是标签的常态色(运行态 accent / 失败态 red 等),
+ * 高亮带扫过的字符临时换成 `ui.sweepHighlight`。
+ *
+ * 中文按**字符**而非列推进:按列推进需要把列偏移折算回字符边界,折算后相邻帧会落在
+ * 同一字符上、视觉上「卡一拍」;按字推进牺牲严格等速,换取每帧必有可见位移。
+ */
+function sweepText(text: string, base: string): string {
+  if (!sweepEnabled()) return text;
+  return sweepRender(text, base, ui.sweepHighlight, _sweepFrame);
+}
+
+/**
+ * 单行摘要。结构(全部单行、行内样式,不改行数):
+ *   `  ◆  探索  ·  5 步 · 16.8s   run_command ×2  glob ×1`
+ * 分项之间用 dim 的 `·` 分隔(比裸空格更有"字段感"),工具名去引号、单次调用不带计数。
+ */
 function buildSummaryLine(record: BatchRecord, live = false): string {
   const prefix = record.indent ?? '';
   const entries = record.entries;
   if (entries.length === 0) {
     return `${prefix}  ${ui.dim}│${ui.reset} ${ui.bold}${ui.accent}◇${ui.reset} ${ui.dim}No tools${ui.reset}`;
   }
-  // N>1:同类合并 "read_file 3, glob 1, grep 1"
-  const counts = new Map<string, number>();
-  for (const e of entries) counts.set(e.name, (counts.get(e.name) ?? 0) + 1);
-  const parts: string[] = [];
-  for (const [n, c] of counts) parts.push(`${n} ${c}`);
+
   const completed = entries.filter(isEntryDone).length;
   const failedCount = entries.filter((e) => e.failed).length;
-  // 工具本身完成就立即显示完成态，不等待整轮正文流完/onDone。
-  // 单项失败不代表整批失败：执行中优先展示进度；完成后区分部分失败与全部失败。
   const finished = completed >= entries.length;
   const allFailed = finished && failedCount === entries.length;
   const partiallyFailed = finished && failedCount > 0 && !allFailed;
-  const symbol = record.running ? RUNNING_GLYPH : !finished ? '◇' : allFailed ? '×' : partiallyFailed ? '!' : '●';
-  const color = record.running
-    ? ui.accent
-    : !finished
-      ? ui.accent
-      : allFailed
-        ? ui.red
-        : partiallyFailed
-          ? ui.yellow
-          : ui.green;
-  const label = !finished ? t('agent.toolsRunning') : allFailed ? t('agent.toolsFailed') : t('agent.toolsComplete');
-  const progress = live && !finished ? `  ${completed}/${entries.length}` : `  ${entries.length}`;
-  const elapsedMs = record.finishedAt ? record.finishedAt - record.startedAt : 0;
-  const elapsed = record.finishedAt ? `  ${elapsedMs < 100 ? '<0.1s' : `${(elapsedMs / 1000).toFixed(1)}s`}` : '';
-  const displayLabel = record.label ?? label;
-  return `${prefix}  ${ui.bold}${color}${symbol}${ui.reset} ${displayLabel}${progress}${elapsed}  ${ui.dim}${parts.join('  ')}${ui.reset}`;
+  const running = !finished || record.running;
+
+  // 符号即进度:运行态按 completed/total 取档(子 agent 批额外 +1 档以示"整个 agent 还在跑")。
+  const stepIdx = Math.min(4, Math.floor((completed / entries.length) * 5));
+  const symbol = running
+    ? STEP_GLYPHS[Math.min(4, record.running ? stepIdx + 1 : stepIdx)]
+    : allFailed
+      ? ALL_FAIL_GLYPH
+      : partiallyFailed
+        ? PARTIAL_FAIL_GLYPH
+        : DONE_GLYPH;
+  const color = running ? ui.accent : allFailed ? ui.red : partiallyFailed ? ui.yellow : ui.accent;
+
+  const labelText =
+    record.label ?? (running ? t('agent.toolsRunning') : allFailed ? t('agent.toolsFailed') : t('agent.toolsComplete'));
+  // 扫光只挂在**执行中**刷新的那一帧(live):收尾定稿(endBatch, live=false)后标签应静止落定。
+  const labelSeg = running && live ? sweepText(labelText, color) : labelText;
+
+  // 步数:运行态用主题色强调进度,收尾退回灰(信息已结算,不抢主色)。
+  const stepsSeg = running
+    ? `${ui.accent}${t('agent.steps', { count: entries.length })}${ui.reset}`
+    : `${ui.dim}${t('agent.steps', { count: entries.length })}${ui.reset}`;
+
+  // 耗时色阶 ≥30s 黄 / ≥60s 红:长步骤自己跳出来,不再和 6.3s 等重。
+  // 在飞态显**实时**耗时(而非等到收尾才出一个死数字):工具阻塞几十秒时,
+  // 「这一行还在走」本身就是最重要的信息(实测场景:单条 run_command 干等 78s,
+  // 期间摘要行只有静态的计数 1,用户无法判断是卡死还是在跑)。
+  const liveElapsed = !record.finishedAt && running;
+  const elapsedMs = record.finishedAt
+    ? record.finishedAt - record.startedAt
+    : liveElapsed
+      ? Date.now() - record.startedAt
+      : 0;
+  const elapsedColor = elapsedMs >= ELAPSED_ALERT_MS ? ui.red : elapsedMs >= ELAPSED_WARN_MS ? ui.yellow : ui.dim;
+  const elapsedSeg =
+    record.finishedAt || liveElapsed
+      ? ` ${ui.dim}·${ui.reset} ${elapsedColor}${elapsedMs < 100 ? '<0.1s' : fmtElapsed(elapsedMs)}${ui.reset}`
+      : '';
+
+  // 工具分项:同类合并;单次调用不带计数(「run_command 1」的尾 1 是纯噪声),多次才写 ×N。
+  const counts = new Map<string, number>();
+  for (const e of entries) counts.set(e.name, (counts.get(e.name) ?? 0) + 1);
+  const tools = [...counts].map(([n, c]) => (c > 1 ? `${n} ×${c}` : n));
+  const toolsSeg = tools.length ? `   ${ui.dim}${tools.join('  ')}${ui.reset}` : '';
+
+  // 符号与标签之间只留 1 空格:Geometric Shapes 字形窄于字符格(左右各约 0.2 列),
+  // 再叠 3 空格会读出「符号孤立在左」的疏离感(实测:3 空格时光学间距≈3.2 列)。
+  const head = `${ui.bold}${color}${symbol}${ui.reset} ${ui.bold}${color}${labelSeg}${ui.reset} ${stepsSeg}${elapsedSeg}`;
+  return `${prefix}${head}${toolsSeg}`;
 }
 
 // ── 展开/折叠 ──
@@ -446,6 +646,8 @@ export function endBatch(
   const b = batches.get(id);
   if (!b) return;
   b.finishedAt ??= Date.now();
+  // 本批收口 → 摘要行变「落定」态(◆ + 定值耗时),不再扫光。若无其它在飞批则心跳自停。
+  syncSweepTimer();
   if (b.summaryAbsIdx >= 0) {
     layout.contentReplaceLine?.(b.summaryAbsIdx, buildSummaryLine(b));
     // 点击命中在 showLiveBatch 首次落盘时即已登记(运行态可展开);这里幂等重登,
@@ -495,6 +697,8 @@ export function showLiveBatch(
 ): void {
   const b = batches.get(id);
   if (!b) return;
+  // 登记 layout:扫光逐帧重画要靠它把新帧写回摘要行(见 _sweepLayout 注释)。
+  _sweepLayout = layout;
   const summary = buildSummaryLine(b, true);
   if (b.summaryAbsIdx < 0) {
     // 子批:摘要行插到父批已渲染块的正下方(而非 buffer 末尾),
@@ -545,6 +749,8 @@ export function showLiveBatch(
   }
   // 展开态的运行态同步:已渲染 entry 的结果回填原位替换 + 新 entry 追加。
   syncLiveExpanded(b, layout);
+  // 本批可能在飞(新 entry 刚入、结果未回)→ 确保扫光心跳在跑;已收口则由上一句的判定自停。
+  syncSweepTimer();
 }
 
 /** 展开态 batch 的运行态同步(每次 showLiveBatch 后调):不展开/未落盘时 no-op。 */
@@ -944,10 +1150,12 @@ export function setBatchLabel(id: string, label: string): void {
   if (b) b.label = label;
 }
 
-/** 设置/清除运行态标志:running=true 时摘要行用「运行中」专属图标,收尾时置 false。 */
+/** 设置/清除运行态标志:running=true 时摘要行用「运行中」专属图标,收尾时置 false。
+ *  同时驱动扫光心跳——置位即开(若尚未开),清除后若无其它运行态批则自停。 */
 export function setBatchRunning(id: string, running: boolean): void {
   const b = batches.get(id);
   if (b) b.running = running;
+  syncSweepTimer();
 }
 
 /** history 回放支持 ── */

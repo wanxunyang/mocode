@@ -223,6 +223,10 @@ const zhCN = {
   'agent.toolsRunning': '正在探索',
   'agent.toolsComplete': '探索',
   'agent.toolsFailed': '探索失败',
+  /** 单次工具调用 = 1「步」的计数单位(中文量词;英文用 countN)。 */
+  'agent.steps': '{count} 步',
+  /** 摘要行分项间的最小视觉分隔符(不占宽度,纯前景色点)。 */
+  'agent.stepSep': '·',
   'agent.changes': '文件变更',
   'agent.files': '{count} 个文件',
   'agent.changeAdded': '  新增',
@@ -606,6 +610,8 @@ const en: Record<TranslationKey, string> = {
   'agent.toolsRunning': 'Exploring',
   'agent.toolsComplete': 'Exploration',
   'agent.toolsFailed': 'Exploration failed',
+  'agent.steps': '{count} step(s)',
+  'agent.stepSep': '·',
   'agent.changes': 'Changes',
   'agent.files': '{count} file(s)',
   'agent.changeAdded': '  Added',

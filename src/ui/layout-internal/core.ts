@@ -68,6 +68,7 @@ export { paintInput, paintRunningInput, repaint } from './input-paint.js';
 export {
   isScrolled,
   repaintViewport,
+  repaintContentLine,
   scrollBy,
   scrollWheel,
   resetScroll,
