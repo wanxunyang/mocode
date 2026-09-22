@@ -138,9 +138,7 @@ export const routerCommands: CommandHandler[] = [
       const envKey = sub === 'min' ? ROUTER_ENV_KEYS.confidenceMin : ROUTER_ENV_KEYS.confidenceMinMcp;
       updateJevRouterConfig({ [field]: value });
       writeConfigKeys({ [envKey]: String(value) });
-      layout.contentWrite(
-        `${ui.green}${t('router.set', { field: sub, value: String(value) })}${ui.reset}\n`,
-      );
+      layout.contentWrite(`${ui.green}${t('router.set', { field: sub, value: String(value) })}${ui.reset}\n`);
       return next();
     }
 

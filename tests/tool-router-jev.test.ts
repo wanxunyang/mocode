@@ -223,7 +223,12 @@ test(
     __setJevFetchImpl(async () => {
       throw new TypeError('fetch failed');
     });
-    const decision = await routeToolGroups({ input: '做点事', previousGroups: [], tools: CATALOG, gateAllows: allowAll });
+    const decision = await routeToolGroups({
+      input: '做点事',
+      previousGroups: [],
+      tools: CATALOG,
+      gateAllows: allowAll,
+    });
     assert.equal(decision.fallback, true);
     assert.deepEqual(decision.groups, []);
     assert.match(decision.reason, /Jev router failed/);

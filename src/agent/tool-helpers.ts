@@ -75,10 +75,7 @@ export function isResourceLockedCall(call: ToolCallRef, toolRuntime: ToolRuntime
 
 /** 编排类工具(如 sub-agent)：同一轮内连续派发的多个调用按上限成批并行。
  *  写冲突仍由子 agent 内层工具各自获取的资源锁保护(编排器本身不持锁)。 */
-export function isParallelOrchestrationCall(
-  name: string,
-  toolRuntime: ToolRuntime = defaultToolRuntime,
-): boolean {
+export function isParallelOrchestrationCall(name: string, toolRuntime: ToolRuntime = defaultToolRuntime): boolean {
   const tool = toolRuntime.findTool(name);
   return !!tool && toolRuntime.getToolCapabilities(tool).parallelOrchestration === true;
 }

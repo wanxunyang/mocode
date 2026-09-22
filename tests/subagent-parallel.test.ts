@@ -57,17 +57,17 @@ const dispatchRequest = (
 test('ToolDispatcher 编排批:同块内交错启动,结果按原序发布', async () => {
   const source = 'subagent-parallel-interleaved';
   const log: string[] = [];
-  registerToolsExtension(source, [makeOrchestrationTool('orch_slow', 30, log), makeOrchestrationTool('orch_fast', 1, log)]);
+  registerToolsExtension(source, [
+    makeOrchestrationTool('orch_slow', 30, log),
+    makeOrchestrationTool('orch_fast', 1, log),
+  ]);
   try {
     const calls = makeCalls(['orch_slow', 'orch_fast']);
     const result = await createStagedToolDispatcher({ checkPermission: async () => 'allow' }).dispatch(
       dispatchRequest(calls, 2),
     );
 
-    assert.ok(
-      log.indexOf('start:orch_slow') < log.indexOf('start:orch_fast'),
-      `两个调用都已启动: ${log.join(',')}`,
-    );
+    assert.ok(log.indexOf('start:orch_slow') < log.indexOf('start:orch_fast'), `两个调用都已启动: ${log.join(',')}`);
     // 并行的关键证据:慢调用尚未结束,快调用就已经启动(串行实现里 fast 必在 slow 之后)。
     assert.ok(
       log.indexOf('start:orch_fast') < log.indexOf('end:orch_slow'),
@@ -89,7 +89,10 @@ test('ToolDispatcher 编排批:同块内交错启动,结果按原序发布', asy
 test('ToolDispatcher 编排批:上限为 1 时退化为逐个串行', async () => {
   const source = 'subagent-parallel-serial';
   const log: string[] = [];
-  registerToolsExtension(source, [makeOrchestrationTool('orch_one', 30, log), makeOrchestrationTool('orch_two', 1, log)]);
+  registerToolsExtension(source, [
+    makeOrchestrationTool('orch_one', 30, log),
+    makeOrchestrationTool('orch_two', 1, log),
+  ]);
   try {
     const calls = makeCalls(['orch_one', 'orch_two']);
     const result = await createStagedToolDispatcher({ checkPermission: async () => 'allow' }).dispatch(

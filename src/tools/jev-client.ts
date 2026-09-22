@@ -74,10 +74,7 @@ export type JevAskResult =
   | { readonly ok: false; readonly error: string; readonly latencyMs: number };
 
 /** 把外部 signal 与超时合并成一个 signal;返回的 cleanup 必须调用。 */
-function withTimeout(
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-): { signal: AbortSignal; cleanup: () => void } {
+function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('jev request timeout')), timeoutMs);
   const onAbort = (): void => controller.abort(signal?.reason);
@@ -194,7 +191,8 @@ export async function askJev(request: JevAskRequest): Promise<JevAskResult> {
     cleanup();
 
     const record = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
-    const rawAnswers = record.answers && typeof record.answers === 'object' ? (record.answers as Record<string, unknown>) : {};
+    const rawAnswers =
+      record.answers && typeof record.answers === 'object' ? (record.answers as Record<string, unknown>) : {};
 
     const probabilities: Record<string, number> = {};
     let inheritPrevious: number | undefined;
@@ -211,9 +209,7 @@ export async function askJev(request: JevAskRequest): Promise<JevAskResult> {
 
     const usage = record.usage && typeof record.usage === 'object' ? (record.usage as Record<string, unknown>) : {};
     const inputTokens =
-      typeof usage.input_tokens === 'number' && Number.isFinite(usage.input_tokens)
-        ? usage.input_tokens
-        : undefined;
+      typeof usage.input_tokens === 'number' && Number.isFinite(usage.input_tokens) ? usage.input_tokens : undefined;
 
     return {
       ok: true,
