@@ -8,6 +8,9 @@ type ModelDraft = { provider: 'openai' | 'anthropic'; baseURL: string; apiKey: s
 type ModelPresetDetail = ModelDraft & { name: string };
 
 contextBridge.exposeInMainWorld('mocodeWork', {
+  // 渲染层拿它决定快捷键文案里的修饰键写法(Windows/Linux → Ctrl,macOS → Command)。
+  // 渲染进程没有 process,只能由 preload 透出。
+  platform: process.platform,
   getState: (): Promise<ProjectState> => ipcRenderer.invoke('work:get-state'),
   pickProject: (): Promise<ProjectState | null> => ipcRenderer.invoke('work:pick-project'),
   selectProject: (id: string): Promise<ProjectState> => ipcRenderer.invoke('work:select-project', id),

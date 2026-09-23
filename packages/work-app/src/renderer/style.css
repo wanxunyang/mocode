@@ -326,10 +326,16 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .workspace:has(> #empty-state:not(.hidden)) .composer-area {
   position: relative; left: auto; right: auto; bottom: auto; padding: 0 var(--gutter-x);
 }
+/* 空态下隐藏会话相关的面。注意 **#search-panel 不在此列** ——
+   它搜的是「项目 / 任务」(refreshSearch 读 state.projects/state.tasks),
+   跟当前有没有对话毫无关系,空态下 Ctrl+K 恰恰是最该能用的场景。
+   之前把它一起 display:none,导致空态按 Ctrl+K 面板 class 开了却完全不可见
+   (探针实测 panelDisplay=none → 输入框 focus 也失败 = 快捷键形同虚设)。
+   它是 absolute + inset:0 的全屏遮罩,脱离文档流,不受空态 flex 布局影响。 */
 .workspace:has(> #empty-state:not(.hidden)) #conversation,
 .workspace:has(> #empty-state:not(.hidden)) #approval-panel,
 .workspace:has(> #empty-state:not(.hidden)) #inspector,
-.workspace:has(> #empty-state:not(.hidden)) #search-panel { display: none; }
+.workspace:has(> #empty-state:not(.hidden)) #conv-rail { display: none; }
 
 /* ── Composer ────────────────────────────────────────── */
 /* 左右各留 --gutter-x 呼吸位(100% 相对本 area 内容盒算,所以 padding 必须在本 area 上,
@@ -488,6 +494,60 @@ textarea::placeholder { color: var(--text-subtle); }
 .conversation { --scrollbar-w: 10px; position: absolute; inset: 0 0 125px; overflow-y: auto; overflow-x: clip; overflow-anchor: none; scrollbar-gutter: stable; padding: var(--space-2xl) max(0px, calc(var(--gutter-x) - var(--scrollbar-w))) var(--space-2xl) var(--gutter-x); display: flex; flex-direction: column; align-items: center; }
 .conversation::-webkit-scrollbar { width: var(--scrollbar-w); }
 .conversation::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-full); }
+
+/* ── 消息导航轨(minimap rail)───────────────────────────────
+ * 会话列左侧留白里的一竖排小圆点:一个用户消息一个点,点击跳到那条提问。
+ * 结构 / 交互在 renderer.ts 的 syncConvRail。
+ *
+ * 位置:挂在 .workspace 上(不是 #conversation 里),所以**固定不随内容滚**;
+ *   left 由 --gutter-x 派生 —— 会话列左边界就是 --gutter-x,轨道居中在这条留白里
+ *   (80px 留白 → 圆点落在 40px 处),不会压到消息内容,也不会贴死窗口边。
+ * 纵向与 .conversation 的可见区对齐:上留 --space-2xl(会话 padding-top),
+ *   下留 125px + --space-2xl(会话底边 + 它的 padding-bottom),圆点不会钻进输入卡后面。
+ *
+ * ⚠ 圆点的尺寸有两层,别混淆:
+ *   · **占位盒** = --rail-dot(由 JS 按点数自适应,5 档 6→2px);
+ *   · **视觉点** = ::before 的 6px(真正画出来的圆)。
+ *   不能用 padding 把盒子撑大 —— 全局 `* { box-sizing: border-box }` 会让
+ *   `width:6px + padding:4px` 把内容盒压成 0,::before 的 inset 随即算出零尺寸,
+ *   小点直接消失(实测踩过)。所以占位盒自带高度,视觉点绝对居中。
+ * 轨道可用高度由 top/bottom 定死 = 会话可见区高度;JS 据此选档,保证整条不溢出。 */
+.conv-rail {
+  --rail-dot: 6px;
+  --rail-gap: 6px;
+  position: absolute;
+  z-index: var(--z-raised);
+  top: var(--space-2xl);
+  bottom: calc(125px + var(--space-2xl));
+  left: calc(var(--gutter-x) / 2 - var(--rail-dot) / 2);
+  width: var(--rail-dot);
+  padding: 12px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--rail-gap);
+}
+.conv-rail.hidden { display: none; }
+.conv-rail-dot { position: relative; width: var(--rail-dot); height: var(--rail-dot); flex: 0 0 var(--rail-dot); }
+.conv-rail-dot::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  /* 视觉点尺寸 = min(6px, 占位档位) —— 档位降到 4/3/2px 时,圆点跟着缩小,
+     否则 6px 的点在 2px 的占位盒里会互相盖住对方。 */
+  --rail-visual: min(6px, var(--rail-dot));
+  width: var(--rail-visual);
+  height: var(--rail-visual);
+  margin: calc(-1 * var(--rail-visual) / 2) 0 0 calc(-1 * var(--rail-visual) / 2);
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+  transition: background var(--dur-micro) var(--ease-out), transform var(--dur-micro) var(--ease-out);
+}
+.conv-rail-dot:hover::before { background: var(--text-muted); transform: scale(1.35); }
+/* 当前读到的那一轮:实心底色(浅色主题 = 近黑,深色主题 = 近白)。 */
+.conv-rail-dot.is-current::before { background: var(--text-strong); }
 /* 消息列 = 撑满 .conversation 内容盒(其左右 padding 已做成与输入卡同边界),
  * 不再自带宽高,避免与输入卡各算一套宽度。 */
 .message { display: flex; flex: 0 0 auto; gap: var(--space-md); width: 100%; padding: 0; margin: 0 0 var(--space-lg); align-self: center; align-items: flex-start; box-sizing: border-box; animation: msg-in var(--dur-short) var(--ease-out) both; }
@@ -774,7 +834,7 @@ textarea::placeholder { color: var(--text-subtle); }
 .file-preview { max-height: calc(100vh - 150px); color: var(--color-ink-soft); }
 .diff-preview { color: var(--color-ink-soft); }
 
-/* ── Search panel (⌘K) ───────────────────────────────── */
+/* ── Search panel (Ctrl/Cmd+K) ────────────────────────── */
 .search-panel { position: absolute; z-index: var(--z-modal); inset: 0; display: grid; place-items: start center; padding-top: 80px; background: var(--color-scrim); backdrop-filter: blur(8px); animation: fade-in var(--dur-short) var(--ease-out) both; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 .search-panel.hidden { display: none; }
@@ -995,7 +1055,7 @@ textarea::placeholder { color: var(--text-subtle); }
 .cheatsheet-row kbd { display: inline-block; min-width: 48px; padding: 2px 8px; border: var(--rule-hair); border-bottom-width: 2px; border-radius: var(--radius-sm); color: var(--color-ink-soft); background: var(--surface-sunken); font-family: var(--font-outlier); font-size: var(--text-2xs); text-align: center; }
 .cheatsheet-card footer { padding: var(--space-xs) var(--space-md) var(--space-sm); color: var(--color-subtle); font-size: var(--text-2xs); border-top: var(--rule-soft); }
 
-/* ── Conversation search (⌘F) ─────────────────────────── */
+/* ── Conversation search (Ctrl/Cmd+F) ─────────────────── */
 .conv-search { position: fixed; z-index: var(--z-modal); top: var(--space-sm); right: var(--space-sm); animation: fade-in var(--dur-short) var(--ease-out) both; }
 .conv-search.hidden { display: none; }
 .conv-search-bar { display: flex; align-items: center; gap: var(--space-2xs); padding: 6px var(--space-xs); border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-raised); }

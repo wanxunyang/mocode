@@ -13,7 +13,7 @@ export const zhCN = {
   'sidebar.collapse': '折叠侧栏',
   'sidebar.expand': '展开侧栏',
   'sidebar.addProject': '添加项目',
-  'sidebar.search': '搜索 (⌘K)',
+  'sidebar.search': '搜索 ({mod}+K)',
   'sidebar.theme': '切换主题',
   'sidebar.tasks': '任务',
   'sidebar.spaces': '空间',
@@ -35,6 +35,7 @@ export const zhCN = {
   'a11y.sidebarResize': '拖动调整侧栏宽度',
   'a11y.viewActions': '视图操作',
   'a11y.conversationContext': '会话上下文',
+  'a11y.convRail': '消息导航',
   'a11y.settingsNav': '设置分类',
 
   // ── 设置导航 ──
@@ -244,6 +245,7 @@ export const zhCN = {
   'msg.copied': '已复制到剪贴板',
   'msg.copyFailed': '复制失败',
   'msg.rollbackArm': '回滚?',
+  'msg.railTip': '第 {n} 条提问',
 
   // ── Markdown 代码块 ──
   'md.copy': '复制',
@@ -291,7 +293,6 @@ export const zhCN = {
   'toast.hostNotBuilt': 'Agent Host 还没有构建，请先在 mocode 仓库根目录运行 npm run build。',
   'toast.backgroundTask': '后台任务',
   'toast.backgroundNote': '「{name}」{note}',
-  'toast.assistantMode': '助手模式: MoCode Agent (暂未开放多模型切换)',
   'toast.stoppedTask': '已停止当前任务',
   'toast.noConvSearch': '当前没有对话可搜索',
   'toast.associated': '已关联到「{name}」',
@@ -307,8 +308,8 @@ export const zhCN = {
   'composer.compact': '压缩',
   'composer.compactTitle': '压缩会话上下文',
   'composer.contextUsage': '上下文占用',
-  'composer.send': '发送 (⌘⏎)',
-  'composer.stop': '停止运行 (⌘.)',
+  'composer.send': '发送 ({mod}+⏎)',
+  'composer.stop': '停止运行 ({mod}+.)',
   'composer.sendAria': '发送',
   'composer.stopAria': '停止运行',
   'composer.noModel': '未配置模型',
@@ -348,9 +349,11 @@ export const zhCN = {
   // ── 快捷键面板 ──
   'cheatsheet.title': '快捷键',
   'cheatsheet.close': '关闭',
-  'cheatsheet.footer': '提示:大多数快捷键在 Mac 上是 ⌘,Windows/Linux 是 Ctrl。',
+  // footer 是「跨平台对照说明」，两个平台都要写出来 —— 不能用 {mod}（它只会渲染出当前平台那一个）
+  'cheatsheet.footer': '提示:Windows/Linux 上修饰键为 Ctrl,macOS 上为 Command。',
   'cheatsheet.search': '打开搜索',
-  'cheatsheet.toggleAssistant': '切换助手模式',
+  'cheatsheet.switchModel': '切换模型',
+  'cheatsheet.toggleSidebar': '折叠 / 展开侧栏',
   'cheatsheet.send': '发送消息',
   'cheatsheet.newline': '在输入框换行',
   'cheatsheet.stop': '停止当前任务',
@@ -499,7 +502,7 @@ export const enUS: Record<LocaleKey, string> = {
   'sidebar.collapse': 'Collapse sidebar',
   'sidebar.expand': 'Expand sidebar',
   'sidebar.addProject': 'Add Project',
-  'sidebar.search': 'Search (⌘K)',
+  'sidebar.search': 'Search ({mod}+K)',
   'sidebar.theme': 'Toggle theme',
   'sidebar.tasks': 'Tasks',
   'sidebar.spaces': 'Spaces',
@@ -521,6 +524,7 @@ export const enUS: Record<LocaleKey, string> = {
   'a11y.sidebarResize': 'Drag to resize sidebar',
   'a11y.viewActions': 'View actions',
   'a11y.conversationContext': 'Conversation context',
+  'a11y.convRail': 'Message navigation',
   'a11y.settingsNav': 'Settings categories',
 
   // ── Settings nav ──
@@ -730,6 +734,7 @@ export const enUS: Record<LocaleKey, string> = {
   'msg.copied': 'Copied to clipboard',
   'msg.copyFailed': 'Copy failed',
   'msg.rollbackArm': 'Roll back?',
+  'msg.railTip': 'Question {n}',
 
   // ── Markdown code block ──
   'md.copy': 'Copy',
@@ -777,7 +782,6 @@ export const enUS: Record<LocaleKey, string> = {
   'toast.hostNotBuilt': 'The Agent Host isn’t built yet. Run npm run build in the mocode repo root first.',
   'toast.backgroundTask': 'Background task',
   'toast.backgroundNote': '“{name}” {note}',
-  'toast.assistantMode': 'Assistant mode: MoCode Agent (model switching not available yet)',
   'toast.stoppedTask': 'Stopped current task',
   'toast.noConvSearch': 'No conversation to search',
   'toast.associated': 'Associated with “{name}”',
@@ -793,8 +797,8 @@ export const enUS: Record<LocaleKey, string> = {
   'composer.compact': 'Compact',
   'composer.compactTitle': 'Compact conversation context',
   'composer.contextUsage': 'Context usage',
-  'composer.send': 'Send (⌘⏎)',
-  'composer.stop': 'Stop (⌘.)',
+  'composer.send': 'Send ({mod}+⏎)',
+  'composer.stop': 'Stop ({mod}+.)',
   'composer.sendAria': 'Send',
   'composer.stopAria': 'Stop',
   'composer.noModel': 'No model configured',
@@ -834,9 +838,10 @@ export const enUS: Record<LocaleKey, string> = {
   // ─ Cheatsheet ─
   'cheatsheet.title': 'Shortcuts',
   'cheatsheet.close': 'Close',
-  'cheatsheet.footer': 'Tip: most shortcuts use ⌘ on Mac, Ctrl on Windows/Linux.',
+  'cheatsheet.footer': 'Tip: Ctrl on Windows/Linux, Command on macOS.',
   'cheatsheet.search': 'Open search',
-  'cheatsheet.toggleAssistant': 'Toggle assistant mode',
+  'cheatsheet.switchModel': 'Switch model',
+  'cheatsheet.toggleSidebar': 'Collapse / expand sidebar',
   'cheatsheet.send': 'Send message',
   'cheatsheet.newline': 'New line in input',
   'cheatsheet.stop': 'Stop current task',

@@ -1,6 +1,6 @@
 import { renderMarkdown, enhanceCodeBlocks, setMarkdownLabels } from './markdown.js';
 import { mountIcons, icon } from './icons.js';
-import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
+import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, MOD, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
 
 export {};
 
@@ -49,6 +49,8 @@ function applyLanguage(): void {
   renderStatusCacheOnLang();
   setRunning(isRunning(viewingTaskId()));
   renderAttachments();
+  // 轨道点的 title / aria-label 是生成时按当时语言写死的 → 强制重建一次。
+  scheduleConvRail(true);
 }
 onLangChange(() => applyLanguage());
 
@@ -70,6 +72,8 @@ type ModelPresetDetail = ModelDraft & { name: string };
 declare global {
   interface Window {
     mocodeWork: {
+      /** 宿主平台（preload 透出的 process.platform），用于快捷键文案的修饰键写法。 */
+      platform: string;
       getState: () => Promise<WorkState>;
       pickProject: () => Promise<WorkState | null>;
       selectProject: (id: string) => Promise<WorkState>;
@@ -113,6 +117,7 @@ const emptyState = $('#empty-state'); const approvalPanel = $('#approval-panel')
 const sendButton = $('#send-button') as HTMLButtonElement; const inspector = $('#inspector'); const inspectorContent = $('#inspector-content');
 const inspectorTitle = $('#inspector-title'); const attachmentList = $('#attachment-list'); const searchPanel = $('#search-panel'); const searchInput = $('#search-input') as HTMLInputElement;
 const contextUsageEl = $('#context-usage');
+const convRail = $('#conv-rail') as HTMLElement;
 
 let state: WorkState | null = null;
 let collapsedProjects: Set<string> = new Set();
@@ -1068,7 +1073,179 @@ function smartScrollToBottom(force = false): void {
   if (force || isAtBottom()) conversation.scrollTop = conversation.scrollHeight;
 }
 // 用户主动滚动:离开底部超过阈值,直到再次回到底之前都不再自动跟。
-conversation.addEventListener('scroll', () => { userScrolled = !isAtBottom(); }, { passive: true });
+conversation.addEventListener('scroll', () => { userScrolled = !isAtBottom(); syncConvRailActive(); }, { passive: true });
+
+/* ── 消息导航轨(minimap rail)─────────────────────────────
+ * 会话列左侧一排小圆点:一个用户消息一个点,点击滚到那条提问。
+ * 长会话里翻历史时靠它一眼看清"聊了几轮、当前在哪一轮"。
+ *
+ * 三条硬约束(改之前先读):
+ *  1. **必须挂在 .workspace 上,不能进 #conversation** —— 轨道要固定不随内容滚,
+ *     放进滚动容器里就只能靠 position: sticky/fixed 和它较劲。
+ *  2. **位置用 transform 而不是 top** —— 小圆点尺寸小、数量多,改 top 会逐帧触发
+ *     布局;**transform 走合成层**,与滚动同帧不抖。
+ *  3. **只标用户消息** —— 助手消息一轮可能有多个 block(文字/工具交错),
+ *     按它打点会得到一排意义不明的点。用户消息才是"轮次"的天然锚点。
+ */
+const RAIL_DOT_MAX = 6;
+/** 跳转后让目标消息停在视口顶部往下这么多,给它的这一轮回答留出阅读空间。 */
+const RAIL_ANCHOR_OFFSET = 24;
+/** 轨道自身上下内边距,与 .conv-rail 的 padding 保持一致(算可用高度用)。 */
+const RAIL_PAD_Y = 12;
+/** 点尺寸分档:优先大点,放不下就依次退到更小的一档。 */
+const RAIL_DOT_STEPS = [6, 5, 4, 3, 2];
+/** 每档点尺寸配的间隙 —— 点越小间隙越小,尽量把长会话也一一对应地排下。 */
+const railGapFor = (dot: number): number => (dot >= 6 ? 6 : dot >= 4 ? 4 : 2);
+
+/**
+ * 上一次建点时**第一条用户消息**的节点引用 + 当时的条数。
+ * 两者一起当"集合变了没有"的判据,缺一不可:
+ *   · 只比首节点 → 末尾**追加**一条消息时首节点没动,会被误判成"没变"而漏掉新点
+ *     (实测踩过:走真实发送路径 submit → addMessage('user'),点数停在 1 不动);
+ *   · 只比条数 → `conversation.innerHTML = ''` 后重建时条数可能恰好相同,
+ *     但节点全新,轨道会指向已脱离文档的旧节点。
+ * 只做判据用,不参与渲染 —— 高亮那边一律现查 DOM(见 syncConvRailActive)。
+ */
+let railAnchorUser: HTMLElement | null = null;
+let railAnchorCount = -1;
+/**
+ * 每个小点对应的**消息下标**。点数与消息数相等时就是 0..n-1;
+ * 消息太多排不下时会抽稀(见 syncConvRail),那时点 i 对应的是被抽中的那条消息。
+ */
+let railTargets: number[] = [];
+
+function syncConvRail(): void {
+  const users = Array.from(conversation.querySelectorAll<HTMLElement>('.message.user'));
+  if (!users.length) {
+    convRail.classList.add('hidden');
+    convRail.innerHTML = '';
+    railAnchorUser = null;
+    railAnchorCount = 0;
+    railTargets = [];
+    return;
+  }
+  convRail.classList.remove('hidden');
+  // 点尺寸自适应:必须保证「m 个点 + 间隙」塞进轨道的**内容盒**。
+  // ⚠ 可用高度取 convRail 自身的 clientHeight(它由 CSS 的 top/bottom 定死,与
+  //   会话可见区等高),**不能**拿 conversation.clientHeight 再减 padding ——
+  //   那会多算 112px(会话上下各 --space-2xl 的 padding),点多时算出的总高
+  //   看着"放得下"、实际却把首尾的点画到输入卡和顶栏上(实测踩过)。
+  // 取不到高度(隐藏中 / 首帧)时按最大档走,等 ResizeObserver 回调再纠。
+  const available = Math.max(0, convRail.clientHeight - RAIL_PAD_Y * 2);
+  const capacity = (dot: number, gap: number): number => Math.floor((available + gap) / (dot + gap));
+  let dot = RAIL_DOT_MAX;
+  let gap = railGapFor(RAIL_DOT_MAX);
+  for (const size of RAIL_DOT_STEPS) {
+    const candidateGap = railGapFor(size);
+    dot = size; gap = candidateGap;
+    // available === 0(还没测量)时容量不可信,先按最大档建,别抽稀。
+    if (available > 0 && users.length <= capacity(size, candidateGap)) break;
+  }
+  // 连最小档都排不下(几百轮的长会话):抽稀成等距的 m 个点。
+  // 保留首尾两条 —— 用户最需要的是"能跳到最开始"和"跳到最新",中间稀疏点无妨。
+  const maxDots = available > 0 ? Math.max(1, capacity(dot, gap)) : users.length;
+  const count = Math.min(users.length, maxDots);
+  railTargets = users.length <= count
+    ? users.map((_, index) => index)
+    : Array.from({ length: count }, (_, i) => Math.round((i * (users.length - 1)) / (count - 1)));
+  const tip = (index: number): string => escapeHtml(t('msg.railTip', { n: index + 1 }));
+  convRail.innerHTML = railTargets
+    .map((messageIndex, i) => `<button class="conv-rail-dot" type="button" data-rail="${messageIndex}" title="${tip(messageIndex)}" aria-label="${tip(messageIndex)}"${count < users.length ? ' data-sampled="1"' : ''}></button>`)
+    .join('');
+  convRail.style.setProperty('--rail-dot', `${dot}px`);
+  convRail.style.setProperty('--rail-gap', `${gap}px`);
+  railAnchorUser = users[0]!;
+  railAnchorCount = users.length;
+  syncConvRailActive();
+}
+
+/**
+ * 高亮"当前读到哪一轮":离视口**中线**最近的那条用户消息。
+ * 用中线而不是顶边 —— 用户翻历史时目光停在屏幕中央,"我在读哪一轮"就由中间那条决定。
+ *
+ * 每次都从 DOM 现查消息、**不缓存节点数组**:缓存过一次就会在
+ * 「`conversation.innerHTML = ''` 后重建」「重新生成截断尾部」这些路径上留下
+ * 指向已脱离文档的旧节点 —— 它们的 offsetTop/offsetHeight 恒为 0,
+ * 于是每一条的距离都相等、高亮永远停在第一个点(实测踩过)。
+ * 现查的代价只是一次 querySelectorAll,远比"高亮静默失真"划算。
+ */
+function syncConvRailActive(): void {
+  const dots = convRail.querySelectorAll<HTMLElement>('.conv-rail-dot');
+  if (!dots.length) return;
+  // 布局未落定(隐藏中 / 尺寸过渡中)时 clientHeight 为 0,读到的 offsetTop 也不可信,
+  // 算出来必然是"第一个点",干脆不算 —— 下一个真实触发点会纠正。
+  if (!conversation.clientHeight) return;
+  const users = conversation.querySelectorAll<HTMLElement>('.message.user');
+  const mid = conversation.scrollTop + conversation.clientHeight / 2;
+  // 找离中线最近的**消息**(不是点):抽稀后消息比点多,先定位消息再折回点。
+  let best = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  users.forEach((message, index) => {
+    // offsetTop 相对 .conversation(定位祖先),不受滚动影响 —— 正是要的"文档位置"。
+    const center = message.offsetTop + message.offsetHeight / 2;
+    const distance = Math.abs(center - mid);
+    if (distance < bestDistance) { bestDistance = distance; best = index; }
+  });
+  // 折回最近的小点(点 i 对应消息 railTargets[i])。
+  let current = 0;
+  let dotDistance = Number.POSITIVE_INFINITY;
+  railTargets.forEach((messageIndex, i) => {
+    const distance = Math.abs(messageIndex - best);
+    if (distance < dotDistance) { dotDistance = distance; current = i; }
+  });
+  dots.forEach((dot, index) => dot.classList.toggle('is-current', index === Math.min(current, dots.length - 1)));
+}
+
+/** 点击小点:把那条用户消息滚到视口靠上位置 —— 留出它后面这一轮回答的阅读空间。 */
+convRail.addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>('.conv-rail-dot');
+  if (!button) return;
+  const index = Number(button.dataset.rail ?? '');
+  const message = conversation.querySelectorAll<HTMLElement>('.message.user')[index];
+  if (!message) return;
+  // 手写滚动而不是 scrollIntoView:要控制"停在顶部往下一点"。
+  conversation.scrollTo({ top: Math.max(0, message.offsetTop - RAIL_ANCHOR_OFFSET), behavior: 'smooth' });
+});
+
+/**
+ * 请求重建轨道。**用微任务而不是 rAF 合并**,两个原因:
+ *  1. rAF 只在真的有帧要画时才跑 —— 窗口最小化 / 离屏 / 后台时不推进,
+ *     轨道会停在旧状态(实测离屏窗口里 rAF 会静默挂起,点数始终不更新);
+ *  2. 微任务同样能把「一个同步任务里的 n 次 append」合并成一次回调
+ *     (MutationObserver 本身就是按微任务投递的),不会有 O(n²) 重建。
+ * 未变化时只重算高亮:重建要 innerHTML 全量重写 + querySelectorAll,
+ * 而流式期间状态行的挂载/卸载也会命中 observer,那些都不改变用户消息集合。
+ * 跳过条件必须比对**首节点同一性** —— 切任务走 `conversation.innerHTML = ''` 后重建,
+ * 条数可能与原来相同但节点全新,只看条数会留下指向已脱离文档的旧节点的轨道。
+ */
+let railSyncScheduled = false;
+let railForceSync = false;
+function scheduleConvRail(force = false): void {
+  if (force) railForceSync = true;
+  if (railSyncScheduled) return;
+  railSyncScheduled = true;
+  queueMicrotask(() => {
+    railSyncScheduled = false;
+    const forced = railForceSync;
+    railForceSync = false;
+    const users = conversation.querySelectorAll<HTMLElement>('.message.user');
+    // 集合没变就只重算高亮(重建要点 innerHTML 全量重写)。
+    // 「变了没有」必须同时比对**首节点同一性 + 条数**,缺一不可:
+    //   · 只比首节点 → 末尾追加一条时首节点没动,新点会被漏掉(实测踩过);
+    //   · 只比条数   → `innerHTML = ''` 后重建可能条数恰好相同但节点全新,轨道会指向旧节点。
+    const unchanged = users.length === railAnchorCount && users.length > 0 && users[0] === railAnchorUser;
+    if (!forced && unchanged) { syncConvRailActive(); return; }
+    syncConvRail();
+  });
+}
+
+/* 轨道是会话 DOM 的派生视图,用 observer 而不是在每个增删点手写调用 ——
+ * 增(addMessage)、删(回滚重建 / 重新生成截断 / 切任务清空)都能自动跟上,
+ * 少一处漏调用就少一个"点数对不上"的 bug。只看直接子节点(childList,不带 subtree):
+ * 流式写入发生在 .message-body 内部,不该触发轨道重建。 */
+new MutationObserver(() => scheduleConvRail()).observe(conversation, { childList: true });
+// 视口尺寸变了要重算间距上限(窄窗 / 拖侧栏 / 开 inspector 都会改会话高度)。
+new ResizeObserver(() => scheduleConvRail(true)).observe(conversation);
 let userScrolled = false;
 
 /* ── Per-message actions (copy / regenerate / rollback) ── */
@@ -1235,13 +1412,14 @@ let cheatsheetEl: HTMLElement | null = null;
 function ensureCheatsheet(): HTMLElement {
   if (cheatsheetEl) return cheatsheetEl;
   const rows: Array<[string, string]> = [
-    ['⌘ K', t('cheatsheet.search')],
-    ['⌘ ⇧ N', t('nav.newTask')],
-    ['⌘ /', t('cheatsheet.toggleAssistant')],
-    ['⌘ ⏎', t('cheatsheet.send')],
-    ['⇧ ⏎', t('cheatsheet.newline')],
-    ['⌘ .', t('cheatsheet.stop')],
-    ['⌘ F', t('cheatsheet.searchConv')],
+    [`${MOD}+K`, t('cheatsheet.search')],
+    [`${MOD}+⇧+N`, t('nav.newTask')],
+    [`${MOD}+/`, t('cheatsheet.switchModel')],
+    [`${MOD}+⏎`, t('cheatsheet.send')],
+    ['⇧+⏎', t('cheatsheet.newline')],
+    [`${MOD}+.`, t('cheatsheet.stop')],
+    [`${MOD}+F`, t('cheatsheet.searchConv')],
+    [`${MOD}+B`, t('cheatsheet.toggleSidebar')],
     ['Esc', t('cheatsheet.esc')],
     ['?', t('cheatsheet.help')],
   ];
@@ -1283,7 +1461,7 @@ async function addImageFile(file: File, fallbackName = t('composer.imageFallback
   }
 }
 
-/** 粘贴图片（Ctrl/⌘+V）—— 剪贴板里的位图没有文件名,按时间戳生成一个。 */
+/** 粘贴图片（Ctrl/Cmd+V）—— 剪贴板里的位图没有文件名,按时间戳生成一个。 */
 function setupPasteImage(): void {
   promptInput.addEventListener('paste', (event) => {
     const files = Array.from(event.clipboardData?.items ?? [])
@@ -1337,7 +1515,7 @@ function setupDragDrop(): void {
 }
 setupDragDrop();
 
-/* ── Conversation search (⌘F) ─────────────────────────── */
+/* ── Conversation search (Ctrl/Cmd+F) ─────────────────── */
 let searchOverlay: HTMLElement | null = null;
 function ensureSearchOverlay(): HTMLElement {
   if (searchOverlay) return searchOverlay;
@@ -3086,18 +3264,34 @@ window.addEventListener('resize', () => {
 window.addEventListener('keydown', (event) => {
   const cmd = event.ctrlKey || event.metaKey;
   // ? 打开 cheatsheet(Shift + / 在大多数键盘上是 ?)
-  if (event.key === '?' && !(event.target instanceof HTMLElement && (event.target.matches('input, textarea') || event.target.isContentEditable))) { event.preventDefault(); cheatsheetEl?.classList.contains('hidden') ? showCheatsheet() : hideCheatsheet(); return; }
+  // 注意判空:cheatsheetEl 首次按下时还是 null,写成 `cheatsheetEl?.classList.contains('hidden')`
+  // 会得到 undefined 从而走 else 的 hideCheatsheet() —— 「第一次按 ? 没反应」。
+  if (event.key === '?' && !(event.target instanceof HTMLElement && (event.target.matches('input, textarea') || event.target.isContentEditable))) { event.preventDefault(); if (!cheatsheetEl || cheatsheetEl.classList.contains('hidden')) showCheatsheet(); else hideCheatsheet(); return; }
   if (event.key === 'Escape') {
-    if (!cheatsheetEl?.classList.contains('hidden')) { hideCheatsheet(); return; }
-    if (!searchOverlay?.classList.contains('hidden')) { closeConvSearch(); return; }
+    // ⚠ 判空必须写成 `X && !X.classList.contains(...)`,不能用 `X?.classList.contains(...)`:
+    //   三个浮层都是懒建的,首次按 Esc 时变量还是 null,可选链求值得 undefined(falsy)
+    //   → 全部跳过 → 落到最后一行,连当时开着的 search-panel 也关不掉(实测踩过)。
+    if (cheatsheetEl && !cheatsheetEl.classList.contains('hidden')) { hideCheatsheet(); return; }
+    if (searchOverlay && !searchOverlay.classList.contains('hidden')) { closeConvSearch(); return; }
     if (modelPickerEl && !modelPickerEl.classList.contains('hidden')) { hideModelPicker(); return; }
-    searchPanel.classList.add('hidden'); approvalPanel.classList.add('hidden');
+    if (!searchPanel.classList.contains('hidden')) { searchPanel.classList.add('hidden'); return; }
+    if (!approvalPanel.classList.contains('hidden')) { approvalPanel.classList.add('hidden'); return; }
+    // 快捷键面板里 Esc 那行写的是「关闭弹窗 / 取消输入焦点」——后半句此前没有实现
+    // (全仓没有任何 blur() 调用)。没有浮层可关时,把焦点还给正文。
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && (active.matches('input, textarea') || active.isContentEditable)) active.blur();
     return;
   }
   if (cmd && event.key.toLowerCase() === 'k') { event.preventDefault(); searchPanel.classList.remove('hidden'); searchInput.value = ''; searchInput.focus(); refreshSearch(); return; }
   if (cmd && event.key.toLowerCase() === '/') {
     event.preventDefault();
-    showToast('info', t('toast.assistantMode'));
+    // 原来这里只弹一句「助手模式: MoCode Agent(暂未开放多模型切换)」—— 那是多模型切换
+    // 还没做时的占位。现在模型选择器已经是真功能,这条快捷键就该真去开它,
+    // 否则快捷键面板里那行是空壳(用户报过「这些快捷键都是空壳」)。
+    const picker = ensureModelPicker();
+    if (!picker.classList.contains('hidden')) { hideModelPicker(); return; }
+    hideWorkspacePicker();
+    void refreshModelList().then(() => { renderModelPicker(); showModelPicker(); });
     return;
   }
   if (cmd && event.key === '.') {

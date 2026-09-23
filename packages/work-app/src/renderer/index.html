@@ -46,6 +46,9 @@
           <h1 class="empty-lockup"><img class="empty-mark" src="../assets/icon-mark.png" alt="" aria-hidden="true" /><span class="empty-wordmark" data-i18n="app.emptyWordmark">让 MoCode 为你工作</span></h1>
         </section>
         <section id="conversation" class="conversation" aria-live="polite"></section>
+        <!-- 消息导航轨:一个用户消息一个点,点击跳到那条消息(见 renderer.ts 的 syncConvRail)。
+             挂在 .workspace 上而不是 #conversation 内部 —— 它不能随内容滚动。 -->
+        <nav id="conv-rail" class="conv-rail hidden" aria-label="消息导航" data-i18n-aria="a11y.convRail"></nav>
         <section id="approval-panel" class="approval-panel hidden"></section>
         <aside id="inspector" class="inspector hidden">
           <header class="inspector-header"><b id="inspector-title" data-i18n="inspector.overview">项目概览</b><button id="close-inspector" data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button></header>

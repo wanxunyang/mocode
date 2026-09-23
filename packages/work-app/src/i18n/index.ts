@@ -39,19 +39,41 @@ function readStoredLang(): SupportedLang {
 let lang: SupportedLang = readStoredLang();
 const subscribers = new Set<(lang: SupportedLang) => void>();
 
+/**
+ * 平台修饰键写法。渲染进程读不到 `process`，只能问 preload 透出的 `platform`。
+ * 拿不到就按非 mac 处理 —— Windows/Linux 是本应用的主战场。
+ */
+const isMac = ((): boolean => {
+  try {
+    return (window as unknown as { mocodeWork?: { platform?: string } }).mocodeWork?.platform === 'darwin';
+  } catch {
+    return false;
+  }
+})();
+
+/**
+ * 快捷键文案里的修饰键。所有 `t()` 译文中的 `{mod}` 都会被它替换。
+ *
+ * 不用 Mac 的修饰键符号字形：它属于 macOS 的符号区，Windows 上常缺字形而掉进
+ * fallback 字体，排出来是方框或大小不一的异体字；对中文用户也不如 "Ctrl" 直白，
+ * 而应用本身是跨平台的（Windows 上还特意配了 titleBarOverlay）。
+ */
+export const MOD = isMac ? 'Command' : 'Ctrl';
+
 /** 当前语言。 */
 export function getLang(): SupportedLang {
   return lang;
 }
 
-/** 翻译：`t('key', { name: 'x' })`。当前语言缺译时回退 zh-CN，再缺则回退 key 本身。 */
+/**
+ * 翻译：`t('key', { name: 'x' })`。当前语言缺译时回退 zh-CN，再缺则回退 key 本身。
+ * `mod` 是内置变量（当前平台的修饰键，见 MOD），调用方显式传入时可覆盖它。
+ */
 export function t(key: LocaleKey, vars?: Record<string, string | number>): string {
   const table = LOCALES[lang] ?? zhCN;
   let value: string = table[key] ?? zhCN[key] ?? (key as string);
-  if (vars) {
-    for (const [name, raw] of Object.entries(vars)) {
-      value = value.replace(new RegExp(`\\{${name}\\}`, 'g'), String(raw));
-    }
+  for (const [name, raw] of Object.entries({ mod: MOD, ...vars })) {
+    value = value.replace(new RegExp(`\\{${name}\\}`, 'g'), String(raw));
   }
   return value;
 }
