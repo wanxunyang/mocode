@@ -504,7 +504,7 @@ function buildSummaryLine(record: BatchRecord, live = false): string {
 /** 把 batch 的详情行展开成自洽行数组(供 layout.contentInsertAfter 走 mid-buffer 插入)。
  *  每行末尾必须以 \x1B[0m 收尾(SGR 自洽模型),行内允许含 SGR(行末 reset 不影响行内样式),
  *  但**绝不**带 \n——rows[] 是行数组,不是流输出。 */
-function buildEntryDetailLines(e: BatchEntry, indent = '      '): string[] {
+function buildEntryDetailLines(e: BatchEntry, indent = DETAIL_INDENT): string[] {
   const lines: string[] = [];
   if (e.diffBlock) {
     // diff 块多行文本(由 renderFileChange 渲染);按 \n 拆成物理行,
@@ -570,8 +570,18 @@ const CARET_EXPANDED = '▾';
 /** 无详情可展开时占位,保持与 "▸ " 同宽,让工具名列对齐。 */
 const CARET_NONE = '  ';
 
-/** 详情行缩进:统一 7 空格(对齐 entry 行的 "    ▸ " 之后再右移一列,形成层次)。 */
-const DETAIL_INDENT = '       ';
+/** 第一层(工具调用行)相对摘要行的前导缩进:2 空格。
+ *  曾为 4 空格——摘要行(`◆ 探索 …`)与工具调用行之间留白过大,工具名被推得过右(用户实测反馈);
+ *  子批再叠 8 空格后层级被拉散。收成 2 空格后每层固定递进 2 列,层级仍清晰但不空旷。 */
+const ENTRY_INDENT = '  ';
+
+/** 子 agent 批摘要行的缩进(= 两层 entry 缩进)。
+ *  子批摘要挂在父批的 entry 行之下,是第二层;硬编码会与 ENTRY_INDENT 脱钩,
+ *  故由 ENTRY_INDENT 推得。 */
+export const SUB_BATCH_INDENT = ENTRY_INDENT + ENTRY_INDENT;
+
+/** 详情行缩进:5 空格(对齐 entry 行的 "  ▸ " 之后再右移一列,形成层次)。 */
+const DETAIL_INDENT = '     ';
 
 /**
  * 详情行结果标记:·(U+00B7 MIDDLE DOT, Latin-1 Supplement, **EAW = Narrow**)。
@@ -609,7 +619,7 @@ function buildEntryLine(b: BatchExpandedRenderInput, index: number, extraIndent 
   const caret = entryCaret(e, b.expandedEntries.has(index));
   const failure = e.failed ? `${ui.red}×${ui.reset} ` : '';
   return sanitizeRow(
-    `${extraIndent}    ${caret}${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`,
+    `${extraIndent}${ENTRY_INDENT}${caret}${failure}${ui.accent}${e.name}${ui.reset}  ${ui.dim}${e.callSummary}${ui.reset}${result}`,
     cols,
   );
 }
@@ -628,9 +638,11 @@ export function buildExpandedLines(
   return out;
 }
 
-/** 详情行缩进(现在与 index 无关,统一常量;保留签名以免调用点全改)。 */
-function entryDetailIndent(_entries: BatchEntry[], _index: number): string {
-  return DETAIL_INDENT;
+/** 详情行缩进(随批层级联动):批量缩进 + 5 空格。
+ *  5 = ENTRY_INDENT(2) + caret 宽(2) + 1,即相对 entry 行的工具名右移一列形成层次。
+ *  必须跟随 b.indent——否则子批(挂在父批下、entry 行更深)的详情行会跑回父层左侧(错位)。 */
+function entryDetailIndent(indent: string): string {
+  return indent + DETAIL_INDENT;
 }
 
 /** 在 batch 收尾时(onToolBatchEnd):写摘要行 + 登记 summaryAbsIdx;若已展开(回放场景)立即插详情。 */
@@ -826,7 +838,7 @@ export function refreshBatchExpanded(
   let anchor = b.summaryAbsIdx + b.renderedCount;
   for (const j of b.expandedEntries) {
     if (j < b.renderedCount) {
-      anchor += buildEntryDetailLines(b.entries[j], entryDetailIndent(b.entries, j)).length;
+      anchor += buildEntryDetailLines(b.entries[j], entryDetailIndent(b.indent ?? '')).length;
     }
   }
   if (b.groupParent) {
@@ -835,8 +847,7 @@ export function refreshBatchExpanded(
       if (target.batchId !== b.id) continue;
       // entry 行自身(含其二层明细)的块末位置
       const end = b.expandedEntries.has(target.entryIndex)
-        ? idx +
-          buildEntryDetailLines(b.entries[target.entryIndex], entryDetailIndent(b.entries, target.entryIndex)).length
+        ? idx + buildEntryDetailLines(b.entries[target.entryIndex], entryDetailIndent(b.indent ?? '')).length
         : idx;
       if (end > maxIdx) maxIdx = end;
     }
@@ -846,7 +857,7 @@ export function refreshBatchExpanded(
         if (expandedBatches.has(child.id)) {
           childEnd += child.renderedCount;
           for (const j of child.expandedEntries) {
-            childEnd += buildEntryDetailLines(child.entries[j], entryDetailIndent(child.entries, j)).length;
+            childEnd += buildEntryDetailLines(child.entries[j], entryDetailIndent(child.indent ?? '')).length;
           }
         }
         if (childEnd > maxIdx) maxIdx = childEnd;
@@ -936,7 +947,7 @@ export function expandSingleEntryFully(
 ): void {
   const b = batches.get(id);
   if (!b || b.entries.length !== 1 || expandedBatches.has(id)) return;
-  const lines = [...buildExpandedLines(b), ...buildEntryDetailLines(b.entries[0], entryDetailIndent(b.entries, 0))];
+  const lines = [...buildExpandedLines(b), ...buildEntryDetailLines(b.entries[0], entryDetailIndent(b.indent ?? ''))];
   // keepViewport=false:这是 agent 产出后的**自动**展开,属于「新内容」而非用户点击的回看式展开,
   // 视口必须跟随屏底(同其它工具输出 / 子 agent 实时嵌套)。传 true 会让视口锚定在摘要行、
   // 把 scrollOffset 顶到插入行数(diff 常几百行),此后 contentWriteMd 见 offset>0 就只喂缓冲
@@ -966,7 +977,7 @@ function collapse(
   // entries 可能多于已渲染行,按 entries.length 会多删并行批量子 agent 的行。
   let lineCount = b.renderedCount;
   for (const i of b.expandedEntries) {
-    lineCount += buildEntryDetailLines(b.entries[i], entryDetailIndent(b.entries, i)).length;
+    lineCount += buildEntryDetailLines(b.entries[i], entryDetailIndent(b.indent ?? '')).length;
   }
   // 组容器批折叠时:一并移除嵌套子批的摘要行(及其已展开详情),
   // 否则父批再次展开后子批摘要仍残留在明细区,出现重复行。
@@ -986,7 +997,7 @@ function collapse(
         // 否则删少了会留下孤儿明细行。
         lineCount += child.renderedCount;
         for (const j of child.expandedEntries) {
-          lineCount += buildEntryDetailLines(child.entries[j], entryDetailIndent(child.entries, j)).length;
+          lineCount += buildEntryDetailLines(child.entries[j], entryDetailIndent(child.indent ?? '')).length;
         }
         child.expandedEntries.clear();
         expandedBatches.delete(child.id);
@@ -1034,7 +1045,7 @@ export function toggleEntry(
   // 子批自己的摘要行（● 子 Agent 完成 ...）来控制。
   if (b.groupParent) {
     // 如果该 sub-agent entry 没有可展开的详情，fallback 到 toggle 子批工具列表。
-    const details = buildEntryDetailLines(b.entries[entryIndex], entryDetailIndent(b.entries, entryIndex));
+    const details = buildEntryDetailLines(b.entries[entryIndex], entryDetailIndent(b.indent ?? ''));
     if (details.length === 0) {
       const child = [...batches.values()].find((x) => x.parentId === batchId && x.groupChildIndex === entryIndex);
       if (child) {
@@ -1049,7 +1060,7 @@ export function toggleEntry(
     if (target.batchId === batchId && target.entryIndex === entryIndex) headerIdx = idx;
   }
   if (headerIdx < 0) return;
-  const details = buildEntryDetailLines(b.entries[entryIndex], entryDetailIndent(b.entries, entryIndex));
+  const details = buildEntryDetailLines(b.entries[entryIndex], entryDetailIndent(b.indent ?? ''));
   if (details.length === 0) return;
   const wasExpanded = b.expandedEntries.has(entryIndex);
   // 先翻状态再重画三角:buildEntryLine 读 b.expandedEntries 决定 ▸/▾。

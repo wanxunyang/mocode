@@ -230,6 +230,30 @@ describe('batch 纯渲染 helper', () => {
     assert.match(visible[0], /grep.*needle/);
     assert.match(visible[1], /glob.*\*\*\/\*\.ts/);
   });
+
+  it('缩进单一体系:entry 行前导 = ENTRY_INDENT(2),子批随批缩进联动', () => {
+    // entry 行相对摘要行的前导缩进(曾为 4,用户反馈第二层留白过大 → 收成 2)。
+    // 必须带 resultSummary —— 否则 hasEntryDetail 为 false,三角退化成占位空格,indexOf('▸') 得 -1。
+    const mk = (name: string, extraIndent: string) =>
+      batch.buildExpandedLines(
+        {
+          entries: [{ name, callSummary: 'pwd-cmd', resultSummary: 'ok-result', diffBlock: null }],
+          expandedEntries: new Set<number>(),
+        },
+        extraIndent,
+        0,
+        120,
+      );
+
+    assert.equal(stripAnsi(mk('run_command', '')[0]).indexOf('▸'), 2, 'entry 行 ▸ 应落在 col 2');
+
+    // 子批(挂在父批下)多叠 SUB_BATCH_INDENT,不能与 ENTRY_INDENT 脱钩。
+    assert.equal(
+      stripAnsi(mk('grep', batch.SUB_BATCH_INDENT)[0]).indexOf('▸'),
+      batch.SUB_BATCH_INDENT.length + 2,
+      '子批 entry 行 = 批缩进 + ENTRY_INDENT',
+    );
+  });
 });
 
 describe('batch 摘要行:结构与字形', () => {
@@ -475,6 +499,49 @@ describe('batch renderedCount 未追平 entries', () => {
       visible.some((line) => line.includes('sentinel-must-survive')),
       true,
       '折叠必须只删除 renderedCount 条一级行，不能按 entries.length 多删正文',
+    );
+  });
+});
+
+// 详情行缩进必须跟随批自身层级:子批(挂在父批下、entry 行更深)的二层详情
+// 若仍用固定常量,会跑回父层左侧 —— 层级读错、且插/删行数计算点同源,漏改会行错位。
+describe('batch 详情行缩进随批层级联动', () => {
+  it('无缩进批的详情行 = DETAIL_INDENT(5);子批详情 = 批缩进 + 5', () => {
+    const layout = makeLayout();
+    /** 按剥色后的整行精确取详情行 —— 不能用 includes('a') 之类的子串匹配:
+     *  摘要行 `◆ Exploration …` 里同样含 'a',会误命中(实测踩到)。 */
+    const detailRow = (text: string): string =>
+      content
+        .sliceFromEnd(0, content.totalRows())
+        .map((r) => stripAnsi(r))
+        .find((r) => r.trim() === text) ?? '';
+
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'run_command', 'pwd');
+    batch.recordResult(id, 'run_command', 'ok', null, 'a\nb\nc');
+    batch.endBatch(id, layout);
+    batch.expandBatch(id, layout, true);
+    batch.toggleEntry(id, 0, layout);
+
+    const row = detailRow('a');
+    assert.notEqual(row, '', '详情行应已插入');
+    assert.equal(row.match(/^ */)?.[0].length, 5, '顶层批详情行前导缩进应为 5');
+
+    // 子批:同一 entry 展开,详情行必须整体右移 SUB_BATCH_INDENT
+    const child = batch.beginBatch('子 Agent 运行中', { indent: batch.SUB_BATCH_INDENT, running: true });
+    batch.recordCall(child, 'grep', 'needle');
+    batch.recordResult(child, 'grep', '3 matches', null, 'x.ts\n');
+    batch.showLiveBatch(child, layout as never);
+    batch.endBatch(child, layout);
+    batch.expandBatch(child, layout, true);
+    batch.toggleEntry(child, 0, layout);
+
+    const childRow = detailRow('x.ts');
+    assert.notEqual(childRow, '', '子批详情行应已插入');
+    assert.equal(
+      childRow.match(/^ */)?.[0].length,
+      batch.SUB_BATCH_INDENT.length + 5,
+      '子批详情行前导缩进 = 批缩进 + DETAIL_INDENT(不得跑回父层左侧)',
     );
   });
 });

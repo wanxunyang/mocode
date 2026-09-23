@@ -244,7 +244,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     const childIndex = parentId ? batch.getGroupChildIndex(opts.callId) : undefined;
     liveBatchId = batch.beginBatch(t('subagent.running'), {
       parentId,
-      indent: parentId ? '        ' : undefined,
+      // 子批摘要行缩进 = 两层 entry 缩进(随 ENTRY_INDENT 联动,不硬编码空格数)。
+      indent: parentId ? batch.SUB_BATCH_INDENT : undefined,
       groupChildIndex: childIndex,
       running: true,
     });
