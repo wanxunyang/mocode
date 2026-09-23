@@ -11,6 +11,14 @@
 const SVG_ATTRS = 'viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"';
 
 export const ICONS: Record<string, string> = {
+  // 品牌标记(MoCode 字标),侧栏底部的 .avatar 用它。
+  // 与 UI 图标同源(20 viewBox + round 端点),但描边不跟着 1.75 那套走:
+  // 它是「标记」不是「图标」—— 16px/1.75 在侧栏底部与相邻的 MoCode 文字一比就发虚。
+  // 2.9 是量出来的,不是拍的:把这条 path 光栅化数墨量(vs 品牌标记 icon-mark.png)得
+  //   1.75→0.607  2.1→0.727  2.4→0.830  2.76→0.947  3.1→1.064,插值取 2.9 ≈ 1.00;
+  // 同时它换算出的笔画比 2.47px/9.69px = 0.255,与品牌图标 M 实测的 0.242 同档。
+  'mocode-mark': `<svg ${SVG_ATTRS}><path d="M4.2 16V4.6L10 12L15.8 4.6V16" stroke-width="2.9"/></svg>`,
+
   // 导航 / sidebar
   'circle-plus': `<svg ${SVG_ATTRS}><circle cx="10" cy="10" r="6.5"/><path d="M10 7v6M7 10h6"/></svg>`,
   'folder': `<svg ${SVG_ATTRS}><path d="M2.5 6.8a1 1 0 0 1 1-1h4l1.5 1.5h7.5a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V6.8z"/></svg>`,

@@ -178,7 +178,16 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .sidebar-footer { width: 100%; min-height: 38px; margin-top: auto; padding: 5px 6px; border-top: var(--rule-hair); display: flex; align-items: center; gap: 9px; color: var(--text-default); font-size: var(--text-sm); font-weight: 500; text-align: left; cursor: pointer; border-radius: var(--radius-sm); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
 .sidebar-footer:hover, .sidebar-footer[aria-expanded="true"] { background: var(--surface-hover); color: var(--text-strong); }
 .sidebar-footer:focus-visible { outline-offset: -2px; }
-.avatar { width: 24px; height: 24px; flex: 0 0 24px; border-radius: var(--radius-full); display: grid; place-items: center; background: var(--color-accent); color: var(--text-on-accent); font-size: var(--text-2xs); font-weight: 500; letter-spacing: 0; }
+/* 侧栏底部字标：不是「用户头像」而是「产品标识」——所以走浅底 + 主题墨色，
+   与助手消息头像（.message.assistant .message-avatar）同一套语汇，
+   而不是实底 accent 圆（那读起来像"当前登录用户"）。
+   盒尺寸/圆角保持 24px 圆角方：与设置页 provider 头像(18px, radius-sm)同族。 */
+.avatar { width: 24px; height: 24px; flex: 0 0 24px; border-radius: var(--radius-sm); display: grid; place-items: center; background: var(--color-accent-soft); color: var(--color-accent-ink); font-size: var(--text-2xs); font-weight: 500; letter-spacing: 0; }
+/* 标记本体 17px，在 24px 盒里留 3.5px 呼吸位。
+   ⚠ 不跟着 UI 图标那套 16px 走：这个标记右边紧挨着 MoCode 文字，
+   16px 与 17px 在实测里的墨迹占盒比是 0.344 vs 0.411 —— 前者明显发虚、像没画满。
+   描边粗细的取值理由写在 icons.ts 的 'mocode-mark' 注释里（是数墨量定出来的）。 */
+.avatar .mocode-mark { width: 17px; height: 17px; }
 .footer-brand { color: inherit; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── 设置弹窗（左分类导航 + 右内容列表） ─────────────────
