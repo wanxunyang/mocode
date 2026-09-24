@@ -5,6 +5,7 @@ import {
   COMMON_TOOL_NAMES,
   DEFAULT_ROUTE_GROUPS,
   TOOL_ROUTE_GROUPS,
+  expandRouteImplications,
   type ToolRouteGroupName,
 } from '../src/config/profiles.js';
 import { ToolPolicyController, getAvailableToolRouteGroups, getRoutableToolRouteGroups } from '../src/tools/policy.js';
@@ -108,6 +109,9 @@ test('ToolPolicy: capability gate 仅把显式 false 当硬否决，MCP 还要�
     registerToolsExtension(extensionSource, [mcpProbe]);
     const blocked = getAvailableToolRouteGroups();
     assert.ok(blocked.includes('workspace-write') && blocked.includes('shell-debug'));
+    // background-exec 无 gateEnv:后台进程管理与 run_command 同级,前端开关关不掉它。
+    // 这是拆簇的核心目的——dev_server 不再被 MOCODE_FRONTEND_TOOLS_ENABLED 连坐否决。
+    assert.ok(blocked.includes('background-exec'), 'background-exec 应始终可路由(无 gateEnv)');
     for (const group of [
       'browser-debug',
       'desktop-observe',
@@ -207,6 +211,53 @@ test('ToolPolicy: 无有效新增不升版本，maxExpansions=0 时不暴露 add
     const fixed = new ToolPolicyController({ maxExpansions: 0 });
     assert.ok(!fixed.snapshot(false).allowedNames.has(ADD_TOOL_GROUPS_TOOL_NAME));
     assert.equal(fixed.canExpand, false);
+  } finally {
+    restore();
+  }
+});
+
+test('ToolPolicy: background-exec 拆簇——dev_server 不再受前端开关否决，且被 browser-debug 蕴含带出', () => {
+  const restore = isolateRouteEnv({ MOCODE_FRONTEND_TOOLS_ENABLED: 'false' });
+  try {
+    // 前端 gate 关掉时 background-exec 仍可路由(无 gateEnv)。
+    assert.ok(getAvailableToolRouteGroups().includes('background-exec'));
+    const controller = new ToolPolicyController({ id: 'policy-bg', groups: ['browser-debug'], maxExpansions: 2 });
+    const names = schemaNames(controller);
+    // browser-debug 被 gate=false 否决 → 不激活;但断言重点在蕴含:显式选中时 dev_server 必到。
+    const open = isolateRouteEnv({ MOCODE_FRONTEND_TOOLS_ENABLED: 'true' });
+    try {
+      const withBrowser = new ToolPolicyController({ id: 'policy-bg2', groups: ['browser-debug'] });
+      const browserNames = schemaNames(withBrowser);
+      assert.ok(browserNames.includes('browser'), 'browser-debug 应带来 browser');
+      assert.ok(
+        browserNames.includes('dev_server'),
+        'browser-debug 蕴含 background-exec → dev_server 必须一并可用(半截能力比多余能力更贵)',
+      );
+      assert.deepEqual([...expandRouteImplications(['browser-debug'])].sort(), ['background-exec', 'browser-debug']);
+      assert.deepEqual([...expandRouteImplications(['workspace-write'])], ['workspace-write'], '无蕴含的簇原样返回');
+    } finally {
+      open();
+    }
+    assert.ok(!names.includes('browser'), 'gate=false 时 browser 不应激活');
+  } finally {
+    restore();
+  }
+});
+
+test('ToolPolicy: expand 返回 implied 且不把蕴含簇计入 added / rejected', () => {
+  const restore = isolateRouteEnv({ MOCODE_FRONTEND_TOOLS_ENABLED: 'true' });
+  try {
+    const controller = new ToolPolicyController({ id: 'policy-implied', groups: [], maxExpansions: 2 });
+    const expansion = controller.expand(['browser-debug'], 'need web UI debugging');
+    assert.deepEqual(expansion.added, ['browser-debug']);
+    assert.deepEqual(expansion.implied, ['background-exec']);
+    assert.deepEqual(expansion.rejected, []);
+    assert.ok(expansion.snapshot.allowedNames.has('dev_server'));
+    // 二次选同一簇:added 为空但 already active 进 rejected;蕴含簇已激活不重复上报。
+    const again = controller.expand(['browser-debug'], 'duplicate');
+    assert.deepEqual(again.added, []);
+    assert.deepEqual(again.implied, []);
+    assert.deepEqual(again.rejected, ['browser-debug: already active']);
   } finally {
     restore();
   }

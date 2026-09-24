@@ -2,6 +2,7 @@ import { readFile, stat } from 'node:fs/promises';
 import { basename, extname } from 'node:path';
 import { createHash } from 'node:crypto';
 import { jailResolve } from '../sandbox/jail.js';
+import { decodePng, downscale, encodePng } from '../runtime/screen-pipeline.js';
 
 export type ImageMime = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 
@@ -28,6 +29,39 @@ export function detectMime(p: string): ImageMime | null {
   return MIME_BY_EXT[extname(p).toLowerCase()] ?? null;
 }
 
+/**
+ * 按**魔数**判定图片类型(不看扩展名)。
+ *
+ * 为什么必须有这条:扩展名会说谎——`data.bin` 可能是 PNG,`notes.png` 也可能是文本。
+ * read_file 要靠它决定「走文本行号分页」还是「走视觉通道」,判错的代价是把二进制
+ * 当 UTF-8 解码(实测一张 42KB PNG 解码出 17862 个 U+FFFD,占 45%)灌进 history。
+ */
+export function sniffImageMime(buf: Buffer): ImageMime | null {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf.toString('ascii', 1, 8) === 'PNG\r\n\x1a\n') return 'image/png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 6 && buf.toString('ascii', 0, 6) === 'GIF87a') return 'image/gif';
+  if (buf.length >= 6 && buf.toString('ascii', 0, 6) === 'GIF89a') return 'image/gif';
+  // WebP: RIFF....WEBP
+  if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return null;
+}
+
+/**
+ * 二进制嗅探:头部 4KB 含 C0 控制字符(NUL/BEL/ESC 等,放行 \t\n\r)即视为二进制。
+ *
+ * 与 grep 的 BINARY_PROBE_RE 同源同口径(集中在此,避免两处正则漂移):SQLite、压缩包、
+ * 可执行文件、minified 数据 dump 都会命中。用途是让 read_file 明确拒绝并指路,
+ * 而不是把乱码塞进上下文——那既烧 token 又让模型基于垃圾内容做判断。
+ */
+export const BINARY_PROBE_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
+
+export function isProbablyBinary(head: Buffer | string): boolean {
+  const sample = typeof head === 'string' ? head : head.toString('latin1');
+  return BINARY_PROBE_RE.test(sample.slice(0, 4096));
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -40,11 +74,104 @@ export function renderChip(att: ImageAttachment): string {
 
 export type LoadImageResult = { ok: true; att: ImageAttachment } | { ok: false; reason: string };
 
-export async function loadImageAttachment(input: string, opts: { maxBytes: number }): Promise<LoadImageResult> {
+/** 降采样兜底的长边上界:对齐主流视觉模型的原生分辨率(Claude 1568 / OpenAI 高分块同级)。 */
+export const DOWNSCALE_MAX_EDGE = 1568;
+
+export type LoadImageWithFallbackResult =
+  | { ok: true; att: ImageAttachment; downscaledFrom?: { width: number; height: number } }
+  | { ok: false; reason: string };
+
+/**
+ * 读图 + 超限自动降采样兜底。
+ *
+ * 为什么要兜底:4 MiB 内联上限对高 DPI 截图偏紧(一张 4K Retina PNG 轻松 5-8 MiB)。
+ * 直接拒绝会逼模型去找压缩工具/改用户文件,而**服务端缩一下就能成功**。
+ * screenshot 早有这条路径(screenshot.ts 的 FALLBACK_MAX_EDGE 分支),这里抽成共享 helper,
+ * 让 view_image / read_file 图片通道同样受益。
+ *
+ * 能力边界(诚实声明):`runtime/screen-pipeline.ts` 的 PNG 解码是手写的、只支持
+ * **8-bit RGB/RGBA PNG**(项目刻意零原生图像依赖)。所以兜底只覆盖 PNG;
+ * JPEG/WebP/GIF 超限仍然拒绝,reason 会写明这一点。
+ */
+export async function loadImageAttachmentWithDownscale(
+  input: string,
+  opts: { maxBytes: number; sniffedMime?: ImageMime | null },
+): Promise<LoadImageWithFallbackResult> {
+  const loaded = await loadImageAttachment(input, opts);
+  if (loaded.ok) return loaded;
+
+  // 只有「体积超限」这一种失败值得兜底:路径为空/扩展名不支持/沙箱越界/不是普通文件
+  // 都是真错误,缩图解决不了,原样透出让调用方给出准确提示。
+  if (!loaded.reason.startsWith('too large')) return loaded;
+
+  const mime = detectMime(input) ?? opts.sniffedMime ?? null;
+  if (mime !== 'image/png') {
+    return {
+      ok: false,
+      reason: `${loaded.reason} — 自动降采样仅支持 PNG(零原生图像依赖);${extname(input)} 请先转成 PNG 或自行压缩后重试`,
+    };
+  }
+
+  let abs: string;
+  try {
+    abs = jailResolve(input.trim());
+  } catch (e) {
+    return { ok: false, reason: `outside sandbox: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  try {
+    const png = decodePng(await readFile(abs));
+    const { img } = downscale(png, DOWNSCALE_MAX_EDGE);
+    const buf = encodePng(img);
+    if (buf.length > opts.maxBytes) {
+      return {
+        ok: false,
+        reason: `${loaded.reason} — 降采样到 ${img.width}×${img.height} 后仍有 ${formatBytes(buf.length)},超过 ${formatBytes(opts.maxBytes)}`,
+      };
+    }
+    let st;
+    try {
+      st = await stat(abs);
+    } catch {
+      st = null;
+    }
+    const id = createHash('sha1')
+      .update(abs)
+      .update('\0downscaled')
+      .update(String(img.width))
+      .update('\0')
+      .update(String(img.height))
+      .update('\0')
+      .update(String(st?.mtimeMs ?? 0))
+      .digest('hex');
+    return {
+      ok: true,
+      downscaledFrom: { width: png.width, height: png.height },
+      att: {
+        id,
+        path: abs,
+        name: basename(abs),
+        bytes: buf.length,
+        mime: 'image/png',
+        dataUrl: `data:image/png;base64,${buf.toString('base64')}`,
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `${loaded.reason}(降采样兜底失败: ${message})` };
+  }
+}
+
+export async function loadImageAttachment(
+  input: string,
+  opts: { maxBytes: number; sniffedMime?: ImageMime | null },
+): Promise<LoadImageResult> {
   const trimmed = input.trim();
   if (!trimmed) return { ok: false, reason: '路径为空' };
 
-  const mime = detectMime(trimmed);
+  // 扩展名优先(便宜、无需读文件);不认识时用调用方给的魔数嗅探结果兜底 ——
+  // read_file 读到的图片常常没有正确扩展名(截图缓存 / 构建产物 / 无扩展名 blob)。
+  const mime = detectMime(trimmed) ?? opts.sniffedMime ?? null;
   if (!mime) {
     return { ok: false, reason: `unsupported: ${extname(trimmed) || '(无扩展名)'} — 仅支持 png/jpg/jpeg/gif/webp` };
   }
@@ -69,7 +196,7 @@ export async function loadImageAttachment(input: string, opts: { maxBytes: numbe
   if (st.size > opts.maxBytes) {
     return {
       ok: false,
-      reason: `too large: ${formatBytes(st.size)} (max ${formatBytes(opts.maxBytes)}) — TODO: URL upload not yet supported`,
+      reason: `too large: ${formatBytes(st.size)} (max ${formatBytes(opts.maxBytes)})`,
     };
   }
 

@@ -278,9 +278,10 @@ ${request.tools ? toolRouteCatalog(availableGroups, request.tools) : toolRouteCa
 
 Routing rules:
 - You MUST call ${ROUTER_TOOL_NAME} exactly once and emit no prose.
-- File edits and command execution are always available; do NOT select them. If common tools plus the always-on groups suffice (most coding, testing, and debugging tasks), return an empty groups array.
+- File edits and foreground command execution are always available; do NOT select them. If common tools plus the always-on groups suffice (most coding, testing, and debugging tasks), return an empty groups array.
 - Select multiple groups when the task genuinely combines capabilities.
-- Web UI DOM/console/network/page sessions or local web servers need browser-debug.
+- background-exec is for any process that must keep running after the tool call returns: dev servers, inference/model services, watchers, log tails, or a command you will poll later. Foreground run_command blocks and is killed at its timeout, so it cannot host them.
+- Web UI DOM/console/network/page sessions need browser-debug; a local web server alone only needs background-exec.
 - Merely observing system dialogs or non-browser windows needs desktop-observe.
 - computer-control requires explicit real GUI clicking, typing, scrolling, or desktop application operation; never infer it from the word "browser" alone.
 - memory-write requires explicit intent to remember, update, forget, or link cross-session knowledge.
@@ -292,7 +293,8 @@ Routing rules:
 Examples (text form; always answer with the ${ROUTER_TOOL_NAME} call):
 - Task "这个仓库用什么测试框架?该怎么加一个新测试?" → groups: [], inheritPrevious: false, reason: "Pure question; common read/search tools suffice."
 - Task "修好 auth.ts 里过期的 token 校验并跑一遍相关测试" → groups: [], inheritPrevious: false, reason: "File edits and test runs are always-on groups, never selected."
-- Task "本地页面白屏了,帮我看看控制台报错" → groups: [browser-debug], inheritPrevious: false, reason: "Needs DOM/console inspection of a local web page."
+- Task "把 8765 端口的推理服务起起来,然后拿它的 /predict 试几个样本" → groups: [background-exec], inheritPrevious: false, reason: "A long-running service must stay alive across calls so it can be polled and stopped later."
+- Task "本地页面白屏了,帮我看看控制台报错" → groups: [background-exec, browser-debug], inheritPrevious: false, reason: "Needs the dev server running plus DOM/console inspection of a local web page."
 - Task "记住这条约定:提交前必须跑 lint" → groups: [memory-write], inheritPrevious: false, reason: "Explicit intent to persist cross-session knowledge."`;
 
   const user = [

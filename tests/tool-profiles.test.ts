@@ -58,11 +58,14 @@ test('profiles: 预置 5 模式,coding 默认含 web(无 frontend/computer/memor
   );
   assert.ok(coding.has('plan_update') && coding.has('ask_human'));
   assert.ok(coding.has('web_search') && coding.has('web_fetch'));
-  assert.equal(coding.size, 14);
+  assert.equal(coding.size, 15);
   // view_image 常驻 core-read,用于读取已有本地图片
   assert.ok(coding.has('view_image'));
+  // dev_server 属 core-write(后台进程管理与 run_command 同级,不是浏览器工具):coding 就该有,
+  // 否则 legacy 嵌入路径下「起个长驻服务」只能退回前台 run_command 被超时杀掉。
+  assert.ok(coding.has('dev_server'), 'coding should include dev_server (core-write)');
   // 省 token/权限面:不装浏览器自动化、桌面、记忆、子代理
-  for (const t of ['browser', 'dev_server', 'screenshot', 'computer', 'memory_search', 'sub-agent']) {
+  for (const t of ['browser', 'screenshot', 'computer', 'memory_search', 'sub-agent']) {
     assert.ok(!coding.has(t), `coding should not include ${t}`);
   }
 });
@@ -131,11 +134,13 @@ test('getProfileDisabledTools: coding 屏蔽非默认簇;full 不屏蔽任何已
     const prev = getActiveProfile();
     setActiveProfile('coding');
     const disabled = getProfileDisabledTools();
-    for (const t of ['browser', 'dev_server', 'screenshot', 'computer', 'memory_save', 'sub-agent']) {
+    for (const t of ['browser', 'screenshot', 'computer', 'memory_save', 'sub-agent']) {
       assert.ok(disabled.has(t), `coding should disable ${t}`);
     }
     assert.ok(!disabled.has('read_file') && !disabled.has('write_file'));
     assert.ok(!disabled.has('web_search') && !disabled.has('web_fetch'));
+    // dev_server 归 core-write 后不再被 frontend 开关否决:后台进程管理与前端联调解耦。
+    assert.ok(!disabled.has('dev_server'), 'coding should NOT disable dev_server any more');
     setActiveProfile('full');
     const fullDisabled = getProfileDisabledTools();
     for (const t of ALL_KNOWN_TOOLS) assert.ok(!fullDisabled.has(t), `full should not disable ${t}`);

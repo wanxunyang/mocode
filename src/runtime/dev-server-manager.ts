@@ -14,6 +14,7 @@ import { mkdir, open, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { filterEnv, getSandboxRoot, isCommandDenied, jailResolve } from '../sandbox/index.js';
+import { defaultShellKind, shellSpawnSpec, type ShellKind } from './shell.js';
 
 export type DevServerState = 'running' | 'exited' | 'stopped';
 export type DevServerErrorCode =
@@ -41,6 +42,8 @@ export interface StartDevServerOptions {
   readyPattern?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** 起进程用的 shell;缺省走平台默认(Windows 上 Git Bash 优先,见 runtime/shell.ts)。 */
+  shell?: ShellKind;
 }
 
 export interface DevServerSnapshot {
@@ -270,10 +273,11 @@ export async function startDevServer(opts: StartDevServerOptions): Promise<Start
 
   let child: ChildProcess;
   try {
-    child = spawn(IS_WINDOWS ? 'cmd.exe' : 'bash', IS_WINDOWS ? ['/d', '/s', '/c', command] : ['-c', command], {
+    const spec = shellSpawnSpec(opts.shell ?? defaultShellKind(), command);
+    child = spawn(spec.file, spec.args, {
       cwd,
       env: filterEnv(process.env),
-      windowsVerbatimArguments: IS_WINDOWS,
+      windowsVerbatimArguments: spec.windowsVerbatimArguments,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });

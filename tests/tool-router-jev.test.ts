@@ -34,6 +34,9 @@ const allowAll = (): boolean => true;
 
 const ROUTER_ENV_KEYS = [
   'MOCODE_ROUTER_MODE',
+  // 总开关必须进隔离清单:开发机全局 config 可能持久化 MOCODE_ROUTER_ENABLED=false
+  // (loadEnvFiles 启动时回填 process.env),否则本文件所有 jev 用例都走「开关关闭」路径假性失败。
+  'MOCODE_ROUTER_ENABLED',
   'MOCODE_ROUTER_JEV_BASE_URL',
   'MOCODE_ROUTER_JEV_API_KEY',
   'MOCODE_ROUTER_JEV_MODEL',

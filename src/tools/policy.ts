@@ -5,6 +5,7 @@ import {
   DEFAULT_ROUTE_GROUPS,
   TOOL_ROUTE_GROUP_NAMES,
   TOOL_ROUTE_GROUPS,
+  expandRouteImplications,
   getToolRouteGroupNames,
   isToolRouteGroupName,
   type ToolRouteGroupName,
@@ -28,6 +29,8 @@ export interface ToolPolicySnapshot {
 
 export interface ToolPolicyExpansion {
   added: ToolRouteGroupName[];
+  /** 由 TOOL_ROUTE_IMPLICATIONS 自动带上的簇;同样进入 snapshot,但不计入 added(保持归因清晰)。 */
+  implied: ToolRouteGroupName[];
   rejected: string[];
   snapshot: ToolPolicySnapshot;
 }
@@ -165,10 +168,11 @@ export class ToolPolicyController {
     this.confidence = clampConfidence(init.confidence ?? 0);
     const available = new Set(getAvailableToolRouteGroups(this.catalog, this.gateAllows));
     // 常驻簇无条件激活:路由漏判/失败都不会让主 Agent 起手就没有写文件或跑命令的能力。
+    // 蕴含簇(browser-debug → background-exec)在此一并展开,弱模型只选浏览器时也拿得到起服务的能力。
     const requested: Set<ToolRouteGroupName> =
       process.env.MOCODE_TOOL_POLICY === 'full'
         ? available
-        : new Set<ToolRouteGroupName>([...DEFAULT_ROUTE_GROUPS, ...(init.groups ?? [])]);
+        : expandRouteImplications([...DEFAULT_ROUTE_GROUPS, ...(init.groups ?? [])]);
     for (const group of requested) {
       if (available.has(group)) this.selected.add(group);
     }
@@ -236,35 +240,51 @@ export class ToolPolicyController {
   expand(rawGroups: readonly unknown[], reason: string): ToolPolicyExpansion {
     const rejected: string[] = [];
     const added: ToolRouteGroupName[] = [];
+    const implied: ToolRouteGroupName[] = [];
     if (this.expansionCount >= this.maxExpansions) {
       return {
         added,
+        implied,
         rejected: ['expansion limit reached'],
         snapshot: this.snapshot(false),
       };
     }
     const available = new Set(getAvailableToolRouteGroups(this.catalog, this.gateAllows));
+    /** 尝试激活一个簇;返回是否真的由本次调用新增。 */
+    const activate = (value: ToolRouteGroupName): boolean => {
+      if (!available.has(value)) return false;
+      if (this.selected.has(value)) return false;
+      this.selected.add(value);
+      return true;
+    };
     for (const value of rawGroups) {
       if (!isToolRouteGroupName(value)) {
         rejected.push(`${String(value)}: unknown group`);
-      } else if (!available.has(value)) {
+        continue;
+      }
+      if (!available.has(value)) {
         rejected.push(`${value}: capability disabled or unavailable`);
       } else if (this.selected.has(value)) {
         rejected.push(`${value}: already active`);
       } else {
-        this.selected.add(value);
+        activate(value);
         added.push(value);
+        // 蕴含簇静默带上:被 gate 否决或已激活都属正常,不进 rejected(不是模型的错)。
+        for (const impliedGroup of expandRouteImplications([value])) {
+          if (impliedGroup !== value && activate(impliedGroup)) implied.push(impliedGroup);
+        }
       }
     }
     if (added.length > 0) {
       this.expansionCount++;
       this.version++;
-      this.reason = reason.trim() || `Main agent added ${added.join(', ')}.`;
+      const gained = [...added, ...implied];
+      this.reason = reason.trim() || `Main agent added ${gained.join(', ')}.`;
       this.confidence = Math.max(this.confidence, 0.8);
       this.autoCache = null;
       this.planCache = null;
     }
-    return { added, rejected, snapshot: this.snapshot(false) };
+    return { added, implied, rejected, snapshot: this.snapshot(false) };
   }
 
   /** 注入请求尾部，不改写稳定 system prefix。 */

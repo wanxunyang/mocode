@@ -8,7 +8,10 @@ interface GrepMatch {
 
 const LEGACY_GREP_RE = /^(.*?):(\d+):(.*)$/;
 const STRUCTURED_HEADER_RE = /^(.*): (\d+) 处匹配,行号 \[([0-9,\s]+)\]$/;
-const STRUCTURED_BODY_RE = /^\s{2}L\d+:/;
+/** body 行:命中 `  L12:` / 上下文 `  L11-`(grep.ts renderBodies 的两种前缀)。 */
+const STRUCTURED_BODY_RE = /^\s{2}L\d+[:-]/;
+/** 不相邻分块分隔符 `  --`(对齐 ripgrep)。Cold 折叠时与 body 一并丢弃。 */
+const STRUCTURED_SEPARATOR_RE = /^\s{2}--$/;
 const STRUCTURED_FOLDED_RE = /^\s{2}\(body 已折叠/;
 
 function isAgedCold(input: EncoderInput): boolean {
@@ -28,7 +31,10 @@ function collapseStructuredGrep(output: string): { text: string; files: number }
       out.push(line);
       continue;
     }
-    if (inFile && (STRUCTURED_BODY_RE.test(line) || STRUCTURED_FOLDED_RE.test(line))) {
+    if (
+      inFile &&
+      (STRUCTURED_BODY_RE.test(line) || STRUCTURED_SEPARATOR_RE.test(line) || STRUCTURED_FOLDED_RE.test(line))
+    ) {
       continue;
     }
     inFile = false;

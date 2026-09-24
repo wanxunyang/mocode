@@ -2,6 +2,7 @@ import { stdout } from 'node:process';
 import { createRequire } from 'node:module';
 import { ui } from './theme.js';
 import { t } from '../i18n/index.js';
+import { IMAGE_READ_MARKER } from '../tools/constants.js';
 
 let VERSION = '0.0.0';
 try {
@@ -437,16 +438,32 @@ export function summarizeToolCall(name: string, argsRaw: string): string {
   }
 }
 
+/** grep 每文件头的命中数:`foo.ts: 3 处匹配,行号 [...]`(与 builtins/grep.ts 的输出契约同源)。 */
+const GREP_HEADER_MATCH_COUNT = /:\s*(\d+)\s*处匹配/g;
+
 /** 工具结果的人可读一行预览(行数 / 匹配数 / 首行);喂回 LLM 的全文不变。 */
 export function summarizeToolResult(name: string, output: string): string {
   const nonEmpty = output.split('\n').filter((l) => l.trim().length > 0);
   switch (name) {
     case 'read_file':
+      // 图片分支(read-file.ts IMAGE_READ_MARKER)不是「N 行」文本,单独说清楚,
+      // 否则用户看到「1 行」会以为读取失败或被截断。
+      if (output.startsWith(IMAGE_READ_MARKER)) return t('toolSummary.imageAttached');
       return nonEmpty.length ? t('toolSummary.lines', { count: nonEmpty.length }) : t('toolSummary.emptyFile');
     case 'glob':
       return nonEmpty.length ? t('toolSummary.files', { count: nonEmpty.length }) : t('toolSummary.noMatches');
-    case 'grep':
-      return nonEmpty.length ? t('toolSummary.matches', { count: nonEmpty.length }) : t('toolSummary.noMatches');
+    case 'grep': {
+      // 「无匹配」结果不含任何文件头:必须显式识别,否则会被当成 1 处匹配(nonEmpty 只有 1 行)。
+      if (!nonEmpty.length || nonEmpty[0].startsWith('无匹配')) return t('toolSummary.noMatches');
+      // 带 context 时 body 行数 ≠ 命中数(邻居行 + `  --` 分隔都在里面),
+      // 按每文件头的真实命中数求和才对得上模型看到的「N 处匹配」。
+      let matches = 0;
+      GREP_HEADER_MATCH_COUNT.lastIndex = 0;
+      for (let m = GREP_HEADER_MATCH_COUNT.exec(output); m; m = GREP_HEADER_MATCH_COUNT.exec(output)) {
+        matches += Number(m[1]);
+      }
+      return matches > 0 ? t('toolSummary.matches', { count: matches }) : t('toolSummary.noMatches');
+    }
     case 'run_command':
       return truncateDisplay(nonEmpty[0] ?? '', 100) || t('toolSummary.noOutput');
     default:

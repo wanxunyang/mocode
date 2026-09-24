@@ -507,6 +507,9 @@ export async function runAgentCoreLegacy(
                         succeeded
                           ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
                           : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
+                        expansion.implied.length > 0
+                          ? `Implied groups also activated: ${expansion.implied.join(', ')}.`
+                          : '',
                         expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
                         succeeded ? 'The added tool schemas become available on the next model step.' : '',
                       ]
@@ -526,6 +529,7 @@ export async function runAgentCoreLegacy(
                         toVersion: expansion.snapshot.version,
                         requestedGroups: parsed.groups.map(String),
                         addedGroups: expansion.added,
+                        impliedGroups: expansion.implied,
                         rejected: expansion.rejected,
                         reason: parsed.reason,
                         status: outcome.status,

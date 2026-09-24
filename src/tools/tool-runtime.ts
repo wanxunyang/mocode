@@ -113,6 +113,40 @@ function terminalOutcome(
   };
 }
 
+/**
+ * 幂等工具的瞬时失败自动重试(retryable 契约的唯一消费点)。
+ *
+ * retryable 字段此前全项目零消费者:工具诚实地标了「这是瞬时失败」,却没人据此行动,
+ * 模型只能靠再发一轮 tool call 自救(浪费一个完整 LLM 往返 + 常忘记重试)。
+ * 现在 runtime 在**工具显式声明 idempotent** 时自动重发:
+ * - 只对 capabilities.idempotent=true 的工具(web_fetch/web_search 这类无副作用 GET)生效;
+ *   写/进程类工具永不自动重试 —— 重试语义由工具自己决定(如 edit_file 的 expected_hash 冲突)。
+ * - 只重试 status='error' 且 retryable=true 的结果:denied/aborted 是终态,重试无意义。
+ * - 退避 400ms/1200ms(最多 2 次):429 的 Retry-After 场景通常秒级窗口就够,
+ *   再长会把「工具调用」拖成用户可感知的卡顿;仍失败则把重试次数写进 output,模型可自行决策。
+ * - abort 敏感:等待期间用户 Ctrl+C 立即放弃,不空耗退避窗口。
+ */
+const RETRY_BACKOFF_MS = [400, 1200] as const;
+
+function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    // onAbort 先声明再被 timer 闭包引用:避免 TDZ 依赖「回调必然异步」这一前提。
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function isTransientExecutionError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
   const value = error as { status?: number; code?: string; name?: string; message?: string };
@@ -263,10 +297,43 @@ export class ToolRuntime {
       if (sandboxError) {
         return terminalOutcome('denied', 'SANDBOX_DENIED', sandboxError, startedAt);
       }
-      return await this.executeToolOnce(tool, args, signal, opts);
+      return await this.executeToolWithRetry(tool, args, signal, opts);
     } catch (error) {
       return executionErrorOutcome(name, error, startedAt, []);
     }
+  }
+
+  /**
+   * 幂等工具的自动重试外壳:非幂等工具直接执行一次(与旧行为逐字节一致,零开销)。
+   * 只有 capabilities.idempotent=true 且结果 status='error' + retryable=true 才重发。
+   */
+  private async executeToolWithRetry(
+    tool: Tool,
+    args: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    opts: ToolExecutionOptions | undefined,
+  ): Promise<ToolOutcome> {
+    const capabilities = this.getToolCapabilities(tool);
+    if (!capabilities.idempotent) return this.executeToolOnce(tool, args, signal, opts);
+
+    let outcome = await this.executeToolOnce(tool, args, signal, opts);
+    for (const backoff of RETRY_BACKOFF_MS) {
+      // 只对瞬时 error 重试;denied/aborted/success 都是终态。abort 后立即停,不空耗退避。
+      if (outcome.status !== 'error' || !outcome.retryable || signal?.aborted) break;
+      // TIMEOUT 不自动重试:一次超时已经烧掉整个超时窗口(web_fetch 是 30s),再试两次最坏
+      // 让单次工具调用变成 90s —— 用户看到的是 spinner 长时间冻住。超时通常是目标主机真的慢,
+      // 重试收益低、体感代价高。retryable 标记仍保留,模型可自行判断是否再发一轮。
+      if (outcome.code === 'TIMEOUT') break;
+      await sleepWithSignal(backoff, signal);
+      if (signal?.aborted) break;
+      outcome = await this.executeToolOnce(tool, args, signal, opts);
+    }
+    // 重试用尽仍失败:把尝试次数写进 output,让模型知道「已经自动重试过了,别再无脑重发」。
+    // TIMEOUT 走的是「未自动重试」路径,不能谎称重试过。
+    if (outcome.status === 'error' && outcome.retryable && outcome.code !== 'TIMEOUT') {
+      outcome = { ...outcome, output: `${outcome.output}\n(runtime 已自动重试 ${RETRY_BACKOFF_MS.length} 次仍失败)` };
+    }
+    return outcome;
   }
 
   /** 字符串兼容入口：现有调用方、TUI 和 LLM history 无需同步迁移。 */

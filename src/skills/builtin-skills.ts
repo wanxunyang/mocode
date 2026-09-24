@@ -35,7 +35,7 @@ run_command({ command: "codegraph node <symbol-or-path>" })
 
 注意:
 
-- Windows 上 \`codegraph\` 是 .cmd,必须走 cmd.exe /c 包装(run_command 内部已处理,直接传 \`codegraph ...\` 即可)。
+- Windows 上 \`codegraph\` 是 .cmd:默认 shell(cmd.exe)直接传 \`codegraph ...\` 即可;若显式用了 \`shell: "bash"\`(Git Bash 同样能按裸名解析 .cmd)一般也行,解析不到就回 cmd。
 - 单次查询 ≤ 60s 超时,模型按需重试/换 query。
 
 ## 何时用

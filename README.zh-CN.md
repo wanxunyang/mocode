@@ -195,9 +195,11 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 | `SUB_AGENT_MAX_STEPS`           | 子 Agent 循环安全上限，默认与主 Agent 一致                                   | `1000`                      |
 | `SANDBOX_ROOT`                  | 沙箱根目录(文件操作边界;未配则用 cwd 兜底)                                   | 无                          |
 | `MOCODE_SUBAGENT_ENABLED`       | 设 `false` 硬禁用 `orchestration`；unset/`true` 允许按需路由                 | 未设置                      |
-| `MOCODE_FRONTEND_TOOLS_ENABLED` | 设 `false` 硬禁用 `browser-debug` / `desktop-observe`；unset/`true` 允许路由 | 未设置                      |
+| `MOCODE_FRONTEND_TOOLS_ENABLED` | 设 `false` 硬禁用 `browser-debug` / `desktop-observe`（不影响 `background-exec`）；unset/`true` 允许路由 | 未设置                      |
 | `MOCODE_COMPUTER_USE_ENABLED`   | 设 `false` 硬禁用高危 `computer-control`；unset/`true` 允许明确意图时路由    | 未设置                      |
 | `MEMORY_ENABLED`                | 设 `false` 硬禁用 memory 簇；`true` 还会启用 Memory Index                    | 未设置                      |
+| `MOCODE_SHELL`                  | `run_command` / `dev_server` 的默认 shell：`cmd` \| `powershell` \| `bash`   | Windows 上 `cmd`，其余 `bash` |
+| `MOCODE_WEB_FETCH_PROXY`        | `web_fetch` 直连被反爬拦截时才启用的前缀型纯文本代理（如 `https://r.jina.ai/`）；默认关——把 URL 交给第三方必须由用户显式打开 | 未设置（关闭）              |
 | `MOCODE_THEME`                  | 颜色主题(default/dark/light…;shell 设置优先于文件)                           | `default`                   |
 
 ## 运行
@@ -221,19 +223,19 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 
 | 工具          | 作用                                                                                                                   |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `read_file`   | 读文本文件,带行号,支持 `offset` / `limit`                                                                              |
-| `view_image`  | 读取已有 PNG/JPEG/GIF/WebP 图片并作为视觉输入回灌模型(最大 4 MiB)                                                      |
+| `read_file`   | 读文件:文本带行号(`offset` / `limit`);PNG/JPEG/GIF/WebP 按**魔数**识别(扩展名会说谎)并作为视觉输入回灌;其余二进制明确拒绝而非灌乱码 |
+| `view_image`  | 读取已有 PNG/JPEG/GIF/WebP 图片并作为视觉输入回灌模型(4 MiB 内联上限;超限 PNG 自动降采样,不再直接拒绝)                   |
 | `screenshot`  | 经用户确认后截取主显示器或整个桌面,保存 PNG 并立即交给视觉模型分析                                                     |
-| `write_file`  | 创建/覆盖文件,自动建父目录                                                                                             |
+| `write_file`  | 创建/覆盖文件,自动建父目录;`append=true` 在文件末尾追加,无需重发全文(分段写长文件/记日志的正确姿势)                      |
 | `edit_file`   | 精确字符串替换(`old_string` 须唯一匹配)                                                                                |
-| `run_command` | 执行 shell 命令,合并 stdout+stderr,默认 120s 超时                                                                      |
-| `dev_server`  | 启动/查看/读日志/停止常驻后台进程(dev server),跨工具调用存活                                                           |
+| `run_command` | 执行**前台** shell 命令,合并 stdout+stderr,默认 120s 超时(硬上限 10min);`shell=cmd\|powershell\|bash` 指定解释器         |
+| `dev_server`  | 启动/查看/读日志/停止**任意需跨调用存活的后台进程**(dev server、推理服务、watcher、日志尾随)                            |
 | `browser`     | Playwright 驱动真实 Chromium:导航 / 点击 / 填表 / 取文本 / 截图 / 控制台诊断                                           |
 | `glob`        | 按 glob 模式找文件(排除 node_modules/.git)                                                                             |
-| `grep`        | 内容正则搜索,纯 JS 实现,不依赖 `rg`                                                                                    |
+| `grep`        | 内容正则搜索,纯 JS 实现,不依赖 `rg`;`context=N` 内联返回邻居行并保留原始缩进,命中后基本不用再 read_file 一次            |
 | `codegraph`   | 已建 `.codegraph/` 索引时,查代码符号源码与调用链(比 read_file/grep 更准更省)                                           |
 | `web_search`  | 联网搜索(AnySearch),返回标题/URL/摘要/正文                                                                             |
-| `web_fetch`   | 抓取指定 URL,HTML 清洗成纯文本                                                                                         |
+| `web_fetch`   | 抓取指定 URL,HTML 清洗成纯文本;带全套浏览器拟真头,瞬时失败(429/5xx/网络抖动)自动退避重试,可选纯文本代理回退              |
 | `use_skill`   | 加载某 skill 的完整 SKILL.md 指令                                                                                      |
 | `ask_human`   | 决策点弹终端问答面板,用户选预设项或自由输入(阻塞至回应)                                                                |
 | `plan_update` | 记录/更新会话执行计划(notes.md 的 `## Plan:` 段);三态步骤机,同一时刻至多一个 in_progress,全部完成自动结算为 `## Done:` |
@@ -261,7 +263,20 @@ dev_server stop   id=srv-xxxx
 - 两者在 plan 模式下均被禁用;mocode 退出时会树杀后台进程并关闭浏览器。
 - 浏览器二进制不随 npm 包分发,首次使用前需 `npx playwright install chromium`。
 
-前端能力按用途拆分：`browser` + `dev_server` 属于 `browser-debug`，整桌面截图 `screenshot` 属于 `desktop-observe`，`view_image` 则始终是公共只读工具。任务同时需要结构化网页诊断与真实桌面交互时，router 可再组合 `computer-control`。`/fe off` 是硬否决，不是手动 profile 选择器。
+前端能力按用途拆分：`browser` 属于 `browser-debug`，整桌面截图 `screenshot` 属于 `desktop-observe`，而 `dev_server` 独立成**无 gate 的 `background-exec` 簇** —— 任何需要跨工具调用存活的进程（dev server、推理/模型服务、watcher、日志尾随）都归它，而不是塞进 `run_command`。选中 `browser-debug` 会**蕴含**激活 `background-exec`：弱模型只想到要浏览器时，也能拿到「先把服务起起来」的能力（半套能力比多一套能力更糟）。`view_image` 则始终是公共只读工具。任务同时需要结构化网页诊断与真实桌面交互时，router 可再组合 `computer-control`。`/fe off` 是硬否决，不是手动 profile 选择器——它不影响 `dev_server`。
+
+### Shell 选择器
+
+`run_command` 与 `dev_server` 都接受 `shell=cmd|powershell|bash`。默认值与旧版一致（Windows 上 `cmd.exe`，其余平台 `bash`），现有 prompt / skill 不受影响；想全局换成 POSIX 的用户设 `MOCODE_SHELL` 即可。在 Windows 上请求 `bash` 时会自动探测 Git for Windows 的 `bash.exe` —— **刻意排除 WSL 的 `System32\bash.exe`**：它进的是 Linux 发行版，路径（`/mnt/f/…`）、工具链与安全策略都与 Windows 原生预期不符。另外，非交互 `cmd.exe` 跑不了 `timeout /t`（直接报错），需要等待时用 `shell=powershell` + `Start-Sleep`，或 `shell=bash` + `sleep`。
+
+### 自动重试（retryable 契约）
+
+工具返回的 `retryable` 此前全项目零消费者 —— 工具诚实标了「这是瞬时失败」，却没人据此行动，模型只能再发一轮 tool call 自救（白烧一个 LLM 往返，且常常忘记重试）。现在 runtime 对**显式声明 `idempotent`** 的工具在退避后自动重发（400ms / 1200ms，最多两次）：
+
+- 只有无副作用的网络只读工具（`web_fetch`、`web_search`）声明了该能力；写文件 / 起进程类工具**一个都没有**，也不会自动重试 —— 重试语义由工具自己决定（如 `edit_file` 的 `expected_hash` 冲突）。
+- 只重试 `status=error` 且 `retryable=true` 的结果；`denied` / `aborted` / `success` 都是终态。
+- **`TIMEOUT` 不自动重试**：一次超时已经烧掉整个超时窗口（`web_fetch` 是 30s），再试两次最坏会让单次工具调用变成 90s，用户看到的就是 spinner 长时间冻住。`retryable` 标记仍保留，模型可自行判断。
+- 退避等待期间用户 Ctrl+C 立即放弃，不空耗窗口；重试用尽仍失败会把尝试次数写进 output，让模型知道「runtime 已经试过了，别再无脑重发」。
 
 6 个 `memory_*` 工具拆成 `memory-read` 与 `memory-write`。只有 router 选择对应簇时才出现；`MEMORY_ENABLED=false` 会硬禁用两簇，`true` 还会把紧凑 Memory Index 注入 prompt。`/memory_switch` 同时管理这个兼容 gate 与 Index 状态。
 

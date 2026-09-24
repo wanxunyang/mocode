@@ -208,9 +208,11 @@ Common backend `base_url` values:
 | `SUB_AGENT_MAX_STEPS`           | Sub-agent loop safety ceiling; defaults to the main-agent value                               | `1000`                      |
 | `SANDBOX_ROOT`                  | Sandbox root directory (file operation boundary; falls back to cwd if unset)                  | none                        |
 | `MOCODE_SUBAGENT_ENABLED`       | Set `false` to veto the `orchestration` route group; unset/`true` allows on-demand routing    | unset                       |
-| `MOCODE_FRONTEND_TOOLS_ENABLED` | Set `false` to veto `browser-debug` and `desktop-observe`; unset/`true` allows routing        | unset                       |
+| `MOCODE_FRONTEND_TOOLS_ENABLED` | Set `false` to veto `browser-debug` and `desktop-observe` (does not affect `background-exec`); unset/`true` allows routing | unset                       |
 | `MOCODE_COMPUTER_USE_ENABLED`   | Set `false` to veto high-risk `computer-control`; unset/`true` allows explicit-intent routing | unset                       |
 | `MEMORY_ENABLED`                | Set `false` to veto memory groups; `true` also enables the Memory Index                       | unset                       |
+| `MOCODE_SHELL`                  | Default shell for `run_command` / `dev_server`: `cmd` \| `powershell` \| `bash`                | `cmd` (Windows) / `bash`    |
+| `MOCODE_WEB_FETCH_PROXY`        | Prefix-style plaintext proxy used by `web_fetch` only when a direct fetch is blocked (e.g. `https://r.jina.ai/`); opt-in because it hands your URLs to a third party | unset (disabled) |
 | `MOCODE_THEME`                  | Color theme (default/dark/light…; shell env takes precedence over file)                       | `default`                   |
 
 ## Usage
@@ -234,15 +236,15 @@ Every real user turn first goes through a constrained LLM router. Ten common too
 
 | Tool          | Purpose                                                                                                                                                               |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `read_file`   | Read a file with line numbers; supports `offset` / `limit`                                                                                                            |
-| `write_file`  | Create/overwrite a file, auto-creating parent directories                                                                                                             |
+| `read_file`   | Read a file: text with line numbers (`offset` / `limit`), images (PNG/JPEG/GIF/WebP detected by magic bytes) as visual model input; other binaries are rejected instead of dumped as garbled text |
+| `write_file`  | Create/overwrite a file, auto-creating parent directories; `append=true` adds to the end without re-sending the whole file                                              |
 | `edit_file`   | Precise string replacement (`old_string` must match uniquely)                                                                                                         |
-| `run_command` | Run a shell command, merging stdout+stderr, 120s default timeout                                                                                                      |
+| `run_command` | Run a foreground shell command, merging stdout+stderr, 120s default timeout; `shell=cmd\|powershell\|bash` picks the interpreter                                       |
 | `glob`        | Find files by glob pattern (excludes node_modules/.git)                                                                                                               |
-| `grep`        | Regex content search, pure JS implementation, no `rg` dependency                                                                                                      |
+| `grep`        | Regex content search, pure JS implementation, no `rg` dependency; `context=N` returns neighbouring lines inline so a hit rarely needs a follow-up read                  |
 | `codegraph`   | With a `.codegraph/` index built, query symbol source and call chains (more accurate and cheaper than read_file/grep)                                                 |
 | `web_search`  | Web search (AnySearch), returns title/URL/snippet/body                                                                                                                |
-| `web_fetch`   | Fetch a URL, cleaning HTML into plain text                                                                                                                            |
+| `web_fetch`   | Fetch a URL, cleaning HTML into plain text; browser-like headers, auto-retry on transient failures, optional plaintext-proxy fallback                                 |
 | `use_skill`   | Load the full SKILL.md instructions for a given skill                                                                                                                 |
 | `ask_human`   | Pop up a Q&A panel at decision points; user picks a preset or types freely (blocks until answered)                                                                    |
 | `plan_update` | Record/update the session execution plan (the `## Plan:` block in notes.md); three-state steps, at most one in_progress, auto-settles to `## Done:` when all complete |
@@ -256,7 +258,20 @@ Every real user turn first goes through a constrained LLM router. Ten common too
 
 The six `memory_*` tools are split into `memory-read` and `memory-write` route groups. They appear only when the router selects them; `MEMORY_ENABLED=false` vetoes both groups, while `MEMORY_ENABLED=true` also enables the compact Memory Index in the prompt. `/memory_switch` manages that compatibility gate.
 
-Frontend capabilities are also split by purpose: `browser` + `dev_server` form `browser-debug`, while whole-desktop `screenshot` is `desktop-observe`; `view_image` remains a common read tool. The router may combine these groups with `computer-control` when a task genuinely needs both structured web diagnostics and real desktop interaction. `/fe off` is a hard veto, not a manual profile selector.
+Frontend capabilities are also split by purpose: `browser` forms `browser-debug`, whole-desktop `screenshot` is `desktop-observe`, and `dev_server` has its own ungated `background-exec` group — any process that must outlive a single tool call (dev server, inference service, watcher, log tail) belongs there rather than in `run_command`. Selecting `browser-debug` implies `background-exec`, so a weak model that only asks for the browser still gets the ability to start the server it needs to look at. `view_image` remains a common read tool. The router may combine these groups with `computer-control` when a task genuinely needs both structured web diagnostics and real desktop interaction. `/fe off` is a hard veto, not a manual profile selector — it does not affect `dev_server`.
+
+### Shell selection
+
+`run_command` and `dev_server` accept `shell=cmd|powershell|bash`. The default is unchanged from earlier releases (`cmd.exe` on Windows, `bash` elsewhere) so existing prompts and skills keep working; `MOCODE_SHELL` flips the default globally for those who prefer POSIX on Windows. When `bash` is requested on Windows, Git for Windows' `bash.exe` is auto-detected — the WSL `System32\bash.exe` is deliberately excluded, since it lands in a Linux distro with different paths, toolchain, and security policy. Non-interactive `cmd.exe` cannot run `timeout /t`; use `shell=powershell` with `Start-Sleep`, or `shell=bash` with `sleep`.
+
+### Automatic retry (the `retryable` contract)
+
+`ToolOutcome.retryable` used to have zero consumers project-wide — a tool honestly marked "this was a transient failure" and nothing acted on it, leaving the model to burn a full LLM round-trip to retry (and often forgetting to). The runtime now re-issues calls that fail transiently, with backoff (400ms / 1200ms, two retries max):
+
+- Only tools that explicitly declare `idempotent` participate — the side-effect-free network reads (`web_fetch`, `web_search`). No write or process tool declares it, and none is ever auto-retried: retrying those would duplicate side effects, so their retry semantics stay inside the tool (e.g. `edit_file`'s `expected_hash` conflict).
+- Only `status=error` with `retryable=true` is retried; `denied` / `aborted` / `success` are terminal.
+- **`TIMEOUT` is never auto-retried**: one timeout has already consumed the whole window (`web_fetch` uses 30s), so two retries could stretch a single tool call to 90s — exactly the frozen-spinner experience users hate. The `retryable` flag is still reported, so the model can decide for itself.
+- Aborting mid-backoff gives up immediately instead of burning the window, and when retries are exhausted the attempt count is appended to the output so the model knows the runtime already tried.
 
 ### Frontend / UI loop
 

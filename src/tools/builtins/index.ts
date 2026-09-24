@@ -40,7 +40,8 @@ const pathResource = (args: Record<string, unknown>): string[] =>
 const workspaceResource = (): string[] => ['workspace'];
 const memoryResource = (): string[] => ['memory-store'];
 
-const CAPABILITIES: Record<string, ToolCapabilities> = {
+/** 导出供审计测试:能力声明是单一事实源,测试直接断言这张表(而非重新枚举一遍工具名)。 */
+export const CAPABILITIES: Record<string, ToolCapabilities> = {
   read_file: { effect: 'read', concurrency: 'parallel', resources: pathResource },
   view_image: { effect: 'read', concurrency: 'parallel', resources: pathResource },
   screenshot: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
@@ -57,8 +58,10 @@ const CAPABILITIES: Record<string, ToolCapabilities> = {
   browser: { effect: 'process', concurrency: 'serial', resources: workspaceResource },
   glob: { effect: 'read', concurrency: 'parallel', resources: workspaceResource },
   grep: { effect: 'read', concurrency: 'parallel', resources: workspaceResource },
-  web_search: { effect: 'network', concurrency: 'parallel', supportsAbort: true },
-  web_fetch: { effect: 'network', concurrency: 'parallel', supportsAbort: true },
+  // 网络只读查询:无副作用,可安全重复执行 → idempotent 让 runtime 对瞬时失败(429/5xx/超时/
+  // 网络抖动)自动退避重试,省掉模型「再发一轮 tool call 自救」的往返。写/进程类工具绝不置此位。
+  web_search: { effect: 'network', concurrency: 'parallel', supportsAbort: true, idempotent: true },
+  web_fetch: { effect: 'network', concurrency: 'parallel', supportsAbort: true, idempotent: true },
   use_skill: { effect: 'read', concurrency: 'serial' },
   run_skill: { effect: 'process', concurrency: 'serial', delegatesResourceLocks: true, supportsAbort: true },
   ask_human: { effect: 'read', concurrency: 'serial' },

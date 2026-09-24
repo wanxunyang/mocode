@@ -13,6 +13,14 @@ export const MAX_FILE_LINES = 2000;
 export const MAX_OUTPUT = 20000;
 export const MAX_RESULTS = 100;
 
+/**
+ * read_file 命中图片分支时 output 的前缀。
+ *
+ * 放在 constants(叶子模块)而不是 builtins/read-file.ts:ui/render.ts 要用它把摘要
+ * 从「N 行」改成「图片已附加」,而 render.ts → builtins → registry 会绕出模块循环。
+ */
+export const IMAGE_READ_MARKER = '[image]';
+
 /** 进 history 的单条工具结果上限(字符)。push-time 第一层裁剪,保 head + 标记 + tail。 */
 export const MAX_HISTORY_RESULT = 8000;
 /** use_skill 结果(SKILL.md 正文)的放宽上限:指令须完整,中截会破坏语义。 */

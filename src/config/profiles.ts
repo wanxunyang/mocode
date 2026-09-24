@@ -22,13 +22,16 @@ export type ProfileName = 'coding' | 'frontend' | 'computer-use' | 'research' | 
  * view_image 放 core-read,保证所有模式都能读取已有本地图片;工具产生的即时视觉结果通过
  * modelAttachments 直接回灌,不依赖 view_image。screenshot 留 frontend(抓整个桌面,隐私敏感,
  * 主要服务前端联调)。
+ * dev_server 归 core-write 而非 frontend:它是「后台进程管理」能力(与 run_command 同级),
+ * 不是浏览器工具,不该受 MOCODE_FRONTEND_TOOLS_ENABLED 否决。与自动路由的 background-exec
+ * 组(无 gateEnv)语义对齐。
  */
 export const TOOL_GROUPS: Record<ToolGroup, readonly string[]> = {
   'core-read': ['read_file', 'view_image', 'glob', 'grep'],
-  'core-write': ['write_file', 'edit_file', 'run_command'],
+  'core-write': ['write_file', 'edit_file', 'run_command', 'dev_server'],
   'agent-meta': ['plan_update', 'note_append', 'ask_human', 'use_skill', 'run_skill'],
   web: ['web_search', 'web_fetch'],
-  frontend: ['browser', 'dev_server', 'screenshot'],
+  frontend: ['browser', 'screenshot'],
   computer: ['computer'],
   memory: ['memory_save', 'memory_search', 'memory_list', 'memory_update', 'memory_forget', 'memory_graph'],
   subagent: ['sub-agent'],
@@ -56,6 +59,7 @@ export const ADD_TOOL_GROUPS_TOOL_NAME = 'add_tool_groups' as const;
 export type ToolRouteGroupName =
   | 'workspace-write'
   | 'shell-debug'
+  | 'background-exec'
   | 'browser-debug'
   | 'desktop-observe'
   | 'computer-control'
@@ -90,9 +94,19 @@ export const TOOL_ROUTE_GROUPS: Record<ToolRouteGroupName, ToolRouteGroupDefinit
     tools: ['run_command'],
     description: 'Run tests, builds, linters, Git, package managers, logs, diagnostics, and foreground commands.',
   },
+  // dev_server 从 browser-debug 拆出:它的能力是「跨工具调用存活的后台进程 + 日志 + 树杀」,
+  // 服务对象远不止前端联调(推理服务、watcher、log tail、任意长驻命令)。留在 browser-debug 时
+  // 受 MOCODE_FRONTEND_TOOLS_ENABLED 否决、且组描述只提 DOM/console,路由 LLM 对「起个服务」
+  // 类任务几乎不会选它 —— 模型于是退回 run_command 前台阻塞(120s 超时)或 start /b 脱离启动,
+  // 之后既拿不到日志也没法优雅 kill。故独立成组且**无 gateEnv**:与 shell-debug 同级、永远可路由。
+  'background-exec': {
+    tools: ['dev_server'],
+    description:
+      'Run any long-running background process that must outlive a single tool call — dev servers, inference/model services, watchers, log tails, message queues. Provides process id, incremental log reads, readiness wait, and process-tree termination.',
+  },
   'browser-debug': {
-    tools: ['browser', 'dev_server'],
-    description: 'Start local development servers and debug web UIs through DOM, console, network, and page sessions.',
+    tools: ['browser'],
+    description: 'Debug web UIs through DOM, console, network, and page sessions in a real browser.',
     gateEnv: 'MOCODE_FRONTEND_TOOLS_ENABLED',
   },
   'desktop-observe': {
@@ -128,6 +142,27 @@ export const TOOL_ROUTE_GROUPS: Record<ToolRouteGroupName, ToolRouteGroupDefinit
 };
 
 export const TOOL_ROUTE_GROUP_NAMES = Object.keys(TOOL_ROUTE_GROUPS) as ToolRouteGroupName[];
+
+/**
+ * 簇蕴含关系:选中 key 簇时自动带上 value 里的簇(仍受各自 gateEnv 否决)。
+ *
+ * 存在的理由是「能力半截」比「能力多余」更贵:browser-debug 只给浏览器,而被调试的页面
+ * 得先有人把它跑起来。弱模型只选 browser-debug 时,它要么白付一个 step 去 add_tool_groups
+ * 扩容 background-exec,要么退回 run_command 前台起服务(120s 超时被杀 / 拿不到日志)。
+ * 蕴含在 policy 层解析,router 的 Examples 仍要求显式列出两者(让强模型学会正确归因)。
+ */
+export const TOOL_ROUTE_IMPLICATIONS: Partial<Record<ToolRouteGroupName, readonly ToolRouteGroupName[]>> = {
+  'browser-debug': ['background-exec'],
+};
+
+/** 展开蕴含:传入簇集合 → 并上其蕴含簇。纯函数、幂等(蕴含不再递归展开第二层)。 */
+export function expandRouteImplications(groups: Iterable<ToolRouteGroupName>): Set<ToolRouteGroupName> {
+  const out = new Set<ToolRouteGroupName>(groups);
+  for (const group of [...out]) {
+    for (const implied of TOOL_ROUTE_IMPLICATIONS[group] ?? []) out.add(implied);
+  }
+  return out;
+}
 
 /**
  * 常驻工具簇:每个 turn 无条件激活,不经过 LLM 路由(路由只需在「可用簇 − 常驻簇」里挑)。

@@ -336,6 +336,9 @@ test('runAgentCore: add_tool_groups 单独形成 step 屏障，新增 schema 只
     const secondNames = capturedToolNames(requests[1]);
     assert.ok(firstNames.includes('add_tool_groups'));
     // 扩容目标用非常驻组:workspace-write 现在每轮常驻,用它验证不了"下一 step 才生效"。
+    // browser 属 browser-debug(本次扩容的簇);dev_server 已拆到无 gate 的 background-exec,
+    // 但 browser-debug 蕴含 background-exec(profiles.ts TOOL_ROUTE_IMPLICATIONS),故扩容后
+    // 两者都必须在位——否则"调试本地页面"会拿到浏览器却没有起服务的能力。
     assert.ok(!firstNames.includes('browser') && !firstNames.includes('dev_server'));
     assert.ok(secondNames.includes('browser') && secondNames.includes('dev_server'));
     assert.deepEqual(outcomes, [{ tool: 'add_tool_groups', status: 'success', code: 'OK' }]);

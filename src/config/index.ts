@@ -12,6 +12,9 @@ import { detectLanguage, setLanguage, t, type Language } from '../i18n/index.js'
 import { isProfileName, profileHasGroup, type ProfileName } from './profiles.js';
 // 端点常量归协议实现方(jev-client.ts,纯叶子无 import,不引入环);此处只引用不重定义。
 import { DEFAULT_JEV_BASE_URL } from '../tools/jev-client.js';
+// shell.ts 是纯叶子(只 import node 内置):PLATFORM_NOTE 的措辞必须跟 run_command/dev_server
+// 实际 spawn 的默认 shell 一致,单一事实源,防「文案说 cmd、实际跑 bash」漂移。
+import { defaultShellKind } from '../runtime/shell.js';
 
 /**
  * 按优先级加载配置文件并回填 process.env:
@@ -183,9 +186,19 @@ export function isModelConfigured(): boolean {
 }
 
 const PLATFORM_NOTE = (() => {
+  const shell = defaultShellKind();
+  if (process.platform === 'win32' && shell === 'cmd') {
+    return `- This is Windows: \`run_command\`/\`dev_server\` default to \`cmd.exe /c\` — use cmd syntax and \`%VAR%\`; Unix builtins and command substitution are unavailable.
+- Non-interactive cmd cannot run \`timeout /t\` (it errors out); pass \`shell: "powershell"\` with \`Start-Sleep\`, or \`shell: "bash"\` with \`sleep\`, when a wait is needed.
+- Prefer read_file/glob/grep for file discovery and reading. When a POSIX shell fits better, pass \`shell: "bash"\` (Git Bash, auto-detected) or \`shell: "powershell"\`; never mix syntaxes within one command.`;
+  }
   if (process.platform === 'win32') {
-    return `- This is Windows: \`run_command\` uses \`cmd.exe /c\` — use cmd syntax and \`%VAR%\`; Unix builtins and command substitution are unavailable.
-- Prefer read_file/glob/grep for file discovery and reading. When shell is necessary, use forward-slash paths or invoke PowerShell explicitly.`;
+    // MOCODE_SHELL 翻转了默认:措辞必须跟着变,否则模型按文案写 cmd 语法却落进 bash。
+    return `- This is Windows: \`run_command\`/\`dev_server\` default to ${shell} (MOCODE_SHELL override) — use ${
+      shell === 'bash' ? 'POSIX syntax ($VAR, &&, forward-slash paths)' : 'PowerShell syntax ($VAR, Start-Sleep)'
+    }.
+- cmd-only syntax (\`%VAR%\`, \`start /b\`, \`dir\`) needs an explicit \`shell: "cmd"\`; do not mix syntaxes within one command.
+- Prefer read_file/glob/grep for file discovery and reading; reach for the shell only when a dedicated tool does not fit.`;
   }
   if (process.platform === 'darwin') {
     return `- This is macOS: \`run_command\` uses bash with BSD utilities. Prefer read_file/glob/grep; account for BSD/GNU differences when shell commands are necessary.`;
@@ -506,12 +519,12 @@ ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 ## Tool policy
 - Silent Execution: invoke tools directly without preamble. Output visible text ONLY for the final answer and critical mid-task findings. Strictly no step-by-step narration (no "let me…", "让我先…", "now checking…" between calls).
 - Go directly to a known path or symbol; use discovery tools only when the location is unknown.
-- Edit against a FRESH read: before any edit_file/write_file, call read_file on the exact path and copy both its latest hash and the exact target text. Never reconstruct old_string from a grep/summary/diff — those lose whitespace and indentation and cause edit failures.
+- Edit against a FRESH read: before any edit_file or a replacing write_file, call read_file on the exact path and copy both its latest hash and the exact target text. Never reconstruct old_string from a grep/summary/diff — those lose whitespace and indentation and cause edit failures. (write_file with append=true is the exception: it reads and hashes the file itself, so no prior read_file and no expected_hash are needed.)
 - A read_file hash from before a compaction, session resume, edit conflict, or external change is STALE and will be rejected — re-read rather than reuse an old hash.
 - Emit multiple independent tool calls in ONE assistant message so they run concurrently — e.g. several read_file regions, a grep plus a glob, or several web_fetch calls. One lookup per message wastes a full model round-trip each time. Place parallel-safe calls consecutively; keep any call that depends on their results (e.g. an edit) for the next message.
 - Never batch a read with an edit that depends on it; do not repeat overlapping reads or unchanged failed calls.
 - On failure, inspect the full error, change the approach, and retry only with a reason. Drop stale tool output when it no longer supports the task.
-- For generated content over roughly 200 lines or 5K tokens, use small staged writes rather than one oversized tool argument.
+- For generated content over roughly 200 lines or 5K tokens, write it in stages: first write_file the initial chunk, then extend it with write_file(append=true, content=<next chunk>) — each call stays small and the file grows transactionally. Appends are VERBATIM: if the file does not already end with a newline, begin your chunk with "\\n" so lines do not merge.
 
 ## Environment
 ${PLATFORM_NOTE}

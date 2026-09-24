@@ -3,9 +3,36 @@ import { MAX_OUTPUT } from '../constants.js';
 import { getSandboxRoot, filterEnv, isCommandDenied, jailResolve } from '../../sandbox/index.js';
 import type { Tool, ToolOutcome } from '../types.js';
 import { t } from '../../i18n/index.js';
+import {
+  SHELL_PARAM_DESCRIPTION,
+  defaultShellKind,
+  parseShellKind,
+  shellSpawnSpec,
+  type ShellKind,
+} from '../../runtime/shell.js';
 
 const OUTPUT_HEAD_LIMIT = Math.floor(MAX_OUTPUT * 0.4);
 const OUTPUT_TAIL_LIMIT = MAX_OUTPUT - OUTPUT_HEAD_LIMIT;
+
+/**
+ * 前台命令的超时窗口钳制。
+ *
+ * 下界 1s:防模型传 0/负数把 timer 变成「立即超时」,命令还没 spawn 就被判 timed_out。
+ * 上界 10min:run_command 声明 concurrency:'serial' + resources:['workspace']
+ * (builtins/index.ts:54),执行期间持有全局 workspace 锁 —— 一条超时 1 小时的命令会把
+ * 所有其它工具调用(含子 agent)一起挂死,且 TUI 只能等或 Ctrl+C。需要长驻的进程走
+ * dev_server(跨调用存活 + 日志增量读 + 树杀),不是把前台超时拉长。
+ */
+export const MIN_COMMAND_TIMEOUT_MS = 1_000;
+export const MAX_COMMAND_TIMEOUT_MS = 600_000;
+export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+
+/** 把模型给的 timeout 钳进 [MIN, MAX];非有限数(NaN/Infinity/非法字符串)回落默认值。 */
+export function clampCommandTimeout(raw: unknown): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return DEFAULT_COMMAND_TIMEOUT_MS;
+  return Math.min(Math.max(Math.trunc(value), MIN_COMMAND_TIMEOUT_MS), MAX_COMMAND_TIMEOUT_MS);
+}
 
 /** 有界采集：短输出逐字保留；超限后保留 head+tail，避免构建/测试错误只出现在尾部时被丢弃。 */
 class BoundedCommandOutput {
@@ -39,11 +66,14 @@ export interface RawCommandResult {
 /** Execute a command with the same sandbox, output cap and cancellation semantics as run_command. */
 export async function runCommandRaw(
   command: string,
-  timeout = 120000,
+  timeout = DEFAULT_COMMAND_TIMEOUT_MS,
   signal?: AbortSignal,
   cwd?: string,
+  shell?: ShellKind,
 ): Promise<RawCommandResult> {
   const startedAt = Date.now();
+  // 内部调用方(skill 注入等)也走同一钳制:防止任何路径把前台命令挂成无限期持锁。
+  const effectiveTimeout = clampCommandTimeout(timeout);
   const deny = isCommandDenied(command);
   if (deny) {
     return { status: 'denied', exitCode: null, output: `错误:${deny}`, durationMs: 0 };
@@ -61,12 +91,13 @@ export async function runCommandRaw(
 
   return new Promise<RawCommandResult>((done) => {
     const isWin = process.platform === 'win32';
-    const child = spawn(isWin ? 'cmd.exe' : 'bash', isWin ? ['/d', '/s', '/c', command] : ['-c', command], {
+    const spec = shellSpawnSpec(shell ?? defaultShellKind(), command);
+    const child = spawn(spec.file, spec.args, {
       cwd: executionCwd,
       env: filterEnv(process.env),
-      // Without this, Node re-quotes cmd.exe arguments and `node -e "..."` can become
-      // a string literal that exits 0, causing false-positive validation on Windows.
-      windowsVerbatimArguments: isWin,
+      // cmd.exe 需要 verbatim:否则 Node 重新引号化参数,`node -e "..."` 会退化成
+      // 字符串字面量并 exit 0,造成 Windows 上的假阳性验证。其它 shell 必须关。
+      windowsVerbatimArguments: spec.windowsVerbatimArguments,
     });
     const output = new BoundedCommandOutput();
     let finished = false;
@@ -102,7 +133,7 @@ export async function runCommandRaw(
     const timer = setTimeout(() => {
       killTree();
       finish({ status: 'timed_out', exitCode: null, output: output.render().trim() });
-    }, timeout);
+    }, effectiveTimeout);
 
     child.stdout.on('data', onChunk);
     child.stderr.on('data', onChunk);
@@ -156,20 +187,52 @@ function commandOutcome(result: RawCommandResult): ToolOutcome {
 export const runCommandTool: Tool = {
   name: 'run_command',
   description:
-    'Run a shell command, merging stdout+stderr. Default timeout 120s. For tests, builds, git, etc.\n' +
+    'Run a FOREGROUND shell command, merging stdout+stderr. Default timeout 120s, hard cap 10min. ' +
+    'For tests, builds, git, etc. Pass shell=cmd|powershell|bash to choose the interpreter ' +
+    '(default: cmd.exe on Windows, bash elsewhere). Non-interactive cmd cannot run `timeout /t` — ' +
+    'pass shell=powershell (`Start-Sleep`) or shell=bash (`sleep`) when a wait is needed.\n' +
+    'Anything that must keep running after this call returns — dev server, inference/model service, watcher, ' +
+    'log tail — belongs to dev_server instead: it survives across tool calls and gives you an id for ' +
+    'incremental log reads and process-tree kill. Do NOT detach with `start /b`, `nohup`, `&` or similar here: ' +
+    'you lose both the logs and the handle.\n' +
     "Multiple independent run_command calls may be issued in one response to save model round-trips; they execute serially, so do not depend one on another's output within the same message.",
   risk: 'dangerous',
   parameters: {
     type: 'object',
     properties: {
       command: { type: 'string', description: 'Command to execute (single line)' },
-      timeout: { type: 'integer', description: 'Timeout in milliseconds, default 120000' },
+      timeout: {
+        type: 'integer',
+        description: `Timeout in milliseconds (default ${DEFAULT_COMMAND_TIMEOUT_MS}, clamped to ${MIN_COMMAND_TIMEOUT_MS}..${MAX_COMMAND_TIMEOUT_MS}). Raise it only for genuinely slow foreground work; use dev_server for long-running processes.`,
+      },
+      shell: { type: 'string', enum: ['cmd', 'powershell', 'bash'], description: SHELL_PARAM_DESCRIPTION },
     },
     required: ['command'],
   },
   async execute(args, ctx) {
     const command = String(args.command);
-    const timeout = Number(args.timeout ?? 120000);
-    return commandOutcome(await runCommandRaw(command, timeout, ctx?.signal));
+    const timeout = clampCommandTimeout(args.timeout);
+    // shell 非法值不静默忽略:明确报错,否则模型以为在 powershell 里跑却落到 cmd,
+    // 语法错误难以归因。合法值大小写/别名由 parseShellKind 归一。
+    let shell: ShellKind | undefined;
+    if (args.shell !== undefined) {
+      const parsed = parseShellKind(args.shell);
+      if (!parsed) {
+        return {
+          status: 'error',
+          code: 'INVALID_ARGUMENTS',
+          retryable: false,
+          output: `错误:无效的 shell "${String(args.shell)}"。可选值:cmd / powershell / bash。`,
+        };
+      }
+      shell = parsed;
+    }
+    const result = await runCommandRaw(command, timeout, ctx?.signal, undefined, shell);
+    const outcome = commandOutcome(result);
+    // 钳制要显式告知:模型传了 30min 却按 10min 判超时,不说清它会以为是环境抽风而盲目重试。
+    if (args.timeout !== undefined && Number(args.timeout) !== timeout && result.status === 'timed_out') {
+      outcome.output = `${outcome.output}\n(请求的 timeout=${Number(args.timeout)}ms 已钳制到 ${timeout}ms;需要长驻进程请改用 dev_server)`;
+    }
+    return outcome;
   },
 };

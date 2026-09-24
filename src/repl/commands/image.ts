@@ -10,7 +10,7 @@
 import * as layout from '../../ui/layout.js';
 import { ui } from '../../ui/theme.js';
 import { config } from '../../config/index.js';
-import { loadImageAttachment, renderChip, MAX_INLINE_BYTES_DEFAULT } from '../../attachments/image.js';
+import { loadImageAttachmentWithDownscale, renderChip, MAX_INLINE_BYTES_DEFAULT } from '../../attachments/image.js';
 import { modelSupportsVision } from '../../llm/capabilities.js';
 import { unhandled, next, type CommandHandler } from './types.js';
 
@@ -52,13 +52,20 @@ export const imageCommands: CommandHandler[] = [
       return next();
     }
     const maxBytes = config.maxImageBytes ?? MAX_INLINE_BYTES_DEFAULT;
-    const r = await loadImageAttachment(arg, { maxBytes });
+    const r = await loadImageAttachmentWithDownscale(arg, { maxBytes });
     if (!r.ok) {
       layout.contentWrite(`${ui.red}[image] ${r.reason}${ui.reset}\n`);
       return next();
     }
     if (!ctx.attachments.list().find((a) => a.id === r.att.id)) {
       ctx.attachments.push(r.att);
+    }
+    // 用户粘/挂的高 DPI 截图超限时会被降采样:必须说出来,否则用户以为发的是原图,
+    // 之后模型「看不清小字」时无从归因。
+    if (r.downscaledFrom) {
+      layout.contentWrite(
+        `  ${ui.yellow}⚠ 原图 ${r.downscaledFrom.width}×${r.downscaledFrom.height} 超过内联上限,已降采样后附加(磁盘原图不变)。${ui.reset}\n`,
+      );
     }
     layout.contentWrite(`  ${ui.dim}${renderChip(r.att)} — will attach to next message${ui.reset}\n`);
     // 提前警告(不阻断附加):当前模型已知不支持视觉(如 MiniMax M2.x / gpt-3.5 等)时,

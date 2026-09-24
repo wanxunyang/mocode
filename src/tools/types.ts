@@ -43,6 +43,13 @@ export interface ToolCapabilities {
   /** 编排类工具(如 sub-agent)：同一轮内按 subAgentConcurrency 成批并行，而非逐个串行。 */
   parallelOrchestration?: boolean;
   supportsAbort?: boolean;
+  /**
+   * 声明本工具**可安全重复执行**:当一次调用返回 retryable 的瞬时失败(429/5xx/超时/网络抖动)时,
+   * runtime 会在退避后自动重发,不产生重复副作用。仅对 effect 为 read/network 的幂等操作置真
+   * (web_fetch GET、web_search);任何有写入/进程副作用的工具绝不能置真 —— 否则重试会重复下单、
+   * 重复起进程。缺省(false)= 永不自动重试,retryable 仅作为给模型的提示信号。
+   */
+  idempotent?: boolean;
 }
 
 export type ToolOutcomeStatus = 'success' | 'error' | 'denied' | 'aborted';
