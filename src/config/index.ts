@@ -423,21 +423,72 @@ export function buildSessionStateReminder(sessionId = getCurrentSessionId()): st
 const MAX_AGENTS_IMPORT_CHARS = 20000;
 
 /**
+ * 不常驻注入的章节(压成指针行,read_file 按需取全文):
+ * - 目录结构 / Directory structure / Project layout —— 架构探索任务用 codegraph/探查工具现查更准;
+ * - 扩展点 / Extension points —— 只在「加新工具/命令/模块」类任务才需要,恰好是 skill 的定义。
+ * 常驻价值密度最高的「项目/命令/约定」(市场实证 arXiv 2511.12884:build/run 62.3%、conventions 主流)全文保留。
+ * 章节标题大小写不敏感,兼容英文写法的 AGENTS.md。
+ */
+const AGENTS_INJECTION_INDEX_SECTIONS = [
+  '目录结构',
+  '扩展点',
+  'directory structure',
+  'project layout',
+  'extension points',
+];
+
+/**
+ * AGENTS.md 按章节过滤注入:命中 {@link AGENTS_INJECTION_INDEX_SECTIONS} 的 H2 章节整段压缩成一行指针,
+ * 其余章节(preamble、## 项目、## 命令、## 约定及未知章节)逐字保留。
+ * H1 及更深层级不动;空文件/无章节文件原样返回。导出供单测直接断言。
+ */
+export function filterAgentsSectionsForInjection(content: string): string {
+  const lines = content.split('\n');
+  const out: string[] = [];
+  let inIndexedSection = false;
+  for (const line of lines) {
+    const h2 = /^##\s+(.*)$/.exec(line);
+    if (h2) {
+      const title = h2[1].trim().toLowerCase();
+      // 前缀匹配容忍「目录结构(monorepo)」「Directory Structure — monorepo」等后缀写法;
+      // 仅当后缀紧邻(空格/括号/冒号/破折号)时命中,避免误伤「约定与目录结构习惯」这类反向词序。
+      inIndexedSection = AGENTS_INJECTION_INDEX_SECTIONS.some(
+        (s) => title === s || new RegExp(`^${s}[\\s(:\\u2014\\uff08\\(]`).test(title),
+      );
+      if (inIndexedSection) {
+        out.push(`- ${h2[1].trim()}: (not injected — read_file AGENTS.md on demand)`);
+        continue;
+      }
+    }
+    if (!inIndexedSection) out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/**
  * 工作区根 AGENTS.md 自动导入段:与 memory 开关完全无关——
  * 只要 <cwd>/AGENTS.md 存在就把正文直接拼进 prompt(超 {@link MAX_AGENTS_IMPORT_CHARS} 截断+末尾提示),
  * 不再只指路让模型按需 read_file。读失败静默跳过(返空串)。
+ *
+ * 瘦身(方案A):目录结构/扩展点两章节不常驻,压成指针行——模型真做架构/扩展任务时
+ * 一次 read_file 取全文(渐进披露,与 Skills 清单同构);截断上限作用于过滤后的正文。
  */
 function buildAgentsImportSection(): string {
   try {
     const projectAgents = path.join(process.cwd(), 'AGENTS.md');
     if (!fs.existsSync(projectAgents)) return '';
-    const content = fs.readFileSync(projectAgents, 'utf8').trim();
-    if (!content) return '';
+    const raw = fs.readFileSync(projectAgents, 'utf8').trim();
+    if (!raw) return '';
+    const filtered = filterAgentsSectionsForInjection(raw);
     const body =
-      content.length > MAX_AGENTS_IMPORT_CHARS
-        ? `${content.slice(0, MAX_AGENTS_IMPORT_CHARS)}\n…[AGENTS.md truncated: first ${MAX_AGENTS_IMPORT_CHARS} characters injected]`
-        : content;
-    return `\n## Project memory (AGENTS.md, auto-imported)\n${body}\n- AGENTS.md may be stale: current code and the user request override stale memory.`;
+      filtered.length > MAX_AGENTS_IMPORT_CHARS
+        ? `${filtered.slice(0, MAX_AGENTS_IMPORT_CHARS)}\n…[AGENTS.md truncated: first ${MAX_AGENTS_IMPORT_CHARS} characters injected]`
+        : filtered;
+    return (
+      `\n## Project memory (AGENTS.md, auto-imported)\n${body}\n` +
+      '- AGENTS.md may be stale: current code and the user request override stale memory.\n' +
+      '- Discovered a stable, non-obvious project fact worth persisting? write_file(append=true) one line to `.mocode/agents-draft.md`; the user merges drafts into AGENTS.md via /init.'
+    );
   } catch {
     return ''; // 读失败静默跳过:不让导入破坏 prompt 构建
   }
