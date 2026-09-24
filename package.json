@@ -41,7 +41,7 @@
     "eval:coding": "tsx evals/coding/runner.ts",
     "eval:coding:list": "tsx evals/coding/runner.ts --list",
     "prepack": "npm run build",
-    "prepare": "git config core.hooksPath .githooks 2>$null; exit 0"
+    "prepare": "node -e \"try{require('child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch(e){}\""
   },
   "dependencies": {
     "ajv": "8.20.0",
