@@ -1,0 +1,6 @@
+#!/bin/sh
+# 提交前自动对暂存文件运行 prettier，格式化后重新加入暂存区
+files=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$files" ] && exit 0
+printf '%s\n' "$files" | xargs -d '\n' npx prettier --write --ignore-unknown || exit 1
+printf '%s\n' "$files" | xargs -d '\n' git add

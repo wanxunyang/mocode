@@ -52,10 +52,6 @@ jobs:
         if: matrix.stack == 'typescript'
         run: npm run lint:check
 
-      - name: Check formatting
-        if: matrix.stack == 'typescript'
-        run: npm run format:check
-
       - name: Test TypeScript
         if: matrix.stack == 'typescript'
         run: npm test
