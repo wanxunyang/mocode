@@ -87,7 +87,7 @@ export type LoadImageWithFallbackResult =
  * 为什么要兜底:4 MiB 内联上限对高 DPI 截图偏紧(一张 4K Retina PNG 轻松 5-8 MiB)。
  * 直接拒绝会逼模型去找压缩工具/改用户文件,而**服务端缩一下就能成功**。
  * screenshot 早有这条路径(screenshot.ts 的 FALLBACK_MAX_EDGE 分支),这里抽成共享 helper,
- * 让 view_image / read_file 图片通道同样受益。
+ * 让 read_file 图片通道(原 view_image,已并入)同样受益。
  *
  * 能力边界(诚实声明):`runtime/screen-pipeline.ts` 的 PNG 解码是手写的、只支持
  * **8-bit RGB/RGBA PNG**(项目刻意零原生图像依赖)。所以兜底只覆盖 PNG;

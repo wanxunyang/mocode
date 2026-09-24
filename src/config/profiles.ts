@@ -19,15 +19,15 @@ export type ProfileName = 'coding' | 'frontend' | 'computer-use' | 'research' | 
 
 /**
  * 工具簇 → 工具名。新增工具时归到对应簇;一个工具只属一个簇。
- * view_image 放 core-read,保证所有模式都能读取已有本地图片;工具产生的即时视觉结果通过
- * modelAttachments 直接回灌,不依赖 view_image。screenshot 留 frontend(抓整个桌面,隐私敏感,
- * 主要服务前端联调)。
+ * 图片读取由 read_file 的魔数嗅探分支覆盖(原 view_image 已并入):文本/图片分流,
+ * 工具产生的即时视觉结果通过 modelAttachments 直接回灌。screenshot 留 frontend(抓整个
+ * 桌面,隐私敏感,主要服务前端联调)。
  * dev_server 归 core-write 而非 frontend:它是「后台进程管理」能力(与 run_command 同级),
  * 不是浏览器工具,不该受 MOCODE_FRONTEND_TOOLS_ENABLED 否决。与自动路由的 background-exec
  * 组(无 gateEnv)语义对齐。
  */
 export const TOOL_GROUPS: Record<ToolGroup, readonly string[]> = {
-  'core-read': ['read_file', 'view_image', 'glob', 'grep'],
+  'core-read': ['read_file', 'glob', 'grep'],
   'core-write': ['write_file', 'edit_file', 'run_command', 'dev_server'],
   'agent-meta': ['plan_update', 'note_append', 'ask_human', 'use_skill', 'run_skill'],
   web: ['web_search', 'web_fetch'],
@@ -39,10 +39,10 @@ export const TOOL_GROUPS: Record<ToolGroup, readonly string[]> = {
 
 // ── LLM 自动工具路由 ──────────────────────────────────────────────────────
 
-/** 主 Agent 每一步都可见的低风险、高复用工具。 */
+/** 主 Agent 每一步都可见的低风险、高复用工具。
+ *  图片读取并入 read_file(魔数嗅探分流,原 view_image 已移除)。 */
 export const COMMON_TOOL_NAMES = [
   'read_file',
-  'view_image',
   'glob',
   'grep',
   'web_search',

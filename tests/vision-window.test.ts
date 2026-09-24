@@ -151,18 +151,18 @@ test('#5 tool 配对不受影响:剪枝后 role 序列与 tool_call_id 一一对
   assert.deepEqual(actualIds, expectedIds, 'tool_call_id 必须保持一一对应');
 });
 
-test('#6 白名单:view_image / 用户粘贴图 / 混合消息均不被剪', () => {
-  const viewImageAttachment = frameMessage('diagram.png');
+test('#6 白名单:read_file 文档图 / 用户粘贴图 / 混合消息均不被剪', () => {
+  const docImageAttachment = frameMessage('diagram.png');
   const userPasted = userPastedImageMessage();
   const mixed = frameMessage('computer-result.png', 'report.png');
-  assert.equal(isFrameCarrier(viewImageAttachment), false, 'view_image 的附件不在白名单');
+  assert.equal(isFrameCarrier(docImageAttachment), false, 'read_file 的文档图附件不在白名单');
   assert.equal(isFrameCarrier(userPasted), false, '用户粘贴图不带附件前言');
   assert.equal(isFrameCarrier(mixed), false, '混进非屏幕帧时整条保留(剪掉是净损失)');
   assert.equal(isFrameCarrier(frameMessage('computer-zoom.png')), true);
   assert.equal(isFrameCarrier(frameMessage('computer-screenshot.png')), true);
 
   const messages: ChatMessage[] = [
-    viewImageAttachment,
+    docImageAttachment,
     userPasted,
     mixed,
     ...Array.from({ length: 8 }, () => frameMessage('computer-result.png')),

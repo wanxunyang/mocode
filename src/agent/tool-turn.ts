@@ -18,7 +18,7 @@ const PLAN_NAG_TEXT =
  * 「工具回灌的屏幕帧」与「用户粘贴的图」——两边各写一份字符串会让识别规则悄悄失效。
  * 新增附件产出点**必须**复用这一个前言。
  */
-export const ATTACHMENT_PREAMBLE = 'The view_image tool loaded the following visual input: ';
+export const ATTACHMENT_PREAMBLE = 'The read_file tool loaded the following visual input: ';
 
 export interface ToolTurnPlanState {
   stepsSincePlanTouch: number;

@@ -58,9 +58,10 @@ test('profiles: 预置 5 模式,coding 默认含 web(无 frontend/computer/memor
   );
   assert.ok(coding.has('plan_update') && coding.has('ask_human'));
   assert.ok(coding.has('web_search') && coding.has('web_fetch'));
-  assert.equal(coding.size, 15);
-  // view_image 常驻 core-read,用于读取已有本地图片
-  assert.ok(coding.has('view_image'));
+  assert.equal(coding.size, 14);
+  // 图片读取已并入 read_file(魔数嗅探分流,view_image 已移除):coding 必含 read_file
+  assert.ok(coding.has('read_file'));
+  assert.ok(!coding.has('view_image'), 'view_image 已并入 read_file,不应再独立存在');
   // dev_server 属 core-write(后台进程管理与 run_command 同级,不是浏览器工具):coding 就该有,
   // 否则 legacy 嵌入路径下「起个长驻服务」只能退回前台 run_command 被超时杀掉。
   assert.ok(coding.has('dev_server'), 'coding should include dev_server (core-write)');
@@ -195,10 +196,10 @@ test('refreshChatTools: 按当前 profile 过滤模型可见工具;plan 再叠 p
     assert.ok(
       names.includes('read_file') &&
         names.includes('write_file') &&
-        names.includes('view_image') &&
         names.includes('web_search') &&
         names.includes('web_fetch'),
     );
+    assert.ok(!names.includes('view_image'), 'view_image 已并入 read_file');
     for (const t of ['browser', 'computer', 'memory_search', 'sub-agent']) {
       assert.ok(!names.includes(t), `coding chatTools should not include ${t}`);
     }

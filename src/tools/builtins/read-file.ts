@@ -168,7 +168,7 @@ export const readFileTool: Tool = {
 /**
  * 图片分支:走视觉通道(modelAttachments),文本 output 只留一句可读摘要。
  *
- * 复用 attachments/image.ts 的加载 + 超限 PNG 降采样逻辑,与 view_image / screenshot 同口径
+ * 复用 attachments/image.ts 的加载 + 超限 PNG 降采样逻辑,与 screenshot 同口径
  * (4 MiB 内联上限、detail 语义、越界拒绝)。offset/limit 对图片无意义,显式说明而非静默忽略。
  */
 async function readAsImage(path: string, mime: ImageMime, detailArg: unknown, bytes: number): Promise<ToolOutcome> {

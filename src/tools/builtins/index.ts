@@ -1,7 +1,6 @@
 import type { Tool, ToolCapabilities } from '../types.js';
 import { installBuiltinTools } from '../registry.js';
 import { readFileTool } from './read-file.js';
-import { viewImageTool } from './view-image.js';
 import { screenshotTool } from './screenshot.js';
 import { writeFileTool } from './write-file.js';
 import { editFileTool } from './edit-file.js';
@@ -43,7 +42,6 @@ const memoryResource = (): string[] => ['memory-store'];
 /** 导出供审计测试:能力声明是单一事实源,测试直接断言这张表(而非重新枚举一遍工具名)。 */
 export const CAPABILITIES: Record<string, ToolCapabilities> = {
   read_file: { effect: 'read', concurrency: 'parallel', resources: pathResource },
-  view_image: { effect: 'read', concurrency: 'parallel', resources: pathResource },
   screenshot: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
   write_file: {
     effect: 'write',
@@ -96,7 +94,6 @@ export const CAPABILITIES: Record<string, ToolCapabilities> = {
 
 const rawBuiltinTools: Tool[] = [
   readFileTool,
-  viewImageTool,
   screenshotTool,
   writeFileTool,
   editFileTool,

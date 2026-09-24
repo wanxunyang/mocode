@@ -1,10 +1,11 @@
 /**
- * read_file 二进制/图片嗅探 + view_image/screenshot 超限 PNG 降采样兜底。
+ * read_file 二进制/图片嗅探 + 超限 PNG 降采样兜底。
  *
  * 背景:read_file 旧实现把任何文件都 readFile(utf8) + 行号分页,读 PNG/二进制会往
  * history 灌乱码(实测一张 42KB PNG 解出 17862 个 U+FFFD,占 45%)。现在按魔数分流:
  * 图片走视觉通道(modelAttachments),其余二进制明确拒绝并指路。
  * 4 MiB 内联上限对高 DPI 截图偏紧:超限 PNG 自动降采样后仍成功,不再直接拒绝。
+ * view_image 已并入 read_file(魔数嗅探分流),本文件同时覆盖其原降采样/越界用例。
  */
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +13,6 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { IMAGE_READ_MARKER } from '../src/tools/builtins/read-file.js';
-import { viewImageTool } from '../src/tools/builtins/view-image.js';
 import { executeToolOutcome } from '../src/tools/registry.js';
 import type { ToolOutcome } from '../src/tools/types.js';
 import '../src/tools/builtins/index.js';
@@ -65,14 +65,9 @@ async function runRead(args: Record<string, unknown>): Promise<ToolOutcome> {
   return inRoot(() => executeToolOutcome('read_file', JSON.stringify(args)));
 }
 
-/** view_image 声明返回 string | ToolOutcome 联合,测试里统一归一成 ToolOutcome 再断言。 */
+/** view_image 的四个原用例已并入 read_file:魔数嗅探分流后行为等价(降采样/越界拒绝)。 */
 async function runView(args: Record<string, unknown>): Promise<ToolOutcome> {
-  return inRoot(async () => {
-    const result = await viewImageTool.execute(args);
-    return typeof result === 'string'
-      ? { status: 'success' as const, code: 'OK' as const, retryable: false, output: result }
-      : result;
-  });
+  return runRead(args);
 }
 
 before(() => {
@@ -256,9 +251,11 @@ test('view_image: 超限的非 PNG 仍拒绝,并说明降采样只支持 PNG(诚
   assert.match(outcome.output, /PNG/, '必须说明自动降采样只覆盖 PNG');
 });
 
-test('view_image: 越界路径按 SANDBOX_DENIED 拒绝', async () => {
+test('view_image(并入 read_file): 越界路径按 SANDBOX_DENIED 拒绝', async () => {
+  // 直调 execute 时是 error;走 executeToolOutcome(真实链路)时沙箱前置拦截为 denied。
+  // 语义相同:都被拒绝且 code=SANDBOX_DENIED。
   const outcome = await runView({ path: '../outside-never-exists.png' });
-  assert.equal(outcome.status, 'error');
+  assert.ok(outcome.status === 'error' || outcome.status === 'denied');
   assert.equal(outcome.code, 'SANDBOX_DENIED');
 });
 

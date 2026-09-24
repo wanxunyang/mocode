@@ -219,12 +219,11 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 
 ## 工具
 
-每个真实用户轮都会先经过受约束的 LLM router。十个公共工具始终可用（`read_file`、`view_image`、`glob`、`grep`、`web_search`、`web_fetch`、`plan_update`、`note_append`、`ask_human`、`use_skill`）；写文件、shell 调试、浏览器调试、桌面观察/控制、记忆、编排和 MCP 作为可组合工具簇按需选择。初始能力不足时，主模型必须单独调用 `add_tool_groups`，新增 schema 从下一 step 生效。路由失败只继承上一轮工具簇（或仅公共工具），绝不回退到全工具。
+每个真实用户轮都会先经过受约束的 LLM router。九个公共工具始终可用（`read_file`、`glob`、`grep`、`web_search`、`web_fetch`、`plan_update`、`note_append`、`ask_human`、`use_skill`）；写文件、shell 调试、浏览器调试、桌面观察/控制、记忆、编排和 MCP 作为可组合工具簇按需选择。初始能力不足时，主模型必须单独调用 `add_tool_groups`，新增 schema 从下一 step 生效。路由失败只继承上一轮工具簇（或仅公共工具），绝不回退到全工具。
 
 | 工具          | 作用                                                                                                                   |
 | ------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `read_file`   | 读文件:文本带行号(`offset` / `limit`);PNG/JPEG/GIF/WebP 按**魔数**识别(扩展名会说谎)并作为视觉输入回灌;其余二进制明确拒绝而非灌乱码 |
-| `view_image`  | 读取已有 PNG/JPEG/GIF/WebP 图片并作为视觉输入回灌模型(4 MiB 内联上限;超限 PNG 自动降采样,不再直接拒绝)                   |
+| `read_file`   | 读文件:文本带行号(`offset` / `limit`);PNG/JPEG/GIF/WebP 按**魔数**识别(扩展名会说谎)并作为视觉输入回灌(4 MiB 内联上限,超限 PNG 自动降采样,`detail=low\|high` 控分辨率);其余二进制明确拒绝而非灌乱码 |
 | `screenshot`  | 经用户确认后截取主显示器或整个桌面,保存 PNG 并立即交给视觉模型分析                                                     |
 | `write_file`  | 创建/覆盖文件,自动建父目录;`append=true` 在文件末尾追加,无需重发全文(分段写长文件/记日志的正确姿势)                      |
 | `edit_file`   | 精确字符串替换(`old_string` 须唯一匹配)                                                                                |
@@ -263,7 +262,7 @@ dev_server stop   id=srv-xxxx
 - 两者在 plan 模式下均被禁用;mocode 退出时会树杀后台进程并关闭浏览器。
 - 浏览器二进制不随 npm 包分发,首次使用前需 `npx playwright install chromium`。
 
-前端能力按用途拆分：`browser` 属于 `browser-debug`，整桌面截图 `screenshot` 属于 `desktop-observe`，而 `dev_server` 独立成**无 gate 的 `background-exec` 簇** —— 任何需要跨工具调用存活的进程（dev server、推理/模型服务、watcher、日志尾随）都归它，而不是塞进 `run_command`。选中 `browser-debug` 会**蕴含**激活 `background-exec`：弱模型只想到要浏览器时，也能拿到「先把服务起起来」的能力（半套能力比多一套能力更糟）。`view_image` 则始终是公共只读工具。任务同时需要结构化网页诊断与真实桌面交互时，router 可再组合 `computer-control`。`/fe off` 是硬否决，不是手动 profile 选择器——它不影响 `dev_server`。
+前端能力按用途拆分：`browser` 属于 `browser-debug`，整桌面截图 `screenshot` 属于 `desktop-observe`，而 `dev_server` 独立成**无 gate 的 `background-exec` 簇** —— 任何需要跨工具调用存活的进程（dev server、推理/模型服务、watcher、日志尾随）都归它，而不是塞进 `run_command`。选中 `browser-debug` 会**蕴含**激活 `background-exec`：弱模型只想到要浏览器时，也能拿到「先把服务起起来」的能力（半套能力比多一套能力更糟）。图片读取（`read_file` 魔数分流）则始终是公共只读能力。任务同时需要结构化网页诊断与真实桌面交互时，router 可再组合 `computer-control`。`/fe off` 是硬否决，不是手动 profile 选择器——它不影响 `dev_server`。
 
 ### Shell 选择器
 

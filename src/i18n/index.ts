@@ -304,7 +304,7 @@ const zhCN = {
   'fe.status': 'Browser/desktop 自动路由：{state}',
   'fe.stateOn': '允许',
   'fe.stateOff': '禁止',
-  'fe.changedOn': '已允许按需路由 browser-debug / desktop-observe；view_image 始终属于公共工具。',
+  'fe.changedOn': '已允许按需路由 browser-debug / desktop-observe；图片读取(read_file)始终属于公共工具。',
   'fe.changedOff':
     '已禁止 browser-debug / desktop-observe；后续路由不会暴露 browser / screenshot（dev_server 不受此开关影响，始终可路由）。',
   'fe.usage': '用法：/fe on|off|status',
@@ -705,7 +705,7 @@ const en: Record<TranslationKey, string> = {
   'fe.status': 'Browser/desktop automatic routing: {state}',
   'fe.stateOn': 'allowed',
   'fe.stateOff': 'blocked',
-  'fe.changedOn': 'Automatic routing may now select browser-debug / desktop-observe; view_image remains a common tool.',
+  'fe.changedOn': 'Automatic routing may now select browser-debug / desktop-observe; image reading (read_file) remains a common tool.',
   'fe.changedOff':
     'Browser-debug / desktop-observe are blocked; browser / screenshot will not be exposed (dev_server is unaffected and stays routable).',
   'fe.usage': 'Usage: /fe on|off|status',

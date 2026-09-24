@@ -66,7 +66,7 @@ export const toolGroupCommands: CommandHandler[] = [
   },
 
   // /fe|/frontend [status|on|off] — browser-debug + desktop-observe 的兼容 gate。
-  // view_image 是 common 工具，不受此开关影响。
+  // 图片读取(read_file 魔数分流)是 common 工具,不受此开关影响。
   (ctx) => {
     const { line } = ctx;
     const isFe = line === '/fe' || line.startsWith('/fe ') || line === '/frontend' || line.startsWith('/frontend ');

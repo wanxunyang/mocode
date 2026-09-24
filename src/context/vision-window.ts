@@ -37,7 +37,7 @@ const RECOVERY_HINT = ' Call computer{screenshot} if you need the current screen
  *    computer-zoom.png —— 每次动作回灌的屏幕帧,会被反复收发,是二次增长的来源。
  *  - ❌ `browser`:`src/tools/builtins/browser.ts:235` 的附件名是 `${sessionId}.png`,**没有稳定前缀**,
  *    按文档 §2.2 的约定移出白名单(收益小一档但不会误剪)。
- *  - ❌ `screenshot` / `view_image` / 用户粘贴图:读的是"文档图"或用户意图的直接载体,剪掉是净损失。
+ *  - ❌ `screenshot` / `read_file`(文档图)/ 用户粘贴图:读的是"文档图"或用户意图的直接载体,剪掉是净损失。
  *
  * 新增屏幕帧产出点必须沿用 `computer-` 前缀才会自动进窗口;若前缀不同,请在白名单里显式登记
  * 并同步更新 design-notes/vision-window.md。
@@ -130,7 +130,7 @@ function frameNames(message: ChatMessage): string[] | null {
  *  1. `role === 'user'` 且 content 是数组;
  *  2. 数组里至少有 1 个 `image_url` part;
  *  3. 前言以工具附件前言开头(从而排除用户粘贴图),且**所有**帧名命中白名单
- *     (混进 view_image / screenshot / 用户图时不整条淘汰 —— 那些剪掉是净损失)。
+ *     (混进 read_file 文档图 / screenshot / 用户图时不整条淘汰 —— 那些剪掉是净损失)。
  *
  * 已剪过的消息不再含 image_url part → 规则 2 自然失效 → 幂等。
  * **不靠自定义字段打标**:消息对象会被 OpenAI SDK 原样发出,严格兼容后端可能 400。

@@ -45,7 +45,6 @@ function schemaNames(controller: ToolPolicyController, planMode = false): string
 
 const EXPECTED_COMMON = [
   'read_file',
-  'view_image',
   'glob',
   'grep',
   'web_search',
