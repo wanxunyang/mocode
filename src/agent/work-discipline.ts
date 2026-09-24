@@ -42,9 +42,11 @@ Call \`ask_human\` before coding only when repository evidence cannot resolve a 
 3. multiple reasonable options that materially change product behavior;
 4. the request itself admits two or more materially different readings that lead to different deliverables (do not silently pick one and guess).
 
+When the request is ambiguous, vague, or missing key information, first load the \`brainstorming\` skill and clarify the need through a short dialogue (one question at a time) before starting work.
+
 For naming and implementation details, follow repository precedent and choose the safest reversible default. Disclose any consequential assumption.
 
-Budget: at most 2 \`ask_human\` calls per turn. Beyond that, use the safest reversible default and disclose it in the final reply.`;
+Budget: during requirement clarification (the \`brainstorming\` workflow) ask as many questions as genuinely advance understanding; during execution after requirements are clear, use at most 2 \`ask_human\` calls per turn, then fall back to the safest reversible default and disclose it in the final reply.`;
 
 /** Advisory guidance shared by main and sub-agents. */
 export function buildWorkDisciplineSection(_modelFamily?: ModelFamily): string {
