@@ -446,109 +446,176 @@ export async function runAgentCoreLegacy(
                     },
                   );
                 };
-                const hasToolRouteBarrier = calls.some((tc) => tc.name === ADD_TOOL_GROUPS_TOOL_NAME);
+                const controlIndexes: number[] = [];
+                const otherIndexes: number[] = [];
+                calls.forEach((tc, index) =>
+                  (tc.name === ADD_TOOL_GROUPS_TOOL_NAME ? controlIndexes : otherIndexes).push(index),
+                );
+                const hasToolRouteBarrier = controlIndexes.length > 0;
                 if (hasToolRouteBarrier) {
-                  const mixedCall = calls.length !== 1;
-                  for (let index = 0; index < calls.length; index++) {
-                    const tc = calls[index];
-                    hooks.onToolHeader?.(tc);
-                    const parsed = parseArgs(tc.arguments);
-                    let outcome: ToolOutcome;
+                  // 同批非控制调用全部为「未被禁用的并行安全(只读)工具」时(纯 solo 空集也满足),
+                  // 先并发执行只读、再应用扩容;混有写/执行等非并行工具则整批保守拒绝。
+                  const safeReadonlyBatch = otherIndexes.every(
+                    (index) =>
+                      isParallelTool(calls[index].name, ctx.toolRuntime) && !isToolDeniedForStep(calls[index].name),
+                  );
 
-                    if (mixedCall) {
+                  if (safeReadonlyBatch) {
+                    for (let index = 0; index < calls.length; index++) {
+                      hooks.onToolHeader?.(calls[index]);
+                    }
+                    if (otherIndexes.length > 0) {
+                      hooks.onToolStart?.(calls[otherIndexes[0]].name);
+                      const startedReadonly = otherIndexes.map((index) =>
+                        ctx.toolRuntime.executeToolOutcome(calls[index].name, calls[index].arguments, signal, {
+                          callId: calls[index].id,
+                          allowedToolNames: currentAllowedToolNames(),
+                          delegation: delegationForOrchestrator(),
+                        }),
+                      );
+                      for (let k = 0; k < otherIndexes.length; k++) {
+                        const index = otherIndexes[k];
+                        const tc = calls[index];
+                        const outcome = await startedReadonly[k];
+                        usageMeter.add(outcome.usage);
+                        opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
+                        traceToolEnd(tc, index, outcome);
+                        hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+                        pushToolResult(
+                          history,
+                          tc,
+                          outcome.output,
+                          relprune,
+                          lifecycle,
+                          scheduler,
+                          runtimeContextState,
+                          outcome.status === 'success',
+                        );
+                      }
+                      hooks.onToolDone?.();
+                    }
+
+                    for (const index of controlIndexes) {
+                      const tc = calls[index];
+                      const parsed = parseArgs(tc.arguments);
+                      let outcome: ToolOutcome;
+
+                      if (isToolDeniedForStep(tc.name)) {
+                        outcome = {
+                          status: 'denied',
+                          code: 'TOOL_DISABLED',
+                          retryable: false,
+                          output: `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`,
+                          changedFiles: [],
+                          durationMs: 0,
+                        };
+                      } else if (!opts.toolPolicy) {
+                        outcome = {
+                          status: 'denied',
+                          code: 'TOOL_DISABLED',
+                          retryable: false,
+                          output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
+                          changedFiles: [],
+                          durationMs: 0,
+                        };
+                      } else if (
+                        !parsed ||
+                        !Array.isArray(parsed.groups) ||
+                        parsed.groups.length === 0 ||
+                        typeof parsed.reason !== 'string' ||
+                        !parsed.reason.trim()
+                      ) {
+                        outcome = {
+                          status: 'error',
+                          code: 'INVALID_ARGUMENTS',
+                          retryable: false,
+                          output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
+                          changedFiles: [],
+                          durationMs: 0,
+                        };
+                      } else {
+                        const expansion = opts.toolPolicy.expand(parsed.groups, parsed.reason);
+                        const succeeded = expansion.added.length > 0;
+                        const details = [
+                          succeeded
+                            ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
+                            : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
+                          expansion.implied.length > 0
+                            ? `Implied groups also activated: ${expansion.implied.join(', ')}.`
+                            : '',
+                          expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
+                          succeeded ? 'The added tool schemas become available on the next model step.' : '',
+                        ]
+                          .filter(Boolean)
+                          .join('\n');
+                        outcome = {
+                          status: succeeded ? 'success' : 'error',
+                          code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
+                          retryable: false,
+                          output: details,
+                          changedFiles: [],
+                          durationMs: 0,
+                        };
+                        emitTrace('tool_route_expand', {
+                          policyId: expansion.snapshot.id,
+                          fromVersion: policySnapshot?.version,
+                          toVersion: expansion.snapshot.version,
+                          requestedGroups: parsed.groups.map(String),
+                          addedGroups: expansion.added,
+                          impliedGroups: expansion.implied,
+                          rejected: expansion.rejected,
+                          reason: parsed.reason,
+                          status: outcome.status,
+                        });
+                      }
+
+                      opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
+                      hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+                      pushToolResult(
+                        history,
+                        tc,
+                        outcome.output,
+                        relprune,
+                        lifecycle,
+                        scheduler,
+                        runtimeContextState,
+                        outcome.status === 'success',
+                      );
+                      traceToolEnd(tc, index, outcome);
+                    }
+                  } else {
+                    // 不安全批:不扩容、不执行普通工具,逐 call 按原序配对拒绝结果。
+                    for (let index = 0; index < calls.length; index++) {
+                      const tc = calls[index];
+                      hooks.onToolHeader?.(tc);
                       const isControl = tc.name === ADD_TOOL_GROUPS_TOOL_NAME;
-                      outcome = {
+                      const isReadonly = isParallelTool(tc.name, ctx.toolRuntime);
+                      const outcome: ToolOutcome = {
                         status: 'denied',
                         code: isControl ? 'INVALID_ARGUMENTS' : 'TOOL_DISABLED',
                         retryable: false,
                         output: isControl
-                          ? '错误:add_tool_groups 必须在一个独立的 model step 中单独调用；本次没有扩容。'
-                          : `错误:同一响应包含 add_tool_groups，工具 ${tc.name} 未执行。请等待扩容结果后在下一 step 重试。`,
+                          ? '错误:add_tool_groups 只能单独调用，或与只读工具(read_file/glob/grep/web 等)同批；本次没有扩容。'
+                          : isReadonly
+                            ? `错误:同一响应包含 add_tool_groups，工具 ${tc.name} 未执行。请在下一 step 重试。`
+                            : `错误:add_tool_groups 不能与写/执行工具 ${tc.name} 同批；请先完成扩容，再在下一 step 调用 ${tc.name}。`,
                         changedFiles: [],
                         durationMs: 0,
                       };
-                    } else if (isToolDeniedForStep(tc.name)) {
-                      outcome = {
-                        status: 'denied',
-                        code: 'TOOL_DISABLED',
-                        retryable: false,
-                        output: `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`,
-                        changedFiles: [],
-                        durationMs: 0,
-                      };
-                    } else if (!opts.toolPolicy) {
-                      outcome = {
-                        status: 'denied',
-                        code: 'TOOL_DISABLED',
-                        retryable: false,
-                        output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
-                        changedFiles: [],
-                        durationMs: 0,
-                      };
-                    } else if (
-                      !parsed ||
-                      !Array.isArray(parsed.groups) ||
-                      parsed.groups.length === 0 ||
-                      typeof parsed.reason !== 'string' ||
-                      !parsed.reason.trim()
-                    ) {
-                      outcome = {
-                        status: 'error',
-                        code: 'INVALID_ARGUMENTS',
-                        retryable: false,
-                        output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
-                        changedFiles: [],
-                        durationMs: 0,
-                      };
-                    } else {
-                      const expansion = opts.toolPolicy.expand(parsed.groups, parsed.reason);
-                      const succeeded = expansion.added.length > 0;
-                      const details = [
-                        succeeded
-                          ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
-                          : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
-                        expansion.implied.length > 0
-                          ? `Implied groups also activated: ${expansion.implied.join(', ')}.`
-                          : '',
-                        expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
-                        succeeded ? 'The added tool schemas become available on the next model step.' : '',
-                      ]
-                        .filter(Boolean)
-                        .join('\n');
-                      outcome = {
-                        status: succeeded ? 'success' : 'error',
-                        code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
-                        retryable: false,
-                        output: details,
-                        changedFiles: [],
-                        durationMs: 0,
-                      };
-                      emitTrace('tool_route_expand', {
-                        policyId: expansion.snapshot.id,
-                        fromVersion: policySnapshot?.version,
-                        toVersion: expansion.snapshot.version,
-                        requestedGroups: parsed.groups.map(String),
-                        addedGroups: expansion.added,
-                        impliedGroups: expansion.implied,
-                        rejected: expansion.rejected,
-                        reason: parsed.reason,
-                        status: outcome.status,
-                      });
+                      opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
+                      hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+                      pushToolResult(
+                        history,
+                        tc,
+                        outcome.output,
+                        relprune,
+                        lifecycle,
+                        scheduler,
+                        runtimeContextState,
+                        false,
+                      );
+                      traceToolEnd(tc, index, outcome);
                     }
-
-                    opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
-                    hooks.onToolResult?.(tc, outcome.output, null, null, 1);
-                    pushToolResult(
-                      history,
-                      tc,
-                      outcome.output,
-                      relprune,
-                      lifecycle,
-                      scheduler,
-                      runtimeContextState,
-                      outcome.status === 'success',
-                    );
-                    traceToolEnd(tc, index, outcome);
                   }
                 }
 

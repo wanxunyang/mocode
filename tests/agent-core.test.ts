@@ -362,7 +362,7 @@ test('runAgentCore: add_tool_groups 单独形成 step 屏障，新增 schema 只
   }
 });
 
-test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call 配对结果', async () => {
+test('runAgentCore: add_tool_groups 与写/执行工具同批时拒绝整批但为每个 provider call 配对结果', async () => {
   const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
   delete process.env.MOCODE_TOOL_POLICY;
   const previousFrontend = process.env.MOCODE_FRONTEND_TOOLS_ENABLED;
@@ -379,8 +379,8 @@ test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call
             tool_calls: [
               {
                 index: 0,
-                id: 'mixed-read',
-                function: { name: 'read_file', arguments: '{"path":"must-not-run.txt"}' },
+                id: 'mixed-run',
+                function: { name: 'run_command', arguments: '{"command":"echo must-not-run"}' },
               },
               {
                 index: 1,
@@ -405,7 +405,7 @@ test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call
     const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
     const result = await runAgentCore({
       history,
-      userInput: 'read then edit',
+      userInput: 'run then expand',
       maxSteps: 2,
       toolPolicy: policy,
       runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
@@ -415,9 +415,9 @@ test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call
 
     assert.equal(result.completed, true);
     assert.equal(result.finalText, 'mixed handled');
-    assert.deepEqual(started, [], 'mixed-call 屏障不得启动任何普通工具');
+    assert.deepEqual(started, [], '写/执行混合屏障不得启动任何普通工具');
     assert.deepEqual(outcomes, [
-      { tool: 'read_file', status: 'denied', code: 'TOOL_DISABLED' },
+      { tool: 'run_command', status: 'denied', code: 'TOOL_DISABLED' },
       { tool: 'add_tool_groups', status: 'denied', code: 'INVALID_ARGUMENTS' },
     ]);
     assert.equal(policy.snapshot(false).version, 1);
@@ -428,20 +428,116 @@ test('runAgentCore: mixed add_tool_groups 拒绝整批但为每个 provider call
     const assistant = history[2] as { tool_calls?: Array<{ id: string }> };
     assert.deepEqual(
       assistant.tool_calls?.map((toolCall) => toolCall.id),
-      ['mixed-read', 'mixed-expand'],
+      ['mixed-run', 'mixed-expand'],
     );
     const firstResult = history[3] as { role: string; tool_call_id?: string; content?: string };
     const secondResult = history[4] as { role: string; tool_call_id?: string; content?: string };
     assert.equal(firstResult.role, 'tool');
-    assert.equal(firstResult.tool_call_id, 'mixed-read');
-    assert.match(firstResult.content ?? '', /未执行/);
+    assert.equal(firstResult.tool_call_id, 'mixed-run');
+    assert.match(firstResult.content ?? '', /不能与写\/执行工具/);
     assert.equal(secondResult.role, 'tool');
     assert.equal(secondResult.tool_call_id, 'mixed-expand');
-    assert.match(secondResult.content ?? '', /必须在一个独立的 model step/);
+    assert.match(secondResult.content ?? '', /只读工具/);
   } finally {
     __setChatCreateImpl(null);
     restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
     restoreEnv('MOCODE_FRONTEND_TOOLS_ENABLED', previousFrontend);
+  }
+});
+
+test('runAgentCore: add_tool_groups 与只读工具同批 → 只读本 step 执行、扩容下一 step 生效', async () => {
+  for (const pipeline of ['legacy', 'staged'] as const) {
+    const root = mkdtempSync(join(tmpdir(), `mocode-agent-readonly-expand-${pipeline}-`));
+    writeFileSync(join(root, 'fixture.txt'), 'readonly-batch-content', 'utf8');
+    const previousRoot = setSandboxRoot(root);
+    const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
+    delete process.env.MOCODE_TOOL_POLICY;
+    const previousFrontend = process.env.MOCODE_FRONTEND_TOOLS_ENABLED;
+    process.env.MOCODE_FRONTEND_TOOLS_ENABLED = 'true';
+    const requests: CapturedAgentRequest[] = [];
+    let call = 0;
+    __setChatCreateImpl(async (body) => {
+      requests.push(body as unknown as CapturedAgentRequest);
+      call++;
+      if (call === 1) {
+        return sseStream([
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'batched-read',
+                  function: { name: 'read_file', arguments: '{"path":"fixture.txt"}' },
+                },
+                {
+                  index: 1,
+                  id: 'batched-expand',
+                  function: {
+                    name: 'add_tool_groups',
+                    arguments: '{"groups":["browser-debug"],"reason":"need DOM debug next"}',
+                  },
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      return sseStream([{ delta: { content: 'readonly expand handled' } }]);
+    });
+
+    const policy = new ToolPolicyController({ id: `core-readonly-expand-${pipeline}` });
+    const started: string[] = [];
+    const outcomes: Array<{ tool: string; status: string; code: string }> = [];
+    try {
+      const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+      const result = await runAgentCore({
+        history,
+        userInput: 'read and arm browser',
+        maxSteps: 2,
+        pipeline,
+        toolPolicy: policy,
+        runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+        hooks: { onToolStart: (name) => started.push(name) },
+        onToolOutcome: (tool, _args, outcome) => outcomes.push({ tool, status: outcome.status, code: outcome.code }),
+      });
+
+      assert.equal(result.completed, true, `[${pipeline}] 应正常完成`);
+      assert.equal(result.finalText, 'readonly expand handled');
+      // 只读批真的启动并执行(不是被屏障拒绝)。
+      assert.deepEqual(started, ['read_file'], `[${pipeline}] read_file 应在本 step 启动`);
+      assert.deepEqual(
+        outcomes,
+        [
+          { tool: 'read_file', status: 'success', code: 'OK' },
+          { tool: 'add_tool_groups', status: 'success', code: 'OK' },
+        ],
+        `[${pipeline}] 只读与扩容都应成功`,
+      );
+      assert.equal(policy.snapshot(false).version, 2, `[${pipeline}] 扩容应升版本`);
+
+      // history:[system, user, assistant(2 calls), tool(read), tool(expand), assistant(text)]
+      assert.equal(history.length, 6, `[${pipeline}] history 应 6 条`);
+      const readResult = history[3] as { role: string; tool_call_id?: string; content?: string };
+      assert.equal(readResult.role, 'tool');
+      assert.equal(readResult.tool_call_id, 'batched-read');
+      assert.match(readResult.content ?? '', /readonly-batch-content/, `[${pipeline}] 只读结果应含文件内容`);
+      const expandResult = history[4] as { role: string; tool_call_id?: string; content?: string };
+      assert.equal(expandResult.tool_call_id, 'batched-expand');
+      assert.match(expandResult.content ?? '', /next model step/);
+
+      // 新增 schema 下一 step 才出现,本 step 的请求里没有 browser/dev_server。
+      assert.ok(!capturedToolNames(requests[0]).includes('browser'));
+      assert.ok(
+        capturedToolNames(requests[1]).includes('browser') && capturedToolNames(requests[1]).includes('dev_server'),
+        `[${pipeline}] browser 与蕴含的 dev_server 应在下一 step 可用`,
+      );
+    } finally {
+      __setChatCreateImpl(null);
+      setSandboxRoot(previousRoot);
+      restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
+      restoreEnv('MOCODE_FRONTEND_TOOLS_ENABLED', previousFrontend);
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

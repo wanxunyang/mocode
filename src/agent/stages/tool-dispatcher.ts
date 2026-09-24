@@ -127,95 +127,138 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
       });
     }
 
-    const hasRouteBarrier = calls.some((call) => call.name === ADD_TOOL_GROUPS_TOOL_NAME);
+    const controlIndexes: number[] = [];
+    const otherIndexes: number[] = [];
+    calls.forEach((call, index) =>
+      (call.name === ADD_TOOL_GROUPS_TOOL_NAME ? controlIndexes : otherIndexes).push(index),
+    );
+    const hasRouteBarrier = controlIndexes.length > 0;
     if (hasRouteBarrier) {
-      const mixedCall = calls.length !== 1;
-      for (let index = 0; index < calls.length; index++) {
-        const call = calls[index];
-        request.onEvent({ type: 'header', call });
-        const parsed = parseArgs(call.arguments);
-        let outcome: ToolOutcome;
+      // 同批的非控制调用全部是「未被禁用的并行安全(只读)工具」时(纯 solo 时空集也满足),
+      // 允许它们与扩容同批:先并发执行只读调用,再应用扩容。只读结果本 step 即得,新增 schema
+      // 下一 step 生效——不必为扩容空耗一轮。只要混有写/执行等非并行工具(或某只读调用已被
+      // 当前 snapshot 拒绝),即退回整批保守拒绝。
+      const safeReadonlyBatch = otherIndexes.every(
+        (index) => isParallelTool(calls[index].name, toolRuntime) && !request.isDenied(calls[index].name),
+      );
 
-        if (mixedCall) {
+      if (safeReadonlyBatch) {
+        // 所有 header 按调用原序先发(渲染侧据此建组容器),只读批的 header 必须先于 execute。
+        for (let index = 0; index < calls.length; index++) {
+          request.onEvent({ type: 'header', call: calls[index] });
+        }
+        if (otherIndexes.length > 0) {
+          request.onEvent({ type: 'start', tool: calls[otherIndexes[0]].name });
+          const startedReadonly = otherIndexes.map((index) => execute(calls[index]));
+          for (let offset = 0; offset < otherIndexes.length; offset++) {
+            const index = otherIndexes[offset];
+            const outcome = await startedReadonly[offset];
+            record(index, outcome);
+            executionEvents(index, parseArgs(calls[index].arguments), outcome);
+            resultEvent(index, outcome, null);
+          }
+          request.onEvent({ type: 'done' });
+        }
+
+        // 控制调用(header 已发):逐个校验并应用扩容;solo 与同批语义一致。
+        for (const index of controlIndexes) {
+          const call = calls[index];
+          const parsed = parseArgs(call.arguments);
+          let outcome: ToolOutcome;
+
+          if (request.isDenied(call.name)) {
+            outcome = {
+              status: 'denied',
+              code: 'TOOL_DISABLED',
+              retryable: false,
+              output: `错误:当前 tool policy snapshot 不允许调用 ${call.name}。`,
+              changedFiles: [],
+              durationMs: 0,
+            };
+          } else if (!request.expandToolGroups) {
+            outcome = {
+              status: 'denied',
+              code: 'TOOL_DISABLED',
+              retryable: false,
+              output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
+              changedFiles: [],
+              durationMs: 0,
+            };
+          } else if (
+            !parsed ||
+            !Array.isArray(parsed.groups) ||
+            parsed.groups.length === 0 ||
+            typeof parsed.reason !== 'string' ||
+            !parsed.reason.trim()
+          ) {
+            outcome = {
+              status: 'error',
+              code: 'INVALID_ARGUMENTS',
+              retryable: false,
+              output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
+              changedFiles: [],
+              durationMs: 0,
+            };
+          } else {
+            const expansion = request.expandToolGroups(parsed.groups, parsed.reason);
+            const succeeded = expansion.added.length > 0;
+            const details = [
+              succeeded
+                ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
+                : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
+              expansion.implied.length > 0 ? `Implied groups also activated: ${expansion.implied.join(', ')}.` : '',
+              expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
+              succeeded ? 'The added tool schemas become available on the next model step.' : '',
+            ]
+              .filter(Boolean)
+              .join('\n');
+            outcome = {
+              status: succeeded ? 'success' : 'error',
+              code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
+              retryable: false,
+              output: details,
+              changedFiles: [],
+              durationMs: 0,
+            };
+            request.onEvent({
+              type: 'route_expand',
+              fromVersion: request.policy.toolPolicy?.version,
+              expansion,
+              requestedGroups: parsed.groups,
+              reason: parsed.reason,
+              status: outcome.status,
+            });
+          }
+
+          record(index, outcome);
+          request.onEvent({ type: 'host_outcome', call, parsed: parsed ?? {}, outcome });
+          resultEvent(index, outcome, null);
+          traceEnd(index, outcome);
+        }
+      } else {
+        // 不安全批(混有写/执行等非并行工具):不扩容、不执行任何普通工具,逐 call 按原序配对拒绝结果。
+        for (let index = 0; index < calls.length; index++) {
+          const call = calls[index];
+          request.onEvent({ type: 'header', call });
           const isControl = call.name === ADD_TOOL_GROUPS_TOOL_NAME;
-          outcome = {
+          const isReadonly = isParallelTool(call.name, toolRuntime);
+          const outcome: ToolOutcome = {
             status: 'denied',
             code: isControl ? 'INVALID_ARGUMENTS' : 'TOOL_DISABLED',
             retryable: false,
             output: isControl
-              ? '错误:add_tool_groups 必须在一个独立的 model step 中单独调用；本次没有扩容。'
-              : `错误:同一响应包含 add_tool_groups，工具 ${call.name} 未执行。请等待扩容结果后在下一 step 重试。`,
+              ? '错误:add_tool_groups 只能单独调用，或与只读工具(read_file/glob/grep/web 等)同批；本次没有扩容。'
+              : isReadonly
+                ? `错误:同一响应包含 add_tool_groups，工具 ${call.name} 未执行。请在下一 step 重试。`
+                : `错误:add_tool_groups 不能与写/执行工具 ${call.name} 同批；请先完成扩容，再在下一 step 调用 ${call.name}。`,
             changedFiles: [],
             durationMs: 0,
           };
-        } else if (request.isDenied(call.name)) {
-          outcome = {
-            status: 'denied',
-            code: 'TOOL_DISABLED',
-            retryable: false,
-            output: `错误:当前 tool policy snapshot 不允许调用 ${call.name}。`,
-            changedFiles: [],
-            durationMs: 0,
-          };
-        } else if (!request.expandToolGroups) {
-          outcome = {
-            status: 'denied',
-            code: 'TOOL_DISABLED',
-            retryable: false,
-            output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
-            changedFiles: [],
-            durationMs: 0,
-          };
-        } else if (
-          !parsed ||
-          !Array.isArray(parsed.groups) ||
-          parsed.groups.length === 0 ||
-          typeof parsed.reason !== 'string' ||
-          !parsed.reason.trim()
-        ) {
-          outcome = {
-            status: 'error',
-            code: 'INVALID_ARGUMENTS',
-            retryable: false,
-            output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
-            changedFiles: [],
-            durationMs: 0,
-          };
-        } else {
-          const expansion = request.expandToolGroups(parsed.groups, parsed.reason);
-          const succeeded = expansion.added.length > 0;
-          const details = [
-            succeeded
-              ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
-              : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
-            expansion.implied.length > 0 ? `Implied groups also activated: ${expansion.implied.join(', ')}.` : '',
-            expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
-            succeeded ? 'The added tool schemas become available on the next model step.' : '',
-          ]
-            .filter(Boolean)
-            .join('\n');
-          outcome = {
-            status: succeeded ? 'success' : 'error',
-            code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
-            retryable: false,
-            output: details,
-            changedFiles: [],
-            durationMs: 0,
-          };
-          request.onEvent({
-            type: 'route_expand',
-            fromVersion: request.policy.toolPolicy?.version,
-            expansion,
-            requestedGroups: parsed.groups,
-            reason: parsed.reason,
-            status: outcome.status,
-          });
+          record(index, outcome);
+          request.onEvent({ type: 'host_outcome', call, parsed: parseArgs(call.arguments) ?? {}, outcome });
+          resultEvent(index, outcome, null);
+          traceEnd(index, outcome);
         }
-
-        record(index, outcome);
-        request.onEvent({ type: 'host_outcome', call, parsed: parsed ?? {}, outcome });
-        resultEvent(index, outcome, null);
-        traceEnd(index, outcome);
       }
     }
 
