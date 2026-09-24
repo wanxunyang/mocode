@@ -56,6 +56,7 @@ function selectorCall(args: unknown): AsyncIterable<unknown> {
 }
 
 const ROUTE_ENV_KEYS = [
+  'MOCODE_ROUTER_ENABLED',
   'MOCODE_SUBAGENT_ENABLED',
   'MOCODE_FRONTEND_TOOLS_ENABLED',
   'MOCODE_COMPUTER_USE_ENABLED',
@@ -178,6 +179,26 @@ test('routeToolGroups: 缺失或损坏 selector 调用只回退 previous/common'
     assert.equal(malformed.fallback, true);
     assert.deepEqual(malformed.groups, []);
     assert.match(malformed.reason, /no valid select_tool_groups/);
+  } finally {
+    __setChatCreateImpl(null);
+    restore();
+  }
+});
+
+test('routeToolGroups: MOCODE_ROUTER_ENABLED=false 跳过路由调用，只保留默认簇', async () => {
+  const restore = isolateRouteEnv({ MOCODE_ROUTER_ENABLED: 'false' });
+  let called = false;
+  __setChatCreateImpl(async () => {
+    called = true;
+    return selectorCall({ groups: ['browser-debug'], inheritPrevious: false, reason: 'should not run' });
+  });
+  try {
+    const decision = await routeToolGroups({ input: 'do work', previousGroups: ['memory-read'] });
+    assert.equal(called, false, '开关关闭时不应发起任何路由调用（LLM/Jev 都不该被触碰）');
+    assert.equal(decision.fallback, true);
+    assert.deepEqual(decision.groups, [], 'groups 置空 → controller 只保留常驻簇，不借 previous 扩权');
+    assert.equal(decision.inheritPrevious, false);
+    assert.match(decision.reason, /pre-routing is disabled/i);
   } finally {
     __setChatCreateImpl(null);
     restore();

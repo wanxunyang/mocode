@@ -9,7 +9,7 @@ import {
   type ToolRouteGroupName,
 } from '../config/profiles.js';
 import { getRoutableToolRouteGroups, toolRouteCatalog } from './policy.js';
-import { getRouterMode, getJevRouterConfig, isJevRouterConfigured } from '../config/index.js';
+import { getRouterMode, getJevRouterConfig, isJevRouterConfigured, isToolRoutingEnabled } from '../config/index.js';
 import { askJev, type JevAskResult, type JevQuestion } from './jev-client.js';
 
 const ROUTER_TOOL_NAME = 'select_tool_groups';
@@ -133,6 +133,8 @@ function parseDecision(
  *   - `jev`:TypeSafe systemone,每组独立出 0~1 概率,按阈值出簇(阈值可调是选它的核心理由)。
  * 两条路径失败都沿用上一 turn 的簇;主 Agent 仍可通过 add_tool_groups 自救,
  * 但绝不因路由失败直接暴露 full 工具集。
+ * 总开关(/router off,MOCODE_ROUTER_ENABLED=false):跳过路由调用,只保留常驻簇
+ * (controller 无条件激活的 DEFAULT_ROUTE_GROUPS)+ 通用工具,不再选任何额外簇。
  */
 export async function routeToolGroups(request: ToolRouteRequest): Promise<ToolRouteDecision> {
   const startedAt = Date.now();
@@ -141,6 +143,18 @@ export async function routeToolGroups(request: ToolRouteRequest): Promise<ToolRo
   const availableGroups = getRoutableToolRouteGroups(request.tools, request.gateAllows);
   const available = new Set(availableGroups);
   const previousGroups = (request.previousGroups ?? []).filter((group) => available.has(group));
+  // 总开关关闭:不发任何路由请求。groups 置空 → controller 只保留常驻簇 + 通用工具,
+  // 缺的能力模型仍可 add_tool_groups 自救。fallback 标记让 metadata 能区分「真路由」与「开关直通」。
+  if (!isToolRoutingEnabled()) {
+    return {
+      groups: [],
+      inheritPrevious: false,
+      confidence: 0,
+      reason: 'Tool pre-routing is disabled (/router off); common tools plus default groups only.',
+      latencyMs: Date.now() - startedAt,
+      fallback: true,
+    };
+  }
   if (availableGroups.length === 0) {
     return fallbackDecision(
       startedAt,

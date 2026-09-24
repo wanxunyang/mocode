@@ -99,6 +99,8 @@ export function buildSlashCommands(): SlashCommand[] {
       desc: d('commands.router'),
       children: [
         { name: 'status', value: '/router', desc: d('commands.routerStatus') },
+        { name: 'on', value: '/router on', desc: d('commands.routerOn') },
+        { name: 'off', value: '/router off', desc: d('commands.routerOff') },
         { name: 'llm', value: '/router llm', desc: d('commands.routerLlm') },
         { name: 'jev', value: '/router jev', desc: d('commands.routerJev') },
         { name: 'test', value: '/router test', desc: d('commands.routerTest') },

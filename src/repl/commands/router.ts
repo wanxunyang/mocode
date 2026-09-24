@@ -21,6 +21,8 @@ import {
   getJevRouterConfig,
   updateJevRouterConfig,
   isJevRouterConfigured,
+  isToolRoutingEnabled,
+  updateToolRoutingEnabled,
 } from '../../config/index.js';
 import { writeConfigKeys, CONFIG_PATH } from '../../config/file.js';
 import { probeJev } from '../../tools/jev-client.js';
@@ -28,6 +30,7 @@ import { maskKey } from '../commands.js';
 import { unhandled, next, type CommandHandler } from './types.js';
 
 const ROUTER_ENV_KEYS = {
+  enabled: 'MOCODE_ROUTER_ENABLED',
   mode: 'MOCODE_ROUTER_MODE',
   baseUrl: 'MOCODE_ROUTER_JEV_BASE_URL',
   apiKey: 'MOCODE_ROUTER_JEV_API_KEY',
@@ -47,6 +50,11 @@ export const routerCommands: CommandHandler[] = [
     const arg = spaceIndex === -1 ? '' : rest.slice(spaceIndex + 1).trim();
 
     const showStatus = (): void => {
+      const enabled = isToolRoutingEnabled();
+      const stateLabel = t(enabled ? 'router.stateOn' : 'router.stateOff');
+      layout.contentWrite(
+        `${enabled ? ui.green : ui.yellow}${t('router.toggleStatus', { state: stateLabel })}${ui.reset}\n`,
+      );
       const mode = getRouterMode();
       const label = mode === 'jev' ? t('router.modeJev') : t('router.modeLlm');
       layout.contentWrite(`${ui.accent}${t('router.status', { mode: label })}${ui.reset}\n`);
@@ -68,6 +76,15 @@ export const routerCommands: CommandHandler[] = [
     // /router 或 /router status
     if (rest === '' || sub === 'status') {
       showStatus();
+      return next();
+    }
+
+    // /router on | /router off —— 预路由总开关。off = 跳过每轮路由调用,只保留默认簇。
+    if (sub === 'on' || sub === 'off') {
+      const enabled = sub === 'on';
+      updateToolRoutingEnabled(enabled);
+      writeConfigKeys({ [ROUTER_ENV_KEYS.enabled]: enabled ? 'true' : 'false' });
+      layout.contentWrite(`${ui.green}${t(enabled ? 'router.enabledOn' : 'router.enabledOff')}${ui.reset}\n`);
       return next();
     }
 

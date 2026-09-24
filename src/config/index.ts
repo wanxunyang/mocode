@@ -945,6 +945,21 @@ export function updateRouterMode(mode: RouterMode): void {
   process.env.MOCODE_ROUTER_MODE = mode;
 }
 
+/**
+ * 工具预路由总开关。关闭 = 每个 turn 跳过路由调用,只保留常驻簇
+ * (controller 无条件激活的 DEFAULT_ROUTE_GROUPS)+ 通用工具,不选任何额外簇;默认开启。
+ * 与 RouterMode 同一理由直接读写 process.env:支持 /router on|off 即时切换,
+ * routeToolGroups 在每 turn 调用点实时读,改后下一真实用户 turn 生效。
+ */
+export function isToolRoutingEnabled(): boolean {
+  return process.env.MOCODE_ROUTER_ENABLED !== 'false';
+}
+
+/** /router 的写入口;持久化由调用方写 MOCODE_ROUTER_ENABLED(见 config/file.ts)。 */
+export function updateToolRoutingEnabled(enabled: boolean): void {
+  process.env.MOCODE_ROUTER_ENABLED = enabled ? 'true' : 'false';
+}
+
 export interface JevRouterConfig {
   /** systemone 端点基址(不含 /v1/systemone 路径段)。本地兼容层(如 arbiter)指向 localhost。 */
   baseUrl: string;
