@@ -10,8 +10,7 @@ const MAX_CONTENT_CHARS = 800;
 export const webSearchTool: Tool = {
   name: 'web_search',
   description:
-    'Search the web (AnySearch). Returns title/url/snippet/body per result. Optional tag for sub-domain capability.',
-  parameters: {
+    'Search the web (AnySearch). Returns title/url/snippet/body per result. Optional tag for sub-domain capability.',  parameters: {
     type: 'object',
     properties: {
       query: { type: 'string', description: 'Search query' },

@@ -296,7 +296,7 @@ export class ToolPolicyController {
       '## Tool route (current turn)',
       `Policy ${snapshot.id} v${snapshot.version}; active groups: ${active}.`,
       `Router reason: ${snapshot.reason}`,
-      'Use only the tools currently exposed. If a required capability is missing, call add_tool_groups alone; dependent calls must wait until the next step.',
+      'Use only the exposed tools. Missing capability? Call add_tool_groups alone; dependent calls wait for the next step.',
     ];
     if (remaining.length) lines.push(`Groups still available: ${remaining.join(', ')}.`);
     if (this.selected.has('computer-control')) {

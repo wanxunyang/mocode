@@ -16,23 +16,15 @@ function conflict(path: string, details: string): ToolOutcome {
 
 export const editFileTool: Tool = {
   name: 'edit_file',
-  description: `Replace content in a file transactionally. Supports two modes:
+  description: `Replace content in a file transactionally. Two modes:
 
-**String replacement mode (default):** Provide old_string that occurs exactly once in the file. The old_string must be copied verbatim from a fresh read_file output — do NOT reconstruct from memory, summaries, or grep output, as these lose whitespace/indentation details. Common failure modes: trailing whitespace, tabs vs spaces, indentation changes, line-ending mismatches (CRLF vs LF).
+**String replacement (default):** old_string must occur EXACTLY once, copied verbatim from a fresh read_file output — never reconstruct from memory, summaries, or grep output (whitespace/indentation/line-ending details are lost there).
 
-**Line-range mode:** Provide line_start and line_end (1-based, inclusive) instead of old_string. Use this when the exact text is hard to reproduce or when replacing a large block.
+**Line-range:** line_start/line_end (1-based, inclusive) instead of old_string — for large blocks, repeated patterns, or hard-to-reproduce text.
 
-expected_hash is required (sha256 from read_file artifact header) and must match the current file hash. If the file changed after your read, the edit is rejected. Recovery: call read_file again on the same path and copy both the new hash and exact text.
+expected_hash (sha256 from read_file artifact header) is required and must match the current file; changed-since-read edits are rejected — re-read and retry with the new hash.
 
-**When to use which mode:**
-- String replacement: small, unique text fragments (function signatures, config keys, error messages)
-- Line-range: large blocks, repeated patterns, or when whitespace precision is critical
-
-**Anti-patterns (will fail):**
-- old_string reconstructed from memory or a summary
-- old_string copied from a previous tool call that may be stale
-- old_string that appears multiple times (add more context to make it unique)
-- expected_hash from a different file or an old read_file call`,
+Anti-patterns (will fail): old_string from memory/summary/stale call; multiple occurrences (add context to disambiguate); hash from another file or old read.`,
   risk: 'confirm',
   parameters: {
     type: 'object',

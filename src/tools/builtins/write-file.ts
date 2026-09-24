@@ -43,10 +43,8 @@ function invalid(path: string, message: string): ToolOutcome {
 export const writeFileTool: Tool = {
   name: 'write_file',
   description:
-    'Create or replace one file transactionally. expected_hash may be omitted (or null) only for create-only writes to a path that must not exist; overwriting requires the hash from a fresh read_file artifact header.\n' +
-    'To ADD to an existing file (logs, growing docs, staged generation of a long file), pass append=true instead of re-sending the whole content: only the new text goes in `content`. ' +
-    'append needs NO expected_hash and NO prior read_file (concurrency is handled by the file lock); it creates the file when missing, and it appends bytes VERBATIM — ' +
-    'if the file does not end with a newline, start your content with "\\n" or the last line will merge with yours.',
+    'Create or replace one file transactionally. expected_hash may be omitted (or null) only for create-only writes to a path that must not exist; overwriting requires the hash from a fresh read_file.\n' +
+    'To ADD to an existing file, pass append=true — only the new text goes in `content`; NO expected_hash and NO prior read_file needed (lock-protected; creates the file when missing). Appends VERBATIM: if the file does not end with a newline, start your content with "\\n" or the last line will merge with yours.',
   risk: 'confirm',
   parameters: {
     type: 'object',

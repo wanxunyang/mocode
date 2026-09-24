@@ -113,10 +113,9 @@ export const askHumanTool: Tool = {
   name: 'ask_human',
   description: [
     'Ask the user a question and wait for their response.',
-    ' CHOICES: pass 2-4 concrete options via `options`, each as { label, description? }.',
+    ' CHOICES: pass 2-4 concrete options via `options`, each as { label, description? }; every non-empty option requires a non-empty `label`.',
     ' FREE-TEXT: pass `options: []` when the answer cannot be reduced to choices (e.g. "paste the error message").',
-    ' Every non-empty option requires a non-empty `label`; never emit [{}], omit label, or omit `options`.',
-    ' DO NOT call when the task is clear and you can pick a sensible default.',
+    ' DO NOT call when the task is clear and a sensible default exists.',
   ].join(' '),
   parameters: {
     type: 'object',

@@ -166,18 +166,17 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     const ephemeralReminder = [
       runPolicy.reminder,
       !opts.suppressOpeningAnalysis && step === 0
-        ? '## Opening analysis\nBegin your FIRST response of this turn with a brief analysis of the request and your planned approach (1-3 sentences, no filler), THEN start tool calls. This opening is the only place where pre-tool prose is expected; after it, work quietly with no narration between tool calls.'
+        ? '## Opening analysis\nStart your first response of this turn with a brief analysis of the request and approach (1-3 sentences, no filler), then start tool calls. This is the only expected pre-tool prose; afterwards work quietly, no narration between calls.'
         : '',
       historyRebuilt
-        ? '## Post-compaction recovery\n' +
-          'Context was compacted before this request. Recover before doing anything else, in this order:\n' +
-          '1. Read the session summary at the top of the history: `## Completed` is already done — do not redo or re-verify it. `## In Progress` / `## Next Steps` tell you exactly where work stopped and what is next.\n' +
-          '2. Read `## Session state` below (refreshed every step from notes.md / gui-actions.log): the active plan is authoritative — `[x]` steps are finished, resume from the first `[ ]`. A `## Compaction Snapshot` section there is the progress checkpoint written at this compaction. A `## GUI actions` section lists every GUI action already performed with its observed result: do not repeat an action that appears there, unless the latest screenshot contradicts it (then the screenshot wins — treat that line as attempted but unverified).\n' +
+        ? '## Post-compaction recovery\nContext was compacted before this request. Recover first, in this order:\n' +
+          '1. Read the session summary at the top of the history: `## Completed` is done — do not redo or re-verify it; `## In Progress` / `## Next Steps` say where work stopped and what is next.\n' +
+          '2. Read `## Session state` below (refreshed from notes.md / gui-actions.log): the active plan is authoritative — `[x]` steps are done, resume from the first `[ ]`. `## Compaction Snapshot` is the checkpoint written at this compaction. `## GUI actions` lists every GUI action already performed with its result: do not repeat one that appears there, unless the latest screenshot contradicts it (the screenshot wins — treat that line as attempted but unverified).\n' +
           (sessionStateText
             ? ''
-            : '(No active plan or snapshot was found in notes.md — reconstruct what is done purely from the summary and treat its `## Completed` as ground truth.)\n') +
-          '3. Before any file edit, read_file the target fresh to get the current content hash — never edit from memory of pre-compaction content.\n' +
-          '4. Before re-running a search/read you think you already did, check the summary and notes first: only repeat it if the result is genuinely missing or the target has changed.'
+            : '(No active plan or snapshot in notes.md — reconstruct progress from the summary; treat its `## Completed` as ground truth.)\n') +
+          '3. Before any file edit, read_file the target fresh for its current hash — never edit from pre-compaction memory.\n' +
+          '4. Before re-running a search/read you think you already did, check the summary and notes first; repeat only if the result is genuinely missing or the target changed.'
         : '',
       sessionStateText,
     ]

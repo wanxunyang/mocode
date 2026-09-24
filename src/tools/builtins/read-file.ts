@@ -49,18 +49,11 @@ export const readFileTool: Tool = {
   name: 'read_file',
   description:
     'Read a file: text with line numbers, images as visual model input.\n' +
-    'Text — read before editing. For files >500 lines: grep first to locate regions, then call read_file ' +
-    'multiple times with offset+limit (e.g. offset=350, limit=120). Do NOT read an entire large file in one call.\n' +
-    'When you need several regions of the SAME file, issue those read_file calls together in one ' +
-    'response (they run concurrently) instead of paging through it one page after another — ' +
-    'avoid sequential offset+=limit walks of the same file.\n' +
-    'For files ≤500 lines you may read the whole file in one call. Independent region reads ' +
-    'may be issued in the same response — they run concurrently, saving a round-trip each.\n' +
-    'Images — PNG/JPEG/GIF/WebP are detected by MAGIC BYTES (the extension does not matter) and attached as ' +
-    'visual model input; pass detail=low|high to control resolution, and oversized PNGs are downscaled automatically.\n' +
-    'Other binary files are REJECTED with an explanation instead of being dumped as garbled text. ' +
-    'If you truly need their content, use run_command with a proper tool (e.g. `file`, `strings`, a disassembler).\n' +
-    'For architecture or call-chain questions, prefer loading the `codegraph` skill (use_skill) over reading files one at a time.',
+    'Text — read before editing. Files >500 lines: grep first, then read_file with offset+limit (e.g. offset=350, limit=120); never read a whole large file in one call. ' +
+    'Need several regions of the SAME file? Issue those read_file calls together in one response (they run concurrently) instead of sequential offset+=limit walks. ' +
+    'Images — PNG/JPEG/GIF/WebP detected by MAGIC BYTES (extension ignored), attached as visual input; detail=low|high controls resolution, oversized PNGs downscale automatically. ' +
+    'Other binaries are REJECTED with an explanation — use run_command with a proper tool (`file`, `strings`, disassembler) if you need their content. ' +
+    'Architecture/call-chain questions: prefer the codegraph skill over reading files one at a time.',
   parameters: {
     type: 'object',
     properties: {

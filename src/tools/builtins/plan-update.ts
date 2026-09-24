@@ -30,12 +30,7 @@ function normalizeStatus(raw: unknown): string {
 export const planUpdateTool: Tool = {
   name: 'plan_update',
   description:
-    'Record and update the session execution plan (the `## Plan:` block in `.mocode/sessions/<id>/notes.md`). ' +
-    'Use for any task with 3+ steps or context-loss risk. This REPLACES the whole plan each call, so always pass the full steps array. ' +
-    'Rules: at most one step may be in_progress; mark a step completed as soon as its work is done — do not batch updates to end of turn. ' +
-    'Give every step a short `title` (≤20 chars, e.g. "编写测试" / "修 status bar") that shows in the status bar, ' +
-    'plus a `content` that is self-contained enough to survive context compaction: name the target file/symbol, the change, and how to verify. ' +
-    'When every step is completed the plan auto-settles to `## Done:`. Creates notes.md if missing. Safe to call in PLAN mode (writes only the session notepad, never project files).',
+    'Record and update the session execution plan (the `## Plan:` block in notes.md). Use for any task with 3+ steps or context-loss risk. REPLACES the whole plan each call — always pass the full steps array. At most one step in_progress; mark a step completed as soon as its work is done, not batched to end of turn. Each step: short `title` (≤20 chars, shown in the status bar) + `content` self-contained enough to survive compaction (target file/symbol, change, verification). All steps completed → auto-settles to `## Done:`. Creates notes.md if missing. Safe in PLAN mode (writes only the session notepad).',
   risk: 'safe',
   parameters: {
     type: 'object',

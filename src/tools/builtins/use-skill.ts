@@ -18,9 +18,9 @@ const MAX_SKILL_FILE = 200_000;
 export const useSkillTool: Tool = {
   name: 'use_skill',
   description:
-    'Load the full SKILL.md instructions for a given skill. See the skill list in the system prompt for when to use each. ' +
+    'Load the full SKILL.md instructions for a given skill (see the skill list in the system prompt for when to use each). ' +
     'Supports args (renders $ARGUMENTS / $1.. / ${SKILL_DIR}) and file (reads a bundled reference file). ' +
-    'For skills marked [fork], this returns a guide to call run_skill instead of loading the body inline.',
+    'Skills marked [fork] return a guide to call run_skill instead of loading the body inline.',
   parameters: {
     type: 'object',
     properties: {

@@ -36,14 +36,10 @@ function normalizeSection(raw: unknown): string | null {
 export const noteAppendTool: Tool = {
   name: 'note_append',
   description:
-    'Append a decision-grade note (a finding, decision, open question, or risk) to the session notepad ' +
-    '(`.mocode/sessions/<id>/notes.md`) so it survives context compaction and stays resident in the prompt. ' +
-    'Use this for NON-OBVIOUS, lasting-value discoveries — subtle constraints, decisions with downstream impact, ' +
-    'open questions that block a choice, or risks that affect later steps. Do NOT use it for routine progress ' +
-    '(that is the plan via `plan_update`) or for stable cross-session facts (that is `memory_save`). ' +
-    'Notes you write here persist across compaction within this session and are re-injected into the prompt ' +
-    'automatically, so the agent keeps remembering what it found/decided. Call it the moment you make the ' +
-    'discovery or decision — do not batch to the end.',
+    'Append ONE decision-grade note (finding / decision / open question / risk) to the session notepad (notes.md); it survives compaction and is re-injected into the prompt automatically. ' +
+    'Only NON-OBVIOUS, lasting-value discoveries: subtle constraints, decisions with downstream impact, open questions blocking a choice, risks affecting later steps. ' +
+    'NOT routine progress (that is plan_update) and NOT stable cross-session facts (that is memory_save). ' +
+    'Call the moment you make the discovery or decision — do not batch to the end. One item per call.',
   risk: 'safe',
   parameters: {
     type: 'object',

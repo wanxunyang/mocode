@@ -187,15 +187,9 @@ function commandOutcome(result: RawCommandResult): ToolOutcome {
 export const runCommandTool: Tool = {
   name: 'run_command',
   description:
-    'Run a FOREGROUND shell command, merging stdout+stderr. Default timeout 120s, hard cap 10min. ' +
-    'For tests, builds, git, etc. Pass shell=cmd|powershell|bash to choose the interpreter — the platform ' +
-    'default (and any MOCODE_SHELL override) is stated in the system prompt. Non-interactive cmd cannot run `timeout /t` — ' +
-    'pass shell=powershell (`Start-Sleep`) or shell=bash (`sleep`) when a wait is needed.\n' +
-    'Anything that must keep running after this call returns — dev server, inference/model service, watcher, ' +
-    'log tail — belongs to dev_server instead: it survives across tool calls and gives you an id for ' +
-    'incremental log reads and process-tree kill. Do NOT detach with `start /b`, `nohup`, `&` or similar here: ' +
-    'you lose both the logs and the handle.\n' +
-    "Multiple independent run_command calls may be issued in one response to save model round-trips; they execute serially, so do not depend one on another's output within the same message.",
+    'Run a FOREGROUND shell command, merging stdout+stderr. Default timeout 120s, hard cap 10min; pass shell=cmd|powershell|bash to pick the interpreter (platform default and MOCODE_SHELL override are stated in the system prompt). Non-interactive cmd cannot run `timeout /t` — use shell=powershell (`Start-Sleep`) or shell=bash (`sleep`) for waits.\n' +
+    'Anything that must keep running after this call returns — dev server, model service, watcher, log tail — belongs to dev_server (survives across calls; gives an id for incremental logs and process-tree kill). Do NOT detach via `start /b`, `nohup`, `&`: you lose both the logs and the handle.\n' +
+    'Multiple independent calls may be issued in one response (they run serially, in order); do not depend one on another\'s output within the same message.',
   risk: 'dangerous',
   parameters: {
     type: 'object',

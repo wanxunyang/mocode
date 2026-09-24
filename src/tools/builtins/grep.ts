@@ -65,13 +65,9 @@ export const grepTool: Tool = {
   description:
     'Search file contents by regex (recursive, excludes node_modules/.git/dist).\n' +
     'Output: per-file header "<path>: N matches, lines [l1, l2, ...]" + matched lines with ORIGINAL INDENTATION kept.\n' +
-    'Pass context=2..5 to get neighbouring lines inline (like ripgrep -C) — use it INSTEAD of following every hit ' +
-    'with a read_file round-trip. Context lines use an `L<n>-` prefix and blocks are separated by `  --`.\n' +
-    'Still use read_file(offset=X, limit=Y) when you need a whole region or exact text for an edit — ' +
-    'do NOT read entire files after grepping, and do NOT reconstruct an edit_file old_string from grep output ' +
-    '(long lines are clipped).\n' +
-    'Independent read_file/grep/glob calls may be issued in the same response and run concurrently. ' +
-    'For call chains across many files, prefer loading the `codegraph` skill (use_skill).',
+    'Pass context=2..5 to get neighbouring lines inline (like ripgrep -C) — use it INSTEAD of following every hit with a read_file round-trip.\n' +
+    'Still use read_file(offset=X, limit=Y) for a whole region or exact edit text — never reconstruct an edit_file old_string from grep output (long lines are clipped). ' +
+    'For call chains across many files, prefer the codegraph skill.',
   parameters: {
     type: 'object',
     properties: {
