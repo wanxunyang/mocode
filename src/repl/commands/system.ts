@@ -36,7 +36,8 @@ function buildInitPrompt(): string {
   let oldSizeNote = '';
   try {
     const old = fs.readFileSync(path.join(process.cwd(), 'AGENTS.md'), 'utf8');
-    if (old.trim()) oldSizeNote = `旧 AGENTS.md 为 ${old.length} 字(新文件净字数必须 ≤ ${Math.min(4000, old.length)}:既守 4000 上限也守零和,超出即继续删低价值条目直到达标)。`;
+    if (old.trim())
+      oldSizeNote = `旧 AGENTS.md 为 ${old.length} 字(新文件净字数必须 ≤ ${Math.min(4000, old.length)}:既守 4000 上限也守零和,超出即继续删低价值条目直到达标)。`;
   } catch {
     // 无旧文件:首次生成,只受 4000 字绝对上限约束。
   }

@@ -705,7 +705,8 @@ const en: Record<TranslationKey, string> = {
   'fe.status': 'Browser/desktop automatic routing: {state}',
   'fe.stateOn': 'allowed',
   'fe.stateOff': 'blocked',
-  'fe.changedOn': 'Automatic routing may now select browser-debug / desktop-observe; image reading (read_file) remains a common tool.',
+  'fe.changedOn':
+    'Automatic routing may now select browser-debug / desktop-observe; image reading (read_file) remains a common tool.',
   'fe.changedOff':
     'Browser-debug / desktop-observe are blocked; browser / screenshot will not be exposed (dev_server is unaffected and stays routable).',
   'fe.usage': 'Usage: /fe on|off|status',

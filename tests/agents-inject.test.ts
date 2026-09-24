@@ -79,16 +79,9 @@ test('filterAgentsSections: 无章节/无命中文件原样返回(仅空白规�
 });
 
 test('filterAgentsSections: 压缩段后续章节终止索引,连续多段不被连坐', () => {
-  const md = [
-    '## 目录结构',
-    '- 目录A',
-    '## 命令',
-    '- `npm test`',
-    '## 扩展点',
-    '- 接缝B',
-    '## 约定',
-    '- 约定C',
-  ].join('\n');
+  const md = ['## 目录结构', '- 目录A', '## 命令', '- `npm test`', '## 扩展点', '- 接缝B', '## 约定', '- 约定C'].join(
+    '\n',
+  );
   const out = filterAgentsSectionsForInjection(md);
   assert.ok(!out.includes('目录A'));
   assert.ok(!out.includes('接缝B'));

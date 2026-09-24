@@ -189,7 +189,7 @@ export const runCommandTool: Tool = {
   description:
     'Run a FOREGROUND shell command, merging stdout+stderr. Default timeout 120s, hard cap 10min; pass shell=cmd|powershell|bash to pick the interpreter (platform default and MOCODE_SHELL override are stated in the system prompt). Non-interactive cmd cannot run `timeout /t` — use shell=powershell (`Start-Sleep`) or shell=bash (`sleep`) for waits.\n' +
     'Anything that must keep running after this call returns — dev server, model service, watcher, log tail — belongs to dev_server (survives across calls; gives an id for incremental logs and process-tree kill). Do NOT detach via `start /b`, `nohup`, `&`: you lose both the logs and the handle.\n' +
-    'Multiple independent calls may be issued in one response (they run serially, in order); do not depend one on another\'s output within the same message.',
+    "Multiple independent calls may be issued in one response (they run serially, in order); do not depend one on another's output within the same message.",
   risk: 'dangerous',
   parameters: {
     type: 'object',

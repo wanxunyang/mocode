@@ -95,7 +95,8 @@ async function attemptFetch(target: string, via: FetchAttempt['via'], signal: Ab
 export const webFetchTool: Tool = {
   name: 'web_fetch',
   description:
-    'Fetch a URL and clean HTML to body text. Use to read a link from search results or a URL given by the user.',  parameters: {
+    'Fetch a URL and clean HTML to body text. Use to read a link from search results or a URL given by the user.',
+  parameters: {
     type: 'object',
     properties: {
       url: { type: 'string', description: 'Full URL to fetch; must be http/https' },
