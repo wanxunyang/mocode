@@ -6,7 +6,7 @@ import {
   startDevServer,
   stopDevServer,
 } from '../../runtime/dev-server-manager.js';
-import { SHELL_PARAM_DESCRIPTION, parseShellKind } from '../../runtime/shell.js';
+import { shellParamDescription, parseShellKind } from '../../runtime/shell.js';
 
 function result(status: ToolOutcomeStatus, code: ToolOutcomeCode, payload: unknown): ToolOutcome {
   return { status, code, retryable: false, output: JSON.stringify(payload, null, 2) };
@@ -68,7 +68,7 @@ export const devServerTool: Tool = {
         description: 'Wait until server output matches this case-insensitive regex, e.g. "ready in|listening on"',
       },
       timeoutMs: { type: 'integer', description: 'Readiness wait budget in ms (default 30000, max 180000)' },
-      shell: { type: 'string', enum: ['cmd', 'powershell', 'bash'], description: SHELL_PARAM_DESCRIPTION },
+      shell: { type: 'string', enum: ['cmd', 'powershell', 'bash'], description: shellParamDescription() },
       offset: { type: 'integer', description: 'Byte offset for action=logs (default: tail)' },
       limit: { type: 'integer', description: 'Max bytes for action=logs (default 8000, max 64000)' },
     },

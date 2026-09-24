@@ -16,7 +16,7 @@
 // - 仅在**显式请求 shell=bash** 时才探测(懒求值 + 缓存):cmd 默认路径不付这个同步 IO 成本。
 
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 export type ShellKind = 'cmd' | 'powershell' | 'bash';
 
@@ -39,15 +39,29 @@ const GIT_BASH_CANDIDATES = [
   `${process.env.LOCALAPPDATA ?? ''}\\Programs\\Git\\bin\\bash.exe`,
 ];
 
-/** PATH 命中里要排除的目录片段:WSL bash 住在 System32,语义完全不同。 */
-const WSL_BASH_HINTS = ['system32', 'sysnative'];
+/** PATH 命中里要排除的目录片段:WSL bash 住在 System32,语义完全不同;
+ *  WindowsApps 目录下是 wsl 存根的应用执行别名,同样不能当 bash 解析。 */
+const WSL_BASH_HINTS = ['system32', 'sysnative', 'windowsapps'];
 
 function findWindowsBash(): string | null {
   for (const candidate of GIT_BASH_CANDIDATES) {
     if (candidate && existsSync(candidate)) return candidate;
   }
   // PATH 探测:手工拆分而不是 where.exe —— 需要看到完整路径才能排除 System32(WSL)。
+  // 先看 PATH 上的 git.exe(Git for Windows 的 <root>\cmd\git.exe):由 git 根反推
+  // <root>\bin\bash.exe。自定义安装位(如 D:\Git)不在上面的候选表里,但 git 在 PATH 上
+  // 是极普遍形态 —— 从 git 推 bash 比枚举安装目录鲁棒得多。
   const pathVar = process.env.PATH ?? process.env.Path ?? '';
+  for (const dir of pathVar.split(';')) {
+    if (!dir) continue;
+    if (WSL_BASH_HINTS.some((hint) => dir.toLowerCase().includes(hint))) continue;
+    if (!existsSync(join(dir, 'git.exe'))) continue;
+    const gitRoot = resolve(dir, '..');
+    for (const candidate of [join(gitRoot, 'bin', 'bash.exe'), join(gitRoot, 'usr', 'bin', 'bash.exe')]) {
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  // 兜底:PATH 上直接出现的 bash.exe(排除 System32/WindowsApps 后,多为与 git 同目录布局)。
   for (const dir of pathVar.split(';')) {
     if (!dir) continue;
     if (WSL_BASH_HINTS.some((hint) => dir.toLowerCase().includes(hint))) continue;
@@ -133,8 +147,15 @@ export function defaultShellLabel(): string {
   return 'cmd.exe';
 }
 
-/** 供 run_command / dev_server 的 description 复用的 shell 参数说明(单一事实源,防漂移)。 */
-export const SHELL_PARAM_DESCRIPTION =
+/** 供 run_command / dev_server 的 description 复用的 shell 参数说明(单一事实源,防漂移)。
+ *  默认值不在文案里烘焙静态答案:真实默认由 defaultShellKind()(运行时读 env)决定,
+ *  shell.ts 模块求值时 config 链路未必已把 ~/.mocode/config 回填进 env,静态串会与
+ *  系统提示(MOCODE_SHELL 分支)自相矛盾。改为 getter,取用时才求值。
+ *  平台默认:Windows=cmd、其余=bash;MOCODE_SHELL 可翻转。 */
+export const shellParamDescription = (): string =>
   'Shell to run the command in: cmd | powershell | bash (default: ' +
-  (IS_WINDOWS ? 'cmd.exe' : 'bash') +
+  defaultShellLabel() +
   '). Pick the shell whose syntax the command is written in; do not mix (e.g. no %VAR% in bash, no $VAR in cmd).';
+
+/** 兼容旧引用:初始化即求值的快照(不追踪 MOCODE_SHELL 翻转;新代码用 shellParamDescription())。 */
+export const SHELL_PARAM_DESCRIPTION = shellParamDescription();

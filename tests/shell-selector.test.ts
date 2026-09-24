@@ -9,6 +9,8 @@
  */
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import {
   parseShellKind,
   shellSpawnSpec,
@@ -76,8 +78,17 @@ test('shellSpawnSpec(bash): -c 单行命令,不 verbatim', () => {
 test('defaultShellKind: 保守默认 —— Windows 恒为 cmd(不静默翻解释器),非 Windows 恒为 bash', () => {
   // 关键设计:即使本机 PATH 上有 Git Bash / WSL bash,默认也不翻转 —— 翻默认是产品级破坏性变更,
   // 现有 prompt/skill/codegraph 的 .cmd 调用都假设 cmd。切换只经显式 shell 参数或 MOCODE_SHELL。
-  const kind = defaultShellKind();
-  assert.equal(kind, process.platform === 'win32' ? 'cmd' : 'bash');
+  // 注意:测试进程会经 config 链路回填 ~/.mocode/config 里的 MOCODE_SHELL(用户可能已设),
+  // 断言「出厂默认」前必须先摘掉该变量,否则测试依赖外部环境是否干净。
+  const saved = process.env.MOCODE_SHELL;
+  try {
+    delete process.env.MOCODE_SHELL;
+    const kind = defaultShellKind();
+    assert.equal(kind, process.platform === 'win32' ? 'cmd' : 'bash');
+  } finally {
+    if (saved === undefined) delete process.env.MOCODE_SHELL;
+    else process.env.MOCODE_SHELL = saved;
+  }
 });
 
 test('defaultShellKind: MOCODE_SHELL 显式翻转(Unix 上 cmd 无意义,忽略)', () => {
@@ -101,8 +112,25 @@ test('defaultShellKind: MOCODE_SHELL 显式翻转(Unix 上 cmd 无意义,忽略)
 test('windowsGitBash: 返回值要么是存在的 bash 路径,要么 null;绝不返回 WSL(System32)的 bash', () => {
   const bash = windowsGitBash();
   if (bash === null) return; // 本机没装 Git Bash 也算合法结果
-  assert.ok(!/system32|sysnative/i.test(bash), `绝不能把 WSL bash 当默认: ${bash}`);
+  assert.ok(!/system32|sysnative|windowsapps/i.test(bash), `绝不能把 WSL bash 当默认: ${bash}`);
   assert.match(bash.toLowerCase(), /bash\.exe$/, '应指向 bash.exe 而非 wsl.exe');
+});
+
+test('windowsGitBash: PATH 上 git.exe(自定义安装位)→ 反推 <root>\\bin\\bash.exe(本机 D:\\Git 形态)', () => {
+  const bash = windowsGitBash();
+  if (process.platform !== 'win32' || bash === null) return;
+  // 探测到结果时,来源必须可解释:候选表标准位,或 PATH 上某 git.exe 的根下 bin/bash.exe。
+  const pathVar = process.env.PATH ?? process.env.Path ?? '';
+  const gitRoots = pathVar
+    .split(';')
+    .filter((dir) => dir && !/system32|sysnative|windowsapps/i.test(dir))
+    .map((dir) => resolve(dir, '..'))
+    .filter((root) => existsSync(join(root, 'cmd', 'git.exe')) || existsSync(join(root, 'bin', 'git.exe')));
+  const derivable = gitRoots.some((root) => existsSync(join(root, 'bin', 'bash.exe')));
+  if (derivable) {
+    const fromGitRoot = gitRoots.find((root) => existsSync(join(root, 'bin', 'bash.exe')));
+    assert.equal(bash, join(fromGitRoot!, 'bin', 'bash.exe'), 'PATH git.exe 存在时优先由 git 根推导');
+  }
 });
 
 test('SHELL_PARAM_DESCRIPTION: 文案含三个可选值(供 run_command/dev_server schema 复用)', () => {

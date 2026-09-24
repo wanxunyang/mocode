@@ -4,7 +4,7 @@ import { getSandboxRoot, filterEnv, isCommandDenied, jailResolve } from '../../s
 import type { Tool, ToolOutcome } from '../types.js';
 import { t } from '../../i18n/index.js';
 import {
-  SHELL_PARAM_DESCRIPTION,
+  shellParamDescription,
   defaultShellKind,
   parseShellKind,
   shellSpawnSpec,
@@ -188,8 +188,8 @@ export const runCommandTool: Tool = {
   name: 'run_command',
   description:
     'Run a FOREGROUND shell command, merging stdout+stderr. Default timeout 120s, hard cap 10min. ' +
-    'For tests, builds, git, etc. Pass shell=cmd|powershell|bash to choose the interpreter ' +
-    '(default: cmd.exe on Windows, bash elsewhere). Non-interactive cmd cannot run `timeout /t` — ' +
+    'For tests, builds, git, etc. Pass shell=cmd|powershell|bash to choose the interpreter — the platform ' +
+    'default (and any MOCODE_SHELL override) is stated in the system prompt. Non-interactive cmd cannot run `timeout /t` — ' +
     'pass shell=powershell (`Start-Sleep`) or shell=bash (`sleep`) when a wait is needed.\n' +
     'Anything that must keep running after this call returns — dev server, inference/model service, watcher, ' +
     'log tail — belongs to dev_server instead: it survives across tool calls and gives you an id for ' +
@@ -205,7 +205,7 @@ export const runCommandTool: Tool = {
         type: 'integer',
         description: `Timeout in milliseconds (default ${DEFAULT_COMMAND_TIMEOUT_MS}, clamped to ${MIN_COMMAND_TIMEOUT_MS}..${MAX_COMMAND_TIMEOUT_MS}). Raise it only for genuinely slow foreground work; use dev_server for long-running processes.`,
       },
-      shell: { type: 'string', enum: ['cmd', 'powershell', 'bash'], description: SHELL_PARAM_DESCRIPTION },
+      shell: { type: 'string', enum: ['cmd', 'powershell', 'bash'], description: shellParamDescription() },
     },
     required: ['command'],
   },
