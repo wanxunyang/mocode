@@ -24,6 +24,7 @@ import { memoryForgetTool } from './memory-forget.js';
 import { memoryGraphTool } from './memory-graph.js';
 import { subAgentTool } from './task.js';
 import { computerTool } from './computer.js';
+import { sessionSearchTool } from './session-search.js';
 
 /**
  * 所有内置工具,按注册顺序排列。
@@ -75,6 +76,8 @@ export const CAPABILITIES: Record<string, ToolCapabilities> = {
   memory_forget: { effect: 'write', concurrency: 'serial', resources: memoryResource },
   // memory_graph:search/neighbors/stats 只读、add 写,统一按写处理走串行(调用不频繁,简化)。
   memory_graph: { effect: 'write', concurrency: 'serial', resources: memoryResource },
+  // session_search 只读归档索引,纯本地无副作用;串行(每次重建 BM25 索引,避免并发交错)。
+  session_search: { effect: 'read', concurrency: 'serial' },
   // computer 桌面操控:桌面状态全局唯一,任何两个 computer 调用都不允许并发;
   // effect=process(不写工作区文件,不触发 rollback/diff 追踪),supportsAbort 中断长 wait/拖拽。
   computer: { effect: 'process', concurrency: 'serial', resources: () => ['desktop'], supportsAbort: true },
@@ -117,6 +120,7 @@ const rawBuiltinTools: Tool[] = [
   memoryGraphTool,
   subAgentTool,
   computerTool,
+  sessionSearchTool,
 ];
 
 /** 所有内置工具均携带显式能力；新增工具遗漏声明时 registry 会保守串行。 */

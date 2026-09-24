@@ -33,7 +33,15 @@ export const TOOL_GROUPS: Record<ToolGroup, readonly string[]> = {
   web: ['web_search', 'web_fetch'],
   frontend: ['browser', 'screenshot'],
   computer: ['computer'],
-  memory: ['memory_save', 'memory_search', 'memory_list', 'memory_update', 'memory_forget', 'memory_graph'],
+  memory: [
+    'memory_save',
+    'memory_search',
+    'memory_list',
+    'memory_update',
+    'memory_forget',
+    'memory_graph',
+    'session_search',
+  ],
   subagent: ['sub-agent'],
 };
 

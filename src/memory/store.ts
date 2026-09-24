@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import os from 'node:os';
 import path from 'node:path';
 import { MAX_ACTIVE, MAX_INDEX_ENTRIES, MAX_MEMORY_ENTRY, DECAY_DAYS, GC_DAYS } from '../tools/constants.js';
+import { TextSearchIndex } from '../context/text-search.js';
 
 export type MemoryType = 'decision' | 'fact' | 'pitfall' | 'reference' | 'feedback';
 export type MemoryStatus = 'active' | 'superseded' | 'archived';
@@ -189,52 +190,58 @@ export interface SearchOpts {
   limit?: number;
 }
 
-function scoreEntry(e: MemoryEntry, terms: string[]): number {
-  if (terms.length === 0) return 1; // 无关键词:全命中(取前 limit)
-  const id = e.id.toLowerCase();
-  const name = e.name.toLowerCase();
-  const summary = e.summary.toLowerCase();
-  const body = e.body.toLowerCase();
-  let s = 0;
-  for (const t of terms) {
-    if (id.includes(t)) s += 8; // 含 id 匹配:模型常按索引里的 id 取详情(slug 带连字符,名字带空格,不单独匹配 id 会漏)
-    if (name.includes(t)) s += 10;
-    if (summary.includes(t)) s += 5;
-    if (body.includes(t)) s += 1;
-  }
-  return s;
-}
-
-/** 关键词搜索:多词子串匹配(name 权重最高)。命中即 bump recallCount/lastRecalledAt 写回(遗忘衰减依据)。 */
+/**
+ * 关键词搜索:CJK 感知 BM25(共享 context/text-search),字段权重 name 10 > id 8 >
+ * summary 5 > body 1。命中即 bump recallCount/lastRecalledAt 写回(遗忘衰减依据)。
+ * 空查询:按旧行为返回前 limit 条(全命中)。
+ */
 export function searchEntries(query: string, opts: SearchOpts = {}): MemoryEntry[] {
   const all = loadAll();
   const status = opts.status ?? 'active';
   const pool = all
     .filter((e) => (status === 'any' ? true : e.status === status))
     .filter((e) => (opts.type ? e.type === opts.type : true));
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const scored = pool.map((e) => ({ e, s: scoreEntry(e, terms) })).filter((x) => x.s > 0);
-  scored.sort((a, b) => b.s - a.s);
   const limit = Math.max(1, Math.min(opts.limit ?? 5, 20));
-  const top = scored.slice(0, limit);
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const top: MemoryEntry[] = [];
+  if (terms.length === 0) {
+    top.push(...pool.slice(0, limit));
+  } else {
+    const index = new TextSearchIndex(
+      pool.map((e) => ({
+        id: e.id,
+        fields: [
+          { text: e.name, weight: 10 },
+          { text: e.id, weight: 8 },
+          { text: e.summary, weight: 5 },
+          { text: e.body, weight: 1 },
+        ],
+      })),
+    );
+    const byId = new Map(pool.map((e) => [e.id, e]));
+    for (const hit of index.search(query, limit)) {
+      const e = byId.get(hit.id);
+      if (e) top.push(e);
+    }
+  }
   if (top.length === 0) return [];
   // bump recall:只写有命中的 scope 文件
   const now = nowIso();
-  const hitIds = new Set(top.map((x) => x.e.id));
+  const hitIds = new Set(top.map((x) => x.id));
   for (const e of all) {
     if (hitIds.has(e.id)) {
       e.recallCount++;
       e.lastRecalledAt = now;
     }
   }
-  const hitScopes = new Set(top.map((x) => x.e.scope));
+  const hitScopes = new Set(top.map((x) => x.scope));
   for (const scope of hitScopes) {
     const p = pathForScope(scope);
     const entries = all.filter((e) => e.scope === scope);
     ensureDir(p);
     writeAtomic(p, entries);
   }
-  return top.map((x) => x.e);
+  return top;
 }
 
 /** 索引(无 body、不 bump recall)。 */

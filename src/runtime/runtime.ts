@@ -14,7 +14,16 @@ import {
   contextState as defaultContextState,
   createContextState,
   manualCompact,
+  planRetention,
+  runRetention,
+  searchArchiveIndex,
+  shouldAutoGc,
+  writeLastAutoGc,
+  DEFAULT_RETENTION_POLICY,
   type ContextState,
+  type ArchiveSearchHit,
+  type RetentionPlan,
+  type RetentionResult,
   type SchedulerRunLog,
   type SessionMeta,
   type SessionRecord,
@@ -53,6 +62,7 @@ export type RuntimeEventType =
   | 'session.resumed'
   | 'session.saved'
   | 'session.cleared'
+  | 'session.gc'
   | 'rollback.planned'
   | 'rollback.applied'
   | 'compact.started'
@@ -87,6 +97,16 @@ export interface RuntimeSessionFacade {
   ): SessionMeta;
   list(limit?: number): SessionMeta[];
   clear(): string;
+  /** 老会话 GC。dryRun(默认)仅返回计划不写盘;execute 执行归档/清除。当前会话永不归档。 */
+  gc(opts: { dryRun: false }): Promise<RetentionResult>;
+  gc(opts?: { dryRun?: boolean }): RetentionPlan;
+  /** 跨会话搜索归档(episodic):BM25 over 首条用户消息+摘要。 */
+  searchArchive(query: string, limit?: number): ArchiveSearchHit[];
+  /**
+   * 启动时限频自动 GC:距上次自动 GC ≥24h(或从未跑过)才执行,归档+purge 全做。
+   * 限频未到/被 MOCODE_AUTO_GC=false 关闭/没有可处理项时返回 null。
+   */
+  autoGc(): Promise<RetentionResult | null>;
 }
 
 export interface RuntimeRollbackFacade {
@@ -158,6 +178,33 @@ export class Runtime {
         return this.context.sessionStore.list(limit);
       },
       clear: () => this.createSession(true),
+      gc: (async (opts: { dryRun?: boolean } = {}) => {
+        this.assertIdle('gc sessions');
+        const root = this.context.sessionStore.sessionsRoot;
+        const currentId = this.context.sessionStore.getCurrentSessionId();
+        const plan = planRetention(root, DEFAULT_RETENTION_POLICY, Date.now(), currentId);
+        if (opts.dryRun !== false) return plan;
+        const result = await runRetention(root, plan);
+        this.emit('session.gc', { archived: result.archived, purged: result.purged });
+        return result;
+      }) as RuntimeSessionFacade['gc'],
+      searchArchive: (query, limit) => {
+        this.assertOpen();
+        return searchArchiveIndex(this.context.sessionStore.sessionsRoot, query, limit ?? 10);
+      },
+      autoGc: async () => {
+        this.assertOpen();
+        const root = this.context.sessionStore.sessionsRoot;
+        if (!shouldAutoGc(root)) return null;
+        const currentId = this.context.sessionStore.getCurrentSessionId();
+        const plan = planRetention(root, DEFAULT_RETENTION_POLICY, Date.now(), currentId);
+        // 先写闸门:即使本次没有命中项,也 记录“已检查”,避免每次启动都重新扫描。
+        writeLastAutoGc(root);
+        if (plan.items.length === 0) return null;
+        const result = await runRetention(root, plan);
+        this.emit('session.gc', { archived: result.archived, purged: result.purged, auto: true });
+        return result;
+      },
     };
     this.rollback = {
       list: () => {

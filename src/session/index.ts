@@ -26,6 +26,28 @@ export type { SessionMeta, SessionRecord } from './persist.js';
 export { SessionStore, defaultSessionStore, getActiveSessionStore, withSessionStore } from './store.js';
 export type { SessionStoreOptions } from './store.js';
 
+// ── 老会话 retention/GC(30 天归档 / 90 天清正文)────────────────────────
+export {
+  planRetention,
+  runRetention,
+  readArchiveIndex,
+  upsertArchiveIndex,
+  loadArchivedSession,
+  searchArchiveIndex,
+  retentionPaths,
+  shouldAutoGc,
+  writeLastAutoGc,
+  DEFAULT_RETENTION_POLICY,
+} from './retention.js';
+export type {
+  RetentionPolicy,
+  RetentionPlan,
+  RetentionResult,
+  RetentionItem,
+  ArchiveIndexEntry,
+  ArchiveSearchHit,
+} from './retention.js';
+
 export {
   appendCurrentSessionTrace,
   appendCurrentSessionTraceEvent,

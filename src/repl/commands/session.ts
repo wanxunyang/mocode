@@ -80,6 +80,62 @@ export const sessionCommands: CommandHandler[] = [
     await ctx.resumeFromPick(pick);
     return next();
   },
+  // /session gc [--yes]:老会话垃圾回收。30 天未活动→gzip 归档(archive/),90 天→清正文。
+  // 默认(及 --dry-run)只列计划不写盘;--yes 才执行——删除不可逆,用显式参数而非交互确认。
+  async (ctx) => {
+    const m = /^\/sessions?\s+gc\b(.*)$/.exec(ctx.line);
+    if (!m) return unhandled();
+    const args = (m[1] ?? '').trim();
+    const execute = args === '--yes';
+    if (args && args !== '--yes' && args !== '--dry-run') {
+      layout.contentWrite(`${ui.yellow}用法: /session gc [--dry-run|--yes]${ui.reset}\n`);
+      return next();
+    }
+    const fmtKb = (n: number): string => `${(n / 1024).toFixed(0)}KB`;
+    if (execute) {
+      const result = await ctx.runtime.session.gc({ dryRun: false });
+      layout.contentWrite(
+        `${ui.accent}已归档 ${result.archived}、清除 ${result.purged},回收 ${fmtKb(result.bytesReclaimed)}${ui.reset}\n`,
+      );
+      return next();
+    }
+    const plan = ctx.runtime.session.gc({ dryRun: true });
+    if (plan.items.length === 0) {
+      layout.contentWrite(`${ui.dim}(没有需要归档或清除的会话)${ui.reset}\n`);
+      return next();
+    }
+    for (const it of plan.items) {
+      const label = it.action === 'archive' ? `${ui.cyan}归档` : `${ui.yellow}清除`;
+      layout.contentWrite(
+        `  ${label}${ui.reset}  ${it.id}  ${it.ageDays.toFixed(0)}天  ${fmtKb(it.sizeBytes)}  ${it.firstUser}\n`,
+      );
+    }
+    layout.contentWrite(`  ${ui.dim}共 ${plan.items.length} 项,可回收 ${fmtKb(plan.bytesReclaimable)}${ui.reset}\n`);
+    layout.contentWrite(`${ui.dim}(dry-run;加 --yes 执行,归档/清除不可逆)${ui.reset}\n`);
+    return next();
+  },
+  // /ssearch <关键词>:跨会话搜索归档(episodic),命中显示 id/日期/摘要。
+  // 未 purge 的会话可直接 /resume <id> 取回;已 purge 仅可检索摘要。
+  (ctx) => {
+    if (!ctx.line.startsWith('/ssearch')) return unhandled();
+    const query = ctx.line.replace(/^\/ssearch\s*/, '').trim();
+    if (!query) {
+      layout.contentWrite(`${ui.yellow}用法: /ssearch <关键词>${ui.reset}\n`);
+      return next();
+    }
+    const hits = ctx.runtime.session.searchArchive(query, 10);
+    if (hits.length === 0) {
+      layout.contentWrite(`${ui.dim}(无匹配归档会话)${ui.reset}\n`);
+      return next();
+    }
+    for (const h of hits) {
+      const tag = h.purgedAt ? ` ${ui.yellow}[仅摘要]${ui.reset}` : ` ${ui.dim}[可 resume]${ui.reset}`;
+      layout.contentWrite(`  ${ui.cyan}${h.id}${ui.reset}  ${h.createdAt}${tag}\n`);
+      const body = (h.summary || h.firstUser).split('\n').slice(0, 4).join('\n');
+      layout.contentWrite(`  ${ui.dim}${body}${ui.reset}\n\n`);
+    }
+    return next();
+  },
   // /rollback:打开轮次菜单(↑/↓ 选,Enter 回滚到该轮并预填其输入,再 Enter 重新跑)。
   // 忽略任何数字参数(原「输数字选回滚」已删,统一走菜单)。无快照的旧轮次(/resume 重建)文件改动不可撤销。
   async (ctx) => {

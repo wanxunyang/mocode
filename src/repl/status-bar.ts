@@ -56,7 +56,8 @@ export function renderContextBar(history: ChatMessage[]): string {
   const lifecycleLine = lifecycle
     ? `\n  lifecycle · live ${lifecycle.live} · referenced ${lifecycle.referenced} · digested ${lifecycle.digested} · stubbed ${lifecycle.stubbed}`
     : '\n  lifecycle · no active snapshot (run a tool-enabled turn first)';
-  const archiveLine = `\n  archived tool results · ${archived.stubbed}`;
+  const archiveLine = `
+  archived tool results · ${archived.stubbed}${archived.cleared > 0 ? ` · cleared ${archived.cleared} (low-pressure)` : ''}`;
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${Math.round(pct * 100)}%  ${k(est)}/${k(win)} tokens · ${t('status.messages', { count: history.length })} (${src})${measuredNote}${ui.reset}${artifactLine}${lifecycleLine}${archiveLine}`;
 }
 

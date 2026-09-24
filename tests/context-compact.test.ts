@@ -193,6 +193,8 @@ test('automatic and manual compaction use the injected runtime config and transp
       contextBudget: true,
       contextRelprune: false,
       contextOptimize: false,
+      lowPressureRatio: 0.6,
+      toolClearing: true,
     },
     modelTransport: transport,
   };

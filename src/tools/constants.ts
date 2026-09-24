@@ -28,6 +28,15 @@ export const MAX_SKILL_RESULT = 64000;
 /** 微压缩时旧工具结果截到的存根长度(字符)。 */
 export const MAX_OLD_TOOL_STUB = 600;
 
+// ── 磁盘侧治理(见 session/store.ts)──────────────────────────────────────
+/** trace.jsonl 单文件大小上限(字节):超过即把整份 gzip 轮转为 trace.N.jsonl.gz 并清空。
+ *  trace 是纯诊断数据,可激进轮转;512KB 约含千余条事件。 */
+export const MAX_TRACE_BYTES = 512 * 1024;
+/** 保留的历史 trace 轮转份数(trace.1 .. trace.N),更老的硬删。 */
+export const MAX_TRACE_ROTATIONS = 3;
+/** rollback snapshots 压缩前滚动窗口:无论是否 compact,仅保留最近 N 个 user turn 的快照。 */
+export const MAX_SNAPSHOT_TURNS = 50;
+
 // ── 上下文压缩摘要(见 session/compact.ts defaultSummarize)────────────────
 /** 摘要输入单条消息封顶:逐条封顶保证每轮对话都有代表,替代整段中截(会切掉中间整轮)。
  *  转录总量超 SUMMARY_TRANSCRIPT_WINDOW_RATIO 时,这些封顶会被等比缩小重拼。 */

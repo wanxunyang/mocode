@@ -62,7 +62,13 @@ import { writeCompactionSnapshot } from './notes.js';
 export interface CompactionRuntime {
   readonly config: Pick<
     Config,
-    'contextWindowTokens' | 'autoCompact' | 'contextBudget' | 'contextRelprune' | 'contextOptimize'
+    | 'contextWindowTokens'
+    | 'autoCompact'
+    | 'contextBudget'
+    | 'contextRelprune'
+    | 'contextOptimize'
+    | 'lowPressureRatio'
+    | 'toolClearing'
   >;
   readonly modelTransport: ChatTransport;
   readonly rollbackStore?: Pick<RollbackStore, 'pruneAfterCompaction'>;

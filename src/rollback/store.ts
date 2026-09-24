@@ -15,6 +15,7 @@ import {
 import * as fsp from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config/index.js';
+import { MAX_SNAPSHOT_TURNS } from '../tools/constants.js';
 import { toText } from '../context/utils.js';
 import type { ChatMessage } from '../llm/index.js';
 import { truncateDisplay } from '../ui/render.js';
@@ -306,7 +307,22 @@ export class RollbackStore {
     this.turnIdCounter += 1;
     this.currentTurnId = this.turnIdCounter;
     this.turns.push({ turnId: this.currentTurnId, firstLine });
+    // 压缩前滚动窗口:snapshots.json 此前只在 compact 后剪枝,长会话压缩前持续累积
+    // (实测单文件 2MB)。每开新 turn 即丢掉超过 MAX_SNAPSHOT_TURNS 的老 turn 及其快照。
+    // env 覆盖仅供测试:MOCODE_MAX_SNAPSHOT_TURNS=2 可立刻触发滚动剪枝。
+    const envMax = Number(process.env.MOCODE_MAX_SNAPSHOT_TURNS);
+    this.pruneOldTurns(Number.isFinite(envMax) && envMax >= 1 ? envMax : MAX_SNAPSHOT_TURNS);
     return this.currentTurnId;
+  }
+
+  /** 仅保留最近 maxTurns 个 turn 及其快照;currentTurnId 被剪掉时归零(不应发生,当前 turn 恒在尾部)。 */
+  private pruneOldTurns(maxTurns: number): void {
+    if (this.turns.length <= maxTurns) return;
+    const kept = this.turns.slice(-maxTurns);
+    const alive = new Set(kept.map((turn) => turn.turnId));
+    this.turns = kept;
+    this.snapshots = this.snapshots.filter((snapshot) => alive.has(snapshot.turnId));
+    if (!alive.has(this.currentTurnId)) this.currentTurnId = 0;
   }
 
   getCurrentTurnId(): number {

@@ -1,7 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { gzipSync } from 'node:zlib';
 import path from 'node:path';
+import { MAX_TRACE_BYTES, MAX_TRACE_ROTATIONS } from '../tools/constants.js';
+import { loadArchivedSession, readArchiveIndex, retentionPaths } from './retention.js';
 import { config, getActiveModel } from '../config/index.js';
 import { getWorkspaceRoot } from '../workspace/index.js';
 import { isToolRouteGroupName, type ToolRouteGroupName } from '../config/profiles.js';
@@ -18,6 +30,8 @@ export interface SessionMeta {
   createdAt: string;
   model: string;
   firstUser: string;
+  /** 来自归档索引(正文在 archive/<id>.json.gz);仍可按 id resume。purge 后不可恢复故不列出。 */
+  archived?: boolean;
 }
 
 export interface SessionRecord extends SessionMeta {
@@ -148,16 +162,56 @@ export class SessionStore {
     return path.join(this.sessionsRoot, id, filename);
   }
 
+  /**
+   * 追加一条 trace 事件;当前 trace.jsonl 已达 MAX_TRACE_BYTES 时先轮转:
+   * 旧内容 gzip 成 trace.1.jsonl.gz,既有轮转依次后移(只留最近 MAX_TRACE_ROTATIONS 份),
+   * 然后清空当前文件。纯诊断数据,任何失败静默降级为普通追加。
+   */
   appendTrace(id: string, value: unknown): void {
     try {
       const dir = path.join(this.sessionsRoot, id);
       mkdirSync(dir, { recursive: true });
       const line = `${JSON.stringify(value)}\n`;
       const tracePath = path.join(dir, 'trace.jsonl');
+      // env 覆盖仅供测试:MOCODE_MAX_TRACE_BYTES=200 可立刻触发轮转。
+      const envMax = Number(process.env.MOCODE_MAX_TRACE_BYTES);
+      const maxTraceBytes = Number.isFinite(envMax) && envMax >= 0 ? envMax : MAX_TRACE_BYTES;
+      const size = existsSync(tracePath) ? statSync(tracePath).size : 0;
+      if (size >= maxTraceBytes) {
+        this.rotateTrace(dir, tracePath);
+      }
       writeFileSync(tracePath, line, { encoding: 'utf8', flag: 'a' });
     } catch {
       // Observability is best-effort and cannot block coding work.
     }
+  }
+
+  private rotateTrace(dir: string, tracePath: string): void {
+    const rotPath = (n: number): string => path.join(dir, `trace.${n}.jsonl.gz`);
+    // 最老的一份硬删;其余从老到新依次后移,腾出 trace.1。
+    try {
+      if (existsSync(rotPath(MAX_TRACE_ROTATIONS))) unlinkSync(rotPath(MAX_TRACE_ROTATIONS));
+    } catch {
+      // 删失败不致命,rename 覆盖亦可。
+    }
+    for (let n = MAX_TRACE_ROTATIONS - 1; n >= 1; n--) {
+      const from = rotPath(n);
+      if (!existsSync(from)) continue;
+      try {
+        renameSync(from, rotPath(n + 1));
+      } catch {
+        // Windows 下目标存在时 rename 可能失败:尝试删目标再移。
+        try {
+          unlinkSync(rotPath(n + 1));
+          renameSync(from, rotPath(n + 1));
+        } catch {
+          // 放弃这份轮转,保留新 gz 更重要。
+        }
+      }
+    }
+    const content = readFileSync(tracePath);
+    writeFileSync(rotPath(1), gzipSync(content));
+    writeFileSync(tracePath, '');
   }
 
   save(
@@ -187,7 +241,11 @@ export class SessionStore {
       queryHistory: [...queryHistory],
       lastToolGroups: [...lastToolGroups],
     };
-    writeFileSync(currentPath, JSON.stringify(record), 'utf8');
+    // 原子落盘:先写同目录 tmp 再 rename——全量重写(长会话可达数 MB)中途崩溃/断电
+    // 不会留下半个 JSON 把整个会话写坏(对齐 memory/store.ts writeAtomic)。
+    const tmpPath = path.join(this.sessionsRoot, id, 'session.json.tmp');
+    writeFileSync(tmpPath, JSON.stringify(record), 'utf8');
+    renameSync(tmpPath, currentPath);
     if (existsSync(legacyPath)) unlinkSync(legacyPath);
     return meta;
   }
@@ -195,8 +253,12 @@ export class SessionStore {
   load(id: string): SessionRecord | null {
     const currentPath = this.sessionPath(id);
     const legacyPath = path.join(this.sessionsRoot, `${id}.json`);
-    const source = existsSync(currentPath) ? currentPath : legacyPath;
-    if (!existsSync(source)) return null;
+    let source = existsSync(currentPath) ? currentPath : legacyPath;
+    // 活会话与 legacy 单文件都没有:回退从归档 gz 取回(30-90 天的会话仍可 resume)。
+    if (!existsSync(source)) {
+      const archived = loadArchivedSession(this.sessionsRoot, id);
+      return archived ?? null;
+    }
     try {
       const rec = JSON.parse(readFileSync(source, 'utf8')) as SessionRecord;
       if (!rec || !Array.isArray(rec.history)) return null;
@@ -248,7 +310,22 @@ export class SessionStore {
         // 跳过损坏文件。
       }
     }
-    return out;
+
+    // 归档(未 purge)会话并入列表:正文在 archive/<id>.json.gz,仍可按 id resume。
+    // 与 live 去重(理论上不会重叠),按时间统一降序后再截 limit。
+    const liveIds = new Set(out.map((m) => m.id));
+    for (const e of readArchiveIndex(retentionPaths(root).indexPath)) {
+      if (e.purgedAt || liveIds.has(e.id)) continue;
+      out.push({
+        id: e.id,
+        createdAt: e.createdAt ?? idToIso(e.id),
+        model: e.model ?? '',
+        firstUser: e.firstUser ?? '',
+        archived: true,
+      });
+    }
+    out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+    return Number.isFinite(maxResults) ? out.slice(0, maxResults) : out;
   }
 }
 

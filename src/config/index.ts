@@ -43,7 +43,7 @@ function loadEnvFiles(): void {
   }
 }
 
-// 在 loadEnvFiles 回填前捕获:MOCODE_THEME / MOCODE_LANGUAGE 是否由 shell 设置。
+// 在 loadEnvFiles 回填前先捕获:MOCODE_THEME / MOCODE_LANGUAGE 是否由 shell 显式 export(决定后续优先级提示)。
 const themeFromShell = process.env.MOCODE_THEME !== undefined;
 export const languageFromShell = process.env.MOCODE_LANGUAGE !== undefined;
 // 在 loadEnvFiles 回填前捕获:哪些 LLM 键由 shell 设置(决定 /model 写文件是否下次启动生效)。
@@ -120,6 +120,12 @@ export interface Config {
    *  关掉仍由 maybeCompact(history) 使用同一 80% 基础保护线。
    *  默认 true;设 MOCODE_BUDGET_SCHEDULER=false 全局回退。 */
   contextBudget: boolean;
+  /** 低压触发比例:占用达到该值(但未到 80%)即运行零 LLM 成本的
+   *  masking/tool-clearing;80% 才动 LLM 摘要。默认 0.6;MOCODE_LOW_PRESSURE_RATIO 覆盖。 */
+  lowPressureRatio: number;
+  /** Tool-result clearing 开关:冷区可重取工具(read_file/grep/glob/web_*)结果
+   *  在低压阶段替换为 tombstone。默认 true;MOCODE_TOOL_CLEARING=false 关闭。 */
+  toolClearing: boolean;
   /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
   autoReflect: boolean;
   /**
@@ -593,7 +599,8 @@ ${buildVoiceSection()}
 - Stop immediately when no more tools are needed; give conclusions directly.
 - **Do not stop prematurely during exploration**: if you started investigating but haven't gathered enough information to answer the user's question, keep calling tools. Only stop when you have sufficient evidence or hit a dead end.
 - **No flattery / no preamble in conclusions**: skip "Sure", "好的", "我已经完成了" and similar no-information prefixes — jump straight to substance.
-- Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.`;
+- Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.
+- Definition of done: never declare a multi-feature request finished just because the code exists. Each distinct user request listed in the plan must be actually verified (the relevant check run / observed result), not merely implemented; mark plan steps \`[x]\` only after that verification. If the user supplied an acceptance list, every item on it must pass. Leave unverified items explicitly listed as pending instead of collapsing them into "done".`;
 
   // 动态段(置于末尾):AGENTS.md 项目记忆 + notepad 索引/说明。工具簇特定指导由
   // ToolPolicyController.reminder() 按当前 turn 的 route 注入，避免旧全局 profile 与真实 schema 分裂。
@@ -695,6 +702,8 @@ export const config: Config = {
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',
   contextBudget: process.env.MOCODE_BUDGET_SCHEDULER !== 'false',
+  lowPressureRatio: Math.min(0.95, Math.max(0.1, Number(process.env.MOCODE_LOW_PRESSURE_RATIO) || 0.6)),
+  toolClearing: process.env.MOCODE_TOOL_CLEARING !== 'false',
   autoReflect: process.env.AUTO_REFLECT === 'true',
   memoryEnabled: process.env.MEMORY_ENABLED === 'true',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,

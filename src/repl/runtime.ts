@@ -365,6 +365,9 @@ export async function startRepl(
   if (!history.some((m) => m.role === 'user')) {
     layout.writeWelcomeBlock(welcomeLines());
   }
+  // 启动时限频自动 GC(24h 闸门,归档+purge 全做):fire-and-forget,
+  // 不阻塞进入主循环;runRetention 内部归档本地秒完、reflection 后台跑。可用 MOCODE_AUTO_GC=false 关闭。
+  void runtime.session.autoGc().catch(() => undefined);
   /**
    * 切换 agent 模式(Shift+Tab 触发,经 prompt.ts 的 onCycleMode 回调)。
    * cycleMode 翻 agentMode + applyMode 重写 history[0] + refreshStatusBase 设状态行 modeTag;

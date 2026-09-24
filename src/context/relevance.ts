@@ -283,13 +283,20 @@ export function computePruneStats(history: ChatMessage[]): {
   originalTokens: number;
   stubChars: number;
   freedTokens: number;
+  /** tool-clearing(P1-6)清除的可重取结果数,前缀 ⌦[已清除:。 */
+  cleared: number;
 } {
   let stubbed = 0;
   let originalChars = 0;
   let stubChars = 0;
+  let cleared = 0;
   for (const message of history) {
     if (message.role !== 'tool') continue;
     const content = toText((message as { content?: unknown }).content);
+    if (content.startsWith('⌦[已清除:')) {
+      cleared++;
+      continue;
+    }
     const isPruneStub = content.startsWith(STUB_PREFIX);
     const isDigest = content.startsWith('⌦[摘要:');
     if (!isPruneStub && !isDigest) continue;
@@ -306,5 +313,6 @@ export function computePruneStats(history: ChatMessage[]): {
     originalTokens,
     stubChars,
     freedTokens: Math.max(0, originalTokens - stubTokens),
+    cleared,
   };
 }

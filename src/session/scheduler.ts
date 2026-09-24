@@ -19,15 +19,21 @@ import {
 } from './compact.js';
 import { pruneStaleArtifacts, refreshArtifactFreshness } from '../context/artifacts.js';
 import { pruneSuperseded } from '../context/relevance.js';
+import { clearRetrievableResults } from '../context/clearing.js';
 import { createAgeAwareEncodingState } from '../context/age-aware.js';
 
 export interface PressureCompressionLog {
+  /** 80% 高压(动 LLM 摘要);60-80% 低压只跑确定性清理。 */
   triggered: boolean;
+  /** 60% 低压事件(零 LLM 成本 masking/clearing)。 */
+  lowTriggered: boolean;
   before: number;
   after: number;
   superseded: number;
   staleArtifacts: number;
   encodedLogsAndSearches: number;
+  /** tool-result clearing 清除的消息数。 */
+  cleared: number;
 }
 
 export interface SchedulerRunLog {
@@ -78,11 +84,13 @@ function atPressure(report: BudgetReport): boolean {
 function emptyPressure(report: BudgetReport): PressureCompressionLog {
   return {
     triggered: false,
+    lowTriggered: false,
     before: report.total,
     after: report.total,
     superseded: 0,
     staleArtifacts: 0,
     encodedLogsAndSearches: 0,
+    cleared: 0,
   };
 }
 
@@ -106,12 +114,15 @@ export function createBudgetScheduler(
       refreshArtifactFreshness(state, history);
       const report = evaluate(history, step, activeTools, ephemeralTokens);
       const pressure = emptyPressure(report);
-      pressure.triggered = atPressure(report);
+      const occupancy = Math.max(report.rawTotal, report.total);
+      pressure.triggered = occupancy >= report.window * DEFAULT_BUDGET_POLICY.pressureTriggerRatio;
+      pressure.lowTriggered = !pressure.triggered && occupancy >= report.window * runtime.config.lowPressureRatio;
 
       if (pressure.triggered) {
         // A single 80% pressure event owns every history rewrite. Run all enabled
         // low-cost cleanup first, then always compact; do not introduce per-stage
         // thresholds or stop early when one stage happens to cross below 80%.
+        // 注意:此阶段不跑 tool-clearing——旧区内容马上要喂给摘要器,清掉会把摘要弄瞎。
         if (runtime.config.contextRelprune) {
           pressure.superseded = pruneSuperseded(history, report.hotBoundary);
         }
@@ -121,15 +132,35 @@ export function createBudgetScheduler(
           pressure.encodedLogsAndSearches = ageAware.sweepPressure(history, report.hotBoundary);
         }
         pressure.after = evaluate(history, step, activeTools, ephemeralTokens).total;
+      } else if (pressure.lowTriggered) {
+        // 60-80% 低压:只做零 LLM 成本的确定性清理(masking/clearing),不摘要、不重建。
+        // 可重取结果在此阶段丢弃;热区(最近 4 user turn)不动。各步幂等,占用停留在
+        // 低压带时重复执行也很便宜。
+        if (runtime.config.contextRelprune) {
+          pressure.superseded = pruneSuperseded(history, report.hotBoundary);
+        }
+        pressure.staleArtifacts = pruneStaleArtifacts(state, history, report.hotBoundary);
+        if (runtime.config.toolClearing) {
+          pressure.cleared = clearRetrievableResults(history, report.hotBoundary);
+        }
+        if (runtime.config.contextOptimize) {
+          const ageAware = createAgeAwareEncodingState(history);
+          pressure.encodedLogsAndSearches = ageAware.sweepPressure(history, report.hotBoundary);
+        }
+        pressure.after = evaluate(history, step, activeTools, ephemeralTokens).total;
       }
 
       // Use the trigger report intentionally: cleanup may reduce the current estimate,
       // but crossing 80% commits this step to compacting for maximum token savings.
-      const actions = scheduleActions(report);
+      // 低压不进 LLM 压缩:actions 仅在 80% 高压时生成。
+      const actions = pressure.triggered ? scheduleActions(report) : [];
       let compactHistoryCalled = false;
       let historyRebuilt = false;
       let contentMutated =
-        pressure.superseded > 0 || pressure.staleArtifacts > 0 || pressure.encodedLogsAndSearches > 0;
+        pressure.superseded > 0 ||
+        pressure.staleArtifacts > 0 ||
+        pressure.encodedLogsAndSearches > 0 ||
+        pressure.cleared > 0;
       for (const _action of actions) {
         const result = await maybeCompact(history, report, undefined, state, activeTools, signal, runtime);
         compactHistoryCalled = true;
