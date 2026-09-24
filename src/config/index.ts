@@ -600,25 +600,15 @@ ${buildVoiceSection()}
   // 按需注入(#13):有内容的索引才拼对应标题,避免空标题噪声。
   const dynamicParts: string[] = [];
 
-  // 会话级私有尾段(子 agent 切片会丢弃):Session state 说明无条件注入在前,Project context 按需在后。
+  // 会话级私有尾段(子 agent 切片会丢弃)。只放一句指针:plan/note 的完整规则由
+  // plan_update / note_append 的 description 承载(两工具在常驻面,调用时一定可见),
+  // 避免把规则在系统提示里每请求预付第三遍。**标题 '## Session state' 必须保留**:
+  // buildMocodeCorePrompt 靠 MARKER_DROPPABLE_SECTION 给子 agent 切片。
   dynamicParts.push(
     `## Session state (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
-      'Persistent working surface for tasks with 3+ steps or context-loss risk; skip it for simple work. It survives compaction.\n\n' +
-      'Record and update the execution plan with the `plan_update` tool (not by hand-editing checkboxes); it keeps at most one active plan:\n' +
-      '```\n' +
-      '## Plan: <title>\n' +
-      'Goal: <outcome>\n' +
-      '### Steps\n' +
-      '- [ ] 1. **<short label, ≤20 chars>** — <self-contained step: target file/symbol, the change, and how to verify>\n' +
-      '### Progress\n' +
-      '- <completed/total>\n' +
-      '```\n' +
-      'Each step: short `title` (≤20 chars, e.g. "编写测试" / "修 status bar", shown in the status bar) + self-contained `content` (target file/symbol, exact change, verification — readable cold, without this conversation). ' +
-      'Keep at most one step in_progress; mark a step completed as soon as its work is done, not batched to the end of the turn. ' +
-      'plan_update creates notes.md on demand and settles the plan to `## Done:` when all steps complete; run read_file on the full notes.md to recover context after compaction. ' +
-      'Keep other notes concise and session-specific; use memory for stable cross-session facts.\n' +
-      '## Session notes (resident memory)\n' +
-      'For lasting-value discoveries — subtle constraints, decisions with downstream impact, open questions, or risks — call `note_append` IMMEDIATELY when you make the discovery. Notes land in the same notes.md and are re-injected into the prompt automatically (5k-token budget), surviving compaction. Do NOT use for routine progress (that is the plan) or stable cross-session facts (that is memory_save). Each call appends one item.',
+      'For tasks with 3+ steps or context-loss risk, keep an execution plan with `plan_update`; record non-obvious findings/decisions/open questions/risks with `note_append`. ' +
+      'Both write notes.md, which survives compaction — run read_file on it to recover context after compaction. ' +
+      'Their formats and rules live in each tool\u2019s description; do not hand-edit the files.',
   );
 
   // 日期段:模型需要知道今天才能判断 freshness(web 搜索、版本时效)。只随天变化,

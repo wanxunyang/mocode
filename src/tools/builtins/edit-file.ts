@@ -18,13 +18,11 @@ export const editFileTool: Tool = {
   name: 'edit_file',
   description: `Replace content in a file transactionally. Two modes:
 
-**String replacement (default):** old_string must occur EXACTLY once, copied verbatim from a fresh read_file output — never reconstruct from memory, summaries, or grep output (whitespace/indentation/line-ending details are lost there).
+**String replacement (default):** old_string must occur EXACTLY once; copy it verbatim from a fresh read_file output (see Tool policy — never reconstruct it from memory, summaries, or grep output).
 
 **Line-range:** line_start/line_end (1-based, inclusive) instead of old_string — for large blocks, repeated patterns, or hard-to-reproduce text.
 
-expected_hash (sha256 from read_file artifact header) is required and must match the current file; changed-since-read edits are rejected — re-read and retry with the new hash.
-
-Anti-patterns (will fail): old_string from memory/summary/stale call; multiple occurrences (add context to disambiguate); hash from another file or old read.`,
+expected_hash (sha256 from the read_file artifact header) is required and must match the current file; changed-since-read edits are rejected — re-read and retry with the new hash.`,
   risk: 'confirm',
   parameters: {
     type: 'object',

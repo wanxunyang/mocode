@@ -49,11 +49,9 @@ export const readFileTool: Tool = {
   name: 'read_file',
   description:
     'Read a file: text with line numbers, images as visual model input.\n' +
-    'Text — read before editing. Files >500 lines: grep first, then read_file with offset+limit (e.g. offset=350, limit=120); never read a whole large file in one call. ' +
-    'Need several regions of the SAME file? Issue those read_file calls together in one response (they run concurrently) instead of sequential offset+=limit walks. ' +
+    'Text — read before editing. For files >500 lines, grep first to locate, then read_file with offset+limit (e.g. offset=350, limit=120); never read a whole large file in one call. ' +
     'Images — PNG/JPEG/GIF/WebP detected by MAGIC BYTES (extension ignored), attached as visual input; detail=low|high controls resolution, oversized PNGs downscale automatically. ' +
-    'Other binaries are REJECTED with an explanation — use run_command with a proper tool (`file`, `strings`, disassembler) if you need their content. ' +
-    'Architecture/call-chain questions: prefer the codegraph skill over reading files one at a time.',
+    'Other binaries are REJECTED with an explanation — use run_command with a proper tool (`file`, `strings`, disassembler) if you need their content.',
   parameters: {
     type: 'object',
     properties: {
