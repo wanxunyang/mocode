@@ -341,7 +341,7 @@ system prompt 提供轻量建议而不是框架硬门：只检查支持下一步
 
 mocode 的**双层记忆**模型,跟 Skills 是两件事:
 
-- **Tier-1 — `AGENTS.md`(每轮自动加载,瘦身注入):** Markdown 项目记忆,每轮拼进 system prompt。发现路径:`~/.mocode/AGENTS.md` → 从 cwd 往上逐级 `AGENTS.md`(远→近拼接,近的覆盖更突出);超长截断并标注原始文件。**注入按章节过滤**:「目录结构」「扩展点」两节不进 prompt,压成一行指针(需要时 read_file AGENTS.md 按需取),常驻面只留 项目/命令/约定 等高价值节。运行 `/init` 生成或刷新(整体重写、≤3000 字、零和纪律:加新必删旧),纯 Markdown,可手写,无 schema。agent 工作中发现的「下次要记住的稳定事实」可先追加到 `.mocode/agents-draft.md` 草稿,由 `/init` 合并进 AGENTS.md 并清空。
+- **Tier-1 — `AGENTS.md`(每轮自动加载,瘦身注入):** Markdown 项目记忆,每轮拼进 system prompt。发现路径:`~/.mocode/AGENTS.md` → 从 cwd 往上逐级 `AGENTS.md`(远→近拼接,近的覆盖更突出);超长截断并标注原始文件。**注入按章节过滤**:「目录结构」「扩展点」两节不进 prompt,压成一行指针(需要时 read_file AGENTS.md 按需取),常驻面只留 项目/命令/约定 等高价值节。运行 `/init` 生成或刷新(整体重写、≤4000 字且不超过旧文件、按章节预算分配、装不下的高价值事实进 `.mocode/agents-draft.md` 草稿、产出新旧字数对账),纯 Markdown,可手写,无 schema。agent 工作中发现的「下次要记住的稳定事实」可先追加到 `.mocode/agents-draft.md` 草稿,由 `/init` 合并进 AGENTS.md 并清空。
 - **Tier-2 — `memory_*` 工具库(agent 主导,按需路由):** 离散带标签条目(`decision` / `fact` / `pitfall` / `reference` / `feedback`),按召回计数衰减(30 天 → archived,90 天 → 硬删 GC)。agent 用 `memory-read` 召回，用 `memory-write` 处理明确的持久化意图；保存前先搜索，已有条目优先更新而非重复创建。`MEMORY_ENABLED=false` 会硬禁用两簇，`true` 还会注入紧凑 Memory Index；可在 REPL 内用 `/memory_switch` 管理。
 
 ## 类型检查
