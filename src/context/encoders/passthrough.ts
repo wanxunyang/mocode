@@ -3,8 +3,8 @@ import type { ContextEncoder } from '../types.js';
 /**
  * 兜底 encoder:identity,原样返回。
  *  - classifier 未命中任何 kind(返回 'passthrough')时用。
- *  - pipeline 总开关关闭(MOCODE_CONTEXT_OPTIMIZE=false)时,所有 kind 都走它 → 行为与改造前逐字节一致。
- *  - Phase 1 阶段 registry 只注册它 → 全链路零行为变化。
+ *  - pipeline 总开关关闭(MOCODE_CONTEXT_OPTIMIZE=false)时,所有 kind 都走它 → 与不启用该阶段时的行为逐字节一致。
+ *  - 未注册任何 encoder(仅 passthrough)→ 全链路零改写。
  *  - 任何 encoder 报错时,pipeline catch 后回落到它(传原 output)。
  *
  * 永不抛错:output 可能是任意字符串(含 ANSI / 多行 / 非法 UTF-8 片段),identity 直接返回,无解析风险。

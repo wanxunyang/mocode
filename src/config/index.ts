@@ -108,10 +108,10 @@ export interface Config {
   autoCompact: boolean;
   /** Typed context encoding for old logs/searches during real pressure only.
    * Normal tool results remain raw (apart from the hard per-result safety cap).
-   * Default false; set MOCODE_CONTEXT_OPTIMIZE=true to enable this optional stage. */
+   * Default true; set MOCODE_CONTEXT_OPTIMIZE=false to disable this stage. */
   contextOptimize: boolean;
   /** Exact supersession pruning during real pressure only. Normal history is never
-   * rewritten. Default false; set MOCODE_CONTEXT_RELPRUNE=true to enable it. */
+   * rewritten outside pressure. Default true; set MOCODE_CONTEXT_RELPRUNE=false to disable it. */
   contextRelprune: boolean;
   /** Lifecycle provenance tracking only. It no longer ages or stubs history by
    * tool-call count. Default true; set MOCODE_LIFECYCLE=false to disable tracking. */
@@ -701,8 +701,8 @@ export const config: Config = {
     ? process.env.ANTHROPIC_PROMPT_CACHE !== 'false'
     : (__activePreset?.anthropicPromptCache ?? process.env.ANTHROPIC_PROMPT_CACHE !== 'false'),
   autoCompact: process.env.AUTO_COMPACT !== 'false',
-  contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE === 'true',
-  contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE === 'true',
+  contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
+  contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',
   contextBudget: process.env.MOCODE_BUDGET_SCHEDULER !== 'false',
   autoReflect: process.env.AUTO_REFLECT === 'true',

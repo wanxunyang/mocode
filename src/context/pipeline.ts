@@ -2,8 +2,9 @@
 //
 // Normal tool insertion does not call this module: agent/core stores the raw
 // result after only capToolResultForHistory(). The pressure scheduler invokes
-// this encoder for Cold logs and retrievable searches when the opt-in switch is
-// enabled. Encoder failures always fall back to the raw hard-capped result.
+// this encoder for Cold logs and retrievable searches; the switch defaults to
+// enabled and can be turned off via MOCODE_CONTEXT_OPTIMIZE=false. Encoder
+// failures always fall back to the raw hard-capped result.
 //
 // This does not alter tool schemas, execution, tool_call_id pairing, or TUI
 // rendering; it only provides a pressure-stage representation transform.
@@ -60,7 +61,7 @@ export function optimizeToolResult(
   context: EncoderRuntimeContext = {},
 ): string {
   boot();
-  // Disabled by default: normal history is raw apart from the hard cap.
+  // Opt-out: defaults on; when disabled, normal history is raw apart from the hard cap.
   if (!config.contextOptimize) {
     return capToolResultForHistory(name, output);
   }

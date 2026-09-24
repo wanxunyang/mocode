@@ -188,8 +188,8 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 | `ANYSEARCH_API_KEY`             | 联网搜索 API key(不配走匿名免费额度)                                         | 无                          |
 | `ANYSEARCH_BASE_URL`            | 搜索 API 端点                                                                | `https://api.anysearch.com` |
 | `SKILLS_DIRS`                   | 覆盖默认 skill 扫描目录(平台分隔符)                                          | 三目录自动扫描              |
-| `MOCODE_CONTEXT_OPTIMIZE`       | 仅在真实 pressure 下编码 Cold 日志/搜索（显式开启）                          | `false`                     |
-| `MOCODE_CONTEXT_RELPRUNE`       | 仅在真实 pressure 下裁剪精确 superseded 证据（显式开启）                     | `false`                     |
+| `MOCODE_CONTEXT_OPTIMIZE`       | 仅在真实 pressure 下编码 Cold 日志/搜索（设 `false` 关闭）                          | `true`                     |
+| `MOCODE_CONTEXT_RELPRUNE`       | 仅在真实 pressure 下裁剪精确 superseded 证据（设 `false` 关闭）                     | `true`                     |
 | `MOCODE_LIFECYCLE`              | 只维护 provenance 元数据，不按次数改写正文                                   | `true`                      |
 | `MAX_STEPS`                     | 每轮 Agent 循环最大步数（仅防无限循环）                                      | `1000`                      |
 | `SUB_AGENT_MAX_STEPS`           | 子 Agent 循环安全上限，默认与主 Agent 一致                                   | `1000`                      |

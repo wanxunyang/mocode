@@ -201,8 +201,8 @@ Common backend `base_url` values:
 | `ANYSEARCH_API_KEY`             | Web search API key (falls back to anonymous free quota if unset)                              | none                        |
 | `ANYSEARCH_BASE_URL`            | Search API endpoint                                                                           | `https://api.anysearch.com` |
 | `SKILLS_DIRS`                   | Override the default skill scan directories (platform path separator)                         | three default directories   |
-| `MOCODE_CONTEXT_OPTIMIZE`       | Opt-in typed encoding of Cold logs/searches, only under real pressure                         | `false`                     |
-| `MOCODE_CONTEXT_RELPRUNE`       | Opt-in exact superseded-evidence pruning, only under real pressure                            | `false`                     |
+| `MOCODE_CONTEXT_OPTIMIZE`       | Typed encoding of Cold logs/searches, only under real pressure (set `false` to disable)       | `true`                      |
+| `MOCODE_CONTEXT_RELPRUNE`       | Exact superseded-evidence pruning, only under real pressure (set `false` to disable)          | `true`                      |
 | `MOCODE_LIFECYCLE`              | Provenance metadata tracking; never ages or rewrites content                                  | `true`                      |
 | `MAX_STEPS`                     | Max agent loop steps per turn (infinite-loop safety only)                                     | `1000`                      |
 | `SUB_AGENT_MAX_STEPS`           | Sub-agent loop safety ceiling; defaults to the main-agent value                               | `1000`                      |
