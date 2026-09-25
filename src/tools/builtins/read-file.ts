@@ -10,6 +10,7 @@ import {
   type ImageMime,
 } from '../../attachments/image.js';
 import type { Tool, ToolOutcome } from '../types.js';
+import { config } from '../../config/index.js';
 
 /** 默认单次 read_file 拉取的行数。刻意压低,逼 LLM 分块读大文件,
  * 配合 description 中的 PAGINATION IS MANDATORY 引导。
@@ -70,7 +71,7 @@ export const readFileTool: Tool = {
     },
     required: ['path'],
   },
-  async execute(args): Promise<ToolOutcome> {
+  async execute(args, toolCtx): Promise<ToolOutcome> {
     const path = String(args.path);
     const offset = Number(args.offset ?? 1);
     // 无论 LLM 传多大,单次硬钳到 MAX_FILE_LINES,杜绝「绕过分页引导一把全拿」。
@@ -148,10 +149,28 @@ export const readFileTool: Tool = {
     // 让模型误以为读到了带一行空白的文件。data.length===0 才是真·空的判据。
     if (data.length === 0)
       return { status: 'success', code: 'OK', retryable: false, output: `${artifactHeader}\n(空文件)` };
+    // P2 重复读短路:同区间 + hash 未变 + 内容仍在 context → 短指针。
+    const reqStart = start + 1;
+    const reqEnd = end;
+    const dedup = toolCtx?.readDedup;
+    if (config.readDedup && dedup) {
+      const hit = dedup.findUnchanged(path, reqStart, reqEnd, contentHash(data));
+      if (hit) {
+        return {
+          status: 'success',
+          code: 'OK',
+          retryable: false,
+          output:
+            `${artifactHeader}\n[unchanged since step ${hit.step}, hash=${hit.hash}] ` +
+            '该区间内容已在上方上下文中,未重复返回;若已被压缩或确需重读,请忽略本提示再读一次。',
+        };
+      }
+    }
     const output =
       end < lines.length
         ? `${artifactHeader}\n${body}\n\n... (${lines.length - end} 行未显示,共 ${lines.length} 行)`
         : `${artifactHeader}\n${body}`;
+    dedup?.record(path, reqStart, reqEnd, contentHash(data));
     return { status: 'success', code: 'OK', retryable: false, output };
   },
 };

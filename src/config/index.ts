@@ -2,6 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import type { ReasoningEffort } from '../llm/reasoning.js';
+import { parseReasoningEffort, getScopedEffort } from '../llm/reasoning.js';
+import { getActiveSkill } from '../skills/activation.js';
 import { getCurrentSessionId } from '../session/state.js';
 import { getNotesFilePath, extractActiveNotesSections } from '../session/notes.js';
 import { buildGuiActionsSection } from '../session/gui-actions.js';
@@ -56,6 +59,7 @@ const LLM_ENV_KEYS = [
   'LLM_MODEL',
   'CONTEXT_WINDOW_TOKENS',
   'ANTHROPIC_PROMPT_CACHE',
+  'REASONING_EFFORT',
 ] as const;
 export const DEFAULT_CONTEXT_WINDOW_TOKENS = 256000;
 const llmKeysFromShell = LLM_ENV_KEYS.filter((k) => process.env[k] !== undefined);
@@ -104,8 +108,17 @@ export interface Config {
   includeUsage: boolean;
   /** Anthropic Prompt Caching。开启时在稳定 system/tools 前缀设置 ephemeral cache breakpoint。 */
   anthropicPromptCache: boolean;
+  /** 思考强度(#token-efficiency P3);auto = 不下发,保持旧行为。优先级:env > 激活预设 > config 裸键 > auto。 */
+  reasoningEffort: ReasoningEffort;
   /** 自动压缩总开关。关掉则只靠手动 /compact。 */
   autoCompact: boolean;
+  /** 摘要调用走 cache-safe fork(复用父会话 system+tools+旧消息,仅尾部追加 compact 指令)。
+   *  默认 true;MOCODE_COMPACT_FORK=false 回落到旧的独立 compressor 请求。
+   *  fork 因 buffer 不足装不下时自动回落旧路径,无需手动关。 */
+  compactFork: boolean;
+  /** read_file 重复读短路:同区间、文件未变、内容仍在 context 时返短指针。
+   *  默认 true;MOCODE_READ_DEDUP=false 关闭。 */
+  readDedup: boolean;
   /** Typed context encoding for old logs/searches during real pressure only.
    * Normal tool results remain raw (apart from the hard per-result safety cap).
    * Default true; set MOCODE_CONTEXT_OPTIMIZE=false to disable this stage. */
@@ -148,6 +161,8 @@ export interface Config {
   mcpEnabled: boolean;
   /** 子 Agent 默认步数上限，只防止无限循环；调用方可按任务提高。 */
   subAgentMaxSteps: number;
+  /** 子 agent 递归派生深度上限(≥1);SUB_AGENT_MAX_DEPTH 覆盖,默认 3。 */
+  subAgentMaxDepth: number;
   /** 同一轮内派发的多个子 agent 的并发上限(≥1)；1 即退化为逐个串行。 */
   subAgentConcurrency: number;
   /** 会话落盘目录(cwd 下)。 */
@@ -698,6 +713,11 @@ export const config: Config = {
     ? process.env.ANTHROPIC_PROMPT_CACHE !== 'false'
     : (__activePreset?.anthropicPromptCache ?? process.env.ANTHROPIC_PROMPT_CACHE !== 'false'),
   autoCompact: process.env.AUTO_COMPACT !== 'false',
+  reasoningEffort: llmKeysFromShell.includes('REASONING_EFFORT')
+    ? (parseReasoningEffort(process.env.REASONING_EFFORT) ?? 'auto')
+    : (__activePreset?.reasoningEffort ?? parseReasoningEffort(process.env.REASONING_EFFORT) ?? 'auto'),
+  compactFork: process.env.MOCODE_COMPACT_FORK !== 'false',
+  readDedup: process.env.MOCODE_READ_DEDUP !== 'false',
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',
@@ -711,6 +731,7 @@ export const config: Config = {
   subAgentEnabled: process.env.MOCODE_SUBAGENT_ENABLED === 'true',
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || Number(process.env.MAX_STEPS) || 1000,
   subAgentConcurrency: Math.max(1, Number(process.env.SUB_AGENT_CONCURRENCY) || 5),
+  subAgentMaxDepth: Math.max(1, Number(process.env.SUB_AGENT_MAX_DEPTH) || 3),
   frontendToolsEnabled: process.env.MOCODE_FRONTEND_TOOLS_ENABLED === 'true',
   computerUseEnabled: process.env.MOCODE_COMPUTER_USE_ENABLED === 'true',
   mcpEnabled: process.env.MOCODE_MCP_ENABLED !== 'false',
@@ -760,6 +781,39 @@ export function getActiveModel(): string {
 }
 
 /**
+ * 会话级思考强度钉死(P3),与 sessionModel 同构:窗口启动 pinSessionEffort() 捕获,
+ * /effort 显式修改同步更新钉死值;其它窗口的设置互不影响。
+ */
+let sessionEffort: ReasoningEffort | null = null;
+
+/** REPL 启动时调用一次。 */
+export function pinSessionEffort(): void {
+  sessionEffort = config.reasoningEffort;
+}
+
+/** 运行中 agent 实际使用的思考强度。 */
+export function getActiveEffort(): ReasoningEffort {
+  return sessionEffort ?? config.reasoningEffort;
+}
+
+/**
+ * 生效思考强度统一解析(P3 §4.8):
+ *   显式 per-request 参数(compact/reflect 的 low)> fork ALS scope(skill 子树)
+ *   > inline 激活 skill 的 effort > 会话级。
+ * shell env 显式设置 REASONING_EFFORT 时,skill effort 不参与(对齐 Claude Code:env 最高)。
+ */
+export function effectiveReasoningEffort(explicit?: ReasoningEffort): ReasoningEffort {
+  if (explicit !== undefined) return explicit;
+  const scoped = getScopedEffort();
+  if (scoped) return scoped;
+  if (!config.llmKeysFromShell.includes('REASONING_EFFORT')) {
+    const skillEffort = getActiveSkill()?.effort;
+    if (skillEffort) return skillEffort;
+  }
+  return getActiveEffort();
+}
+
+/**
  * 运行时更新模型相关配置(/model 命令调)。
  * - 更新 config 对象字段(即时生效:chat() 读 config.model,reconfigureClient 读 config.baseURL/apiKey)。
  * - 同步 process.env(保持内存一致:其他读 process.env 的路径也拿到新值;且使新值在下次启动的
@@ -774,6 +828,7 @@ export function updateModelConfig(opts: {
   apiKey?: string;
   contextWindowTokens?: number;
   anthropicPromptCache?: boolean;
+  reasoningEffort?: ReasoningEffort;
 }): void {
   if (opts.provider !== undefined) {
     config.provider = opts.provider;
@@ -801,6 +856,11 @@ export function updateModelConfig(opts: {
   if (opts.anthropicPromptCache !== undefined) {
     config.anthropicPromptCache = opts.anthropicPromptCache;
     process.env.ANTHROPIC_PROMPT_CACHE = opts.anthropicPromptCache ? 'true' : 'false';
+  }
+  if (opts.reasoningEffort !== undefined) {
+    config.reasoningEffort = opts.reasoningEffort;
+    if (sessionEffort !== null) sessionEffort = opts.reasoningEffort;
+    process.env.REASONING_EFFORT = opts.reasoningEffort;
   }
 }
 

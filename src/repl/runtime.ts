@@ -7,6 +7,7 @@ import {
   buildBasePrompt,
   getPlanModeSuffix,
   pinSessionModel,
+  pinSessionEffort,
 } from '../config/index.js';
 import { t } from '../i18n/index.js';
 import { listPresets, migrateCurrentToPreset } from '../config/presets.js';
@@ -215,6 +216,7 @@ export async function startRepl(
   setAgentMode('auto');
   // 钉死本会话模型：之后运行中 agent 一律用此值，其它窗口的 /model switch 不会影响本窗口。
   pinSessionModel();
+  pinSessionEffort();
   // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
   // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());

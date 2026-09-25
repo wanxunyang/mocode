@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createStagedToolDispatcher } from '../src/agent/stages/tool-dispatcher.js';
+import { createReadDedup } from '../src/tools/read-dedup.js';
 import { clearToolsExtension, registerToolsExtension } from '../src/tools/registry.js';
 import type { Tool } from '../src/tools/types.js';
 import type { ToolCallRef } from '../src/llm/index.js';
@@ -49,6 +50,7 @@ const dispatchRequest = (
   isDenied: () => false,
   currentAllowedToolNames: () => calls.map((call) => call.name),
   delegation: () => ({ history: [], tools: [] }),
+  readDedup: createReadDedup(),
   argumentErrorHint: () => undefined,
   orchestrationConcurrency,
   onEvent: () => undefined,

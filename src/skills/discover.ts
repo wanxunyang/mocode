@@ -9,6 +9,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { ReasoningEffort } from '../llm/reasoning.js';
+import { parseReasoningEffort } from '../llm/reasoning.js';
 import { builtinSkillNames } from './builtin-skills.js';
 
 export type SkillOrigin = 'builtin' | 'user' | 'project';
@@ -35,6 +37,8 @@ export interface Skill {
   modelInvocable: boolean;
   /** `max-steps:` 子 agent 步数上限;缺省取 config.subAgentMaxSteps。 */
   maxSteps?: number;
+  /** frontmatter effort(P3):skill 激活期覆盖会话级(但不覆盖 shell env)。 */
+  effort?: ReasoningEffort;
   /** `argument-hint:` 补全提示。 */
   argumentHint?: string;
   /** 触发场景补充(与 description 合并用于路由)。 */
@@ -137,7 +141,7 @@ function resolveContext(meta: Record<string, FrontmatterValue>): SkillContext {
  *  该字段不再产生任何效果,按"已忽略"提示作者,避免其误以为仍有限权语义。 */
 function collectWarnings(meta: Record<string, FrontmatterValue>): string[] {
   const warnings: string[] = [];
-  for (const k of ['hooks', 'model', 'effort', 'paths', 'agent']) {
+  for (const k of ['hooks', 'model', 'paths', 'agent']) {
     if (k in meta) warnings.push(`字段 "${k}" 当前不支持,已忽略`);
   }
   return warnings;
@@ -286,6 +290,7 @@ export function discoverSkills(): Skill[] {
           disallowedTools: asArray(meta, 'disallowed-tools'),
           modelInvocable: !truthy(meta, 'disable-model-invocation'),
           maxSteps: num(meta, 'max-steps'),
+          effort: parseReasoningEffort(scalar(meta, 'effort')),
           argumentHint: scalar(meta, 'argument-hint')?.trim() || undefined,
           whenToUse: scalar(meta, 'when_to_use')?.trim() || undefined,
           origin,

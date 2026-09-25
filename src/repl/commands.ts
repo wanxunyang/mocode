@@ -29,9 +29,12 @@ export function buildSlashCommands(): SlashCommand[] {
     { name: '/skills', desc: d('commands.skills') },
     { name: '/skill', desc: '执行某个 skill(/skill <name> [args-json])' },
     { name: '/compact', desc: d('commands.compact') },
+    { name: '/stats', desc: '查看本会话 token 用量与缓存命中率' },
+    { name: '/effort', desc: '设置思考强度(/effort [low|medium|high|auto])' },
     { name: '/resume', desc: d('commands.sessionResume') },
     { name: '/sessions', desc: d('commands.sessionBrowse') },
     { name: '/rollback', desc: d('commands.sessionRollback') },
+    { name: '/ssearch <关键词>', value: '/ssearch ', submit: false, desc: '跨会话搜索归档会话' },
     {
       name: '/memory',
       desc: d('commands.memory'),

@@ -98,16 +98,23 @@ export function composeModelLine(status: StatusBarData, cols: number): string {
   const HINT = t('status.modeSwitch');
   const hintW = modeTag ? displayWidth(HINT) : 0;
   const hintPart = modeTag ? `${ui.dim}${HINT}${ui.reset}` : '';
+  // P3 effort chip:非 auto 时显示,与 modeTag 同级色(运行时状态),优先级在 hint 之上。
+  const effortTag = status.effort ?? '';
+  const effortPart = effortTag ? `${modeColor}⚡${effortTag}${ui.reset}` : '';
+  const effortW = effortTag ? displayWidth('⚡') + displayWidth(effortTag) : 0;
+  const sepME = modePart && effortPart ? STATUS_SEP : '';
   const tokChip = formatTurnTokenChip(status.lastTurnUsage);
   const tokW = displayWidth(stripAnsi(tokChip));
   // 合并左段:段间留 2 空格分隔。极窄时 hint 与 chip 都可能藏掉。
   // 优先级:modeTag(必) > chip(提示累计 token,有信息量)> hint(纯说明性,窄时最先省)。
-  const sepMH = modePart && (hintPart || tokChip) ? '  ' : '';
+  const sepMH = (modePart || effortPart) && (hintPart || tokChip) ? '  ' : '';
   const sepHT = hintPart && tokChip ? '  ' : '';
-  const leftStr = `${modePart}${sepMH}${hintPart}${sepHT}${tokChip}`;
+  const leftStr = `${modePart}${sepME}${effortPart}${sepMH}${hintPart}${sepHT}${tokChip}`;
   const leftW =
     modeW +
-    (modePart && (hintPart || tokChip) ? sepMH.length : 0) +
+    (sepME ? sepME.length : 0) +
+    effortW +
+    ((modePart || effortPart) && (hintPart || tokChip) ? sepMH.length : 0) +
     hintW +
     (hintPart && tokChip ? sepHT.length : 0) +
     tokW;
@@ -128,15 +135,21 @@ export function composeModelLine(status: StatusBarData, cols: number): string {
   if (leftW + minGap + rightW > cols) {
     // 优先藏 hint(纯说明,信息密度最低):仅留 modePart + sep + tokChip
     if (modePart && tokChip && hintPart) {
-      const leftStr2 = `${modePart}${sepMH}${tokChip}`;
-      const leftW2 = modeW + sepMH.length + tokW;
+      const leftStr2 = `${modePart}${sepME}${effortPart}${effortPart ? STATUS_SEP : ''}${tokChip}`;
+      const leftW2 = modeW + (sepME ? sepME.length : 0) + effortW + (effortPart ? STATUS_SEP_W : 0) + tokW;
       if (leftW2 + minGap + rightW <= cols) {
         return twoColumn(leftStr2, leftW2, rightStr, rightW, cols);
       }
     }
     // 再藏 token chip:仅留 modePart
-    if (modePart && tokChip) {
-      return twoColumn(modePart, modeW, rightStr, rightW, cols);
+    if ((modePart || effortPart) && tokChip) {
+      return twoColumn(
+        `${modePart}${sepME}${effortPart}`,
+        modeW + (sepME ? sepME.length : 0) + effortW,
+        rightStr,
+        rightW,
+        cols,
+      );
     }
   }
   return twoColumn(leftStr, leftW, rightStr, rightW, cols);
@@ -374,6 +387,7 @@ export function setStatusBase(b: {
   contextBar: string;
   cwd: string;
   modeTag?: string;
+  effort?: string;
   planSummary?: string;
   lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }): void {

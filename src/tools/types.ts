@@ -23,6 +23,8 @@ export interface ToolContext {
     history: readonly OpenAI.Chat.Completions.ChatCompletionMessageParam[];
     tools: readonly OpenAI.Chat.Completions.ChatCompletionTool[];
   };
+  /** 当前用户 turn 的重复读 scope(#token-efficiency P2);非 agent 直接调用时缺省。 */
+  readDedup?: import('./read-dedup.js').ReadDedup;
 }
 
 /** 工具风险等级(权限系统用)。 */

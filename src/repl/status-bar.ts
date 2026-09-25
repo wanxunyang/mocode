@@ -3,7 +3,7 @@ import path from 'node:path';
 import { ui } from '../ui/theme.js';
 import * as layout from '../ui/layout.js';
 import { t } from '../i18n/index.js';
-import { config } from '../config/index.js';
+import { config, getActiveEffort } from '../config/index.js';
 import { contextState } from '../session/index.js';
 import { DEFAULT_BUDGET_POLICY } from '../context/budget.js';
 import {
@@ -186,6 +186,7 @@ export function refreshStatusBase(history: ChatMessage[], lastTurnUsage?: ChatUs
     contextBar: renderContextBarInline(history),
     cwd: process.cwd(),
     modeTag: getAgentMode() === 'plan' ? 'Plan' : 'Auto',
+    effort: getActiveEffort() === 'auto' ? undefined : getActiveEffort(),
     planSummary: readPlanFromNotes(),
     lastTurnUsage,
   });

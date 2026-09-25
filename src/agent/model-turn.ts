@@ -8,6 +8,10 @@ import {
 } from '../llm/index.js';
 import { visionBatch, visionKeep } from '../config/index.js';
 import type { ContextState } from '../session/compact.js';
+import { getActiveSessionStore } from '../session/store.js';
+import { getCurrentSessionId } from '../session/state.js';
+import { toUsageRecord } from '../session/usage-stats.js';
+import type { ReadDedup } from '../tools/read-dedup.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
 import type { AgentRunOptions, AgentRunResult } from './run-contracts.js';
 import type { AgentRuntimeContext } from './runtime-context.js';
@@ -41,6 +45,7 @@ export interface ModelTurnInput {
   activeTools: OpenAI.Chat.Completions.ChatCompletionTool[];
   runPolicy: RunPolicySnapshot;
   step: number;
+  readDedup: ReadDedup;
   cacheState: ModelTurnCacheState;
   turnLifecycle: TurnLifecycle;
   cancellationLifecycle: { restore(): void };
@@ -77,6 +82,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     activeTools,
     runPolicy,
     step,
+    readDedup,
     cacheState,
     turnLifecycle,
     cancellationLifecycle,
@@ -102,6 +108,8 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   // 视觉滑动窗口**必须剪在 trim 之前**:contextTrimmer.trim() 拿的是 historyManager.snapshot(),
   // 若先 trim,预算口径还是未剪的旧数组,80% 压力线照旧被图像撑爆(design-notes/vision-window.md §2.1)。
   // 只在这一个地方剪;下面的 overflow 重试路径读同一个 snapshot,会自动受益。
+  runtimeContextState.currentStep = step;
+  readDedup.beginStep(step);
   const visionKeepN = visionKeep();
   if (visionKeepN > 0 && historyManager.pruneVisionWindow({ keep: visionKeepN, batch: visionBatch(), step })) {
     rebuildHistoryIndexes();
@@ -117,6 +125,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     signal,
   });
   historyRebuilt = trimResult.kind === 'rebuild';
+  if (trimResult.kind === 'rebuild' || trimResult.kind === 'content') readDedup.markContextChanged();
   const trimStats = trimResult.kind === 'aborted' ? {} : trimResult.stats;
   if (scheduler && trimStats.compactHistoryCalled) {
     emitTrace('compact', {
@@ -319,6 +328,11 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   });
   runtimeContextState.lastUsage = result.usage;
   usageMeter.add(result.usage);
+  // P1:per-step 用量落盘(失败静默,见 appendUsage)。estimatedTotal 用本次裸估算,
+  // 供 /stats 校验估算偏差。
+  const record = toUsageRecord(step, 'main', result.usage, stepPromptEst);
+  const sessionId = getCurrentSessionId();
+  if (record && sessionId) getActiveSessionStore().appendUsage(sessionId, record);
   if (result.usage) {
     cacheState.lastStepPromptTokens = result.usage.promptTokens;
     if (result.usage.cachedTokens > 0) cacheState.providerCacheSeen = true;

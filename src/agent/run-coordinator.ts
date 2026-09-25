@@ -27,6 +27,7 @@ import {
   pushToolResult,
 } from './tool-helpers.js';
 import { contextState, summarizeToolArguments } from '../session/index.js';
+import { createReadDedup } from '../tools/read-dedup.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
 import { invalidateArtifacts, rehydrateArtifacts } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
@@ -96,6 +97,8 @@ export async function runAgentCoreLegacy(
   const { usageMeter, emitTrace, traceTurnId } = turnLifecycle;
   const toolTurnPlanState = { stepsSincePlanTouch: 0 };
   historyManager.appendUserTurn(userInput);
+  // P2:每用户 turn 一个重复读 scope,经 dispatcher → ToolContext 透传给 read_file。
+  const readDedup = createReadDedup();
   // The initial cancellation checkpoint is captured after the user turn and before any model/tool work.
   // Relevance and lifecycle collect provenance during normal work. Neither path
   // rewrites history; exact supersession is applied only by the pressure scheduler.
@@ -214,6 +217,7 @@ export async function runAgentCoreLegacy(
           activeTools,
           runPolicy,
           step,
+          readDedup,
           cacheState: modelCacheState,
           turnLifecycle,
           cancellationLifecycle,
@@ -389,6 +393,7 @@ export async function runAgentCoreLegacy(
                   isDenied: isToolDeniedForStep,
                   currentAllowedToolNames,
                   delegation: delegationForOrchestrator,
+                  readDedup,
                   argumentErrorHint: (name) => argumentErrorHint(name, runtimeContextState),
                   ...(opts.toolPolicy
                     ? {

@@ -9,6 +9,7 @@
 // 叶子模块:仅依赖 toolmap(亦叶子),不引 tools/permissions/agent,避免环。
 
 import { mapSkillToolName } from './toolmap.js';
+import type { ReasoningEffort } from '../llm/reasoning.js';
 import type { Skill } from './discover.js';
 
 export interface SkillActivation {
@@ -16,6 +17,8 @@ export interface SkillActivation {
   name: string;
   /** 命中即运行时禁用(幻觉调用也执行不了)。 */
   disallowed: Set<string> | null;
+  /** 激活 skill 声明的 effort;最近加载的覆盖。 */
+  effort?: ReasoningEffort;
 }
 
 let active: SkillActivation | null = null;
@@ -30,6 +33,8 @@ export function activateSkill(skill: Skill): void {
   active = {
     name: skill.name,
     disallowed: disallowed.size > 0 ? disallowed : null,
+    // 后者带 effort 则覆盖;没带则继承前一 skill 的设置。
+    effort: skill.effort ?? active?.effort,
   };
 }
 

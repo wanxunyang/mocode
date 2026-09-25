@@ -90,6 +90,8 @@ export interface ModelRequest {
   readonly history: readonly ChatMessage[];
   readonly tools: readonly OpenAI.Chat.Completions.ChatCompletionTool[];
   readonly handlers: ModelStreamHandlers;
+  /** 本请求思考强度;缺省由 transport 读会话级 getActiveEffort()。 */
+  readonly reasoningEffort?: import('../../llm/reasoning.js').ReasoningEffort;
 }
 
 /** Executes one immutable model request and never mutates persistent history. */
@@ -141,6 +143,8 @@ export interface ToolDispatchRequest {
   readonly isDenied: (name: string) => boolean;
   readonly currentAllowedToolNames: () => string[];
   readonly delegation: () => ToolDelegationSnapshot;
+  /** 当前用户 turn 的重复读 scope;dispatcher 透传给工具执行选项。 */
+  readonly readDedup: import('../../tools/read-dedup.js').ReadDedup;
   readonly argumentErrorHint: (name: string) => string | undefined;
   readonly expandToolGroups?: (groups: readonly unknown[], reason: string) => ToolPolicyExpansion;
   /** 子 agent 等编排工具的并发上限覆写；缺省回落到全局 config.subAgentConcurrency。 */

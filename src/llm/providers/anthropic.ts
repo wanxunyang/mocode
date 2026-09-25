@@ -1,5 +1,14 @@
-import { config, getActiveModel } from '../../config/index.js';
-import type { ChatMessage, ChatResult, ChatTool, ChatUsage, StreamHandlers, ToolCallRef } from '../index.js';
+import { config, effectiveReasoningEffort, getActiveModel } from '../../config/index.js';
+import type {
+  ChatMessage,
+  ChatResult,
+  ChatTool,
+  ChatUsage,
+  LlmRequestOverrides,
+  StreamHandlers,
+  ToolCallRef,
+} from '../index.js';
+import { resolveReasoningParams } from '../reasoning.js';
 import type { AnthropicFetchImpl, ModelProviderRuntime } from '../runtime.js';
 import { markStreamInterrupted } from '../stream-interrupt.js';
 
@@ -212,10 +221,20 @@ export function buildAnthropicRequest(
   messages: ChatMessage[],
   tools: readonly ChatTool[],
   runtime?: Pick<ModelProviderRuntime, 'config' | 'getModel'>,
+  overrides?: LlmRequestOverrides,
 ): JsonObject {
   const runtimeConfig = runtime?.config ?? config;
   const encoded = encodeAnthropicMessages(messages, runtimeConfig.anthropicPromptCache);
   const anthropicTools = encodeAnthropicTools(tools, runtimeConfig.anthropicPromptCache);
+  const effort = effectiveReasoningEffort(overrides?.reasoningEffort);
+  const reasoningParams =
+    effort === 'auto'
+      ? {}
+      : resolveReasoningParams(effort, {
+          provider: 'anthropic',
+          model: runtime?.getModel() ?? getActiveModel(),
+          maxTokens: runtimeConfig.maxTokens,
+        });
   return {
     model: runtime?.getModel() ?? getActiveModel(),
     max_tokens: runtimeConfig.maxTokens ?? 8192,
@@ -223,6 +242,7 @@ export function buildAnthropicRequest(
     system: encoded.system,
     messages: encoded.messages,
     ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
+    ...reasoningParams,
   };
 }
 
@@ -333,6 +353,7 @@ export async function anthropicChatOnce(
   signal: AbortSignal | undefined,
   tools: readonly ChatTool[],
   runtime?: ModelProviderRuntime,
+  overrides?: LlmRequestOverrides,
 ): Promise<ChatResult> {
   const runtimeConfig = runtime?.config ?? config;
   const fetchImpl = runtime?.clientState.anthropicFetchImpl ?? defaultAnthropicFetch;
@@ -344,7 +365,7 @@ export async function anthropicChatOnce(
       'x-api-key': runtimeConfig.apiKey,
       'anthropic-version': process.env.ANTHROPIC_VERSION || '2023-06-01',
     },
-    body: JSON.stringify(buildAnthropicRequest(messages, tools, runtime)),
+    body: JSON.stringify(buildAnthropicRequest(messages, tools, runtime, overrides)),
     signal,
   });
   if (!response.ok) await throwResponseError(response);

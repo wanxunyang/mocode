@@ -75,7 +75,22 @@ const emitter = stdin as unknown as KeypressEmitter;
 const customLabel = (): string => t('intervention.custom');
 
 /** 弹出介入面板,阻塞直到用户完成选择。 */
-export async function promptIntervention(req: InterventionRequest): Promise<InterventionResult> {
+export function promptIntervention(req: InterventionRequest): Promise<InterventionResult> {
+  // P4 闸1:并发子 agent 可能同时弹面板。面板进出场全是进程级单例(stdin 监听集/
+  // 鼠标开关/走时计时器/光标处理器),两个面板交错会导致监听恢复错乱与永久泄漏。
+  // 用承诺队列串行化:同一时刻只有一个面板,其余排队;非 TTY 分支不碰单例,排队也无害。
+  const run = (): Promise<InterventionResult> => promptInterventionInner(req);
+  const result = panelQueue.then(run, run);
+  panelQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+let panelQueue: Promise<unknown> = Promise.resolve();
+
+async function promptInterventionInner(req: InterventionRequest): Promise<InterventionResult> {
   // 非 TTY 降级:不阻塞,自动选默认。日志走 stderr(不污染 stdout 内容流)。
   if (!layout.isActive()) {
     const kind = req.type === 'choice' ? t('intervention.defaultChoice') : t('intervention.emptyInput');

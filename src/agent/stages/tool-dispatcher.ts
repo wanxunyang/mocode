@@ -89,6 +89,7 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         callId: call.id,
         allowedToolNames: request.currentAllowedToolNames(),
         delegation: request.delegation(),
+        readDedup: request.readDedup,
         ...(hint ? { argumentErrorHint: hint } : {}),
         ...(onLockAcquired ? { onLockAcquired } : {}),
       });

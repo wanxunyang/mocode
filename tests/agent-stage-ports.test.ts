@@ -4,6 +4,7 @@ import { createLegacyHistoryManager, createStagedHistoryManager } from '../src/a
 import { createLegacyContextTrimmer, createStagedContextTrimmer } from '../src/agent/stages/context-trimmer.js';
 import { createLegacyModelRunner, createStagedModelRunner } from '../src/agent/stages/model-runner.js';
 import { createLegacyToolDispatcher, createStagedToolDispatcher } from '../src/agent/stages/tool-dispatcher.js';
+import { createReadDedup } from '../src/tools/read-dedup.js';
 import {
   createLegacyCapabilityResolver,
   createLegacyTerminationPolicy,
@@ -224,6 +225,7 @@ test('Stage 6 ToolDispatcher: resource permission 全部预检后才启动，结
       isDenied: () => false,
       currentAllowedToolNames: () => calls.map((call) => call.name),
       delegation: () => ({ history: [], tools: [] }),
+      readDedup: createReadDedup(),
       argumentErrorHint: () => undefined,
       onEvent: (event) => {
         if (event.type === 'permission') events.push(`permission:${event.call.name}`);

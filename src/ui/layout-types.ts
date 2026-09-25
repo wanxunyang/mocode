@@ -14,6 +14,8 @@ export interface StatusBarData {
   status: string; // '空闲' | '思考中' | '执行 read_file' …
   spinnerFrame?: string; // 可选 spinner 帧(运行态)
   modeTag?: string; // 模式标识:repl 传 'Auto' / 'Plan'(两段式布局左段显示)
+  /** 思考强度 chip(P3);仅非 auto 时显示。 */
+  effort?: string;
   /** 活跃 plan 短摘要(无 plan=undefined,空串=有 plan 但 chip 不显)。repl 透传 getActivePlanSummary()。 */
   planSummary?: string;
   /** 本轮最后一条 token 用量(modeTag chip 右边显示)。后端不开 include_usage 时 undefined。

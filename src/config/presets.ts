@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { ReasoningEffort } from '../llm/reasoning.js';
+import { parseReasoningEffort } from '../llm/reasoning.js';
 
 /**
  * 多模型预设(`/model save <name>` 保存的命名配置)的纯 I/O 叶子。
@@ -61,6 +63,8 @@ export interface ModelPreset {
   model: string;
   contextWindow: number;
   anthropicPromptCache: boolean;
+  /** 思考强度(P3);绑模型保存,缺省 auto(不下发)。 */
+  reasoningEffort?: ReasoningEffort;
 }
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,32}$/;
@@ -99,6 +103,12 @@ export function parsePreset(raw: string): ModelPreset {
   }
   const provider: PresetProvider = obj.provider === 'anthropic' ? 'anthropic' : 'openai';
   const anthropicPromptCache = provider === 'anthropic' && obj.anthropicPromptCache !== false;
+  // reasoningEffort 缺省 = auto;显式写了非法值按现有校验风格报错(坏文件由 listPresets 跳过)。
+  let reasoningEffort: ReasoningEffort | undefined;
+  if (obj.reasoningEffort !== undefined) {
+    reasoningEffort = parseReasoningEffort(obj.reasoningEffort);
+    if (!reasoningEffort) throw new Error(`预设 ${name}: reasoningEffort 非法(off|low|medium|high|auto)`);
+  }
   return {
     name,
     provider,
@@ -107,6 +117,7 @@ export function parsePreset(raw: string): ModelPreset {
     model,
     contextWindow: Math.floor(contextWindow),
     anthropicPromptCache,
+    ...(reasoningEffort ? { reasoningEffort } : {}),
   };
 }
 
@@ -240,7 +251,8 @@ export function migrateCurrentToPreset(input: {
       p.apiKey === input.apiKey &&
       p.model === input.model &&
       p.contextWindow === input.contextWindow &&
-      p.anthropicPromptCache === anthropicPromptCache,
+      p.anthropicPromptCache === anthropicPromptCache &&
+      (p.reasoningEffort ?? 'auto') === 'auto',
   );
   if (dup) return null;
   // 'default' 已被占 → 用户已显式起过预设,无需老数据迁入;返回 null 让调用方跳过即可。

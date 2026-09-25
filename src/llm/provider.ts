@@ -9,7 +9,7 @@
  * anthropic)由 index.ts 在模块初始化时注册,与既有 config.provider 行为完全一致。
  */
 
-import type { ChatMessage, ChatResult, ChatTool, StreamHandlers } from './index.js';
+import type { ChatMessage, ChatResult, ChatTool, LlmRequestOverrides, StreamHandlers } from './index.js';
 import type { ModelProviderRuntime } from './runtime.js';
 
 /** 单次流式 LLM 请求的 provider 实现(无重试;重试由 chat() 外层统一负责)。 */
@@ -24,9 +24,11 @@ export interface ModelProvider {
     messages: ChatMessage[],
     handlers: StreamHandlers,
     signal: AbortSignal | undefined,
-    tools: ChatTool[] | undefined,
+    tools: readonly ChatTool[] | undefined,
     /** Built-ins consume this explicit context; existing custom providers may ignore it. */
     runtime?: ModelProviderRuntime,
+    /** Per-request overrides(reasoning effort);built-ins consume, custom providers may ignore. */
+    overrides?: LlmRequestOverrides,
   ): Promise<ChatResult>;
 }
 

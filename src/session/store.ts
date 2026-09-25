@@ -214,6 +214,37 @@ export class SessionStore {
     writeFileSync(tracePath, '');
   }
 
+  /**
+   * 追加一条 per-step 用量记录到 <id>/usage.jsonl(#token-efficiency P1)。
+   * 与 appendTrace 同策略:纯诊断,失败静默,不做轮转(长会话的量级远小于 trace)。
+   */
+  appendUsage(id: string, value: unknown): void {
+    try {
+      const dir = path.join(this.sessionsRoot, id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, 'usage.jsonl'), `${JSON.stringify(value)}\n`, { encoding: 'utf8', flag: 'a' });
+    } catch {
+      // Metrics must never block coding work.
+    }
+  }
+
+  /** 读取 <id>/usage.jsonl 全部记录;文件不存在或损坏行跳过。 */
+  readUsage(id: string): unknown[] {
+    const file = path.join(this.sessionsRoot, id, 'usage.jsonl');
+    if (!existsSync(file)) return [];
+    const out: unknown[] = [];
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        out.push(JSON.parse(trimmed));
+      } catch {
+        // 跳过损坏行。
+      }
+    }
+    return out;
+  }
+
   save(
     history: ChatMessage[],
     id: string,

@@ -11,6 +11,7 @@
 //    TUI 未激活(host 嵌入 / 非 TTY)时纯静默,中间过程只缓冲进 transcript。
 //  - 独立 history 分支:子任务的工具噪声不回灌主对话,只有最终摘要回灌。
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type OpenAI from 'openai';
 import { type ChatMessage, type ChatUsage } from '../llm/index.js';
 import { buildMocodeCorePrompt, isSubAgentHardDisabled } from '../config/index.js';
@@ -96,6 +97,8 @@ export interface SpawnResult {
   /** 子 agent 中间过程的人类可读日志(工具调用 + 结果摘要 + 流式正文片段)。主 agent 通常不看,调试用。 */
   transcript: string;
   usage: ChatUsage;
+  /** 本子 agent(含嵌套子 agent)实际改动的文件(P4 闸3 归属)。 */
+  changedFiles?: string[];
 }
 
 /**
@@ -110,6 +113,12 @@ export interface SpawnResult {
  * 中断:opts.signal 透传给子 runAgentCore——主 Ctrl+C 树杀子 agent(chat abort + 工具 abort)。
  * 子 agent 跑在主 signal 下,主 abort 即子 abort;子 agent 的 abortRestore 还原子 history + 模式。
  */
+/** 当前委派深度(P4 闸2):根 agent 无 store=0,每进一层 spawnAgent +1。 */
+const spawnDepthScope = new AsyncLocalStorage<number>();
+function currentSpawnDepth(): number {
+  return spawnDepthScope.getStore() ?? 0;
+}
+
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const activeRuntime = opts.runtime ?? getActiveRuntime();
   const runtimeContext =
@@ -123,6 +132,21 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       transcript: 'Sub-agent execution is disabled by MOCODE_SUBAGENT_ENABLED=false.',
       status: 'failed',
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0 },
+    };
+  }
+  // 深度闸:达上限直接结构化失败(模型看到后会改用直接工具完成)。执行层拦截,不裁 schema。
+  const depth = currentSpawnDepth() + 1;
+  if (depth > runtimeContext.config.subAgentMaxDepth) {
+    const msg =
+      `Sub-agent depth limit ${runtimeContext.config.subAgentMaxDepth} reached ` +
+      '(nested delegation blocked to prevent fork-style recursion); complete the task directly with your own tools.';
+    return {
+      summary: msg,
+      completed: false,
+      transcript: msg,
+      status: 'failed',
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, reasoningTokens: 0 },
+      changedFiles: [],
     };
   }
   const maxSteps = opts.maxSteps ?? runtimeContext.config.subAgentMaxSteps;
@@ -279,6 +303,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   let lastChar = '';
 
+  // P4 闸3:只收集本 agent 树自己产生的改动(钩子按真实执行触发),不靠整轮全局快照。
+  const nestedChangedFiles = new Set<string>();
   const hooks: AgentHooks = {
     onText: (s) => {
       writeBuf(s); // 缓冲流式正文(无 markdown 渲染,原始文本)
@@ -364,21 +390,28 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // 与主 agent 完全同源:写操作直接落在工作区,进入主 agent 当前轮次的同一回滚事务
   // (spawn 不调 beginTurn)。没有 overlay 拷贝/ChangeSet 合并这一步——那是旧 read/write
   // 双模式的产物,子 agent 不再受限,也就不需要"先隔离再合并"。
-  const result = await runtime.run({
-    turn: 'inherit',
-    history,
-    userInput,
-    signal: opts.signal,
-    hooks,
-    maxSteps,
-    toolsOverride,
-    runtimeAllowedToolNames,
-    contextState: localContextState,
-    suppressOpeningAnalysis: true, // 子代理不注入「开场分析」:仅主线面对用户的首次响应用
-    // 子代理不注入主会话「会话状态」(plan + 笔记):那是主 agent 的工作面,委派消息已带齐
-    // 子任务所需上下文,重复注入只白付 token。
-    suppressSessionState: true,
-  });
+  const runResult = () =>
+    runtime.run({
+      turn: 'inherit',
+      history,
+      userInput,
+      signal: opts.signal,
+      hooks,
+      maxSteps,
+      toolsOverride,
+      runtimeAllowedToolNames,
+      contextState: localContextState,
+      // P4 闸3:run-coordinator 只消费顶层 onToolOutcome(非 hooks),在此收集本树真实改动。
+      onToolOutcome: (_tool, _args, outcome) => {
+        for (const f of outcome.changedFiles ?? []) nestedChangedFiles.add(f);
+      },
+      suppressOpeningAnalysis: true, // 子代理不注入「开场分析」:仅主线面对用户的首次响应用
+      // 子代理不注入主会话「会话状态」(plan + 笔记):那是主 agent 的工作面,委派消息已带齐
+      // 子任务所需上下文,重复注入只白付 token。
+      suppressSessionState: true,
+    });
+  // 深度 scope:子 agent 内再派生子 agent 时 ALS 读到此 depth。
+  const result = await spawnDepthScope.run(depth, runResult);
 
   const status: SpawnResult['status'] =
     opts.signal?.aborted || result.terminationReason === 'aborted'
@@ -399,5 +432,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       cachedTokens: result.usage?.cachedTokens ?? 0,
       reasoningTokens: result.usage?.reasoningTokens ?? 0,
     },
+    changedFiles: [...nestedChangedFiles],
   };
 }

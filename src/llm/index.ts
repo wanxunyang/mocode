@@ -8,6 +8,7 @@ import { sanitizeToolSchemas } from './tool-schema.js';
 import { isMarkedStreamInterrupted } from './stream-interrupt.js';
 import { defaultAnthropicFetch, anthropicChatOnce } from './providers/anthropic.js';
 import { registerModelProvider, getModelProvider, listModelProviders } from './provider.js';
+import { effectiveReasoningEffort } from '../config/index.js';
 import type {
   AnthropicFetchImpl,
   ChatClientState,
@@ -15,6 +16,15 @@ import type {
   ModelProviderRuntime,
   ModelRuntimeConfig,
 } from './runtime.js';
+import type { ReasoningEffort } from './reasoning.js';
+import { resolveReasoningParams } from './reasoning.js';
+
+export type { ReasoningEffort } from './reasoning.js';
+
+/** 单次请求级覆盖(沿 transport → provider 透传)。 */
+export interface LlmRequestOverrides {
+  reasoningEffort?: ReasoningEffort;
+}
 
 export type {
   AnthropicFetchImpl,
@@ -459,12 +469,13 @@ export function refreshChatTools(): void {
 // 新增 provider 只需 registerModelProvider,不必改 chat()。
 registerModelProvider({
   name: 'openai',
-  chatOnce: (messages, handlers, signal, tools, runtime) => chatOnce(messages, handlers, signal, tools, runtime),
+  chatOnce: (messages, handlers, signal, tools, runtime, overrides) =>
+    chatOnce(messages, handlers, signal, tools, runtime, overrides),
 });
 registerModelProvider({
   name: 'anthropic',
-  chatOnce: (messages, handlers, signal, tools, runtime) =>
-    anthropicChatOnce(messages, handlers, signal, tools ?? chatTools, runtime),
+  chatOnce: (messages, handlers, signal, tools, runtime, overrides) =>
+    anthropicChatOnce(messages, handlers, signal, tools ?? chatTools, runtime, overrides),
 });
 
 export interface ToolCallRef {
@@ -608,13 +619,14 @@ export type ChatTransport = (
   messages: ChatMessage[],
   handlers?: StreamHandlers,
   signal?: AbortSignal,
-  toolsOverride?: ChatTool[],
+  toolsOverride?: readonly ChatTool[],
+  overrides?: LlmRequestOverrides,
 ) => Promise<ChatResult>;
 
 /** Bind chat dispatch, retries and built-in providers to one explicit runtime. */
 export function createChatTransport(runtime: ModelProviderRuntime): ChatTransport {
-  return (messages, handlers = {}, signal, toolsOverride) =>
-    chatWithRuntime(runtime, messages, handlers, signal, toolsOverride);
+  return (messages, handlers = {}, signal, toolsOverride, overrides) =>
+    chatWithRuntime(runtime, messages, handlers, signal, toolsOverride, overrides);
 }
 
 export function chat(
@@ -622,9 +634,10 @@ export function chat(
   handlers: StreamHandlers = {},
   signal?: AbortSignal,
   /** 覆盖默认工具 schema;plan 模式传 planChatTools(只读子集),缺省=全量 chatTools。 */
-  toolsOverride?: OpenAI.Chat.Completions.ChatCompletionTool[],
+  toolsOverride?: readonly OpenAI.Chat.Completions.ChatCompletionTool[],
+  overrides?: LlmRequestOverrides,
 ): Promise<ChatResult> {
-  return chatWithRuntime(defaultProviderRuntime, messages, handlers, signal, toolsOverride);
+  return chatWithRuntime(defaultProviderRuntime, messages, handlers, signal, toolsOverride, overrides);
 }
 
 async function chatWithRuntime(
@@ -632,7 +645,8 @@ async function chatWithRuntime(
   messages: ChatMessage[],
   handlers: StreamHandlers,
   signal?: AbortSignal,
-  toolsOverride?: ChatTool[],
+  toolsOverride?: readonly ChatTool[],
+  overrides?: LlmRequestOverrides,
 ): Promise<ChatResult> {
   let lastErr: unknown;
   // 本次尝试是否已向调用方产出过内容(可见文本 / 工具名)。用于判断「流中途故障可否安全重试」:
@@ -665,7 +679,7 @@ async function chatWithRuntime(
           `未知的 LLM provider "${runtime.config.provider}";已注册:${listModelProviders().join(', ') || '(空)'}`,
         );
       }
-      return await provider.chatOnce(messages, guardedHandlers, signal, toolsOverride, runtime);
+      return await provider.chatOnce(messages, guardedHandlers, signal, toolsOverride, runtime, overrides);
     } catch (err) {
       lastErr = err;
       // 流中途故障的额外可重试窗口:仅当本次尝试零产出(否则重试会重放半截文本)、用户没有中断、
@@ -737,8 +751,9 @@ async function chatOnce(
   messages: ChatMessage[],
   handlers: StreamHandlers,
   signal: AbortSignal | undefined,
-  toolsOverride: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined,
+  toolsOverride: readonly OpenAI.Chat.Completions.ChatCompletionTool[] | undefined,
   runtime: ModelProviderRuntime = defaultProviderRuntime,
+  overrides?: LlmRequestOverrides,
 ): Promise<ChatResult> {
   // 防御:messages 必须至少含一条非空 user 消息,否则 OpenAI/Anthropic 都会 400。
   // compact force 分支曾把所有 user 丢进摘要 → 重建 history 无 user → 下一轮 400。
@@ -771,6 +786,15 @@ async function chatOnce(
   // transport 边界消毒:剔除部分后端(kimi-k3@dashscope 实测)整请求 400 拒绝的
   // uniqueItems 关键字。无需改写时返回原引用,前缀缓存逐字节稳定不受影响。
   const activeTools = sanitizeToolSchemas(toolsOverride ?? chatTools);
+  const effort = effectiveReasoningEffort(overrides?.reasoningEffort);
+  const reasoningParams =
+    effort === 'auto'
+      ? {}
+      : resolveReasoningParams(effort, {
+          provider: runtimeConfig.provider === 'anthropic' ? 'anthropic' : 'openai',
+          model: runtime.getModel(),
+          maxTokens: runtimeConfig.maxTokens,
+        });
   const stream = await create(
     {
       model: runtime.getModel(),
@@ -787,6 +811,7 @@ async function chatOnce(
         : {}),
       ...(runtimeConfig.maxTokens ? { max_tokens: runtimeConfig.maxTokens } : {}),
       ...(runtimeConfig.includeUsage ? { stream_options: { include_usage: true } } : {}),
+      ...reasoningParams,
     },
     signal ? { signal } : undefined,
   );

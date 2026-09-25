@@ -23,12 +23,14 @@ import { modeCommands } from './mode.js';
 import { petCommands } from './pet.js';
 import { imageCommands } from './image.js';
 import { contextCommands } from './context.js';
+import { statsCommands } from './stats.js';
 import { sessionCommands } from './session.js';
 import { memoryCommands } from './memory.js';
 import { skillCommands } from './skill.js';
 import { compactCommands } from './compact.js';
 import { appearanceCommands } from './appearance.js';
 import { modelCommands } from './model.js';
+import { effortCommands } from './effort.js';
 import { routerCommands } from './router.js';
 import { toolGroupCommands } from './tool-group.js';
 
@@ -45,11 +47,13 @@ export const commandHandlers: CommandHandler[] = [
   ...petCommands,
   ...imageCommands,
   ...contextCommands,
+  ...statsCommands,
   ...sessionCommands,
   ...memoryCommands,
   ...skillCommands,
   ...compactCommands,
   ...appearanceCommands,
+  ...effortCommands,
   ...modelCommands,
   ...routerCommands,
   ...toolGroupCommands,

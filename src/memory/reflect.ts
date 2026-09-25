@@ -164,7 +164,7 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
 
   let content: string | null = null;
   try {
-    const r = await chat([sys, user], {}, signal ?? AbortSignal.timeout(60000));
+    const r = await chat([sys, user], {}, signal ?? AbortSignal.timeout(60000), undefined, { reasoningEffort: 'low' });
     // 推理模型偶发只返 reasoning_content(content null)或幻觉 tool_calls → 视为无产出
     if (!r.toolCalls.length && r.content) content = r.content;
   } catch (e) {

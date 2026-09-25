@@ -33,6 +33,8 @@ export interface ToolExecutionOptions {
     history: readonly OpenAI.Chat.Completions.ChatCompletionMessageParam[];
     tools: readonly OpenAI.Chat.Completions.ChatCompletionTool[];
   };
+  /** 当前用户 turn 的重复读 scope(#token-efficiency P2)。 */
+  readDedup?: import('./read-dedup.js').ReadDedup;
   /** 参数校验失败(INVALID_ARGUMENTS)时追加到报错文案末尾的恢复提示。
    * 由 agent 注入系统已知的候选(如最近 read_file 的 path/hash),
    * 让模型照抄而非凭长上下文记忆复述。仅在参数校验失败时使用。 */
@@ -390,6 +392,7 @@ export class ToolRuntime {
             callId: opts?.callId,
             allowedToolNames: opts?.allowedToolNames,
             delegation: opts?.delegation,
+            readDedup: opts?.readDedup,
           });
         } finally {
           if (pathCapture) this.dependencies.endPathMutation(pathCapture, tool.name);

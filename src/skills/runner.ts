@@ -14,6 +14,7 @@ import { isSkillTrusted, ensureSkillTrust } from './trust.js';
 import { mapSkillTools } from './toolmap.js';
 import { spawnAgent, type SpawnResult } from '../agent/spawn.js';
 import { runCommandRaw } from '../tools/builtins/run-command.js';
+import { runWithEffortScope } from '../llm/reasoning.js';
 import type { Skill } from './discover.js';
 import type { ToolOutcome, ToolContext } from '../tools/types.js';
 
@@ -181,17 +182,20 @@ export async function runSkill(a: RunSkillArgs, ctx?: ToolContext): Promise<Tool
     // 仅记到正文前导,模型可感知哪些 allowed-tools 被忽略(不阻断执行)。
     body = `> 注意:以下 allowed-tools 无法映射到 mocode 工具,已忽略: ${unknown.join(', ')}\n\n` + body;
   }
-  const res = await spawnAgent({
-    prompt: SKILL_PROTOCOL_HEADER + '\n\n' + body,
-    tools: tools ?? undefined,
-    maxSteps: skill.maxSteps,
-    signal: ctx?.signal,
-    context: a.context,
-    systemPromptSuffix: `You are executing the "${skill.name}" skill. SKILL_DIR=${skill.dir}`,
-    quiet: true, // fork skill 是 opaque workflow,不产可展开 batch
-    quietLabel: `执行 ${skill.name}…`,
-    parentAllowedToolNames: ctx?.allowedToolNames,
-    delegation: ctx?.delegation,
-  });
+  const execute = (): Promise<SpawnResult> =>
+    spawnAgent({
+      prompt: SKILL_PROTOCOL_HEADER + '\n\n' + body,
+      tools: tools ?? undefined,
+      maxSteps: skill.maxSteps,
+      signal: ctx?.signal,
+      context: a.context,
+      systemPromptSuffix: `You are executing the "${skill.name}" skill. SKILL_DIR=${skill.dir}`,
+      quiet: true, // fork skill 是 opaque workflow,不产可展开 batch
+      quietLabel: `执行 ${skill.name}…`,
+      parentAllowedToolNames: ctx?.allowedToolNames,
+      delegation: ctx?.delegation,
+    });
+  // skill frontmatter effort 覆盖会话级(ALS 沿子 agent 异步树继承)。
+  const res = skill.effort ? await runWithEffortScope(skill.effort, execute) : await execute();
   return toOutcome(res);
 }

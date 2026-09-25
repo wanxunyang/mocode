@@ -86,6 +86,8 @@ export const subAgentTool: Tool = {
       retryable: false,
       output,
       usage: result.usage,
+      // P4 闸3:只归属本子 agent 树真实改动;tool-runtime 允许工具自报覆盖整轮快照。
+      changedFiles: result.changedFiles ?? [],
     };
     return outcome;
   },

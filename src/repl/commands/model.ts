@@ -26,6 +26,7 @@ import {
   setActivePresetName,
 } from '../../config/presets.js';
 import { reconfigureClient } from '../../llm/index.js';
+import { recognizesReasoning, type ReasoningEffort } from '../../llm/reasoning.js';
 import { promptIntervention } from '../../ui/intervention.js';
 import { renderHistory } from '../message-format.js';
 import { MODEL_PRESETS, maskKey } from '../commands.js';
@@ -83,6 +84,7 @@ export const modelCommands: CommandHandler[] = [
       model: string;
       contextWindow: number;
       anthropicPromptCache: boolean;
+      reasoningEffort?: ReasoningEffort;
     }): void => {
       updateModelConfig({
         provider: target.provider,
@@ -91,6 +93,7 @@ export const modelCommands: CommandHandler[] = [
         apiKey: target.apiKey,
         contextWindowTokens: target.contextWindow,
         anthropicPromptCache: target.anthropicPromptCache,
+        ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
       });
       writeConfigKeys({
         LLM_PROVIDER: target.provider,
@@ -99,6 +102,7 @@ export const modelCommands: CommandHandler[] = [
         LLM_MODEL: target.model,
         CONTEXT_WINDOW_TOKENS: String(target.contextWindow),
         ANTHROPIC_PROMPT_CACHE: target.anthropicPromptCache ? 'true' : 'false',
+        ...(target.reasoningEffort ? { REASONING_EFFORT: target.reasoningEffort } : {}),
       });
       reconfigureClient();
       // 记为激活预设:让上下文窗口等配置从此跟随该预设文件(下次启动也用它,不再回退 config 裸键)。
@@ -200,6 +204,15 @@ export const modelCommands: CommandHandler[] = [
       layout.contentWrite(`  ${ui.accent}baseURL ${ui.reset}  ${config.baseURL}\n`);
       layout.contentWrite(`  ${ui.accent}apiKey  ${ui.reset}  ${maskKey(config.apiKey)}\n`);
       layout.contentWrite(`  ${ui.accent}model   ${ui.reset}  ${config.model}\n`);
+      const recognized = recognizesReasoning({
+        provider: config.provider === 'anthropic' ? 'anthropic' : 'openai',
+        model: config.model,
+        maxTokens: config.maxTokens,
+      });
+      layout.contentWrite(
+        `  ${ui.accent}effort  ${ui.reset}  ${config.reasoningEffort}` +
+          (recognized ? '\n' : `${ui.dim}(当前模型未识别,参数不会下发)${ui.reset}\n`),
+      );
       layout.contentWrite(`  ${ui.accent}窗口    ${ui.reset}  ${config.contextWindowTokens} tokens\n`);
       if (config.provider === 'anthropic') {
         layout.contentWrite(

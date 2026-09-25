@@ -6,7 +6,9 @@ import {
   type ChatTransport,
   type ChatUsage,
   correctTokenEstimate,
+  estimateMessagesTokens,
   estimatePromptTokens,
+  estimateToolSchemaTokens,
   estimateTokens,
 } from '../llm/index.js';
 import { config, type Config } from '../config/index.js';
@@ -34,6 +36,9 @@ import { toText } from '../context/utils.js';
 import { DEFAULT_BUDGET_POLICY } from '../context/budget.js';
 import { collectArtifactRefs } from '../context/artifacts.js';
 import { writeCompactionSnapshot } from './notes.js';
+import { getActiveSessionStore } from './store.js';
+import { getCurrentSessionId } from './state.js';
+import { toUsageRecord } from './usage-stats.js';
 
 /**
  * 上下文压缩子系统:
@@ -138,6 +143,8 @@ export interface CompactResult {
 export interface ContextState {
   lastUsage?: ChatUsage;
   lastEstimate: number;
+  /** 当前 agent step(compact usage 记录用);model-turn 每步写入。 */
+  currentStep?: number;
   /** API 实测 / 估算 的 EWMA 校正系数；1 表示尚未校准。 */
   correction: number;
   /** 当前校准 profile 已吸收的真实 usage 样本数。 */
@@ -564,7 +571,7 @@ function groupTokens(g: Group): number {
   return t;
 }
 
-function flattenGroups(groups: Group[]): ChatMessage[] {
+function flattenGroups(groups: readonly Group[]): ChatMessage[] {
   const out: ChatMessage[] = [];
   for (const g of groups) {
     if (g.assistant) out.push(g.assistant);
@@ -728,8 +735,90 @@ async function defaultSummarize(
     // signal 必须透传:摘要是几十秒的 LLM 调用,不串进来 Ctrl+C 只能干等它跑完。
     // 空 handlers:不打印、不外显流式;tools=[] 不带工具表——摘要纯文本任务,
     // 全量工具 schema 白占几千 token 窗口,还诱导幻觉工具调用。
-    const r = await runtime.modelTransport([sysMsg, userMsg], {}, signal, []);
+    const r = await runtime.modelTransport([sysMsg, userMsg], {}, signal, [], { reasoningEffort: 'low' });
     // 推理模型可能只返 reasoning_content(content 为 null),或幻觉出 tool_calls → 视为失败
+    if (r.toolCalls.length > 0 || !r.content) return null;
+    return capSummaryOutput(r.content);
+  } finally {
+    spinner.stop();
+  }
+}
+
+// ── cache-safe fork 摘要器(#token-efficiency P0) ─────────────────────────
+
+/**
+ * 构造 fork 前缀:父会话 history[0](system)+ 所有不在 kept 里的原始消息
+ * (pinned 旧摘要 + oldGroups),保持原顺序与原对象引用。
+ * 与父请求编码结果逐字节一致是显式/隐式缓存命中的唯一条件。
+ */
+function buildForkMessages(history: ChatMessage[], kept: readonly Group[]): ChatMessage[] {
+  if (history.length === 0) return [];
+  const keptSet = new Set(flattenGroups(kept));
+  const out: ChatMessage[] = [history[0]];
+  for (const m of history.slice(1)) {
+    if (!keptSet.has(m)) out.push(m);
+  }
+  return out;
+}
+
+/** fork 尾部 user 消息:摘要任务指令(原 legacy sysMsg 的规则,措辞改为"上方对话")。 */
+function compactForkInstruction(focus?: string): string {
+  const focusLine = focus ? `Focus: prioritize facts / decisions / file changes related to 「${focus}」.\n\n` : '';
+  return (
+    focusLine +
+    '[COMPACT TASK] You are an aggressive session compressor writing a handoff note for an agent that is about to lose the context above. ' +
+    'The agent will continue with ONLY your summary plus a few most-recent messages (not shown here), so your summary is the sole memory of every message above. ' +
+    'If the messages above include a prior session summary, merge its narrative; its Key Facts are pinned separately by the system — do not duplicate them.\n' +
+    'Output ONLY the summary body in this exact structure (omit empty sections):\n' +
+    "## Objective — the user's core request(s); cover EVERY distinct user request above, in order, noting which are completed vs pending.\n" +
+    '## Completed — what is already done: files created/modified (exact paths), key change per file, commands run and their outcomes (pass/fail, key numbers), decisions made and why.\n' +
+    '## In Progress — what is being worked on right now and exactly where it stopped (e.g. "edit applied to foo.ts, test not yet run").\n' +
+    '## Next Steps — the concrete next actions in order.\n' +
+    '## Key Facts — only what later steps cannot work without: exact paths, symbols/API shapes, artifact IDs/hashes, open questions, failed approaches and errors to avoid repeating. User requests and constraints are pinned verbatim by the system from the raw user messages — do not duplicate them here; you own the technical facts.\n' +
+    'Keep: user requests and constraints; final state of each modified file; conclusions and results, not the steps that led there; decisions with reasons; precise references (paths, symbols, hashes, commands) later steps must cite; failures and what was tried, so mistakes are not repeated.\n' +
+    'Drop: verbatim file contents and tool-output dumps, step-by-step recaps, exploration dead-ends, polite chatter, anything re-derivable by re-reading files.\n' +
+    'GUI EXCEPTION to "step-by-step recaps": for computer/screen-control actions keep the SEQUENCE as an ordered list — one line per action: `N. <action> (<coordinates or target>) → <observed result>`. Never collapse it into prose and never drop attempts that produced no visible change.\n' +
+    'Rules: total ≤ 400 words. State conclusions and locations (path:line where useful), never paste content. ' +
+    'Write each Key Fact as one self-contained line (no pronouns, no "as above", no cross-references). ' +
+    'Do not emit tool calls and do not invent facts; if unsure whether something happened, omit it.'
+  );
+}
+
+/** buffer 校验:fork 全量(含指令 + 摘要输出上限)必须装得进窗口,否则回落 legacy。 */
+function forkFits(
+  prefix: ChatMessage[],
+  instruction: string,
+  activeTools: readonly ChatTool[],
+  window: number,
+): boolean {
+  const forkInput =
+    estimateMessagesTokens([...prefix, { role: 'user', content: instruction } as ChatMessage]) +
+    estimateToolSchemaTokens(activeTools);
+  const outputBudget = estimateTokens('a '.repeat(Math.max(1, Math.floor(SUMMARY_OUTPUT_MAX_CHARS / 2))));
+  return forkInput + outputBudget <= window;
+}
+
+/** 执行 fork 请求:复用父前缀 + activeTools,记录 compact phase 用量。 */
+async function forkSummarize(
+  prefix: ChatMessage[],
+  instruction: string,
+  signal: AbortSignal | undefined,
+  runtime: CompactionRuntime,
+  activeTools: readonly ChatTool[],
+  state: ContextState,
+): Promise<string | null> {
+  if (signal?.aborted) throw new DOMException('This operation is aborted', 'AbortError');
+  const messages: ChatMessage[] = [...prefix, { role: 'user', content: instruction } as ChatMessage];
+  const spinner = new Spinner((msg, frame) => layout.setStatus(msg, frame ?? undefined));
+  spinner.start(signal ? '压缩中(Ctrl+C 取消)' : '压缩中');
+  try {
+    const r = await runtime.modelTransport(messages, {}, signal, activeTools, { reasoningEffort: 'low' });
+    if (r.usage) {
+      const rec = toUsageRecord(state.currentStep ?? -1, 'compact', r.usage);
+      const sessionId = getCurrentSessionId();
+      if (rec && sessionId) getActiveSessionStore().appendUsage(sessionId, rec);
+    }
+    // 同 legacy:幻觉 tool_calls 或空 content → 失败(调用方回落 microcompact)。
     if (r.toolCalls.length > 0 || !r.content) return null;
     return capSummaryOutput(r.content);
   } finally {
@@ -949,8 +1038,15 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
   }
   const summarizeFn =
     opts.summarize ??
-    ((older: ChatMessage[], focus?: string, signal?: AbortSignal) =>
-      defaultSummarize(older, focus, signal, opts.runtime ?? defaultCompactionRuntime));
+    (async (older: ChatMessage[], focus?: string, signal?: AbortSignal): Promise<string | null> => {
+      const rt = opts.runtime ?? defaultCompactionRuntime;
+      // P0:fork 关闭或 buffer 装不下 → 回落 legacy 独立 compressor 路径。
+      if (!config.compactFork) return defaultSummarize(older, focus, signal, rt);
+      const prefix = buildForkMessages(history, kept);
+      const instruction = compactForkInstruction(focus);
+      if (!forkFits(prefix, instruction, activeTools, opts.window)) return defaultSummarize(older, focus, signal, rt);
+      return forkSummarize(prefix, instruction, signal, rt, activeTools, state);
+    });
   let summary: string | null = null;
   try {
     summary = await summarizeFn(older, opts.focus, opts.signal);

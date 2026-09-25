@@ -8,7 +8,13 @@ class ChatModelRunner implements ModelRunner {
   ) {}
 
   run(request: ModelRequest, signal?: AbortSignal) {
-    return this.transport(request.history.slice(), request.handlers, signal, request.tools.slice());
+    return this.transport(
+      request.history.slice(),
+      request.handlers,
+      signal,
+      request.tools.slice(),
+      request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : undefined,
+    );
   }
 }
 
