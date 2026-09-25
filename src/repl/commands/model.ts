@@ -288,25 +288,11 @@ export const modelCommands: CommandHandler[] = [
     // /model 无参 → 直接进入「配置新模型」4 步向导(不弹动作菜单)。
     //   切换 / 查看 / 删除已配置预设改用显式子命令:/model switch · /model list · /model delete <name>。
 
-    // 1) 选 provider 预设(预填 baseURL,后续仍可逐项改)。
-    let preset: (typeof MODEL_PRESETS)[number];
-    try {
-      const res = await promptIntervention({
-        type: 'choice',
-        title: '选择后端预设(预填 baseURL,后续可改)',
-        detail: '选一个会预填 baseURL/model/窗口,之后逐项确认。选「自定义」全部手填。',
-        options: MODEL_PRESETS.map((p) => p.label),
-      });
-      if (res.action === 'cancelled') {
-        return next();
-      }
-      const idx = MODEL_PRESETS.findIndex((p) => p.label === res.value);
-      if (idx === -1) {
-        return next();
-      }
-      preset = MODEL_PRESETS[idx];
-    } catch {
-      return next(); // Ctrl+C
+    // 1) 后端预设：本地/远程都可由一个 OpenAI 兼容端点表达，故只保留「自定义 base_url」
+    //    一个入口；既然只有一个预设，不再弹选择菜单，直接进入字段填写。
+    const preset = MODEL_PRESETS[0];
+    if (!preset) {
+      return next();
     }
 
     // 1.5) 一键应用确认:非「自定义」预设(带预填值)给直接应用入口,免连按 4 次回车。

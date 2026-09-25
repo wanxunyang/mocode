@@ -290,64 +290,6 @@ export const MODEL_PRESETS: {
   anthropicPromptCache: boolean;
 }[] = [
   {
-    label: 'Anthropic Claude',
-    provider: 'anthropic',
-    baseURL: 'https://api.anthropic.com',
-    model: 'claude-sonnet-4-5',
-    window: 200000,
-    anthropicPromptCache: true,
-  },
-  {
-    label: 'GLM(智谱)',
-    provider: 'openai',
-    baseURL: 'https://open.bigmodel.cn/api/v3',
-    model: 'glm-4.6',
-    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
-    anthropicPromptCache: false,
-  },
-  {
-    label: 'DeepSeek',
-    provider: 'openai',
-    baseURL: 'https://api.deepseek.com',
-    model: 'deepseek-chat',
-    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
-    anthropicPromptCache: false,
-  },
-  {
-    label: 'Qwen(阿里)',
-    provider: 'openai',
-    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    model: 'qwen-plus',
-    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
-    anthropicPromptCache: false,
-  },
-  // MiniMax OpenAI 兼容端点(https://platform.minimax.io/docs/api-reference/text-openai-api)。
-  // MiniMax-M3 为唯一支持图片/视频输入的模型;M2 系列纯文本(见 llm/capabilities.ts KNOWN_TEXT_ONLY_PREFIXES)。
-  {
-    label: 'MiniMax',
-    provider: 'openai',
-    baseURL: 'https://api.minimax.io/v1',
-    model: 'MiniMax-M3',
-    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
-    anthropicPromptCache: false,
-  },
-  {
-    label: '本地 Ollama',
-    provider: 'openai',
-    baseURL: 'http://localhost:11434/v1',
-    model: 'qwen2.5:7b',
-    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
-    anthropicPromptCache: false,
-  },
-  {
-    label: '本地 vLLM',
-    provider: 'openai',
-    baseURL: 'http://localhost:8000/v1',
-    model: 'default',
-    window: DEFAULT_CONTEXT_WINDOW_TOKENS,
-    anthropicPromptCache: false,
-  },
-  {
     label: '自定义 base_url',
     provider: 'openai',
     baseURL: '',
