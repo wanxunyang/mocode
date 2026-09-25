@@ -18,6 +18,7 @@ import type {
 } from './runtime.js';
 import type { ReasoningEffort } from './reasoning.js';
 import { resolveReasoningParams } from './reasoning.js';
+import { getActivePresetName, readPreset } from '../config/presets.js';
 
 export type { ReasoningEffort } from './reasoning.js';
 
@@ -787,6 +788,11 @@ async function chatOnce(
   // uniqueItems 关键字。无需改写时返回原引用,前缀缓存逐字节稳定不受影响。
   const activeTools = sanitizeToolSchemas(toolsOverride ?? chatTools);
   const effort = effectiveReasoningEffort(overrides?.reasoningEffort);
+  // 实时读激活预设(#model-catalog M3):capabilities 只存在预设文件里,启动快照不反映切换。
+  const activePreset = (() => {
+    const n = getActivePresetName();
+    return n ? readPreset(n) : null;
+  })();
   const reasoningParams =
     effort === 'auto'
       ? {}
@@ -794,6 +800,16 @@ async function chatOnce(
           provider: runtimeConfig.provider === 'anthropic' ? 'anthropic' : 'openai',
           model: runtime.getModel(),
           maxTokens: runtimeConfig.maxTokens,
+          // 仅当激活预设来自目录且对应当前模型时携带,否则走正则兜底。
+          ...(activePreset && activePreset.catalogProvider && activePreset.model === runtime.getModel()
+            ? {
+                catalogProviderId: activePreset.catalogProvider,
+                catalogReasoning: activePreset.capabilities ? activePreset.capabilities.reasoning : undefined,
+                catalogReasoningOptions: activePreset.capabilities
+                  ? activePreset.capabilities.reasoningOptions
+                  : undefined,
+              }
+            : {}),
         });
   const stream = await create(
     {

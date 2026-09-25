@@ -30,6 +30,7 @@ import { skillCommands } from './skill.js';
 import { compactCommands } from './compact.js';
 import { appearanceCommands } from './appearance.js';
 import { modelCommands } from './model.js';
+import { modelCatalogCommands } from './model-catalog.js';
 import { effortCommands } from './effort.js';
 import { routerCommands } from './router.js';
 import { toolGroupCommands } from './tool-group.js';
@@ -54,6 +55,7 @@ export const commandHandlers: CommandHandler[] = [
   ...compactCommands,
   ...appearanceCommands,
   ...effortCommands,
+  ...modelCatalogCommands,
   ...modelCommands,
   ...routerCommands,
   ...toolGroupCommands,

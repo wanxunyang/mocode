@@ -75,6 +75,13 @@ export const modelCommands: CommandHandler[] = [
     const arg = line.startsWith('/model ') ? line.slice('/model '.length).trim() : '';
     const { history } = ctx;
 
+    // 裸 /model → 统一模型面板(打字过滤+预设+目录+思考强度)。选「自定义」才落到下方手填向导。
+    if (arg === '') {
+      const { openModelPanel } = await import('./model-panel-ui.js');
+      const outcome = await openModelPanel(ctx);
+      if (outcome !== 'custom') return next();
+    }
+
     // 共用:apply 一个预设到 config + 持久化 + 重建 client + 重显横幅。无参 /model 选菜单和 /model use 都走这里。
     const applyPresetAndPersist = (target: {
       name: string;

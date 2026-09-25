@@ -25,6 +25,15 @@ See mocode complete real tasks autonomously:
 
 <p align="center"><img src="./assets/demo-build-pomodoro.gif" alt="mocode builds a Pomodoro web app and self-verifies via browser screenshots" width="100%"></p>
 
+## Faster and more token-efficient
+
+- **Two-level model picker** — A bare `/model` lists providers first; Enter drills into one to pick a model. Search is scoped to the current level — provider names at the top, model names inside a provider — never mixed into one flat list.
+- **Reasoning effort `/effort`** — One normalized `off / low / medium / high / auto`, translated per target model (Anthropic / OpenAI o·gpt-5 / Qwen3 / GLM / DeepSeek-R1 / Doubao). Unknown models and third-party gateways get **no** unknown fields, avoiding hard 400s.
+- **Usage stats `/stats`** — This session's cache hit rate, tiered token usage, and compaction count, built from real provider reports rather than estimates.
+- **Cache-safe compaction fork** — When prior dialogue can be reused verbatim, it forks to preserve the prompt-cache prefix and avoid rebilling; otherwise it falls back to summarization (disable with `MOCODE_COMPACT_FORK=false`).
+- **Repeated-read de-duplication** — Re-reading the same file within one turn hits a cache, so you never pay twice for identical content (disable with `MOCODE_READ_DEDUP=false`).
+- **Sub-agent depth gate** — Recursive spawning is capped at 3 levels by default (tune with `SUB_AGENT_MAX_DEPTH`), preventing unbounded sub-agent fan-out.
+
 ## Engineering discipline
 
 MoCode keeps code-level control light and leaves task strategy to the agent:
@@ -110,7 +119,7 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Session persistence** — Every turn is saved automatically; `--resume` / `/resume` picks up a past session.
 - **Skills system** — Scans directories like `~/.mocode/skills/` automatically; each skill's description is injected into the system prompt, and the model calls `use_skill` to load the full instructions only when relevant (progressive disclosure: skim the summary first, load the body only if needed).
 - **Optional desktop pet** — A small floating window (`/pet`) shows a stateful character that mirrors agent activity (idle / thinking / tool running / waiting for human). Works as a separate process over WebSocket; quit it with `/pet quit`. Sits beside the terminal, never blocks it.
-- **Slash commands** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`, with dropdown filtering as you type.
+- **Slash commands** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/effort` `/stats` `/plan` `/auto` `/pet`, with dropdown filtering as you type.
 
 ## Documentation
 
@@ -305,7 +314,9 @@ dev_server stop   id=srv-xxxx
 | `/memory`        | Show memory library: entry count + recent index                                                |
 | `/memory_switch` | Allow/block memory routing and toggle the Memory Index; effective next real user turn          |
 | `/reflect`       | Manually trigger a background memory reflection pass                                           |
-| `/model`         | Configure the LLM (baseURL / apiKey / model / context window), applied immediately + persisted |
+| `/model`         | Two-level picker (provider → model; scoped search), plus baseURL / apiKey / context-window config; applied immediately + persisted |
+| `/effort`        | Set reasoning effort off/low/medium/high/auto (e.g. `/effort high`); not sent for unrecognized models |
+| `/stats`         | Session usage: cache hit rate / tiered tokens / compaction count |
 | `/init`          | Scan the project and generate `AGENTS.md` project memory (dispatched to the agent)             |
 | `/theme`         | Switch color theme (↑↓ · Enter, or `/theme <name>` directly)                                   |
 | `/plan`          | Switch to plan mode (read-only exploration + plan output, approve to switch to auto)           |
@@ -362,4 +373,4 @@ npm run typecheck   # tsc --noEmit
 
 ## Future extensions
 
-MCP tool integration, finer-grained capability locks, and a real worktree-isolated sub-agent mode. The current version is a streaming, reasoning-visible, rollback-capable terminal coding agent with 20 tools, working-notepad planning, cross-session memory, capability-aware tool scheduling, serial workspace-sharing sub-agents, and an optional desktop pet.
+MCP tool integration, finer-grained capability locks, and a real worktree-isolated sub-agent mode. The current version is a streaming, reasoning-visible, rollback-capable terminal coding agent with 25 tools, working-notepad planning, cross-session memory, capability-aware tool scheduling, serial workspace-sharing sub-agents, and an optional desktop pet.

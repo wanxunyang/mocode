@@ -14,6 +14,8 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 
+import { paramsFromCatalog } from '../models/reasoning-cap.js';
+import type { CatalogReasoningOption } from '../models/types.js';
 export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'auto';
 
 /**
@@ -49,6 +51,13 @@ export interface ReasoningTarget {
   model: string;
   /** Anthropic budget_tokens 的 clamp 上界(max_tokens);不传按 8192 处理。 */
   maxTokens?: number;
+  /**
+   * 模型目录(#model-catalog M3)来源信息。携带且方言可解析时,优先按目录能力下发,
+   * 下面的型号正则降为兜底;缺失(旧路径/手填模型)则完全走正则,行为不变。
+   */
+  catalogProviderId?: string;
+  catalogReasoning?: boolean;
+  catalogReasoningOptions?: CatalogReasoningOption[];
 }
 
 /** 各档对应的思考预算(token):Anthropic budget_tokens / Qwen thinking_budget。 */
@@ -67,6 +76,10 @@ const ANTHROPIC_DEFAULT_MAX = 8192;
  * 供 /model show 给出「参数不会下发」提示,避免用户设了 high 却静默无效。
  */
 export function recognizesReasoning(target: ReasoningTarget): boolean {
+  // 目录来源显式声明了思考能力 → 直接采纳(含声明 false 时不识别)。
+  if (target.catalogProviderId && typeof target.catalogReasoning === 'boolean') {
+    return target.catalogReasoning;
+  }
   if (target.provider === 'anthropic') return true;
   const m = target.model.toLowerCase();
   return (
@@ -85,6 +98,20 @@ export function recognizesReasoning(target: ReasoningTarget): boolean {
  */
 export function resolveReasoningParams(effort: ReasoningEffort, target: ReasoningTarget): Record<string, unknown> {
   if (effort === 'auto') return {};
+
+  // 目录优先:带 catalogProviderId 时按目录能力+厂商方言产出。
+  // 注意 anthropic 路径的思考在 anthropic provider 内仍走它自己的 target.provider,
+  // 目录只对 OpenAI 兼容路径有意义;Anthropic 官方协议继续走下方既有分支。
+  if (target.catalogProviderId && target.provider !== 'anthropic') {
+    const fromCatalog = paramsFromCatalog({
+      effort,
+      catalogProviderId: target.catalogProviderId,
+      reasoningOptions: target.catalogReasoningOptions,
+      maxTokens: target.maxTokens,
+    });
+    // 目录能产出非空字段就用;方言未知/返 {} 则落到正则兜底(而不是直接放弃)。
+    if (Object.keys(fromCatalog).length > 0) return fromCatalog;
+  }
 
   if (target.provider === 'anthropic') {
     const m = target.model.toLowerCase();

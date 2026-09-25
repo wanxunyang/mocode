@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { ReasoningEffort } from '../llm/reasoning.js';
 import { parseReasoningEffort } from '../llm/reasoning.js';
+import type { CatalogReasoningOption } from '../models/types.js';
 
 /**
  * 多模型预设(`/model save <name>` 保存的命名配置)的纯 I/O 叶子。
@@ -65,6 +66,16 @@ export interface ModelPreset {
   anthropicPromptCache: boolean;
   /** 思考强度(P3);绑模型保存,缺省 auto(不下发)。 */
   reasoningEffort?: ReasoningEffort;
+  /** 以下为模型目录(#model-catalog)追加字段,全部可选;旧预设缺字段照常解析。 */
+  catalogProvider?: string;
+  catalogModel?: string;
+  capabilities?: {
+    reasoning?: boolean;
+    reasoningOptions?: CatalogReasoningOption[];
+    toolCall?: boolean;
+    attachment?: boolean;
+  };
+  pricing?: { input?: number; output?: number; cacheRead?: number };
 }
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,32}$/;
@@ -109,6 +120,28 @@ export function parsePreset(raw: string): ModelPreset {
     reasoningEffort = parseReasoningEffort(obj.reasoningEffort);
     if (!reasoningEffort) throw new Error(`预设 ${name}: reasoningEffort 非法(off|low|medium|high|auto)`);
   }
+  // ── 目录可选字段:只在「存在且类型正确」时采纳,缺失/错误即 undefined,不报错 ──
+  const extra: Partial<Pick<ModelPreset, 'catalogProvider' | 'catalogModel' | 'capabilities' | 'pricing'>> = {};
+  if (typeof obj.catalogProvider === 'string' && obj.catalogProvider) extra.catalogProvider = obj.catalogProvider;
+  if (typeof obj.catalogModel === 'string' && obj.catalogModel) extra.catalogModel = obj.catalogModel;
+  if (obj.capabilities && typeof obj.capabilities === 'object') {
+    const c = obj.capabilities as Record<string, unknown>;
+    const caps: NonNullable<ModelPreset['capabilities']> = {};
+    if (typeof c.reasoning === 'boolean') caps.reasoning = c.reasoning;
+    if (typeof c.toolCall === 'boolean') caps.toolCall = c.toolCall;
+    if (typeof c.attachment === 'boolean') caps.attachment = c.attachment;
+    if (Array.isArray(c.reasoningOptions)) caps.reasoningOptions = c.reasoningOptions as CatalogReasoningOption[];
+    extra.capabilities = caps;
+  }
+  if (obj.pricing && typeof obj.pricing === 'object') {
+    const p = obj.pricing as Record<string, unknown>;
+    const pricing: NonNullable<ModelPreset['pricing']> = {};
+    for (const k of ['input', 'output', 'cacheRead'] as const) {
+      if (typeof p[k] === 'number' && Number.isFinite(p[k])) pricing[k] = p[k] as number;
+    }
+    extra.pricing = pricing;
+  }
+
   return {
     name,
     provider,
@@ -118,6 +151,7 @@ export function parsePreset(raw: string): ModelPreset {
     contextWindow: Math.floor(contextWindow),
     anthropicPromptCache,
     ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...extra,
   };
 }
 

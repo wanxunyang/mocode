@@ -25,6 +25,15 @@ mocode 自己探索代码、读写改文件、执行命令、联网查资料,以
 
 <p align="center"><img src="./assets/demo-build-pomodoro.gif" alt="mocode 从零搭建番茄钟并通过浏览器截图自检" width="100%"></p>
 
+## 效率:更快、更省 token
+
+- **两级模型面板** — 裸 `/model` 先列厂商、Enter 进入后再选模型;搜索是作用域内过滤——顶层只匹配**厂商名**,厂商内只匹配**模型名**,不再把厂商和模型混在一个结果里。
+- **思考强度 `/effort`** — `off / low / medium / high / auto` 五档归一,按目标模型自动翻译成各家方言(Anthropic / OpenAI o·gpt-5 / Qwen3 / GLM / DeepSeek-R1 / 豆包);不认识的模型或第三方网关**不下发**未知字段,避免 400。
+- **用量统计 `/stats`** — 本会话缓存命中率、分层 token 用量与压缩次数,基于后端真实上报,不靠估算。
+- **缓存安全的压缩分叉** — 能整段复用旧对话时优先走 fork,保住 prompt-cache 前缀、减少重复计费;不满足条件再回落摘要(`MOCODE_COMPACT_FORK=false` 关闭)。
+- **重复读取去重** — 同一轮对同一文件的重复读取命中缓存,不再为相同内容重复付费(`MOCODE_READ_DEDUP=false` 关闭)。
+- **子 Agent 深度闸** — 递归派生默认最多 3 层(`SUB_AGENT_MAX_DEPTH` 可调),防止子 agent 无限膨胀。
+
 ## 架构
 
 MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，内核通过受控能力平面执行真实操作，持久化认知层则让长任务和跨会话工作保持连贯。
@@ -109,7 +118,7 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **会话持久化** — 每轮自动落盘,`--resume` / `/resume` 续接历史会话
 - **Skills 系统** — 自动扫描 `~/.mocode/skills/` 等目录,description 注入系统提示,模型按需调 `use_skill` 加载完整指令(渐进式披露:先看简介,任务相关才加载正文)
 - **可选桌宠** — 独立悬浮窗(`/pet`)显示一个小角色,镜像 agent 活动(空闲 / 思考 / 跑工具 / 等人工),独立进程走 WebSocket,`/pet quit` 完全关闭。挂在终端外,绝不挡终端。
-- **斜杠命令** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/plan` `/auto` `/pet`,输入时下拉过滤
+- **斜杠命令** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/effort` `/stats` `/plan` `/auto` `/pet`,输入时下拉过滤
 
 ## 使用文档
 
@@ -295,7 +304,9 @@ dev_server stop   id=srv-xxxx
 | `/memory`        | 看记忆库:条目数 + 近期索引                                          |
 | `/memory_switch` | 允许/禁止 memory 自动路由并切换 Memory Index；下一真实用户轮生效    |
 | `/reflect`       | 手动触发一次后台记忆反思 pass                                       |
-| `/model`         | 配置大模型(baseURL / apiKey / model / 上下文窗口),即时生效 + 持久化 |
+| `/model`         | 两级面板切换模型(先选厂商再选模型;顶层按厂商名、厂商内按模型名过滤);也可配置 baseURL / apiKey / 上下文窗口,即时生效 + 持久化 |
+| `/effort`        | 设置思考强度 off/low/medium/high/auto(如 `/effort high`);未识别模型不下发参数 |
+| `/stats`         | 本会话用量:缓存命中率 / 分层 token / 压缩次数 |
 | `/init`          | 扫描项目生成 `AGENTS.md` 项目记忆(发给 agent 执行)                  |
 | `/theme`         | 切换颜色主题(↑↓ · Enter,或 `/theme <name>` 直切)                    |
 | `/plan`          | 切到 plan 模式(只读探查 + 产出计划,审批后切 auto 执行)              |
