@@ -43,6 +43,7 @@ export function charWidth(cp: number): number {
   if (cp >= 0xffe0 && cp <= 0xffe6) return 2;
   if (cp >= 0x1f300 && cp <= 0x1faff) return 2; // 表情
   if (cp >= 0x20000 && cp <= 0x2fffd) return 2; // CJK 扩展 B-F
+  if (cp === 0x26a1) return 2; // ⚡ 闪电:终端按 emoji 2 格渲染,算 1 会与 chip 重叠产生残影
   return 1;
 }
 

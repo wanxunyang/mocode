@@ -101,6 +101,20 @@ test('glm-4.5/4.6/5: thinking enabled/disabled; deepseek-r1/未知不下发', ()
   assert.deepEqual(resolveReasoningParams('high', { provider: 'openai', model: 'some-mystery-model' }), {});
 });
 
+// ── 豆包 Seed(火山 Ark) ──────────────────────────────
+test('doubao-seed: thinking enabled/disabled(开关式)', () => {
+  assert.equal(recognizesReasoning({ provider: 'openai', model: 'doubao-seed-evolving' }), true);
+  assert.deepEqual(resolveReasoningParams('high', { provider: 'openai', model: 'doubao-seed-evolving' }), {
+    thinking: { type: 'enabled' },
+  });
+  assert.deepEqual(resolveReasoningParams('medium', { provider: 'openai', model: 'doubao_seed_1_6' }), {
+    thinking: { type: 'enabled' },
+  });
+  assert.deepEqual(resolveReasoningParams('off', { provider: 'openai', model: 'doubao-seed-evolving' }), {
+    thinking: { type: 'disabled' },
+  });
+});
+
 // ── recognizes ────────────────────────────────────────
 test('recognizesReasoning 白名单', () => {
   assert.equal(recognizesReasoning({ provider: 'anthropic', model: 'whatever' }), true);

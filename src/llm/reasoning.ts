@@ -75,7 +75,8 @@ export function recognizesReasoning(target: ReasoningTarget): boolean {
     /qwen[-_]?3/.test(m) ||
     /deepseek[-_]?r1/.test(m) ||
     /glm[-_]?4[.-]?[56]/.test(m) ||
-    /glm[-_]?5/.test(m)
+    /glm[-_]?5/.test(m) ||
+    /doubao[-_]?seed/.test(m)
   );
 }
 
@@ -112,6 +113,12 @@ export function resolveReasoningParams(effort: ReasoningEffort, target: Reasonin
 
   // GLM-4.5/4.6/5。
   if (/glm[-_]?4[.-]?[56]/.test(m) || /glm[-_]?5/.test(m)) {
+    if (effort === 'off') return { thinking: { type: 'disabled' } };
+    return { thinking: { type: 'enabled' } };
+  }
+
+  // 豆包 Seed(火山 Ark):思考是开关式,无 low/medium/high 预算档——非 off 即启用。
+  if (/doubao[-_]?seed/.test(m)) {
     if (effort === 'off') return { thinking: { type: 'disabled' } };
     return { thinking: { type: 'enabled' } };
   }

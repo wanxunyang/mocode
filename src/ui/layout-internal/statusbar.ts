@@ -100,8 +100,12 @@ export function composeModelLine(status: StatusBarData, cols: number): string {
   const hintPart = modeTag ? `${ui.dim}${HINT}${ui.reset}` : '';
   // P3 effort chip:非 auto 时显示,与 modeTag 同级色(运行时状态),优先级在 hint 之上。
   const effortTag = status.effort ?? '';
-  const effortPart = effortTag ? `${modeColor}⚡${effortTag}${ui.reset}` : '';
-  const effortW = effortTag ? displayWidth('⚡') + displayWidth(effortTag) : 0;
+  // 闪电标识按强度递增:low=1 / medium=2 / high=3,off=0;⚡ 宽度在 charWidth 按 2 格算,
+  // 与终端一致,不会再与右侧内容重叠产生残影。标签(low/medium/high)紧随其后明示档位。
+  const boltCount = effortTag === 'low' ? 1 : effortTag === 'medium' ? 2 : effortTag === 'high' ? 3 : 0;
+  const bolts = '⚡'.repeat(boltCount);
+  const effortPart = effortTag ? `${modeColor}${bolts}${effortTag}${ui.reset}` : '';
+  const effortW = effortTag ? displayWidth(bolts) + displayWidth(effortTag) : 0;
   const sepME = modePart && effortPart ? STATUS_SEP : '';
   const tokChip = formatTurnTokenChip(status.lastTurnUsage);
   const tokW = displayWidth(stripAnsi(tokChip));
