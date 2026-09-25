@@ -211,7 +211,9 @@ export function planRetention(
       const dir = path.join(sessionsRoot, entry.name);
       const sessionPath = path.join(dir, 'session.json');
       if (!existsSync(sessionPath)) continue;
-      const ageDays = (now - statSync(sessionPath).mtimeMs) / DAY_MS;
+      // Date.now() 截断毫秒而 mtimeMs 带小数:新写入文件 age 可能微负,
+      // clamp 到 0 避免阈值 0(=立即归档)下把刚写入的会话误判为未超龄跳过。
+      const ageDays = Math.max(0, now - statSync(sessionPath).mtimeMs) / DAY_MS;
       if (ageDays < policy.archiveAfterDays) continue;
       let firstUser = '';
       try {
@@ -230,7 +232,7 @@ export function planRetention(
       if (!entry.isFile() || !entry.name.endsWith('.json.gz')) continue;
       const id = entry.name.replace(/\.json\.gz$/, '');
       const full = path.join(paths.archiveDir, entry.name);
-      const ageDays = (now - statSync(full).mtimeMs) / DAY_MS;
+      const ageDays = Math.max(0, now - statSync(full).mtimeMs) / DAY_MS;
       if (ageDays < policy.purgeAfterDays) continue;
       const idx = readArchiveIndex(paths.indexPath).find((e) => e.id === id);
       items.push({ id, ageDays, action: 'purge', firstUser: idx?.firstUser ?? '', sizeBytes: statSync(full).size });
