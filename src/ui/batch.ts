@@ -155,6 +155,13 @@ export function beginBatch(
   },
 ): string {
   const id = `b${++_idCounter}`;
+  const parentId = opts?.parentId && batches.has(opts.parentId) ? opts.parentId : undefined;
+  const parent = parentId ? batches.get(parentId) : undefined;
+  // 缩进未显式给定时按父层级自动推导:组容器批的子批 = 两层 entry 缩进;
+  // 普通子 agent 批下再嵌套 = 父批缩进 + 两层(树状逐层加深)。
+  const indent =
+    opts?.indent ??
+    (parent ? (parent.groupParent ? SUB_BATCH_INDENT : (parent.indent ?? '') + SUB_BATCH_INDENT) : undefined);
   batches.set(id, {
     id,
     summaryAbsIdx: -1,
@@ -163,8 +170,8 @@ export function beginBatch(
     renderedCount: 0,
     startedAt: Date.now(),
     label,
-    indent: opts?.indent,
-    parentId: opts?.parentId && batches.has(opts.parentId) ? opts.parentId : undefined,
+    indent,
+    parentId,
     groupParent: opts?.groupParent ?? false,
     groupChildIndex: opts?.groupChildIndex,
     running: opts?.running ?? false,
@@ -195,7 +202,8 @@ export function recordCall(id: string, name: string, callSummary: string, callId
   // 已完成的累计探索后又追加工具：恢复进行中，待新结果返回再完成。
   b.finishedAt = undefined;
   b.entries.push({ name, callSummary, resultSummary: '', diffBlock: null });
-  if (callId && b.groupParent) groupChildIndexByCall.set(callId, b.entries.length - 1);
+  // 对所有批登记:普通批内的 sub-agent 调用(子 agent 嵌套派生)同样要靠它定位锚点。
+  if (callId) groupChildIndexByCall.set(callId, b.entries.length - 1);
   // 新增 entry = 本批重新「在飞」→ 扫光心跳起(此前收口时可能已停)。
   syncSweepTimer();
 }
@@ -228,8 +236,8 @@ export function recordResult(
 ): void {
   const b = batches.get(id);
   if (!b || b.entries.length === 0) return;
-  // 组容器批:优先按 callId 定位 entry,防止多个同名 sub-agent 结果互相填错位置。
-  if (callId && b.groupParent) {
+  // 优先按 callId 定位 entry,防止多个同名工具(并行调用 / 嵌套 sub-agent)结果互相填错。
+  if (callId) {
     const idx = groupChildIndexByCall.get(callId);
     if (idx != null && idx < b.entries.length && !isEntryDone(b.entries[idx])) {
       const e = b.entries[idx];
@@ -667,15 +675,15 @@ export function endBatch(
     absLineToBatchId.set(b.summaryAbsIdx, b.id);
     return;
   }
-  // 子批尚未落盘(组容器折叠期间被隐藏 / 折叠后才新建)。绝不能 contentWrite 到 buffer 末尾:
-  // 那会在正文区留下一条游离的子 agent 摘要行,父批再展开时就变成「多出来的第三条」。
+  // 子批尚未落盘(父批折叠期间被隐藏 / 折叠后才新建)。绝不能 contentWrite 到 buffer 末尾:
+  // 那会在正文区留下一条游离的子批摘要行,父批再展开时就变成「多出来的第三条」。
   if (b.parentId) {
     const parent = batches.get(b.parentId);
-    if (parent?.groupParent) {
+    if (parent) {
       // 父批折叠中:不渲染,等 expand() 统一恢复(那时会用最新状态重建摘要行)。
       if (!expandedBatches.has(parent.id) || parent.summaryAbsIdx < 0) return;
-      // 父批已展开:插到自己的 └─ sub-agent 行下方。
-      const anchor = findParentEntryAbsLine(parent.id, b.groupChildIndex ?? 0) ?? parent.summaryAbsIdx;
+      // 父批已展开:插到对应的内部 sub-agent entry 行下方。
+      const anchor = childBatchAnchor(parent, b.groupChildIndex);
       layout.contentInsertAfter(anchor, [sanitizeRow(buildSummaryLine(b))]);
       b.summaryAbsIdx = anchor + 1;
       absLineToBatchId.set(b.summaryAbsIdx, b.id);
@@ -717,28 +725,15 @@ export function showLiveBatch(
     // 让「子 agent 的工具明细」始终跟在自己的父调用行下——并行派发时才不串行。
     const parent = b.parentId ? batches.get(b.parentId) : undefined;
     if (parent && parent.summaryAbsIdx >= 0 && layout.contentInsertAfter) {
-      // 组容器父批处于折叠态时,子批摘要行先不渲染;等父批展开时由 expand 统一恢复,
-      // 避免子批摘要残留在父批明细区、再次展开后出现重复行。
-      if (parent.groupParent && !expandedBatches.has(parent.id)) {
+      // 父批(组容器批或普通子 agent 批)折叠时,子批摘要行先不渲染;
+      // 等父批展开时由 expand 统一恢复,避免摘要残留/重复行。
+      if (!expandedBatches.has(parent.id)) {
         b.summaryAbsIdx = -1;
         return;
       }
-      let anchor: number;
-      if (parent.groupParent && b.groupChildIndex != null && expandedBatches.has(parent.id)) {
-        // 组容器已展开:子 agent 工具批插到第 groupChildIndex 个 └─ sub-agent 行下方。
-        // 不能用固定偏移 summaryAbsIdx+1+childIndex——前面兄弟子批的内容会把它后面的
-        // entry 行整体下移,固定偏移会错位;用 absLineToEntry 登记的真实绝对索引。
-        let entryAbs = parent.summaryAbsIdx + 1 + b.groupChildIndex;
-        for (const [idx, target] of absLineToEntry) {
-          if (target.batchId === parent.id && target.entryIndex === b.groupChildIndex) {
-            entryAbs = idx;
-            break;
-          }
-        }
-        anchor = entryAbs;
-      } else {
-        anchor = parent.summaryAbsIdx + (expandedBatches.has(parent.id) ? parent.renderedCount : 0);
-      }
+      // 父批已展开:插到本批对应的内部 sub-agent entry 行下方(按真实登记位置,
+      // 不用固定偏移——兄弟内容会把后续行整体下移);找不到 entry 时退化到父批块末。
+      const anchor = childBatchAnchor(parent, b.groupChildIndex);
       layout.contentInsertAfter(anchor, [sanitizeRow(summary)], false);
       b.summaryAbsIdx = anchor + 1;
       absLineToBatchId.set(b.summaryAbsIdx, b.id); // 运行态同样开放点击(endBatch 幂等重登)
@@ -831,40 +826,17 @@ export function refreshBatchExpanded(
   const newEntries = b.entries.slice(b.renderedCount);
   const lines = buildExpandedLines(b, b.indent ?? '', b.renderedCount);
   // 实时追加:不锚定视口,让新明细行自然出现在屏底。
-  // 组容器批的 entry 与子批摘要行交错,新 entry 必须插在当前块末尾,
-  // 不能简单用 summaryAbsIdx+renderedCount(否则 entry 会插到前一个子批摘要行之前)。
-  // 块末还必须计入已渲染 entry 的二层展开明细行(toggleEntry 把明细插在 entry 行下方,
-  // 会把后续 entry 行整体下移;运行态可交互后这条路径高频,漏算会插错位)。
+  // 锚点必须是本批已渲染块的真实最末行——不能简单用 summaryAbsIdx+renderedCount:
+  // ①toggleEntry 展开的二层明细行会把后续行下移;
+  // ②挂在内部 sub-agent entry 下的嵌套子批(摘要 + 其展开内容)也在本批块内。
+  // 组容器批与普通子 agent 批走同一计算。
   let anchor = b.summaryAbsIdx + b.renderedCount;
   for (const j of b.expandedEntries) {
     if (j < b.renderedCount) {
       anchor += buildEntryDetailLines(b.entries[j], entryDetailIndent(b.indent ?? '')).length;
     }
   }
-  if (b.groupParent) {
-    let maxIdx = anchor;
-    for (const [idx, target] of absLineToEntry) {
-      if (target.batchId !== b.id) continue;
-      // entry 行自身(含其二层明细)的块末位置
-      const end = b.expandedEntries.has(target.entryIndex)
-        ? idx + buildEntryDetailLines(b.entries[target.entryIndex], entryDetailIndent(b.indent ?? '')).length
-        : idx;
-      if (end > maxIdx) maxIdx = end;
-    }
-    for (const child of batches.values()) {
-      if (child.parentId === b.id && child.summaryAbsIdx >= 0) {
-        let childEnd = child.summaryAbsIdx;
-        if (expandedBatches.has(child.id)) {
-          childEnd += child.renderedCount;
-          for (const j of child.expandedEntries) {
-            childEnd += buildEntryDetailLines(child.entries[j], entryDetailIndent(child.indent ?? '')).length;
-          }
-        }
-        if (childEnd > maxIdx) maxIdx = childEnd;
-      }
-    }
-    anchor = maxIdx;
-  }
+  anchor = blockEndAbsIdx(b, anchor);
   layout.contentInsertAfter(anchor, lines, false);
   // 登记新增明细行的点击命中(按实际插入位置)
   for (let i = 0; i < newEntries.length; i++) {
@@ -913,15 +885,15 @@ function expand(
     absLineToEntry.set(b.summaryAbsIdx + 1 + i, { batchId: b.id, entryIndex: i });
     b.entries[i].renderedDigest = entryLineDigest(b.entries[i]); // 记指纹,供运行态结果回填原位刷新
   }
-  // 组容器批展开时:把之前被折叠隐藏的子批摘要行重新插回对应 entry 下方,
+  // 展开时:把之前被折叠隐藏的子批摘要行重新插回对应的内部 sub-agent entry 下方,
   // 否则子批摘要行会留在父批摘要行之后、造成明细重复/错位。
-  if (b.groupParent) {
+  // 组容器批与普通子 agent 批同一路径(嵌套孙批保持折叠,逐层展开)。
+  {
     const children = [...batches.values()]
       .filter((x) => x.parentId === b.id)
-      .sort((a, b) => (a.groupChildIndex ?? 0) - (b.groupChildIndex ?? 0));
+      .sort((x, y) => (x.groupChildIndex ?? 0) - (y.groupChildIndex ?? 0));
     for (const child of children) {
-      const entryAbs = findParentEntryAbsLine(b.id, child.groupChildIndex ?? 0);
-      const anchor = entryAbs ?? b.summaryAbsIdx + b.renderedCount;
+      const anchor = childBatchAnchor(b, child.groupChildIndex);
       const summary = buildSummaryLine(child, true);
       layout.contentInsertAfter(anchor, [sanitizeRow(summary)], !live);
       child.summaryAbsIdx = anchor + 1;
@@ -935,6 +907,73 @@ function findParentEntryAbsLine(parentId: string, entryIndex: number): number | 
     if (target.batchId === parentId && target.entryIndex === entryIndex) return idx;
   }
   return null;
+}
+
+/** 子批挂到父批(组容器批或普通子 agent 批)时的插入锚点:
+ *  优先取该子批对应的内部 sub-agent entry 真实行;未登记则退化到父批已渲染块末。 */
+function childBatchAnchor(parent: BatchRecord, childIndex?: number): number {
+  if (childIndex != null) {
+    const entryAbs = findParentEntryAbsLine(parent.id, childIndex);
+    if (entryAbs != null) return entryAbs;
+  }
+  let end = parent.summaryAbsIdx + parent.renderedCount;
+  for (const j of parent.expandedEntries) {
+    end += buildEntryDetailLines(parent.entries[j], entryDetailIndent(parent.indent ?? '')).length;
+  }
+  return blockEndAbsIdx(parent, end);
+}
+
+/** 批已渲染块的真实最末绝对行:把直接挂在本批下的子批(摘要行;若子批展开,
+ *  还含其明细行与再嵌套子批)全部计入,递归得到整棵树的块末。 */
+function blockEndAbsIdx(b: BatchRecord, initial: number): number {
+  let maxIdx = initial;
+  for (const child of batches.values()) {
+    if (child.parentId !== b.id || child.summaryAbsIdx < 0) continue;
+    let childEnd = child.summaryAbsIdx;
+    if (expandedBatches.has(child.id)) {
+      childEnd += child.renderedCount;
+      for (const j of child.expandedEntries) {
+        childEnd += buildEntryDetailLines(child.entries[j], entryDetailIndent(child.indent ?? '')).length;
+      }
+      childEnd = blockEndAbsIdx(child, childEnd);
+    }
+    if (childEnd > maxIdx) maxIdx = childEnd;
+  }
+  return maxIdx;
+  return maxIdx;
+}
+
+/** 折叠父批的所有直接子批(递归):返回这些子批在 buffer 中占据的总行数。
+ *  未落盘子批(父批折叠期间新建)在 buffer 无对应行,只清状态不计数,避免多删相邻正文。 */
+function foldChildren(parentId: string): number {
+  let count = 0;
+  for (const child of batches.values()) {
+    if (child.parentId !== parentId) continue;
+    if (child.summaryAbsIdx < 0) {
+      child.renderedCount = 0;
+      child.expandedEntries.clear();
+      expandedBatches.delete(child.id);
+      foldChildren(child.id);
+      continue;
+    }
+    count += 1; // 子批摘要行本身
+    if (expandedBatches.has(child.id)) {
+      count += child.renderedCount;
+      for (const j of child.expandedEntries) {
+        count += buildEntryDetailLines(child.entries[j], entryDetailIndent(child.indent ?? '')).length;
+      }
+      count += foldChildren(child.id);
+      child.expandedEntries.clear();
+      expandedBatches.delete(child.id);
+    }
+    child.renderedCount = 0;
+    absLineToBatchId.delete(child.summaryAbsIdx);
+    child.summaryAbsIdx = -1;
+    for (const [idx, target] of absLineToEntry) {
+      if (target.batchId === child.id) absLineToEntry.delete(idx);
+    }
+  }
+  return count;
 }
 
 /** mutation 独占 batch 收尾后立即展示其调用概要和 diff。 */
@@ -979,37 +1018,9 @@ function collapse(
   for (const i of b.expandedEntries) {
     lineCount += buildEntryDetailLines(b.entries[i], entryDetailIndent(b.indent ?? '')).length;
   }
-  // 组容器批折叠时:一并移除嵌套子批的摘要行(及其已展开详情),
-  // 否则父批再次展开后子批摘要仍残留在明细区,出现重复行。
-  if (b.groupParent) {
-    const children = [...batches.values()].filter((x) => x.parentId === b.id);
-    for (const child of children) {
-      // 未落盘的子批(父批折叠期间新建)在 buffer 里没有对应行,计进 lineCount 会多删相邻正文。
-      if (child.summaryAbsIdx < 0) {
-        child.renderedCount = 0;
-        child.expandedEntries.clear();
-        expandedBatches.delete(child.id);
-        continue;
-      }
-      lineCount += 1; // 子批摘要行本身
-      if (expandedBatches.has(child.id)) {
-        // 子批自身展开时,它的第一层明细行(renderedCount)也在父批块内,必须一并计入,
-        // 否则删少了会留下孤儿明细行。
-        lineCount += child.renderedCount;
-        for (const j of child.expandedEntries) {
-          lineCount += buildEntryDetailLines(child.entries[j], entryDetailIndent(child.indent ?? '')).length;
-        }
-        child.expandedEntries.clear();
-        expandedBatches.delete(child.id);
-      }
-      child.renderedCount = 0;
-      absLineToBatchId.delete(child.summaryAbsIdx);
-      child.summaryAbsIdx = -1;
-      for (const [idx, target] of absLineToEntry) {
-        if (target.batchId === child.id) absLineToEntry.delete(idx);
-      }
-    }
-  }
+  // 折叠时:递归移除挂在本批下的整棵子批树(子批摘要行 + 已展开明细),
+  // 否则父批再次展开后子批摘要/明细仍残留,出现重复行。组容器批与普通子 agent 批同一路径。
+  lineCount += foldChildren(b.id);
   layout.contentDeleteFrom(b.summaryAbsIdx + 1, lineCount);
   expandedBatches.delete(b.id);
   b.renderedCount = 0;
@@ -1040,11 +1051,10 @@ export function toggleEntry(
   const b = batches.get(batchId);
   if (!b || !expandedBatches.has(batchId)) return;
 
-  // 组容器批的 entry 对应一个子 Agent 批；点击 entry 行应展开/折叠该 entry
-  // 自身的详情（即子 agent 返回的完整文本输出）。子 agent 的工具调用列表由点击
-  // 子批自己的摘要行（● 子 Agent 完成 ...）来控制。
-  if (b.groupParent) {
-    // 如果该 sub-agent entry 没有可展开的详情，fallback 到 toggle 子批工具列表。
+  // sub-agent entry(组容器批的顶层调用,或子 agent 内部嵌套派生)对应一个子批:
+  // 点击 entry 行优先展开/折叠该 entry 自身详情(子 agent 返回的完整文本输出);
+  // 只有没有自身详情时,才 fallback 到 toggle 对应子批的工具列表。
+  if (b.entries[entryIndex]?.name === 'sub-agent') {
     const details = buildEntryDetailLines(b.entries[entryIndex], entryDetailIndent(b.indent ?? ''));
     if (details.length === 0) {
       const child = [...batches.values()].find((x) => x.parentId === batchId && x.groupChildIndex === entryIndex);

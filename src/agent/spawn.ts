@@ -268,8 +268,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     const childIndex = parentId ? batch.getGroupChildIndex(opts.callId) : undefined;
     liveBatchId = batch.beginBatch(t('subagent.running'), {
       parentId,
-      // 子批摘要行缩进 = 两层 entry 缩进(随 ENTRY_INDENT 联动,不硬编码空格数)。
-      indent: parentId ? batch.SUB_BATCH_INDENT : undefined,
+      // 缩进由 beginBatch 按父层级自动推导:组容器批下 = 两层 entry 缩进;
+      // 普通子 agent 批下再嵌套 = 父缩进 + 两层(树状逐层加深)。
       groupChildIndex: childIndex,
       running: true,
     });
@@ -324,7 +324,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       ensureQuietLine(opts.quietLabel ?? t('skill.executing', { name: opts.prompt.slice(0, 40) }));
       ensureLiveBatch();
       if (liveBatchId) {
-        batch.recordCall(liveBatchId, tc.name, summary);
+        // 登记内部调用的 tool_call id:子 agent 嵌套派生时,孙 spawnAgent 据此反查到
+        // 本子批,把孙批挂到对应的内部 sub-agent entry 下(而非游离到 buffer 末尾)。
+        batch.bindCall(tc.id, liveBatchId);
+        batch.recordCall(liveBatchId, tc.name, summary, tc.id);
         // 默认折叠,只刷新摘要行计数(glob/read_file 数量),不展开明细列表。
         batch.showLiveBatch(liveBatchId, liveLayout());
       }
@@ -342,6 +345,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
           null,
           output,
           isToolErrorOutput(output),
+          tc.id,
         );
         batch.showLiveBatch(liveBatchId, liveLayout());
       }
