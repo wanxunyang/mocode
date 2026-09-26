@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import { spawnDetached, killTree } from '../jobs/launch.js';
 import { getSandboxRoot } from '../sandbox/index.js';
 import { cronMatches } from './cron.js';
-import { listSchedules, updateSchedule, getSchedule } from './store.js';
+import { listSchedules, updateSchedule } from './store.js';
 import type { ScheduleRecord } from './store.js';
 
 const DEFAULT_PORT = 8788;

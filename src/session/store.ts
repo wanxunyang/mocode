@@ -284,7 +284,7 @@ export class SessionStore {
   load(id: string): SessionRecord | null {
     const currentPath = this.sessionPath(id);
     const legacyPath = path.join(this.sessionsRoot, `${id}.json`);
-    let source = existsSync(currentPath) ? currentPath : legacyPath;
+    const source = existsSync(currentPath) ? currentPath : legacyPath;
     // 活会话与 legacy 单文件都没有:回退从归档 gz 取回(30-90 天的会话仍可 resume)。
     if (!existsSync(source)) {
       const archived = loadArchivedSession(this.sessionsRoot, id);

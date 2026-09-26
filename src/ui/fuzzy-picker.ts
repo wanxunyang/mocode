@@ -79,7 +79,6 @@ export async function promptFuzzyPicker<T>(opts: FuzzyPickerOpts<T>): Promise<T 
   let cursor = query.length;
   let matches: Ranked<T>[] = [];
   let selected = 0; // 在 matches 中的下标（可能落在禁用项，移动时跳过）
-  let menuTop = 0;
   let resolved = false;
   let resolve!: (v: T | null) => void;
 
@@ -120,9 +119,8 @@ export async function promptFuzzyPicker<T>(opts: FuzzyPickerOpts<T>): Promise<T 
     // 开窗：以 selected 为中心。
     const visibleCount = Math.min(maxVisible, en.length);
     const selPos = en.indexOf(selected);
-    let page = Math.floor(selPos / visibleCount);
+    const page = Math.floor(selPos / visibleCount);
     const winEn = en.slice(page * visibleCount, page * visibleCount + visibleCount);
-    menuTop = winEn[0];
     const hasMore = page * visibleCount + visibleCount < en.length;
     const hasAbove = page > 0;
 

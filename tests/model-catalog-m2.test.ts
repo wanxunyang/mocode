@@ -1,7 +1,7 @@
 /** M2 单测：search 纯函数（过滤/分组/排序）+ catalog 命令路由匹配。 */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { flattenCatalog, searchModels, groupByProvider, type CatalogEntry } from '../src/models/search.js';
+import { flattenCatalog, searchModels, groupByProvider } from '../src/models/search.js';
 import { modelCatalogCommands } from '../src/repl/commands/model-catalog.js';
 import type { CommandContext } from '../src/repl/commands/types.js';
 import type { CatalogProvider } from '../src/models/types.js';

@@ -31,7 +31,7 @@ import type { ChatMessage, ChatUsage, ToolCallRef } from './llm/index.js';
 import { createWorktree, removeWorktree, type Worktree } from './jobs/worktree.js';
 import { runAsIdentity } from './bots/bus.js';
 import { createAsyncApprovalChecker } from './jobs/approval.js';
-import { writeCheckpoint, readCheckpoint, deleteCheckpoint } from './jobs/checkpoint.js';
+import { writeCheckpoint, readCheckpoint } from './jobs/checkpoint.js';
 import { getBot, type BotRecord } from './bots/store.js';
 import type { Tool } from './tools/types.js';
 

@@ -77,10 +77,6 @@ export interface CompactHistoryDetail {
   focus?: string;
 }
 
-function atPressure(report: BudgetReport): boolean {
-  return Math.max(report.rawTotal, report.total) >= report.window * DEFAULT_BUDGET_POLICY.pressureTriggerRatio;
-}
-
 function emptyPressure(report: BudgetReport): PressureCompressionLog {
   return {
     triggered: false,
