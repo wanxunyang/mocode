@@ -405,22 +405,6 @@ export async function promptComposer(opts: ComposerOpts = {}): Promise<ComposerR
     return rows.length - 1;
   }
 
-  /** 上下移动一行(按展示行)。 */
-  function moveVertically(delta: -1 | 1, extend: boolean): void {
-    const rows = dispRows();
-    const idx = cursorDispIdx(rows);
-    const target = Math.max(0, Math.min(rows.length - 1, idx + delta));
-    const r = rows[target];
-    if (!r) return;
-    // 保持视觉列:当前光标视觉列 → 目标展示行同列
-    const curRow = rows[idx];
-    const curText = curRow ? curRow.text : '';
-    const curOff = cur.col - (curRow ? curRow.start : 0);
-    const vis = displayWidth([...curText].slice(0, Math.max(0, curOff)).join(''));
-    const charCol = visColToCharCol(r.text, vis);
-    moveTo({ line: r.li, col: r.start + charCol }, extend);
-  }
-
   function moveByPage(delta: 1 | -1, extend: boolean): void {
     const rows = dispRows();
     const visible = Math.max(1, textRowCount());
@@ -770,10 +754,12 @@ export async function promptComposer(opts: ComposerOpts = {}): Promise<ComposerR
         }
         return;
       case 'up':
-        moveVertically(-1, extend);
+        // ↑ 始终跳到全文最前(Shift 扩展选区)
+        moveTo({ line: 0, col: 0 }, extend);
         return;
       case 'down':
-        moveVertically(1, extend);
+        // ↓ 始终跳到全文最后(Shift 扩展选区)
+        moveTo({ line: lines.length - 1, col: lineLen(lines.length - 1) }, extend);
         return;
       case 'home':
         if (key.ctrl) {

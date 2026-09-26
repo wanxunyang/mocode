@@ -170,13 +170,6 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
     return { line: dl, col: displayWidth(dispLines[dl].slice(0, dispColChars)) };
   }
 
-  /** 展示 (行, 显示列) → 段内字符偏移。供 ↑/↓ 移动后重新定位,以及鼠标点击的反向映射。 */
-  function dispColToCharInLine(dispLine: number, dispCol: number): number {
-    const { lines } = buildDisplay();
-    const ln = lines[dispLine] ?? '';
-    return visColToCharCol(ln, dispCol);
-  }
-
   /** 展示 (行, 字符内偏移) → 段+偏移。光标永远落在可编辑段;点中 chip 则吸附到最近的可编辑边界。 */
   function mapDispToCursor(dispLine: number, charInLine: number): { seg: number; off: number } {
     const { lines: dispLines, segStart } = buildDisplay();
@@ -742,15 +735,11 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
           selected = (selected - 1 + filtered.length) % filtered.length;
           redraw();
         } else {
-          const { line, col } = cursorDisp();
-          if (line > 0) {
-            const m = mapDispToCursor(line - 1, dispColToCharInLine(line - 1, col));
-            curSeg = m.seg;
-            curOff = m.off;
-            redraw();
-          } else {
-            layout.scrollWheel(1); // 等同鼠标滚轮上滚一格
-          }
+          // ↑ 始终跳到全文最前(含跨只读粘贴块,落到首个可编辑段开头)
+          const p = firstEditableStart();
+          curSeg = p.seg;
+          curOff = p.off;
+          redraw();
         }
         return;
       case 'down':
@@ -758,16 +747,11 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
           selected = (selected + 1) % filtered.length;
           redraw();
         } else {
-          const { lines: dispLines } = buildDisplay();
-          const { line, col } = cursorDisp();
-          if (line < dispLines.length - 1) {
-            const m = mapDispToCursor(line + 1, dispColToCharInLine(line + 1, col));
-            curSeg = m.seg;
-            curOff = m.off;
-            redraw();
-          } else {
-            layout.scrollWheel(-1); // 等同鼠标滚轮下滚一格
-          }
+          // ↓ 始终跳到全文最后(含跨只读粘贴块,落到末个可编辑段末尾)
+          const p = lastEditableEnd();
+          curSeg = p.seg;
+          curOff = p.off;
+          redraw();
         }
         return;
       case 'tab':
