@@ -29,6 +29,7 @@ import { summarizeToolCall, summarizeToolResult } from './ui/render.js';
 import { getToolChatSchema } from './tools/policy.js';
 import type { ChatMessage, ChatUsage, ToolCallRef } from './llm/index.js';
 import { createWorktree, removeWorktree, type Worktree } from './jobs/worktree.js';
+import { createAsyncApprovalChecker } from './jobs/approval.js';
 import { getBot, type BotRecord } from './bots/store.js';
 import type { Tool } from './tools/types.js';
 
@@ -44,6 +45,8 @@ export interface HeadlessOptions {
   worktree?: boolean;
   /** 以具名 Bot 身份运行（--bot）。 */
   botName?: string;
+  /** 后台 job id（job-runner 模式）：设置即启用异步审批 checker 并使用独立 Runtime。 */
+  jobId?: string;
 }
 
 export interface HeadlessJsonResult {
@@ -138,7 +141,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     return 1;
   }
   const effectiveSandboxRoot = botInfo?.sandboxRoot ?? initialSandbox;
-  const isolated = wt !== null || opts.sessionDir !== undefined;
+  const isolated = wt !== null || opts.sessionDir !== undefined || opts.jobId !== undefined;
 
   // MCP 先初始化注册：独立 Runtime 创建时复制当前 builtinTools（含 MCP），须早于 new Runtime。
   await initializeAllMcp();
@@ -149,6 +152,18 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     runtime = new Runtime({
       sandboxRoot: effectiveSandboxRoot,
       ...(opts.sessionDir ? { configOverrides: { sessionDir: path.resolve(opts.sessionDir) } } : {}),
+      // bg job：注入异步审批 checker（命中需授权动作时挂起，等 mocode approve）。
+      ...(opts.jobId
+        ? {
+            services: {
+              checkPermission: createAsyncApprovalChecker({
+                jobId: opts.jobId,
+                sandboxRoot: effectiveSandboxRoot,
+                getPrompt: () => prompt,
+              }),
+            },
+          }
+        : {}),
     });
   } else {
     setSandboxRoot(effectiveSandboxRoot);

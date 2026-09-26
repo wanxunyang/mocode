@@ -116,7 +116,7 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **流式输出 + 思考可见** — 回复边生成边显示;模型支持 reasoning 时思考过程实时可见,思考段自动折叠(不占屏)
 - **全屏 TUI** — 备用屏(alt screen)+ 固定底栏状态行 + 滚动回看(PgUp/PgDn),运行中可打字(typeahead),下一轮自动预填
 - **会话持久化** — 每轮自动落盘,`--resume` / `/resume` 续接历史会话
-- **后台任务** — `mocode run --bg "任务"` 派 detached 子进程,关终端不死;状态与日志落 `.mocode/jobs/`,`/jobs` 可列表/看日志/kill。设 `MOCODE_NOTIFY_WEBHOOK` 后,任务结束自动推送通知(ntfy/Bark/Telegram/generic)。
+- **后台任务** — `mocode run --bg "任务"` 派 detached 子进程,关终端不死;状态与日志落 `.mocode/jobs/`,`/jobs` 可列表/看日志/kill。设 `MOCODE_NOTIFY_WEBHOOK` 后,任务结束自动推送通知(ntfy/Bark/Telegram/generic)。无人值守任务遇到未授权的 confirm/dangerous 动作时会挂起(状态 `paused`)并通知你;在另一终端敲 `mocode approve <id>` 批准(`mocode deny` 拒绝,或 TUI 内 `/jobs approve`),任务在同一进程内续跑。
 - **具名 Bot** — `mocode bots add` 定义岗位 Bot(专属系统提示 + 可选工具白名单 + 沙箱范围),项目/全局两级;`--bot <name>` 按名运行,可与后台/schedules 组合。
 - **计划任务** — `mocode schedule add` 注册 cron / webhook 触发;本地 detached 守护(`schedule start`,仅回环)到点或被 `POST /trigger/<token>` 触发即派后台 job,分钟去重;另有 `schedule tick` 供系统任务计划调用。
 - **Headless 一次性执行** — `mocode -p "任务"` 或管道 `echo "任务" | mocode`,可选 `--json` 结构化输出;非交互下 confirm/dangerous 操作默认拒绝(`--dangerously-skip-permissions` 显式放开;`--verbose` 追加工具结果摘要、`--session-dir <目录>`、`--worktree` git 隔离工作树),会话仍自动落盘可 `--resume`

@@ -11,6 +11,7 @@ import { killBackgroundJob } from '../../jobs/launch.js';
 import { unhandled, next, type CommandHandler } from './types.js';
 
 const STATUS_COLOR: Record<JobStatus, string> = {
+  paused: ui.cyan,
   running: ui.yellow,
   succeeded: ui.green,
   failed: ui.red,
@@ -46,6 +47,24 @@ function renderList(): void {
 }
 
 export const jobsCommands: CommandHandler[] = [
+  // /jobs approve|deny [id前缀]
+  async (ctx) => {
+    if (ctx.cmd !== '/jobs') return unhandled();
+    const parts = ctx.line.split(/\s+/);
+    if (parts[1] !== 'approve' && parts[1] !== 'deny') return unhandled();
+    const job = findJob(parts[2]);
+    if (!job) {
+      layout.contentWrite(`${ui.yellow}(没找到唯一匹配的任务)${ui.reset}\n`);
+      return next();
+    }
+    if (job.status !== 'paused') {
+      layout.contentWrite(`${ui.dim}任务 ${job.id} 状态 ${job.status}，无需审批${ui.reset}\n`);
+      return next();
+    }
+    const { runApproveCli } = await import('../../jobs/approve-cli.js');
+    runApproveCli([job.id], parts[1] === 'approve' ? 'approved' : 'denied');
+    return next();
+  },
   // /jobs kill [id前缀]
   (ctx) => {
     if (ctx.cmd !== '/jobs') return unhandled();
@@ -56,7 +75,7 @@ export const jobsCommands: CommandHandler[] = [
       layout.contentWrite(`${ui.yellow}(没找到唯一匹配的任务)${ui.reset}\n`);
       return next();
     }
-    if (job.status !== 'running') {
+    if (job.status !== 'running' && job.status !== 'paused') {
       layout.contentWrite(`${ui.dim}任务 ${job.id} 已是 ${job.status}，无需 kill${ui.reset}\n`);
       return next();
     }

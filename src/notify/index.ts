@@ -12,7 +12,9 @@
 // 本地 webhook 会被转发失败。公网地址仍走 fetch（保留代理穿透）。
 
 export interface NotifyEvent {
-  status: 'succeeded' | 'failed';
+  status: 'succeeded' | 'failed' | 'waiting';
+  /** tool awaiting approval (status=waiting only). */
+  tool?: string;
   prompt: string;
   sessionId: string;
   elapsedMs: number;
@@ -25,10 +27,18 @@ function firstLine(prompt: string): string {
 }
 
 function buildTitle(ev: NotifyEvent): string {
-  return `mocode ${ev.status === 'succeeded' ? 'OK' : 'FAILED'}`;
+  if (ev.status === 'succeeded') return 'mocode OK';
+  if (ev.status === 'failed') return 'mocode FAILED';
+  return 'mocode APPROVAL NEEDED';
 }
 
 function buildBody(ev: NotifyEvent): string {
+  if (ev.status === 'waiting') {
+    return (
+      `Tool: ${ev.tool ?? '?'}\n\n${firstLine(ev.prompt)}\n\nsession: ${ev.sessionId}\nmodel: ${ev.model}` +
+      `\n\nApprove: mocode approve ${ev.sessionId}\nDeny:    mocode deny ${ev.sessionId}`
+    );
+  }
   const secs = (ev.elapsedMs / 1000).toFixed(1);
   return `${firstLine(ev.prompt)}\n\nsession: ${ev.sessionId}\nmodel: ${ev.model}\ntime: ${secs}s`;
 }

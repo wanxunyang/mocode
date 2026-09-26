@@ -9,7 +9,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getSandboxRoot } from '../sandbox/index.js';
 
-export type JobStatus = 'running' | 'succeeded' | 'failed' | 'killed';
+export type JobStatus = 'running' | 'paused' | 'succeeded' | 'failed' | 'killed';
 
 export interface JobRecord {
   id: string;

@@ -102,6 +102,19 @@ async function main(): Promise<void> {
     process.exit(code);
   }
 
+  if (args[0] === 'attach') {
+    const { runAttachCli } = await import('./jobs/attach.js');
+    const code = await runAttachCli(args.slice(1));
+    await shutdownRuntime();
+    process.exit(code);
+  }
+
+  if (args[0] === 'approve' || args[0] === 'deny') {
+    const { runApproveCli } = await import('./jobs/approve-cli.js');
+    const code = runApproveCli(args.slice(1), args[0] === 'approve' ? 'approved' : 'denied');
+    process.exit(code);
+  }
+
   if (args[0] === 'config') {
     const { runConfigWizard } = await import('./commands/config.js');
     await runConfigWizard();
