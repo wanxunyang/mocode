@@ -3,11 +3,12 @@
 // 结束后按退出码回写 job 终态，并 best-effort 发结束通知（MOCODE_NOTIFY_WEBHOOK）。
 
 import { getJob, updateJob } from './store.js';
+import { deleteCheckpoint } from './checkpoint.js';
 import { runHeadless } from '../headless.js';
 import { sendNotification } from '../notify/index.js';
 import { config } from '../config/index.js';
 
-export async function runJobRunner(jobId: string): Promise<number> {
+export async function runJobRunner(jobId: string, resume = false): Promise<number> {
   const record = getJob(jobId);
   if (!record) {
     process.stderr.write(`job runner: unknown job ${jobId}\n`);
@@ -26,6 +27,7 @@ export async function runJobRunner(jobId: string): Promise<number> {
       ...(record.worktree ? { worktree: true } : {}),
       ...(record.botName ? { botName: record.botName } : {}),
       jobId,
+      ...(resume ? { resumeFromCheckpoint: true } : {}),
     });
   } catch (e) {
     updateJob(jobId, { status: 'failed', finishedAt: new Date().toISOString(), exitCode: 1 }, { force: true });
@@ -43,6 +45,7 @@ export async function runJobRunner(jobId: string): Promise<number> {
   const status = exitCode === 0 ? 'succeeded' : 'failed';
   // force：被手动 kill 后进程仍可能在此回写，killed 状态由 killBackgroundJob 强制保留。
   updateJob(jobId, { status, finishedAt: new Date().toISOString(), exitCode }, { force: false });
+  if (status === 'succeeded') deleteCheckpoint(jobId);
 
   // 被 kill 的 job（记录仍是 killed）不发常规成功/失败通知，避免与用户意图冲突。
   const after = getJob(jobId);

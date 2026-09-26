@@ -116,8 +116,10 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **流式输出 + 思考可见** — 回复边生成边显示;模型支持 reasoning 时思考过程实时可见,思考段自动折叠(不占屏)
 - **全屏 TUI** — 备用屏(alt screen)+ 固定底栏状态行 + 滚动回看(PgUp/PgDn),运行中可打字(typeahead),下一轮自动预填
 - **会话持久化** — 每轮自动落盘,`--resume` / `/resume` 续接历史会话
-- **后台任务** — `mocode run --bg "任务"` 派 detached 子进程,关终端不死;状态与日志落 `.mocode/jobs/`,`/jobs` 可列表/看日志/kill。设 `MOCODE_NOTIFY_WEBHOOK` 后,任务结束自动推送通知(ntfy/Bark/Telegram/generic)。无人值守任务遇到未授权的 confirm/dangerous 动作时会挂起(状态 `paused`)并通知你;在另一终端敲 `mocode approve <id>` 批准(`mocode deny` 拒绝,或 TUI 内 `/jobs approve`),任务在同一进程内续跑。
+- **后台任务** — `mocode run --bg "任务"` 派 detached 子进程,关终端不死;状态与日志落 `.mocode/jobs/`,`/jobs` 可列表/看日志/kill。设 `MOCODE_NOTIFY_WEBHOOK` 后,任务结束自动推送通知(ntfy/Bark/Telegram/generic)。无人值守任务遇到未授权的 confirm/dangerous 动作时会挂起(状态 `paused`)并通知你;在另一终端敲 `mocode approve <id>` 批准(`mocode deny` 拒绝,或 TUI 内 `/jobs approve`),任务在同一进程内续跑。用 `mocode attach <id>` 可实时跟随运行中(或已结束)的任务。长任务在每个工具批次后落 checkpoint;进程挂掉或机器重启后,`mocode resume-job <id>` 从最后 checkpoint 重放(在途动作会重跑)。`MOCODE_JOB_MAX_MS` / `MOCODE_JOB_MAX_TOKENS` 提供硬性时长/token 上限。
 - **具名 Bot** — `mocode bots add` 定义岗位 Bot(专属系统提示 + 可选工具白名单 + 沙箱范围),项目/全局两级;`--bot <name>` 按名运行,可与后台/schedules 组合。
+- **Arena 竞技场** — `arena` 工具把同一任务并行跑 N 遍(2-6,各自独立),再由 judge 模型按你给的标准对所有候选打分排序,返回排名和最优方案。适合设计/探索/解题这类“多跑几遍选最好”的场景。
+- **持久 Bot 消息协作** — `message_bus` 工具给具名 bot 提供持久的异步消息存储(`send`/`inbox`/`ack`/`history`):主管 bot 可把活交给当前没在运行的 bot;worker 之后(如被计划任务唤起)拉 inbox、干活、回复。身份随 `--bot` 走,每个 bot 只能看到/确认发给自己的消息。
 - **计划任务** — `mocode schedule add` 注册 cron / webhook 触发;本地 detached 守护(`schedule start`,仅回环)到点或被 `POST /trigger/<token>` 触发即派后台 job,分钟去重;另有 `schedule tick` 供系统任务计划调用。
 - **Headless 一次性执行** — `mocode -p "任务"` 或管道 `echo "任务" | mocode`,可选 `--json` 结构化输出;非交互下 confirm/dangerous 操作默认拒绝(`--dangerously-skip-permissions` 显式放开;`--verbose` 追加工具结果摘要、`--session-dir <目录>`、`--worktree` git 隔离工作树),会话仍自动落盘可 `--resume`
 - **Skills 系统** — 自动扫描 `~/.mocode/skills/` 等目录,description 注入系统提示,模型按需调 `use_skill` 加载完整指令(渐进式披露:先看简介,任务相关才加载正文)

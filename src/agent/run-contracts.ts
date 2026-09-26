@@ -42,6 +42,8 @@ export interface AgentHooks {
     editStartLine: number,
   ) => void;
   onToolBatchEnd?: () => void;
+  /** D3: after each committed tool batch, checkpoint full history for resume. */
+  onCheckpoint?: (history: ChatMessage[]) => void;
   onNoReply?: () => void;
   onMaxSteps?: () => void;
   onAbort?: () => void;
@@ -77,6 +79,8 @@ export interface AgentRunOptions {
   initialToolRoute?: Record<string, unknown>;
   runtimeAllowedToolNames?: ReadonlySet<string>;
   contextState?: ContextState;
+  /** D3: resume — do not append userInput as a new user turn; loop starts from existing history. */
+  continueFromHistory?: boolean;
   runtimeContext?: AgentRuntimeContext;
   permissionPrompt?: PermissionCheckOptions['prompt'];
   onTrace?: (trace: AgentTurnTrace) => void;

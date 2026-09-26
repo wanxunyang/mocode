@@ -23,6 +23,8 @@ import { memoryUpdateTool } from './memory-update.js';
 import { memoryForgetTool } from './memory-forget.js';
 import { memoryGraphTool } from './memory-graph.js';
 import { subAgentTool } from './task.js';
+import { arenaTool } from './arena.js';
+import { messageBusTool } from './message-bus.js';
 import { computerTool } from './computer.js';
 import { sessionSearchTool } from './session-search.js';
 
@@ -119,6 +121,8 @@ const rawBuiltinTools: Tool[] = [
   memoryForgetTool,
   memoryGraphTool,
   subAgentTool,
+  arenaTool,
+  messageBusTool,
   computerTool,
   sessionSearchTool,
 ];

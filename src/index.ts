@@ -102,6 +102,17 @@ async function main(): Promise<void> {
     process.exit(code);
   }
 
+  if (args[0] === 'resume-job') {
+    const { resumeBackgroundJob } = await import('./jobs/launch.js');
+    const rec = resumeBackgroundJob(args[1] ?? '');
+    if (!rec) {
+      process.stderr.write('mocode: job not found\n');
+      process.exit(1);
+    }
+    process.stdout.write(`Resumed ${rec.id} from last checkpoint.\n`);
+    process.exit(0);
+  }
+
   if (args[0] === 'attach') {
     const { runAttachCli } = await import('./jobs/attach.js');
     const code = await runAttachCli(args.slice(1));
@@ -135,7 +146,7 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     const { runJobRunner } = await import('./jobs/runner.js');
-    const code = await runJobRunner(jobId);
+    const code = await runJobRunner(jobId, args.includes('--resume'));
     process.exit(code);
   }
 

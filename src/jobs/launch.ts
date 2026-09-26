@@ -11,7 +11,7 @@ import { openSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
-import { createJobId, saveJob, updateJob, logPathFor, type JobRecord } from './store.js';
+import { createJobId, saveJob, updateJob, logPathFor, getJob, type JobRecord } from './store.js';
 
 const jobsDir = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.resolve(jobsDir, '..');
@@ -109,4 +109,15 @@ export function killBackgroundJob(record: JobRecord): boolean {
   if (!killTree(record.pid)) return false;
   updateJob(record.id, { status: 'killed', finishedAt: new Date().toISOString() }, { force: true });
   return true;
+}
+
+/** D3: 从最后 checkpoint 在新 detached 进程中断点续跑同一 job。 */
+export function resumeBackgroundJob(id: string): JobRecord | null {
+  const record = getJob(id);
+  if (!record) return null;
+  updateJob(id, { status: 'running', finishedAt: undefined, exitCode: undefined }, { force: true });
+  const child = spawnDetached(['--job-runner', id, '--resume'], record.logPath);
+  // 续跑是新 detached 进程，必须回写新 PID，否则后续 /jobs kill 会指向已死的旧 PID。
+  if (child.pid) updateJob(id, { pid: child.pid }, { force: true });
+  return getJob(id);
 }

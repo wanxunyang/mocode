@@ -29,7 +29,9 @@ import { summarizeToolCall, summarizeToolResult } from './ui/render.js';
 import { getToolChatSchema } from './tools/policy.js';
 import type { ChatMessage, ChatUsage, ToolCallRef } from './llm/index.js';
 import { createWorktree, removeWorktree, type Worktree } from './jobs/worktree.js';
+import { runAsIdentity } from './bots/bus.js';
 import { createAsyncApprovalChecker } from './jobs/approval.js';
+import { writeCheckpoint, readCheckpoint, deleteCheckpoint } from './jobs/checkpoint.js';
 import { getBot, type BotRecord } from './bots/store.js';
 import type { Tool } from './tools/types.js';
 
@@ -47,6 +49,8 @@ export interface HeadlessOptions {
   botName?: string;
   /** 后台 job id（job-runner 模式）：设置即启用异步审批 checker 并使用独立 Runtime。 */
   jobId?: string;
+  /** D3: resume bg job from its last checkpoint. */
+  resumeFromCheckpoint?: boolean;
 }
 
 export interface HeadlessJsonResult {
@@ -201,9 +205,50 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     : baseConventions;
 
   const history: ChatMessage[] = [{ role: 'system', content: effectiveSystemPrompt(systemContent) }];
+  let resumedFromCheckpoint = false;
+  if (opts.resumeFromCheckpoint && opts.jobId) {
+    const snap = readCheckpoint(opts.jobId);
+    if (snap && snap.length) {
+      history.length = 0;
+      history.push(...snap);
+      resumedFromCheckpoint = true;
+    } else {
+      process.stderr.write('mocode: no checkpoint to resume from\n');
+      await runtime.close();
+      return 1;
+    }
+  }
 
   let textBuffer = '';
+  // D3 runaway guard (bg jobs only): hard wall-clock / token caps.
+  let jobSignal: AbortSignal | undefined;
+  let jobGuard:
+    | { timer?: ReturnType<typeof setTimeout>; tokens: number; maxTokens: number; controller?: AbortController }
+    | undefined;
+  if (opts.jobId) {
+    const maxMs = Number(process.env.MOCODE_JOB_MAX_MS ?? 0);
+    const maxTokens = Number(process.env.MOCODE_JOB_MAX_TOKENS ?? 0);
+    if (maxMs > 0 || maxTokens > 0) {
+      const controller = new AbortController();
+      const state = { tokens: 0, maxTokens, controller, timer: undefined as ReturnType<typeof setTimeout> | undefined };
+      if (maxMs > 0)
+        state.timer = setTimeout(() => {
+          process.stderr.write(`\n[guard] job exceeded ${maxMs}ms; aborting\n`);
+          controller.abort();
+        }, maxMs);
+      jobGuard = state;
+      jobSignal = controller.signal;
+    }
+  }
   const hooks: AgentHooks = {
+    onLiveUsage: (u) => {
+      if (!jobGuard) return;
+      jobGuard.tokens = Math.max(jobGuard.tokens, u.totalTokens);
+      if (jobGuard.maxTokens && jobGuard.tokens > jobGuard.maxTokens) {
+        process.stderr.write(`\n[guard] job exceeded ${jobGuard.maxTokens} tokens; aborting\n`);
+        jobGuard.controller?.abort();
+      }
+    },
     onText: (delta) => {
       textBuffer += delta;
       if (!opts.json) process.stdout.write(delta);
@@ -219,6 +264,11 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       if (!opts.verbose) return;
       process.stderr.write(`  → ${summarizeToolResult(tc.name, output)}\n`);
     },
+    ...(opts.jobId
+      ? {
+          onCheckpoint: (h: ChatMessage[]) => writeCheckpoint(opts.jobId!, h),
+        }
+      : {}),
     onModelRetry: (info) => {
       process.stderr.write(`[retry] model error (${info.code}), retry ${info.nextAttempt} in ${info.waitMs}ms\n`);
     },
@@ -227,15 +277,20 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   const startedAt = Date.now();
   let exitCode = 0;
   let result;
-  try {
-    result = await runAgentCore({
+  const invokeCore = () =>
+    runAgentCore({
       history,
       userInput: prompt,
       hooks,
+      ...(jobSignal ? { signal: jobSignal } : {}),
       runtimeContext: runtime.context,
+      ...(resumedFromCheckpoint ? { continueFromHistory: true } : {}),
       ...(toolFilter ? { toolsOverride: toolFilter.toolsOverride, runtimeAllowedToolNames: toolFilter.allowed } : {}),
     });
+  try {
+    result = opts.botName ? await runAsIdentity(opts.botName, () => invokeCore()) : await invokeCore();
   } finally {
+    if (jobGuard?.timer) clearTimeout(jobGuard.timer);
     try {
       runtime.session.save(history, sessionId, [prompt], []);
     } catch {

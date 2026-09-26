@@ -96,7 +96,7 @@ export async function runAgentCoreLegacy(
   const turnLifecycle = createTurnLifecycle(opts, ctx, stages, savedMode);
   const { usageMeter, emitTrace, traceTurnId } = turnLifecycle;
   const toolTurnPlanState = { stepsSincePlanTouch: 0 };
-  historyManager.appendUserTurn(userInput);
+  if (!opts.continueFromHistory) historyManager.appendUserTurn(userInput);
   // P2:每用户 turn 一个重复读 scope,经 dispatcher → ToolContext 透传给 read_file。
   const readDedup = createReadDedup();
   // The initial cancellation checkpoint is captured after the user turn and before any model/tool work.

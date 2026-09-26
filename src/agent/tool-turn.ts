@@ -130,6 +130,8 @@ export async function runToolTurn(input: ToolTurnInput): Promise<void> {
     throw error;
   }
 
+  // D3: batch committed (staged shadow pushed into backing) -> persist full history.
+  hooks.onCheckpoint?.(opts.history);
   hooks.onToolBatchEnd?.();
   cancellationLifecycle.checkpoint();
   const batchDecision = terminationPolicy.decide({

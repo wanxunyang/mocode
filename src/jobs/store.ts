@@ -93,7 +93,16 @@ export function listJobs(): JobRecord[] {
   for (const file of files) {
     if (!file.endsWith('.json')) continue;
     try {
-      records.push(JSON.parse(fs.readFileSync(path.join(jobsRoot(), file), 'utf8')) as JobRecord);
+      const parsed = JSON.parse(fs.readFileSync(path.join(jobsRoot(), file), 'utf8')) as Partial<JobRecord>;
+      // 只认完整 JobRecord，排除 <id>.approval.json / <id>.checkpoint.json 等附属文件。
+      if (
+        typeof parsed.id === 'string' &&
+        typeof parsed.status === 'string' &&
+        typeof parsed.logPath === 'string' &&
+        typeof parsed.prompt === 'string'
+      ) {
+        records.push(parsed as JobRecord);
+      }
     } catch {
       // 跳过损坏记录
     }
