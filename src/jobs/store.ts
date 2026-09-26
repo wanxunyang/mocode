@@ -25,6 +25,8 @@ export interface JobRecord {
   /** isolated session dir passed through to runHeadless. */
   sessionDir?: string;
   /** run inside a git worktree. */
+  /** named bot identity to run as. */
+  botName?: string;
   worktree?: boolean;
 }
 

@@ -2,16 +2,17 @@
 // 与 REPL 共用同一套装配（builtins 工具包 + MCP + runAgentCore），区别只在展示：
 // 没有全屏 TUI，正文流式写 stdout，进度写 stderr（保 stdout 可被管道解析）。
 //
-// 工具进度：默认每个调用打一行「[工具名] 关键参数」（经 summarizeToolCall，与 TUI
-// 同源；browser fill 等敏感值刻意不显示）。--verbose 额外追加工具结果摘要。
+// 工具进度：默认每个调用打一行「[工具名] 关键参数」（summarizeToolCall，与 TUI
+// 同源；browser fill 等敏感值刻意不显示）。--verbose 追加工具结果摘要。
 //
-// 隔离（B3）：
-// - --session-dir <path>：会话写到独立目录（不污染主 .mocode/sessions）。
-// - --worktree：在 git detached worktree 里跑，sandboxRoot 指向 worktree，
-//   结束自动销毁；主工作区零改动。两者都走独立 Runtime（不碰全局单例）。
+// 具名 Bot（C2）：--bot <name> 时用 Bot 的岗位提示作为角色前缀，并按其工具白名单
+// 过滤可调用工具（toolsOverride + runtimeAllowedToolNames，schema 即上限）。
 //
-// 权限：非交互默认 fail-closed——confirm/dangerous 工具一律拒绝（见 permissions/index.ts
-// 的 !process.stdin.isTTY 分支）。--dangerously-skip-permissions 显式关闭权限闸。
+// 隔离：--session-dir <path> 会话独立目录；--worktree 在 git detached worktree 中
+// 执行并自动销毁。两者走独立 Runtime（不碰全局单例）。
+//
+// 权限：非交互默认 fail-closed（permissions/index.ts 的 !isTTY 分支）。
+// --dangerously-skip-permissions 显式关闭权限闸。
 
 import path from 'node:path';
 import { setSandboxRoot } from './sandbox/root.js';
@@ -25,8 +26,11 @@ import { buildMemoryIndexSection } from './memory/store.js';
 import { defaultRuntime, Runtime } from './runtime/index.js';
 import { runAgentCore, type AgentHooks } from './agent/core.js';
 import { summarizeToolCall, summarizeToolResult } from './ui/render.js';
+import { getToolChatSchema } from './tools/policy.js';
 import type { ChatMessage, ChatUsage, ToolCallRef } from './llm/index.js';
 import { createWorktree, removeWorktree, type Worktree } from './jobs/worktree.js';
+import { getBot, type BotRecord } from './bots/store.js';
+import type { Tool } from './tools/types.js';
 
 export interface HeadlessOptions {
   prompt: string;
@@ -36,8 +40,10 @@ export interface HeadlessOptions {
   sandboxRootOverride?: string;
   /** 会话独立落盘目录（--session-dir）。 */
   sessionDir?: string;
-  /** 在 git detached worktree 中执行（--worktree）。 */
+  /** 在 git worktree 中执行（--worktree）。 */
   worktree?: boolean;
+  /** 以具名 Bot 身份运行（--bot）。 */
+  botName?: string;
 }
 
 export interface HeadlessJsonResult {
@@ -48,6 +54,7 @@ export interface HeadlessJsonResult {
   usage?: ChatUsage;
   elapsedMs: number;
   model: string;
+  bot?: string;
 }
 
 /** 读取 stdin 全部内容作为 prompt（管道场景）。 */
@@ -56,6 +63,42 @@ async function readStdin(): Promise<string> {
   process.stdin.setEncoding('utf8');
   for await (const chunk of process.stdin) data += chunk;
   return data;
+}
+
+/**
+ * 解析 Bot：查记录、解析其沙箱范围、校验白名单。
+ * 返回 null 表示未使用 Bot；找不到 Bot 抛错（不静默用默认身份，避免误以为岗位生效）。
+ */
+function resolveBot(
+  botName: string | undefined,
+  baseSandbox: string,
+): {
+  bot: BotRecord;
+  sandboxRoot: string;
+} | null {
+  if (!botName) return null;
+  const bot = getBot(botName);
+  if (!bot) throw new Error(`bot "${botName}" not found (project .mocode/bots or global ~/.mocode/bots)`);
+  let sandboxRoot = baseSandbox;
+  if (bot.sandboxPath) {
+    // project bot 相对其工作区；global bot 相对当前 cwd。
+    const anchor = bot.scope === 'project' ? baseSandbox : process.cwd();
+    sandboxRoot = path.resolve(anchor, bot.sandboxPath);
+  }
+  return { bot, sandboxRoot };
+}
+
+/** 从工具目录按白名单构造 schema 集 + 允许名集合。 */
+function buildBotToolFilter(
+  catalog: readonly Tool[],
+  allowNames: readonly string[],
+): { toolsOverride: NonNullable<Parameters<typeof runAgentCore>[0]['toolsOverride']>; allowed: Set<string> } {
+  const wanted = new Set(allowNames);
+  const toolsOverride = catalog
+    .filter((t) => wanted.has(t.name))
+    .map((t) => getToolChatSchema(t.name, catalog))
+    .filter((s): s is NonNullable<typeof s> => s !== null);
+  return { toolsOverride, allowed: new Set(toolsOverride.map((s) => s.function.name)) };
 }
 
 export async function runHeadless(opts: HeadlessOptions): Promise<number> {
@@ -67,7 +110,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
 
   if (opts.skipPermissions) config.permissionEnabled = false;
 
-  // worktree：先建隔离工作树（失败明确报错，不静默回退主工作区——避免误以为已隔离）。
+  // worktree 先建（失败明确报错，不静默回退主工作区）。
   let wt: Worktree | null = null;
   if (opts.worktree) {
     try {
@@ -77,34 +120,72 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       return 1;
     }
   }
-  const effectiveSandboxRoot = wt?.path ?? opts.sandboxRootOverride;
+  const initialSandbox = wt?.path ?? opts.sandboxRootOverride ?? config.sandboxRoot ?? process.cwd();
+
+  // Bot 解析（在选沙箱之后：bot.sandboxPath 可进一步收窄）。
+  let botInfo: { bot: BotRecord; sandboxRoot: string } | null;
+  try {
+    botInfo = resolveBot(opts.botName, initialSandbox);
+  } catch (e) {
+    if (wt) {
+      try {
+        removeWorktree(wt);
+      } catch {
+        // ignore
+      }
+    }
+    process.stderr.write(`mocode: ${e instanceof Error ? e.message : String(e)}\n`);
+    return 1;
+  }
+  const effectiveSandboxRoot = botInfo?.sandboxRoot ?? initialSandbox;
   const isolated = wt !== null || opts.sessionDir !== undefined;
 
-  // MCP 先初始化并注册到全局：独立 Runtime 创建时会复制当前 builtinTools（含 MCP），
-  // 故这步必须早于 new Runtime。
+  // MCP 先初始化注册：独立 Runtime 创建时复制当前 builtinTools（含 MCP），须早于 new Runtime。
   await initializeAllMcp();
   registerToolsExtension('mcp', getMcpTools());
 
   let runtime: Runtime;
   if (isolated) {
     runtime = new Runtime({
-      sandboxRoot: effectiveSandboxRoot, // undefined → context 回退全局根（--session-dir 单用场景）
+      sandboxRoot: effectiveSandboxRoot,
       ...(opts.sessionDir ? { configOverrides: { sessionDir: path.resolve(opts.sessionDir) } } : {}),
     });
   } else {
-    setSandboxRoot(effectiveSandboxRoot ?? config.sandboxRoot ?? process.cwd());
+    setSandboxRoot(effectiveSandboxRoot);
     runtime = defaultRuntime;
   }
 
   await runtime.start();
   const sessionId = runtime.session.create();
 
-  const history: ChatMessage[] = [
-    {
-      role: 'system',
-      content: effectiveSystemPrompt(buildBasePrompt(sessionId) + buildMemoryIndexSection(isMemoryEnabled())),
-    },
-  ];
+  // Bot 工具白名单：从该 runtime 实际工具目录过滤。
+  let toolFilter: ReturnType<typeof buildBotToolFilter> | null = null;
+  if (botInfo?.bot.tools && botInfo.bot.tools.length) {
+    toolFilter = buildBotToolFilter(runtime.context.toolRuntime.tools, botInfo.bot.tools);
+    if (toolFilter.toolsOverride.length === 0) {
+      process.stderr.write('mocode: bot tool whitelist matched no available tools\n');
+      await runtime.close();
+      if (wt) {
+        try {
+          removeWorktree(wt);
+        } catch {
+          // ignore
+        }
+      }
+      return 1;
+    }
+  }
+
+  // 系统提示：Bot 岗位角色在前，基础约定在后；白名单存在时补一句工具边界。
+  const baseConventions = buildBasePrompt(sessionId) + buildMemoryIndexSection(isMemoryEnabled());
+  const systemContent = botInfo
+    ? `# Role\n${botInfo.bot.systemPrompt}\n\n` +
+      `${botInfo.bot.description ? `**Position:** ${botInfo.bot.description}\n\n` : ''}` +
+      `---\n\n${baseConventions}` +
+      (toolFilter ? `\n\n## Tool boundary\nOnly these tools are available: ${[...toolFilter.allowed].join(', ')}.` : '')
+    : baseConventions;
+
+  const history: ChatMessage[] = [{ role: 'system', content: effectiveSystemPrompt(systemContent) }];
 
   let textBuffer = '';
   const hooks: AgentHooks = {
@@ -137,6 +218,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       userInput: prompt,
       hooks,
       runtimeContext: runtime.context,
+      ...(toolFilter ? { toolsOverride: toolFilter.toolsOverride, runtimeAllowedToolNames: toolFilter.allowed } : {}),
     });
   } finally {
     try {
@@ -146,7 +228,6 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     }
     closeAllMcp();
     await runtime.close();
-    // worktree 最后销毁（runtime 已关闭、文件句柄释放）。
     if (wt) {
       try {
         removeWorktree(wt);
@@ -168,6 +249,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       usage: result.usage,
       elapsedMs,
       model: config.model,
+      ...(opts.botName ? { bot: opts.botName } : {}),
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   } else if (finalText && !textBuffer) {

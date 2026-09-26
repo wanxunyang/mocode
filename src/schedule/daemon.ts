@@ -71,6 +71,7 @@ async function fireSchedule(s: ScheduleRecord, now: Date): Promise<void> {
   const { record } = launchBackgroundJob(s.prompt, {
     ...(s.worktree ? { worktree: true } : {}),
     ...(s.sessionDir ? { sessionDir: s.sessionDir } : {}),
+    ...(s.botName ? { botName: s.botName } : {}),
   });
   updateSchedule(s.id, { lastRunAt: now.toISOString() });
   process.stdout.write(`[${now.toISOString()}] fired ${s.name} (${s.id}) → job ${record.id}\n`);
@@ -140,6 +141,7 @@ export function runDaemon(port: number = DEFAULT_PORT): void {
         const { record } = launchBackgroundJob(sched.prompt, {
           ...(sched.worktree ? { worktree: true } : {}),
           ...(sched.sessionDir ? { sessionDir: sched.sessionDir } : {}),
+          ...(sched.botName ? { botName: sched.botName } : {}),
         });
         updateSchedule(sched.id, { lastRunAt: new Date().toISOString() });
         res.writeHead(200, { 'Content-Type': 'application/json' });

@@ -19,6 +19,7 @@ export interface ScheduleRecord {
   webhookToken?: string;
   worktree?: boolean;
   sessionDir?: string;
+  botName?: string;
   createdAt: string;
   lastRunAt?: string;
 }
@@ -66,6 +67,7 @@ export interface NewScheduleInput {
   webhook?: boolean;
   worktree?: boolean;
   sessionDir?: string;
+  botName?: string;
 }
 
 /** 创建并落盘一个 schedule。 */

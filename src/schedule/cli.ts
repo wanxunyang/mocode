@@ -32,6 +32,7 @@ export async function runScheduleCli(rawArgs: string[]): Promise<number> {
       const cron = flagValue(args, '--cron');
       const webhook = args.includes('--webhook');
       const worktree = args.includes('--worktree');
+      const botForSchedule = flagValue(args, '--bot');
       if (!name || !prompt) {
         process.stderr.write(
           'usage: mocode schedule add --name <n> --prompt "<task>" (--cron "<5 fields>" and/or --webhook) [--worktree]\n',
@@ -39,7 +40,7 @@ export async function runScheduleCli(rawArgs: string[]): Promise<number> {
         return 1;
       }
       try {
-        const rec = createSchedule({ name, prompt, cron, webhook, worktree });
+        const rec = createSchedule({ name, prompt, cron, webhook, worktree, botName: botForSchedule });
         process.stdout.write(`Schedule created: ${rec.id}\n  name: ${rec.name}\n`);
         if (rec.cron) process.stdout.write(`  cron: ${rec.cron}（需 mocode schedule start）\n`);
         if (rec.webhookToken) {

@@ -86,8 +86,16 @@ async function main(): Promise<void> {
     }
   }
   const useWorktree = args.includes('--worktree');
+  const botFlagIdx = args.indexOf('--bot');
+  const botName = botFlagIdx !== -1 ? args[botFlagIdx + 1] : undefined;
 
   // 首跑配置向导:写 ~/.mocode/config。独立模块,不触发 config 校验,故零配置也能跑。
+  if (args[0] === 'bots') {
+    const { runBotsCli } = await import('./bots/cli.js');
+    const code = await runBotsCli(args.slice(1));
+    process.exit(code);
+  }
+
   if (args[0] === 'schedule') {
     const { runScheduleCli } = await import('./schedule/cli.js');
     const code = await runScheduleCli(args.slice(1));
@@ -151,6 +159,7 @@ async function main(): Promise<void> {
       const { record } = launchBackgroundJob(resolved, {
         ...(sessionDirOverride ? { sessionDir: sessionDirOverride } : {}),
         ...(useWorktree ? { worktree: true } : {}),
+        ...(botName ? { botName } : {}),
       });
       process.stdout.write(
         `Job started: ${record.id}\n  pid: ${record.pid ?? '?'}\n  log: ${record.logPath}\n` +
@@ -173,6 +182,7 @@ async function main(): Promise<void> {
       sandboxRootOverride,
       sessionDir: sessionDirOverride,
       worktree: useWorktree,
+      ...(botName ? { botName } : {}),
     });
     await shutdownRuntime();
     process.exit(code);
@@ -208,6 +218,7 @@ async function main(): Promise<void> {
       sandboxRootOverride,
       sessionDir: sessionDirOverride,
       worktree: useWorktree,
+      ...(botName ? { botName } : {}),
     });
     await shutdownRuntime();
     process.exit(exitCode);

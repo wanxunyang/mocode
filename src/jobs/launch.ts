@@ -56,6 +56,7 @@ export interface LaunchResult {
 export interface LaunchOptions {
   sessionDir?: string;
   worktree?: boolean;
+  botName?: string;
 }
 
 /** 创建记录并启动 detached job。spawn 失败时记录置 failed。 */
@@ -71,6 +72,7 @@ export function launchBackgroundJob(prompt: string, opts: LaunchOptions = {}): L
     startedAt: new Date().toISOString(),
     ...(opts.sessionDir ? { sessionDir: opts.sessionDir } : {}),
     ...(opts.worktree ? { worktree: true } : {}),
+    ...(opts.botName ? { botName: opts.botName } : {}),
   };
   saveJob(record);
 
