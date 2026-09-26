@@ -39,9 +39,12 @@ process.on('unhandledRejection', (e) => {
 });
 
 /**
- * 入口:装配并启动 REPL。支持 --resume <id> 续接历史会话(裸 --resume 列出会话)。
+ * 入口:
+ * - Headless（一次性 / 非交互）:`mocode -p "任务"` 或 `echo "任务" | mocode`，
+ *   可选 --json / --dangerously-skip-permissions。
+ * - 交互 REPL（默认）;支持 --resume <id> 续接历史会话(裸 --resume 列出会话)。
  * `mocode config` 走首跑配置向导(动态加载 commands/config,不引入 REPL/config 图,故缺配置也能跑)。
- * REPL / session 用动态 import 按需加载——只在真正启动时才拉入 config 依赖图。
+ * REPL / session / headless 用动态 import 按需加载——只在真正启动时才拉入 config 依赖图。
  * 显式 process.exit(0)——OpenAI 客户端的 keep-alive 会卡住事件循环。
  */
 async function main(): Promise<void> {
@@ -65,6 +68,38 @@ async function main(): Promise<void> {
     const { runConfigWizard } = await import('./commands/config.js');
     await runConfigWizard();
     process.exit(0);
+  }
+
+  // Headless：-p / --print [prompt]。prompt 缺省时从 stdin（管道）读取。
+  const printIdx = args.findIndex((a) => a === '-p' || a === '--print');
+  if (printIdx !== -1) {
+    // 任意位置的非 flag 参数都作为 prompt（不要求紧跟 -p）；排除 --sandbox-root 的值。
+    const inlinePrompt = args.find(
+      (a, idx) => idx !== printIdx && !a.startsWith('-') && args[idx - 1] !== '--sandbox-root',
+    );
+    const { runHeadless, resolvePrompt } = await import('./headless.js');
+    const { isModelConfigured } = await import('./config/index.js');
+    const prompt = await resolvePrompt(inlinePrompt);
+    if (!prompt) {
+      process.stderr.write('mocode: empty prompt (use -p "..." or pipe via stdin)\n');
+      process.exit(1);
+    }
+    if (!isModelConfigured()) {
+      process.stderr.write(
+        'mocode: model not configured. Set LLM_BASE_URL / LLM_API_KEY / LLM_MODEL ' +
+          '(or run `mocode config`) before using -p.\n',
+      );
+      process.exit(1);
+    }
+    const exitCode = await runHeadless({
+      prompt,
+      json: args.includes('--json'),
+      verbose: args.includes('--verbose'),
+      skipPermissions: args.includes('--dangerously-skip-permissions'),
+      sandboxRootOverride,
+    });
+    await shutdownRuntime();
+    process.exit(exitCode);
   }
 
   const i = args.indexOf('--resume');
@@ -99,4 +134,8 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
-main();
+main().catch((e) => {
+  exitAltScreen();
+  process.stderr.write(`${e instanceof Error ? e.stack || e.message : String(e)}\n`);
+  process.exit(1);
+});
