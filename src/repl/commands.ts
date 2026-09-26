@@ -36,6 +36,7 @@ export function buildSlashCommands(): SlashCommand[] {
     { name: '/rollback', desc: d('commands.sessionRollback') },
     { name: '/ssearch <关键词>', value: '/ssearch ', submit: false, desc: '跨会话搜索归档会话' },
     { name: '/jobs', desc: '后台任务列表(/jobs log/kill <id前缀>)' },
+    { name: '/schedules', desc: '查看定时计划与调度守护状态' },
     {
       name: '/memory',
       desc: d('commands.memory'),

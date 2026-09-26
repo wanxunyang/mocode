@@ -35,6 +35,7 @@ import { effortCommands } from './effort.js';
 import { routerCommands } from './router.js';
 import { toolGroupCommands } from './tool-group.js';
 import { jobsCommands } from './jobs.js';
+import { scheduleCommands } from './schedule.js';
 
 /**
  * 命令注册表。顺序即匹配优先级 —— 更具体的分支放前面。
@@ -61,6 +62,7 @@ export const commandHandlers: CommandHandler[] = [
   ...routerCommands,
   ...toolGroupCommands,
   ...jobsCommands,
+  ...scheduleCommands,
 ];
 
 /**

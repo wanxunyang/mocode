@@ -88,6 +88,12 @@ async function main(): Promise<void> {
   const useWorktree = args.includes('--worktree');
 
   // 首跑配置向导:写 ~/.mocode/config。独立模块,不触发 config 校验,故零配置也能跑。
+  if (args[0] === 'schedule') {
+    const { runScheduleCli } = await import('./schedule/cli.js');
+    const code = await runScheduleCli(args.slice(1));
+    process.exit(code);
+  }
+
   if (args[0] === 'config') {
     const { runConfigWizard } = await import('./commands/config.js');
     await runConfigWizard();
@@ -112,6 +118,15 @@ async function main(): Promise<void> {
     process.exit(code);
   }
 
+  // 调度守护进程内部模式：detached 进程入口。
+  const schedDaemonIdx = args.indexOf('--schedule-daemon');
+  if (schedDaemonIdx !== -1) {
+    const portIdx = args.indexOf('--port');
+    const port = portIdx !== -1 ? Number(args[portIdx + 1]) : undefined;
+    const { runDaemon } = await import('./schedule/daemon.js');
+    runDaemon(port);
+    return; // 常驻：不显式 exit，detached 进程靠事件循环存活
+  }
   // 后台任务：mocode run [--bg] "任务"。
   if (args[0] === 'run') {
     const rest = args.slice(1);
@@ -133,7 +148,10 @@ async function main(): Promise<void> {
         process.stderr.write('mocode: empty task (use `mocode run --bg "task"` or pipe via stdin)\n');
         process.exit(1);
       }
-      const { record } = launchBackgroundJob(resolved);
+      const { record } = launchBackgroundJob(resolved, {
+        ...(sessionDirOverride ? { sessionDir: sessionDirOverride } : {}),
+        ...(useWorktree ? { worktree: true } : {}),
+      });
       process.stdout.write(
         `Job started: ${record.id}\n  pid: ${record.pid ?? '?'}\n  log: ${record.logPath}\n` +
           `  track with: mocode /jobs (in TUI) or read the log file\n`,

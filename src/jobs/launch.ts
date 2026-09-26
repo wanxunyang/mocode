@@ -1,8 +1,10 @@
-// 后台任务 launcher / kill：spawn 一个 detached 子进程跑内部 `--job-runner <id>` 模式，
-// 子进程 stdio 重定向到 <id>.log；父进程退出不影响它（detached + 独立进程组）。
+// 后台任务 launcher / kill：spawn 一个 detached 子进程，父进程退出不影响它
+//（detached + 独立进程组），stdio 重定向到日志文件。
 //
-// 形态自适应：编译产物 src/index.js 存在 → node 直跑；否则（开发态）用 tsx 跑
-// src/index.ts，与 `npm start` 同源。
+// 形态自适应：编译产物 src/index.js 存在 → node 直跑；否则（开发态）用 node 加载
+// tsx loader 单进程跑 src/index.ts（不用 tsx CLI：它会 respawn 一个不 hide 的弹窗 node）。
+//
+// 通用件 buildEntryArgs / spawnDetached 也供 schedule 守护进程复用（src/schedule/daemon.ts）。
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { openSync } from 'node:fs';
@@ -20,17 +22,30 @@ const sourceEntry = path.join(srcDir, 'index.ts');
 const tsxLoader = path.join(projectRoot, 'node_modules', 'tsx', 'dist', 'loader.mjs');
 const tsxPreflight = path.join(projectRoot, 'node_modules', 'tsx', 'dist', 'preflight.cjs');
 
-/** 构造 detached 子进程的命令与参数。 */
-function runnerSpec(jobId: string): { command: string; args: string[] } {
-  if (existsSync(compiledEntry)) {
-    return { command: process.execPath, args: [compiledEntry, '--job-runner', jobId] };
-  }
-  return {
-    command: process.execPath,
-    // 不走 tsx CLI：它内部会 respawn 一个不带 windowsHide 的 node（弹窗根因）。
-    // 直接用 node 加载 tsx loader，单进程、不弹窗。
-    args: ['--require', tsxPreflight, '--import', pathToFileURL(tsxLoader).href, sourceEntry, '--job-runner', jobId],
-  };
+/**
+ * 构造「node …入口… internalArgs」的完整参数。
+ * 生产/开发形态自动选择，调用方只需给入口之后的内部参数（如 ['--job-runner', id]）。
+ */
+export function buildEntryArgs(internalArgs: string[]): string[] {
+  if (existsSync(compiledEntry)) return [compiledEntry, ...internalArgs];
+  return ['--require', tsxPreflight, '--import', pathToFileURL(tsxLoader).href, sourceEntry, ...internalArgs];
+}
+
+/**
+ * detached spawn 一个 node 子进程。stdio 重定向到 logPath（stdout+stderr 同一 fd）。
+ * 调用方负责后续 saveJob 等状态回写。
+ */
+export function spawnDetached(internalArgs: string[], logPath: string, cwd: string = process.cwd()): ChildProcess {
+  const outFd = openSync(logPath, 'a');
+  const child = spawn(process.execPath, buildEntryArgs(internalArgs), {
+    detached: true,
+    stdio: ['ignore', outFd, outFd],
+    cwd,
+    env: process.env,
+    windowsHide: true,
+  });
+  child.unref();
+  return child;
 }
 
 export interface LaunchResult {
@@ -38,8 +53,13 @@ export interface LaunchResult {
   child: ChildProcess;
 }
 
-/** 创建记录并启动 detached job。spawn 失败时记录置 failed 并抛出。 */
-export function launchBackgroundJob(prompt: string): LaunchResult {
+export interface LaunchOptions {
+  sessionDir?: string;
+  worktree?: boolean;
+}
+
+/** 创建记录并启动 detached job。spawn 失败时记录置 failed。 */
+export function launchBackgroundJob(prompt: string, opts: LaunchOptions = {}): LaunchResult {
   const id = createJobId();
   const logPath = logPathFor(id);
   const record: JobRecord = {
@@ -49,26 +69,15 @@ export function launchBackgroundJob(prompt: string): LaunchResult {
     cwd: process.cwd(),
     logPath,
     startedAt: new Date().toISOString(),
+    ...(opts.sessionDir ? { sessionDir: opts.sessionDir } : {}),
+    ...(opts.worktree ? { worktree: true } : {}),
   };
   saveJob(record);
 
-  const { command, args } = runnerSpec(id);
-  // 'a' 保日志跨多次启动累积；同一 fd 给 stdout+stderr，输出顺序即写入顺序。
-  const outFd = openSync(logPath, 'a');
-  const child = spawn(command, args, {
-    detached: true,
-    stdio: ['ignore', outFd, outFd],
-    cwd: process.cwd(),
-    env: process.env,
-    windowsHide: true,
-  });
-  child.unref();
+  const child = spawnDetached(['--job-runner', id], logPath);
 
-  if (child.pid) {
-    saveJob({ ...record, pid: child.pid });
-  }
+  if (child.pid) saveJob({ ...record, pid: child.pid });
   child.on('error', () => {
-    // spawn 失败（tsx/node 路径缺失等）：落 failed，避免 job 永远挂 running。
     updateJob(id, { status: 'failed', finishedAt: new Date().toISOString() }, { force: true });
   });
 
@@ -76,22 +85,26 @@ export function launchBackgroundJob(prompt: string): LaunchResult {
 }
 
 /**
- * 树杀 job 进程并置 killed。
- * Windows：taskkill /T /F 杀整棵进程树（job 可能派生了 shell/dev_server）。
- * POSIX：detached 子进程是新进程组组长，负 pid 杀整个进程组。
+ * 树杀进程并置 killed。
+ * Windows：taskkill /T /F 杀整棵进程树；POSIX：负 pid 杀整个进程组。
  */
+export function killTree(pid: number): boolean {
+  if (process.platform === 'win32') {
+    const r = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+    return r.status === 0;
+  }
+  try {
+    process.kill(-pid, 'SIGTERM');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 树杀 job 并置 killed。 */
 export function killBackgroundJob(record: JobRecord): boolean {
   if (typeof record.pid !== 'number') return false;
-  if (process.platform === 'win32') {
-    const r = spawnSync('taskkill', ['/PID', String(record.pid), '/T', '/F'], { windowsHide: true });
-    if (r.status !== 0) return false;
-  } else {
-    try {
-      process.kill(-record.pid, 'SIGTERM');
-    } catch {
-      return false;
-    }
-  }
+  if (!killTree(record.pid)) return false;
   updateJob(record.id, { status: 'killed', finishedAt: new Date().toISOString() }, { force: true });
   return true;
 }

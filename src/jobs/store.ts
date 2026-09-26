@@ -22,6 +22,10 @@ export interface JobRecord {
   startedAt: string;
   finishedAt?: string;
   exitCode?: number;
+  /** isolated session dir passed through to runHeadless. */
+  sessionDir?: string;
+  /** run inside a git worktree. */
+  worktree?: boolean;
 }
 
 /** 与 session 同风格的时间戳 id：YYYYMMDD-HHMMSS-rand。 */

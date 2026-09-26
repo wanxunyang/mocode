@@ -22,6 +22,8 @@ export async function runJobRunner(jobId: string): Promise<number> {
       json: false,
       verbose: false,
       skipPermissions: false,
+      ...(record.sessionDir ? { sessionDir: record.sessionDir } : {}),
+      ...(record.worktree ? { worktree: true } : {}),
     });
   } catch (e) {
     updateJob(jobId, { status: 'failed', finishedAt: new Date().toISOString(), exitCode: 1 }, { force: true });
