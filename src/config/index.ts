@@ -185,6 +185,8 @@ export interface Config {
    *  关闭则所有工具直接放行(零交互,向后兼容旧行为)。默认 true。
    *  设 MOCODE_PERMISSION=false 全局回退。 */
   permissionEnabled: boolean;
+  /** Task-finish webhook URL (ntfy/Bark/Telegram/generic); best-effort. MOCODE_NOTIFY_WEBHOOK. */
+  notifyWebhook?: string;
   /** Allow confirmation-requiring tools without a TTY. Defaults false (fail closed). */
   permissionNonInteractiveAllow: boolean;
 }
@@ -745,6 +747,7 @@ export const config: Config = {
   llmKeysFromShell,
   permissionEnabled: process.env.MOCODE_PERMISSION !== 'false',
   permissionNonInteractiveAllow: process.env.MOCODE_PERMISSION_NON_INTERACTIVE_ALLOW === 'true',
+  notifyWebhook: process.env.MOCODE_NOTIFY_WEBHOOK || undefined,
 };
 
 /**

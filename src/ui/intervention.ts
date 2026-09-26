@@ -6,6 +6,7 @@ import { displayWidth, truncateDisplay, visColToCharCol, wrapByDisplayWidth } fr
 import * as layout from './layout.js';
 import * as mouse from './mouse.js';
 import { Spinner } from './spinner.js';
+import { resumeSweep, suspendSweep } from './batch.js';
 import { t } from '../i18n/index.js';
 
 /**
@@ -295,6 +296,8 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
     });
     if (layout.isScrolled()) layout.resetScroll();
     else layout.repaintViewport();
+    // 恢复扫光心跳(若仍有在飞批):必须在 repaintViewport 之后——先恢复内容区,再让心跳重画摘要行。
+    resumeSweep();
     // 恢复走时计时器(RUNNING 态):面板期间 stopTurnTimer 停了心跳,退出后恢复状态行 80ms 刷新。
     layout.startTurnTimerIfRunning();
   }
@@ -428,6 +431,9 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
       // 把真光标拉到 runningCaretPos 覆盖 paintInput 的正确光标位)+ 禁鼠标框选(防拖拽 viewport 重画覆盖菜单)+ 回尾(若用户正滚动回看)
       Spinner.pauseCurrent();
       layout.stopTurnTimer();
+      // 暂停 batch 摘要行扫光:摘要行在内容区底,菜单向上展开会与之重叠,心跳继续重画会
+      // 把「◇ 正在探索」帧泄漏到选项之间(cleanup 退出时 resumeSweep 恢复)。
+      suspendSweep();
       layout.setMouseEnabled(false);
       layout.resetScroll();
       // 快照现有 keypress 监听(运行态的 onRunningKey)并摘掉,挂自己的 onKey

@@ -545,3 +545,33 @@ describe('batch 详情行缩进随批层级联动', () => {
     );
   });
 });
+
+describe('扫光暂停/恢复(介入面板 ask_human 期间防「◇ 正在探索」泄漏进菜单)', () => {
+  it('suspend 置暂停态且幂等;期间 showLiveBatch 不重启心跳;resume 解除', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'run_command', 'a');
+    batch.showLiveBatch(id, layout);
+
+    assert.equal(batch.__sweepTest.isSuspended(), false, '前置:未暂停');
+    batch.suspendSweep();
+    assert.equal(batch.__sweepTest.isSuspended(), true, 'suspend 后应处暂停态');
+    assert.equal(batch.__sweepTest.timerActive(), false, '暂停后心跳必须停止(非 TTY 下本来也不启)');
+
+    // 面板期间工具状态若再刷新(showLiveBatch),心跳也不得被 syncSweepTimer 拉起
+    batch.recordCall(id, 'run_command', 'b');
+    batch.showLiveBatch(id, layout);
+    assert.equal(batch.__sweepTest.isSuspended(), true, '暂停态不得被 showLiveBatch 清掉');
+    assert.equal(batch.__sweepTest.timerActive(), false, '暂停期间心跳不得重启——否则帧会画进菜单区');
+
+    // 幂等:重复 suspend 不改变状态
+    batch.suspendSweep();
+    assert.equal(batch.__sweepTest.isSuspended(), true);
+
+    batch.resumeSweep();
+    assert.equal(batch.__sweepTest.isSuspended(), false, 'resume 后应解除暂停');
+    // resume 幂等:再次调不应抛错/改状态
+    batch.resumeSweep();
+    assert.equal(batch.__sweepTest.isSuspended(), false);
+  });
+});

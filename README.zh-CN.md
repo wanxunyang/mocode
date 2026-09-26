@@ -116,10 +116,11 @@ mocode 不是一个套壳聊天框,而是一个能真正动手干活的 agent:
 - **流式输出 + 思考可见** — 回复边生成边显示;模型支持 reasoning 时思考过程实时可见,思考段自动折叠(不占屏)
 - **全屏 TUI** — 备用屏(alt screen)+ 固定底栏状态行 + 滚动回看(PgUp/PgDn),运行中可打字(typeahead),下一轮自动预填
 - **会话持久化** — 每轮自动落盘,`--resume` / `/resume` 续接历史会话
-- **Headless 一次性执行** — `mocode -p "任务"` 或管道 `echo "任务" | mocode`,可选 `--json` 结构化输出;非交互下 confirm/dangerous 操作默认拒绝(`--dangerously-skip-permissions` 显式放开;`--verbose` 追加工具结果摘要),会话仍自动落盘可 `--resume`
+- **后台任务** — `mocode run --bg "任务"` 派 detached 子进程,关终端不死;状态与日志落 `.mocode/jobs/`,`/jobs` 可列表/看日志/kill。设 `MOCODE_NOTIFY_WEBHOOK` 后,任务结束自动推送通知(ntfy/Bark/Telegram/generic)。
+- **Headless 一次性执行** — `mocode -p "任务"` 或管道 `echo "任务" | mocode`,可选 `--json` 结构化输出;非交互下 confirm/dangerous 操作默认拒绝(`--dangerously-skip-permissions` 显式放开;`--verbose` 追加工具结果摘要、`--session-dir <目录>`、`--worktree` git 隔离工作树),会话仍自动落盘可 `--resume`
 - **Skills 系统** — 自动扫描 `~/.mocode/skills/` 等目录,description 注入系统提示,模型按需调 `use_skill` 加载完整指令(渐进式披露:先看简介,任务相关才加载正文)
 - **可选桌宠** — 独立悬浮窗(`/pet`)显示一个小角色,镜像 agent 活动(空闲 / 思考 / 跑工具 / 等人工),独立进程走 WebSocket,`/pet quit` 完全关闭。挂在终端外,绝不挡终端。
-- **斜杠命令** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/effort` `/stats` `/plan` `/auto` `/pet`,输入时下拉过滤
+- **斜杠命令** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/jobs` `/memory` `/reflect` `/init` `/theme` `/model` `/effort` `/stats` `/plan` `/auto` `/pet`,输入时下拉过滤
 
 ## 使用文档
 

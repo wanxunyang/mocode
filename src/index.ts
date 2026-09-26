@@ -38,13 +38,25 @@ process.on('unhandledRejection', (e) => {
   process.exit(1);
 });
 
+/** 取 args 中任意位置的非 flag 参数；排除带值 flag（--sandbox-root）的下一个值。 */
+function firstPositional(args: string[], options: { valueFlags?: string[] } = {}): string | undefined {
+  const valueFlags = options.valueFlags ?? [];
+  return args.find((a, idx) => {
+    if (a.startsWith('-')) return false;
+    if (valueFlags.includes(args[idx - 1] ?? '')) return false;
+    return true;
+  });
+}
+
 /**
  * 入口:
+ * - 后台任务:`mocode run --bg "任务"`（detached 子进程，状态落 .mocode/jobs/）。
+ * - Job runner 内部模式:`mocode --job-runner <id>`（由 run --bg 派生，用户不直接用）。
  * - Headless（一次性 / 非交互）:`mocode -p "任务"` 或 `echo "任务" | mocode`，
- *   可选 --json / --dangerously-skip-permissions。
+ *   可选 --json / --verbose / --dangerously-skip-permissions。
  * - 交互 REPL（默认）;支持 --resume <id> 续接历史会话(裸 --resume 列出会话)。
  * `mocode config` 走首跑配置向导(动态加载 commands/config,不引入 REPL/config 图,故缺配置也能跑)。
- * REPL / session / headless 用动态 import 按需加载——只在真正启动时才拉入 config 依赖图。
+ * REPL / session / headless / jobs 用动态 import 按需加载——只在真正启动时才拉入 config 依赖图。
  * 显式 process.exit(0)——OpenAI 客户端的 keep-alive 会卡住事件循环。
  */
 async function main(): Promise<void> {
@@ -63,6 +75,18 @@ async function main(): Promise<void> {
     }
   }
 
+  // --session-dir <path>:会话独立落盘目录(不写主 .mocode/sessions)。
+  const sd = args.indexOf('--session-dir');
+  let sessionDirOverride: string | undefined;
+  if (sd !== -1) {
+    sessionDirOverride = args[sd + 1];
+    if (!sessionDirOverride || sessionDirOverride.startsWith('--')) {
+      console.error('mocode: --session-dir requires a path');
+      process.exit(1);
+    }
+  }
+  const useWorktree = args.includes('--worktree');
+
   // 首跑配置向导:写 ~/.mocode/config。独立模块,不触发 config 校验,故零配置也能跑。
   if (args[0] === 'config') {
     const { runConfigWizard } = await import('./commands/config.js');
@@ -70,12 +94,79 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  // Job runner 内部模式：detached 子进程入口。
+  const runnerIdx = args.indexOf('--job-runner');
+  if (runnerIdx !== -1) {
+    const jobId = args[runnerIdx + 1];
+    if (!jobId) {
+      process.stderr.write('mocode: --job-runner requires a job id\n');
+      process.exit(1);
+    }
+    const { isModelConfigured } = await import('./config/index.js');
+    if (!isModelConfigured()) {
+      process.stderr.write('mocode: model not configured; cannot run background job.\n');
+      process.exit(1);
+    }
+    const { runJobRunner } = await import('./jobs/runner.js');
+    const code = await runJobRunner(jobId);
+    process.exit(code);
+  }
+
+  // 后台任务：mocode run [--bg] "任务"。
+  if (args[0] === 'run') {
+    const rest = args.slice(1);
+    const background = rest.includes('--bg');
+    const prompt = firstPositional(rest, { valueFlags: ['--sandbox-root'] });
+    const { isModelConfigured } = await import('./config/index.js');
+    if (!isModelConfigured()) {
+      process.stderr.write(
+        'mocode: model not configured. Set LLM_BASE_URL / LLM_API_KEY / LLM_MODEL ' +
+          '(or run `mocode config`) first.\n',
+      );
+      process.exit(1);
+    }
+    if (background) {
+      const { launchBackgroundJob } = await import('./jobs/launch.js');
+      const { resolvePrompt } = await import('./headless.js');
+      const resolved = await resolvePrompt(prompt);
+      if (!resolved) {
+        process.stderr.write('mocode: empty task (use `mocode run --bg "task"` or pipe via stdin)\n');
+        process.exit(1);
+      }
+      const { record } = launchBackgroundJob(resolved);
+      process.stdout.write(
+        `Job started: ${record.id}\n  pid: ${record.pid ?? '?'}\n  log: ${record.logPath}\n` +
+          `  track with: mocode /jobs (in TUI) or read the log file\n`,
+      );
+      process.exit(0);
+    }
+    // 前台 run：等价 -p，走 headless。
+    const { runHeadless, resolvePrompt } = await import('./headless.js');
+    const resolved = await resolvePrompt(prompt);
+    if (!resolved) {
+      process.stderr.write('mocode: empty task\n');
+      process.exit(1);
+    }
+    const code = await runHeadless({
+      prompt: resolved,
+      json: rest.includes('--json'),
+      verbose: rest.includes('--verbose'),
+      skipPermissions: rest.includes('--dangerously-skip-permissions'),
+      sandboxRootOverride,
+      sessionDir: sessionDirOverride,
+      worktree: useWorktree,
+    });
+    await shutdownRuntime();
+    process.exit(code);
+  }
+
   // Headless：-p / --print [prompt]。prompt 缺省时从 stdin（管道）读取。
   const printIdx = args.findIndex((a) => a === '-p' || a === '--print');
   if (printIdx !== -1) {
     // 任意位置的非 flag 参数都作为 prompt（不要求紧跟 -p）；排除 --sandbox-root 的值。
-    const inlinePrompt = args.find(
-      (a, idx) => idx !== printIdx && !a.startsWith('-') && args[idx - 1] !== '--sandbox-root',
+    const inlinePrompt = firstPositional(
+      args.filter((_, idx) => idx !== printIdx),
+      { valueFlags: ['--sandbox-root'] },
     );
     const { runHeadless, resolvePrompt } = await import('./headless.js');
     const { isModelConfigured } = await import('./config/index.js');
@@ -97,6 +188,8 @@ async function main(): Promise<void> {
       verbose: args.includes('--verbose'),
       skipPermissions: args.includes('--dangerously-skip-permissions'),
       sandboxRootOverride,
+      sessionDir: sessionDirOverride,
+      worktree: useWorktree,
     });
     await shutdownRuntime();
     process.exit(exitCode);

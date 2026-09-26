@@ -117,10 +117,11 @@ MoCode isn't a chat box with a coat of paint — it's an agent that actually get
 - **Streaming output + visible reasoning** — Responses render as they're generated; when the model supports reasoning, the thinking process is visible in real time and auto-collapses to save screen space.
 - **Full-screen TUI** — Alt-screen mode with a fixed status bar, scrollback (PgUp/PgDn), typeahead while the agent is running, and auto-prefill for the next turn.
 - **Session persistence** — Every turn is saved automatically; `--resume` / `/resume` picks up a past session.
-- **Headless one-shot mode** — `mocode -p "task"` or piped `echo "task" | mocode`, with optional `--json` structured output; confirm/dangerous actions are denied by default when non-interactive (opt in with `--dangerously-skip-permissions`; `--verbose` adds tool-result summaries), and sessions are still saved for `--resume`.
+- **Background jobs** — `mocode run --bg "task"` spawns a detached process that survives terminal close; state and logs land in `.mocode/jobs/`, and `/jobs` lists, tails logs, or kills them. Set `MOCODE_NOTIFY_WEBHOOK` to push a finish notification (ntfy/Bark/Telegram/generic).
+- **Headless one-shot mode** — `mocode -p "task"` or piped `echo "task" | mocode`, with optional `--json` structured output; confirm/dangerous actions are denied by default when non-interactive (opt in with `--dangerously-skip-permissions`; `--verbose` adds tool-result summaries, `--session-dir <dir>`, `--worktree` ephemeral git worktree), and sessions are still saved for `--resume`.
 - **Skills system** — Scans directories like `~/.mocode/skills/` automatically; each skill's description is injected into the system prompt, and the model calls `use_skill` to load the full instructions only when relevant (progressive disclosure: skim the summary first, load the body only if needed).
 - **Optional desktop pet** — A small floating window (`/pet`) shows a stateful character that mirrors agent activity (idle / thinking / tool running / waiting for human). Works as a separate process over WebSocket; quit it with `/pet quit`. Sits beside the terminal, never blocks it.
-- **Slash commands** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/memory` `/reflect` `/init` `/theme` `/model` `/effort` `/stats` `/plan` `/auto` `/pet`, with dropdown filtering as you type.
+- **Slash commands** — `/exit` `/clear` `/cd` `/context` `/skills` `/compact` `/resume` `/rollback` `/jobs` `/memory` `/reflect` `/init` `/theme` `/model` `/effort` `/stats` `/plan` `/auto` `/pet`, with dropdown filtering as you type.
 
 ## Documentation
 

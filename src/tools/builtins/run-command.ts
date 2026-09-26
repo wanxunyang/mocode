@@ -98,6 +98,7 @@ export async function runCommandRaw(
       // cmd.exe 需要 verbatim:否则 Node 重新引号化参数,`node -e "..."` 会退化成
       // 字符串字面量并 exit 0,造成 Windows 上的假阳性验证。其它 shell 必须关。
       windowsVerbatimArguments: spec.windowsVerbatimArguments,
+      windowsHide: true,
     });
     const output = new BoundedCommandOutput();
     let finished = false;
@@ -106,7 +107,7 @@ export async function runCommandRaw(
       try {
         if (isWin) {
           if (child.pid != null) {
-            spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+            spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
           }
         } else {
           child.kill('SIGTERM');

@@ -1,15 +1,19 @@
 // Headless（一次性 / 非交互）模式：mocode -p "任务" 或 echo "任务" | mocode。
-// 与 REPL 共用同一套装配（builtins 工具包 + MCP + Runtime + runAgentCore），
-// 区别只在展示：没有全屏 TUI，正文流式写 stdout，进度写 stderr（保 stdout 可被管道解析）。
+// 与 REPL 共用同一套装配（builtins 工具包 + MCP + runAgentCore），区别只在展示：
+// 没有全屏 TUI，正文流式写 stdout，进度写 stderr（保 stdout 可被管道解析）。
 //
 // 工具进度：默认每个调用打一行「[工具名] 关键参数」（经 summarizeToolCall，与 TUI
 // 同源；browser fill 等敏感值刻意不显示）。--verbose 额外追加工具结果摘要。
-// 正文通常不以换行收尾，工具行前先补一个换行，避免「…正文。[read_file] …」挤一行。
+//
+// 隔离（B3）：
+// - --session-dir <path>：会话写到独立目录（不污染主 .mocode/sessions）。
+// - --worktree：在 git detached worktree 里跑，sandboxRoot 指向 worktree，
+//   结束自动销毁；主工作区零改动。两者都走独立 Runtime（不碰全局单例）。
 //
 // 权限：非交互默认 fail-closed——confirm/dangerous 工具一律拒绝（见 permissions/index.ts
-// 的 !process.stdin.isTTY 分支）。--dangerously-skip-permissions 显式关闭权限闸（与
-// Claude Code 同名，操作者自担风险）。
+// 的 !process.stdin.isTTY 分支）。--dangerously-skip-permissions 显式关闭权限闸。
 
+import path from 'node:path';
 import { setSandboxRoot } from './sandbox/root.js';
 import { registerToolsExtension } from './tools/registry.js';
 // 装配官方默认工具包：registry 不顶层 import builtins（破模块循环），入口须显式装配。
@@ -18,10 +22,11 @@ import { initializeAllMcp, getMcpTools, closeAllMcp } from './mcp/index.js';
 import { config, buildBasePrompt, isMemoryEnabled } from './config/index.js';
 import { effectiveSystemPrompt } from './skills/index.js';
 import { buildMemoryIndexSection } from './memory/store.js';
-import { defaultRuntime } from './runtime/index.js';
+import { defaultRuntime, Runtime } from './runtime/index.js';
 import { runAgentCore, type AgentHooks } from './agent/core.js';
 import { summarizeToolCall, summarizeToolResult } from './ui/render.js';
 import type { ChatMessage, ChatUsage, ToolCallRef } from './llm/index.js';
+import { createWorktree, removeWorktree, type Worktree } from './jobs/worktree.js';
 
 export interface HeadlessOptions {
   prompt: string;
@@ -29,6 +34,10 @@ export interface HeadlessOptions {
   verbose: boolean;
   skipPermissions: boolean;
   sandboxRootOverride?: string;
+  /** 会话独立落盘目录（--session-dir）。 */
+  sessionDir?: string;
+  /** 在 git detached worktree 中执行（--worktree）。 */
+  worktree?: boolean;
 }
 
 export interface HeadlessJsonResult {
@@ -58,15 +67,37 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
 
   if (opts.skipPermissions) config.permissionEnabled = false;
 
-  setSandboxRoot(opts.sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
+  // worktree：先建隔离工作树（失败明确报错，不静默回退主工作区——避免误以为已隔离）。
+  let wt: Worktree | null = null;
+  if (opts.worktree) {
+    try {
+      wt = createWorktree();
+    } catch (e) {
+      process.stderr.write(`mocode: worktree setup failed: ${e instanceof Error ? e.message : String(e)}\n`);
+      return 1;
+    }
+  }
+  const effectiveSandboxRoot = wt?.path ?? opts.sandboxRootOverride;
+  const isolated = wt !== null || opts.sessionDir !== undefined;
 
-  const runtime = defaultRuntime;
-  await runtime.start();
-  const sessionId = runtime.session.create();
-
-  // MCP：与 REPL 同路径初始化；单个 server 失败不阻断。
+  // MCP 先初始化并注册到全局：独立 Runtime 创建时会复制当前 builtinTools（含 MCP），
+  // 故这步必须早于 new Runtime。
   await initializeAllMcp();
   registerToolsExtension('mcp', getMcpTools());
+
+  let runtime: Runtime;
+  if (isolated) {
+    runtime = new Runtime({
+      sandboxRoot: effectiveSandboxRoot, // undefined → context 回退全局根（--session-dir 单用场景）
+      ...(opts.sessionDir ? { configOverrides: { sessionDir: path.resolve(opts.sessionDir) } } : {}),
+    });
+  } else {
+    setSandboxRoot(effectiveSandboxRoot ?? config.sandboxRoot ?? process.cwd());
+    runtime = defaultRuntime;
+  }
+
+  await runtime.start();
+  const sessionId = runtime.session.create();
 
   const history: ChatMessage[] = [
     {
@@ -81,9 +112,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       textBuffer += delta;
       if (!opts.json) process.stdout.write(delta);
     },
-    // 每个工具调用（含并行批）都先过 header：按模型发起顺序、带完整参数。
     onToolHeader: (tc: ToolCallRef) => {
-      // 正文流不以换行收尾（最常见），工具行不补换行就会接在「…正文。」后面。
       if (!opts.json && textBuffer && !textBuffer.endsWith('\n')) {
         process.stdout.write('\n');
         textBuffer += '\n';
@@ -110,7 +139,6 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       runtimeContext: runtime.context,
     });
   } finally {
-    // 无论成败都落盘 + 清理，保证会话可 --resume、MCP/浏览器进程不残留。
     try {
       runtime.session.save(history, sessionId, [prompt], []);
     } catch {
@@ -118,6 +146,14 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     }
     closeAllMcp();
     await runtime.close();
+    // worktree 最后销毁（runtime 已关闭、文件句柄释放）。
+    if (wt) {
+      try {
+        removeWorktree(wt);
+      } catch {
+        process.stderr.write(`mocode: failed to remove worktree ${wt.path}（手动清理）\n`);
+      }
+    }
   }
 
   const elapsedMs = Date.now() - startedAt;
@@ -135,7 +171,6 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   } else if (finalText && !textBuffer) {
-    // 模型未走 onText 流式（极少见）时兜底输出。
     process.stdout.write(finalText);
   }
   if (!opts.json && process.stdout.isTTY && finalText && !finalText.endsWith('\n')) process.stdout.write('\n');

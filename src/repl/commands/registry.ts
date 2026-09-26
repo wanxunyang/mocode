@@ -34,6 +34,7 @@ import { modelCatalogCommands } from './model-catalog.js';
 import { effortCommands } from './effort.js';
 import { routerCommands } from './router.js';
 import { toolGroupCommands } from './tool-group.js';
+import { jobsCommands } from './jobs.js';
 
 /**
  * 命令注册表。顺序即匹配优先级 —— 更具体的分支放前面。
@@ -59,6 +60,7 @@ export const commandHandlers: CommandHandler[] = [
   ...modelCommands,
   ...routerCommands,
   ...toolGroupCommands,
+  ...jobsCommands,
 ];
 
 /**
