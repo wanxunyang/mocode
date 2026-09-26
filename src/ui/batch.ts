@@ -135,6 +135,8 @@ export function reset(): void {
   expandedBatches.clear();
   callToBatch.clear();
   groupChildIndexByCall.clear();
+  // 复位外部暂停态(兜底:面板异常退出未走 cleanup 时,避免暂停泄漏到后续 turn)。
+  _sweepSuspended = false;
   // 扫光心跳随运行态批自停:batch 全清后 hasRunningBatch 必为 false。
   syncSweepTimer();
 }
@@ -319,6 +321,13 @@ let _sweepTimer: NodeJS.Timeout | null = null;
 let _sweepLayout: { contentReplaceLine(absIdx: number, line: string): void } | null = null;
 
 /**
+ * 扫光被外部暂停(介入面板 ask_human 期间):摘要行已在内容区底部,而菜单同样从
+ * contentBottom 向上展开,心跳若继续逐帧重画该行会写进菜单区、把「◇ 正在探索」
+ * 泄漏到选项之间(用户截图实证)。暂停只冻结心跳,不清状态;resumeSweep 后立即恢复。
+ */
+let _sweepSuspended = false;
+
+/**
  * 批是否「在飞」(需要扫光与实时耗时)。判据是**已收口即落定**:
  * `endBatch` 必设 finishedAt,故先看它 —— 否则任何「endBatch 了但 running 标志残留」
  * 的路径会让扫光永远转下去(实测:探针手动置 running 后收口,扫光仍在写)。
@@ -339,7 +348,7 @@ function hasLiveBatch(): boolean {
 
 /** 扫光可用性:TUI(非 TTY 输出纯文本,不能塞动画转义)+ 有在飞批 + 有可写回的 layout。 */
 function sweepEnabled(): boolean {
-  return ui.isTTY && _sweepLayout != null && hasLiveBatch();
+  return !_sweepSuspended && ui.isTTY && _sweepLayout != null && hasLiveBatch();
 }
 
 /**
@@ -382,6 +391,29 @@ export function syncSweepTimer(): void {
     return timer;
   })();
 }
+
+/**
+ * 暂停扫光心跳(介入面板进入时调):syncSweepTimer 经 sweepEnabled 判定立即清 timer;
+ * 暂停期间 showLiveBatch/endBatch 再调 syncSweepTimer 也不会重启。幂等:重复挂起不抖状态。
+ */
+export function suspendSweep(): void {
+  if (_sweepSuspended) return;
+  _sweepSuspended = true;
+  syncSweepTimer();
+}
+
+/** 恢复扫光(介入面板退出时调):若仍有在飞批则心跳立即重建;无在飞批则保持停止。幂等。 */
+export function resumeSweep(): void {
+  if (!_sweepSuspended) return;
+  _sweepSuspended = false;
+  syncSweepTimer();
+}
+
+/** 测试钩子:扫光当前是否处于外部暂停态(介入面板泄漏回归用)。 */
+export const __sweepTest = {
+  isSuspended: (): boolean => _sweepSuspended,
+  timerActive: (): boolean => _sweepTimer !== null,
+};
 
 /**
  * 计算本帧高亮带覆盖的字符区间 `[start, end)`(纯函数,导出供帧推进/带宽测试)。
