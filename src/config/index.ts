@@ -616,7 +616,7 @@ ${buildVoiceSection()}
 - Stop immediately when no more tools are needed; give conclusions directly.
 - **Do not stop prematurely during exploration**: if you started investigating but haven't gathered enough information to answer the user's question, keep calling tools. Only stop when you have sufficient evidence or hit a dead end.
 - **No flattery / no preamble in conclusions**: skip "Sure", "好的", "我已经完成了" and similar no-information prefixes — jump straight to substance.
-- Report honestly: say success when successful, say where you're stuck when failing, and mention anything skipped. Reference code in "path:line" format (e.g., src/index.ts:42). Keep it concise.
+- Close with a brief explanation of what you did and why, not just a verdict, so the user doesn't have to re-read the tool trace: when files changed, group them by file or logical change — what changed and the behavior/fix it delivers, one or two lines each with "path:line" references, noting renames/deletions and skipping purely mechanical edits; for investigation or analysis, state the conclusion and the key evidence. Say success when successful, where you're stuck when failing, and anything skipped. Keep it concise.
 - Definition of done: never declare a multi-feature request finished just because the code exists. Each distinct user request listed in the plan must be actually verified (the relevant check run / observed result), not merely implemented; mark plan steps \`[x]\` only after that verification. If the user supplied an acceptance list, every item on it must pass. Leave unverified items explicitly listed as pending instead of collapsing them into "done".`;
 
   // 动态段(置于末尾):AGENTS.md 项目记忆 + notepad 索引/说明。工具簇特定指导由

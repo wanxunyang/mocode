@@ -57,8 +57,8 @@ export const CAPABILITIES: Record<string, ToolCapabilities> = {
   // 后台进程与浏览器会话跨调用存活；串行执行避免同一页面/服务被并发操作。
   dev_server: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
   browser: { effect: 'process', concurrency: 'serial', resources: workspaceResource },
-  glob: { effect: 'read', concurrency: 'parallel', resources: workspaceResource },
-  grep: { effect: 'read', concurrency: 'parallel', resources: workspaceResource },
+  glob: { effect: 'read', concurrency: 'parallel', resources: workspaceResource, supportsAbort: true },
+  grep: { effect: 'read', concurrency: 'parallel', resources: workspaceResource, supportsAbort: true },
   // 网络只读查询:无副作用,可安全重复执行 → idempotent 让 runtime 对瞬时失败(429/5xx/超时/
   // 网络抖动)自动退避重试,省掉模型「再发一轮 tool call 自救」的往返。写/进程类工具绝不置此位。
   web_search: { effect: 'network', concurrency: 'parallel', supportsAbort: true, idempotent: true },
@@ -95,6 +95,13 @@ export const CAPABILITIES: Record<string, ToolCapabilities> = {
     parallelOrchestration: true,
     supportsAbort: true,
   },
+  // arena:一次调用内部并行 spawnAgent 出多个候选 + 一次 judge(见 ./arena.ts)。与 sub-agent 同理:
+  // 资源锁委派给内层 spawn 出的工具,否则 arena 自持 workspace 写锁会与候选内 run_command 自锁;
+  // 候选直接写共享工作区 → effect=write;它是单个工具调用,不置 parallelOrchestration(那是跨调用批)。
+  arena: { effect: 'write', concurrency: 'serial', delegatesResourceLocks: true, supportsAbort: true },
+  // message_bus:读写 .mocode/bus 下的内部消息文件(send 写 / inbox·ack·history 多为读),不触碰
+  // 项目代码;用独立 message-bus 资源键串行(类比 memory-store),不作项目 mutation 追踪/回滚。
+  message_bus: { effect: 'write', concurrency: 'serial', resources: () => ['message-bus'] },
 };
 
 const rawBuiltinTools: Tool[] = [

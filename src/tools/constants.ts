@@ -103,6 +103,17 @@ export const IGNORE = [
   '**/rust/**',
   '**/dist/**',
   '**/dist-tests/**',
+  // Python 生态:虚拟环境与缓存目录动辄上万文件,ripgrep 路径下主要靠 .gitignore 自动跳过,
+  // 这里是「非 git 仓库 / 未写进 .gitignore」时的兜底;Node 兜底路径更依赖这份硬名单。
+  '**/.venv/**',
+  '**/venv/**',
+  '**/__pycache__/**',
+  '**/.mypy_cache/**',
+  '**/.pytest_cache/**',
+  '**/.tox/**',
+  '**/htmlcov/**',
+  '**/.ipynb_checkpoints/**',
+  '**/*.egg-info/**',
 ];
 
 // ── legacy profile fallback（官方 TUI/stdio 已由 ToolPolicy 控制）────────────────

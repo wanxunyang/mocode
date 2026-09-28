@@ -262,7 +262,7 @@ The tables below are selected capabilities, not an exhaustive tool inventory. Cu
 | `edit_file`   | Precise string replacement (`old_string` must match uniquely)                                                                                                         |
 | `run_command` | Run a foreground shell command, merging stdout+stderr, 120s default timeout; `shell=cmd\|powershell\|bash` picks the interpreter                                       |
 | `glob`        | Find files by glob pattern (excludes node_modules/.git)                                                                                                               |
-| `grep`        | Regex content search, pure JS implementation, no `rg` dependency; `context=N` returns neighbouring lines inline so a hit rarely needs a follow-up read                  |
+| `grep`        | Regex content search powered by ripgrep (bundled via `@vscode/ripgrep`; respects `.gitignore`, skips binaries), falling back to a pure-JS scan only when no `rg` binary is available; `context=N` returns neighbouring lines inline so a hit rarely needs a follow-up read                  |
 | `web_search`  | Web search (AnySearch), returns title/URL/snippet/body                                                                                                                |
 | `web_fetch`   | Fetch a URL, cleaning HTML into plain text; browser-like headers, auto-retry on transient failures, optional plaintext-proxy fallback                                 |
 | `use_skill`   | Load the full SKILL.md instructions for a given skill                                                                                                                 |

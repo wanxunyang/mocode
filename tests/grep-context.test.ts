@@ -104,16 +104,42 @@ test('grep context: 非法/越界值钳制(负数→0,超大→10,NaN→0)', asy
   assert.ok(!/L5/.test(nan), 'NaN context 应按 0 处理');
 });
 
-test('grep: 超过体积闸门的文件被跳过并显式报出(不静默吞)', async () => {
+test('grep: 大文件由 ripgrep 流式扫描,命中照常返回(2MiB 体积闸门只 Node 兜底路径需要)', async () => {
   const out = await run({ pattern: 'NEEDLE', glob: 'src/huge.txt' });
-  assert.match(out, /无匹配/, '2MiB 以上文件应被跳过,不产出命中');
-  assert.match(out, /跳过 1 个超过 2MiB 的文件/, '必须告知模型有文件被跳过,否则它以为真的没有匹配');
+  assert.match(out, /src\/huge\.txt: 1 处匹配,行号 \[1\]/, 'ripgrep 流式读不撑内存,不应跳过');
+  assert.ok(!/跳过/.test(out), '不应再有体积跳过提示');
 });
 
-test('grep: 二进制文件仍然跳过(与 read_file 共用 isProbablyBinary)', async () => {
+test('grep: 二进制文件仍然跳过(ripgrep 原生 NUL 探测;Node 兜底走 isProbablyBinary)', async () => {
   writeFileSync(join(root, 'src', 'blob.bin'), Buffer.concat([Buffer.from('NEEDLE'), Buffer.from([0x00, 0x01, 0x02])]));
   const out = await run({ pattern: 'NEEDLE', glob: 'src/*' });
   assert.ok(!/blob\.bin:/.test(out), '二进制文件不应产出命中');
+});
+
+test('grep: 非法正则返回明确错误(不启动扫描)', async () => {
+  const out = await run({ pattern: '[' });
+  assert.match(out, /非法正则/);
+});
+
+test('grep: 尊重 .gitignore,被忽略目录不扫描', async () => {
+  mkdirSync(join(root, 'ignored'), { recursive: true });
+  writeFileSync(join(root, '.gitignore'), 'ignored/\n');
+  writeFileSync(join(root, 'ignored', 'secret.py'), 'preference_engine_enabled = True');
+  const out = await run({ pattern: 'preference_engine_enabled' });
+  assert.match(out, /无匹配/, '.gitignore 忽略的目录不应被扫描');
+});
+
+test('grep: 外部信号已中止时立即返回,不启动扫描', async () => {
+  const prev = setSandboxRoot(root);
+  const ac = new AbortController();
+  ac.abort();
+  try {
+    const raw = await grepTool.execute({ pattern: 'NEEDLE' }, { signal: ac.signal });
+    const out = typeof raw === 'string' ? raw : raw.output;
+    assert.match(out, /中断|interrupt/i);
+  } finally {
+    setSandboxRoot(prev);
+  }
 });
 
 test('searchEncoder: Cold 折叠同时吃掉 context 行与 `  --` 分隔符,只留头部', () => {

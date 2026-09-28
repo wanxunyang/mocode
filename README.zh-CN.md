@@ -264,7 +264,7 @@ agent 工作在**启动时所在的工作目录**——想让它操作某个项�
 | `dev_server`  | 启动/查看/读日志/停止**任意需跨调用存活的后台进程**(dev server、推理服务、watcher、日志尾随)                            |
 | `browser`     | Playwright 驱动真实 Chromium:导航 / 点击 / 填表 / 取文本 / 截图 / 控制台诊断                                           |
 | `glob`        | 按 glob 模式找文件(排除 node_modules/.git)                                                                             |
-| `grep`        | 内容正则搜索,纯 JS 实现,不依赖 `rg`;`context=N` 内联返回邻居行并保留原始缩进,命中后基本不用再 read_file 一次            |
+| `grep`        | 内容正则搜索,以 ripgrep 为快速路径(随 `@vscode/ripgrep` 分发,尊重 `.gitignore`、跳过二进制),找不到 `rg` 时才回退纯 JS 扫描;`context=N` 内联返回邻居行并保留原始缩进,命中后基本不用再 read_file 一次            |
 | `web_search`  | 联网搜索(AnySearch),返回标题/URL/摘要/正文                                                                             |
 | `web_fetch`   | 抓取指定 URL,HTML 清洗成纯文本;带全套浏览器拟真头,瞬时失败(429/5xx/网络抖动)自动退避重试,可选纯文本代理回退              |
 | `use_skill`   | 加载某 skill 的完整 SKILL.md 指令                                                                                      |

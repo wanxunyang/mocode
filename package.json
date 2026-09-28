@@ -1,7 +1,7 @@
 {
   "name": "mocode-ai",
   "version": "1.6.6",
-  "description": "终端编码 agent:LLM + tool-call 循环 + 流式输出(含思考)+ 25 个工具,接任意 OpenAI 兼容后端。",
+  "description": "终端编码 agent:LLM + tool-call 循环 + 流式输出(含思考)+ 27 个工具,接任意 OpenAI 兼容后端。",
   "type": "module",
   "bin": {
     "mocode": "bin/mocode.js",
@@ -44,6 +44,7 @@
     "prepare": "node -e \"try{require('child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch(e){}\""
   },
   "dependencies": {
+    "@vscode/ripgrep": "^1.18.0",
     "ajv": "8.20.0",
     "cli-highlight": "^2.1.11",
     "dotenv": "^16.0.0",
