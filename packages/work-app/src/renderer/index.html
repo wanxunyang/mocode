@@ -153,6 +153,27 @@
         </div>
       </section>
 
+      <!-- 模型目录浏览：与 mocode 终端 /model browse 等价，共用 ~/.mocode/catalog.json 快照。
+           选中条目后回模型表单预填，apiKey 仍由用户确认/粘贴 -->
+      <section id="catalog-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="catalog-title">
+        <div class="modal-card catalog-card">
+          <header class="modal-head">
+            <b id="catalog-title" data-i18n="catalog.title">模型目录</b>
+            <span class="catalog-meta" id="catalog-meta"></span>
+            <button class="icon-button muted" id="catalog-refresh" data-i18n-title="catalog.refreshTitle" data-i18n-aria="catalog.refreshTitle"><svg class="icon" data-icon="regen"></svg></button>
+            <button class="modal-close icon-button muted" data-close data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button>
+          </header>
+          <div class="modal-body catalog-body">
+            <label class="field">
+              <span class="field-label"><svg class="icon" data-icon="search"></svg> <span data-i18n="catalog.search">搜索</span></span>
+              <input id="catalog-search" class="field-input" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="catalog.searchPlaceholder" />
+            </label>
+            <p class="catalog-status hidden" id="catalog-status"></p>
+            <div class="catalog-list" id="catalog-list" role="listbox" aria-label="catalog"></div>
+          </div>
+        </div>
+      </section>
+
       <!-- 重命名任务 弹窗（新建任务不再弹窗，标题由首条指令自动摘要） -->
       <section id="task-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="task-modal-title">
         <div class="modal-card">

@@ -6,6 +6,11 @@ type Task = { id: string; projectId: string; title: string; status: string; sess
 type ProjectState = { version: 1; projects: Project[]; selectedProjectId: string; tasks: Task[]; selectedTaskId?: string };
 type ModelDraft = { provider: 'openai' | 'anthropic'; baseURL: string; apiKey: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
 type ModelPresetDetail = ModelDraft & { name: string };
+type CatalogEntryView = {
+  providerId: string; providerName: string; modelId: string; name?: string;
+  contextWindow: number; reasoning: boolean; toolCall: boolean; attachment: boolean; releaseDate?: string;
+};
+type CatalogPrefill = { provider: 'openai' | 'anthropic'; baseURL: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
 
 contextBridge.exposeInMainWorld('mocodeWork', {
   // 渲染层拿它决定快捷键文案里的修饰键写法(Windows/Linux → Ctrl,macOS → Command)。
@@ -35,6 +40,10 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   getModel: (name: string): Promise<{ ok: boolean; message?: string; preset?: ModelPresetDetail }> => ipcRenderer.invoke('work:get-model', name),
   saveModel: (payload: { name: string; originalName?: string; draft: ModelDraft; activate?: boolean }): Promise<{ ok: boolean; message: string; name?: string }> => ipcRenderer.invoke('work:save-model', payload),
   deleteModel: (name: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:delete-model', name),
+  // 模型目录（models.dev）：load 拉全部可直发条目（refresh=true 强制联网刷新），
+  // prefill 把选中条目变成表单预填草稿（apiKeySeed 已按 provider.env 从主进程 env 探测）。
+  catalogLoad: (options?: { refresh?: boolean }): Promise<{ ok: boolean; message?: string; source?: string; fetchedAt?: string; total?: number; providerCount?: number; entries?: CatalogEntryView[] }> => ipcRenderer.invoke('work:catalog-load', options ?? {}),
+  catalogPrefill: (pick: { providerId: string; modelId: string }): Promise<{ ok: boolean; message?: string; prefill?: CatalogPrefill; suggestedName?: string; providerName?: string; envKeys?: string[]; apiKeySeed?: string }> => ipcRenderer.invoke('work:catalog-prefill', pick),
   getSettings: (): Promise<Record<string, boolean>> => ipcRenderer.invoke('work:get-settings'),
   setSettings: (patch: Record<string, boolean>): Promise<Record<string, boolean>> => ipcRenderer.invoke('work:set-settings', patch),
   listBranches: (): Promise<{ ok: boolean; message: string; current: string; branches: string[] }> => ipcRenderer.invoke('work:list-branches'),

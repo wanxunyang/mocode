@@ -9,6 +9,15 @@ import dotenv from 'dotenv';
 import { truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
 import { tMain } from './i18n/main.js';
 import {
+  buildCatalogPick,
+  catalogSnapshotPath,
+  flattenSupportedEntries,
+  filterEntries,
+  hasCatalogSnapshot,
+  readCatalogSnapshot,
+  refreshCatalog,
+} from './catalog.js';
+import {
   AgentHostClient,
   resolveMocodeHostLaunchSpec,
   type HostCommand,
@@ -1335,6 +1344,52 @@ function installIpc(): void {
     const result = switchModel(name);
     if (result.ok) broadcastState();
     return { ok: result.ok, message: result.message };
+  });
+  // 模型目录（models.dev）：浏览 + 刷新。快照与 mocode 终端共用 ~/.mocode/catalog.json，
+  // 任何一边刷新，另一边都能直接读到最新目录。只返回可直发条目（协议判定同 core）。
+  ipcMain.handle('work:catalog-load', async (_event, payload: { refresh?: boolean }) => {
+    const refresh = (payload ?? {}).refresh === true;
+    let providers: Record<string, import('./catalog.js').CatalogProviderInfo>;
+    let source: import('./catalog.js').CatalogSource;
+    let fetchedAt: string | undefined;
+    if (refresh || !hasCatalogSnapshot()) {
+      const result = await refreshCatalog();
+      if (!result.ok) {
+        return { ok: false, message: tMain('main.catalog.unavailable', { msg: result.message ?? '' }) };
+      }
+      providers = result.providers;
+      source = result.source;
+      fetchedAt = result.fetchedAt;
+    } else {
+      const snapshot = readCatalogSnapshot();
+      if (!snapshot) return { ok: false, message: tMain('main.catalog.unavailable', { msg: catalogSnapshotPath() }) };
+      providers = snapshot.providers;
+      source = 'cache';
+      fetchedAt = snapshot.fetchedAt;
+    }
+    const entries = flattenSupportedEntries(providers);
+    return {
+      ok: true,
+      source,
+      fetchedAt: fetchedAt ?? '',
+      total: entries.length,
+      providerCount: Object.keys(providers).length,
+      entries,
+    };
+  });
+  // 选中一个目录模型 → 返回模型表单的预填草稿。apiKeySeed 从主进程 env 里按
+  // provider.env 声明的变量名探测（与 core 的 resolveApiKey 同语义），找不到给空串。
+  ipcMain.handle('work:catalog-prefill', (_event, payload: { providerId?: unknown; modelId?: unknown }) => {
+    const providerId = String(payload?.providerId ?? '');
+    const modelId = String(payload?.modelId ?? '');
+    if (!providerId || !modelId) return { ok: false, message: tMain('main.catalog.unknown'), envKeys: [], apiKeySeed: '' };
+    const snapshot = readCatalogSnapshot();
+    if (!snapshot) return { ok: false, message: tMain('main.catalog.unknown'), envKeys: [], apiKeySeed: '' };
+    const result = buildCatalogPick(snapshot.providers, providerId, modelId);
+    if (!result.ok) {
+      return { ok: false, message: result.message === 'unsupported' ? tMain('main.catalog.unsupported') : tMain('main.catalog.unknown'), envKeys: result.envKeys, apiKeySeed: '' };
+    }
+    return result;
   });
   ipcMain.handle('work:get-settings', () => readSettings());
   ipcMain.handle('work:set-settings', (_event, patch: Record<string, unknown>) => {

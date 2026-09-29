@@ -68,6 +68,11 @@ type ModelConfig = { model: string; label: string; provider: LlmProvider; prompt
 type ModelItem = { name: string; label: string; provider: LlmProvider; promptCache: boolean; baseURL: string; providerHost: string; contextWindow: number; isActive: boolean };
 type ModelDraft = { provider: LlmProvider; baseURL: string; apiKey: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
 type ModelPresetDetail = ModelDraft & { name: string };
+type CatalogEntryView = {
+  providerId: string; providerName: string; modelId: string; name?: string;
+  contextWindow: number; reasoning: boolean; toolCall: boolean; attachment: boolean; releaseDate?: string;
+};
+type CatalogPrefill = { provider: LlmProvider; baseURL: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
 
 declare global {
   interface Window {
@@ -98,6 +103,9 @@ declare global {
       getModel: (name: string) => Promise<{ ok: boolean; message?: string; preset?: ModelPresetDetail }>;
       saveModel: (payload: { name: string; originalName?: string; draft: ModelDraft; activate?: boolean }) => Promise<{ ok: boolean; message: string; name?: string }>;
       deleteModel: (name: string) => Promise<{ ok: boolean; message: string }>;
+      /** 模型目录（models.dev，快照与 mocode 终端共用）。refresh=true 强制联网刷新。 */
+      catalogLoad: (options?: { refresh?: boolean }) => Promise<{ ok: boolean; message?: string; source?: string; fetchedAt?: string; total?: number; providerCount?: number; entries?: CatalogEntryView[] }>;
+      catalogPrefill: (pick: { providerId: string; modelId: string }) => Promise<{ ok: boolean; message?: string; prefill?: CatalogPrefill; suggestedName?: string; providerName?: string; envKeys?: string[]; apiKeySeed?: string }>;
       getSettings: () => Promise<Record<string, boolean>>;
       setSettings: (patch: Record<string, boolean>) => Promise<Record<string, boolean>>;
       listBranches: () => Promise<{ ok: boolean; message: string; current: string; branches: string[] }>;
@@ -2349,12 +2357,17 @@ async function renderSettingsModelSection(): Promise<void> {
     settingsSection.innerHTML = `
       <div class="settings-block">
         <div class="settings-empty">${icon('warn')}<div><b>${t('settings.noModelPresets')}</b><p>${t('settings.noModelPresetsHint')}</p></div></div>
-        <button class="settings-add" id="model-add">
-          <span class="settings-add-icon">${icon('plus')}</span>
-          <span class="settings-row-body"><span class="settings-row-title">${t('settings.addModel')}</span><span class="settings-row-sub">${t('settings.addModelSub')}</span></span>
-        </button>
+      <button class="settings-add" id="model-add">
+        <span class="settings-add-icon">${icon('plus')}</span>
+        <span class="settings-row-body"><span class="settings-row-title">${t('settings.addModel')}</span><span class="settings-row-sub">${t('settings.addModelSub')}</span></span>
+      </button>
+      <button class="settings-add" id="model-browse-catalog">
+        <span class="settings-add-icon">${icon('globe')}</span>
+        <span class="settings-row-body"><span class="settings-row-title">${t('settings.browseCatalog')}</span><span class="settings-row-sub">${t('settings.browseCatalogSub')}</span></span>
+      </button>
       </div>`;
     settingsSection.querySelector<HTMLButtonElement>('#model-add')?.addEventListener('click', () => openModelForm());
+    settingsSection.querySelector<HTMLButtonElement>('#model-browse-catalog')?.addEventListener('click', () => void openCatalogModal());
     return;
   }
   let config: ModelConfig | null = null;
@@ -2378,6 +2391,10 @@ async function renderSettingsModelSection(): Promise<void> {
       <button class="settings-add" id="model-add">
         <span class="settings-add-icon">${icon('plus')}</span>
         <span class="settings-row-body"><span class="settings-row-title">${t('settings.addModel')}</span><span class="settings-row-sub">${t('settings.addModelSub')}</span></span>
+      </button>
+      <button class="settings-add" id="model-browse-catalog">
+        <span class="settings-add-icon">${icon('globe')}</span>
+        <span class="settings-row-body"><span class="settings-row-title">${t('settings.browseCatalog')}</span><span class="settings-row-sub">${t('settings.browseCatalogSub')}</span></span>
       </button>
       <div class="settings-providers">
         ${groups.map((group) => `
@@ -2422,6 +2439,141 @@ async function renderSettingsModelSection(): Promise<void> {
     });
   });
   settingsSection.querySelector<HTMLButtonElement>('#model-add')?.addEventListener('click', () => openModelForm());
+  settingsSection.querySelector<HTMLButtonElement>('#model-browse-catalog')?.addEventListener('click', () => void openCatalogModal());
+}
+
+/* ── 模型目录浏览（models.dev） ───────────────────────────────
+ * 与 mocode 终端 /model browse 等价：快照与终端共用 ~/.mocode/catalog.json，
+ * 任何一边刷新两边都能读到。选中条目回模型表单预填（协议判定同 core，
+ * 只暴露可直发的 openai-compatible / anthropic 条目）。 */
+
+const CATALOG_MAX_ROWS = 120;
+let catalogEntries: CatalogEntryView[] = [];
+let catalogLoaded = false;
+let catalogLoading = false;
+let catalogEl: HTMLElement | null = null;
+
+const catalogField = <T extends HTMLElement>(id: string): T => catalogEl!.querySelector(`#${id}`) as T;
+
+function ensureCatalogModal(): HTMLElement {
+  if (catalogEl) return catalogEl;
+  const el = $('#catalog-modal') as HTMLElement;
+  catalogEl = el;
+  const searchInput = catalogField<HTMLInputElement>('catalog-search');
+  // 输入即时过滤（客户端过滤，主进程一次性回全量可直发条目）。
+  searchInput.addEventListener('input', () => renderCatalogList());
+  catalogField<HTMLButtonElement>('catalog-refresh').addEventListener('click', () => void loadCatalogEntries(true));
+  el.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeCatalogModal));
+  el.addEventListener('click', (event) => { if (event.target === el) closeCatalogModal(); });
+  return el;
+}
+
+function catalogStatusText(message: string, show: boolean = true): void {
+  const el = catalogField<HTMLElement>('catalog-status');
+  el.textContent = message;
+  el.classList.toggle('hidden', !show);
+}
+
+function openCatalogModal(): void {
+  const el = ensureCatalogModal();
+  el.classList.remove('hidden');
+  catalogField<HTMLInputElement>('catalog-search').value = '';
+  if (!catalogLoaded) void loadCatalogEntries(false);
+  else renderCatalogList();
+  catalogField<HTMLInputElement>('catalog-search').focus();
+}
+
+function closeCatalogModal(): void {
+  catalogEl?.classList.add('hidden');
+}
+
+async function loadCatalogEntries(refresh: boolean): Promise<void> {
+  if (catalogLoading) return;
+  catalogLoading = true;
+  const refreshButton = catalogField<HTMLButtonElement>('catalog-refresh');
+  refreshButton.disabled = true;
+  refreshButton.classList.add('spinning');
+  catalogStatusText(t('catalog.loading'));
+  try {
+    const result = await window.mocodeWork.catalogLoad({ refresh });
+    if (!result.ok || !result.entries) {
+      catalogStatusText(result.message ?? t('catalog.loadFailed'));
+      return;
+    }
+    catalogEntries = result.entries;
+    catalogLoaded = true;
+    catalogStatusText('');
+    const meta = catalogField<HTMLElement>('catalog-meta');
+    meta.textContent = t('catalog.count', {
+      providers: result.providerCount ?? 0,
+      models: result.total ?? result.entries.length,
+      date: (result.fetchedAt ?? '').slice(0, 10),
+    });
+  } catch (error) {
+    catalogStatusText(t('catalog.loadFailed', { msg: (error as Error).message }));
+  } finally {
+    catalogLoading = false;
+    refreshButton.disabled = false;
+    refreshButton.classList.remove('spinning');
+    renderCatalogList();
+  }
+}
+
+function renderCatalogList(): void {
+  if (!catalogEl) return;
+  const listEl = catalogField<HTMLElement>('catalog-list');
+  // 首次还没加载成功前列表保持空白：状态条负责展示「加载中 / 失败」，别自相矛盾。
+  if (!catalogLoaded) {
+    listEl.innerHTML = '';
+    return;
+  }
+  const query = catalogField<HTMLInputElement>('catalog-search').value;
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const filtered = tokens.length
+    ? catalogEntries.filter((e) => {
+        const hay = [e.providerName, e.providerId, e.modelId, e.name ?? ''].join(' ').toLowerCase();
+        return tokens.every((tok) => hay.includes(tok));
+      })
+    : catalogEntries;
+  if (!filtered.length) {
+    listEl.innerHTML = `<p class="catalog-none">${escapeHtml(tokens.length ? t('catalog.noMatch', { query }) : t('catalog.empty'))}</p>`;
+    return;
+  }
+  const rows = filtered.slice(0, CATALOG_MAX_ROWS).map((entry, index) => {
+    const title = entry.name || entry.modelId;
+    const caps = [
+      entry.reasoning ? `<span class="catalog-cap">${t('catalog.capReasoning')}</span>` : '',
+      entry.toolCall ? `<span class="catalog-cap">${t('catalog.capTools')}</span>` : '',
+      entry.attachment ? `<span class="catalog-cap">${t('catalog.capVision')}</span>` : '',
+    ].filter(Boolean).join('');
+    return `
+      <button class="catalog-row" data-provider="${escapeHtml(entry.providerId)}" data-model="${escapeHtml(entry.modelId)}" role="option" data-index="${index}">
+        <span class="catalog-row-main">
+          <span class="catalog-row-name">${escapeHtml(title)}</span>
+          <span class="catalog-row-provider">${escapeHtml(entry.providerName)}</span>
+        </span>
+        <span class="catalog-row-meta">
+          <span class="catalog-row-id">${escapeHtml(entry.modelId)}</span>
+          <span class="catalog-row-ctx">${Math.round(entry.contextWindow / 1000)}k</span>
+          ${caps}
+        </span>
+      </button>`;
+  }).join('');
+  listEl.innerHTML = rows + (filtered.length > CATALOG_MAX_ROWS ? `<p class="catalog-none">${escapeHtml(t('catalog.truncated', { shown: CATALOG_MAX_ROWS, total: filtered.length }))}</p>` : '');
+  listEl.querySelectorAll<HTMLButtonElement>('.catalog-row').forEach((row) => {
+    row.addEventListener('click', () => void pickCatalogEntry(row.dataset.provider ?? '', row.dataset.model ?? ''));
+  });
+}
+
+async function pickCatalogEntry(providerId: string, modelId: string): Promise<void> {
+  if (!providerId || !modelId) return;
+  const result = await window.mocodeWork.catalogPrefill({ providerId, modelId });
+  if (!result.ok || !result.prefill) {
+    showToast('error', result.message ?? t('catalog.loadFailed'));
+    return;
+  }
+  closeCatalogModal();
+  openModelForm(undefined, { ...result.prefill, suggestedName: result.suggestedName, apiKeySeed: result.apiKeySeed ?? '' });
 }
 
 /* ── 模型预设编辑器（添加 / 编辑 / 删除） ─────────────────────
@@ -2578,8 +2730,9 @@ function clearModelFormFields(): void {
   modelFormField<HTMLButtonElement>('model-form-save').disabled = false;
 }
 
-/** 打开编辑器。传 name = 编辑既有预设（回读完整字段含 apiKey）；不传 = 新增。 */
-function openModelForm(name?: string): void {
+/** 打开编辑器。传 name = 编辑既有预设（回读完整字段含 apiKey）；
+ *  不传 name 但传 prefill = 从模型目录选中后预填（仍是新增态）；都不传 = 空白新增。 */
+function openModelForm(name?: string, prefill?: CatalogPrefill & { suggestedName?: string; apiKeySeed?: string }): void {
   const el = ensureModelForm();
   modelFormEditing = name;
   const isEdit = !!name;
@@ -2601,6 +2754,21 @@ function openModelForm(name?: string): void {
   el.classList.remove('hidden');
 
   if (!isEdit) {
+    if (prefill) {
+      // 目录预填：字段与 mocode 终端 buildPreset 的产物一致，apiKey 用户仍需确认/粘贴。
+      modelFormField<HTMLSelectElement>('model-form-provider').value = prefill.provider;
+      modelFormField<HTMLInputElement>('model-form-baseurl').value = prefill.baseURL;
+      modelFormField<HTMLInputElement>('model-form-model').value = prefill.model;
+      modelFormField<HTMLInputElement>('model-form-window').value = String(prefill.contextWindow);
+      setFormToggle('model-form-cache', prefill.anthropicPromptCache);
+      if (prefill.apiKeySeed) modelFormField<HTMLInputElement>('model-form-apikey').value = prefill.apiKeySeed;
+      const nameInput = modelFormField<HTMLInputElement>('model-form-name');
+      nameInput.value = prefill.suggestedName ?? '';
+      nameInput.dataset.auto = '1';
+      syncFormVisibility();
+      modelFormField<HTMLInputElement>('model-form-apikey').focus();
+      return;
+    }
     modelFormField<HTMLInputElement>('model-form-name').focus();
     return;
   }
