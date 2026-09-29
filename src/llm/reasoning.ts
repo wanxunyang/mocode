@@ -47,7 +47,7 @@ export function parseReasoningEffort(value: unknown): ReasoningEffort | undefine
 }
 
 export interface ReasoningTarget {
-  provider: 'openai' | 'anthropic';
+  provider: 'openai' | 'anthropic' | 'google';
   model: string;
   /** Anthropic budget_tokens 的 clamp 上界(max_tokens);不传按 8192 处理。 */
   maxTokens?: number;
@@ -76,6 +76,8 @@ const ANTHROPIC_DEFAULT_MAX = 8192;
  * 供 /model show 给出「参数不会下发」提示,避免用户设了 high 却静默无效。
  */
 export function recognizesReasoning(target: ReasoningTarget): boolean {
+  // Google Gemini 的 thinkingConfig 由 vertex provider 自行转换。
+  if (target.provider === 'google') return /gemini/.test(target.model.toLowerCase());
   // 目录来源显式声明了思考能力 → 直接采纳(含声明 false 时不识别)。
   if (target.catalogProviderId && typeof target.catalogReasoning === 'boolean') {
     return target.catalogReasoning;
@@ -98,6 +100,8 @@ export function recognizesReasoning(target: ReasoningTarget): boolean {
  */
 export function resolveReasoningParams(effort: ReasoningEffort, target: ReasoningTarget): Record<string, unknown> {
   if (effort === 'auto') return {};
+  // Gemini/Vertex provider 在 buildGeminiRequest 内直接生成 thinkingConfig；这里不应再注入 OpenAI 方言。
+  if (target.provider === 'google') return {};
 
   // 目录优先:带 catalogProviderId 时按目录能力+厂商方言产出。
   // 注意 anthropic 路径的思考在 anthropic provider 内仍走它自己的 target.provider,

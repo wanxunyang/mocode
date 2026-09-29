@@ -5,7 +5,7 @@
  * 这样命令层与测试都能直接用，且不落盘——落盘仍归 presets.ts。
  */
 import type { CatalogModel, CatalogProvider } from './types.js';
-import { classifyProvider, resolveBaseURL, toPresetProvider } from './protocol.js';
+import { classifyModel, resolveModelBaseURL, toPresetProvider } from './protocol.js';
 
 /** 上下文窗口缺失/为 0 时的保守默认（宁可小，避免超长发出去被拒）。 */
 export const FALLBACK_CONTEXT_WINDOW = 128000;
@@ -15,7 +15,14 @@ export const FALLBACK_CONTEXT_WINDOW = 128000;
  * 读 process.env 是本模块唯一触碰环境的地方，调用方可传 env 覆盖以便测试。
  */
 export function resolveApiKey(provider: CatalogProvider, env: NodeJS.ProcessEnv = process.env): string | null {
-  for (const keyName of provider.env ?? []) {
+  // models.dev 的 google-vertex.env 是 project/location/ADC，不是 Express API key；不能误当密钥。
+  const googleKeyEnvs = ['GOOGLE_CLOUD_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'GEMINI_API_KEY'];
+  const keyNames = isGeminiProvider(provider)
+    ? provider.npm === '@ai-sdk/google-vertex'
+      ? googleKeyEnvs
+      : [...new Set([...googleKeyEnvs, ...(provider.env ?? [])])]
+    : (provider.env ?? []);
+  for (const keyName of keyNames) {
     const v = env[keyName];
     if (typeof v === 'string' && v.trim()) return v.trim();
   }
@@ -23,6 +30,21 @@ export function resolveApiKey(provider: CatalogProvider, env: NodeJS.ProcessEnv 
 }
 
 /** 把目录来源拼成合法预设名：`<provider>-<model>` 去非法字符。 */
+export function isGeminiProvider(provider: Pick<CatalogProvider, 'id' | 'npm'>): boolean {
+  return (
+    provider.id === 'google' ||
+    provider.id === 'google-vertex' ||
+    provider.npm === '@ai-sdk/google' ||
+    provider.npm === '@ai-sdk/google-vertex'
+  );
+}
+
+/** Vertex 目录的首个 env 是 project 变量；API key 接入时应优先提示实际使用的 key。 */
+export function preferredKeyEnvName(provider: CatalogProvider): string {
+  if (isGeminiProvider(provider)) return 'GOOGLE_CLOUD_API_KEY';
+  return provider.env?.[0] ?? 'API_KEY';
+}
+
 export function defaultPresetName(providerId: string, modelId: string): string {
   const raw = `${providerId}-${modelId}`;
   const sanitized =
@@ -49,11 +71,11 @@ export interface BuildPresetInput {
  */
 export function buildPreset(input: BuildPresetInput) {
   const { provider, model } = input;
-  const proto = classifyProvider(provider);
+  const proto = classifyModel(provider, model);
   const presetProvider = toPresetProvider(proto);
   if (!presetProvider) return null;
 
-  const baseURL = resolveBaseURL(provider);
+  const baseURL = resolveModelBaseURL(provider, model);
   if (!baseURL) return null;
 
   const contextWindow =

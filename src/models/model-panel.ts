@@ -7,7 +7,7 @@
  */
 import type { ModelPreset } from '../config/presets.js';
 import type { CatalogProvider } from './types.js';
-import { classifyProvider, resolveBaseURL } from './protocol.js';
+import { classifyProvider, classifyModel, resolveBaseURL, resolveModelBaseURL } from './protocol.js';
 import type { CatalogEntry } from './search.js';
 
 export type PanelChoice =
@@ -76,7 +76,7 @@ export function buildPanelEntries(input: BuildPanelInput): PanelEntryView[] {
     const provider = input.providers[e.providerId];
     if (!provider) continue;
     if (classifyProvider(provider) === 'unsupported') continue;
-    if (presetKeys.has(`${provider.api ?? ''}|${e.modelId}`)) continue;
+    if (presetKeys.has(`${resolveBaseURL(provider)}|${e.modelId}`)) continue;
     const c = e.model.cost;
     const caps = [e.model.reasoning ? '思考' : '', e.model.tool_call ? '工具' : '', e.model.attachment ? '多模态' : '']
       .filter(Boolean)
@@ -230,6 +230,7 @@ export function buildModelTree(input: BuildPanelInput): ModelTreeNode[] {
 
     for (const e of input.catalog) {
       if (!e.supported || e.providerId !== providerId) continue;
+      if (classifyModel(provider, e.model) === 'unsupported') continue;
       if (g.seenModels.has(e.modelId)) continue;
       g.seenModels.add(e.modelId);
       g.catalogLeaves.push(catalogLeaf(e));

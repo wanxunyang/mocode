@@ -91,7 +91,7 @@ const catalog: CatalogEntry[] = [
   }),
   // 与预设 'mine' 同 baseURL+model → 去重
   catalogEntry({ providerId: 'mine-prov', modelId: 'doubao' }),
-  // 不支持的 provider → 跳过
+  // Google Gemini 现在支持，应作为目录行保留
   catalogEntry({ providerId: 'google', modelId: 'gemini-x' }),
 ];
 
@@ -111,10 +111,11 @@ test('buildPanelEntries: 当前预设置顶★；目录去重、跳过不支持�
   // 预设 other 紧随。
   assert.equal(rows[1].choice.kind, 'preset');
 
-  // 目录只保留 glm-5v（doubao 去重、gemini 跳过）。
+  // 目录保留 glm-5v 和 gemini-x（doubao 去重）。
   const catRows = rows.filter((r) => r.choice.kind === 'catalog');
-  assert.equal(catRows.length, 1);
-  if (catRows[0].choice.kind === 'catalog') assert.equal(catRows[0].choice.entry.modelId, 'glm-5v');
+  assert.equal(catRows.length, 2);
+  const catModelIds = catRows.map((r) => (r.choice.kind === 'catalog' ? r.choice.entry.modelId : null)).sort();
+  assert.deepEqual(catModelIds, ['gemini-x', 'glm-5v']);
 
   // 3 个操作行：custom / effort / refresh。
   const actions = rows.filter((r) => r.choice.kind === 'action');

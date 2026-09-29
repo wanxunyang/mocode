@@ -88,10 +88,15 @@ const __activePreset = (() => {
 })();
 setLanguage(detectLanguage(process.env.MOCODE_LANGUAGE));
 
-export type LlmProvider = 'openai' | 'anthropic';
+export type LlmProvider = 'openai' | 'anthropic' | 'google';
 
 export function normalizeLlmProvider(value: unknown): LlmProvider {
-  return typeof value === 'string' && value.toLowerCase() === 'anthropic' ? 'anthropic' : 'openai';
+  if (typeof value !== 'string') return 'openai';
+  const provider = value.toLowerCase();
+  if (provider === 'anthropic') return 'anthropic';
+  // Vertex 与 Gemini Developer API 共用 Gemini Contents 协议，统一注册为 google。
+  if (provider === 'google' || provider === 'gemini' || provider === 'vertex') return 'google';
+  return 'openai';
 }
 
 export interface Config {
@@ -583,6 +588,7 @@ Complete programming tasks through an "analyze → call tool → observe result 
 ## Workflow
 - Understand: use existing conversation and tool evidence before gathering more.
 - Plan: for tasks with 3+ steps or context-loss risk, record the plan with the \`plan_update\` tool (see Session state).
+- Delegate: when the \`sub-agent\` tool is exposed, prefer it for exploration-heavy work (unfamiliar subsystems, multi-file audits, open-ended "how does X work here" investigation) and for independent sub-tasks — emit several \`sub-agent\` calls in ONE message and they run concurrently. A worker returns only its summary, so its tool noise never floods the main context. Keep single known-path reads and trivial lookups inline.
 - Implement: edit against a fresh read (see Tool policy); change scope follows Engineering principles.
 - Verify: whether and what to run follows Engineering principles; use Validation commands for exact commands.
 - Report: stop when done and give honest conclusions with path:line references (see Reporting).

@@ -27,11 +27,14 @@ function assistantMessage(turn: AssistantTurn): ChatMessage {
     content: turn.content,
   };
   if (turn.toolCalls.length > 0) {
+    // thoughtSignature 不是 OpenAI 字段，是 mocode 给 Gemini/Vertex 透传用的；
+    // 挂在 tool_call 上随 history 落盘/回灌，Vertex encoder 会读回它。
     message.tool_calls = turn.toolCalls.map((call) => ({
       id: call.id,
       type: 'function' as const,
       function: { name: call.name, arguments: call.arguments },
-    }));
+      ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
+    })) as unknown as OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam['tool_calls'];
   }
   return message;
 }

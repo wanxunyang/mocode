@@ -34,16 +34,16 @@ const providers: Record<string, CatalogProvider> = {
   }),
 };
 
-test('flattenCatalog: supported 标记正确（google 不支持直发）', () => {
+test('flattenCatalog: supported 标记正确（Google Gemini 可直发）', () => {
   const all = flattenCatalog(providers);
   const byId = Object.fromEntries(all.map((e) => [`${e.providerId}/${e.modelId}`, e]));
   assert.equal(byId['zhipuai/glm-5v'].supported, true);
-  assert.equal(byId['google/gemini-x'].supported, false);
+  assert.equal(byId['google/gemini-x'].supported, true);
 });
 
 test('searchModels: 默认只返回可直发；关键字匹配 id/厂商', () => {
   const def = searchModels(providers);
-  assert.equal(def.length, 2); // 只有 zhipuai 两个
+  assert.equal(def.length, 3); // zhipuai 两个 + Google Gemini 一个
   assert.ok(def.every((e) => e.supported));
 
   const glm = searchModels(providers, { query: 'glm-5v' });
@@ -57,7 +57,7 @@ test('searchModels: 默认只返回可直发；关键字匹配 id/厂商', () =>
 
 test('searchModels: 能力过滤 + 多关键字 AND', () => {
   const reasoning = searchModels(providers, { reasoning: true });
-  assert.deepEqual(reasoning.map((e) => e.modelId).sort(), ['glm-5v']); // glm-flash 不思考
+  assert.deepEqual(reasoning.map((e) => e.modelId).sort(), ['gemini-x', 'glm-5v']);
 
   const multi = searchModels(providers, { query: 'glm zhipu' });
   assert.equal(multi.length, 2);

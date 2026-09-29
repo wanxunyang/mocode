@@ -25,7 +25,7 @@ const LEVEL_LABELS: Record<ReasoningEffort, string> = {
 /** 当前目标模型是否在白名单内(未识别则给提示)。 */
 function currentModelRecognized(): boolean {
   return recognizesReasoning({
-    provider: config.provider === 'anthropic' ? 'anthropic' : 'openai',
+    provider: config.provider,
     model: config.model,
     maxTokens: config.maxTokens,
   });

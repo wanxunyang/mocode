@@ -35,8 +35,16 @@ export interface CatalogModalities {
   output?: string[];
 }
 
+/** 模型级协议覆盖：google-vertex 下的 Claude/Llama 等模型与顶层 Gemini 协议不同。 */
+export interface CatalogModelProviderInfo {
+  npm?: string;
+  api?: string;
+}
+
 export interface CatalogModel {
   id: string;
+  /** 可选模型级 provider 覆盖；缺失时使用 provider 顶层协议。 */
+  provider?: CatalogModelProviderInfo;
   name?: string;
   family?: string;
   attachment?: boolean;

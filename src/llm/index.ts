@@ -7,6 +7,8 @@ import { ThinkTagFilter } from './think-filter.js';
 import { sanitizeToolSchemas } from './tool-schema.js';
 import { isMarkedStreamInterrupted } from './stream-interrupt.js';
 import { defaultAnthropicFetch, anthropicChatOnce } from './providers/anthropic.js';
+import { vertexChatOnce } from './providers/vertex.js';
+import { installEnvProxy } from './proxy.js';
 import { registerModelProvider, getModelProvider, listModelProviders } from './provider.js';
 import { effectiveReasoningEffort } from '../config/index.js';
 import type {
@@ -89,6 +91,7 @@ export function createChatClientState(
   runtimeConfig: ModelRuntimeConfig,
   overrides: ChatClientOverrides = {},
 ): ChatClientState {
+  installEnvProxy();
   return {
     openAI: newOpenAIClient(runtimeConfig),
     openAICreateImpl: overrides.openAICreateImpl ?? null,
@@ -478,11 +481,19 @@ registerModelProvider({
   chatOnce: (messages, handlers, signal, tools, runtime, overrides) =>
     anthropicChatOnce(messages, handlers, signal, tools ?? chatTools, runtime, overrides),
 });
+registerModelProvider({ name: 'google', chatOnce: vertexChatOnce });
 
 export interface ToolCallRef {
   id: string;
   name: string;
   arguments: string; // 原始 JSON 字符串
+  /**
+   * Gemini/Vertex 思考模型在 functionCall part 上返回的 thought signature。
+   * 下一轮把该 functionCall 回灌时必须原样带回，否则 Vertex 报错：
+   * "Function call is missing a thought_signature in functionCall parts"。
+   * OpenAI/Anthropic 路径无此字段。
+   */
+  thoughtSignature?: string;
 }
 
 /** 一次 chat 调用返回的真实 token 用量(include_usage 时由后端给出)。 */
@@ -673,7 +684,9 @@ async function chatWithRuntime(
     }
     producedOutput = false;
     try {
-      const provider = getModelProvider(runtime.config.provider);
+      const providerName =
+        runtime === defaultProviderRuntime && runtime.clientState.openAICreateImpl ? 'openai' : runtime.config.provider;
+      const provider = getModelProvider(providerName);
       if (!provider) {
         // 未注册的 provider:给出可用名单,避免悄悄落到错误实现。
         throw new Error(
@@ -797,7 +810,7 @@ async function chatOnce(
     effort === 'auto'
       ? {}
       : resolveReasoningParams(effort, {
-          provider: runtimeConfig.provider === 'anthropic' ? 'anthropic' : 'openai',
+          provider: runtimeConfig.provider,
           model: runtime.getModel(),
           maxTokens: runtimeConfig.maxTokens,
           // 仅当激活预设来自目录且对应当前模型时携带,否则走正则兜底。

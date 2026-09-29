@@ -53,7 +53,7 @@ export function setActivePresetName(name: string): void {
   fs.renameSync(tmp, ACTIVE_PRESET_PATH);
 }
 
-export type PresetProvider = 'openai' | 'anthropic';
+export type PresetProvider = 'openai' | 'anthropic' | 'google';
 
 /** 单个预设的内容:provider/cache 字段可选输入，读取后总会规范化。 */
 export interface ModelPreset {
@@ -79,6 +79,15 @@ export interface ModelPreset {
 }
 
 const NAME_RE = /^[a-zA-Z0-9_-]{1,32}$/;
+
+/** Vertex 与 Gemini Developer API 共用 Contents 协议；旧文件/别名统一规范化为 google。 */
+export function normalizePresetProvider(value: unknown): PresetProvider {
+  if (typeof value !== 'string') return 'openai';
+  const provider = value.toLowerCase();
+  if (provider === 'anthropic') return 'anthropic';
+  if (provider === 'google' || provider === 'gemini' || provider === 'vertex') return 'google';
+  return 'openai';
+}
 
 /** 名字是否合法(调用方复用,避免在多处重复同一正则)。 */
 export function isValidPresetName(name: string): boolean {
@@ -112,7 +121,7 @@ export function parsePreset(raw: string): ModelPreset {
   if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) {
     throw new Error(`预设 ${name}: contextWindow 必须为正数`);
   }
-  const provider: PresetProvider = obj.provider === 'anthropic' ? 'anthropic' : 'openai';
+  const provider = normalizePresetProvider(obj.provider);
   const anthropicPromptCache = provider === 'anthropic' && obj.anthropicPromptCache !== false;
   // reasoningEffort 缺省 = auto;显式写了非法值按现有校验风格报错(坏文件由 listPresets 跳过)。
   let reasoningEffort: ReasoningEffort | undefined;
@@ -179,7 +188,7 @@ export function savePreset(
   if (!isValidPresetName(preset.name)) {
     throw new Error(`非法预设名: ${JSON.stringify(preset.name)}`);
   }
-  const provider = preset.provider ?? 'openai';
+  const provider = normalizePresetProvider(preset.provider);
   const normalized: ModelPreset = {
     ...preset,
     provider,

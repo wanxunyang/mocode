@@ -31,11 +31,12 @@ import { promptIntervention } from '../../ui/intervention.js';
 import { renderHistory } from '../message-format.js';
 import { MODEL_PRESETS, maskKey } from '../commands.js';
 import { unhandled, next, type CommandContext, type CommandHandler } from './types.js';
+import type { PresetProvider } from '../../config/presets.js';
 
 /** 决定自动存的预设名:协议、缓存配置和连接四元组都一致时不重复存。 */
 function uniquePresetName(
   desired: string,
-  provider: 'openai' | 'anthropic',
+  provider: PresetProvider,
   baseURL: string,
   apiKey: string,
   model: string,
@@ -85,7 +86,7 @@ export const modelCommands: CommandHandler[] = [
     // 共用:apply 一个预设到 config + 持久化 + 重建 client + 重显横幅。无参 /model 选菜单和 /model use 都走这里。
     const applyPresetAndPersist = (target: {
       name: string;
-      provider: 'openai' | 'anthropic';
+      provider: PresetProvider;
       baseURL: string;
       apiKey: string;
       model: string;
@@ -212,7 +213,7 @@ export const modelCommands: CommandHandler[] = [
       layout.contentWrite(`  ${ui.accent}apiKey  ${ui.reset}  ${maskKey(config.apiKey)}\n`);
       layout.contentWrite(`  ${ui.accent}model   ${ui.reset}  ${config.model}\n`);
       const recognized = recognizesReasoning({
-        provider: config.provider === 'anthropic' ? 'anthropic' : 'openai',
+        provider: config.provider,
         model: config.model,
         maxTokens: config.maxTokens,
       });

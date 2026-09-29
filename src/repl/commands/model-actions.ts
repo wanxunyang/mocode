@@ -15,7 +15,7 @@ import { promptIntervention } from '../../ui/intervention.js';
 import { renderHistory } from '../message-format.js';
 import { refreshCatalog } from '../../models/catalog.js';
 import type { CatalogEntry } from '../../models/search.js';
-import { buildPreset, defaultPresetName, resolveApiKey } from '../../models/map-preset.js';
+import { buildPreset, defaultPresetName, preferredKeyEnvName, resolveApiKey } from '../../models/map-preset.js';
 import type { CommandContext } from './types.js';
 
 /** 应用预设到 config + 落 config 文件 + 重建 client + 重显。 */
@@ -57,7 +57,7 @@ export async function addCatalogModel(
   if (!catalogProvider) return 'cancelled';
 
   // key：无论环境变量是否找到，都弹一次确认——回车沿用预填值、粘贴即覆盖。
-  const envName = catalogProvider.env?.[0] ?? 'API_KEY';
+  const envName = preferredKeyEnvName(catalogProvider);
   const detectedKey = resolveApiKey(catalogProvider);
   const kres = await promptIntervention({
     type: 'input',

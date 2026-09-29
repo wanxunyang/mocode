@@ -5,7 +5,7 @@
  * 不支持的项不进列表（而不是放进列表再置灰），减少干扰；需要时可显式 includeUnsupported。
  */
 import type { CatalogModel, CatalogProvider } from './types.js';
-import { classifyProvider } from './protocol.js';
+import { classifyModel } from './protocol.js';
 
 export interface CatalogEntry {
   providerId: string;
@@ -29,9 +29,9 @@ export interface SearchFilters {
 export function flattenCatalog(providers: Record<string, CatalogProvider>): CatalogEntry[] {
   const out: CatalogEntry[] = [];
   for (const [providerId, provider] of Object.entries(providers)) {
-    const supported = classifyProvider(provider) !== 'unsupported';
     const providerName = provider.name || providerId;
     for (const [modelId, model] of Object.entries(provider.models ?? {})) {
+      const supported = classifyModel(provider, model) !== 'unsupported';
       out.push({ providerId, providerName, modelId, model, supported });
     }
   }
