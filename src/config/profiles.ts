@@ -139,7 +139,8 @@ export const TOOL_ROUTE_GROUPS: Record<ToolRouteGroupName, ToolRouteGroupDefinit
   },
   orchestration: {
     tools: ['sub-agent', 'run_skill'],
-    description: 'Delegate genuinely independent work or execute a packaged fork skill in an isolated worker.',
+    description:
+      'Delegate exploration-heavy or parallelizable work to isolated workers: codebase investigation, multi-file research, audits, independent sub-tasks, or a packaged fork skill. Keeps exploration noise out of the main context.',
     gateEnv: 'MOCODE_SUBAGENT_ENABLED',
   },
   mcp: {

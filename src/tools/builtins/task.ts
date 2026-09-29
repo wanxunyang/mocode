@@ -16,6 +16,7 @@ export const subAgentTool: Tool = {
   risk: 'dangerous',
   description: [
     'Spawn a worker with your own full capability set and conversation context for an isolated sub-task; only its structured result returns.',
+    'Use it for exploration-heavy work (unfamiliar subsystems, multi-file research, audits) and for independent sub-tasks; emit several calls in one message to run them concurrently.',
     'The worker sees everything you have already read and concluded, so it does not repeat exploration.',
   ].join(''),
   parameters: {

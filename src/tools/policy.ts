@@ -306,6 +306,11 @@ export class ToolPolicyController {
         'Require explicit user intent before destructive or sensitive targets such as submit, payment, credentials, delete, or send; every action still passes the permission gate.',
       );
     }
+    if (this.selected.has('orchestration')) {
+      lines.push(
+        'Orchestration: prefer sub-agent for exploration-heavy work (unfamiliar subsystems, multi-file research, audits) and for independent sub-tasks; emit several sub-agent calls in one message to run them concurrently. Each worker returns only its summary, keeping the main context clean. Pass what you already know via the context parameter so workers do not repeat your exploration.',
+      );
+    }
     if (this.selected.has('memory-read')) {
       lines.push(
         'Memory read: use memory_search for relevant cross-session facts and memory_list only when an index overview is needed; memory_search may also return graph relations.',
