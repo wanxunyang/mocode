@@ -2229,14 +2229,30 @@ $('#theme-toggle').addEventListener('click', () => {
 /** 把渲染层实测的 titlebar 颜色同步给主进程，让 Windows 原生窗口控制按钮
  *  （右上角最小化/最大化/关闭那一块）跟 CSS 的 .titlebar 同色。
  *  颜色读 getComputedStyle 而非硬编码：surface-app 是带 accent 色相的 oklch，
- *  换主题/换主题色都会变，主进程侧硬编码 hex 永远对不齐。 */
+ *  换主题/换主题色都会变，主进程侧硬编码 hex 永远对不齐。
+ *  注意 computed style 返回的是 oklch(...) 字符串，setTitleBarOverlay 对它解析不可靠，
+ *  必须经 canvas 规范化成 #rrggbb 再传。 */
+function toSrgbHex(color: string): string | null {
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) return null;
+  ctx.fillStyle = color;
+  const normalized = ctx.fillStyle;
+  if (normalized.startsWith('#')) {
+    if (normalized.length === 7) return normalized;
+    if (normalized.length === 4) return `#${[...normalized.slice(1)].map((c) => c + c).join('')}`;
+    return null;
+  }
+  const m = normalized.match(/rgba?\((\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+  return m ? `#${[m[1]!, m[2]!, m[3]!].map((n) => Number(n).toString(16).padStart(2, '0')).join('')}` : null;
+}
+
 function syncTitleBarOverlay(): void {
   const bar = document.querySelector('.titlebar');
   if (!bar) return;
-  const bg = getComputedStyle(bar).backgroundColor;
+  const bg = toSrgbHex(getComputedStyle(bar).backgroundColor);
   const brandText = bar.querySelector('.titlebar-brand-text');
-  const symbol = (brandText ? getComputedStyle(brandText).color : '') || getComputedStyle(bar).color;
-  if (bg && bg !== 'rgba(0, 0, 0, 0)') window.mocodeWork.setTitleBarOverlay({ bg, symbol });
+  const symbol = toSrgbHex((brandText ? getComputedStyle(brandText).color : '') || getComputedStyle(bar).color);
+  if (bg && symbol) window.mocodeWork.setTitleBarOverlay({ bg, symbol });
 }
 
 function applyTheme(saved: 'light' | 'dark' | 'system'): void {
@@ -4262,3 +4278,7 @@ document.addEventListener('click', (event) => {
   if (el.contains(target) || $('#empty-chip-project')?.contains(target)) return;
   hideWorkspacePicker();
 });
+
+// 启动即对一次 titlebar overlay 的色：首屏脚本只落了 dataset.theme/accent，
+// 不在这里同步的话，深色主题用户开窗到第一次碰主题设置前，右上角控制按钮一直是初始浅色底。
+syncTitleBarOverlay();

@@ -1015,7 +1015,7 @@ function createWindow(): void {
     ...(existsSync(appIconPath) ? { icon: appIconPath } : {}),
     ...(process.platform === 'win32' ? {
       titleBarStyle: 'hidden' as const,
-      titleBarOverlay: { color: '#f7f8f7', symbolColor: '#202124', height: 38 },
+      titleBarOverlay: { color: '#f7f8f7', symbolColor: '#202124', height: 37 },
     } : {}),
     webPreferences: { preload: path.join(__dirname, 'renderer', 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
@@ -1035,7 +1035,9 @@ function applyThemeBackground(theme: 'light' | 'dark' | 'system'): void {
     windowRef.setTitleBarOverlay({
       color: isDark ? '#202225' : '#f7f8f7',
       symbolColor: isDark ? '#f5f5f5' : '#202124',
-      height: 38,
+      // 37 = titlebar 38px - 1px CSS 底边线：overlay 若盖满 38，按钮区那段就没有
+      // .titlebar 的 border-bottom，肉眼可见一条断口。渲染层实测色会随后覆盖这里的兜底值。
+      height: 37,
     });
   }
 }
@@ -1520,7 +1522,7 @@ function installIpc(): void {
   ipcMain.on('work:set-titlebar-overlay', (_event, colors: { bg?: string; symbol?: string }) => {
     if (process.platform !== 'win32' || !windowRef || windowRef.isDestroyed()) return;
     if (!colors?.bg || !colors?.symbol) return;
-    try { windowRef.setTitleBarOverlay({ color: colors.bg, symbolColor: colors.symbol, height: 38 }); }
+    try { windowRef.setTitleBarOverlay({ color: colors.bg, symbolColor: colors.symbol, height: 37 }); }
     catch { /* 某些平台/版本不支持动态 overlay，静默即可 */ }
   });
   ipcMain.on('work:show-menu', (event, menuId: string, clientX: number, clientY: number) => {
