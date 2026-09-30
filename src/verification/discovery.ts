@@ -5,14 +5,14 @@ import type { PackageProfile, ProjectProfile, ProjectPackageManager } from './pr
 
 /** Command metadata used by offline project-profile evaluation; nothing executes it automatically. */
 export interface ValidationCommand {
-  script: 'typecheck' | 'test' | 'build';
+  script: 'typecheck' | 'lint' | 'test' | 'build';
   command: string;
   packageManager: ProjectPackageManager;
   cwd: string;
 }
 
 const COMPATIBILITY_PRIORITY = ['typecheck', 'test', 'build'] as const;
-const LAYERED_ORDER = ['typecheck', 'build', 'test'] as const;
+const LAYERED_ORDER = ['typecheck', 'lint', 'build', 'test'] as const;
 const isWindows = process.platform === 'win32';
 
 function samePath(left: string, right: string): boolean {

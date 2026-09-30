@@ -49,6 +49,8 @@ MoCode is organized as a layered runtime: the terminal experience drives an auto
 
 Implementation entry points: [Agent core](src/agent/core.ts), [tool dispatch](src/agent/stages/tool-dispatcher.ts), and [tool execution](src/tools/tool-runtime.ts).
 
+<p align="center"><img src="./assets/architecture/system-overview.svg" alt="MoCode system overview: experience layer, autonomous runtime, capability plane, persistent intelligence" width="100%"></p>
+
 ### Autonomous execution loop
 
 Each model response is one step in a closed loop. Tool calls are classified by declared capabilities, safe reads can run in parallel, and writes acquire canonical resource locks. Tool evidence returns to history unchanged apart from a hard per-result safety cap. When the agent has no more tools to call, its response completes immediately; the framework does not run hidden validation or force another model turn.

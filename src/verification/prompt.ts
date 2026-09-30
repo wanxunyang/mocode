@@ -22,7 +22,7 @@ function lineFor(profile: ProjectProfile, packageProfile: PackageProfile): strin
 /**
  * Deterministic project validation map injected into the system prompt: which package owns which
  * script, and the exact command plus cwd to run it. Commands are listed in increasing cost order
- * (typecheck → build → test) and are never executed here — this is evidence, not a completion gate.
+ * (typecheck → lint → build → test) and are never executed here — this is evidence, not a completion gate.
  *
  * Returns '' when no package exposes a validation script, or when discovery fails for any reason
  * (missing/invalid manifest, unreadable workspace): prompt construction must never break.

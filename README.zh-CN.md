@@ -40,6 +40,8 @@ MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，
 
 实现入口：[Agent 内核](src/agent/core.ts)、[工具派发](src/agent/stages/tool-dispatcher.ts)、[工具执行](src/tools/tool-runtime.ts)。
 
+<p align="center"><img src="./assets/architecture/system-overview-zh-CN.svg" alt="MoCode 系统全景：交互体验层、自治执行内核、受控能力平面、持久化认知层" width="100%"></p>
+
 ### 自治执行循环
 
 每次模型响应都是闭环中的一步。工具调用按能力声明分类，安全读取可以并行，写操作获取规范化资源锁。工具证据除单条 hard cap 外原样进入 history，用户与模型看到同一事实。agent 没有更多工具调用时立即完成；框架不会暗中运行验证，也不会强迫追加一轮模型调用。
