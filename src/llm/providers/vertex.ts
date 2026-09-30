@@ -284,8 +284,12 @@ export function buildGeminiRequest(
   const geminiTools = encodeGeminiTools(tools);
   const effort = effectiveReasoningEffort(overrides?.reasoningEffort);
   const budget = thinkingBudget(effort);
+  // Gemini 的思考 token 计入 maxOutputTokens：不给思考留余量时，思考先吃光预算，
+  // finishReason=MAX_TOKENS 且正文为空/截断（3.8-flash 实测：maxOutputTokens=100 → 正文空，
+  // =2000 → 92 thoughts + "OK"）。auto 档动态思考上限按 flash 系 24576 保守留量。
+  const thinkingAllowance = budget ?? (effort === 'auto' ? 24576 : 0);
   const generationConfig: JsonObject = {
-    maxOutputTokens: runtimeConfig.maxTokens ?? 8192,
+    maxOutputTokens: (runtimeConfig.maxTokens ?? 8192) + thinkingAllowance,
     temperature: 0.2,
     ...(budget === null ? {} : { thinkingConfig: { thinkingBudget: budget } }),
   };
@@ -377,6 +381,7 @@ export async function vertexChatOnce(
   let usage: ChatUsage | undefined;
   const toolCalls: ToolCallRef[] = [];
   let reportedTool = false;
+  let finishReason = '';
   const live = { cjk: 0, other: 0 };
   const countLive = (text: string): void => {
     for (const ch of text) {
@@ -402,6 +407,7 @@ export async function vertexChatOnce(
 
     const candidates = Array.isArray(event.candidates) ? event.candidates : [];
     const candidate = isRecord(candidates[0]) ? candidates[0] : undefined;
+    if (typeof candidate?.finishReason === 'string') finishReason = candidate.finishReason;
     const candidateContent = isRecord(candidate?.content) ? candidate.content : undefined;
     const parts = Array.isArray(candidateContent?.parts) ? candidateContent.parts : [];
 
@@ -440,6 +446,15 @@ export async function vertexChatOnce(
       promptTokens: usage.promptTokens,
       cachedTokens: usage.cachedTokens,
     });
+  }
+
+  // MAX_TOKENS 截断曾静默返回：模型没发完工具调用就结束 turn（「没干完活就结束」）。
+  // 显式标注让用户与下一轮模型都看到截断事实；正常 STOP/SAFETY 等不加。
+  if (finishReason === 'MAX_TOKENS' && (content || toolCalls.length > 0)) {
+    const marker =
+      '\n\n[mocode] Gemini finishReason=MAX_TOKENS：输出在 token 上限处被截断（思考也计入 maxOutputTokens）。可调大 MAX_TOKENS 或 /effort 降低思考强度。';
+    content += marker;
+    handlers.onText?.(marker);
   }
 
   return { content: content || null, toolCalls, usage };

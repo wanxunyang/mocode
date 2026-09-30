@@ -165,3 +165,85 @@ test('encodeGeminiMessages: functionResponse 后的 system reminder 独立成 us
   assert.equal(lastTwo[1]?.role, 'user');
   assert.equal(lastTwo[1]?.parts[0]?.text, '[System reminder]\nephemeral reminder');
 });
+
+test('buildGeminiRequest: 思考 token 计入 maxOutputTokens，须给思考留余量（回归正文截空）', () => {
+  const noTools: ChatTool[] = [];
+  // effort=high（thinkingBudget 24576）→ 输出上限 = maxTokens + 24576。
+  const high = buildGeminiRequest(
+    [{ role: 'user', content: 'hi' }],
+    noTools,
+    {
+      config: {
+        provider: 'google' as const,
+        baseURL: 'https://x',
+        apiKey: 'k',
+        maxTokens: 8192,
+        anthropicPromptCache: false,
+        includeUsage: true,
+      },
+      getModel: () => 'gemini-3.8-flash',
+    },
+    { reasoningEffort: 'high' },
+  );
+  const cfg = high.generationConfig as { maxOutputTokens?: number; thinkingConfig?: { thinkingBudget?: number } };
+  assert.equal(cfg.maxOutputTokens, 8192 + 24576);
+  assert.equal(cfg.thinkingConfig?.thinkingBudget, 24576);
+
+  // effort=off（无思考）→ 不额外加量。
+  const off = buildGeminiRequest(
+    [{ role: 'user', content: 'hi' }],
+    noTools,
+    {
+      config: {
+        provider: 'google' as const,
+        baseURL: 'https://x',
+        apiKey: 'k',
+        maxTokens: 8192,
+        anthropicPromptCache: false,
+        includeUsage: true,
+      },
+      getModel: () => 'gemini-3.8-flash',
+    },
+    { reasoningEffort: 'off' },
+  );
+  const cfgOff = off.generationConfig as { maxOutputTokens?: number; thinkingConfig?: { thinkingBudget?: number } };
+  assert.equal(cfgOff.maxOutputTokens, 8192);
+  assert.equal(cfgOff.thinkingConfig?.thinkingBudget, 0);
+});
+
+test('vertexChatOnce: MAX_TOKENS 截断时正文显式标注，不再静默当正常完成', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    sseResponse([
+      {
+        candidates: [{ content: { parts: [{ text: 'partial answer' }] }, finishReason: 'MAX_TOKENS' }],
+        usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 9, totalTokenCount: 14 },
+      },
+    ])) as unknown as typeof fetch;
+
+  try {
+    const result = await vertexChatOnce([{ role: 'user', content: 'hi' }], {}, undefined, []);
+    assert.match(result.content ?? '', /MAX_TOKENS/);
+    assert.match(result.content ?? '', /partial answer/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('vertexChatOnce: 正常 STOP 不加任何标注', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    sseResponse([
+      {
+        candidates: [{ content: { parts: [{ text: 'clean answer' }] }, finishReason: 'STOP' }],
+      },
+    ])) as unknown as typeof fetch;
+
+  try {
+    const result = await vertexChatOnce([{ role: 'user', content: 'hi' }], {}, undefined, []);
+    assert.equal(result.content, 'clean answer');
+    assert.doesNotMatch(result.content ?? '', /MAX_TOKENS/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
