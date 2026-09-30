@@ -469,19 +469,32 @@ export async function runAgentCoreLegacy(
                     for (let index = 0; index < calls.length; index++) {
                       hooks.onToolHeader?.(calls[index]);
                     }
+                    // 只读调用先并发启动(执行序不变);发布(history 回灌/事件)按 provider
+                    // 声明序交错进行:批校验按 assistant tool_calls 逐位配对 id,若按执行序
+                    // 发布(只读先、扩容后),add_tool_groups 排在只读之前时必然 id 错位,整轮 rollback。
+                    const startedReadonly: Array<Promise<ToolOutcome> | undefined> = new Array(calls.length);
                     if (otherIndexes.length > 0) {
                       hooks.onToolStart?.(calls[otherIndexes[0]].name);
-                      const startedReadonly = otherIndexes.map((index) =>
-                        ctx.toolRuntime.executeToolOutcome(calls[index].name, calls[index].arguments, signal, {
-                          callId: calls[index].id,
-                          allowedToolNames: currentAllowedToolNames(),
-                          delegation: delegationForOrchestrator(),
-                        }),
-                      );
-                      for (let k = 0; k < otherIndexes.length; k++) {
-                        const index = otherIndexes[k];
+                      for (const index of otherIndexes) {
+                        startedReadonly[index] = ctx.toolRuntime.executeToolOutcome(
+                          calls[index].name,
+                          calls[index].arguments,
+                          signal,
+                          {
+                            callId: calls[index].id,
+                            allowedToolNames: currentAllowedToolNames(),
+                            delegation: delegationForOrchestrator(),
+                          },
+                        );
+                      }
+                    }
+                    const lastReadonlyIndex = otherIndexes.length > 0 ? otherIndexes[otherIndexes.length - 1] : -1;
+
+                    for (let index = 0; index < calls.length; index++) {
+                      const readonlyPromise = startedReadonly[index];
+                      if (readonlyPromise) {
                         const tc = calls[index];
-                        const outcome = await startedReadonly[k];
+                        const outcome = await readonlyPromise;
                         usageMeter.add(outcome.usage);
                         opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
                         traceToolEnd(tc, index, outcome);
@@ -496,11 +509,13 @@ export async function runAgentCoreLegacy(
                           runtimeContextState,
                           outcome.status === 'success',
                         );
+                        // done 紧跟最后一个只读结果(控制调用在尾部时与旧事件序完全一致)。
+                        if (index === lastReadonlyIndex) hooks.onToolDone?.();
+                        continue;
                       }
-                      hooks.onToolDone?.();
-                    }
 
-                    for (const index of controlIndexes) {
+                      // 控制调用(header 已发):校验并应用扩容。扩容只改下一 step 的 schema,
+                      // 本批只读执行都走 step 快照,与执行的先后无行为差。
                       const tc = calls[index];
                       const parsed = parseArgs(tc.arguments);
                       let outcome: ToolOutcome;

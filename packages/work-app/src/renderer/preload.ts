@@ -11,6 +11,20 @@ type CatalogEntryView = {
   contextWindow: number; reasoning: boolean; toolCall: boolean; attachment: boolean; releaseDate?: string;
 };
 type CatalogPrefill = { provider: 'openai' | 'anthropic'; baseURL: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
+type SkillItem = { name: string; description: string; version?: string; dir: string; origin: 'user' | 'claude' | 'project'; modelInvocable: boolean; allowedTools?: string[] };
+type ImportResult = { ok: boolean; message?: string; installed: Array<{ name: string; dir: string; updated: boolean }> };
+type MarketSkills = { ok: boolean; message?: string; skills: Array<{ name: string; description: string; version?: string; relDir: string }> };
+type McpServerView = {
+  name: string; transport: 'stdio' | 'sse' | 'streamable-http';
+  command?: string; args?: string[]; env?: Record<string, string>;
+  url?: string; headers?: Record<string, string>;
+  requestTimeoutMs?: number; disabled: boolean;
+};
+type McpDraft = {
+  transport: 'stdio' | 'sse' | 'streamable-http';
+  command?: string; argsText?: string; envText?: string;
+  url?: string; headersText?: string; requestTimeoutMs?: number;
+};
 
 contextBridge.exposeInMainWorld('mocodeWork', {
   // 渲染层拿它决定快捷键文案里的修饰键写法(Windows/Linux → Ctrl,macOS → Command)。
@@ -46,9 +60,26 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   catalogPrefill: (pick: { providerId: string; modelId: string }): Promise<{ ok: boolean; message?: string; prefill?: CatalogPrefill; suggestedName?: string; providerName?: string; envKeys?: string[]; apiKeySeed?: string }> => ipcRenderer.invoke('work:catalog-prefill', pick),
   getSettings: (): Promise<Record<string, boolean>> => ipcRenderer.invoke('work:get-settings'),
   setSettings: (patch: Record<string, boolean>): Promise<Record<string, boolean>> => ipcRenderer.invoke('work:set-settings', patch),
+  // ── Skill 市场 / 扩展 ──
+  skillsList: (projectRoot?: string): Promise<SkillItem[]> => ipcRenderer.invoke('work:skills-list', projectRoot),
+  skillImportFolder: (): Promise<ImportResult> => ipcRenderer.invoke('work:skill-import-folder'),
+  skillImportZip: (): Promise<ImportResult> => ipcRenderer.invoke('work:skill-import-zip'),
+  skillImportGit: (url: string): Promise<ImportResult> => ipcRenderer.invoke('work:skill-import-git', url),
+  skillsMarketLoad: (url: string, refresh?: boolean): Promise<MarketSkills> => ipcRenderer.invoke('work:skills-market-load', { url, refresh }),
+  skillInstallMarket: (url: string, relDir: string): Promise<ImportResult> => ipcRenderer.invoke('work:skill-install-market', { url, relDir }),
+  skillDelete: (dir: string, projectRoot?: string): Promise<{ ok: boolean; message?: string }> => ipcRenderer.invoke('work:skill-delete', dir, projectRoot),
+  skillOpen: (dir: string): Promise<boolean> => ipcRenderer.invoke('work:skill-open', dir),
+  // ── MCP 接入 ──
+  mcpList: (): Promise<McpServerView[]> => ipcRenderer.invoke('work:mcp-list'),
+  mcpSave: (payload: { name: string; originalName?: string; draft: McpDraft }): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:mcp-save', payload),
+  mcpDelete: (name: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:mcp-delete', name),
+  mcpToggle: (name: string, disabled: boolean): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:mcp-toggle', name, disabled),
+  mcpImportJson: (text: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:mcp-import-json', text),
+  mcpConfigPath: (): Promise<string> => ipcRenderer.invoke('work:mcp-config-path'),
   listBranches: (): Promise<{ ok: boolean; message: string; current: string; branches: string[] }> => ipcRenderer.invoke('work:list-branches'),
   switchBranch: (branch: string): Promise<{ ok: boolean; message: string; branch?: string }> => ipcRenderer.invoke('work:switch-branch', branch),
   setTheme: (theme: 'light' | 'dark' | 'system'): void => ipcRenderer.send('work:set-theme', theme),
+  setTitleBarOverlay: (colors: { bg: string; symbol: string }): void => ipcRenderer.send('work:set-titlebar-overlay', colors),
   setLanguage: (language: string): Promise<{ ok: boolean; language?: string; message?: string }> => ipcRenderer.invoke('work:set-language', language),
   // 回滚对话:把会话截断到指定用户消息之前(id + 该消息在当前会话里的序号)。
   rollback: (value: { id: string; userIndex: number }): Promise<{ ok: boolean; message?: string; state?: ProjectState; history?: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> }> => ipcRenderer.invoke('work:rollback', value.id, value.userIndex),

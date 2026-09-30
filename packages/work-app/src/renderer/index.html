@@ -31,6 +31,8 @@
         <header class="brand-row"><button class="icon-button muted" id="sidebar-toggle" data-sidebar-toggle data-i18n-title="sidebar.collapse" data-i18n-aria="sidebar.collapse" aria-pressed="false"><svg class="icon" data-icon="panel-left"></svg></button><div class="brand-actions"><button class="icon-button muted" id="add-project" data-i18n-title="sidebar.addProject" data-i18n-aria="sidebar.addProject"><svg class="icon" data-icon="plus"></svg></button><button class="icon-button muted" id="search-button" data-i18n-title="sidebar.search" data-i18n-aria="sidebar.search"><svg class="icon" data-icon="search"></svg></button><button class="icon-button muted" id="theme-toggle" data-i18n-title="sidebar.theme" data-i18n-aria="sidebar.theme"><svg class="icon" data-icon="moon"></svg><svg class="icon icon-swap" data-icon="sun"></svg></button></div></header>
         <nav class="primary-nav" aria-label="主导航" data-i18n-aria="a11y.primaryNav">
           <button class="nav-item active" id="new-task"><svg class="icon" data-icon="circle-plus"></svg><span data-i18n="nav.newTask">新建任务</span></button>
+          <button class="nav-item" id="nav-skills" data-i18n-title="nav.skills" aria-haspopup="dialog"><svg class="icon" data-icon="sparkles"></svg><span data-i18n="nav.skills">Skill 市场</span></button>
+          <button class="nav-item" id="nav-mcp" data-i18n-title="nav.mcp" aria-haspopup="dialog"><svg class="icon" data-icon="globe"></svg><span data-i18n="nav.mcp">MCP 接入</span></button>
         </nav>
         <section class="sidebar-section tasks-section"><div id="task-list" class="task-list"><p class="empty-tasks" data-i18n="sidebar.emptyTasks">无任务</p></div></section>
         <button class="sidebar-footer" id="settings-button" data-i18n-title="settings.title" aria-haspopup="dialog" aria-expanded="false">
@@ -56,6 +58,15 @@
           <div id="inspector-content" class="inspector-content"></div>
         </aside>
         <section id="search-panel" class="search-panel hidden"><div class="search-dialog"><input id="search-input" data-i18n-placeholder="search.placeholder" /><div id="search-results"></div></div></section>
+        <!-- 扩展页（Skills / MCP）：覆盖 agent 输出区的整页视图，不是弹窗。
+             点击侧栏「Skill 市场」「MCP 接入」切换进来，返回按钮或选择任务时退出。 -->
+        <section id="extensions-view" class="extensions-view hidden" role="region" aria-label="扩展">
+          <header class="extensions-header">
+            <button id="extensions-view-back" class="icon-button muted" data-i18n-title="common.back" data-i18n-aria="common.back" aria-label="返回"><svg class="icon" data-icon="arrow-left"></svg></button>
+            <b id="extensions-view-title"></b>
+          </header>
+          <div id="extensions-view-body" class="extensions-body"></div>
+        </section>
         <footer class="composer-area">
           <div class="composer">
             <div id="attachment-list" class="attachment-list"></div>
@@ -170,6 +181,105 @@
             </label>
             <p class="catalog-status hidden" id="catalog-status"></p>
             <div class="catalog-list" id="catalog-list" role="listbox" aria-label="catalog"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP server 编辑器：新增 / 编辑共用。落盘 ~/.mocode/mcp.json（标准 mcpServers 格式） -->
+      <section id="mcp-form-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mcp-form-title">
+        <div class="modal-card model-form-card">
+          <header class="modal-head">
+            <b id="mcp-form-title" data-i18n="mcpForm.add">添加 MCP Server</b>
+            <button class="modal-close icon-button muted" data-close data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button>
+          </header>
+          <div class="modal-body model-form-body">
+            <label class="field">
+              <span class="field-label" data-i18n="mcpForm.preset">常用模板</span>
+              <select id="mcp-form-template" class="field-input">
+                <option value="" data-i18n="mcpForm.custom">自定义（全部手填）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label"><span data-i18n="mcpForm.name">名称</span> <span class="field-optional" data-i18n="mcpForm.nameOptional">标识用，唯一</span></span>
+              <input id="mcp-form-name" class="field-input" type="text" maxlength="64" autocomplete="off" spellcheck="false" data-i18n-placeholder="mcpForm.namePlaceholder" />
+            </label>
+            <label class="field">
+              <span class="field-label" data-i18n="mcpForm.transport">传输类型</span>
+              <select id="mcp-form-transport" class="field-input">
+                <option value="stdio" data-i18n="mcpForm.transportStdio">stdio（本地命令行进程）</option>
+                <option value="streamable-http" data-i18n="mcpForm.transportHttp">streamable-http（远程 HTTP）</option>
+                <option value="sse" data-i18n="mcpForm.transportSse">sse（远程 SSE）</option>
+              </select>
+            </label>
+            <label class="field" id="mcp-form-command-field">
+              <span class="field-label"><span data-i18n="mcpForm.command">启动命令</span> <span class="field-optional" data-i18n="mcpForm.commandOptional">如 npx / uvx</span></span>
+              <input id="mcp-form-command" class="field-input" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="mcpForm.commandPlaceholder" />
+            </label>
+            <label class="field" id="mcp-form-args-field">
+              <span class="field-label"><span data-i18n="mcpForm.args">参数</span> <span class="field-optional" data-i18n="mcpForm.argsOptional">每行一个</span></span>
+              <textarea id="mcp-form-args" class="field-input" rows="3" spellcheck="false" data-i18n-placeholder="mcpForm.argsPlaceholder"></textarea>
+            </label>
+            <label class="field" id="mcp-form-env-field">
+              <span class="field-label"><span data-i18n="mcpForm.env">环境变量</span> <span class="field-optional" data-i18n="mcpForm.envOptional">每行 KEY=VALUE</span></span>
+              <textarea id="mcp-form-env" class="field-input" rows="3" spellcheck="false" data-i18n-placeholder="mcpForm.envPlaceholder"></textarea>
+            </label>
+            <label class="field field-hidden" id="mcp-form-url-field">
+              <span class="field-label" data-i18n="mcpForm.url">服务 URL</span>
+              <input id="mcp-form-url" class="field-input" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="mcpForm.urlPlaceholder" />
+            </label>
+            <label class="field field-hidden" id="mcp-form-headers-field">
+              <span class="field-label"><span data-i18n="mcpForm.headers">请求头</span> <span class="field-optional" data-i18n="mcpForm.headersOptional">每行 KEY: VALUE</span></span>
+              <textarea id="mcp-form-headers" class="field-input" rows="3" spellcheck="false" data-i18n-placeholder="mcpForm.headersPlaceholder"></textarea>
+            </label>
+            <p class="model-form-error hidden" id="mcp-form-error"></p>
+          </div>
+          <footer class="modal-foot">
+            <button class="btn-ghost" id="mcp-form-delete" hidden data-i18n="mcpForm.delete">删除</button>
+            <span class="modal-foot-spacer"></span>
+            <button class="btn-ghost" data-close data-i18n="taskModal.cancel">取消</button>
+            <button class="btn-primary" id="mcp-form-save" data-i18n="mcpForm.save">保存</button>
+          </footer>
+        </div>
+      </section>
+
+      <!-- MCP 配置导入：粘贴标准 mcpServers JSON（Claude Desktop / Cursor 等格式可直接粘） -->
+      <section id="mcp-import-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="mcp-import-title">
+        <div class="modal-card">
+          <header class="modal-head">
+            <b id="mcp-import-title" data-i18n="mcpImport.title">导入 MCP 配置</b>
+            <button class="modal-close icon-button muted" data-close data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button>
+          </header>
+          <div class="modal-body">
+            <p class="settings-row-sub" data-i18n="mcpImport.hint">粘贴 JSON（支持 {"mcpServers": {...}}、裸 server map、带 name 的数组），同名条目会被覆盖。</p>
+            <label class="field">
+              <textarea id="mcp-import-text" class="field-input mcp-import-text" rows="12" spellcheck="false" data-i18n-placeholder="mcpImport.placeholder"></textarea>
+            </label>
+            <p class="model-form-error hidden" id="mcp-import-error"></p>
+          </div>
+          <footer class="modal-foot">
+            <span class="modal-foot-spacer"></span>
+            <button class="btn-ghost" data-close data-i18n="taskModal.cancel">取消</button>
+            <button class="btn-primary" id="mcp-import-save" data-i18n="mcpImport.import">导入</button>
+          </footer>
+        </div>
+      </section>
+
+      <!-- Skill 市场：git 仓库 → 本地缓存 → 扫描 SKILL.md → 按需安装 -->
+      <section id="skill-market-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="skill-market-title">
+        <div class="modal-card catalog-card">
+          <header class="modal-head">
+            <b id="skill-market-title" data-i18n="skillMarket.title">Skill 市场</b>
+            <span class="catalog-meta" id="skill-market-meta"></span>
+            <button class="icon-button muted" id="skill-market-refresh" data-i18n-title="skillMarket.refreshTitle" data-i18n-aria="skillMarket.refreshTitle"><svg class="icon" data-icon="regen"></svg></button>
+            <button class="modal-close icon-button muted" data-close data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button>
+          </header>
+          <div class="modal-body catalog-body">
+            <div class="skill-market-source">
+              <select id="skill-market-source" class="field-input"></select>
+              <input id="skill-market-url" class="field-input field-hidden" type="text" autocomplete="off" spellcheck="false" data-i18n-placeholder="skillMarket.urlPlaceholder" />
+            </div>
+            <p class="catalog-status hidden" id="skill-market-status"></p>
+            <div class="catalog-list" id="skill-market-list" role="list" aria-label="skill market"></div>
           </div>
         </div>
       </section>

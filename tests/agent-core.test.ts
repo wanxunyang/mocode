@@ -541,6 +541,104 @@ test('runAgentCore: add_tool_groups 与只读工具同批 → 只读本 step 执
   }
 });
 
+test('runAgentCore: add_tool_groups 排在只读工具之前时,结果仍按声明序回灌不中断', async () => {
+  // 回归:模型把 add_tool_groups 放在同批第一个(真实事故形态)。旧实现按执行序发布
+  // tool_result(只读先、扩容后),而 history 批校验按 assistant 声明序逐位配对 id,
+  // 必然 id 错位抛错回滚、整轮中断。修复后发布必须按 provider 原序交错。
+  for (const pipeline of ['legacy', 'staged'] as const) {
+    const root = mkdtempSync(join(tmpdir(), `mocode-agent-expand-first-${pipeline}-`));
+    writeFileSync(join(root, 'fixture.txt'), 'expand-first-content', 'utf8');
+    const previousRoot = setSandboxRoot(root);
+    const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
+    delete process.env.MOCODE_TOOL_POLICY;
+    const previousFrontend = process.env.MOCODE_FRONTEND_TOOLS_ENABLED;
+    process.env.MOCODE_FRONTEND_TOOLS_ENABLED = 'true';
+    const requests: CapturedAgentRequest[] = [];
+    let call = 0;
+    __setChatCreateImpl(async (body) => {
+      requests.push(body as unknown as CapturedAgentRequest);
+      call++;
+      if (call === 1) {
+        return sseStream([
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'expand-first-control',
+                  function: {
+                    name: 'add_tool_groups',
+                    arguments: '{"groups":["browser-debug"],"reason":"need DOM debug next"}',
+                  },
+                },
+                {
+                  index: 1,
+                  id: 'expand-first-read',
+                  function: { name: 'read_file', arguments: '{"path":"fixture.txt"}' },
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      return sseStream([{ delta: { content: 'expand first handled' } }]);
+    });
+
+    const policy = new ToolPolicyController({ id: `core-expand-first-${pipeline}` });
+    const outcomes: Array<{ tool: string; status: string; code: string }> = [];
+    try {
+      const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+      const result = await runAgentCore({
+        history,
+        userInput: 'expand then read',
+        hooks: {},
+        maxSteps: 2,
+        pipeline,
+        toolPolicy: policy,
+        runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+        onToolOutcome: (tool, _args, outcome) => outcomes.push({ tool, status: outcome.status, code: outcome.code }),
+      });
+
+      assert.equal(result.completed, true, `[${pipeline}] 应正常完成(不得因 id 错位中断)`);
+      assert.equal(result.finalText, 'expand first handled');
+      assert.deepEqual(
+        outcomes,
+        [
+          { tool: 'add_tool_groups', status: 'success', code: 'OK' },
+          { tool: 'read_file', status: 'success', code: 'OK' },
+        ],
+        `[${pipeline}] 扩容与只读都应成功,发布按声明序`,
+      );
+      assert.equal(policy.snapshot(false).version, 2, `[${pipeline}] 扩容应升版本`);
+
+      // history:[system, user, assistant(2 calls), tool(expand), tool(read), assistant(text)]
+      // tool_result 必须与 assistant tool_calls 逐位配对(id 一一对应),这是本次修复的核心断言。
+      assert.equal(history.length, 6, `[${pipeline}] history 应 6 条`);
+      const expandResult = history[3] as { role: string; tool_call_id?: string; content?: string };
+      assert.equal(expandResult.role, 'tool');
+      assert.equal(expandResult.tool_call_id, 'expand-first-control');
+      assert.match(expandResult.content ?? '', /next model step/);
+      const readResult = history[4] as { role: string; tool_call_id?: string; content?: string };
+      assert.equal(readResult.role, 'tool');
+      assert.equal(readResult.tool_call_id, 'expand-first-read');
+      assert.match(readResult.content ?? '', /expand-first-content/);
+
+      // 新增 schema 下一 step 生效;本 step 请求里没有 browser/dev_server。
+      assert.ok(!capturedToolNames(requests[0]).includes('browser'));
+      assert.ok(
+        capturedToolNames(requests[1]).includes('browser') && capturedToolNames(requests[1]).includes('dev_server'),
+        `[${pipeline}] browser 与蕴含的 dev_server 应在下一 step 可用`,
+      );
+    } finally {
+      __setChatCreateImpl(null);
+      setSandboxRoot(previousRoot);
+      restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
+      restoreEnv('MOCODE_FRONTEND_TOOLS_ENABLED', previousFrontend);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test('runAgentCore: runtimeAllowedToolNames 与 schema 同源拒绝伪造调用且不产生副作用', async () => {
   const root = mkdtempSync(join(tmpdir(), 'mocode-agent-policy-deny-'));
   const previousRoot = setSandboxRoot(root);

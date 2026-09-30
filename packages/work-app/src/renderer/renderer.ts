@@ -73,6 +73,22 @@ type CatalogEntryView = {
   contextWindow: number; reasoning: boolean; toolCall: boolean; attachment: boolean; releaseDate?: string;
 };
 type CatalogPrefill = { provider: LlmProvider; baseURL: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
+type SkillOrigin = 'user' | 'claude' | 'project';
+type SkillItem = { name: string; description: string; version?: string; dir: string; origin: SkillOrigin; modelInvocable: boolean; allowedTools?: string[] };
+type ImportResult = { ok: boolean; message?: string; installed: Array<{ name: string; dir: string; updated: boolean }> };
+type MarketSkills = { ok: boolean; message?: string; skills: Array<{ name: string; description: string; version?: string; relDir: string }> };
+type McpTransport = 'stdio' | 'sse' | 'streamable-http';
+type McpServerView = {
+  name: string; transport: McpTransport;
+  command?: string; args?: string[]; env?: Record<string, string>;
+  url?: string; headers?: Record<string, string>;
+  requestTimeoutMs?: number; disabled: boolean;
+};
+type McpDraft = {
+  transport: McpTransport;
+  command?: string; argsText?: string; envText?: string;
+  url?: string; headersText?: string; requestTimeoutMs?: number;
+};
 
 declare global {
   interface Window {
@@ -106,11 +122,28 @@ declare global {
       /** 模型目录（models.dev，快照与 mocode 终端共用）。refresh=true 强制联网刷新。 */
       catalogLoad: (options?: { refresh?: boolean }) => Promise<{ ok: boolean; message?: string; source?: string; fetchedAt?: string; total?: number; providerCount?: number; entries?: CatalogEntryView[] }>;
       catalogPrefill: (pick: { providerId: string; modelId: string }) => Promise<{ ok: boolean; message?: string; prefill?: CatalogPrefill; suggestedName?: string; providerName?: string; envKeys?: string[]; apiKeySeed?: string }>;
+      /** ── Skill 市场 / 扩展 ── */
+      skillsList: (projectRoot?: string) => Promise<SkillItem[]>;
+      skillImportFolder: () => Promise<ImportResult>;
+      skillImportZip: () => Promise<ImportResult>;
+      skillImportGit: (url: string) => Promise<ImportResult>;
+      skillsMarketLoad: (url: string, refresh?: boolean) => Promise<MarketSkills>;
+      skillInstallMarket: (url: string, relDir: string) => Promise<ImportResult>;
+      skillDelete: (dir: string, projectRoot?: string) => Promise<{ ok: boolean; message?: string }>;
+      skillOpen: (dir: string) => Promise<boolean>;
+      /** ── MCP 接入 ── */
+      mcpList: () => Promise<McpServerView[]>;
+      mcpSave: (payload: { name: string; originalName?: string; draft: McpDraft }) => Promise<{ ok: boolean; message: string }>;
+      mcpDelete: (name: string) => Promise<{ ok: boolean; message: string }>;
+      mcpToggle: (name: string, disabled: boolean) => Promise<{ ok: boolean; message: string }>;
+      mcpImportJson: (text: string) => Promise<{ ok: boolean; message: string }>;
+      mcpConfigPath: () => Promise<string>;
       getSettings: () => Promise<Record<string, boolean>>;
       setSettings: (patch: Record<string, boolean>) => Promise<Record<string, boolean>>;
       listBranches: () => Promise<{ ok: boolean; message: string; current: string; branches: string[] }>;
       switchBranch: (branch: string) => Promise<{ ok: boolean; message: string; branch?: string }>;
       setTheme: (theme: 'light' | 'dark' | 'system') => void;
+      setTitleBarOverlay: (colors: { bg: string; symbol: string }) => void;
       setLanguage: (language: string) => Promise<{ ok: boolean; language?: string; message?: string }>;
       send: (value: Record<string, unknown>) => void;
       onAgentEvent: (callback: (event: AgentEnvelope) => void) => () => void;
@@ -645,7 +678,7 @@ function renderTasks(): void {
 }
 
 function updateState(next: WorkState): void { state = next; renderProjects(); renderTasks(); renderEmptyChips(); }
-function clearWorkspace(): void { conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); }
+function clearWorkspace(): void { hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); }
 
 /**
  * 一轮 assistant 输出 = 一条 message 内的**有序 block 流**:
@@ -955,6 +988,7 @@ function appendText(text: string): void {
   smartScrollToBottom();
 }
 function renderHistory(history: HistoryItem[]): void {
+  hideExtensionsView();
   conversation.innerHTML = ''; activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
   if (!history.length) { emptyState.classList.remove('hidden'); return; }
   // 一条 user 消息之后的所有 assistant / tool 片段归为同一轮,按原始顺序铺成 block 流。
@@ -2071,6 +2105,38 @@ $('#add-project').addEventListener('click', async () => {
   if (project && project.id !== before) showToast('success', t('toast.switchedProject', { name: project.name }));
 });
 $('#new-task').addEventListener('click', () => void startNewTask());
+/* ── 扩展整页视图（Skills / MCP）：覆盖 agent 输出区，不是弹窗 ──
+ * 侧栏「新建任务」下方两个入口切换进来；返回按钮 / 选择任务 / 新建任务时退出。
+ * 渲染函数 renderSkillsView / renderMcpView 与弹窗解耦，接收容器参数。 */
+const extensionsView = $('#extensions-view');
+const extensionsViewBody = $('#extensions-view-body');
+type ExtensionsViewTab = 'skills' | 'mcp';
+let extensionsActiveTab: ExtensionsViewTab = 'skills';
+
+/** 重绘扩展视图当前页的内容（tab 切换由侧栏入口负责，这里只刷新标题 + 列表）。 */
+async function renderExtensionsView(): Promise<void> {
+  if (!extensionsViewBody) return;
+  const title = document.querySelector('#extensions-view-title');
+  if (title) title.textContent = t(extensionsActiveTab === 'skills' ? 'nav.skills' : 'nav.mcp');
+  if (extensionsActiveTab === 'skills') await renderSkillsView(extensionsViewBody);
+  else await renderMcpView(extensionsViewBody);
+}
+
+/** 打开扩展视图并定位到指定 tab（重复点击同 tab = 刷新列表）。 */
+function showExtensionsView(tab: ExtensionsViewTab): void {
+  extensionsActiveTab = tab;
+  extensionsView?.classList.remove('hidden');
+  void renderExtensionsView();
+}
+
+/** 关闭扩展视图，回到会话画面。 */
+function hideExtensionsView(): void {
+  extensionsView?.classList.add('hidden');
+}
+
+$('#nav-skills').addEventListener('click', () => showExtensionsView('skills'));
+$('#nav-mcp').addEventListener('click', () => showExtensionsView('mcp'));
+$('#extensions-view-back').addEventListener('click', hideExtensionsView);
 
 /**
  * 新建任务：不弹窗、不填表。直接建一个空任务（标题留空 → 侧栏显示「新任务」），
@@ -2160,11 +2226,25 @@ $('#theme-toggle').addEventListener('click', () => {
 });
 
 /** 应用并持久化主题。saved 可为 light/dark/system; dataset 始终写入实际生效的 light/dark。 */
+/** 把渲染层实测的 titlebar 颜色同步给主进程，让 Windows 原生窗口控制按钮
+ *  （右上角最小化/最大化/关闭那一块）跟 CSS 的 .titlebar 同色。
+ *  颜色读 getComputedStyle 而非硬编码：surface-app 是带 accent 色相的 oklch，
+ *  换主题/换主题色都会变，主进程侧硬编码 hex 永远对不齐。 */
+function syncTitleBarOverlay(): void {
+  const bar = document.querySelector('.titlebar');
+  if (!bar) return;
+  const bg = getComputedStyle(bar).backgroundColor;
+  const brandText = bar.querySelector('.titlebar-brand-text');
+  const symbol = (brandText ? getComputedStyle(brandText).color : '') || getComputedStyle(bar).color;
+  if (bg && bg !== 'rgba(0, 0, 0, 0)') window.mocodeWork.setTitleBarOverlay({ bg, symbol });
+}
+
 function applyTheme(saved: 'light' | 'dark' | 'system'): void {
   const effective = saved === 'system' ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : saved;
   document.documentElement.dataset.theme = effective;
   try { localStorage.setItem('mocode-work-theme', saved); } catch { /* 无 localStorage 则仅本次生效 */ }
   window.mocodeWork.setTheme(saved);
+  syncTitleBarOverlay();
   refreshThemeSegmented();
 }
 
@@ -2201,6 +2281,8 @@ function currentAccent(): AccentId {
 function applyAccent(id: AccentId): void {
   document.documentElement.dataset.accent = id;
   try { localStorage.setItem(ACCENT_KEY, id); } catch { /* 无 localStorage 则仅本次生效 */ }
+  // accent 色相会轻微改变 surface-app，titlebar overlay 也要跟着对一次色。
+  syncTitleBarOverlay();
   refreshAccentChips();
 }
 
@@ -2252,6 +2334,7 @@ const SETTING_ITEMS: Array<{ key: string; labelKey: LocaleKey; hintKey: LocaleKe
   { key: 'memory', labelKey: 'setting.memory', hintKey: 'setting.memoryHint' },
   { key: 'subAgent', labelKey: 'setting.subAgent', hintKey: 'setting.subAgentHint' },
   { key: 'autoReflect', labelKey: 'setting.autoReflect', hintKey: 'setting.autoReflectHint' },
+  { key: 'mcp', labelKey: 'setting.mcp', hintKey: 'setting.mcpHint' },
 ];
 let settingsState: Record<string, boolean> = {};
 
@@ -2574,6 +2657,533 @@ async function pickCatalogEntry(providerId: string, modelId: string): Promise<vo
   }
   closeCatalogModal();
   openModelForm(undefined, { ...result.prefill, suggestedName: result.suggestedName, apiKeySeed: result.apiKeySeed ?? '' });
+}
+
+/* ── Skill 市场 / 扩展管理（设置页「Skills」分类） ──────────────
+ * skill 安装目录 ~/.mocode/skills/ 与 mocode 终端共用，格式兼容 Claude Code /
+ * Agent Skills 开放标准（目录 + SKILL.md frontmatter）。导入通道：本地文件夹、
+ * zip 包、git 仓库（市场）；市场 = 浅克隆到本地缓存 → 扫描含 SKILL.md 的目录。 */
+
+let skillListItems: SkillItem[] = [];
+
+/** 市场源：内置精选 + 自定义 git URL。label 为品牌名（仓库路径），不随语言变。 */
+const SKILL_MARKET_SOURCES: Array<{ id: string; url: string; labelKey?: LocaleKey; label?: string }> = [
+  { id: 'anthropics-skills', url: 'https://github.com/anthropics/skills', label: 'anthropics/skills' },
+  { id: 'obra-superpowers', url: 'https://github.com/obra/superpowers', label: 'obra/superpowers' },
+  { id: 'custom', url: '', labelKey: 'skillMarket.customSource' },
+];
+
+const MCP_TEMPLATES: Array<{ label: string; name: string; draft: McpDraft }> = [
+  { label: 'fetch · 网页抓取', name: 'fetch', draft: { transport: 'stdio', command: 'uvx', argsText: 'mcp-server-fetch' } },
+  { label: 'memory · 长期记忆', name: 'memory', draft: { transport: 'stdio', command: 'npx', argsText: '-y\n@modelcontextprotocol/server-memory' } },
+  { label: 'filesystem · 文件系统', name: 'filesystem', draft: { transport: 'stdio', command: 'npx', argsText: '-y\n@modelcontextprotocol/server-filesystem\n.' } },
+  { label: 'sequential-thinking · 思维链', name: 'sequential-thinking', draft: { transport: 'stdio', command: 'npx', argsText: '-y\n@modelcontextprotocol/server-sequential-thinking' } },
+  { label: 'context7 · 文档检索', name: 'context7', draft: { transport: 'stdio', command: 'npx', argsText: '-y\n@upstash/context7-mcp' } },
+  { label: 'playwright · 浏览器自动化', name: 'playwright', draft: { transport: 'stdio', command: 'npx', argsText: '-y\n@playwright/mcp@latest' } },
+  { label: 'everything · 测试服务器', name: 'everything', draft: { transport: 'stdio', command: 'npx', argsText: '-y\n@modelcontextprotocol/server-everything' } },
+];
+
+function skillOriginLabel(origin: SkillOrigin): string {
+  return origin === 'user' ? t('extensions.originUser') : origin === 'claude' ? t('extensions.originClaude') : t('extensions.originProject');
+}
+
+function skillRow(item: SkillItem): string {
+  const meta = [
+    skillOriginLabel(item.origin),
+    item.version ? `v${escapeHtml(item.version)}` : null,
+    item.modelInvocable ? null : t('extensions.manualOnly'),
+  ].filter(Boolean).join(' · ');
+  const deletable = item.origin !== 'claude';
+  return `
+    <div class="settings-row-wrap">
+      <div class="settings-row" role="listitem">
+        <span class="settings-row-body">
+          <span class="settings-row-title">${escapeHtml(item.name)}</span>
+          <span class="settings-row-sub" title="${escapeHtml(item.description)}">${escapeHtml(item.description)}</span>
+          <span class="settings-row-sub">${meta}</span>
+        </span>
+      </div>
+      <button class="settings-row-act icon-button muted" data-skill-open="${escapeHtml(item.dir)}" title="${t('extensions.openDir')}" aria-label="${t('extensions.openDir')}">${icon('folder-open')}</button>
+      ${deletable ? `<button class="settings-row-act icon-button muted" data-skill-delete="${escapeHtml(item.dir)}" data-skill-name="${escapeHtml(item.name)}" title="${t('extensions.delete')}" aria-label="${t('extensions.delete')}">${icon('trash')}</button>` : `<span class="settings-row-act settings-row-readonly" title="${t('extensions.readonlyDir')}">${icon('info')}</span>`}
+    </div>`;
+}
+
+/** 「Skills」分类：已安装列表 + 四条导入通道。 */
+/** 「Skill 市场」整页视图（渲染进 #extensions-view-body，不再是设置弹窗分类）。 */
+async function renderSkillsView(container: HTMLElement): Promise<void> {
+  const projectRoot = selectedProject()?.root;
+  try { skillListItems = await window.mocodeWork.skillsList(projectRoot); }
+  catch { skillListItems = []; }
+  const groups: Array<{ origin: SkillOrigin; items: SkillItem[] }> = (['user', 'claude', 'project'] as const)
+    .map((origin) => ({ origin, items: skillListItems.filter((s) => s.origin === origin) }))
+    .filter((group) => group.items.length);
+  container.innerHTML = `
+    <div class="settings-block">
+      <div class="settings-block-head"><b>${t('extensions.importTitle')}</b><span>${t('extensions.importHint')}</span></div>
+      <div class="skill-import-grid">
+        <button class="settings-add" id="skill-import-folder">
+          <span class="settings-add-icon">${icon('folder-open')}</span>
+          <span class="settings-row-body"><span class="settings-row-title">${t('extensions.importFolder')}</span><span class="settings-row-sub">${t('extensions.importFolderSub')}</span></span>
+        </button>
+        <button class="settings-add" id="skill-import-zip">
+          <span class="settings-add-icon">${icon('files')}</span>
+          <span class="settings-row-body"><span class="settings-row-title">${t('extensions.importZip')}</span><span class="settings-row-sub">${t('extensions.importZipSub')}</span></span>
+        </button>
+        <button class="settings-add" id="skill-browse-market">
+          <span class="settings-add-icon">${icon('globe')}</span>
+          <span class="settings-row-body"><span class="settings-row-title">${t('skillMarket.title')}</span><span class="settings-row-sub">${t('skillMarket.subtitle')}</span></span>
+        </button>
+      </div>
+      <div class="skill-git-row">
+        <input id="skill-git-url" class="field-input" type="text" autocomplete="off" spellcheck="false" placeholder="${t('extensions.gitUrlPlaceholder')}" />
+        <button class="btn-primary" id="skill-git-import">${t('extensions.gitImport')}</button>
+      </div>
+    </div>
+    <div class="settings-block">
+      <div class="settings-block-head"><b>${t('extensions.installedTitle')}</b><span>${t('extensions.installedHint', { n: skillListItems.length })}</span></div>
+      ${groups.length
+        ? groups.map((group) => `
+            <div class="settings-provider">
+              <div class="settings-provider-head"><b>${escapeHtml(skillOriginLabel(group.origin))}</b><span class="settings-provider-count">${t('settings.providerCount', { n: group.items.length })}</span></div>
+              <div class="settings-list">${group.items.map(skillRow).join('')}</div>
+            </div>`).join('')
+        : `<div class="settings-empty">${icon('sparkles')}<div><b>${t('extensions.emptyTitle')}</b><p>${t('extensions.emptyHint')}</p></div></div>`}
+    </div>
+  `;
+  const applyImport = async (result: ImportResult | Promise<ImportResult>): Promise<void> => {
+    const settled = await result;
+    if (!settled.ok && settled.message !== 'cancelled' && settled.message) showToast('error', settled.message);
+    if (settled.ok) showToast('success', settled.message ?? t('extensions.importDone'));
+    await renderSkillsView(container);
+  };
+  container.querySelector<HTMLButtonElement>('#skill-import-folder')?.addEventListener('click', () => void applyImport(window.mocodeWork.skillImportFolder()));
+  container.querySelector<HTMLButtonElement>('#skill-import-zip')?.addEventListener('click', () => void applyImport(window.mocodeWork.skillImportZip()));
+  container.querySelector<HTMLButtonElement>('#skill-browse-market')?.addEventListener('click', () => openSkillMarketModal());
+  container.querySelector<HTMLButtonElement>('#skill-git-import')?.addEventListener('click', () => {
+    const input = container.querySelector<HTMLInputElement>('#skill-git-url');
+    const url = input?.value.trim() ?? '';
+    if (!url) { showToast('warn', t('extensions.gitUrlRequired')); return; }
+    showToast('info', t('extensions.gitImporting'));
+    void applyImport(window.mocodeWork.skillImportGit(url));
+  });
+  container.querySelectorAll<HTMLButtonElement>('[data-skill-open]').forEach((button) => {
+    button.addEventListener('click', () => void window.mocodeWork.skillOpen(button.dataset.skillOpen!));
+  });
+  container.querySelectorAll<HTMLButtonElement>('[data-skill-delete]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (button.dataset.armed !== '1') {
+        button.dataset.armed = '1';
+        button.classList.add('danger-armed');
+        showToast('warn', t('extensions.deleteConfirm', { name: button.dataset.skillName ?? '' }));
+        setTimeout(() => { button.dataset.armed = '0'; button.classList.remove('danger-armed'); }, 3200);
+        return;
+      }
+      const result = await window.mocodeWork.skillDelete(button.dataset.skillDelete!, projectRoot);
+      if (!result.ok && result.message) showToast('error', result.message);
+      else showToast('success', t('extensions.deleted', { name: button.dataset.skillName ?? '' }));
+      await renderSkillsView(container);
+    });
+  });
+}
+
+/* ── Skill 市场弹窗 ──────────────────────────────────────────── */
+
+let skillMarketEl: HTMLElement | null = null;
+let skillMarketUrl = SKILL_MARKET_SOURCES[0]?.url ?? '';
+let skillMarketLoading = false;
+
+const skillMarketField = <T extends HTMLElement>(id: string): T => skillMarketEl!.querySelector(`#${id}`) as T;
+
+function ensureSkillMarketModal(): HTMLElement {
+  if (skillMarketEl) return skillMarketEl;
+  const el = $('#skill-market-modal') as HTMLElement;
+  skillMarketEl = el;
+  const sourceSelect = skillMarketField<HTMLSelectElement>('skill-market-source');
+  const rebuildSources = (): void => {
+    sourceSelect.innerHTML = '';
+    for (const source of SKILL_MARKET_SOURCES) {
+      const option = document.createElement('option');
+      option.value = source.id;
+      option.textContent = source.labelKey ? t(source.labelKey) : source.label!;
+      sourceSelect.append(option);
+    }
+  };
+  rebuildSources();
+  sourceSelect.addEventListener('change', () => {
+    const source = SKILL_MARKET_SOURCES.find((s) => s.id === sourceSelect.value);
+    skillMarketUrl = source?.url ?? '';
+    skillMarketField<HTMLInputElement>('skill-market-url').classList.toggle('field-hidden', !!source?.url);
+    if (source?.url) void loadSkillMarketList(false);
+  });
+  skillMarketField<HTMLInputElement>('skill-market-url').addEventListener('change', () => {
+    skillMarketUrl = skillMarketField<HTMLInputElement>('skill-market-url').value.trim();
+  });
+  skillMarketField<HTMLButtonElement>('skill-market-refresh').addEventListener('click', () => void loadSkillMarketList(true));
+  el.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeSkillMarketModal));
+  el.addEventListener('click', (event) => { if (event.target === el) closeSkillMarketModal(); });
+  return el;
+}
+
+function openSkillMarketModal(): void {
+  const el = ensureSkillMarketModal();
+  el.classList.remove('hidden');
+  if (!skillMarketLoading) void loadSkillMarketList(false);
+}
+
+function closeSkillMarketModal(): void {
+  skillMarketEl?.classList.add('hidden');
+}
+
+function skillMarketStatus(message: string, show = true): void {
+  const el = skillMarketField<HTMLElement>('skill-market-status');
+  el.textContent = message;
+  el.classList.toggle('hidden', !show);
+}
+
+async function loadSkillMarketList(refresh: boolean): Promise<void> {
+  if (!skillMarketEl) return;
+  const sourceSelect = skillMarketField<HTMLSelectElement>('skill-market-source');
+  const source = SKILL_MARKET_SOURCES.find((s) => s.id === sourceSelect.value);
+  const url = source?.url || skillMarketField<HTMLInputElement>('skill-market-url').value.trim();
+  if (!url) { skillMarketStatus(t('extensions.gitUrlRequired')); return; }
+  skillMarketLoading = true;
+  const refreshButton = skillMarketField<HTMLButtonElement>('skill-market-refresh');
+  refreshButton.disabled = true;
+  refreshButton.classList.add('spinning');
+  skillMarketStatus(t('skillMarket.loading'));
+  try {
+    const result = await window.mocodeWork.skillsMarketLoad(url, refresh);
+    if (!result.ok) { skillMarketStatus(result.message ?? t('skillMarket.loadFailed')); return; }
+    skillMarketStatus('');
+    skillMarketField<HTMLElement>('skill-market-meta').textContent = t('skillMarket.count', { n: result.skills.length });
+    renderSkillMarketList(url, result.skills);
+  } catch (error) {
+    skillMarketStatus(t('skillMarket.loadFailed', { msg: (error as Error).message }));
+  } finally {
+    skillMarketLoading = false;
+    refreshButton.disabled = false;
+    refreshButton.classList.remove('spinning');
+  }
+}
+
+function renderSkillMarketList(url: string, skills: MarketSkills['skills']): void {
+  const listEl = skillMarketField<HTMLElement>('skill-market-list');
+  if (!skills.length) { listEl.innerHTML = `<p class="catalog-none">${t('skillMarket.empty')}</p>`; return; }
+  listEl.innerHTML = skills.map((skill) => `
+    <div class="settings-row-wrap">
+      <div class="settings-row" role="listitem">
+        <span class="settings-row-body">
+          <span class="settings-row-title">${escapeHtml(skill.name)}${skill.version ? ` <span class="catalog-row-id">v${escapeHtml(skill.version)}</span>` : ''}</span>
+          <span class="settings-row-sub" title="${escapeHtml(skill.description)}">${escapeHtml(skill.description)}</span>
+        </span>
+      </div>
+      <button class="btn-primary skill-market-install" data-url="${escapeHtml(url)}" data-reldir="${escapeHtml(skill.relDir)}" data-name="${escapeHtml(skill.name)}">${t('skillMarket.install')}</button>
+    </div>`).join('');
+  listEl.querySelectorAll<HTMLButtonElement>('.skill-market-install').forEach((button) => {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        const result = await window.mocodeWork.skillInstallMarket(button.dataset.url!, button.dataset.reldir!);
+        if (!result.ok && result.message) { showToast('error', result.message); return; }
+        showToast('success', t('extensions.installedOne', { name: button.dataset.name ?? '' }));
+        button.textContent = t('skillMarket.installed');
+        // 市场弹窗关掉后背后就是 Skill 页：安装成功即刷新列表，免去手动刷新。
+        if (extensionsView && !extensionsView.classList.contains('hidden') && extensionsActiveTab === 'skills' && extensionsViewBody) void renderSkillsView(extensionsViewBody);
+      } finally { button.disabled = false; }
+    });
+  });
+}
+
+/* ── MCP 接入（设置页「MCP」分类） ─────────────────────────────
+ * 配置落 ~/.mocode/mcp.json（标准 { "mcpServers": ... } 格式），main 进程启动时
+ * 把它注入 host 的 MCP_CONFIG_PATH（用户已有自己的 MCP 配置时不覆盖）。 */
+
+let mcpListItems: McpServerView[] = [];
+
+function mcpRow(server: McpServerView): string {
+  const detail = server.transport === 'stdio'
+    ? `${server.command ?? ''}${server.args?.length ? ' ' + server.args.join(' ') : ''}`.trim()
+    : server.url ?? '';
+  const meta = [
+    server.transport,
+    detail ? `<code class="mcp-detail" title="${escapeHtml(detail)}">${escapeHtml(detail)}</code>` : null,
+    Object.keys(server.env ?? {}).length ? t('mcp.envCount', { n: Object.keys(server.env ?? {}).length }) : null,
+    server.disabled ? t('mcp.disabled') : null,
+  ].filter(Boolean).join(' · ');
+  return `
+    <div class="settings-row-wrap">
+      <div class="settings-row ${server.disabled ? 'mcp-disabled' : ''}" role="listitem">
+        <span class="settings-row-body">
+          <span class="settings-row-title">${escapeHtml(server.name)}</span>
+          <span class="settings-row-sub">${meta}</span>
+        </span>
+      </div>
+      <button class="settings-row-act icon-button muted" data-mcp-toggle="${escapeHtml(server.name)}" data-disabled="${server.disabled ? '0' : '1'}" title="${server.disabled ? t('mcp.enable') : t('mcp.disable')}" aria-label="${server.disabled ? t('mcp.enable') : t('mcp.disable')}">${icon(server.disabled ? 'circle-plus' : 'close')}</button>
+      <button class="settings-row-act icon-button muted" data-mcp-edit="${escapeHtml(server.name)}" title="${t('menu.edit')}" aria-label="${t('menu.edit')}">${icon('edit')}</button>
+      <button class="settings-row-act icon-button muted" data-mcp-delete="${escapeHtml(server.name)}" title="${t('extensions.delete')}" aria-label="${t('extensions.delete')}">${icon('trash')}</button>
+    </div>`;
+}
+
+/** 「MCP 接入」整页视图（渲染进 #extensions-view-body，不再是设置弹窗分类）。 */
+async function renderMcpView(container: HTMLElement): Promise<void> {
+  try { mcpListItems = await window.mocodeWork.mcpList(); }
+  catch { mcpListItems = []; }
+  const configPath = await window.mocodeWork.mcpConfigPath();
+  container.innerHTML = `
+    <div class="settings-block">
+      <div class="settings-block-head"><b>${t('mcp.listTitle')}</b><span>${t('mcp.listHint', { n: mcpListItems.length })}</span></div>
+      <div class="skill-import-grid">
+        <button class="settings-add" id="mcp-add">
+          <span class="settings-add-icon">${icon('plus')}</span>
+          <span class="settings-row-body"><span class="settings-row-title">${t('mcp.add')}</span><span class="settings-row-sub">${t('mcp.addSub')}</span></span>
+        </button>
+        <button class="settings-add" id="mcp-import">
+          <span class="settings-add-icon">${icon('copy')}</span>
+          <span class="settings-row-body"><span class="settings-row-title">${t('mcp.importJson')}</span><span class="settings-row-sub">${t('mcp.importJsonSub')}</span></span>
+        </button>
+      </div>
+      ${mcpListItems.length
+        ? `<div class="settings-list">${mcpListItems.map(mcpRow).join('')}</div>`
+        : `<div class="settings-empty">${icon('globe')}<div><b>${t('mcp.emptyTitle')}</b><p>${t('mcp.emptyHint')}</p></div></div>`}
+    </div>
+    <div class="settings-block">
+      <div class="settings-block-head"><b>${t('mcp.aboutTitle')}</b><span>${t('mcp.aboutHint')}</span></div>
+      <div class="settings-kv">
+        <div class="settings-kv-row"><span>${t('mcp.kvConfigFile')}</span><b title="${escapeHtml(configPath)}">${escapeHtml(configPath)}</b></div>
+        <div class="settings-kv-row"><span>${t('mcp.kvEffective')}</span><b>${t('mcp.kvEffectiveValue')}</b></div>      </div>
+      <p class="settings-row-sub">${t('mcp.aboutNote')}</p>
+    </div>
+  `;
+  container.querySelector<HTMLButtonElement>('#mcp-add')?.addEventListener('click', () => openMcpForm());
+  container.querySelector<HTMLButtonElement>('#mcp-import')?.addEventListener('click', () => openMcpImportModal());
+  container.querySelectorAll<HTMLButtonElement>('[data-mcp-toggle]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const result = await window.mocodeWork.mcpToggle(button.dataset.mcpToggle!, button.dataset.disabled === '1');
+      showToast(result.ok ? 'success' : 'error', result.message);
+      await renderMcpView(container);
+    });
+  });
+  container.querySelectorAll<HTMLButtonElement>('[data-mcp-edit]').forEach((button) => {
+    button.addEventListener('click', () => openMcpForm(button.dataset.mcpEdit));
+  });
+  container.querySelectorAll<HTMLButtonElement>('[data-mcp-delete]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (button.dataset.armed !== '1') {
+        button.dataset.armed = '1';
+        button.classList.add('danger-armed');
+        showToast('warn', t('mcp.deleteConfirm', { name: button.dataset.mcpDelete ?? '' }));
+        setTimeout(() => { button.dataset.armed = '0'; button.classList.remove('danger-armed'); }, 3200);
+        return;
+      }
+      const result = await window.mocodeWork.mcpDelete(button.dataset.mcpDelete!);
+      showToast(result.ok ? 'success' : 'error', result.message);
+      await renderMcpView(container);
+    });
+  });
+}
+
+/* ── MCP server 编辑器（添加 / 编辑 / 模板） ────────────────── */
+
+let mcpFormEl: HTMLElement | null = null;
+let mcpFormEditing: string | undefined;
+
+const mcpFormField = <T extends HTMLElement>(id: string): T => mcpFormEl!.querySelector(`#${id}`) as T;
+
+function rebuildMcpTemplates(): void {
+  const select = mcpFormField<HTMLSelectElement>('mcp-form-template');
+  if (!select) return;
+  select.innerHTML = '';
+  const custom = document.createElement('option');
+  custom.value = '';
+  custom.textContent = t('mcpForm.custom');
+  select.append(custom);
+  for (const [index, template] of MCP_TEMPLATES.entries()) {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = `${template.label} · ${template.name}`;
+    select.append(option);
+  }
+}
+
+function syncMcpFormVisibility(): void {
+  const isStdio = mcpFormField<HTMLSelectElement>('mcp-form-transport').value === 'stdio';
+  mcpFormField<HTMLElement>('mcp-form-command-field').classList.toggle('field-hidden', !isStdio);
+  mcpFormField<HTMLElement>('mcp-form-args-field').classList.toggle('field-hidden', !isStdio);
+  mcpFormField<HTMLElement>('mcp-form-env-field').classList.toggle('field-hidden', !isStdio);
+  mcpFormField<HTMLElement>('mcp-form-url-field').classList.toggle('field-hidden', isStdio);
+  mcpFormField<HTMLElement>('mcp-form-headers-field').classList.toggle('field-hidden', isStdio);
+}
+
+function showMcpFormError(message: string): void {
+  const el = mcpFormField<HTMLElement>('mcp-form-error');
+  el.textContent = message;
+  el.classList.remove('hidden');
+}
+
+function clearMcpFormError(): void {
+  const el = mcpFormField<HTMLElement>('mcp-form-error');
+  el.textContent = '';
+  el.classList.add('hidden');
+}
+
+function ensureMcpForm(): HTMLElement {
+  if (mcpFormEl) return mcpFormEl;
+  const el = $('#mcp-form-modal') as HTMLElement;
+  mcpFormEl = el;
+  rebuildMcpTemplates();
+  mcpFormField<HTMLSelectElement>('mcp-form-template').addEventListener('change', () => {
+    const select = mcpFormField<HTMLSelectElement>('mcp-form-template');
+    if (select.value === '') return;
+    const template = MCP_TEMPLATES[Number(select.value)];
+    if (!template) return;
+    mcpFormField<HTMLInputElement>('mcp-form-name').value = template.name;
+    mcpFormField<HTMLSelectElement>('mcp-form-transport').value = template.draft.transport;
+    mcpFormField<HTMLInputElement>('mcp-form-command').value = template.draft.command ?? '';
+    mcpFormField<HTMLTextAreaElement>('mcp-form-args').value = template.draft.argsText ?? '';
+    mcpFormField<HTMLTextAreaElement>('mcp-form-env').value = template.draft.envText ?? '';
+    syncMcpFormVisibility();
+  });
+  mcpFormField<HTMLSelectElement>('mcp-form-transport').addEventListener('change', syncMcpFormVisibility);
+  el.querySelector('.model-form-body')?.addEventListener('input', () => clearMcpFormError());
+  $('#mcp-form-save')?.addEventListener('click', () => void submitMcpForm());
+  $('#mcp-form-delete')?.addEventListener('click', () => void deleteEditingMcp());
+  el.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeMcpForm));
+  el.addEventListener('click', (event) => { if (event.target === el) closeMcpForm(); });
+  el.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.target as HTMLElement).tagName !== 'TEXTAREA') { event.preventDefault(); void submitMcpForm(); }
+  });
+  return el;
+}
+
+function openMcpForm(name?: string): void {
+  const el = ensureMcpForm();
+  mcpFormEditing = name;
+  const isEdit = !!name;
+  const title = el.querySelector('#mcp-form-title') as HTMLElement;
+  const deleteButton = el.querySelector('#mcp-form-delete') as HTMLButtonElement;
+  deleteButton.dataset.armed = '0';
+  deleteButton.textContent = t('mcpForm.delete');
+  deleteButton.hidden = !isEdit;
+  title.textContent = isEdit ? t('mcpForm.edit') : t('mcpForm.add');
+  mcpFormField<HTMLSelectElement>('mcp-form-template').value = '';
+  mcpFormField<HTMLSelectElement>('mcp-form-template').disabled = isEdit;
+  mcpFormField<HTMLInputElement>('mcp-form-name').value = '';
+  mcpFormField<HTMLSelectElement>('mcp-form-transport').value = 'stdio';
+  mcpFormField<HTMLInputElement>('mcp-form-command').value = '';
+  mcpFormField<HTMLTextAreaElement>('mcp-form-args').value = '';
+  mcpFormField<HTMLTextAreaElement>('mcp-form-env').value = '';
+  mcpFormField<HTMLInputElement>('mcp-form-url').value = '';
+  mcpFormField<HTMLTextAreaElement>('mcp-form-headers').value = '';
+  clearMcpFormError();
+  el.classList.remove('hidden');
+  if (!isEdit) { mcpFormField<HTMLInputElement>('mcp-form-name').focus(); return; }
+  const server = mcpListItems.find((item) => item.name === name);
+  if (!server) { showMcpFormError(t('mcpForm.notFound', { name: name ?? '' })); return; }
+  mcpFormField<HTMLInputElement>('mcp-form-name').value = server.name;
+  mcpFormField<HTMLSelectElement>('mcp-form-transport').value = server.transport;
+  mcpFormField<HTMLInputElement>('mcp-form-command').value = server.command ?? '';
+  mcpFormField<HTMLTextAreaElement>('mcp-form-args').value = (server.args ?? []).join('\n');
+  mcpFormField<HTMLTextAreaElement>('mcp-form-env').value = Object.entries(server.env ?? {}).map(([k, v]) => `${k}=${v}`).join('\n');
+  mcpFormField<HTMLInputElement>('mcp-form-url').value = server.url ?? '';
+  mcpFormField<HTMLTextAreaElement>('mcp-form-headers').value = Object.entries(server.headers ?? {}).map(([k, v]) => `${k}: ${v}`).join('\n');
+  syncMcpFormVisibility();
+}
+
+function closeMcpForm(): void {
+  mcpFormEl?.classList.add('hidden');
+  mcpFormEditing = undefined;
+}
+
+function collectMcpDraft(): McpDraft | null {
+  const transport = mcpFormField<HTMLSelectElement>('mcp-form-transport').value as McpTransport;
+  const draft: McpDraft = { transport };
+  if (transport === 'stdio') {
+    draft.command = mcpFormField<HTMLInputElement>('mcp-form-command').value.trim();
+    if (!draft.command) {
+      showMcpFormError(t('mcpForm.errorCommand'));
+      return null;
+    }
+    draft.argsText = mcpFormField<HTMLTextAreaElement>('mcp-form-args').value;
+    draft.envText = mcpFormField<HTMLTextAreaElement>('mcp-form-env').value;
+  } else {
+    draft.url = mcpFormField<HTMLInputElement>('mcp-form-url').value.trim();
+    if (!draft.url) {
+      showMcpFormError(t('mcpForm.errorUrl'));
+      return null;
+    }
+    draft.headersText = mcpFormField<HTMLTextAreaElement>('mcp-form-headers').value;
+  }
+  return draft;
+}
+
+async function submitMcpForm(): Promise<void> {
+  clearMcpFormError();
+  const name = mcpFormField<HTMLInputElement>('mcp-form-name').value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name)) { showMcpFormError(t('mcpForm.errorName')); return; }
+  const draft = collectMcpDraft();
+  if (!draft) return;
+  const result = await window.mocodeWork.mcpSave({ name, originalName: mcpFormEditing, draft });
+  if (!result.ok) { showMcpFormError(result.message); return; }
+  showToast('success', result.message);
+  closeMcpForm();
+  if (extensionsViewBody) await renderMcpView(extensionsViewBody);
+}
+
+async function deleteEditingMcp(): Promise<void> {
+  const name = mcpFormEditing;
+  if (!name) return;
+  const button = mcpFormField<HTMLButtonElement>('mcp-form-delete');
+  if (button.dataset.armed !== '1') {
+    button.dataset.armed = '1';
+    button.textContent = t('mcpForm.confirmDelete');
+    setTimeout(() => { button.dataset.armed = '0'; button.textContent = t('mcpForm.delete'); }, 3200);
+    return;
+  }
+  const result = await window.mocodeWork.mcpDelete(name);
+  if (!result.ok) { showMcpFormError(result.message); return; }
+  showToast('success', result.message);
+  closeMcpForm();
+  if (extensionsViewBody) await renderMcpView(extensionsViewBody);
+}
+
+/* ── MCP JSON 导入弹窗 ──────────────────────────────────────── */
+
+let mcpImportEl: HTMLElement | null = null;
+
+function ensureMcpImportModal(): HTMLElement {
+  if (mcpImportEl) return mcpImportEl;
+  const el = $('#mcp-import-modal') as HTMLElement;
+  mcpImportEl = el;
+  $('#mcp-import-save')?.addEventListener('click', () => void submitMcpImport());
+  el.querySelectorAll('[data-close]').forEach((button) => button.addEventListener('click', closeMcpImportModal));
+  el.addEventListener('click', (event) => { if (event.target === el) closeMcpImportModal(); });
+  return el;
+}
+
+function openMcpImportModal(): void {
+  const el = ensureMcpImportModal();
+  (el.querySelector('#mcp-import-text') as HTMLTextAreaElement).value = '';
+  (el.querySelector('#mcp-import-error') as HTMLElement).classList.add('hidden');
+  el.classList.remove('hidden');
+  (el.querySelector('#mcp-import-text') as HTMLTextAreaElement).focus();
+}
+
+function closeMcpImportModal(): void {
+  mcpImportEl?.classList.add('hidden');
+}
+
+async function submitMcpImport(): Promise<void> {
+  const text = (mcpImportEl!.querySelector('#mcp-import-text') as HTMLTextAreaElement).value;
+  const errorEl = mcpImportEl!.querySelector('#mcp-import-error') as HTMLElement;
+  const result = await window.mocodeWork.mcpImportJson(text);
+  if (!result.ok) {
+    errorEl.textContent = result.message;
+    errorEl.classList.remove('hidden');
+    return;
+  }
+  showToast('success', result.message);
+  closeMcpImportModal();
+  if (extensionsViewBody) await renderMcpView(extensionsViewBody);
 }
 
 /* ── 模型预设编辑器（添加 / 编辑 / 删除） ─────────────────────

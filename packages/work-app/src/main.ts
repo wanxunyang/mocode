@@ -9,6 +9,21 @@ import dotenv from 'dotenv';
 import { truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
 import { tMain } from './i18n/main.js';
 import {
+  deleteMcpServer,
+  deleteSkill,
+  importMcpJson,
+  importSkillsFromFolder,
+  importSkillsFromZip,
+  installFromMarket,
+  listInstalledSkills,
+  listMcpServers,
+  loadSkillMarket,
+  mcpConfigPath,
+  openSkillFolder,
+  saveMcpServer,
+  toggleMcpServer,
+} from './extensions.js';
+import {
   buildCatalogPick,
   catalogSnapshotPath,
   flattenSupportedEntries,
@@ -51,6 +66,7 @@ const MOCODE_CONFIG_KEYS = [
   'MAX_STEPS', 'MOCODE_SUBAGENT_ENABLED', 'SUB_AGENT_MAX_STEPS', 'SANDBOX_ROOT',
   'ANYSEARCH_API_KEY', 'ANYSEARCH_BASE_URL', 'MOCODE_MAX_IMAGE_BYTES',
   'MOCODE_PERMISSION', 'MOCODE_PERMISSION_NON_INTERACTIVE_ALLOW', 'MOCODE_THEME', 'MOCODE_LANGUAGE',
+  'MCP_CONFIG_PATH', 'MCP_SERVERS', 'MOCODE_MCP_ENABLED',
 ] as const;
 
 function loadMocodeConfig(projectRoot?: string): { loaded: string[]; missing: string[] } {
@@ -465,6 +481,8 @@ const SETTING_TOGGLES = {
   memory: { env: 'MEMORY_ENABLED', on: (v: string | undefined) => v === 'true' },
   subAgent: { env: 'MOCODE_SUBAGENT_ENABLED', on: (v: string | undefined) => v === 'true' },
   autoReflect: { env: 'AUTO_REFLECT', on: (v: string | undefined) => v === 'true' },
+  // MCP 总开关（core 的 readMcpServers 认 MOCODE_MCP_ENABLED=false）。默认开（!== 'false'）。
+  mcp: { env: 'MOCODE_MCP_ENABLED', on: (v: string | undefined) => v !== 'false' },
 } as const;
 type SettingKey = keyof typeof SETTING_TOGGLES;
 
@@ -1410,6 +1428,73 @@ function installIpc(): void {
     }
     return readSettings();
   });
+  // ── Skill 市场 / 扩展管理 ──────────────────────────────────────
+  // skill 热重载由 core 的 skillsScanSignature 处理，装完即生效，无需重启 host；
+  // MCP 配置在 host 启动时固化，增删改后必须 restartAllAgents()。
+  ipcMain.handle('work:skills-list', (_event, projectRoot?: string) => listInstalledSkills(typeof projectRoot === 'string' && projectRoot ? projectRoot : undefined));
+  ipcMain.handle('work:skill-import-folder', () => importSkillsFromFolder());
+  ipcMain.handle('work:skill-import-zip', () => importSkillsFromZip());
+  ipcMain.handle('work:skill-import-git', (_event, url: string) => {
+    if (typeof url !== 'string' || !url.trim()) return { ok: false, message: tMain('extensions.gitUrlRequired'), installed: [] };
+    // 直接从 git URL 导入：克隆到市场缓存 → 扫描 → 安装（与市场共用同一条链路）
+    return loadSkillMarket(url, true).then((loaded) => {
+      if (!loaded.ok) return { ok: false, message: loaded.message ?? tMain('extensions.marketLoadFailed'), installed: [] };
+      if (!loaded.skills.length) return { ok: false, message: tMain('extensions.noSkillsInRepo'), installed: [] };
+      return installFromMarket(url, loaded.skills[0]!.relDir).then(async (first) => {
+        // 仓库里不止一个 skill 时把其余的一并装上（显式给 URL = 用户想要整个仓库）
+        const rest = loaded.skills.slice(1);
+        if (!rest.length) return first;
+        const results = [first];
+        for (const skill of rest) results.push(await installFromMarket(url, skill.relDir));
+        const ok = results.some((r) => r.ok);
+        const installed = results.flatMap((r) => r.installed);
+        return { ok, message: ok ? tMain('extensions.installedCount', { n: installed.length }) : first.message, installed };
+      });
+    });
+  });
+  ipcMain.handle('work:skills-market-load', (_event, payload: { url?: string; refresh?: boolean }) => {
+    const url = typeof payload?.url === 'string' ? payload.url : '';
+    return loadSkillMarket(url, payload?.refresh === true);
+  });
+  ipcMain.handle('work:skill-install-market', (_event, payload: { url?: string; relDir?: string }) => {
+    const url = typeof payload?.url === 'string' ? payload.url : '';
+    const relDir = typeof payload?.relDir === 'string' ? payload.relDir : '';
+    return installFromMarket(url, relDir);
+  });
+  ipcMain.handle('work:skill-delete', (_event, dir: string, projectRoot?: string) => {
+    if (typeof dir !== 'string' || !dir) return { ok: false, message: tMain('extensions.invalidParam') };
+    return deleteSkill(dir, typeof projectRoot === 'string' && projectRoot ? projectRoot : undefined);
+  });
+  ipcMain.handle('work:skill-open', (_event, dir: string) => {
+    if (typeof dir === 'string' && dir) openSkillFolder(dir);
+    return true;
+  });
+  // ── MCP 接入 ──────────────────────────────────────────────────
+  ipcMain.handle('work:mcp-list', () => listMcpServers());
+  ipcMain.handle('work:mcp-save', (_event, payload: { name?: unknown; originalName?: unknown; draft?: unknown }) => {
+    const name = String(payload?.name ?? '');
+    const originalName = typeof payload?.originalName === 'string' && payload.originalName ? payload.originalName : undefined;
+    const draft = (payload?.draft ?? {}) as Parameters<typeof saveMcpServer>[1];
+    const result = saveMcpServer(name, draft, originalName);
+    if (result.ok) restartAllAgents(); // host 启动时固化 MCP 配置，改完必须重启才生效
+    return result;
+  });
+  ipcMain.handle('work:mcp-delete', (_event, name: string) => {
+    const result = deleteMcpServer(String(name ?? ''));
+    if (result.ok) restartAllAgents();
+    return result;
+  });
+  ipcMain.handle('work:mcp-toggle', (_event, name: string, disabled: boolean) => {
+    const result = toggleMcpServer(String(name ?? ''), disabled === true);
+    if (result.ok) restartAllAgents();
+    return result;
+  });
+  ipcMain.handle('work:mcp-import-json', (_event, text: string) => {
+    const result = importMcpJson(String(text ?? ''));
+    if (result.ok) restartAllAgents();
+    return result;
+  });
+  ipcMain.handle('work:mcp-config-path', () => mcpConfigPath());
   ipcMain.handle('work:list-branches', async () => {
     const project = selectedProject();
     const res = await runCommand(project.root, 'git', ['branch', '--format', '%(refname:short)']);
@@ -1430,6 +1515,14 @@ function installIpc(): void {
     return { ok: true, message: tMain('main.branch.switched', { branch: updated.branch }), branch: updated.branch };
   });
   ipcMain.on('work:set-theme', (_event, theme: 'light' | 'dark' | 'system') => applyThemeBackground(theme));
+  // 渲染层把它实测到的 titlebar CSS 颜色同步过来 —— 比主进程硬编码 hex 可靠：
+  // surface-app 是带 accent 色相的 oklch，主题色一换色调就变，硬编码永远追不上。
+  ipcMain.on('work:set-titlebar-overlay', (_event, colors: { bg?: string; symbol?: string }) => {
+    if (process.platform !== 'win32' || !windowRef || windowRef.isDestroyed()) return;
+    if (!colors?.bg || !colors?.symbol) return;
+    try { windowRef.setTitleBarOverlay({ color: colors.bg, symbolColor: colors.symbol, height: 38 }); }
+    catch { /* 某些平台/版本不支持动态 overlay，静默即可 */ }
+  });
   ipcMain.on('work:show-menu', (event, menuId: string, clientX: number, clientY: number) => {
     if (!['file', 'edit', 'view', 'help'].includes(menuId) || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
     const targetWindow = BrowserWindow.fromWebContents(event.sender);
@@ -1480,6 +1573,21 @@ function rebuildAppMenu(): void {
   ]);
 }
 
+// 单实例锁：第二个实例直接退出并把焦点还给已有窗口。不加的话，残留实例还握着
+// %APPDATA%\mocode-work 的 GPU/disk 缓存锁，新实例启动时报一串
+// 「Unable to move the cache: 拒绝访问 (0x5) / Gpu Cache Creation failed: -2」。
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const win = windowRef ?? BrowserWindow.getAllWindows()[0];
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+  });
+}
+
 app.whenReady().then(async () => {
   // 首屏之前先把界面语言/主题从 ~/.mocode/config 回填到 process.env：
   // 原生菜单在 whenReady 里就构建了，而 loadMocodeConfig() 要到第一个任务启动才跑 ——
@@ -1501,6 +1609,15 @@ app.whenReady().then(async () => {
   // create-task handler 自己就会预热；猜「最近任务」去预热大概率白烧一个进程。
   const bootTask = state.selectedTaskId ? taskById(state.selectedTaskId) : undefined;
   if (bootTask) ensureAgent(bootTask);
+  // MCP 配置兜底：用户没在 shell env / ~/.mocode/config 里指定 MCP_CONFIG_PATH 或
+  // MCP_SERVERS 时，把 work-app 托管的 ~/.mocode/mcp.json 设为配置源 —— host 子进程
+  // （core 的 readMcpServers）会从 MCP_CONFIG_PATH 读标准 { mcpServers } 格式。
+  {
+    const cfg = readUserConfig();
+    if (!process.env.MCP_CONFIG_PATH && !cfg.MCP_CONFIG_PATH && !process.env.MCP_SERVERS && !cfg.MCP_SERVERS) {
+      process.env.MCP_CONFIG_PATH = mcpConfigPath();
+    }
+  }
   installIpc();
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

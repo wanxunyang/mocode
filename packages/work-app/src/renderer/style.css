@@ -1148,3 +1148,82 @@ select.field-input { appearance: none; cursor: pointer; background-image: linear
 /* 刷新按钮旋转态：加载中给一点「在动」的反馈 */
 #catalog-refresh.spinning .icon { animation: catalog-spin 0.9s linear infinite; }
 @keyframes catalog-spin { to { transform: rotate(360deg); } }
+
+/* ── 扩展：Skills / MCP（设置页两个新分类 + 三个弹窗） ─────────────────── */
+
+/* Skill 导入按钮两列排布（文件夹 / ZIP / 市场各一格，复用 .settings-add 的虚线卡样式） */
+.skill-import-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-xs); }
+.skill-import-grid .settings-add { margin-bottom: 0; }
+/* 第三个按钮（市场）占满整行 */
+.skill-import-grid .settings-add:nth-child(3) { grid-column: 1 / -1; }
+
+/* git URL 导入行：输入框 + 按钮 */
+.skill-git-row { display: flex; gap: var(--space-xs); margin-top: var(--space-xs); }
+.skill-git-row .field-input { flex: 1; min-width: 0; }
+.skill-git-row .btn-primary { flex: 0 0 auto; }
+
+/* 市场弹窗：源选择行（下拉 + 自定义 URL 输入） */
+.skill-market-source { display: flex; gap: var(--space-xs); margin-bottom: var(--space-xs); }
+.skill-market-source .field-input { min-width: 0; }
+.skill-market-source select { flex: 0 0 46%; }
+.skill-market-source input { flex: 1; }
+
+/* 市场安装按钮：行尾的实体小按钮 */
+.skill-market-install { flex: 0 0 auto; padding: 5px 14px; font-size: var(--text-2xs); }
+.skill-market-install:disabled { opacity: 0.55; cursor: default; }
+
+/* MCP 行内命令 / URL 摘要 */
+.mcp-detail { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; padding: 0 3px; border-radius: var(--radius-sm); background: var(--color-paper-3); font-family: var(--font-outlier); font-size: var(--text-2xs); }
+.mcp-disabled .settings-row-title { color: var(--color-subtle); text-decoration: line-through; }
+
+/* 删除按钮的两步确认武装态（变红提示再次点击） */
+.danger-armed { color: var(--color-fail) !important; background: color-mix(in oklab, var(--color-fail) 12%, transparent); }
+
+/* 只读标记（~/.claude/skills 的 info 占位） */
+.settings-row-readonly { flex: 0 0 28px; width: 28px; display: grid; place-items: center; color: var(--color-subtle); }
+.settings-row-readonly .icon { width: 13px; height: 13px; }
+
+/* MCP JSON 导入 textarea：等宽 + 限高滚动 */
+.mcp-import-text { font-family: var(--font-mono, monospace); font-size: var(--text-2xs); line-height: 1.55; resize: vertical; min-height: 220px; }
+
+/* ── 扩展整页视图（Skills / MCP）：覆盖 agent 输出区，非弹窗 ── */
+
+/* z-index 用 --z-page(300)：必须压过 .composer-area 的 --z-sticky(200)，否则输入框浮在页面上；
+   又要低于 --z-modal(400)，让 MCP 表单 / 市场弹窗能正常盖在扩展页上。 */
+.extensions-view { position: absolute; z-index: var(--z-page); inset: 0; display: flex; flex-direction: column; background: var(--surface-content); animation: fade-in var(--dur-short) var(--ease-out) both; }
+.extensions-view.hidden { display: none; }
+
+.extensions-header { height: 48px; flex: 0 0 auto; display: flex; align-items: center; gap: var(--space-sm); padding: 0 var(--space-md); border-bottom: var(--rule-soft); }
+.extensions-header .icon-button { width: 28px; height: 28px; border-radius: var(--radius-sm); color: var(--color-subtle); display: grid; place-items: center; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.extensions-header .icon-button:hover { background: var(--surface-hover); color: var(--text-strong); }
+.extensions-header .icon-button .icon { width: 15px; height: 15px; }
+
+/* 头部标题（当前页名，切换由侧栏入口负责） */
+.extensions-header b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); font-weight: 500; color: var(--text-strong); }
+
+/* 内容列：限宽居中，接近会话栏的阅读宽度 */
+.extensions-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-xl) var(--space-lg) calc(var(--space-xl) * 2); }
+.extensions-body > * { max-width: 780px; margin-left: auto; margin-right: auto; }
+
+/* 呼吸感：复用的 .settings-* 排版是弹窗紧凑档，整页视图整体放宽一档 */
+.extensions-body .settings-block + .settings-block { margin-top: var(--space-xl); }
+.extensions-body .settings-block-head { margin-bottom: var(--space-sm); }
+.extensions-body .settings-block-head b { font-size: var(--text-md); font-weight: 600; }
+.extensions-body .settings-block-head span { font-size: var(--text-xs); }
+.extensions-body .settings-list { gap: 8px; }
+.extensions-body .settings-row-wrap { gap: 4px; }
+.extensions-body .settings-row { padding: var(--space-sm) var(--space-md); }
+.extensions-body .settings-row-title { font-size: var(--text-sm); }
+.extensions-body .settings-row-sub { font-size: var(--text-xs); }
+.extensions-body .settings-row-wrap .settings-row-body { display: flex; flex-direction: column; gap: 3px; }
+.extensions-body .settings-add { padding: var(--space-sm) var(--space-md); gap: var(--space-sm); }
+/* 「添加/导入」卡与下面的列表之间原本零间距（.settings-add 的 margin-bottom 被网格样式清掉了） */
+.extensions-body .skill-import-grid { margin-bottom: var(--space-md); }
+.extensions-body .skill-git-row { margin-top: var(--space-sm); }
+.extensions-body .skill-git-row .field-input { height: 40px; }
+.extensions-body .settings-kv { padding: var(--space-xs) 0; }
+.extensions-body .settings-kv-row { padding: var(--space-xs) var(--space-2xs); }
+.extensions-body .settings-kv-row span { font-size: var(--text-xs); }
+.extensions-body .settings-kv-row b { font-size: var(--text-xs); }
+.extensions-body .settings-empty { padding: var(--space-lg); }
+.extensions-body .mcp-detail { font-size: var(--text-xs); }

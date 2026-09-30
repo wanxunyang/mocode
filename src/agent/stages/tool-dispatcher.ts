@@ -148,21 +148,30 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         for (let index = 0; index < calls.length; index++) {
           request.onEvent({ type: 'header', call: calls[index] });
         }
+        // 只读调用先并发启动(执行序不变);但发布(history 回灌/事件)一律按 provider 声明序
+        // 交错进行:history 批校验按 assistant tool_calls 逐位配对 id,若按执行序发布(只读先、
+        // 扩容后),add_tool_groups 排在只读之前时必然 id 错位,整批 rollback 中断本轮。
+        const startedReadonly: Array<Promise<ToolOutcome> | undefined> = new Array(calls.length);
         if (otherIndexes.length > 0) {
           request.onEvent({ type: 'start', tool: calls[otherIndexes[0]].name });
-          const startedReadonly = otherIndexes.map((index) => execute(calls[index]));
-          for (let offset = 0; offset < otherIndexes.length; offset++) {
-            const index = otherIndexes[offset];
-            const outcome = await startedReadonly[offset];
+          for (const index of otherIndexes) startedReadonly[index] = execute(calls[index]);
+        }
+        const lastReadonlyIndex = otherIndexes.length > 0 ? otherIndexes[otherIndexes.length - 1] : -1;
+
+        for (let index = 0; index < calls.length; index++) {
+          const readonlyPromise = startedReadonly[index];
+          if (readonlyPromise) {
+            const outcome = await readonlyPromise;
             record(index, outcome);
             executionEvents(index, parseArgs(calls[index].arguments), outcome);
             resultEvent(index, outcome, null);
+            // done 紧跟最后一个只读结果(控制调用在尾部时与旧事件序完全一致)。
+            if (index === lastReadonlyIndex) request.onEvent({ type: 'done' });
+            continue;
           }
-          request.onEvent({ type: 'done' });
-        }
 
-        // 控制调用(header 已发):逐个校验并应用扩容;solo 与同批语义一致。
-        for (const index of controlIndexes) {
+          // 控制调用(header 已发):逐个校验并应用扩容;solo 与同批语义一致。
+          // 扩容只改下一 step 的 schema;本批只读执行都走 step 快照,先后无行为差。
           const call = calls[index];
           const parsed = parseArgs(call.arguments);
           let outcome: ToolOutcome;
