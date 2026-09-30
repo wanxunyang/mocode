@@ -7,7 +7,7 @@
  */
 import type { ModelPreset } from '../config/presets.js';
 import type { CatalogProvider } from './types.js';
-import { classifyProvider, classifyModel, resolveBaseURL, resolveModelBaseURL } from './protocol.js';
+import { classifyProvider, classifyModel, resolveBaseURL } from './protocol.js';
 import type { CatalogEntry } from './search.js';
 
 export type PanelChoice =
