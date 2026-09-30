@@ -15,6 +15,7 @@
 // --dangerously-skip-permissions 显式关闭权限闸。
 
 import path from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { setSandboxRoot } from './sandbox/root.js';
 import { registerToolsExtension } from './tools/registry.js';
 // 装配官方默认工具包：registry 不顶层 import builtins（破模块循环），入口须显式装配。
@@ -27,8 +28,9 @@ import { defaultRuntime, Runtime } from './runtime/index.js';
 import { runAgentCore, type AgentHooks } from './agent/core.js';
 import { summarizeToolCall, summarizeToolResult } from './ui/render.js';
 import { getToolChatSchema } from './tools/policy.js';
+import { jobsRoot, updateJob } from './jobs/store.js';
 import type { ChatMessage, ChatUsage, ToolCallRef } from './llm/index.js';
-import { createWorktree, removeWorktree, type Worktree } from './jobs/worktree.js';
+import { createWorktree, exportWorktreePatch, removeWorktree, type Worktree } from './jobs/worktree.js';
 import { runAsIdentity } from './bots/bus.js';
 import { createAsyncApprovalChecker } from './jobs/approval.js';
 import { writeCheckpoint, readCheckpoint } from './jobs/checkpoint.js';
@@ -300,6 +302,25 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     await runtime.close();
     if (wt) {
       try {
+        // worktree 成果挽留:销毁前把相对 HEAD 的改动导成 patch 落到主工作区
+        // .mocode/jobs/,后台任务/一次性 worktree 跑完不再"自毁成果"。job 模式顺带
+        // 回写 patchPath 供 /jobs 与通知引用;非 git 改动(导出失败)不阻塞清理。
+        const patch = exportWorktreePatch(wt);
+        if (patch !== null) {
+          const patchFile = path.join(jobsRoot(), opts.jobId ? `${opts.jobId}.patch` : `wt-${Date.now()}.patch`);
+          try {
+            mkdirSync(path.dirname(patchFile), { recursive: true });
+            writeFileSync(patchFile, patch, 'utf8');
+            process.stderr.write(`mocode: worktree 改动已导出 patch:${patchFile}\n`);
+            if (opts.jobId) {
+              updateJob(opts.jobId, { patchPath: patchFile });
+            }
+          } catch (e) {
+            process.stderr.write(
+              `mocode: patch 导出失败(${e instanceof Error ? e.message : String(e)}),worktree 改动将丢失\n`,
+            );
+          }
+        }
         removeWorktree(wt);
       } catch {
         process.stderr.write(`mocode: failed to remove worktree ${wt.path}（手动清理）\n`);
@@ -322,6 +343,11 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       ...(opts.botName ? { bot: opts.botName } : {}),
     };
     process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  } else if (result.terminationReason === 'max_steps' && result.finalText) {
+    // 撞限 salvage 摘要:非 json 模式也必须落 stdout。它从未被 onText 流式输出,
+    // 走旧的「!textBuffer 才补打」分支会在本轮早前已有叙述文本时把它整个吞掉。
+    // 尾部换行沿用下方 isTTY 统一补行逻辑,与 completed 路径行为一致。
+    process.stdout.write(result.finalText);
   } else if (finalText && !textBuffer) {
     process.stdout.write(finalText);
   }

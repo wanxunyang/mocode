@@ -35,6 +35,7 @@ import { effortCommands } from './effort.js';
 import { routerCommands } from './router.js';
 import { toolGroupCommands } from './tool-group.js';
 import { jobsCommands } from './jobs.js';
+import { diffCommands } from './diff.js';
 import { scheduleCommands } from './schedule.js';
 import { botsCommands } from './bots.js';
 
@@ -63,6 +64,7 @@ export const commandHandlers: CommandHandler[] = [
   ...routerCommands,
   ...toolGroupCommands,
   ...jobsCommands,
+  ...diffCommands,
   ...scheduleCommands,
   ...botsCommands,
 ];

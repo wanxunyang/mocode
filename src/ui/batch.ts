@@ -615,10 +615,11 @@ const CARET_NONE = '  ';
  *  子批再叠 8 空格后层级被拉散。收成 2 空格后每层固定递进 2 列,层级仍清晰但不空旷。 */
 const ENTRY_INDENT = '  ';
 
-/** 子 agent 批摘要行的缩进(= 两层 entry 缩进)。
- *  子批摘要挂在父批的 entry 行之下,是第二层;硬编码会与 ENTRY_INDENT 脱钩,
- *  故由 ENTRY_INDENT 推得。 */
-export const SUB_BATCH_INDENT = ENTRY_INDENT + ENTRY_INDENT;
+/** 子 agent 批摘要行的缩进(= 三层 entry 缩进)。
+ *  子批摘要挂在父批的 entry 行之下,entry 行本身已带 2 空格;此前取两层(4)时子批
+ *  摘要与父 entry 行仅差 2 列,视觉上挤在同一层级(用户实测反馈)。取三层(6)后,
+ *  子批摘要比父 entry 行深 4 列,父子层级一眼可分;仍由 ENTRY_INDENT 推导,不脱钩。 */
+export const SUB_BATCH_INDENT = ENTRY_INDENT + ENTRY_INDENT + ENTRY_INDENT;
 
 /** 详情行缩进:5 空格(对齐 entry 行的 "  ▸ " 之后再右移一列,形成层次)。 */
 const DETAIL_INDENT = '     ';

@@ -57,8 +57,12 @@ export const CAPABILITIES: Record<string, ToolCapabilities> = {
   // 后台进程与浏览器会话跨调用存活；串行执行避免同一页面/服务被并发操作。
   dev_server: { effect: 'process', concurrency: 'serial', resources: workspaceResource, supportsAbort: true },
   browser: { effect: 'process', concurrency: 'serial', resources: workspaceResource },
-  glob: { effect: 'read', concurrency: 'parallel', resources: workspaceResource, supportsAbort: true },
-  grep: { effect: 'read', concurrency: 'parallel', resources: workspaceResource, supportsAbort: true },
+  // glob/grep 不取任何资源锁:读枚举容忍命令执行期间的瞬时不一致(一次目录扫描的结果
+  // 本来就无事务语义),换取「一条 run_command/dev_server 持 workspace 写锁期间,只读
+  // 枚举与并行子 agent 的读不被全面压制」。文件级一致性仍由 read_file 的 file:<path>
+  // 锁保证(与 file-locked 写互斥)。网络只读同理不锁。
+  glob: { effect: 'read', concurrency: 'parallel', resources: (): string[] => [], supportsAbort: true },
+  grep: { effect: 'read', concurrency: 'parallel', resources: (): string[] => [], supportsAbort: true },
   // 网络只读查询:无副作用,可安全重复执行 → idempotent 让 runtime 对瞬时失败(429/5xx/超时/
   // 网络抖动)自动退避重试,省掉模型「再发一轮 tool call 自救」的往返。写/进程类工具绝不置此位。
   web_search: { effect: 'network', concurrency: 'parallel', supportsAbort: true, idempotent: true },

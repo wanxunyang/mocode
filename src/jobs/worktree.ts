@@ -55,6 +55,25 @@ export function createWorktree(): Worktree {
   return { path: wtPath, repoRoot };
 }
 
+/**
+ * 把 worktree 相对 HEAD 的全部改动导出为 unified diff（含未跟踪文件，binary 标记为
+ * Binary files differ）。无改动返回 null（调用方不写空 patch 文件）。
+ *
+ * 用 spawnSync 而非异步 spawn：本函数只在 headless/runner 的收尾路径调用（事件循环
+ * 已无流式渲染在跑），且 removeWorktree 本身就是同步链，拆异步收益为零。
+ */
+export function exportWorktreePatch(wt: Worktree): string | null {
+  const status = git(['status', '--porcelain'], wt.path);
+  if (!status.ok || !status.output) return null; // 无改动 / git 不可用
+  // 未跟踪文件：先 git add -N(intent-to-add) 让 diff 能覆盖新文件,否则 --worktree
+  // 默认跳过 untracked,新建的文件会随 worktree 一起消失。--intent-to-add 不改
+  // index 的实际内容、不产生对象,worktree remove --force 可正常清理。
+  git(['add', '-N', '.'], wt.path);
+  const diff = git(['diff', 'HEAD', '--binary'], wt.path);
+  if (!diff.ok || !diff.output) return null;
+  return `${diff.output}\n`;
+}
+
 /** 先删 node_modules 链接（防误伤目标），再移除 worktree + prune。 */
 export function removeWorktree(wt: Worktree): void {
   const link = join(wt.path, 'node_modules');

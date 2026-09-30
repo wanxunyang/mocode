@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { MAX_OUTPUT } from '../constants.js';
 import { getSandboxRoot, filterEnv, isCommandDenied, jailResolve } from '../../sandbox/index.js';
 import type { Tool, ToolOutcome } from '../types.js';
@@ -103,12 +103,21 @@ export async function runCommandRaw(
     const output = new BoundedCommandOutput();
     let finished = false;
 
-    const killTree = (): void => {
+    // 异步树杀:spawnSync('taskkill') 会同步阻塞整个事件循环(扫进程树期间流式渲染、
+    // 其它并行工具全部停摆)。taskkill 自身是独立进程,发出去后等它退出即可;
+    // 只在 abort/timeout 路径调用,正常退出(close)不杀。
+    const killTree = async (): Promise<void> => {
       try {
         if (isWin) {
-          if (child.pid != null) {
-            spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-          }
+          if (child.pid == null) return;
+          await new Promise<void>((resolve) => {
+            const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+              stdio: 'ignore',
+              windowsHide: true,
+            });
+            killer.on('close', () => resolve());
+            killer.on('error', () => resolve());
+          });
         } else {
           child.kill('SIGTERM');
         }
@@ -123,25 +132,34 @@ export async function runCommandRaw(
       signal?.removeEventListener('abort', onAbort);
       done({ ...result, durationMs: Date.now() - startedAt });
     };
+    // 树杀(异步)进行中:child 的 close 事件可能由 taskkill 触发并抢在 finish 前,
+    // 必须忽略之,否则 abort/timeout 会被误报成 failed(进程被杀的 exitCode ≠ 0)。
+    let pendingTermination: 'aborted' | 'timed_out' | null = null;
+    const terminate = (status: 'aborted' | 'timed_out'): void => {
+      if (finished || pendingTermination) return;
+      pendingTermination = status;
+      void killTree().then(() => {
+        finish({ status, exitCode: null, output: output.render().trim() });
+      });
+    };
     const onAbort = (): void => {
-      killTree();
-      finish({ status: 'aborted', exitCode: null, output: output.render().trim() });
+      terminate('aborted');
     };
     const onChunk = (chunk: Buffer): void => output.append(chunk.toString('utf8'));
 
     // 先起 timer 再挂事件:finish/onAbort 是闭包,里面要 clearTimeout(timer)。
     // 把 timer 的初始化提到所有引用它的注册点之前,避免依赖"事件回调必然异步"这一前提。
     const timer = setTimeout(() => {
-      killTree();
-      finish({ status: 'timed_out', exitCode: null, output: output.render().trim() });
+      terminate('timed_out');
     }, effectiveTimeout);
 
     child.stdout.on('data', onChunk);
     child.stderr.on('data', onChunk);
     child.on('error', (error) => {
-      finish({ status: 'spawn_error', exitCode: null, output: error.message });
+      if (!pendingTermination) finish({ status: 'spawn_error', exitCode: null, output: error.message });
     });
     child.on('close', (code) => {
+      if (pendingTermination) return;
       finish({
         status: code === 0 ? 'passed' : 'failed',
         exitCode: code,

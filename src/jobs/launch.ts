@@ -6,7 +6,7 @@
 //
 // 通用件 buildEntryArgs / spawnDetached 也供 schedule 守护进程复用（src/schedule/daemon.ts）。
 
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { openSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -87,13 +87,19 @@ export function launchBackgroundJob(prompt: string, opts: LaunchOptions = {}): L
 }
 
 /**
- * 树杀进程并置 killed。
+ * 树杀进程。返回「kill 信号已成功发出」(Windows)或「信号已发送」(POSIX),不保证目标已退出。
  * Windows：taskkill /T /F 杀整棵进程树；POSIX：负 pid 杀整个进程组。
+ *
+ * 异步化:spawnSync('taskkill') 会同步阻塞整个事件循环(扫树期间流式渲染/并行工具停摆)。
+ * 调用方「已知 job 已死」的语义靠 exited 轮询(isDaemonRunning / reconcile),不依赖本函数的返回时序。
  */
-export function killTree(pid: number): boolean {
+export async function killTree(pid: number): Promise<boolean> {
   if (process.platform === 'win32') {
-    const r = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
-    return r.status === 0;
+    return new Promise<boolean>((resolve) => {
+      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+      killer.on('close', (code) => resolve(code === 0));
+      killer.on('error', () => resolve(false));
+    });
   }
   try {
     process.kill(-pid, 'SIGTERM');
@@ -104,9 +110,10 @@ export function killTree(pid: number): boolean {
 }
 
 /** 树杀 job 并置 killed。 */
-export function killBackgroundJob(record: JobRecord): boolean {
+export async function killBackgroundJob(record: JobRecord): Promise<boolean> {
   if (typeof record.pid !== 'number') return false;
-  if (!killTree(record.pid)) return false;
+  const ok = await killTree(record.pid);
+  if (!ok) return false;
   updateJob(record.id, { status: 'killed', finishedAt: new Date().toISOString() }, { force: true });
   return true;
 }

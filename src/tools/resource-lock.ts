@@ -155,7 +155,10 @@ export function resolveResourceLockRequests(
     return workspaceWrite();
   }
   if (keys.length === 0) {
-    return capabilities.effect === 'network' ? [] : workspaceWrite();
+    // 显式声明「无资源」(glob/grep 等读枚举、网络只读)即不锁:
+    // 读枚举容忍命令执行期间的瞬时不一致,换取 workspace 写锁期间的读不被压制。
+    if (capabilities.effect === 'network' || capabilities.effect === 'read') return [];
+    return workspaceWrite();
   }
 
   const mode = modeFor(capabilities.effect);

@@ -45,6 +45,8 @@ export interface ModelTurnInput {
   activeTools: OpenAI.Chat.Completions.ChatCompletionTool[];
   runPolicy: RunPolicySnapshot;
   step: number;
+  /** 本次 run 的步数上限(来自 opts.maxSteps,经 profile cap);用于剩余步数预警。 */
+  maxSteps: number;
   readDedup: ReadDedup;
   cacheState: ModelTurnCacheState;
   turnLifecycle: TurnLifecycle;
@@ -82,6 +84,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     activeTools,
     runPolicy,
     step,
+    maxSteps,
     readDedup,
     cacheState,
     turnLifecycle,
@@ -172,10 +175,15 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   emitTrace('model_start', { model: requestModel, provider });
 
   const buildRequestHistory = (): ChatMessage[] => {
+    const remainingSteps = maxSteps - step;
     const ephemeralReminder = [
       runPolicy.reminder,
       !opts.suppressOpeningAnalysis && step === 0
         ? '## Opening analysis\nStart your first response of this turn with a brief analysis of the request and approach (1-3 sentences, no filler), then start tool calls. This is the only expected pre-tool prose; afterwards work quietly, no narration between calls.'
+        : '',
+      remainingSteps <= 3
+        ? `## Step budget warning\nOnly ${remainingSteps} step(s) remain before the hard step limit (${maxSteps}). ` +
+          'Stop opening new lines of exploration NOW. Wind down: finish the current tool call if any, then use the remaining step(s) to produce your final summary — what you found, key files/evidence, and what remains undone. A terse partial report is far better than being cut off mid-work.'
         : '',
       historyRebuilt
         ? '## Post-compaction recovery\nContext was compacted before this request. Recover first, in this order:\n' +

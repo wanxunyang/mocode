@@ -135,132 +135,50 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
     );
     const hasRouteBarrier = controlIndexes.length > 0;
     if (hasRouteBarrier) {
-      // 同批的非控制调用全部是「未被禁用的并行安全(只读)工具」时(纯 solo 时空集也满足),
-      // 允许它们与扩容同批:先并发执行只读调用,再应用扩容。只读结果本 step 即得,新增 schema
-      // 下一 step 生效——不必为扩容空耗一轮。只要混有写/执行等非并行工具(或某只读调用已被
-      // 当前 snapshot 拒绝),即退回整批保守拒绝。
-      const safeReadonlyBatch = otherIndexes.every(
+      // add_tool_groups 混批语义 = 部分执行:同批所有「未被禁用的并行安全(只读)」调用
+      // 本 step 照常并发执行,控制调用照常应用扩容(只改下一 step 的 schema);仅写/执行
+      // 等非并行调用被配对拒绝并提示下一 step 重试——单个违规调用不再让整批陪葬。
+      // 所有 header 按调用原序先发(渲染侧据此建组容器),只读批的 header 必须先于 execute。
+      for (let index = 0; index < calls.length; index++) {
+        request.onEvent({ type: 'header', call: calls[index] });
+      }
+      // 只读调用先并发启动(执行序不变);但发布(history 回灌/事件)一律按 provider 声明序
+      // 交错进行:history 批校验按 assistant tool_calls 逐位配对 id,若按执行序发布(只读先、
+      // 扩容后),add_tool_groups 排在只读之前时必然 id 错位,整批 rollback 中断本轮。
+      // 非并行(写/执行/串行)调用不启动:它们与扩容同批时被拒绝,下一 step 重试。
+      const startedReadonly: Array<Promise<ToolOutcome> | undefined> = new Array(calls.length);
+      const eligibleReadonly = otherIndexes.filter(
         (index) => isParallelTool(calls[index].name, toolRuntime) && !request.isDenied(calls[index].name),
       );
+      if (eligibleReadonly.length > 0) {
+        request.onEvent({ type: 'start', tool: calls[eligibleReadonly[0]].name });
+        for (const index of eligibleReadonly) startedReadonly[index] = execute(calls[index]);
+      }
+      const lastReadonlyIndex = eligibleReadonly.length > 0 ? eligibleReadonly[eligibleReadonly.length - 1] : -1;
 
-      if (safeReadonlyBatch) {
-        // 所有 header 按调用原序先发(渲染侧据此建组容器),只读批的 header 必须先于 execute。
-        for (let index = 0; index < calls.length; index++) {
-          request.onEvent({ type: 'header', call: calls[index] });
-        }
-        // 只读调用先并发启动(执行序不变);但发布(history 回灌/事件)一律按 provider 声明序
-        // 交错进行:history 批校验按 assistant tool_calls 逐位配对 id,若按执行序发布(只读先、
-        // 扩容后),add_tool_groups 排在只读之前时必然 id 错位,整批 rollback 中断本轮。
-        const startedReadonly: Array<Promise<ToolOutcome> | undefined> = new Array(calls.length);
-        if (otherIndexes.length > 0) {
-          request.onEvent({ type: 'start', tool: calls[otherIndexes[0]].name });
-          for (const index of otherIndexes) startedReadonly[index] = execute(calls[index]);
-        }
-        const lastReadonlyIndex = otherIndexes.length > 0 ? otherIndexes[otherIndexes.length - 1] : -1;
-
-        for (let index = 0; index < calls.length; index++) {
-          const readonlyPromise = startedReadonly[index];
-          if (readonlyPromise) {
-            const outcome = await readonlyPromise;
-            record(index, outcome);
-            executionEvents(index, parseArgs(calls[index].arguments), outcome);
-            resultEvent(index, outcome, null);
-            // done 紧跟最后一个只读结果(控制调用在尾部时与旧事件序完全一致)。
-            if (index === lastReadonlyIndex) request.onEvent({ type: 'done' });
-            continue;
-          }
-
-          // 控制调用(header 已发):逐个校验并应用扩容;solo 与同批语义一致。
-          // 扩容只改下一 step 的 schema;本批只读执行都走 step 快照,先后无行为差。
-          const call = calls[index];
-          const parsed = parseArgs(call.arguments);
-          let outcome: ToolOutcome;
-
-          if (request.isDenied(call.name)) {
-            outcome = {
-              status: 'denied',
-              code: 'TOOL_DISABLED',
-              retryable: false,
-              output: `错误:当前 tool policy snapshot 不允许调用 ${call.name}。`,
-              changedFiles: [],
-              durationMs: 0,
-            };
-          } else if (!request.expandToolGroups) {
-            outcome = {
-              status: 'denied',
-              code: 'TOOL_DISABLED',
-              retryable: false,
-              output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
-              changedFiles: [],
-              durationMs: 0,
-            };
-          } else if (
-            !parsed ||
-            !Array.isArray(parsed.groups) ||
-            parsed.groups.length === 0 ||
-            typeof parsed.reason !== 'string' ||
-            !parsed.reason.trim()
-          ) {
-            outcome = {
-              status: 'error',
-              code: 'INVALID_ARGUMENTS',
-              retryable: false,
-              output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
-              changedFiles: [],
-              durationMs: 0,
-            };
-          } else {
-            const expansion = request.expandToolGroups(parsed.groups, parsed.reason);
-            const succeeded = expansion.added.length > 0;
-            const details = [
-              succeeded
-                ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
-                : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
-              expansion.implied.length > 0 ? `Implied groups also activated: ${expansion.implied.join(', ')}.` : '',
-              expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
-              succeeded ? 'The added tool schemas become available on the next model step.' : '',
-            ]
-              .filter(Boolean)
-              .join('\n');
-            outcome = {
-              status: succeeded ? 'success' : 'error',
-              code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
-              retryable: false,
-              output: details,
-              changedFiles: [],
-              durationMs: 0,
-            };
-            request.onEvent({
-              type: 'route_expand',
-              fromVersion: request.policy.toolPolicy?.version,
-              expansion,
-              requestedGroups: parsed.groups,
-              reason: parsed.reason,
-              status: outcome.status,
-            });
-          }
-
+      for (let index = 0; index < calls.length; index++) {
+        const readonlyPromise = startedReadonly[index];
+        if (readonlyPromise) {
+          const outcome = await readonlyPromise;
           record(index, outcome);
-          request.onEvent({ type: 'host_outcome', call, parsed: parsed ?? {}, outcome });
+          executionEvents(index, parseArgs(calls[index].arguments), outcome);
           resultEvent(index, outcome, null);
-          traceEnd(index, outcome);
+          // done 紧跟最后一个只读结果(控制调用在尾部时与旧事件序完全一致)。
+          if (index === lastReadonlyIndex) request.onEvent({ type: 'done' });
+          continue;
         }
-      } else {
-        // 不安全批(混有写/执行等非并行工具):不扩容、不执行任何普通工具,逐 call 按原序配对拒绝结果。
-        for (let index = 0; index < calls.length; index++) {
+
+        if (calls[index].name !== ADD_TOOL_GROUPS_TOOL_NAME) {
+          // 非并行(写/执行/串行)或被禁用的普通调用:与扩容同批时不执行,配对拒绝并提示
+          // 下一 step 重试;控制调用与只读不受其影响照常处理。
           const call = calls[index];
-          request.onEvent({ type: 'header', call });
-          const isControl = call.name === ADD_TOOL_GROUPS_TOOL_NAME;
-          const isReadonly = isParallelTool(call.name, toolRuntime);
           const outcome: ToolOutcome = {
             status: 'denied',
-            code: isControl ? 'INVALID_ARGUMENTS' : 'TOOL_DISABLED',
+            code: 'TOOL_DISABLED',
             retryable: false,
-            output: isControl
-              ? '错误:add_tool_groups 只能单独调用，或与只读工具(read_file/glob/grep/web 等)同批；本次没有扩容。'
-              : isReadonly
-                ? `错误:同一响应包含 add_tool_groups，工具 ${call.name} 未执行。请在下一 step 重试。`
-                : `错误:add_tool_groups 不能与写/执行工具 ${call.name} 同批；请先完成扩容，再在下一 step 调用 ${call.name}。`,
+            output: request.isDenied(call.name)
+              ? `错误:当前 tool policy snapshot 不允许调用 ${call.name}。`
+              : `错误:add_tool_groups 不能与写/执行工具 ${call.name} 同批执行，本 step 已跳过该调用（其余只读调用与扩容已正常处理）；请在下一 step 重试 ${call.name}。`,
             changedFiles: [],
             durationMs: 0,
           };
@@ -268,7 +186,83 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
           request.onEvent({ type: 'host_outcome', call, parsed: parseArgs(call.arguments) ?? {}, outcome });
           resultEvent(index, outcome, null);
           traceEnd(index, outcome);
+          continue;
         }
+
+        // 控制调用(header 已发):逐个校验并应用扩容;solo 与同批语义一致。
+        // 扩容只改下一 step 的 schema;本批只读执行都走 step 快照,先后无行为差。
+        const call = calls[index];
+        const parsed = parseArgs(call.arguments);
+        let outcome: ToolOutcome;
+
+        if (request.isDenied(call.name)) {
+          outcome = {
+            status: 'denied',
+            code: 'TOOL_DISABLED',
+            retryable: false,
+            output: `错误:当前 tool policy snapshot 不允许调用 ${call.name}。`,
+            changedFiles: [],
+            durationMs: 0,
+          };
+        } else if (!request.expandToolGroups) {
+          outcome = {
+            status: 'denied',
+            code: 'TOOL_DISABLED',
+            retryable: false,
+            output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
+            changedFiles: [],
+            durationMs: 0,
+          };
+        } else if (
+          !parsed ||
+          !Array.isArray(parsed.groups) ||
+          parsed.groups.length === 0 ||
+          typeof parsed.reason !== 'string' ||
+          !parsed.reason.trim()
+        ) {
+          outcome = {
+            status: 'error',
+            code: 'INVALID_ARGUMENTS',
+            retryable: false,
+            output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
+            changedFiles: [],
+            durationMs: 0,
+          };
+        } else {
+          const expansion = request.expandToolGroups(parsed.groups, parsed.reason);
+          const succeeded = expansion.added.length > 0;
+          const details = [
+            succeeded
+              ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
+              : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
+            expansion.implied.length > 0 ? `Implied groups also activated: ${expansion.implied.join(', ')}.` : '',
+            expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
+            succeeded ? 'The added tool schemas become available on the next model step.' : '',
+          ]
+            .filter(Boolean)
+            .join('\n');
+          outcome = {
+            status: succeeded ? 'success' : 'error',
+            code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
+            retryable: false,
+            output: details,
+            changedFiles: [],
+            durationMs: 0,
+          };
+          request.onEvent({
+            type: 'route_expand',
+            fromVersion: request.policy.toolPolicy?.version,
+            expansion,
+            requestedGroups: parsed.groups,
+            reason: parsed.reason,
+            status: outcome.status,
+          });
+        }
+
+        record(index, outcome);
+        request.onEvent({ type: 'host_outcome', call, parsed: parsed ?? {}, outcome });
+        resultEvent(index, outcome, null);
+        traceEnd(index, outcome);
       }
     }
 
@@ -301,11 +295,18 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         for (const call of batch) request.onEvent({ type: 'header', call });
         request.onEvent({ type: 'start', tool: batch[0].name });
         const started = batch.map((call) => execute(call));
+        // 完成即发:usage/host_outcome/trace_end 在各 outcome 落地瞬间发出(1s 的 grep 不再
+        // 被 60s 的 run_command 卡住可见性);result(history 回灌)严格保持原序。
+        await Promise.all(
+          started.map(async (pending, offset) => {
+            const outcome = await pending;
+            executionEvents(index + offset, parseArgs(batch[offset].arguments), outcome);
+          }),
+        );
         for (let offset = 0; offset < batch.length; offset++) {
           const callIndex = index + offset;
           const outcome = await started[offset];
           record(callIndex, outcome);
-          executionEvents(callIndex, parseArgs(batch[offset].arguments), outcome);
           resultEvent(callIndex, outcome, null);
         }
         request.onEvent({ type: 'done' });
@@ -356,25 +357,37 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         const firstAllowed = entries.find((entry) => !entry.denied);
         if (firstAllowed) request.onEvent({ type: 'start', tool: firstAllowed.call.name });
 
-        for (let chunkStart = 0; chunkStart < entries.length; chunkStart += concurrency) {
-          const chunk = entries.slice(chunkStart, chunkStart + concurrency);
-          // 块内同时启动,再按原序 await + 回灌：完成顺序任意,history/trace 始终是原调用序。
-          const started = chunk.map((entry) => {
-            if (entry.denied) return Promise.resolve(entry.denied);
-            return execute(entry.call, request.argumentErrorHint(entry.call.name), (lockedArgs) => {
-              entry.diff = readDiffContext(entry.call, lockedArgs, jailResolve);
-            });
-          });
-
-          for (let k = 0; k < chunk.length; k++) {
-            const callIndex = index + chunkStart + k;
-            const entry = chunk[k];
-            const outcome = await started[k];
-            record(callIndex, outcome);
-            executionEvents(callIndex, entry.parsed, outcome);
-            resultEvent(callIndex, outcome, entry.denied ? null : entry.parsed, entry.diff);
-            invalidate(outcome);
+        // 动态补位池:启动上限 concurrency,任意一个完成立即补位下一个——静态分块时
+        // 「7 个任务、1 个跑 10 分钟」会让第 5 分钟起 4 个槽位空转而 6/7 号干等,总耗时
+        // ≈最慢链;补位后 ≈最满调度。
+        // 完成即发:usage/host_outcome/trace_end 在各 outcome 落地瞬间发出(快完成的
+        // 子 agent 不再被批内前面的慢调用卡住可见性)。history 回灌(result 事件)严格
+        // 保持 provider 原调用序——批校验按 assistant tool_calls 逐位配对 id。
+        // 实现用 worker 循环而非「补位回调 + outcomes.map」:outcomes 是稀疏数组,
+        // Array.prototype.map 会跳过未启动槽位的洞,补位链条会在第 N+1 个断掉。
+        const outcomes: Array<Promise<ToolOutcome>> = new Array(entries.length);
+        let cursor = 0;
+        const runWorker = async (): Promise<void> => {
+          while (cursor < entries.length) {
+            const position = cursor++;
+            const entry = entries[position];
+            const outcome = entry.denied
+              ? entry.denied
+              : await execute(entry.call, request.argumentErrorHint(entry.call.name), (lockedArgs) => {
+                  entry.diff = readDiffContext(entry.call, lockedArgs, jailResolve);
+                });
+            outcomes[position] = Promise.resolve(outcome);
+            executionEvents(index + position, entry.parsed, outcome);
           }
+        };
+        await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, () => runWorker()));
+
+        for (let offset = 0; offset < entries.length; offset++) {
+          const outcome = await outcomes[offset];
+          const callIndex = index + offset;
+          record(callIndex, outcome);
+          resultEvent(callIndex, outcome, entries[offset].denied ? null : entries[offset].parsed, entries[offset].diff);
+          invalidate(outcome);
         }
         if (firstAllowed) request.onEvent({ type: 'done' });
         index = end;
@@ -427,12 +440,19 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
           });
         });
 
+        // 完成即发:usage/host_outcome/trace_end 落地瞬间发出;result(history 回灌)严格原序
+        // ——批校验按 assistant tool_calls 逐位配对 id,同文件排队由 canonical file 锁保证。
+        await Promise.all(
+          started.map(async (pending, offset) => {
+            const outcome = await pending;
+            executionEvents(index + offset, entries[offset].parsed, outcome);
+          }),
+        );
         for (let offset = 0; offset < entries.length; offset++) {
           const callIndex = index + offset;
           const entry = entries[offset];
           const outcome = await started[offset];
           record(callIndex, outcome);
-          executionEvents(callIndex, entry.parsed, outcome);
           resultEvent(callIndex, outcome, entry.denied ? null : entry.parsed, entry.diff);
           invalidate(outcome);
         }

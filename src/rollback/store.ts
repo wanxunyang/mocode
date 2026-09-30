@@ -508,6 +508,14 @@ export class RollbackStore {
     return this.turns.slice();
   }
 
+  /**
+   * 只读侧门(供 /diff 渲染):返回 turnId > sinceTurnId 的全部快照,浅拷贝数组。
+   * 快照内容含 before 原文,调用方不得 mutate 返回值;用于展示,不影响回滚语义。
+   */
+  snapshotsSince(sinceTurnId: number): Snapshot[] {
+    return this.snapshots.filter((snapshot) => snapshot.turnId > sinceTurnId);
+  }
+
   private findCutoffIndex(n: number, history: ChatMessage[]): number {
     let seen = 0;
     for (let i = 0; i < history.length; i++) {

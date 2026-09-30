@@ -26,6 +26,8 @@ import {
   __setChatCreateImpl,
   chat,
   classifyChatError,
+  computeRetryWaitMs,
+  isConnectionClassError,
   isRetryableError,
   isStreamInterruptedError,
   type ChatMessage,
@@ -362,4 +364,87 @@ test('建连失败:零产出自动重试,第二次成功(trace code="Error" 那�
   } finally {
     __setChatCreateImpl(null);
   }
+});
+
+test('连接类错误:首次重试 0ms 等待(换条新连接几乎必成,不再白等 1s)', async () => {
+  let createCalls = 0;
+  const waitMs: number[] = [];
+  __setChatCreateImpl(async () => {
+    createCalls++;
+    if (createCalls === 1) throw connectionError(dnsCause());
+    return okStream('recovered');
+  });
+  const startedAt = Date.now();
+  try {
+    const result = await chat(messages, { onRetry: (r) => waitMs.push(r.waitMs) });
+    assert.equal(result.content, 'recovered');
+    assert.equal(createCalls, 2, '应重发一次');
+    assert.equal(waitMs.length, 1);
+    assert.equal(waitMs[0], 0, '连接类错误首次重试应零等待');
+    // 0ms 等待不能只是「没 sleep」的巧合:整条 chat 往返应远小于旧行为的 1s 基线退避。
+    assert.ok(Date.now() - startedAt < 500, '首次重试必须立即发出');
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('连接类错误:第二次起恢复指数退避(预算与时序语义不变)', async () => {
+  // 连续失败 3 次:第 1 次失败 → 0ms 重试;第 2 次失败 → 退避 >= RETRY_BASE_MS 的八成(1s±20% 抖动)。
+  let createCalls = 0;
+  const waitMs: number[] = [];
+  __setChatCreateImpl(async () => {
+    createCalls++;
+    if (createCalls <= 3) throw connectionError(dnsCause());
+    return okStream('recovered');
+  });
+  try {
+    const result = await chat(messages, { onRetry: (r) => waitMs.push(r.waitMs) });
+    assert.equal(result.content, 'recovered');
+    assert.equal(waitMs.length, 3, '共重试三次');
+    assert.equal(waitMs[0], 0, '首次重试零等待');
+    assert.ok(waitMs[1] !== undefined && waitMs[1] >= 700, `第二次重试应恢复指数退避(≈1s),实际 ${waitMs[1]}ms`);
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('非连接类错误(429/5xx)不享受首退避 0ms', async () => {
+  // 429 无 Retry-After 头:虽然可重试,但退避必须保持指数基线 —— 立即重发只会火上浇油。
+  let createCalls = 0;
+  const waitMs: number[] = [];
+  const rateLimited = new OpenAI.APIError(429, { message: 'rate limited' }, undefined, undefined);
+  __setChatCreateImpl(async () => {
+    createCalls++;
+    if (createCalls === 1) throw rateLimited;
+    return okStream('recovered');
+  });
+  try {
+    await chat(messages, { onRetry: (r) => waitMs.push(r.waitMs) });
+    assert.equal(waitMs.length, 1);
+    assert.ok(waitMs[0] !== undefined && waitMs[0] >= 700, `429 首次重试应仍走 ~1s 退避,实际 ${waitMs[0]}ms`);
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('computeRetryWaitMs 纯函数:连接类判据与 Retry-After 优先级', () => {
+  const econnreset = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+  // 连接类:首次 0ms;有 Retry-After 时优先尊重服务端指令(429 与断流可能同源)。
+  assert.equal(computeRetryWaitMs(1, econnreset), 0, '连接类首次零等待');
+  assert.ok((computeRetryWaitMs(1, econnreset, 5000) ?? 0) > 0, 'Retry-After 存在时连接类也尊重服务端指令');
+  assert.ok((computeRetryWaitMs(2, econnreset) ?? 0) >= 700, '连接类第二次起恢复指数退避');
+  // 非连接类:不触发零等待快捷通道。
+  const local = new Error('messages must contain at least one non-empty user message');
+  assert.ok((computeRetryWaitMs(1, local) ?? 0) >= 700, '普通错误首次退避照常 ~1s');
+  assert.ok(isConnectionClassError(econnreset), 'errno 连接类');
+  assert.ok(isConnectionClassError(prematureClose()), '流中断连接类');
+  assert.ok(isConnectionClassError(connectionError()), 'SDK 建连失败连接类');
+  assert.ok(isConnectionClassError(fetchFailedCause()), 'cause 链 errno 连接类');
+  assert.equal(
+    isConnectionClassError(new OpenAI.APIError(400, { message: 'bad' }, undefined, undefined)),
+    false,
+    '4xx 不是连接类',
+  );
+  assert.equal(isConnectionClassError(new OpenAI.APIUserAbortError()), false, '用户中断不是连接类');
+  assert.equal(isConnectionClassError(undefined), false, '非对象不是连接类');
 });

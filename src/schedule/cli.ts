@@ -91,7 +91,7 @@ export async function runScheduleCli(rawArgs: string[]): Promise<number> {
     }
 
     case 'stop':
-      process.stdout.write(stopDaemon() ? 'Scheduler stopped\n' : 'Scheduler was not running\n');
+      process.stdout.write((await stopDaemon()) ? 'Scheduler stopped\n' : 'Scheduler was not running\n');
       return 0;
 
     case 'status': {

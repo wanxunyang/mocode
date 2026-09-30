@@ -116,7 +116,7 @@ function addToolGroupsSchema(groups: readonly ToolRouteGroupName[]): ChatTool {
     function: {
       name: ADD_TOOL_GROUPS_TOOL_NAME,
       description:
-        'Expand the tool surface for this turn when the current tools are insufficient. Call this tool ALONE, before any dependent tool call. Added groups become available on the next model step and cannot be removed during the turn.',
+        'Expand the tool surface for this turn when the current tools are insufficient. Call it alone or batched with read-only tools (read_file/glob/grep/web_search/web_fetch): the read-only calls run in the same step and the new groups take effect on the next model step. Write/execute tools batched with it are skipped and must be retried on the next step, so keep calls that depend on the newly added groups for the next step. Groups cannot be removed during the turn.',
       parameters: {
         type: 'object',
         properties: {
@@ -296,7 +296,7 @@ export class ToolPolicyController {
       '## Tool route (current turn)',
       `Policy ${snapshot.id} v${snapshot.version}; active groups: ${active}.`,
       `Router reason: ${snapshot.reason}`,
-      'Use only the exposed tools. Missing capability? Call add_tool_groups — alone, or batched with read-only tools (read_file/glob/grep/web_search/web_fetch); the read-only calls run in that same step and the new groups take effect on the next step. Do not batch it with write/execute tools, and keep calls that depend on the newly added groups in the next step.',
+      'Use only the exposed tools. Missing capability? Call add_tool_groups — alone, or batched with read-only tools (read_file/glob/grep/web_search/web_fetch); the read-only calls run in that same step and the new groups take effect on the next step. Write/execute tools batched with it are skipped (retry them on the next step), and calls that depend on the newly added groups belong in the next step.',
     ];
     if (remaining.length) lines.push(`Groups still available: ${remaining.join(', ')}.`);
     if (this.selected.has('computer-control')) {

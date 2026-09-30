@@ -202,7 +202,29 @@ async function probeReady(url: URL): Promise<boolean> {
   }
 }
 
-function killTree(pid: number): void {
+/**
+ * 异步树杀(运行期路径):spawnSync('taskkill') 会同步阻塞事件循环(扫树期间流式渲染/
+ * 并行工具停摆)。发出 kill 后等 taskkill 退出,不牺牲「进程已终止」语义。
+ * 退出路径(stopAllDevServersSync)必须同步,用 killTreeSync 保留原行为。
+ */
+async function killTree(pid: number): Promise<void> {
+  if (!IS_WINDOWS) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      // 已退出或无权限:best-effort。
+    }
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    killer.on('close', () => resolve());
+    killer.on('error', () => resolve());
+  });
+}
+
+/** 同步树杀:仅供进程退出钩子(stopAllDevServersSync)使用,运行期请走异步版。 */
+function killTreeSync(pid: number): void {
   try {
     if (IS_WINDOWS) {
       spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
@@ -348,14 +370,14 @@ export async function startDevServer(opts: StartDevServerOptions): Promise<Start
   } catch (error) {
     // 启动失败 / 被中断:不留孤儿进程。
     record.stopRequested = true;
-    killTree(record.pid);
+    await killTree(record.pid);
     finalizeExit(record, record.child.exitCode, record.child.signalCode);
     throw error;
   }
 
   if (wantsReadySignal && !ready) {
     record.stopRequested = true;
-    killTree(record.pid);
+    await killTree(record.pid);
     finalizeExit(record, record.child.exitCode, record.child.signalCode);
     throw new DevServerManagerError(
       'TIMEOUT',
@@ -423,7 +445,7 @@ export async function stopDevServer(id: string): Promise<StopDevServerResult> {
   }
 
   record.stopRequested = true;
-  killTree(record.pid);
+  await killTree(record.pid);
 
   const deadline = Date.now() + STOP_GRACE_MS;
   while (Date.now() < deadline && isAlive(record.pid)) {
@@ -445,7 +467,7 @@ export function stopAllDevServersSync(): void {
   for (const record of servers.values()) {
     if (record.state !== 'running') continue;
     record.stopRequested = true;
-    killTree(record.pid);
+    killTreeSync(record.pid);
     finalizeExit(record, record.child.exitCode, record.child.signalCode);
   }
 }

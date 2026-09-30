@@ -217,6 +217,7 @@ export async function runAgentCoreLegacy(
           activeTools,
           runPolicy,
           step,
+          maxSteps,
           readDedup,
           cacheState: modelCacheState,
           turnLifecycle,
@@ -458,138 +459,47 @@ export async function runAgentCoreLegacy(
                 );
                 const hasToolRouteBarrier = controlIndexes.length > 0;
                 if (hasToolRouteBarrier) {
-                  // 同批非控制调用全部为「未被禁用的并行安全(只读)工具」时(纯 solo 空集也满足),
-                  // 先并发执行只读、再应用扩容;混有写/执行等非并行工具则整批保守拒绝。
-                  const safeReadonlyBatch = otherIndexes.every(
+                  // add_tool_groups 混批语义 = 部分执行:同批所有「未被禁用的并行安全(只读)」调用
+                  // 本 step 照常并发执行,控制调用照常应用扩容(只改下一 step 的 schema);仅写/执行
+                  // 等非并行调用被配对拒绝并提示下一 step 重试——单个违规调用不再让整批陪葬。
+                  for (let index = 0; index < calls.length; index++) {
+                    hooks.onToolHeader?.(calls[index]);
+                  }
+                  // 只读调用先并发启动(执行序不变);发布(history 回灌/事件)按 provider
+                  // 声明序交错进行:批校验按 assistant tool_calls 逐位配对 id,若按执行序
+                  // 发布(只读先、扩容后),add_tool_groups 排在只读之前时必然 id 错位,整轮 rollback。
+                  // 非并行(写/执行/串行)调用不启动:它们与扩容同批时被拒绝,下一 step 重试。
+                  const startedReadonly: Array<Promise<ToolOutcome> | undefined> = new Array(calls.length);
+                  const eligibleReadonly = otherIndexes.filter(
                     (index) =>
                       isParallelTool(calls[index].name, ctx.toolRuntime) && !isToolDeniedForStep(calls[index].name),
                   );
-
-                  if (safeReadonlyBatch) {
-                    for (let index = 0; index < calls.length; index++) {
-                      hooks.onToolHeader?.(calls[index]);
+                  if (eligibleReadonly.length > 0) {
+                    hooks.onToolStart?.(calls[eligibleReadonly[0]].name);
+                    for (const index of eligibleReadonly) {
+                      startedReadonly[index] = ctx.toolRuntime.executeToolOutcome(
+                        calls[index].name,
+                        calls[index].arguments,
+                        signal,
+                        {
+                          callId: calls[index].id,
+                          allowedToolNames: currentAllowedToolNames(),
+                          delegation: delegationForOrchestrator(),
+                        },
+                      );
                     }
-                    // 只读调用先并发启动(执行序不变);发布(history 回灌/事件)按 provider
-                    // 声明序交错进行:批校验按 assistant tool_calls 逐位配对 id,若按执行序
-                    // 发布(只读先、扩容后),add_tool_groups 排在只读之前时必然 id 错位,整轮 rollback。
-                    const startedReadonly: Array<Promise<ToolOutcome> | undefined> = new Array(calls.length);
-                    if (otherIndexes.length > 0) {
-                      hooks.onToolStart?.(calls[otherIndexes[0]].name);
-                      for (const index of otherIndexes) {
-                        startedReadonly[index] = ctx.toolRuntime.executeToolOutcome(
-                          calls[index].name,
-                          calls[index].arguments,
-                          signal,
-                          {
-                            callId: calls[index].id,
-                            allowedToolNames: currentAllowedToolNames(),
-                            delegation: delegationForOrchestrator(),
-                          },
-                        );
-                      }
-                    }
-                    const lastReadonlyIndex = otherIndexes.length > 0 ? otherIndexes[otherIndexes.length - 1] : -1;
+                  }
+                  const lastReadonlyIndex =
+                    eligibleReadonly.length > 0 ? eligibleReadonly[eligibleReadonly.length - 1] : -1;
 
-                    for (let index = 0; index < calls.length; index++) {
-                      const readonlyPromise = startedReadonly[index];
-                      if (readonlyPromise) {
-                        const tc = calls[index];
-                        const outcome = await readonlyPromise;
-                        usageMeter.add(outcome.usage);
-                        opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
-                        traceToolEnd(tc, index, outcome);
-                        hooks.onToolResult?.(tc, outcome.output, null, null, 1);
-                        pushToolResult(
-                          history,
-                          tc,
-                          outcome.output,
-                          relprune,
-                          lifecycle,
-                          scheduler,
-                          runtimeContextState,
-                          outcome.status === 'success',
-                        );
-                        // done 紧跟最后一个只读结果(控制调用在尾部时与旧事件序完全一致)。
-                        if (index === lastReadonlyIndex) hooks.onToolDone?.();
-                        continue;
-                      }
-
-                      // 控制调用(header 已发):校验并应用扩容。扩容只改下一 step 的 schema,
-                      // 本批只读执行都走 step 快照,与执行的先后无行为差。
+                  for (let index = 0; index < calls.length; index++) {
+                    const readonlyPromise = startedReadonly[index];
+                    if (readonlyPromise) {
                       const tc = calls[index];
-                      const parsed = parseArgs(tc.arguments);
-                      let outcome: ToolOutcome;
-
-                      if (isToolDeniedForStep(tc.name)) {
-                        outcome = {
-                          status: 'denied',
-                          code: 'TOOL_DISABLED',
-                          retryable: false,
-                          output: `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`,
-                          changedFiles: [],
-                          durationMs: 0,
-                        };
-                      } else if (!opts.toolPolicy) {
-                        outcome = {
-                          status: 'denied',
-                          code: 'TOOL_DISABLED',
-                          retryable: false,
-                          output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
-                          changedFiles: [],
-                          durationMs: 0,
-                        };
-                      } else if (
-                        !parsed ||
-                        !Array.isArray(parsed.groups) ||
-                        parsed.groups.length === 0 ||
-                        typeof parsed.reason !== 'string' ||
-                        !parsed.reason.trim()
-                      ) {
-                        outcome = {
-                          status: 'error',
-                          code: 'INVALID_ARGUMENTS',
-                          retryable: false,
-                          output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
-                          changedFiles: [],
-                          durationMs: 0,
-                        };
-                      } else {
-                        const expansion = opts.toolPolicy.expand(parsed.groups, parsed.reason);
-                        const succeeded = expansion.added.length > 0;
-                        const details = [
-                          succeeded
-                            ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
-                            : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
-                          expansion.implied.length > 0
-                            ? `Implied groups also activated: ${expansion.implied.join(', ')}.`
-                            : '',
-                          expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
-                          succeeded ? 'The added tool schemas become available on the next model step.' : '',
-                        ]
-                          .filter(Boolean)
-                          .join('\n');
-                        outcome = {
-                          status: succeeded ? 'success' : 'error',
-                          code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
-                          retryable: false,
-                          output: details,
-                          changedFiles: [],
-                          durationMs: 0,
-                        };
-                        emitTrace('tool_route_expand', {
-                          policyId: expansion.snapshot.id,
-                          fromVersion: policySnapshot?.version,
-                          toVersion: expansion.snapshot.version,
-                          requestedGroups: parsed.groups.map(String),
-                          addedGroups: expansion.added,
-                          impliedGroups: expansion.implied,
-                          rejected: expansion.rejected,
-                          reason: parsed.reason,
-                          status: outcome.status,
-                        });
-                      }
-
-                      opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
+                      const outcome = await readonlyPromise;
+                      usageMeter.add(outcome.usage);
+                      opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
+                      traceToolEnd(tc, index, outcome);
                       hooks.onToolResult?.(tc, outcome.output, null, null, 1);
                       pushToolResult(
                         history,
@@ -601,24 +511,22 @@ export async function runAgentCoreLegacy(
                         runtimeContextState,
                         outcome.status === 'success',
                       );
-                      traceToolEnd(tc, index, outcome);
+                      // done 紧跟最后一个只读结果(控制调用在尾部时与旧事件序完全一致)。
+                      if (index === lastReadonlyIndex) hooks.onToolDone?.();
+                      continue;
                     }
-                  } else {
-                    // 不安全批:不扩容、不执行普通工具,逐 call 按原序配对拒绝结果。
-                    for (let index = 0; index < calls.length; index++) {
+
+                    if (calls[index].name !== ADD_TOOL_GROUPS_TOOL_NAME) {
+                      // 非并行(写/执行/串行)或被禁用的普通调用:与扩容同批时不执行,
+                      // 配对拒绝并提示下一 step 重试;控制调用与只读不受其影响照常处理。
                       const tc = calls[index];
-                      hooks.onToolHeader?.(tc);
-                      const isControl = tc.name === ADD_TOOL_GROUPS_TOOL_NAME;
-                      const isReadonly = isParallelTool(tc.name, ctx.toolRuntime);
                       const outcome: ToolOutcome = {
                         status: 'denied',
-                        code: isControl ? 'INVALID_ARGUMENTS' : 'TOOL_DISABLED',
+                        code: 'TOOL_DISABLED',
                         retryable: false,
-                        output: isControl
-                          ? '错误:add_tool_groups 只能单独调用，或与只读工具(read_file/glob/grep/web 等)同批；本次没有扩容。'
-                          : isReadonly
-                            ? `错误:同一响应包含 add_tool_groups，工具 ${tc.name} 未执行。请在下一 step 重试。`
-                            : `错误:add_tool_groups 不能与写/执行工具 ${tc.name} 同批；请先完成扩容，再在下一 step 调用 ${tc.name}。`,
+                        output: isToolDeniedForStep(tc.name)
+                          ? `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`
+                          : `错误:add_tool_groups 不能与写/执行工具 ${tc.name} 同批执行，本 step 已跳过该调用（其余只读调用与扩容已正常处理）；请在下一 step 重试 ${tc.name}。`,
                         changedFiles: [],
                         durationMs: 0,
                       };
@@ -635,12 +543,103 @@ export async function runAgentCoreLegacy(
                         false,
                       );
                       traceToolEnd(tc, index, outcome);
+                      continue;
                     }
+
+                    // 控制调用(header 已发):校验并应用扩容。扩容只改下一 step 的 schema,
+                    // 本批只读执行都走 step 快照,与执行的先后无行为差。
+                    const tc = calls[index];
+                    const parsed = parseArgs(tc.arguments);
+                    let outcome: ToolOutcome;
+
+                    if (isToolDeniedForStep(tc.name)) {
+                      outcome = {
+                        status: 'denied',
+                        code: 'TOOL_DISABLED',
+                        retryable: false,
+                        output: `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`,
+                        changedFiles: [],
+                        durationMs: 0,
+                      };
+                    } else if (!opts.toolPolicy) {
+                      outcome = {
+                        status: 'denied',
+                        code: 'TOOL_DISABLED',
+                        retryable: false,
+                        output: '错误:当前 Agent 未启用动态工具策略，无法调用 add_tool_groups。',
+                        changedFiles: [],
+                        durationMs: 0,
+                      };
+                    } else if (
+                      !parsed ||
+                      !Array.isArray(parsed.groups) ||
+                      parsed.groups.length === 0 ||
+                      typeof parsed.reason !== 'string' ||
+                      !parsed.reason.trim()
+                    ) {
+                      outcome = {
+                        status: 'error',
+                        code: 'INVALID_ARGUMENTS',
+                        retryable: false,
+                        output: '错误:add_tool_groups 需要非空 groups 数组和非空 reason。',
+                        changedFiles: [],
+                        durationMs: 0,
+                      };
+                    } else {
+                      const expansion = opts.toolPolicy.expand(parsed.groups, parsed.reason);
+                      const succeeded = expansion.added.length > 0;
+                      const details = [
+                        succeeded
+                          ? `Tool policy expanded to v${expansion.snapshot.version}; added groups: ${expansion.added.join(', ')}.`
+                          : `Tool policy was not expanded (still v${expansion.snapshot.version}).`,
+                        expansion.implied.length > 0
+                          ? `Implied groups also activated: ${expansion.implied.join(', ')}.`
+                          : '',
+                        expansion.rejected.length > 0 ? `Rejected: ${expansion.rejected.join('; ')}.` : '',
+                        succeeded ? 'The added tool schemas become available on the next model step.' : '',
+                      ]
+                        .filter(Boolean)
+                        .join('\n');
+                      outcome = {
+                        status: succeeded ? 'success' : 'error',
+                        code: succeeded ? 'OK' : 'INVALID_ARGUMENTS',
+                        retryable: false,
+                        output: details,
+                        changedFiles: [],
+                        durationMs: 0,
+                      };
+                      emitTrace('tool_route_expand', {
+                        policyId: expansion.snapshot.id,
+                        fromVersion: policySnapshot?.version,
+                        toVersion: expansion.snapshot.version,
+                        requestedGroups: parsed.groups.map(String),
+                        addedGroups: expansion.added,
+                        impliedGroups: expansion.implied,
+                        rejected: expansion.rejected,
+                        reason: parsed.reason,
+                        status: outcome.status,
+                      });
+                    }
+
+                    opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
+                    hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+                    pushToolResult(
+                      history,
+                      tc,
+                      outcome.output,
+                      relprune,
+                      lifecycle,
+                      scheduler,
+                      runtimeContextState,
+                      outcome.status === 'success',
+                    );
+                    traceToolEnd(tc, index, outcome);
                   }
                 }
 
                 // add_tool_groups 是 step 屏障：只要本响应出现该控制调用，本批所有普通工具都不执行。
                 // 但上面仍为每个 provider tool_call 写入了配对 tool_result，保持 OpenAI 协议完整。
+                // (部分执行语义:并行安全只读与扩容照常,写/执行调用跳过待下一 step 重试。)
                 let i = hasToolRouteBarrier ? calls.length : 0;
                 while (i < calls.length) {
                   const currentCall = calls[i];
@@ -693,12 +692,19 @@ export async function runAgentCoreLegacy(
                         delegation: delegationForOrchestrator(),
                       }),
                     );
+                    // 完成即发:usage/onToolOutcome/trace 在各 outcome 落地瞬间发出(1s 的
+                    // grep 不再被 60s 的 web_fetch 卡住可见性);history 回灌严格按原序。
+                    await Promise.all(
+                      started.map(async (pending, k) => {
+                        const outcome = await pending;
+                        usageMeter.add(outcome.usage);
+                        opts.onToolOutcome?.(batch[k].name, parseArgs(batch[k].arguments) ?? {}, outcome);
+                        traceToolEnd(batch[k], i + k, outcome);
+                      }),
+                    );
                     for (let k = 0; k < batch.length; k++) {
                       const tc = batch[k];
                       const outcome = await started[k];
-                      usageMeter.add(outcome.usage);
-                      opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
-                      traceToolEnd(tc, i + k, outcome);
                       const output = outcome.output;
                       hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
                       if (tc.name === 'ask_human' && outcome.status === 'success') {
@@ -788,59 +794,70 @@ export async function runAgentCoreLegacy(
                     const firstAllowed = entries.find((entry) => !entry.denied);
                     if (firstAllowed) hooks.onToolStart?.(firstAllowed.tc.name);
 
+                    // 动态补位池:启动上限 concurrency,任意一个完成立即补位——静态分块时
+                    // 「7 个任务、1 个跑 10 分钟」会让第 5 分钟起槽位空转而 6/7 号干等,
+                    // 总耗时≈最慢链;补位后≈最满调度。与 staged dispatcher 同构。
+                    // 完成即发:usage/onToolOutcome/trace 在各 outcome 落地瞬间发出(快调用
+                    // 不再被批内慢调用卡住可见性),history 回灌(pushToolResult)仍严格原序。
+                    // 实现用 worker 循环而非「补位回调 + outcomes.map」:outcomes 是稀疏数组,
+                    // Array.prototype.map 会跳过未启动槽位的洞,补位链条会在第 N+1 个断掉。
                     const concurrency = Math.max(1, ctx.config.subAgentConcurrency);
-                    for (let chunkStart = 0; chunkStart < entries.length; chunkStart += concurrency) {
-                      const chunk = entries.slice(chunkStart, chunkStart + concurrency);
-                      // 块内同时启动(executeToolOutcome 调用即开始 I/O),再按原序 await + 回灌:
-                      // 完成顺序任意,history 与 trace 顺序始终是原调用序。
-                      const started = chunk.map((entry) => {
-                        if (entry.denied) return Promise.resolve(entry.denied);
+                    const outcomes: Array<Promise<ToolOutcome>> = new Array(entries.length);
+                    let cursor = 0;
+                    const runWorker = async (): Promise<void> => {
+                      while (cursor < entries.length) {
+                        const position = cursor++;
+                        const entry = entries[position];
                         const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
-                        return ctx.toolRuntime.executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
-                          callId: entry.tc.id,
-                          allowedToolNames: currentAllowedToolNames(),
-                          delegation: delegationForOrchestrator(),
-                          ...(hint ? { argumentErrorHint: hint } : {}),
-                          onLockAcquired: (lockedArgs) => {
-                            entry.diff = readDiffContext(entry.tc, lockedArgs, ctx.jailResolve);
-                          },
-                        });
-                      });
-
-                      for (let k = 0; k < chunk.length; k++) {
-                        const entry = chunk[k];
-                        const outcome = await started[k];
+                        const outcome = entry.denied
+                          ? entry.denied
+                          : await ctx.toolRuntime.executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
+                              callId: entry.tc.id,
+                              allowedToolNames: currentAllowedToolNames(),
+                              delegation: delegationForOrchestrator(),
+                              ...(hint ? { argumentErrorHint: hint } : {}),
+                              onLockAcquired: (lockedArgs) => {
+                                entry.diff = readDiffContext(entry.tc, lockedArgs, ctx.jailResolve);
+                              },
+                            });
+                        outcomes[position] = Promise.resolve(outcome);
                         usageMeter.add(outcome.usage);
                         opts.onToolOutcome?.(entry.tc.name, entry.parsed ?? {}, outcome);
-                        traceToolEnd(entry.tc, i + chunkStart + k, outcome);
-                        hooks.onToolResult?.(
-                          entry.tc,
-                          outcome.output,
-                          entry.denied ? null : entry.parsed,
-                          entry.diff.preWriteOld,
-                          entry.diff.editStartLine,
-                        );
-                        pushToolResult(
-                          history,
-                          entry.tc,
-                          outcome.output,
-                          relprune,
-                          lifecycle,
-                          scheduler,
-                          runtimeContextState,
-                          outcome.status === 'success',
-                        );
-                        const invalidatedFiles = [
-                          ...new Set([...(outcome.changedFiles ?? []), ...(outcome.staleFiles ?? [])]),
-                        ];
-                        if (invalidatedFiles.length > 0) {
-                          for (const changedFile of invalidatedFiles) {
-                            relprune?.observeMutation(history, changedFile);
-                            lifecycle?.pushMutation(history, history.length - 1, changedFile);
-                          }
-                          invalidateArtifacts(runtimeContextState, history, invalidatedFiles);
-                          runtimeContextState.lifecycleStats = lifecycle?.stats();
+                        traceToolEnd(entry.tc, i + position, outcome);
+                      }
+                    };
+                    await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, () => runWorker()));
+
+                    for (let offset = 0; offset < entries.length; offset++) {
+                      const entry = entries[offset];
+                      const outcome = await outcomes[offset];
+                      hooks.onToolResult?.(
+                        entry.tc,
+                        outcome.output,
+                        entry.denied ? null : entry.parsed,
+                        entry.diff.preWriteOld,
+                        entry.diff.editStartLine,
+                      );
+                      pushToolResult(
+                        history,
+                        entry.tc,
+                        outcome.output,
+                        relprune,
+                        lifecycle,
+                        scheduler,
+                        runtimeContextState,
+                        outcome.status === 'success',
+                      );
+                      const invalidatedFiles = [
+                        ...new Set([...(outcome.changedFiles ?? []), ...(outcome.staleFiles ?? [])]),
+                      ];
+                      if (invalidatedFiles.length > 0) {
+                        for (const changedFile of invalidatedFiles) {
+                          relprune?.observeMutation(history, changedFile);
+                          lifecycle?.pushMutation(history, history.length - 1, changedFile);
                         }
+                        invalidateArtifacts(runtimeContextState, history, invalidatedFiles);
+                        runtimeContextState.lifecycleStats = lifecycle?.stats();
                       }
                     }
                     if (firstAllowed) hooks.onToolDone?.();
@@ -918,12 +935,19 @@ export async function runAgentCoreLegacy(
                       });
                     });
 
+                    // 完成即发:usage/onToolOutcome/trace 落地瞬间发出;history 回灌严格原序——
+                    // 同文件排队由 canonical file 锁保证,异文件并发不受影响。
+                    await Promise.all(
+                      started.map(async (pending, k) => {
+                        const outcome = await pending;
+                        usageMeter.add(outcome.usage);
+                        opts.onToolOutcome?.(entries[k].tc.name, entries[k].parsed ?? {}, outcome);
+                        traceToolEnd(entries[k].tc, i + k, outcome);
+                      }),
+                    );
                     for (let k = 0; k < entries.length; k++) {
                       const entry = entries[k];
                       const outcome = await started[k];
-                      usageMeter.add(outcome.usage);
-                      opts.onToolOutcome?.(entry.tc.name, entry.parsed ?? {}, outcome);
-                      traceToolEnd(entry.tc, i + k, outcome);
                       hooks.onToolResult?.(
                         entry.tc,
                         outcome.output,
@@ -1119,10 +1143,50 @@ export async function runAgentCoreLegacy(
     hooks.onMaxSteps?.();
     turnLifecycle.markMaxSteps();
     const finalMutation = ctx.getCurrentTurnMutationState();
+
+    // ── 撞限 salvage:最后一次不带工具的收尾请求 ──
+    // 撞步数上限时 history 里往往已有几十步探索/实现成果,直接返回会把它们整体丢掉
+    // (调用方只拿到 finalText=null →「子 agent 被中断」,token 白花还得重新探索)。
+    // 这里多发一步无工具(tools=[])的请求,ephemeral system 指示立即输出最终摘要;
+    // 成功则把它作为 finalText 带回(terminationReason/completed 语义不变,诚实反映撞限),
+    // 请求失败或中止则静默回退旧行为。跳过条件:本来就无工具调用(纯闲聊撞限,无成果可捞)
+    // 或已 abort(用户主动取消,不应再花钱)。
+    let salvageText: string | null = null;
+    const hasToolHistory = history.some((m) => m.role === 'tool');
+    if (hasToolHistory && !signal?.aborted) {
+      const salvageInstruction =
+        '## Step limit reached — final summary required\n' +
+        `The hard step limit (${maxSteps}) has been reached and no further tool calls are possible. ` +
+        'Write your final report NOW as plain text (no tool calls): what you accomplished, key findings with file paths / evidence, decisions made, and what remains undone. Be concise but complete — this text is the only thing the caller will receive.';
+      try {
+        const salvage = await modelRunner.run(
+          {
+            history: [...history, { role: 'system', content: salvageInstruction } as ChatMessage],
+            handlers: {},
+            tools: [],
+          },
+          signal,
+        );
+        if (salvage.content?.trim()) salvageText = salvage.content.trim();
+        if (salvage.usage) usageMeter.add(salvage.usage);
+        emitTrace('max_steps_salvage', {
+          recovered: !!salvageText,
+          tokens: salvage.usage?.totalTokens,
+        });
+      } catch (error) {
+        // salvage 是 best-effort:失败不改变撞限终止语义,静默回退;但留一条 trace 取证
+        // (否则事后只看到 finalText=null,无法区分「无事可捞」与「收尾请求本身失败」)。
+        emitTrace('max_steps_salvage', {
+          recovered: false,
+          error: error instanceof Error ? error.message.slice(0, 300) : String(error),
+        });
+      }
+    }
+
     return {
       completed: false,
       terminationReason: 'max_steps',
-      finalText: null,
+      finalText: salvageText,
       usage: usageMeter.snapshot(),
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
     };

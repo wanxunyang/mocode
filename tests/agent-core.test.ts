@@ -24,6 +24,7 @@ import { defaultAgentRuntimeContext } from '../src/agent/runtime-context.js';
 import { __setChatCreateImpl, type ChatMessage } from '../src/llm/index.js';
 import { setSandboxRoot } from '../src/sandbox/root.js';
 import { ToolPolicyController } from '../src/tools/policy.js';
+import { config } from '../src/config/index.js';
 import type { Tool } from '../src/tools/types.js';
 // 装配官方默认工具包(提供本测试真执行的 read_file):registry 不再顶层 import builtins,须显式装配。
 import '../src/tools/builtins/index.js';
@@ -362,86 +363,113 @@ test('runAgentCore: add_tool_groups 单独形成 step 屏障，新增 schema 只
   }
 });
 
-test('runAgentCore: add_tool_groups 与写/执行工具同批时拒绝整批但为每个 provider call 配对结果', async () => {
-  const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
-  delete process.env.MOCODE_TOOL_POLICY;
-  const previousFrontend = process.env.MOCODE_FRONTEND_TOOLS_ENABLED;
-  process.env.MOCODE_FRONTEND_TOOLS_ENABLED = 'true';
-  const requests: CapturedAgentRequest[] = [];
-  let call = 0;
-  __setChatCreateImpl(async (body) => {
-    requests.push(body as unknown as CapturedAgentRequest);
-    call++;
-    if (call === 1) {
-      return sseStream([
-        {
-          delta: {
-            tool_calls: [
-              {
-                index: 0,
-                id: 'mixed-run',
-                function: { name: 'run_command', arguments: '{"command":"echo must-not-run"}' },
-              },
-              {
-                index: 1,
-                id: 'mixed-expand',
-                function: {
-                  name: 'add_tool_groups',
-                  arguments: '{"groups":["browser-debug"],"reason":"need DOM debug"}',
+test('runAgentCore: add_tool_groups 与写/执行工具同批时仅跳过写调用，只读与扩容照常执行', async () => {
+  // 部分执行语义:单个违规调用不再让整批陪葬。plan_update(写/串行)被配对拒绝并提示
+  // 下一 step 重试,read_file 本 step 照常执行,扩容照常应用并在下一 step 生效。
+  // 混批形态取自真实事故:模型把 plan_update + add_tool_groups + read_file 塞进同一条消息。
+  for (const pipeline of ['legacy', 'staged'] as const) {
+    const root = mkdtempSync(join(tmpdir(), `mocode-agent-mixed-expand-${pipeline}-`));
+    writeFileSync(join(root, 'fixture.txt'), 'mixed-batch-content', 'utf8');
+    const previousRoot = setSandboxRoot(root);
+    const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
+    delete process.env.MOCODE_TOOL_POLICY;
+    const previousFrontend = process.env.MOCODE_FRONTEND_TOOLS_ENABLED;
+    process.env.MOCODE_FRONTEND_TOOLS_ENABLED = 'true';
+    const requests: CapturedAgentRequest[] = [];
+    let call = 0;
+    __setChatCreateImpl(async (body) => {
+      requests.push(body as unknown as CapturedAgentRequest);
+      call++;
+      if (call === 1) {
+        return sseStream([
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'mixed-plan',
+                  function: { name: 'plan_update', arguments: '{"title":"t","steps":[]}' },
                 },
-              },
-            ],
+                {
+                  index: 1,
+                  id: 'mixed-expand',
+                  function: {
+                    name: 'add_tool_groups',
+                    arguments: '{"groups":["browser-debug"],"reason":"need DOM debug"}',
+                  },
+                },
+                {
+                  index: 2,
+                  id: 'mixed-read',
+                  function: { name: 'read_file', arguments: '{"path":"fixture.txt"}' },
+                },
+              ],
+            },
           },
-        },
-      ]);
-    }
-    return sseStream([{ delta: { content: 'mixed handled' } }]);
-  });
-
-  const policy = new ToolPolicyController({ id: 'core-mixed' });
-  const started: string[] = [];
-  const outcomes: Array<{ tool: string; status: string; code: string }> = [];
-  try {
-    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
-    const result = await runAgentCore({
-      history,
-      userInput: 'run then expand',
-      maxSteps: 2,
-      toolPolicy: policy,
-      runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
-      hooks: { onToolStart: (name) => started.push(name) },
-      onToolOutcome: (tool, _args, outcome) => outcomes.push({ tool, status: outcome.status, code: outcome.code }),
+        ]);
+      }
+      return sseStream([{ delta: { content: 'mixed handled' } }]);
     });
 
-    assert.equal(result.completed, true);
-    assert.equal(result.finalText, 'mixed handled');
-    assert.deepEqual(started, [], '写/执行混合屏障不得启动任何普通工具');
-    assert.deepEqual(outcomes, [
-      { tool: 'run_command', status: 'denied', code: 'TOOL_DISABLED' },
-      { tool: 'add_tool_groups', status: 'denied', code: 'INVALID_ARGUMENTS' },
-    ]);
-    assert.equal(policy.snapshot(false).version, 1);
-    assert.ok(!policy.snapshot(false).allowedNames.has('browser'));
-    assert.ok(!capturedToolNames(requests[1]).includes('browser'));
+    const policy = new ToolPolicyController({ id: `core-mixed-${pipeline}` });
+    const started: string[] = [];
+    const outcomes: Array<{ tool: string; status: string; code: string }> = [];
+    try {
+      const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+      const result = await runAgentCore({
+        history,
+        userInput: 'plan, expand, then read',
+        maxSteps: 2,
+        pipeline,
+        toolPolicy: policy,
+        runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+        hooks: { onToolStart: (name) => started.push(name) },
+        onToolOutcome: (tool, _args, outcome) => outcomes.push({ tool, status: outcome.status, code: outcome.code }),
+      });
 
-    assert.equal(history.length, 6);
-    const assistant = history[2] as { tool_calls?: Array<{ id: string }> };
-    assert.deepEqual(
-      assistant.tool_calls?.map((toolCall) => toolCall.id),
-      ['mixed-run', 'mixed-expand'],
-    );
-    const firstResult = history[3] as { role: string; tool_call_id?: string; content?: string };
-    const secondResult = history[4] as { role: string; tool_call_id?: string; content?: string };
-    assert.equal(firstResult.role, 'tool');
-    assert.equal(firstResult.tool_call_id, 'mixed-run');
-    assert.match(firstResult.content ?? '', /不能与写\/执行工具/);
-    assert.equal(secondResult.role, 'tool');
-    assert.equal(secondResult.tool_call_id, 'mixed-expand');
-    assert.match(secondResult.content ?? '', /只读工具/);
-  } finally {
-    __setChatCreateImpl(null);
-    restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
-    restoreEnv('MOCODE_FRONTEND_TOOLS_ENABLED', previousFrontend);
+      assert.equal(result.completed, true, `[${pipeline}] 应正常完成`);
+      assert.equal(result.finalText, 'mixed handled');
+      assert.deepEqual(started, ['read_file'], `[${pipeline}] 只读调用应启动，写/串行调用不得启动`);
+      assert.deepEqual(
+        outcomes,
+        [
+          { tool: 'plan_update', status: 'denied', code: 'TOOL_DISABLED' },
+          { tool: 'add_tool_groups', status: 'success', code: 'OK' },
+          { tool: 'read_file', status: 'success', code: 'OK' },
+        ],
+        `[${pipeline}] 写调用被配对拒绝，扩容与只读照常成功`,
+      );
+      assert.equal(policy.snapshot(false).version, 2, `[${pipeline}] 扩容应升版本`);
+      assert.ok(policy.snapshot(false).allowedNames.has('browser'), `[${pipeline}] browser 应已入 allow-list`);
+
+      // history:[system, user, assistant(3 calls), tool(denied plan), tool(expand), tool(read), assistant(text)]
+      assert.equal(history.length, 7, `[${pipeline}] history 应 7 条`);
+      const assistant = history[2] as { tool_calls?: Array<{ id: string }> };
+      assert.deepEqual(
+        assistant.tool_calls?.map((toolCall) => toolCall.id),
+        ['mixed-plan', 'mixed-expand', 'mixed-read'],
+      );
+      const planResult = history[3] as { role: string; tool_call_id?: string; content?: string };
+      assert.equal(planResult.role, 'tool');
+      assert.equal(planResult.tool_call_id, 'mixed-plan');
+      assert.match(planResult.content ?? '', /不能与写\/执行工具/, `[${pipeline}] 写调用应收到跳过说明`);
+      const expandResult = history[4] as { role: string; tool_call_id?: string; content?: string };
+      assert.equal(expandResult.tool_call_id, 'mixed-expand');
+      assert.match(expandResult.content ?? '', /next model step/);
+      const readResult = history[5] as { role: string; tool_call_id?: string; content?: string };
+      assert.equal(readResult.tool_call_id, 'mixed-read');
+      assert.match(readResult.content ?? '', /mixed-batch-content/, `[${pipeline}] 只读结果应含文件内容`);
+
+      // 新增 schema 下一 step 才出现,本 step 的请求里没有 browser。
+      assert.ok(!capturedToolNames(requests[0]).includes('browser'), `[${pipeline}] 本 step 不暴露 browser`);
+      assert.ok(capturedToolNames(requests[1]).includes('browser'), `[${pipeline}] browser 下一 step 可用`);
+    } finally {
+      __setChatCreateImpl(null);
+      setSandboxRoot(previousRoot);
+      restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
+      restoreEnv('MOCODE_FRONTEND_TOOLS_ENABLED', previousFrontend);
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1198,4 +1226,141 @@ test('runAgentCore legacy: 同轮多个编排调用并发执行,结果按 provid
     __setChatCreateImpl(null);
     clearToolsExtension(source);
   }
+});
+
+test('runAgentCore legacy: 编排批动态补位——concurrency=2 时第三个不等整块完成', async () => {
+  // 静态分块的缺陷场景:7 个任务分块 [1,2][3,4][5,6][7],块 2 必须等块 1 全部完成。
+  // 这里用 5 个任务 + concurrency=2 构造可判别的事件序:task1 慢(40ms),其余快(5ms)。
+  // 动态补位:task1/task2 启动 → task2 完成(≈5ms)立即补位 task3 → 依此类推,
+  // task3/4/5 全部在 task1(40ms)结束前启动。静态分块下 task3 必须等 task1 完成后才开始。
+  const { registerToolsExtension, clearToolsExtension } = await import('../src/tools/registry.js');
+  const source = 'agent-core-orch-backfill';
+  const log: string[] = [];
+  const makeOrchestrationTool = (name: string, waitMs: number): Tool => ({
+    name,
+    description: `${name} orchestration stub`,
+    risk: 'dangerous',
+    parameters: {
+      type: 'object',
+      properties: { prompt: { type: 'string' } },
+      required: ['prompt'],
+      additionalProperties: false,
+    },
+    capabilities: {
+      effect: 'write',
+      concurrency: 'resource-locked',
+      delegatesResourceLocks: true,
+      parallelOrchestration: true,
+    },
+    async execute(args) {
+      log.push(`start:${name}`);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      log.push(`end:${name}`);
+      return `result:${String(args.prompt)}`;
+    },
+  });
+  registerToolsExtension(source, [
+    makeOrchestrationTool('mcp__bf_slow', 40),
+    makeOrchestrationTool('mcp__bf_t2', 5),
+    makeOrchestrationTool('mcp__bf_t3', 5),
+    makeOrchestrationTool('mcp__bf_t4', 5),
+    makeOrchestrationTool('mcp__bf_t5', 5),
+  ]);
+
+  let call = 0;
+  __setChatCreateImpl(async () => {
+    call++;
+    if (call === 1) {
+      return sseStream([
+        {
+          delta: {
+            tool_calls: [
+              { index: 0, id: 'bf-slow', function: { name: 'mcp__bf_slow', arguments: '{"prompt":"1"}' } },
+              { index: 1, id: 'bf-t2', function: { name: 'mcp__bf_t2', arguments: '{"prompt":"2"}' } },
+              { index: 2, id: 'bf-t3', function: { name: 'mcp__bf_t3', arguments: '{"prompt":"3"}' } },
+              { index: 3, id: 'bf-t4', function: { name: 'mcp__bf_t4', arguments: '{"prompt":"4"}' } },
+              { index: 4, id: 'bf-t5', function: { name: 'mcp__bf_t5', arguments: '{"prompt":"5"}' } },
+            ],
+          },
+        },
+      ]);
+    }
+    return sseStream([{ delta: { content: 'backfill done' } }]);
+  });
+
+  const names = ['mcp__bf_slow', 'mcp__bf_t2', 'mcp__bf_t3', 'mcp__bf_t4', 'mcp__bf_t5'] as const;
+  const schemas = names.map((name) => ({
+    type: 'function' as const,
+    function: {
+      name,
+      description: `${name} orchestration stub`,
+      parameters: {
+        type: 'object',
+        properties: { prompt: { type: 'string' } },
+        required: ['prompt'],
+      },
+    },
+  }));
+
+  const prevConcurrency = config.subAgentConcurrency;
+  config.subAgentConcurrency = 2;
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'run five orchestration tasks',
+      maxSteps: 2,
+      toolsOverride: schemas,
+      runtimeAllowedToolNames: new Set<string>(names),
+      runtimeContext: {
+        ...defaultAgentRuntimeContext,
+        getAgentMode: () => 'auto' as const,
+        checkPermission: async () => 'allow' as const,
+      },
+      hooks: {},
+    });
+    assert.equal(result.completed, true);
+    assert.equal(result.finalText, 'backfill done');
+    // 判别式:slow 的 end 之前,除了首批 2 个,后续 3 个必须都已 start(补位生效)。
+    const slowEndIdx = log.indexOf('end:mcp__bf_slow');
+    assert.ok(slowEndIdx > 0, 'slow 必须完成');
+    const startsBeforeSlowEnd = log.slice(0, slowEndIdx).filter((entry) => entry.startsWith('start:'));
+    assert.equal(
+      startsBeforeSlowEnd.length,
+      5,
+      `动态补位:slow 结束前 5 个任务应全部启动(静态分块只会是 2),实际 ${JSON.stringify(log)}`,
+    );
+    // history 回灌不变量:provider 原序。
+    const toolResults = history.filter(
+      (message): message is ChatMessage & { role: 'tool'; tool_call_id: string } => message.role === 'tool',
+    );
+    assert.deepEqual(
+      toolResults.map((m) => m.tool_call_id),
+      ['bf-slow', 'bf-t2', 'bf-t3', 'bf-t4', 'bf-t5'],
+    );
+  } finally {
+    config.subAgentConcurrency = prevConcurrency;
+    __setChatCreateImpl(null);
+    clearToolsExtension(source);
+  }
+});
+
+test('glob/grep 不取资源锁:workspace 写锁持有期间读枚举不被阻塞', async () => {
+  // 直接断言工具执行层语义(不经过 agent 循环):run_command 持 workspace 写锁的
+  // 同时,grep 工具照常完成。旧声明下 grep 会排队等锁释放,Promise.all 时序即可判别。
+  const { toolResourceLockManager } = await import('../src/tools/resource-lock.js');
+  const { grepTool } = await import('../src/tools/builtins/grep.js');
+  const release = await toolResourceLockManager.acquire([{ key: 'workspace', scope: 'workspace', mode: 'write' }]);
+  let grepFinishedDuringHold = false;
+  const grepPromise = (async () => {
+    const outcome = await grepTool.execute({ pattern: 'nomatch-x1y2z3', glob: 'src/nested.ts' }, undefined);
+    return outcome;
+  })();
+  const watchdog = new Promise<void>((resolve) => setTimeout(resolve, 300));
+  const first = await Promise.race([grepPromise.then(() => 'grep'), watchdog.then(() => 'timeout')]);
+  if (first === 'grep') grepFinishedDuringHold = true;
+  release();
+  const outcome = await grepPromise;
+  assert.equal(grepFinishedDuringHold, true, 'workspace 写锁持有期间 grep 必须不被阻塞(读枚举容忍瞬时不一致)');
+  assert.ok(typeof outcome === 'string' || typeof outcome === 'object');
 });

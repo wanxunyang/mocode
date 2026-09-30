@@ -57,10 +57,18 @@ export function resolveRgPath(): string | null {
   return probe.status === 0 ? (isWin ? 'rg.exe' : 'rg') : null;
 }
 
+// 异步树杀:spawnSync('taskkill') 会同步阻塞事件循环(扫树期间流式渲染/并行工具停摆)。
+// 两处调用都是 fire-and-forget(结果由 close 事件收口,finish 有 settled 守卫)。
 function killTree(child: ReturnType<typeof spawn>): void {
   try {
     if (isWin && child.pid != null) {
-      spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      killer.on('error', () => {
+        // 进程已退出或终止失败,尽力而为。
+      });
     } else {
       child.kill('SIGTERM');
     }

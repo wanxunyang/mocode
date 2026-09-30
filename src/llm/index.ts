@@ -51,6 +51,8 @@ if (process.env.DEBUG === 'true') {
  *   不重试  →  400 (bad request) / 401 (auth) / 其他 4xx / 用户中断 (AbortError / APIUserAbortError)
  *
  * 退避:指数 + ±20% jitter,首等 1s,翻倍,封顶 30s;若后端返回 Retry-After 头则优先按其值。
+ *   例外:「连接类」错误(连接被掐断 / 建连层网络错)的首次重试不等待(见 computeRetryWaitMs):
+ *   换条新连接几乎必成,白等 1s 只让用户干看「重试中」;第二次起照常退避。
  * 默认 10 次尝试(1 初始 + 9 重试),要调改 RETRY_MAX_ATTEMPTS。
  *
  * SDK 内置 maxRetries 默认 2(对所有 5xx+网络错重试),与本策略叠加会双重重试 5xx —— 显式置 0 让
@@ -410,6 +412,33 @@ export function computeBackoff(attempt: number, retryAfterMs?: number): number {
   return Math.max(0, Math.round(lo + Math.random() * (hi - lo)));
 }
 
+/**
+ * 「连接类」错误:连接被掐断 / 建连层网络错(errno 藏在 cause 链)/ SDK 建连失败包装 /
+ * 折叠成文案的网络错。这类错误的共同点:**重发到一条新连接几乎必成** —— 池里的旧连接
+ * 被代理掐死(keepalive 竞速)是最常见成因,第一次失败换条连接就好。
+ * 判据全部复用 isRetryableError / hasStreamBreakSignal 已有的分类原语,不引入新词表。
+ */
+export function isConnectionClassError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { constructor?: { name?: string }; message?: string };
+  const ctor = e.constructor?.name ?? '';
+  if (ctor === 'APIConnectionError' || ctor === 'APIConnectionTimeoutError') return true;
+  if (hasStreamBreakSignal(err)) return true;
+  if (causeChainFrames(err).some((f) => !!f.code && RETRYABLE_ERRNO.has(f.code))) return true;
+  const msg = typeof e.message === 'string' ? e.message : '';
+  return /^connection error\.?$/i.test(msg.trim()) || /\bfetch failed\b/i.test(msg);
+}
+
+/**
+ * 第 N 次失败后的实际等待毫秒。连接类错误的**首次**重试不等待(0ms):换条新连接几乎
+ * 必成,白等 1s 只让用户干看「重试中」闪烁;第二次起照常指数退避(预算与封顶都不变)。
+ * Retry-After 存在时优先尊重服务端指令 —— 429 限流与断流可能同源,立即重发只会火上浇油。
+ */
+export function computeRetryWaitMs(attempt: number, err: unknown, retryAfterMs?: number): number {
+  if (attempt === 1 && retryAfterMs === undefined && isConnectionClassError(err)) return 0;
+  return computeBackoff(attempt, retryAfterMs);
+}
+
 function logRetry(attempt: number, err: unknown, waitMs: number): void {
   const e = err as { status?: number; name?: string; message?: string };
   const tag = e.status ? `HTTP ${e.status}` : e.name || 'Error';
@@ -708,7 +737,7 @@ async function chatWithRuntime(
         throw err;
       }
       if (streamRetryable) streamRetries++;
-      const wait = computeBackoff(attempt, getRetryAfterMs(err));
+      const wait = computeRetryWaitMs(attempt, err, getRetryAfterMs(err));
       const retry = {
         attempt,
         nextAttempt: attempt + 1,

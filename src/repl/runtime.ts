@@ -223,10 +223,17 @@ export async function startRepl(
   const runtime = defaultRuntime;
   await runtime.start();
   const runtimeContext = runtime.context;
-  // MCP 在工具表和 LLM schema 创建前连接；失败的单个 server 只给提示，不阻断 REPL。
-  const mcpReport = await initializeAllMcp();
-  registerToolsExtension('mcp', getMcpTools());
-  refreshChatTools();
+  // MCP 异步并行连接(不阻塞首帧):旧序「await initializeAllMcp() → banner」在
+  // npx/stdio 类 server 上把 REPL 首屏卡住数秒(黑屏等待)。现在 banner/欢迎块先画,
+  // MCP 在后台连;完成后注册工具 + refreshChatTools + 在内容区补连接结果行。
+  // runTurn 前 mcpReady barrier 兜底:用户在连接完成前就发消息时等它就绪(见 runTurn)。
+  const mcpReady = (async () => {
+    const report = await initializeAllMcp();
+    registerToolsExtension('mcp', getMcpTools());
+    refreshChatTools();
+    return report;
+  })();
+  void mcpReady.catch(() => undefined); // 连接失败不产生 unhandledRejection;报告行由 then 写
   // --resume:读回该会话的轮次/快照;无文件则从 history 重建 turns(无快照→旧轮次文件改动不可撤销)
   let currentSessionId: string | undefined = sessionId;
   if (!currentSessionId) currentSessionId = runtime.session.create();
@@ -327,14 +334,18 @@ export async function startRepl(
   } else {
     layout.writeBanner(bannerLines(banner()));
   }
-  if (mcpReport.connected.length > 0) {
-    layout.contentWrite(
-      `${ui.dim}  ↳ 已连接 MCP: ${mcpReport.connected.join(', ')} (${getMcpTools().length} 个工具;外部工具每次均需授权)${ui.reset}\n`,
-    );
-  }
-  for (const warning of mcpReport.warnings) {
-    layout.contentWrite(`${ui.yellow}  ⚠ ${warning}${ui.reset}\n`);
-  }
+  // MCP 连接结果在就绪后补写(后台并行连接,不再阻塞上方首帧);用户已滚动时仍
+  // 落在内容区尾部,与启动期其它提示行为一致。
+  void mcpReady.then((mcpReport) => {
+    if (mcpReport.connected.length > 0) {
+      layout.contentWrite(
+        `${ui.dim}  ↳ 已连接 MCP: ${mcpReport.connected.join(', ')} (${getMcpTools().length} 个工具;外部工具每次均需授权)${ui.reset}\n`,
+      );
+    }
+    for (const warning of mcpReport.warnings) {
+      layout.contentWrite(`${ui.yellow}  ⚠ ${warning}${ui.reset}\n`);
+    }
+  });
   if (!isModelConfigured()) {
     // 未配置 baseURL/apiKey:醒目提示引导 /model(不退出,REPL 仍可用;发消息会失败但不崩)。
     layout.contentWrite(
@@ -523,6 +534,9 @@ export async function startRepl(
     let routingDone = toolPolicy != null;
     try {
       signal = startRunningListener(placeholder);
+      // MCP 后台连接兜底:启动后在连接完成前就发消息的极端窗口,先等就绪再路由,
+      // 保证路由看到的工具表含 MCP 工具(否则本 turn 工具簇不含 mcp__,模型路由失真)。
+      await mcpReady.catch(() => undefined);
       // 入口设定本轮初始模式（合成执行轮传 false→auto；用户轮传当前 mode）。
       // setAgentMode 触发 listener 重写 history[0]；模式只由用户面切换，runAgent 每步读取当前值。
       setAgentMode(planMode ? 'plan' : 'auto');
@@ -607,6 +621,11 @@ export async function startRepl(
         initialToolRoute,
         runtime,
       );
+      // 撞限 salvage 摘要要在 TUI 落地:runAgent 只把 finalText 带回不渲染,主线撞限的
+      // 收尾摘要若不打印,这笔收尾请求的 token 就白花(用户只看到「达到最大步数」一行)。
+      if (result.terminationReason === 'max_steps' && result.finalText) {
+        layout.contentWrite(result.finalText.endsWith('\n') ? result.finalText : `${result.finalText}\n`);
+      }
       if (toolPolicy) lastToolGroups = toolPolicy.groupNames;
       // 本轮 token 累计(底栏模式 chip 右边显示)。undefined = 后端不开 include_usage。
       // 状态栏统一在 finally 刷新，确保正常、中断、异常都经过同一 plan 收尾路径。

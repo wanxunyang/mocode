@@ -86,6 +86,21 @@ function windowsProxyOptions(): WindowsProxyOptions | null {
   };
 }
 
+/**
+ * 空闲 keepalive 连接的存活时长(毫秒)。
+ *
+ * undici 默认 4s:编码会话里工具执行(npm test/build)几乎总超过 4s,下一次 LLM 请求时
+ * 连接已被池回收,经 Clash 重新做 TCP+TLS 握手(实测 1.4–8s),每个 step 都吃一次;
+ * 「undici 拿到刚被代理掐死的连接」也正是偶发 ECONNRESET 的来源。拉长到 60s 让空闲
+ * 连接活过典型的工具执行间隔,复用率上升。可用 MOCODE_KEEPALIVE_MS 覆盖(非正数回退默认)。
+ */
+const DEFAULT_KEEPALIVE_TIMEOUT_MS = 60_000;
+
+function keepAliveTimeoutMs(): number {
+  const raw = Number(process.env.MOCODE_KEEPALIVE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_KEEPALIVE_TIMEOUT_MS;
+}
+
 export function installEnvProxy(): void {
   if (installed) return;
   installed = true;
@@ -106,7 +121,19 @@ export function installEnvProxy(): void {
     return (originalEmitWarning as (...a: unknown[]) => void)(...args);
   }) as typeof process.emitWarning;
   try {
-    setGlobalDispatcher(new EnvHttpProxyAgent(options));
+    // keepalive 调参:EnvHttpProxyAgent 把 ...agentOpts 透传给内部 Agent/ProxyAgent
+    // (undici 6.21 env-http-proxy-agent.js 构造器),Client 层消费这三个选项。
+    // threshold 刻意高于默认 2s:undici 会在「服务端 Keep-Alive 头声明的存活期 − threshold」
+    // 时刻掐自己的空闲连接,若代理声明的存活期略长于我们的 keepAliveTimeout,留出余量
+    // 可避免双方同时收线时撞上刚被掐死的连接(那正是 ECONNRESET 的形态)。
+    setGlobalDispatcher(
+      new EnvHttpProxyAgent({
+        ...(options ?? {}),
+        keepAliveTimeout: keepAliveTimeoutMs(),
+        keepAliveMaxTimeout: 600_000,
+        keepAliveTimeoutThreshold: 5_000,
+      }),
+    );
   } finally {
     process.emitWarning = originalEmitWarning;
   }

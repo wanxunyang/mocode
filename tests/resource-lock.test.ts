@@ -165,8 +165,18 @@ test('resolveResourceLockRequests: 空键 + network effect → 无锁', () => {
   assert.deepEqual(resolveResourceLockRequests(caps, {}), []);
 });
 
-test('resolveResourceLockRequests: 空键 + 非 network → fail-closed 到 workspace 写锁', () => {
-  const caps: ToolCapabilities = { effect: 'read', concurrency: 'serial', resources: () => [] };
+test('resolveResourceLockRequests: 空键 + read effect → 无锁(glob/grep 读枚举不压制并发)', () => {
+  // 语义变更(2026-09):显式声明无资源的只读枚举不再 fail-closed 到 workspace 写锁。
+  // 旧行为会让一条 run_command 的 workspace 写锁期间所有 glob/grep/read_file 排队,
+  // 「并行探索」退化为读串行。读枚举容忍瞬时不一致,文件级一致性仍由 read_file 的
+  // file:<path> 锁保证。
+  const caps: ToolCapabilities = { effect: 'read', concurrency: 'parallel', resources: () => [] };
+  assert.deepEqual(resolveResourceLockRequests(caps, {}), []);
+});
+
+test('resolveResourceLockRequests: 空键 + write effect → 仍 fail-closed 到 workspace 写锁', () => {
+  // 声明无资源的写工具:没有可依赖的锁粒度,必须保守(写不享受读枚举的放行)。
+  const caps: ToolCapabilities = { effect: 'write', concurrency: 'serial', resources: () => [] };
   assert.deepEqual(resolveResourceLockRequests(caps, {}), [ws()]);
 });
 

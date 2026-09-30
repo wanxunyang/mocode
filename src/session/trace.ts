@@ -20,6 +20,8 @@ export type TraceEventType =
   | 'abort'
   | 'rollback'
   | 'ask_human_call'
+  // 撞步数上限后的 salvage 收尾请求结果(是否捞回摘要、token 数)。
+  | 'max_steps_salvage'
   // Interstitial narration is observation-only; it never feeds instructions back to the model.
   | 'narration';
 

@@ -28,6 +28,8 @@ export interface JobRecord {
   /** named bot identity to run as. */
   botName?: string;
   worktree?: boolean;
+  /** worktree 改动导出的 patch 主工作区绝对路径(worktree 销毁前导出,防成果自毁)。 */
+  patchPath?: string;
 }
 
 /** 与 session 同风格的时间戳 id：YYYYMMDD-HHMMSS-rand。 */

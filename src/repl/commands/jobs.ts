@@ -66,7 +66,7 @@ export const jobsCommands: CommandHandler[] = [
     return next();
   },
   // /jobs kill [id前缀]
-  (ctx) => {
+  async (ctx) => {
     if (ctx.cmd !== '/jobs') return unhandled();
     const parts = ctx.line.split(/\s+/);
     if (parts[1] !== 'kill') return unhandled();
@@ -79,7 +79,7 @@ export const jobsCommands: CommandHandler[] = [
       layout.contentWrite(`${ui.dim}任务 ${job.id} 已是 ${job.status}，无需 kill${ui.reset}\n`);
       return next();
     }
-    const ok = killBackgroundJob(job);
+    const ok = await killBackgroundJob(job);
     layout.contentWrite(
       ok
         ? `${ui.yellow}已 kill 任务 ${job.id}${ui.reset}\n`

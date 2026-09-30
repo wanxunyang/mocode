@@ -182,7 +182,7 @@ test('Stage 5 ContextTrimmer: scheduled 明确区分 content 与 rebuild', async
   assert.deepEqual(history, [{ role: 'user', content: 'rebuilt' }]);
 });
 
-test('Stage 6 ToolDispatcher: resource permission 全部预检后才启动，结果按 provider 原序发布', async () => {
+test('Stage 6 ToolDispatcher: resource permission 全部预检后才启动，history 按原序、trace 完成序', async () => {
   const source = 'agent-stage-dispatcher-resource';
   const execution: string[] = [];
   const makeTool = (name: string, waitMs: number): Tool => ({
@@ -244,7 +244,8 @@ test('Stage 6 ToolDispatcher: resource permission 全部预检后才启动，结
         ['stage_resource_fast', 'stage_resource_fast:fast.txt'],
       ],
     );
-    assert.deepEqual(events.slice(-2), ['end:stage_resource_slow', 'end:stage_resource_fast']);
+    // trace_end 完成即发(fast 先落地先发);history 回灌由 orderedResults 保证原序。
+    assert.deepEqual(events.slice(-2), ['end:stage_resource_fast', 'end:stage_resource_slow']);
   } finally {
     clearToolsExtension(source);
   }

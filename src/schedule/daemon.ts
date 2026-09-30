@@ -176,11 +176,11 @@ export function startDaemon(port: number = DEFAULT_PORT): {
   return { started: true, state };
 }
 
-/** 停止守护进程并清状态。 */
-export function stopDaemon(): boolean {
+/** 停止守护进程并清状态。异步:树杀不再阻塞事件循环(见 jobs/launch.ts killTree)。 */
+export async function stopDaemon(): Promise<boolean> {
   const state = getDaemonState();
   if (!state) return false;
-  const ok = killTree(state.pid);
+  const ok = await killTree(state.pid);
   try {
     fs.rmSync(daemonStatePath());
   } catch {
