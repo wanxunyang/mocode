@@ -37,6 +37,13 @@ export function applyPresetConfig(ctx: CommandContext, p: ModelPreset): void {
     CONTEXT_WINDOW_TOKENS: String(p.contextWindow),
     ANTHROPIC_PROMPT_CACHE: p.anthropicPromptCache ? 'true' : 'false',
   });
+  // 关键不变量：应用预设即激活——必须同步 .active 指针。否则重启时旧激活预设的优先级
+  // 高于刚写入的 config 文件，表现为「切了模型、重启又回到原来的」（实测的丢配置 bug）。
+  try {
+    setActivePresetName(p.name);
+  } catch {
+    /* 指针写失败不阻断切换 */
+  }
   reconfigureClient();
   ctx.refreshStatusBase(ctx.history);
   layout.clearContent();
