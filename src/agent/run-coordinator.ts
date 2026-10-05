@@ -485,6 +485,7 @@ export async function runAgentCoreLegacy(
                           callId: calls[index].id,
                           allowedToolNames: currentAllowedToolNames(),
                           delegation: delegationForOrchestrator(),
+                          readDedup,
                         },
                       );
                     }
@@ -690,6 +691,7 @@ export async function runAgentCoreLegacy(
                         callId: tc.id,
                         allowedToolNames: currentAllowedToolNames(),
                         delegation: delegationForOrchestrator(),
+                        readDedup,
                       }),
                     );
                     // 完成即发:usage/onToolOutcome/trace 在各 outcome 落地瞬间发出(1s 的
@@ -815,6 +817,7 @@ export async function runAgentCoreLegacy(
                               callId: entry.tc.id,
                               allowedToolNames: currentAllowedToolNames(),
                               delegation: delegationForOrchestrator(),
+                              readDedup,
                               ...(hint ? { argumentErrorHint: hint } : {}),
                               onLockAcquired: (lockedArgs) => {
                                 entry.diff = readDiffContext(entry.tc, lockedArgs, ctx.jailResolve);
@@ -928,6 +931,7 @@ export async function runAgentCoreLegacy(
                         callId: entry.tc.id,
                         allowedToolNames: currentAllowedToolNames(),
                         delegation: delegationForOrchestrator(),
+                        readDedup,
                         ...(hint ? { argumentErrorHint: hint } : {}),
                         onLockAcquired: (lockedArgs) => {
                           entry.diff = readDiffContext(entry.tc, lockedArgs, ctx.jailResolve);
@@ -1051,6 +1055,7 @@ export async function runAgentCoreLegacy(
                       callId: tc.id,
                       allowedToolNames: currentAllowedToolNames(),
                       delegation: delegationForOrchestrator(),
+                      readDedup,
                       ...(serialHint ? { argumentErrorHint: serialHint } : {}),
                       onLockAcquired: (lockedArgs) => {
                         if (mutationParsed) diff = readDiffContext(tc, lockedArgs, ctx.jailResolve);

@@ -110,6 +110,20 @@ export class SessionStore {
   private readonly currentSessionIdProvider?: () => string | undefined;
   private readonly currentSessionIdSetter?: (id: string | undefined) => void;
   private currentSessionId: string | undefined;
+  /**
+   * 已确保存在的会话目录缓存(2026-10-05)。
+   *
+   * `mkdirSync(recursive)` 单次 0.20ms —— 比 existsSync+statSync(合计 0.009ms)贵 20 倍,
+   * 因为 recursive 模式要逐级向下 stat 每层路径。而 appendTrace 每 step 调 14 次
+   * (step_start/end + model_start/end + 每工具 2 个),每轮 20 step ≈ 280 次全花在
+   * 「确认目录已存在」上,一轮白烧 56ms。
+   *
+   * 缓存的是「已 mkdir 成功」这件事,不是路径存在性。**代价**:外部删掉目录后缓存会失真。
+   * 兜底是三个写盘方法统一的「失败 → invalidateEnsuredDir → 重试一次」模式
+   * (见 appendTrace / appendUsage / save),既保住性能又不丢数据。
+   * 护栏见 tests/session-dir-cache.test.ts 的「外部删除后自愈」三例。
+   */
+  private ensuredDirs = new Set<string>();
 
   constructor(options: SessionStoreOptions = {}) {
     if (typeof options.workspaceRoot === 'function') {
@@ -137,8 +151,26 @@ export class SessionStore {
 
   sessionDir(): string {
     const root = this.sessionsRoot;
-    mkdirSync(root, { recursive: true });
+    this.ensureDir(root);
     return root;
+  }
+
+  /**
+   * 幂等建目录:同一路径只在首次真正 mkdir(见 ensuredDirs 的成本说明)。
+   *
+   * 缓存意味着「外部删掉目录后不自愈」,故所有写盘方法都用
+   * {@link invalidateEnsuredDir} + 重试一次兜住(retention 归档后 rmSync、
+   * 用户手工清理等)。单靠这里的 Set 不会自愈,必须配对那个重试。
+   */
+  private ensureDir(dir: string): void {
+    if (this.ensuredDirs.has(dir)) return;
+    mkdirSync(dir, { recursive: true });
+    this.ensuredDirs.add(dir);
+  }
+
+  /** 让 ensureDir 下次真正 mkdir(用于 append 失败后的自愈重试)。 */
+  private invalidateEnsuredDir(dir: string): void {
+    this.ensuredDirs.delete(dir);
   }
 
   createId(): string {
@@ -168,21 +200,36 @@ export class SessionStore {
    * 然后清空当前文件。纯诊断数据,任何失败静默降级为普通追加。
    */
   appendTrace(id: string, value: unknown): void {
-    try {
-      const dir = path.join(this.sessionsRoot, id);
-      mkdirSync(dir, { recursive: true });
-      const line = `${JSON.stringify(value)}\n`;
-      const tracePath = path.join(dir, 'trace.jsonl');
-      // env 覆盖仅供测试:MOCODE_MAX_TRACE_BYTES=200 可立刻触发轮转。
-      const envMax = Number(process.env.MOCODE_MAX_TRACE_BYTES);
-      const maxTraceBytes = Number.isFinite(envMax) && envMax >= 0 ? envMax : MAX_TRACE_BYTES;
-      const size = existsSync(tracePath) ? statSync(tracePath).size : 0;
-      if (size >= maxTraceBytes) {
-        this.rotateTrace(dir, tracePath);
+    const dir = path.join(this.sessionsRoot, id);
+    const line = `${JSON.stringify(value)}\n`;
+    const tracePath = path.join(dir, 'trace.jsonl');
+    // env 覆盖仅供测试:MOCODE_MAX_TRACE_BYTES=200 可立刻触发轮转。
+    const envMax = Number(process.env.MOCODE_MAX_TRACE_BYTES);
+    const maxTraceBytes = Number.isFinite(envMax) && envMax >= 0 ? envMax : MAX_TRACE_BYTES;
+    // 目录缓存可能因外部删除而失真(如 retention 归档后 rmSync):首次失败清缓存重试一次。
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        this.ensureDir(dir); // 缓存:每 step 14 次调用,省 14×0.20ms
+        // statSync 一次即可拿到「不存在 / 大小」两种答案,省掉 existsSync 那一跳
+        // (两者合计仅 0.009ms,但顺手消掉一次 TOCTOU 窗口)。
+        let size = 0;
+        try {
+          size = statSync(tracePath).size;
+        } catch {
+          size = 0;
+        }
+        if (size >= maxTraceBytes) {
+          this.rotateTrace(dir, tracePath);
+        }
+        writeFileSync(tracePath, line, { encoding: 'utf8', flag: 'a' });
+        return;
+      } catch {
+        this.invalidateEnsuredDir(dir);
+        if (attempt === 1) {
+          // Observability is best-effort and cannot block coding work.
+          return;
+        }
       }
-      writeFileSync(tracePath, line, { encoding: 'utf8', flag: 'a' });
-    } catch {
-      // Observability is best-effort and cannot block coding work.
     }
   }
 
@@ -219,12 +266,22 @@ export class SessionStore {
    * 与 appendTrace 同策略:纯诊断,失败静默,不做轮转(长会话的量级远小于 trace)。
    */
   appendUsage(id: string, value: unknown): void {
-    try {
-      const dir = path.join(this.sessionsRoot, id);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(path.join(dir, 'usage.jsonl'), `${JSON.stringify(value)}\n`, { encoding: 'utf8', flag: 'a' });
-    } catch {
-      // Metrics must never block coding work.
+    const dir = path.join(this.sessionsRoot, id);
+    const line = `${JSON.stringify(value)}\n`;
+    const file = path.join(dir, 'usage.jsonl');
+    // 同 appendTrace:目录缓存失真时清缓存重试一次。
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        this.ensureDir(dir); // 同appendTrace:每 step 1 次,省 0.20ms
+        writeFileSync(file, line, { encoding: 'utf8', flag: 'a' });
+        return;
+      } catch {
+        this.invalidateEnsuredDir(dir);
+        if (attempt === 1) {
+          // Metrics must never block coding work.
+          return;
+        }
+      }
     }
   }
 
@@ -245,6 +302,13 @@ export class SessionStore {
     return out;
   }
 
+  /**
+   * 全量落盘会话(history + queryHistory + lastToolGroups),原子写(先 tmp 再 rename)。
+   *
+   * 与 appendTrace/appendUsage 的差别:**失败会抛给调用方**——这是用户数据,
+   * 静默丢失不可接受(那两个是诊断数据,静默降级是对的)。目录缓存失真时会
+   * 清缓存重试一次,仍失败则照旧抛出。
+   */
   save(
     history: ChatMessage[],
     id: string,
@@ -265,20 +329,30 @@ export class SessionStore {
     if (history.length <= 1 && queryHistory.length === 0 && !existsSync(currentPath) && !existsSync(legacyPath)) {
       return meta;
     }
-    mkdirSync(path.join(this.sessionsRoot, id), { recursive: true });
+    const dir = path.join(this.sessionsRoot, id);
+    const tmpPath = path.join(dir, 'session.json.tmp');
     const record: SessionRecord = {
       ...meta,
       history,
       queryHistory: [...queryHistory],
       lastToolGroups: [...lastToolGroups],
     };
-    // 原子落盘:先写同目录 tmp 再 rename——全量重写(长会话可达数 MB)中途崩溃/断电
-    // 不会留下半个 JSON 把整个会话写坏(对齐 memory/store.ts writeAtomic)。
-    const tmpPath = path.join(this.sessionsRoot, id, 'session.json.tmp');
-    writeFileSync(tmpPath, JSON.stringify(record), 'utf8');
-    renameSync(tmpPath, currentPath);
-    if (existsSync(legacyPath)) unlinkSync(legacyPath);
-    return meta;
+    // 目录缓存失真时清缓存重试一次(与 appendTrace 同理);仍失败则照旧抛给调用方
+    // —— save 是用户数据落盘,失败必须可见(appendTrace/appendUsage 是诊断数据,静默)。
+    for (let attempt = 0; ; attempt++) {
+      try {
+        this.ensureDir(dir);
+        // 原子落盘:先写同目录 tmp 再 rename——全量重写(长会话可达数 MB)中途崩溃/断电
+        // 不会留下半个 JSON 把整个会话写坏(对齐 memory/store.ts writeAtomic)。
+        writeFileSync(tmpPath, JSON.stringify(record), 'utf8');
+        renameSync(tmpPath, currentPath);
+        if (existsSync(legacyPath)) unlinkSync(legacyPath);
+        return meta;
+      } catch (error) {
+        this.invalidateEnsuredDir(dir);
+        if (attempt === 1) throw error;
+      }
+    }
   }
 
   load(id: string): SessionRecord | null {

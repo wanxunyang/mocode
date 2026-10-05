@@ -1083,8 +1083,36 @@ export function contentTokens(content: unknown): number {
   return estimateTokens(contentToText(content));
 }
 
-/** 估算单条消息的 token 数:结构开销 + content + tool_calls 参数。 */
+/** 单条消息的 token 估算缓存:命中键 = 该消息的「内容签名」(见 messageSignature)。 */
+const messageTokensCache = new WeakMap<object, { sig: string; tokens: number }>();
+
+/**
+ * 消息内容签名:content 引用 + role + 有无 tool_calls。
+ *
+ * **为什么签名里用 content 的「长度」而不是内容本身**:签名要在每次估算时算,必须是 O(1)。
+ * 用 `typeof content === 'string' ? content.length : -1` 兼顾 O(1) 与可判定性 ——
+ * string 不可变,原地改写(`msg.content = ...`)必然换成另一个字符串对象、长度通常也变;
+ * 长度相同而内容变了的情况(如 microcompact 截到同样长度)极少,且那种路径
+ * (compact / age-aware)本身会先 markContextChanged 走全量重估(见 scheduler)。
+ *
+ * **为什么不直接用对象身份当键**(即 WeakMap<ChatMessage, number>):有 4 处代码会
+ * **原地改写** message.content —— age-aware.ts:66、artifacts.ts:269(标 stale)、
+ * compact.ts:590/597(微压缩)。对象身份不变但内容已变,身份缓存会返回旧值 →
+ * token 低估 → 80% 压力线不触发 → prompt 实际已超窗口(llm/index.ts:1042-1044 注释
+ * 描述过这个失败模式:「模型突然抽风」)。签名方案让这4 处自动安全,无需挂失效钩子。
+ */
+function messageSignature(m: ChatMessage): string {
+  const c = (m as { content?: unknown }).content;
+  const tcs = (m as { tool_calls?: unknown }).tool_calls;
+  return `${(m as { role?: string }).role ?? ''}|${typeof c === 'string' ? c.length : -1}|${tcs ? 1 : 0}`;
+}
+
+/** 估算单条消息的 token 数:结构开销 + content + tool_calls 参数。内容签名命中则复用上次结果。 */
 export function messageTokens(m: ChatMessage): number {
+  const key = m as object;
+  const sig = messageSignature(m);
+  const hit = messageTokensCache.get(key);
+  if (hit !== undefined && hit.sig === sig) return hit.tokens;
   const role = (m as { role?: string }).role;
   let structural = 4; // {role}\n{content}\n 框架基线
   if (role === 'system') structural = 3;
@@ -1094,7 +1122,9 @@ export function messageTokens(m: ChatMessage): number {
   if (tcs) {
     for (const tc of tcs) body += estimateTokens(tc?.function?.arguments ?? '');
   }
-  return structural + body;
+  const tokens = structural + body;
+  messageTokensCache.set(key, { sig, tokens });
+  return tokens;
 }
 
 /** 估算整段 messages 的 token 数(不含工具 schema,含 priming 常数)。 */
