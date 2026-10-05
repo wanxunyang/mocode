@@ -51,6 +51,7 @@ import {
   contentDeleteFrom,
   contentReplaceLine,
   reflowContentForResize,
+  flushMdSegment,
 } from './content-write.js';
 
 export { isTuiActive, getGeo, setRegion, contentMode, isStreamingPaused } from './screen.js';
@@ -449,6 +450,11 @@ export function enterInputMode(status: string = t('repl.idle')): void {
     state.userActiveUntil = 0;
     if (state.active) repaintViewport();
   }
+  // 轮末补渲流式 md:节流后 mdBuf 可能仍有未渲的 chunk(下一次渲染的定时器还没到点),
+  // 而下面要画输入框、repaintViewport —— 画面会停在上一帧,看起来像「回复最后几句丢了」。
+  // 正常轮末会先经 commitMd(有 flush)走到这里,mdActive 应已是 false;此分支只兜
+  // 「异常路径直接进输入态」的情况,故只在 mdActive 时才动手。
+  if (state.active && state.mdActive) flushMdSegment();
   if (state.active && state.base) {
     // 先按当前 base.planSummary 重算 planRows(可能从上次会话残留 stale 值),再据此 setRegion
     // 撑出正确脚栏高;否则 plan 撑 2 行时 setRegion(6) 会把 spinner 挤到 plan 第 2 行位置。
@@ -516,6 +522,12 @@ export function enterAltScreen(): void {
   state.scrollLockUntil = 0;
   state.mdActive = false;
   state.mdBuf = '';
+  if (state.mdFlushTimer) {
+    clearTimeout(state.mdFlushTimer);
+    state.mdFlushTimer = null;
+  }
+  state.mdLastRenderAt = 0;
+  state.mdRenderedLen = 0;
   state.selection = null;
   state.selecting = false;
   content.reset();
@@ -616,6 +628,11 @@ export function exitAltScreen(): void {
   if (state.flushTimer) {
     clearTimeout(state.flushTimer);
     state.flushTimer = null;
+  }
+  // 流式 md 补渲定时器同理:退出后再触发会往已退 alt screen 的终端写内容。
+  if (state.mdFlushTimer) {
+    clearTimeout(state.mdFlushTimer);
+    state.mdFlushTimer = null;
   }
   state.userActiveUntil = 0;
 }

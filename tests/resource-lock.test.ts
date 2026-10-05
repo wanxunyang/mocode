@@ -75,6 +75,78 @@ test('workspace 写锁与任意资源写锁冲突', async () => {
   await pFile;
 });
 
+test('workspace 写锁不压制资源读锁(2026-10-05:run_command 期间 read_file 可并发)', async () => {
+  // 回归护栏:旧判据是「任一 write 即冲突」,于是 run_command 持 workspace 写锁期间
+  // 所有 read_file(file:<path> 读锁)全部排队 —— 一条 60s 的 npm test 会让同 step 的
+  // 并行探查退化为串行。现放行这一格,读单个已知文件与命令的工作区写入不构成事务冲突。
+  const mgr = new ResourceLockManager();
+  const releaseWs = await mgr.acquire([ws()]);
+  let readAcquired = false;
+  const pRead = mgr.acquire([res('f', 'read')]).then(() => {
+    readAcquired = true;
+  });
+  await sleep(20);
+  assert.equal(readAcquired, true, '命令执行期间的 read_file 不应被 workspace 写锁阻塞');
+  releaseWs();
+  await pRead;
+});
+
+test('workspace 写锁仍压制**同 key** 资源写锁(防命令与 Agent 改同一文件)', async () => {
+  // 放行只针对读锁:run_command 与 write_file/edit_file 改同一文件必须互斥,
+  // 否则 ChangeSet 的 read-modify-write 会读到命令写入的半成品。
+  const mgr = new ResourceLockManager();
+  const releaseWs = await mgr.acquire([ws()]);
+  let writeAcquired = false;
+  const pWrite = mgr.acquire([res('f', 'write')]).then(() => {
+    writeAcquired = true;
+  });
+  await sleep(20);
+  assert.equal(writeAcquired, false, '写锁冲突边界不可放宽');
+  releaseWs();
+  await pWrite;
+});
+
+test('资源写锁也不因方向而被放行(冲突判定对称)', async () => {
+  // requestConflicts(a, b) 必须与 requestConflicts(b, a) 一致,否则 dispatch 的
+  // 全对全冲突检测会依赖入队顺序,产生方向性放行。
+  const mgr = new ResourceLockManager();
+  const releaseRes = await mgr.acquire([res('f', 'write')]);
+  let wsAcquired = false;
+  const pWs = mgr.acquire([ws()]).then(() => {
+    wsAcquired = true;
+  });
+  await sleep(20);
+  assert.equal(wsAcquired, false);
+  releaseRes();
+  await pWs;
+});
+
+test('两个 workspace 写锁仍互斥(命令之间不并发)', async () => {
+  const mgr = new ResourceLockManager();
+  const release1 = await mgr.acquire([ws()]);
+  let secondAcquired = false;
+  const p2 = mgr.acquire([ws()]).then(() => {
+    secondAcquired = true;
+  });
+  await sleep(20);
+  assert.equal(secondAcquired, false);
+  release1();
+  await p2;
+});
+
+test('workspace 读锁与资源写锁仍冲突(读命令期不挡写)', async () => {
+  const mgr = new ResourceLockManager();
+  const releaseWsRead = await mgr.acquire([ws('read')]);
+  let writeAcquired = false;
+  const pWrite = mgr.acquire([res('f', 'write')]).then(() => {
+    writeAcquired = true;
+  });
+  await sleep(20);
+  assert.equal(writeAcquired, false);
+  releaseWsRead();
+  await pWrite;
+});
+
 test('workspace 读锁与资源读锁不冲突(读读共享)', async () => {
   const mgr = new ResourceLockManager();
   await Promise.all([mgr.acquire([ws('read')]), mgr.acquire([res('f', 'read')])]);

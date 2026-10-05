@@ -74,11 +74,23 @@ export const state = {
   contentRow: 1, // 续写位行(1-based,屏坐标,[1,contentBottom])
   contentCol: 1, // 续写位列(1-based)
   segmentStartRow: 1, // 当前 md 段起始屏行(供 contentWriteMd 定位段末续写位;段内行数由 content 段标记跟踪)
-  /** markdown 流式段:agent onText 的 chunk 累积到 mdBuf,每 chunk 把整段经 renderMarkdown
+  /** markdown 流式段:agent onText 的 chunk 累积到 mdBuf,按节流节奏经renderMarkdown
    *  渲成自洽行,replace 缓冲段(content.setLines)+ repaintViewport 重画。mdActive 期间任何
-   *  非 md 写(contentWrite)先 commitMd 收尾(清 segMark,后续写不再被 setLines 截断)。 */
+   *  非 md 写(contentWrite)先 commitMd 收尾(清 segMark,后续写不再被 setLines 截断)。
+   *
+   *  **为什么需要节流**(2026-10-05 实测):每 chunk 重渲整个累积 mdBuf 是 O(n²)——
+   *  一次 5879 字符回复被切成~1960 chunk,累计扫描 5.5MB、纯 CPU ~900ms。renderMarkdown
+   *  内部的 LRU memo(key=text)在流式下每次 text 都变,必然 miss,救不了。真正的成本是
+   *  **次数**而非单次(实测单次 render 仅 0.05ms 量级)。故改为「攒够一段时间或跨过行
+   *  边界才渲」,把渲染次数从 O(chunk数) 降到 O(耗时/节流间隔)。 */
   mdActive: false,
   mdBuf: '',
+  /** 流式 md 上次实际渲染的时刻(Date.now());0=本段尚未渲过。节流判定用。 */
+  mdLastRenderAt: 0,
+  /** 本段已渲进缓冲的 mdBuf 长度;内容节流判定「攒够多少」用。 */
+  mdRenderedLen: 0,
+  /** 节流到期的定时器;非 null 表示「还有未渲染的 chunk 待补渲」。 */
+  mdFlushTimer: null as NodeJS.Timeout | null,
   bannerH: 0,
   welcomeStart: -1, // 块起点(content.committedRows 口径的绝对行索引)
   welcomeRows: 0, // 块行数(0 = 屏上无欢迎块)

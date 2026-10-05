@@ -148,10 +148,55 @@ const YIELD_EVERY = 64;
 const YIELD_BYTES = 1024 * 1024;
 const FRESH_WINDOW_MS = 2000;
 
+/**
+ * contentCache 的常驻字节上限(base64 后的长度和);0 = 不限。
+ *
+ * contentCache 是「上次扫描读到的内容」的跨扫描复用:命中则省一次 readFile,
+ * 这就是第 2 次及以后的 workspace 扫描只要 ~35ms 而首次要 500ms+ 的原因
+ * (实测 2026-10-05,2000 entries / 42.7MB base64)。它原先只增不减(唯一清理点是
+ * resetState),即一次扫描就把整个工作区文本永久常留内存。
+ *
+ * **默认保持不限(0)**:实测把上限压到 16MB 会把命中率打崩 —— 缓存从 664 条掉到 54 条,
+ * 扫描耗时从 ~67ms 反弹到 ~1000ms(涨 15倍)。原因是遍历顺序下累积的大文件会挤掉后续
+ * 所有条目,淘汰机制天然对「后访问的小文件」不友好。42.7MB 换每条命令 67ms 是划算的,
+ * 不值得为省内存牺牲 15 倍扫描速度。
+ *
+ * 保留这个旋门是为了「大工作区内存吃紧」的场景(比如 node_modules 被误纳入扫描),
+ * 可通过 MOCODE_ROLLBACK_CACHE_MB 收紧;不设则沿用无上限的既有行为。
+ */
+const CONTENT_CACHE_MAX_BYTES = (() => {
+  const mb = Number(process.env.MOCODE_ROLLBACK_CACHE_MB);
+  return Number.isFinite(mb) && mb > 0 ? Math.floor(mb) * 1024 * 1024 : 0;
+})();
+
 interface CachedContent {
   stamp: string;
   mode: number;
   data: string;
+}
+
+/**
+ * 把扫描产出的缓存裁到 CONTENT_CACHE_MAX_BYTES 以内,按插入序淘汰最旧条目。
+ *
+ * 仅在 CONTENT_CACHE_MAX_BYTES > 0(即用户显式设了 MOCODE_ROLLBACK_CACHE_MB)时生效;
+ * 默认无上限,保持既有行为。淘汰只影响性能,不影响正确性:被淘汰的条目下次扫描时
+ * stamp 不匹配 → 重新 readFile 而已(snapshot 记录的是**本次扫描当场读到**的内容,
+ * 见 scanWorkspace 的 `cached.stamp === stamp` 校验)。
+ */
+function trimContentCache(cache: Map<string, CachedContent>): Map<string, CachedContent> {
+  if (CONTENT_CACHE_MAX_BYTES <= 0) return cache;
+  let total = 0;
+  for (const entry of cache.values()) total += entry.data.length;
+  if (total <= CONTENT_CACHE_MAX_BYTES) return cache;
+  // Map 保插入序 → 最旧的在最前。逐个删到回到预算内,单趟 O(n) 足够。
+  for (const key of cache.keys()) {
+    if (total <= CONTENT_CACHE_MAX_BYTES) break;
+    const entry = cache.get(key);
+    if (!entry) continue;
+    total -= entry.data.length;
+    cache.delete(key);
+  }
+  return cache;
 }
 
 /**
@@ -452,7 +497,7 @@ export class RollbackStore {
       }
     };
     await Promise.all(Array.from({ length: Math.min(SCAN_CONCURRENCY, Math.max(1, paths.length)) }, worker));
-    this.contentCache = nextCache;
+    this.contentCache = trimContentCache(nextCache);
     return entries;
   }
 

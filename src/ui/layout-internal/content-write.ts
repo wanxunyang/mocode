@@ -11,6 +11,48 @@ import { state } from './state.js';
 import { esc, cup, getGeo, setRegion, runningCaretPos } from './screen.js';
 import { viewportAbsStart, repaintViewport } from './scroll.js';
 
+// ── 流式 markdown 渲染节流(2026-10-05)──
+// 背景:原实现每收到一个 onText chunk 就把**累积的整个 mdBuf** 重渲一遍(渲成自洽 ANSI 行
+// 替换缓冲段 + repaintViewport 全画)。这是 O(n²):实测一次 5879 字符的回复被切成~1960 个
+// chunk,累计扫描 5.5MB、纯 CPU ~900ms,且全程同步阻塞事件循环(TUI 的 spinner/输入都跟着卡)。
+// renderMarkdown 内有 LRU memo(key = 完整 text),但流式下每次 text 都是新串 → 必然 miss。
+// 分块归因实测:单次 render 仅 0.05ms 量级,带 lang 的代码块最贵(0.097ms),无 lang 近乎免费。
+// → 结论是「贵在次数,不在单次」,故按时间/内容节流降次数,而不是优化单次渲染。
+
+/**
+ * 两次渲染的最小间隔(ms)。
+ *
+ * 取 32ms(~30fps)而非 16ms:终端正文流式本来肉眼无法分辨更高帧率,32ms 把渲染次数压到
+ * 1/20 左右的量级而观感无差异。低于此值收益边际递减(受 pty 写吞吐约束),高于此值
+ * 长文本回复会有肉眼可见的「一段一段蹦」感。
+ */
+const MD_RENDER_INTERVAL_MS = 32;
+
+/**
+ * 两次渲染的最小字符增量(**仅用于防饿死**,不是常规触发路径)。
+ *
+ * 后端可能一次性吐出一个大 chunk(如整段代码 / 工具参数),此时距上次渲染可能才过去
+ * 1~2ms,纯按时间判定会把它推迟到下个间隔才上屏。攒够这么多字符就立刻渲,保证
+ * 「有实质进展就尽快上屏」,同时仍拦住小碎 chunk 的逐个重渲。
+ *
+ * **取值的关键**:必须**远大于**「一个节流间隔内正常 chunk 的累积量」,否则它会抢在
+ * 时间节流前面触发,节流退化成「每 N 个 chunk 渲一次」—— 时间维度失效。
+ * 高速后端(约 5ms/chunk、1~2 token ≈ 5 字符)在一个 32ms 间隔内约累积 30 字符,
+ * 取 512 留出 17 倍余量:突发大段能快速上屏,正常流里则几乎只由时间节流驱动。
+ */
+const MD_RENDER_BURST_CHARS = 512;
+
+/**
+ * 节流判定(纯函数,导出供单测 —— TUI 渲染路径本身需要真 TTY,无法在测试里驱动)。
+ *
+ * @param elapsedNow距上次渲染的毫秒数
+ * @param pendingChars 本次 chunk 累积后、尚未渲染的字符数
+ * @returns true=本次就渲染;false=只累积并挂补渲定时器
+ */
+export function shouldRenderMdSegment(elapsedNow: number, pendingChars: number): boolean {
+  return elapsedNow >= MD_RENDER_INTERVAL_MS || pendingChars >= MD_RENDER_BURST_CHARS;
+}
+
 /**
  * 内容区正文写:CUP 到续写位 + 写出 + 按字符宽度/折行更新续写位 + 同步入 content 缓冲(供滚动回看)。
  * 滚动区域内写满自动在区域内滚动,底栏在区域外不被顶。非 TTY / 未激活:直接 stdout.write(内联退化)。
@@ -162,13 +204,25 @@ function beginMdSegment(): void {
   content.beginSegment();
   state.mdBuf = '';
   state.mdActive = true;
+  state.mdLastRenderAt = 0;
+  state.mdRenderedLen = 0;
 }
 
-/** 提交 markdown 段:清 accumulator + content.commitSegment(后续非 md 写不再被 setLines 截断)。 */
+/**
+ * 提交 markdown 段:清 accumulator + content.commitSegment(后续非 md 写不再被 setLines 截断)。
+ *
+ * 必须先 flushMdSegment:commitSegment 会清 segMark,此后 setLines 不再截断到段头——若此时
+ * mdBuf 还有未渲的 chunk,那部分内容将永远进不了缓冲(静默丢字)。故「收尾」语义在这里
+ * 兑现:任何离开 md 段的路径都先把累积内容渲上屏。这也是节流的安全网:定时器只是兜底,
+ * 真正的收尾由本函数保证。
+ */
 function commitMd(): void {
   if (!state.mdActive) return;
+  flushMdSegment();
   state.mdActive = false;
   state.mdBuf = '';
+  state.mdLastRenderAt = 0;
+  state.mdRenderedLen = 0;
   content.commitSegment();
 }
 
@@ -237,24 +291,19 @@ export function bannerHeight(): number {
   return state.bannerH;
 }
 
+/** 本段已渲染进缓冲的 mdBuf 长度(节流的内容判定用;md 段外无意义故返回 0)。 */
+function mdRenderedLen(): number {
+  return state.mdActive ? state.mdRenderedLen : 0;
+}
+
 /**
- * markdown 正文写(替代 contentWrite 用于 agent onText):累积 chunk 到 mdBuf,每 chunk 把整段
- * mdBuf 经 renderMarkdown 渲成自洽 ANSI 行,replace 缓冲段(content.setLines 截旧 + 写新),
- * repaintViewport 重画(仅尾 offset=0 且未暂停)。流式安全:未闭合 fence 照常 emit 进行中代码块;
- * renderMarkdown 内部 memo by text 使重复渲染命中缓存。非 TTY / 未激活:直接 stdout.write(与
- * contentWrite 一致,管道流式可见)。
+ * 把当前 mdBuf 渲成自洽行并 replace 缓冲段 + 重画 viewport。
  *
- * 续写位 = 段末下一行(段占 lines.length 行从 segmentStartRow 起);超可视区则滚动留 contentBottom。
- * 物理重画用 repaintViewport(全内容区,原子一次 write 无闪烁)— md 段是缓冲尾,viewport 显尾即显段。
- * 滚动回看(scrollOffset>0)只更新缓冲不物理写(回尾时显);打字中照常物理写——单次 write 结尾 cup 回输入框,IME 锚定不动。
+ * 从 contentWriteMd 抽出的独立步骤:节流路径在「攒够间隔」和「收尾强制补渲」两条路上
+ * 都要用到它。行为与原 contentWriteMd 渲染体逐行一致(滚动回看冻结、续写位推进、
+ * running 态光标归位都在此),调用方只负责决定**何时**调。
  */
-export function contentWriteMd(s: string): void {
-  if (!state.active || !ui.isTTY) {
-    stdout.write(s);
-    return;
-  }
-  if (!state.mdActive) beginMdSegment();
-  state.mdBuf += s;
+function renderMdSegment(): void {
   const g = getGeo();
   // 滚动回看冻结(同 contentWrite):scrollOffset>0 时 setLines 替换段会改缓冲行数,若 offset 不变,
   // 下次 scrollBy→repaintViewport 取漂移窗口、把流式正文画进历史视图。故 setLines 前后算 totalRows 差,
@@ -263,6 +312,7 @@ export function contentWriteMd(s: string): void {
   const totalBefore = scrolled ? content.totalRows() : 0;
   const lines = renderMarkdown(state.mdBuf, g.cols);
   content.setLines(lines, state.mdBuf);
+  state.mdRenderedLen = state.mdBuf.length;
   const segRows = lines.length;
   const available = g.contentBottom - state.segmentStartRow + 1;
   state.contentRow = segRows >= available ? g.contentBottom : state.segmentStartRow + segRows;
@@ -274,12 +324,81 @@ export function contentWriteMd(s: string): void {
       state.scrollOffset = Math.max(0, Math.min(state.scrollOffset + delta, maxOff));
     }
   }
+  state.mdLastRenderAt = Date.now();
   if (state.scrollOffset === 0) {
     repaintViewport(); // 单次 write 结尾 cup 回 runningCaretPos(运行态),IME 锚输入框;打字中不再暂停
     if (state.mode === 'running') {
       const p = runningCaretPos();
       stdout.write(cup(p.row, p.col));
     }
+  }
+}
+
+/**
+ * 立即把mdBuf 渲进缓冲并重画,并撤销待补渲定时器。
+ *
+ * 所有「不能留待定时器补渲」的路径都必须走这里(收尾/ 换段 / resize / 清屏 / 退出):
+ * 缓冲内容是后续一切布局计算(contentInsertAfter 的 segMark 平移、contentRow 续写位、
+ * reflow 的 activeSegmentStart)的地基,留着未渲的 chunk 会让它们算错。
+ *
+ * 导出给 layout-internal/core 的 enterInputMode 用(轮末兜底补渲);core 只在 mdActive
+ * 时调,其余调用方是本模块内的 commitMd / clearContent。
+ */
+export function flushMdSegment(): void {
+  if (state.mdFlushTimer) {
+    clearTimeout(state.mdFlushTimer);
+    state.mdFlushTimer = null;
+  }
+  if (!state.mdActive) return;
+  renderMdSegment();
+}
+
+/**
+ * markdown 正文写(替代 contentWrite 用于 agent onText):累积 chunk 到 mdBuf,**按节流节奏**
+ * 经 renderMarkdown 渲成自洽 ANSI 行,replace 缓冲段(content.setLines)+ repaintViewport 重画。
+ * 非 TTY / 未激活:直接 stdout.write(与 contentWrite 一致,管道流式可见)。
+ *
+ * **节流(2026-10-05)**:每 chunk 重渲整个累积 mdBuf 是 O(n²)(实测 5879 字符回复 →
+ * 1960 chunk → 累计扫描 5.5MB / ~900ms 纯 CPU),而 renderMarkdown 的 LRU memo 在流式下
+ * 必然 miss。改为:距上次渲染不足 MD_RENDER_INTERVAL_MS 时只累积 chunk 并挂补渲定时器。
+ *
+ * 渲染时机由**时间**主导(唯一正常路径的触发条件),内容增益只在「时间未到但已攒了
+ * 远超一帧正常量的字符」时放行:
+ *  - elapsed ≥ MD_RENDER_INTERVAL_MS:正常节流(约 30fps)
+ *  - 累积 ≥ MD_RENDER_BURST_CHARS:防单个超大 chunk 饿死。取 MD_RENDER_BURST_CHARS
+ *    远大于「一个间隔内正常 chunk 的累积量」是重点 —— 否则它会退化成「每 N chunk 渲一次」,
+ *    时间节流失效(实测取 64 时只降到 2x,因为高速流每 20ms 就攒够 64 字符)。
+ *    高速后端(约 5ms/chunk)一个 32ms 间隔约累积 6~7 个 token(~25 字符),故取 512:
+ *    既允许突发大段快速上屏,又不会在正常流里抢在时间节流前面触发。
+ *
+ * 续写位 = 段末下一行(段占 lines.length 行从 segmentStartRow 起);超可视区则滚动留 contentBottom。
+ * 物理重画用 repaintViewport(全内容区,原子一次 write 无闪烁)— md 段是缓冲尾,viewport 显尾即显段。
+ * 滚动回看(scrollOffset>0)只更新缓冲不物理写(回尾时显);打字中照常物理写——单次 write 结尾 cup 回输入框,IME 锚定不动。
+ *
+ * 收尾安全网:onToolCall / 轮末 / resize / 任何非 md 写都经 commitMd → flushMdSegment,
+ * 补渲定时器到点也会渲染,故不存在「最后一段丢失」。见 beginMdSegment/commitMd 的定时器清理。
+ */
+export function contentWriteMd(s: string): void {
+  if (!state.active || !ui.isTTY) {
+    stdout.write(s);
+    return;
+  }
+  if (!state.mdActive) beginMdSegment();
+  state.mdBuf += s;
+  const now = Date.now();
+  const elapsed = now - state.mdLastRenderAt;
+  if (shouldRenderMdSegment(elapsed, state.mdBuf.length - mdRenderedLen())) {
+    flushMdSegment();
+    return;
+  }
+  // 尚未到渲染节奏:挂一个补渲定时器(若已有则不重复挂——同一段内始终只有一个)。
+  // unref:该定时器不该让进程在退出时多留一帧;退出路径由 exitAltScreen 清理。
+  if (!state.mdFlushTimer) {
+    state.mdFlushTimer = setTimeout(() => {
+      state.mdFlushTimer = null;
+      if (state.active && state.mdActive) renderMdSegment();
+    }, MD_RENDER_INTERVAL_MS - elapsed);
+    state.mdFlushTimer.unref?.();
   }
 }
 
@@ -321,6 +440,15 @@ export function clearContent(): void {
   state.scrollLockUntil = 0;
   state.mdActive = false;
   state.mdBuf = '';
+  // 清 md 段状态必须同时撤掉待补渲定时器:否则它在 content.reset() 之后才到点触发,
+  // 往已清空的 buffer 里 setLines(残留 mdBuf 的旧内容) —— /clear、/resume、/theme
+  // 都会走到这里,表现为清屏后凭空冒出几行旧正文。
+  if (state.mdFlushTimer) {
+    clearTimeout(state.mdFlushTimer);
+    state.mdFlushTimer = null;
+  }
+  state.mdLastRenderAt = 0;
+  state.mdRenderedLen = 0;
   // 清内容缓冲时必须同步重置 banner 状态:否则后续 writeBanner() 会走 rewriteBanner 路径,
   // 在已空的 content 上调 replaceHead(0, lines) → startIdx(0) >= committed(0) → 抛错 → REPL 退出。
   // /theme、/clear、/resume 等命令 clearContent 后紧接 writeBanner 的场景均依赖此重置。
@@ -460,6 +588,10 @@ export function dismissWelcomeBlock(): void {
  */
 export function contentInsertAfter(after: number, lines: string[], keepViewport = true): void {
   if (!state.active || lines.length === 0) return;
+  // 节流后 mdBuf 可能仍有未渲 chunk:调用方给的 after 是按**当前 buffer** 算的绝对行索引,
+  // 而待渲 chunk 还没进buffer。不先补渲就会插到错误位置(展开行插进正文中间)。
+  // 故凡有活跃 md 段,插入前先把累积内容渲上屏,让 buffer 与 mdBuf 对齐。
+  if (state.mdActive) flushMdSegment();
   const g = getGeo();
   const totalBefore = content.totalRows();
   const scrolled = state.scrollOffset > 0;
@@ -507,6 +639,8 @@ export function contentInsertAfter(after: number, lines: string[], keepViewport 
  */
 export function contentDeleteFrom(startIdx: number, n: number): void {
   if (!state.active || n <= 0) return;
+  // 同 contentInsertAfter:startIdx 是按当前 buffer 算的,先补渲让两者对齐。
+  if (state.mdActive) flushMdSegment();
   const totalBefore = content.totalRows();
   const scrolled = state.scrollOffset > 0;
   content.deleteFrom(startIdx, n);
@@ -601,6 +735,11 @@ function remapLineForReflow(line: number, change: content.ReflowChange): number 
 
 /** 终端尺寸变化后更新正文布局。列宽变化时先重排欢迎块、再重排 markdown 段;仅高度变化时只重算屏幕锚点。 */
 export function reflowContentForResize(cols: number, colsChanged: boolean): void {
+  // 节流后 mdBuf 可能仍有未渲的 chunk:reflowMarkdown 拿 segment.source(上次 setLines 时
+  // 的 source)按新列宽重排,若 source 滞后于 mdBuf,重排的是旧文本,而紧接着的一次
+  // 补渲又会把新文本按新列宽整段渲一遍 —— 中间这拍白做,更糟的是 oldLines/newLines 的
+  // 选区映射基于旧文本,用户选中的位置会漂。先补渲,让 reflow 看到的 source 与 mdBuf 一致。
+  if (state.mdActive) flushMdSegment();
   const oldTotal = content.totalRows();
   const oldViewportStart = viewportAbsStart();
   const oldViewportEnd = Math.max(oldViewportStart, oldTotal - state.scrollOffset - 1);

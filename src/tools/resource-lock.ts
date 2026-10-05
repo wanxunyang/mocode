@@ -29,10 +29,47 @@ function abortError(): Error {
   return error;
 }
 
+/**
+ * 两个锁请求是否冲突。
+ *
+ * 冲突矩阵(workspace 锁 vs 资源锁):
+ *
+ * |左\右| workspace-write | resource-read | resource-write |
+ * |------|-----------------|--------------|----------------|
+ * | ws-write |冲突(命令互斥) | **不冲突** | 冲突(防命令与 Agent 写同文件) |
+ * | ws-read  | 不冲突 | 不冲突 | 冲突 |
+ * | res-read | 不冲突 | 同 key 不冲突 | 冲突 |
+ *
+ * **唯一放行的是「workspace 写锁 vs 资源读锁」**(表中加粗那格)。这条正是
+ * 「一条 run_command 期间所有 read_file 排队」的根因:run_command 声明
+ * `resources: () => ['workspace']` + `effect: 'process'` → resolveResourceLockRequests
+ * 恒返回 workspace 写锁(resource-lock.ts 的 workspaceWrite()),而 read_file 持
+ * `file:<path>` 读锁,旧判据「任一 write 即冲突」把两者判成互斥 —— 一条 60s 的
+ * `npm test` 会让同 step 的所有 read_file 全部阻塞排队,并行探查退化为串行。
+ *
+ * 放行的依据与 glob/grep 的 `resources: () => []` 豁免同源(见 builtins/index.ts 的
+ * CAPABILITIES 注释「读枚举容忍命令执行期间的瞬时不一致」):run_command **不通过
+ * ChangeSet 写文件**,它的工作区写入对 read_file 不构成事务性冲突 —— read_file 读的是
+ * 单个已知文件,与命令的写入在绝大多数情况下无关。若命令恰好在改这个文件,读到不一致
+ * 内容的后果由既有机制兜住:read_file 的输出带 content hash 记入 artifact,后续
+ * refreshArtifactFreshness / invalidateArtifacts 会把它标 stale。
+ *
+ * **保持冲突的边界(不可放宽)**:
+ * - workspace-write vs resource-write:run_command 与 write_file/edit_file 改同一文件
+ *   必须互斥,否则 ChangeSet 的 read-modify-write 会读到命令的半成品。
+ * - workspace-write vs workspace-write:命令之间互斥(文件句柄 / 端口 / 环境变量共享)。
+ */
 function requestConflicts(a: ResourceLockRequest, b: ResourceLockRequest): boolean {
   if (a.scope === 'workspace' || b.scope === 'workspace') {
-    if (a.mode === 'write' || b.mode === 'write') return true;
-    return false;
+    // 同为 workspace 锁(实践中只有 write):沿用「任一 write 即冲突」。
+    if (a.scope === 'workspace' && b.scope === 'workspace') {
+      return a.mode === 'write' || b.mode === 'write';
+    }
+    const workspaceReq = a.scope === 'workspace' ? a : b;
+    const resourceReq = a.scope === 'workspace' ? b : a;
+    // 放行格:workspace 写锁(命令)与资源读锁(读单个已知文件)不冲突。
+    if (workspaceReq.mode === 'write' && resourceReq.mode === 'read') return false;
+    return workspaceReq.mode === 'write' || resourceReq.mode === 'write';
   }
   return a.key === b.key && (a.mode === 'write' || b.mode === 'write');
 }
