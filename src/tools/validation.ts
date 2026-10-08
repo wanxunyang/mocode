@@ -11,7 +11,10 @@ type CachedValidator = { valid: true; validate: ValidateFunction } | { valid: fa
 const options = {
   allErrors: true,
   strict: false,
-  coerceTypes: false,
+  // 中转网关/弱模型常把 integer/number/boolean 序列化成字符串(如 "100"),
+  // 开启标量强转在校验前自动还原;类型完全不符("abc"→number)仍会被拦,
+  // minimum/maximum 等约束在转换后照常生效。
+  coerceTypes: true,
   useDefaults: false,
   removeAdditional: false,
   validateFormats: false,
@@ -79,7 +82,7 @@ function formatErrors(errors: ErrorObject[] | null | undefined, schema?: Record<
   return body + hint;
 }
 
-/** Validate after tool-local normalization; AJV itself never coerces or mutates arguments. */
+/** Validate after tool-local normalization; AJV coerces scalar strings to declared types. */
 export function validateToolArguments(tool: Tool, args: unknown): ToolArgumentValidation {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return {
