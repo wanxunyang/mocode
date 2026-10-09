@@ -57,7 +57,13 @@ import {
   queryHistoryFromMessages,
   renderHistory,
 } from './message-format.js';
-import { startRunningListener, stopRunningListener, getRunningInput, clearRunningInput } from './running-input.js';
+import {
+  startRunningListener,
+  stopRunningListener,
+  getRunningInput,
+  clearRunningInput,
+  waitForRunningComposer,
+} from './running-input.js';
 
 // ── 斜杠命令树已移到 ./commands.ts ──
 // ── 状态栏已移到 ./status-bar.ts ──
@@ -753,6 +759,9 @@ export async function startRepl(
 
   let hasSubmittedInput = false;
   while (true) {
+    // 运行态 Ctrl+G 打开的输入面板可能在 agent 结束时仍开着:等它关闭再进 INPUT 态,
+    // 否则面板与 promptWithSlashMenu 两个 keypress 监听抢键;面板确认的内容随后经 getRunningInput 预填。
+    await waitForRunningComposer();
     // INPUT 态:画底栏输入框 + 状态行,光标入输入框
     refreshStatusBase(history);
     // 后台反思若已完成(上轮 fire-and-forget),在安全点 flush 一行 dim 摘要:

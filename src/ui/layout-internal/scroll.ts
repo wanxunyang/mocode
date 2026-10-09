@@ -50,7 +50,7 @@ export function screenRowToAbsLine(row: number): number {
  * 直接跳过刷新(冻结视口),而非在这里猜屏幕映射。
  */
 export function repaintContentLine(absIdx: number, line: string): void {
-  if (!state.active) return;
+  if (!state.active || state.overlayActive) return; // 覆盖层打开中不写屏(缓冲已由调用方更新)
   const g = getGeo();
   const row = absIdx - viewportAbsStart() + 1;
   if (row < 1 || row > g.contentBottom) return; // 不在视口内:不猜映射,交由上层处理
@@ -83,7 +83,9 @@ export function repaintContentLine(absIdx: number, line: string): void {
  * 提示「↑ 这是上方滚走的内容」,不与内容区行内 SGR 冲突。
  */
 export function repaintViewport(): void {
-  if (!state.active) return;
+  // 覆盖层(composer)打开中不写屏:setUserActive 的 flush 定时器等路径会调到这里,整幅重画会盖掉弹窗;
+  // 关闭方先 setOverlayActive(false) 再 repaintViewport 还原。
+  if (!state.active || state.overlayActive) return;
   const g = getGeo();
   const h = g.contentBottom;
   const slice = content.sliceFromEnd(state.scrollOffset, h);

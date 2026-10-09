@@ -221,6 +221,8 @@ export function composePlanLines(status: StatusBarData, cols: number): string[] 
  *    model 行    = rows                       (屏底:auto + ctx + cwd) */
 export function drawStatusBar(status?: StatusBarData): void {
   if (!state.active || !state.base) return;
+  // 覆盖层(composer)打开中照常刷底栏:弹窗只占内容区(2..contentBottom-1),底栏行在其外不冲突;
+  // 仅末尾光标归位改为弹窗自报位(见下),防 80ms 心跳把弹窗光标拽到底栏输入框。
   const s = status ?? { ...state.base, status: state.statusText, spinnerFrame: state.spinnerFrame };
   const g = getGeo();
   const planLines = composePlanLines(s, g.cols);
@@ -250,7 +252,10 @@ export function drawStatusBar(status?: StatusBarData): void {
     cup(modelRow, 1) +
     esc.clearLine +
     composeModelLine(s, g.cols);
-  if (state.mode === 'running') {
+  if (state.overlayActive) {
+    // 覆盖层打开中:光标还给弹窗自报位(未报/光标滚出可视区时不归位,由弹窗下次 paint 自行定位)
+    if (state.overlayCaret) out += cup(state.overlayCaret.row, state.overlayCaret.col);
+  } else if (state.mode === 'running') {
     // 运行态(回尾 / 滚动回看均):cup 回输入框光标位(供 IME 锚定)。
     const p = runningCaretPos();
     out += cup(p.row, p.col);
@@ -310,6 +315,7 @@ export function startTurnTimerIfRunning(): void {
  * 打字暂停态(isStreamingPaused)spinner 不画帧——恢复 557e678 前的 spinner 隐形行为(只关 spinner,不动 contentWrite)。
  */
 export function paintLiveAtCursor(text: string): void {
+  if (state.overlayActive) return; // 覆盖层(composer)打开中:不画帧(否则 80ms 心跳覆盖弹窗、抢光标)
   if (!state.active || !ui.isTTY || state.scrollOffset !== 0 || isStreamingPaused()) {
     // 滚动态 / 暂停态:不画新帧。但若有旧帧残留(frameRow),必须清掉——
     // 否则旧 spinner 帧停在历史视图某行,用户看到「思考中」卡在消息堆里(根因)。
@@ -364,6 +370,12 @@ export function paintLiveAtCursor(text: string): void {
 export function clearLiveAtCursor(): void {
   if (!state.active || !ui.isTTY) return;
   if (!state.frameRow) return; // 没画过就不清(避免误清当前续写位内容)
+  if (state.overlayActive) {
+    // 覆盖层打开中:帧不在缓冲里,关闭后 repaintViewport 整幅重画自然抹掉;此处不写屏,只清记录
+    state.frameRow = 0;
+    state.frameCol = 0;
+    return;
+  }
   // 滚动态也清:旧帧不该残留。清"画过的行"(frameRow),回尾后该行由 repaintViewport 重画历史内容。
   // resize 后 contentBottom 可能缩小:frameRow 钳到可视区,避免 cup 到屏外行清错位置。
   const g = getGeo();

@@ -147,6 +147,12 @@ export const state = {
    *  返回 true = 已消费(不再走 layout 默认处理);弹窗自己消费全部事件,
    *  防止背景选区/翻页触发 repaintViewport 重画覆盖弹窗。传 null 注销。 */
   overlayMouseHandler: null as ((e: mouse.MouseEvent) => boolean) | null,
+  /** 全屏覆盖层(composer 输入面板)打开中:内容区 / 状态行 / spinner 帧只喂缓冲不物理写,
+   *  防运行态流式输出与心跳覆盖弹窗、抢走弹窗光标。关闭方负责 repaintViewport 整幅还原。 */
+  overlayActive: false,
+  /** 覆盖层自报的真光标位(1-based 屏坐标;null = 未报/光标不在可视区)。overlay 期间 drawStatusBar
+   *  照常刷底栏,但末尾 cup 回这里而非 runningCaretPos,防 80ms 心跳把弹窗光标拽到底栏输入框。 */
+  overlayCaret: null as { row: number; col: number } | null,
 };
 
 export type LayoutState = typeof state;

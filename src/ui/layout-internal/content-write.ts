@@ -187,7 +187,8 @@ export function contentWrite(s: string): void {
   // 物理写(回尾 offset=0):cup 写起点 + s + (pending 时补 \n 提交换行)+ (运行态 cup 回输入框)。
   // 打字中不再暂停物理写——单次 write 结尾 cup 回 runningCaretPos(输入框),IME 锚定不动(跟踪每次 write
   // 最终位置);旧设计 isStreamingPaused 暂停写致流式卡顿,现单次写归位已无需暂停。
-  if (state.scrollOffset === 0) {
+  // 覆盖层(composer)打开中:只喂缓冲不物理写,关闭后 repaintViewport 整幅还原。
+  if (state.scrollOffset === 0 && !state.overlayActive) {
     let out = cup(startRow, startCol) + s;
     if (pendingWrap) out += '\n'; // 滚动区域底行触发 DECSTBM 上滚、中段 LF 下移到 (下一行,1)
     if (state.mode === 'running') {
@@ -325,7 +326,7 @@ function renderMdSegment(): void {
     }
   }
   state.mdLastRenderAt = Date.now();
-  if (state.scrollOffset === 0) {
+  if (state.scrollOffset === 0 && !state.overlayActive) {
     repaintViewport(); // 单次 write 结尾 cup 回 runningCaretPos(运行态),IME 锚输入框;打字中不再暂停
     if (state.mode === 'running') {
       const p = runningCaretPos();

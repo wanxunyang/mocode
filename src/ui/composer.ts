@@ -500,19 +500,23 @@ export async function promptComposer(opts: ComposerOpts = {}): Promise<ComposerR
     buf += CUP(boxBottom, left);
     buf += `${ui.accent}╰${'─'.repeat(innerW)}╯${ui.reset}`;
 
-    // 光标(滚轮翻看把光标滚出可视区时不画,防 CUP 落到边框/提示行上)
+    // 光标(滚轮翻看把光标滚出可视区时不画,防 CUP 落到边框/提示行上)。
+    // 同步上报给 layout:运行态底栏照常刷新,每次写完据此把光标还给弹窗(而非底栏输入框)。
+    let caret: { row: number; col: number } | null = null;
     const cr = rows[cIdx];
     if (cr) {
       const rowIdx = cIdx - scrollRow;
       if (rowIdx >= 0 && rowIdx < textRows) {
         const vis = displayWidth([...cr.text].slice(0, cur.col - cr.start).join(''));
-        buf += CUP(textTop + rowIdx, left + 1 + vis) + SHOW;
+        caret = { row: textTop + rowIdx, col: left + 1 + vis };
+        buf += CUP(caret.row, caret.col) + SHOW;
       } else {
         buf += SHOW;
       }
     } else {
       buf += SHOW;
     }
+    layout.setOverlayCaret(caret);
     try {
       layout.writeDirect(buf);
     } catch {

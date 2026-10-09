@@ -165,8 +165,11 @@ export function setUserActive(): void {
     if (state.active && state.mode === 'running' && state.scrollOffset === 0) {
       repaintViewport(); // 重画内容区(显示活跃期间缓冲的流式内容)
       drawStatusBar(); // 刷状态行(活跃期间冻住,现恢复)
-      const p = runningCaretPos();
-      stdout.write(cup(p.row, p.col));
+      // 覆盖层(composer)打开中:光标归属弹窗(drawStatusBar 已归位到 overlayCaret),不能拽回底栏输入框
+      if (!state.overlayActive) {
+        const p = runningCaretPos();
+        stdout.write(cup(p.row, p.col));
+      }
     }
   }, USER_ACTIVE_PAUSE_MS);
   state.flushTimer.unref();
@@ -205,6 +208,20 @@ export function setOverlayMouseHandler(fn: ((e: mouse.MouseEvent) => boolean) | 
   state.overlayMouseHandler = fn;
 }
 
+/**
+ * 标记全屏覆盖层(运行态 composer)开/关。开启期间内容区 / 状态行 / spinner 帧只喂缓冲不物理写,
+ * 防流式输出与 80ms 心跳覆盖弹窗。关闭后由调用方 repaintViewport + drawStatusBar 整幅还原。
+ */
+export function setOverlayActive(v: boolean): void {
+  state.overlayActive = v;
+  if (!v) state.overlayCaret = null;
+}
+
+/** 覆盖层(composer)每次 paint 上报自己的光标位;overlay 期间底栏刷新后光标归还此处。null = 不归位。 */
+export function setOverlayCaret(pos: { row: number; col: number } | null): void {
+  state.overlayCaret = pos;
+}
+
 /** picker / 介入面板期间禁用鼠标选区与拖拽(避免 viewport 重画覆盖菜单);滚轮仍可用。面板退出后恢复。 */
 export function setMouseEnabled(v: boolean): void {
   state.mouseEnabled = v;
@@ -239,10 +256,13 @@ export function setMouseEnabled(v: boolean): void {
 function setInputCursorFromClick(screenRow: number, screenCol: number): void {
   if (!state.active || !state.base || !state.lastView) return;
 
-  // running 态:先收归输入态(enterInputMode 会 paintInput 整帧重画;之后我们再按新光标重画一次覆盖即可)
-  if (state.mode !== 'input') {
-    enterInputMode(state.statusText);
-  }
+  // 调用方守卫保证:仅 INPUT 态或介入面板(cursorChangeHandler 已注册)到达此处。
+  // 历史行为是 running 态先 enterInputMode 收归输入态——这会把 RUNNING 击穿成 INPUT:
+  // 走时/实时 token chip 的显示门(state.mode==='running')同时熄灭,而 spinner 自身的
+  // 80ms 心跳不知道 mode 变了,drawStatusBar 走 INPUT 分支把真光标 cup 到内容区续写位,
+  // 产生「点击后 agent 输出区底部闪光标 + 走时消失」的复合 bug。运行态点击输入框已改为
+  // handleMouseEvent 直接 no-op(键盘 ←/→/Home/End 仍可定位 typeahead 光标);
+  // 介入面板期间不切 mode(面板退出后 startTurnTimerIfRunning 才能恢复走时心跳)。
 
   const pos = inputScreenToInputPos(screenRow, screenCol);
   if (!pos) {
@@ -283,9 +303,13 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     scrollWheel(e.dir);
     return;
   }
-  // 输入行左键点击:即使 mouseEnabled=false(如 intervention 面板期间)也允许定位光标,
-  // 提升用户体验(点哪插哪)。拖拽/右键/内容区点击仍受 mouseEnabled 限制。
+  // 输入行左键点击:INPUT 态(含 intervention 面板,其 cursorChangeHandler 已注册)允许定位光标,
+  // 提升用户体验(点哪插哪)。RUNNING 态直接 no-op——光标定位是 INPUT 态交互,运行态
+  // typeahead 由键盘体系管理(←/→/Home/End,running-input.ts),不应触发模式切换(见
+  // setInputCursorFromClick 注释)。mouseEnabled=false 期间(面板)仍走定位分支。
+  // 拖拽/右键/内容区点击仍受 mouseEnabled 限制。
   if (e.button === 0 && e.type === 'press' && isInputRow(e.row)) {
+    if (state.mode === 'running' && !state.cursorChangeHandler) return; // 运行态无文本所有者:点击不改光标
     setInputCursorFromClick(e.row, e.col);
     const pos = inputScreenToInputPos(e.row, e.col);
     if (pos) {

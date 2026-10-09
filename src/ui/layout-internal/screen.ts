@@ -140,3 +140,8 @@ export function contentMode(): void {
 export function isStreamingPaused(): boolean {
   return state.mode === 'running' && Date.now() < state.userActiveUntil;
 }
+
+/** 覆盖层(composer)是否打开:是则各物理写路径跳过写屏(缓冲照常更新),关闭后由调用方整幅重画。 */
+export function isOverlayActive(): boolean {
+  return state.overlayActive;
+}
