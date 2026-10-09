@@ -63,7 +63,7 @@ The implementation is defined by [budget accounting](src/context/budget.ts) and 
 
 ### Multi-agent work in a shared workspace
 
-Sub-agents keep independent history branches, can reuse the parent's conversation prefix, and cannot expand beyond the tool set delegated by the parent step. Consecutive sub-agent calls run in bounded parallel batches (`SUB_AGENT_CONCURRENCY`, default `5`; set `1` for sequential dispatch).
+Sub-agents keep independent history branches, can reuse the parent's conversation prefix, and cannot expand beyond the tool set delegated by the parent step. Consecutive sub-agent calls run in bounded parallel batches (`SUB_AGENT_CONCURRENCY`, default `10`; set `1` for sequential dispatch).
 
 **History isolation is not filesystem isolation.** Sub-agents write directly to the shared workspace and inherit the parent's current rollback turn. There is no private filesystem overlay, per-worker worktree, or post-task ChangeSet merge. Nested tools acquire their own resource locks; supported file edits enforce their own expected-hash checks. These guards do not make an entire multi-step sub-task an isolated transaction. The parent receives the final summary, status, usage, and tracked changed files rather than the full worker transcript. Validation remains an explicit agent choice.
 
@@ -225,7 +225,7 @@ Common backend `base_url` values:
 | `MOCODE_LIFECYCLE`              | Provenance metadata tracking; never ages or rewrites content                                  | `true`                      |
 | `MAX_STEPS`                     | Max agent loop steps per turn (infinite-loop safety only)                                     | `1000`                      |
 | `SUB_AGENT_MAX_STEPS`           | Sub-agent loop safety ceiling; defaults to the main-agent value                               | `1000`                      |
-| `SUB_AGENT_CONCURRENCY`         | Concurrent sub-agent calls per dispatch batch; `1` dispatches them sequentially               | `5`                         |
+| `SUB_AGENT_CONCURRENCY`         | Concurrent sub-agent calls per dispatch batch; `1` dispatches them sequentially               | `10`                        |
 | `SUB_AGENT_MAX_DEPTH`           | Maximum recursive delegation depth                                                            | `3`                         |
 | `SANDBOX_ROOT`                  | Sandbox root directory (file operation boundary; falls back to cwd if unset)                  | none                        |
 | `MOCODE_SUBAGENT_ENABLED`       | Set `false` to veto the `orchestration` route group; unset/`true` allows on-demand routing    | unset                       |

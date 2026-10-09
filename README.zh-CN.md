@@ -54,7 +54,7 @@ MoCode 是一个分层的自治运行时：终端交互层驱动 Agent 内核，
 
 ### 多 Agent 协作：共享工作区，有界并发
 
-子 agent 维护独立历史分支，可以复用父级对话前缀，工具能力不能超出父 step 委派的范围。连续的子 agent 调用按并发上限分批执行（`SUB_AGENT_CONCURRENCY` 默认 `5`，设为 `1` 时逐个派发）。
+子 agent 维护独立历史分支，可以复用父级对话前缀，工具能力不能超出父 step 委派的范围。连续的子 agent 调用按并发上限分批执行（`SUB_AGENT_CONCURRENCY` 默认 `10`，设为 `1` 时逐个派发）。
 
 **历史隔离不等于文件系统隔离。** 子 agent 直接写入共享工作区，并继承父级当前轮次的回滚记录；没有私有文件系统 overlay、每个 worker 独立的 worktree，也没有任务结束后的 ChangeSet 合并阶段。嵌套工具各自获取资源锁，支持的文件编辑各自执行 expected hash 校验；这些保护不意味着整个多步子任务具备事务隔离。主线接收最终摘要、状态、用量和已追踪的改动文件，而不是完整的子任务过程记录。是否验证及验证范围仍由 agent 自主决定。
 
@@ -224,7 +224,7 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 | `MOCODE_LIFECYCLE`              | 只维护 provenance 元数据，不按次数改写正文                                   | `true`                      |
 | `MAX_STEPS`                     | 每轮 Agent 循环最大步数（仅防无限循环）                                      | `1000`                      |
 | `SUB_AGENT_MAX_STEPS`           | 子 Agent 循环安全上限，默认与主 Agent 一致                                   | `1000`                      |
-| `SUB_AGENT_CONCURRENCY`         | 每批子 agent 调用的并发上限；设为 `1` 时逐个派发                             | `5`                         |
+| `SUB_AGENT_CONCURRENCY`         | 每批子 agent 调用的并发上限；设为 `1` 时逐个派发                             | `10`                        |
 | `SUB_AGENT_MAX_DEPTH`           | 递归委派深度上限                                                              | `3`                         |
 | `SANDBOX_ROOT`                  | 沙箱根目录(文件操作边界;未配则用 cwd 兜底)                                   | 无                          |
 | `MOCODE_SUBAGENT_ENABLED`       | 设 `false` 硬禁用 `orchestration`；unset/`true` 允许按需路由                 | 未设置                      |

@@ -130,3 +130,73 @@ test('ToolRuntime coerces string-encoded integers before AJV validation (coerceT
     assert.match(rejected.output, /must be integer/);
   }
 });
+
+/**
+ * 弱模型/中转网关把嵌套数组整体序列化成字符串(真实会话 2026-10-09:
+ * plan_update {"steps":"[{\"title\":...}]"} → "/steps must be array" 乒乓失败)。
+ * AJV coerceTypes 只救标量,不救 string→array;必须在校验前按 schema 声明还原。
+ * 此测试锁定:①合法字符串数组被还原且后续 schema 通过;②元素级还原(steps[i] 里
+ * 声明为数组的字段);③不合法的字符串(非 [ 开头 / parse 失败 / 类型不符)照旧被拦。
+ */
+test('ToolRuntime coerces stringified arrays from weak models before AJV validation', async () => {
+  const seen: unknown[] = [];
+  const runtime = new ToolRuntime({
+    enforceSandbox: () => null,
+  });
+  runtime.registerToolsExtension('coerce-array-test', [
+    {
+      name: 'array_probe',
+      description: 'probe with array params',
+      parameters: {
+        type: 'object',
+        properties: {
+          steps: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                content: { type: 'string' },
+                tags: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['content'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['steps'],
+        additionalProperties: false,
+      },
+      capabilities: { effect: 'read', concurrency: 'parallel' },
+      execute: async (args) => {
+        seen.push({ ...args });
+        return 'ok';
+      },
+    },
+  ]);
+
+  // 真实故障形态:steps 被序列化成字符串。必须还原为数组且 schema 通过。
+  const stepsJson = JSON.stringify([{ content: '写测试', tags: JSON.stringify(['a', 'b']) }, { content: '跑构建' }]);
+  const outcome = await runtime.executeToolOutcome('array_probe', JSON.stringify({ steps: stepsJson }));
+  assert.equal(outcome.status, 'success');
+  assert.deepEqual(seen[0], {
+    steps: [{ content: '写测试', tags: ['a', 'b'] }, { content: '跑构建' }],
+  });
+
+  // 真正的坏值仍要拦:非数组 JSON、类型不符(字符串对象给数组字段)。
+  // bad 数组里放的是「内层 steps 字符串的值」,直接作为 args.steps 传入,不经 JSON.parse(bad)。
+  for (const bad of ['{"content":"x"}', '[1,2]']) {
+    const rejected = await runtime.executeToolOutcome('array_probe', JSON.stringify({ steps: bad }));
+    assert.equal(rejected.status, 'error');
+    assert.equal(rejected.code, 'INVALID_ARGUMENTS');
+  }
+  // parse 失败的字符串(内层非法 JSON):同样作为普通字符串字段值传入。
+  {
+    const rejected = await runtime.executeToolOutcome('array_probe', JSON.stringify({ steps: '[{bad json' }));
+    assert.equal(rejected.status, 'error');
+    assert.equal(rejected.code, 'INVALID_ARGUMENTS');
+  }
+  // 非法元素(缺 required content)照旧被 items 校验拦下。
+  const rejectedElement = await runtime.executeToolOutcome('array_probe', JSON.stringify({ steps: [{}] }));
+  assert.equal(rejectedElement.status, 'error');
+  assert.match(rejectedElement.output, /缺少必填字段/);
+});

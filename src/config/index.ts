@@ -738,7 +738,7 @@ export const config: Config = {
   maxSteps: Number(process.env.MAX_STEPS) || 1000,
   subAgentEnabled: process.env.MOCODE_SUBAGENT_ENABLED === 'true',
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || Number(process.env.MAX_STEPS) || 1000,
-  subAgentConcurrency: Math.max(1, Number(process.env.SUB_AGENT_CONCURRENCY) || 5),
+  subAgentConcurrency: Math.max(1, Number(process.env.SUB_AGENT_CONCURRENCY) || 10),
   subAgentMaxDepth: Math.max(1, Number(process.env.SUB_AGENT_MAX_DEPTH) || 3),
   frontendToolsEnabled: process.env.MOCODE_FRONTEND_TOOLS_ENABLED === 'true',
   computerUseEnabled: process.env.MOCODE_COMPUTER_USE_ENABLED === 'true',
