@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setSandboxRoot } from '../src/sandbox/root.js';
 import { setCurrentSessionId } from '../src/session/state.js';
-import { appendNoteToSection, extractActiveNotesSections } from '../src/session/notes.js';
+import { appendNoteToSection, extractActiveNotesSections, writeCompactionSnapshot } from '../src/session/notes.js';
 import { noteAppendTool } from '../src/tools/builtins/note-append.js';
 import { reinjectSessionNotesIntoSystem } from '../src/config/index.js';
 import type { ToolOutcome } from '../src/tools/types.js';
@@ -175,6 +175,69 @@ test('extractActiveNotesSections: 无笔记段时返空串', () => {
     writeNotes('## Plan: x\n### Steps\n- [ ] 1. a\n');
     const out = extractActiveNotesSections();
     assert.equal(out, '');
+  } finally {
+    teardown();
+  }
+});
+
+test('extractActiveNotesSections: 活跃 plan 在场时跳过 Compaction Snapshot,其余笔记段照常注入', () => {
+  setup();
+  try {
+    // 时序:先压缩写了快照,之后模型建了 plan——写入侧不会再被调用,
+    // 残留快照由注入侧过滤(authoritative 标签 + 过期数据 = 模型反复自证忽略)。
+    writeNotes(
+      [
+        '## Compaction Snapshot',
+        '## Objective\n做 X',
+        '## In Progress\n旧进度',
+        '',
+        '## Plan: fix bug',
+        '### Steps',
+        '- [ ] 1. real step',
+        '',
+        '## Findings',
+        '- f1',
+        '',
+      ].join('\n'),
+    );
+    const out = extractActiveNotesSections();
+    assert.doesNotMatch(out, /Compaction Snapshot/, '活跃 plan 在场时快照不注入');
+    assert.doesNotMatch(out, /旧进度/, '过期快照内容不注入');
+    assert.match(out, /## Findings/, '其余笔记段照常注入');
+    // 对照:plan 移除后快照恢复注入(压缩后无 plan 的恢复路径)
+    writeNotes('## Compaction Snapshot\n## Objective\n做 X\n\n## Findings\n- f1\n');
+    const out2 = extractActiveNotesSections();
+    assert.match(out2, /Compaction Snapshot/, '无 plan 时快照照常注入');
+  } finally {
+    teardown();
+  }
+});
+
+test('writeCompactionSnapshot: 活跃 plan 在场时移除残留旧快照段,不写新快照', () => {
+  setup();
+  try {
+    writeNotes(
+      [
+        '## Compaction Snapshot',
+        '## Objective\n旧目标',
+        '',
+        '## Plan: x',
+        '### Steps',
+        '- [ ] 1. a',
+        '',
+        '## Risks',
+        '- r1',
+        '',
+      ].join('\n'),
+    );
+    writeCompactionSnapshot('## Objective\n新目标\n## In Progress\n新进度');
+    const content = readNotes();
+    assert.doesNotMatch(content, /Compaction Snapshot/, '残留快照段被移除');
+    assert.doesNotMatch(content, /旧目标/, '旧快照内容被移除');
+    assert.doesNotMatch(content, /新目标/, '新快照不写入');
+    assert.match(content, /## Plan: x/, 'plan 段原样保留');
+    assert.match(content, /## Risks/, '其它笔记段原样保留');
+    assert.match(content, /- r1/, '其它段内容保留');
   } finally {
     teardown();
   }

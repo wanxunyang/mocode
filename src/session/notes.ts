@@ -328,6 +328,18 @@ function trimSectionToBudget(body: string, budgetTokens: number): string | null 
 }
 
 /**
+ * 快照段正文的已知子标题(extractProgressSnapshot 从摘要原样透传 `## Objective` /
+ * `## In Progress` / `## Next Steps` 级标题)。段扫描器把任何 `##` 行当段边界,
+ * 若不豁免,快照正文会被切碎成游离段(优先级 0)漏进注入、绕过快照的过滤逻辑。
+ */
+const SNAPSHOT_SUBHEADERS = /^##\s+(Objective|In Progress|Next Steps)\s*(?:[—–-].*)?$/;
+
+/** 快照段的边界:下一个非快照子标题的 `##` 行。 */
+function isSnapshotBoundary(line: string): boolean {
+  return /^##\s/.test(line) && !SNAPSHOT_SUBHEADERS.test(line);
+}
+
+/**
  * 读 notes.md,提取所有活跃笔记段正文(排除 `## Plan:` 与 `## Done:`),
  * 按 NOTES_INJECT_BUDGET_TOKENS 裁剪后返回——供 reinject 注入 system prompt。
  * 裁剪策略:段按优先级排序(Risks>Findings>Decisions>Open Questions>自定义),
@@ -348,6 +360,9 @@ export function extractActiveNotesSections(
     return '';
   }
   const lines = content.split('\n');
+  // 活跃 plan 存在时快照即过期(writeCompactionSnapshot 在 plan 在场时不写,
+  // 但快照先于 plan 写入的时序残留仍会被本函数读到):跳过注入,与写入侧对称。
+  const hasActivePlan = lines.some((l) => /^## Plan:\s*.+$/.test(l));
   const sections: { key: string; body: string }[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -357,15 +372,22 @@ export function extractActiveNotesSections(
       continue;
     }
     const title = m[1];
-    // 跳过 Plan/Done 段(Plan 有专属 ACTIVE_PLAN_MARKER 重注入;Done 是归档不常驻)
-    if (/^Plan:/.test(title) || /^Done:/.test(title)) {
+    const isSnapshot = matchSectionKey(title) === 'compaction_snapshot';
+    const skip =
+      // Plan/Done 段(Plan 有专属 ACTIVE_PLAN_MARKER 重注入;Done 是归档不常驻)
+      /^Plan:/.test(title) ||
+      /^Done:/.test(title) ||
+      // 活跃 plan 在场时快照过期:不注入(authoritative 标签 + 过期数据 = 模型反复自证忽略)
+      (hasActivePlan && isSnapshot);
+    const nextSection = (line: string): boolean => (isSnapshot ? isSnapshotBoundary(line) : /^##\s/.test(line));
+    if (skip) {
       i++;
-      while (i < lines.length && !/^##\s/.test(lines[i])) i++;
+      while (i < lines.length && !nextSection(lines[i])) i++;
       continue;
     }
     const start = i;
     i++;
-    while (i < lines.length && !/^##\s/.test(lines[i])) i++;
+    while (i < lines.length && !nextSection(lines[i])) i++;
     const body = lines.slice(start, i).join('\n').trim();
     if (body) sections.push({ key: matchSectionKey(title), body });
   }
@@ -403,16 +425,45 @@ export function extractActiveNotesSections(
 /** 快照段标题。extractActiveNotesSections 经 matchSectionKey 识别并注入。 */
 export const COMPACTION_SNAPSHOT_TITLE = NOTE_SECTION_TITLES.compaction_snapshot;
 
+/** 从 notes.md 正文移除整个 `## Compaction Snapshot` 段(含其 `## Objective` 等子标题);无该段返原文。 */
+function stripSnapshotSection(existing: string): string {
+  const header = `## ${COMPACTION_SNAPSHOT_TITLE}`;
+  const lines = existing.split('\n');
+  const start = lines.findIndex((l) => l.trim() === header);
+  if (start < 0) return existing;
+  let end = lines.length;
+  for (let k = start + 1; k < lines.length; k++) {
+    if (isSnapshotBoundary(lines[k])) {
+      end = k;
+      break;
+    }
+  }
+  const before = lines.slice(0, start).join('\n').replace(/\s+$/, '');
+  const after = lines.slice(end).join('\n').replace(/^\s+/, '');
+  return [before, after].filter((s) => s.length > 0).join('\n\n') + '\n';
+}
+
 /**
  * 把压缩摘要的关键段固结到 notes.md 的 `## Compaction Snapshot` 段。
- * 整段替换旧快照(不累积);仅在当前无活跃 plan 时写入(已有 plan 时权威计划仍在,
- * 快照只会重复)。body 为空时不动。永不抛错:压缩主流程不能因快照失败而失败。
+ * 整段替换旧快照(不累积);仅在当前无活跃 plan 时写入。body 为空时不动。
+ * 有活跃 plan 时移除残留的旧快照段:写入侧「不写」若配上注入侧「照旧注入」,
+ * 模型每步都会看到一份 authoritative 标签的过期数据,被迫反复自证「快照是旧的,
+ * 我忽略它」——与 {@link extractActiveNotesSections} 的对称过滤一起根治。
+ * 永不抛错:压缩主流程不能因快照失败而失败。
  */
 export function writeCompactionSnapshot(body: string, sessionId = getCurrentSessionId()): void {
   try {
     const trimmed = (body ?? '').trim();
     if (!trimmed) return;
-    if (readActivePlanTitle(sessionId)) return; // 已有权威计划,快照是冗余
+    if (readActivePlanTitle(sessionId)) {
+      // 已有权威计划,快照是冗余:连同旧快照段一并移除(注入侧不再有过期数据可读)
+      const p = getNotesFilePath(sessionId);
+      if (!p) return;
+      const existing = fs.readFileSync(p, 'utf8').replace(/\r\n?/g, '\n');
+      const next = stripSnapshotSection(existing);
+      if (next !== existing) fs.writeFileSync(p, next, 'utf8');
+      return;
+    }
     const p = getNotesFilePath(sessionId);
     if (!p) return;
     let existing = '';
