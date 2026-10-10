@@ -32,7 +32,7 @@ export const TOOL_GROUPS: Record<ToolGroup, readonly string[]> = {
   'agent-meta': ['plan_update', 'note_append', 'ask_human', 'use_skill', 'run_skill'],
   web: ['web_search', 'web_fetch'],
   frontend: ['browser', 'screenshot'],
-  computer: ['computer'],
+  computer: ['computer', 'run_flow'],
   memory: [
     'memory_save',
     'memory_search',
@@ -123,7 +123,7 @@ export const TOOL_ROUTE_GROUPS: Record<ToolRouteGroupName, ToolRouteGroupDefinit
     gateEnv: 'MOCODE_FRONTEND_TOOLS_ENABLED',
   },
   'computer-control': {
-    tools: ['computer'],
+    tools: ['computer', 'run_flow'],
     description: 'Control real desktop applications with mouse, keyboard, scrolling, and visual feedback.',
     gateEnv: 'MOCODE_COMPUTER_USE_ENABLED',
   },

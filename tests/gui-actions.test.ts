@@ -225,3 +225,60 @@ test('parseComputerOutput: P1 元素动作句式(inspect / click_element / set_v
   assert.equal(failed?.intent, 'failed');
   assert.match(failed!.observation, /ELEMENT_NOT_FOUND/);
 });
+
+test('parseComputerOutput: P2 wait_until / paste 句式', () => {
+  assert.deepEqual(
+    parseComputerOutput(
+      'waited until stable: met (1200ms, 4 polls, last frame diff 0.00%). Screen re-captured (primary screen 1920×1080 physical): inspect the attached screenshot.',
+    ),
+    { intent: 'wait_until stable', observation: 'met, 1200ms' },
+  );
+  assert.deepEqual(
+    parseComputerOutput(
+      'waited until element_present Button:"OK": timed out (10000ms, 25 polls). The condition did not hold within 10000ms.',
+    ),
+    { intent: 'wait_until element_present Button:"OK"', observation: 'timed out, 10000ms' },
+  );
+  assert.equal(parseComputerOutput(RE_CAPTURED('pasted 300 characters via clipboard'))?.intent, 'paste 300 chars');
+  assert.equal(
+    parseComputerOutput(
+      RE_CAPTURED(
+        'pasted 5 characters via clipboard (WARNING: the previous clipboard held non-text data (image/files) and could not be restored)',
+      ),
+    )?.intent,
+    'paste 5 chars',
+  );
+});
+
+test('parseComputerOutput: P3 窗口作用域句式(list_windows / focus_window / 窗口截图)', () => {
+  assert.deepEqual(
+    parseComputerOutput(
+      'Windows (5, front to back). Rects are normalized 0-1000 [x, y, w, h] over the primary screen.\nw1 notepad.exe "x"',
+    ),
+    { intent: 'list_windows', observation: '5 windows' },
+  );
+  assert.deepEqual(
+    parseComputerOutput(
+      'Focused w2 notepad.exe "无标题 - Notepad" rect=[40, 70, 500, 500] (normalized 0-1000 over the primary screen). Screen re-captured (shown at 960×540).',
+    ),
+    { intent: 'focus_window w2', observation: 're-captured' },
+  );
+  assert.deepEqual(
+    parseComputerOutput(
+      'Focused w2 notepad.exe "x" (normalized). Screen re-captured (shown at 960×540). The OS refused the foreground switch (focus-stealing protection).',
+    ),
+    { intent: 'focus_window w2', observation: 're-captured, OS refused foreground switch' },
+  );
+  assert.deepEqual(
+    parseComputerOutput(
+      'w4 chrome.exe "页面" is on a secondary display or off-screen, so it was NOT focused or moved (computer actions only reach the primary screen).',
+    ),
+    { intent: 'focus_window w4', observation: 'not focused (secondary display)' },
+  );
+  assert.deepEqual(
+    parseComputerOutput(
+      'Window screenshot of w2 notepad.exe "无标题" (printwindow, 923×587 physical, shown at 923×587). On the primary screen this window occupies normalized rect [40, 70, 480, 540].',
+    ),
+    { intent: 'screenshot window w2', observation: 'captured (printwindow, window only)' },
+  );
+});

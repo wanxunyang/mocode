@@ -283,7 +283,7 @@ Routing rules:
 - background-exec is for any process that must keep running after the tool call returns: dev servers, inference/model services, watchers, log tails, or a command you will poll later. Foreground run_command blocks and is killed at its timeout, so it cannot host them.
 - Web UI DOM/console/network/page sessions need browser-debug; a local web server alone only needs background-exec.
 - Merely observing system dialogs or non-browser windows needs desktop-observe.
-- computer-control requires explicit real GUI clicking, typing, scrolling, or desktop application operation; never infer it from the word "browser" alone.
+- computer-control requires explicit real GUI clicking, typing, scrolling, or desktop application operation, including replaying a recorded desktop flow (run_flow); never infer it from the word "browser" alone.
 - memory-write requires explicit intent to remember, update, forget, or link cross-session knowledge.
 - orchestration is for exploration-heavy or parallelizable work: open-ended codebase investigation, multi-file research or audits, independent sub-tasks that can run in parallel, or a fork skill. Prefer it whenever the task needs substantial exploration whose tool output would flood the main context; a single trivial lookup does not need it.
 - For short continuations such as "continue", "do it", or "fix that", inherit previous groups unless the user clearly starts a new task.

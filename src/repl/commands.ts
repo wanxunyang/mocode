@@ -80,6 +80,16 @@ export function buildSlashCommands(): SlashCommand[] {
       ],
     },
     {
+      name: '/flow',
+      desc: d('commands.flow'),
+      children: [
+        { name: 'list', value: '/flow list', desc: d('commands.flowList') },
+        { name: 'show', value: '/flow show ', submit: false, desc: d('commands.flowShow') },
+        { name: 'save', value: '/flow save ', submit: false, desc: d('commands.flowSave') },
+        { name: 'run', value: '/flow run ', submit: false, desc: d('commands.flowRun') },
+      ],
+    },
+    {
       name: '/mcp',
       desc: d('commands.mcp'),
       children: [

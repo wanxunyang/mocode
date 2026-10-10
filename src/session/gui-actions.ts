@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getSandboxRoot } from '../sandbox/root.js';
+import { LIST_WINDOWS_OUTPUT_PREFIX } from '../runtime/window-list.js';
 import { getCurrentSessionId } from './state.js';
 
 /** 台账文件名:与 notes.md 同目录(会话目录)。 */
@@ -60,6 +61,8 @@ function normalizeIntent(summary: string): string {
   // 顺序敏感:先处理带自身句式的动作,最后才是泛化的 "<action> at (x, y)"。
   text = text.replace(/^moved cursor to (\(.*\))$/, 'mouse_move $1');
   text = text.replace(/^typed ([\d.]+) characters$/, 'type $1 chars');
+  // type 的 paste 路径(computer.ts):`pasted 300 characters via clipboard[ (WARNING: ...)]` → `paste 300 chars`。
+  text = text.replace(/^pasted ([\d.]+) characters via clipboard(?: \(WARNING:.*\))?$/, 'paste $1 chars');
   text = text.replace(/^pressed key combo (".*")$/, 'key $1');
   text = text.replace(/^dragged from (\([^)]*\)) to (\([^)]*\))$/, 'drag $1 -> $2');
   text = text.replace(/^scrolled (\w+) by ([\d.]+) at (\(.*\))$/, 'scroll $1 $2 $3');
@@ -105,6 +108,41 @@ export function parseComputerOutput(output: string): GuiActionEntry | null {
   if (text.startsWith('UI elements of window ')) {
     const n = /, (\d+) nodes \(/.exec(text);
     return { intent: 'inspect', observation: n ? `${n[1]} nodes` : 'listed' };
+  }
+  // 窗口作用域(computer.ts, design-notes/computer-use-rpa.md §4)。
+  // list_windows:`Windows (N, front to back). ...`,只回灌文本。
+  if (text.startsWith(LIST_WINDOWS_OUTPUT_PREFIX)) {
+    const n = /^Windows \((\d+)/.exec(text);
+    return { intent: 'list_windows', observation: n ? `${n[1]} windows` : 'listed' };
+  }
+  // focus_window 副屏窗口默认不搬动:`w3 app.exe "title" is on a secondary display or off-screen, so it was NOT focused ...`。
+  const notFocused = /^(w\d+) .* is on a secondary display or off-screen, so it was NOT focused/.exec(text);
+  if (notFocused) {
+    return { intent: `focus_window ${notFocused[1]}`, observation: 'not focused (secondary display)' };
+  }
+  // focus_window 成功路径:`Focused w3 app.exe "title" rect=[...]. Screen re-captured ...`;系统拒绝前台切换时如实标注。
+  const focused = /^Focused (w\d+) /.exec(text);
+  if (focused) {
+    const refused = text.includes('The OS refused the foreground switch');
+    return {
+      intent: `focus_window ${focused[1]}`,
+      observation: refused ? 're-captured, OS refused foreground switch' : 're-captured',
+    };
+  }
+  // 窗口截图:`Window screenshot of w3 app.exe "title" (printwindow, 923×587 physical, ...)`;不是整屏基准,不参与差分。
+  const winShot = /^Window screenshot of (w\d+) .*? \((printwindow|screen),/.exec(text);
+  if (winShot) {
+    return { intent: `screenshot window ${winShot[1]}`, observation: `captured (${winShot[2]}, window only)` };
+  }
+
+  // wait_until(computer.ts):`waited until <cond>: met (1200ms, 4 polls...)` / `... timed out (10000ms, ...)`。
+  // 台账只记条件与耗时;met 只代表轮询条件成立,仍遵循"像素优先"纪律,不升级成任务成功。
+  const waited = /^waited until (.+?): (met|timed out) \((\d+)ms/.exec(text);
+  if (waited) {
+    return {
+      intent: `wait_until ${truncateDetail(waited[1])}`,
+      observation: `${waited[2]}, ${waited[3]}ms`,
+    };
   }
 
   const diffMatch = /\.\s*No visible change on screen \(frame diff ([\d.]+)%/.exec(text);

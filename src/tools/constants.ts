@@ -164,6 +164,7 @@ export const PLAN_DISABLED_TOOLS = new Set([
   'sub-agent',
   'run_skill', // fork 子 agent 执行面;plan 模式不应派生子工作流
   'computer', // 桌面操控:plan 只读模式无论开关状态都永远屏蔽
+  'run_flow', // 回放录制的桌面 flow:同 computer,plan 模式永远屏蔽
 ]);
 
 /**

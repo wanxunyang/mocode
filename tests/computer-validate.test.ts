@@ -111,3 +111,58 @@ test('validateComputerArgs: P1 元素动作(inspect/click_element/set_value)', (
   assert.equal(validateComputerArgs({ action: 'set_value', ref: 'e1', text: '' }), null);
   assert.ok(validateComputerArgs({ action: 'set_value', ref: 'e1', text: 'x', via: 'mouse' }));
 });
+
+test('validateComputerArgs: P2 wait_until 条件与超时', () => {
+  assert.match(validateComputerArgs({ action: 'wait_until' })!, /condition/);
+  assert.ok(validateComputerArgs({ action: 'wait_until', condition: { kind: 'bogus' } }));
+  assert.equal(validateComputerArgs({ action: 'wait_until', condition: { kind: 'stable' } }), null);
+  assert.equal(validateComputerArgs({ action: 'wait_until', condition: { kind: 'changed' }, timeout_ms: 5000 }), null);
+  assert.ok(validateComputerArgs({ action: 'wait_until', condition: { kind: 'stable', frames: 9 } }));
+  assert.ok(validateComputerArgs({ action: 'wait_until', condition: { kind: 'stable' }, timeout_ms: 100 }));
+  assert.ok(validateComputerArgs({ action: 'wait_until', condition: { kind: 'stable' }, timeout_ms: 30001 }));
+  // element_*:ref 与 selector_text 必须二选一
+  assert.ok(validateComputerArgs({ action: 'wait_until', condition: { kind: 'element_present' } }));
+  assert.ok(
+    validateComputerArgs({
+      action: 'wait_until',
+      condition: { kind: 'element_present', ref: 'e1', selector_text: '"OK"' },
+    }),
+  );
+  assert.equal(validateComputerArgs({ action: 'wait_until', condition: { kind: 'element_present', ref: 'e1' } }), null);
+  assert.equal(
+    validateComputerArgs({
+      action: 'wait_until',
+      condition: { kind: 'element_absent', selector_text: 'Button:"确定"' },
+    }),
+    null,
+  );
+  assert.ok(validateComputerArgs({ action: 'wait_until', condition: { kind: 'element_absent', selector_text: 'OK' } }));
+});
+
+test('validateComputerArgs: P2 type.method 取值', () => {
+  assert.equal(validateComputerArgs({ action: 'type', text: 'hi' }), null);
+  for (const method of ['auto', 'keys', 'paste']) {
+    assert.equal(validateComputerArgs({ action: 'type', text: 'hi', method }), null);
+  }
+  assert.match(validateComputerArgs({ action: 'type', text: 'hi', method: 'clipboard' })!, /auto\|keys\|paste/);
+});
+
+test('validateComputerArgs: P3 窗口作用域参数', () => {
+  // list_windows 无需参数
+  assert.equal(validateComputerArgs({ action: 'list_windows' }), null);
+  // focus_window 必须给 window 或 title_regex
+  assert.match(validateComputerArgs({ action: 'focus_window' })!, /requires window/);
+  assert.equal(validateComputerArgs({ action: 'focus_window', window: 'w3' }), null);
+  assert.equal(validateComputerArgs({ action: 'focus_window', title_regex: 'Notepad', move_to_primary: true }), null);
+  // window 必须是 wN;title_regex 非空;二者互斥
+  assert.ok(validateComputerArgs({ action: 'focus_window', window: '3' }));
+  assert.ok(validateComputerArgs({ action: 'focus_window', window: 'w' }));
+  assert.ok(validateComputerArgs({ action: 'focus_window', title_regex: '' }));
+  assert.match(validateComputerArgs({ action: 'focus_window', window: 'w1', title_regex: 'x' })!, /not both/);
+  // move_to_primary 必须是布尔
+  assert.ok(validateComputerArgs({ action: 'focus_window', window: 'w1', move_to_primary: 'yes' }));
+  // inspect / screenshot 可带窗口作用域
+  assert.equal(validateComputerArgs({ action: 'inspect', window: 'w2' }), null);
+  assert.equal(validateComputerArgs({ action: 'screenshot', title_regex: 'Notepad' }), null);
+  assert.ok(validateComputerArgs({ action: 'inspect', window: 'bogus' }));
+});

@@ -26,6 +26,7 @@ import { subAgentTool } from './task.js';
 import { arenaTool } from './arena.js';
 import { messageBusTool } from './message-bus.js';
 import { computerTool } from './computer.js';
+import { runFlowTool } from './run-flow.js';
 import { sessionSearchTool } from './session-search.js';
 
 /**
@@ -91,6 +92,8 @@ export const CAPABILITIES: Record<string, ToolCapabilities> = {
   // computer 桌面操控:桌面状态全局唯一,任何两个 computer 调用都不允许并发;
   // effect=process(不写工作区文件,不触发 rollback/diff 追踪),supportsAbort 中断长 wait/拖拽。
   computer: { effect: 'process', concurrency: 'serial', resources: () => ['desktop'], supportsAbort: true },
+  // run_flow 回放录制的桌面流程:内部直接驱动 computer,同样独占 desktop 资源,可中断。
+  run_flow: { effect: 'process', concurrency: 'serial', resources: () => ['desktop'], supportsAbort: true },
   // sub-agent 与主 agent 同权,直接写工作区(无 overlay)。编排器本身不持锁——锁由嵌套工具
   // 各自获取,否则子 agent 内的 run_command 会等父持有的 workspace 锁而自锁。
   // parallelOrchestration:同一轮派发的多个子 agent 按 subAgentConcurrency 上限成批并行
@@ -139,6 +142,7 @@ const rawBuiltinTools: Tool[] = [
   arenaTool,
   messageBusTool,
   computerTool,
+  runFlowTool,
   sessionSearchTool,
 ];
 

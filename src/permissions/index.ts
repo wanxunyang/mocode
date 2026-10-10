@@ -52,35 +52,11 @@ function canonicalProjectRoot(root: string): string {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
-/**
- * computer 工具的 type/key 文本内容审查:
- * 命中 URL / 密码形态 / 支付关键词时,无论是否已授权都强制 once 级确认——
- * 这类文本是「把内容敲进任意应用」的载体,不能因 session/项目授权而放行后续所有输入。
- * 纯函数,独立可单测。
- */
-export function computerTextNeedsReview(text: string): boolean {
-  const s = text.toLowerCase();
-  if (/https?:\/\/|www\.[a-z0-9-]+\.[a-z]{2,}/i.test(s)) return true;
-  if (/\b(pass(word)?|passwd|pwd|secret|token|api[_-]?key|credential)\b\s*[:=]/i.test(s)) return true;
-  if (/\b(card\s*number|cvv|cvc|expiry)\b/i.test(s)) return true;
-  // CJK 关键词没有 \b 词边界概念(\b 只在 \w 与非 \w 之间成立,中文不是 \w),用普通子串匹配。
-  if (/信用卡|卡号|密码|支付|付款|验证码/.test(s)) return true;
-  return false;
-}
-
-/**
- * computer click_element 目标元素名审查(design-notes/computer-use-rpa.md §2.6):
- * 名称命中删除/发送/提交/支付类关键词时强制 once 级确认——这类按钮一点即产生外部副作用,
- * 不能因为「本会话允许 click_element」而静默放行。纯函数,独立可单测。
- */
-export function computerTargetNeedsReview(name: string): boolean {
-  const s = name.toLowerCase();
-  if (/\b(delete|remove|send|submit|pay|purchase|buy|checkout|confirm|transfer|uninstall|format|erase)\b/i.test(s)) {
-    return true;
-  }
-  if (/删除|移除|发送|提交|支付|付款|购买|下单|确认|转账|卸载|格式化|清空/.test(s)) return true;
-  return false;
-}
+// 敏感内容谓词住在叶子模块 computer-review.ts(flows/ 要复用,而本文件将反过来读 flow 文件,
+// 放叶子里避免 import 环);这里 re-export 保持既有 API 与测试不变。
+import { computerTargetNeedsReview, computerTextNeedsReview } from './computer-review.js';
+export { computerTargetNeedsReview, computerTextNeedsReview };
+import { reviewFlowRun } from './flow-review.js';
 
 /** computer 调用是否命中「强制 once」审查:敏感文本(type/key/set_value)或敏感按钮(click_element)。 */
 export function computerArgsNeedReview(args: Record<string, unknown>): boolean {
@@ -107,6 +83,10 @@ export function permissionFingerprint(tool: Tool, args: Record<string, unknown>)
     // computer:坐标/文本每次不同,进指纹会让每次点击都弹窗(功能上等同不可用)。
     // 按动作粒度授权:允许一次 left_click = 本会话允许任意坐标的左键。
     subject = { computer: typeof args.action === 'string' ? args.action : 'unknown' };
+  } else if (tool.name === 'run_flow') {
+    // run_flow:授权绑定 flow 名 + 文件 hash(flow 被改过,旧授权立即失效);参数值不进指纹。
+    const review = reviewFlowRun(args);
+    subject = { run_flow: review.name, hash: review.hash ?? 'unloadable' };
   } else {
     let resources: string[] | undefined;
     try {
@@ -175,7 +155,9 @@ export function getToolRisk(tool: Tool): ToolRisk {
   return tool.risk ?? 'safe';
 }
 
-function summarizeArgs(args: Record<string, unknown>): string {
+function summarizeArgs(args: Record<string, unknown>, toolName?: string): string {
+  // run_flow:弹窗展示整条 flow 的步骤摘要与参数(secret 以 *** 显示),而不是只有一个 flow 名。
+  if (toolName === 'run_flow') return reviewFlowRun(args).summary;
   const lines: string[] = [];
   if (typeof args.path === 'string') lines.push(t('permission.path', { value: args.path }));
   if (typeof args.command === 'string') lines.push(t('permission.command', { value: args.command }));
@@ -233,7 +215,11 @@ async function checkPermissionWithSessionGrants(
   // computer 命中敏感内容时强制 once 级确认:type/key/set_value 的文本(URL/密码/支付),
   // 或 click_element 的目标按钮名(删除/发送/支付…)。不看任何授权缓存,也不提供
   // session/项目/永久授权选项——这类动作一旦放行不该沿用到下一次。
-  const forceOnce = tool.name === 'computer' && computerArgsNeedReview(args);
+  // run_flow 回放内部的单步不再走本函数,所以整条 flow 的敏感判定在启动前一次做完(flow-review.ts)。
+  const flowReview = tool.name === 'run_flow' ? reviewFlowRun(args) : undefined;
+  const forceOnce =
+    (tool.name === 'computer' && computerArgsNeedReview(args)) ||
+    (flowReview !== undefined && flowReview.reasons.length > 0);
 
   const fingerprint = permissionFingerprint(tool, args);
   const projectRoot = canonicalProjectRoot(options.projectRoot ?? getSandboxRoot() ?? process.cwd());
@@ -258,8 +244,14 @@ async function checkPermissionWithSessionGrants(
 
   // 新手首次审批引导:第一次弹出确认面板时附一段说明(每个用户只出现一次,
   // ~/.mocode/config 的 onboarding_approval_hint 标记;读写失败静默,不阻断审批)。
-  let detail = summarizeArgs(args) + (dangerous ? `\n\n${t('permission.dangerWarning')}` : '');
-  if (forceOnce) detail += `\n\n${t('permission.computerSensitiveReview')}`;
+  // run_flow:弹窗展示整条 flow 的步骤摘要(不含 secret 取值)与触发强制确认的原因。
+  let detail =
+    (flowReview ? flowReview.summary : summarizeArgs(args)) + (dangerous ? `\n\n${t('permission.dangerWarning')}` : '');
+  if (forceOnce) {
+    detail += flowReview?.reasons.length
+      ? `\n\nPer-run approval required:\n${flowReview.reasons.map((r) => `  - ${r}`).join('\n')}`
+      : `\n\n${t('permission.computerSensitiveReview')}`;
+  }
   const ONBOARDING_KEY = 'onboarding_approval_hint';
   try {
     if (!readConfigFile()[ONBOARDING_KEY]) {

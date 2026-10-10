@@ -8,7 +8,7 @@
  * 安全:risk=dangerous(权限弹窗默认高亮「拒绝」),plan 模式常驻屏蔽,
  * /cu off 时既不进 schema 也被运行时兜底拦截。
  */
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { jailResolve } from '../../sandbox/index.js';
 import { captureDesktop } from '../../runtime/screen-capture.js';
@@ -27,17 +27,48 @@ import {
   type PngImage,
 } from '../../runtime/screen-pipeline.js';
 import { createInputInjector, type InputInjector } from '../../runtime/input-injector.js';
-import { getUiaService, UiaElementGoneError } from '../../runtime/uia-service.js';
+import { getUiaService, UiaElementGoneError, UiaWindowGoneError } from '../../runtime/uia-service.js';
+import {
+  formatWindowList,
+  pickWindow,
+  pickWindowForReplay,
+  type PickResult,
+  type WindowItem,
+} from '../../runtime/window-list.js';
 import {
   clearElementRefNames,
   formatSnapshot,
+  matchSelector,
   rectCenter,
+  rectToNorm,
   selectDisplayNodes,
   setElementRefNames,
   type DisplayElement,
   type UiaRawTree,
+  type UiaSelector,
 } from '../../runtime/uia-selector.js';
-import type { Tool, ToolOutcome } from '../types.js';
+import {
+  describeCondition,
+  parseWaitCondition,
+  pickTypeMethod,
+  waitUntil,
+  WAIT_UNTIL_DEFAULT_TIMEOUT_MS,
+  WAIT_UNTIL_MAX_TIMEOUT_MS,
+  WAIT_UNTIL_MIN_TIMEOUT_MS,
+  type ElementTarget,
+} from '../../runtime/wait-until.js';
+import {
+  appendTrace,
+  buildTraceEntry,
+  isRecordedAction,
+  isTraceSuspended,
+  nextTraceSeq,
+  outputIndicatesChange,
+  traceEnabled,
+  type TraceBuildContext,
+} from '../../flows/trace.js';
+import { lookupElementRefName } from '../../runtime/uia-selector.js';
+import type { Tool, ToolExecuteResult, ToolOutcome } from '../types.js';
 
 /**
  * 喂模型的截图长边上限。1280 是 Anthropic 的兼容下限,1568 对齐主流视觉模型原生分辨率 ——
@@ -85,10 +116,13 @@ const ACTIONS = [
   'key',
   'scroll',
   'wait',
+  'wait_until',
   'cursor_position',
   'inspect',
   'click_element',
   'set_value',
+  'list_windows',
+  'focus_window',
 ] as const;
 type ComputerAction = (typeof ACTIONS)[number];
 
@@ -143,6 +177,25 @@ export function validateComputerArgs(args: Record<string, unknown>): string | nu
       return `action "${action}" requires a non-empty text string`;
     }
   }
+  if (action === 'type' && args.method !== undefined) {
+    if (args.method !== 'auto' && args.method !== 'keys' && args.method !== 'paste') {
+      return 'type method must be auto|keys|paste';
+    }
+  }
+  if (action === 'wait_until') {
+    const parsed = parseWaitCondition(args.condition, diffThreshold());
+    if (!parsed.ok) return parsed.error;
+    const to = args.timeout_ms;
+    if (
+      to !== undefined &&
+      (typeof to !== 'number' ||
+        !Number.isInteger(to) ||
+        to < WAIT_UNTIL_MIN_TIMEOUT_MS ||
+        to > WAIT_UNTIL_MAX_TIMEOUT_MS)
+    ) {
+      return `timeout_ms must be an integer in ${WAIT_UNTIL_MIN_TIMEOUT_MS}-${WAIT_UNTIL_MAX_TIMEOUT_MS}`;
+    }
+  }
   if (action === 'scroll') {
     const dir = args.scroll_direction;
     if (dir !== 'up' && dir !== 'down' && dir !== 'left' && dir !== 'right') {
@@ -186,6 +239,22 @@ export function validateComputerArgs(args: Record<string, unknown>): string | nu
     if (args.via !== undefined && args.via !== 'pattern' && args.via !== 'keys') {
       return 'set_value via must be pattern|keys';
     }
+  }
+  // 窗口作用域(design-notes/computer-use-rpa.md §4):window("wN",来自最近一次 list_windows)与 title_regex 二选一。
+  const hasWin = args.window !== undefined;
+  const hasRe = args.title_regex !== undefined;
+  if (hasWin && (typeof args.window !== 'string' || !/^w\d+$/.test(args.window))) {
+    return 'window must look like "w3" (a ref from the latest list_windows); use title_regex to match by title';
+  }
+  if (hasRe && (typeof args.title_regex !== 'string' || args.title_regex.length === 0)) {
+    return 'title_regex must be a non-empty string';
+  }
+  if (hasWin && hasRe) return 'pass either window or title_regex, not both';
+  if (action === 'focus_window' && !hasWin && !hasRe) {
+    return 'action "focus_window" requires window ("wN" from list_windows) or title_regex';
+  }
+  if (args.move_to_primary !== undefined && typeof args.move_to_primary !== 'boolean') {
+    return 'move_to_primary must be a boolean';
   }
   return null;
 }
@@ -232,10 +301,42 @@ interface ElementSnapshot {
 let elementSnapshot: ElementSnapshot | null = null;
 let snapshotGeneration = 0;
 
+/**
+ * 最近一次 list_windows 的窗口快照(w1..wN → hwnd)。ref 只在下一次 list_windows 之前有效;
+ * title_regex 选择走实时枚举、不覆盖它,以免悄悄让模型手里的 wN 失效。
+ */
+let windowSnapshot: WindowItem[] = [];
+
+/** 窗口选择失败(ref 过期 / 正则无匹配或歧义)。execute 据此返回专门前缀,让模型重新 list_windows。 */
+class WindowSelectionError extends Error {}
+
+/** 按 window:'wN'(快照)或 title_regex(实时枚举)选窗口。 */
+async function resolveWindow(
+  args: Record<string, unknown>,
+  screen: ScreenState,
+  signal: AbortSignal | undefined,
+): Promise<WindowItem> {
+  let picked: PickResult;
+  if (typeof args.window === 'string') {
+    picked = pickWindow(windowSnapshot, { ref: args.window });
+  } else {
+    const { items } = formatWindowList(await getUiaService().windows(signal), screen);
+    picked = pickWindow(items, { titleRegex: args.title_regex as string });
+  }
+  if (!picked.ok) throw new WindowSelectionError(picked.error);
+  return picked.item;
+}
+
+function windowLabel(w: WindowItem): string {
+  const title = w.title.replace(/\s+/g, ' ').trim();
+  return `${w.ref} ${w.processName ? `${w.processName}.exe` : 'unknown'} ${JSON.stringify(title.length > 60 ? `${title.slice(0, 60)}…` : title)}`;
+}
+
 export function resetComputerState(): void {
   geometryCache = null;
   lastFrame = null;
   elementSnapshot = null;
+  windowSnapshot = [];
   clearElementRefNames();
 }
 
@@ -446,8 +547,20 @@ async function executeAction(
       return `dragged from (${x0}, ${y0}) to (${x1}, ${y1})`;
     }
     case 'type': {
-      await injector.typeText(args.text as string);
-      return `typed ${(args.text as string).length} characters`;
+      const text = args.text as string;
+      const rawMethod = args.method as 'auto' | 'keys' | 'paste' | undefined;
+      const method = pickTypeMethod(text, rawMethod === 'auto' ? undefined : rawMethod);
+      if (method === 'paste') {
+        const { clipboardOverwritten } = await injector.paste(text);
+        return (
+          `pasted ${text.length} characters via clipboard` +
+          (clipboardOverwritten
+            ? ' (WARNING: the previous clipboard held non-text data (image/files) and could not be restored)'
+            : '')
+        );
+      }
+      await injector.typeText(text);
+      return `typed ${text.length} characters`;
     }
     case 'key': {
       await injector.pressKey(args.text as string);
@@ -586,7 +699,7 @@ export function resetComputerMetrics(): void {
   metrics.length = 0;
 }
 
-export const computerTool: Tool = {
+const computerToolBase: Tool = {
   name: 'computer',
   description:
     'Control the desktop GUI: move/click the mouse, type text, press keys, scroll, and zoom into screen regions. ' +
@@ -645,6 +758,24 @@ export const computerTool: Tool = {
         type: 'boolean',
         description: 'inspect only: also attach a screenshot (default false; the element list is usually enough).',
       },
+      window: {
+        type: 'string',
+        description:
+          'Window ref like "w3" from the latest list_windows. focus_window: the window to bring to front. ' +
+          'inspect / screenshot: scope to that window (works even when it is covered by other windows).',
+      },
+      title_regex: {
+        type: 'string',
+        description:
+          'Alternative to window: case-insensitive regex matched against window titles (must match exactly one window). ' +
+          'focus_window / inspect / screenshot.',
+      },
+      move_to_primary: {
+        type: 'boolean',
+        description:
+          'focus_window only: if the window is on a secondary display or off-screen, move it to the primary screen first ' +
+          '(default false: a window on another display is only reported, not moved).',
+      },
       ref: {
         type: 'string',
         description:
@@ -662,6 +793,25 @@ export const computerTool: Tool = {
         description:
           'click_element: "mouse" (default, real click at the live element center) or "pattern" (UIA Invoke/Toggle/Select/Expand, no mouse). ' +
           'set_value: "pattern" (ValuePattern, default when supported) or "keys" (focus, select all, type).',
+      },
+      condition: {
+        type: 'object',
+        description:
+          'wait_until only. { kind: "stable" | "changed" | "element_present" | "element_absent", ' +
+          'frames?: 2-5 (stable), threshold?: 0-1 frame-diff ratio, interval_ms?: 200-2000, ' +
+          'ref?: "e12" or selector_text?: \'Button:"OK"\' (element_* only, exactly one) }. ' +
+          '"stable" = screen stops changing (page/app finished loading); "changed" = screen differs from the last screenshot you saw.',
+      },
+      timeout_ms: {
+        type: 'integer',
+        description: `wait_until only: give up after this many ms (${WAIT_UNTIL_MIN_TIMEOUT_MS}-${WAIT_UNTIL_MAX_TIMEOUT_MS}, default ${WAIT_UNTIL_DEFAULT_TIMEOUT_MS}).`,
+      },
+      method: {
+        type: 'string',
+        enum: ['auto', 'keys', 'paste'],
+        description:
+          'type only: "keys" (per-character key events), "paste" (clipboard paste, fast and IME-safe; restores text clipboard), ' +
+          'or "auto" (default: paste for text >200 chars or containing newlines, else keys).',
       },
     },
     required: ['action'],
@@ -710,7 +860,9 @@ export const computerTool: Tool = {
       // (抓屏是整条链路最贵的一步,省掉这一步等于把每步的本地开销砍半)。
       let screen: ScreenState;
       let freshPath: string | undefined;
-      if (action === 'zoom' || action === 'screenshot') {
+      // 窗口作用域的 screenshot 走 PrintWindow,不需要整屏位图,只要几何(命中缓存即免抓屏)。
+      const windowScoped = args.window !== undefined || args.title_regex !== undefined;
+      if (action === 'zoom' || (action === 'screenshot' && !windowScoped)) {
         const t = Date.now();
         const shot = await capturePrimary(ctx?.signal);
         m.captureMs += Date.now() - t;
@@ -766,6 +918,103 @@ export const computerTool: Tool = {
         };
       }
 
+      // list_windows:枚举顶层窗口并刷新 wN 快照;不注入输入、不附截图。
+      if (action === 'list_windows') {
+        const t = Date.now();
+        const raw = await getUiaService().windows(ctx?.signal);
+        m.injectMs += Date.now() - t;
+        const { text, items } = formatWindowList(raw, screen);
+        windowSnapshot = items;
+        return { status: 'success', code: 'OK', retryable: false, output: text };
+      }
+
+      // focus_window:还原 + 置前。副屏窗口默认只报告不搬动(computer 的动作只作用于主屏),move_to_primary 才挪到主屏。
+      if (action === 'focus_window') {
+        const w = await resolveWindow(args, screen, ctx?.signal);
+        const moveToPrimary = args.move_to_primary === true;
+        if (!w.minimized && !w.onPrimary && !moveToPrimary) {
+          return {
+            status: 'success',
+            code: 'OK',
+            retryable: false,
+            output:
+              `${windowLabel(w)} is on a secondary display or off-screen, so it was NOT focused or moved ` +
+              '(computer actions only reach the primary screen). Retry focus_window with move_to_primary: true to bring it onto the primary screen.',
+          };
+        }
+        const t = Date.now();
+        const res = await getUiaService().focusWindow(
+          {
+            hwnd: w.hwnd,
+            moveTo: moveToPrimary && !w.onPrimary ? { x: screen.originX + 40, y: screen.originY + 40 } : undefined,
+          },
+          ctx?.signal,
+        );
+        m.injectMs += Date.now() - t;
+        const norm = rectToNorm(res.rect, screen);
+        const cx = res.rect.x + res.rect.w / 2;
+        const cy = res.rect.y + res.rect.h / 2;
+        const nowOnPrimary =
+          cx >= screen.originX &&
+          cx < screen.originX + screen.physW &&
+          cy >= screen.originY &&
+          cy < screen.originY + screen.physH;
+        const notes: string[] = [];
+        if (!res.foreground) {
+          notes.push(
+            'The OS refused the foreground switch (focus-stealing protection); the window may still be behind others — retry once or click its title bar.',
+          );
+        }
+        if (!nowOnPrimary) {
+          notes.push('The window is not on the primary screen; retry with move_to_primary: true.');
+        }
+        const t2 = Date.now();
+        const shot = await capturePrimary(ctx?.signal);
+        m.captureMs += Date.now() - t2;
+        syncGeometry(shot);
+        const att = await toAttachment(shot.path, m);
+        commitFrame(att.img);
+        m.bytes = att.bytes;
+        return {
+          status: 'success',
+          code: 'OK',
+          retryable: false,
+          output:
+            `Focused ${windowLabel(w)}${nowOnPrimary ? ` rect=[${norm.join(', ')}] (normalized 0-1000 over the primary screen)` : ''}. ` +
+            `Screen re-captured (shown at ${att.dispW}×${att.dispH}).${notes.length ? ` ${notes.join(' ')}` : ''}`,
+          modelAttachments: [{ type: 'image', name: 'computer-result.png', mime: 'image/png', dataUrl: att.dataUrl }],
+        };
+      }
+
+      // screenshot + window/title_regex:PrintWindow 截单个窗口(被遮挡也能截),不是整屏基准,不参与差分。
+      if (action === 'screenshot' && windowScoped) {
+        const w = await resolveWindow(args, screen, ctx?.signal);
+        if (w.minimized) {
+          throw new WindowSelectionError(`${windowLabel(w)} is minimized; call focus_window first`);
+        }
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const winPath = jailResolve(`.mocode/screenshots/computer-${ts}-window.png`);
+        await mkdir(dirname(winPath), { recursive: true });
+        const t = Date.now();
+        const cap = await getUiaService().captureWindow({ hwnd: w.hwnd, path: winPath }, ctx?.signal);
+        m.captureMs += Date.now() - t;
+        const att = await toAttachment(winPath, m);
+        lastFrame = null;
+        m.bytes = att.bytes;
+        const norm = rectToNorm(cap.rect, screen);
+        return {
+          status: 'success',
+          code: 'OK',
+          retryable: false,
+          output:
+            `Window screenshot of ${windowLabel(w)} (${cap.method}, ${cap.width}×${cap.height} physical, shown at ${att.dispW}×${att.dispH}). ` +
+            `On the primary screen this window occupies normalized rect [${norm.join(', ')}] (x, y, w, h): ` +
+            'the attached image shows ONLY the window, so convert image-local fractions to screen coordinates ' +
+            '(x = rect.x + fx·rect.w, y = rect.y + fy·rect.h) before clicking. If other windows cover it, focus_window first — clicks hit whatever is on top.',
+          modelAttachments: [{ type: 'image', name: 'computer-window.png', mime: 'image/png', dataUrl: att.dataUrl }],
+        };
+      }
+
       // screenshot:只截屏回灌(target 可指定 all)。
       if (action === 'screenshot') {
         let shotPath = freshPath;
@@ -797,8 +1046,17 @@ export const computerTool: Tool = {
 
       // inspect:读前台窗口 UIA 元素树,文本回灌;不注入输入,默认不附截图(元素清单本身就是感知结果)。
       if (action === 'inspect') {
+        // window/title_regex:按 hwnd 读指定窗口(可被遮挡);省略 = 前台窗口。
+        let inspectHwnd: number | undefined;
+        if (windowScoped) {
+          const w = await resolveWindow(args, screen, ctx?.signal);
+          if (w.minimized) {
+            throw new WindowSelectionError(`${windowLabel(w)} is minimized; call focus_window first`);
+          }
+          inspectHwnd = w.hwnd;
+        }
         const t = Date.now();
-        const tree = await getUiaService().tree({}, ctx?.signal);
+        const tree = await getUiaService().tree(inspectHwnd !== undefined ? { hwnd: inspectHwnd } : {}, ctx?.signal);
         m.injectMs += Date.now() - t;
         const maxNodes = (args.max_nodes as number | undefined) ?? INSPECT_DEFAULT_NODES;
         const { items, truncated } = selectDisplayNodes(tree, maxNodes);
@@ -834,6 +1092,95 @@ export const computerTool: Tool = {
           };
         }
         return { status: 'success', code: 'OK', retryable: false, output: text };
+      }
+
+      // wait_until:轮询直到画面稳定/变化或元素出现/消失;不注入输入(design-notes/computer-use-rpa.md §3.1)。
+      // 轮询帧只在内存里比对、用完即删文件;仅结束时抓一张正式截图回灌并设为新的差分基准。
+      if (action === 'wait_until') {
+        const parsed = parseWaitCondition(args.condition, diffThreshold());
+        if (!parsed.ok) throw new Error(parsed.error); // validate 已拦过,这里只为收窄类型
+        const cond = parsed.condition;
+        const timeoutMs = (args.timeout_ms as number | undefined) ?? WAIT_UNTIL_DEFAULT_TIMEOUT_MS;
+
+        const grab = async (): Promise<PngImage> => {
+          const t0 = Date.now();
+          const shot = await capturePrimary(ctx?.signal);
+          m.captureMs += Date.now() - t0;
+          try {
+            return downscale(decodePng(await readFile(shot.path)), maxEdge()).img;
+          } finally {
+            await rm(shot.path, { force: true }).catch(() => undefined);
+          }
+        };
+        // 元素存在性:在前台窗口当前 UIA 树里按 role+name 找(ref 取自最近一次 inspect 快照)。
+        const elementExists = async (target: ElementTarget): Promise<boolean> => {
+          let role: string | undefined;
+          let name: string | undefined;
+          if ('ref' in target) {
+            const known = lookupElement(target.ref).item.node;
+            role = known.role;
+            name = known.name;
+          } else {
+            role = target.step.role;
+            name = target.step.name;
+          }
+          const tree = await getUiaService().tree({}, ctx?.signal);
+          return tree.nodes.some(
+            (n) => n.id !== 0 && (role === undefined || n.role === role) && (name === undefined || n.name === name),
+          );
+        };
+
+        const res = await waitUntil(cond, timeoutMs, {
+          captureFrame: grab,
+          elementExists,
+          baseline: lastFrame,
+          signal: ctx?.signal,
+        });
+        if (res.outcome === 'aborted') {
+          return { status: 'aborted', code: 'ABORTED', retryable: false, output: 'wait_until aborted' };
+        }
+
+        const timedOut = res.outcome === 'timeout';
+        const desc = describeCondition(cond);
+        const stats =
+          `${res.elapsedMs}ms, ${res.polls} polls` +
+          (res.lastDiff !== undefined ? `, last frame diff ${(res.lastDiff * 100).toFixed(2)}%` : '');
+        // 画面类条件、以及任何超时,都回灌一张最终截图;元素类条件满足时纯文本即可。
+        const wantShot = timedOut || cond.kind === 'stable' || cond.kind === 'changed';
+        let attachments: ToolOutcome['modelAttachments'];
+        if (wantShot) {
+          const t2 = Date.now();
+          const shot = await capturePrimary(ctx?.signal);
+          m.captureMs += Date.now() - t2;
+          syncGeometry(shot);
+          const att = await toAttachment(shot.path, m);
+          commitFrame(att.img);
+          m.bytes = att.bytes;
+          m.diff = att.diff;
+          attachments = [{ type: 'image', name: 'computer-wait.png', mime: 'image/png', dataUrl: att.dataUrl }];
+        }
+        const shotNote = wantShot
+          ? ` Screen re-captured (primary screen ${screen.physW}×${screen.physH} physical): inspect the attached screenshot.`
+          : '';
+        if (timedOut) {
+          // 超时不自动重试(TIMEOUT 契约):已烧掉整个等待窗口,由模型决定改条件/加长超时/换思路。
+          return {
+            status: 'error',
+            code: 'TIMEOUT',
+            retryable: false,
+            output:
+              `waited until ${desc}: timed out (${stats}). The condition did not hold within ${timeoutMs}ms.` +
+              `${shotNote} Check the screenshot, then adjust the condition, raise timeout_ms, or take a different approach.`,
+            modelAttachments: attachments,
+          };
+        }
+        return {
+          status: 'success',
+          code: 'OK',
+          retryable: false,
+          output: `waited until ${desc}: met (${stats}).${shotNote}`,
+          modelAttachments: attachments,
+        };
       }
 
       // 输入动作:注入 → 重截屏回灌(wait 也回灌,等待后界面往往已变化)。
@@ -897,6 +1244,15 @@ export const computerTool: Tool = {
           output: `computer action failed: ELEMENT_NOT_FOUND: ${message}`,
         };
       }
+      if (error instanceof WindowSelectionError || error instanceof UiaWindowGoneError) {
+        // 窗口选不到 / 已关闭:同样是「前置定位不成立」,不自动重试,让模型重新 list_windows。
+        return {
+          status: 'error',
+          code: 'POSTCONDITION_FAILED',
+          retryable: false,
+          output: `computer action failed: WINDOW_NOT_FOUND: ${message}`,
+        };
+      }
       return {
         status: 'error',
         code: 'EXECUTION_ERROR',
@@ -916,3 +1272,121 @@ export const computerTool: Tool = {
     }
   },
 };
+
+/**
+ * 构造 trace 条目的上下文:必须在执行前读取模块级快照(执行后 inspect/list_windows 可能已替换)。
+ * 任何异常都按"不录制"处理,绝不影响动作本身。
+ */
+function buildTraceForCall(args: Record<string, unknown>): ReturnType<typeof buildTraceEntry> {
+  const ctx: TraceBuildContext = {
+    seq: nextTraceSeq(),
+    geometry: geometryCache ?? undefined,
+    lookupRef: lookupElementRefName,
+  };
+  if ((args.action === 'click_element' || args.action === 'set_value') && typeof args.ref === 'string') {
+    const item = elementSnapshot?.items.get(args.ref);
+    if (elementSnapshot && item) ctx.element = { tree: elementSnapshot.tree, nodeId: item.node.id };
+  }
+  if (args.action === 'focus_window' && typeof args.window === 'string') {
+    ctx.windowProcess = windowSnapshot.find((w) => w.ref === args.window)?.processName || undefined;
+  }
+  return buildTraceEntry(args, ctx);
+}
+
+/**
+ * 对外导出的 computer 工具 = 基础工具 + 结构化录制(design-notes/computer-use-rpa.md §5.1)。
+ * 仅在动作成功后追加一行 gui-trace.jsonl;回放期间(withTraceSuspended)与 MOCODE_FLOW_TRACE=false 时不录。
+ */
+export const computerTool: Tool = {
+  ...computerToolBase,
+  async execute(args, ctx): Promise<ToolExecuteResult> {
+    let entry: ReturnType<typeof buildTraceEntry> = null;
+    if (traceEnabled() && !isTraceSuspended() && typeof args.action === 'string' && isRecordedAction(args.action)) {
+      try {
+        entry = buildTraceForCall(args);
+      } catch {
+        entry = null;
+      }
+    }
+    const result = await computerToolBase.execute(args, ctx);
+    if (entry && typeof result !== 'string' && result.status === 'success') {
+      entry.changed = outputIndicatesChange(entry.action, result.output);
+      appendTrace(entry);
+    }
+    return result;
+  },
+};
+
+// ── flow 回放接入点(src/flows/runner.ts 的 RunnerDeps 由 run_flow 工具接到这里) ─────────────
+
+/**
+ * 把录制的 selector 现场解析成当前快照里的 ref:按 processName(+titleRegex) 选窗 → 读该窗口 UIA 树 →
+ * matchSelector(歧义即失败)→ 目标必须在展示集中(与 inspect 同口径),并把整棵展示集登记为新快照,
+ * 这样随后的 click_element/set_value 带 ref 走原有"执行前按 hwnd+path 重定位并校验 role/name"路径。
+ */
+export async function resolveSelectorToRef(
+  selector: UiaSelector,
+  signal?: AbortSignal,
+): Promise<{ ok: true; ref: string } | { ok: false; error: string }> {
+  try {
+    const raw = await getUiaService().windows(signal);
+    const picked = pickWindowForReplay(raw, {
+      processName: selector.window.processName,
+      titleRegex: selector.window.titleRegex,
+    });
+    if (!picked.ok) return { ok: false, error: picked.error };
+    if (picked.window.minimized) {
+      return {
+        ok: false,
+        error: `window ${JSON.stringify(picked.window.title.slice(0, 40))} is minimized; a focus_window step must run first`,
+      };
+    }
+    const tree = await getUiaService().tree({ hwnd: picked.window.hwnd }, signal);
+    const node = matchSelector(tree, selector);
+    if (!node) {
+      return { ok: false, error: 'no unique element matches the recorded selector in the current window' };
+    }
+    const { items } = selectDisplayNodes(tree, tree.nodes.length);
+    const hit = items.find((it) => it.node.id === node.id);
+    if (!hit) {
+      return {
+        ok: false,
+        error: `the matched ${node.role} ${JSON.stringify(node.name.slice(0, 40))} is not an interactive, visible element right now`,
+      };
+    }
+    snapshotGeneration += 1;
+    elementSnapshot = {
+      generation: snapshotGeneration,
+      tree,
+      items: new Map(items.map((it) => [it.ref, it])),
+    };
+    setElementRefNames(items);
+    return { ok: true, ref: hit.ref };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * focus_window 回放:按 processName(+titleRegex) 现场选窗,刷新 wN 快照并返回 computer 能接受的 {window:'wN'}。
+ */
+export async function resolveWindowForReplay(
+  win: { processName?: string; titleRegex?: string },
+  signal?: AbortSignal,
+): Promise<{ ok: true; args: Record<string, unknown> } | { ok: false; error: string }> {
+  try {
+    const raw = await getUiaService().windows(signal);
+    const picked = pickWindowForReplay(raw, win);
+    if (!picked.ok) return { ok: false, error: picked.error };
+    const { screen } = await resolveScreen(signal);
+    const { items } = formatWindowList(raw, screen);
+    const item = items.find((i) => i.hwnd === picked.window.hwnd);
+    if (!item) return { ok: false, error: 'the matching window is not in the visible window list' };
+    windowSnapshot = items;
+    return { ok: true, args: { window: item.ref } };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}

@@ -17,6 +17,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { filterEnv } from '../sandbox/index.js';
 import { IdleGuard, envInt } from './idle-guard.js';
 import { parseRawTree, type UiaRawTree, type UiaRect } from './uia-selector.js';
+import { parseRawWindows, type RawWindow } from './window-list.js';
 
 export type UiaActKind = 'invoke' | 'toggle' | 'select' | 'expand' | 'setvalue' | 'focus' | 'rect';
 
@@ -41,14 +42,38 @@ export interface UiaActRequest {
   expectName?: string;
 }
 
+export interface UiaFocusRequest {
+  hwnd: number;
+  /** 先把窗口左上角挪到该物理坐标(主屏内)再置前;省略则不移动。 */
+  moveTo?: { x: number; y: number };
+}
+
+export interface UiaCaptureWindowRequest {
+  hwnd: number;
+  /** PNG 输出绝对路径。 */
+  path: string;
+}
+
 export interface UiaService {
   tree(req: UiaTreeRequest, signal?: AbortSignal): Promise<UiaRawTree>;
   act(req: UiaActRequest, signal?: AbortSignal): Promise<{ rect: UiaRect }>;
+  /** 枚举顶层可见窗口(z-order 前→后,未过滤;过滤/编号见 window-list.ts)。 */
+  windows(signal?: AbortSignal): Promise<RawWindow[]>;
+  /** 还原最小化并置前;foreground=false 表示系统仍拒绝了前台切换。rect 为置前后的可见边框。 */
+  focusWindow(req: UiaFocusRequest, signal?: AbortSignal): Promise<{ foreground: boolean; rect: UiaRect }>;
+  /** 截取窗口(PrintWindow,失败回落屏幕裁剪)写入 PNG;rect 为截图对应的物理矩形。 */
+  captureWindow(
+    req: UiaCaptureWindowRequest,
+    signal?: AbortSignal,
+  ): Promise<{ method: 'printwindow' | 'screen'; width: number; height: number; rect: UiaRect }>;
   dispose(): Promise<void>;
 }
 
 /** 元素已消失/已变化(界面重排、窗口关闭)。computer 工具据此提示模型重新 inspect。 */
 export class UiaElementGoneError extends Error {}
+
+/** 目标窗口已关闭。computer 工具据此提示模型重新 list_windows。 */
+export class UiaWindowGoneError extends Error {}
 
 const DEFAULT_TREE_NODES = 800;
 const DEFAULT_TREE_DEPTH = 25;
@@ -56,6 +81,17 @@ const DEFAULT_TREE_DEPTH = 25;
 const DEFAULT_TREE_TIME_MS = 6000;
 const TREE_OP_TIMEOUT_MS = 10000;
 const ACT_OP_TIMEOUT_MS = 5000;
+/** windows / focus / capwin:都是单次 Win32 调用,目标应用卡住时 5s 足够判定为无响应。 */
+const WINDOW_OP_TIMEOUT_MS = 5000;
+/** capwin 要建位图 + PrintWindow + PNG 编码,4K 大窗口比单次 Win32 调用慢,放宽到 8s。 */
+const CAPWIN_OP_TIMEOUT_MS = 8000;
+
+/** PowerShell 响应里的 rect 对象 → UiaRect;字段缺失/非数值一律取 0。 */
+function toRect(raw: unknown): UiaRect {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : 0);
+  return { x: n(r.x), y: n(r.y), w: Math.max(0, n(r.w)), h: Math.max(0, n(r.h)) };
+}
 const DEFAULT_IDLE_MS = 3 * 60 * 1000;
 /** 名称截断长度:与 PowerShell 侧 Clip-Name 一致(expectName 比较依赖它)。 */
 export const UIA_NAME_MAX = 200;
@@ -71,6 +107,73 @@ const PS_UIA_SCRIPT = [
   '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
   '  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);',
   '  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();',
+  // ── 窗口 API(list_windows / focus_window / 窗口截图,design-notes/computer-use-rpa.md §4)──
+  // 结构体读写与回调全放 C# 里:PowerShell 对嵌套值类型赋值落在副本上(见 input-injector.ts 的教训)。
+  '  public struct RECT { public int L; public int T; public int R; public int B; }',
+  '  public delegate bool EnumProc(IntPtr h, IntPtr l);',
+  '  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc p, IntPtr l);',
+  '  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);',
+  '  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);',
+  '  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);',
+  '  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);',
+  '  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);',
+  '  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);',
+  '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);',
+  '  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);',
+  '  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);',
+  '  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);',
+  '  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);',
+  '  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();',
+  '  [DllImport("dwmapi.dll", EntryPoint="DwmGetWindowAttribute")] public static extern int DwmInt(IntPtr h, int attr, out int v, int size);',
+  '  [DllImport("dwmapi.dll", EntryPoint="DwmGetWindowAttribute")] public static extern int DwmRect(IntPtr h, int attr, out RECT r, int size);',
+  '  public static System.Collections.Generic.List<IntPtr> Top() {',
+  '    System.Collections.Generic.List<IntPtr> l = new System.Collections.Generic.List<IntPtr>();',
+  '    EnumWindows(delegate(IntPtr h, IntPtr p) { if (IsWindowVisible(h)) l.Add(h); return true; }, IntPtr.Zero);',
+  '    return l;',
+  '  }',
+  '  public static string Title(IntPtr h) {',
+  '    int n = GetWindowTextLength(h);',
+  '    if (n <= 0) return "";',
+  '    System.Text.StringBuilder sb = new System.Text.StringBuilder(n + 1);',
+  '    GetWindowText(h, sb, sb.Capacity);',
+  '    return sb.ToString();',
+  '  }',
+  '  public static uint Pid(IntPtr h) { uint p; GetWindowThreadProcessId(h, out p); return p; }',
+  '  public static int[] WinRect(IntPtr h) { RECT r; GetWindowRect(h, out r); return new int[] { r.L, r.T, r.R, r.B }; }',
+  // 可见边框(DWMWA_EXTENDED_FRAME_BOUNDS=9):GetWindowRect 在 Win10+ 含 ~8px 不可见阴影边,模型看到的是去掉它的矩形。
+  '  public static int[] FrameRect(IntPtr h) {',
+  '    RECT r;',
+  '    if (DwmRect(h, 9, out r, 16) == 0) return new int[] { r.L, r.T, r.R, r.B };',
+  '    return WinRect(h);',
+  '  }',
+  '  public static bool ToolWin(IntPtr h) { return (GetWindowLong(h, -20) & 0x80) != 0; }',
+  '  public static bool Cloaked(IntPtr h) { int v; return DwmInt(h, 14, out v, 4) == 0 && v != 0; }',
+  '  public static bool Move(IntPtr h, int x, int y) { return SetWindowPos(h, IntPtr.Zero, x, y, 0, 0, 0x15); }',
+  // 前台锁绕过:挂接到当前前台窗口的输入线程再 SetForegroundWindow;仍失败才点一下 Alt 重试
+  // (Alt 点按可能激活原前台窗口的菜单栏,所以只作兜底)。
+  '  public static bool Focus(IntPtr h) {',
+  '    IntPtr fg = GetForegroundWindow();',
+  '    uint dummy;',
+  '    uint fgT = fg == IntPtr.Zero ? 0 : GetWindowThreadProcessId(fg, out dummy);',
+  '    uint me = GetCurrentThreadId();',
+  '    bool attached = false;',
+  '    if (fgT != 0 && fgT != me) attached = AttachThreadInput(me, fgT, true);',
+  '    try {',
+  '      BringWindowToTop(h);',
+  '      SetForegroundWindow(h);',
+  '      if (GetForegroundWindow() != h) {',
+  '        keybd_event(0x12, 0, 0, UIntPtr.Zero); keybd_event(0x12, 0, 2, UIntPtr.Zero);',
+  '        SetForegroundWindow(h);',
+  '      }',
+  '    } finally {',
+  '      if (attached) AttachThreadInput(me, fgT, false);',
+  '    }',
+  '    return GetForegroundWindow() == h;',
+  '  }',
   '}',
   '"@',
   // DPI 感知必须先于 UIA 加载:BoundingRectangle 按调用进程的 awareness 返回坐标,
@@ -195,6 +298,73 @@ const PS_UIA_SCRIPT = [
   '          default { throw "unknown act kind: $($req.kind)" }',
   '        }',
   '        $resp.rect = To-Rect $el.Current.BoundingRectangle',
+  '        $resp.ok = $true',
+  '      }',
+  // ── 窗口 op(design-notes/computer-use-rpa.md §4)──
+  // windows:枚举顶层可见窗口(z-order 前→后),过滤/编号/norm 换算在 TS 侧(window-list.ts)。
+  '      "windows" {',
+  '        $fg = [MoUia]::GetForegroundWindow()',
+  '        $list = New-Object System.Collections.ArrayList',
+  '        $pcache = @{}',
+  '        foreach ($h in [MoUia]::Top()) {',
+  '          $t = [MoUia]::Title($h)',
+  '          if (-not $t) { continue }',
+  '          $wpid = [int][MoUia]::Pid($h)',
+  '          if (-not $pcache.ContainsKey($wpid)) { $pn = ""; try { $pn = (Get-Process -Id $wpid).ProcessName } catch { }; $pcache[$wpid] = $pn }',
+  '          $r = [MoUia]::FrameRect($h)',
+  '          [void]$list.Add(@{ hwnd = $h.ToInt64(); title = (Clip-Name $t); processName = $pcache[$wpid]; pid = $wpid;',
+  '            rect = @{ x = $r[0]; y = $r[1]; w = ($r[2] - $r[0]); h = ($r[3] - $r[1]) };',
+  '            minimized = [MoUia]::IsIconic($h); foreground = ($h -eq $fg); toolWindow = [MoUia]::ToolWin($h); cloaked = [MoUia]::Cloaked($h) })',
+  '        }',
+  '        $resp.windows = $list',
+  '        $resp.ok = $true',
+  '      }',
+  // focus:还原最小化 → (可选)挪到主屏 → 绕前台锁置前。foreground=false 表示系统仍拒绝了切换。
+  '      "focus" {',
+  '        $h = [IntPtr]::new([long]$req.hwnd)',
+  '        if (-not [MoUia]::IsWindow($h)) { throw "WINDOW_GONE: the window no longer exists" }',
+  '        if ([MoUia]::IsIconic($h)) { [void][MoUia]::ShowWindow($h, 9) }',
+  '        if ($req.moveToPrimary) { [void][MoUia]::Move($h, [int]$req.x, [int]$req.y) }',
+  '        $okf = [MoUia]::Focus($h)',
+  '        Start-Sleep -Milliseconds 80',
+  '        $r = [MoUia]::FrameRect($h)',
+  '        $resp.foreground = $okf',
+  '        $resp.rect = @{ x = $r[0]; y = $r[1]; w = ($r[2] - $r[0]); h = ($r[3] - $r[1]) }',
+  '        $resp.ok = $true',
+  '      }',
+  // capwin:PrintWindow(PW_RENDERFULLCONTENT) 截窗口(可被遮挡),裁掉不可见阴影边;失败回落屏幕裁剪。
+  '      "capwin" {',
+  '        Add-Type -AssemblyName System.Drawing',
+  '        $h = [IntPtr]::new([long]$req.hwnd)',
+  '        if (-not [MoUia]::IsWindow($h)) { throw "WINDOW_GONE: the window no longer exists" }',
+  '        if ([MoUia]::IsIconic($h)) { throw "the window is minimized; call focus_window first" }',
+  '        $wr = [MoUia]::WinRect($h); $fr = [MoUia]::FrameRect($h)',
+  '        $ww = $wr[2] - $wr[0]; $wh = $wr[3] - $wr[1]',
+  '        if ($ww -le 0 -or $wh -le 0) { throw "the window has an empty rectangle" }',
+  '        $full = New-Object System.Drawing.Bitmap($ww, $wh)',
+  '        $g = [System.Drawing.Graphics]::FromImage($full)',
+  '        $hdc = $g.GetHdc()',
+  '        $okp = $false',
+  '        try { $okp = [MoUia]::PrintWindow($h, $hdc, 2) } finally { $g.ReleaseHdc($hdc); $g.Dispose() }',
+  '        $cx = [Math]::Max(0, $fr[0] - $wr[0]); $cy = [Math]::Max(0, $fr[1] - $wr[1])',
+  '        $cw = [Math]::Min($ww - $cx, $fr[2] - $fr[0]); $ch = [Math]::Min($wh - $cy, $fr[3] - $fr[1])',
+  '        if ($cw -le 0 -or $ch -le 0) { $cx = 0; $cy = 0; $cw = $ww; $ch = $wh }',
+  '        $method = "printwindow"',
+  '        if ($okp) {',
+  '          $out = $full.Clone((New-Object System.Drawing.Rectangle($cx, $cy, $cw, $ch)), $full.PixelFormat)',
+  '        } else {',
+  '          $method = "screen"',
+  '          $out = New-Object System.Drawing.Bitmap($cw, $ch)',
+  '          $g2 = [System.Drawing.Graphics]::FromImage($out)',
+  '          $g2.CopyFromScreen(($wr[0] + $cx), ($wr[1] + $cy), 0, 0, (New-Object System.Drawing.Size($cw, $ch)))',
+  '          $g2.Dispose()',
+  '        }',
+  '        $full.Dispose()',
+  '        $out.Save([string]$req.path, [System.Drawing.Imaging.ImageFormat]::Png)',
+  '        $out.Dispose()',
+  '        $resp.method = $method',
+  '        $resp.width = $cw; $resp.height = $ch',
+  '        $resp.rect = @{ x = ($wr[0] + $cx); y = ($wr[1] + $cy); w = $cw; h = $ch }',
   '        $resp.ok = $true',
   '      }',
   '      default { $resp.detail = "unknown op: $($req.op)" }',
@@ -335,6 +505,7 @@ class PowerShellUiaService implements UiaService {
       if (resp.ok !== true) {
         const detail = String(resp.detail ?? 'unknown error');
         if (detail.includes('ELEMENT_GONE')) throw new UiaElementGoneError(detail.replace(/^.*ELEMENT_GONE:\s*/, ''));
+        if (detail.includes('WINDOW_GONE')) throw new UiaWindowGoneError(detail.replace(/^.*WINDOW_GONE:\s*/, ''));
         throw new Error(`UIA op "${op}" failed: ${explainUiaError(detail)}`);
       }
       return resp;
@@ -373,6 +544,40 @@ class PowerShellUiaService implements UiaService {
     const r = (resp.rect && typeof resp.rect === 'object' ? resp.rect : {}) as Record<string, unknown>;
     const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : 0);
     return { rect: { x: n(r.x), y: n(r.y), w: Math.max(0, n(r.w)), h: Math.max(0, n(r.h)) } };
+  }
+
+  async windows(signal?: AbortSignal): Promise<RawWindow[]> {
+    const resp = await this.call('windows', {}, WINDOW_OP_TIMEOUT_MS, signal);
+    return parseRawWindows(resp);
+  }
+
+  async focusWindow(req: UiaFocusRequest, signal?: AbortSignal): Promise<{ foreground: boolean; rect: UiaRect }> {
+    const resp = await this.call(
+      'focus',
+      {
+        hwnd: req.hwnd,
+        moveToPrimary: req.moveTo !== undefined,
+        x: req.moveTo?.x ?? 0,
+        y: req.moveTo?.y ?? 0,
+      },
+      WINDOW_OP_TIMEOUT_MS,
+      signal,
+    );
+    return { foreground: resp.foreground === true, rect: toRect(resp.rect) };
+  }
+
+  async captureWindow(
+    req: UiaCaptureWindowRequest,
+    signal?: AbortSignal,
+  ): Promise<{ method: 'printwindow' | 'screen'; width: number; height: number; rect: UiaRect }> {
+    const resp = await this.call('capwin', { hwnd: req.hwnd, path: req.path }, CAPWIN_OP_TIMEOUT_MS, signal);
+    const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : 0);
+    return {
+      method: resp.method === 'screen' ? 'screen' : 'printwindow',
+      width: n(resp.width),
+      height: n(resp.height),
+      rect: toRect(resp.rect),
+    };
   }
 
   async dispose(): Promise<void> {

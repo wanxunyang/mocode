@@ -24,6 +24,11 @@ export interface InputInjector {
   /** 按住左键拖动到目标(配合 mouseDown 使用;内部只是 move,拖拽语义由 down+move+up 组合)。 */
   dragTo(x: number, y: number): Promise<void>;
   typeText(text: string): Promise<void>;
+  /**
+   * 剪贴板粘贴:保存剪贴板文本 → 写入 text → ctrl+v → 还原。
+   * 原剪贴板是非文本(图片/文件)时无法还原,返回 clipboardOverwritten=true。
+   */
+  paste(text: string): Promise<{ clipboardOverwritten: boolean }>;
   /** combo 形如 'Return' / 'ctrl+s' / 'ctrl+shift+t'。 */
   pressKey(combo: string): Promise<void>;
   scroll(direction: 'up' | 'down' | 'left' | 'right', amount: number): Promise<void>;
@@ -157,42 +162,38 @@ const PS_INJECTOR_SCRIPT = [
   '  [StructLayout(LayoutKind.Explicit)] public struct INPUTUNION { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }',
   '  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public UIntPtr dwExtraInfo; }',
   '  [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public UIntPtr dwExtraInfo; }',
+  '  public static void Key(ushort vk, ushort scan, uint flags) {',
+  '    INPUT[] a = new INPUT[1];',
+  '    a[0].type = 1;',
+  '    a[0].U.ki.wVk = vk; a[0].U.ki.wScan = scan; a[0].U.ki.dwFlags = flags;',
+  '    SendInput(1, a, Marshal.SizeOf(typeof(INPUT)));',
+  '  }',
   '}',
   '"@',
   // DPI 感知:SetCursorPos/GetCursorPos 始终按物理像素解释,而进程默认 DPI UNAWARE。
   // 声明 PER_MONITOR_AWARE_V2(失败回落 SYSTEM_AWARE)后 GetCursorPos 与调用方的物理坐标口径一致,
   // 避免 cursor_position 读回的坐标与主屏物理分辨率不同源。
   'try { if (-not [Inject]::SetProcessDpiAwarenessContext([IntPtr](-4))) { [void][Inject]::SetProcessDPIAware() } } catch { }',
+  // 剪贴板 API(paste op 用)要求 STA 线程,进程以 -STA 启动;剪贴板偶发被其它进程占用,重试几次。
+  'Add-Type -AssemblyName System.Windows.Forms',
+  'function Set-ClipText([string]$s) {',
+  '  for ($i = 0; $i -lt 5; $i++) {',
+  '    try { [System.Windows.Forms.Clipboard]::SetText($s); return } catch { Start-Sleep -Milliseconds 50 }',
+  '  }',
+  '  throw "clipboard is busy"',
+  '}',
+  // 键盘事件的 INPUT 必须在 C# 里构造:PowerShell 对嵌套值类型(`$inp.U.ki.wVk = ...`)的赋值作用在副本上,
+  // 结果是发出全零的空事件(实测 wVk 读回 0)。Inject.Key 在 C# 内就地填充后调用 SendInput。
   'function Send-VkCombo([int[]]$vks) {',
-  '  $size = [Runtime.InteropServices.Marshal]::SizeOf([type]"Inject+INPUT")',
-  '  foreach ($vk in $vks) {',
-  '    $inp = New-Object "Inject+INPUT"',
-  '    $inp.type = 1',
-  '    $inp.U.ki.wVk = $vk',
-  '    $inp.U.ki.dwFlags = 0',
-  '    [Inject]::SendInput(1, [Inject+INPUT[]]@($inp), $size) | Out-Null',
-  '  }',
+  '  foreach ($vk in $vks) { [Inject]::Key([uint16]$vk, [uint16]0, [uint32]0) }',
   '  [array]::Reverse($vks)',
-  '  foreach ($vk in $vks) {',
-  '    $inp = New-Object "Inject+INPUT"',
-  '    $inp.type = 1',
-  '    $inp.U.ki.wVk = $vk',
-  '    $inp.U.ki.dwFlags = 2',
-  '    [Inject]::SendInput(1, [Inject+INPUT[]]@($inp), $size) | Out-Null',
-  '  }',
+  '  foreach ($vk in $vks) { [Inject]::Key([uint16]$vk, [uint16]0, [uint32]2) }',
   '}',
   'function Send-UnicodeText([string]$text) {',
-  '  $size = [Runtime.InteropServices.Marshal]::SizeOf([type]"Inject+INPUT")',
   '  for ($i = 0; $i -lt $text.Length; $i++) {',
-  '    $code = [int][char]$text[$i]',
-  '    foreach ($flag in @(4, 6)) {',
-  '      $inp = New-Object "Inject+INPUT"',
-  '      $inp.type = 1',
-  '      $inp.U.ki.wVk = 0',
-  '      $inp.U.ki.wScan = $code',
-  '      $inp.U.ki.dwFlags = $flag',
-  '      [Inject]::SendInput(1, [Inject+INPUT[]]@($inp), $size) | Out-Null',
-  '    }',
+  '    $code = [uint16][char]$text[$i]',
+  '    [Inject]::Key([uint16]0, $code, [uint32]4)',
+  '    [Inject]::Key([uint16]0, $code, [uint32]6)',
   '  }',
   '}',
   'while ($null -ne ($line = [Console]::In.ReadLine())) {',
@@ -221,6 +222,19 @@ const PS_INJECTOR_SCRIPT = [
   '        [Inject]::mouse_event($flag, 0, 0, 0, [UIntPtr]::Zero); $resp.ok = $true',
   '      }',
   '      "type" { Send-UnicodeText([string]$req.text); $resp.ok = $true }',
+  '      "paste" {',
+  // 剪贴板粘贴:保存文本剪贴板 → 写入 → ctrl+v → 等目标应用读完 → 还原。
+  // 原剪贴板是图片/文件等非文本时无法还原,如实上报 overwritten,不假装还原。
+  '        $hadText = [System.Windows.Forms.Clipboard]::ContainsText()',
+  '        $old = if ($hadText) { [System.Windows.Forms.Clipboard]::GetText() } else { $null }',
+  '        $nonText = (-not $hadText) -and ([System.Windows.Forms.Clipboard]::ContainsImage() -or [System.Windows.Forms.Clipboard]::ContainsFileDropList() -or [System.Windows.Forms.Clipboard]::ContainsAudio())',
+  '        Set-ClipText ([string]$req.text)',
+  '        Send-VkCombo([int[]]@(17, 86))',
+  '        Start-Sleep -Milliseconds 150',
+  '        if ($hadText) { Set-ClipText $old } elseif (-not $nonText) { [System.Windows.Forms.Clipboard]::Clear() }',
+  '        $resp.overwritten = [bool]$nonText',
+  '        $resp.ok = $true',
+  '      }',
   '      "key" { Send-VkCombo([int[]]$req.vks); $resp.ok = $true }',
   '      "scroll" {',
   '        $amt = [int]$req.amount * 120',
@@ -275,7 +289,7 @@ class PowerShellInjector implements InputInjector {
     if (this.child && this.child.exitCode === null && !this.child.killed) return this.child;
     this.child = spawn(
       'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', PS_INJECTOR_SCRIPT],
+      ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', PS_INJECTOR_SCRIPT],
       { env: filterEnv(process.env), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     this.stdoutBuf = '';
@@ -388,6 +402,10 @@ class PowerShellInjector implements InputInjector {
   }
   async typeText(text: string): Promise<void> {
     await this.call('type', { text }, this.signal);
+  }
+  async paste(text: string): Promise<{ clipboardOverwritten: boolean }> {
+    const resp = await this.call('paste', { text }, this.signal);
+    return { clipboardOverwritten: resp.overwritten === true };
   }
   async pressKey(combo: string): Promise<void> {
     const vks = mapKeyComboToVk(combo);
