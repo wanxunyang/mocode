@@ -322,12 +322,17 @@ export interface BannerInfo {
 
 const MARGIN = '  '; // 盒外左缩进
 
-// ── MoCode 块字符 logo(4 行,neofetch 风)──
-const LOGO_W = 35; // logo 区显示宽度
+// ── MoCode 块字符 logo(6 行,neofetch 风)──
+const LOGO_W = 35; // logo 区显示宽度(字母 30 + 5 格留白)
 const LOGO_GAP = 0; // logo 与信息区之间的间隔
-// 块字符画 4 行:M / o / C / o / d / e,块字符上半/下半合并两个 ASCII 行
+// 块字符画:M / o / C / o / d / e,块字符上半/下半合并两个 ASCII 行(后 4 行);
+// 第一个 o(第 6-9 列)头上坐着早期版本(6be25e8)的作者小人,眼睛 ◑(右半实心)朝右看。
+// 屁股 ╰ 落在 o 顶边上半块 █▀▀█(贴格子顶,无半格空隙);腿 ──── 往右伸,脚 ＯＯ 在第 11-14 列。
+// 腿与 d 的升部 ▄(第 24 列)同一行
 const LOGO_LINES: string[] = [
-  '                        ▄     ',
+  '      [◕ᴗ◕]',
+  '     ●|   |●',
+  '       ＯＯ             ▄     ',
   '█▀█▀█ █▀▀█ ▄▄▄▄ ▄▄▄▄ ▄▄▄█ ▄▄▄▄',
   '█ █ █ █  █ █  ▀ █  █ █  █ █▄▄█',
   '▀ ▀ ▀ ▀▀▀▀ █▄▄█ █▄▄█ █▄▄█ █▄▄▄',
@@ -354,17 +359,20 @@ function memoryValue(on: boolean): string {
 }
 
 /** 横幅纯文本(带 ANSI 颜色,不写出)——供 TUI 经 contentWrite 写入内容区以跟踪续写位。
- *  布局:大字 logo(4 行,块字符)左对齐,右侧并排放标题/信息(neofetch 风)。 */
+ *  布局:大字 logo(6 行:小人 2 行 + 脚/升部 1 行 + 字母 3 行)左对齐,
+ *  标题/信息并排放在后 4 行右侧(neofetch 风),小人头/身两行右侧留空。 */
 export function bannerString(info: BannerInfo): string {
   const title = `${ui.bold}${ui.accent}●  MoCode${ui.reset}  ${ui.dim}v${VERSION}${ui.reset}`;
   const labels = [t('banner.model'), t('banner.directory'), t('banner.memory')];
   // 标签列按当前语言最长文本动态定宽，并至少留两个空格；中文保持原 6 列，英文扩至 11 列。
   const labelWidth = Math.max(...labels.map(displayWidth)) + 2;
   const rows = [
-    logoLine(0) + title,
-    logoLine(1) + labelContent(labels[0], info.model, labelWidth),
-    logoLine(2) + labelContent(labels[1], truncateDisplay(info.cwd, 48), labelWidth),
-    logoLine(3) + labelContent(labels[2], memoryValue(info.memoryEnabled), labelWidth),
+    logoLine(0),
+    logoLine(1),
+    logoLine(2) + title,
+    logoLine(3) + labelContent(labels[0], info.model, labelWidth),
+    logoLine(4) + labelContent(labels[1], truncateDisplay(info.cwd, 48), labelWidth),
+    logoLine(5) + labelContent(labels[2], memoryValue(info.memoryEnabled), labelWidth),
   ];
   return rows.map((r) => MARGIN + r).join('\n') + '\n\n';
 }
@@ -386,8 +394,8 @@ export function printBanner(info: BannerInfo): void {
  */
 export function bannerLines(info: BannerInfo): string[] {
   const raw = bannerString(info);
-  // bannerString 形如 "行1\n行2\n行3\n行4\n",split('\n') 长度 = 5(末尾 \n 后空串)
-  // 行集合真实包含 4 行(4 行 logo+info);filter(Boolean?) 不可 — 空行也要算
+  // bannerString 形如 "行1\n…\n行6\n\n",末尾 \n 后切出一个尾空串
+  // 行集合 = 6 行 logo+info + 1 空行分隔;filter(Boolean?) 不可 — 空行也要算
   // 仅过滤最后那个 \n 切出的尾空
   const split = raw.split('\n');
   const lines = split.length > 0 && split[split.length - 1] === '' ? split.slice(0, -1) : split;

@@ -220,7 +220,7 @@ const STREAM_BREAK_CODES = new Set([
 ]);
 
 const STREAM_BREAK_MESSAGE =
-  /premature close|other side closed|socket hang up|\bterminated\b|stream (?:closed|ended) (?:prematurely|unexpectedly)|econnreset|econnaborted/i;
+  /premature close|other side closed|socket hang up|\bterminated\b|stream (?:closed|ended) (?:prematurely|unexpectedly)|\bunexpected eof\b|econnreset|econnaborted/i;
 
 /**
  * 「连接层」可重试 errno。与 STREAM_BREAK_CODES 的区别:这些在**建连/发请求**阶段就失败

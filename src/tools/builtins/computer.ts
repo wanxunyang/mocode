@@ -27,6 +27,16 @@ import {
   type PngImage,
 } from '../../runtime/screen-pipeline.js';
 import { createInputInjector, type InputInjector } from '../../runtime/input-injector.js';
+import { getUiaService, UiaElementGoneError } from '../../runtime/uia-service.js';
+import {
+  clearElementRefNames,
+  formatSnapshot,
+  rectCenter,
+  selectDisplayNodes,
+  setElementRefNames,
+  type DisplayElement,
+  type UiaRawTree,
+} from '../../runtime/uia-selector.js';
 import type { Tool, ToolOutcome } from '../types.js';
 
 /**
@@ -76,8 +86,16 @@ const ACTIONS = [
   'scroll',
   'wait',
   'cursor_position',
+  'inspect',
+  'click_element',
+  'set_value',
 ] as const;
 type ComputerAction = (typeof ACTIONS)[number];
+
+/** inspect 默认/最大展示节点数(design-notes/computer-use-rpa.md §2.4)。 */
+const INSPECT_DEFAULT_NODES = 120;
+const INSPECT_MAX_NODES = 300;
+const ELEMENT_ACTIONS: ReadonlySet<ComputerAction> = new Set(['click_element', 'set_value']);
 
 const ACTIONS_NEEDING_COORDINATE: ReadonlySet<ComputerAction> = new Set([
   'mouse_move',
@@ -141,6 +159,34 @@ export function validateComputerArgs(args: Record<string, unknown>): string | nu
       return `action "wait" requires duration_ms: integer in 1-${WAIT_MAX_MS}`;
     }
   }
+  if (action === 'inspect' && args.max_nodes !== undefined) {
+    const n = args.max_nodes;
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > INSPECT_MAX_NODES) {
+      return `max_nodes must be an integer in 1-${INSPECT_MAX_NODES}`;
+    }
+  }
+  if (ELEMENT_ACTIONS.has(action)) {
+    if (typeof args.ref !== 'string' || !/^e\d+$/.test(args.ref)) {
+      return `action "${action}" requires ref: an element ref like "e12" from the latest inspect`;
+    }
+  }
+  if (action === 'click_element') {
+    const b = args.button;
+    if (b !== undefined && b !== 'left' && b !== 'right' && b !== 'middle') {
+      return 'click_element button must be left|right|middle';
+    }
+    const c = args.click_count;
+    if (c !== undefined && c !== 1 && c !== 2 && c !== 3) return 'click_element click_count must be 1, 2 or 3';
+    if (args.via !== undefined && args.via !== 'mouse' && args.via !== 'pattern') {
+      return 'click_element via must be mouse|pattern';
+    }
+  }
+  if (action === 'set_value') {
+    if (typeof args.text !== 'string') return 'action "set_value" requires a text string';
+    if (args.via !== undefined && args.via !== 'pattern' && args.via !== 'keys') {
+      return 'set_value via must be pattern|keys';
+    }
+  }
   return null;
 }
 
@@ -173,9 +219,24 @@ let geometryCache: ScreenState | null = null;
 /** 会话级上一帧(已 downscale),用于差分。/cu off 时清空。 */
 let lastFrame: PngImage | null = null;
 
+/**
+ * 会话级 UIA 快照(design-notes/computer-use-rpa.md §2.2):每次 inspect 整体替换、generation 递增。
+ * click_element/set_value 只接受当前快照里的 ref,且执行前必按 hwnd+path 重定位并校验 role/name,
+ * 不信任旧矩形。
+ */
+interface ElementSnapshot {
+  generation: number;
+  tree: UiaRawTree;
+  items: Map<string, DisplayElement>;
+}
+let elementSnapshot: ElementSnapshot | null = null;
+let snapshotGeneration = 0;
+
 export function resetComputerState(): void {
   geometryCache = null;
   lastFrame = null;
+  elementSnapshot = null;
+  clearElementRefNames();
 }
 
 /** 抓一次主屏并返回几何信息。Windows 走 captureDesktop 的 geometry(零解码);其余平台只读 IHDR。 */
@@ -283,11 +344,65 @@ function commitFrame(img: PngImage): void {
   lastFrame = img;
 }
 
+/** 元素动作无法定位目标(ref 过期 / 元素消失)。execute 据此返回专门提示,让模型重新 inspect。 */
+class ElementNotFoundError extends Error {}
+
+interface ResolvedElement {
+  hwnd: number;
+  item: DisplayElement;
+}
+
+/** 按 ref 查当前快照;未 inspect 或 ref 不在当前 generation → ElementNotFoundError。 */
+function lookupElement(ref: string): ResolvedElement {
+  if (!elementSnapshot) {
+    throw new ElementNotFoundError(`no element snapshot yet; call inspect before using ref ${ref}`);
+  }
+  const item = elementSnapshot.items.get(ref);
+  if (!item) {
+    throw new ElementNotFoundError(
+      `ref ${ref} is not in the current snapshot (generation ${elementSnapshot.generation}); call inspect again`,
+    );
+  }
+  return { hwnd: elementSnapshot.tree.window.hwnd, item };
+}
+
+/** via:'pattern' 时按优先级挑一个可用的点击语义 pattern。 */
+export function pickClickPattern(patterns: readonly string[]): 'invoke' | 'toggle' | 'select' | 'expand' | null {
+  for (const p of ['invoke', 'toggle', 'select', 'expand'] as const) {
+    if (patterns.includes(p)) return p;
+  }
+  return null;
+}
+
+/** 调 UIA act;元素已变化/消失统一转成 ElementNotFoundError。 */
+async function actOnElement(
+  el: ResolvedElement,
+  kind: 'invoke' | 'toggle' | 'select' | 'expand' | 'setvalue' | 'focus' | 'rect',
+  signal: AbortSignal | undefined,
+  text?: string,
+): Promise<{ rect: { x: number; y: number; w: number; h: number } }> {
+  const { node } = el.item;
+  try {
+    return await getUiaService().act(
+      { hwnd: el.hwnd, path: node.path, kind, text, expectRole: node.role, expectName: node.name },
+      signal,
+    );
+  } catch (error) {
+    if (error instanceof UiaElementGoneError) {
+      throw new ElementNotFoundError(
+        `element ${el.item.ref} ${node.role} ${JSON.stringify(node.name)} is gone or changed (${error.message}); call inspect again`,
+      );
+    }
+    throw error;
+  }
+}
+
 async function executeAction(
   injector: InputInjector,
   action: ComputerAction,
   args: Record<string, unknown>,
   screen: ScreenState,
+  signal?: AbortSignal,
 ): Promise<string> {
   const { physW, physH, originX, originY } = screen;
   // norm1000 → 虚拟桌面物理像素:先按物理分辨率缩放,再叠加主屏原点(多屏)。
@@ -353,6 +468,55 @@ async function executeAction(
       const pos = await injector.cursorPosition();
       const [nx, ny] = physicalToNorm(pos.x - originX, pos.y - originY, physW, physH);
       return `cursor at physical (${pos.x}, ${pos.y}) = normalized (${nx}, ${ny})`;
+    }
+    case 'click_element': {
+      const el = lookupElement(args.ref as string);
+      const { node } = el.item;
+      const label = `element ${el.item.ref} ${node.role} ${JSON.stringify(node.name)}`;
+      if (args.via === 'pattern') {
+        const kind = pickClickPattern(node.patterns);
+        if (!kind) {
+          throw new Error(
+            `${label} exposes no invoke/toggle/select/expand pattern; retry click_element with via "mouse"`,
+          );
+        }
+        await actOnElement(el, kind, signal);
+        return `clicked ${label} via ${kind} pattern`;
+      }
+      // mouse:按 hwnd+path 重定位拿**实时**矩形,不信任 inspect 时的旧矩形(窗口可能已移动)。
+      const { rect } = await actOnElement(el, 'rect', signal);
+      if (rect.w <= 0 || rect.h <= 0) {
+        throw new Error(`${label} has an empty bounding rectangle (hidden or collapsed); call inspect again`);
+      }
+      const [x, y] = rectCenter(rect);
+      await injector.moveTo(x, y);
+      const button = (args.button as 'left' | 'right' | 'middle' | undefined) ?? 'left';
+      const count = (args.click_count as 1 | 2 | 3 | undefined) ?? 1;
+      await injector.click(button, count);
+      return `clicked ${label} at (${x}, ${y})`;
+    }
+    case 'set_value': {
+      const el = lookupElement(args.ref as string);
+      const { node } = el.item;
+      const text = args.text as string;
+      const label = `element ${el.item.ref} ${node.role} ${JSON.stringify(node.name)}`;
+      // 密码框:模型不代填密码(design-notes/computer-use-rpa.md §2.6),用户需要时手动输入。
+      if (node.isPassword)
+        throw new Error(`${label} is a password field; refusing to fill it — ask the user to type it`);
+      const hasValuePattern = node.patterns.includes('value');
+      const via = (args.via as 'pattern' | 'keys' | undefined) ?? (hasValuePattern ? 'pattern' : 'keys');
+      if (via === 'pattern') {
+        if (!hasValuePattern) {
+          throw new Error(`${label} does not support ValuePattern; retry set_value with via "keys"`);
+        }
+        await actOnElement(el, 'setvalue', signal, text);
+      } else {
+        await actOnElement(el, 'focus', signal);
+        await injector.pressKey('ctrl+a');
+        if (text.length > 0) await injector.typeText(text);
+        else await injector.pressKey('Delete');
+      }
+      return `set value of ${label} (${text.length} chars) via ${via}`;
     }
     default:
       throw new Error(`no executor for action "${action}"`);
@@ -430,8 +594,10 @@ export const computerTool: Tool = {
     'attached and the result says so — treat the previous screenshot as still current instead of assuming the action failed. ' +
     'Inspect each attached screenshot before the next action and self-correct. ' +
     'Coordinates use a normalized 0-1000 grid (x right, y down) over the primary screen; you never need the physical resolution. ' +
-    'Use zoom on a tight region before clicking small or dense UI elements. Destructive or sensitive targets ' +
-    '(form submit, payment, credentials, delete/send) require explicit user intent — ask first.',
+    'Use zoom on a tight region before clicking small or dense UI elements. ' +
+    'Prefer inspect + click_element/set_value for standard desktop apps (Windows UI Automation): element refs are exact and ' +
+    'cheaper than screenshots. Fall back to coordinates when the tree is sparse or the target is not listed. ' +
+    'Destructive or sensitive targets (form submit, payment, credentials, delete/send) require explicit user intent — ask first.',
   risk: 'dangerous',
   parameters: {
     type: 'object',
@@ -453,7 +619,8 @@ export const computerTool: Tool = {
       },
       text: {
         type: 'string',
-        description: 'Text to type (type) or key combo like "ctrl+s" / "Return" / "ctrl+shift+t" (key).',
+        description:
+          'Text to type (type), key combo like "ctrl+s" / "Return" / "ctrl+shift+t" (key), or the new value (set_value; may be empty to clear).',
       },
       scroll_direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
       scroll_amount: { type: 'integer', description: `Scroll clicks 1-${SCROLL_MAX} (default 3).` },
@@ -469,6 +636,32 @@ export const computerTool: Tool = {
         type: 'string',
         enum: ['primary', 'all'],
         description: 'screenshot only: display scope (default primary). All other actions act on the primary screen.',
+      },
+      max_nodes: {
+        type: 'integer',
+        description: `inspect only: max elements listed (1-${INSPECT_MAX_NODES}, default ${INSPECT_DEFAULT_NODES}).`,
+      },
+      include_screenshot: {
+        type: 'boolean',
+        description: 'inspect only: also attach a screenshot (default false; the element list is usually enough).',
+      },
+      ref: {
+        type: 'string',
+        description:
+          'click_element/set_value: element ref like "e12" from the latest inspect (refs expire on the next inspect).',
+      },
+      button: {
+        type: 'string',
+        enum: ['left', 'right', 'middle'],
+        description: 'click_element only: mouse button (default left).',
+      },
+      click_count: { type: 'integer', description: 'click_element only: 1-3 (default 1).' },
+      via: {
+        type: 'string',
+        enum: ['mouse', 'pattern', 'keys'],
+        description:
+          'click_element: "mouse" (default, real click at the live element center) or "pattern" (UIA Invoke/Toggle/Select/Expand, no mouse). ' +
+          'set_value: "pattern" (ValuePattern, default when supported) or "keys" (focus, select all, type).',
       },
     },
     required: ['action'],
@@ -602,10 +795,51 @@ export const computerTool: Tool = {
         };
       }
 
+      // inspect:读前台窗口 UIA 元素树,文本回灌;不注入输入,默认不附截图(元素清单本身就是感知结果)。
+      if (action === 'inspect') {
+        const t = Date.now();
+        const tree = await getUiaService().tree({}, ctx?.signal);
+        m.injectMs += Date.now() - t;
+        const maxNodes = (args.max_nodes as number | undefined) ?? INSPECT_DEFAULT_NODES;
+        const { items, truncated } = selectDisplayNodes(tree, maxNodes);
+        snapshotGeneration += 1;
+        elementSnapshot = {
+          generation: snapshotGeneration,
+          tree,
+          items: new Map(items.map((it) => [it.ref, it])),
+        };
+        setElementRefNames(items);
+        const text = formatSnapshot(tree, items, {
+          generation: snapshotGeneration,
+          truncated,
+          maxNodes,
+          geometry: screen,
+        });
+        if (args.include_screenshot === true) {
+          const t2 = Date.now();
+          const shot = await capturePrimary(ctx?.signal);
+          m.captureMs += Date.now() - t2;
+          syncGeometry(shot);
+          const att = await toAttachment(shot.path, m);
+          commitFrame(att.img);
+          m.bytes = att.bytes;
+          return {
+            status: 'success',
+            code: 'OK',
+            retryable: false,
+            output: text,
+            modelAttachments: [
+              { type: 'image', name: 'computer-inspect.png', mime: 'image/png', dataUrl: att.dataUrl },
+            ],
+          };
+        }
+        return { status: 'success', code: 'OK', retryable: false, output: text };
+      }
+
       // 输入动作:注入 → 重截屏回灌(wait 也回灌,等待后界面往往已变化)。
       if (action === 'left_mouse_down') pendingMouseDown = true;
       let t = Date.now();
-      const summary = await executeAction(injector, action, args, screen);
+      const summary = await executeAction(injector, action, args, screen, ctx?.signal);
       m.injectMs += Date.now() - t;
       if (action === 'left_mouse_up') pendingMouseDown = false;
 
@@ -652,6 +886,16 @@ export const computerTool: Tool = {
       const message = error instanceof Error ? error.message : String(error);
       if (ctx?.signal?.aborted || /aborted/i.test(message)) {
         return { status: 'aborted', code: 'ABORTED', retryable: false, output: message };
+      }
+      if (error instanceof ElementNotFoundError) {
+        // ToolOutcomeCode 无 ELEMENT_NOT_FOUND;用 POSTCONDITION_FAILED 表达「前置定位不成立」,
+        // 输出前缀固定,供台账识别。不自动重试:界面已变,必须让模型重新 inspect。
+        return {
+          status: 'error',
+          code: 'POSTCONDITION_FAILED',
+          retryable: false,
+          output: `computer action failed: ELEMENT_NOT_FOUND: ${message}`,
+        };
       }
       return {
         status: 'error',

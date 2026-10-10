@@ -192,13 +192,16 @@ export const toolGroupCommands: CommandHandler[] = [
       // 常驻 PowerShell 进程(注入 / 抓屏)不会随主进程自动退出(Windows 尤其),关开关时必须
       // 显式回收,否则每次 /cu off 都留一组孤儿进程。差分基准帧与几何缓存也一并清掉。
       try {
-        const [{ disposeInputInjector }, { disposeCaptureService }, { resetComputerState }] = await Promise.all([
-          import('../../runtime/input-injector.js'),
-          import('../../runtime/screen-capture-service.js'),
-          import('../../tools/builtins/computer.js'),
-        ]);
+        const [{ disposeInputInjector }, { disposeCaptureService }, { disposeUiaService }, { resetComputerState }] =
+          await Promise.all([
+            import('../../runtime/input-injector.js'),
+            import('../../runtime/screen-capture-service.js'),
+            import('../../runtime/uia-service.js'),
+            import('../../tools/builtins/computer.js'),
+          ]);
         await disposeInputInjector();
         await disposeCaptureService();
+        await disposeUiaService();
         resetComputerState();
       } catch {
         // 从未启动过常驻进程:dispose 是空操作,忽略。

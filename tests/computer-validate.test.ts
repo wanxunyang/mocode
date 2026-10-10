@@ -93,3 +93,21 @@ test('validateComputerArgs: 无坐标要求的动作(截图/光标位置)直接�
   assert.equal(validateComputerArgs({ action: 'screenshot', target: 'all' }), null);
   assert.equal(validateComputerArgs({ action: 'cursor_position' }), null);
 });
+
+test('validateComputerArgs: P1 元素动作(inspect/click_element/set_value)', () => {
+  assert.equal(validateComputerArgs({ action: 'inspect' }), null);
+  assert.equal(validateComputerArgs({ action: 'inspect', max_nodes: 50 }), null);
+  assert.ok(validateComputerArgs({ action: 'inspect', max_nodes: 0 }));
+  assert.ok(validateComputerArgs({ action: 'inspect', max_nodes: 301 }));
+
+  assert.match(validateComputerArgs({ action: 'click_element' })!, /requires ref/);
+  assert.ok(validateComputerArgs({ action: 'click_element', ref: '12' }));
+  assert.equal(validateComputerArgs({ action: 'click_element', ref: 'e12' }), null);
+  assert.ok(validateComputerArgs({ action: 'click_element', ref: 'e1', click_count: 4 }));
+  assert.ok(validateComputerArgs({ action: 'click_element', ref: 'e1', via: 'keys' }));
+  assert.equal(validateComputerArgs({ action: 'click_element', ref: 'e1', via: 'pattern', button: 'right' }), null);
+
+  assert.ok(validateComputerArgs({ action: 'set_value', ref: 'e1' }));
+  assert.equal(validateComputerArgs({ action: 'set_value', ref: 'e1', text: '' }), null);
+  assert.ok(validateComputerArgs({ action: 'set_value', ref: 'e1', text: 'x', via: 'mouse' }));
+});

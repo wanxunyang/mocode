@@ -9,6 +9,7 @@ import type { Config } from '../config/index.js';
 import { readConfigFile, updateConfigKey } from '../config/file.js';
 import { getSandboxRoot } from '../sandbox/index.js';
 import { t } from '../i18n/index.js';
+import { lookupElementRefName } from '../runtime/uia-selector.js';
 
 export type PermissionScope = 'once' | 'session' | 'project';
 
@@ -64,6 +65,36 @@ export function computerTextNeedsReview(text: string): boolean {
   if (/\b(card\s*number|cvv|cvc|expiry)\b/i.test(s)) return true;
   // CJK 关键词没有 \b 词边界概念(\b 只在 \w 与非 \w 之间成立,中文不是 \w),用普通子串匹配。
   if (/信用卡|卡号|密码|支付|付款|验证码/.test(s)) return true;
+  return false;
+}
+
+/**
+ * computer click_element 目标元素名审查(design-notes/computer-use-rpa.md §2.6):
+ * 名称命中删除/发送/提交/支付类关键词时强制 once 级确认——这类按钮一点即产生外部副作用,
+ * 不能因为「本会话允许 click_element」而静默放行。纯函数,独立可单测。
+ */
+export function computerTargetNeedsReview(name: string): boolean {
+  const s = name.toLowerCase();
+  if (/\b(delete|remove|send|submit|pay|purchase|buy|checkout|confirm|transfer|uninstall|format|erase)\b/i.test(s)) {
+    return true;
+  }
+  if (/删除|移除|发送|提交|支付|付款|购买|下单|确认|转账|卸载|格式化|清空/.test(s)) return true;
+  return false;
+}
+
+/** computer 调用是否命中「强制 once」审查:敏感文本(type/key/set_value)或敏感按钮(click_element)。 */
+export function computerArgsNeedReview(args: Record<string, unknown>): boolean {
+  if (
+    (args.action === 'type' || args.action === 'key' || args.action === 'set_value') &&
+    typeof args.text === 'string'
+  ) {
+    if (computerTextNeedsReview(args.text)) return true;
+  }
+  if (args.action === 'click_element' && typeof args.ref === 'string') {
+    const el = lookupElementRefName(args.ref);
+    // ref 无登记(未 inspect / 已过期):工具会以 ELEMENT_NOT_FOUND 拒绝执行,这里不额外弹窗。
+    if (el && computerTargetNeedsReview(el.name)) return true;
+  }
   return false;
 }
 
@@ -152,6 +183,11 @@ function summarizeArgs(args: Record<string, unknown>): string {
     // computer 工具:动作名 + 坐标/文本预览(文本截断防长串刷屏)。
     const parts: string[] = [args.action];
     if (Array.isArray(args.coordinate)) parts.push(`@(${args.coordinate.join(', ')})`);
+    if (typeof args.ref === 'string') {
+      // click_element/set_value:弹窗显示 ref 对应的元素名,而不是只给一个无意义的 e9。
+      const el = lookupElementRefName(args.ref);
+      parts.push(el ? `${args.ref} ${el.role} ${JSON.stringify(el.name.slice(0, 60))}` : args.ref);
+    }
     if (typeof args.text === 'string' && args.text) {
       const preview = args.text.slice(0, 80);
       parts.push(`"${preview}${args.text.length > 80 ? '…' : ''}"`);
@@ -194,14 +230,10 @@ async function checkPermissionWithSessionGrants(
   loadPermanent();
   if (permanentToolAllows.has(tool.name)) return 'allow';
 
-  // computer 的 type/key 命中敏感内容(URL/密码/支付)时强制 once 级确认:
-  // 不看任何授权缓存,也不提供 session/项目/永久授权选项——这类文本是「敲进任意应用」的载体,
-  // 一旦放行不该沿用到下一次输入。
-  const forceOnce =
-    tool.name === 'computer' &&
-    (args.action === 'type' || args.action === 'key') &&
-    typeof args.text === 'string' &&
-    computerTextNeedsReview(args.text);
+  // computer 命中敏感内容时强制 once 级确认:type/key/set_value 的文本(URL/密码/支付),
+  // 或 click_element 的目标按钮名(删除/发送/支付…)。不看任何授权缓存,也不提供
+  // session/项目/永久授权选项——这类动作一旦放行不该沿用到下一次。
+  const forceOnce = tool.name === 'computer' && computerArgsNeedReview(args);
 
   const fingerprint = permissionFingerprint(tool, args);
   const projectRoot = canonicalProjectRoot(options.projectRoot ?? getSandboxRoot() ?? process.cwd());

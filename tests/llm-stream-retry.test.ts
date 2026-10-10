@@ -448,3 +448,31 @@ test('computeRetryWaitMs 纯函数:连接类判据与 Retry-After 优先级', ()
   assert.equal(isConnectionClassError(new OpenAI.APIUserAbortError()), false, '用户中断不是连接类');
   assert.equal(isConnectionClassError(undefined), false, '非对象不是连接类');
 });
+
+test('isStreamInterruptedError:Go 代理/网关的 "unexpected EOF" 属流中断(含 cause 链)', () => {
+  assert.equal(isStreamInterruptedError(new Error('unexpected EOF')), true, '顶层文案');
+  assert.equal(
+    isStreamInterruptedError(new Error('Post "https://x/v1": unexpected EOF')),
+    true,
+    '带前缀的 Go 风格文案',
+  );
+  const wrapped = new TypeError('fetch failed');
+  (wrapped as { cause?: unknown }).cause = new Error('unexpected EOF');
+  assert.equal(isStreamInterruptedError(wrapped), true, 'cause 链里的 unexpected EOF 要能穿透');
+});
+
+test('unexpected EOF:零产出自动重试,第二次成功', async () => {
+  let createCalls = 0;
+  __setChatCreateImpl(async () => {
+    createCalls++;
+    if (createCalls === 1) return throwingStream(new Error('unexpected EOF'));
+    return okStream('recovered');
+  });
+  try {
+    const result = await chat(messages, {});
+    assert.equal(createCalls, 2, '应重试一次');
+    assert.equal(result.content, 'recovered');
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});

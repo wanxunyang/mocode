@@ -16,12 +16,14 @@ export async function shutdownRuntime(): Promise<void> {
   try {
     // 动态 import:未用过 computer 工具时不该把这两个常驻进程拉进来。
     // 常驻 PowerShell 进程不随主进程自动退出,必须显式回收(否则每次会话留一组孤儿)。
-    const [{ disposeInputInjector }, { disposeCaptureService }] = await Promise.all([
+    const [{ disposeInputInjector }, { disposeCaptureService }, { disposeUiaService }] = await Promise.all([
       import('./input-injector.js'),
       import('./screen-capture-service.js'),
+      import('./uia-service.js'),
     ]);
     await disposeInputInjector();
     await disposeCaptureService();
+    await disposeUiaService();
   } catch {
     // 从未启动过:忽略。
   }

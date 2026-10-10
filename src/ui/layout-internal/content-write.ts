@@ -233,7 +233,7 @@ function commitMd(): void {
 // 应让 buffer 顶部始终是「最新的一份 banner」,而不是堆 5 份。
 // rewriteBanner 在 banner 已建好时原地等长替换顶部 bannerH 行,viewport 自动从 rows[] 头读新版。
 //
-// bannerH = bannerLines(banner()) 的行数(目前 5:4 行 logo+info + 1 空行分隔)。如未来
+// bannerH = bannerLines(banner()) 的行数(目前 7:6 行 logo+info + 1 空行分隔)。如未来
 // bannerString 变化,调用方需重调 writeBanner 重设 bannerH。
 
 /**
@@ -511,13 +511,72 @@ export function renderWelcomeRows(lines: readonly string[], cols: number): strin
   });
 }
 
-/** 写欢迎引导块(逻辑行经 renderWelcomeRows 居中后写入,contentWrite 兜底折行);已在屏上则跳过。 */
+/** 逻辑行折行后占的物理行数(可见宽度 ≥ cols 的行由 contentWrite 折行;空行占 1 行)。 */
+function welcomePhysicalRows(lines: readonly string[], cols: number): number {
+  let n = 0;
+  for (const line of lines) n += Math.max(1, Math.ceil(ansiDisplayWidth(line) / Math.max(1, cols)));
+  return n;
+}
+
+/**
+ * 让欢迎块「banner + 块」放得进内容区,否则 viewport 取缓冲尾窗会把顶部 logo 挤出屏外
+ * (矮窗口 / 折行多时 logo 不再置顶)。放不下时按段(空行分隔)舍弃:先从末段往前丢,
+ * 首段(原生终端提示)优先级最低、其后丢,「快速上手」段最后丢;连一段都放不下则返回 [](不写块)。
+ * 预留 1 行余量:块末换行不能把续写位推出内容区底而触发滚动。
+ */
+export function fitWelcomeLines(
+  lines: readonly string[],
+  cols: number,
+  contentBottom: number,
+  bannerH: number,
+): string[] {
+  const budget = contentBottom - bannerH - 1;
+  if (welcomePhysicalRows(lines, cols) <= budget) return [...lines];
+  // 按空行切段(段内不含空行),重组时用 '' 分隔并首尾各补一个 '',与 welcomeLines 的版式一致
+  const groups: string[][] = [];
+  let cur: string[] = [];
+  for (const line of lines) {
+    if (line === '') {
+      if (cur.length > 0) groups.push(cur);
+      cur = [];
+    } else {
+      cur.push(line);
+    }
+  }
+  if (cur.length > 0) groups.push(cur);
+  // 丢弃顺序:末段 → … → 第 3 段,然后首段,最后第 2 段
+  const dropOrder: number[] = [];
+  for (let i = groups.length - 1; i >= 2; i--) dropOrder.push(i);
+  if (groups.length >= 1) dropOrder.push(0);
+  if (groups.length >= 2) dropOrder.push(1);
+  const alive = new Set(groups.map((_, i) => i));
+  const build = (): string[] => {
+    const out: string[] = [''];
+    for (let i = 0; i < groups.length; i++) {
+      if (!alive.has(i)) continue;
+      out.push(...groups[i], '');
+    }
+    return out;
+  };
+  for (const idx of dropOrder) {
+    alive.delete(idx);
+    if (alive.size === 0) return [];
+    const built = build();
+    if (welcomePhysicalRows(built, cols) <= budget) return built;
+  }
+  return [];
+}
+
+/** 写欢迎引导块(逻辑行经 fit 裁剪 + renderWelcomeRows 居中后写入,contentWrite 兜底折行);已在屏上则跳过。 */
 export function writeWelcomeBlock(lines: string[]): void {
   if (!state.active || !ui.isTTY || lines.length === 0) return;
   if (state.welcomeRows > 0) return; // 已在屏上,不重复写
+  const g = getGeo();
+  const fitted = fitWelcomeLines(lines, g.cols, g.contentBottom, state.bannerH);
+  if (fitted.length === 0) return; // 窗口太矮:宁可不画,也别把顶部 logo 挤出屏
   state.welcomeSource = [...lines];
   state.welcomeStart = content.committedRows();
-  contentWrite(renderWelcomeRows(lines, getGeo().cols).join('\n') + '\n');
+  contentWrite(renderWelcomeRows(fitted, g.cols).join('\n') + '\n');
   state.welcomeRows = content.committedRows() - state.welcomeStart;
 }
 
@@ -550,7 +609,9 @@ function reflowWelcomeBlockForResize(cols: number): content.ReflowChange | null 
   const g = getGeo();
   state.contentRow = Math.min(start + 1, g.contentBottom);
   state.contentCol = 1;
-  contentWrite(renderWelcomeRows(source, cols).join('\n') + '\n');
+  // 与 writeWelcomeBlock 同口径先 fit:窗口变矮后按新高度裁剪,避免把顶部 logo 挤出屏。
+  const fitted = fitWelcomeLines(source, cols, g.contentBottom, state.bannerH);
+  if (fitted.length > 0) contentWrite(renderWelcomeRows(fitted, cols).join('\n') + '\n');
   state.welcomeRows = content.committedRows() - start;
   const newLines: string[] = [];
   for (let i = start; i < start + state.welcomeRows; i++) newLines.push(content.lineAt(i) ?? '');

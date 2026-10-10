@@ -199,3 +199,29 @@ test('getGuiActionsFilePath: 与 notes.md 同目录;无会话时返 null', () =>
     teardown();
   }
 });
+
+test('parseComputerOutput: P1 元素动作句式(inspect / click_element / set_value)', () => {
+  assert.deepEqual(
+    parseComputerOutput(
+      'UI elements of window "无标题 - 记事本" (notepad.exe), generation 3, 41 nodes (interactive only).\ne1 ...',
+    ),
+    { intent: 'inspect', observation: '41 nodes' },
+  );
+  assert.equal(
+    parseComputerOutput(RE_CAPTURED('clicked element e9 Button "关闭" at (978, 11)'))?.intent,
+    'click_element e9 "关闭"',
+  );
+  assert.equal(
+    parseComputerOutput(NO_CHANGE('clicked element e3 MenuItem "文件" via expand pattern'))?.intent,
+    'click_element e3 "文件"',
+  );
+  assert.equal(
+    parseComputerOutput(RE_CAPTURED('set value of element e7 Document "文本编辑器" (18 chars) via pattern'))?.intent,
+    'set_value e7 18 chars',
+  );
+  const failed = parseComputerOutput(
+    'computer action failed: ELEMENT_NOT_FOUND: ref e5 is not in the current snapshot',
+  );
+  assert.equal(failed?.intent, 'failed');
+  assert.match(failed!.observation, /ELEMENT_NOT_FOUND/);
+});

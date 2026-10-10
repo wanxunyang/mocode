@@ -65,6 +65,11 @@ function normalizeIntent(summary: string): string {
   text = text.replace(/^scrolled (\w+) by ([\d.]+) at (\(.*\))$/, 'scroll $1 $2 $3');
   text = text.replace(/^waited ([\d.]+)ms$/, 'wait $1ms');
   text = text.replace(/^cursor at physical \([^)]*\) = normalized (\(.*\))$/, 'cursor_position $1');
+  // UIA 元素动作(computer.ts executeAction 的 click_element/set_value 句式):
+  // `clicked element e9 Button "关闭" at (978, 11)` / `... via invoke pattern` → `click_element e9 "关闭"`;
+  // `set value of element e7 Document "文本" (18 chars) via pattern` → `set_value e7 18 chars`。
+  text = text.replace(/^clicked element (e\d+) \S+ (".*") (?:at \([^)]*\)|via \w+ pattern)$/, 'click_element $1 $2');
+  text = text.replace(/^set value of element (e\d+) \S+ ".*" \((\d+) chars\) via \w+$/, 'set_value $1 $2 chars');
   text = text.replace(/^(\w+) at (\(.*\))$/, '$1 $2');
   return text;
 }
@@ -95,6 +100,11 @@ export function parseComputerOutput(output: string): GuiActionEntry | null {
   }
   if (text.startsWith('Screenshot captured (')) {
     return { intent: 'screenshot', observation: 're-captured' };
+  }
+  // inspect 输出前缀与 runtime/uia-selector.ts 的 INSPECT_OUTPUT_PREFIX 一致;只回灌文本,不改差分基准。
+  if (text.startsWith('UI elements of window ')) {
+    const n = /, (\d+) nodes \(/.exec(text);
+    return { intent: 'inspect', observation: n ? `${n[1]} nodes` : 'listed' };
   }
 
   const diffMatch = /\.\s*No visible change on screen \(frame diff ([\d.]+)%/.exec(text);

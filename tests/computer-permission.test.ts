@@ -74,3 +74,49 @@ test('permissionFingerprint: 非 computer 工具行为不变(run_command 仍按�
   assert.notEqual(a, b);
   assert.equal(permissionFingerprint(runStub, { command: 'git status' }), a);
 });
+
+// ── P1 UIA 元素动作的审查(design-notes/computer-use-rpa.md §2.6)──────────
+
+test('computerTargetNeedsReview: 删除/发送/支付类按钮名命中(中英)', async () => {
+  const { computerTargetNeedsReview } = await import('../src/permissions/index.js');
+  assert.equal(computerTargetNeedsReview('Delete'), true);
+  assert.equal(computerTargetNeedsReview('Send message'), true);
+  assert.equal(computerTargetNeedsReview('确认付款'), true);
+  assert.equal(computerTargetNeedsReview('删除文件'), true);
+  assert.equal(computerTargetNeedsReview('文件'), false);
+  assert.equal(computerTargetNeedsReview('Close'), false);
+});
+
+test('computerArgsNeedReview: set_value 文本与 click_element 目标名都走 forceOnce', async () => {
+  const { computerArgsNeedReview } = await import('../src/permissions/index.js');
+  const { setElementRefNames, clearElementRefNames } = await import('../src/runtime/uia-selector.js');
+  const node = (name: string) => ({
+    id: 1,
+    parent: 0,
+    path: '0',
+    depth: 1,
+    role: 'Button',
+    name,
+    automationId: '',
+    className: '',
+    rect: { x: 0, y: 0, w: 10, h: 10 },
+    enabled: true,
+    offscreen: false,
+    isPassword: false,
+    patterns: ['invoke'],
+  });
+  try {
+    assert.equal(computerArgsNeedReview({ action: 'set_value', ref: 'e1', text: 'password: x' }), true);
+    assert.equal(computerArgsNeedReview({ action: 'set_value', ref: 'e1', text: 'hello' }), false);
+    setElementRefNames([
+      { ref: 'e1', node: node('发送') },
+      { ref: 'e2', node: node('文件') },
+    ]);
+    assert.equal(computerArgsNeedReview({ action: 'click_element', ref: 'e1' }), true);
+    assert.equal(computerArgsNeedReview({ action: 'click_element', ref: 'e2' }), false);
+    // 未登记 ref:工具自身会 ELEMENT_NOT_FOUND,这里不额外强制。
+    assert.equal(computerArgsNeedReview({ action: 'click_element', ref: 'e99' }), false);
+  } finally {
+    clearElementRefNames();
+  }
+});
