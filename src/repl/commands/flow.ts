@@ -114,7 +114,20 @@ async function flowRun(tokens: string[]): Promise<void> {
   if (!isComputerUseRouteAllowed()) return warn(t('flow.gateOff'));
 
   const params: Record<string, string> = {};
-  for (const tok of tokens) {
+  let windowTitleRegex: string | undefined;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (tok === '--window') {
+      const re = tokens[++i];
+      if (!re) return warn(t('flow.usage'));
+      try {
+        new RegExp(re, 'i');
+      } catch {
+        return warn(t('flow.badParam', { token: `--window ${re}` }));
+      }
+      windowTitleRegex = re;
+      continue;
+    }
     const eq = tok.indexOf('=');
     if (eq <= 0) return warn(t('flow.badParam', { token: tok }));
     params[tok.slice(0, eq)] = tok.slice(eq + 1);
@@ -126,7 +139,11 @@ async function flowRun(tokens: string[]): Promise<void> {
 
   // 与 run_flow 工具同一套审查:敏感 flow 开跑前必须逐次确认(回放内部的单步不再弹窗)。
   const { reviewFlowRun } = await import('../../permissions/flow-review.js');
-  const review = reviewFlowRun({ name, params });
+  const review = reviewFlowRun({
+    name,
+    params,
+    ...(windowTitleRegex !== undefined ? { window_title_regex: windowTitleRegex } : {}),
+  });
   if (review.reasons.length) {
     const allow = t('permission.allow');
     const deny = t('permission.deny');
@@ -146,7 +163,7 @@ async function flowRun(tokens: string[]): Promise<void> {
   const signal = startRunningListener(t('flow.running'));
   let result;
   try {
-    result = await runFlowWithComputer(loaded.flow, params, signal);
+    result = await runFlowWithComputer(loaded.flow, params, signal, { windowTitleRegex });
   } finally {
     stopRunningListener();
   }

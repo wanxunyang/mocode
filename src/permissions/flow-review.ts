@@ -43,6 +43,14 @@ export function reviewFlowRun(args: Record<string, unknown>): FlowRunReview {
     const v = values[k];
     return `  ${k} = ${v === undefined ? '(missing)' : JSON.stringify(clip(v, 60))}`;
   });
-  const summary = [summarizeFlow(flow), ...(paramLines.length ? ['Parameter values:', ...paramLines] : [])].join('\n');
+  const windowOverride =
+    typeof args.window_title_regex === 'string' && args.window_title_regex.trim() !== ''
+      ? [`Window override: title matches /${clip(args.window_title_regex, 80)}/i for every window/element step`]
+      : [];
+  const summary = [
+    summarizeFlow(flow),
+    ...windowOverride,
+    ...(paramLines.length ? ['Parameter values:', ...paramLines] : []),
+  ].join('\n');
   return { name, hash: loaded.hash, reasons, summary };
 }

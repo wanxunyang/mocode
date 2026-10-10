@@ -334,3 +334,40 @@ test('pickWindowForReplay: 非法 titleRegex 报错而不抛', () => {
   const r = pickWindowForReplay([win({})], { titleRegex: '(' });
   assert.ok(!r.ok && /not a valid regular expression/.test(r.error));
 });
+
+// ── windowTitleRegex 运行时覆盖 ──────────────────────────────────────────
+
+test('runFlow: windowTitleRegex 覆盖元素步骤 selector.window.titleRegex,进程名与 path 不变,原 flow 不被改写', async () => {
+  const flow = mk([{ action: 'set_value', selector: SEL, text: 'hi' }]);
+  const h = harness();
+  const r = await runFlow(flow, undefined, h.deps, { windowTitleRegex: '^flow' });
+  assert.equal(r.status, 'completed');
+  assert.deepEqual(h.resolved, [{ window: { processName: 'notepad', titleRegex: '^flow' }, path: SEL.path }]);
+  assert.equal((flow.steps[0].selector as { window: { titleRegex?: string } }).window.titleRegex, undefined);
+});
+
+test('runFlow: windowTitleRegex 覆盖 focus_window(带进程名时经 resolveWindow,仅标题时走 title_regex 参数)', async () => {
+  const seen: Array<{ processName?: string; titleRegex?: string }> = [];
+  const flow = mk([
+    { action: 'focus_window', window: { processName: 'notepad', titleRegex: 'old' } },
+    { action: 'focus_window', window: { titleRegex: 'older' } },
+  ]);
+  const h = harness({
+    async resolveWindow(win) {
+      seen.push(win);
+      return { ok: true, args: { window: 'w2' } };
+    },
+  });
+  const r = await runFlow(flow, undefined, h.deps, { windowTitleRegex: 'new' });
+  assert.equal(r.status, 'completed');
+  assert.deepEqual(seen, [{ processName: 'notepad', titleRegex: 'new' }]);
+  assert.deepEqual(h.calls[0], { action: 'focus_window', window: 'w2' });
+  assert.deepEqual(h.calls[1], { action: 'focus_window', title_regex: 'new' });
+});
+
+test('runFlow: 不传 windowTitleRegex 时行为不变(selector 原样传给 resolveRef)', async () => {
+  const flow = mk([{ action: 'click_element', selector: SEL }]);
+  const h = harness();
+  await runFlow(flow, undefined, h.deps);
+  assert.deepEqual(h.resolved, [SEL]);
+});

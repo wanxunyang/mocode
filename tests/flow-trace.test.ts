@@ -19,6 +19,8 @@ import {
   nextTraceSeq,
   outputIndicatesChange,
   readTrace,
+  TRACE_KEEP_ENTRIES,
+  trimTraceFile,
   withTraceSuspended,
 } from '../src/flows/trace.js';
 
@@ -183,4 +185,57 @@ test('withTraceSuspended: 嵌套计数,异常后也恢复', async () => {
   assert.equal(isTraceSuspended(), false);
   await assert.rejects(withTraceSuspended(async () => Promise.reject(new Error('x'))));
   assert.equal(isTraceSuspended(), false);
+});
+
+test('trimTraceFile: 未超大小不动;超限只留最近 keep 条且不留 tmp,seq 不重编号', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mocode-trace-trim-'));
+  try {
+    const file = path.join(root, TRACE_FILENAME);
+    const lines = Array.from({ length: 10 }, (_, i) =>
+      JSON.stringify({ seq: i + 1, ts: 'T', action: 'key', args: { text: 'x' } }),
+    );
+    fs.writeFileSync(file, `${lines.join('\n')}\n`, 'utf8');
+
+    assert.equal(trimTraceFile(file, 1_000_000, 3), false, '未超大小不裁');
+    assert.equal(fs.readFileSync(file, 'utf8').trim().split('\n').length, 10);
+
+    assert.equal(trimTraceFile(file, 10, 20), false, '条数不足 keep 不裁');
+    assert.equal(trimTraceFile(file, 10, 3), true);
+    const kept = fs
+      .readFileSync(file, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => (JSON.parse(l) as { seq: number }).seq);
+    assert.deepEqual(kept, [8, 9, 10]);
+    assert.equal(fs.existsSync(`${file}.tmp`), false);
+
+    assert.equal(trimTraceFile(path.join(root, 'missing.jsonl'), 1, 1), false, '文件缺失不抛');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('appendTrace: 持续追加超过大小上限后自动裁剪,最新条目保留且 seq 单调', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mocode-trace-cap-'));
+  const prev = setSandboxRoot(root);
+  try {
+    setCurrentSessionId('trace-cap', root);
+    // 单条略大于 1.3KB:256KB 上限在约 200 条时被越过,才同时满足「超大小」与「条数 > keep」两个裁剪条件。
+    const big = 'a'.repeat(1400);
+    const total = 215;
+    // seq 用循环计数而不是每次 nextTraceSeq():后者整文件解析,会让用例 O(n²) 变慢。
+    for (let i = 1; i <= total; i++) {
+      assert.equal(appendTrace({ seq: i, ts: 'T', action: 'type', args: { text: big } }), true);
+    }
+    const all = readTrace();
+    assert.ok(all.length >= TRACE_KEEP_ENTRIES, `kept ${all.length}`);
+    assert.ok(all.length < total, `expected trimming, kept ${all.length}`);
+    assert.equal(all[all.length - 1].seq, total);
+    assert.equal(nextTraceSeq(), total + 1);
+    for (let i = 1; i < all.length; i++) assert.ok(all[i].seq > all[i - 1].seq);
+  } finally {
+    setCurrentSessionId(undefined, root);
+    setSandboxRoot(prev);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

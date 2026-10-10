@@ -323,7 +323,7 @@ const zhCN = {
     '视觉窗口 · {frames} 条帧消息 · history 内 {images} 张图 · 约 {tokens} 图像 token · keep {keep}/batch {batch} · 已淘汰 {dropped}',
   'cu.actionLedger': '动作台账 · 已记录 {count} 条 GUI 动作',
   'flow.usage':
-    '用法：/flow list · /flow show <name> · /flow save <name> [--from N] [--to M] [--force] [描述] · /flow run <name> [参数=值 ...]',
+    '用法：/flow list · /flow show <name> · /flow save <name> [--from N] [--to M] [--force] [描述] · /flow run <name> [--window <标题正则>] [参数=值 ...]',
   'flow.noFlows': '还没有保存的 flow（.mocode/flows/）。先用 computer 操作一遍，再 /flow save <name>。',
   'flow.saved': '已保存 flow "{name}"（{steps} 步）→ {path}',
   'flow.savedParams': '回放时需提供参数：{params}（/flow run {name} 参数=值）',
@@ -736,7 +736,7 @@ const en: Record<TranslationKey, string> = {
     'vision window · {frames} frame msg(s) · {images} image(s) in history · ~{tokens} image tk · keep {keep}/batch {batch} · {dropped} dropped',
   'cu.actionLedger': 'action ledger · {count} gui actions logged',
   'flow.usage':
-    'Usage: /flow list · /flow show <name> · /flow save <name> [--from N] [--to M] [--force] [description] · /flow run <name> [param=value ...]',
+    'Usage: /flow list · /flow show <name> · /flow save <name> [--from N] [--to M] [--force] [description] · /flow run <name> [--window <title-regex>] [param=value ...]',
   'flow.noFlows': 'No saved flows yet (.mocode/flows/). Drive the desktop with computer first, then /flow save <name>.',
   'flow.saved': 'Saved flow "{name}" ({steps} steps) → {path}',
   'flow.savedParams': 'Parameters required at replay: {params} (/flow run {name} param=value)',

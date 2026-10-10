@@ -124,14 +124,27 @@ function isElementStep(step: FlowStep): boolean {
   return step.action === 'click_element' || step.action === 'set_value';
 }
 
-async function attemptStep(step: FlowStep, deps: RunnerDeps): Promise<Attempt> {
+/** 运行时选项。 */
+export interface RunFlowOptions {
+  /**
+   * 运行时覆盖窗口标题正则:同进程开了多个窗口(如两个记事本)时,不必改 flow 文件即可指定目标。
+   * 作用于 focus_window 步骤的 window.titleRegex 与元素步骤 selector.window.titleRegex;进程名仍以 flow 为准。
+   */
+  windowTitleRegex?: string;
+}
+
+async function attemptStep(step: FlowStep, deps: RunnerDeps, windowTitleRegex?: string): Promise<Attempt> {
   try {
     let argSets: Record<string, unknown>[];
     let note: string | undefined;
 
     if (isElementStep(step)) {
-      const located: RefResolution = step.selector
-        ? await deps.resolveRef(step.selector, deps.signal)
+      const selector =
+        step.selector && windowTitleRegex !== undefined
+          ? { ...step.selector, window: { ...step.selector.window, titleRegex: windowTitleRegex } }
+          : step.selector;
+      const located: RefResolution = selector
+        ? await deps.resolveRef(selector, deps.signal)
         : { ok: false, error: 'this step has no selector' };
       if (located.ok) {
         argSets = [{ ...computerArgs(step), ref: located.ref }];
@@ -150,7 +163,8 @@ async function attemptStep(step: FlowStep, deps: RunnerDeps): Promise<Attempt> {
         };
       }
     } else if (step.action === 'focus_window') {
-      const win = step.window;
+      const win =
+        step.window && windowTitleRegex !== undefined ? { ...step.window, titleRegex: windowTitleRegex } : step.window;
       if (win?.processName) {
         const resolved = await deps.resolveWindow(win, deps.signal);
         if (!resolved.ok) return { ok: false, error: resolved.error, aborted: false, retryable: true };
@@ -193,6 +207,7 @@ export async function runFlow(
   flow: Flow,
   given: Record<string, unknown> | undefined,
   deps: RunnerDeps,
+  options: RunFlowOptions = {},
 ): Promise<FlowRunResult> {
   const resolved = resolveParams(flow, given);
   if (!resolved.ok) return { status: 'rejected', steps: [], completed: 0, skipped: 0, error: resolved.error };
@@ -243,7 +258,7 @@ export async function runFlow(
 
     while (attempts < maxAttempts) {
       attempts += 1;
-      const r = await attemptStep(step, deps);
+      const r = await attemptStep(step, deps, options.windowTitleRegex);
       if (r.ok) {
         success = r;
         break;

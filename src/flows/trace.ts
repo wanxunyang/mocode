@@ -227,17 +227,44 @@ export function nextTraceSeq(sessionId = getCurrentSessionId()): number {
   return max + 1;
 }
 
-/** 追加一条;失败静默,返回是否写入成功。 */
+/** trace 单文件大小上限(字节):超过即裁剪到最近 TRACE_KEEP_ENTRIES 条。flow 导出只需要最近一段操作。 */
+export const TRACE_MAX_BYTES = 256 * 1024;
+export const TRACE_KEEP_ENTRIES = 200;
+
+/**
+ * 文件超过上限时只保留最近 `keep` 条(tmp+rename 原子写)。seq 不重编号——导出按 seq 取范围,
+ * nextTraceSeq 取现存最大值 +1,裁掉旧条目不影响后续序号单调递增。
+ * 会话整体归档/清除(session/retention.ts)时 trace 随会话目录一起删除:已固化的 flow 在 `.mocode/flows/`,不受影响。
+ */
+export function trimTraceFile(file: string, maxBytes = TRACE_MAX_BYTES, keep = TRACE_KEEP_ENTRIES): boolean {
+  try {
+    if (fs.statSync(file).size <= maxBytes) return false;
+    const lines = fs
+      .readFileSync(file, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim());
+    if (lines.length <= keep) return false;
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, `${lines.slice(-keep).join('\n')}\n`, 'utf8');
+    fs.renameSync(tmp, file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 追加一条;失败静默,返回是否写入成功。超过大小上限时顺带裁剪旧条目。 */
 export function appendTrace(entry: TraceEntry, sessionId = getCurrentSessionId()): boolean {
   const file = getTraceFilePath(sessionId);
   if (!file) return false;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, 'utf8');
-    return true;
   } catch {
     return false;
   }
+  trimTraceFile(file);
+  return true;
 }
 
 // ── 回放期间暂停录制 ─────────────────────────────────────────────────────

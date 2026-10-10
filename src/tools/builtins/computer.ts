@@ -676,15 +676,33 @@ export interface ComputerMetricsSummary {
   captureP50: number;
   skippedRatio: number;
   avgBytes: number;
+  /** 按 action 分组的总耗时分位数(基于同一个 ring buffer),新动作(inspect/wait_until 等)可单独对比基线。 */
+  byAction: Record<string, { count: number; p50: number; p95: number }>;
   last?: ComputerMetric;
 }
 
 export function getComputerMetrics(): ComputerMetricsSummary {
+  return summarizeMetrics(metrics);
+}
+
+/** 纯函数:把一批度量汇总成分位数(导出供单测用合成数据覆盖,不依赖模块级 ring buffer)。 */
+export function summarizeMetrics(metrics: readonly ComputerMetric[]): ComputerMetricsSummary {
   const totals = metrics.map((m) => m.totalMs);
   const caps = metrics.map((m) => m.captureMs);
   const skipped = metrics.filter((m) => m.skipped).length;
   const bytes = metrics.reduce((a, m) => a + m.bytes, 0);
+  const grouped = new Map<string, number[]>();
+  for (const m of metrics) {
+    const list = grouped.get(m.action);
+    if (list) list.push(m.totalMs);
+    else grouped.set(m.action, [m.totalMs]);
+  }
+  const byAction: ComputerMetricsSummary['byAction'] = {};
+  for (const [action, list] of grouped) {
+    byAction[action] = { count: list.length, p50: pct(list, 50), p95: pct(list, 95) };
+  }
   return {
+    byAction,
     count: metrics.length,
     totalP50: pct(totals, 50),
     totalP95: pct(totals, 95),

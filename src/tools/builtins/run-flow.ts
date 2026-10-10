@@ -9,6 +9,7 @@ import {
   runFlow,
   formatFlowRunResult,
   type FlowRunResult,
+  type RunFlowOptions,
   type RunnerDeps,
   type StepOutcome,
 } from '../../flows/runner.js';
@@ -55,8 +56,9 @@ export function runFlowWithComputer(
   flow: Flow,
   params: Record<string, unknown> | undefined,
   signal?: AbortSignal,
+  options?: RunFlowOptions,
 ): Promise<FlowRunResult> {
-  return withTraceSuspended(() => runFlow(flow, params, createComputerRunnerDeps(signal)));
+  return withTraceSuspended(() => runFlow(flow, params, createComputerRunnerDeps(signal), options));
 }
 
 export const runFlowTool: Tool = {
@@ -79,6 +81,12 @@ export const runFlowTool: Tool = {
           'Values for the flow parameters, e.g. {"text_3": "hello"}. Unknown or missing required parameters are rejected.',
         additionalProperties: { type: ['string', 'number', 'boolean'] },
       },
+      window_title_regex: {
+        type: 'string',
+        description:
+          'Optional case-insensitive regex that overrides the recorded window title match for every window/element step. ' +
+          'Use it when several windows of the same app are open (e.g. two Notepad windows) so the target is unambiguous.',
+      },
     },
     required: ['name'],
     additionalProperties: false,
@@ -94,7 +102,31 @@ export const runFlowTool: Tool = {
         ? (args.params as Record<string, unknown>)
         : undefined;
 
-    const result = await runFlowWithComputer(loaded.flow, params, ctx?.signal);
+    let windowTitleRegex: string | undefined;
+    if (args.window_title_regex !== undefined) {
+      const raw = args.window_title_regex;
+      if (typeof raw !== 'string' || raw.trim() === '') {
+        return {
+          status: 'error',
+          code: 'INVALID_ARGUMENTS',
+          retryable: false,
+          output: 'window_title_regex must be a non-empty regex string',
+        };
+      }
+      try {
+        new RegExp(raw, 'i');
+      } catch {
+        return {
+          status: 'error',
+          code: 'INVALID_ARGUMENTS',
+          retryable: false,
+          output: `window_title_regex is not a valid regular expression: ${raw}`,
+        };
+      }
+      windowTitleRegex = raw;
+    }
+
+    const result = await runFlowWithComputer(loaded.flow, params, ctx?.signal, { windowTitleRegex });
     const output = formatFlowRunResult(loaded.flow, result);
     const modelAttachments = result.attachments;
 

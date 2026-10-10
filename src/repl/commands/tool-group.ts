@@ -138,6 +138,11 @@ export const toolGroupCommands: CommandHandler[] = [
               `capture p50 ${s.captureP50}ms · ${kb}KB/frame · ` +
               `dedup ${(s.skippedRatio * 100).toFixed(0)}%${ui.reset}\n`,
           );
+          // 按动作拆开:新动作(inspect / wait_until / 窗口类)单独对比基线,不被截图类动作的分位数淹没。
+          const rows = Object.entries(s.byAction)
+            .sort((a, b) => b[1].count - a[1].count)
+            .map(([action, v]) => `${action} ×${v.count} p50 ${v.p50}ms / p95 ${v.p95}ms`);
+          if (rows.length > 0) layout.contentWrite(`${ui.dim}${rows.join(' · ')}${ui.reset}\n`);
         }
       } catch {
         // 埋点不可用时不影响状态输出。
