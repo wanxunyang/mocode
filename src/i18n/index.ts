@@ -247,6 +247,9 @@ const zhCN = {
   'toolSummary.noOutput': '(无输出)',
   'toolSummary.imageAttached': '图片已作为视觉输入附加',
   'toolError.unknown': '错误:未知工具 "{name}"',
+  'toolError.unregistered':
+    '错误:工具 "{name}" 未注册（不在本会话可用工具列表中，可能是拼写错误或模型幻觉出的名称）。相近的已注册工具:{suggestions}。请只调用 tools 列表中存在的名称，不要自造工具名。',
+  'toolError.noCloseMatch': '无相近的已注册工具名',
   'toolError.invalidJson': '错误:工具 {name} 的 arguments 不是合法 JSON: {arguments}',
   'toolError.execution': '错误:工具 {name} 执行失败: {message}',
   'command.outputTruncated': '...(输出已截断 {count} 字符，保留开头与结尾)...',
@@ -651,6 +654,9 @@ const en: Record<TranslationKey, string> = {
   'toolSummary.noOutput': '(no output)',
   'toolSummary.imageAttached': 'Image attached as visual input',
   'toolError.unknown': 'Error: unknown tool "{name}"',
+  'toolError.unregistered':
+    'Error: tool "{name}" is not registered (it is not in this session\'s available tool list — likely a misspelling or a model-hallucinated name). Closest registered tools: {suggestions}. Only call names that appear in the tools list; never invent tool names.',
+  'toolError.noCloseMatch': 'no close match among registered tools',
   'toolError.invalidJson': 'Error: arguments for tool {name} are not valid JSON: {arguments}',
   'toolError.execution': 'Error: tool {name} failed: {message}',
   'command.outputTruncated': '...(output truncated by {count} characters; keeping the beginning and end)...',

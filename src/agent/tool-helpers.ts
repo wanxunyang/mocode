@@ -21,6 +21,7 @@ import { isToolResultSuccess } from '../context/utils.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
 import { appendGuiAction } from '../session/gui-actions.js';
+import { t } from '../i18n/index.js';
 
 /** 解析工具 arguments JSON;非法或空返 null(调用方据此降级到普通 preview)。 */
 export function parseArgs(raw: string): Record<string, unknown> | null {
@@ -87,6 +88,49 @@ export function deniedOutcome(name: string): ToolOutcome {
     code: 'PERMISSION_DENIED',
     retryable: false,
     output: `错误:用户拒绝了工具 ${name} 的执行。`,
+  };
+}
+
+/** 编辑距离(Levenshtein);名字很短时用上限截断避免 O(n²) 浪费。 */
+function editDistance(a: string, b: string, max = 4): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  const prev = new Array<number>(b.length + 1);
+  const curr = new Array<number>(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (curr[j] < rowMin) rowMin = curr[j];
+    }
+    if (rowMin > max) return max + 1;
+    for (let j = 0; j <= b.length; j++) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+/**
+ * 未注册工具名(模型幻觉/拼写错误)的专门 denied 结果。
+ * isToolDeniedForStep 对不在 allowedToolNames 里的一切名字(含 registry 中不存在的)都返回
+ * true,旧路径一律复用 task.disabled 文案,误导用户去开 /subagent。此 helper 先查 registry:
+ * 名字根本不存在时给出「未注册 + 相近候选」的纠错提示;存在但本步不允许时才回落 gate 文案。
+ */
+export function unregisteredToolOutcome(name: string, toolRuntime: ToolRuntime): ToolOutcome {
+  const registered = toolRuntime.tools.map((tool) => tool.name);
+  const ranked = registered
+    .map((candidate) => ({
+      candidate,
+      distance: editDistance(name.toLowerCase(), candidate.toLowerCase()),
+    }))
+    .sort((x, y) => x.distance - y.distance);
+  const close = ranked.filter((entry) => entry.distance <= 3).slice(0, 3);
+  const suggestions = close.length > 0 ? close.map((entry) => entry.candidate).join(', ') : t('toolError.noCloseMatch');
+  return {
+    status: 'denied',
+    code: 'UNKNOWN_TOOL',
+    retryable: false,
+    output: t('toolError.unregistered', { name, suggestions }),
   };
 }
 

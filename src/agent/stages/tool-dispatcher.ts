@@ -14,6 +14,7 @@ import {
   isResourceLockedCall,
   parseArgs,
   readDiffContext,
+  unregisteredToolOutcome,
 } from '../tool-helpers.js';
 import type {
   OrderedToolCallResult,
@@ -174,10 +175,12 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
           const call = calls[index];
           const outcome: ToolOutcome = {
             status: 'denied',
-            code: 'TOOL_DISABLED',
+            code: request.isDenied(call.name) && !toolRuntime.findTool(call.name) ? 'UNKNOWN_TOOL' : 'TOOL_DISABLED',
             retryable: false,
             output: request.isDenied(call.name)
-              ? `错误:当前 tool policy snapshot 不允许调用 ${call.name}。`
+              ? !toolRuntime.findTool(call.name)
+                ? unregisteredToolOutcome(call.name, toolRuntime).output
+                : `错误:当前 tool policy snapshot 不允许调用 ${call.name}。`
               : `错误:add_tool_groups 不能与写/执行工具 ${call.name} 同批执行，本 step 已跳过该调用（其余只读调用与扩容已正常处理）；请在下一 step 重试 ${call.name}。`,
             changedFiles: [],
             durationMs: 0,
@@ -271,10 +274,12 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
       const current = calls[index];
       if (request.isDenied(current.name)) {
         request.onEvent({ type: 'header', call: current });
-        const output = t('task.disabled');
+        // registry 中不存在的名字(幻觉/拼写错误)给纠错提示,不误导用户去开 /subagent。
+        const unregistered = !toolRuntime.findTool(current.name);
+        const output = unregistered ? unregisteredToolOutcome(current.name, toolRuntime).output : t('task.disabled');
         const outcome: ToolOutcome = {
           status: 'denied',
-          code: 'TOOL_DISABLED',
+          code: unregistered ? 'UNKNOWN_TOOL' : 'TOOL_DISABLED',
           retryable: false,
           output,
           changedFiles: [],

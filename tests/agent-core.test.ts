@@ -24,6 +24,8 @@ import { defaultAgentRuntimeContext } from '../src/agent/runtime-context.js';
 import { __setChatCreateImpl, type ChatMessage } from '../src/llm/index.js';
 import { setSandboxRoot } from '../src/sandbox/root.js';
 import { ToolPolicyController } from '../src/tools/policy.js';
+import { defaultToolRuntime } from '../src/tools/registry.js';
+import { unregisteredToolOutcome } from '../src/agent/tool-helpers.js';
 import { config } from '../src/config/index.js';
 import type { Tool } from '../src/tools/types.js';
 // 装配官方默认工具包(提供本测试真执行的 read_file):registry 不再顶层 import builtins,须显式装配。
@@ -738,6 +740,85 @@ test('runAgentCore: runtimeAllowedToolNames 与 schema 同源拒绝伪造调用�
     restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('runAgentCore: 模型幻觉出的未注册工具名返回 UNKNOWN_TOOL 纠错提示而非 /subagent gate 文案', async () => {
+  for (const pipeline of ['legacy', 'staged'] as const) {
+    const root = mkdtempSync(join(tmpdir(), `mocode-agent-unregistered-${pipeline}-`));
+    const previousRoot = setSandboxRoot(root);
+    const previousPolicyMode = process.env.MOCODE_TOOL_POLICY;
+    delete process.env.MOCODE_TOOL_POLICY;
+    let call = 0;
+    __setChatCreateImpl(async () => {
+      call++;
+      if (call === 1) {
+        return sseStream([
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'hallucinated-tool',
+                  function: { name: 'runChecked', arguments: '{}' },
+                },
+              ],
+            },
+          },
+        ]);
+      }
+      return sseStream([{ delta: { content: 'hallucination handled' } }]);
+    });
+
+    const policy = new ToolPolicyController({ id: `core-unregistered-${pipeline}` });
+    const traces: Array<{ type: string; data: Record<string, unknown> }> = [];
+    try {
+      const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+      const result = await runAgentCore({
+        history,
+        userInput: 'run the thing',
+        maxSteps: 2,
+        pipeline,
+        toolPolicy: policy,
+        runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+        hooks: {},
+        onTraceEvent: (event) => traces.push({ type: event.type, data: event.data as Record<string, unknown> }),
+      });
+
+      assert.equal(result.completed, true, `[${pipeline}] 应正常完成`);
+      assert.equal(result.finalText, 'hallucination handled');
+      const endTrace = traces.find((event) => event.type === 'tool_call_end' && event.data.tool === 'runChecked');
+      assert.ok(endTrace, `[${pipeline}] 应有 runChecked 的 tool_call_end`);
+      assert.equal(endTrace.data.status, 'denied');
+      assert.equal(endTrace.data.code, 'UNKNOWN_TOOL', `[${pipeline}] 未注册名应报 UNKNOWN_TOOL`);
+      // 纠错语义:不再误导用户去开 /subagent;错误正文点名幻觉工具名。
+      // (runChecked 与 run_command 编辑距离 4 > 阈值 3,不硬凑候选,允许 noCloseMatch。)
+      const resultMessage = history[3] as { role: string; tool_call_id?: string; content?: string };
+      assert.equal(resultMessage.role, 'tool');
+      assert.equal(resultMessage.tool_call_id, 'hallucinated-tool');
+      assert.ok(
+        !resultMessage.content?.includes('/subagent'),
+        `[${pipeline}] 不得复用 task.disabled 的 /subagent 误导文案`,
+      );
+      assert.match(resultMessage.content ?? '', /runChecked/, `[${pipeline}] 错误正文应点名未注册的工具名`);
+    } finally {
+      __setChatCreateImpl(null);
+      setSandboxRoot(previousRoot);
+      restoreEnv('MOCODE_TOOL_POLICY', previousPolicyMode);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('unregisteredToolOutcome: 拼写接近的幻觉名给出相近候选,已注册名回落 policy 文案', () => {
+  // read_filez 与 read_file 编辑距离 1 → 应给出候选。
+  const close = unregisteredToolOutcome('read_filez', defaultToolRuntime);
+  assert.equal(close.code, 'UNKNOWN_TOOL');
+  assert.ok(close.output.includes('read_file'), '应建议最相近的 read_file');
+  assert.ok(!close.output.includes('/subagent'));
+  // 完全不像的名字(如 zzzzzzzzzz)不硬凑候选。
+  const far = unregisteredToolOutcome('zzzzzzzzzz', defaultToolRuntime);
+  assert.equal(far.code, 'UNKNOWN_TOOL');
+  assert.ok(!far.output.includes('read_file'), '无相近候选时不应硬凑');
 });
 
 test('runAgentCore: inline skill deny 同批生效并统一收窄 schema 与后代 allow-list', async () => {

@@ -25,6 +25,7 @@ import {
   deniedOutcome,
   readDiffContext,
   pushToolResult,
+  unregisteredToolOutcome,
 } from './tool-helpers.js';
 import { contextState, summarizeToolArguments } from '../session/index.js';
 import { createReadDedup } from '../tools/read-dedup.js';
@@ -523,10 +524,15 @@ export async function runAgentCoreLegacy(
                       const tc = calls[index];
                       const outcome: ToolOutcome = {
                         status: 'denied',
-                        code: 'TOOL_DISABLED',
+                        code:
+                          isToolDeniedForStep(tc.name) && !ctx.toolRuntime.findTool(tc.name)
+                            ? 'UNKNOWN_TOOL'
+                            : 'TOOL_DISABLED',
                         retryable: false,
                         output: isToolDeniedForStep(tc.name)
-                          ? `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`
+                          ? !ctx.toolRuntime.findTool(tc.name)
+                            ? unregisteredToolOutcome(tc.name, ctx.toolRuntime).output
+                            : `错误:当前 tool policy snapshot 不允许调用 ${tc.name}。`
                           : `错误:add_tool_groups 不能与写/执行工具 ${tc.name} 同批执行，本 step 已跳过该调用（其余只读调用与扩容已正常处理）；请在下一 step 重试 ${tc.name}。`,
                         changedFiles: [],
                         durationMs: 0,
@@ -646,10 +652,14 @@ export async function runAgentCoreLegacy(
                   const currentCall = calls[i];
                   if (isToolDeniedForStep(currentCall.name)) {
                     hooks.onToolHeader?.(currentCall);
-                    const error = t('task.disabled');
+                    // registry 中根本不存在的名字(模型幻觉/拼写错误)给专门纠错提示,
+                    // 不再复用 task.disabled 的 /subagent 误导文案;已注册但本步不允许才用 gate 文案。
+                    const error = !ctx.toolRuntime.findTool(currentCall.name)
+                      ? unregisteredToolOutcome(currentCall.name, ctx.toolRuntime).output
+                      : t('task.disabled');
                     const outcome: ToolOutcome = {
                       status: 'denied',
-                      code: 'TOOL_DISABLED',
+                      code: !ctx.toolRuntime.findTool(currentCall.name) ? 'UNKNOWN_TOOL' : 'TOOL_DISABLED',
                       retryable: false,
                       output: error,
                       changedFiles: [],
