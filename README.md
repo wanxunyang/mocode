@@ -259,7 +259,7 @@ The tables below are selected capabilities, not an exhaustive tool inventory. Cu
 
 | Tool          | Purpose                                                                                                                                                               |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `read_file`   | Read a file: text with line numbers (`offset` / `limit`), images (PNG/JPEG/GIF/WebP detected by magic bytes) as visual model input; other binaries are rejected instead of dumped as garbled text |
+| `read_file`   | Read a file: text with line numbers (`offset` / `limit`, output capped at ~32k chars per call — size ranges by content density, not line count), images (PNG/JPEG/GIF/WebP detected by magic bytes) as visual model input; other binaries are rejected instead of dumped as garbled text |
 | `write_file`  | Create/overwrite a file, auto-creating parent directories; `append=true` adds to the end without re-sending the whole file                                              |
 | `edit_file`   | Precise string replacement (`old_string` must match uniquely)                                                                                                         |
 | `run_command` | Run a foreground shell command, merging stdout+stderr, 120s default timeout; `shell=cmd\|powershell\|bash` picks the interpreter                                       |

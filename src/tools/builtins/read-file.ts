@@ -1,7 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { contentHash } from '../../changeset/index.js';
-import { IMAGE_READ_MARKER, MAX_FILE_LINES } from '../constants.js';
+import { IMAGE_READ_MARKER, MAX_FILE_LINES, MAX_HISTORY_RESULT } from '../constants.js';
 import {
   MAX_INLINE_BYTES_DEFAULT,
   isProbablyBinary,
@@ -61,7 +61,7 @@ export const readFileTool: Tool = {
       limit: {
         type: 'integer',
         description:
-          'Max lines to read (default 300, hard cap 2000). Keep ranges modest (e.g. 80-300); for files ≤500 lines you may read the whole file in one call. Text only; ignored for images.',
+          'Max lines to read (default 300, hard cap 2000). Size by OUTPUT, not lines: outputs are capped at ~32k chars per call, so a dense (CJK) file fits ~200-400 lines in one call while sparse code fits 1000+. If a range exceeds that, split it; the output tail always reports how many lines remain. Text only; ignored for images.',
       },
       detail: {
         type: 'string',
@@ -170,10 +170,62 @@ export const readFileTool: Tool = {
       end < lines.length
         ? `${artifactHeader}\n${body}\n\n... (${lines.length - end} 行未显示,共 ${lines.length} 行)`
         : `${artifactHeader}\n${body}`;
-    dedup?.record(path, reqStart, reqEnd, contentHash(data));
+    // dedup 只登记「确实会进 context 的区间」。pushToolResult 会把超长输出经
+    // capToolResultForHistory 中截到 MAX_HISTORY_RESULT(丢中段)——若此处仍登记
+    // 完整 [reqStart, reqEnd],后续对「被截掉的中段」的重读会被 findUnchanged 命中,
+    // 模型拿到 unchanged 短指针却找不到内容,只能反复缩小区间撞墙、最终用 shell 绕过
+    // (实测事故:会话 20261012-033757)。故输出超 cap 时只登记头/尾两段实际保留的行。
+    if (dedup && config.readDedup && output.length > MAX_HISTORY_RESULT) {
+      const fileHash = contentHash(data);
+      const truncated = truncatedOutputRanges(lines, start, end, output.length, MAX_HISTORY_RESULT);
+      for (const r of truncated) dedup.record(path, r.start, r.end, fileHash);
+    } else {
+      dedup?.record(path, reqStart, reqEnd, contentHash(data));
+    }
     return { status: 'success', code: 'OK', retryable: false, output };
   },
 };
+
+/**
+ * 输出将被中截(头 60% / 尾 40%)时,反推真正保留进 context 的行区间。
+ * 输出长度按行聚合估算:行号前缀(≤7 字符 + tab)与换行在各行间均摊,误差 ≤1 行,
+ * 对 dedup 区间判定足够保守(宁可少记、不可多记——漏记只会多一次全量返回,多记会造成幽灵命中)。
+ */
+function truncatedOutputRanges(
+  lines: string[],
+  start: number,
+  end: number,
+  outputLen: number,
+  cap: number,
+): Array<{ start: number; end: number }> {
+  const marker = `…[已截断 ${outputLen - cap} 字符]…`;
+  const remain = cap - marker.length;
+  const headChars = Math.ceil(remain * 0.6);
+  const tailChars = remain - headChars;
+  // 头段:从 start 起累加行,直至耗尽 headChars(含 artifact header 的固定开销,按保守处理:header 不占行预算)。
+  const lineLen = (i: number): number => `${String(i + 1).padStart(6, ' ')}\t${lines[i]}`.length + 1;
+  const ranges: Array<{ start: number; end: number }> = [];
+  let acc = 0;
+  let headEnd = start - 1;
+  for (let i = start; i < end; i++) {
+    const l = lineLen(i);
+    if (acc + l > headChars) break;
+    acc += l;
+    headEnd = i;
+  }
+  if (headEnd >= start) ranges.push({ start: start + 1, end: headEnd + 1 });
+  // 尾段:从 end-1 反向累加,直至耗尽 tailChars。区间下限不得超过头段结尾(头尾重叠说明整体保留)。
+  acc = 0;
+  let tailStart = end;
+  for (let i = end - 1; i >= start; i--) {
+    const l = lineLen(i);
+    if (acc + l > tailChars) break;
+    acc += l;
+    tailStart = i;
+  }
+  if (tailStart < end && tailStart > headEnd) ranges.push({ start: tailStart + 1, end });
+  return ranges;
+}
 
 /**
  * 图片分支:走视觉通道(modelAttachments),文本 output 只留一句可读摘要。

@@ -21,8 +21,13 @@ export const MAX_RESULTS = 100;
  */
 export const IMAGE_READ_MARKER = '[image]';
 
-/** 进 history 的单条工具结果上限(字符)。push-time 第一层裁剪,保 head + 标记 + tail。 */
-export const MAX_HISTORY_RESULT = 8000;
+/**
+ * 进 history 的单条工具结果上限(字符)。push-time 第一层裁剪,保 head + 标记 + tail。
+ * 32000 ≈ 9k~19k token(视内容密度),对 256k 窗口 <8%:足以让「一次读一个完整大文件/大段代码」
+ * 完整进上下文(旧值 8000 只覆盖 25~30% 窗口占比 1~2%,曾迫使模型分批小读 + 引发幽灵区间事故)。
+ * 防爆责任后移给分层清理:微压缩存根 → 60% 低压(REFETCHABLE)→ 80% 高压 LLM 摘要。
+ */
+export const MAX_HISTORY_RESULT = 32000;
 /** use_skill 结果(SKILL.md 正文)的放宽上限:指令须完整,中截会破坏语义。 */
 export const MAX_SKILL_RESULT = 64000;
 /** 微压缩时旧工具结果截到的存根长度(字符)。 */

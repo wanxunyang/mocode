@@ -897,7 +897,7 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
   let oldGroups = groups.slice(0, groups.length - kept.length);
 
   // 非空 user 兜底:保留区从尾部累积,长回合里最近的若干组常常全是 assistant+tool,
-  // 一个 8000 字符的工具结果就能吃满小窗口的 keepBudget → user 全落进旧区被摘要掉 →
+  // 一个 MAX_HISTORY_RESULT 量级的工具结果就能吃满小窗口的 keepBudget → user 全落进旧区被摘要掉 →
   // 重建后 history 无 user → 下一步 chat() 被 hasNonEmptyUser 守卫直接拒(整轮中断)。
   // 把紧邻保留区之前的那条 user 移进保留区:它是当前任务的原始请求,且 user 消息本身极小。
   // 放这里(而非重建后补 stub)是因为:原文保留,不造新消息形状,也不必进摘要器。
