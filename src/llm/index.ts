@@ -5,6 +5,7 @@ import { getPlanDisabledTools, getProfileDisabledTools } from '../tools/constant
 import { imageSizeFromDataUrl } from '../attachments/image.js';
 import { ThinkTagFilter } from './think-filter.js';
 import { sanitizeToolSchemas } from './tool-schema.js';
+import { sanitizeAssistantContent } from './message-shape.js';
 import { isMarkedStreamInterrupted } from './stream-interrupt.js';
 import { defaultAnthropicFetch, anthropicChatOnce } from './providers/anthropic.js';
 import { vertexChatOnce } from './providers/vertex.js';
@@ -856,7 +857,7 @@ async function chatOnce(
   const stream = await create(
     {
       model: runtime.getModel(),
-      messages: normalizeImageDetail(messages),
+      messages: sanitizeAssistantContent(normalizeImageDetail(messages)),
       stream: true,
       // 空工具表(如摘要请求)不发 tools 字段——部分网关拒绝空数组。
       ...(activeTools.length > 0

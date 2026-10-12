@@ -1034,7 +1034,11 @@ test('runAgentCore: 空模型回复保持 completed 与 onNoReply 语义', async
     assert.deepEqual(events, ['chat_done', 'no_reply', 'done']);
     assert.equal(history.length, 3);
     assert.equal(history[2].role, 'assistant');
-    assert.equal((history[2] as { content?: string | null }).content, null);
+    // 落盘形状必须是 "" 而不是 null:无 tool_calls 的 assistant 带 content:null 会被严格
+    // OpenAI 兼容网关整请求拒(实测 speedbear "messages[N].content 不能为 null"),而它一旦
+    // 进 history 就每轮重发 → 整个会话永久 400,换会话同模型却正常。见 src/llm/message-shape.ts。
+    // 注意:返回值语义(terminationReason=completed / finalText=null / onNoReply)不变。
+    assert.equal((history[2] as { content?: string | null }).content, '');
   } finally {
     __setChatCreateImpl(null);
   }
