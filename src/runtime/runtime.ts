@@ -111,6 +111,8 @@ export interface RuntimeSessionFacade {
 
 export interface RuntimeRollbackFacade {
   list(): Turn[];
+  /** 菜单第 pickedIndex(0-based)轮对应的真实用户消息;续接历史缺轮时为 undefined。 */
+  turnUserMessage(pickedIndex: number, history: ChatMessage[]): ChatMessage | undefined;
   plan(n: number, history: ChatMessage[]): RollbackPlan;
   apply(
     plan: RollbackPlan,
@@ -210,6 +212,10 @@ export class Runtime {
       list: () => {
         this.assertOpen();
         return this.context.rollbackStore.listTurns();
+      },
+      turnUserMessage: (pickedIndex, history) => {
+        this.assertOpen();
+        return this.context.rollbackStore.turnUserMessage(pickedIndex, history);
       },
       plan: (n, history) => {
         this.assertIdle('plan rollback');

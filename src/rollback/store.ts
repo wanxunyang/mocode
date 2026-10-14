@@ -140,6 +140,49 @@ const EXCLUDED_WORKSPACE_DIRS: readonly string[] = Object.freeze([
   '.gradle',
 ]);
 
+/**
+ * 工具经 modelAttachments 注入的合成 user 消息前言(见 agent/tool-turn.ts 的
+ * ATTACHMENT_PREAMBLE)。这类消息 role 也是 'user',但不对应 beginTurn 的真实用户轮,
+ * 回滚按 role==='user' 数轮次会与 turns 数组错位,导致"回退一条却连带删掉好几轮"。
+ * 两处常量必须保持一致;不 import tool-turn 是为避免 rollback→agent 的层级反向依赖。
+ */
+const TOOL_ATTACHMENT_PREAMBLE = 'The read_file tool loaded the following visual input: ';
+/**
+ * 视觉滑动窗口剪枝占位前缀(必须与 context/vision-window.ts 的 PRUNED_FRAME_PREFIX 逐字一致)。
+ * 这里内联常量而不是 import:vision-window → llm → … → rollback/index 会形成循环依赖,
+ * 在共享进程的测试里触发 "Cannot access 'defaultRollbackStore' before initialization"。
+ */
+const PRUNED_FRAME_PREFIX = '[screenshot omitted: ';
+
+function isPrunedFrameText(text: unknown): boolean {
+  return typeof text === 'string' && text.startsWith(PRUNED_FRAME_PREFIX);
+}
+
+/**
+ * 判断一条 user 消息是否对应一个真实用户轮(= beginTurn 记进 turns 的那一条)。
+ *
+ * 排除两种合成 user 消息(都是 role:'user' 但不计轮次):
+ *  1. 工具批次提交时由 modelAttachments 注入的附件消息:ContentPart[] 的 text part
+ *     以工具附件前言开头;
+ *  2. 上述附件消息经视觉滑动窗口剪枝后的占位:整个 content 被替换成
+ *     "[screenshot omitted: …]" 文本,前言已不存在(见 vision-window.pruneFrameMessage),
+ *     形态可能是数组 text part,也可能是纯字符串。
+ *
+ * 用户自己发的多模态消息没有这两个标记,不会被误判。
+ */
+function isRealTurnUserMessage(message: ChatMessage): boolean {
+  if (message.role !== 'user') return false;
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === 'string') return !isPrunedFrameText(content);
+  if (!Array.isArray(content)) return false;
+  for (const part of content as ReadonlyArray<Record<string, unknown>>) {
+    if (part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string') {
+      if (part.text.startsWith(TOOL_ATTACHMENT_PREAMBLE) || isPrunedFrameText(part.text)) return false;
+    }
+  }
+  return true;
+}
+
 const CAPTURE_FILE_LIMIT = 1024 * 1024;
 const CAPTURE_TOTAL_LIMIT = 32 * 1024 * 1024;
 const CAPTURE_ENTRY_LIMIT = 20000;
@@ -554,6 +597,31 @@ export class RollbackStore {
   }
 
   /**
+   * 取菜单第 pickedIndex(0-based)轮对应的真实用户消息(用于 /rollback 后预填)。
+   * 与 findCutoffIndex 同一套尾对齐规则。无对应消息(续接历史缺轮)时返回 undefined。
+   */
+  turnUserMessage(pickedIndex: number, history: ChatMessage[]): ChatMessage | undefined {
+    const index = this.findTurnUserIndex(pickedIndex, history);
+    return index < 0 ? undefined : history[index];
+  }
+
+  /**
+   * 菜单第 pickedIndex(0-based)轮对应的真实用户消息在 history 中的下标。
+   * turns 是真实轮次的尾部连续子集(滚动剪枝/压缩只丢旧轮),故菜单第 k 轮 =
+   * history 中倒数第 (turns.length-k) 条真实用户轮消息。找不到返回 -1。
+   */
+  private findTurnUserIndex(pickedIndex: number, history: ChatMessage[]): number {
+    let wantReverseRank = this.turns.length - pickedIndex;
+    if (wantReverseRank <= 0) return -1;
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (!isRealTurnUserMessage(history[i])) continue;
+      wantReverseRank -= 1;
+      if (wantReverseRank === 0) return i;
+    }
+    return -1;
+  }
+
+  /**
    * 只读侧门(供 /diff 渲染):返回 turnId > sinceTurnId 的全部快照,浅拷贝数组。
    * 快照内容含 before 原文,调用方不得 mutate 返回值;用于展示,不影响回滚语义。
    */
@@ -561,19 +629,22 @@ export class RollbackStore {
     return this.snapshots.filter((snapshot) => snapshot.turnId > sinceTurnId);
   }
 
+  /**
+   * 回滚切点:保留菜单前 n 轮,从第 n+1 轮(菜单下标 n,0-based)的真实 user 消息处切断。
+   *
+   * turns(菜单)= 当前仍可回滚的轮次,是真实轮次的**尾部连续子集**(滚动剪枝/压缩只丢旧轮),
+   * 故从尾部倒数定位,而不是正数第 n 条——压缩的「user 逐字通道」会把更老的 user 原文
+   * 捞回保留区,正数下标与 turns 不再连续对齐。找不到(无第 n+1 轮)时返回 history.length。
+   */
   private findCutoffIndex(n: number, history: ChatMessage[]): number {
-    let seen = 0;
-    for (let i = 0; i < history.length; i++) {
-      if (history[i].role === 'user') {
-        seen += 1;
-        if (seen === n + 1) return i;
-      }
-    }
-    return history.length;
+    const index = this.findTurnUserIndex(n, history);
+    return index < 0 ? history.length : index;
   }
 
   planRollback(n: number, history: ChatMessage[]): RollbackPlan {
     const cutoffTurnId = this.turns[n - 1]?.turnId ?? 0;
+    // turns 与 history 真实 user 消息尾对齐后再取切点:滚动剪枝(>50 轮)/压缩/续接后
+    // turns 只是尾部子集,不能再把 n 当成全局第 n 条 user 消息,否则会多删 offset 轮。
     const cutoffIndex = this.findCutoffIndex(n, history);
     const order: string[] = [];
     const map = new Map<string, FileChange>();
@@ -699,7 +770,9 @@ export class RollbackStore {
   }
 
   pruneAfterCompaction(history: ChatMessage[]): void {
-    const count = history.filter((message) => message.role === 'user').length;
+    // 只数真实用户轮(排除工具附件合成 user 消息);压缩会整体丢弃旧轮,
+    // 保留下来的总是最近的轮次,故 turns 同样从尾部对齐截取。
+    const count = history.filter((message) => isRealTurnUserMessage(message)).length;
     this.turns = count >= this.turns.length ? this.turns : this.turns.slice(-count);
     const alive = new Set(this.turns.map((turn) => turn.turnId));
     this.snapshots = this.snapshots.filter((snapshot) => alive.has(snapshot.turnId));
@@ -717,7 +790,9 @@ export class RollbackStore {
   rebuildFromHistory(history: ChatMessage[]): void {
     const rebuilt: Turn[] = [];
     for (const message of history) {
-      if (message.role !== 'user') continue;
+      // 跳过工具附件注入的合成 user 消息,否则 turns 比真实轮次多,
+      // /rollback 菜单与 history 切点(planRollback 按 turns[n-1])整体错位。
+      if (!isRealTurnUserMessage(message)) continue;
       const first = toText((message as { content?: unknown }).content).split('\n')[0] ?? '';
       rebuilt.push({ turnId: rebuilt.length + 1, firstLine: truncateDisplay(first, 40) });
     }

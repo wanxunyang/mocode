@@ -30,6 +30,14 @@ const UNKNOWN_FRAME_NAME = 'frame';
 const RECOVERY_HINT = ' Call computer{screenshot} if you need the current screen.';
 
 /**
+ * 帧被剪枝后占位文本的固定前缀(见 pruneFrameMessage)。
+ * 剪枝会把合成附件消息整个 content 换成占位(前言 ATTACHMENT_PREAMBLE 随之消失),
+ * rollback 对齐真实用户轮时必须认出这个占位、不把它算成一轮——那里因循环依赖无法
+ * import 本模块,故在 rollback/store.ts 内联了同一常量,修改此串时两处必须同步。
+ */
+const PRUNED_FRAME_PREFIX = '[screenshot omitted: ';
+
+/**
  * 白名单:参与滑动窗口的屏幕帧名前缀。
  *
  * 取值来自**实际产出点**(design-notes/vision-window.md §2.2 要求实施时读一次代码定稿,不凭猜):
@@ -178,10 +186,10 @@ function pruneFrameMessage(
   let index = 0;
   for (const part of parts) {
     if (part.type !== 'image_url') continue;
-    lines.push(`[screenshot omitted: ${names[index] ?? UNKNOWN_FRAME_NAME} · step ${step}]`);
+    lines.push(`${PRUNED_FRAME_PREFIX}${names[index] ?? UNKNOWN_FRAME_NAME} · step ${step}]`);
     index++;
   }
-  if (lines.length === 0) lines.push(`[screenshot omitted: ${names[0] ?? UNKNOWN_FRAME_NAME} · step ${step}]`);
+  if (lines.length === 0) lines.push(`${PRUNED_FRAME_PREFIX}${names[0] ?? UNKNOWN_FRAME_NAME} · step ${step}]`);
   if (withHint) lines[0] = `${lines[0]}${RECOVERY_HINT}`;
   const content: ContentPart[] = [{ type: 'text', text: lines.join('\n') }];
   return { role: 'user', content } as ChatMessage;

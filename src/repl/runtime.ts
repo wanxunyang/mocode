@@ -420,11 +420,6 @@ export async function startRepl(
       layout.contentWrite(`${ui.dim}(没有可回滚的轮次)${ui.reset}\n`);
       return;
     }
-    // 各轮 user 全文(预填用;按 user 消息顺序与 turnList 对齐)
-    const userTexts: string[] = [];
-    for (const m of history) {
-      if (m.role === 'user') userTexts.push(textOf((m as { content?: unknown }).content));
-    }
     const items = turnList.map((t) => ({ firstLine: t.firstLine }));
     let picked: number | null;
     try {
@@ -433,8 +428,11 @@ export async function startRepl(
       return; // Ctrl+C(SIGINT)→ 取消回滚
     }
     if (picked === null) return; // Esc 取消
-    // picked(0-based)= 第 (picked+1) 轮:删该轮及之后(planRollback(picked) 保 1..picked),预填该轮 user 输入
-    const prefillText = userTexts[picked] ?? '';
+    // picked(0-based)= 第 (picked+1) 轮:删该轮及之后(planRollback(picked) 保前 picked 轮),
+    // 预填该轮 user 输入。必须经 store 按"尾部对齐的真实用户轮消息"定位——直接按 history 里
+    // role==='user' 数下标会把工具附件的合成 user 消息/被剪枝老轮算进去,预填错轮。
+    const pickedMessage = runtime.rollback.turnUserMessage(picked, history);
+    const prefillText = pickedMessage ? textOf((pickedMessage as { content?: unknown }).content) : '';
     const plan = runtime.rollback.plan(picked, history);
     // 清屏(擦选轮菜单 + /rollback 回显)+ 复位 lastView(dim 空),给文件询问一个干净、resize 安全的画面
     layout.clearContent();
