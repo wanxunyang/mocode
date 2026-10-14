@@ -245,6 +245,26 @@ test('视觉窗口剪枝后的占位消息不占轮次(前言已消失)', () => 
   );
 });
 
+test('真实用户输入恰好以占位前缀开头时不被误判为合成消息', () => {
+  const store = newStore();
+  store.beginTurn('T1');
+  store.beginTurn('像占位的文本');
+  // 只是前缀像,但不符合 `[screenshot omitted: <名> · step N]` 整行机器格式。
+  const history: ChatMessage[] = [
+    { role: 'system', content: 'sys' } as ChatMessage,
+    user('T1'),
+    assistant('a1'),
+    user('[screenshot omitted: 帮我把这条提示也读一下,谢谢'),
+    assistant('a2'),
+  ];
+  const turns = store.listTurns();
+  assert.equal(turns.length, 2);
+  const plan = store.planRollback(1, history);
+  // 必须切到第 2 条真实用户消息,而不是把它当占位跳过导致切点错位/无可删。
+  assert.equal(history[plan.cutoffIndex]?.content, '[screenshot omitted: 帮我把这条提示也读一下,谢谢');
+  assert.equal(store.turnUserMessage(1, history)?.content, '[screenshot omitted: 帮我把这条提示也读一下,谢谢');
+});
+
 test('用户自己发的多模态消息算真实轮次', () => {
   const store = newStore();
   store.beginTurn('看看这张图');

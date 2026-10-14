@@ -30,10 +30,10 @@ const UNKNOWN_FRAME_NAME = 'frame';
 const RECOVERY_HINT = ' Call computer{screenshot} if you need the current screen.';
 
 /**
- * 帧被剪枝后占位文本的固定前缀(见 pruneFrameMessage)。
+ * 帧被剪枝后占位行的固定前缀(见 pruneFrameMessage,完整行为 `[screenshot omitted: <帧名> · step N]`)。
  * 剪枝会把合成附件消息整个 content 换成占位(前言 ATTACHMENT_PREAMBLE 随之消失),
  * rollback 对齐真实用户轮时必须认出这个占位、不把它算成一轮——那里因循环依赖无法
- * import 本模块,故在 rollback/store.ts 内联了同一常量,修改此串时两处必须同步。
+ * import 本模块,故在 rollback/store.ts 内联了同一行格式(按整行正则判定),修改此串时两处必须同步。
  */
 const PRUNED_FRAME_PREFIX = '[screenshot omitted: ';
 

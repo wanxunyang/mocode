@@ -39,14 +39,31 @@ function contentTextOf(message: Record<string, unknown>): string {
  * 「回滚到这条消息之前」切错位置、连带删掉后面好几轮真实对话。
  */
 const TOOL_ATTACHMENT_PREAMBLE = 'The read_file tool loaded the following visual input: ';
-/** 视觉滑动窗口剪枝占位前缀(与 core 的 context/vision-window.ts PRUNED_FRAME_PREFIX 保持一致)。 */
-const PRUNED_FRAME_PREFIX = '[screenshot omitted: ';
+/**
+ * 视觉滑动窗口剪枝占位行(与 core 的 rollback/store.ts PRUNED_FRAME_LINE_RE 保持一致):
+ * 一行或多行 `[screenshot omitted: <帧名> · step N]`,首行可能再跟固定恢复提示后缀。
+ * 按整行正则而非前缀判定,避免把用户恰好以该前缀开头的真实输入误判成占位。
+ */
+const PRUNED_FRAME_LINE_RE = /^\[screenshot omitted: .+? · step \d+\]$/;
+const PRUNED_FRAME_HINT_SUFFIX = " Call computer{screenshot} if you need the current screen.";
+
+function isPrunedFrameText(text: unknown): boolean {
+  if (typeof text !== 'string') return false;
+  const lines = text.split('\n');
+  return lines.every((line, i) => {
+    const core =
+      i === 0 && line.endsWith(PRUNED_FRAME_HINT_SUFFIX)
+        ? line.slice(0, -PRUNED_FRAME_HINT_SUFFIX.length)
+        : line;
+    return PRUNED_FRAME_LINE_RE.test(core);
+  });
+}
 
 /** role==='user' 且不是工具附件注入/剪枝占位的合成消息,才算一个真实用户轮。 */
 function isRealUserMessage(message: Record<string, unknown>): boolean {
   if (message.role !== 'user') return false;
   const content = message.content;
-  if (typeof content === 'string') return !content.startsWith(PRUNED_FRAME_PREFIX);
+  if (typeof content === 'string') return !isPrunedFrameText(content);
   if (!Array.isArray(content)) return false;
   for (const part of content) {
     if (
@@ -56,7 +73,7 @@ function isRealUserMessage(message: Record<string, unknown>): boolean {
       typeof (part as { text?: unknown }).text === 'string'
     ) {
       const text = (part as { text: string }).text;
-      if (text.startsWith(TOOL_ATTACHMENT_PREAMBLE) || text.startsWith(PRUNED_FRAME_PREFIX)) return false;
+      if (text.startsWith(TOOL_ATTACHMENT_PREAMBLE) || isPrunedFrameText(text)) return false;
     }
   }
   return true;

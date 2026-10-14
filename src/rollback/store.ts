@@ -148,14 +148,25 @@ const EXCLUDED_WORKSPACE_DIRS: readonly string[] = Object.freeze([
  */
 const TOOL_ATTACHMENT_PREAMBLE = 'The read_file tool loaded the following visual input: ';
 /**
- * 视觉滑动窗口剪枝占位前缀(必须与 context/vision-window.ts 的 PRUNED_FRAME_PREFIX 逐字一致)。
- * 这里内联常量而不是 import:vision-window → llm → … → rollback/index 会形成循环依赖,
- * 在共享进程的测试里触发 "Cannot access 'defaultRollbackStore' before initialization"。
+ * 视觉滑动窗口剪枝占位的机器固定格式(必须与 context/vision-window.ts 的
+ * pruneFrameMessage 输出逐字一致):一行或多行 `[screenshot omitted: <帧名> · step <数字>]`,
+ * 首行可能再跟固定恢复提示后缀。用整串正则而不是前缀匹配,避免把恰好以
+ * "[screenshot omitted: " 开头的真实用户输入误判成占位。
+ *
+ * 这里内联而不是 import vision-window:vision-window → llm → … → rollback/index 会形成
+ * 循环依赖,在共享进程的测试里触发 "Cannot access 'defaultRollbackStore' before initialization"。
  */
-const PRUNED_FRAME_PREFIX = '[screenshot omitted: ';
+const PRUNED_FRAME_LINE_RE = /^\[screenshot omitted: .+? · step \d+\]$/;
+const PRUNED_FRAME_HINT_SUFFIX = ' Call computer{screenshot} if you need the current screen.';
 
 function isPrunedFrameText(text: unknown): boolean {
-  return typeof text === 'string' && text.startsWith(PRUNED_FRAME_PREFIX);
+  if (typeof text !== 'string') return false;
+  const lines = text.split('\n');
+  return lines.every((line, i) => {
+    const core =
+      i === 0 && line.endsWith(PRUNED_FRAME_HINT_SUFFIX) ? line.slice(0, -PRUNED_FRAME_HINT_SUFFIX.length) : line;
+    return PRUNED_FRAME_LINE_RE.test(core);
+  });
 }
 
 /**
