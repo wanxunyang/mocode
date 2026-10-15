@@ -1,7 +1,17 @@
 import { readFile } from 'node:fs/promises';
 import { jailResolve } from '../../sandbox/index.js';
-import { commitChangeSet, createChangeSet, normalizeContentHash, summarizeChangeSet } from '../../changeset/index.js';
+import {
+  commitChangeSet,
+  contentHash,
+  createChangeSet,
+  normalizeContentHash,
+  summarizeChangeSet,
+} from '../../changeset/index.js';
+import { isProbablyBinary } from '../../attachments/image.js';
 import type { Tool, ToolOutcome } from '../types.js';
+
+/** 二进制嗅探只需文件头,与 read_file / write_file 同口径(16KB)。 */
+const SNIFF_BYTES = 16 * 1024;
 
 function conflict(path: string, details: string): ToolOutcome {
   return {
@@ -10,7 +20,7 @@ function conflict(path: string, details: string): ToolOutcome {
     retryable: false,
     changedFiles: [],
     staleFiles: [path],
-    output: `CHANGE_CONFLICT: ${path} was not changed. ${details} Do not retry these arguments. Call read_file on this exact path and copy both its latest hash and exact target text before editing again.`,
+    output: `CHANGE_CONFLICT: ${path} was not changed. ${details} Do not retry these arguments. Call read_file on this exact path and copy the exact target text (plus its latest hash if you pass expected_hash, which line-range mode requires) before editing again.`,
   };
 }
 
@@ -18,11 +28,9 @@ export const editFileTool: Tool = {
   name: 'edit_file',
   description: `Replace content in a file transactionally. Two modes:
 
-**String replacement (default):** old_string must occur EXACTLY once; copy it verbatim from a fresh read_file output (see Tool policy — never reconstruct it from memory, summaries, or grep output).
+**String replacement (default):** old_string must occur EXACTLY once; copy it verbatim from a fresh read_file output (see Tool policy — never reconstruct it from memory, summaries, or grep output). expected_hash is OPTIONAL in this mode: omit it and the tool checks the file itself (old_string must still match exactly once, and the commit is conflict-checked). If you do pass it, it must match the current file or the edit is rejected.
 
-**Line-range:** line_start/line_end (1-based, inclusive) instead of old_string — for large blocks, repeated patterns, or hard-to-reproduce text.
-
-expected_hash (sha256 from the read_file artifact header) is required and must match the current file; changed-since-read edits are rejected — re-read and retry with the new hash.`,
+**Line-range:** line_start/line_end (1-based, inclusive) instead of old_string — for large blocks, repeated patterns, or hard-to-reproduce text. Line numbers drift when a file changes, so expected_hash (sha256 from the read_file artifact header) is REQUIRED here; if it is stale, re-read and retry with the new hash.`,
   risk: 'confirm',
   parameters: {
     type: 'object',
@@ -44,21 +52,20 @@ expected_hash (sha256 from the read_file artifact header) is required and must m
       },
       expected_hash: {
         type: 'string',
-        description: 'sha256 hash from the latest read_file artifact header (sha256:<64 hex>).',
+        description:
+          'sha256 hash from the latest read_file artifact header (sha256:<64 hex>). Optional for old_string mode; required for line-range mode.',
       },
     },
     // 注意:expected_hash 故意不放进 schema 的 required。
-    // 原因:缺失时若被 AJV 在 schema 层拦下,只会得到泛化的
-    // "缺少必填字段 expected_hash",模型据此只补该字段、反而丢掉 path,形成乒乓失败。
-    // 改为只在 execute 内校验(见下方 normalizeContentHash 检查),缺失时返回富指导信息,
-    // 明确要求先 read_file 并复制最新 hash——与 write_file 的设计保持一致。
+    // 原因:old_string 模式下它是可选的(old_string 唯一命中本身就是基于内容的前置条件,
+    // 提交时 ChangeSet 仍会比对读到的内容 hash 防并发改动);行号模式下必填,但缺失时若被
+    // AJV 在 schema 层拦下,只会得到泛化的「缺少必填字段 expected_hash」,模型据此只补该字段、
+    // 反而丢掉 path,形成乒乓失败。故只在 execute 内校验,缺失时返回富指导信息。
     required: ['path', 'new_string'],
   },
   async execute(args, ctx) {
     const file = String(args.path);
     const newString = String(args.new_string);
-    const expectedHash = normalizeContentHash(String(args.expected_hash));
-    if (!expectedHash) return conflict(file, 'expected_hash 必须是 sha256:<64 hex>。');
 
     const hasOldString = args.old_string !== undefined;
     const hasLineStart = args.line_start !== undefined;
@@ -72,7 +79,25 @@ expected_hash (sha256 from the read_file artifact header) is required and must m
       return conflict(file, '必须提供 old_string 或同时提供 line_start 和 line_end。');
     }
 
-    const data = await readFile(jailResolve(file), 'utf8');
+    // expected_hash:缺省/null/空串都视为「未提供」。提供了就必须格式正确并严格校验。
+    const rawHash = args.expected_hash;
+    const hashProvided = rawHash !== undefined && rawHash !== null && String(rawHash).trim() !== '';
+    let expectedHash = hashProvided ? normalizeContentHash(String(rawHash)) : null;
+    if (hashProvided && !expectedHash) return conflict(file, 'expected_hash 必须是 sha256:<64 hex>。');
+    if (!hasOldString && !expectedHash) {
+      return conflict(file, '行号模式必须提供 expected_hash(行号会随文件变化漂移,需要内容版本锚点)。');
+    }
+
+    // 以 Buffer 读取并按 Buffer 算 hash,与 ChangeSet 内部口径一致(非法 UTF-8 时字符串 hash 会对不上)。
+    const buffer = await readFile(jailResolve(file));
+    if (isProbablyBinary(buffer.subarray(0, SNIFF_BYTES))) {
+      return conflict(file, '是二进制文件,不能按文本编辑(utf8 往返会损毁原有字节)。');
+    }
+    // 未提供 hash:用刚读到的内容算。读与提交之间的窗口由 ChangeSet 的 dry-run + 提交前复核兜底,
+    // 期间文件被改会报 CHANGE_CONFLICT(fail-loud),不会静默覆盖。
+    if (!expectedHash) expectedHash = contentHash(buffer);
+
+    const data = buffer.toString('utf8');
     const normalized = data.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     const newNormalized = newString.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
