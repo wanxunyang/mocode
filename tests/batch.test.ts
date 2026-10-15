@@ -506,6 +506,30 @@ describe('batch renderedCount 未追平 entries', () => {
 // 详情行缩进必须跟随批自身层级:子批(挂在父批下、entry 行更深)的二层详情
 // 若仍用固定常量,会跑回父层左侧 —— 层级读错、且插/删行数计算点同源,漏改会行错位。
 describe('batch 详情行缩进随批层级联动', () => {
+  it('展开中的 run_command 实时刷新;折叠时缓冲,重开后显示并在收尾替换', () => {
+    const layout = makeLayout();
+    const id = batch.beginBatch();
+    batch.recordCall(id, 'run_command', 'npm test', 'call-1');
+    batch.bindCall('call-1', id);
+    batch.showLiveBatch(id, layout);
+    batch.expandBatch(id, layout, true);
+    batch.recordOutput('call-1', 'first line\n', layout);
+    batch.toggleEntry(id, 0, layout);
+    assert.ok(content.sliceFromEnd(0, content.totalRows()).some((line) => stripAnsi(line).includes('first line')));
+
+    batch.toggleEntry(id, 0, layout);
+    const rowsBefore = content.totalRows();
+    batch.recordOutput('call-1', 'second line\n', layout);
+    assert.equal(content.totalRows(), rowsBefore, 'entry 折叠时只缓存,不插入内容区');
+
+    batch.toggleEntry(id, 0, layout);
+    assert.ok(content.sliceFromEnd(0, content.totalRows()).some((line) => stripAnsi(line).includes('second line')));
+    batch.recordResult(id, 'run_command', 'exit 0', null, 'final output', false, 'call-1', layout);
+    const rows = content.sliceFromEnd(0, content.totalRows()).map(stripAnsi);
+    assert.ok(rows.some((line) => line.includes('final output')));
+    assert.ok(!rows.some((line) => line.includes('first line') || line.includes('second line')));
+  });
+
   it('无缩进批的详情行 = DETAIL_INDENT(5);子批详情 = 批缩进 + 5', () => {
     const layout = makeLayout();
     /** 按剥色后的整行精确取详情行 —— 不能用 includes('a') 之类的子串匹配:

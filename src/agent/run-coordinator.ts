@@ -397,6 +397,7 @@ export async function runAgentCoreLegacy(
                   delegation: delegationForOrchestrator,
                   readDedup,
                   argumentErrorHint: (name) => argumentErrorHint(name, runtimeContextState),
+                  onToolOutput: (call, chunk) => hooks.onToolOutput?.(call, chunk),
                   ...(opts.toolPolicy
                     ? {
                         expandToolGroups: (groups: readonly unknown[], reason: string) =>
@@ -484,6 +485,7 @@ export async function runAgentCoreLegacy(
                         signal,
                         {
                           callId: calls[index].id,
+                          onOutput: (chunk) => hooks.onToolOutput?.(calls[index], chunk),
                           allowedToolNames: currentAllowedToolNames(),
                           delegation: delegationForOrchestrator(),
                           readDedup,
@@ -699,6 +701,7 @@ export async function runAgentCoreLegacy(
                     const started = batch.map((tc) =>
                       ctx.toolRuntime.executeToolOutcome(tc.name, tc.arguments, signal, {
                         callId: tc.id,
+                        onOutput: (chunk) => hooks.onToolOutput?.(tc, chunk),
                         allowedToolNames: currentAllowedToolNames(),
                         delegation: delegationForOrchestrator(),
                         readDedup,
@@ -825,6 +828,7 @@ export async function runAgentCoreLegacy(
                           ? entry.denied
                           : await ctx.toolRuntime.executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
                               callId: entry.tc.id,
+                              onOutput: (chunk) => hooks.onToolOutput?.(entry.tc, chunk),
                               allowedToolNames: currentAllowedToolNames(),
                               delegation: delegationForOrchestrator(),
                               readDedup,
@@ -939,6 +943,7 @@ export async function runAgentCoreLegacy(
                       const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
                       return ctx.toolRuntime.executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
                         callId: entry.tc.id,
+                        onOutput: (chunk) => hooks.onToolOutput?.(entry.tc, chunk),
                         allowedToolNames: currentAllowedToolNames(),
                         delegation: delegationForOrchestrator(),
                         readDedup,
@@ -1063,6 +1068,7 @@ export async function runAgentCoreLegacy(
                     const serialHint = argumentErrorHint(tc.name, runtimeContextState);
                     const outcome = await ctx.toolRuntime.executeToolOutcome(tc.name, tc.arguments, signal, {
                       callId: tc.id,
+                      onOutput: (chunk) => hooks.onToolOutput?.(tc, chunk),
                       allowedToolNames: currentAllowedToolNames(),
                       delegation: delegationForOrchestrator(),
                       readDedup,

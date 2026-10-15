@@ -26,6 +26,8 @@ export interface ToolExecutionOptions {
   onLockAcquired?: (args: Record<string, unknown>) => void;
   /** 本次调用的 tool_call id,透传给工具 ctx(编排型工具关联渲染用)。 */
   callId?: string;
+  /** 运行中输出增量;仅由明确消费流式输出的工具调用。 */
+  onOutput?: (chunk: string) => void;
   /** 产生调用时的 effective allow-list；仅用于子执行面求交和 skill 命令注入门禁。 */
   allowedToolNames?: readonly string[];
   /** 父 agent 委派前缀：编排工具(sub-agent/run_skill)据此让子 agent 复用主上下文命中缓存。 */
@@ -390,6 +392,7 @@ export class ToolRuntime {
           raw = await tool.execute(args, {
             signal,
             callId: opts?.callId,
+            onOutput: opts?.onOutput,
             allowedToolNames: opts?.allowedToolNames,
             delegation: opts?.delegation,
             readDedup: opts?.readDedup,

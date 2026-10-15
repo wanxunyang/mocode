@@ -33,6 +33,7 @@ export interface AgentHooks {
   onTextEnd?: () => void;
   onToolHeader?: (tc: ToolCallRef) => void;
   onToolStart?: (name: string) => void;
+  onToolOutput?: (tc: ToolCallRef, chunk: string) => void;
   onToolDone?: () => void;
   onToolResult?: (
     tc: ToolCallRef,

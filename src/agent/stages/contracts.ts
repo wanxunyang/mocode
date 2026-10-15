@@ -149,6 +149,8 @@ export interface ToolDispatchRequest {
   readonly expandToolGroups?: (groups: readonly unknown[], reason: string) => ToolPolicyExpansion;
   /** 子 agent 等编排工具的并发上限覆写；缺省回落到全局 config.subAgentConcurrency。 */
   readonly orchestrationConcurrency?: number;
+  /** 实时工具输出;按 callId 归属,不参与 tool result/history 回灌。 */
+  readonly onToolOutput?: (call: ToolCallRef, chunk: string) => void;
   /** Synchronous live publication; throwing stops dispatch at the same point as the legacy hook. */
   readonly onEvent: (event: ToolDispatchEvent) => void;
 }

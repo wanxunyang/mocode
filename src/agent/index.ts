@@ -148,7 +148,7 @@ function writeToolHeader(tc: ToolCallRef, toolRuntime: AgentRuntimeContext['tool
     const id = batch.beginBatch();
     currentBatchId = id;
     batch.bindCall(tc.id, id);
-    batch.recordCall(id, tc.name, summarizeToolCall(tc.name, tc.arguments));
+    batch.recordCall(id, tc.name, summarizeToolCall(tc.name, tc.arguments), tc.id);
     batch.showLiveBatch(id, layout);
   } else {
     // 普通工具合并到 currentBatchId；同轮并行或连续无正文的工具轮次共享一个摘要行。
@@ -159,7 +159,7 @@ function writeToolHeader(tc: ToolCallRef, toolRuntime: AgentRuntimeContext['tool
     // 结果按 tool_call id 归位：并行执行时 currentBatchId 会漂移，只按“当前批”回填会漏填，
     // 摘要行就永远停在 ◇（用户实测：子 agent 跑完主侧菱形没变成实心圆）。
     batch.bindCall(tc.id, id);
-    batch.recordCall(id, tc.name, summarizeToolCall(tc.name, tc.arguments));
+    batch.recordCall(id, tc.name, summarizeToolCall(tc.name, tc.arguments), tc.id);
     // 第一条工具开始时立即落摘要；后续调用加入同一 batch，并原地刷新计数。
     batch.showLiveBatch(id, layout);
   }
@@ -183,7 +183,7 @@ function writeToolResult(
     // 无需独立批。全部 entry 完成后收口组容器批(落完成态 + 开放点击展开),
     // 并与后续内容约定一条分隔空行。
     const preview = summarizeToolResult(tc.name, output);
-    batch.recordResult(batchId, tc.name, preview, null, output, isToolErrorOutput(output), tc.id);
+    batch.recordResult(batchId, tc.name, preview, null, output, isToolErrorOutput(output), tc.id, layout);
     if (batch.isBatchComplete(batchId)) {
       batch.endBatch(batchId, layout);
       subAgentGroupId = null;
@@ -211,7 +211,7 @@ function writeToolResult(
     });
   }
   const preview = diff ? '' : summarizeToolResult(tc.name, output);
-  batch.recordResult(batchId, tc.name, preview, diff, output, isToolErrorOutput(output));
+  batch.recordResult(batchId, tc.name, preview, diff, output, isToolErrorOutput(output), tc.id, layout);
   batch.showLiveBatch(batchId, layout);
   // mutation 结果（成功 diff 或错误输出）立即可见，并阻止后续普通工具并入这一批。
   if (isMutationTool(tc.name, toolRuntime)) finishStandaloneBatch(batchId, true);
@@ -429,6 +429,7 @@ export async function runAgent(
       writeToolHeader(tc, runtime.context.toolRuntime);
     },
     onToolStart: (name) => spinner.start(t('agent.executing', { tool: name })),
+    onToolOutput: (tc, chunk) => batch.recordOutput(tc.id, chunk, layout),
     onToolDone: () => spinner.stop(),
     onToolResult: (tc, output, parsed, preWriteOld, editStartLine) =>
       writeToolResult(tc, output, parsed, preWriteOld, editStartLine, runtime.context.toolRuntime),

@@ -70,6 +70,7 @@ export async function runCommandRaw(
   signal?: AbortSignal,
   cwd?: string,
   shell?: ShellKind,
+  onOutput?: (chunk: string) => void,
 ): Promise<RawCommandResult> {
   const startedAt = Date.now();
   // 内部调用方(skill 注入等)也走同一钳制:防止任何路径把前台命令挂成无限期持锁。
@@ -145,7 +146,15 @@ export async function runCommandRaw(
     const onAbort = (): void => {
       terminate('aborted');
     };
-    const onChunk = (chunk: Buffer): void => output.append(chunk.toString('utf8'));
+    const onChunk = (chunk: Buffer): void => {
+      const text = chunk.toString('utf8');
+      output.append(text);
+      try {
+        onOutput?.(text);
+      } catch {
+        // Output observers must not affect the command process lifecycle.
+      }
+    };
 
     // 先起 timer 再挂事件:finish/onAbort 是闭包,里面要 clearTimeout(timer)。
     // 把 timer 的初始化提到所有引用它的注册点之前,避免依赖"事件回调必然异步"这一前提。
@@ -240,7 +249,7 @@ export const runCommandTool: Tool = {
       }
       shell = parsed;
     }
-    const result = await runCommandRaw(command, timeout, ctx?.signal, undefined, shell);
+    const result = await runCommandRaw(command, timeout, ctx?.signal, undefined, shell, ctx?.onOutput);
     const outcome = commandOutcome(result);
     // 钳制要显式告知:模型传了 30min 却按 10min 判超时,不说清它会以为是环境抽风而盲目重试。
     if (args.timeout !== undefined && Number(args.timeout) !== timeout && result.status === 'timed_out') {

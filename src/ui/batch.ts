@@ -30,6 +30,11 @@ export interface BatchEntry {
   diffBlock: string | null;
   /** 工具完整原始输出(纯文本,无 ANSI)。展开时显示完整内容;缺省时退化为 resultSummary 单行。 */
   fullOutput?: string;
+  /** 运行中的命令输出缓冲;独立于工具最终 output,避免结果前缀/状态重复写入详情。 */
+  liveOutput?: string;
+  renderedDetailCount?: number;
+  liveRefreshAt?: number;
+  liveRefreshTimer?: NodeJS.Timeout;
   failed?: boolean;
   /** 结果已回填。不能只看 resultSummary 是否非空——sub-agent 等工具的 preview 可能为空串,
    *  那样摘要行会永远停在 ◇「正在探索」(用户实测:子 agent 跑完主侧菱形不变实心圆)。 */
@@ -96,6 +101,8 @@ const groupChildIndexByCall = new Map<string, number>();
 
 /** 展开时完整输出的最大行数;超出截断,避免巨型输出撑爆 viewport。 */
 const MAX_EXPAND_LINES = 200;
+const MAX_LIVE_OUTPUT_CHARS = 256 * 1024;
+const LIVE_OUTPUT_REFRESH_MS = 80;
 
 /** 自洽行允许的最大显示宽(= 终端 cols)。buffer 行超 cols 会被终端 auto-wrap,
  *  物理行与缓冲行失配 → repaintViewport 的 CUP 寻址全错(屏幕错乱)。 */
@@ -129,6 +136,11 @@ export function isMutationToolName(name: string): boolean {
 
 /** 通知 buffer 整体清空(clearContent / exitAltScreen / 新一轮 turn)——本模块状态同步归零。 */
 export function reset(): void {
+  for (const record of batches.values()) {
+    for (const entry of record.entries) {
+      if (entry.liveRefreshTimer) clearTimeout(entry.liveRefreshTimer);
+    }
+  }
   batches.clear();
   absLineToBatchId.clear();
   absLineToEntry.clear();
@@ -227,6 +239,74 @@ export function isBatchComplete(id: string): boolean {
 /** 记一条工具结果(diff 块或单行 preview);agent 在 onToolResult 时调,匹配最后一条未填的 entry。
  *  fullOutput:工具原始完整输出(纯文本),展开时显示;mutation 工具的 diff 块已自含无需传。
  *  callId:组容器批用,直接把结果填到对应 entry(避免多个 sub-agent 同名时反向匹配错位)。 */
+function refreshEntryDetails(
+  b: BatchRecord,
+  entryIndex: number,
+  layout: {
+    contentInsertAfter(after: number, lines: string[], keepViewport?: boolean): void;
+    contentDeleteFrom(startIdx: number, n: number): void;
+    contentReplaceLine(absIdx: number, line: string): void;
+  },
+): void {
+  if (!expandedBatches.has(b.id) || !b.expandedEntries.has(entryIndex)) return;
+  const headerIdx = [...absLineToEntry].find(
+    ([, target]) => target.batchId === b.id && target.entryIndex === entryIndex,
+  )?.[0];
+  if (headerIdx == null) return;
+  const entry = b.entries[entryIndex];
+  const oldCount = entry.renderedDetailCount ?? 0;
+  const lines = buildEntryDetailLines(entry, entryDetailIndent(b.indent ?? ''));
+  const replacement = lines.slice(0, MAX_EXPAND_LINES);
+  if (oldCount > 0) layout.contentDeleteFrom(headerIdx + 1, oldCount);
+  if (replacement.length > 0) layout.contentInsertAfter(headerIdx, replacement, false);
+  entry.renderedDetailCount = replacement.length;
+  entry.renderedDigest = entryLineDigest(entry);
+  layout.contentReplaceLine(headerIdx, buildEntryLine(b, entryIndex, b.indent ?? ''));
+}
+
+export function recordOutput(
+  callId: string,
+  chunk: string,
+  layout: {
+    contentInsertAfter(after: number, lines: string[], keepViewport?: boolean): void;
+    contentDeleteFrom(startIdx: number, n: number): void;
+    contentReplaceLine(absIdx: number, line: string): void;
+  },
+): void {
+  const batchId = callToBatch.get(callId);
+  const b = batchId ? batches.get(batchId) : undefined;
+  const entryIndex = groupChildIndexByCall.get(callId);
+  if (!b || entryIndex == null || b.entries[entryIndex]?.name !== 'run_command') return;
+  const entry = b.entries[entryIndex];
+  entry.liveOutput = `${entry.liveOutput ?? ''}${chunk}`;
+  if (entry.liveOutput.length > MAX_LIVE_OUTPUT_CHARS) {
+    entry.liveOutput = entry.liveOutput.slice(-MAX_LIVE_OUTPUT_CHARS);
+  }
+  if (!expandedBatches.has(b.id)) return;
+  if (!b.expandedEntries.has(entryIndex)) {
+    const headerIdx = [...absLineToEntry].find(
+      ([, target]) => target.batchId === b.id && target.entryIndex === entryIndex,
+    )?.[0];
+    if (headerIdx != null) {
+      entry.renderedDigest = entryLineDigest(entry);
+      layout.contentReplaceLine(headerIdx, buildEntryLine(b, entryIndex, b.indent ?? ''));
+    }
+    return;
+  }
+  if (entry.liveRefreshTimer) return;
+  const refresh = (): void => {
+    entry.liveRefreshTimer = undefined;
+    entry.liveRefreshAt = Date.now();
+    refreshEntryDetails(b, entryIndex, layout);
+  };
+  const wait = Math.max(0, LIVE_OUTPUT_REFRESH_MS - (Date.now() - (entry.liveRefreshAt ?? 0)));
+  if (wait === 0) refresh();
+  else {
+    entry.liveRefreshTimer = setTimeout(refresh, wait);
+    entry.liveRefreshTimer.unref();
+  }
+}
+
 export function recordResult(
   id: string,
   name: string,
@@ -235,6 +315,11 @@ export function recordResult(
   fullOutput?: string,
   failed = false,
   callId?: string,
+  layout?: {
+    contentInsertAfter(after: number, lines: string[], keepViewport?: boolean): void;
+    contentDeleteFrom(startIdx: number, n: number): void;
+    contentReplaceLine(absIdx: number, line: string): void;
+  },
 ): void {
   const b = batches.get(id);
   if (!b || b.entries.length === 0) return;
@@ -248,7 +333,11 @@ export function recordResult(
       e.fullOutput = fullOutput;
       e.failed = failed;
       e.done = true;
+      if (e.liveRefreshTimer) clearTimeout(e.liveRefreshTimer);
+      e.liveRefreshTimer = undefined;
+      e.liveOutput = undefined;
       if (b.entries.every(isEntryDone)) b.finishedAt = Date.now();
+      if (layout) refreshEntryDetails(b, idx, layout);
       return;
     }
   }
@@ -260,7 +349,11 @@ export function recordResult(
       b.entries[i].fullOutput = fullOutput;
       b.entries[i].failed = failed;
       b.entries[i].done = true;
+      if (b.entries[i].liveRefreshTimer) clearTimeout(b.entries[i].liveRefreshTimer);
+      b.entries[i].liveRefreshTimer = undefined;
+      b.entries[i].liveOutput = undefined;
       if (b.entries.every(isEntryDone)) b.finishedAt = Date.now();
+      if (layout) refreshEntryDetails(b, i, layout);
       return;
     }
   }
@@ -272,7 +365,11 @@ export function recordResult(
     last.fullOutput = fullOutput;
     last.failed = failed;
     last.done = true;
+    if (last.liveRefreshTimer) clearTimeout(last.liveRefreshTimer);
+    last.liveRefreshTimer = undefined;
+    last.liveOutput = undefined;
     if (b.entries.every(isEntryDone)) b.finishedAt = Date.now();
+    if (layout) refreshEntryDetails(b, b.entries.length - 1, layout);
   }
 }
 
@@ -556,11 +653,10 @@ function buildEntryDetailLines(e: BatchEntry, indent = DETAIL_INDENT): string[] 
       const prefixed = `${ui.dim}${indent}${ui.reset}${line}`;
       lines.push(sanitizeRow(prefixed));
     }
-  } else if (e.fullOutput) {
-    // 完整工具输出(纯文本):按行展开,每行缩进 + dim 样式;长输出截断到 MAX_EXPAND_LINES 行。
-    // 每行经 sanitizeRow 钳宽:fullOutput 可能含 grep 扫二进制(db/压缩文件)得到的
-    // 超长行 + 控制字符,不钳会让终端 auto-wrap 打乱屏位。
-    const rawLines = e.fullOutput.split('\n');
+  } else if (e.liveOutput || e.fullOutput) {
+    // 实时输出优先展示;结束后由 recordResult 替换成最终有界工具结果。
+    // 每行 sanitizeRow 会清除控制字符并钳宽,避免 ANSI/终端控制序列污染 TUI。
+    const rawLines = (e.liveOutput || e.fullOutput || '').split(/\r\n|\n|\r/);
     const truncated = rawLines.length > MAX_EXPAND_LINES;
     const displayLines = truncated ? rawLines.slice(0, MAX_EXPAND_LINES) : rawLines;
     for (const line of displayLines) {
@@ -586,7 +682,7 @@ function buildEntryDetailLines(e: BatchEntry, indent = DETAIL_INDENT): string[] 
  * 只取有无不取内容:完整输出可能上万字符,拼进指纹是浪费,且其内容不影响 entry 行渲染。
  */
 function entryLineDigest(e: BatchEntry): string {
-  return `${e.resultSummary}\u0001${e.diffBlock ? '1' : '0'}\u0001${e.fullOutput ? '1' : '0'}\u0001${e.failed ? '1' : '0'}`;
+  return `${e.resultSummary}\u0001${e.diffBlock ? '1' : '0'}\u0001${e.fullOutput || e.liveOutput ? '1' : '0'}\u0001${e.failed ? '1' : '0'}`;
 }
 
 /**
@@ -636,7 +732,7 @@ const DETAIL_RESULT_MARK = '· ';
 /** entry 是否有可展开的详情行。须与 buildEntryDetailLines 的分支一致,
  *  否则会画出点了没反应的三角(toggleEntry 对空 details 直接 return)。 */
 function hasEntryDetail(e: BatchEntry): boolean {
-  return Boolean(e.diffBlock || e.fullOutput || e.resultSummary);
+  return Boolean(e.diffBlock || e.fullOutput || e.liveOutput || e.resultSummary);
 }
 
 /** entry 行的展开三角(含尾随空格与配色)。折叠 dim、展开 accent,一眼区分当前态。 */
@@ -1113,8 +1209,10 @@ export function toggleEntry(
   layout.contentReplaceLine(headerIdx, buildEntryLine(b, entryIndex, b.indent ?? ''));
   if (wasExpanded) {
     layout.contentDeleteFrom(headerIdx + 1, details.length);
+    b.entries[entryIndex].renderedDetailCount = 0;
   } else {
     layout.contentInsertAfter(headerIdx, details);
+    b.entries[entryIndex].renderedDetailCount = Math.min(details.length, MAX_EXPAND_LINES);
   }
 }
 

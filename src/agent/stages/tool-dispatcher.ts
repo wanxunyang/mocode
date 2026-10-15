@@ -88,6 +88,7 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
     ) =>
       toolRuntime.executeToolOutcome(call.name, call.arguments, request.signal, {
         callId: call.id,
+        onOutput: (chunk) => request.onToolOutput?.(call, chunk),
         allowedToolNames: request.currentAllowedToolNames(),
         delegation: request.delegation(),
         readDedup: request.readDedup,

@@ -146,9 +146,13 @@ test('runCommandRaw: 显式 shell=bash 跑 POSIX 命令成功(Windows 无 Git Ba
     return;
   }
   // $((1+1)) 是 POSIX 专有算术展开,cmd 解析不出来 → 能跑通即证明真的走了 bash。
-  const result = await runCommandRaw('echo $((1+1))', 5000, undefined, undefined, 'bash');
+  const chunks: string[] = [];
+  const result = await runCommandRaw('echo $((1+1))', 5000, undefined, undefined, 'bash', (chunk) =>
+    chunks.push(chunk),
+  );
   assert.equal(result.status, 'passed', `bash 分支应成功: ${result.output}`);
   assert.match(result.output, /2/);
+  assert.match(chunks.join(''), /2/, '实时回调应收到进程 stdout');
 });
 
 test('runCommandRaw: Windows 上显式 shell=cmd 跑 cmd 专有语法(非 Windows 跳过)', async (t) => {
