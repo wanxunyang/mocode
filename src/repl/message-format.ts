@@ -3,9 +3,15 @@ import * as layout from '../ui/layout.js';
 import * as batch from '../ui/batch.js';
 import { displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
 import { renderChip } from '../attachments/image.js';
+import { t } from '../i18n/index.js';
 import { PROMPT } from './commands.js';
 import type { ChatMessage } from '../llm/index.js';
 import type { ImageAttachment } from '../attachments/image.js';
+
+/** compact 摘要消息头(与 session/compact.ts SUMMARY_MARKER 同值;本地复制避免拉入 compact 的重依赖图,同 retention.ts)。 */
+const SUMMARY_MARKER = '# 会话摘要';
+/** 回放时摘要最多显示的字符数(摘要上限 6000,全量回放会淹没保留的用户原话)。 */
+const SUMMARY_REPLAY_MAX_CHARS = 3000;
 
 /** side channel:history 中 user 消息的 index → 附件列表,供 renderHistory 复显文件名。runTurn 在 push 前设。 */
 export const messageAttachments = new Map<number, ImageAttachment[]>();
@@ -74,7 +80,26 @@ export function renderHistory(history: ChatMessage[]): void {
   };
   for (let idx = 0; idx < history.length; idx++) {
     const m = history[idx];
-    if (m.role === 'system') continue;
+    if (m.role === 'system') {
+      // compact 摘要是被压缩掉的助手回复/工具过程的唯一留存:回放时显示出来(history[0] 的系统提示仍跳过)。
+      const body = textOf((m as { content?: unknown }).content);
+      if (idx > 0 && body.startsWith(SUMMARY_MARKER)) {
+        flushBatch();
+        layout.normalizeMutationBoundary();
+        layout.contentWrite(`${ui.dim}${t('repl.compactedNotice')}${ui.reset}\n\n`);
+        const text = body.slice(SUMMARY_MARKER.length).trim();
+        if (text.length > SUMMARY_REPLAY_MAX_CHARS) {
+          layout.contentWriteMdOnce(text.slice(0, SUMMARY_REPLAY_MAX_CHARS));
+          layout.contentWrite(
+            `${ui.dim}${t('repl.compactedTruncated', { total: text.length, shown: SUMMARY_REPLAY_MAX_CHARS })}${ui.reset}\n`,
+          );
+        } else {
+          layout.contentWriteMdOnce(text);
+        }
+        layout.normalizeMutationBoundary();
+      }
+      continue;
+    }
     if (m.role === 'user') {
       flushBatch(); // 上一轮 batch(若有)收尾
       const lines = textOf((m as { content?: unknown }).content).split('\n');

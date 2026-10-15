@@ -170,6 +170,8 @@ const zhCN = {
   'repl.queuedCommandHeld': '排队的是斜杠命令，已填入输入框，请确认后手动发送',
   'repl.loadFailed': '（加载失败）',
   'repl.resumeAnchor': '已恢复会话 {id} · {count} 条消息 · 当前模型 {model}（/model switch 可切换）',
+  'repl.compactedNotice': '── 更早的对话已被压缩成摘要（助手回复与工具过程不再保留），以下为摘要与保留的用户原话 ──',
+  'repl.compactedTruncated': '…（摘要共 {total} 字符，仅显示前 {shown} 字符）',
   'repl.noSessions': '（没有已保存的会话）',
   'repl.noValue': '（无）',
   'repl.historyCleared': '（历史已清空，保留系统提示）',
@@ -581,6 +583,9 @@ const en: Record<TranslationKey, string> = {
   'repl.queuedCommandHeld': 'Queued text is a slash command; filled into the input for you to send manually',
   'repl.loadFailed': '(load failed)',
   'repl.resumeAnchor': 'Resumed session {id} · {count} messages · model {model} (/model switch to change)',
+  'repl.compactedNotice':
+    '── Earlier conversation was compacted into a summary (assistant replies and tool steps are not kept); below are the summary and the preserved user messages ──',
+  'repl.compactedTruncated': '… (summary is {total} chars, showing the first {shown})',
   'repl.noSessions': '(no saved sessions)',
   'repl.noValue': '(none)',
   'repl.historyCleared': '(history cleared; system prompt kept)',
