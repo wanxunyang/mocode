@@ -1,4 +1,4 @@
-import fg from 'fast-glob';
+import { loadFastGlob } from '../fast-glob-lazy.js';
 import { IGNORE } from '../constants.js';
 import { getSandboxRoot, isInsideRoot } from '../../sandbox/index.js';
 import type { Tool, ToolOutcome } from '../types.js';
@@ -43,6 +43,7 @@ export const globTool: Tool = {
     try {
       // fast-glob 3.3 的 signal 选项运行时不生效(实测),用 Promise.race 做超时/中断墙:
       // 触发后不再等待枚举——纯只读 readdir 会自行跑完,用户面即时解锁。
+      const fg = await loadFastGlob();
       const fgPromise = fg(pattern, {
         cwd,
         onlyFiles: true,

@@ -1,5 +1,5 @@
-import Ajv, { type ErrorObject, type ValidateFunction } from 'ajv';
-import Ajv2020 from 'ajv/dist/2020.js';
+import type { ErrorObject, ValidateFunction } from 'ajv';
+import { createRequire } from 'node:module';
 import type { Tool } from './types.js';
 
 export type ToolArgumentValidation =
@@ -7,6 +7,17 @@ export type ToolArgumentValidation =
   | { valid: false; code: 'INVALID_ARGUMENTS' | 'INVALID_TOOL_SCHEMA'; message: string };
 
 type CachedValidator = { valid: true; validate: ValidateFunction } | { valid: false; message: string };
+
+// ajv 懒加载:它本身不算巨包,但顶层就构造 draft7/draft2020 两个实例会把包求值提前到启动路径
+// (tool-runtime → validation)。首帧 UI 不做任何参数校验,故推迟到首次 compile 时才加载。
+const require = createRequire(import.meta.url);
+type AjvLike = {
+  compile: (schema: Record<string, unknown>) => ValidateFunction;
+};
+
+let draft7: AjvLike | null = null;
+let draft2020: AjvLike | null = null;
+let ajvPromise: Promise<unknown> | null = null;
 
 const options = {
   allErrors: true,
@@ -20,17 +31,35 @@ const options = {
   validateFormats: false,
   allowUnionTypes: true,
 } as const;
-const draft7 = new Ajv(options);
-const draft2020 = new Ajv2020(options);
+
+/** 首次真实工具参数校验时才加载 ajv 并构造两个 draft 实例。 */
+function ensureAjv(): { draft7: AjvLike; draft2020: AjvLike } {
+  if (draft7 && draft2020) return { draft7, draft2020 };
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const Ajv = require('ajv') as typeof import('ajv').default;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const Ajv2020 = require('ajv/dist/2020.js') as typeof import('ajv/dist/2020.js').default;
+  draft7 = new Ajv(options);
+  draft2020 = new Ajv2020(options);
+  return { draft7, draft2020 };
+}
+
+/** 首帧后后台预热;与同步 require 共享模块缓存。失败静默。 */
+export function prewarmAjv(): Promise<unknown> {
+  if (!ajvPromise) {
+    ajvPromise = Promise.all([import('ajv'), import('ajv/dist/2020.js')]).catch(() => undefined);
+  }
+  return ajvPromise;
+}
+
 const cache = new WeakMap<object, CachedValidator>();
 
 function compile(schema: Record<string, unknown>): CachedValidator {
   const cached = cache.get(schema);
   if (cached) return cached;
+  const { draft7: d7, draft2020: d2020 } = ensureAjv();
   const preferred =
-    typeof schema.$schema === 'string' && schema.$schema.includes('2020-12')
-      ? [draft2020, draft7]
-      : [draft7, draft2020];
+    typeof schema.$schema === 'string' && schema.$schema.includes('2020-12') ? [d2020, d7] : [d7, d2020];
   let lastError: unknown;
   for (const ajv of preferred) {
     try {

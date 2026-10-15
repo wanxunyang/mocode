@@ -9,9 +9,12 @@
  * 幂等：进程内只安装一次。MOCODE_NO_ENV_PROXY=1 可完全关闭。
  */
 import { execSync } from 'node:child_process';
-import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
+
+// undici 懒加载:它是百毫秒级依赖,而代理安装只在首个真实出站请求时才需要(首帧 UI 不需要)。
+// 故不在模块顶层 import,改在 installEnvProxy 内动态 import。
 
 let installed = false;
+let installPromise: Promise<void> | null = null;
 
 function withProtocol(value: string): string {
   return /^https?:\/\//i.test(value) ? value : `http://${value}`;
@@ -101,40 +104,48 @@ function keepAliveTimeoutMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_KEEPALIVE_TIMEOUT_MS;
 }
 
-export function installEnvProxy(): void {
-  if (installed) return;
+export function installEnvProxy(): Promise<void> {
+  if (installed) return Promise.resolve();
+  if (installPromise) return installPromise;
   installed = true;
-  if (process.env.MOCODE_NO_ENV_PROXY === '1') return;
+  installPromise = (async () => {
+    if (process.env.MOCODE_NO_ENV_PROXY === '1') return;
 
-  const envProxy =
-    process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
-  const windowsOptions = windowsProxyOptions();
-  const options = envProxy ? undefined : (windowsOptions ?? undefined);
-  if (!envProxy && !windowsOptions) return;
+    const envProxy =
+      process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+    // reg query(同步子进程)只在没有 env 代理时才探测 Windows 系统代理,避免无谓启动。
+    const windowsOptions = envProxy ? null : windowsProxyOptions();
+    const options = envProxy ? undefined : (windowsOptions ?? undefined);
+    if (!envProxy && !windowsOptions) return;
 
-  // EnvHttpProxyAgent 构造时会通过 process.emitWarning 打一条 UNDICI-EHPA 实验性警告，
-  // 在 TUI 里可能落成脏行；屏蔽这一条特定警告，其余警告照常。
-  const originalEmitWarning = process.emitWarning.bind(process);
-  process.emitWarning = ((...args: unknown[]) => {
-    const first = args[0];
-    if (typeof first === 'string' && first.includes('EnvHttpProxyAgent is experimental')) return;
-    return (originalEmitWarning as (...a: unknown[]) => void)(...args);
-  }) as typeof process.emitWarning;
-  try {
-    // keepalive 调参:EnvHttpProxyAgent 把 ...agentOpts 透传给内部 Agent/ProxyAgent
-    // (undici 6.21 env-http-proxy-agent.js 构造器),Client 层消费这三个选项。
-    // threshold 刻意高于默认 2s:undici 会在「服务端 Keep-Alive 头声明的存活期 − threshold」
-    // 时刻掐自己的空闲连接,若代理声明的存活期略长于我们的 keepAliveTimeout,留出余量
-    // 可避免双方同时收线时撞上刚被掐死的连接(那正是 ECONNRESET 的形态)。
-    setGlobalDispatcher(
-      new EnvHttpProxyAgent({
-        ...(options ?? {}),
-        keepAliveTimeout: keepAliveTimeoutMs(),
-        keepAliveMaxTimeout: 600_000,
-        keepAliveTimeoutThreshold: 5_000,
-      }),
-    );
-  } finally {
-    process.emitWarning = originalEmitWarning;
-  }
+    const { EnvHttpProxyAgent, setGlobalDispatcher } = await import('undici');
+
+    // EnvHttpProxyAgent 构造时会通过 process.emitWarning 打一条 UNDICI-EHPA 实验性警告，
+    // 在 TUI 里可能落成脏行；屏蔽这一条特定警告，其余警告照常。
+    const originalEmitWarning = process.emitWarning.bind(process);
+    process.emitWarning = ((...args: unknown[]) => {
+      const first = args[0];
+      if (typeof first === 'string' && first.includes('EnvHttpProxyAgent is experimental')) return;
+      return (originalEmitWarning as (...a: unknown[]) => void)(...args);
+    }) as typeof process.emitWarning;
+    try {
+      // keepalive 调参:EnvHttpProxyAgent 把 ...agentOpts 透传给内部 Agent/ProxyAgent
+      // (undici 6.21 env-http-proxy-agent.js 构造器),Client 层消费这三个选项。
+      // threshold 刻意高于默认 2s:undici 会在「服务端 Keep-Alive 头声明的存活期 − threshold」
+      // 时刻掐自己的空闲连接,若代理声明的存活期略长于我们的 keepAliveTimeout,留出余量
+      // 可避免双方同时收线时撞上刚被掐死的连接(那正是 ECONNRESET 的形态)。
+      setGlobalDispatcher(
+        new EnvHttpProxyAgent({
+          ...(options ?? {}),
+          keepAliveTimeout: keepAliveTimeoutMs(),
+          keepAliveMaxTimeout: 600_000,
+          keepAliveTimeoutThreshold: 5_000,
+        }),
+      );
+    } finally {
+      process.emitWarning = originalEmitWarning;
+    }
+  })();
+  // 安装失败不影响后续重试语义;这里只保证并发调用复用同一 promise。
+  return installPromise;
 }

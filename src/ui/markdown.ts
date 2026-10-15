@@ -11,7 +11,7 @@
 // 硬约束:每行 ansiDisplayWidth ≤ cols(layout.repaintViewport 直出行,超宽会让终端 auto-wrap
 // 错位;若上层 <Text wrap=truncate> 补 … U+2026 在中文终端算 2 宽会顶屏)。所有路径软折行 +
 // clipAnsiLine 兜底,绝不溢出。颜色一律嵌入式 ANSI(ui.*)写进字符串。
-import { highlight, supportsLanguage } from 'cli-highlight';
+import { getCliHighlight } from './cli-highlight-lazy.js';
 import { ui, getThemeVersion } from './theme.js';
 import { charWidth, displayWidth, ansiDisplayWidth, stripAnsi } from './render.js';
 
@@ -298,6 +298,7 @@ function wrapWithPrefix(segs: Seg[], prefix: string, contPrefix: string, cols: n
 function highlightCodeBlock(code: string, lang: string): string {
   if (!lang) return code;
   try {
+    const { highlight, supportsLanguage } = getCliHighlight();
     if (supportsLanguage(lang)) {
       return highlight(code, { language: lang, ignoreIllegals: true });
     }

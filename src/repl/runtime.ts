@@ -23,6 +23,7 @@ import * as mouse from '../ui/mouse.js';
 import { promptWithSlashMenu, promptTurnPicker, promptRevertChoice, type SessionPickerItem } from '../ui/prompt.js';
 import { promptIntervention } from '../ui/intervention.js';
 import { registerToolsExtension } from '../tools/registry.js';
+import { startPrewarm, defaultWorkerUrl } from '../startup/prewarm.js';
 // 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),REPL 入口须显式装配。
 import '../tools/builtins/index.js';
 import { initializeAllMcp, getMcpTools, closeAllMcp } from '../mcp/index.js';
@@ -341,6 +342,11 @@ export async function startRepl(
   } else {
     layout.writeBanner(bannerLines(banner()));
   }
+  // 首帧已渲染(banner / 恢复历史)。立刻后台预热重依赖(openai/fast-glob/cli-highlight/ajv/…):
+  // 占满用户阅读 banner / 思考 / 打字的时间窗,Worker 冷编译不冻结 TUI,主线程随后分块热加载,
+  // 让首次真实请求(首 token)不再付冷加载成本。fire-and-forget,失败静默。
+  startPrewarm(defaultWorkerUrl());
+
   // MCP 连接结果在就绪后补写(后台并行连接,不再阻塞上方首帧);用户已滚动时仍
   // 落在内容区尾部,与启动期其它提示行为一致。
   void mcpReady.then((mcpReport) => {

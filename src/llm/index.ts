@@ -1,4 +1,4 @@
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 import { config, getActiveModel } from '../config/index.js';
 import { tools } from '../tools/registry.js';
 import { getPlanDisabledTools, getProfileDisabledTools } from '../tools/constants.js';
@@ -76,8 +76,30 @@ const STREAM_RETRY_MAX_ATTEMPTS = 2;
  * 与 OpenAI 兼容协议的独立 `reasoning_content` 字段不同,这些模型把 thinking 直接嵌进 content
  * 字符串,期间不调 onText(spinner 持续转 ⠹ 思考中…),也不写入可见 content(history 不被思考段污染)。
  */
-function newOpenAIClient(runtimeConfig: ModelRuntimeConfig): OpenAI {
-  return new OpenAI({
+
+// ── openai SDK 懒加载 ────────────────────────────────────────────────────────
+// openai 是千余文件的巨型 CJS 包,冷态(开机磁盘缓存冷)首次加载实测 3.8–6s,
+// 是首帧 UI 最大瓶颈。静态 import 会在模块求值时把它整个拉进来。这里:
+//   1) 模块顶层只保留类型,不加载包;
+//   2) getOpenAI() 首次调用时动态 import(异步,不阻塞构造);
+//   3) 首帧后由 src/startup/prewarm 在后台(Worker 冷编译 + 主线程热加载)提前就绪。
+let openAIModulePromise: Promise<typeof import('openai')> | null = null;
+
+/** 加载 openai 包(预热与首次实例化共用,全程只加载一次)。 */
+function loadOpenAIModule(): Promise<typeof import('openai')> {
+  if (!openAIModulePromise) {
+    openAIModulePromise = import('openai');
+  }
+  return openAIModulePromise;
+}
+
+/** 首帧后后台预热:提前把 openai 包加载进内存,让首次真实请求零等待。幂等,失败静默。 */
+export function prewarmLlm(): Promise<unknown> {
+  return loadOpenAIModule();
+}
+
+function newOpenAIClient(mod: typeof import('openai'), runtimeConfig: ModelRuntimeConfig): OpenAI {
+  return new mod.default({
     baseURL: runtimeConfig.baseURL,
     apiKey: runtimeConfig.apiKey,
     maxRetries: 0,
@@ -94,9 +116,24 @@ export function createChatClientState(
   runtimeConfig: ModelRuntimeConfig,
   overrides: ChatClientOverrides = {},
 ): ChatClientState {
-  installEnvProxy();
+  let cfg = runtimeConfig;
+  let clientPromise: Promise<OpenAI> | null = null;
   return {
-    openAI: newOpenAIClient(runtimeConfig),
+    getOpenAI() {
+      if (!clientPromise) {
+        // 代理(undici)同样懒装:百毫秒级依赖,且只影响真实出站请求。
+        clientPromise = (async () => {
+          await installEnvProxy();
+          const mod = await loadOpenAIModule();
+          return newOpenAIClient(mod, cfg);
+        })();
+      }
+      return clientPromise;
+    },
+    resetOpenAI(nextConfig) {
+      cfg = nextConfig;
+      clientPromise = null;
+    },
     openAICreateImpl: overrides.openAICreateImpl ?? null,
     anthropicFetchImpl: overrides.anthropicFetchImpl ?? fetch,
   };
@@ -104,7 +141,7 @@ export function createChatClientState(
 
 /** Rebuild only the OpenAI SDK client while preserving runtime-local test/transport overrides. */
 export function reconfigureChatClient(state: ChatClientState, runtimeConfig: ModelRuntimeConfig): void {
-  state.openAI = newOpenAIClient(runtimeConfig);
+  state.resetOpenAI(runtimeConfig);
 }
 
 const defaultClientState = createChatClientState(config, { anthropicFetchImpl: defaultAnthropicFetch });
@@ -113,6 +150,14 @@ const defaultProviderRuntime: ModelProviderRuntime = {
   getModel: getActiveModel,
   clientState: defaultClientState,
 };
+
+/**
+ * 首帧后后台预热默认客户端:在用户阅读 banner / 输入需求的时间窗里提前加载 openai 并实例化,
+ * 让首次真实请求不必再付冷加载成本。fire-and-forget,任何失败静默(真实请求路径会自行重试/报错)。
+ */
+export function prewarmDefaultClient(): void {
+  void defaultClientState.getOpenAI().catch(() => undefined);
+}
 
 /**
  * 运行时重建 OpenAI 客户端(/model 切换 baseURL/apiKey 后调)。
@@ -820,13 +865,18 @@ async function chatOnce(
   // openAICreateImpl 的 body 类型故意宽成 Record(测试桩用),生产走 client 分支时由 OpenAI 自己的类型守门。
   const runtimeConfig = runtime.config;
   const runtimeClientState = runtime.clientState;
-  const create = runtimeClientState.openAICreateImpl
+  const create: (
+    body: Record<string, unknown>,
+    opts: { signal?: AbortSignal } | undefined,
+  ) => Promise<AsyncIterable<unknown>> = runtimeClientState.openAICreateImpl
     ? runtimeClientState.openAICreateImpl
-    : (body: Record<string, unknown>, opts: { signal?: AbortSignal } | undefined) =>
-        runtimeClientState.openAI.chat.completions.create(
-          body as unknown as Parameters<typeof runtimeClientState.openAI.chat.completions.create>[0],
-          opts as unknown as Parameters<typeof runtimeClientState.openAI.chat.completions.create>[1],
-        );
+    : async (body, opts) => {
+        const client = await runtimeClientState.getOpenAI();
+        return client.chat.completions.create(
+          body as unknown as Parameters<typeof client.chat.completions.create>[0],
+          opts as unknown as Parameters<typeof client.chat.completions.create>[1],
+        ) as unknown as AsyncIterable<unknown>;
+      };
   // transport 边界消毒:剔除部分后端(kimi-k3@dashscope 实测)整请求 400 拒绝的
   // uniqueItems 关键字。无需改写时返回原引用,前缀缓存逐字节稳定不受影响。
   const activeTools = sanitizeToolSchemas(toolsOverride ?? chatTools);

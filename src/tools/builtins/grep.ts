@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises';
-import fg from 'fast-glob';
+import { loadFastGlob } from '../fast-glob-lazy.js';
 import { IGNORE, MAX_RESULTS } from '../constants.js';
 import { isProbablyBinary } from '../../attachments/image.js';
 import { getSandboxRoot, isInsideRoot, jailResolve } from '../../sandbox/index.js';
@@ -109,6 +109,7 @@ async function nodeFallback(
     return `错误:非法正则 ${pattern}: ${e instanceof Error ? e.message : String(e)}`;
   }
   const cwd = getSandboxRoot() ?? process.cwd();
+  const fg = await loadFastGlob();
   const entries = (
     await fg(glob, {
       cwd,

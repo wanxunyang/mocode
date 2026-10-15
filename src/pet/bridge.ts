@@ -5,7 +5,7 @@
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import WebSocket, { type RawData } from 'ws';
+import type { RawData } from 'ws';
 import type {
   PetState,
   PetStateMeta,
@@ -16,6 +16,22 @@ import type {
   SkinListMessage,
 } from './protocol.js';
 import { parseServerMessage } from './protocol.js';
+
+// ws 懒加载:桌宠是可选增强,首帧 UI 与主 agent 循环都不需要 WebSocket。
+// 仅在真正发起本地连接(probePort / connect)时才同步加载;类型仍用 type-only import。
+const require = createRequire(import.meta.url);
+type WebSocket = import('ws').default;
+/** ws readyState 常量(open=1),与 WebSocket.OPEN 等价;本地常量避免顶层加载包。 */
+const WS_OPEN = 1;
+
+let WsCtor: typeof import('ws').default | null = null;
+function getWsCtor(): typeof import('ws').default {
+  if (!WsCtor) {
+    const mod = require('ws') as typeof import('ws');
+    WsCtor = mod.default ?? mod;
+  }
+  return WsCtor;
+}
 
 /** 默认端口;MOCODE_PET_PORT 环境变量覆盖(design.md 默认假设)。 */
 export const DEFAULT_PET_PORT = 47821;
@@ -54,7 +70,7 @@ function clearHeartbeat(): void {
 function startHeartbeat(ws: WebSocket): void {
   clearHeartbeat();
   heartbeatTimer = setInterval(() => {
-    if (ws.readyState !== WebSocket.OPEN) return;
+    if (ws.readyState !== WS_OPEN) return;
     try {
       ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
     } catch {
@@ -80,7 +96,7 @@ function startHeartbeat(ws: WebSocket): void {
 export function probePort(port: number, timeoutMs: number = PROBE_TIMEOUT_MS): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
-    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const ws = new (getWsCtor())(`ws://127.0.0.1:${port}`);
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -122,7 +138,6 @@ export function spawnPetProcess(): Promise<void> {
   return new Promise((resolve, reject) => {
     let binPath: string;
     try {
-      const require = createRequire(import.meta.url);
       binPath = require.resolve('mocode-pet-app/bin/pet-app.js');
     } catch {
       reject(new Error('mocode-pet-app 未安装,请运行 npm install mocode-pet-app'));
@@ -176,7 +191,7 @@ function sleep(ms: number): Promise<void> {
 /** 真正建立并返回一条打开的 WS 连接(不做探测,假定端口已确认可连)。 */
 function openConnection(port: number): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    const ws = new (getWsCtor())(`ws://127.0.0.1:${port}`);
     const timer = setTimeout(() => {
       try {
         ws.terminate();
@@ -248,7 +263,7 @@ function wireConnection(ws: WebSocket): void {
  * 后置条件:若 state !== lastSentState,构造并发送一条合法 StateMessage;否则无副作用。
  */
 export function sendState(state: PetState, meta?: PetStateMeta): void {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return; // 未连接:no-op,不缓冲不报错
+  if (!socket || socket.readyState !== WS_OPEN) return; // 未连接:no-op,不缓冲不报错
   if (state === lastSentState) return; // 节流:状态未变化不重发
   lastSentState = state;
   const msg: StateMessage = { type: 'state', clientId, state, meta, ts: Date.now() };
@@ -261,7 +276,7 @@ export function sendState(state: PetState, meta?: PetStateMeta): void {
 
 /** 当前是否已建立活跃连接。 */
 export function isConnected(): boolean {
-  return !!socket && socket.readyState === WebSocket.OPEN;
+  return !!socket && socket.readyState === WS_OPEN;
 }
 
 /** 主动断开连接(best-effort 发 bye 后 close code=1000)。 */
@@ -292,7 +307,7 @@ export async function killPetProcess(): Promise<{ ok: boolean; reason?: string }
   const port = petPort();
   let ws = socket;
   let owned = false; // 是否为本函数临时建立的连接(需要负责关闭)
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
+  if (!ws || ws.readyState !== WS_OPEN) {
     const already = await probePort(port, PROBE_TIMEOUT_MS);
     if (!already) {
       return { ok: false, reason: '桌宠未运行' };
@@ -364,7 +379,7 @@ export async function listSkins(): Promise<SkinListMessage> {
  * 后置条件:已连接时发送 set_skin 消息;未连接时不抛错、无副作用。
  */
 export function setSkin(skinId: string): void {
-  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (!socket || socket.readyState !== WS_OPEN) return;
   try {
     socket.send(JSON.stringify({ type: 'set_skin', clientId, skinId, ts: Date.now() }));
   } catch {

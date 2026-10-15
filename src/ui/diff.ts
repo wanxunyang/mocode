@@ -1,6 +1,10 @@
-import { highlight, plain, type Theme } from 'cli-highlight';
+import type { Theme } from 'cli-highlight';
+import { getCliHighlight } from './cli-highlight-lazy.js';
 import { ui, type ColorKey } from './theme.js';
 import { charWidth, displayWidth } from './render.js';
+
+/** cli-highlight 的 plain 主题就是恒等函数(已实测),这里本地等价实现,避免顶层加载整包。 */
+const plain = (codePart: string): string => codePart;
 
 /**
  * 文件改动 diff 渲染:
@@ -139,7 +143,7 @@ const THEME: Theme = {
 function highlightLine(text: string, lang: string | undefined): string {
   if (!lang || text === '') return text;
   try {
-    return highlight(text, { language: lang, theme: THEME });
+    return getCliHighlight().highlight(text, { language: lang, theme: THEME });
   } catch {
     return text; // 语言未注册 / 解析失败:退化为纯文本
   }
