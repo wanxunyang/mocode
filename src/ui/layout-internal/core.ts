@@ -63,6 +63,7 @@ export {
   paintLiveAtCursor,
   clearLiveAtCursor,
   setLiveUsage,
+  setQueuedTurn,
   setStatusBase,
 } from './statusbar.js';
 export { paintInput, paintRunningInput, repaint } from './input-paint.js';

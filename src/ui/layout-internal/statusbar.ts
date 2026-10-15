@@ -72,6 +72,13 @@ export function composeSpinnerLine(status: StatusBarData, cols: number): string 
     leadW = 1 + 1 + displayWidth(status.status);
   }
 
+  // 排队下一跳:紧跟「● 状态(+走时)」右侧显示,运行中持续可见,当前任务结束即自动发送。
+  const queued = queuedChip();
+  if (queued) {
+    lead += `  ${queued.str}`;
+    leadW += 2 + queued.w;
+  }
+
   // ── 右段:仅滚动回看时显历史指示 ──
   let tail = '';
   let tailW = 0;
@@ -395,6 +402,29 @@ export function setLiveUsage(
   u: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number } | undefined,
 ): void {
   state.liveUsage = u;
+}
+
+/**
+ * 设置/清除运行态已排队的下一条消息 chip(显示在 `● 状态` 右侧)。
+ * 立即重画一次保证入队瞬间可见;之后 RUNNING 态 80ms 心跳会自然带上。
+ */
+export function setQueuedTurn(text: string | undefined, mode?: string): void {
+  state.queuedText = text;
+  state.queuedMode = mode;
+  drawStatusBar();
+}
+
+/** 排队 chip:▸ 排队: <首行…>（Plan)。只拼左段,宽度另计(不含 ANSI)。 */
+function queuedChip(): { str: string; w: number } | null {
+  const raw = state.queuedText;
+  if (!raw) return null;
+  const firstLine = raw.split('\n')[0] ?? '';
+  const preview = truncateDisplay(firstLine.trim(), 32);
+  const modeTag = state.queuedMode === 'plan' ? t('status.queuePlanTag') : '';
+  const label = t('status.queued');
+  const plain = `${label} ${preview}${modeTag}`;
+  const str = `${ui.yellow}▸ ${plain}${ui.reset}`;
+  return { str, w: 2 + displayWidth(plain) };
 }
 
 /** 更新状态行基线(模型 / context / cwd / 模式标识 / 活跃 plan chip / 本轮 token chip)。repl 在轮次边界与切模式时调。 */

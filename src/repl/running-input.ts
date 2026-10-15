@@ -4,6 +4,7 @@ import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
 import { promptComposer } from '../ui/composer.js';
 import { appendCurrentSessionRuntimeEvent } from '../session/index.js';
+import { getAgentMode, type AgentMode } from '../agent/mode.js';
 
 /** stdin 的 keypress 事件接口(emitKeypressEvents 后发,不在 ReadStream 类型里)。 */
 interface KeypressEmitter {
@@ -19,6 +20,12 @@ let runningCursor = 0; // 缓冲内光标字符索引(0..len);运行态支持任
 let runningPlaceholder = '';
 let currentAbort: AbortController | null = null;
 let listening = false; // onRunningKey 是否处于挂载期(start → stop 之间)
+/**
+ * 运行态「预加载/排队」消息:运行中打字后按 Enter 入队(单条,再次入队即替换),
+ * 当前 agent 结束后由主循环自动发送,无需用户在 INPUT 态再按一次 Enter。
+ * null = 没有排队。mode 快照入队那一刻的模式,自动执行时沿用(用户选「沿用当前模式」)。
+ */
+let queuedTurn: { text: string; mode: AgentMode } | null = null;
 /** 运行态打开的输入面板(Ctrl+G);非 null = 面板仍开着。主循环进 INPUT 态前须等它关闭,否则两个 keypress 监听抢键。 */
 let composerPending: Promise<void> | null = null;
 
@@ -31,6 +38,23 @@ export function getRunningInput(): string {
 export function clearRunningInput(): void {
   runningInput = '';
   runningCursor = 0;
+}
+
+/** 当前排队消息(运行中按 Enter 预加载);无则 null。主循环在 agent 结束后取走并自动发送。 */
+export function getQueuedTurn(): { text: string; mode: AgentMode } | null {
+  return queuedTurn;
+}
+
+/** 取走并清空排队消息(消费一次)。 */
+export function consumeQueuedTurn(): { text: string; mode: AgentMode } | null {
+  const queued = queuedTurn;
+  queuedTurn = null;
+  return queued;
+}
+
+/** 取消排队(运行态 Esc 在已有排队时优先取消排队,而不是只清 typeahead)。 */
+export function clearQueuedTurn(): void {
+  queuedTurn = null;
 }
 
 /**
@@ -103,6 +127,11 @@ function onRunningKey(_str: string, key?: Key): void {
       runningCursor = 0;
       paint();
     } else if (currentAbort && !currentAbort.signal.aborted) {
+      // 中断当前任务 = 明确要停下,排队的下一跳也一并取消,避免 agent 一停又自动发新需求。
+      if (queuedTurn) {
+        queuedTurn = null;
+        layout.setQueuedTurn(undefined); // 只撤状态行 chip,不在内容区写提示
+      }
       appendCurrentSessionRuntimeEvent('abort', { phase: 'requested', source: 'keyboard' });
       currentAbort.abort();
     }
@@ -157,13 +186,30 @@ function onRunningKey(_str: string, key?: Key): void {
     return;
   }
   if (key.name === 'escape') {
-    runningInput = '';
-    runningCursor = 0;
-    paint();
+    // 有排队消息时 Esc 只取消排队,不清空 typeahead 草稿(避免误删正在打的字);
+    // 无排队时维持原语义:清空 typeahead。
+    if (queuedTurn) {
+      queuedTurn = null;
+      layout.setQueuedTurn(undefined); // 只撤状态行 chip,不在内容区写提示
+      paint();
+    } else {
+      runningInput = '';
+      runningCursor = 0;
+      paint();
+    }
     return;
   }
-  // Enter / Ctrl+J:运行中 no-op(单行 typeahead;agent 结束后预填,用户在 INPUT 态按 Enter 提交)
+  // Enter / Ctrl+J:把 typeahead 内容入队(单条,再次入队即替换)。当前 agent 结束后
+  // 主循环经 consumeQueuedTurn 自动发送,无需在 INPUT 态再按一次 Enter。空内容 no-op。
   if (key.name === 'return' || key.name === 'enter' || (key.ctrl && key.name === 'j')) {
+    const text = runningInput.trim();
+    if (!text) return;
+    queuedTurn = { text: runningInput, mode: getAgentMode() }; // 单条:再次入队即替换
+    runningInput = '';
+    runningCursor = 0;
+    // 入队只反映在状态行 `● 状态` 右侧的常驻 chip(含预览/模式),不往 agent 输出区写行。
+    layout.setQueuedTurn(queuedTurn.text, queuedTurn.mode);
+    paint(); // 清空底部 typeahead 回显
     return;
   }
   // 可打印字符(>= 空格,非 ctrl/meta)→ 光标处插入 + 非 dim 回显(与空闲态一致)
