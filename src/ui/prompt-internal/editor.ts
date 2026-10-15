@@ -734,6 +734,11 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
         if (menuOpen && filtered.length) {
           selected = (selected - 1 + filtered.length) % filtered.length;
           redraw();
+        } else if (buildDisplay().lines.length <= 1) {
+          // 单行输入 + 菜单关闭:裸 ↑/↓ 视作鼠标滚轮。Trae/VSCode 内置终端(xterm)在鼠标
+          // 报表未被接收时会把滚轮降级成 ↑/↓ 方向键;这里转成内容区滚动,与运行态滚轮一致,
+          // 否则空/单行输入框里滚轮"毫无反应"。多行输入时仍跳到全文首/尾(保留编辑语义)。
+          layout.scrollWheel(1);
         } else {
           // ↑ 始终跳到全文最前(含跨只读粘贴块,落到首个可编辑段开头)
           const p = firstEditableStart();
@@ -746,6 +751,8 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
         if (menuOpen && filtered.length) {
           selected = (selected + 1) % filtered.length;
           redraw();
+        } else if (buildDisplay().lines.length <= 1) {
+          layout.scrollWheel(-1);
         } else {
           // ↓ 始终跳到全文最后(含跨只读粘贴块,落到末个可编辑段末尾)
           const p = lastEditableEnd();
