@@ -326,6 +326,8 @@ const ANY_HEADING_RE = /^ {0,3}##\s+\S/;
 const PRIOR_NARRATIVE_LABEL = '[prior summary — 上一代摘要的叙述部分:与下方新内容合并压缩,不要重复罗列细节]';
 /** 尾部 provenance 块:解析时剥掉,重建时按当次 older 重算(否则跨代累积并重复)。 */
 const ARTIFACT_REFS_RE = /\n*\[artifact refs:[^\]]*\]\s*$/;
+/** 尾部归档指针:同理按当次压缩重算(指向最新 seg),跨代不累积进叙述/Key Facts。 */
+const ARCHIVED_REFS_RE = /\n*\[archived:[^\]]*\]\s*$/;
 
 /** Key Facts 累计预算(字符):窗口比例换算 + 上下限——小窗口留得住初始约束,
  *  大窗口也不会让索引段膨胀成正文。 */
@@ -340,7 +342,7 @@ export function keyFactsBudgetChars(window: number): number {
  * older 重算,不该跨代累积。无 Key Facts 段时 rest 为全文、keyFacts 为空。
  */
 export function splitSummaryText(raw: string): { keyFacts: string; rest: string } {
-  let text = (raw ?? '').replace(ARTIFACT_REFS_RE, '').trim();
+  let text = (raw ?? '').replace(ARCHIVED_REFS_RE, '').replace(ARTIFACT_REFS_RE, '').trim();
   if (text.startsWith(SUMMARY_MARKER)) {
     const nl = text.indexOf('\n');
     text = (nl < 0 ? '' : text.slice(nl + 1)).trim();
@@ -1081,10 +1083,24 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
       const snapshot = extractProgressSnapshot(parsed.rest);
       if (snapshot) writeCompactionSnapshot(snapshot);
     }
+    // 旧区原文归档(仅主 agent):摘要成功后这些消息将被整体丢弃且 session.json
+    // 随后被覆盖——落盘 compacted/seg-NNN.md,模型事后靠 grep/read_file 回捞精确原文。
+    // best-effort:失败只丢回捞能力,绝不阻塞压缩。
+    let archivedPath: string | null = null;
+    if (state === contextState) {
+      try {
+        archivedPath = getActiveSessionStore().archiveCompactedMessages(getCurrentSessionId() ?? '', older);
+      } catch {
+        archivedPath = null;
+      }
+    }
     const body = [parsed.rest, pinnedFacts ? `## Key Facts\n${pinnedFacts}` : ''].filter(Boolean).join('\n\n');
+    const archivedRef = archivedPath
+      ? `\n\n[archived: ${archivedPath} — 被压缩内容的精确原文;更早段见同目录 index.md]`
+      : '';
     const summaryMsg = {
       role: 'system' as const,
-      content: `${SUMMARY_MARKER}\n${body}${provenance}`,
+      content: `${SUMMARY_MARKER}\n${body}${provenance}${archivedRef}`,
     } as ChatMessage;
     // 原地重建:[systemPrompt, summaryMsg, ...kept]
     const systemMsg = history[0];

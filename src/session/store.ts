@@ -12,8 +12,19 @@ import {
 } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import path from 'node:path';
-import { MAX_TRACE_BYTES, MAX_TRACE_ROTATIONS } from '../tools/constants.js';
+import { MAX_TRACE_BYTES, MAX_TRACE_ROTATIONS, MAX_COMPACTED_ARCHIVE_BYTES } from '../tools/constants.js';
 import { loadArchivedSession, readArchiveIndex, retentionPaths } from './retention.js';
+import {
+  COMPACTED_DIRNAME,
+  isCompactedAssetName,
+  parseSegmentMeta,
+  renderArchiveIndex,
+  renderCompactedSegment,
+  resultBlobFileName,
+  RESULT_BLOB_FILE_RE,
+  SEGMENT_FILE_RE,
+  type CompactedSegmentMeta,
+} from './compact-archive.js';
 import { config, getActiveModel } from '../config/index.js';
 import { getWorkspaceRoot } from '../workspace/index.js';
 import { isToolRouteGroupName, type ToolRouteGroupName } from '../config/profiles.js';
@@ -40,6 +51,12 @@ export interface SessionRecord extends SessionMeta {
   queryHistory?: string[];
   /** 上一真实用户 turn 最终激活的工具簇；旧 session 缺失时回退 common-only。 */
   lastToolGroups?: ToolRouteGroupName[];
+  /**
+   * 归档 gz 内嵌的压缩归档资产(compacted/ 下的 seg/index/result blob,relPath → utf8)。
+   * 仅在归档时由 retention 写入;活会话的 session.json 不带这字段。resume 时
+   * SessionStore.load 据此把文件写回 <id>/compacted/。
+   */
+  compactedAssets?: Record<string, string>;
 }
 
 export interface SessionStoreOptions {
@@ -87,6 +104,14 @@ function firstUserOf(history: ChatMessage[]): string {
     return truncateDisplay(text, 40);
   }
   return '';
+}
+
+/** compacted/ 总量上限:MOCODE_MAX_COMPACTED_BYTES 覆盖(供测试/小盘),非法值回退默认。 */
+function envMaxCompactedBytes(): number {
+  const raw = process.env.MOCODE_MAX_COMPACTED_BYTES;
+  if (!raw) return MAX_COMPACTED_ARCHIVE_BYTES;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : MAX_COMPACTED_ARCHIVE_BYTES;
 }
 
 /**
@@ -285,6 +310,163 @@ export class SessionStore {
     }
   }
 
+  /**
+   * 压缩归档:把本次压缩丢弃的旧区消息渲染成 `compacted/seg-NNN.md`,
+   * 并重建 `compacted/index.md`。best-effort——这是压缩的增值能力,不是用户数据主副本
+   * (session.json 仍是主副本),任何失败静默降级,绝不阻塞压缩。
+   *
+   * 编号:扫描已有 seg-NNN.md 取 max+1(外部删除/重命名后仍单调)。
+   * 淘汰:全部 seg 总量超 MAX_COMPACTED_ARCHIVE_BYTES 时,从最老段硬删并重建 index。
+   * 目录缓存失真时与 appendTrace 同模式:清缓存重试一次。
+   *
+   * @returns 段相对路径(供摘要写指针);失败返 null。
+   */
+  archiveCompactedMessages(sessionId: string, messages: readonly ChatMessage[]): string | null {
+    if (!sessionId || messages.length === 0) return null;
+    const dir = path.join(this.sessionsRoot, sessionId, COMPACTED_DIRNAME);
+    const budget = envMaxCompactedBytes();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        this.ensureDir(dir);
+        const seq = this.nextSegmentSeq(dir);
+        const { markdown, meta } = renderCompactedSegment(seq, messages);
+        writeFileSync(path.join(dir, meta.file), markdown, 'utf8');
+        this.pruneCompacted(dir, budget);
+        // 新增了一个 seg,index 必须重建才能列全(prune 是否删旧段不影响这一点;
+        // result blob 不走这里,故不需要每次写 blob 都重建)。
+        this.rebuildCompactedIndex(sessionId, dir);
+        return `.mocode/sessions/${sessionId}/${COMPACTED_DIRNAME}/${meta.file}`;
+      } catch {
+        this.invalidateEnsuredDir(dir);
+        if (attempt === 1) return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * push-time 截断兜底:工具完整结果在进 history 前被 capToolResultForHistory 裁掉时,
+   * 把**完整原文**另存为 `compacted/result-<toolCallId>.txt`,供事后 grep/read_file 回捞。
+   * best-effort,写失败静默(绝不阻塞工具回灌);纳入与段相同的总量预算淘汰。
+   *
+   * @returns 全文相对路径(供 history 截断内容留指针);失败返 null。
+   */
+  archiveToolResult(sessionId: string, toolCallId: string, fullOutput: string): string | null {
+    if (!sessionId || !toolCallId || !fullOutput) return null;
+    const dir = path.join(this.sessionsRoot, sessionId, COMPACTED_DIRNAME);
+    const fileName = resultBlobFileName(toolCallId);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        this.ensureDir(dir);
+        writeFileSync(path.join(dir, fileName), fullOutput, 'utf8');
+        this.pruneCompacted(dir, envMaxCompactedBytes());
+        return `.mocode/sessions/${sessionId}/${COMPACTED_DIRNAME}/${fileName}`;
+      } catch {
+        this.invalidateEnsuredDir(dir);
+        if (attempt === 1) return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * resume 归档会话时,把 gz 内嵌的 compacted 资产(seg/index/截断原文 blob)写回磁盘,
+   * 恢复历史回捞链。best-effort:任何坏条目跳过。防 zip-slip:只接受 compacted/ 下
+   * 白名单单层文件名。
+   */
+  restoreCompactedAssets(id: string, record: SessionRecord): void {
+    const assets = record.compactedAssets;
+    if (!assets || typeof assets !== 'object') return;
+    const dir = path.join(this.sessionsRoot, id, COMPACTED_DIRNAME);
+    for (const [relPath, content] of Object.entries(assets)) {
+      if (typeof content !== 'string') continue;
+      const base = relPath.startsWith(`${COMPACTED_DIRNAME}/`) ? relPath.slice(COMPACTED_DIRNAME.length + 1) : null;
+      if (!base || base.includes('/') || base.includes('\\') || !isCompactedAssetName(base)) continue;
+      try {
+        this.ensureDir(dir);
+        writeFileSync(path.join(dir, base), content, 'utf8');
+      } catch {
+        this.invalidateEnsuredDir(dir);
+      }
+    }
+  }
+
+  /** 扫描 seg-NNN.md 取下一个编号;损坏文件名跳过。 */
+  private nextSegmentSeq(dir: string): number {
+    let max = 0;
+    for (const name of this.listDirNames(dir)) {
+      const m = SEGMENT_FILE_RE.exec(name);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    return max + 1;
+  }
+
+  /**
+   * compacted/ 全目录(seg 段 + result blob)统一字节预算淘汰:
+   * 超 MAX_COMPACTED_ARCHIVE_BYTES 时从最老文件(mtime,再按名)硬删。
+   * 唯一豁免 = 编号最大的那个 seg(始终保住最近一代压缩的完整回捞入口);
+   * index.md 不占删除候选(段变更后重建)。
+   *
+   * @returns 是否有 seg 被删(调用方据此重建 index)。
+   */
+  private pruneCompacted(dir: string, budget: number): boolean {
+    if (!(budget > 0)) return false;
+    const newestSeq = this.listDirNames(dir).reduce((max, name) => {
+      const m = SEGMENT_FILE_RE.exec(name);
+      return m ? Math.max(max, Number(m[1])) : max;
+    }, 0);
+    const candidates = this.listDirNames(dir)
+      .filter((name) => SEGMENT_FILE_RE.test(name) || RESULT_BLOB_FILE_RE.test(name))
+      .map((name) => {
+        const m = SEGMENT_FILE_RE.exec(name);
+        const st = statSync(path.join(dir, name));
+        return { name, size: st.size, mtimeMs: st.mtimeMs, seq: m ? Number(m[1]) : null };
+      })
+      // 最老在前:blob 与跨类型文件按 mtime;同刻按名,保证确定性。
+      .sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : 1));
+
+    let total = candidates.reduce((s, e) => s + e.size, 0);
+    let removedSeg = false;
+    for (const e of candidates) {
+      if (total <= budget) break;
+      if (e.seq !== null && e.seq === newestSeq) continue; // 永不删最新段
+      try {
+        unlinkSync(path.join(dir, e.name));
+      } catch {
+        break; // 删不动就停止淘汰,避免死循环
+      }
+      total -= e.size;
+      if (e.seq !== null) removedSeg = true;
+    }
+    return removedSeg;
+  }
+
+  /** 仅凭现存 seg 文件重建 index.md(段被外部增删后也一致)。 */
+  private rebuildCompactedIndex(sessionId: string, dir: string): void {
+    const metas: CompactedSegmentMeta[] = [];
+    for (const name of this.listDirNames(dir)) {
+      if (!SEGMENT_FILE_RE.test(name)) continue;
+      try {
+        const meta = parseSegmentMeta(readFileSync(path.join(dir, name), 'utf8'));
+        if (meta) metas.push(meta);
+      } catch {
+        // 单个段损坏不拖垮索引。
+      }
+    }
+    const relativeDir = `.mocode/sessions/${sessionId}/compacted`;
+    writeFileSync(path.join(dir, 'index.md'), renderArchiveIndex(metas, relativeDir), 'utf8');
+  }
+
+  private listDirNames(dir: string): string[] {
+    try {
+      return readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isFile())
+        .map((e) => e.name);
+    } catch {
+      return [];
+    }
+  }
+
   /** 读取 <id>/usage.jsonl 全部记录;文件不存在或损坏行跳过。 */
   readUsage(id: string): unknown[] {
     const file = path.join(this.sessionsRoot, id, 'usage.jsonl');
@@ -355,14 +537,18 @@ export class SessionStore {
     }
   }
 
-  load(id: string): SessionRecord | null {
+  load(id: string, opts?: { restoreAssets?: boolean }): SessionRecord | null {
     const currentPath = this.sessionPath(id);
     const legacyPath = path.join(this.sessionsRoot, `${id}.json`);
     const source = existsSync(currentPath) ? currentPath : legacyPath;
     // 活会话与 legacy 单文件都没有:回退从归档 gz 取回(30-90 天的会话仍可 resume)。
     if (!existsSync(source)) {
       const archived = loadArchivedSession(this.sessionsRoot, id);
-      return archived ?? null;
+      if (!archived) return null;
+      // 仅 resume 显式要求时把 gz 内嵌的 compacted 资产写回磁盘(load 也被会话列表等
+      // 只读路径调用,不能在那些场景产生写盘副作用)。
+      if (opts?.restoreAssets) this.restoreCompactedAssets(id, archived);
+      return archived;
     }
     try {
       const rec = JSON.parse(readFileSync(source, 'utf8')) as SessionRecord;

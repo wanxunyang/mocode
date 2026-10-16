@@ -38,6 +38,14 @@ export interface RgParams {
   /** fast-glob 口径的 glob;**\/* 视为不限定。 */
   glob: string;
   context: number;
+  /**
+   * 放开 VCS ignore(.gitignore)。默认遵守 .gitignore(配合 --no-require-git,
+   * 非 git 项目也生效)——.mocode/ 在 .gitignore 里,故模型用 glob 显式限定
+   * `.mocode/...`(回捞压缩归档等)时必须置 true,否则 rg 一个文件都不搜,
+   * 以 exit 2 "No files were searched" 收尾。仅在 glob 显式指向 .mocode 时开启,
+   * 避免普通搜索意外扫入整个会话目录。
+   */
+  noIgnoreVcs?: boolean;
 }
 
 /**
@@ -94,6 +102,8 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
   // --no-require-git:rg 默认只在 git 仓库内才读 .gitignore;加上后非 git 项目的 .gitignore
   // 同样生效(实测不加时 ignored/ 会被扫到)。
   const args = ['--json', '--hidden', '--no-require-git', '--path-separator', '/'];
+  // glob 显式指向 gitignore 内的 .mocode(回捞压缩归档等)时放开 VCS ignore。
+  if (params.noIgnoreVcs) args.push('--no-ignore-vcs');
   if (params.context > 0) args.push('-C', String(params.context));
   if (params.glob && params.glob !== '**/*') args.push('-g', params.glob);
   for (const entry of IGNORE) args.push('-g', `!${entry}`);
@@ -183,7 +193,14 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
       if (buffer.trim()) handleLine(buffer.trim());
       // exit 2 + stderr = 正则/参数错误;无命中事件时按 regex_error 上报。
       if (code === 2 && byPath.size === 0 && stderr.trim()) {
-        finish({ status: 'regex_error', message: stderr.trim() });
+        const message = stderr.trim();
+        // 过滤器把所有文件排除(典型:glob 指向 .gitignore 内的 .mocode 却没放开 ignore)
+        // 不是正则错误——按无匹配处理,避免误导模型去改 pattern。
+        if (/No files were searched/i.test(message)) {
+          finish({ status: 'no-match', scanned, truncated });
+          return;
+        }
+        finish({ status: 'regex_error', message });
         return;
       }
       if (byPath.size === 0) {

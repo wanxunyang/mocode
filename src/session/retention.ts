@@ -25,6 +25,7 @@ import path from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import type { ChatMessage } from '../llm/index.js';
 import type { SessionRecord } from './store.js';
+import { COMPACTED_DIRNAME, isCompactedAssetName } from './compact-archive.js';
 import { TextSearchIndex } from '../context/text-search.js';
 import { config } from '../config/index.js';
 import { runReflection, snapshotTranscript } from '../memory/index.js';
@@ -244,15 +245,42 @@ export function planRetention(
 }
 
 // ── 执行 ─────────────────────────────────────────────────────────────────
-/** 归档单个会话:读 session.json → gzip → 写 index → 删原目录。失败抛错由调用方统一处理。 */
+/** 收集 <id>/compacted/ 下白名单资产为 relPath → utf8;无/读失败返空对象。 */
+function readCompactedAssets(sessionsRoot: string, id: string): Record<string, string> {
+  const dir = path.join(sessionsRoot, id, COMPACTED_DIRNAME);
+  const assets: Record<string, string> = {};
+  let names: string[];
+  try {
+    names = readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => e.name);
+  } catch {
+    return assets;
+  }
+  for (const name of names) {
+    if (!isCompactedAssetName(name)) continue;
+    try {
+      assets[`${COMPACTED_DIRNAME}/${name}`] = readFileSync(path.join(dir, name), 'utf8');
+    } catch {
+      // 单个资产读失败不拖垮归档。
+    }
+  }
+  return assets;
+}
+
+/** 归档单个会话:读 session.json(+compacted 资产)→ gzip → 写 index → 删原目录。失败抛错由调用方统一处理。 */
 function archiveSession(sessionsRoot: string, id: string, now: number): void {
   const paths = retentionPaths(sessionsRoot);
   const dir = path.join(sessionsRoot, id);
   const sessionPath = path.join(dir, 'session.json');
   const record = JSON.parse(readFileSync(sessionPath, 'utf8')) as SessionRecord;
+  // 把压缩归档资产(seg/index/截断原文 blob)内嵌进 gz,避免 rmSync 目录时永久丢失
+  // ——否则 30 天后 resume,历史回捞链整体消失。purge 时随 gz 一起删。
+  const assets = readCompactedAssets(sessionsRoot, id);
+  if (Object.keys(assets).length > 0) record.compactedAssets = assets;
   mkdirSync(paths.archiveDir, { recursive: true });
   const gzPath = path.join(paths.archiveDir, `${id}.json.gz`);
-  writeFileSync(gzPath + '.tmp', gzipSync(readFileSync(sessionPath)));
+  writeFileSync(gzPath + '.tmp', gzipSync(Buffer.from(JSON.stringify(record), 'utf8')));
   renameSync(gzPath + '.tmp', gzPath);
   upsertArchiveIndex(paths.indexPath, {
     id: record.id,

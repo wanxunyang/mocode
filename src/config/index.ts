@@ -639,7 +639,10 @@ ${buildVoiceSection()}
     `## Session state (\`.mocode/sessions/${sessionId ?? '<id>'}/notes.md\`)\n` +
       'For tasks with 3+ steps or context-loss risk, keep an execution plan with `plan_update`; record non-obvious findings/decisions/open questions/risks with `note_append`. ' +
       'Both write notes.md, which survives compaction — run read_file on it to recover context after compaction. ' +
-      'Their formats and rules live in each tool\u2019s description; do not hand-edit the files.',
+      'Their formats and rules live in each tool\u2019s description; do not hand-edit the files. ' +
+      'When compaction drops older conversation, its verbatim text (user messages, your earlier decisions, full tool args/results) is archived under ' +
+      `\`.mocode/sessions/${sessionId ?? '<id>'}/compacted/\` (see index.md there): the summary line ends with an [archived: …] pointer. ` +
+      'Before re-running a command or guessing what an old output said, grep that directory with glob narrowed to `.mocode/sessions/**` (required: .mocode is gitignored), then read_file the segment at the hit lines.',
   );
 
   // 日期段:模型需要知道今天才能判断 freshness(web 搜索、版本时效)。只随天变化,

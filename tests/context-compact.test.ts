@@ -416,15 +416,19 @@ test('compactHistory 摘要成功后把进度快照固结进 notes.md(仅主 age
   const { getNotesFilePath, readActivePlanTitle } = await import('../src/session/notes.js');
   const { setCurrentSessionId } = await import('../src/session/state.js');
   const { setSandboxRoot } = await import('../src/sandbox/root.js');
+  const { config } = await import('../src/config/index.js');
   const fs = await import('node:fs');
   const path = await import('node:path');
   const os = await import('node:os');
 
   // 隔离临时 sandbox root:notes.md 落到 <tmp>/.mocode/sessions/<sid>/notes.md,
-  // 不污染真实工作区。
+  // 不污染真实工作区。归档走默认 SessionStore 的 config.sessionDir(不看 sandbox root),
+  // 一并指到 tmp,避免 compacted/ 写进真实仓库。
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mocode-compact-snap-'));
   const sid = `snap-${Date.now()}`;
   const prevRoot = setSandboxRoot(tmpRoot);
+  const prevSessionDir = config.sessionDir;
+  config.sessionDir = path.join(tmpRoot, '.mocode', 'sessions');
   setCurrentSessionId(sid, tmpRoot);
   const notesPath = getNotesFilePath(sid)!;
 
@@ -480,6 +484,7 @@ test('compactHistory 摘要成功后把进度快照固结进 notes.md(仅主 age
 
   setCurrentSessionId(undefined, tmpRoot);
   setSandboxRoot(prevRoot);
+  config.sessionDir = prevSessionDir;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

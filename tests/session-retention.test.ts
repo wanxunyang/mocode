@@ -279,3 +279,54 @@ test('DEFAULT_RETENTION_POLICY: 默认 30/90 天', () => {
   assert.equal(DEFAULT_RETENTION_POLICY.archiveAfterDays, 30);
   assert.equal(DEFAULT_RETENTION_POLICY.purgeAfterDays, 90);
 });
+
+test('runRetention: compacted 归档资产随 gz 带走,load(resume) 恢复、只读 load 不写盘', async () => {
+  const { SessionStore } = await import('../src/session/store.js');
+  __setChatCreateImpl(async () => {
+    throw new Error('no-llm-in-test');
+  });
+  const root = makeRoot();
+  try {
+    const id = '20260810-130000-cafe0001';
+    const dir = writeSession(root, id, '长会话,要保住压缩段');
+    // 模拟主 agent 落盘的压缩段 + 截断原文 blob。
+    const store = new SessionStore({ sessionsRoot: root });
+    const segRel = store.archiveCompactedMessages(id, [
+      { role: 'user', content: '先跑测试' },
+      { role: 'assistant', content: '好的' },
+    ] as ChatMessage[]);
+    assert.ok(segRel);
+    const blobRel = store.archiveToolResult(id, 'toolu_x', 'UNIQUE-ARCHIVED-BLOB');
+    assert.ok(blobRel);
+    const compactedDir = join(dir, 'compacted');
+    assert.ok(existsSync(join(compactedDir, 'index.md')));
+
+    // 立即归档。
+    await runRetention(root, planRetention(root, { archiveAfterDays: 0, purgeAfterDays: 90 }));
+    assert.equal(existsSync(dir), false, '原会话目录应删除');
+
+    // gz 内嵌资产。
+    const gz = loadArchivedSession(root, id);
+    assert.ok(gz?.compactedAssets, 'gz 应带 compactedAssets');
+    assert.ok(gz!.compactedAssets!['compacted/index.md']);
+    assert.match(gz!.compactedAssets!['compacted/result-toolu_x.txt'] ?? '', /UNIQUE-ARCHIVED-BLOB/);
+
+    // 只读 load(默认)不产生写盘副作用。
+    const quiet = new SessionStore({ sessionsRoot: root });
+    assert.ok(quiet.load(id)?.history.length);
+    assert.equal(existsSync(join(root, id)), false, '默认 load 不得把资产写回磁盘');
+
+    // resume:restoreAssets 写回 seg/index/blob。
+    const resumed = quiet.load(id, { restoreAssets: true });
+    assert.ok(resumed);
+    assert.ok(existsSync(join(root, id, 'compacted', 'index.md')));
+    assert.match(
+      readFileSync(join(root, id, 'compacted', 'result-toolu_x.txt'), 'utf8'),
+      /UNIQUE-ARCHIVED-BLOB/,
+      '截断原文 blob 随 resume 恢复,回捞链不断',
+    );
+  } finally {
+    __setChatCreateImpl(null);
+    rmSync(root, { recursive: true, force: true });
+  }
+});

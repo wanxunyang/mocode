@@ -24,9 +24,10 @@ export function saveSession(
   return defaultSessionStore.save(history, id, queryHistory, lastToolGroups);
 }
 
-/** 加载会话；不存在或损坏时返回 null。 */
-export function loadSession(id: string) {
-  return defaultSessionStore.load(id);
+/** 加载会话；不存在或损坏时返回 null。restoreAssets=true 时(resume)把归档 gz
+ *  内嵌的 compacted 资产写回磁盘;列表/检索等只读场景保持默认不产生写盘副作用。 */
+export function loadSession(id: string, opts?: { restoreAssets?: boolean }) {
+  return defaultSessionStore.load(id, opts);
 }
 
 /** 列出最近会话，按 createdAt 降序。 */

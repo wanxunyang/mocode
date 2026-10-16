@@ -395,7 +395,7 @@ export class Runtime {
 
   private resumeSession(id: string): SessionRecord | null {
     this.assertIdle('resume session');
-    const loaded = this.context.sessionStore.load(id);
+    const loaded = this.context.sessionStore.load(id, { restoreAssets: true });
     if (!loaded?.history.length) return null;
     this.context.sessionStore.setCurrentSessionId(loaded.id);
     this.context.rollbackStore.resetState();

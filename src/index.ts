@@ -272,7 +272,7 @@ async function main(): Promise<void> {
       }
       process.exit(0);
     }
-    const loaded = loadSession(id);
+    const loaded = loadSession(id, { restoreAssets: true });
     if (!loaded || !loaded.history.length) {
       console.error(t('cli.sessionMissing', { id }));
       process.exit(1);

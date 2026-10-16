@@ -15,6 +15,8 @@ import { defaultToolRuntime, type ToolOutcome, type ToolRuntime } from '../tools
 import { jailResolve } from '../sandbox/index.js';
 import { contextState, type ContextState } from '../session/compact.js';
 import { capToolResultForHistory } from '../session/compact.js';
+import { getActiveSessionStore } from '../session/store.js';
+import { getCurrentSessionId } from '../session/state.js';
 import { recordArtifact, knownEditTargets } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
 import { isToolResultSuccess } from '../context/utils.js';
@@ -190,12 +192,25 @@ export function pushToolResult(
   succeededOverride?: boolean,
 ): void {
   const succeeded = succeededOverride ?? isToolResultSuccess(output);
+  const capped = capToolResultForHistory(tc.name, output);
+  // push-time 截断兜底:完整结果另存 compacted/result-<id>.txt,并在进 history 的
+  // 截断内容尾部留一行全文指针。仅主 agent(共享 contextState)落盘——子 agent 的
+  // 结果随其临时 history 消亡,不污染主会话。best-effort:存不上就只保留截断内容。
+  let content = capped;
+  if (capped.length < output.length && runtimeContextState === contextState) {
+    try {
+      const rel = getActiveSessionStore().archiveToolResult(getCurrentSessionId() ?? '', tc.id, output);
+      if (rel) content = `${capped.replace(/\s+$/, '')}\n…[完整结果已归档,需要原文时 grep/read_file:${rel}]`;
+    } catch {
+      // 归档失败不影响工具回灌。
+    }
+  }
   const msg = {
     role: 'tool' as const,
     tool_call_id: tc.id,
     // Preserve evidence verbatim in normal operation; the hard per-result cap
     // remains solely as a request-size safety rail.
-    content: capToolResultForHistory(tc.name, output),
+    content,
   } as ChatMessage;
   history.push(msg);
   const messageIndex = history.length - 1;

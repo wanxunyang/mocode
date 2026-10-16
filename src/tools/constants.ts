@@ -39,6 +39,10 @@ export const MAX_OLD_TOOL_STUB = 600;
 export const MAX_TRACE_BYTES = 512 * 1024;
 /** 保留的历史 trace 轮转份数(trace.1 .. trace.N),更老的硬删。 */
 export const MAX_TRACE_ROTATIONS = 3;
+/** compacted/ 压缩归档目录总量上限(字节):旧区原文逐段累积,超了从最老 seg 淘汰。
+ *  段大小与窗口正相关(200k 窗口单段约几百 KB),10MiB 约覆盖十几~几十次压缩。
+ *  可用 MOCODE_MAX_COMPACTED_BYTES 覆盖(测试/小盘用)。 */
+export const MAX_COMPACTED_ARCHIVE_BYTES = 10 * 1024 * 1024;
 /** rollback snapshots 压缩前滚动窗口:无论是否 compact,仅保留最近 N 个 user turn 的快照。 */
 export const MAX_SNAPSHOT_TURNS = 50;
 

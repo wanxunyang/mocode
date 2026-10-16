@@ -175,7 +175,8 @@ export const grepTool: Tool = {
   description:
     'Search file contents by regex (recursive; powered by ripgrep: respects .gitignore, skips binaries).\n' +
     'Output: per-file header "<path>: N matches, lines [l1, l2, ...]" plus rendered lines with ORIGINAL INDENTATION kept.\n' +
-    'Pass context=2..5 to include neighbouring lines inline (like ripgrep -C) instead of following each hit with a read_file round-trip. Hard wall 120s; narrow the glob if a tree contains network mounts. Use read_file when you need a whole region or exact edit text.',
+    'Pass context=2..5 to include neighbouring lines inline (like ripgrep -C) instead of following each hit with a read_file round-trip. Hard wall 120s; narrow the glob if a tree contains network mounts. Use read_file when you need a whole region or exact edit text.\n' +
+    'Note: .mocode/ is gitignored; to search session data (e.g. .mocode/sessions/<id>/compacted archived history) you MUST narrow glob to that path, e.g. glob=".mocode/sessions/**".',
   parameters: {
     type: 'object',
     properties: {
@@ -217,7 +218,9 @@ export const grepTool: Tool = {
     }, GREP_TIMEOUT_MS);
 
     try {
-      const result = await runRipgrep({ pattern, glob, context }, controller.signal);
+      // glob 显式限定到 .mocode(gitignore 内)时放开 VCS ignore,否则 rg 零文件退出。
+      const noIgnoreVcs = glob === '.mocode/**' || glob.startsWith('.mocode/');
+      const result = await runRipgrep({ pattern, glob, context, noIgnoreVcs }, controller.signal);
       switch (result.status) {
         case 'regex_error':
           return `错误:非法正则 ${pattern}: ${result.message}`;
