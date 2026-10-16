@@ -36,6 +36,7 @@ import { clearSkillActivation } from '../skills/activation.js';
 import {
   buildMemoryIndexSection,
   buildAboutYouSection,
+  buildProjectGraphHint,
   initPersona,
   kickoffReflection,
   drainMemoryBackground,
@@ -266,7 +267,8 @@ export async function startRepl(
       buildBasePrompt(currentSessionId) +
         buildAboutYouSection(memoryOn) +
         (planMode ? getPlanModeSuffix() : '') +
-        buildMemoryIndexSection(memoryOn),
+        buildMemoryIndexSection(memoryOn) +
+        buildProjectGraphHint(memoryOn),
     );
   };
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);

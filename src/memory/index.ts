@@ -19,6 +19,7 @@ export {
   upsertEntity,
   findEntity,
   searchGraph,
+  searchGraphFacts,
   neighborsOf,
   pathBetween,
   graphStats,
@@ -34,6 +35,8 @@ export {
 } from './graph.js';
 
 export { buildAboutYouSection, initPersona, __resetPersonaInitForTests, ABOUT_YOU_MAX_CHARS } from './persona.js';
+
+export { buildProjectGraphHint, GRAPH_HINT_MAX_CHARS } from './recall.js';
 
 export {
   kickoffReflection,

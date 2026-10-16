@@ -313,6 +313,115 @@ export function searchGraph(query: string, limit: number = 8): GraphSearchResult
   return { entities: scored.map((x) => x.e), edges };
 }
 
+// ── 边(事实)级词面检索:供 memory_search 的图谱事实段 ─────────────────────
+// searchGraph 是实体名/别名子串匹配,中文整句 fact 与多词 query 召回弱。这里用
+// context/text-search 的 CJK 分词(unigram+bigram)对「端点实体名/别名 + relation +
+// fact」做加权词面打分,再做一跳邻接扩展(命中实体相连的其它 active 边,降权补全)。
+
+import { tokenize } from '../context/text-search.js';
+
+export interface FactHit {
+  edge: GraphEdge;
+  srcEntity: GraphEntity | null;
+  dstEntity: GraphEntity | null;
+  score: number;
+  /** true = 非直接命中,而是命中实体的一跳邻接边(降权补全上下文)。 */
+  viaNeighbor: boolean;
+}
+
+export interface FactSearchOptions {
+  scope?: MemoryScope | 'all';
+  limit?: number;
+  /** 一跳邻接扩展的最大边数(默认 4);0 关闭。 */
+  neighbors?: number;
+}
+
+const FIELD_WEIGHTS = { name: 6, alias: 4, fact: 2, relation: 2 } as const;
+
+/** 统计 query terms 在一段文本里的命中次数。 */
+function termHits(terms: string[], text: string): number {
+  if (!text) return 0;
+  const lower = text.toLowerCase();
+  let hits = 0;
+  for (const t of terms) if (lower.includes(t)) hits++;
+  return hits;
+}
+
+/**
+ * 边级相关度检索。仅 active 边;按 scope 过滤。排序:score 降序、其次边 id(稳定)。
+ * 要求至少一个 query term 直接命中才返回(邻接边依附于直接命中,不会凭空出现)。
+ */
+export function searchGraphFacts(query: string, opts: FactSearchOptions = {}): FactHit[] {
+  const terms = [...new Set(tokenize(query))];
+  if (terms.length === 0) return [];
+  const scope = opts.scope ?? 'all';
+  const limit = Math.max(1, opts.limit ?? 8);
+  const neighborCap = Math.max(0, opts.neighbors ?? 4);
+
+  const g = loadAllGraph();
+  const inScope = (s: MemoryScope) => scope === 'all' || s === scope;
+  const byId = new Map(g.entities.map((e) => [e.id, e]));
+  const activeEdges = g.edges.filter((e) => !e.invalidAt && inScope(e.scope));
+
+  const scoreEdge = (e: GraphEdge): number => {
+    const src = byId.get(e.src);
+    const dst = byId.get(e.dst);
+    let score = 0;
+    if (src) {
+      score += termHits(terms, src.name) * FIELD_WEIGHTS.name;
+      for (const a of src.aliases) score += termHits(terms, a) * FIELD_WEIGHTS.alias;
+    }
+    if (dst) {
+      score += termHits(terms, dst.name) * FIELD_WEIGHTS.name;
+      for (const a of dst.aliases) score += termHits(terms, a) * FIELD_WEIGHTS.alias;
+    }
+    score += termHits(terms, e.relation) * FIELD_WEIGHTS.relation;
+    score += termHits(terms, e.fact) * FIELD_WEIGHTS.fact;
+    return score;
+  };
+
+  const direct = activeEdges
+    .map((edge) => ({ edge, score: scoreEdge(edge) }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || a.edge.id.localeCompare(b.edge.id));
+
+  const chosen: FactHit[] = [];
+  const chosenIds = new Set<string>();
+  const hitEndpoints = new Set<string>();
+  for (const { edge, score } of direct.slice(0, limit)) {
+    chosen.push({
+      edge,
+      srcEntity: byId.get(edge.src) ?? null,
+      dstEntity: byId.get(edge.dst) ?? null,
+      score,
+      viaNeighbor: false,
+    });
+    chosenIds.add(edge.id);
+    hitEndpoints.add(edge.src);
+    hitEndpoints.add(edge.dst);
+  }
+
+  // 一跳邻接:命中实体相连的其它 active 边,固定降权(0.45× 直接边的保底分),补足上下文。
+  if (neighborCap > 0 && chosen.length > 0) {
+    const directTop = direct[0]?.score ?? 1;
+    const neighborScore = Math.max(1, Math.round(directTop * 0.45));
+    const extras = activeEdges
+      .filter((e) => !chosenIds.has(e.id) && (hitEndpoints.has(e.src) || hitEndpoints.has(e.dst)))
+      .sort((a, b) => a.id.localeCompare(b.id))
+      .slice(0, neighborCap);
+    for (const edge of extras) {
+      chosen.push({
+        edge,
+        srcEntity: byId.get(edge.src) ?? null,
+        dstEntity: byId.get(edge.dst) ?? null,
+        score: neighborScore,
+        viaNeighbor: true,
+      });
+    }
+  }
+  return chosen;
+}
+
 export interface NeighborResult {
   center: GraphEntity | null;
   entities: GraphEntity[]; // 不含 center

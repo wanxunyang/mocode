@@ -25,6 +25,7 @@ import { config, buildBasePrompt, isMemoryEnabled } from './config/index.js';
 import { effectiveSystemPrompt } from './skills/index.js';
 import { buildMemoryIndexSection } from './memory/store.js';
 import { buildAboutYouSection, initPersona } from './memory/persona.js';
+import { buildProjectGraphHint } from './memory/recall.js';
 import { defaultRuntime, Runtime } from './runtime/index.js';
 import { runAgentCore, type AgentHooks } from './agent/core.js';
 import { summarizeToolCall, summarizeToolResult } from './ui/render.js';
@@ -202,7 +203,10 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   const memoryOn = isMemoryEnabled();
   initPersona(memoryOn);
   const baseConventions =
-    buildBasePrompt(sessionId) + buildAboutYouSection(memoryOn) + buildMemoryIndexSection(memoryOn);
+    buildBasePrompt(sessionId) +
+    buildAboutYouSection(memoryOn) +
+    buildMemoryIndexSection(memoryOn) +
+    buildProjectGraphHint(memoryOn);
   const systemContent = botInfo
     ? `# Role\n${botInfo.bot.systemPrompt}\n\n` +
       `${botInfo.bot.description ? `**Position:** ${botInfo.bot.description}\n\n` : ''}` +

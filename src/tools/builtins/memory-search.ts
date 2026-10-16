@@ -1,17 +1,17 @@
 import type { Tool } from '../types.js';
 import { searchEntries, type MemoryType, type MemoryStatus } from '../../memory/store.js';
-import { searchGraph } from '../../memory/graph.js';
+import { searchGraphFacts } from '../../memory/graph.js';
 
 // ---------- memory_search ----------
 // 唯一记忆搜索入口:关键词搜记忆正文(多词子串匹配,name 权重最高)+ 知识图谱事实段
-// (命中实体的 active 边)。命中条目即 bump recallCount(遗忘衰减依据)。
-// 结果走 capToolResultForHistory 的放宽上限(同 use_skill,保正文完整)。
+// (CJK 分词加权、边级相关度 + 一跳邻接,跨 global/project 两 scope)。命中条目即 bump
+// recallCount(遗忘衰减依据)。结果走 capToolResultForHistory 的放宽上限(同 use_skill)。
 const GRAPH_FACTS_LIMIT = 10;
 
 export const memorySearchTool: Tool = {
   name: 'memory_search',
   description:
-    'Search memory entries by keyword (substring match), returning full body. Also surfaces knowledge-graph facts (active edges) for entities matching the query.',
+    'Search memory entries by keyword (substring match), returning full body. Also surfaces knowledge-graph facts (active edges across project + global), ranked by CJK-aware term overlap on entity names/aliases/relation/fact, plus one-hop neighbor edges for context.',
   parameters: {
     type: 'object',
     properties: {
@@ -41,19 +41,20 @@ export const memorySearchTool: Tool = {
       .map((e) => `# [${e.id}] ${e.name} (${e.type}, recalled ${e.recallCount})\nsummary: ${e.summary}\n\n${e.body}`)
       .join('\n\n---\n\n');
 
-    // 知识图谱事实段:命中实体的 active 边(容错:图坏了不连累条目搜索)。
+    // 知识图谱事实段:边级相关度检索(容错:图坏了不连累条目搜索)。
     let graphText = '';
     try {
-      const g = searchGraph(query, 8);
-      if (g.edges.length > 0) {
-        const lines = g.edges
-          .slice(0, GRAPH_FACTS_LIMIT)
-          .map((e) => `${e.src} --[${e.relation}]--> ${e.dst}${e.fact ? ` (${e.fact})` : ''}`);
-        const more =
-          g.edges.length > GRAPH_FACTS_LIMIT
-            ? `\n…(共 ${g.edges.length} 条,其余用 memory_graph action=neighbors 展开)`
-            : '';
-        graphText = `\n\n## 知识图谱事实\n${lines.join('\n')}${more}`;
+      const hits = searchGraphFacts(query, { scope: 'all', limit: GRAPH_FACTS_LIMIT, neighbors: 4 });
+      if (hits.length > 0) {
+        const lines = hits.map((h) => {
+          const src = h.srcEntity?.name ?? h.edge.src;
+          const dst = h.dstEntity?.name ?? h.edge.dst;
+          const fact = h.edge.fact ? ` (${h.edge.fact})` : '';
+          const tag = h.viaNeighbor ? ' [neighbor]' : '';
+          const scopeTag = h.edge.scope === 'global' ? '[global]' : '[project]';
+          return `${scopeTag} ${src} --[${h.edge.relation}]--> ${dst}${fact}${tag}`;
+        });
+        graphText = `\n\n## 知识图谱事实\n${lines.join('\n')}`;
       }
     } catch {
       // 静默:图谱段是增强,失败只降级为纯条目结果
