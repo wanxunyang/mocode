@@ -35,6 +35,8 @@ import { effectiveSystemPrompt } from '../skills/index.js';
 import { clearSkillActivation } from '../skills/activation.js';
 import {
   buildMemoryIndexSection,
+  buildAboutYouSection,
+  initPersona,
   kickoffReflection,
   drainMemoryBackground,
   getLastReflectResult,
@@ -254,12 +256,19 @@ export async function startRepl(
   // 与开关联动:① base 用 buildBasePrompt() 取代 config.systemPrompt(后者是启动时一次性
   // 求值的常量,运行时 /memory_switch 不会刷新);② plan suffix 走 getPlanModeSuffix() 现拼;
   // ③ AGENTS.md 存在工作区根时由 base 无条件自动导入正文(超长截断，与 memory 开关无关)；④ Memory Index 按开关注入。
-  const buildSystemMessage = (planMode: boolean): string =>
-    effectiveSystemPrompt(
+  // 启动期一次性身份归一(幂等,best-effort):把全局图里的用户指称碎片并入
+  // person-primary,随后 About you 段才能渲染出完整画像。
+  initPersona(isMemoryEnabled());
+  // 开关现读:运行时 /memory_switch 重建 history[0] 时,About you 与 Memory Index 同步显隐。
+  const buildSystemMessage = (planMode: boolean): string => {
+    const memoryOn = isMemoryEnabled();
+    return effectiveSystemPrompt(
       buildBasePrompt(currentSessionId) +
+        buildAboutYouSection(memoryOn) +
         (planMode ? getPlanModeSuffix() : '') +
-        buildMemoryIndexSection(isMemoryEnabled()),
+        buildMemoryIndexSection(memoryOn),
     );
+  };
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
   // 否则新会话只塞 system 提示(默认 auto)。
   const history: ChatMessage[] =

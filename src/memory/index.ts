@@ -22,11 +22,18 @@ export {
   neighborsOf,
   pathBetween,
   graphStats,
+  ensurePrimaryPerson,
+  mergeEntities,
+  canonicalizePrimaryPerson,
+  PRIMARY_PERSON_ID,
   type GraphEntity,
   type GraphEdge,
   type TripleInput,
   type AddTripleResult,
+  type CanonicalizeReport,
 } from './graph.js';
+
+export { buildAboutYouSection, initPersona, __resetPersonaInitForTests, ABOUT_YOU_MAX_CHARS } from './persona.js';
 
 export {
   kickoffReflection,

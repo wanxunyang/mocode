@@ -124,7 +124,7 @@ function writeGraphForScope(scope: MemoryScope, g: GraphFile): void {
 }
 
 /** 单 scope 的完整图(读文件,scope 归一化)。 */
-function loadScopeGraph(scope: MemoryScope): GraphFile {
+export function loadScopeGraph(scope: MemoryScope): GraphFile {
   const g = readGraphFile(graphPathForScope(scope));
   for (const e of g.entities) e.scope = scope;
   for (const e of g.edges) e.scope = scope;
@@ -475,4 +475,165 @@ export function graphStats(): GraphStats {
     edgesInvalid: g.edges.filter((e) => !!e.invalidAt).length,
     byScope: { project: count('project'), global: count('global') },
   };
+}
+
+// ── 规范用户画像实体(G0 身份归一)──────────────────────────────────────────
+//
+// 全局图里历史上反思自由起名,把同一个用户碎成多个实体(实测:mocode user / 万 /
+// user-name-wanjizhu / user-role-… 互不相连)。这里固定一个主键实体,所有"关于人"
+// 的属性都挂到它身上;角色值(user-role-*)是属性的**值**不是人,不并入。
+
+/** 全局规范用户实体的固定 id(概念名 person:primary,实现用文件安全 slug)。 */
+export const PRIMARY_PERSON_ID = 'person-primary';
+
+/** 判定一个全局实体是否"用户指称碎片"(应并入 primary),角色值实体除外。 */
+function isPersonFragment(e: GraphEntity, selfNameHints: Set<string>): boolean {
+  const id = e.id.toLowerCase();
+  const name = e.name.trim().toLowerCase();
+  if (id === PRIMARY_PERSON_ID) return false;
+  if (id.startsWith('user-role-')) return false; // 角色值,不是人
+  if (id === 'mocode-user' || name === 'mocode user') return true;
+  if (id.startsWith('user-name-')) return true;
+  // 经 named 边收集到的自称(如"万")
+  if (selfNameHints.has(name)) return true;
+  return false;
+}
+
+/** 确保全局规范用户实体存在(固定 id,绕过自由 slug);返回其最新内容。 */
+export function ensurePrimaryPerson(displayName?: string): GraphEntity {
+  const scope: MemoryScope = 'global';
+  const g = loadScopeGraph(scope);
+  let p = g.entities.find((e) => e.id === PRIMARY_PERSON_ID);
+  if (!p) {
+    const now = nowIso();
+    p = {
+      id: PRIMARY_PERSON_ID,
+      name: (displayName ?? 'user').trim() || 'user',
+      aliases: [],
+      summary: '规范用户实体(所有跨项目的用户画像属性挂这里)',
+      createdAt: now,
+      updatedAt: now,
+      scope,
+    };
+    g.entities.push(p);
+    writeGraphForScope(scope, g);
+    return p;
+  }
+  let dirty = false;
+  if (displayName && displayName.trim() && displayName.trim() !== p.name) {
+    if (!p.aliases.includes(p.name)) p.aliases.push(p.name);
+    p.name = displayName.trim();
+    dirty = true;
+  }
+  if (!p.summary) {
+    p.summary = '规范用户实体(所有跨项目的用户画像属性挂这里)';
+    dirty = true;
+  }
+  if (dirty) {
+    p.updatedAt = nowIso();
+    writeGraphForScope(scope, g);
+  }
+  return p;
+}
+
+export interface MergeReport {
+  target: string;
+  merged: string[];
+  /** 迁移后边去重而被失效的边数。 */
+  dedupedEdges: number;
+}
+
+/**
+ * 把同一 scope 内 source 实体并入 target:
+ *  - source 的 active 边 endpoint 改写为 target;改写后与 target 现有 active 边
+ *    (src,relation,dst) 全等的重复边置 invalidAt(时序失效,不删);
+ *  - source 名字/别名并入 target.aliases;source 标 mergedInto 保留(可追溯、可被别名词命中)。
+ * 幂等:source===target 或不存在则 no-op。
+ */
+export function mergeEntities(targetId: string, sourceId: string, scope: MemoryScope = 'global'): MergeReport | null {
+  if (targetId === sourceId) return null;
+  const g = loadScopeGraph(scope);
+  const target = g.entities.find((e) => e.id === targetId);
+  const source = g.entities.find((e) => e.id === sourceId);
+  if (!target || !source) return null;
+
+  const activeOf = (id: string) => g.edges.filter((e) => !e.invalidAt && (e.src === id || e.dst === id));
+  const existsActive = (src: string, relation: string, dst: string) =>
+    g.edges.some((e) => !e.invalidAt && e.src === src && e.relation === relation && e.dst === dst);
+
+  let dedupedEdges = 0;
+  for (const edge of activeOf(sourceId)) {
+    const nextSrc = edge.src === sourceId ? targetId : edge.src;
+    const nextDst = edge.dst === sourceId ? targetId : edge.dst;
+    if (nextSrc === nextDst) {
+      edge.invalidAt = nowIso(); // 自指环(并入自己)无意义,失效
+      dedupedEdges++;
+      continue;
+    }
+    if (existsActive(nextSrc, edge.relation, nextDst) && (nextSrc !== edge.src || nextDst !== edge.dst)) {
+      edge.invalidAt = nowIso(); // target 已有等价 active 边,去重
+      dedupedEdges++;
+      continue;
+    }
+    edge.src = nextSrc;
+    edge.dst = nextDst;
+  }
+
+  const addAlias = (a: string) => {
+    const v = a.trim();
+    if (v && v !== target.name && !target.aliases.includes(v)) target.aliases.push(v);
+  };
+  addAlias(source.name);
+  for (const a of source.aliases) addAlias(a);
+  (source as GraphEntity & { mergedInto?: string }).mergedInto = targetId;
+  source.updatedAt = nowIso();
+  target.updatedAt = nowIso();
+
+  writeGraphForScope(scope, g);
+  return { target: targetId, merged: [sourceId], dedupedEdges };
+}
+
+export interface CanonicalizeReport {
+  primary: string;
+  displayName: string | null;
+  merged: string[];
+  dedupedEdges: number;
+}
+
+/**
+ * 一次性身份归一(幂等):确保 person-primary 存在,把全局图里的用户指称碎片
+ * (mocode-user / user-name-* / 沿 named 边找到的自称,如"万")并入它。
+ * 角色值实体(user-role-*)、兴趣、地点、项目/工具实体不碰。返回合并报告(无操作时 merged 为空)。
+ */
+export function canonicalizePrimaryPerson(): CanonicalizeReport {
+  const scope: MemoryScope = 'global';
+  const g = loadScopeGraph(scope);
+  // 沿 named 边收集自称:X --named--> N,则 N.name 是用户的名字。
+  const selfNameHints = new Set<string>();
+  for (const e of g.edges) {
+    if (e.invalidAt || e.relation !== 'named') continue;
+    const src = g.entities.find((x) => x.id === e.src);
+    const dst = g.entities.find((x) => x.id === e.dst);
+    if (src && dst && (src.id === 'mocode-user' || src.id.startsWith('user-name-') || /user/i.test(src.name))) {
+      selfNameHints.add(dst.name.trim().toLowerCase());
+    }
+  }
+  const fragments = g.entities.filter((e) => isPersonFragment(e, selfNameHints));
+  // 显示名:优先最短的中文/字母自称(通常是"万"),退回已存在 primary 的名字。
+  const existing = g.entities.find((e) => e.id === PRIMARY_PERSON_ID);
+  const nameCandidates = [...selfNameHints].filter((n) => n && !/^user/.test(n));
+  const displayName = nameCandidates.sort((a, b) => a.length - b.length)[0] ?? existing?.name ?? null;
+
+  ensurePrimaryPerson(displayName ?? undefined);
+
+  let deduped = 0;
+  const merged: string[] = [];
+  for (const f of fragments) {
+    const r = mergeEntities(PRIMARY_PERSON_ID, f.id, scope);
+    if (r) {
+      merged.push(f.id);
+      deduped += r.dedupedEdges;
+    }
+  }
+  return { primary: PRIMARY_PERSON_ID, displayName, merged, dedupedEdges: deduped };
 }

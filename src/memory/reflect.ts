@@ -14,7 +14,7 @@ import path from 'node:path';
 import { chat, type ChatMessage } from '../llm/index.js';
 import { config, isMemoryEnabled } from '../config/index.js';
 import { saveEntry, updateEntry, forgetEntry, loadAll, gcMemories, type MemoryType } from './store.js';
-import { addTriple } from './graph.js';
+import { addTriple, ensurePrimaryPerson, PRIMARY_PERSON_ID } from './graph.js';
 
 export interface ReflectResult {
   ts: string;
@@ -25,7 +25,13 @@ export interface ReflectResult {
   gcDecayed: number;
   gcCapped: number;
   gcGced: number;
+  /** 全局用户画像三元组(挂 person-primary)落条数。 */
+  profiles?: number;
   error?: string;
+  /** parse-failed 时的原始返回片段(供 kickoff 落 memory.log 排查);成功不设。 */
+  rawParseFailure?: string;
+  /** 首轮解析失败后是否触发过一次「修复式重试」。 */
+  repairAttempted?: boolean;
 }
 
 // ── 日志(静默容错,裁尾保最近)─────────────────────────────────────────────
@@ -100,7 +106,7 @@ function buildMemorySample(): string {
 const TYPES = 'decision | fact | pitfall | reference | feedback';
 
 const REFLECT_SYS = `You are mocode's memory reflector. Review the recent session and existing memories, producing **only** updates worth remembering long-term.
-Output strictly JSON (no markdown code blocks, no explanatory text): {"saves":[{"type":"...","name":"...","summary":"...","body":"..."}],"updates":[{"id":"...","reason":"...","summary":"...","body":"..."}],"forgets":[{"id":"...","reason":"..."}],"triples":[{"src":"...","relation":"...","dst":"...","fact":"..."}]}
+Output strictly JSON (no markdown code blocks, no explanatory text): {"saves":[{"type":"...","name":"...","summary":"...","body":"..."}],"updates":[{"id":"...","reason":"...","summary":"...","body":"..."}],"forgets":[{"id":"...","reason":"..."}],"triples":[{"src":"...","relation":"...","dst":"...","fact":"..."}],"profile":[{"relation":"...","dst":"...","fact":"..."}]}
 Empty arrays are valid (if nothing is worth saving, all arrays are empty).
 Rules:
 ① Only store non-obvious, cross-session-useful facts/decisions/pitfalls; do not store current bugs, temp files, undecided TODOs, or volatile items;
@@ -109,7 +115,8 @@ Rules:
 ④ names in saves must be concise and not collide with existing ones; type ∈ {${TYPES}};
 ⑤ If an existing memory contradicts new facts or is outdated, update the old entry (modify summary/body) rather than creating a duplicate;
 ⑥ forgets are for memories clearly stale / superseded by a new entry (archive, not hard-delete);
-⑦ triples are knowledge-graph facts distilled from this session: concise entity names (lowercase snake_case or proper nouns), relation in snake_case (e.g. depends_on, decided_by, implemented_in, conflicts_with), plus a one-line fact. Only emit triples that are stable, non-obvious and cross-session-useful (2-6 at most); they may reference entities from saves/updates or existing memories.`;
+⑦ triples are PROJECT knowledge-graph facts about THIS CODEBASE distilled from this session: concise entity names (lowercase snake_case or proper nouns), relation in snake_case (e.g. depends_on, decided_by, implemented_in, conflicts_with), plus a one-line fact. Only emit triples that are stable, non-obvious and reusable in this repo (2-6 at most).
+⑧ profile is for facts about THE USER (the human), which must apply across ALL projects — identity, role, expertise, language/communication style, stable preferences, current goals, constraints. They are attached to the single canonical person entity. Each item: relation in snake_case (e.g. named, has_role, works_at, located_in, speaks, verbosity, communication_style, prefers, avoids, current_goal, constraint, has_hobby, skill_level), dst is a short atomic value/entity, fact is one neutral Chinese sentence stating it. NEVER put repo paths, commands, file names, ports, secrets or one-task details in profile — those belong in triples. Only emit profile when the user explicitly revealed something durable about themselves (0-3 items); when unsure, omit.`;
 
 const REFLECT_USER = (transcript: string, sample: string) =>
   `## Recent session\n${transcript}\n\n## Existing memories\n${sample}\n\nProduce JSON:`;
@@ -119,14 +126,19 @@ interface ReflectPlan {
   updates?: { id?: string; reason?: string; summary?: string; body?: string }[];
   forgets?: { id?: string; reason?: string }[];
   triples?: { src?: string; relation?: string; dst?: string; fact?: string }[];
+  /**
+   * 全局用户画像(跨项目):关于"用户这个人"的稳定事实,自动挂到规范实体
+   * person-primary、写入 global 图;与项目 triples(默认 project)分流。
+   */
+  profile?: { relation?: string; dst?: string; fact?: string }[];
 }
 
-function parsePlan(content: string | null): ReflectPlan | null {
+export function parsePlan(content: string | null): ReflectPlan | null {
   if (!content) return null;
   let s = content.trim();
-  // 去 ```json … ``` 代码块(模型偶发包裹)
-  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) s = fence[1].trim();
+  // 去 ```json … ``` 代码块(模型偶发包裹);取最后一个块(前面可能有解释文字)。
+  const fences = [...s.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  if (fences.length) s = fences[fences.length - 1]![1].trim();
   // 容错:截到首个 { 到末个 }
   const first = s.indexOf('{');
   const last = s.lastIndexOf('}');
@@ -136,13 +148,41 @@ function parsePlan(content: string | null): ReflectPlan | null {
     if (!p || typeof p !== 'object') return null;
     return p;
   } catch {
+    // 再试一次:去掉对象/数组尾逗号(模型常见的非法 JSON)。
+    try {
+      const p = JSON.parse(s.replace(/,\s*([}\]])/g, '$1')) as ReflectPlan;
+      if (p && typeof p === 'object') return p;
+    } catch {
+      // 落到 null
+    }
     return null;
   }
 }
 
+/** 取一次反思 LLM 返回的可解析文本(content 优先;tool_calls 的 JSON 串参数兜底)。 */
+async function fetchReflection(
+  messages: ChatMessage[],
+  signal: AbortSignal,
+): Promise<{ content: string | null; raw: string | null }> {
+  const r = await chat(messages, {}, signal, undefined, { reasoningEffort: 'low' });
+  if (!r.toolCalls.length && r.content) return { content: r.content, raw: null };
+  // 推理模型偶发只把 JSON 塞进 tool_calls 参数、或 content 为 null:从工具调用里捞 JSON 串。
+  for (const tc of r.toolCalls) {
+    const args = (tc as { function?: { arguments?: string } }).function?.arguments;
+    if (typeof args === 'string' && args.includes('{')) return { content: args, raw: null };
+  }
+  // 无可用正文(典型:只吐 reasoning_content):保留简短指纹供日志排查。
+  const fingerprint = r.content
+    ? `content=${r.content.slice(0, 200)}`
+    : `content=null, toolCalls=${r.toolCalls.length}`;
+  return { content: null, raw: fingerprint };
+}
+
 /**
  * 跑一次反思:chat() 空 handlers(静默)→ 解析 JSON → 经 store 落地 → gcMemories。
- * 解析失败整 pass 放弃(不部分落地)。store 调用全同步,落地是一个原子块。
+ * 首轮解析失败时做**一次修复式重试**(明确要求"只输出 JSON、不要思考过程"),
+ * 重试仍失败才报 parse-failed——此时 rawParseFailure 带原始返回指纹,由 kickoff 落
+ * memory.log,不再像旧版那样无声丢掉一整轮且无从排查。store 调用全同步。
  * 60s 超时(AbortSignal.timeout)防 exit 时 drain 挂死。
  */
 export async function runReflection(transcript: string, signal?: AbortSignal): Promise<ReflectResult> {
@@ -151,7 +191,7 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
   const sys = { role: 'system' as const, content: REFLECT_SYS } as ChatMessage;
   const user = { role: 'user' as const, content: REFLECT_USER(transcript, sample) } as ChatMessage;
 
-  let result: ReflectResult = {
+  const result: ReflectResult = {
     ts,
     saves: 0,
     updates: 0,
@@ -162,11 +202,28 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
     gcGced: 0,
   };
 
+  const timeoutSignal = signal ?? AbortSignal.timeout(60000);
   let content: string | null = null;
   try {
-    const r = await chat([sys, user], {}, signal ?? AbortSignal.timeout(60000), undefined, { reasoningEffort: 'low' });
-    // 推理模型偶发只返 reasoning_content(content null)或幻觉 tool_calls → 视为无产出
-    if (!r.toolCalls.length && r.content) content = r.content;
+    const first = await fetchReflection([sys, user], timeoutSignal);
+    content = first.content;
+    // 首轮拿不到可解析正文 → 一次修复式重试(同一超时信号的剩余预算)。
+    if (parsePlan(content) === null) {
+      result.repairAttempted = true;
+      const repairUser = {
+        role: 'user' as const,
+        content:
+          '你的上一条回复无法被解析为目标 JSON。现在只输出一个 JSON 对象,不要 markdown 围栏、不要解释、不要思考过程,' +
+          '形状严格为 {"saves":[],"updates":[],"forgets":[],"triples":[]};没有值得长期记住的内容就全部给空数组。',
+      } as ChatMessage;
+      const second = await fetchReflection(
+        [sys, user, { role: 'assistant', content: content ?? '' } as ChatMessage, repairUser],
+        timeoutSignal,
+      );
+      if (second.content) content = second.content;
+      if (!content && first.raw) result.rawParseFailure = first.raw;
+      else if (second.raw && parsePlan(content) === null) result.rawParseFailure = second.raw;
+    }
   } catch (e) {
     result.error = e instanceof Error ? e.name + ': ' + e.message : String(e);
     return result;
@@ -175,6 +232,7 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
   const plan = parsePlan(content);
   if (!plan) {
     result.error = 'parse-failed';
+    if (!result.rawParseFailure) result.rawParseFailure = (content ?? '').slice(0, 300);
     return result;
   }
 
@@ -225,9 +283,37 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
       if (r.ok && !r.duplicate) triples++;
     }
   }
+  // 全局用户画像:挂到规范 person-primary、写 global 图(与项目 triples 分流)。
+  let profiles = 0;
+  if (Array.isArray(plan.profile) && plan.profile.length > 0) {
+    let personId = PRIMARY_PERSON_ID;
+    try {
+      personId = ensurePrimaryPerson().id;
+    } catch {
+      personId = PRIMARY_PERSON_ID;
+    }
+    for (const p of plan.profile.slice(0, 6)) {
+      if (!p?.relation || !p.dst) continue;
+      const r = addTriple({
+        src: personId,
+        relation: String(p.relation),
+        dst: String(p.dst),
+        fact: p.fact ? String(p.fact) : undefined,
+        scope: 'global',
+      });
+      if (r.ok && !r.duplicate) profiles++;
+    }
+  }
   const gc = gcMemories();
 
-  result = { ...result, saves, updates, forgets, triples, gcDecayed: gc.decayed, gcCapped: gc.capped, gcGced: gc.gced };
+  result.saves = saves;
+  result.updates = updates;
+  result.forgets = forgets;
+  result.triples = triples;
+  result.profiles = profiles;
+  result.gcDecayed = gc.decayed;
+  result.gcCapped = gc.capped;
+  result.gcGced = gc.gced;
   return result;
 }
 
@@ -242,9 +328,10 @@ function normalizeType(t: unknown): MemoryType | undefined {
 let inflight: Promise<void> | null = null;
 let lastReflectResult: ReflectResult | null = null;
 
-/** 摘要串(供 repl flush):存N 改N 忘N 图N;有错误附上。 */
+/** 摘要串(供 repl flush):存N 改N 忘N 图N [画像N];有错误附上。 */
 export function formatReflectResult(r: ReflectResult): string {
   const parts = [`存${r.saves}`, `改${r.updates}`, `忘${r.forgets}`, `图${r.triples}`];
+  if (r.profiles) parts.push(`画像${r.profiles}`);
   if (r.gcDecayed || r.gcCapped || r.gcGced) {
     parts.push(`遗忘(衰减${r.gcDecayed}/封顶${r.gcCapped}/清除${r.gcGced})`);
   }
@@ -265,6 +352,10 @@ export function kickoffReflection(transcript: string): void {
       const r = await runReflection(transcript);
       lastReflectResult = r;
       appendLog(`[${r.ts}] ${formatReflectResult(r)}`);
+      if (r.error === 'parse-failed' && r.rawParseFailure) {
+        // 留证:旧版 parse-failed 无声丢弃,无法排查(实测约三成反思命中)。
+        appendLog(`  ↳ parse-failed 原始返回: ${r.rawParseFailure.replace(/\s+/g, ' ').slice(0, 500)}`);
+      }
     } catch (e) {
       appendLog(`[${new Date().toISOString()}] 反思异常: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
