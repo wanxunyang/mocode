@@ -1,6 +1,7 @@
 import type { Tool } from '../types.js';
 import { searchEntries, type MemoryType, type MemoryStatus } from '../../memory/store.js';
 import { searchGraphFacts } from '../../memory/graph.js';
+import { recordRecallSearch } from '../../memory/recall-stats.js';
 
 // ---------- memory_search ----------
 // 唯一记忆搜索入口:关键词搜记忆正文(多词子串匹配,name 权重最高)+ 知识图谱事实段
@@ -43,9 +44,11 @@ export const memorySearchTool: Tool = {
 
     // 知识图谱事实段:边级相关度检索(容错:图坏了不连累条目搜索)。
     let graphText = '';
+    let graphHit = false;
     try {
       const hits = searchGraphFacts(query, { scope: 'all', limit: GRAPH_FACTS_LIMIT, neighbors: 4 });
-      if (hits.length > 0) {
+      graphHit = hits.length > 0;
+      if (graphHit) {
         const lines = hits.map((h) => {
           const src = h.srcEntity?.name ?? h.edge.src;
           const dst = h.dstEntity?.name ?? h.edge.dst;
@@ -59,6 +62,7 @@ export const memorySearchTool: Tool = {
     } catch {
       // 静默:图谱段是增强,失败只降级为纯条目结果
     }
+    recordRecallSearch(graphHit); // 埋点:pull 召回使用情况(写盘失败静默)
 
     if (!entryText && !graphText) return `(无匹配记忆:query="${query}")`;
     if (!entryText) return `(无匹配记忆条目,但图谱有命中)\n${graphText.trimStart()}`;

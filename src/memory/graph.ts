@@ -22,6 +22,11 @@ export interface GraphEntity {
   name: string;
   aliases: string[];
   summary: string;
+  /**
+   * 轻量实体类型(轻量本体,memory-2.2):缺省 'unknown'。当前仅用于 person 合并守卫等
+   * 安全用途,不做 domain/range 强校验;将来完整 ontology 再扩展(Person/Tool/Port…)。
+   */
+  type?: string;
   createdAt: string; // ISO
   updatedAt: string; // ISO
   scope: MemoryScope;
@@ -159,11 +164,12 @@ export interface UpsertEntityResult {
  */
 export function upsertEntity(
   name: string,
-  opts: { summary?: string; alias?: string; scope?: MemoryScope } = {},
+  opts: { summary?: string; alias?: string; scope?: MemoryScope; type?: string } = {},
 ): UpsertEntityResult {
   const scope: MemoryScope = opts.scope === 'global' ? 'global' : 'project';
   const trimmed = name.trim();
   if (!trimmed) return { id: '', created: false, rejected: 'empty-name' };
+  const nextType = opts.type?.trim() || undefined;
   const g = loadScopeGraph(scope);
   const hit = findEntityIn(g, trimmed);
   if (hit) {
@@ -174,6 +180,10 @@ export function upsertEntity(
     }
     if (opts.summary && opts.summary.trim() && opts.summary.trim() !== hit.summary) {
       hit.summary = opts.summary.trim();
+      dirty = true;
+    }
+    if (nextType && (hit.type ?? '') !== nextType) {
+      hit.type = nextType;
       dirty = true;
     }
     if (dirty) {
@@ -202,6 +212,7 @@ export function upsertEntity(
     name: trimmed,
     aliases: opts.alias && norm(opts.alias) !== norm(trimmed) ? [opts.alias.trim()] : [],
     summary: opts.summary?.trim() ?? '',
+    type: nextType,
     createdAt: now,
     updatedAt: now,
     scope,
@@ -594,6 +605,16 @@ export function graphStats(): GraphStats {
 
 /** 全局规范用户实体的固定 id(概念名 person:primary,实现用文件安全 slug)。 */
 export const PRIMARY_PERSON_ID = 'person-primary';
+/** 规范用户实体的轻量类型标记。 */
+export const PERSON_TYPE = 'Person';
+/** 未分型实体的占位类型(历史数据无 type 字段时按此处理,不参与跨类型守卫)。 */
+export const UNKNOWN_TYPE = 'unknown';
+
+/** 实体有效类型(缺省/空串视为 unknown)。 */
+function entityType(e: GraphEntity): string {
+  const t = (e.type ?? '').trim();
+  return t || UNKNOWN_TYPE;
+}
 
 /** 判定一个全局实体是否"用户指称碎片"(应并入 primary),角色值实体除外。 */
 function isPersonFragment(e: GraphEntity, selfNameHints: Set<string>): boolean {
@@ -620,6 +641,7 @@ export function ensurePrimaryPerson(displayName?: string): GraphEntity {
       name: (displayName ?? 'user').trim() || 'user',
       aliases: [],
       summary: '规范用户实体(所有跨项目的用户画像属性挂这里)',
+      type: PERSON_TYPE,
       createdAt: now,
       updatedAt: now,
       scope,
@@ -629,6 +651,10 @@ export function ensurePrimaryPerson(displayName?: string): GraphEntity {
     return p;
   }
   let dirty = false;
+  if (entityType(p) !== PERSON_TYPE) {
+    p.type = PERSON_TYPE; // 历史库回填:G0 已建的 primary 当时无 type
+    dirty = true;
+  }
   if (displayName && displayName.trim() && displayName.trim() !== p.name) {
     if (!p.aliases.includes(p.name)) p.aliases.push(p.name);
     p.name = displayName.trim();
@@ -650,6 +676,8 @@ export interface MergeReport {
   merged: string[];
   /** 迁移后边去重而被失效的边数。 */
   dedupedEdges: number;
+  /** 非空表示未合并(如跨类型守卫拦截);merged 此时为空。 */
+  rejected?: string;
 }
 
 /**
@@ -657,7 +685,9 @@ export interface MergeReport {
  *  - source 的 active 边 endpoint 改写为 target;改写后与 target 现有 active 边
  *    (src,relation,dst) 全等的重复边置 invalidAt(时序失效,不删);
  *  - source 名字/别名并入 target.aliases;source 标 mergedInto 保留(可追溯、可被别名词命中)。
- * 幂等:source===target 或不存在则 no-op。
+ * 类型守卫(轻量本体):双方都已明确分型(非 unknown)且类型不同 → 拒绝,防止把
+ * Port/Hobby 等异类实体误并进 Person;任一方 unknown(历史未分型)则照常允许。
+ * 幂等:source===target 或不存在则 no-op(null)。
  */
 export function mergeEntities(targetId: string, sourceId: string, scope: MemoryScope = 'global'): MergeReport | null {
   if (targetId === sourceId) return null;
@@ -665,6 +695,12 @@ export function mergeEntities(targetId: string, sourceId: string, scope: MemoryS
   const target = g.entities.find((e) => e.id === targetId);
   const source = g.entities.find((e) => e.id === sourceId);
   if (!target || !source) return null;
+
+  const tt = entityType(target);
+  const st = entityType(source);
+  if (tt !== UNKNOWN_TYPE && st !== UNKNOWN_TYPE && tt !== st) {
+    return { target: targetId, merged: [], dedupedEdges: 0, rejected: `type-mismatch: ${st} != ${tt}` };
+  }
 
   const activeOf = (id: string) => g.edges.filter((e) => !e.invalidAt && (e.src === id || e.dst === id));
   const existsActive = (src: string, relation: string, dst: string) =>
@@ -739,7 +775,7 @@ export function canonicalizePrimaryPerson(): CanonicalizeReport {
   const merged: string[] = [];
   for (const f of fragments) {
     const r = mergeEntities(PRIMARY_PERSON_ID, f.id, scope);
-    if (r) {
+    if (r && !r.rejected) {
       merged.push(f.id);
       deduped += r.dedupedEdges;
     }

@@ -1,5 +1,6 @@
 import type { Tool } from '../types.js';
 import { addTriple, graphStats, neighborsOf, pathBetween } from '../../memory/graph.js';
+import { formatRecallStats } from '../../memory/recall-stats.js';
 
 // ---------- memory_graph ----------
 // 知识图谱维护工具:邻居遍历(1-3 跳,可 relation 过滤)、两点最短路径、手工加三元组、看图统计。
@@ -63,6 +64,7 @@ export const memoryGraphTool: Tool = {
         `实体 ${s.entities} 条边(active ${s.edgesActive} / 已失效 ${s.edgesInvalid})`,
         `project: ${s.byScope.project.entities} 实体, ${s.byScope.project.edges} 边`,
         `global:  ${s.byScope.global.entities} 实体, ${s.byScope.global.edges} 边`,
+        formatRecallStats(),
       ].join('\n');
     }
 

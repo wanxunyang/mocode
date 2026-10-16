@@ -15,6 +15,7 @@ import { chat, type ChatMessage } from '../llm/index.js';
 import { config, isMemoryEnabled } from '../config/index.js';
 import { saveEntry, updateEntry, forgetEntry, loadAll, gcMemories, type MemoryType } from './store.js';
 import { addTriple, ensurePrimaryPerson, PRIMARY_PERSON_ID } from './graph.js';
+import { normalizeRelation, isKnownRelation, relationCheatSheet } from './relation-vocab.js';
 
 export interface ReflectResult {
   ts: string;
@@ -27,6 +28,8 @@ export interface ReflectResult {
   gcGced: number;
   /** 全局用户画像三元组(挂 person-primary)落条数。 */
   profiles?: number;
+  /** 词表外关系条数(软策略仍写入,仅观测)。 */
+  relViolations?: number;
   error?: string;
   /** parse-failed 时的原始返回片段(供 kickoff 落 memory.log 排查);成功不设。 */
   rawParseFailure?: string;
@@ -115,8 +118,8 @@ Rules:
 ④ names in saves must be concise and not collide with existing ones; type ∈ {${TYPES}};
 ⑤ If an existing memory contradicts new facts or is outdated, update the old entry (modify summary/body) rather than creating a duplicate;
 ⑥ forgets are for memories clearly stale / superseded by a new entry (archive, not hard-delete);
-⑦ triples are PROJECT knowledge-graph facts about THIS CODEBASE distilled from this session: concise entity names (lowercase snake_case or proper nouns), relation in snake_case (e.g. depends_on, decided_by, implemented_in, conflicts_with), plus a one-line fact. Only emit triples that are stable, non-obvious and reusable in this repo (2-6 at most).
-⑧ profile is for facts about THE USER (the human), which must apply across ALL projects — identity, role, expertise, language/communication style, stable preferences, current goals, constraints. They are attached to the single canonical person entity. Each item: relation in snake_case (e.g. named, has_role, works_at, located_in, speaks, verbosity, communication_style, prefers, avoids, current_goal, constraint, has_hobby, skill_level), dst is a short atomic value/entity, fact is one neutral Chinese sentence stating it. NEVER put repo paths, commands, file names, ports, secrets or one-task details in profile — those belong in triples. Only emit profile when the user explicitly revealed something durable about themselves (0-3 items); when unsure, omit.`;
+⑦ triples are PROJECT knowledge-graph facts about THIS CODEBASE distilled from this session: concise entity names (lowercase snake_case or proper nouns) plus a one-line fact. Prioritize the high-reuse structural relations in this order — dependency/ownership (depends_on, uses, used_by, calls, part_of), location (implemented_in, reads, writes, configured_by, runs_on, listens_on), verification (tests, documented_in), rationale/risk (decided_by, conflicts_with); full list: ${relationCheatSheet('project')}. Favor facts that would help a future session navigate or avoid re-deriving (which module implements X, what depends on Y, what conflicts with Z). A relation outside this list is allowed only when none fits (it gets flagged for review). Only emit triples that are stable, non-obvious and reusable in this repo (2-6 at most).
+⑧ profile is for facts about THE USER (the human), which must apply across ALL projects — identity, role, expertise, language/communication style, stable preferences, current goals, constraints. They are attached to the single canonical person entity. Each item: dst is a short atomic value/entity, fact is one neutral Chinese sentence stating it. Prefer these relations: ${relationCheatSheet('global')}. A relation outside this list is allowed only when none fits. NEVER put repo paths, commands, file names, ports, secrets or one-task details in profile — those belong in triples. Only emit profile when the user explicitly revealed something durable about themselves (0-3 items); when unsure, omit.`;
 
 const REFLECT_USER = (transcript: string, sample: string) =>
   `## Recent session\n${transcript}\n\n## Existing memories\n${sample}\n\nProduce JSON:`;
@@ -270,13 +273,17 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
     }
   }
   // 知识图谱三元组:容错——单项失败跳过,不影响 saves/updates/forgets 已落地的结果。
+  // 关系名先归一(别名/拼写);词表外关系仍允许写(软封闭世界),但计 relViolations 供观测。
   let triples = 0;
+  let relViolations = 0;
   if (Array.isArray(plan.triples)) {
     for (const t of plan.triples.slice(0, 10)) {
       if (!t?.src || !t?.relation || !t?.dst) continue;
+      const relation = normalizeRelation(String(t.relation));
+      if (!isKnownRelation(relation, 'project')) relViolations++;
       const r = addTriple({
         src: String(t.src),
-        relation: String(t.relation),
+        relation,
         dst: String(t.dst),
         fact: t.fact ? String(t.fact) : undefined,
       });
@@ -294,9 +301,11 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
     }
     for (const p of plan.profile.slice(0, 6)) {
       if (!p?.relation || !p.dst) continue;
+      const relation = normalizeRelation(String(p.relation));
+      if (!isKnownRelation(relation, 'global')) relViolations++;
       const r = addTriple({
         src: personId,
-        relation: String(p.relation),
+        relation,
         dst: String(p.dst),
         fact: p.fact ? String(p.fact) : undefined,
         scope: 'global',
@@ -311,6 +320,7 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
   result.forgets = forgets;
   result.triples = triples;
   result.profiles = profiles;
+  result.relViolations = relViolations;
   result.gcDecayed = gc.decayed;
   result.gcCapped = gc.capped;
   result.gcGced = gc.gced;
@@ -328,10 +338,11 @@ function normalizeType(t: unknown): MemoryType | undefined {
 let inflight: Promise<void> | null = null;
 let lastReflectResult: ReflectResult | null = null;
 
-/** 摘要串(供 repl flush):存N 改N 忘N 图N [画像N];有错误附上。 */
+/** 摘要串(供 repl flush):存N 改N 忘N 图N [画像N 违N];有错误附上。 */
 export function formatReflectResult(r: ReflectResult): string {
   const parts = [`存${r.saves}`, `改${r.updates}`, `忘${r.forgets}`, `图${r.triples}`];
   if (r.profiles) parts.push(`画像${r.profiles}`);
+  if (r.relViolations) parts.push(`违${r.relViolations}`);
   if (r.gcDecayed || r.gcCapped || r.gcGced) {
     parts.push(`遗忘(衰减${r.gcDecayed}/封顶${r.gcCapped}/清除${r.gcGced})`);
   }
