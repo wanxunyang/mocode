@@ -111,7 +111,7 @@ export const editFileTool: Tool = {
     const toLf = (s: string): string => s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
     // multi:数组形状校验(schema 已守,这里给富指导并归一化 CRLF)。
-    let multiEdits: Array<{ old: string; next: string }> = [];
+    const multiEdits: Array<{ old: string; next: string }> = [];
     if (mode === 'multi') {
       const arr = args.replacements;
       if (!Array.isArray(arr) || arr.length === 0) {
