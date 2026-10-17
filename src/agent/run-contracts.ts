@@ -41,6 +41,8 @@ export interface AgentHooks {
     parsed: Record<string, unknown> | null,
     preWriteOld: string | null,
     editStartLine: number,
+    /** edit_file replacements[] 模式:每个替换段一个 diff hunk;缺省按单段 old/new 渲染。 */
+    multiHunks?: ReadonlyArray<{ oldStr: string; newStr: string; startLine: number }>,
   ) => void;
   onToolBatchEnd?: () => void;
   /** D3: after each committed tool batch, checkpoint full history for resume. */

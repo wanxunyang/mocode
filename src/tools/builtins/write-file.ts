@@ -43,8 +43,10 @@ function invalid(path: string, message: string): ToolOutcome {
 export const writeFileTool: Tool = {
   name: 'write_file',
   description:
-    'Create or replace one file transactionally. expected_hash may be omitted (or null) only for create-only writes to a path that must not exist; overwriting requires the hash from a fresh read_file.\n' +
-    'To ADD to an existing file, pass append=true — only the new text goes in `content`; NO expected_hash and NO prior read_file needed (lock-protected; creates the file when missing). Appends VERBATIM: if the file does not end with a newline, start your content with "\\n" or the last line will merge with yours.',
+    'Create a NEW file, APPEND to one, or rewrite essentially the WHOLE file — transactionally.\n' +
+    'Do NOT use this for localized changes to an existing file, even when there are several separate changes: use edit_file (a single edit, one replacements[] batch covering many spots, or a line range). Re-sending an entire file just to tweak a few lines wastes tokens and the long JSON is prone to truncation. Reach for write_file on an existing path only when most of the file is actually being replaced.\n' +
+    'expected_hash may be omitted (or null) only for create-only writes to a path that must not exist; overwriting requires the hash from a fresh read_file.\n' +
+    'To ADD to an existing file, pass append=true — only the new text goes in `content`; NO expected_hash and NO prior read_file needed (lock-protected; creates the file when missing). For long generated output, write the first chunk normally then extend it with repeated append=true calls, keeping each call small. Appends VERBATIM: if the file does not end with a newline, start your content with "\\n" or the last line will merge with yours.',
   risk: 'confirm',
   parameters: {
     type: 'object',

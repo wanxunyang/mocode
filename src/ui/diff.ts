@@ -335,16 +335,17 @@ export function renderFileChange(opts: {
   return renderBody(head, counts, compactCtx(ops), padW, startLine, lang);
 }
 
-/** 头行 + 计数行 + 正文(折叠 + 截断 + 行号),每行尾 \n。 */
-function renderBody(
-  head: string,
-  counts: string,
-  items: Item[],
-  padW: number,
-  startLine: number,
-  lang: string | undefined,
-): string {
-  const lines: string[] = [head, counts];
+/** Update(path) 头行(edit / 多 hunk 共用)。 */
+function updateHead(pathDisp: string): string {
+  return `${HEAD_INDENT}${ui.bold}${ui.accent}Update${ui.reset}${ui.gray}(${ui.reset}${ui.accent}${pathDisp}${ui.reset}${ui.gray})${ui.reset}`;
+}
+
+/**
+ * 单个 hunk 的正文行(折叠 + 截断 + 行号),不含头/计数行。
+ * 多替换模式对每个 {old_string,new_string} 各调一次,行号从该 hunk 的 startLine 独立起算。
+ */
+function renderHunkBody(items: Item[], padW: number, startLine: number, lang: string | undefined): string[] {
+  const lines: string[] = [];
   const metaPrefix = `${BODY_INDENT}`; // 与正文行左对齐(batch 展开时还会再加外层 indent,避免双重缩进导致提示行突兀)
 
   let oldLine = startLine;
@@ -413,5 +414,75 @@ function renderBody(
   if (overflow > 0) {
     lines.push(`${metaPrefix}${ui.dim}…(还有 ${overflow} 行未显示)${ui.reset}`);
   }
-  return lines.join('\n') + '\n';
+  return lines;
+}
+
+/** 单 hunk:头行 + 计数行 + 正文。 */
+function renderBody(
+  head: string,
+  counts: string,
+  items: Item[],
+  padW: number,
+  startLine: number,
+  lang: string | undefined,
+): string {
+  return [head, counts, ...renderHunkBody(items, padW, startLine, lang)].join('\n') + '\n';
+}
+
+/** 单个 hunk 的增删行计数。 */
+function countOps(ops: DiffLine[]): { add: number; del: number } {
+  let add = 0;
+  let del = 0;
+  for (const o of ops) {
+    if (o.op === 'add') add++;
+    else if (o.op === 'del') del++;
+  }
+  return { add, del };
+}
+
+function countsLine(add: number, del: number): string {
+  const parts: string[] = [];
+  if (add > 0) parts.push(`${ui.dim}Added ${ui.reset}${ui.green}${add}${ui.reset}${ui.dim} ${lineWord(add)}`);
+  if (del > 0) parts.push(`${ui.dim}removed ${ui.reset}${ui.red}${del}${ui.reset}${ui.dim} ${lineWord(del)}`);
+  return parts.length > 0
+    ? `${HEAD_INDENT}  ${parts.join(`${ui.dim}, ${ui.reset}`)}${ui.reset}`
+    : `${HEAD_INDENT}  ${ui.dim}No changes${ui.reset}`;
+}
+
+/**
+ * 多替换模式:一个文件里多个互不相邻的 hunk,共用一个 Update(path) 头,
+ * 每个 hunk 独立行号(由 readDiffContext 在原文定位其起始行)。
+ * 任一 hunk 过大无法做 LCS 时返回 null,调用方退回摘要展示(与 renderFileChange 同策略)。
+ */
+export function renderMultiFileChange(opts: {
+  path: string;
+  hunks: Array<{ oldStr: string; newStr: string; startLine: number }>;
+}): string | null {
+  const lang = langForPath(opts.path);
+  const head = updateHead(opts.path);
+
+  const prepared: Array<{ ops: DiffLine[]; startLine: number; padW: number }> = [];
+  let totalAdd = 0;
+  let totalDel = 0;
+  let maxLineNo = 1;
+  for (const h of opts.hunks) {
+    const ops = lineDiff(h.oldStr, h.newStr);
+    if (ops === null) return null;
+    const { add, del } = countOps(ops);
+    totalAdd += add;
+    totalDel += del;
+    maxLineNo = Math.max(
+      maxLineNo,
+      h.startLine + Math.max(splitLines(h.oldStr).length, splitLines(h.newStr).length) - 1,
+    );
+    prepared.push({ ops, startLine: h.startLine, padW: 0 });
+  }
+  const padW = Math.max(3, String(maxLineNo).length);
+
+  const out: string[] = [head, countsLine(totalAdd, totalDel)];
+  prepared.forEach((p, idx) => {
+    if (idx > 0) out.push(`${BODY_INDENT}${ui.dim}@@${ui.reset}`);
+    out.push(...renderHunkBody(compactCtx(p.ops), padW, p.startLine, lang));
+  });
+  return out.join('\n') + '\n';
 }

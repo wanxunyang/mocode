@@ -457,5 +457,11 @@ export async function vertexChatOnce(
     handlers.onText?.(marker);
   }
 
-  return { content: content || null, toolCalls, usage };
+  return {
+    content: content || null,
+    toolCalls,
+    usage,
+    // Gemini MAX_TOKENS 归一到 OpenAI 的 'length',供工具层给出截断恢复指引。
+    ...(finishReason ? { finishReason: finishReason === 'MAX_TOKENS' ? 'length' : finishReason } : {}),
+  };
 }

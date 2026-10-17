@@ -41,6 +41,86 @@ export interface ToolExecutionOptions {
    * 由 agent 注入系统已知的候选(如最近 read_file 的 path/hash),
    * 让模型照抄而非凭长上下文记忆复述。仅在参数校验失败时使用。 */
   argumentErrorHint?: string;
+  /** 产生本次调用的那个 model turn 的归一化停止原因(见 ChatResult.finishReason)。
+   *  'length' 表示输出在 max_tokens 处被截断——此时 tool_call 参数必为残缺 JSON,
+   *  INVALID_JSON 诊断据此给出「分段续写」而非泛化的「JSON 不合法」。 */
+  finishReason?: string;
+}
+
+/** 长非法 JSON 回显时首尾各保留的字符数(尾部对判断截断最关键)。 */
+const INVALID_JSON_SNIPPET = 150;
+
+/** 按工具给出参数损坏后的可执行恢复路径。truncated=已确认输出被 token 上限截断。 */
+function invalidJsonRecovery(name: string, truncated: boolean): string {
+  if (truncated) {
+    if (name === 'write_file') {
+      return (
+        '恢复方法(不要用相同参数重试):\n' +
+        '1) write_file 只写入首块内容,再用 write_file(append=true, content=…) 分多次续写,每段保持短小;\n' +
+        '2) 若只是修改已有文件的局部,改用 edit_file(只发 old_string/new_string,不要整篇重发);\n' +
+        '3) 确需一次生成,调大 MAX_TOKENS 后再试。'
+      );
+    }
+    if (name === 'edit_file') {
+      return '恢复方法:参数在 token 上限处被截断。缩短 old_string(只保留唯一命中所需的最小上下文),或调大 MAX_TOKENS 后再试。';
+    }
+    return '恢复方法:参数在 token 上限处被截断。把本次调用拆成更小的多个调用,或调大 MAX_TOKENS 后再试。';
+  }
+  if (name === 'write_file' || name === 'edit_file') {
+    return (
+      '恢复方法:JSON 字符串值里的换行必须转义为 \\n、双引号转义为 \\"、反斜杠转义为 \\\\,不要在字符串中放裸换行。\n' +
+      '长内容优先 write_file 首块 + append=true 分段,或改用 edit_file 做局部替换。'
+    );
+  }
+  return '恢复方法:检查参数 JSON 的引号、反斜杠与换行转义后重试。';
+}
+
+/** 把 JSON.parse 的 SyntaxError 映射成可操作的中文死因。 */
+function classifyJsonSyntaxError(message: string, knownTruncated: boolean): string {
+  if (knownTruncated) {
+    return '死因:模型输出在 max_tokens 处被硬截断,tool_call 参数是不完整的 JSON(没有正常结尾)。';
+  }
+  if (/unterminated string/i.test(message)) {
+    return '死因:字符串未正常结束(Unterminated string)——参数可能在末尾被截断,或内容里的引号未转义。';
+  }
+  if (/bad control character|bad escaped/i.test(message)) {
+    return '死因:字符串值里出现了裸控制字符(最常见是裸换行)——JSON 字符串内换行必须写成 \\n。';
+  }
+  if (/unexpected token/i.test(message)) {
+    return '死因:出现非法字符(Unexpected token)——多为内容中的双引号/反斜杠没有转义,或参数被截断。';
+  }
+  if (/expected|end of (data|json)|unexpected end/i.test(message)) {
+    return '死因:JSON 提前结束或结构残缺——参数可能被截断。';
+  }
+  return `死因:${message}`;
+}
+
+/** argsRaw 的安全摘要:短则全量,长则只给长度+首尾片段,避免几万字符刷屏且被 TUI 二次截断。 */
+function summarizeRawArgs(argsRaw: string): string {
+  const len = argsRaw.length;
+  if (len <= INVALID_JSON_SNIPPET * 2 + 40) return argsRaw;
+  const head = argsRaw.slice(0, INVALID_JSON_SNIPPET);
+  const tail = argsRaw.slice(len - INVALID_JSON_SNIPPET);
+  return `${head}\n…[中间省略 ${len - INVALID_JSON_SNIPPET * 2} 字符]…\n${tail}`;
+}
+
+function invalidJsonOutcome(
+  name: string,
+  argsRaw: string,
+  parseError: unknown,
+  opts: ToolExecutionOptions | undefined,
+  startedAt: number,
+): ToolOutcome {
+  const syntaxMessage = parseError instanceof Error ? parseError.message : String(parseError);
+  const knownTruncated = opts?.finishReason === 'length';
+  const looksTruncated = /end of (data|json)|unexpected end/i.test(syntaxMessage);
+  const output =
+    `错误:工具 ${name} 的 arguments 不是合法 JSON(收到 ${argsRaw.length} 字符)。\n` +
+    `${classifyJsonSyntaxError(syntaxMessage, knownTruncated)}\n` +
+    `${invalidJsonRecovery(name, knownTruncated || looksTruncated)}\n` +
+    `解析器报错:${syntaxMessage}\n` +
+    `参数片段(首/尾):\n${summarizeRawArgs(argsRaw)}`;
+  return terminalOutcome('error', 'INVALID_JSON', output, startedAt);
 }
 
 /** Injectable execution services. Defaults preserve the process-global sandbox, rollback, and lock behavior. */
@@ -278,13 +358,10 @@ export class ToolRuntime {
     let parsed: unknown;
     try {
       parsed = argsRaw.trim() ? JSON.parse(argsRaw) : {};
-    } catch {
-      return terminalOutcome(
-        'error',
-        'INVALID_JSON',
-        t('toolError.invalidJson', { name, arguments: argsRaw }),
-        startedAt,
-      );
+    } catch (parseError) {
+      // 不再裸 catch:保留 SyntaxError 的具体死因(截断 vs 裸换行 vs 漏转义),
+      // 并结合 finish_reason=length 给出可执行恢复路径,替代旧的整段 argsRaw 刷屏。
+      return invalidJsonOutcome(name, argsRaw, parseError, opts, startedAt);
     }
 
     const validation = validateToolArguments(tool, parsed);

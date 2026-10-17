@@ -58,6 +58,7 @@ const LLM_ENV_KEYS = [
   'LLM_API_KEY',
   'LLM_MODEL',
   'CONTEXT_WINDOW_TOKENS',
+  'MAX_TOKENS',
   'ANTHROPIC_PROMPT_CACHE',
   'REASONING_EFFORT',
 ] as const;
@@ -603,7 +604,7 @@ ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 - Silent Execution: invoke tools directly without preamble. Output visible text ONLY for the final answer and critical mid-task findings. Strictly no step-by-step narration (no "let me…", "让我先…", "now checking…" between calls).
 - Go directly to a known path or symbol; use discovery tools only when the location is unknown.
 - Edit against a FRESH read: before editing, call read_file on the exact path and copy the exact target text. Never reconstruct old_string from a grep/summary/diff — those lose whitespace and indentation and cause edit failures.
-- Pick the right file tool: use edit_file for partial changes to an existing file (expected_hash is OPTIONAL in old_string mode, REQUIRED in line-range mode); use write_file only to create a file, to rewrite most of a file (replacing needs the latest read_file hash), or to append (append=true needs no read_file and no hash). Never write a throwaway script (tmp_patch*.cjs, fix_*.py, ...) to modify source files: scripts run outside ChangeSet tracking, so rollback and diff cannot see them.
+- Pick the right file tool: for an EXISTING file, DEFAULT to edit_file — one old_string for a single change, replacements[] for many separate changes in one atomic call, or a line range for a big block. Do NOT overwrite an existing file with write_file just to tweak parts of it (re-sending the whole file wastes tokens and its long JSON is truncation-prone). Use write_file only to create a new file, to append (append=true needs no read_file and no hash), or to rewrite essentially the WHOLE file (a full rewrite needs the latest read_file hash). expected_hash is OPTIONAL in edit_file old_string/replacements mode, REQUIRED in line-range mode. Never write a throwaway script (tmp_patch*.cjs, fix_*.py, ...) to modify source files: scripts run outside ChangeSet tracking, so rollback and diff cannot see them.
 - A read_file hash from before a compaction, session resume, edit conflict, or external change is STALE and will be rejected if you pass it. In edit_file old_string mode just omit expected_hash; otherwise re-read rather than reuse an old hash.
 - Emit multiple independent tool calls in ONE assistant message so they run concurrently — e.g. several read_file regions, a grep plus a glob, or several web_fetch calls. One lookup per message wastes a full model round-trip each time. Place parallel-safe calls consecutively; keep any call that depends on their results (e.g. an edit) for the next message.
 - Never batch a read with an edit that depends on it; do not repeat overlapping reads or unchanged failed calls.
@@ -707,7 +708,8 @@ export const config: Config = {
   model: llmKeysFromShell.includes('LLM_MODEL')
     ? process.env.LLM_MODEL || 'gpt-4o-mini'
     : (__activePreset?.model ?? process.env.LLM_MODEL ?? 'gpt-4o-mini'),
-  maxTokens: process.env.MAX_TOKENS ? Number(process.env.MAX_TOKENS) : undefined,
+  // 优先级:shell env > 激活预设(目录添加时按 limit.output 预填)> undefined=不下发吃后端默认。
+  maxTokens: process.env.MAX_TOKENS ? Number(process.env.MAX_TOKENS) : (__activePreset?.maxTokens ?? undefined),
   // 用 getter 而非 buildBasePrompt() 立即求值：对象字面量初始化期间 buildBasePrompt 会读取
   // config.model 等字段，直接调用会触发 TDZ。Getter 也让语言、persona 等运行时变化在下一轮生效。
   get systemPrompt(): string {
@@ -840,6 +842,8 @@ export function updateModelConfig(opts: {
   baseURL?: string;
   apiKey?: string;
   contextWindowTokens?: number;
+  /** 设为数字即生效;显式 null 清除(切到不带该值的预设),undefined 表示本次不动。 */
+  maxTokens?: number | null;
   anthropicPromptCache?: boolean;
   reasoningEffort?: ReasoningEffort;
 }): void {
@@ -865,6 +869,12 @@ export function updateModelConfig(opts: {
   if (opts.contextWindowTokens !== undefined) {
     config.contextWindowTokens = opts.contextWindowTokens;
     process.env.CONTEXT_WINDOW_TOKENS = String(opts.contextWindowTokens);
+  }
+  if (opts.maxTokens !== undefined) {
+    // null = 显式清除(切到无该值的预设);数字 = 设置。同步 env 保证本窗口立即按新值/不发该字段。
+    config.maxTokens = opts.maxTokens === null ? undefined : opts.maxTokens;
+    if (opts.maxTokens === null) delete process.env.MAX_TOKENS;
+    else process.env.MAX_TOKENS = String(opts.maxTokens);
   }
   if (opts.anthropicPromptCache !== undefined) {
     config.anthropicPromptCache = opts.anthropicPromptCache;

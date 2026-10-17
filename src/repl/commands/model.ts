@@ -42,6 +42,7 @@ function uniquePresetName(
   model: string,
   contextWindow: number,
   anthropicPromptCache: boolean,
+  maxTokens?: number,
 ): string | null {
   const existing = listPresets();
   const sameEntry = existing.find(
@@ -51,7 +52,8 @@ function uniquePresetName(
       p.apiKey === apiKey &&
       p.model === model &&
       p.contextWindow === contextWindow &&
-      p.anthropicPromptCache === anthropicPromptCache,
+      p.anthropicPromptCache === anthropicPromptCache &&
+      (p.maxTokens ?? undefined) === maxTokens,
   );
   if (sameEntry) return null;
   const sanitized =
@@ -93,6 +95,7 @@ export const modelCommands: CommandHandler[] = [
       contextWindow: number;
       anthropicPromptCache: boolean;
       reasoningEffort?: ReasoningEffort;
+      maxTokens?: number;
     }): void => {
       updateModelConfig({
         provider: target.provider,
@@ -100,6 +103,8 @@ export const modelCommands: CommandHandler[] = [
         baseURL: target.baseURL,
         apiKey: target.apiKey,
         contextWindowTokens: target.contextWindow,
+        // 预设带值用值;不带则显式清除(否则本窗口/配置文件里的旧 MAX_TOKENS 会一直盖过新预设)。
+        maxTokens: target.maxTokens ?? null,
         anthropicPromptCache: target.anthropicPromptCache,
         ...(target.reasoningEffort ? { reasoningEffort: target.reasoningEffort } : {}),
       });
@@ -109,6 +114,8 @@ export const modelCommands: CommandHandler[] = [
         LLM_API_KEY: target.apiKey,
         LLM_MODEL: target.model,
         CONTEXT_WINDOW_TOKENS: String(target.contextWindow),
+        // null = 从配置文件删除该键(写不下发=吃后端默认)。
+        MAX_TOKENS: target.maxTokens ? String(target.maxTokens) : null,
         ANTHROPIC_PROMPT_CACHE: target.anthropicPromptCache ? 'true' : 'false',
         ...(target.reasoningEffort ? { REASONING_EFFORT: target.reasoningEffort } : {}),
       });
@@ -222,6 +229,9 @@ export const modelCommands: CommandHandler[] = [
           (recognized ? '\n' : `${ui.dim}(当前模型未识别,参数不会下发)${ui.reset}\n`),
       );
       layout.contentWrite(`  ${ui.accent}窗口    ${ui.reset}  ${config.contextWindowTokens} tokens\n`);
+      layout.contentWrite(
+        `  ${ui.accent}输出上限${ui.reset} ${config.maxTokens ? `${config.maxTokens} tokens` : `${ui.dim}未设置(不下发,吃后端默认)${ui.reset}`}\n`,
+      );
       if (config.provider === 'anthropic') {
         layout.contentWrite(
           `  ${ui.accent}缓存    ${ui.reset}  Prompt Cache ${config.anthropicPromptCache ? 'on' : 'off'}\n`,
@@ -328,11 +338,14 @@ export const modelCommands: CommandHandler[] = [
     let apiKey: string;
     let model: string;
     let window: number;
+    // 单次输出上限;undefined = 不下发(吃后端默认)。quickApply 沿用当前值。
+    let maxTokens: number | undefined;
     if (quickApply) {
       baseURL = preset.baseURL;
       apiKey = config.apiKey;
       model = preset.model;
       window = preset.window;
+      maxTokens = config.maxTokens;
     } else {
       // baseURL
       {
@@ -409,6 +422,29 @@ export const modelCommands: CommandHandler[] = [
           window = Math.floor(n);
         }
       }
+
+      // maxTokens(可选):单次回复输出上限。回车采纳当前值;填 0/留空 = 不下发吃后端默认。
+      {
+        const res = await promptIntervention({
+          type: 'input',
+          title: 'MAX_TOKENS',
+          detail:
+            '单次回复最大输出 token(思考+正文+工具参数)。留空=不下发吃后端默认;' +
+            '部分兼容网关默认仅 4k/8k,长文件写入会被截断,建议填该模型官方最大输出(常见 8k-64k)。回车采纳当前值。',
+          seed: config.maxTokens ? String(config.maxTokens) : '',
+        });
+        if (res.action === 'cancelled') {
+          return next();
+        }
+        const v = (res.value ?? '').trim();
+        if (v) {
+          const n = Number(v);
+          if (Number.isFinite(n) && n > 0) maxTokens = Math.floor(n);
+          // 非法值不阻断:保持 undefined(不下发),与留空同义。
+        } else {
+          maxTokens = undefined;
+        }
+      }
     }
 
     // 3) 应用协议、连接与缓存配置；Anthropic 原生协议无需重建 OpenAI client，但统一刷新无害。
@@ -420,6 +456,8 @@ export const modelCommands: CommandHandler[] = [
       baseURL,
       apiKey,
       contextWindowTokens: window,
+      // 手填向导里留空 = undefined → 显式清除旧值,不下发 max_tokens。
+      maxTokens: maxTokens ?? null,
       anthropicPromptCache,
     });
     writeConfigKeys({
@@ -428,6 +466,7 @@ export const modelCommands: CommandHandler[] = [
       LLM_API_KEY: apiKey,
       LLM_MODEL: model,
       CONTEXT_WINDOW_TOKENS: String(window),
+      MAX_TOKENS: maxTokens ? String(maxTokens) : null,
       ANTHROPIC_PROMPT_CACHE: anthropicPromptCache ? 'true' : 'false',
     });
     reconfigureClient();
@@ -435,7 +474,16 @@ export const modelCommands: CommandHandler[] = [
     // 3.5) 自动存为命名预设；协议与缓存策略也是去重键的一部分。
     let savedName: string | null = null;
     try {
-      const finalName = uniquePresetName(model, provider, baseURL, apiKey, model, window, anthropicPromptCache);
+      const finalName = uniquePresetName(
+        model,
+        provider,
+        baseURL,
+        apiKey,
+        model,
+        window,
+        anthropicPromptCache,
+        maxTokens,
+      );
       if (finalName) {
         savePreset({
           name: finalName,
@@ -444,6 +492,7 @@ export const modelCommands: CommandHandler[] = [
           apiKey,
           model,
           contextWindow: window,
+          ...(maxTokens ? { maxTokens } : {}),
           anthropicPromptCache,
         });
         savedName = finalName;

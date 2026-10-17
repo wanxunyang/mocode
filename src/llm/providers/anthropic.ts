@@ -372,6 +372,8 @@ export async function anthropicChatOnce(
 
   let content = '';
   let usage: ChatUsage | undefined;
+  // message_delta 的 delta.stop_reason 给出停止原因;max_tokens 归一到 OpenAI 的 'length'。
+  let finishReason: string | undefined;
   const toolAcc = new Map<number, ToolCallRef>();
   const live = { cjk: 0, other: 0 };
   const reportLive = (): void => {
@@ -444,6 +446,12 @@ export async function anthropicChatOnce(
       continue;
     }
     if (type === 'message_delta') {
+      // stop_reason 位于 message_delta 的 delta 子对象(与 usage 同级事件)。
+      const d = event.delta as Record<string, unknown> | undefined;
+      if (typeof d?.stop_reason === 'string' && d.stop_reason) {
+        // Anthropic: end_turn / max_tokens / stop_sequence / tool_use / tool_use 等。
+        finishReason = d.stop_reason === 'max_tokens' ? 'length' : d.stop_reason;
+      }
       const raw = event.usage as Record<string, unknown> | undefined;
       if (raw) {
         const previous = usage ?? usageFromAnthropic({});
@@ -468,5 +476,5 @@ export async function anthropicChatOnce(
   const toolCalls = [...toolAcc.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, call]) => ({ ...call, arguments: call.arguments || '{}' }));
-  return { content: content || null, toolCalls, usage };
+  return { content: content || null, toolCalls, usage, finishReason };
 }

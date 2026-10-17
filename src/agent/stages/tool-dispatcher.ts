@@ -93,6 +93,7 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         delegation: request.delegation(),
         readDedup: request.readDedup,
         ...(hint ? { argumentErrorHint: hint } : {}),
+        ...(request.finishReason ? { finishReason: request.finishReason } : {}),
         ...(onLockAcquired ? { onLockAcquired } : {}),
       });
     const executionEvents = (index: number, parsed: Record<string, unknown> | null, outcome: ToolOutcome): void => {

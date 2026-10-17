@@ -41,7 +41,7 @@ import type { LegacyStageAdapters } from './stages/legacy-adapters.js';
 import { createLegacyModelRunner, createStagedModelRunner } from './stages/model-runner.js';
 import { createLegacyContextTrimmer, createStagedContextTrimmer } from './stages/context-trimmer.js';
 import { createLegacyToolDispatcher, createStagedToolDispatcher } from './stages/tool-dispatcher.js';
-import type { ToolDispatchEvent } from './stages/contracts.js';
+import type { ToolDiffContext, ToolDispatchEvent } from './stages/contracts.js';
 import {
   createLegacyCapabilityResolver,
   createLegacyTerminationPolicy,
@@ -349,6 +349,7 @@ export async function runAgentCoreLegacy(
                         event.parsed,
                         event.diff.preWriteOld,
                         event.diff.editStartLine,
+                        event.diff.multiHunks,
                       );
                       if (event.call.name === 'ask_human' && event.outcome.status === 'success') {
                         askHumanCountThisTurn += 1;
@@ -397,6 +398,7 @@ export async function runAgentCoreLegacy(
                   delegation: delegationForOrchestrator,
                   readDedup,
                   argumentErrorHint: (name) => argumentErrorHint(name, runtimeContextState),
+                  ...(result.finishReason ? { finishReason: result.finishReason } : {}),
                   onToolOutput: (call, chunk) => hooks.onToolOutput?.(call, chunk),
                   ...(opts.toolPolicy
                     ? {
@@ -489,6 +491,7 @@ export async function runAgentCoreLegacy(
                           allowedToolNames: currentAllowedToolNames(),
                           delegation: delegationForOrchestrator(),
                           readDedup,
+                          ...(result.finishReason ? { finishReason: result.finishReason } : {}),
                         },
                       );
                     }
@@ -705,6 +708,7 @@ export async function runAgentCoreLegacy(
                         allowedToolNames: currentAllowedToolNames(),
                         delegation: delegationForOrchestrator(),
                         readDedup,
+                        ...(result.finishReason ? { finishReason: result.finishReason } : {}),
                       }),
                     );
                     // 完成即发:usage/onToolOutcome/trace 在各 outcome 落地瞬间发出(1s 的
@@ -767,7 +771,7 @@ export async function runAgentCoreLegacy(
                     const entries: Array<{
                       tc: ToolCallRef;
                       parsed: Record<string, unknown> | null;
-                      diff: { preWriteOld: string | null; editStartLine: number };
+                      diff: ToolDiffContext;
                       denied?: ToolOutcome;
                     }> = [];
 
@@ -833,6 +837,7 @@ export async function runAgentCoreLegacy(
                               delegation: delegationForOrchestrator(),
                               readDedup,
                               ...(hint ? { argumentErrorHint: hint } : {}),
+                              ...(result.finishReason ? { finishReason: result.finishReason } : {}),
                               onLockAcquired: (lockedArgs) => {
                                 entry.diff = readDiffContext(entry.tc, lockedArgs, ctx.jailResolve);
                               },
@@ -854,6 +859,7 @@ export async function runAgentCoreLegacy(
                         entry.denied ? null : entry.parsed,
                         entry.diff.preWriteOld,
                         entry.diff.editStartLine,
+                        entry.diff.multiHunks,
                       );
                       pushToolResult(
                         history,
@@ -897,7 +903,7 @@ export async function runAgentCoreLegacy(
                     const entries: Array<{
                       tc: ToolCallRef;
                       parsed: Record<string, unknown> | null;
-                      diff: { preWriteOld: string | null; editStartLine: number };
+                      diff: ToolDiffContext;
                       denied?: ToolOutcome;
                     }> = [];
 
@@ -948,6 +954,7 @@ export async function runAgentCoreLegacy(
                         delegation: delegationForOrchestrator(),
                         readDedup,
                         ...(hint ? { argumentErrorHint: hint } : {}),
+                        ...(result.finishReason ? { finishReason: result.finishReason } : {}),
                         onLockAcquired: (lockedArgs) => {
                           entry.diff = readDiffContext(entry.tc, lockedArgs, ctx.jailResolve);
                         },
@@ -973,6 +980,7 @@ export async function runAgentCoreLegacy(
                         entry.denied ? null : entry.parsed,
                         entry.diff.preWriteOld,
                         entry.diff.editStartLine,
+                        entry.diff.multiHunks,
                       );
                       pushToolResult(
                         history,
@@ -1073,6 +1081,7 @@ export async function runAgentCoreLegacy(
                       delegation: delegationForOrchestrator(),
                       readDedup,
                       ...(serialHint ? { argumentErrorHint: serialHint } : {}),
+                      ...(result.finishReason ? { finishReason: result.finishReason } : {}),
                       onLockAcquired: (lockedArgs) => {
                         if (mutationParsed) diff = readDiffContext(tc, lockedArgs, ctx.jailResolve);
                       },
@@ -1082,7 +1091,14 @@ export async function runAgentCoreLegacy(
                     traceToolEnd(tc, i, outcome);
                     const output = outcome.output;
                     hooks.onToolDone?.();
-                    hooks.onToolResult?.(tc, output, mutationParsed, diff.preWriteOld, diff.editStartLine);
+                    hooks.onToolResult?.(
+                      tc,
+                      output,
+                      mutationParsed,
+                      diff.preWriteOld,
+                      diff.editStartLine,
+                      diff.multiHunks,
+                    );
                     if (tc.name === 'ask_human' && outcome.status === 'success') {
                       askHumanCountThisTurn += 1;
                       emitTrace(

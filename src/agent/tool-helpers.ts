@@ -11,6 +11,7 @@
 
 import { readFileSync } from 'node:fs';
 import type { ChatMessage, ToolCallRef } from '../llm/index.js';
+import type { ToolDiffContext, ToolDiffHunk } from './stages/contracts.js';
 import { defaultToolRuntime, type ToolOutcome, type ToolRuntime } from '../tools/registry.js';
 import { jailResolve } from '../sandbox/index.js';
 import { contextState, type ContextState } from '../session/compact.js';
@@ -139,42 +140,68 @@ export function unregisteredToolOutcome(name: string, toolRuntime: ToolRuntime):
 /** mutation 执行前读旧内容供 diff:write_file 取整文件旧内容(不存在→null=新建),
  * edit_file 取 old_string 起始行号(供 diff 显示真实文件行号)。读不到则 diff 退化为相对行号。
  * 非 mutation 或参数非法返 { preWriteOld: null, editStartLine: 1 }。失败不阻断。 */
+const toLf = (s: string): string => s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
 export function readDiffContext(
   tc: ToolCallRef,
   parsed: Record<string, unknown> | null,
   resolvePath: (path: string) => string = jailResolve,
-): { preWriteOld: string | null; editStartLine: number } {
-  if (!parsed) return { preWriteOld: null, editStartLine: 1 };
+): ToolDiffContext {
+  const empty: ToolDiffContext = { preWriteOld: null, editStartLine: 1 };
+  if (!parsed) return empty;
   const p = String(parsed.path ?? '');
-  if (!p) return { preWriteOld: null, editStartLine: 1 };
+  if (!p) return empty;
   if (tc.name === 'write_file') {
     try {
       // jailResolve:沙箱越界(../../、绝对外圈、软链出圈)抛错 → catch 兜底返 null,不泄露牢外内容(TOCTOU)
       return { preWriteOld: readFileSync(resolvePath(p), 'utf8'), editStartLine: 1 };
     } catch {
-      return { preWriteOld: null, editStartLine: 1 }; // 文件不存在(新建)、不可读 或 沙箱越界(不泄露)
+      return empty; // 文件不存在(新建)、不可读 或 沙箱越界(不泄露)
     }
   }
   if (tc.name === 'edit_file') {
     // 行尾归一化:LLM 生成的 old_string 用 LF(\n),但 Windows 文件可能是 CRLF(\r\n),
     // 不统一则 indexOf 必败、editStartLine 恒为 1。与 edit-file.ts 保持一致归一化为 LF。
-    const oldStr = String(parsed.old_string ?? '')
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n');
+    const replacements = Array.isArray(parsed.replacements) ? parsed.replacements : null;
     try {
       // jailResolve:同上,沙箱越界抛错 → catch 兜底,不泄露牢外内容
       const raw = readFileSync(resolvePath(p), 'utf8');
-      const data = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const data = toLf(raw);
+
+      // 多替换模式:在「编辑前」的原文上为每个 old_string 定位唯一命中的起始行,
+      // 供多 hunk diff 显示真实文件行号。任一项非唯一/找不到就不带 hunk(退回工具结果摘要),
+      // 真正的原子校验仍以 edit-file.ts execute 为准,这里只做展示、失败不阻断。
+      if (replacements) {
+        const hunks: ToolDiffHunk[] = [];
+        for (const item of replacements) {
+          if (!item || typeof item !== 'object') return empty;
+          const rec = item as Record<string, unknown>;
+          if (typeof rec.old_string !== 'string' || typeof rec.new_string !== 'string') return empty;
+          const oldStr = toLf(rec.old_string);
+          if (!oldStr) return empty;
+          const first = data.indexOf(oldStr);
+          if (first < 0 || data.indexOf(oldStr, first + oldStr.length) !== -1) return empty;
+          hunks.push({
+            oldStr: rec.old_string,
+            newStr: rec.new_string,
+            startLine: data.slice(0, first).split('\n').length,
+          });
+        }
+        if (hunks.length === 0) return empty;
+        return { preWriteOld: null, editStartLine: hunks[0].startLine, multiHunks: hunks };
+      }
+
+      const oldStr = toLf(String(parsed.old_string ?? ''));
       const idx = oldStr ? data.indexOf(oldStr) : -1;
       return {
         preWriteOld: null,
         editStartLine: idx >= 0 ? data.slice(0, idx).split('\n').length : 1,
       };
     } catch {
-      return { preWriteOld: null, editStartLine: 1 }; // 读不到:diff 退化为相对行号(含沙箱越界)
+      return empty; // 读不到:diff 退化为相对行号(含沙箱越界)
     }
   }
-  return { preWriteOld: null, editStartLine: 1 };
+  return empty;
 }
 
 /** 回灌 tool 结果到 history。

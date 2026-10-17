@@ -46,6 +46,32 @@ test('目录字段：类型正确才采纳', () => {
   assert.deepEqual(p.pricing, { input: 0.73, output: 3.19, cacheRead: 0.07 });
 });
 
+test('maxTokens：缺省为 undefined（不下发，吃后端默认）', () => {
+  const p = parsePreset(JSON.stringify(base));
+  assert.equal(p.maxTokens, undefined);
+});
+
+test('maxTokens：正整数被采纳', () => {
+  const p = parsePreset(JSON.stringify({ ...base, maxTokens: 32000 }));
+  assert.equal(p.maxTokens, 32000);
+});
+
+test('maxTokens：非整数向下取整', () => {
+  const p = parsePreset(JSON.stringify({ ...base, maxTokens: 8192.9 }));
+  assert.equal(p.maxTokens, 8192);
+});
+
+test('maxTokens：非法值（0/负/字符串）抛错，坏文件由 listPresets 跳过', () => {
+  for (const bad of [0, -1, '32000']) {
+    assert.throws(() => parsePreset(JSON.stringify({ ...base, maxTokens: bad })), /maxTokens/);
+  }
+});
+
+test('maxTokens：null 视为未设置（undefined），不抛错', () => {
+  const p = parsePreset(JSON.stringify({ ...base, maxTokens: null }));
+  assert.equal(p.maxTokens, undefined);
+});
+
 test('脏字段被忽略：类型错的条目不采纳，合法字段仍保留', () => {
   const p = parsePreset(
     JSON.stringify({

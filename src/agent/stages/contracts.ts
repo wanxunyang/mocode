@@ -130,9 +130,18 @@ export interface ToolDelegationSnapshot {
   readonly tools: OpenAI.Chat.Completions.ChatCompletionTool[];
 }
 
+/** edit_file 多替换模式的单个 diff hunk(在原文定位后的起始行 + 新旧文本)。 */
+export interface ToolDiffHunk {
+  readonly oldStr: string;
+  readonly newStr: string;
+  readonly startLine: number;
+}
+
 export interface ToolDiffContext {
   readonly preWriteOld: string | null;
   readonly editStartLine: number;
+  /** 仅 edit_file replacements[] 模式存在:每段替换各自一个 hunk;缺省走单段渲染。 */
+  readonly multiHunks?: readonly ToolDiffHunk[];
 }
 
 export interface ToolDispatchRequest {
@@ -146,6 +155,8 @@ export interface ToolDispatchRequest {
   /** 当前用户 turn 的重复读 scope;dispatcher 透传给工具执行选项。 */
   readonly readDedup: import('../../tools/read-dedup.js').ReadDedup;
   readonly argumentErrorHint: (name: string) => string | undefined;
+  /** 本 model turn 的归一化停止原因(见 ChatResult.finishReason);'length' 时透传给工具层做截断诊断。 */
+  readonly finishReason?: string;
   readonly expandToolGroups?: (groups: readonly unknown[], reason: string) => ToolPolicyExpansion;
   /** 子 agent 等编排工具的并发上限覆写；缺省回落到全局 config.subAgentConcurrency。 */
   readonly orchestrationConcurrency?: number;

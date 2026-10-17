@@ -26,6 +26,8 @@ export function applyPresetConfig(ctx: CommandContext, p: ModelPreset): void {
     baseURL: p.baseURL,
     apiKey: p.apiKey,
     contextWindowTokens: p.contextWindow,
+    // 预设带值用值;不带显式清除(否则旧 MAX_TOKENS 残留会盖过新预设)。
+    maxTokens: p.maxTokens ?? null,
     anthropicPromptCache: p.anthropicPromptCache,
     ...(p.reasoningEffort ? { reasoningEffort: p.reasoningEffort } : {}),
   });
@@ -35,6 +37,7 @@ export function applyPresetConfig(ctx: CommandContext, p: ModelPreset): void {
     LLM_API_KEY: p.apiKey,
     LLM_MODEL: p.model,
     CONTEXT_WINDOW_TOKENS: String(p.contextWindow),
+    MAX_TOKENS: p.maxTokens ? String(p.maxTokens) : null,
     ANTHROPIC_PROMPT_CACHE: p.anthropicPromptCache ? 'true' : 'false',
   });
   // 关键不变量：应用预设即激活——必须同步 .active 指针。否则重启时旧激活预设的优先级

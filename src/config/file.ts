@@ -25,11 +25,17 @@ export function readConfigFile(): Record<string, string> {
 
 /**
  * 读-合并-写:把 entries 覆盖进 ~/.mocode/config,保留文件里其它键。
- * mkdirSync 兜底(首跑无 ~/.mocode)。不吞 I/O 异常——向导路径让其抛(与历史行为一致);
- * UI 偏好路径用 `updateConfigKey`(自带 try/catch 静默)。
+ * 值为 null 表示从配置文件删除该键(用于切到「不带某可选值」的预设时清除残留,
+ * 否则旧值会一直盖过新预设)。mkdirSync 兜底(首跑无 ~/.mocode)。不吞 I/O 异常——
+ * 向导路径让其抛(与历史行为一致);UI 偏好路径用 `updateConfigKey`(自带 try/catch 静默)。
  */
-export function writeConfigKeys(entries: Record<string, string>): void {
-  const merged: Record<string, string> = { ...readConfigFile(), ...entries };
+export function writeConfigKeys(entries: Record<string, string | null>): void {
+  const existing = readConfigFile();
+  const merged: Record<string, string> = { ...existing };
+  for (const [k, v] of Object.entries(entries)) {
+    if (v === null) delete merged[k];
+    else merged[k] = v;
+  }
   const body = Object.entries(merged)
     .map(([k, v]) => `${k}=${v}`)
     .join('\n');

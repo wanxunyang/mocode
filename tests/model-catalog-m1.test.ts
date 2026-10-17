@@ -142,6 +142,16 @@ test('buildPreset: 字段映射；窗口缺失回落；Google 端点正确', () 
   const fb = buildPreset({ provider: p, model: { id: 'm' }, apiKey: 'k' });
   assert.equal(fb?.contextWindow, FALLBACK_CONTEXT_WINDOW);
 
+  // limit.output → maxTokens 自动填充(避免吃网关小默认导致长写入被截断);无 output 时不带该键。
+  const withOut = buildPreset({
+    provider: p,
+    model: { id: 'g', limit: { context: 200000, output: 8192 } },
+    apiKey: 'k',
+  });
+  assert.equal(withOut?.maxTokens, 8192);
+  const noOut = buildPreset({ provider: p, model: { id: 'g', limit: { context: 200000 } }, apiKey: 'k' });
+  assert.equal('maxTokens' in (noOut ?? {}), false);
+
   const ov = buildPreset({ provider: p, model: { id: 'm' }, apiKey: 'k', modelOverride: 'ep-123' });
   assert.equal(ov?.model, 'ep-123');
 

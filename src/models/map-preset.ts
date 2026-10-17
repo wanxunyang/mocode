@@ -82,6 +82,10 @@ export function buildPreset(input: BuildPresetInput) {
     typeof model.limit?.context === 'number' && model.limit.context > 0
       ? Math.floor(model.limit.context)
       : FALLBACK_CONTEXT_WINDOW;
+  // 单次输出上限:目录有 limit.output 就带上(避免吃网关小默认导致长 write_file 被截断);
+  // 目录缺失则留 undefined=不下发,绝不硬编码大值(超过模型真实上限会被后端 400 拒整请求)。
+  const maxOutput =
+    typeof model.limit?.output === 'number' && model.limit.output > 0 ? Math.floor(model.limit.output) : undefined;
 
   return {
     name: input.name ?? defaultPresetName(provider.id, model.id),
@@ -90,6 +94,7 @@ export function buildPreset(input: BuildPresetInput) {
     apiKey: input.apiKey,
     model: input.modelOverride ?? model.id,
     contextWindow,
+    ...(maxOutput ? { maxTokens: maxOutput } : {}),
     anthropicPromptCache: presetProvider === 'anthropic',
   };
 }

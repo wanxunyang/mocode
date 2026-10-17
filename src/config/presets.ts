@@ -63,6 +63,12 @@ export interface ModelPreset {
   apiKey: string;
   model: string;
   contextWindow: number;
+  /**
+   * 单次回复输出 token 上限(请求 max_tokens;思考+正文+工具参数共享)。
+   * 缺省/undefined = 不下发该字段,吃后端默认(部分兼容网关默认仅 4k/8k,长 write_file 会被截断)。
+   * 从模型目录添加时自动取 limit.output;旧预设缺字段照常解析。
+   */
+  maxTokens?: number;
   anthropicPromptCache: boolean;
   /** 思考强度(P3);绑模型保存,缺省 auto(不下发)。 */
   reasoningEffort?: ReasoningEffort;
@@ -121,6 +127,14 @@ export function parsePreset(raw: string): ModelPreset {
   if (typeof contextWindow !== 'number' || !Number.isFinite(contextWindow) || contextWindow <= 0) {
     throw new Error(`预设 ${name}: contextWindow 必须为正数`);
   }
+  // maxTokens 可选:缺省=不下发(吃后端默认);给了就必须是正整数。
+  let maxTokens: number | undefined;
+  if (obj.maxTokens !== undefined && obj.maxTokens !== null) {
+    if (typeof obj.maxTokens !== 'number' || !Number.isFinite(obj.maxTokens) || obj.maxTokens <= 0) {
+      throw new Error(`预设 ${name}: maxTokens 必须为正数`);
+    }
+    maxTokens = Math.floor(obj.maxTokens);
+  }
   const provider = normalizePresetProvider(obj.provider);
   const anthropicPromptCache = provider === 'anthropic' && obj.anthropicPromptCache !== false;
   // reasoningEffort 缺省 = auto;显式写了非法值按现有校验风格报错(坏文件由 listPresets 跳过)。
@@ -158,6 +172,7 @@ export function parsePreset(raw: string): ModelPreset {
     apiKey,
     model,
     contextWindow: Math.floor(contextWindow),
+    ...(maxTokens ? { maxTokens } : {}),
     anthropicPromptCache,
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...extra,

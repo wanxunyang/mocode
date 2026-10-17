@@ -7,7 +7,7 @@ import type { ChatMessage, ChatUsage, ToolCallRef } from '../llm/index.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
 import { summarizeToolCall, summarizeToolResult, truncateDisplay, fmtElapsed } from '../ui/render.js';
-import { renderFileChange } from '../ui/diff.js';
+import { renderFileChange, renderMultiFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
 import * as batch from '../ui/batch.js';
 import { config } from '../config/index.js';
@@ -174,6 +174,7 @@ function writeToolResult(
   preWriteOld: string | null,
   editStartLine: number,
   toolRuntime: AgentRuntimeContext['toolRuntime'],
+  multiHunks?: ReadonlyArray<{ oldStr: string; newStr: string; startLine: number }>,
 ): void {
   // 优先按 tool_call id 反查所属批（并行 / sub-agent 组时 currentBatchId 已不是它）。
   const batchId = batch.batchIdForCall(tc.id) ?? currentBatchId;
@@ -195,19 +196,57 @@ function writeToolResult(
   }
   let diff: string | null = null;
   if ((tc.name === 'edit_file' || tc.name === 'write_file') && parsed && !isToolErrorOutput(output)) {
-    const oldText = tc.name === 'edit_file' ? String(parsed.old_string ?? '') : preWriteOld;
-    const newText = String((tc.name === 'edit_file' ? parsed.new_string : parsed.content) ?? '');
-    diff = renderFileChange({
-      path: String(parsed.path ?? ''),
-      kind: tc.name === 'edit_file' ? 'edit' : 'write',
-      oldStr: tc.name === 'edit_file' ? String(parsed.old_string ?? '') : preWriteOld,
-      newStr: String((tc.name === 'edit_file' ? parsed.new_string : parsed.content) ?? ''),
-      startLine: tc.name === 'edit_file' ? editStartLine : 1,
-    });
+    const filePath = String(parsed.path ?? '');
+    const isEdit = tc.name === 'edit_file';
+    // 多替换模式:每个 old/new 段一个 hunk,渲染成一个 Update 块内的多个 hunk。
+    const multi = isEdit && multiHunks && multiHunks.length > 0 ? multiHunks : null;
+    const oldText = isEdit
+      ? multi
+        ? multi.map((h) => h.oldStr).join('\n')
+        : String(parsed.old_string ?? '')
+      : preWriteOld;
+    const newText = isEdit
+      ? multi
+        ? multi.map((h) => h.newStr).join('\n')
+        : String(parsed.new_string ?? '')
+      : String(parsed.content ?? '');
+    if (multi) {
+      diff = renderMultiFileChange({
+        path: filePath,
+        hunks: multi.map((h) => ({ oldStr: h.oldStr, newStr: h.newStr, startLine: h.startLine })),
+      });
+      // 渲染器对超大 diff 返回 null(无法做 LCS)时退回工具结果摘要。
+      if (!diff)
+        diff = renderFileChange({
+          path: filePath,
+          kind: 'edit',
+          oldStr: oldText,
+          newStr: newText,
+          startLine: editStartLine,
+        });
+    } else {
+      diff = renderFileChange({
+        path: filePath,
+        kind: isEdit ? 'edit' : 'write',
+        oldStr: isEdit ? String(parsed.old_string ?? '') : preWriteOld,
+        newStr: String((isEdit ? parsed.new_string : parsed.content) ?? ''),
+        startLine: isEdit ? editStartLine : 1,
+      });
+    }
+    // 回合改动统计:多替换按各 hunk 独立计算后累加(拼接不相邻段再 diff 会把跨段行误算成增删)。
+    const delta = multi
+      ? multi.reduce(
+          (acc, h) => {
+            const d = lineDelta(h.oldStr, h.newStr);
+            return { added: acc.added + d.added, removed: acc.removed + d.removed };
+          },
+          { added: 0, removed: 0 },
+        )
+      : lineDelta(oldText, newText);
     turnFileChanges.push({
-      path: String(parsed.path ?? ''),
+      path: filePath,
       kind: tc.name === 'write_file' && preWriteOld == null ? 'A' : 'M',
-      ...lineDelta(oldText, newText),
+      ...delta,
     });
   }
   const preview = diff ? '' : summarizeToolResult(tc.name, output);
@@ -431,8 +470,8 @@ export async function runAgent(
     onToolStart: (name) => spinner.start(t('agent.executing', { tool: name })),
     onToolOutput: (tc, chunk) => batch.recordOutput(tc.id, chunk, layout),
     onToolDone: () => spinner.stop(),
-    onToolResult: (tc, output, parsed, preWriteOld, editStartLine) =>
-      writeToolResult(tc, output, parsed, preWriteOld, editStartLine, runtime.context.toolRuntime),
+    onToolResult: (tc, output, parsed, preWriteOld, editStartLine, multiHunks) =>
+      writeToolResult(tc, output, parsed, preWriteOld, editStartLine, runtime.context.toolRuntime, multiHunks),
     onToolBatchEnd: () => {
       // 一次工具轮次结束不再切 UI batch；下一轮若仍无正文，继续复用 currentBatchId。
     },

@@ -657,6 +657,12 @@ export interface ChatResult {
   content: string | null;
   toolCalls: ToolCallRef[];
   usage?: ChatUsage;
+  /**
+   * 归一化的停止原因,各 provider 映射到 OpenAI 词表:
+   * 'length' = 输出撞 max_tokens 被截断(tool_call 参数此时通常是残缺 JSON)。
+   * 缺失表示后端未提供或正常结束。供工具层把「INVALID_JSON」升级成可执行的截断恢复指引。
+   */
+  finishReason?: string;
 }
 
 export interface ChatRetryInfo {
@@ -931,6 +937,10 @@ async function chatOnce(
   let consumedAny = false;
   const thinkFilter = new ThinkTagFilter();
   let usage: ChatUsage | undefined;
+  // finish_reason 只在最后一个带 choice 的 chunk 出现;取最后一次非空值。
+  // 'length' 意味着输出在 max_tokens 处被硬切断——长 tool_call 参数此时必为残缺 JSON,
+  // 工具层据此把笼统的 INVALID_JSON 升级成截断恢复指引。
+  let finishReason: string | undefined;
   const toolAcc = new Map<number, { id?: string; name: string; arguments: string }>();
 
   const emitVisible = (text: string): void => {
@@ -975,6 +985,7 @@ async function chatOnce(
           function?: { name?: string; arguments?: string };
         }>;
       };
+      finish_reason?: string | null;
     }>;
   }>) {
     // usage:末尾 chunk(choices 可能为空)在 include_usage 时携带;先读再 continue。
@@ -994,7 +1005,11 @@ async function chatOnce(
         cachedTokens: usage.cachedTokens,
       });
     }
-    const delta = chunk.choices?.[0]?.delta;
+    const choice0 = chunk.choices?.[0];
+    const delta = choice0?.delta;
+    if (typeof choice0?.finish_reason === 'string' && choice0.finish_reason) {
+      finishReason = choice0.finish_reason;
+    }
     if (!delta) continue; // 末尾 usage-only chunk 等无 delta
 
     if (delta.content) {
@@ -1045,6 +1060,7 @@ async function chatOnce(
     content: consumedAny ? visibleContent : null,
     toolCalls,
     usage,
+    finishReason,
   };
 }
 
