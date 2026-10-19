@@ -28,6 +28,13 @@ export type { ReasoningEffort } from './reasoning.js';
 /** 单次请求级覆盖(沿 transport → provider 透传)。 */
 export interface LlmRequestOverrides {
   reasoningEffort?: ReasoningEffort;
+  /**
+   * 本次调用的总尝试上限(含首次),夹到 [1, RETRY_MAX_ATTEMPTS],缺省 10。
+   * 后台 fire-and-forget 任务(记忆反思)应传小值:交互式 10 次指数退避累计约 60s
+   * (0+1+2+4+8+16+30s),恰好打满后台任务自带的 AbortSignal 超时——超时落在退避
+   * sleep 里时只会报一个含义不明的 'AbortError: This operation was aborted'。
+   */
+  maxAttempts?: number;
 }
 
 export type {
@@ -759,7 +766,12 @@ async function chatWithRuntime(
   };
   // 流中途故障用独立计数,避免与 HTTP 层共享 10 次预算(理由见 STREAM_RETRY_MAX_ATTEMPTS)。
   let streamRetries = 0;
-  for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
+  // 后台任务可收紧总尝试数(见 LlmRequestOverrides.maxAttempts);非法值回落到默认。
+  const maxAttempts =
+    overrides?.maxAttempts && Number.isFinite(overrides.maxAttempts)
+      ? Math.min(RETRY_MAX_ATTEMPTS, Math.max(1, Math.floor(overrides.maxAttempts)))
+      : RETRY_MAX_ATTEMPTS;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (signal?.aborted) {
       throw new DOMException('This operation was aborted', 'AbortError');
     }
@@ -785,7 +797,7 @@ async function chatWithRuntime(
         isStreamInterruptedError(err) &&
         !producedOutput &&
         streamRetries < STREAM_RETRY_MAX_ATTEMPTS;
-      if (attempt >= RETRY_MAX_ATTEMPTS || (!isRetryableError(err, signal) && !streamRetryable)) {
+      if (attempt >= maxAttempts || (!isRetryableError(err, signal) && !streamRetryable)) {
         throw err;
       }
       if (streamRetryable) streamRetries++;

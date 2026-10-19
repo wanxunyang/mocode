@@ -72,6 +72,22 @@ export const RELATION_ALIASES: Record<string, string> = {
 const PROJECT_SET = new Set<string>(PROJECT_RELATIONS);
 const PROFILE_SET = new Set<string>(PROFILE_RELATIONS);
 
+/**
+ * 画像轨的**单值关系**(Wikidata single-value 约束的最小落地):同一主语在该关系上
+ * 只允许一条 active 边——写入新值(哪怕 dst 不同,如换城市/换工作)时,同 src+relation
+ * 的旧边一律时序失效。多值关系(prefers / has_hobby / constraint…)不在此列。
+ */
+const PROFILE_SINGLE_VALUE = new Set<string>([
+  'named',
+  'has_role',
+  'works_at',
+  'located_in',
+  'speaks',
+  'verbosity',
+  'communication_style',
+  'current_goal',
+]);
+
 /** 关系名归一:lowercase + 空白转下划线 + 别名映射。 */
 export function normalizeRelation(raw: string): string {
   const base = String(raw ?? '')
@@ -85,6 +101,11 @@ export function normalizeRelation(raw: string): string {
 export function isKnownRelation(relation: string, scope: MemoryScope): boolean {
   const r = normalizeRelation(relation);
   return scope === 'global' ? PROFILE_SET.has(r) : PROJECT_SET.has(r);
+}
+
+/** 画像关系是否单值(换值即作废旧边;先归一再判定)。 */
+export function isSingleValueProfile(relation: string): boolean {
+  return PROFILE_SINGLE_VALUE.has(normalizeRelation(relation));
 }
 
 /** 注入反思提示词的紧凑词表(按 scope)。 */

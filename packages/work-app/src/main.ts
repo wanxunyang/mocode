@@ -475,12 +475,12 @@ function restartAllAgents(): void {
 
 /* ── 行为开关（设置浮层用，语义对齐 mocode 终端的斜杠命令） ──
  * 读取顺序：process.env（host 启动时的快照来源）→ ~/.mocode/config → mocode 默认值。
- * mocode 默认：AUTO_COMPACT 开（!== 'false'），其余显式 'true' 才开（=== 'true'）。 */
+ * mocode 默认：AUTO_COMPACT / AUTO_REFLECT 开（!== 'false'），其余显式 'true' 才开（=== 'true'）。 */
 const SETTING_TOGGLES = {
   autoCompact: { env: 'AUTO_COMPACT', on: (v: string | undefined) => v !== 'false' },
   memory: { env: 'MEMORY_ENABLED', on: (v: string | undefined) => v === 'true' },
   subAgent: { env: 'MOCODE_SUBAGENT_ENABLED', on: (v: string | undefined) => v === 'true' },
-  autoReflect: { env: 'AUTO_REFLECT', on: (v: string | undefined) => v === 'true' },
+  autoReflect: { env: 'AUTO_REFLECT', on: (v: string | undefined) => v !== 'false' },
   // MCP 总开关（core 的 readMcpServers 认 MOCODE_MCP_ENABLED=false）。默认开（!== 'false'）。
   mcp: { env: 'MOCODE_MCP_ENABLED', on: (v: string | undefined) => v !== 'false' },
 } as const;

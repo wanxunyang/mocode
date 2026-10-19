@@ -280,6 +280,31 @@ export function updateEntry(id: string, patch: UpdatePatch): UpdateResult {
   return { ok: true };
 }
 
+/**
+ * 把旧条目标记为被新条目取代(status=superseded + supersededBy 链,不删除可审计)。
+ * 与 forgetEntry 的区别:这是 belief-revision 语义——"旧信念被新事实取代",
+ * 而不是"过期清理"。pinned 条目同样允许被取代(取代链是显式修正,不是自动遗忘)。
+ */
+export function supersedeEntry(
+  oldId: string,
+  newId: string,
+  reason?: string,
+): { ok: true } | { ok: false; notFound: true } {
+  const all = loadAll();
+  const oldE = all.find((x) => x.id === oldId);
+  if (!oldE) return { ok: false, notFound: true };
+  oldE.status = 'superseded';
+  oldE.supersededBy = newId;
+  oldE.updatedAt = nowIso();
+  if (reason) oldE.lastUpdateReason = reason;
+  const p = pathForScope(oldE.scope);
+  writeAtomic(
+    p,
+    all.filter((x) => x.scope === oldE.scope),
+  );
+  return { ok: true };
+}
+
 export type ForgetResult = { ok: true; mode: string } | { ok: false; notFound: true } | { ok: false; pinned: true };
 
 /** 归档(默认,可复活)/ 硬删;pinned 拒删。 */

@@ -7,6 +7,7 @@ export {
   buildMemoryIndexSection,
   loadAll,
   gcMemories,
+  supersedeEntry,
   type MemoryEntry,
   type MemoryIndexItem,
   type MemoryType,
@@ -26,15 +27,34 @@ export {
   ensurePrimaryPerson,
   mergeEntities,
   canonicalizePrimaryPerson,
+  invalidateEdge,
+  promoteEdge,
+  voteEdge,
+  invalidateProfileEdges,
+  migrateLegacyProfileProvenance,
+  __resetLegacyMigrationForTests,
   PRIMARY_PERSON_ID,
   type GraphEntity,
   type GraphEdge,
+  type EdgeProvenance,
+  type EdgeVote,
+  type EdgeVoteResult,
   type TripleInput,
   type AddTripleResult,
   type CanonicalizeReport,
 } from './graph.js';
 
-export { buildAboutYouSection, initPersona, __resetPersonaInitForTests, ABOUT_YOU_MAX_CHARS } from './persona.js';
+export {
+  buildAboutYouSection,
+  initPersona,
+  isInternalizedEdge,
+  listProfileCandidates,
+  listInternalizedProfile,
+  inspectPrimaryProfile,
+  __resetPersonaInitForTests,
+  ABOUT_YOU_MAX_CHARS,
+  type ProfileCandidate,
+} from './persona.js';
 
 export { buildProjectGraphHint, GRAPH_HINT_MAX_CHARS } from './recall.js';
 

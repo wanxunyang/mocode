@@ -16,6 +16,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { MAX_GRAPH_EDGES, MAX_GRAPH_ENTITIES } from '../tools/constants.js';
 import type { MemoryScope } from './store.js';
+import { isSingleValueProfile, isKnownRelation } from './relation-vocab.js';
+
+/** 边的溯源类型:谁让这条事实成立(可信度的来源先验)。 */
+export type EdgeProvenance = 'user_said' | 'user_confirmed' | 'tool_observed' | 'reflection';
 
 export interface GraphEntity {
   id: string;
@@ -42,6 +46,17 @@ export interface GraphEdge {
   invalidAt: string | null; // 被新边取代时置时间戳(时序失效,不删除)
   sourceEntry: string | null; // 源 memory 条目 id(可溯源)
   scope: MemoryScope;
+  /**
+   * 溯源(M2 信念分级):用户亲述/用户确认 > 工具观测 > 反思推断。
+   * 缺省=历史遗留边或工具直写;画像遗留边由 migrateLegacyProfileProvenance 一次性补 user_said。
+   */
+  prov?: EdgeProvenance;
+  /** 初始置信 0..1(来源先验,如 reflection=0.4、user_said=0.9、user_confirmed=1)。 */
+  confidence?: number;
+  /** 环境证据计数;β 后验 (confirmed+1)/(confirmed+contradicted+2) 决定内化升级。 */
+  evidence?: { confirmed: number; contradicted: number };
+  /** 失效原因(单值换值 / 用户纠正 / 手动撤销),仅审计用。 */
+  invalidReason?: string;
 }
 
 interface GraphFile {
@@ -232,6 +247,10 @@ export interface TripleInput {
   fact?: string;
   sourceEntry?: string | null;
   scope?: MemoryScope;
+  /** 溯源(M2);画像边必带,缺省视为工具直写(无置信分级)。 */
+  prov?: EdgeProvenance;
+  /** 初始置信(来源先验,如反思画像 0.4、用户亲述 0.9)。 */
+  confidence?: number;
 }
 
 export type AddTripleResult =
@@ -240,9 +259,11 @@ export type AddTripleResult =
 
 /**
  * 写一条三元组。src/dst 自动 upsert 为实体。
- * 冲突策略:同 scope 内已有 active 边同(src,dst,relation):
- *  - fact 相同 → 幂等跳过(duplicate);
- *  - fact 不同 → 旧边 invalidAt=now(时序失效),新边入库。
+ * 冲突策略:
+ *  - 画像单值关系(global,如 located_in/works_at):同 src+relation 的**所有** active 旧边
+ *    一律 invalidAt=now——即便 dst 不同(换城市/换工作),不允许新旧值并存;
+ *  - 其余关系:同(src,dst,relation)已有 active 边,fact 相同 → 幂等跳过(duplicate),
+ *    fact 不同 → 旧边时序失效,新边入库。
  * 容量保护:边超限先清已失效边;仍超 → 拒绝。
  */
 export function addTriple(input: TripleInput): AddTripleResult {
@@ -261,12 +282,25 @@ export function addTriple(input: TripleInput): AddTripleResult {
 
   const g = loadScopeGraph(scope);
   const fact = (input.fact ?? '').trim();
-  const clash = g.edges.find((e) => !e.invalidAt && e.src === s.id && e.dst === d.id && e.relation === relation);
-  if (clash) {
-    if (!fact || clash.fact === fact) {
-      return { ok: true, edgeId: clash.id, superseded: 0, duplicate: true };
-    }
-    clash.invalidAt = nowIso(); // 时序失效,保留可追溯
+  const singleValue = scope === 'global' && isSingleValueProfile(relation);
+
+  // 单值关系:先圈定同 src+relation 的全部 active 旧边(换 dst 也失效)。
+  const sameKey: GraphEdge[] = [];
+  for (const e of g.edges) {
+    if (e.invalidAt || e.src !== s.id || e.relation !== relation) continue;
+    if (singleValue || e.dst === d.id) sameKey.push(e);
+  }
+  // 完全等价(src+relation+dst 全等且 fact 相同/空)→ 幂等跳过。
+  const exact = sameKey.find((e) => e.dst === d.id && (!fact || e.fact === fact));
+  if (exact) {
+    return { ok: true, edgeId: exact.id, superseded: 0, duplicate: true };
+  }
+  let superseded = 0;
+  const ts = nowIso();
+  for (const e of sameKey) {
+    e.invalidAt = ts;
+    e.invalidReason = singleValue ? 'single-value-replaced' : 'fact-changed';
+    superseded++;
   }
 
   // 容量保护:先清失效边
@@ -282,14 +316,139 @@ export function addTriple(input: TripleInput): AddTripleResult {
     dst: d.id,
     relation,
     fact,
-    validAt: nowIso(),
+    validAt: ts,
     invalidAt: null,
     sourceEntry: input.sourceEntry ?? null,
     scope,
   };
+  if (input.prov) edge.prov = input.prov;
+  if (typeof input.confidence === 'number' && Number.isFinite(input.confidence)) {
+    edge.confidence = Math.min(1, Math.max(0, input.confidence));
+  }
   g.edges.push(edge);
   writeGraphForScope(scope, g);
-  return { ok: true, edgeId: edge.id, superseded: clash ? 1 : 0 };
+  return { ok: true, edgeId: edge.id, superseded };
+}
+
+// ── 信念修正:撤销 / 晋升 / 遗留迁移(M2/M3)────────────────────────────────
+export type EdgeMutationResult = { ok: true } | { ok: false; reason: string };
+
+/** 按时序失效一条边(不删除,可审计);edge id 或 (src,relation,dst 候选) 定位。 */
+export function invalidateEdge(edgeId: string, reason: string = 'manual'): EdgeMutationResult {
+  const id = edgeId.trim();
+  if (!id) return { ok: false, reason: 'missing edge id' };
+  for (const scope of ['global', 'project'] as const) {
+    const g = loadScopeGraph(scope);
+    const e = g.edges.find((x) => x.id === id && !x.invalidAt);
+    if (e) {
+      e.invalidAt = nowIso();
+      e.invalidReason = reason;
+      writeGraphForScope(scope, g);
+      return { ok: true };
+    }
+  }
+  return { ok: false, reason: 'not-found' };
+}
+
+/**
+ * 用户确认一条画像边:补 prov=user_confirmed / confidence=1,立即获得 L2 内化资格。
+ * 仅对 person-primary 出发的画像边生效(/profile confirm 的落地点)。
+ */
+export function promoteEdge(edgeId: string): EdgeMutationResult {
+  const id = edgeId.trim();
+  if (!id) return { ok: false, reason: 'missing edge id' };
+  const scope: MemoryScope = 'global';
+  const g = loadScopeGraph(scope);
+  const e = g.edges.find((x) => x.id === id);
+  if (!e) return { ok: false, reason: 'not-found' };
+  if (e.src !== PRIMARY_PERSON_ID) return { ok: false, reason: 'not-a-profile-edge' };
+  e.prov = 'user_confirmed';
+  e.confidence = 1;
+  // 显式确认是用户主权动作,优先级高于自动行为证据:清零相悖计数(否则一条被强反证
+  // 自动降级的边,用户 /memory confirm 翻案后仍会被 persona 的强反证否决挡在门外)。
+  e.evidence = { confirmed: (e.evidence?.confirmed ?? 0) + 1, contradicted: 0 };
+  if (e.invalidAt) {
+    e.invalidAt = null; // 确认一条被误失效的边=复活
+    e.invalidReason = undefined;
+  }
+  writeGraphForScope(scope, g);
+  return { ok: true };
+}
+
+/** 环境证据投票方向:本轮对话行为与该信念一致(confirm)或相悖(contradict)。 */
+export type EdgeVote = 'confirm' | 'contradict';
+
+export interface EdgeVoteResult {
+  ok: boolean;
+  reason?: string;
+  confirmed?: number;
+  contradicted?: number;
+  /** 投票后的 β 后验 (confirmed+1)/(confirmed+contradicted+2)。 */
+  posterior?: number;
+}
+
+/**
+ * 环境证据累计(反思 evidence 桶的落地点):对一条 active 画像边加一张确认/反对票。
+ * 与 promoteEdge 的本质区别——**不碰 prov/confidence**:这里只做可涨可跌、可逆的纯证据
+ * 计数,能否内化交给 persona.isInternalizedEdge 按 β 后验统一判定。因此:
+ *  - 反思候选可经多次行为印证自动转正(无需用户手敲 /memory confirm);
+ *  - 已内化边被多轮行为矛盾后自动退回候选(不硬删,用户仍可 promoteEdge 翻案)。
+ * 只对 person-primary 出发的 global 画像边开放;project triples 不参与画像分级。
+ */
+export function voteEdge(edgeId: string, vote: EdgeVote): EdgeVoteResult {
+  const id = edgeId.trim();
+  if (!id) return { ok: false, reason: 'missing edge id' };
+  if (vote !== 'confirm' && vote !== 'contradict') return { ok: false, reason: 'bad-vote' };
+  const scope: MemoryScope = 'global';
+  const g = loadScopeGraph(scope);
+  const e = g.edges.find((x) => x.id === id);
+  if (!e) return { ok: false, reason: 'not-found' };
+  if (e.invalidAt) return { ok: false, reason: 'edge-invalid' };
+  if (e.src !== PRIMARY_PERSON_ID) return { ok: false, reason: 'not-a-profile-edge' };
+  const prev = e.evidence ?? { confirmed: 0, contradicted: 0 };
+  const next =
+    vote === 'confirm'
+      ? { confirmed: prev.confirmed + 1, contradicted: prev.contradicted }
+      : { confirmed: prev.confirmed, contradicted: prev.contradicted + 1 };
+  e.evidence = next;
+  writeGraphForScope(scope, g);
+  return {
+    ok: true,
+    confirmed: next.confirmed,
+    contradicted: next.contradicted,
+    posterior: (next.confirmed + 1) / (next.confirmed + next.contradicted + 2),
+  };
+}
+
+/**
+ * 失效 person-primary 在某个画像关系上的 active 边(自然语言纠正的落地点:
+ * "别再当我在 X 了" → invalidateProfileEdges('located_in'))。多值关系只按 dst 过滤。
+ * 返回失效条数。
+ */
+export function invalidateProfileEdges(relation: string, dst?: string): number {
+  const rel = relation.trim().toLowerCase().replace(/\s+/g, '_');
+  if (!rel) return 0;
+  const scope: MemoryScope = 'global';
+  const g = loadScopeGraph(scope);
+  const dstWant = dst?.trim().toLowerCase();
+  let n = 0;
+  const ts = nowIso();
+  for (const e of g.edges) {
+    if (e.invalidAt || e.src !== PRIMARY_PERSON_ID || e.relation !== rel) continue;
+    if (dstWant) {
+      const target = g.entities.find((x) => x.id === e.dst);
+      const names = [e.dst, target?.name ?? '', ...(target?.aliases ?? [])]
+        .map((s) => s.trim().toLowerCase())
+        .filter((s) => s.length > 0);
+      const hit = names.some((s) => s.includes(dstWant) || dstWant.includes(s));
+      if (!hit) continue;
+    }
+    e.invalidAt = ts;
+    e.invalidReason = 'user-correction';
+    n++;
+  }
+  if (n > 0) writeGraphForScope(scope, g);
+  return n;
 }
 
 // ── 查询 ────────────────────────────────────────────────────────────────
@@ -781,4 +940,41 @@ export function canonicalizePrimaryPerson(): CanonicalizeReport {
     }
   }
   return { primary: PRIMARY_PERSON_ID, displayName, merged, dedupedEdges: deduped };
+}
+
+// ── 遗留画像边溯源迁移(M2)─────────────────────────────────────────────────
+//
+// 引入 prov/confidence 之前,所有画像边都"挂上 person-primary 即无条件常驻",
+// 反思单次推断与用户亲述同权。升级后新反思边带 prov='reflection'(0.4,不内化);
+// 而升级前落库的边没有 prov——它们大多来自用户亲口陈述或人工添加,一次性保守补成
+// user_said(0.9,可内化),避免收紧 About you 门槛后真实画像整体消失。
+// 幂等:已有 prov 的边不动;进程内只跑一次(initPersona 守卫)。
+
+let legacyMigrationDone = false;
+
+export interface LegacyProfileMigration {
+  migrated: number;
+}
+
+export function migrateLegacyProfileProvenance(force: boolean = false): LegacyProfileMigration {
+  if (legacyMigrationDone && !force) return { migrated: 0 };
+  legacyMigrationDone = true;
+  const scope: MemoryScope = 'global';
+  const g = loadScopeGraph(scope);
+  let migrated = 0;
+  for (const e of g.edges) {
+    if (e.prov || e.invalidAt) continue;
+    if (e.src !== PRIMARY_PERSON_ID) continue;
+    if (!isKnownRelation(e.relation, 'global')) continue; // 只提升词表内画像关系
+    e.prov = 'user_said';
+    e.confidence = 0.9;
+    migrated++;
+  }
+  if (migrated > 0) writeGraphForScope(scope, g);
+  return { migrated };
+}
+
+/** 测试专用:重置遗留迁移的进程内守卫。 */
+export function __resetLegacyMigrationForTests(): void {
+  legacyMigrationDone = false;
 }

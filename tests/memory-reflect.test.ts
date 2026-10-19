@@ -108,3 +108,42 @@ test(
     assert.match(r.rawParseFailure ?? '', /content=null/);
   }),
 );
+
+test(
+  'runReflection: 后台重试预算收紧到 3 次——后端持续失败不再打满 60s 超时',
+  isolated(async () => {
+    // 回归:默认交互式预算 10 次、退避累计 ≈61s,恰好打满反思 60s 超时,状态栏只剩
+    // 含义不明的 AbortError。连接类错误首次重试零等待,3 次预算应在毫秒级耗尽。
+    let calls = 0;
+    __setChatCreateImpl(async () => {
+      calls++;
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+      });
+    });
+    const startedAt = Date.now();
+    const r = await runReflection('user: hi');
+    assert.equal(calls, 3, '反思只允许 1 次初始 + 2 次重试');
+    assert.ok(Date.now() - startedAt < 5_000, '远小于 60s 超时');
+    assert.ok(r.error, '持续失败仍以错误收尾,但不再是裸 AbortError');
+    assert.doesNotMatch(r.error ?? '', /AbortError|This operation was aborted/);
+  }),
+);
+
+test(
+  'runReflection: 外部 signal 中断 → 归类为可读的反思超时,而非 AbortError 文案',
+  isolated(async () => {
+    __setChatCreateImpl((_body, opts) => {
+      // 模拟一个挂住的请求:signal 到期时底层 fetch 抛裸 AbortError。
+      return new Promise((_resolve, reject) => {
+        opts?.signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('This operation was aborted', 'AbortError')),
+          { once: true },
+        );
+      });
+    });
+    const r = await runReflection('user: hi', AbortSignal.timeout(50));
+    assert.match(r.error ?? '', /^反思超时/, `应归类为反思超时,实际: ${r.error}`);
+  }),
+);

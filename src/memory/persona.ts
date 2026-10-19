@@ -11,10 +11,49 @@
 import {
   loadScopeGraph,
   canonicalizePrimaryPerson,
+  migrateLegacyProfileProvenance,
   PRIMARY_PERSON_ID,
   type GraphEdge,
   type GraphEntity,
 } from './graph.js';
+
+/** β(1,1) 后验:P(信念为真 | 证据)。confirmed/contradicted 来自反思对对话行为的计票。 */
+export function edgePosterior(e: GraphEdge): number {
+  const c = e.evidence?.confirmed ?? 0;
+  const x = e.evidence?.contradicted ?? 0;
+  return (c + 1) / (c + x + 2);
+}
+
+/** 行为印证自动转正:连续 ≥3 次确认且零反驳(β=0.8)——"多次默认、从不反对"。 */
+const BEHAVIOR_PROMOTE_MIN_CONFIRMS = 3;
+/** 强反证自动降级:≥3 次行为相悖且后验 <0.4,连 user_said 也退回候选(用户 promote 可翻案)。 */
+const STRONG_VETO_MIN_CONTRADICTS = 3;
+const STRONG_VETO_POSTERIOR = 0.4;
+
+/**
+ * L2 内化判定:只有"被验证过的"画像边才配常驻每轮 system prompt。
+ *  - 强反证否决优先:≥3 次行为相悖且后验 <0.4 → 一律退回候选(即使用户亲述过;
+ *    显式纠正应走 corrections 桶,这里只处理"用下来发现不对"的弱信号累积);
+ *  - prov=user_said / user_confirmed:用户亲述或确认(迁移的旧边保守视作亲述);
+ *  - confidence ≥ 0.85:显式高置信;
+ *  - β 后验 ≥ 0.85 且至少 1 次环境确认;
+ *  - 或连续 ≥3 次行为印证、零反驳(反思候选的自动转正通道,无需手敲 confirm)。
+ * 反思单次推断(prov=reflection,0.4)不达标 → 只作候选,不进 About you。
+ */
+export function isInternalizedEdge(e: GraphEdge): boolean {
+  const x = e.evidence?.contradicted ?? 0;
+  if (x >= STRONG_VETO_MIN_CONTRADICTS && edgePosterior(e) < STRONG_VETO_POSTERIOR) return false;
+  if (e.prov === 'user_said' || e.prov === 'user_confirmed') return true;
+  if (typeof e.confidence === 'number' && e.confidence >= 0.85) return true;
+  const c = e.evidence?.confirmed ?? 0;
+  if (c >= 1) {
+    const posterior = edgePosterior(e);
+    if (posterior >= 0.85) return true;
+    // 纯行为通道:多次印证 + 零反驳。任何一次相悖都留在候选,等用户显式确认。
+    if (c >= BEHAVIOR_PROMOTE_MIN_CONFIRMS && x === 0) return true;
+  }
+  return false;
+}
 
 /** About you 段硬预算(字符):只放高等级画像,超了按置信/顺序截断。 */
 export const ABOUT_YOU_MAX_CHARS = 800;
@@ -50,7 +89,9 @@ interface FactLine {
 }
 
 /**
- * 渲染全局 L2 画像段。无 person-primary / 无 active 画像边 → 空串(零注入)。
+ * 渲染全局 L2 画像段。无 person-primary / 无**达内化门槛**的 active 画像边 → 空串。
+ * 内化门槛见 isInternalizedEdge:反思推断(0.4)不常驻,用户亲述/确认/高置信,
+ * 或多次行为印证零反驳(≥3 confirm)才在;强反证(≥3 contradict 且后验<0.4)会降回候选。
  * 优先用边上的中文 fact 原文;没有 fact 时用「关系标签 + 目标实体名」。
  * 同名去重;has_hobby 合并为一行;整体截断到 ABOUT_YOU_MAX_CHARS。
  */
@@ -61,7 +102,9 @@ export function buildAboutYouSection(memoryEnabled: boolean = true): string {
   if (!me) return '';
   const byId = new Map(g.entities.map((e) => [e.id, e]));
 
-  const outgoing = g.edges.filter((e) => !e.invalidAt && e.src === PRIMARY_PERSON_ID && e.dst !== PRIMARY_PERSON_ID);
+  const outgoing = g.edges.filter(
+    (e) => !e.invalidAt && e.src === PRIMARY_PERSON_ID && e.dst !== PRIMARY_PERSON_ID && isInternalizedEdge(e),
+  );
   if (outgoing.length === 0) return '';
 
   const hobbies: string[] = [];
@@ -130,6 +173,50 @@ export function inspectPrimaryProfile(): { me: GraphEntity | null; edges: GraphE
   return { me, edges };
 }
 
+export interface ProfileCandidate {
+  edge: GraphEdge;
+  text: string;
+  relation: string;
+}
+
+/** L2 内化画像列表(当前会渲染进 About you 的边),与 listProfileCandidates 对称。 */
+export function listInternalizedProfile(limit: number = 20): ProfileCandidate[] {
+  const g = loadScopeGraph('global');
+  const byId = new Map(g.entities.map((e) => [e.id, e]));
+  const out: ProfileCandidate[] = [];
+  for (const e of g.edges) {
+    if (e.invalidAt || e.src !== PRIMARY_PERSON_ID || e.dst === PRIMARY_PERSON_ID) continue;
+    if (!isInternalizedEdge(e)) continue;
+    const dst = byId.get(e.dst);
+    const target = dst ? displayName(dst.name) : displayName(e.dst);
+    const text = e.fact?.trim() || `${RELATION_LABEL[e.relation] ?? e.relation.replace(/_/g, ' ')}:${target}`;
+    out.push({ edge: e, text, relation: e.relation });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/**
+ * L1 候选画像:挂在 person-primary 上、active、但**未达内化门槛**的边
+ * (典型:反思单次推断 prov=reflection/0.4)。供 /profile 展示"待确认"列表,
+ * 用户确认后 promoteEdge 升 L2。不含已渲染在 About you 里的内化边。
+ */
+export function listProfileCandidates(limit: number = 10): ProfileCandidate[] {
+  const g = loadScopeGraph('global');
+  const byId = new Map(g.entities.map((e) => [e.id, e]));
+  const out: ProfileCandidate[] = [];
+  for (const e of g.edges) {
+    if (e.invalidAt || e.src !== PRIMARY_PERSON_ID || e.dst === PRIMARY_PERSON_ID) continue;
+    if (isInternalizedEdge(e)) continue;
+    const dst = byId.get(e.dst);
+    const target = dst ? displayName(dst.name) : displayName(e.dst);
+    const text = e.fact?.trim() || `${RELATION_LABEL[e.relation] ?? e.relation.replace(/_/g, ' ')}:${target}`;
+    out.push({ edge: e, text, relation: e.relation });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 let personaInitialized = false;
 
 /**
@@ -145,6 +232,12 @@ export function initPersona(memoryEnabled: boolean = true): void {
     canonicalizePrimaryPerson();
   } catch {
     // 归一只是增强(图谱损坏/IO 异常),绝不能拖垮 REPL 启动。
+  }
+  try {
+    // M2:升级前落库的画像边没有 prov,保守补 user_said(详见函数注释)。
+    migrateLegacyProfileProvenance();
+  } catch {
+    // 迁移同样只是增强。
   }
 }
 

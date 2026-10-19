@@ -145,7 +145,11 @@ export interface Config {
   /** Tool-result clearing 开关:冷区可重取工具(read_file/grep/glob/web_*)结果
    *  在低压阶段替换为 tombstone。默认 true;MOCODE_TOOL_CLEARING=false 关闭。 */
   toolClearing: boolean;
-  /** 后台反思 pass 总开关。关掉则只靠手动 /reflect + 机会主义 memory_update。 */
+  /**
+   * 后台反思 pass 总开关(默认开)。反思是记忆自动写入与信念修正的唯一自动通道,
+   * 默认关闭会让整个记忆子系统只靠模型手动 memory_save;节流由 reflect.ts 负责
+   * (每会话上限次数 + 实质转录闸门),AUTO_REFLECT=false 显式关闭。
+   */
   autoReflect: boolean;
   /**
    * Memory Index / 后台反思开关。`true` 时把紧凑索引注入 prompt；`false` 时不注入。
@@ -738,7 +742,7 @@ export const config: Config = {
   contextBudget: process.env.MOCODE_BUDGET_SCHEDULER !== 'false',
   lowPressureRatio: Math.min(0.95, Math.max(0.1, Number(process.env.MOCODE_LOW_PRESSURE_RATIO) || 0.6)),
   toolClearing: process.env.MOCODE_TOOL_CLEARING !== 'false',
-  autoReflect: process.env.AUTO_REFLECT === 'true',
+  autoReflect: process.env.AUTO_REFLECT !== 'false',
   memoryEnabled: process.env.MEMORY_ENABLED === 'true',
   reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
   maxSteps: Number(process.env.MAX_STEPS) || 1000,

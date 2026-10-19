@@ -66,7 +66,7 @@ test(
 
 test(
   'canonicalizePrimaryPerson: 合并碎片、重连属性边、保留角色值实体',
-  isolated(() => {
+  isolated(async () => {
     // 复刻真实库的碎裂结构。
     addTriple({ src: 'mocode user', relation: 'named', dst: '万', scope: 'global' });
     addTriple({
@@ -88,11 +88,14 @@ test(
     assert.ok(!report.merged.includes('user-role-ai-app-dev'), '角色值实体不并入 person');
     assert.equal(report.displayName, '万');
 
-    // located_in 边应重连到 person-primary。
+    // located_in 边应重连到 person-primary。重连的是无 prov 历史边,需经遗留迁移
+    // (保守视作用户亲述)才达 L2 内化门槛。
+    const { migrateLegacyProfileProvenance } = await import('../src/memory/graph.js');
+    migrateLegacyProfileProvenance(true);
     const section = buildAboutYouSection(true);
     assert.match(section, /## About you/);
     assert.match(section, /用户:万/);
-    assert.match(section, /hangzhou|杭州/, 'located_in 边重连后仍可渲染');
+    assert.match(section, /hangzhou|杭州/, 'located_in 边重连+迁移后仍可渲染');
     assert.ok(section.length <= 800, `画像段超预算:${section.length}`);
   }),
 );
@@ -118,8 +121,10 @@ test(
 );
 
 test(
-  '反思 profile 桶:全局画像三元组挂 person-primary 并进入 About you',
+  '反思 profile 桶:推断画像先作 L1 候选(不进 About you),用户确认后才 L2 内化',
   isolated(async () => {
+    const { listProfileCandidates } = await import('../src/memory/persona.js');
+    const { promoteEdge } = await import('../src/memory/graph.js');
     const plan = JSON.stringify({
       saves: [],
       updates: [],
@@ -131,9 +136,53 @@ test(
     const r = await runReflection('user: 我在杭州');
     assert.equal(r.error, undefined);
     assert.equal(r.profiles, 1);
+    // 反思推断 = 低置信候选,不允许零确认常驻。
+    assert.equal(buildAboutYouSection(true), '');
+    const cands = listProfileCandidates();
+    assert.equal(cands.length, 1);
+    assert.match(cands[0]!.text, /杭州/);
+    // 用户确认 → promoteEdge → 进入 About you。
+    promoteEdge(cands[0]!.edge.id);
+    const section = buildAboutYouSection(true);
+    assert.match(section, /## About you/);
+    assert.match(section, /杭州/);
+  }),
+);
+
+test(
+  '反思 corrections 桶:用户纠正直接以 user_confirmed 内化,并时序失效旧值',
+  isolated(async () => {
+    const { addTriple, ensurePrimaryPerson, loadScopeGraph } = await import('../src/memory/graph.js');
+    ensurePrimaryPerson('万');
+    const old = addTriple({
+      src: 'person-primary',
+      relation: 'located_in',
+      dst: 'beijing',
+      fact: '用户常住北京',
+      scope: 'global',
+      prov: 'user_said',
+      confidence: 0.9,
+    });
+    assert.ok(old.ok);
+    assert.match(buildAboutYouSection(true), /北京/, '前置:旧值已内化');
+
+    const plan = JSON.stringify({
+      saves: [],
+      updates: [],
+      forgets: [],
+      triples: [],
+      corrections: [{ relation: 'located_in', dst: 'hangzhou', fact: '用户已搬到杭州', old: 'beijing' }],
+    });
+    __setChatCreateImpl(async () => sse(plan));
+    const r = await runReflection('user: 不对,我已经搬到杭州了');
+    assert.equal(r.corrections, 1);
+    assert.equal(r.profileChanged, true);
     const section = buildAboutYouSection(true);
     assert.match(section, /杭州/);
-    // 项目 triples 不应被写到 global(本次没有 triples);画像边 src 必须是 person。
-    assert.match(section, /## About you/);
+    assert.doesNotMatch(section, /北京/, '旧值必须被时序失效');
+    // 旧边保留但已失效(可审计),不是硬删。
+    const g = loadScopeGraph('global');
+    const oldEdge = g.edges.find((e) => e.id === old.edgeId);
+    assert.ok(oldEdge?.invalidAt, '旧边应被时序失效而非删除');
   }),
 );

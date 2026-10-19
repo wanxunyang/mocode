@@ -38,6 +38,7 @@ import {
   buildAboutYouSection,
   buildProjectGraphHint,
   initPersona,
+  gcMemories,
   kickoffReflection,
   drainMemoryBackground,
   getLastReflectResult,
@@ -260,6 +261,15 @@ export async function startRepl(
   // 启动期一次性身份归一(幂等,best-effort):把全局图里的用户指称碎片并入
   // person-primary,随后 About you 段才能渲染出完整画像。
   initPersona(isMemoryEnabled());
+  // 遗忘 GC 与反思解耦:启动时跑一次(30 天衰减/90 天清除/封顶),
+  // 不再依赖 AUTO_REFLECT 是否开启。静默容错——GC 失败绝不拖垮 REPL 启动。
+  if (isMemoryEnabled()) {
+    try {
+      gcMemories();
+    } catch {
+      // best-effort
+    }
+  }
   // 开关现读:运行时 /memory_switch 重建 history[0] 时,About you 与 Memory Index 同步显隐。
   const buildSystemMessage = (planMode: boolean): string => {
     const memoryOn = isMemoryEnabled();

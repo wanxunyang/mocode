@@ -23,7 +23,7 @@ import './tools/builtins/index.js';
 import { initializeAllMcp, getMcpTools, closeAllMcp } from './mcp/index.js';
 import { config, buildBasePrompt, isMemoryEnabled } from './config/index.js';
 import { effectiveSystemPrompt } from './skills/index.js';
-import { buildMemoryIndexSection } from './memory/store.js';
+import { buildMemoryIndexSection, gcMemories } from './memory/store.js';
 import { buildAboutYouSection, initPersona } from './memory/persona.js';
 import { buildProjectGraphHint } from './memory/recall.js';
 import { defaultRuntime, Runtime } from './runtime/index.js';
@@ -202,6 +202,14 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   // 系统提示：Bot 岗位角色在前，基础约定在后；白名单存在时补一句工具边界。
   const memoryOn = isMemoryEnabled();
   initPersona(memoryOn);
+  // 遗忘 GC 与反思解耦:headless 启动也跑一次(best-effort,不拖垮一次性执行)。
+  if (memoryOn) {
+    try {
+      gcMemories();
+    } catch {
+      // best-effort
+    }
+  }
   const baseConventions =
     buildBasePrompt(sessionId) +
     buildAboutYouSection(memoryOn) +

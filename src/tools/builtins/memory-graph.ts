@@ -1,5 +1,5 @@
 import type { Tool } from '../types.js';
-import { addTriple, graphStats, neighborsOf, pathBetween } from '../../memory/graph.js';
+import { addTriple, graphStats, neighborsOf, pathBetween, type EdgeProvenance } from '../../memory/graph.js';
 import { formatRecallStats } from '../../memory/recall-stats.js';
 
 // ---------- memory_graph ----------
@@ -51,6 +51,12 @@ export const memoryGraphTool: Tool = {
         type: 'string',
         enum: ['project', 'global'],
         description: 'add: which graph file to write, default project',
+      },
+      prov: {
+        type: 'string',
+        enum: ['user_said', 'user_confirmed', 'tool_observed', 'reflection'],
+        description:
+          'add: provenance for belief grading. Global profile facts the user stated directly → user_said (internalized); reflection-only guesses → reflection (0.4, not internalized until confirmed).',
       },
     },
     required: ['action'],
@@ -104,12 +110,16 @@ export const memoryGraphTool: Tool = {
       const relation = String(args.relation ?? '').trim();
       const dst = String(args.dst ?? '').trim();
       if (!src || !relation || !dst) return '错误:add 需要 src、relation、dst。';
+      const prov = (['user_said', 'user_confirmed', 'tool_observed', 'reflection'] as const).find(
+        (p) => args.prov === p,
+      ) as EdgeProvenance | undefined;
       const r = addTriple({
         src,
         relation,
         dst,
         fact: typeof args.fact === 'string' ? args.fact : undefined,
         scope: args.scope === 'global' ? 'global' : 'project',
+        prov,
       });
       if (!r.ok) return `错误:三元组未写入 (${r.reason})。`;
       if (r.duplicate) return `已存在相同三元组 (${r.edgeId}),幂等跳过。`;

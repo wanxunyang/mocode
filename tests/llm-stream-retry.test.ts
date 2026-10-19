@@ -476,3 +476,35 @@ test('unexpected EOF:零产出自动重试,第二次成功', async () => {
     __setChatCreateImpl(null);
   }
 });
+
+test('maxAttempts 覆盖:后台任务可把默认 10 次尝试收紧到 3 次', async () => {
+  // 回归:记忆反思用交互式 10 次退避(累计 ≈61s)会打满自身 60s 超时,最后只剩
+  // 含义不明的 AbortError;后台调用经 overrides.maxAttempts 收紧预算。
+  let createCalls = 0;
+  __setChatCreateImpl(async () => {
+    createCalls++;
+    throw connectionError(dnsCause());
+  });
+  try {
+    await assert.rejects(() => chat(messages, {}, undefined, undefined, { maxAttempts: 3 }));
+    assert.equal(createCalls, 3, '预算 3 = 1 次初始 + 2 次重试,不再退到第 10 次');
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('maxAttempts: 1 时一次失败即抛,不重试不等待;非法值回落默认', async () => {
+  let createCalls = 0;
+  __setChatCreateImpl(async () => {
+    createCalls++;
+    throw connectionError(dnsCause());
+  });
+  const startedAt = Date.now();
+  try {
+    await assert.rejects(() => chat(messages, {}, undefined, undefined, { maxAttempts: 1 }));
+    assert.equal(createCalls, 1);
+    assert.ok(Date.now() - startedAt < 300, '无重试退避');
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
