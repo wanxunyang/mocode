@@ -88,6 +88,9 @@ const emitter = stdin as unknown as KeypressEmitter;
 // ── 运行态交互已移到 ./running-input.ts ──
 // ── pendingPrefill / pendingTimer / pendingAttachments 保留在此(awaitPendingRecall / echoInput 用)
 let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user 输入(下轮 INPUT 态消费)
+// 排队队列里遇到斜杠命令时暂停自动消费:命令不静默自动跑,先填回输入框等用户确认;
+// 确认前队列里后面的消息也不得抢先发送,待该输入框轮次结束再恢复逐条自动发送。
+let queuedHold = false;
 
 // ── pending send 撤回窗口(用户按 Enter 后、agent 真发请求前)──
 // 500ms 内 Ctrl+C / Esc → 整条用户气泡从内容区擦掉 + 原行 prefilled 回输入框(可改可再发);
@@ -788,12 +791,11 @@ export async function startRepl(
     // 运行态 Ctrl+G 打开的输入面板可能在 agent 结束时仍开着:等它关闭再进 INPUT 态,
     // 否则面板与 promptWithSlashMenu 两个 keypress 监听抢键;面板确认的内容随后经 getRunningInput 预填。
     await waitForRunningComposer();
-    // 消息预加载:上一轮运行中用户按 Enter 排了队(consumeQueuedTurn),agent 一结束就自动发送,
-    // 跳过 INPUT 态输入框与撤回窗口(入队那一刻即已确认)。非空才自动发;排队时正在打的 typeahead
-    // 草稿经 pendingPrefill 保住,留到下一轮输入框。
-    const queued = consumeQueuedTurn();
+    // 消息预加载:上一轮运行中用户按 Enter 排了队(consumeQueuedTurn,支持多条 FIFO),agent 一结束就
+    // 逐条自动发送,跳过 INPUT 态输入框与撤回窗口(入队那一刻即已确认)。queuedHold=上一条是被拦的斜杠
+    // 命令、仍在输入框等确认,此时不消费队列(后面的消息不得抢先),等该输入框轮次结束再恢复。
+    const queued = queuedHold ? null : consumeQueuedTurn();
     const autoSend = !!queued && queued.text.trim().length > 0;
-    if (queued) layout.setQueuedTurn(undefined); // chip 已被消费(或为空丢弃),从状态行撤下
     if (autoSend && queued) {
       // 排队时仍在输入框草稿里的字(typeahead)不能丢:回填为下一轮预填。
       if (getRunningInput().trim()) pendingPrefill = [getRunningInput()];
@@ -840,6 +842,7 @@ export async function startRepl(
       }
       pendingPrefill = null; // 预填已消费,清空
       clearRunningInput(); // 预填已消费,清空(下轮运行态从空开始)
+      queuedHold = false; // 被拦的排队斜杠命令已在输入框处理完,恢复队列自动消费
     }
 
     let joined = input.join('\n');
@@ -849,6 +852,7 @@ export async function startRepl(
     // (否则排队 /clear、/exit、/rollback 会在用户没看着时触发),改为填回输入框由用户显式确认。
     if (autoSend && isCommandShape(line.split(/\s+/)[0] ?? '')) {
       pendingPrefill = input;
+      queuedHold = true; // 暂停消费队列,等该命令在输入框被确认/处理完,后面的排队消息才继续
       layout.contentWrite(`${ui.dim}  ↳ ${t('repl.queuedCommandHeld')}${ui.reset}\n`);
       continue;
     }

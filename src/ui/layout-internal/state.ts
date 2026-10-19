@@ -112,10 +112,12 @@ export const state = {
    *  composeModelLine 在 RUNNING 态把它画成 chip 放 context 进度条左侧;
    *  不主动触发重画——RUNNING 态 turnTimer 80ms 心跳重画自然取最新值。 */
   liveUsage: undefined as TokenUsage | undefined,
-  /** 运行态已排队、当前任务结束后自动发送的下一条消息(纯文本摘要,无=undefined)。 */
+  /** 运行态已排队消息:队首(第一条/下一条待自动发送)纯文本预览,无=undefined。 */
   queuedText: undefined as string | undefined,
-  /** 排队消息入队时的模式,用于在 chip 上标注 Plan/Auto。 */
+  /** 队首排队消息入队时的模式,用于在 chip 上标注 Plan/Auto。 */
   queuedMode: undefined as string | undefined,
+  /** 排队剩余条数(>=1);1 = 单条不显示计数,>1 在 chip 上显示「×N」。 */
+  queuedCount: 1,
   statusText: '',
   spinnerFrame: undefined as string | undefined,
   turnStart: null as number | null, // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
