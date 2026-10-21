@@ -3,6 +3,7 @@ import { stdin } from 'node:process';
 import * as layout from '../ui/layout.js';
 import * as mouse from '../ui/mouse.js';
 import { promptComposer } from '../ui/composer.js';
+import { ensurePasteDetector, pasteState } from '../ui/prompt-internal/paste.js';
 import { appendCurrentSessionRuntimeEvent } from '../session/index.js';
 import { getAgentMode, type AgentMode } from '../agent/mode.js';
 
@@ -33,6 +34,8 @@ export interface QueuedTurn {
 let queuedTurns: QueuedTurn[] = [];
 /** 运行态打开的输入面板(Ctrl+G);非 null = 面板仍开着。主循环进 INPUT 态前须等它关闭,否则两个 keypress 监听抢键。 */
 let composerPending: Promise<void> | null = null;
+/** 粘贴多行时 \r\n 合一:刚吃了 \r,尾随的 \n 需吞掉(与 INPUT 态编辑器一致)。 */
+let pasteJustSawCR = false;
 
 /** 获取运行中输入缓冲(agent 结束后预填下一轮 INPUT 态)。 */
 export function getRunningInput(): string {
@@ -87,6 +90,13 @@ export function waitForRunningComposer(): Promise<void> {
 /** 单行回显:换行折为空格(等长替换,光标索引不变),防多行内容撑破底栏输入行。 */
 function paint(): void {
   layout.paintRunningInput(runningInput.replace(/[\r\n]/g, ' '), runningCursor, runningPlaceholder);
+}
+
+/** 在光标处插入文本(打字/粘贴),推进光标并重绘;换行保留在缓冲里(回显折空格),作为同一条内容。 */
+function insertRunningText(text: string): void {
+  runningInput = runningInput.slice(0, runningCursor) + text + runningInput.slice(runningCursor);
+  runningCursor += text.length;
+  paint();
 }
 
 /**
@@ -161,6 +171,26 @@ function onRunningKey(_str: string, key?: Key): void {
     }
     return;
   }
+  // 粘贴中(块级/时间窗检测,与 INPUT 态编辑器共用 pasteState):整段累积进 typeahead 缓冲,
+  // 换行作为多行文本插入而非触发 Enter 入队——否则粘贴一段含上百行的日志会被拆成上百条排队消息。
+  // \r\n 合一成单个 \n(尾随 \n 吞掉);可打印字符在光标处插入。粘贴结束(50ms 静默)后用户按 Enter 才整条入队。
+  if (pasteState.pasting) {
+    const s = key.sequence ?? '';
+    const isReturn = key.name === 'return' || key.name === 'enter';
+    if (s === '\n' && pasteJustSawCR) {
+      pasteJustSawCR = false;
+      return;
+    }
+    if (isReturn || s === '\r' || s === '\n') {
+      pasteJustSawCR = s === '\r';
+      insertRunningText('\n');
+      return;
+    }
+    pasteJustSawCR = false;
+    if (s && s >= ' ' && s !== '\uFEFF' && !key.ctrl && !key.meta) insertRunningText(s);
+    return;
+  }
+  pasteJustSawCR = false;
   // Ctrl+G:打开输入面板(与 INPUT 态一致;确认只填回 typeahead 缓冲,agent 结束后预填,不发送)
   if (key.ctrl && key.name === 'g') {
     if (!composerPending) {
@@ -236,9 +266,7 @@ function onRunningKey(_str: string, key?: Key): void {
   }
   // 可打印字符(>= 空格,非 ctrl/meta)→ 光标处插入 + 非 dim 回显(与空闲态一致)
   if (s && s >= ' ' && !key.ctrl && !key.meta) {
-    runningInput = runningInput.slice(0, runningCursor) + s + runningInput.slice(runningCursor);
-    runningCursor += s.length;
-    paint();
+    insertRunningText(s);
   }
 }
 
@@ -255,6 +283,14 @@ export function startRunningListener(placeholder: string): AbortSignal {
   runningPlaceholder = placeholder;
   runningInput = '';
   runningCursor = 0;
+  pasteJustSawCR = false;
+  // 粘贴检测(块级/时间窗)是 INPUT 态编辑器同款、全局幂等:运行态也装上,使多行/大段粘贴
+  // 在 onRunningKey 的 pasting 分支整段进 typeahead,而不是被换行拆成多条排队消息。
+  ensurePasteDetector();
+  if (pasteState.pasteTimer) clearTimeout(pasteState.pasteTimer);
+  pasteState.pasting = false;
+  pasteState.pasteParts = [];
+  pasteState.onPasteEnd = null; // 运行态直接实时累积进 runningInput,不用编辑器的落 chip 回调
   emitKeypressEvents(stdin); // 幂等:首轮 prompt 已永久挂解析器,这里防御性再调
   try {
     stdin.setRawMode(true);
