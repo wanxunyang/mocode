@@ -18,6 +18,8 @@
  * 主题(theme.ts)只用单参数 SGR 码,故 curSgr 状态机简单:遇 \x1B[0m / \x1B[m 清空,其余累加。
  * 上限 20000 行防无限增长(超限丢头部,批量 trim)。
  */
+import type { RenderedCodeBlock } from './markdown.js';
+
 const MAX_ROWS = 20000;
 
 let rows: string[] = [];
@@ -30,6 +32,8 @@ interface ReflowSegment {
   start: number;
   rowCount: number;
   source: string;
+  /** 段内代码块定位(相对行号 + 复制按钮列 + 原文),随每次 setLines/reflow 重算,供鼠标命中复制。 */
+  codeBlocks?: RenderedCodeBlock[];
 }
 
 export interface ReflowChange {
@@ -197,7 +201,7 @@ export function beginSegment(): void {
  * 行须各自自洽(行内 SGR 自带、行末 reset)——不经 feedChar/feedSgr,直接入 rows,
  * 故 setLines 后 hasCurrent=false(snapshot 只返 rows;续写位由 layout 跟踪)。
  */
-export function setLines(lines: string[], source?: string): void {
+export function setLines(lines: string[], source?: string, codeBlocks?: RenderedCodeBlock[]): void {
   if (segMark) {
     rows.length = segMark.rowIdx;
   }
@@ -210,6 +214,7 @@ export function setLines(lines: string[], source?: string): void {
       segment.start = segMark.rowIdx;
       segment.rowCount = lines.length;
       if (source !== undefined) segment.source = source;
+      segment.codeBlocks = codeBlocks;
     }
   }
   trimRows();
@@ -225,7 +230,10 @@ export function setLines(lines: string[], source?: string): void {
  * 每个 change 的 start 都是应用前面 change 后的当前绝对行坐标，调用方可据此逐段修正
  * batch/选区等物理行索引。普通 contentWrite 行仍保持原物理行语义，不参与重排。
  */
-export function reflowMarkdown(cols: number, render: (source: string, cols: number) => string[]): ReflowChange[] {
+export function reflowMarkdown(
+  cols: number,
+  render: (source: string, cols: number) => string[] | { lines: string[]; codeBlocks: RenderedCodeBlock[] },
+): ReflowChange[] {
   const width = Math.max(1, Math.floor(cols));
   const changes: ReflowChange[] = [];
   for (const segment of [...reflowSegments].sort((a, b) => a.start - b.start)) {
@@ -233,7 +241,9 @@ export function reflowMarkdown(cols: number, render: (source: string, cols: numb
     const start = Math.max(0, Math.min(rows.length, segment.start));
     const oldCount = Math.max(0, Math.min(segment.rowCount, rows.length - start));
     const oldLines = rows.slice(start, start + oldCount);
-    const next = render(segment.source, width);
+    const rendered = render(segment.source, width);
+    const next = Array.isArray(rendered) ? rendered : rendered.lines;
+    segment.codeBlocks = Array.isArray(rendered) ? [] : rendered.codeBlocks;
     rows.splice(start, oldCount, ...next);
     const delta = next.length - oldCount;
     segment.start = start;
@@ -342,6 +352,32 @@ export function normalizeTrailingBlankRows(count: number): void {
 export function lineAt(abs: number): string | null {
   const all = snapshot();
   return abs >= 0 && abs < all.length ? all[abs] : null;
+}
+
+/** 命中某个代码块的复制按钮时返回其原文、header 绝对行与按钮显示列区间,否则 null。col 为 0-based 显示列。 */
+export function codeBlockCopyAt(
+  absLine: number,
+  col: number,
+): { code: string; headerAbs: number; colStart: number; colEnd: number } | null {
+  for (const segment of reflowSegments) {
+    const rel = absLine - segment.start;
+    for (const block of segment.codeBlocks ?? []) {
+      if (
+        rel === block.headerLine &&
+        block.buttonColStart >= 0 &&
+        col >= block.buttonColStart &&
+        col < block.buttonColEnd
+      ) {
+        return {
+          code: block.code,
+          headerAbs: segment.start + block.headerLine,
+          colStart: block.buttonColStart,
+          colEnd: block.buttonColEnd,
+        };
+      }
+    }
+  }
+  return null;
 }
 
 /** 等长替换一条已提交物理行，供运行中的工具 batch 原地刷新摘要。 */

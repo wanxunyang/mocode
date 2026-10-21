@@ -412,8 +412,32 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     // 内容区纯点击(未拖动):若落在工具 batch 摘要行上 → 切换展开/折叠;
     // 否则原行为:清选区。batch 反查通过 content lineAt + dynamic import(避免 layout↔batch 循环依赖)。
     const absClick = state.selection.anchorLine; // 起止同行同列,取任一;未拖动时 line = anchor = end
+    const colClick = state.selection.anchorCol;
     void (async (): Promise<void> => {
       try {
+        // 代码块复制按钮:命中 header 右侧「复制」即把代码原文写剪贴板(优先于选区/batch 展开)。
+        const copyHit = content.codeBlockCopyAt(absClick, colClick);
+        if (copyHit) {
+          state.selection = null;
+          copyToClipboard(copyHit.code);
+          // 按钮瞬时反白反馈 900ms(纯视觉覆盖,不改缓冲,不依赖剪贴板成败回执)。
+          const flash = {
+            absLine: copyHit.headerAbs,
+            colStart: copyHit.colStart,
+            colEnd: copyHit.colEnd,
+            until: Date.now() + 900,
+          };
+          state.copyFlash = flash;
+          repaintViewport();
+          setTimeout(() => {
+            // 连点时只清自己那次闪烁,不误清后一次。
+            if (state.copyFlash !== flash) return;
+            state.copyFlash = null;
+            repaintViewport();
+          }, 900).unref?.();
+          repaint();
+          return;
+        }
         const m = await import('../batch.js');
         const entry = m.findEntryByAbsLine(absClick);
         if (entry) {

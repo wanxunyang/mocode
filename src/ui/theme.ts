@@ -48,6 +48,8 @@ export interface Palette {
   addBg: string;
   /** diff 删除行整行底色——同 addBg,跟红字 fg 配对。 */
   delBg: string;
+  /** markdown 代码块整块底色(含 header 行与右侧复制按钮):比终端底略亮/略深一档,圈出可复制区。 */
+  codeBg: string;
 }
 // 注意:本模块**不碰终端窗口背景**(OSC 11)。终端底色一律保持用户终端自身的原色,
 // 切主题只换 SGR 前景/行内底色。唯一例外是退出时 `resetTerminalBackground()`(OSC 111),
@@ -72,6 +74,7 @@ const DEFAULT: Palette = {
   // diff 行底色:One Dark bg #282c34 上加 ~14% 亮度的对应色,够辨识但不刺眼
   addBg: '\x1B[48;2;44;62;42m', // 偏暗绿(One Dark green(152,195,121)暗化)
   delBg: '\x1B[48;2;62;38;42m', // 偏暗红(One Dark red(224,108,117)暗化)
+  codeBg: '\x1B[48;2;50;56;68m', // One Dark bg(40,44,52)上提亮一档的冷灰蓝;纯黑终端上同样可辨
 };
 
 /**
@@ -99,6 +102,7 @@ const THEMES: Record<string, Palette> = {
     // 比直接用 base1 更柔,跟深 fg(red/green)对比充足
     addBg: '\x1B[48;2;220;235;205m',
     delBg: '\x1B[48;2;245;218;215m',
+    codeBg: '\x1B[48;2;238;232;213m', // Solarized base2:浅米底上的代码块
   },
   solarized: {
     red: '\x1B[38;2;220;50;47m',
@@ -116,6 +120,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:Solarized Dark base03(0,43,54)上加对应色族暗 tint
     addBg: '\x1B[48;2;20;50;38m',
     delBg: '\x1B[48;2;55;30;30m',
+    codeBg: '\x1B[48;2;7;54;66m', // Solarized base02
   },
   gruvbox: {
     red: '\x1B[38;2;251;73;52m',
@@ -133,6 +138,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:Gruvbox dark bg(40,40,40)上贴暗 bg0_a 风格
     addBg: '\x1B[48;2;40;55;30m',
     delBg: '\x1B[48;2;70;35;30m',
+    codeBg: '\x1B[48;2;60;56;54m', // Gruvbox bg1
   },
   nord: {
     red: '\x1B[38;2;191;97;106m',
@@ -150,6 +156,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:Nord polar night(46,52,64)上贴对应色族暗 tint
     addBg: '\x1B[48;2;46;66;52m',
     delBg: '\x1B[48;2;72;46;52m',
+    codeBg: '\x1B[48;2;59;66;82m', // Nord polar night nord1
   },
   orange: {
     // 秋季/南瓜橙:深暖底(#231c16 系)+ accent 主强调走橙色;yellow 槽也偏橙
@@ -170,6 +177,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:暖深棕底上贴对应色族暗 tint,跟 fg 配对柔和可辨
     addBg: '\x1B[48;2;55;70;35m',
     delBg: '\x1B[48;2;78;42;32m',
+    codeBg: '\x1B[48;2;58;46;36m',
   },
   rose: {
     // 玫红:深紫底 + accent 玫粉作主强调;magenta 槽与 accent 同源(主题色),
@@ -189,6 +197,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深紫底贴对应色族暗 tint,绿暗化偏橄榄、红暗化偏紫红
     addBg: '\x1B[48;2;50;60;42m',
     delBg: '\x1B[48;2;75;40;52m',
+    codeBg: '\x1B[48;2;56;42;54m',
   },
   emerald: {
     // 翡翠绿:深绿底 + accent 翡翠绿作主强调;green 槽与 accent 同源(主题色),
@@ -208,6 +217,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深绿底贴对应色族暗 tint,绿暗化偏深绿、红暗化偏暗红
     addBg: '\x1B[48;2;30;55;40m',
     delBg: '\x1B[48;2;60;40;40m',
+    codeBg: '\x1B[48;2;34;56;50m',
   },
   amber: {
     // 琥珀金黄:深棕底 + accent 琥珀金黄作主强调;yellow 槽与 accent 同源(主题色),
@@ -227,6 +237,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深棕底贴对应色族暗 tint,绿暗化偏橄榄、红暗化偏暗棕红
     addBg: '\x1B[48;2;50;55;25m',
     delBg: '\x1B[48;2;70;40;28m',
+    codeBg: '\x1B[48;2;60;48;32m',
   },
   lavender: {
     // 薰衣草淡紫:深紫底 + accent 淡紫作主强调;magenta 槽与 accent 同源(主题色),
@@ -246,6 +257,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深紫底贴对应色族暗 tint,绿暗化偏冷绿、红暗化偏冷紫红
     addBg: '\x1B[48;2;38;46;42m',
     delBg: '\x1B[48;2;60;40;55m',
+    codeBg: '\x1B[48;2;50;44;70m',
   },
   sunset: {
     // 日落珊瑚:深棕红底 + accent 珊瑚红作主强调;red 槽与 accent 同源(主题色);
@@ -265,6 +277,7 @@ const THEMES: Record<string, Palette> = {
     // diff 行底色:深棕红底贴对应色族暗 tint,绿暗化偏橄榄、红暗化偏暗棕红
     addBg: '\x1B[48;2;50;55;30m',
     delBg: '\x1B[48;2;75;32;30m',
+    codeBg: '\x1B[48;2;62;42;40m',
   },
 };
 
@@ -367,5 +380,8 @@ export const ui = {
   },
   get delBg() {
     return color('delBg');
+  },
+  get codeBg() {
+    return color('codeBg');
   },
 };

@@ -15,6 +15,23 @@ import { getCliHighlight } from './cli-highlight-lazy.js';
 import { ui, getThemeVersion } from './theme.js';
 import { charWidth, displayWidth, ansiDisplayWidth, stripAnsi } from './render.js';
 
+/** 渲染后单个代码块的定位信息(行号为本次输出 lines[] 的 0-based 相对行)。 */
+export interface RenderedCodeBlock {
+  /** header 行(语言标签 + 右侧复制按钮)在 lines 中的下标。 */
+  headerLine: number;
+  /** 第一段代码物理行下标(软折行后可能 > 源码行数)。 */
+  codeStartLine: number;
+  /** 最后一段代码物理行下标;空代码块时 < codeStartLine。 */
+  codeEndLine: number;
+  /** 复制按钮(` ❐ `,贴 header 行右端)的显示列区间 [buttonColStart, buttonColEnd),0-based;窄窗放不下时为 -1。 */
+  buttonColStart: number;
+  buttonColEnd: number;
+  /** fence 语言标注(可能为空串)。 */
+  lang: string;
+  /** 代码块原文(不含 fence / 语言行),点击复制时写入剪贴板。 */
+  code: string;
+}
+
 const RESET = '\x1b[0m';
 // theme 无 italic/strike,自备(TTY 感知:!isTTY 退化为空串,同 ui.* 契约)。
 const ITALIC = ui.isTTY ? '\x1b[3m' : '';
@@ -426,15 +443,22 @@ function renderTable(header: string[], aligns: Align[], rows: string[][], cols: 
 
 // ── 主渲染 ──
 
-const MEMO = new Map<string, { cols: number; lines: string[]; themeVersion: number }>();
+const MEMO = new Map<
+  string,
+  { cols: number; lines: string[]; codeBlocks: RenderedCodeBlock[]; themeVersion: number }
+>();
 const MEMO_CAP = 16;
 
-function renderMarkdownImpl(text: string, cols: number): string[] {
+function renderMarkdownImpl(text: string, cols: number): { lines: string[]; codeBlocks: RenderedCodeBlock[] } {
   const out: string[] = [];
-  const src = text.split('\n');
+  const codeBlocks: RenderedCodeBlock[] = [];
+  const src = text.split(/\r?\n/); // 兼容 CRLF:否则行尾 \r 让 fence 正则失配、整块不识别
   let i = 0;
   let inFence = false;
   let fenceChar = '';
+  let fenceLen = 0; // 开栏围栏长度:闭合栏须 ≥ 此长度(CommonMark),4 反引号外层可安全包住 3 反引号示例
+  let fenceDepth = 0; // 同长度带语言标注的嵌套开栏深度(3 反引号外层包 ```ts 示例的常见写法)
+  let fenceIndent = 0; // 开栏缩进(列表项内的围栏):复制原文时按 CommonMark 剥掉这层缩进
   let lang = '';
   let codeBuf: string[] = [];
   let para: string[] = [];
@@ -450,16 +474,61 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
     prevBlank = true;
   };
 
+  // 代码块整块铺 codeBg 底色(header + 代码行补满到 cols),与正文区分出「可复制区」。
+  // 非 TTY(codeBg 为空串)退化为无底色、不补尾随空格。文本内的 reset 之后重开底色,防高亮 SGR 打断。
+  const paintCodeRow = (text: string): string => {
+    const bg = ui.codeBg;
+    const body = clipAnsiLine(text, cols);
+    if (!bg) return body;
+    const pad = Math.max(0, cols - ansiDisplayWidth(body));
+    return `${bg}${body.split(RESET).join(RESET + bg)}${' '.repeat(pad)}${RESET}`;
+  };
+
+  // header 行:左侧 dim 语言标签(始终保留这行以承载按钮),右端 accent 复制图标 ` ❐ `(两侧各留 1 格扩大点击面)。
+  // 窄窗放不下按钮时只画标签,buttonCol=-1 表示不可点。
+  const COPY_BTN = ' \u2750 ';
+  const buildHeader = (language: string): { line: string; colStart: number; colEnd: number } => {
+    const btnW = displayWidth(COPY_BTN);
+    const left = language ? `  ${ui.dim}${language}${ui.reset}` : '  ';
+    const leftW = 2 + displayWidth(language); // '  ' gutter + 语言名
+    const spaces = cols - leftW - btnW;
+    if (spaces < 0) return { line: paintCodeRow(left), colStart: -1, colEnd: -1 };
+    const colStart = leftW + spaces;
+    return {
+      line: paintCodeRow(`${left}${' '.repeat(spaces)}${ui.accent}${COPY_BTN}${ui.reset}`),
+      colStart,
+      colEnd: colStart + btnW,
+    };
+  };
+
   const flushCode = () => {
-    if (lang) out.push(`  ${ui.dim}${lang}${ui.reset}`);
-    const highlighted = highlightCodeBlock(codeBuf.join('\n'), lang);
+    const strip = fenceIndent > 0 ? new RegExp(`^[ \\t]{0,${fenceIndent}}`) : null;
+    const code = (strip ? codeBuf.map((l) => l.replace(strip, '')) : codeBuf).join('\n');
+    const headerLine = out.length;
+    const header = buildHeader(lang);
+    out.push(header.line);
+    const codeStartLine = out.length;
+    const highlighted = highlightCodeBlock(code, lang);
     const codeW = Math.max(1, cols - 2);
     for (const l of wrapAnsiString(highlighted, codeW)) {
-      out.push(clipAnsiLine(`  ${l}`, cols));
+      out.push(paintCodeRow(`  ${l}`));
     }
+    const codeEndLine = out.length - 1;
+    codeBlocks.push({
+      headerLine,
+      codeStartLine,
+      codeEndLine,
+      buttonColStart: header.colStart,
+      buttonColEnd: header.colEnd,
+      lang,
+      code,
+    });
     out.push('');
     inFence = false;
     fenceChar = '';
+    fenceLen = 0;
+    fenceDepth = 0;
+    fenceIndent = 0;
     lang = '';
     codeBuf = [];
     prevBlank = true;
@@ -471,7 +540,7 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
     // 若不恢复，后续所有标题、列表和下一段代码都会被吞进首个代码块，最终显示成截图里的原始
     // `##` / ```。只接受“独占一行、恰好两个同类字符”，避免误伤代码中的行内双反引号。
     const shortClose = inFence ? line.match(/^\s*(`{2}|~{2})\s*$/) : null;
-    if (shortClose && shortClose[1][0] === fenceChar) {
+    if (shortClose && shortClose[1][0] === fenceChar && fenceDepth === 0) {
       flushCode();
       i++;
       continue;
@@ -483,10 +552,22 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
         flushPara();
         inFence = true;
         fenceChar = fm[2][0];
+        fenceLen = fm[2].length;
+        fenceDepth = 0;
+        fenceIndent = fm[1].length;
         lang = fm[3].trim();
         codeBuf = [];
-      } else if (fm[2][0] === fenceChar) {
-        flushCode();
+      } else if (fm[2][0] === fenceChar && fm[2].length >= fenceLen) {
+        if (fm[3].trim()) {
+          // 带语言标注的同类围栏不是闭合栏(CommonMark),按嵌套开栏计深度,其配对的裸栏不会提前截断外层块。
+          fenceDepth++;
+          codeBuf.push(line);
+        } else if (fenceDepth > 0) {
+          fenceDepth--;
+          codeBuf.push(line);
+        } else {
+          flushCode();
+        }
       } else {
         codeBuf.push(line);
       }
@@ -606,13 +687,28 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
   // "\n\n" 与首段正文拆成不同 chunk；仅清洗首个正文 chunk 不够，因为 mdBuf
   // 累积重渲染时这些换行仍会变成段首空行。这里最终兜底，正文段永不自带前导空行。
   const isVisualBlank = (line: string): boolean => stripAnsi(line).trim().length === 0;
-  while (out.length > 0 && isVisualBlank(out[0])) out.shift();
+  let headShift = 0;
+  while (out.length > 0 && isVisualBlank(out[0])) {
+    out.shift();
+    headShift++;
+  }
   // 末尾不留空行:agent onText 后接 onToolCall 的 contentWrite('\n') 会补 1 空行分隔正文与 ● 行;
   // 若 md 末尾自带空行(段落/代码块后)则叠成 2 空行。裁掉末尾连续空行,让 onToolCall / 轮末
   // contentWrite('\n') 恰好补 1 行(与改造前 raw 文本行为一致)。块间空行(flushPara/flushCode 中段
   // push 的)不受影响——只裁末尾。
   while (out.length > 0 && isVisualBlank(out[out.length - 1])) out.pop();
-  return out;
+  // 前导空行被 shift:同步平移仍在输出区内的代码块相对行(被整体裁掉的块丢弃)。
+  const blocks = headShift
+    ? codeBlocks
+        .map((b) => ({
+          ...b,
+          headerLine: b.headerLine - headShift,
+          codeStartLine: b.codeStartLine - headShift,
+          codeEndLine: b.codeEndLine - headShift,
+        }))
+        .filter((b) => b.codeEndLine >= 0)
+    : codeBlocks;
+  return { lines: out, codeBlocks: blocks };
 }
 
 /**
@@ -621,18 +717,29 @@ function renderMarkdownImpl(text: string, cols: number): string[] {
  * 命中(MRU 提升),cols 变(resize)或切主题(themeVersion 变)则重算覆写。供 layout.contentWriteMd
  * 每 chunk 调用(memo 使重复渲染命中缓存)。themeVersion 使 setTheme 后全量重绘不命中旧主题缓存行。
  */
-export function renderMarkdown(text: string, cols: number): string[] {
+export function renderMarkdownWithMeta(
+  text: string,
+  cols: number,
+): {
+  lines: string[];
+  codeBlocks: RenderedCodeBlock[];
+} {
   const hit = MEMO.get(text);
   if (hit && hit.cols === cols && hit.themeVersion === getThemeVersion()) {
     MEMO.delete(text);
     MEMO.set(text, hit); // MRU 提升
-    return hit.lines;
+    return { lines: hit.lines, codeBlocks: hit.codeBlocks };
   }
-  const lines = renderMarkdownImpl(text, cols);
+  const { lines, codeBlocks } = renderMarkdownImpl(text, cols);
   if (MEMO.has(text)) MEMO.delete(text);
   else if (MEMO.size >= MEMO_CAP) MEMO.delete(MEMO.keys().next().value as string);
-  MEMO.set(text, { cols, lines, themeVersion: getThemeVersion() });
-  return lines;
+  MEMO.set(text, { cols, lines, codeBlocks, themeVersion: getThemeVersion() });
+  return { lines, codeBlocks };
+}
+
+/** 只取物理行(向后兼容 reflow / 测试);代码块定位信息见 renderMarkdownWithMeta。 */
+export function renderMarkdown(text: string, cols: number): string[] {
+  return renderMarkdownWithMeta(text, cols).lines;
 }
 
 // 供 check 脚本 / 单元验证用(不进 layout 运行时路径)。

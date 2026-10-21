@@ -159,6 +159,9 @@ export const state = {
   /** 覆盖层自报的真光标位(1-based 屏坐标;null = 未报/光标不在可视区)。overlay 期间 drawStatusBar
    *  照常刷底栏,但末尾 cup 回这里而非 runningCaretPos,防 80ms 心跳把弹窗光标拽到底栏输入框。 */
   overlayCaret: null as { row: number; col: number } | null,
+
+  // ── 代码块「复制」按钮点击反馈(瞬时反白,不改缓冲;超时后随下次 repaintViewport 自然消失) ──
+  copyFlash: null as { absLine: number; colStart: number; colEnd: number; until: number } | null,
 };
 
 export type LayoutState = typeof state;

@@ -77,7 +77,8 @@ export function extractSelectionText(sel: {
     const lineW = displayWidth(plain);
     const colStart = abs === sel.startLine ? sel.startCol : 0;
     const colEnd = abs === sel.endLine ? sel.endCol : lineW;
-    out.push(sliceByDisplayCol(plain, colStart, colEnd));
+    // 去行尾空白:代码块整块铺底色时每行补满到列宽,不剥会把补位空格一起复制出去。
+    out.push(sliceByDisplayCol(plain, colStart, colEnd).trimEnd());
   }
   return out.join('\n');
 }

@@ -6,7 +6,7 @@ import { charWidth, truncateAnsi, ansiDisplayWidth, remapWrappedPoint } from '..
 import { ui } from '../theme.js';
 import * as content from '../content.js';
 import { reset as resetBatches, shiftBatchesAfter, shiftBatchesForReflow } from '../batch.js';
-import { renderMarkdown } from '../markdown.js';
+import { renderMarkdownWithMeta } from '../markdown.js';
 import { state } from './state.js';
 import { esc, cup, getGeo, setRegion, runningCaretPos } from './screen.js';
 import { viewportAbsStart, repaintViewport } from './scroll.js';
@@ -311,8 +311,8 @@ function renderMdSegment(): void {
   // offset += delta(可负:setLines 重渲染可能缩行)冻住视图。md 段在尾,窗口在上方,冻结后不重叠。
   const scrolled = state.scrollOffset > 0;
   const totalBefore = scrolled ? content.totalRows() : 0;
-  const lines = renderMarkdown(state.mdBuf, g.cols);
-  content.setLines(lines, state.mdBuf);
+  const { lines, codeBlocks } = renderMarkdownWithMeta(state.mdBuf, g.cols);
+  content.setLines(lines, state.mdBuf, codeBlocks);
   state.mdRenderedLen = state.mdBuf.length;
   const segRows = lines.length;
   const available = g.contentBottom - state.segmentStartRow + 1;
@@ -416,8 +416,8 @@ export function contentWriteMdOnce(s: string): void {
   if (state.mdActive) commitMd();
   const g = getGeo();
   content.beginSegment();
-  const lines = renderMarkdown(s, g.cols);
-  content.setLines(lines, s);
+  const { lines, codeBlocks } = renderMarkdownWithMeta(s, g.cols);
+  content.setLines(lines, s, codeBlocks);
   content.commitSegment();
   // setLines 直接提交了全部 markdown 物理行；补回一个未提交的空当前行，保证满屏时
   // 下一次 contentWrite 从正文下一行开始，而不是在 contentBottom 第 1 列覆盖正文末行。
@@ -812,7 +812,7 @@ export function reflowContentForResize(cols: number, colsChanged: boolean): void
     // 其行数变化会平移后续段;先重排它,reflowMarkdown 报告的 start 才与它在同一坐标系。
     const welcomeChange = reflowWelcomeBlockForResize(cols);
     if (welcomeChange) changes.push(welcomeChange);
-    changes.push(...content.reflowMarkdown(cols, renderMarkdown));
+    changes.push(...content.reflowMarkdown(cols, renderMarkdownWithMeta));
   }
   for (const change of changes) {
     shiftBatchesForReflow(change.start, change.oldCount, change.newCount);

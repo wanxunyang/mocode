@@ -126,6 +126,13 @@ export function repaintViewport(): void {
         line = highlightRange(line, colStart, colEnd);
       }
     }
+    // 代码块「复制」按钮点击反馈:超时则清除(纯视觉,不改缓冲)。复用选区反白样式。
+    if (state.copyFlash) {
+      if (Date.now() >= state.copyFlash.until) state.copyFlash = null;
+      else if (state.copyFlash.absLine === absStart + r - 1) {
+        line = highlightRange(line, state.copyFlash.colStart, state.copyFlash.colEnd);
+      }
+    }
     p += cup(r, 1) + esc.clearLine + line;
   }
   // 光标:合并进同一 write(若拆成两次 stdout.write,行写完光标会暂留 contentRow/contentBottom,
