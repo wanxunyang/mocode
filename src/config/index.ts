@@ -256,7 +256,7 @@ const DEFAULT_VOICE = `## Voice
 - Give technical recommendations with brief trade-off reasoning when choices exist.
 - Focus on useful information. Avoid unnecessary greetings, apologies, repetition, or filler.
 - Match the user's style and language while staying task-focused.
-- Disclose assumptions; ask only when the choice is user-owned (see When to ask instead of guess).`;
+- Disclose assumptions; decisions and key modifications belong to the user, so ask first (see When to ask instead of guess).`;
 
 /** 解析用户自定义声音:persona.md 文件优先(项目级 > 全局),其次 env MOCODE_PERSONA。无则返回 ''。 */
 function readPersonaFile(): string {

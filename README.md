@@ -40,7 +40,7 @@ MoCode keeps code-level control light and leaves task strategy to the agent:
 
 - **Advisory working discipline** — The system prompt asks the agent to make focused changes, avoid redundant retrieval, and decide for itself whether validation is useful. Validation is optional and is never a completion gate.
 - **Bounded tool retries, explicit failures** — The runtime automatically retries only transient errors from tools explicitly marked `idempotent`, at most twice. `TIMEOUT`, permission denial, cancellation, and non-idempotent calls are not automatically retried. The resulting structured outcome is returned to the agent for any further recovery decision; see [Automatic retry](#automatic-retry-the-retryable-contract).
-- **`ask_human` for user-owned decisions** — The agent asks only when repository evidence cannot resolve a high-impact choice; implementation details remain autonomous.
+- **`ask_human` for user-owned decisions** — The agent must ask before any decision the user has not made (multiple reasonable approaches) and before key modifications (public APIs, schemas, dependencies, file moves/deletes, architecture, security, large or irreversible changes). Only trivial, repository-precedent details are decided alone.
 - **Five-zone context controls + token self-calibration** — Five independent dials (`autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget`) manage context pressure. Token estimation self-calibrates against provider usage.
 
 ## Architecture

@@ -115,7 +115,8 @@ export const askHumanTool: Tool = {
     'Ask the user a question and wait for their response.',
     ' CHOICES: pass 2-4 concrete options via `options`, each as { label, description? }; every non-empty option requires a non-empty `label`.',
     ' FREE-TEXT: pass `options: []` when the answer cannot be reduced to choices (e.g. "paste the error message").',
-    ' DO NOT call when the task is clear and a sensible default exists.',
+    ' MUST call BEFORE any decision the user has not made (multiple reasonable approaches) or any key modification (public API, schema, dependencies, file moves/deletes, architecture, security, large or irreversible changes); never decide these yourself.',
+    ' Skip only for trivial details that follow repository precedent and are easily reversible.',
   ].join(' '),
   parameters: {
     type: 'object',
