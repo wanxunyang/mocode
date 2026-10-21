@@ -43,13 +43,110 @@ export function charWidth(cp: number): number {
   if (cp >= 0xffe0 && cp <= 0xffe6) return 2;
   if (cp >= 0x1f300 && cp <= 0x1faff) return 2; // 表情
   if (cp >= 0x20000 && cp <= 0x2fffd) return 2; // CJK 扩展 B-F
-  if (cp === 0x26a1) return 2; // ⚡ 闪电:终端按 emoji 2 格渲染,算 1 会与 chip 重叠产生残影
+  if (isWideBmpEmoji(cp)) return 2; // ⚡ ✅ ❌ ⭐ 等:终端按 emoji 2 格渲染,算 1 会与 chip 重叠产生残影、表格列错位
   return 1;
+}
+
+/**
+ * BMP 内 East Asian Width = W 的 emoji(Emoji_Presentation=Yes,无需 VS16 就按 2 格画)。
+ * ✔ (U+2714) / ⚠ (U+26A0) 等文本呈现符号默认是窄的,不在此表。
+ * 补充平面(U+1F300+)已由上面的区间覆盖。
+ */
+const WIDE_BMP_EMOJI: ReadonlyArray<readonly [number, number]> = [
+  [0x231a, 0x231b],
+  [0x23e9, 0x23ec],
+  [0x23f0, 0x23f0],
+  [0x23f3, 0x23f3],
+  [0x25fd, 0x25fe],
+  [0x2614, 0x2615],
+  [0x2648, 0x2653],
+  [0x267f, 0x267f],
+  [0x2693, 0x2693],
+  [0x26a1, 0x26a1],
+  [0x26aa, 0x26ab],
+  [0x26bd, 0x26be],
+  [0x26c4, 0x26c5],
+  [0x26ce, 0x26ce],
+  [0x26d4, 0x26d4],
+  [0x26ea, 0x26ea],
+  [0x26f2, 0x26f3],
+  [0x26f5, 0x26f5],
+  [0x26fa, 0x26fa],
+  [0x26fd, 0x26fd],
+  [0x2705, 0x2705],
+  [0x270a, 0x270b],
+  [0x2728, 0x2728],
+  [0x274c, 0x274c],
+  [0x274e, 0x274e],
+  [0x2753, 0x2755],
+  [0x2757, 0x2757],
+  [0x2795, 0x2797],
+  [0x27b0, 0x27b0],
+  [0x27bf, 0x27bf],
+  [0x2b1b, 0x2b1c],
+  [0x2b50, 0x2b50],
+  [0x2b55, 0x2b55],
+];
+
+function isWideBmpEmoji(cp: number): boolean {
+  if (cp < 0x231a || cp > 0x2b55) return false;
+  for (const [lo, hi] of WIDE_BMP_EMOJI) {
+    if (cp >= lo && cp <= hi) return true;
+  }
+  return false;
+}
+
+/**
+ * 读 str 中 UTF-16 下标 i 处的一个「显示簇」,返回它占的终端列数与簇末下标(不含)。
+ * 终端会把下面几类码点序列合成一个字形,只画 emoji 的 2 格;逐码点累加宽度会算宽,表格边框就凹进去:
+ *  - 区域旗帜:两个 Regional Indicator(🇨🇳)→ 2 格,而不是 2+2
+ *  - ZWJ 序列:👨‍💻 / 👩‍👧 / ❤️‍🔥 → 以首个字符为准,ZWJ 后并入的 emoji 不再计宽
+ *  - 肤色修饰符:👍🏽 → 并入前一字符
+ *  - 后随 FE0F(VS16):⚠️ ✔️ ❤️ 默认文本呈现的窄符号切成 emoji 呈现 → 2 格;keycap(1️⃣)同为 2 格
+ * 组合符 / 控制符仍按 charWidth 算 0 宽。ZWJ 只与 U+2190 以上的符号 / emoji 合并,
+ * 避免把印地语等文字里的 ZWJ 误当 emoji 连接。
+ */
+export function graphemeAt(str: string, i: number): { width: number; end: number } {
+  const cp = str.codePointAt(i) ?? 0;
+  let end = i + (cp > 0xffff ? 2 : 1);
+  if (cp >= 0x1f1e6 && cp <= 0x1f1ff) {
+    const next = str.codePointAt(end);
+    if (next !== undefined && next >= 0x1f1e6 && next <= 0x1f1ff) end += 2;
+    return { width: 2, end };
+  }
+  let width = charWidth(cp);
+  for (;;) {
+    const n = str.codePointAt(end);
+    if (n === undefined) break;
+    if (n === 0xfe0f) {
+      if (width === 1 && cp >= 0x80) width = 2;
+      end += 1;
+    } else if (n === 0xfe0e) {
+      end += 1;
+    } else if (n === 0x20e3) {
+      if (width > 0) width = 2;
+      end += 1;
+    } else if (n >= 0x1f3fb && n <= 0x1f3ff && width > 0) {
+      end += 2;
+    } else if (n === 0x200d) {
+      const m = str.codePointAt(end + 1);
+      if (m !== undefined && cp >= 0x2190 && m >= 0x2190) end += 1 + (m > 0xffff ? 2 : 1);
+      else end += 1;
+    } else {
+      break;
+    }
+  }
+  return { width, end };
 }
 
 export function displayWidth(str: string): number {
   let w = 0;
-  for (const ch of str) w += charWidth(ch.codePointAt(0) ?? 0);
+  let i = 0;
+  while (i < str.length) {
+    const g = graphemeAt(str, i);
+    w += g.width;
+    i = g.end;
+  }
   return w;
 }
 

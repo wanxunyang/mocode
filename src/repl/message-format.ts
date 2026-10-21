@@ -1,4 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { ui } from '../ui/theme.js';
+import { renderFileChange, renderMultiFileChange } from '../ui/diff.js';
+import { isToolErrorOutput } from '../tools/result.js';
+import { jailResolve } from '../sandbox/index.js';
 import * as layout from '../ui/layout.js';
 import * as batch from '../ui/batch.js';
 import { displayWidth, padEndDisplay, summarizeToolCall, summarizeToolResult } from '../ui/render.js';
@@ -31,6 +35,78 @@ export function formatUserMessage(lines: string[], trailingBlank = true): string
       })
       .join('\n') + (trailingBlank ? '\n\n' : '\n')
   );
+}
+
+const toLf = (s: string): string => s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+/** 回放用的行号定位:在**当前**文件里找 text 的唯一命中行(edit 已落盘,找新文本);找不到/不唯一退回 1。 */
+function locateLine(filePath: string, text: string): number {
+  if (!text) return 1;
+  try {
+    const data = toLf(readFileSync(jailResolve(filePath), 'utf8'));
+    const needle = toLf(text);
+    const first = data.indexOf(needle);
+    if (first < 0 || data.indexOf(needle, first + needle.length) !== -1) return 1;
+    return data.slice(0, first).split('\n').length;
+  } catch {
+    return 1;
+  }
+}
+
+/**
+ * 由历史里的工具参数重建 edit_file/write_file 的 diff 块(回放时自动展开用)。
+ * history 只存参数不存执行前快照,所以是尽力还原:
+ *  - write_file 无旧内容 → 按 Create 展示全部为新增行;
+ *  - edit_file 行号在当前文件里按新文本定位,定位不到退回相对行号 1;
+ *  - 行号区间模式(无 old_string)、失败结果、参数非法 → 返回 null,退回单行摘要。
+ */
+export function buildReplayDiff(name: string, rawArgs: string, output: string): string | null {
+  if (isToolErrorOutput(output)) return null;
+  let parsed: Record<string, unknown>;
+  try {
+    const v = JSON.parse(rawArgs);
+    if (!v || typeof v !== 'object') return null;
+    parsed = v as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const filePath = String(parsed.path ?? '');
+  if (!filePath) return null;
+  if (name === 'write_file') {
+    if (typeof parsed.content !== 'string') return null;
+    return renderFileChange({ path: filePath, kind: 'write', oldStr: null, newStr: parsed.content, startLine: 1 });
+  }
+  if (name !== 'edit_file') return null;
+  if (Array.isArray(parsed.replacements) && parsed.replacements.length > 0) {
+    const hunks: Array<{ oldStr: string; newStr: string; startLine: number }> = [];
+    for (const item of parsed.replacements) {
+      const rec = item as Record<string, unknown> | null;
+      if (!rec || typeof rec.old_string !== 'string' || typeof rec.new_string !== 'string') return null;
+      hunks.push({
+        oldStr: rec.old_string,
+        newStr: rec.new_string,
+        startLine: locateLine(filePath, rec.new_string),
+      });
+    }
+    return (
+      renderMultiFileChange({ path: filePath, hunks }) ??
+      renderFileChange({
+        path: filePath,
+        kind: 'edit',
+        oldStr: hunks.map((h) => h.oldStr).join('\n'),
+        newStr: hunks.map((h) => h.newStr).join('\n'),
+        startLine: hunks[0].startLine,
+      })
+    );
+  }
+  if (typeof parsed.old_string !== 'string' || typeof parsed.new_string !== 'string') return null;
+  return renderFileChange({
+    path: filePath,
+    kind: 'edit',
+    oldStr: parsed.old_string,
+    newStr: parsed.new_string,
+    startLine: locateLine(filePath, parsed.new_string),
+  });
 }
 
 /** 把任意消息 content 拍平成字符串(OpenAI 可能 string / null / 多模态数组)。 */
@@ -66,6 +142,7 @@ export function queryHistoryFromMessages(messages: ChatMessage[]): string[] {
  */
 export function renderHistory(history: ChatMessage[]): void {
   const idToEntry = new Map<string, batch.BatchEntry>();
+  const idToArgs = new Map<string, string>(); // tool_call id → 原始参数 JSON,供重建 mutation diff
   // 普通工具可跨 assistant 步聚合；mutation 各自占一个 group，并切断前后普通工具。
   let pendingBatches: batch.BatchEntry[][] = [];
   let normalBatch: batch.BatchEntry[] | null = null;
@@ -102,6 +179,9 @@ export function renderHistory(history: ChatMessage[]): void {
     }
     if (m.role === 'user') {
       flushBatch(); // 上一轮 batch(若有)收尾
+      // 上一条 agent 正文 → 本条用户气泡:contentWriteMdOnce 会裁掉 markdown 尾部空行,
+      // 不归一的话气泡紧贴正文(实时对话由 REPL 循环顶部的 normalizeInputBoundary 保证恰好 1 条空行)。
+      layout.normalizeInputBoundary();
       const lines = textOf((m as { content?: unknown }).content).split('\n');
       layout.contentWrite(formatUserMessage(lines));
       const atts = messageAttachments.get(idx);
@@ -163,7 +243,10 @@ export function renderHistory(history: ChatMessage[]): void {
             }
             normalBatch.push(entry);
           }
-          if (tc?.id) idToEntry.set(tc.id, entry);
+          if (tc?.id) {
+            idToEntry.set(tc.id, entry);
+            idToArgs.set(tc.id, args);
+          }
         }
         continue; // 跳过后续 tool 消息处理循环(由下一分支填 result)
       }
@@ -176,9 +259,11 @@ export function renderHistory(history: ChatMessage[]): void {
       const target = idToEntry.get(id);
       const name = target?.name ?? '';
       const output = textOf((m as { content?: unknown }).content);
-      const preview = summarizeToolResult(name, output);
       if (target) {
-        target.resultSummary = preview;
+        // mutation 成功:重建 diff 块,回放时自动展开(与实时一致);否则退回单行摘要。
+        const diff = batch.isMutationToolName(name) ? buildReplayDiff(name, idToArgs.get(id) ?? '', output) : null;
+        target.diffBlock = diff;
+        target.resultSummary = diff ? '' : summarizeToolResult(name, output);
         target.fullOutput = output;
       }
       // 不直接写屏——等 flushBatch 时出单行摘要

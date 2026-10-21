@@ -13,7 +13,7 @@
 // clipAnsiLine 兜底,绝不溢出。颜色一律嵌入式 ANSI(ui.*)写进字符串。
 import { getCliHighlight } from './cli-highlight-lazy.js';
 import { ui, getThemeVersion } from './theme.js';
-import { charWidth, displayWidth, ansiDisplayWidth, stripAnsi } from './render.js';
+import { graphemeAt, displayWidth, ansiDisplayWidth, stripAnsi } from './render.js';
 
 /** 渲染后单个代码块的定位信息(行号为本次输出 lines[] 的 0-based 相对行)。 */
 export interface RenderedCodeBlock {
@@ -58,12 +58,15 @@ function clipAnsiLine(str: string, width: number): string {
       out += parts[i];
       continue;
     }
-    for (const ch of parts[i]) {
-      const cw = charWidth(ch.codePointAt(0) ?? 0);
-      if (cw > 0 && w + cw > width) {
+    const seg = parts[i];
+    for (let gi = 0; gi < seg.length; ) {
+      const g = graphemeAt(seg, gi);
+      const ch = seg.slice(gi, g.end);
+      gi = g.end;
+      if (g.width > 0 && w + g.width > width) {
         return out + RESET;
       }
-      if (cw > 0) w += cw;
+      if (g.width > 0) w += g.width;
       out += ch;
     }
   }
@@ -280,8 +283,11 @@ function wrapAnsiString(str: string, width: number): string[] {
       else activeSgr += tok;
       continue;
     }
-    for (const ch of tok) {
-      const cw = charWidth(ch.codePointAt(0) ?? 0);
+    for (let gi = 0; gi < tok.length; ) {
+      const g = graphemeAt(tok, gi);
+      const ch = tok.slice(gi, g.end);
+      gi = g.end;
+      const cw = g.width;
       if (cw <= 0) {
         cur += ch;
         continue;
@@ -336,8 +342,37 @@ type Align = 'left' | 'right' | 'center';
 function parseTableRow(line: string): string[] {
   let s = line.trim();
   if (s.startsWith('|')) s = s.slice(1);
-  if (s.endsWith('|')) s = s.slice(0, -1);
-  return s.split('|').map((c) => c.trim());
+  // 末尾 | 只有在未被转义时才是边框(`a \|` 结尾的 \| 是单元格内容)
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+  // 按「未转义、且不在行内代码里」的 | 切分;\| 还原成 |(GFM 规则:转义管道符在代码里也生效)
+  const cells: string[] = [];
+  let cur = '';
+  let ticks = 0; // 当前打开的行内代码反引号数(0 = 不在代码里)
+  for (let k = 0; k < s.length; k++) {
+    const ch = s[k];
+    if (ch === '\\' && s[k + 1] === '|') {
+      cur += '|';
+      k++;
+      continue;
+    }
+    if (ch === '`') {
+      let run = 1;
+      while (s[k + run] === '`') run++;
+      if (ticks === 0) ticks = run;
+      else if (ticks === run) ticks = 0;
+      cur += '`'.repeat(run);
+      k += run - 1;
+      continue;
+    }
+    if (ch === '|' && ticks === 0) {
+      cells.push(cur.trim());
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
 }
 
 /** 分隔行每 cell :?-+:? → 对齐(left 默认)。 */
@@ -348,6 +383,33 @@ function parseAlign(sep: string[]): Align[] {
     const r = t.endsWith(':');
     return l && r ? 'center' : r ? 'right' : 'left';
   });
+}
+
+/**
+ * 宽容匹配 GFM 表格:src[i] 为表头、src[i+1] 为分隔行。
+ * 分隔行本身带 |、每格只含 `-` 与 `:`、至少一格含 `-` 即可(模型常写出列数与表头不一致的分隔行、
+ * 漏写竖线的粘连格 `--:----:`、单列表格);列数以表头为准,缺的列按左对齐。
+ * 不带 | 的 `---`(hr / setext)与 `~ | ==` 等非法写法返回 null,仍走普通文本。
+ * 数据行读到空行或不含 | 的行为止。next 为表格后第一行的下标。
+ */
+function matchTable(
+  src: string[],
+  i: number,
+): { header: string[]; aligns: Align[]; rows: string[][]; next: number } | null {
+  if (i + 1 >= src.length || !src[i].includes('|') || !src[i + 1].includes('|')) return null;
+  const header = parseTableRow(src[i]);
+  const sepCells = parseTableRow(src[i + 1]);
+  if (header.length < 1) return null;
+  if (!sepCells.some((c) => c.includes('-')) || !sepCells.every((c) => /^[:-]+$/.test(c))) return null;
+  const rows: string[][] = [];
+  let j = i + 2;
+  while (j < src.length) {
+    const r = src[j];
+    if (r.trim() === '' || !r.includes('|')) break;
+    rows.push(parseTableRow(r));
+    j++;
+  }
+  return { header, aligns: parseAlign(sepCells), rows, next: j };
 }
 
 /** ANSI 感知按可见宽度 pad(左/右/中),补空格;不截断(超宽原样返回,由 clipAnsiLine 兜底)。 */
@@ -617,11 +679,31 @@ function renderMarkdownImpl(text: string, cols: number): { lines: string[]; code
       flushPara();
       const prefix = `  ${ui.dim}│${ui.reset} `;
       const cont = ' '.repeat(ansiDisplayWidth(prefix));
-      for (const l of wrapWithPrefix(renderInline(bm[1]), prefix, cont, cols)) {
-        out.push(l);
+      // 收齐连续的引用行,去掉 > 前缀后再识别表格(否则引用块里的表格会逐行显示成竖线原文)
+      const inner: string[] = [];
+      let j = i;
+      while (j < src.length) {
+        const m = src[j].match(/^>\s?(.*)$/);
+        if (!m) break;
+        inner.push(m[1]);
+        j++;
+      }
+      let k = 0;
+      while (k < inner.length) {
+        const t = matchTable(inner, k);
+        if (t) {
+          const tw = Math.max(1, cols - ansiDisplayWidth(prefix));
+          for (const l of renderTable(t.header, t.aligns, t.rows, tw)) out.push(clipAnsiLine(prefix + l, cols));
+          k = t.next;
+          continue;
+        }
+        for (const l of wrapWithPrefix(renderInline(inner[k]), prefix, cont, cols)) {
+          out.push(l);
+        }
+        k++;
       }
       prevBlank = false;
-      i++;
+      i = j;
       continue;
     }
     // 无序列表 - * +
@@ -653,28 +735,28 @@ function renderMarkdownImpl(text: string, cols: number): { lines: string[]; code
       i++;
       continue;
     }
-    // GFM 表格:表头(含 |,≥2 cell)+ 紧跟 |---| 分隔行 → 收齐整块渲染(详见 renderTable)
-    if (line.includes('|')) {
-      const headerCells = parseTableRow(line);
-      if (headerCells.length >= 2 && i + 1 < src.length) {
-        const sepCells = parseTableRow(src[i + 1]);
-        if (sepCells.length === headerCells.length && sepCells.every((c) => /^:?-+:?$/.test(c.trim()))) {
-          flushPara();
-          const aligns = parseAlign(sepCells);
-          i += 2;
-          const trows: string[][] = [];
-          while (i < src.length) {
-            const r = src[i];
-            if (r.trim() === '' || !r.includes('|')) break;
-            trows.push(parseTableRow(r));
-            i++;
-          }
-          for (const l of renderTable(headerCells, aligns, trows, cols)) out.push(l);
-          out.push('');
-          prevBlank = true;
-          continue;
-        }
+    // GFM 表格:表头 + 紧跟分隔行 → 收齐整块渲染(宽容匹配规则见 matchTable / renderTable)
+    const tbl = matchTable(src, i);
+    if (tbl) {
+      flushPara();
+      for (const l of renderTable(tbl.header, tbl.aligns, tbl.rows, cols)) out.push(l);
+      out.push('');
+      prevBlank = true;
+      i = tbl.next;
+      continue;
+    }
+    // 没有合法分隔行的竖线行(模型漏写分隔行 / 写法非法):保持逐行显示,
+    // 不能并进段落——段落会把多行 join 成一行,竖线文字糊成一团。
+    if (/^\s*\|/.test(line)) {
+      flushPara();
+      while (i < src.length && /^\s*\|/.test(src[i]) && !(i > 0 && matchTable(src, i))) {
+        const segs = renderInline(src[i].trim());
+        for (const l of wrapAnsiString(segsToAnsi(segs), cols)) out.push(clipAnsiLine(l, cols));
+        i++;
       }
+      out.push('');
+      prevBlank = true;
+      continue;
     }
     // 段落:累积(连续非空非特殊行 join ' ' 后渲染)
     para.push(line);
