@@ -21,8 +21,9 @@ import {
   isProbablyBinary,
   loadImageAttachmentWithDownscale,
   MAX_INLINE_BYTES_DEFAULT,
+  INLINE_PNG_BUDGET_BYTES,
 } from '../src/attachments/image.js';
-import { encodePng } from '../src/runtime/screen-pipeline.js';
+import { decodePng, encodePng } from '../src/runtime/screen-pipeline.js';
 import { IMAGE_READ_MARKER as MARKER_FROM_CONSTANTS } from '../src/tools/constants.js';
 import { summarizeToolResult } from '../src/ui/render.js';
 import { t } from '../src/i18n/index.js';
@@ -257,6 +258,46 @@ test('view_image(并入 read_file): 越界路径按 SANDBOX_DENIED 拒绝', asyn
   const outcome = await runView({ path: '../outside-never-exists.png' });
   assert.ok(outcome.status === 'error' || outcome.status === 'denied');
   assert.equal(outcome.code, 'SANDBOX_DENIED');
+});
+
+test('loadImageAttachmentWithDownscale: 未超 4MiB 但超软预算的 PNG 也降采样(防上游请求体 400)', async () => {
+  // 2400x800、8 级量化:远超 360 KiB 软预算,但低于 4 MiB 硬上限。
+  writeFileSync(join(root, 'assets', 'mid.png'), makePngBuffer(2400, 800, 8));
+  const original = readFileSync(join(root, 'assets', 'mid.png'));
+  assert.ok(original.length > INLINE_PNG_BUDGET_BYTES, `样本须超软预算,实际 ${original.length}`);
+  assert.ok(original.length < MAX_INLINE_BYTES_DEFAULT, `样本须低于硬上限,实际 ${original.length}`);
+
+  const loaded = await inRoot(() =>
+    loadImageAttachmentWithDownscale('assets/mid.png', { maxBytes: MAX_INLINE_BYTES_DEFAULT }),
+  );
+  assert.equal(loaded.ok, true);
+  if (!loaded.ok) return;
+  assert.ok(loaded.downscaledFrom, '必须报告发生了降采样');
+  assert.ok(loaded.att.bytes < original.length, '降采样副本应更小');
+
+  // 显式放宽软预算则原样发送。
+  const raw = await inRoot(() =>
+    loadImageAttachmentWithDownscale('assets/mid.png', {
+      maxBytes: MAX_INLINE_BYTES_DEFAULT,
+      budgetBytes: MAX_INLINE_BYTES_DEFAULT,
+    }),
+  );
+  assert.equal(raw.ok, true);
+  if (raw.ok) assert.equal(raw.downscaledFrom, undefined);
+});
+
+test('loadImageAttachmentWithDownscale: 1568 边长仍超预算时逐级再缩,直到装进软预算', async () => {
+  // oversized.png 在 1568 下约 1.3 MiB,远超 360 KiB 预算,必须继续降到更小的长边。
+  const loaded = await inRoot(() =>
+    loadImageAttachmentWithDownscale('assets/oversized.png', { maxBytes: MAX_INLINE_BYTES_DEFAULT }),
+  );
+  assert.equal(loaded.ok, true, loaded.ok ? '' : loaded.reason);
+  if (!loaded.ok) return;
+  const m = /^data:image\/png;base64,(.+)$/s.exec(loaded.att.dataUrl);
+  assert.ok(m, 'dataUrl 必须是 PNG data URL');
+  const decoded = decodePng(Buffer.from(m![1], 'base64'));
+  assert.ok(Math.max(decoded.width, decoded.height) < 1568, `应比 1568 更小,实际 ${decoded.width}×${decoded.height}`);
+  assert.ok(loaded.att.bytes <= INLINE_PNG_BUDGET_BYTES, `应装进软预算,实际 ${loaded.att.bytes}`);
 });
 
 // ── TUI 摘要 ─────────────────────────────────────────────────────────────

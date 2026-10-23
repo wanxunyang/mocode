@@ -30,6 +30,12 @@ export interface AgentHooks {
   /** 一次 chat 失败后即将退避重试(429/5xx/网络错/流中途故障)。宿主可据此给出可见反馈,
    *  否则用户面对的是长达数十秒的「无解释等待」。 */
   onModelRetry?: (info: { attempt: number; nextAttempt: number; waitMs: number; code: string }) => void;
+  /** 请求体字节预算触发的「图片 → 文字卡」压缩。start 在描述请求发出前,done 在替换完成后(replaced=0 表示未改动)。 */
+  onImageRelief?: (
+    info:
+      | { phase: 'start'; images: number; bytes: number }
+      | { phase: 'done'; replaced: number; described: number; bytesBefore: number; bytesAfter: number },
+  ) => void;
   onTextEnd?: () => void;
   onToolHeader?: (tc: ToolCallRef) => void;
   onToolStart?: (name: string) => void;

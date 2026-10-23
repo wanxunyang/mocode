@@ -451,6 +451,22 @@ export async function runAgent(
       spinner.start(t('agent.retrying', { seconds: Math.max(1, Math.round(r.waitMs / 1000)), attempt: r.attempt })),
     // 流式实时用量 → 底栏 context 进度条左侧 chip;轮末由 repl 清空。
     onLiveUsage: (u) => layout.setLiveUsage(u),
+    // 请求体字节预算触发的「图片 → 文字卡」:描述请求发出前先亮状态行,否则几十秒静止像卡死;
+    // 完成后打一行结果(与「压缩上下文」摘要行区分,不写 tokens)。
+    onImageRelief: (info) => {
+      const fmt = (n: number): string =>
+        n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`;
+      if (info.phase === 'start') {
+        spinner.start(`正在压缩图片(${info.images} 张,请求体约 ${fmt(info.bytes)})…`);
+        return;
+      }
+      spinner.stop();
+      if (info.replaced <= 0) return;
+      if (!isLastContentRowBlank()) layout.contentWrite('\n');
+      layout.contentWrite(
+        `  ${ui.accent}●${ui.reset} 压缩图片  ${info.replaced} 张转为文字卡(${info.described} 张含描述)  请求体 ${fmt(info.bytesBefore)} → ${fmt(info.bytesAfter)}\n`,
+      );
+    },
     onTextEnd: () => {
       if (lastChar && lastChar !== '\n') {
         layout.contentWrite('\n');

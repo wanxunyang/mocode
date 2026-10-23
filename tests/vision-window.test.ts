@@ -14,10 +14,25 @@ import {
   visionWindowStats,
   getVisionWindowTelemetry,
   resetVisionWindowTelemetry,
+  stripOversizedImages,
+  countOversizedImages,
+  countOversizedImagePlaceholders,
+  OVERSIZED_IMAGE_MIN_CHARS,
+  applyImageBudget,
+  applyImageTurnAging,
+  IMAGE_AGED_PLACEHOLDER_PREFIX,
+  IMAGE_BUDGET_PLACEHOLDER_PREFIX,
+  OVERSIZED_IMAGE_PLACEHOLDER_PREFIX,
 } from '../src/context/vision-window.js';
 import { createStagedHistoryManager } from '../src/agent/stages/history-manager.js';
 import type { HistoryManager } from '../src/agent/stages/contracts.js';
-import { visionBatch, visionKeep, DEFAULT_VISION_KEEP, DEFAULT_VISION_BATCH } from '../src/config/index.js';
+import {
+  visionBatch,
+  visionKeep,
+  imageTurnAgingEnabled,
+  DEFAULT_VISION_KEEP,
+  DEFAULT_VISION_BATCH,
+} from '../src/config/index.js';
 
 /** 1×1 PNG;imageTokens 解析不出尺寸时会走 85 兜底,不影响本文件的结构与算法断言。 */
 const TINY_PNG = 'data:image/png;base64,iVBORw0KGgo=';
@@ -283,4 +298,198 @@ test('#12 HistoryManager 集成:pruneVisionWindow 原地换 backing 并推进 re
   // 已剪过后再 prune 是 no-op(幂等)。
   assert.equal(manager.pruneVisionWindow({ keep: 2, batch: 4, step: 9 }), false);
   resetVisionWindowTelemetry();
+});
+
+// ── 上游请求体过大:大图摘除(不走摘要压缩)────────────────────────────────
+
+function bigImageMessage(name = 'big.png'): ChatMessage {
+  const url = `data:image/png;base64,${'A'.repeat(OVERSIZED_IMAGE_MIN_CHARS + 10)}`;
+  return {
+    role: 'user',
+    content: [
+      { type: 'text', text: `${ATTACHMENT_PREAMBLE}${name}. Analyze the attached image content directly.` },
+      { type: 'image_url', image_url: { url } },
+    ],
+  } as ChatMessage;
+}
+
+test('#13 stripOversizedImages: 只换大图,小图与前言原样保留,且可被计数识别', () => {
+  const messages: ChatMessage[] = [bigImageMessage(), frameMessage('computer-result.png'), userPastedImageMessage()];
+  assert.equal(countOversizedImages(messages), 1);
+  const r = stripOversizedImages(messages);
+  assert.equal(r.changed, true);
+  assert.equal(r.stripped, 1);
+  assert.equal(countImages(r.messages), 2, '小图保留');
+  assert.equal(countOversizedImages(r.messages), 0);
+  assert.equal(countOversizedImagePlaceholders(r.messages), 1, '占位可作无状态计数器');
+  assert.equal(r.messages[1], messages[1], '未改动的消息保持原引用');
+  const first = JSON.stringify(r.messages[0]);
+  assert.ok(first.includes('The image was not seen'), '占位必须告诉模型图没被看到');
+  assert.ok(first.includes(ATTACHMENT_PREAMBLE), '前言保留');
+});
+
+test('#14 stripOversizedImages: 无大图时返回入参引用且 changed=false(幂等)', () => {
+  const messages: ChatMessage[] = [frameMessage('computer-result.png')];
+  const r = stripOversizedImages(messages);
+  assert.equal(r.changed, false);
+  assert.equal(r.messages, messages);
+  const once = stripOversizedImages([bigImageMessage()]);
+  const twice = stripOversizedImages(once.messages);
+  assert.equal(twice.changed, false);
+});
+
+test('#15 HistoryManager.stripOversizedImages: 原地替换并推进 revision,二次调用返回 0', () => {
+  const backing: ChatMessage[] = [{ role: 'user', content: 'hi' } as ChatMessage, bigImageMessage()];
+  const manager: HistoryManager = createStagedHistoryManager({ messages: backing });
+  const before = manager.snapshot().revision;
+  assert.equal(manager.stripOversizedImages(), 1);
+  assert.equal(manager.snapshot().revision, before + 1);
+  assert.equal(countOversizedImages(backing), 0);
+  assert.equal(manager.stripOversizedImages(), 0);
+});
+
+// ── 图片总量预算(非屏幕帧图片攒多了整体越过上游请求体上限)──────────────────
+
+function sizedImageMessage(chars: number, name = 'doc.png'): ChatMessage {
+  const url = `data:image/png;base64,${'A'.repeat(chars)}`;
+  return {
+    role: 'user',
+    content: [
+      { type: 'text', text: `${ATTACHMENT_PREAMBLE}${name}. Analyze the attached image content directly.` },
+      { type: 'image_url', image_url: { url } },
+    ],
+  } as ChatMessage;
+}
+
+test('#16 applyImageBudget: 超预算时从最旧淘汰,保留最新,屏幕帧不动,占位不计入上游拒收计数', () => {
+  const frame = frameMessage('computer-result.png');
+  const messages: ChatMessage[] = [
+    sizedImageMessage(100_000, 'a.png'),
+    frame,
+    sizedImageMessage(100_000, 'b.png'),
+    sizedImageMessage(100_000, 'c.png'),
+  ];
+  const r = applyImageBudget(messages, { maxChars: 250_000 });
+  assert.equal(r.changed, true);
+  assert.equal(r.evicted, 1, '总量 300k+ > 250k:淘汰最旧一张即可');
+  assert.equal(r.messages[1], frame, '屏幕帧原引用保留(归 applyVisionWindow 管)');
+  assert.equal(r.messages[2], messages[2]);
+  assert.equal(r.messages[3], messages[3], '最新一张保留');
+  const first = JSON.stringify(r.messages[0]);
+  assert.ok(first.includes(IMAGE_BUDGET_PLACEHOLDER_PREFIX));
+  assert.ok(first.includes(ATTACHMENT_PREAMBLE), '附件前言保留(rollback 靠它区分真实用户轮)');
+  assert.equal(countOversizedImagePlaceholders(r.messages), 0, '与上游拒收占位前缀刻意不同');
+  assert.ok(!first.includes(OVERSIZED_IMAGE_PLACEHOLDER_PREFIX));
+  // 幂等。
+  const again = applyImageBudget(r.messages, { maxChars: 250_000 });
+  assert.equal(again.changed, false);
+  assert.equal(again.messages, r.messages);
+});
+
+test('#17 applyImageBudget: 只有一张时即使超预算也保留;maxChars<=0 视为关闭', () => {
+  const one: ChatMessage[] = [sizedImageMessage(300_000)];
+  const r = applyImageBudget(one, { maxChars: 100_000 });
+  assert.equal(r.changed, false);
+  assert.equal(r.messages, one);
+  const many: ChatMessage[] = [sizedImageMessage(100_000), sizedImageMessage(100_000)];
+  assert.equal(applyImageBudget(many, { maxChars: 0 }).changed, false);
+});
+
+test('#18 HistoryManager.enforceImageBudget: 原地替换并推进 revision,二次调用返回 0', () => {
+  const backing: ChatMessage[] = [sizedImageMessage(100_000), sizedImageMessage(100_000), sizedImageMessage(100_000)];
+  const manager: HistoryManager = createStagedHistoryManager({ messages: backing });
+  const before = manager.snapshot().revision;
+  assert.equal(manager.enforceImageBudget({ maxChars: 150_000 }), 2);
+  assert.equal(manager.snapshot().revision, before + 1);
+  assert.equal(countImages(backing), 1);
+  assert.equal(manager.enforceImageBudget({ maxChars: 150_000 }), 0);
+});
+
+// ── 图片按轮次淘汰(下一个真实用户轮开始时,上一轮工具图换成文字卡)──────────────
+
+function realUser(text: string): ChatMessage {
+  return { role: 'user', content: text } as ChatMessage;
+}
+
+test('#20 applyImageTurnAging: 当前轮内的工具图原样保留', () => {
+  const messages: ChatMessage[] = [realUser('读一下这张图'), sizedImageMessage(5_000, 'a.png')];
+  const r = applyImageTurnAging(messages);
+  assert.equal(r.changed, false);
+  assert.equal(r.messages, messages, '无改动返回入参引用');
+});
+
+test('#21 applyImageTurnAging: 跨轮后上一轮工具图换文字卡,前言保留,当前轮图不动', () => {
+  const old = sizedImageMessage(5_000, 'old.png');
+  const cur = sizedImageMessage(5_000, 'cur.png');
+  const messages: ChatMessage[] = [realUser('第一轮'), old, realUser('第二轮'), cur];
+  const r = applyImageTurnAging(messages);
+  assert.equal(r.changed, true);
+  assert.equal(r.aged, 1);
+  assert.equal(r.messages[3], cur, '当前轮的图保持原引用');
+  const first = JSON.stringify(r.messages[1]);
+  assert.ok(first.includes(IMAGE_AGED_PLACEHOLDER_PREFIX));
+  assert.ok(first.includes('old.png'), '文字卡写明帧名');
+  assert.ok(first.includes('read_file'), '文字卡提示可重读');
+  assert.ok(first.includes(ATTACHMENT_PREAMBLE), '附件前言保留(rollback 靠它区分真实用户轮)');
+  assert.equal(countImages(r.messages), 1);
+  assert.equal(countOversizedImagePlaceholders(r.messages), 0, '与上游拒收占位前缀不同');
+  // 幂等。
+  const again = applyImageTurnAging(r.messages);
+  assert.equal(again.changed, false);
+  assert.equal(again.messages, r.messages);
+});
+
+test('#22 applyImageTurnAging: computer- 屏幕帧与用户粘贴图不被淘汰', () => {
+  const frame = frameMessage('computer-result.png');
+  const pasted = userPastedImageMessage();
+  const messages: ChatMessage[] = [realUser('第一轮'), frame, pasted, realUser('第二轮')];
+  const r = applyImageTurnAging(messages);
+  assert.equal(r.changed, false, '屏幕帧归 applyVisionWindow 管,用户图不动');
+  assert.equal(r.messages, messages);
+});
+
+test('#23 applyImageTurnAging: computer- 帧剪枝占位不被误判成真实用户轮', () => {
+  const pruned = {
+    role: 'user',
+    content: [{ type: 'text', text: '[screenshot omitted: computer-result.png · step 3]' }],
+  } as ChatMessage;
+  const doc = sizedImageMessage(5_000, 'doc.png');
+  // 最后一条「真实」用户消息是 realUser('第一轮'),占位在其后,不应成为轮次边界。
+  const messages: ChatMessage[] = [realUser('第一轮'), doc, pruned];
+  const r = applyImageTurnAging(messages);
+  assert.equal(r.changed, false, '占位不算新一轮,doc 图仍属当前轮');
+});
+
+test('#24 HistoryManager.ageToolImages: 原地替换并推进 revision,二次调用返回 0', () => {
+  const backing: ChatMessage[] = [
+    realUser('第一轮'),
+    sizedImageMessage(5_000, 'a.png'),
+    realUser('第二轮'),
+    sizedImageMessage(5_000, 'b.png'),
+  ];
+  const manager: HistoryManager = createStagedHistoryManager({ messages: backing });
+  const before = manager.snapshot().revision;
+  assert.equal(manager.ageToolImages(), 1);
+  assert.equal(manager.snapshot().revision, before + 1);
+  assert.equal(countImages(backing), 1);
+  assert.equal(manager.ageToolImages(), 0);
+});
+
+test('#25 imageTurnAgingEnabled: 默认开,0/false/off/no 关闭', () => {
+  const prev = process.env.MOCODE_IMAGE_AGE_TURNS;
+  try {
+    delete process.env.MOCODE_IMAGE_AGE_TURNS;
+    assert.equal(imageTurnAgingEnabled(), true);
+    process.env.MOCODE_IMAGE_AGE_TURNS = '  ';
+    assert.equal(imageTurnAgingEnabled(), true);
+    for (const off of ['0', 'false', 'OFF', 'no']) {
+      process.env.MOCODE_IMAGE_AGE_TURNS = off;
+      assert.equal(imageTurnAgingEnabled(), false, off);
+    }
+    process.env.MOCODE_IMAGE_AGE_TURNS = '1';
+    assert.equal(imageTurnAgingEnabled(), true);
+  } finally {
+    if (prev === undefined) delete process.env.MOCODE_IMAGE_AGE_TURNS;
+    else process.env.MOCODE_IMAGE_AGE_TURNS = prev;
+  }
 });

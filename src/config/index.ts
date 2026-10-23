@@ -1014,6 +1014,16 @@ export function visionBatch(): number {
   return Math.round(parsed);
 }
 
+/**
+ * 图片按轮次淘汰开关:下一个真实用户轮开始时,上一轮工具图(非 computer- 帧)换成文字卡。
+ * **默认开**;显式 0 / false / off 关闭。env: MOCODE_IMAGE_AGE_TURNS。
+ */
+export function imageTurnAgingEnabled(): boolean {
+  const raw = process.env.MOCODE_IMAGE_AGE_TURNS?.trim().toLowerCase();
+  if (raw === undefined || raw === '') return true;
+  return !(raw === '0' || raw === 'false' || raw === 'off' || raw === 'no');
+}
+
 /** MCP 总开关；关闭时下次启动跳过 MCP 配置读取与服务连接。 */
 export function isMcpEnabled(): boolean {
   return config.mcpEnabled;

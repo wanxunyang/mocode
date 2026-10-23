@@ -73,6 +73,26 @@ export interface HistoryManager {
    * 从 manager 进才不会漏。
    */
   pruneVisionWindow(opts: { keep: number; batch: number; step: number }): boolean;
+  /**
+   * 上游因请求体过大拒收后的补救:把 history 里的大图换成文本占位(不做摘要)。
+   * 返回摘掉的图片数(0 = 没有可摘的大图)。
+   */
+  stripOversizedImages(): number;
+  /**
+   * 图片总量预算:非屏幕帧图片总字符数超 maxChars 时淘汰最旧的(保留最新一张)。
+   * 返回淘汰的图片数(0 = 未改动)。
+   */
+  enforceImageBudget(opts: { maxChars: number }): number;
+  /**
+   * 图片按轮次淘汰:最后一条真实用户消息之前的工具图(非 computer- 帧)换成文字卡。
+   * 返回换掉的图片数(0 = 未改动)。
+   */
+  ageToolImages(): number;
+  /**
+   * 请求体字节预算:把 cards(key=`${msg}:${part}` → 文字卡)对应的图片换成文字卡。
+   * 返回换掉的图片数(0 = 未改动)。key 来自 listReplaceableImages(同一份 snapshot,期间不得改 history)。
+   */
+  replaceImagesWithCards(cards: ReadonlyMap<string, string>): number;
   createCheckpoint(): HistoryCheckpoint;
   restore(checkpoint: HistoryCheckpoint): void;
   /** Narrow bridge for the legacy scheduler/compact implementation during staged migration. */

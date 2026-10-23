@@ -6,7 +6,10 @@ import {
   type ChatMessage,
   type ChatResult,
 } from '../llm/index.js';
-import { visionBatch, visionKeep } from '../config/index.js';
+import { imageTurnAgingEnabled, visionBatch, visionKeep } from '../config/index.js';
+import { estimateRequestBytes, learnRequestByteLimit, requestByteLimit } from '../context/request-limit.js';
+import { createImageDescriber, relieveRequestBytes } from './request-governor.js';
+import { countOversizedImagePlaceholders, countOversizedImages } from '../context/vision-window.js';
 import type { ContextState } from '../session/compact.js';
 import { getActiveSessionStore } from '../session/store.js';
 import { getCurrentSessionId } from '../session/state.js';
@@ -117,6 +120,55 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   if (visionKeepN > 0 && historyManager.pruneVisionWindow({ keep: visionKeepN, batch: visionBatch(), step })) {
     rebuildHistoryIndexes();
     onContextUpdate?.();
+  }
+  // 图片按轮次淘汰:上一个真实用户轮及更早的工具图换成文字卡,当前轮内保留原图。
+  // 先于总量预算跑(预算只兜底「当前轮内」仍然过多的图)。同样要通知 readDedup。
+  if (imageTurnAgingEnabled() && historyManager.ageToolImages() > 0) {
+    rebuildHistoryIndexes();
+    readDedup.markContextChanged();
+    onContextUpdate?.();
+  }
+  // 请求体字节预算(上限来源见 context/request-limit.ts,触发线 = 上限 × 0.8):超线且去图即可达标时,
+  // 让模型把图描述成文字卡替换原图(卡片带路径,可 read_file 重读)。同样必须在 trim 之前;
+  // 被换掉的图要通知 readDedup,否则模型重读同一路径会被去重提示挡回。
+  const byteLimit = requestByteLimit(requestBaseURL);
+  if (byteLimit > 0) {
+    let reliefAnnounced = false;
+    const relief = await relieveRequestBytes({
+      historyManager,
+      tools: activeTools,
+      limitBytes: byteLimit,
+      extraBytes: sessionStateText ? Buffer.byteLength(sessionStateText, 'utf8') : 0,
+      signal,
+      describe: createImageDescriber(modelRunner),
+      onStart: (info) => {
+        reliefAnnounced = true;
+        hooks.onImageRelief?.({ phase: 'start', ...info });
+      },
+    });
+    if (reliefAnnounced) {
+      hooks.onImageRelief?.({
+        phase: 'done',
+        replaced: relief.replaced,
+        described: relief.described,
+        bytesBefore: relief.bytesBefore,
+        bytesAfter: relief.bytesAfter,
+      });
+    }
+    if (relief.replaced > 0) {
+      emitTrace('compact', {
+        source: 'request_bytes',
+        reason: 'describe_images',
+        compacted: false,
+        replaced: relief.replaced,
+        described: relief.described,
+        estimateBefore: relief.bytesBefore,
+        estimateAfter: relief.bytesAfter,
+      });
+      rebuildHistoryIndexes();
+      readDedup.markContextChanged();
+      onContextUpdate?.();
+    }
   }
   const compactStartedAt = Date.now();
   const trimResult = await contextTrimmer.trim({
@@ -279,45 +331,175 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       turnLifecycle.markAborted();
       return { kind: 'aborted', result: turnLifecycle.buildAbortedResult() };
     }
+    // 字节拒收的学习 + 描述重试:token 估算远低于窗口却被判超长 → 上游限的是请求体字节数。
+    // 记下这次失败请求的字节数作为上限(取历史最小值),再按 0.8 线把图描述成文字卡后重试一次。
+    let byteResult: ChatResult | undefined;
     if (!overflowRetried && isContextLengthError(error)) {
-      overflowRetried = true;
-      const rawEstimate = estimatePromptTokens(requestHistory, activeTools);
-      if (rawEstimate > 1_000) {
-        const calibration = ctx.updateTokenCalibration(
-          requestBaseURL,
-          requestModel,
-          activeTools,
-          rawEstimate,
-          ctx.config.contextWindowTokens,
-        );
-        runtimeContextState.correction = calibration.correction;
-        runtimeContextState.calibrationSamples = calibration.samples;
+      const winTokens = ctx.config.contextWindowTokens;
+      const tokenEst = estimatePromptTokens(requestHistory, activeTools);
+      if (!(winTokens > 0 && tokenEst >= winTokens * 0.5)) {
+        const failingBytes = estimateRequestBytes(requestHistory, activeTools);
+        const learned = learnRequestByteLimit(requestBaseURL, failingBytes);
+        let reliefAnnounced = false;
+        const relief = await relieveRequestBytes({
+          historyManager,
+          tools: activeTools,
+          limitBytes: learned,
+          extraBytes:
+            requestHistory.length > history.length ? failingBytes - estimateRequestBytes(history, activeTools) : 0,
+          signal,
+          describe: createImageDescriber(modelRunner),
+          onStart: (info) => {
+            reliefAnnounced = true;
+            hooks.onImageRelief?.({ phase: 'start', ...info });
+          },
+        });
+        if (reliefAnnounced) {
+          hooks.onImageRelief?.({
+            phase: 'done',
+            replaced: relief.replaced,
+            described: relief.described,
+            bytesBefore: relief.bytesBefore,
+            bytesAfter: relief.bytesAfter,
+          });
+        }
+        emitTrace('compact', {
+          source: 'overflow_retry',
+          reason: 'request_bytes',
+          compacted: false,
+          limit: learned,
+          relief: relief.reason,
+          replaced: relief.replaced,
+          described: relief.described,
+          estimateBefore: failingBytes,
+          durationMs: Date.now() - modelStartedAt,
+        });
+        if (relief.replaced > 0) {
+          rebuildHistoryIndexes();
+          readDedup.markContextChanged();
+          requestHistory = buildRequestHistory();
+          stepPromptEst = estimatePromptTokens(requestHistory, activeTools, runtimeContextState.correction);
+          try {
+            byteResult = await runChatOnce();
+          } catch (retryError) {
+            // 去图后仍被判超长:说明还有文本压力,回落到下面的摘要路径(图已换成卡片)。
+            if (signal?.aborted || !isContextLengthError(retryError)) throw retryError;
+          }
+        }
       }
-      const overflowResult = await contextTrimmer.trim({
-        mode: 'overflow',
-        history: historyManager.snapshot(),
-        step,
-        tools: activeTools,
-        ephemeralTokens: sessionStateText ? estimateTokens(sessionStateText) : 0,
-        signal,
-      });
-      const overflowStats = overflowResult.kind === 'aborted' ? {} : overflowResult.stats;
+    }
+    // 上游按请求体字节数拒收(而非 token):本地估算远低于窗口、history 里却有大图 → 病因是图,
+    // 摘要压缩救不了(摘要只会把图剥掉,模型没看过图又会重读,形成「读图→400→压缩」死循环)。
+    // 已经摘过 >=2 次仍被拒,直接抛错,不再循环。
+    const oversizedImages =
+      !byteResult && !overflowRetried && isContextLengthError(error) ? countOversizedImages(history) : 0;
+    if (oversizedImages > 0 && countOversizedImagePlaceholders(history) >= 2) throw error;
+    const overflowLocalEstimate = oversizedImages > 0 ? estimatePromptTokens(requestHistory, activeTools) : 0;
+    const overflowWindow = ctx.config.contextWindowTokens;
+    if (byteResult) {
+      // 已由上面的字节预算路径重试成功。
+      overflowRetried = true;
+      result = byteResult;
+    } else if (oversizedImages > 0 && !(overflowWindow > 0 && overflowLocalEstimate >= overflowWindow * 0.5)) {
+      overflowRetried = true;
+      const stripped = historyManager.stripOversizedImages();
       emitTrace('compact', {
         source: 'overflow_retry',
-        reason: overflowStats.reason ?? 'noop',
-        compacted: overflowStats.compacted === true,
-        estimateBefore: overflowStats.estimateBefore,
-        estimateAfter: overflowStats.estimateAfter,
+        reason: 'strip_oversized_images',
+        compacted: false,
+        stripped,
+        estimateBefore: overflowLocalEstimate,
         durationMs: Date.now() - modelStartedAt,
       });
-      if (overflowResult.kind === 'none' || overflowResult.kind === 'aborted') throw error;
-      if (overflowResult.kind === 'rebuild') {
-        historyRebuilt = true;
-        rebuildHistoryIndexes();
-      }
+      if (stripped === 0) throw error;
+      rebuildHistoryIndexes();
+      readDedup.markContextChanged();
       requestHistory = buildRequestHistory();
       stepPromptEst = estimatePromptTokens(requestHistory, activeTools, runtimeContextState.correction);
       result = await runChatOnce();
+    } else if (!overflowRetried && isContextLengthError(error)) {
+      overflowRetried = true;
+      // 第一道:摘要既压不掉保留区里的图,又白花一次 LLM 调用。先把除最新一张外的非屏幕帧图
+      // 换成文字卡,直接重试;只有「去图后仍被判超长」才说明是文本本身的问题,再走摘要。
+      let reliefResult: ChatResult | undefined;
+      const relieved = historyManager.enforceImageBudget({ maxChars: 1 });
+      if (relieved > 0) {
+        emitTrace('compact', {
+          source: 'overflow_retry',
+          reason: 'relieve_images',
+          compacted: false,
+          stripped: relieved,
+          durationMs: Date.now() - modelStartedAt,
+        });
+        rebuildHistoryIndexes();
+        readDedup.markContextChanged();
+        requestHistory = buildRequestHistory();
+        stepPromptEst = estimatePromptTokens(requestHistory, activeTools, runtimeContextState.correction);
+        try {
+          reliefResult = await runChatOnce();
+        } catch (retryError) {
+          if (signal?.aborted || !isContextLengthError(retryError)) throw retryError;
+        }
+      }
+      if (reliefResult) {
+        result = reliefResult;
+      } else {
+        // 跨 step 断路器:runModelTurn 的 overflowRetried 每 step 重置,挡不住「每步 400 → 每步摘要」。
+        // 同一用户轮(turnId)内摘要过一次仍被拒,说明摘要救不了,直接抛错,不再循环。
+        const breakerTurnId = turnLifecycle.traceTurnId;
+        if (breakerTurnId !== undefined) {
+          const prior = runtimeContextState.overflowCompaction;
+          const count = prior && prior.turnId === breakerTurnId ? prior.count : 0;
+          if (count >= 1) {
+            emitTrace('compact', {
+              source: 'overflow_retry',
+              reason: 'breaker_open',
+              compacted: false,
+              priorCompactions: count,
+              durationMs: Date.now() - modelStartedAt,
+            });
+            throw error;
+          }
+          runtimeContextState.overflowCompaction = { turnId: breakerTurnId, count: count + 1 };
+        }
+        const rawEstimate = estimatePromptTokens(requestHistory, activeTools);
+        if (rawEstimate > 1_000) {
+          const calibration = ctx.updateTokenCalibration(
+            requestBaseURL,
+            requestModel,
+            activeTools,
+            rawEstimate,
+            ctx.config.contextWindowTokens,
+          );
+          runtimeContextState.correction = calibration.correction;
+          runtimeContextState.calibrationSamples = calibration.samples;
+        }
+        const overflowResult = await contextTrimmer.trim({
+          mode: 'overflow',
+          history: historyManager.snapshot(),
+          step,
+          tools: activeTools,
+          ephemeralTokens: sessionStateText ? estimateTokens(sessionStateText) : 0,
+          signal,
+        });
+        const overflowStats = overflowResult.kind === 'aborted' ? {} : overflowResult.stats;
+        emitTrace('compact', {
+          source: 'overflow_retry',
+          reason: overflowStats.reason ?? 'noop',
+          compacted: overflowStats.compacted === true,
+          estimateBefore: overflowStats.estimateBefore,
+          estimateAfter: overflowStats.estimateAfter,
+          durationMs: Date.now() - modelStartedAt,
+        });
+        if (overflowResult.kind === 'none' || overflowResult.kind === 'aborted') throw error;
+        if (overflowResult.kind === 'rebuild') {
+          historyRebuilt = true;
+          rebuildHistoryIndexes();
+        }
+        requestHistory = buildRequestHistory();
+        stepPromptEst = estimatePromptTokens(requestHistory, activeTools, runtimeContextState.correction);
+        result = await runChatOnce();
+      }
     } else {
       throw error;
     }

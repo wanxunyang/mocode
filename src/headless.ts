@@ -290,6 +290,15 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     onModelRetry: (info) => {
       process.stderr.write(`[retry] model error (${info.code}), retry ${info.nextAttempt} in ${info.waitMs}ms\n`);
     },
+    onImageRelief: (info) => {
+      process.stderr.write(
+        info.phase === 'start'
+          ? `[images] compressing ${info.images} image(s) to text cards (request ~${Math.round(info.bytes / 1024)} KB)\n`
+          : info.replaced > 0
+            ? `[images] ${info.replaced} image(s) replaced (${Math.round(info.bytesBefore / 1024)} KB -> ${Math.round(info.bytesAfter / 1024)} KB)\n`
+            : '',
+      );
+    },
   };
 
   const startedAt = Date.now();

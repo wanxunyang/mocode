@@ -247,6 +247,243 @@ export function applyVisionWindow(messages: readonly ChatMessage[], opts: Vision
   }
 }
 
+/**
+ * 上游拒收请求体时,被摘掉的大图所留下的占位行前缀。
+ * 兼作「已发生过几次」的无状态计数器(数 history 里有几条占位),用来掐断跨 step 的循环。
+ */
+export const OVERSIZED_IMAGE_PLACEHOLDER_PREFIX = '[image removed: upstream rejected the request size';
+
+/** 默认「大图」阈值:data URL 字符数。约 150 KB 原始字节;小图不动。 */
+export const OVERSIZED_IMAGE_MIN_CHARS = 200_000;
+
+export interface StripOversizedImagesResult {
+  changed: boolean;
+  /** 本次摘掉的 image_url part 数。 */
+  stripped: number;
+  messages: ChatMessage[];
+}
+
+function imageUrlChars(part: MaybePart): number {
+  const iu = part.image_url as { url?: unknown } | string | undefined;
+  const url = typeof iu === 'string' ? iu : iu && typeof iu === 'object' ? iu.url : undefined;
+  return typeof url === 'string' ? url.length : 0;
+}
+
+/** history 里 data URL 超过阈值的 image_url part 数(只读)。 */
+export function countOversizedImages(
+  messages: readonly ChatMessage[],
+  minChars: number = OVERSIZED_IMAGE_MIN_CHARS,
+): number {
+  let count = 0;
+  if (!Array.isArray(messages)) return 0;
+  for (const message of messages) {
+    const parts = userContentParts(message);
+    if (!parts) continue;
+    for (const part of parts) if (part.type === 'image_url' && imageUrlChars(part) >= minChars) count++;
+  }
+  return count;
+}
+
+/** history 里已有多少条「大图被摘除」占位(无状态地得知本会话已经历过几次)。 */
+export function countOversizedImagePlaceholders(messages: readonly ChatMessage[]): number {
+  let count = 0;
+  if (!Array.isArray(messages)) return 0;
+  for (const message of messages) {
+    const parts = userContentParts(message);
+    if (!parts) continue;
+    for (const part of parts) {
+      if (typeof part.text === 'string' && part.text.startsWith(OVERSIZED_IMAGE_PLACEHOLDER_PREFIX)) count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * 上游因请求体过大拒收时的外科手术:只把**大** image_url part 换成文本占位,其余 part(含附件前言)原样保留。
+ * 与摘要压缩的区别:不丢任何对话信息,模型能看到「图被拒了、该降采样后重读」而不是被摘要悄悄吞掉。
+ * 纯函数、永不抛错;无改动时返回入参引用。
+ */
+export function stripOversizedImages(
+  messages: readonly ChatMessage[],
+  opts: { minChars?: number } = {},
+): StripOversizedImagesResult {
+  try {
+    if (!Array.isArray(messages)) return { changed: false, stripped: 0, messages: messages as ChatMessage[] };
+    const minChars = opts.minChars ?? OVERSIZED_IMAGE_MIN_CHARS;
+    let stripped = 0;
+    const next = messages.map((message) => {
+      const parts = userContentParts(message);
+      if (!parts || !parts.some((p) => p.type === 'image_url' && imageUrlChars(p) >= minChars)) return message;
+      const content = parts.map((part) => {
+        if (part.type === 'image_url' && imageUrlChars(part) >= minChars) {
+          stripped++;
+          return {
+            type: 'text',
+            text:
+              `${OVERSIZED_IMAGE_PLACEHOLDER_PREFIX} (~${Math.round(imageUrlChars(part) / 1024)} KB inline). ` +
+              'The image was not seen. Shrink or downscale it (e.g. resize to <=1568px long edge) and read it again.]',
+          };
+        }
+        return part;
+      });
+      return { role: 'user', content } as ChatMessage;
+    });
+    if (stripped === 0) return { changed: false, stripped: 0, messages: messages as ChatMessage[] };
+    return { changed: true, stripped, messages: next };
+  } catch {
+    return { changed: false, stripped: 0, messages: messages as ChatMessage[] };
+  }
+}
+
+/** 总量预算淘汰留下的占位前缀;与 OVERSIZED_IMAGE_PLACEHOLDER_PREFIX 刻意不同,不计入「上游拒收」循环计数。 */
+export const IMAGE_BUDGET_PLACEHOLDER_PREFIX = '[image removed: over the request image budget';
+
+export interface ApplyImageBudgetResult {
+  changed: boolean;
+  /** 本次淘汰的 image_url part 数。 */
+  evicted: number;
+  messages: ChatMessage[];
+}
+
+/**
+ * 图片总量预算:history 里**非屏幕帧**图片(read_file 文档图 / screenshot / 用户粘贴图)的 data URL
+ * 字符数之和超过 maxChars 时,从最旧的开始换成文本占位,**始终保留最新一张**。
+ *
+ * 为什么要有:上游代理限的是整个请求体字节数,而图片会随 history 每步重发、只增不减;
+ * 每张图单独都合规,攒几张就整体越线。屏幕帧(`computer-`)由 applyVisionWindow 管,这里不碰,
+ * 避免改变 Computer Use 既有行为。幂等:淘汰后总量 <= 预算或只剩一张,再调即 no-op。
+ * 纯函数、永不抛错;无改动返回入参引用。附件前言原样保留(rollback 靠它区分真实用户轮)。
+ */
+export function applyImageBudget(messages: readonly ChatMessage[], opts: { maxChars: number }): ApplyImageBudgetResult {
+  const noop = (): ApplyImageBudgetResult => ({ changed: false, evicted: 0, messages: messages as ChatMessage[] });
+  try {
+    if (!Array.isArray(messages) || !Number.isFinite(opts?.maxChars) || opts.maxChars <= 0) return noop();
+    const entries: Array<{ msg: number; part: number; chars: number }> = [];
+    let total = 0;
+    for (let i = 0; i < messages.length; i++) {
+      const parts = userContentParts(messages[i]);
+      if (!parts || isFrameCarrier(messages[i])) continue;
+      for (let j = 0; j < parts.length; j++) {
+        if (parts[j].type !== 'image_url') continue;
+        const chars = imageUrlChars(parts[j]);
+        entries.push({ msg: i, part: j, chars });
+        total += chars;
+      }
+    }
+    if (total <= opts.maxChars || entries.length <= 1) return noop();
+
+    const evict = new Set<string>();
+    for (let k = 0; k < entries.length - 1 && total > opts.maxChars; k++) {
+      evict.add(`${entries[k].msg}:${entries[k].part}`);
+      total -= entries[k].chars;
+    }
+    const sizeOf = new Map(entries.map((e) => [`${e.msg}:${e.part}`, e.chars]));
+    const budgetKb = Math.round(opts.maxChars / 1024);
+    const next = messages.map((message, i) => {
+      const parts = userContentParts(message);
+      if (!parts || !parts.some((_, j) => evict.has(`${i}:${j}`))) return message;
+      const content = parts.map((part, j) =>
+        evict.has(`${i}:${j}`)
+          ? {
+              type: 'text',
+              text:
+                `${IMAGE_BUDGET_PLACEHOLDER_PREFIX} (~${Math.round((sizeOf.get(`${i}:${j}`) ?? 0) / 1024)} KB inline; ` +
+                (budgetKb >= 1
+                  ? `older images are dropped to keep the total under ~${budgetKb} KB). `
+                  : 'older images are dropped to relieve context pressure; only the latest is kept). ') +
+                'Not visible now; read it again with read_file if you still need it.]',
+            }
+          : part,
+      );
+      return { role: 'user', content } as ChatMessage;
+    });
+    return { changed: true, evicted: evict.size, messages: next };
+  } catch {
+    return noop();
+  }
+}
+
+/** 按轮次淘汰留下的文字卡前缀;与 OVERSIZED/BUDGET 前缀刻意不同,不计入「上游拒收」循环计数。 */
+export const IMAGE_AGED_PLACEHOLDER_PREFIX = '[image aged out: ';
+
+export interface ApplyImageTurnAgingResult {
+  changed: boolean;
+  /** 本次换成文字卡的 image_url part 数。 */
+  aged: number;
+  messages: ChatMessage[];
+}
+
+/**
+ * 是否为真实用户轮消息(beginTurn 记入 turns 的那条)。口径同 rollback/store.ts 的 isRealTurnUserMessage:
+ * 排除工具附件载体(带 ATTACHMENT_PREAMBLE)与 computer- 帧剪枝后的 `[screenshot omitted: …]` 占位。
+ * 不能 import rollback(循环依赖),故本地实现。
+ */
+function isRealUserTurnMessage(message: ChatMessage): boolean {
+  if (!message || (message as { role?: unknown }).role !== 'user') return false;
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === 'string') return !content.startsWith(PRUNED_FRAME_PREFIX);
+  if (!Array.isArray(content)) return false;
+  for (const raw of content) {
+    if (!raw || typeof raw !== 'object') continue;
+    const text = (raw as MaybePart).text;
+    if (typeof text === 'string' && (text.startsWith(ATTACHMENT_PREAMBLE) || text.startsWith(PRUNED_FRAME_PREFIX))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * 图片按轮次淘汰:最后一条真实用户消息**之前**的工具附件图(read_file 文档图 / screenshot / browser 等,
+ * 即帧名不以 `computer-` 开头的)换成文字卡;当前轮内的图原样保留(模型常多步引用)。
+ * 用户自己粘贴的图不动(没有附件前言);屏幕帧由 applyVisionWindow 管。
+ * 文字卡写明帧名与体积,提示需要时 read_file 重读。附件前言 text part 原样保留(rollback 靠它区分轮次)。
+ * 幂等(淘汰后不再含 image_url);纯函数、永不抛错;无改动返回入参引用。
+ */
+export function applyImageTurnAging(messages: readonly ChatMessage[]): ApplyImageTurnAgingResult {
+  const noop = (): ApplyImageTurnAgingResult => ({ changed: false, aged: 0, messages: messages as ChatMessage[] });
+  try {
+    if (!Array.isArray(messages)) return noop();
+    let lastUser = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (isRealUserTurnMessage(messages[i])) {
+        lastUser = i;
+        break;
+      }
+    }
+    if (lastUser <= 0) return noop();
+
+    let aged = 0;
+    const next = messages.map((message, i) => {
+      if (i >= lastUser) return message;
+      const parts = userContentParts(message);
+      if (!parts || imagePartCount(parts) === 0) return message;
+      const names = frameNames(message);
+      if (!names) return message; // 无附件前言 = 用户粘贴图,不动
+      let imageIndex = 0;
+      let changed = false;
+      const content = parts.map((part) => {
+        if (part.type !== 'image_url') return part;
+        const name = names[imageIndex++];
+        if (name !== undefined && VISION_FRAME_NAME_PREFIXES.some((prefix) => name.startsWith(prefix))) return part;
+        changed = true;
+        aged++;
+        return {
+          type: 'text',
+          text:
+            `${IMAGE_AGED_PLACEHOLDER_PREFIX}${name ?? UNKNOWN_FRAME_NAME} (~${Math.round(imageUrlChars(part) / 1024)} KB inline). ` +
+            'It was viewed in an earlier turn and is no longer attached; call read_file on the file again if you need to see it.]',
+        };
+      });
+      return changed ? ({ role: 'user', content } as ChatMessage) : message;
+    });
+    if (aged === 0) return noop();
+    return { changed: true, aged, messages: next };
+  } catch {
+    return noop();
+  }
+}
+
 /** 累积一次剪枝结果(由 HistoryManager 调用)。 */
 export function recordVisionWindowPrune(droppedFrames: number): void {
   if (!Number.isFinite(droppedFrames) || droppedFrames <= 0) return;
@@ -263,4 +500,142 @@ export function getVisionWindowTelemetry(): Readonly<VisionWindowTelemetry> {
 export function resetVisionWindowTelemetry(): void {
   telemetry.prunes = 0;
   telemetry.framesDropped = 0;
+}
+
+// ───────────────────────── 请求体字节预算:图片 → 文字卡 ─────────────────────────
+//
+// 请求体超过字节线(request-limit.ts)而去掉图片即可达标时,由模型把图描述成文字,
+// 再用「描述 + 文件路径」卡片替换原图;模型需要细节时按路径 read_file 重读。
+
+/** 描述卡前缀;与 OVERSIZED/BUDGET/AGED 前缀刻意不同,不计入「上游拒收」循环计数。 */
+export const IMAGE_CARD_PREFIX = '[image described: ';
+
+/** 描述文字的长度上限(字符),防止一张图的描述反过来撑大请求。 */
+export const IMAGE_CARD_MAX_DESCRIPTION_CHARS = 1500;
+
+export interface ReplaceableImage {
+  /** `${msg}:${part}`,applyImageCards 的寻址键。 */
+  key: string;
+  msg: number;
+  part: number;
+  /** data URL 字符数(≈ 请求体里这张图占的字节数)。 */
+  chars: number;
+  dataUrl: string;
+  /** 附件前言里的文件名;用户粘贴图为 undefined。 */
+  name?: string;
+  /** 从前一个 assistant tool_call 的 path 参数反查到的原路径;查不到为 undefined。 */
+  path?: string;
+}
+
+function imageUrlOf(part: MaybePart): string {
+  const iu = part.image_url as { url?: unknown } | string | undefined;
+  const url = typeof iu === 'string' ? iu : iu && typeof iu === 'object' ? iu.url : undefined;
+  return typeof url === 'string' ? url : '';
+}
+
+function basenameOf(p: string): string {
+  const segs = p.split(/[\\/]/);
+  return segs[segs.length - 1] || p;
+}
+
+/** 在附件消息之前最近的一次 assistant tool_calls 里,按 path 参数的文件名反查原路径。 */
+function findSourcePath(messages: readonly ChatMessage[], msgIndex: number, name: string): string | undefined {
+  for (let i = msgIndex - 1; i >= 0 && i >= msgIndex - 12; i--) {
+    const m = messages[i] as { role?: string; tool_calls?: Array<{ function?: { arguments?: string } }> };
+    if (m?.role !== 'assistant' || !Array.isArray(m.tool_calls) || m.tool_calls.length === 0) continue;
+    for (const call of m.tool_calls) {
+      try {
+        const args = JSON.parse(call?.function?.arguments ?? '') as { path?: unknown };
+        if (typeof args?.path === 'string' && basenameOf(args.path) === name) return args.path;
+      } catch {
+        // 参数不是合法 JSON:跳过这一条。
+      }
+    }
+    return undefined; // 只看最近的一批
+  }
+  return undefined;
+}
+
+/**
+ * 列出 history 里可被换成文字卡的图片(按出现顺序,旧在前):非屏幕帧的工具图与用户粘贴图。
+ * `computer-` 屏幕帧由 applyVisionWindow 管,这里不碰。纯函数、永不抛错。
+ */
+export function listReplaceableImages(messages: readonly ChatMessage[]): ReplaceableImage[] {
+  const out: ReplaceableImage[] = [];
+  try {
+    if (!Array.isArray(messages)) return out;
+    for (let i = 0; i < messages.length; i++) {
+      const parts = userContentParts(messages[i]);
+      if (!parts || imagePartCount(parts) === 0 || isFrameCarrier(messages[i])) continue;
+      const names = frameNames(messages[i]);
+      let imageIndex = 0;
+      for (let j = 0; j < parts.length; j++) {
+        if (parts[j].type !== 'image_url') continue;
+        const name = names ? names[imageIndex] : undefined;
+        imageIndex++;
+        if (name !== undefined && VISION_FRAME_NAME_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
+        const dataUrl = imageUrlOf(parts[j]);
+        out.push({
+          key: `${i}:${j}`,
+          msg: i,
+          part: j,
+          chars: dataUrl.length,
+          dataUrl,
+          name,
+          path: name !== undefined ? findSourcePath(messages, i, name) : undefined,
+        });
+      }
+    }
+  } catch {
+    // 永不抛错:返回已收集到的部分。
+  }
+  return out;
+}
+
+/** 生成替换原图的文字卡。description 为 null 表示描述失败:只留名称与重读提示。 */
+export function buildImageCard(img: ReplaceableImage, description: string | null): string {
+  const kb = Math.round(img.chars / 1024);
+  const label = img.name ?? 'pasted image';
+  const reread = img.path
+    ? `For details, call read_file on "${img.path}" again.`
+    : img.name
+      ? `For details, call read_file on the file "${img.name}" again.`
+      : 'It has no file path and cannot be re-read.';
+  const body = description
+    ? `Summary: ${description.trim().slice(0, IMAGE_CARD_MAX_DESCRIPTION_CHARS)}`
+    : 'No summary is available (the image was not seen).';
+  return `${IMAGE_CARD_PREFIX}${label} (~${kb} KB inline, removed to keep the request under the upstream size limit). ${body} ${reread}]`;
+}
+
+export interface ApplyImageCardsResult {
+  changed: boolean;
+  replaced: number;
+  messages: ChatMessage[];
+}
+
+/** 把 cards(key → 卡片文本)对应的 image_url part 换成 text part。幂等;无改动返回入参引用。 */
+export function applyImageCards(
+  messages: readonly ChatMessage[],
+  cards: ReadonlyMap<string, string>,
+): ApplyImageCardsResult {
+  const noop = (): ApplyImageCardsResult => ({ changed: false, replaced: 0, messages: messages as ChatMessage[] });
+  try {
+    if (!Array.isArray(messages) || cards.size === 0) return noop();
+    let replaced = 0;
+    const next = messages.map((message, i) => {
+      const parts = userContentParts(message);
+      if (!parts || !parts.some((p, j) => p.type === 'image_url' && cards.has(`${i}:${j}`))) return message;
+      const content = parts.map((part, j) => {
+        const card = part.type === 'image_url' ? cards.get(`${i}:${j}`) : undefined;
+        if (card === undefined) return part;
+        replaced++;
+        return { type: 'text', text: card };
+      });
+      return { role: 'user', content } as ChatMessage;
+    });
+    if (replaced === 0) return noop();
+    return { changed: true, replaced, messages: next };
+  } catch {
+    return noop();
+  }
 }

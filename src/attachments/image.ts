@@ -93,40 +93,49 @@ export type LoadImageWithFallbackResult =
  * **8-bit RGB/RGBA PNG**(项目刻意零原生图像依赖)。所以兜底只覆盖 PNG;
  * JPEG/WebP/GIF 超限仍然拒绝,reason 会写明这一点。
  */
-export async function loadImageAttachmentWithDownscale(
-  input: string,
-  opts: { maxBytes: number; sniffedMime?: ImageMime | null },
-): Promise<LoadImageWithFallbackResult> {
-  const loaded = await loadImageAttachment(input, opts);
-  if (loaded.ok) return loaded;
+/**
+ * PNG 内联体积软预算(原始字节;base64 后约 ×1.33)。
+ *
+ * 为什么不只看 4 MiB 硬上限:上游代理对**整个请求体字节数**另有上限(本机 Kiro-Go 的
+ * maxPayloadBytes = 900 KiB,见其 proxy/translator.go;超限先丢旧历史,丢超 2 轮就回
+ * 400 "Request history exceeds the upstream payload limit"),而本地 token 估算按像素面积算,
+ * 看不出请求体已超 —— 结果是被误判成上下文超长,反复摘要压缩、模型始终看不到图。
+ *
+ * 360 KiB 原始字节 ≈ 480 KiB base64,给文本历史/工具 schema 留出约 400 KiB。
+ * 超预算的 PNG 先降到 DOWNSCALE_MAX_EDGE,仍超预算就沿 DOWNSCALE_FALLBACK_EDGES 逐级再缩
+ * (噪声多的截图在 1568 边长下仍可能 >1 MiB),直到装进预算或缩到最小一档。
+ * history 里所有非屏幕帧图片的总量另由 vision-window.applyImageBudget 兜底。
+ */
+export const INLINE_PNG_BUDGET_BYTES = 360 * 1024;
 
-  // 只有「体积超限」这一种失败值得兜底:路径为空/扩展名不支持/沙箱越界/不是普通文件
-  // 都是真错误,缩图解决不了,原样透出让调用方给出准确提示。
-  if (!loaded.reason.startsWith('too large')) return loaded;
+/** 1568 仍超预算时依次尝试的更小长边。 */
+const DOWNSCALE_FALLBACK_EDGES: readonly number[] = [1280, 1024, 768, 512];
 
-  const mime = detectMime(input) ?? opts.sniffedMime ?? null;
-  if (mime !== 'image/png') {
-    return {
-      ok: false,
-      reason: `${loaded.reason} — 自动降采样仅支持 PNG(零原生图像依赖);${extname(input)} 请先转成 PNG 或自行压缩后重试`,
-    };
-  }
+type DownscaleResult =
+  | { ok: true; att: ImageAttachment; downscaledFrom: { width: number; height: number } }
+  | { ok: false; reason: string };
 
-  let abs: string;
-  try {
-    abs = jailResolve(input.trim());
-  } catch (e) {
-    return { ok: false, reason: `outside sandbox: ${e instanceof Error ? e.message : String(e)}` };
-  }
-
+/** 读 PNG → 长边缩到 DOWNSCALE_MAX_EDGE → 重编码为内联附件。`failPrefix` 拼在失败原因前。 */
+async function downscalePngFile(
+  abs: string,
+  maxBytes: number,
+  failPrefix: string,
+  budgetBytes: number,
+): Promise<DownscaleResult> {
   try {
     const png = decodePng(await readFile(abs));
-    const { img } = downscale(png, DOWNSCALE_MAX_EDGE);
-    const buf = encodePng(img);
-    if (buf.length > opts.maxBytes) {
+    let img = downscale(png, DOWNSCALE_MAX_EDGE).img;
+    let buf = encodePng(img);
+    for (const edge of DOWNSCALE_FALLBACK_EDGES) {
+      if (buf.length <= budgetBytes) break;
+      if (edge >= Math.max(img.width, img.height)) continue;
+      img = downscale(png, edge).img;
+      buf = encodePng(img);
+    }
+    if (buf.length > maxBytes) {
       return {
         ok: false,
-        reason: `${loaded.reason} — 降采样到 ${img.width}×${img.height} 后仍有 ${formatBytes(buf.length)},超过 ${formatBytes(opts.maxBytes)}`,
+        reason: `${failPrefix} — 降采样到 ${img.width}×${img.height} 后仍有 ${formatBytes(buf.length)},超过 ${formatBytes(maxBytes)}`,
       };
     }
     let st;
@@ -158,8 +167,44 @@ export async function loadImageAttachmentWithDownscale(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, reason: `${loaded.reason}(降采样兜底失败: ${message})` };
+    return { ok: false, reason: `${failPrefix}(降采样兜底失败: ${message})` };
   }
+}
+
+export async function loadImageAttachmentWithDownscale(
+  input: string,
+  opts: { maxBytes: number; sniffedMime?: ImageMime | null; budgetBytes?: number },
+): Promise<LoadImageWithFallbackResult> {
+  const loaded = await loadImageAttachment(input, opts);
+  if (loaded.ok) {
+    // 软预算:未超限但体积偏大的 PNG 也缩一次;缩失败 / 缩了反而更大(已 ≤ 1568 的图)就原样发。
+    const budget = opts.budgetBytes ?? INLINE_PNG_BUDGET_BYTES;
+    if (loaded.att.mime !== 'image/png' || loaded.att.bytes <= budget) return loaded;
+    const shrunk = await downscalePngFile(loaded.att.path, opts.maxBytes, '', budget);
+    if (shrunk.ok && shrunk.att.bytes < loaded.att.bytes) return shrunk;
+    return loaded;
+  }
+
+  // 只有「体积超限」这一种失败值得兜底:路径为空/扩展名不支持/沙箱越界/不是普通文件
+  // 都是真错误,缩图解决不了,原样透出让调用方给出准确提示。
+  if (!loaded.reason.startsWith('too large')) return loaded;
+
+  const mime = detectMime(input) ?? opts.sniffedMime ?? null;
+  if (mime !== 'image/png') {
+    return {
+      ok: false,
+      reason: `${loaded.reason} — 自动降采样仅支持 PNG(零原生图像依赖);${extname(input)} 请先转成 PNG 或自行压缩后重试`,
+    };
+  }
+
+  let abs: string;
+  try {
+    abs = jailResolve(input.trim());
+  } catch (e) {
+    return { ok: false, reason: `outside sandbox: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  return downscalePngFile(abs, opts.maxBytes, loaded.reason, opts.budgetBytes ?? INLINE_PNG_BUDGET_BYTES);
 }
 
 export async function loadImageAttachment(

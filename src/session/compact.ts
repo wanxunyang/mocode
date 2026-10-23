@@ -149,6 +149,9 @@ export interface ContextState {
   correction: number;
   /** 当前校准 profile 已吸收的真实 usage 样本数。 */
   calibrationSamples: number;
+  /** overflow 触发的摘要压缩断路器:同一用户轮(turnId)内已做过几次。跨 step 存活,
+   *  runModelTurn 的局部 overflowRetried 每 step 重置,挡不住「每步 400 → 每步摘要」的循环。 */
+  overflowCompaction?: { turnId: number | undefined; count: number };
   schedulerLog?: import('./scheduler.js').SchedulerRunLog;
   /** 最近一次 agent 生命周期图快照；/context 用于展示 observation 衰减状态。 */
   lifecycleStats?: {

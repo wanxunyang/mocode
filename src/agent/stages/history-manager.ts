@@ -1,6 +1,13 @@
 import type OpenAI from 'openai';
 import type { ChatMessage, ToolCallRef } from '../../llm/index.js';
-import { applyVisionWindow, recordVisionWindowPrune } from '../../context/vision-window.js';
+import {
+  applyImageBudget,
+  applyImageCards,
+  applyImageTurnAging,
+  applyVisionWindow,
+  recordVisionWindowPrune,
+  stripOversizedImages,
+} from '../../context/vision-window.js';
 import type {
   AssistantTurn,
   CompactedHistory,
@@ -206,6 +213,42 @@ class DefaultHistoryManager implements HistoryManager {
     // revision++ 必须:snapshot() 用 revision 标识版本,下游(compact / checkpoint)据此判断是否重建。
     this.revision++;
     return true;
+  }
+
+  stripOversizedImages(): number {
+    this.assertNoActiveBatch('strip oversized images');
+    const result = stripOversizedImages(this.backing);
+    if (!result.changed) return 0;
+    replaceMessages(this.backing, result.messages);
+    this.revision++;
+    return result.stripped;
+  }
+
+  ageToolImages(): number {
+    this.assertNoActiveBatch('age tool images');
+    const result = applyImageTurnAging(this.backing);
+    if (!result.changed) return 0;
+    replaceMessages(this.backing, result.messages);
+    this.revision++;
+    return result.aged;
+  }
+
+  replaceImagesWithCards(cards: ReadonlyMap<string, string>): number {
+    this.assertNoActiveBatch('replace images with cards');
+    const result = applyImageCards(this.backing, cards);
+    if (!result.changed) return 0;
+    replaceMessages(this.backing, result.messages);
+    this.revision++;
+    return result.replaced;
+  }
+
+  enforceImageBudget(opts: { maxChars: number }): number {
+    this.assertNoActiveBatch('enforce image budget');
+    const result = applyImageBudget(this.backing, opts);
+    if (!result.changed) return 0;
+    replaceMessages(this.backing, result.messages);
+    this.revision++;
+    return result.evicted;
   }
 
   createCheckpoint(): HistoryCheckpoint {

@@ -21,6 +21,7 @@ import { pruneStaleArtifacts, refreshArtifactFreshness } from '../context/artifa
 import { pruneSuperseded } from '../context/relevance.js';
 import { clearRetrievableResults } from '../context/clearing.js';
 import { createAgeAwareEncodingState } from '../context/age-aware.js';
+import { applyImageBudget } from '../context/vision-window.js';
 
 export interface PressureCompressionLog {
   /** 80% 高压(动 LLM 摘要);60-80% 低压只跑确定性清理。 */
@@ -34,6 +35,8 @@ export interface PressureCompressionLog {
   encodedLogsAndSearches: number;
   /** tool-result clearing 清除的消息数。 */
   cleared: number;
+  /** 压力线触发时,摘要之前先剥掉的图片数(只留最新一张)。 */
+  imagesRelieved?: number;
 }
 
 export interface SchedulerRunLog {
@@ -108,10 +111,25 @@ export function createBudgetScheduler(
     async runStep(history, step, activeTools = chatTools, ephemeralTokens = 0, signal?: AbortSignal) {
       // External file changes and mutations only update artifact metadata here.
       refreshArtifactFreshness(state, history);
-      const report = evaluate(history, step, activeTools, ephemeralTokens);
+      let report = evaluate(history, step, activeTools, ephemeralTokens);
+      const pressureLine = report.window * DEFAULT_BUDGET_POLICY.pressureTriggerRatio;
+      // 图片先行:压力线触发时先剥图(只留最新一张非屏幕帧图)再重估。图按像素计 token、又会随
+      // history 每步重发,但摘要只对旧区剥图、保留区的图原样留着 —— 为图压缩既压不掉图又白花一次
+      // LLM 调用。剥完低于线就根本不摘要;仍高于线说明文本本身超了,此时摘要才有意义。
+      // 屏幕帧(computer-)由 vision-window 管,这里不碰。
+      let imagesRelieved = 0;
+      if (Math.max(report.rawTotal, report.total) >= pressureLine) {
+        const relief = applyImageBudget(history, { maxChars: 1 });
+        if (relief.changed) {
+          history.splice(0, history.length, ...relief.messages);
+          imagesRelieved = relief.evicted;
+          report = evaluate(history, step, activeTools, ephemeralTokens);
+        }
+      }
       const pressure = emptyPressure(report);
+      pressure.imagesRelieved = imagesRelieved;
       const occupancy = Math.max(report.rawTotal, report.total);
-      pressure.triggered = occupancy >= report.window * DEFAULT_BUDGET_POLICY.pressureTriggerRatio;
+      pressure.triggered = occupancy >= pressureLine;
       pressure.lowTriggered = !pressure.triggered && occupancy >= report.window * runtime.config.lowPressureRatio;
 
       if (pressure.triggered) {
@@ -153,6 +171,7 @@ export function createBudgetScheduler(
       let compactHistoryCalled = false;
       let historyRebuilt = false;
       let contentMutated =
+        imagesRelieved > 0 ||
         pressure.superseded > 0 ||
         pressure.staleArtifacts > 0 ||
         pressure.encodedLogsAndSearches > 0 ||
