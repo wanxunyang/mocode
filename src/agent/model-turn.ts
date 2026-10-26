@@ -203,6 +203,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   if (historyRebuilt) {
     rebuildHistoryIndexes();
     if (!opts.suppressSessionState) sessionStateText = ctx.buildSessionStateReminder();
+    hooks.onHistoryRebuilt?.();
   }
 
   hooks.onStepStart?.();
@@ -495,6 +496,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
         if (overflowResult.kind === 'rebuild') {
           historyRebuilt = true;
           rebuildHistoryIndexes();
+          hooks.onHistoryRebuilt?.();
         }
         requestHistory = buildRequestHistory();
         stepPromptEst = estimatePromptTokens(requestHistory, activeTools, runtimeContextState.correction);

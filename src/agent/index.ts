@@ -445,6 +445,10 @@ export async function runAgent(
       if (name) spinner.start(t('agent.generating', { tool: name }));
     },
     onStepStart: () => spinner.start(t('agent.thinking')),
+    // 压缩重建 history 是硬边界:收口压缩前仍未 flush 的工具批,
+    // 否则压缩后第一步的工具调用会因 currentBatchId 仍挂着而并进压缩前的「探索」集合,
+    // 形成跨压缩行的巨型批次。收口后压缩后的调用自然另起新批。
+    onHistoryRebuilt: () => flushToolBatch(),
     onChatDone: () => spinner.stop(),
     // 退避重试要在状态行可见:否则用户面对的是几十秒到几分钟的静止 spinner,与卡死无异。
     onModelRetry: (r) =>

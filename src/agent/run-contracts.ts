@@ -20,6 +20,12 @@ export interface AgentHooks {
   onText?: (delta: string) => void;
   onToolCall?: (name: string) => void;
   onStepStart?: () => void;
+  /**
+   * 上下文压缩导致 history 被原地重建后触发(每个 step 至多一次,overflow 重试重建时也会触发)。
+   * 展示层据此收口压缩前的工具调用批次,使压缩后的工具调用另起新批,
+   * 而不是并入压缩行之前那个仍未 flush 的 currentBatch。
+   */
+  onHistoryRebuilt?: () => void;
   onLiveUsage?: (usage: {
     promptTokens: number;
     completionTokens: number;
