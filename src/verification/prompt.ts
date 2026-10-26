@@ -45,7 +45,7 @@ export function buildValidationCommandsSection(root: string = process.cwd()): st
     return [
       '',
       '## Validation commands (discovered from project manifests)',
-      'Listed in increasing cost order. Use them when a check is worth running; prefer the package that owns your change over repository-wide runs. Not a completion gate.',
+      'Listed in increasing cost order. These apply only after code/behavior changes, and only when a check is worth the cost — pure questions and read-only analysis need none. Prefer the package that owns your change over repository-wide runs. Not a completion gate.',
       ...lines,
     ].join('\n');
   } catch {
