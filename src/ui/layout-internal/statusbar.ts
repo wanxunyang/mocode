@@ -2,7 +2,7 @@
 // 从 layout-internal/core.ts 按依赖分层拆出;可变运行态集中在 ./state.ts。
 
 import { stdout } from 'node:process';
-import { displayWidth, truncateDisplay, ansiDisplayWidth, fmtElapsed, stripAnsi } from '../render.js';
+import { displayWidth, truncateDisplay, ansiDisplayWidth, fmtElapsed, fmtCompactTokens, stripAnsi } from '../render.js';
 import { ui } from '../theme.js';
 import * as content from '../content.js';
 import { t } from '../../i18n/index.js';
@@ -174,10 +174,9 @@ function formatTurnTokenChip(
 ): string {
   if (!usage || !usage.totalTokens) return '';
   const n = usage.totalTokens;
-  const text = n < 1000 ? `${n}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  const text = fmtCompactTokens(n);
   const cached = usage.cachedTokens ?? 0;
-  const cacheTag =
-    cached > 0 ? ` ↻ ${cached < 1000 ? cached : `${(cached / 1000).toFixed(cached >= 10000 ? 0 : 1)}k`}` : '';
+  const cacheTag = cached > 0 ? ` ↻ ${fmtCompactTokens(cached)}` : '';
   // chip 用 mid 灰(降优先级)— 模式仍是主色
   return `${ui.dim}${text} tokens${cacheTag}${ui.reset}`;
 }
@@ -186,7 +185,7 @@ function formatTurnTokenChip(
  *  ↓completion,cache 命中带 ↻ 标记;缩写与轮末摘要 / 左侧 turn chip 同款。
  *  流式期为估算值,每步末尾 usage chunk 到达后换实测;dim 灰降优先级,不与进度条阈值警示抢色。 */
 function formatLiveUsageChip(u: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string {
-  const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`);
+  const fmt = fmtCompactTokens;
   const cached = u.cachedTokens ?? 0;
   const billable = Math.max(0, u.promptTokens - cached);
   const cacheTag = cached > 0 ? ` ↻ ${fmt(cached)}` : '';

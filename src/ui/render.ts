@@ -166,6 +166,18 @@ export function fmtElapsed(ms: number): string {
   return `${h}h ${rm}m`;
 }
 
+/**
+ * 紧凑 token 计数:用于底栏用量 chip / 轮末 token 行等信息密度高的位置。
+ *  - < 1k:整数(512)
+ *  - 1k–<10k:一位小数 k(8.3k);10k–<100k:整数 k(876k)
+ *  - ≥ 100k:以 M 计,<1M 显一位小数(0.1M 起),≥1M 整数 M(1M、12M)
+ */
+export function fmtCompactTokens(n: number): string {
+  if (n < 1000) return `${Math.round(n)}`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+}
+
 /** 去除 SGR 颜色转义(\x1B[…m),用于度量带色串的真实可见宽度。 */
 export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, '');

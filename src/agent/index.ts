@@ -6,7 +6,7 @@
 import type { ChatMessage, ChatUsage, ToolCallRef } from '../llm/index.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
-import { summarizeToolCall, summarizeToolResult, truncateDisplay, fmtElapsed } from '../ui/render.js';
+import { summarizeToolCall, summarizeToolResult, truncateDisplay, fmtElapsed, fmtCompactTokens } from '../ui/render.js';
 import { renderFileChange, renderMultiFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
 import * as batch from '../ui/batch.js';
@@ -587,7 +587,7 @@ function formatTurnTokens(usage: ChatUsage | undefined): string {
   if (!usage) return '';
   const total = usage.totalTokens;
   if (!total) return '';
-  const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(total >= 10000 ? 0 : 1)}k`);
+  const fmt = fmtCompactTokens;
   const cached = usage.cachedTokens;
   const cacheCreated = usage.cacheCreationTokens ?? 0;
   const reasoning = usage.reasoningTokens;

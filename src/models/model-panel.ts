@@ -9,6 +9,7 @@ import type { ModelPreset } from '../config/presets.js';
 import type { CatalogProvider } from './types.js';
 import { classifyProvider, classifyModel, resolveBaseURL } from './protocol.js';
 import type { CatalogEntry } from './search.js';
+import { fmtCompactTokens } from '../ui/render.js';
 
 export type PanelChoice =
   | { kind: 'preset'; preset: ModelPreset }
@@ -26,7 +27,7 @@ export interface PanelEntryView {
 
 function fmtK(n: number | undefined): string {
   if (!n || n <= 0) return '-';
-  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+  return fmtCompactTokens(n);
 }
 
 /** 该预设是否与当前生效配置一致（用于标 ★）。 */

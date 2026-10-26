@@ -30,6 +30,7 @@ import {
 } from '../tools/constants.js';
 import { ui } from '../ui/theme.js';
 import { Spinner } from '../ui/spinner.js';
+import { fmtCompactTokens } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import { defaultRollbackStore, type RollbackStore } from '../rollback/index.js';
 import { toText } from '../context/utils.js';
@@ -847,13 +848,13 @@ function rawPromptTokens(history: ChatMessage[], activeTools: readonly ChatTool[
   return estimatePromptTokens(history, activeTools, 1);
 }
 
-/** 压缩行统一格式:`● 标签  205214 → 28614 tokens  (80% → 11%)`。
+/** 压缩行统一格式:`● 标签  205k → 29k tokens  (80% → 11%)`(≥100k 用 0.x M)。
  * 百分比与数字同源(裸估算 / 窗口),让「凭什么这时压」在行内自证,不必回头翻代码。 */
 function compactionLogLine(label: string, before: number, after: number, window: number): string {
   const pct = (n: number): string => `${Math.round((n / Math.max(1, window)) * 100)}%`;
   return (
     `  ${ui.bold}${ui.accent}●${ui.reset} ${ui.accent}${label}${ui.reset}  ` +
-    `${ui.dim}${before} → ${after} tokens  (${pct(before)} → ${pct(after)})${ui.reset}\n`
+    `${ui.dim}${fmtCompactTokens(before)} → ${fmtCompactTokens(after)} tokens  (${pct(before)} → ${pct(after)})${ui.reset}\n`
   );
 }
 

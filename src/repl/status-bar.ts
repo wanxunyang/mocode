@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ui } from '../ui/theme.js';
+import { fmtCompactTokens } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
 import { t } from '../i18n/index.js';
 import { config, getActiveEffort } from '../config/index.js';
@@ -31,7 +32,7 @@ export function renderContextBar(history: ChatMessage[]): string {
   const W = 10;
   const filled = Math.round(pct * W);
   const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
-  const k = (n: number) => `${Math.round(n / 1000)}k`;
+  const k = fmtCompactTokens;
   // 标签必须描述**这个数字**是什么:本条 bar 恒为「对话内容」估算(dialog-only,不含
   // system prompt / 工具 schema),与底栏用量条、80% 压力线都不是同一个数。
   // 旧实现只要 lastUsage 存在就打「实测」,而显示的仍是估算值 —— 标签与数字对不上,
@@ -119,8 +120,8 @@ export function renderContextBarInline(history: ChatMessage[]): string {
   const W = 10;
   const filled = Math.round(pct * W);
   const bar = '█'.repeat(filled) + '░'.repeat(W - filled);
-  // 与轮末 token 行 formatTurnTokens 同一格式:<10k 保留一位小数,锚点生效时两处逐字一致(5.2k)。
-  const k = (n: number) => (n < 1000 ? `${Math.round(n)}` : `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`);
+  // 与轮末 token 行 formatTurnTokens 同一格式(共用 fmtCompactTokens):<10k 保留一位小数,锚点生效时两处逐字一致(5.2k);≥100k 切 M。
+  const k = fmtCompactTokens;
   const pctCol = pct >= DEFAULT_BUDGET_POLICY.pressureTriggerRatio ? ui.yellow : ui.accent;
   return `${ui.gray}[${pctCol}${bar}${ui.reset}] ${pctCol}${Math.round(pct * 100)}%${ui.reset} ${ui.dim}${k(est)}/${k(win)}${ui.reset}`;
 }
