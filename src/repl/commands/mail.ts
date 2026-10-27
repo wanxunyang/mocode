@@ -13,7 +13,13 @@ import * as layout from '../../ui/layout.js';
 import { ui } from '../../ui/theme.js';
 import { t } from '../../i18n/index.js';
 import { readConfigFile, writeConfigKeys, updateConfigKey } from '../../config/file.js';
-import { getMailStatus, sendTestMail, resetMailConfigCache } from '../../mail/index.js';
+import {
+  getMailStatus,
+  sendTestMail,
+  resetMailConfigCache,
+  getMailPollState,
+  pendingInterventionCount,
+} from '../../mail/index.js';
 import { guessMailHosts } from '../../mail/providers.js';
 import { promptIntervention, type InterventionResult } from '../../ui/intervention.js';
 import { unhandled, next, type CommandHandler } from './types.js';
@@ -49,6 +55,23 @@ function renderStatus(): string {
   lines.push(
     `  ${t('mail.fieldTiming', { idle: Math.round(cfg.idleMs / 1000), poll: Math.round(cfg.pollMs / 1000) })}`,
   );
+  // 轮询诊断:邮件提醒是否真的在收、收到后卡在哪一步(排障用,不含敏感信息)。
+  const ps = getMailPollState();
+  if (ps.at > 0) {
+    lines.push(
+      `  ${ui.dim}${t('mail.lastPoll', {
+        time: new Date(ps.at).toLocaleTimeString(),
+        highest: String(ps.highest),
+        candidates: String(ps.candidates),
+        handled: String(ps.handled),
+        pending: String(pendingInterventionCount()),
+      })}${ui.reset}`,
+    );
+    if (ps.skipped) lines.push(`  ${ui.dim}${t('mail.lastPollSkip', { reason: ps.skipped })}${ui.reset}`);
+    if (ps.error) lines.push(`  ${ui.yellow}${t('mail.lastPollError', { error: ps.error })}${ui.reset}`);
+  } else {
+    lines.push(`  ${ui.dim}${t('mail.lastPollNever')}${ui.reset}`);
+  }
   lines.push('');
   lines.push(`${ui.dim}/mail setup · /mail test · /mail on · /mail off${ui.reset}`);
   return lines.join('\n') + '\n';

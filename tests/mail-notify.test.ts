@@ -18,6 +18,9 @@ import {
   resetMailConfigCache,
   buildSubject,
   buildBody,
+  buildHtmlBody,
+  isSelfReminder,
+  resolvePending,
   MAIL_SUBJECT_PREFIX,
 } from '../src/mail/index.js';
 import { guessMailHosts } from '../src/mail/providers.js';
@@ -81,6 +84,120 @@ test('buildBody: 选项详情逐行列出,用户不看终端也能凭邮件取�
   assert.match(body, /影响 3 个文件/);
 });
 
+test('buildBody: 首行是语言无关的机器标记,分段排版含问题/选项/回复说明/编号', () => {
+  const cfg = {
+    enabled: true,
+    idleMs: 30_000,
+    pollMs: 1,
+    smtpHost: 's',
+    smtpPort: 465,
+    smtpSecure: true,
+    imapHost: 'i',
+    imapPort: 993,
+    imapSecure: true,
+    user: 'a@example.com',
+    pass: 'x',
+    to: 'a@example.com',
+  };
+  const req: InterventionRequest = {
+    type: 'choice',
+    title: '是否删除?',
+    detail: '影响 3 个文件',
+    options: [
+      { label: '允许', detail: '放行本次删除' },
+      { label: '拒绝', detail: '中止操作' },
+    ],
+  };
+  const body = buildBody(cfg, { id: 'ABCD1234', req });
+  // 首行标记必须与语言无关(轮询靠它认"提醒自己"),且带介入编号
+  assert.equal(body.split('\n')[0], '[mocode-intervention: ABCD1234]');
+  assert.match(body, /30/); // 静默秒数写进正文
+  assert.match(body, /1\. 允许/);
+  assert.match(body, /放行本次删除/);
+  assert.match(body, /2\. 拒绝/);
+  assert.match(body, /影响 3 个文件/);
+  assert.match(body, /介入编号|Intervention ID/);
+  assert.ok(body.includes('ABCD1234'));
+});
+
+test('buildHtmlBody: 有 HTML 版(选项编号/详情/回复提示),并转义模型给的任意 HTML', () => {
+  const cfg = {
+    enabled: true,
+    idleMs: 30_000,
+    pollMs: 1,
+    smtpHost: 's',
+    smtpPort: 465,
+    smtpSecure: true,
+    imapHost: 'i',
+    imapPort: 993,
+    imapSecure: true,
+    user: 'a@example.com',
+    pass: 'x',
+    to: 'a@example.com',
+  };
+  const req: InterventionRequest = {
+    type: 'choice',
+    title: '<b>危险操作</b>',
+    detail: '删除 a & b',
+    options: [{ label: '<script>alert(1)</script>', detail: 'd > e' }, '保留'],
+  };
+  const html = buildHtmlBody(cfg, { id: 'ABCD1234', req });
+  assert.ok(!html.includes('<script>'), '模型给的 script 不能被原样注入');
+  assert.match(html, /&lt;script&gt;/);
+  assert.match(html, /&lt;b&gt;危险操作&lt;\/b&gt;/);
+  assert.match(html, /删除 a &amp; b/);
+  assert.match(html, /d &gt; e/);
+  assert.match(html, /">1<\/span>/); // 选项编号徽标
+  assert.match(html, /ABCD1234/);
+});
+
+test('isSelfReminder: 自发提醒被认出,用户回复不被误判(163 会改写 Message-ID,只能靠正文)', () => {
+  const cfg = {
+    enabled: true,
+    idleMs: 1,
+    pollMs: 1,
+    smtpHost: 's',
+    smtpPort: 465,
+    smtpSecure: true,
+    imapHost: 'i',
+    imapPort: 993,
+    imapSecure: true,
+    user: 'a@example.com',
+    pass: 'x',
+    to: 'a@example.com',
+  };
+  const reminder = buildBody(cfg, { id: 'ABCD1234', req: inputReq });
+  assert.equal(isSelfReminder({ id: 'ABCD1234' }, reminder), true);
+  // 被引用的提醒同样要认出(有的客户端整段引用)
+  assert.equal(isSelfReminder({ id: 'ABCD1234' }, `> ${reminder}`), true);
+  // 用户真实回复:数字 / 自由文本都不算提醒
+  assert.equal(isSelfReminder({ id: 'ABCD1234' }, '1'), false);
+  assert.equal(isSelfReminder({ id: 'ABCD1234' }, '这是我的答复'), false);
+  // 别家介入的提醒(编号不同)不算本介入的提醒
+  assert.equal(isSelfReminder({ id: 'FFFFFFFF' }, reminder), false);
+});
+
+test('提醒正文自身会被 parseReply 当成自由文本回复 —— 故必须靠 isSelfReminder 挡住', () => {
+  const cfg = {
+    enabled: true,
+    idleMs: 1,
+    pollMs: 1,
+    smtpHost: 's',
+    smtpPort: 465,
+    smtpSecure: true,
+    imapHost: 'i',
+    imapPort: 993,
+    imapSecure: true,
+    user: 'a@example.com',
+    pass: 'x',
+    to: 'a@example.com',
+  };
+  const body = buildBody(cfg, { id: 'ABCD1234', req: inputReq });
+  const parsed = parseReply(`${MAIL_SUBJECT_PREFIX} ABCD1234 q`, body, 0);
+  assert.equal(parsed?.kind, 'text');
+  assert.ok(isSelfReminder({ id: 'ABCD1234' }, body));
+});
+
 test('firstReplyLine: 跳过引用/邮件头/签名分隔,取用户真正写的首行', () => {
   const body = ['>', '> 在 2026-10-26,you@163.com 写道:', '> 原问题', '', '2', '一些补充说明'].join('\n');
   assert.equal(firstReplyLine(body), '2');
@@ -90,10 +207,40 @@ test('firstReplyLine: 跳过引用/邮件头/签名分隔,取用户真正写的�
   assert.equal(firstReplyLine('> 原邮件\n> 发件人: x'), '');
 });
 
-test('buildSubject: 前缀 + 8 位 id + 单行标题', () => {
-  const s = buildSubject('A1B2C3D4', '多行\n标题');
-  assert.ok(s.startsWith(`${MAIL_SUBJECT_PREFIX} A1B2C3D4 `));
+test('buildSubject: 前缀 + 单行标题,且不再把介入编号顶在标题开头', () => {
+  const s = buildSubject('多行\n标题');
+  assert.ok(s.startsWith(MAIL_SUBJECT_PREFIX + ' '));
   assert.ok(!s.includes('\n'));
+  assert.ok(s.includes('标题'));
+  // 8 位十六进制编号不应出现在主题里(对用户无信息量)
+  assert.ok(!/[0-9A-F]{8}/i.test(s), `subject should not contain an intervention id: ${s}`);
+});
+
+test('resolvePending: 主题旧编号 / In-Reply-To / 正文编号 / 单待决兜底', () => {
+  const a = { id: 'AAAAAAAA', actualMessageId: 'real-a@163.com', selfMessageId: 'mocode-aaaaaaaa@163.com' };
+  const b = { id: 'BBBBBBBB', actualMessageId: null, selfMessageId: 'mocode-bbbbbbbb@163.com' };
+  const mk = (
+    over: Partial<{ subject: string; body: string; inReplyTo: string | null; references: string[] | null }>,
+  ) => ({
+    subject: '',
+    body: '',
+    inReplyTo: null,
+    references: null,
+    ...over,
+  });
+  // 1) 旧版主题里的编号优先
+  assert.equal(resolvePending([a, b], mk({ subject: '[mocode] BBBBBBBB 问题' }))?.id, 'BBBBBBBB');
+  // 2) 回复头指向提醒被服务端改写后的真实 Message-ID
+  assert.equal(resolvePending([a, b], mk({ inReplyTo: '<real-a@163.com>' }))?.id, 'AAAAAAAA');
+  assert.equal(resolvePending([a, b], mk({ references: ['<x@y>', '<REAL-A@163.com>'] }))?.id, 'AAAAAAAA');
+  // 3) 正文引用了介入编号
+  assert.equal(resolvePending([a, b], mk({ body: '> 介入编号: BBBBBBBB' }))?.id, 'BBBBBBBB');
+  // 4) 只有一个待决介入 → 直接归它
+  assert.equal(resolvePending([a], mk({ subject: '回复:[mocode] 待你决定 · 问题', body: '1' }))?.id, 'AAAAAAAA');
+  // 多个待决且无法归属 → null(宁可不动,也不猜错)
+  assert.equal(resolvePending([a, b], mk({ body: '1' })), null);
+  // 正文引用了已不存在的编号 → null,不能被单待决兜底误吞
+  assert.equal(resolvePending([a], mk({ body: '介入编号: CCCCCCCC' })), null);
 });
 
 test('parseReply: 主题带 id + 正文首行数字 → choice', () => {
@@ -175,7 +322,7 @@ test('getMailConfig: 必填缺失 → null(未启用)', () => {
     assert.ok(cfg);
     assert.equal(cfg?.enabled, true);
     assert.equal(cfg?.to, 'a@example.com'); // 缺省收件人 = user
-    assert.equal(cfg?.idleMs, 5 * 60_000); // 默认 5 分钟
+    assert.equal(cfg?.idleMs, 60_000); // 默认 1 分钟
     assert.equal(cfg?.smtpPort, 465);
     assert.equal(cfg?.imapPort, 993);
 
@@ -186,7 +333,7 @@ test('getMailConfig: 必填缺失 → null(未启用)', () => {
     // 非法值回退默认
     process.env.MOCODE_MAIL_IDLE_MS = '0';
     resetMailConfigCache();
-    assert.equal(getMailConfig()?.idleMs, 5 * 60_000);
+    assert.equal(getMailConfig()?.idleMs, 60_000);
 
     // 显式关闭
     process.env.MOCODE_MAIL_ENABLED = 'false';

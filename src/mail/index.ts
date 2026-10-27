@@ -12,12 +12,13 @@
 import crypto from 'node:crypto';
 import type { InterventionRequest, InterventionResult } from '../ui/intervention.js';
 import { promptIntervention, dismissActiveIntervention } from '../ui/intervention.js';
+import { t } from '../i18n/index.js';
 
 // ── 配置(env 直读:与 MOCODE_APPROVAL_TIMEOUT_MS 同款,改文件/环境后下个介入即生效)──
 
 export interface MailConfig {
   enabled: boolean;
-  /** 发提醒前的静默等待毫秒,默认 5 分钟。 */
+  /** 发提醒前的静默等待毫秒,默认 1 分钟。 */
   idleMs: number;
   /** IMAP 轮询间隔毫秒,默认 15s。 */
   pollMs: number;
@@ -52,7 +53,7 @@ export function getMailConfig(): MailConfig | null {
   const cfg: MailConfig | null = ready
     ? {
         enabled: true,
-        idleMs: numEnv('MOCODE_MAIL_IDLE_MS', 5 * 60_000),
+        idleMs: numEnv('MOCODE_MAIL_IDLE_MS', 60_000),
         pollMs: numEnv('MOCODE_MAIL_POLL_MS', 15_000),
         smtpHost,
         smtpPort: numEnv('MOCODE_SMTP_PORT', 465),
@@ -110,8 +111,21 @@ interface PendingIntervention {
    * 只搜未读会漏接(线上实测)。0 = 尚未取到水位(跳过本轮,等待初始化)。
    */
   watermark: number;
-  /** 去重:已据此邮件 resolve 过(按 UID),防同封重复应答。 */
-  seen: Set<string>;
+  /** 提醒邮件发出时刻(ms),水位未知时据此按日期范围找回回复。 */
+  sentAt: number;
+
+  /**
+   * 本介入提醒邮件的 Message-ID(小写、无尖括号)。
+   * 注意:163/Coremail 会**改写** Message-ID(实测改成 <uuid@163.com>),
+   * 故这条只对其他保留自定义头的服务端有效;163 上靠 isSelfReminder() 正文标记兜底。
+   */
+  selfMessageId: string | null;
+  /**
+   * 从收件箱里那份"提醒副本"读到的**真实** Message-ID(服务端改写后的)。
+   * 用户回复的 In-Reply-To 指向它,是移除主题编号后最可靠的归属依据。
+   * 轮询第一次遇到本介入的提醒副本时回填。
+   */
+  actualMessageId: string | null;
   settled: (result: InterventionResult) => void;
 }
 
@@ -126,44 +140,171 @@ function newId(): string {
 /** 主题前缀,回复解析靠它定位待决介入。 */
 export const MAIL_SUBJECT_PREFIX = '[mocode]';
 
-export function buildSubject(id: string, title: string): string {
+/**
+ * 提醒邮件的机器可读首行标记。163/Coremail 会改写 Message-ID,没法靠 header 认出
+ * "提醒自己",故用这行固定标记(含介入编号)在轮询里识别并跳过。
+ * 用户真实回复不会以此开头;标记与语言无关,中英文界面都不会误判。
+ */
+function reminderMark(id: string): string {
+  return `[mocode-intervention: ${id}]`;
+}
+
+/** 本地时间 "YYYY-MM-DD HH:mm"(邮件里给人看,不带时区噪声)。 */
+function formatTime(d: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+export function buildSubject(title: string): string {
   const oneLine = title.replace(/\s+/g, ' ').trim().slice(0, 60);
-  return `${MAIL_SUBJECT_PREFIX} ${id} ${oneLine}`.trim();
+  const tag = t('mail.subjectTag');
+  // 主题不带介入编号:编号对用户没有信息量,且会顶在标题最显眼处。
+  // 回复归属改由 In-Reply-To(提醒真实 Message-ID)/正文引用/单待决兜底判定。
+  return `${MAIL_SUBJECT_PREFIX} ${tag} · ${oneLine}`.trim();
 }
 
 /**
- * 构造提醒邮件正文(纯文本)。choice 列出编号选项;input 提示直接回复文本。
+ * 构造提醒邮件正文(纯文本,兼作邮件客户端的降级展示)。
+ * 分段式排版:问题 / 背景 / 选项 / 怎么回复 / 其他信息,让用户在手机上也能一眼看懂。
  * 编号与面板选项顺序一致(含权限面板,故 1=允许一次、末项=拒绝)。
  */
 export function buildBody(cfg: MailConfig, p: Pick<PendingIntervention, 'id' | 'req'>): string {
-  const lines: string[] = [];
-  lines.push('mocode 在执行任务时暂停,等待你的决定。');
-  lines.push('');
-  lines.push(`问题: ${p.req.title}`);
-  if (p.req.detail) {
-    lines.push('');
-    lines.push(p.req.detail);
-  }
   const options = optionPairs(p.req);
+  const idle = Math.max(1, Math.round(cfg.idleMs / 1000));
+  const lines: string[] = [];
+  lines.push(reminderMark(p.id));
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  lines.push(` ${t('mail.bodyTitle')}`);
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   lines.push('');
-  if (options.length > 0) {
-    lines.push('直接回复本邮件,在正文第一行写选项编号即可继续:');
+  lines.push(t('mail.bodyIntro', { idle }));
+  lines.push('');
+  lines.push(`■ ${t('mail.bodyProblem')}`);
+  for (const l of p.req.title.split(/\r?\n/)) lines.push(`  ${l}`);
+  if (p.req.detail && p.req.detail.trim()) {
     lines.push('');
+    lines.push(`■ ${t('mail.bodyBackground')}`);
+    for (const l of p.req.detail.split(/\r?\n/)) lines.push(`  ${l}`);
+  }
+  if (options.length > 0) {
+    lines.push('');
+    lines.push(`■ ${t('mail.bodyOptions')}`);
     for (let i = 0; i < options.length; i++) {
       const { label, detail } = options[i];
       lines.push(`  ${i + 1}. ${label}`);
       // 选项详情(取舍/含义)单独缩进一行,让用户不看终端也能凭邮件做决定。
-      if (detail) lines.push(`      ${detail}`);
+      if (detail) lines.push(`     ${detail}`);
     }
-    lines.push('');
-    lines.push(`例如回复: 1`);
-  } else {
-    lines.push('直接回复本邮件,在正文写下你的答复即可继续(自由文本)。');
   }
   lines.push('');
-  lines.push(`介入编号: ${p.id}(无需手填,直接回复本邮件即可)`);
-  lines.push(`本邮件由 mocode 发往 ${cfg.to},仅接受来自该地址的回复。`);
+  lines.push(`■ ${t('mail.bodyReply')}`);
+  const reply =
+    options.length > 0
+      ? t('mail.bodyReplyChoice', { example: '1', marker: MAIL_SUBJECT_PREFIX })
+      : t('mail.bodyReplyInput');
+  for (const l of reply.split('\n')) lines.push(`  ${l}`);
+  lines.push('');
+  lines.push(`■ ${t('mail.bodyMeta')}`);
+  lines.push(`  ${t('mail.bodyMetaId')}: ${p.id}`);
+  lines.push(`  ${t('mail.bodyMetaCwd')}: ${process.cwd()}`);
+  lines.push(`  ${t('mail.bodyMetaTime')}: ${formatTime(new Date())}`);
+  lines.push('');
+  lines.push(t('mail.bodyTrusted', { to: cfg.to }));
+  lines.push(t('mail.bodyFooter'));
   return lines.join('\n');
+}
+
+/** HTML 转义:标题/详情/选项都来自模型,绝不能原样塞进邮件 HTML。 */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * 构造 HTML 版提醒邮件(网页/手机客户端优先渲染这版,纯文本作为降级)。
+ * 只用行内样式 + table 布局:邮件客户端普遍不支持 <style>/flex/grid。
+ */
+export function buildHtmlBody(cfg: MailConfig, p: Pick<PendingIntervention, 'id' | 'req'>): string {
+  const options = optionPairs(p.req);
+  const idle = Math.max(1, Math.round(cfg.idleMs / 1000));
+  const esc = escapeHtml;
+  const sectionLabel = (text: string): string =>
+    `<div style="font-size:12px;letter-spacing:.06em;color:#6b7280;margin:0 0 8px">${esc(text)}</div>`;
+
+  const optionRows = options
+    .map((o, i) => {
+      const detail = o.detail
+        ? `<div style="font-size:13px;line-height:1.6;color:#6b7280;margin-top:4px">${esc(o.detail)}</div>`
+        : '';
+      return `<tr>
+        <td style="vertical-align:top;padding:10px 12px;border-top:1px solid #f1f5f9;width:44px">
+          <span style="display:inline-block;width:24px;height:24px;line-height:24px;text-align:center;border-radius:12px;background:#eef2ff;color:#4338ca;font-size:13px;font-weight:600">${i + 1}</span>
+        </td>
+        <td style="vertical-align:top;padding:10px 12px 10px 0;border-top:1px solid #f1f5f9">
+          <div style="font-size:14px;font-weight:600;color:#111827;line-height:1.5">${esc(o.label)}</div>
+          ${detail}
+        </td>
+      </tr>`;
+    })
+    .join('');
+
+  const replyBox =
+    options.length > 0
+      ? `<div style="background:#eef2ff;border:1px solid #e0e7ff;border-radius:10px;padding:14px 16px;margin:22px 0 0">
+          <div style="font-size:13px;font-weight:600;color:#3730a3;margin-bottom:6px">${esc(t('mail.bodyReply'))}</div>
+          <div style="font-size:13px;line-height:1.8;color:#374151">${esc(t('mail.htmlReplyChoice', { marker: MAIL_SUBJECT_PREFIX }))}</div>
+          <div style="margin-top:10px;font-family:Consolas,Menlo,monospace;font-size:20px;font-weight:700;color:#4338ca;background:#ffffff;border:1px dashed #c7d2fe;border-radius:8px;padding:8px 14px;display:inline-block">1</div>
+        </div>`
+      : `<div style="background:#eef2ff;border:1px solid #e0e7ff;border-radius:10px;padding:14px 16px;margin:22px 0 0">
+          <div style="font-size:13px;font-weight:600;color:#3730a3;margin-bottom:6px">${esc(t('mail.bodyReply'))}</div>
+          <div style="font-size:13px;line-height:1.8;color:#374151">${esc(t('mail.bodyReplyInput'))}</div>
+        </div>`;
+
+  const detailBlock = p.req.detail?.trim()
+    ? `<div style="margin:0 0 20px">
+        ${sectionLabel(t('mail.bodyBackground'))}
+        <div style="font-size:14px;line-height:1.8;color:#374151;white-space:pre-wrap">${esc(p.req.detail)}</div>
+      </div>`
+    : '';
+
+  const optionsBlock =
+    options.length > 0
+      ? `<div style="margin:0 0 4px">
+          ${sectionLabel(t('mail.bodyOptions'))}
+          <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;background:#ffffff">${optionRows}</table>
+        </div>`
+      : '';
+
+  return `<!doctype html>
+<html><body style="margin:0;padding:24px 12px;background:#f3f4f6">
+  <div style="max-width:640px;margin:0 auto;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden">
+    <div style="background:#111827;padding:18px 24px">
+      <div style="font-size:11px;letter-spacing:.18em;color:#9ca3af">MOCODE</div>
+      <div style="font-size:19px;font-weight:600;color:#ffffff;margin-top:4px">${esc(t('mail.htmlTitle'))}</div>
+    </div>
+    <div style="padding:24px 24px 22px">
+      <div style="font-size:15px;line-height:1.75;color:#374151;margin:0 0 20px">${esc(t('mail.bodyIntro', { idle }))}</div>
+      <div style="background:#f9fafb;border-left:3px solid #6366f1;border-radius:0 8px 8px 0;padding:14px 16px;margin:0 0 20px">
+        ${sectionLabel(t('mail.bodyProblem'))}
+        <div style="font-size:17px;font-weight:600;line-height:1.5;color:#111827">${esc(p.req.title)}</div>
+      </div>
+      ${detailBlock}
+      ${optionsBlock}
+      ${replyBox}
+      <div style="border-top:1px solid #e5e7eb;margin:22px 0 14px"></div>
+      <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
+        <tr><td style="font-size:12px;color:#9ca3af;padding:2px 0">${esc(t('mail.bodyMetaId'))}</td><td style="font-size:12px;color:#6b7280;padding:2px 0;text-align:right;font-family:Consolas,Menlo,monospace">${esc(p.id)}</td></tr>
+        <tr><td style="font-size:12px;color:#9ca3af;padding:2px 0">${esc(t('mail.bodyMetaCwd'))}</td><td style="font-size:12px;color:#6b7280;padding:2px 0;text-align:right;word-break:break-all">${esc(process.cwd())}</td></tr>
+        <tr><td style="font-size:12px;color:#9ca3af;padding:2px 0">${esc(t('mail.bodyMetaTime'))}</td><td style="font-size:12px;color:#6b7280;padding:2px 0;text-align:right">${esc(formatTime(new Date()))}</td></tr>
+      </table>
+      <div style="font-size:11px;color:#9ca3af;line-height:1.8;margin-top:12px">${esc(t('mail.bodyTrusted', { to: cfg.to }))}<br>${esc(t('mail.bodyFooter'))}</div>
+    </div>
+  </div>
+</body></html>`;
 }
 
 /** 选项的 label + 可选详情(choice 用);字符串选项或 input 模式无详情。 */
@@ -191,7 +332,27 @@ export function normalizedOptions(req: InterventionRequest): string[] {
 
 // ── SMTP 发送 ───────────────────────────────────────────────────────────────
 
-async function sendMail(cfg: MailConfig, subject: string, text: string): Promise<void> {
+/** 生成提醒邮件的确定性 Message-ID(无尖括号),便于轮询识别并跳过自发自收的提醒本身。 */
+function selfMessageId(id: string, user: string): string {
+  const domain = user.includes('@') ? user.split('@')[1] : 'localhost';
+  return `mocode-${id.toLowerCase()}@${domain}`;
+}
+
+/** 归一化 Message-ID:去尖括号/空白、转小写。 */
+function normMessageId(raw: string | undefined | null): string {
+  return (raw ?? '')
+    .trim()
+    .replace(/^<+|>+$/g, '')
+    .toLowerCase();
+}
+
+async function sendMail(
+  cfg: MailConfig,
+  subject: string,
+  text: string,
+  messageId: string,
+  html?: string,
+): Promise<void> {
   const nodemailer = await import('nodemailer');
   const transporter = nodemailer.createTransport({
     host: cfg.smtpHost,
@@ -204,7 +365,17 @@ async function sendMail(cfg: MailConfig, subject: string, text: string): Promise
     socketTimeout: 15_000,
   });
   try {
-    await transporter.sendMail({ from: cfg.user, to: cfg.to, subject, text });
+    await transporter.sendMail({
+      from: cfg.user,
+      to: cfg.to,
+      subject,
+      text,
+      // 同时给 text + html:客户端优先渲染 HTML,不支持时自动降级到纯文本。
+      ...(html ? { html } : {}),
+      // 显式钉死 Message-ID(加回尖括号):保留自定义 Message-ID 的服务端可据此识别
+      // "提醒本身";163 会改写它,故另有 isSelfReminder 正文标记兜底。
+      messageId: `<${messageId}>`,
+    });
   } finally {
     transporter.close();
   }
@@ -220,10 +391,30 @@ export interface ParsedReply {
   text: string;
 }
 
+export interface ReplyIntent {
+  kind: 'choice' | 'text';
+  /** choice=选中的选项序号(1 起);text 时为 0。 */
+  option: number;
+  text: string;
+}
+
+/**
+ * 只解析"用户想要什么"(编号或自由文本),不关心属于哪一次介入。
+ * 归属由 resolvePending 依据主题/引用头/正文编号/单待决兜底判定。
+ */
+export function parseIntent(body: string, optionCount: number): ReplyIntent | null {
+  const cleaned = firstReplyLine(body);
+  const numMatch = /^(\d{1,2})\b/.exec(cleaned);
+  const option = numMatch ? Number(numMatch[1]) : 0;
+  if (optionCount > 0 && option >= 1) return { kind: 'choice', option, text: '' };
+  if (optionCount === 0 && cleaned) return { kind: 'text', option: 0, text: cleaned };
+  return null;
+}
+
 /**
  * 从回复邮件的主题 + 正文解析介入编号与意图。
- *  - 主题优先匹配 [mocode] <ID>;主题缺失时从正文找形如 ID:XXXX 的 8 位十六进制。
- *  - 选项:正文首个有效 token 是 1..n 的数字;自由文本取正文首行。
+ *  - 主题优先匹配 [mocode] <ID>(兼容旧版提醒);缺失时从正文找"介入编号: XXXX"。
+ *  - 选项:正文首个有效 token 是数字;自由文本取正文首行。
  * 无法解析出 id 返 null。
  */
 export function parseReply(subject: string, body: string, optionCount: number): ParsedReply | null {
@@ -234,19 +425,54 @@ export function parseReply(subject: string, body: string, optionCount: number): 
     id = bodyMatch?.[1]?.toUpperCase();
   }
   if (!id) return null;
+  const intent = parseIntent(body, optionCount);
+  if (!intent) return null;
+  return { id, ...intent };
+}
 
-  const cleaned = firstReplyLine(body);
-  const numMatch = /^(\d{1,2})\b/.exec(cleaned);
-  const option = numMatch ? Number(numMatch[1]) : 0;
-  if (optionCount > 0 && option >= 1 && option <= optionCount) {
-    return { id, kind: 'choice', option, text: '' };
+/** 一封回复邮件用于归属判定所需的元信息。 */
+export interface ReplyMeta {
+  subject: string;
+  body: string;
+  /** 回复引用的原邮件 Message-ID(mailparser 的 inReplyTo)。 */
+  inReplyTo?: string | null;
+  /** 引用链(References 头)。 */
+  references?: string[] | null;
+}
+
+/** resolvePending 只需要这三个字段(便于单测)。 */
+export type PendingKey = Pick<PendingIntervention, 'id' | 'actualMessageId' | 'selfMessageId'>;
+
+/**
+ * 判定一封回复属于哪个待决介入。顺序(强 → 弱):
+ *  1. 主题里的旧式编号 `[mocode] <ID>`(兼容历史提醒邮件);
+ *  2. In-Reply-To / References 命中提醒的 Message-ID(可能是服务端改写后的真实 ID);
+ *  3. 正文引用了"介入编号: XXXX"(客户端把原文引用下来时);
+ *  4. 只有一个待决介入 → 就是它(绝大多数场景:agent 被该介入阻塞)。
+ * 无法唯一确定时返 null,宁可不处理也不猜错选项。
+ */
+export function resolvePending<T extends PendingKey>(pendings: T[], meta: ReplyMeta): T | null {
+  const subjectId = new RegExp(`${escapeRegExp(MAIL_SUBJECT_PREFIX)}\\s*([0-9A-Fa-f]{8})\\b`, 'i')
+    .exec(meta.subject ?? '')?.[1]
+    ?.toUpperCase();
+  if (subjectId) return pendings.find((p) => p.id === subjectId) ?? null;
+
+  const refs = new Set<string>();
+  for (const raw of [meta.inReplyTo, ...(meta.references ?? [])]) {
+    const n = normMessageId(raw);
+    if (n) refs.add(n);
   }
-  if (optionCount === 0 && cleaned) {
-    return { id, kind: 'text', option: 0, text: cleaned };
+  if (refs.size > 0) {
+    const hit = pendings.find(
+      (p) => (!!p.actualMessageId && refs.has(p.actualMessageId)) || (!!p.selfMessageId && refs.has(p.selfMessageId)),
+    );
+    if (hit) return hit;
   }
-  // choice 场景给了越界数字或无法识别:交给调用方判断(此处仍返回 id,便于回退)。
-  if (optionCount > 0 && option >= 1) return { id, kind: 'choice', option, text: '' };
-  return null;
+
+  const bodyId = /(?:介入编号|ID)\s*[:：]\s*([0-9A-Fa-f]{8})\b/i.exec(meta.body ?? '')?.[1]?.toUpperCase();
+  if (bodyId) return pendings.find((p) => p.id === bodyId) ?? null;
+
+  return pendings.length === 1 ? pendings[0] : null;
 }
 
 /**
@@ -292,6 +518,20 @@ export function extractAddress(raw: string): string {
   return (m ? m[1] : raw).trim();
 }
 
+/**
+ * 这封邮件是不是我们自己发出的提醒(回投到收件箱)而不是用户回复?
+ *  - 正文首个非空行(允许被引用的 ">")是 `[mocode-intervention: <ID>]` 标记。
+ * 用户回复只会以自己写的内容开头,不会被误判;标记与语言无关,对 163(改写
+ * Message-ID)同样有效。公开以便单元测试。
+ */
+export function isSelfReminder(p: Pick<PendingIntervention, 'id'>, body: string): boolean {
+  const first = (body ?? '')
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^[>\s]+/, '').trim())
+    .find((l) => l.length > 0);
+  return !!first && first.includes(reminderMark(p.id));
+}
+
 // ── IMAP 轮询 ───────────────────────────────────────────────────────────────
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -325,60 +565,12 @@ export function stopMailPollerSync(): void {
   }
 }
 
-/**
- * 读取 INBOX 当前 uidNext(下一封新邮件的起始 UID)作为水位基线,失败返 0。
- * 用 STATUS 命令取(免 SELECT/加锁),163 等服务端兼容性比 client.mailbox 更好。
- */
-async function fetchInboxUidNext(client: import('imapflow').ImapFlow): Promise<number> {
-  try {
-    const status = (await client.status('INBOX', { uidNext: true })) as { uidNext?: number } | false;
-    return status ? (status.uidNext ?? 0) : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * 自管理短连接地 best-effort 预取一次 uidNext(用于发信前精确设定水位,
- * 把自发自收的提醒自身排除)。任何失败/超时都静默返 0,绝不阻断发信。
- */
-async function probeUidNextBestEffort(cfg: MailConfig): Promise<number> {
-  const { ImapFlow } = await import('imapflow');
-  const client = new ImapFlow({
-    host: cfg.imapHost,
-    port: cfg.imapPort,
-    secure: cfg.imapSecure,
-    auth: { user: cfg.user, pass: cfg.pass },
-    logger: false,
-    tls: { rejectUnauthorized: true },
-  });
-  try {
-    // 整个探测限 8s:超时或任何异常都静默返 0,绝不阻断发信(finally 会关闭连接)。
-    return await Promise.race([
-      (async () => {
-        await client.connect();
-        return fetchInboxUidNext(client);
-      })(),
-      new Promise<number>((resolve) => {
-        const t = setTimeout(() => resolve(0), 8000);
-        t.unref?.();
-      }),
-    ]);
-  } catch {
-    return 0;
-  } finally {
-    await client.logout().catch(() => {});
-  }
-}
-
-async function pollOnce(): Promise<void> {
-  const cfg = getMailConfig();
-  if (!cfg || polling || pending.size === 0) return;
-  polling = true;
-  try {
-    const { ImapFlow } = await import('imapflow');
-    const { simpleParser } = await import('mailparser');
-    const client = new ImapFlow({
+/** 邮件 IMAP 连接工厂(与 /mail test 同参数)。 */
+function connectImap(cfg: MailConfig): Promise<import('imapflow').ImapFlow> {
+  let ctor: typeof import('imapflow').ImapFlow;
+  return import('imapflow').then(({ ImapFlow }) => {
+    ctor = ImapFlow;
+    const client = new ctor({
       host: cfg.imapHost,
       port: cfg.imapPort,
       secure: cfg.imapSecure,
@@ -386,60 +578,173 @@ async function pollOnce(): Promise<void> {
       logger: false,
       tls: { rejectUnauthorized: true },
     });
-    await client.connect();
-    try {
-      // 懒初始化水位:首次轮询时以"当前 uidNext"为基线,跳过全部历史邮件
-      // (含刚自发自收的提醒本身),只处理此后到达的回复。水位与发信解耦。
-      let uidNext = 0;
-      for (const p of pending.values()) {
-        if (p.watermark !== 0) continue;
-        if (uidNext === 0) uidNext = await fetchInboxUidNext(client);
-        if (uidNext > 0) p.watermark = uidNext - 1;
-      }
-      if (uidNext === 0) {
-        // STATUS 没取到:回退到加锁后读 mailbox;仍取不到则本轮放弃,下轮重试。
-        const lock = await client.getMailboxLock('INBOX');
-        try {
-          const mailbox = client.mailbox as { uidNext?: number } | false;
-          uidNext = mailbox ? (mailbox.uidNext ?? 0) : 0;
-          for (const p of pending.values()) {
-            if (p.watermark === 0 && uidNext > 0) p.watermark = uidNext - 1;
-          }
-        } finally {
-          lock.release();
-        }
-      }
-      if (uidNext <= 0) return;
+    return client.connect().then(() => client);
+  });
+}
 
+/**
+ * 读取 INBOX 当前**最高一封邮件的 UID**(空邮箱返 0),作为水位基线。
+ * 不依赖 STATUS uidNext——163 邮箱实测 STATUS/SELECT 都不返回 uidNext(只给
+ * messages/unseen),改用 IMAP `UID SEARCH *`(`search({uid:'*'}, {uid:true})`),
+ * 各主流服务端都支持。必须在已 open/lock INBOX 的连接上调用。
+ */
+async function fetchHighestUid(client: import('imapflow').ImapFlow): Promise<number> {
+  try {
+    const r = await client.search({ uid: '*' }, { uid: true });
+    const last = Array.isArray(r) ? r[r.length - 1] : undefined;
+    return typeof last === 'number' && Number.isFinite(last) ? last : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 自管理短连接地 best-effort 预取一次"发信前最高 UID"(用于精确设定水位,
+ * 把自发自收的提醒自身排除:水位 = 当前最高,提醒自身 UID > 水位时才被处理,
+ * 而它发出后下一轮水位会先被它推进——因此实际靠"发信前快照 + 下轮增量"语义)。
+ * 任何失败/超时都静默返 0,绝不阻断发信。
+ */
+async function probeHighestUidBestEffort(cfg: MailConfig): Promise<number> {
+  // 连接/查询放在独立 IIFE 里:超时只是放弃等待,后台任务自己收尾(lock/logout),
+  // 故 client 句柄不跨 await 暴露给外层,避免类型窄化与悬挂连接。
+  const attempt = (async (): Promise<number> => {
+    let client: import('imapflow').ImapFlow | null = null;
+    try {
+      client = await connectImap(cfg);
       const lock = await client.getMailboxLock('INBOX');
       try {
-        // 只拉「水位之后、当前最后一封」的新邮件,不限已读/未读——回复经网页端常被自动
-        // 标已读,只搜未读会漏接。'*' 是当前最后一封;range 为水位+1 到 uidNext-1。
-        for (const p of [...pending.values()]) {
-          if (p.watermark <= 0) continue;
-          const start = p.watermark + 1;
-          const end = uidNext - 1;
-          if (start > end) continue; // 这轮没有比水位更新的邮件
-          const messages = client.fetch(`${start}:${end}`, { uid: true, source: true });
-          for await (const message of messages) {
-            const key = String(message.uid);
-            if (p.seen.has(key) || message.source == null) continue;
-            // 推进水位:无论是否命中,这封已扫过,下轮不再重复拉(IMAP expunge 后 UID 仍单调)。
-            p.watermark = Math.max(p.watermark, Number(message.uid));
-            let parsed: Awaited<ReturnType<typeof simpleParser>>;
-            try {
-              parsed = await simpleParser(message.source);
-            } catch {
-              continue;
-            }
-            const from = Array.isArray(parsed.from) ? parsed.from[0]?.text : parsed.from?.text;
-            if (!isTrustedSender(from, cfg)) continue;
-            const subject = parsed.subject ?? '';
-            const body = (parsed.text ?? '').trim();
-            const handled = routeReply(p, subject, body, key);
-            if (handled) {
-              await client.messageFlagsAdd(key, ['\\Seen'], { uid: true }).catch(() => {});
-            }
+        return await fetchHighestUid(client);
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client?.logout().catch(() => {});
+    }
+  })();
+  attempt.catch(() => {}); // 超时后后台任务若最终失败,不要变成 unhandled rejection
+  const timeout = new Promise<number>((resolve) => {
+    const t = setTimeout(() => resolve(0), 8000);
+    t.unref?.();
+  });
+  try {
+    const highest = await Promise.race([attempt, timeout]);
+    return Number.isFinite(highest) && highest > 0 ? highest : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** 最近一次轮询的诊断快照(/mail 状态页展示,排障用;不含敏感信息)。 */
+export interface MailPollState {
+  at: number;
+  highest: number;
+  candidates: number;
+  handled: number;
+  /** 最近一次跳过的原因:空=未跳过。ambiguous=多个待决介入无法归属。 */
+  skipped: 'sender' | 'self' | 'parse' | 'ambiguous' | null;
+  error: string | null;
+}
+
+let lastPoll: MailPollState = { at: 0, highest: 0, candidates: 0, handled: 0, skipped: null, error: null };
+
+/** 只读诊断快照:让用户在 TUI 里看到"轮询有没有真的在跑、跑到哪一步"。 */
+export function getMailPollState(): Readonly<MailPollState> {
+  return lastPoll;
+}
+
+/** 当前待决介入数(/mail 状态页展示;>0 才会有轮询在跑)。 */
+export function pendingInterventionCount(): number {
+  return pending.size;
+}
+
+/**
+ * 列出本轮要检查的候选 UID(升序),取所有待决介入的公共下界。
+ *  - 水位全部已知:直接 `UID SEARCH <min(watermark)+1>:*`,无时间上限,晚几天的回复也能收。
+ *  - 任一水位未知(发信前预取失败):退化为"最早发信日回溯 1 天"的日期搜索,
+ *    绝不把 watermark 直接设成当前最高——那会把发信后立刻到达的回复永久跳过。
+ */
+async function candidateUids(client: import('imapflow').ImapFlow, list: PendingIntervention[]): Promise<number[]> {
+  const watermarks = list.map((p) => p.watermark);
+  const known = watermarks.every((w) => w > 0);
+  const query = known
+    ? { uid: `${Math.min(...watermarks) + 1}:*` }
+    : { since: new Date(Math.min(...list.map((p) => p.sentAt)) - 24 * 3600_000) };
+  const found = await client.search(query, { uid: true });
+  const uids = Array.isArray(found) ? found : [];
+  const floor = known ? Math.min(...watermarks) : 0;
+  return uids
+    .filter((n): n is number => typeof n === 'number' && Number.isFinite(n) && n > floor)
+    .sort((a, b) => a - b);
+}
+
+async function pollOnce(): Promise<void> {
+  const cfg = getMailConfig();
+  if (!cfg || polling || pending.size === 0) return;
+  polling = true;
+  const state: MailPollState = { at: Date.now(), highest: 0, candidates: 0, handled: 0, skipped: null, error: null };
+  lastPoll = state;
+  try {
+    const { simpleParser } = await import('mailparser');
+    const client = await connectImap(cfg);
+    try {
+      const lock = await client.getMailboxLock('INBOX');
+      try {
+        // 当前最高 UID(163 不支持 STATUS uidNext,用 UID SEARCH * 取)。
+        const highest = await fetchHighestUid(client);
+        state.highest = highest;
+        if (highest <= 0) return; // 空邮箱或服务端异常:本轮无可拉取,下轮重试。
+
+        // 全局扫一遍候选:一封回复只处理一次,归属靠 resolvePending 判定。
+        const list = [...pending.values()];
+        const uids = await candidateUids(client, list);
+        state.candidates = uids.length;
+        for (const uid of uids) {
+          // 单封按 UID 取(第三参 { uid: true } 不可省,否则 range 被当序列号)。
+          const fetched = await client.fetchOne(String(uid), { source: true }, { uid: true }).catch(() => null);
+          if (!fetched || !fetched.source) continue;
+          let parsed: Awaited<ReturnType<typeof simpleParser>>;
+          try {
+            parsed = await simpleParser(fetched.source);
+          } catch {
+            state.skipped = 'parse';
+            continue; // 不推进水位:下轮重试这封,别把不可解析的邮件当已处理
+          }
+          // 解析成功才推进水位:这封已纳入判断,下轮不再重复拉取。
+          for (const q of pending.values()) q.watermark = Math.max(q.watermark, uid);
+
+          const from = Array.isArray(parsed.from) ? parsed.from[0]?.text : parsed.from?.text;
+          if (!isTrustedSender(from, cfg)) {
+            state.skipped = 'sender';
+            continue;
+          }
+          const subject = parsed.subject ?? '';
+          const body = (parsed.text ?? '').trim();
+
+          // 先认"提醒自己的副本":命中则记下服务端改写后的真实 Message-ID
+          // (用户回复的 In-Reply-To 指向它),并跳过,绝不当成用户答复。
+          const owner = [...pending.values()].find(
+            (q) =>
+              (!!q.selfMessageId && normMessageId(parsed.messageId) === q.selfMessageId) || isSelfReminder(q, body),
+          );
+          if (owner) {
+            if (!owner.actualMessageId) owner.actualMessageId = normMessageId(parsed.messageId) || null;
+            state.skipped = 'self';
+            continue;
+          }
+
+          const refs = (Array.isArray(parsed.references) ? parsed.references : [parsed.references]).filter(
+            (r): r is string => typeof r === 'string',
+          );
+          const meta = { subject, body, inReplyTo: parsed.inReplyTo ?? null, references: refs };
+          const target = resolvePending([...pending.values()], meta);
+          if (!target) {
+            // 多个待决介入且无法归属:宁可不动,也不猜错选项。
+            state.skipped = 'ambiguous';
+            continue;
+          }
+          if (routeReply(target, body)) {
+            state.handled++;
+            await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true }).catch(() => {});
           }
         }
       } finally {
@@ -448,24 +753,23 @@ async function pollOnce(): Promise<void> {
     } finally {
       await client.logout().catch(() => {});
     }
+  } catch (e) {
+    // 以前这里静默吞错,导致"邮件到了却什么都不发生"。留痕到诊断快照,便于 /mail 查看。
+    state.error = e instanceof Error ? e.message : String(e);
   } finally {
     polling = false;
     stopPollingIfIdle();
   }
 }
 
-/** 把一封回复路由到对应待决介入并 resolve。 */
 /**
  * 尝试用一封回复满足指定待决介入。命中并 resolve 返 true。
- * 主题里带 id 优先;主题被改时回退用正文里的「介入编号: XXXX」。
+ * 归属由 resolvePending 决定,这里只把正文解析成意图(编号/自由文本)。
  */
-function routeReply(p: PendingIntervention, subject: string, body: string, messageKey: string): boolean {
-  if (p.seen.has(messageKey)) return false;
-  const optionCount = normalizedOptions(p.req).length;
-  const parsed = parseReply(subject, body, optionCount);
-  if (!parsed || parsed.id !== p.id) return false;
-  p.seen.add(messageKey);
-  const result = toInterventionResult(p, parsed);
+function routeReply(p: PendingIntervention, body: string): boolean {
+  const intent = parseIntent(body, normalizedOptions(p.req).length);
+  if (!intent) return false;
+  const result = toInterventionResult(p, intent);
   if (!result) return false; // 越界选项:忽略,继续等待有效回复
   pending.delete(p.id);
   p.settled(result);
@@ -474,13 +778,13 @@ function routeReply(p: PendingIntervention, subject: string, body: string, messa
   return true;
 }
 
-/** ParsedReply → InterventionResult;choice 越界返 null。 */
-function toInterventionResult(p: PendingIntervention, parsed: ParsedReply): InterventionResult | null {
-  if (parsed.kind === 'text') {
-    return { action: 'submitted', value: parsed.text };
+/** ReplyIntent → InterventionResult;choice 越界返 null。 */
+function toInterventionResult(p: PendingIntervention, intent: ReplyIntent): InterventionResult | null {
+  if (intent.kind === 'text') {
+    return { action: 'submitted', value: intent.text };
   }
   const options = normalizedOptions(p.req);
-  const label = options[parsed.option - 1];
+  const label = options[intent.option - 1];
   if (!label) return null;
   return { action: 'selected', value: label };
 }
@@ -505,7 +809,9 @@ export function promptWithMail(req: InterventionRequest): Promise<InterventionRe
     id,
     req,
     watermark: 0,
-    seen: new Set(),
+    sentAt: Date.now(),
+    selfMessageId: null,
+    actualMessageId: null,
     settled: () => {},
   };
 
@@ -540,8 +846,9 @@ export function promptWithMail(req: InterventionRequest): Promise<InterventionRe
 /**
  * 超时后发提醒邮件并把待决项挂进轮询。isSettled 用于在异步预取/发信期间
  * 检测用户是否已在终端作答,若是则放弃。发信绝不因 IMAP 失败而被阻断:
- * 发信前 best-effort 预取水位(成功即可精确排除自发自收的提醒本身);
- * 预取失败也照发,水位由轮询首次运行时懒初始化兜底。
+ * 发信前 best-effort 预取"当前最高 UID"作为水位;预取失败也照发,轮询退化为
+ * "发信时间之后"的日期搜索(不会跳过发信后立即到达的回复)。
+ * 提醒自身靠 isSelfReminder(正文特征)+ Message-ID 在轮询中被跳过。
  */
 async function notifyByMail(
   cfg: MailConfig,
@@ -550,15 +857,17 @@ async function notifyByMail(
   p: PendingIntervention,
   isSettled: () => boolean,
 ): Promise<void> {
-  // 取的是"下一封的 UID":水位设为 uidNext-1,随后到达的提醒自身 UID 即 uidNext,
-  // 会被排除在抓取范围(watermark+1=uidNext 起)之外,只处理其后真正的用户回复。
-  const uidNext = await probeUidNextBestEffort(cfg);
+  // 发信前快照"当前最高 UID":水位之下全是历史邮件;提醒自身 UID 虽高于水位,
+  // 但会被 isSelfReminder/Message-ID 判断跳过,只处理其后真正的用户回复。
+  const highest = await probeHighestUidBestEffort(cfg);
   if (isSettled()) return;
-  if (uidNext > 0) p.watermark = uidNext - 1;
+  if (highest > 0) p.watermark = highest;
+  p.sentAt = Date.now();
+  p.selfMessageId = selfMessageId(id, cfg.user);
 
   pending.set(id, p);
   try {
-    await sendMail(cfg, buildSubject(id, req.title), buildBody(cfg, p));
+    await sendMail(cfg, buildSubject(req.title), buildBody(cfg, p), p.selfMessageId, buildHtmlBody(cfg, p));
   } catch {
     // 发信失败:撤销注册,避免空等;本地面板仍在,用户可终端作答。
     pending.delete(id);
@@ -608,6 +917,8 @@ export async function sendTestMail(): Promise<MailTestResult> {
         '',
         '人工介入提醒也会发到这个邮箱;直接回复提醒邮件即可让 mocode 继续执行。',
       ].join('\n'),
+      // 测试信也要显式 Message-ID(与提醒邮件同款),避免服务端留空导致后续排障困难。
+      `mocode-test-${Date.now().toString(36)}@${cfg.user.includes('@') ? cfg.user.split('@')[1] : 'localhost'}`,
     );
     result.smtp = 'ok';
   } catch (e) {
