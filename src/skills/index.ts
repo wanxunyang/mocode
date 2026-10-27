@@ -14,6 +14,23 @@ export type { Skill };
 let cache: Skill[] | null = null;
 let cacheKey: string | null = null;
 
+/**
+ * 自上次调用以来磁盘上的 skill 集合/内容是否发生变化(增删目录、改 SKILL.md)。
+ * 供 REPL 每个真实用户轮入口探测:变了就重建 history[0],让会话中途新增的 skill
+ * 无需重启/切模式即可进入模型清单。首轮(尚未构建过系统提示)不算变化,避免多余重建。
+ */
+let observedKey: string | null = null;
+export function skillsChangedSinceLastObserve(): boolean {
+  const key = skillsScanSignature();
+  if (observedKey === null) {
+    observedKey = key;
+    return false;
+  }
+  if (key === observedKey) return false;
+  observedKey = key;
+  return true;
+}
+
 /** 当前扫描签名(各 skills 目录 + 各 SKILL.md 的 mtime 拼接);用于热重载失效判断。 */
 function currentKey(): string {
   return skillsScanSignature();

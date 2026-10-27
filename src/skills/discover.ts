@@ -11,7 +11,6 @@ import os from 'node:os';
 import path from 'node:path';
 import type { ReasoningEffort } from '../llm/reasoning.js';
 import { parseReasoningEffort } from '../llm/reasoning.js';
-import { builtinSkillNames } from './builtin-skills.js';
 
 export type SkillOrigin = 'builtin' | 'user' | 'project';
 export type SkillContext = 'inline' | 'fork';
@@ -261,11 +260,8 @@ export function discoverSkills(): Skill[] {
     const origin: SkillOrigin = dir === projDir ? 'project' : 'user';
 
     for (const name of entries) {
-      // 跳过内置 skill 同名目录(项目级用户版可放在 ~/.mocode/skills/<name>/
-      // 覆盖内置版;cwd/.mocode/skills/<name>/ 也算项目级覆盖)。discoverSkills 按
-      // 优先级升序遍历、项目级 Map.set 后写覆盖先写,所以这里只是「不重复登记内置」,
-      // 真实覆盖逻辑在 listSkills 的合并步骤。
-      if (builtinSkillNames.has(name)) continue;
+      // 不跳过与内置同名的目录:discoverSkills 按优先级升序遍历、listSkills 合并时
+      // 磁盘 skill 后写覆盖内置版,故 ~/.mocode/skills/codegraph/ 等可正常覆盖内置版。
       const skillDir = path.join(dir, name);
       const skillMdPath = path.join(skillDir, 'SKILL.md');
       try {
@@ -320,6 +316,20 @@ export function skillsScanSignature(): string {
       parts.push('D' + dir + statSync(dir).mtimeMs);
     } catch {
       parts.push('D' + dir + 'x');
+    }
+    // 同时 stat 每个一级子目录:覆盖"先 mkdir 空子目录、会话中才写入 SKILL.md"的盲区——
+    // 写文件改的是子目录 mtime,skills 根目录 mtime 此时不变。
+    try {
+      for (const name of readdirSync(dir, { withFileTypes: true })) {
+        if (!name.isDirectory()) continue;
+        try {
+          parts.push('S' + path.join(dir, name.name) + statSync(path.join(dir, name.name)).mtimeMs);
+        } catch {
+          parts.push('S' + path.join(dir, name.name) + 'x');
+        }
+      }
+    } catch {
+      // 根目录不可读已在上面记 'x',这里无需再处理。
     }
   }
   for (const p of lastKnownMdPaths) {

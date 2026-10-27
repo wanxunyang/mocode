@@ -31,7 +31,7 @@ import { refreshChatTools, classifyChatError, type ChatMessage, type ChatUsage }
 import { renderChip, type ImageAttachment } from '../attachments/image.js';
 import type { ContentPart } from '../agent/core.js';
 import { contextState, appendCurrentSessionRuntimeEvent } from '../session/index.js';
-import { effectiveSystemPrompt } from '../skills/index.js';
+import { effectiveSystemPrompt, skillsChangedSinceLastObserve } from '../skills/index.js';
 import { clearSkillActivation } from '../skills/activation.js';
 import {
   buildMemoryIndexSection,
@@ -575,6 +575,11 @@ export async function startRepl(
       // 入口设定本轮初始模式（合成执行轮传 false→auto；用户轮传当前 mode）。
       // setAgentMode 触发 listener 重写 history[0]；模式只由用户面切换，runAgent 每步读取当前值。
       setAgentMode(planMode ? 'plan' : 'auto');
+      // 会话中途新增/修改 skill 后,普通对话轮也刷新系统提示,使新 skill 立即可见于模型,
+      // 不必等切模式 / /cd / /clear / 重启。listSkills 内部按签名热重载,此处只触发重建。
+      if (!inheritedToolPolicy && skillsChangedSinceLastObserve()) {
+        applyMode(getAgentMode() === 'plan');
+      }
       // 仅真实用户轮清除上一轮 inline skill 激活态。plan 审批后的合成执行轮继承
       // 同一 controller 与 skill deny，避免审批边界意外扩权。
       if (!inheritedToolPolicy) clearSkillActivation();
