@@ -40,6 +40,17 @@ export function buildSlashCommands(): SlashCommand[] {
     { name: '/schedules', desc: '查看定时计划与调度守护状态' },
     { name: '/bots', desc: '查看具名 Bot 列表' },
     {
+      name: '/mail',
+      desc: '人工介入超时邮件提醒与邮件回复(/mail setup|test|on|off)',
+      children: [
+        { name: 'setup', value: '/mail setup', desc: '在 REPL 内配置邮箱账号、应用密码与 SMTP/IMAP' },
+        { name: 'status', value: '/mail', desc: '查看邮件通知配置与启用状态' },
+        { name: 'test', value: '/mail test', desc: '发测试邮件并自检 SMTP/IMAP' },
+        { name: 'on', value: '/mail on', desc: '开启邮件提醒(本会话立即生效并持久化)' },
+        { name: 'off', value: '/mail off', desc: '关闭邮件提醒' },
+      ],
+    },
+    {
       name: '/memory',
       desc: d('commands.memory'),
       children: [
@@ -205,7 +216,19 @@ export const HELP_GROUPS: { key: TranslationKey; names: string[] }[] = [
   { key: 'help.groupSession', names: ['/sessions', '/rollback', '/memory', '/skills', '/skill', '/init'] },
   {
     key: 'help.groupConfig',
-    names: ['/mode', '/subagent', '/fe', '/mcp', '/router', '/theme', '/pet', '/image', '/language', '/upgrade'],
+    names: [
+      '/mode',
+      '/subagent',
+      '/fe',
+      '/mcp',
+      '/router',
+      '/mail',
+      '/theme',
+      '/pet',
+      '/image',
+      '/language',
+      '/upgrade',
+    ],
   },
 ];
 

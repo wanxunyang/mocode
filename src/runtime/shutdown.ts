@@ -5,6 +5,7 @@
 // 两个入口都必须幂等:normal exit / SIGINT / uncaughtException 可能重复触发。
 
 import { stopAllDevServersSync } from './dev-server-manager.js';
+import { stopMailPollerSync } from '../mail/index.js';
 
 let asyncDone = false;
 
@@ -39,4 +40,5 @@ export async function shutdownRuntime(): Promise<void> {
 /** 同步兜底(process exit / 信号 / 未捕获异常):只做同步树杀,不留孤儿 dev server。 */
 export function shutdownRuntimeSync(): void {
   stopAllDevServersSync();
+  stopMailPollerSync(); // 回收 IMAP 轮询定时器(已 unref,此处幂等保险)
 }

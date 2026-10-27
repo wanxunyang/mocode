@@ -91,6 +91,25 @@ export function promptIntervention(req: InterventionRequest): Promise<Interventi
 
 let panelQueue: Promise<unknown> = Promise.resolve();
 
+/**
+ * 当前活跃面板的 finish 句柄。面板经 panelQueue 串行化,同一进程至多一个活跃面板。
+ * 供「外部通道应答」(邮件/远程审批)在用户未操作终端时编程式关闭面板:
+ * 由 dismissActiveIntervention 调用,等价于用户在面板上做出同一选择。
+ * 无活跃面板时为 null;cleanup() 负责清空。
+ */
+let activeFinish: ((result: InterventionResult) => void) | null = null;
+
+/**
+ * 从外部(非键盘)结束当前活跃介入面板。返回是否有面板被关闭。
+ * 用于邮件回复到达时收起本地 TUI 面板;finish 自带 resolved 幂等守卫,重复调用安全。
+ */
+export function dismissActiveIntervention(result: InterventionResult): boolean {
+  const finish = activeFinish;
+  if (!finish) return false;
+  finish(result);
+  return true;
+}
+
 async function promptInterventionInner(req: InterventionRequest): Promise<InterventionResult> {
   // 非 TTY 降级:不阻塞,自动选默认。日志走 stderr(不污染 stdout 内容流)。
   if (!layout.isActive()) {
@@ -278,6 +297,7 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
 
   /** 退出:摘自己的监听 + 恢复快照监听 + 擦菜单恢复内容区。不 setRawMode(false)/pause stdin(运行态由 repl 接管)。 */
   function cleanup(): void {
+    if (activeFinish === finish) activeFinish = null;
     layout.setMouseEnabled(true); // 恢复鼠标框选(面板期间禁,防拖拽覆盖菜单)
     layout.setCursorChangeHandler(null); // 注销光标变更处理器
     emitter.removeListener('keypress', onKey);
@@ -426,6 +446,7 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
 
   return new Promise<InterventionResult>((res, rej) => {
     resolve = res;
+    activeFinish = finish; // 暴露给外部通道(dismissActiveIntervention)编程式关闭
     try {
       // 进入面板:停 spinner(避免 onFrame 覆盖)+ 停走时计时器(避免 drawStatusBar 80ms 心跳
       // 把真光标拉到 runningCaretPos 覆盖 paintInput 的正确光标位)+ 禁鼠标框选(防拖拽 viewport 重画覆盖菜单)+ 回尾(若用户正滚动回看)
@@ -466,6 +487,7 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
         }
       }
       savedListeners = [];
+      if (activeFinish === finish) activeFinish = null;
       rej(e instanceof Error ? e : new Error(String(e)));
     }
   });

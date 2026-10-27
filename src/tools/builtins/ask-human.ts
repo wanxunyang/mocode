@@ -1,5 +1,5 @@
 import type { Tool } from '../types.js';
-import { promptIntervention } from '../../ui/intervention.js';
+import { promptWithMail } from '../../mail/index.js';
 import { sendState } from '../../pet/bridge.js';
 import { t } from '../../i18n/index.js';
 
@@ -163,7 +163,7 @@ export const askHumanTool: Tool = {
     const context = args.context ? String(args.context) : undefined;
 
     sendState('waiting_human');
-    const result = await promptIntervention({
+    const result = await promptWithMail({
       type: options.length > 0 ? 'choice' : 'input',
       title: question,
       options: options.length > 0 ? options : undefined,

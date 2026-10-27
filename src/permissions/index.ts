@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Tool, ToolRisk } from '../tools/types.js';
 import { promptIntervention, type InterventionResult } from '../ui/intervention.js';
+import { promptWithMail } from '../mail/index.js';
 import { config } from '../config/index.js';
 import type { Config } from '../config/index.js';
 import { readConfigFile, updateConfigKey } from '../config/file.js';
@@ -262,7 +263,10 @@ async function checkPermissionWithSessionGrants(
     // 标记读/写失败 → 视为未展示过:多提示一次无害,少提示也只是回归现状。
   }
 
-  const result = await (options.prompt ?? promptIntervention)({
+  // 显式注入的 prompt(stdio host / bg job)优先;默认走邮件中介——本地按键或邮件回复均可放行,
+  // 邮件未配置时 promptWithMail 内部退化为纯本地面板。
+  const prompt = options.prompt ?? promptWithMail;
+  const result = await prompt({
     type: 'choice',
     title: dangerous
       ? t('permission.dangerTitle', { tool: tool.name })

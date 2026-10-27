@@ -39,6 +39,7 @@ import { diffCommands } from './diff.js';
 import { scheduleCommands } from './schedule.js';
 import { botsCommands } from './bots.js';
 import { flowCommands } from './flow.js';
+import { mailCommands } from './mail.js';
 
 /**
  * 命令注册表。顺序即匹配优先级 —— 更具体的分支放前面。
@@ -69,6 +70,7 @@ export const commandHandlers: CommandHandler[] = [
   ...scheduleCommands,
   ...botsCommands,
   ...flowCommands,
+  ...mailCommands,
 ];
 
 /**
