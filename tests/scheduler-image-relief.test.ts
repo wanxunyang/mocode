@@ -100,6 +100,7 @@ test('文本本身超线时:剥图后仍照常摘要(图片先行不吞掉真正
   assert.equal(log.pressure.imagesRelieved, 1);
   assert.equal(log.pressure.triggered, true, '文本仍超线');
   assert.equal(log.compactHistoryCalled, true, '文本超线仍要摘要');
+  assert.equal(transportCalls, 1, '摘要确实走了一次模型调用');
 });
 
 test('没有图片时不改动 history,imagesRelieved 为 0', async () => {

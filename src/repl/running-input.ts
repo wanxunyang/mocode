@@ -31,7 +31,7 @@ export interface QueuedTurn {
   text: string;
   mode: AgentMode;
 }
-let queuedTurns: QueuedTurn[] = [];
+const queuedTurns: QueuedTurn[] = [];
 /** 运行态打开的输入面板(Ctrl+G);非 null = 面板仍开着。主循环进 INPUT 态前须等它关闭,否则两个 keypress 监听抢键。 */
 let composerPending: Promise<void> | null = null;
 /** 粘贴多行时 \r\n 合一:刚吃了 \r,尾随的 \n 需吞掉(与 INPUT 态编辑器一致)。 */
