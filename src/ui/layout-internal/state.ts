@@ -136,6 +136,14 @@ export const state = {
   lastView: null as InputView | null,
   lastMenuStartRow: 0, // 上次菜单起始屏行(供擦除)
   lastMenuRows: 0,
+  /**
+   * 当前向上菜单占用内容区**底部**的物理行数(paintInput 画菜单期间 >0)。
+   * 介入面板(ask_human / 权限)在 RUNNING 态弹出时,最关键的命令/diff/ask_human 行
+   * 恰好位于内容区底——若菜单直接盖上去,用户看不到决策依据。该值让视口有效高度
+   * 收缩为 contentBottom - menuReserveRows:正文重排到菜单上沿之上,二者不重叠;
+   * 面板内 PgUp/滚轮也只在压缩后的视口里滚动。菜单关闭复位 0,repaintViewport 全量恢复。
+   */
+  menuReserveRows: 0,
   /** 上次画过输入框的 lastView 签名(lines 数 + 每行 display_w 累加);变了说明 prompt.ts 改了文本 → 选区锚点失效,清掉。 */
   lastInputSig: '',
   pasteHandler: null as ((text: string) => void) | null,

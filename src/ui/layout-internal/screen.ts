@@ -75,6 +75,16 @@ export function getGeo(fh: number = state.footerH): Geo {
   };
 }
 
+/**
+ * 正文当前真正可用的**内容区底行**:有预留菜单(介入面板)时为 contentBottom - menuReserveRows。
+ * viewport 切片、滚动钳位、续写末行重画都用它,保证正文只画到菜单上沿、不与菜单重叠。
+ * 无菜单预留时与 getGeo().contentBottom 相同。
+ */
+export function getEffectiveContentBottom(): number {
+  const g = getGeo();
+  return Math.max(1, g.contentBottom - state.menuReserveRows);
+}
+
 /** (重)设滚动区域 [1, rows-footerH];设完 \x1B[H 归位(conhost 设 DECSTBM 时光标留旧位置行为未定义)。 */
 export function setRegion(fh: number): Geo {
   const rows = stdout.rows || 24;

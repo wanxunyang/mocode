@@ -54,7 +54,7 @@ import {
   flushMdSegment,
 } from './content-write.js';
 
-export { isTuiActive, getGeo, setRegion, contentMode, isStreamingPaused } from './screen.js';
+export { isTuiActive, getGeo, getEffectiveContentBottom, setRegion, contentMode, isStreamingPaused } from './screen.js';
 export {
   drawStatusBar,
   setStatus,
@@ -74,6 +74,7 @@ export {
   scrollBy,
   scrollWheel,
   resetScroll,
+  setMenuReserve,
   lockScrollToBottom,
   unlockScroll,
   isScrollLocked,
@@ -615,6 +616,12 @@ export function enterAltScreen(): void {
       const colsChanged = latest.cols !== state.lastTerminalCols;
       reflowContentForResize(latest.cols, colsChanged);
       state.lastTerminalCols = latest.cols;
+      // 介入面板开着时菜单预留行可能因新窗口高度而越界:重新钳到 contentBottom-1。
+      // 菜单本身的重排由 intervention 的 resize 监听负责(它会按新几何重算 menuLines 并再设一次预留);
+      // 这里只保证视口几何不留错值,避免正文重排到菜单带里。
+      if (state.menuReserveRows > 0) {
+        state.menuReserveRows = Math.min(state.menuReserveRows, latest.contentBottom - 1);
+      }
       repaintViewport(); // 内容区按最新高度和列宽重画；markdown 历史已按新列宽 reflow
       repaint(); // 底栏重画
     }, 100);

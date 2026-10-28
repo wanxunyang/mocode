@@ -7,7 +7,7 @@ import { ui } from '../theme.js';
 import * as content from '../content.js';
 import type { StatusBarData, InputView } from '../layout-types.js';
 import { state } from './state.js';
-import { esc, cup, getGeo, setRegion, runningCaretPos } from './screen.js';
+import { esc, cup, getGeo, getEffectiveContentBottom, setRegion, runningCaretPos } from './screen.js';
 import { SEL_OPEN, SEL_OFF, normalizeInputSelection, inputViewSig } from './selection.js';
 import { composeSpinnerLine, composeModelLine, composePlanLines, drawStatusBar } from './statusbar.js';
 
@@ -166,11 +166,14 @@ export function paintInput(view: InputView): void {
     g = setRegion(needFooterH);
   }
 
-  // 2b. 重画内容末行(底栏上一行)从缓冲:防 WT 边距漏影(状态行重复到该行),并保证该行显正确内容
+  // 2b. 重画内容末行(有效视口底行)从缓冲:防 WT 边距漏影(状态行重复到该行),并保证该行显正确内容。
+  // 介入面板预留菜单行时,末行是菜单上沿那一行(getEffectiveContentBottom),不是物理 contentBottom——
+  // 后者属于菜单预留带,由第 5 步画菜单,这里不能碰,否则会在选项之间漏出正文。
   {
-    const slice = content.sliceFromEnd(state.scrollOffset, g.contentBottom);
-    const line = slice[g.contentBottom - 1] ?? '';
-    buf += cup(g.contentBottom, 1) + esc.clearLine + line;
+    const effBottom = getEffectiveContentBottom();
+    const slice = content.sliceFromEnd(state.scrollOffset, effBottom);
+    const line = slice[effBottom - 1] ?? '';
+    buf += cup(effBottom, 1) + esc.clearLine + line;
   }
 
   // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):
@@ -266,9 +269,14 @@ export function paintInput(view: InputView): void {
   // 4b. 下线(输入框底):满屏宽细线 ─(cyan),在 model 行上一行(model 行占屏底 rows)
   buf += cup(g.rows - 1, 1) + esc.clearLine + ui.accent + '─'.repeat(g.cols) + ui.reset;
 
-  // 5. 向上菜单(画在内容区底,底栏正上方)
+  // 5. 向上菜单(画在内容区底,底栏正上方)。
+  // 介入面板经 setMenuReserve 预留了等宽的底部行,正文已重排到菜单上沿之上,故菜单画进预留带、
+  // 不再覆盖任何正文;无预留(命令补全等普通 picker)时退回旧的 overlay 行为,直接贴内容区底。
   if (view.menu && view.menu.lines.length > 0) {
-    const menuRows = Math.min(view.menu.lines.length, g.contentBottom);
+    const reserve = state.menuReserveRows > 0;
+    const menuRows = reserve
+      ? Math.min(view.menu.lines.length, state.menuReserveRows)
+      : Math.min(view.menu.lines.length, g.contentBottom);
     const menuStart = g.contentBottom - menuRows + 1;
     for (let i = 0; i < menuRows; i++) {
       buf += cup(menuStart + i, 1) + esc.clearLine + view.menu.lines[i];

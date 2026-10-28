@@ -6,7 +6,7 @@ import { displayWidth, truncateDisplayHead, truncateAnsi, ansiDisplayWidth, padE
 import { ui } from '../theme.js';
 import * as content from '../content.js';
 import { state } from './state.js';
-import { esc, cup, getGeo, runningCaretPos } from './screen.js';
+import { esc, cup, getGeo, getEffectiveContentBottom, runningCaretPos } from './screen.js';
 import { normalizeSelection, highlightRange } from './selection.js';
 import { repaint } from './input-paint.js';
 
@@ -27,10 +27,10 @@ export function isScrolled(): boolean {
 
 /** viewport 窗口起点绝对行索引(0-based,对齐 content.sliceFromEnd 的 start)。 */
 export function viewportAbsStart(): number {
-  const g = getGeo();
+  const h = getEffectiveContentBottom();
   const total = content.totalRows();
   const end = Math.max(0, total - state.scrollOffset);
-  return Math.max(0, end - g.contentBottom);
+  return Math.max(0, end - h);
 }
 
 /** 屏行(1-based,内容区内)→ 绝对缓冲行索引(0-based)。 */
@@ -51,22 +51,19 @@ export function screenRowToAbsLine(row: number): number {
  */
 export function repaintContentLine(absIdx: number, line: string): void {
   if (!state.active || state.overlayActive) return; // 覆盖层打开中不写屏(缓冲已由调用方更新)
-  const g = getGeo();
+  const bottom = getEffectiveContentBottom();
   const row = absIdx - viewportAbsStart() + 1;
-  if (row < 1 || row > g.contentBottom) return; // 不在视口内:不猜映射,交由上层处理
+  if (row < 1 || row > bottom) return; // 不在有效视口内(含被预留菜单占住的行):不写
   // 已提交行自带完整 SGR 前缀(breakRow 落盘的是 `rowStartSgr + curRaw + reset`,见 content.ts),
   // 故单行重画无需补前缀,只需按当前列宽钳宽(窄窗兜底,防 auto-wrap 破坏「一行=一物理行」)。
-  const text = truncateAnsi(line, g.cols);
+  const text = truncateAnsi(line, getGeo().cols);
   let out = cup(row, 1) + esc.clearLine + text;
   // 与 repaintViewport 同约定:运行态光标归输入框(供 IME 锚定),INPUT 态归续写位。
   if (state.mode === 'running') {
     const c = runningCaretPos();
     out += cup(c.row, c.col);
   } else {
-    out += cup(
-      state.scrollOffset === 0 ? state.contentRow : g.contentBottom,
-      state.scrollOffset === 0 ? state.contentCol : 1,
-    );
+    out += cup(state.scrollOffset === 0 ? state.contentRow : bottom, state.scrollOffset === 0 ? state.contentCol : 1);
   }
   stdout.write(out);
 }
@@ -87,7 +84,9 @@ export function repaintViewport(): void {
   // 关闭方先 setOverlayActive(false) 再 repaintViewport 还原。
   if (!state.active || state.overlayActive) return;
   const g = getGeo();
-  const h = g.contentBottom;
+  // 介入面板预留菜单行时,正文只画到菜单上沿;菜单区(其下到 contentBottom)留给 paintInput,
+  // 这里绝不能 cup+clearLine 进去,否则会把菜单擦掉或在选项之间漏出正文。
+  const h = getEffectiveContentBottom();
   const slice = content.sliceFromEnd(state.scrollOffset, h);
   const sel = normalizeSelection();
   // viewportAbsStart() 无选区时也用:sticky banner 必须按真实窗口头算,不能降级 0(否则 banner 永不出现)。
@@ -150,13 +149,14 @@ export function repaintViewport(): void {
   stdout.write(p);
 }
 
-/** 滚动 delta 行(正=往新、负=往旧);钳 [0, max(0, total-contentBottom)];变则重画 + 刷底栏(显指示、光标回输入框)。 */
+/** 滚动 delta 行(正=往新、负=往旧);钳 [0, max(0, total-视口高)];变则重画 + 刷底栏(显指示、光标回输入框)。 */
 export function scrollBy(delta: number): void {
   if (!state.active) return;
   if (Date.now() < state.scrollLockUntil) return; // 轮首滚动锁:吸收发消息前后 stdin 残留滚轮事件,保 agent 输出从底部开始
+  const h = getEffectiveContentBottom(); // 介入面板期按菜单上沿之上的压缩视口算滚动范围
   const g = getGeo();
   const total = content.totalRows();
-  const maxOff = Math.max(0, total - g.contentBottom);
+  const maxOff = Math.max(0, total - h);
   const off = Math.max(0, Math.min(state.scrollOffset + delta, maxOff));
   if (off === state.scrollOffset) return;
   // 进入滚动态前清掉 spinner 内联帧:滚动态由状态行心跳兜底,内联帧若残留会卡在历史视图某行。
@@ -197,6 +197,37 @@ export function lockScrollToBottom(ms: number = SCROLL_LOCK_MS): void {
 /** 解锁(轮末 enterInputMode / 测试用)。 */
 export function unlockScroll(): void {
   state.scrollLockUntil = 0;
+}
+
+/**
+ * 设置向上菜单对内容区**底部**的预留行数(介入面板专用)。
+ *  - rows > 0:正文视口压缩为 contentBottom-rows 行,整体重排到菜单上沿之上,菜单不再盖住正文;
+ *  - rows = 0:菜单关闭,恢复满内容区。
+ * 仅在数值变化时重画正文(↑↓ 导航若菜单高度不变无需重排),避免每帧整屏闪烁。
+ * 预留区里被腾出来的行(rows 变小/归零时新增可见的行)由本函数用清行 + 重画补齐,
+ * 调用方随后 paintInput 把菜单画在预留区内。
+ */
+export function setMenuReserve(rows: number): void {
+  if (!state.active) return;
+  const g = getGeo();
+  const clamped = Math.max(0, Math.min(rows, g.contentBottom - 1));
+  if (clamped === state.menuReserveRows) return;
+  const prev = state.menuReserveRows;
+  state.menuReserveRows = clamped;
+  // 预留变小(菜单缩短/关闭):旧菜单区里 [新上沿+1 .. 旧上沿] 这几行需要先清掉旧菜单残留,
+  // 再由 repaintViewport 用正文重画;repaintViewport 只画到新上沿,故这里先清再画。
+  if (clamped < prev) {
+    const newBottom = g.contentBottom - clamped;
+    const oldBottom = g.contentBottom - prev;
+    let p = '';
+    for (let r = newBottom + 1; r <= oldBottom; r++) p += cup(r, 1) + esc.clearLine;
+    if (p) stdout.write(p);
+  }
+  // 滚动偏移可能超过压缩视口的新上限:钳回,避免顶部出现空窗。
+  const h = g.contentBottom - clamped;
+  const maxOff = Math.max(0, content.totalRows() - h);
+  if (state.scrollOffset > maxOff) state.scrollOffset = maxOff;
+  repaintViewport();
 }
 
 /** 轮首滚动锁是否生效(测试用)。 */

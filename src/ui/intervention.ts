@@ -268,6 +268,11 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
   }
 
   function redraw(): void {
+    // 介入面板在 RUNNING 态弹出,最关键的命令/diff/ask_human 行恰好在内容区底部。
+    // 先按菜单行数预留内容区底部等宽行:正文整体重排到菜单上沿之上,菜单不再盖住决策依据;
+    // 菜单高度不变时 setMenuReserve 内部去重,↑↓ 导航不会整屏闪。
+    const menuLines = mode === 'choice' ? menuLinesChoice() : menuLinesInput();
+    layout.setMenuReserve(menuLines.length);
     if (mode === 'choice') {
       const hint = t('prompt.chooseConfirm');
       layout.paintInput({
@@ -275,7 +280,7 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
         lines: [hint],
         cursorLine: 0,
         cursorCol: displayWidth(hint),
-        menu: { lines: menuLinesChoice() },
+        menu: { lines: menuLines },
       });
     } else {
       layout.paintInput({
@@ -283,7 +288,7 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
         lines: [text],
         cursorLine: 0,
         cursorCol: displayWidth(text.slice(0, cursor)),
-        menu: { lines: menuLinesInput() },
+        menu: { lines: menuLines },
       });
     }
   }
@@ -295,6 +300,15 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
     resolve(result);
   }
 
+  /** 终端尺寸变化:layout 先重设区域/钳预留(它也挂了 SIGWINCH),稍等再按新几何重算
+   *  菜单行数并重设预留 + 重画,否则窗口缩高后旧菜单会超出新预留带、选项被裁。 */
+  function onResize(): void {
+    setTimeout(() => {
+      if (resolved) return;
+      redraw();
+    }, 60);
+  }
+
   /** 退出:摘自己的监听 + 恢复快照监听 + 擦菜单恢复内容区。不 setRawMode(false)/pause stdin(运行态由 repl 接管)。 */
   function cleanup(): void {
     if (activeFinish === finish) activeFinish = null;
@@ -303,6 +317,11 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
     emitter.removeListener('keypress', onKey);
     for (const l of savedListeners) emitter.on('keypress', l);
     savedListeners = [];
+    try {
+      process.removeListener('SIGWINCH', onResize);
+    } catch {
+      // 忽略
+    }
     // 先 paintInput(dim,menu:null):擦菜单(用 lastMenuRows)+ 画 dim 占位底栏 + 复位 lastMenuRows=0;
     // 再处理滚动:面板内可能滚过滚轮(scrollOffset>0)→ resetScroll 回尾让 agent 后续输出可见;
     //   未滚则 repaintViewport 从 content 缓冲重画内容区(恢复被菜单覆盖的 ● ask_human 行)。
@@ -314,6 +333,10 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
       cursorCol: 0,
       menu: null,
     });
+    // 释放菜单预留行:正文恢复满内容区(setMenuReserve 内部重画被菜单占过的底部行)。
+    // 必须在 menu:null 擦菜单之后——先释放会让 repaintViewport 用正文覆盖尚未擦的菜单,
+    // 紧接着的 stale lastMenuRows 擦除又会把刚恢复的正文抹掉。
+    layout.setMenuReserve(0);
     if (layout.isScrolled()) layout.resetScroll();
     else layout.repaintViewport();
     // 恢复扫光心跳(若仍有在飞批):必须在 repaintViewport 之后——先恢复内容区,再让心跳重画摘要行。
@@ -469,6 +492,11 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
       }
       stdin.resume();
       emitter.on('keypress', onKey);
+      try {
+        process.on('SIGWINCH', onResize);
+      } catch {
+        // 不支持则放弃 resize 自适应,不阻断面板
+      }
       layout.setCursorChangeHandler(applyExternalCursor); // 鼠标左键单击输入框 → 移光标到点击位
       redraw();
     } catch (e) {
@@ -476,6 +504,11 @@ async function promptInterventionInner(req: InterventionRequest): Promise<Interv
       layout.setMouseEnabled(true);
       try {
         emitter.removeListener('keypress', onKey);
+      } catch {
+        // 忽略
+      }
+      try {
+        process.removeListener('SIGWINCH', onResize);
       } catch {
         // 忽略
       }
