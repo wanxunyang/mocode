@@ -15,7 +15,7 @@ const assert = (condition: unknown, message: string): void => {
 // ── advisory discipline section ───────────────────────────────────────────────
 const section = buildWorkDisciplineSection();
 assert(section.includes('Use your judgment'), 'discipline must delegate strategy to the agent');
-assert(section.includes('Validation is optional, not a completion gate'), 'validation must be optional');
+assert(section.includes('optional, not a completion gate'), 'validation must be optional');
 assert(section.includes('do not run broad test/build suites by default'), 'broad checks must not be automatic');
 assert(section.includes('## When to ask instead of guess'), 'ask whitelist must stay in the discipline section');
 assert(!section.includes('MUST complete'), 'discipline must not force phases');
@@ -36,9 +36,16 @@ const principlesIdx = prompt.indexOf('## Engineering principles');
 assert(workflowIdx > 0 && principlesIdx > workflowIdx, 'engineering principles must follow the workflow');
 assert(prompt.includes(section), 'base prompt must embed the advisory discipline verbatim');
 assert(
-  prompt.includes('Verify: whether and what to run follows Engineering principles'),
+  prompt.includes('Whether and what to run follows Engineering principles'),
   'workflow must preserve agent choice over validation',
 );
+
+// ── final-answer presentation rules ─────────────────────────────────────────
+assert(prompt.includes('Lead with the outcome'), 'final reply must lead with the outcome');
+assert(prompt.includes('Match the reply to the task'), 'pure answers must not get the change/verification template');
+assert(prompt.includes('No dead endings'), 'final reply must forbid filler closings');
+assert(prompt.includes('Prevent the follow-up'), 'final reply must be complete enough to avoid a follow-up turn');
+assert(prompt.includes('Terminal-first formatting'), 'final reply must stay terminal-readable');
 
 // ── discovered validation commands (deterministic project profile) ───────────
 const validation = buildValidationCommandsSection();
@@ -64,7 +71,7 @@ assert(core.includes('## Reporting'), 'core must retain reporting rules');
 
 const originalModel = config.model;
 config.model = 'gpt-4o-mini';
-assert(buildBasePrompt().includes('Validation is optional'), 'runtime prompt must remain advisory');
+assert(buildBasePrompt().includes('optional, not a completion gate'), 'runtime prompt must remain advisory');
 config.model = originalModel;
 
 console.log('work-discipline regression checks passed');
