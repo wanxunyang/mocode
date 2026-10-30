@@ -1,5 +1,5 @@
 /**
- * flow 回放器单测(design-notes/computer-use-rpa.md §5.3):用假 deps 覆盖
+ * flow 回放器单测(design-notes/computer-use/computer-use-rpa.md §5.3):用假 deps 覆盖
  * 成功 / 重试 / handoff / skip / abort / TIMEOUT 不重试 / 坐标回退闸 / 缺参 / secret 打码 / 中断。
  */
 import test from 'node:test';

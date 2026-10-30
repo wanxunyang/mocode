@@ -1,5 +1,5 @@
 /**
- * UIA 选择器纯函数单测(design-notes/computer-use-rpa.md §2.3/§2.9)。
+ * UIA 选择器纯函数单测(design-notes/computer-use/computer-use-rpa.md §2.3/§2.9)。
  * 基于 JSON fixture 树离线跑,不碰 COM/进程。
  */
 import test from 'node:test';

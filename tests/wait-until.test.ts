@@ -1,5 +1,5 @@
 /**
- * wait_until 纯逻辑单测(design-notes/computer-use-rpa.md §3.1/§3.2)。
+ * wait_until 纯逻辑单测(design-notes/computer-use/computer-use-rpa.md §3.1/§3.2)。
  * 用合成 PngImage 序列 + 假时钟,不碰屏幕/进程。
  */
 import test from 'node:test';

@@ -1,5 +1,5 @@
 /**
- * computer.wait_until 的纯逻辑层(design-notes/computer-use-rpa.md §3.1)。
+ * computer.wait_until 的纯逻辑层(design-notes/computer-use/computer-use-rpa.md §3.1)。
  *
  * 条件解析、轮询状态机、type 输入方式选择都在这里;抓屏与元素存在性检查通过 WaitDeps 注入,
  * 因此可以用合成 PngImage 序列 + 假时钟离线单测,不碰屏幕/进程。

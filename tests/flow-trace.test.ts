@@ -1,5 +1,5 @@
 /**
- * flow trace 单测(design-notes/computer-use-rpa.md §5.1):buildTraceEntry 纯函数 + JSONL 存取。
+ * flow trace 单测(design-notes/computer-use/computer-use-rpa.md §5.1):buildTraceEntry 纯函数 + JSONL 存取。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';

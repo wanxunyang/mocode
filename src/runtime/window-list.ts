@@ -1,5 +1,5 @@
 /**
- * computer.list_windows / focus_window 的纯逻辑层(design-notes/computer-use-rpa.md §4)。
+ * computer.list_windows / focus_window 的纯逻辑层(design-notes/computer-use/computer-use-rpa.md §4)。
  *
  * 窗口枚举的原始数据来自 uia-service 的 `windows` op;过滤、编号(w1..wN)、norm1000 换算、
  * 按 ref / title_regex 选窗口都在这里,可用 fixture 离线单测,不碰 Win32。

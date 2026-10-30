@@ -132,7 +132,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  // 桌面流程:mocode flow list | show <name> | run <name> ...(不经模型、不进 REPL;design-notes/computer-use-rpa.md §5.4)。
+  // 桌面流程:mocode flow list | show <name> | run <name> ...(不经模型、不进 REPL;design-notes/computer-use/computer-use-rpa.md §5.4)。
   if (args[0] === 'flow') {
     const { runFlowCli } = await import('./flows/cli.js');
     const code = await runFlowCli(args.slice(1));

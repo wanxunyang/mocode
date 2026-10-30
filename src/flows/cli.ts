@@ -1,6 +1,6 @@
 /**
  * `mocode flow list | show <name> | run <name> [k=v ...] [--window <正则>] [--yes] [--sandbox-root <path>]`
- * (design-notes/computer-use-rpa.md §5.4)。
+ * (design-notes/computer-use/computer-use-rpa.md §5.4)。
  *
  * 非交互回放入口:不经过模型、不依赖 REPL。权限语义与 `/flow run` 一致但 fail-closed:
  *   - 受 Computer Use 总开关否决(MOCODE_COMPUTER_USE_ENABLED=false);

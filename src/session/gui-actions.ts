@@ -109,7 +109,7 @@ export function parseComputerOutput(output: string): GuiActionEntry | null {
     const n = /, (\d+) nodes \(/.exec(text);
     return { intent: 'inspect', observation: n ? `${n[1]} nodes` : 'listed' };
   }
-  // 窗口作用域(computer.ts, design-notes/computer-use-rpa.md §4)。
+  // 窗口作用域(computer.ts, design-notes/computer-use/computer-use-rpa.md §4)。
   // list_windows:`Windows (N, front to back). ...`,只回灌文本。
   if (text.startsWith(LIST_WINDOWS_OUTPUT_PREFIX)) {
     const n = /^Windows \((\d+)/.exec(text);

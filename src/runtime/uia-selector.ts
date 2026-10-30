@@ -1,5 +1,5 @@
 /**
- * UIA 元素树的纯函数层(design-notes/computer-use-rpa.md §2.2–2.4)。
+ * UIA 元素树的纯函数层(design-notes/computer-use/computer-use-rpa.md §2.2–2.4)。
  *
  * 只处理 JSON 化的元素树:解析/规整 PowerShell 侧输出、选择器生成与匹配、inspect 文本渲染、
  * ref → 名称登记表(供权限层展示与敏感判定)。不碰进程、屏幕或 COM,跨平台可单测。

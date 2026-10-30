@@ -1,5 +1,5 @@
 /**
- * flow 回放器(design-notes/computer-use-rpa.md §5.3)。
+ * flow 回放器(design-notes/computer-use/computer-use-rpa.md §5.3)。
  *
  * 不碰屏幕、不碰 UIA:所有副作用经 RunnerDeps 注入(生产由 run-flow 工具接 computer.ts,单测用假实现)。
  * 失败策略沿用影刀式 onError:每步先重试 retry 次(间隔 retryDelayMs),仍失败则 abort / skip / handoff

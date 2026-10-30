@@ -1,7 +1,7 @@
 /**
  * 桌面流程命令组:/flow list · show <name> · save <name> [--from N] [--to M] [--force] [描述] · run <name> [参数=值 ...]
  *
- * 数据流(design-notes/computer-use-rpa.md §5):computer 动作被结构化录进会话的 gui-trace.jsonl,
+ * 数据流(design-notes/computer-use/computer-use-rpa.md §5):computer 动作被结构化录进会话的 gui-trace.jsonl,
  * `/flow save` 把它导出成 `.mocode/flows/<name>.json`,`/flow run` 不经过模型直接回放。
  * 回放受 Computer Use 总开关否决(/cu off);命中敏感内容(secret 参数、敏感文本、删除/发送/支付类目标)
  * 的 flow 在开跑前强制逐次确认,与 run_flow 工具走同一套审查(permissions/flow-review.ts)。

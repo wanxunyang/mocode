@@ -126,7 +126,7 @@ const ACTIONS = [
 ] as const;
 type ComputerAction = (typeof ACTIONS)[number];
 
-/** inspect 默认/最大展示节点数(design-notes/computer-use-rpa.md §2.4)。 */
+/** inspect 默认/最大展示节点数(design-notes/computer-use/computer-use-rpa.md §2.4)。 */
 const INSPECT_DEFAULT_NODES = 120;
 const INSPECT_MAX_NODES = 300;
 const ELEMENT_ACTIONS: ReadonlySet<ComputerAction> = new Set(['click_element', 'set_value']);
@@ -240,7 +240,7 @@ export function validateComputerArgs(args: Record<string, unknown>): string | nu
       return 'set_value via must be pattern|keys';
     }
   }
-  // 窗口作用域(design-notes/computer-use-rpa.md §4):window("wN",来自最近一次 list_windows)与 title_regex 二选一。
+  // 窗口作用域(design-notes/computer-use/computer-use-rpa.md §4):window("wN",来自最近一次 list_windows)与 title_regex 二选一。
   const hasWin = args.window !== undefined;
   const hasRe = args.title_regex !== undefined;
   if (hasWin && (typeof args.window !== 'string' || !/^w\d+$/.test(args.window))) {
@@ -289,7 +289,7 @@ let geometryCache: ScreenState | null = null;
 let lastFrame: PngImage | null = null;
 
 /**
- * 会话级 UIA 快照(design-notes/computer-use-rpa.md §2.2):每次 inspect 整体替换、generation 递增。
+ * 会话级 UIA 快照(design-notes/computer-use/computer-use-rpa.md §2.2):每次 inspect 整体替换、generation 递增。
  * click_element/set_value 只接受当前快照里的 ref,且执行前必按 hwnd+path 重定位并校验 role/name,
  * 不信任旧矩形。
  */
@@ -613,7 +613,7 @@ async function executeAction(
       const { node } = el.item;
       const text = args.text as string;
       const label = `element ${el.item.ref} ${node.role} ${JSON.stringify(node.name)}`;
-      // 密码框:模型不代填密码(design-notes/computer-use-rpa.md §2.6),用户需要时手动输入。
+      // 密码框:模型不代填密码(design-notes/computer-use/computer-use-rpa.md §2.6),用户需要时手动输入。
       if (node.isPassword)
         throw new Error(`${label} is a password field; refusing to fill it — ask the user to type it`);
       const hasValuePattern = node.patterns.includes('value');
@@ -1112,7 +1112,7 @@ const computerToolBase: Tool = {
         return { status: 'success', code: 'OK', retryable: false, output: text };
       }
 
-      // wait_until:轮询直到画面稳定/变化或元素出现/消失;不注入输入(design-notes/computer-use-rpa.md §3.1)。
+      // wait_until:轮询直到画面稳定/变化或元素出现/消失;不注入输入(design-notes/computer-use/computer-use-rpa.md §3.1)。
       // 轮询帧只在内存里比对、用完即删文件;仅结束时抓一张正式截图回灌并设为新的差分基准。
       if (action === 'wait_until') {
         const parsed = parseWaitCondition(args.condition, diffThreshold());
@@ -1312,7 +1312,7 @@ function buildTraceForCall(args: Record<string, unknown>): ReturnType<typeof bui
 }
 
 /**
- * 对外导出的 computer 工具 = 基础工具 + 结构化录制(design-notes/computer-use-rpa.md §5.1)。
+ * 对外导出的 computer 工具 = 基础工具 + 结构化录制(design-notes/computer-use/computer-use-rpa.md §5.1)。
  * 仅在动作成功后追加一行 gui-trace.jsonl;回放期间(withTraceSuspended)与 MOCODE_FLOW_TRACE=false 时不录。
  */
 export const computerTool: Tool = {

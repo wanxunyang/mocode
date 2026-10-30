@@ -1,5 +1,5 @@
 /**
- * `mocode flow` CLI 单测(design-notes/computer-use-rpa.md §5.4):参数解析、list/show、
+ * `mocode flow` CLI 单测(design-notes/computer-use/computer-use-rpa.md §5.4):参数解析、list/show、
  * run 的 fail-closed 权限、总开关否决、退出码、--window 透传。回放本身用假 deps,不碰屏幕。
  */
 import test from 'node:test';

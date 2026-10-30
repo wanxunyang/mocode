@@ -1,5 +1,5 @@
 /**
- * list_windows / focus_window 纯逻辑单测(design-notes/computer-use-rpa.md §4.4)。
+ * list_windows / focus_window 纯逻辑单测(design-notes/computer-use/computer-use-rpa.md §4.4)。
  * 用 fixture 数据,不碰 Win32。
  */
 import test from 'node:test';

@@ -1,5 +1,5 @@
 /**
- * run_flow 工具:回放 `.mocode/flows/<name>.json` 里录制好的桌面流程(design-notes/computer-use-rpa.md §5.3)。
+ * run_flow 工具:回放 `.mocode/flows/<name>.json` 里录制好的桌面流程(design-notes/computer-use/computer-use-rpa.md §5.3)。
  *
  * 与逐步调用 computer 的区别:整条流程不经过模型,按录制的 selector 现场定位元素,失败按步骤的
  * onError 策略重试 / 跳过 / 中止 / 交还模型。权限在整条 flow 层面一次做完(permissions/flow-review.ts):

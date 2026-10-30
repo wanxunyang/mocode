@@ -1,5 +1,5 @@
 /**
- * computer 动作的结构化录制(design-notes/computer-use-rpa.md §5.1)。
+ * computer 动作的结构化录制(design-notes/computer-use/computer-use-rpa.md §5.1)。
  *
  * 与 session/gui-actions.ts 的区别:台账是给模型看的有损文本(24 条滚动);trace 是给 flow 导出用的
  * 结构化 JSONL(`gui-trace.jsonl`,同会话目录),元素动作落盘的是 selector 而不是会过期的 ref。

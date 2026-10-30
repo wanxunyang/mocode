@@ -1,5 +1,5 @@
 /**
- * run_flow 的权限审查输入:把"这次回放到底会做什么"在启动前一次算清(design-notes/computer-use-rpa.md §5.3)。
+ * run_flow 的权限审查输入:把"这次回放到底会做什么"在启动前一次算清(design-notes/computer-use/computer-use-rpa.md §5.3)。
  *
  * 回放内部的单步不再走 checkPermission,所以整条 flow 的敏感判定必须在这里完成:
  *   - 指纹绑定 flow 文件 hash:flow 被改过(哪怕同名)旧授权立即失效;

@@ -1,5 +1,5 @@
 /**
- * flow 文件单测(design-notes/computer-use-rpa.md §5.2):解析校验、模板、参数、敏感审查、
+ * flow 文件单测(design-notes/computer-use/computer-use-rpa.md §5.2):解析校验、模板、参数、敏感审查、
  * 从 trace 导出、存取。纯逻辑 + 临时目录,不碰屏幕/UIA。
  */
 import test from 'node:test';

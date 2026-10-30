@@ -1,5 +1,5 @@
 /**
- * flow 文件:格式、校验、从 trace 导出、参数模板、存取(design-notes/computer-use-rpa.md §5.2)。
+ * flow 文件:格式、校验、从 trace 导出、参数模板、存取(design-notes/computer-use/computer-use-rpa.md §5.2)。
  *
  * flow 是 `.mocode/flows/<name>.json`,人可编辑,是回放的唯一事实源。设计要点:
  *   - 步骤是扁平对象:保留键(selector/target/fallback/window/allowCoordinateFallback/fragile/onError/note)

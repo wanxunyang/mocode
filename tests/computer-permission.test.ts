@@ -75,7 +75,7 @@ test('permissionFingerprint: 非 computer 工具行为不变(run_command 仍按�
   assert.equal(permissionFingerprint(runStub, { command: 'git status' }), a);
 });
 
-// ── P1 UIA 元素动作的审查(design-notes/computer-use-rpa.md §2.6)──────────
+// ── P1 UIA 元素动作的审查(design-notes/computer-use/computer-use-rpa.md §2.6)──────────
 
 test('computerTargetNeedsReview: 删除/发送/支付类按钮名命中(中英)', async () => {
   const { computerTargetNeedsReview } = await import('../src/permissions/index.js');

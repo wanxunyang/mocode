@@ -23,7 +23,7 @@ export function computerTextNeedsReview(text: string): boolean {
 }
 
 /**
- * computer click_element 目标元素名审查(design-notes/computer-use-rpa.md §2.6):
+ * computer click_element 目标元素名审查(design-notes/computer-use/computer-use-rpa.md §2.6):
  * 名称命中删除/发送/提交/支付类关键词时强制 once 级确认——这类按钮一点即产生外部副作用,
  * 不能因为「本会话允许 click_element」而静默放行。纯函数,独立可单测。
  */

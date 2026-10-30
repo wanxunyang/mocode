@@ -1,5 +1,5 @@
 /**
- * UI Automation 常驻服务(Windows):computer 工具的「元素之眼」(design-notes/computer-use-rpa.md §2.1)。
+ * UI Automation 常驻服务(Windows):computer 工具的「元素之眼」(design-notes/computer-use/computer-use-rpa.md §2.1)。
  *
  * 为什么独立成进程而不是塞进 input-injector:
  *  1. 元素树遍历可能要几百 ms 到数秒,注入器是串行管道,混在一起会让 click 排在慢 tree 后面;
@@ -107,7 +107,7 @@ const PS_UIA_SCRIPT = [
   '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
   '  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);',
   '  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();',
-  // ── 窗口 API(list_windows / focus_window / 窗口截图,design-notes/computer-use-rpa.md §4)──
+  // ── 窗口 API(list_windows / focus_window / 窗口截图,design-notes/computer-use/computer-use-rpa.md §4)──
   // 结构体读写与回调全放 C# 里:PowerShell 对嵌套值类型赋值落在副本上(见 input-injector.ts 的教训)。
   '  public struct RECT { public int L; public int T; public int R; public int B; }',
   '  public delegate bool EnumProc(IntPtr h, IntPtr l);',
@@ -300,7 +300,7 @@ const PS_UIA_SCRIPT = [
   '        $resp.rect = To-Rect $el.Current.BoundingRectangle',
   '        $resp.ok = $true',
   '      }',
-  // ── 窗口 op(design-notes/computer-use-rpa.md §4)──
+  // ── 窗口 op(design-notes/computer-use/computer-use-rpa.md §4)──
   // windows:枚举顶层可见窗口(z-order 前→后),过滤/编号/norm 换算在 TS 侧(window-list.ts)。
   '      "windows" {',
   '        $fg = [MoUia]::GetForegroundWindow()',

@@ -310,16 +310,20 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       writeBuf(s); // 缓冲流式正文(无 markdown 渲染,原始文本)
       if (s) lastChar = s[s.length - 1];
     },
-    onToolCall: (_name) => {
+    onToolCall: () => {
+      // 不能在工具名到达时就给转写补 \n:网关可能交错下发 content / tool_calls,
+      // 工具名先到、正文后补完,提前换行会在词中间断句。换行延迟到 onToolHeader(流已结束)。
+      // 子 agent 静默:不启 spinner(name 参数仅主 agent 用)
+    },
+    onToolHeader: (tc) => {
+      // 流末工具头落缓冲前补正文收尾换行(等价主 agent 的 onTextEnd)。
       if (lastChar && lastChar !== '\n') {
         writeBuf('\n');
         lastChar = '\n';
       }
-      // 子 agent 静默:不启 spinner(name 参数仅主 agent 用)
-    },
-    onToolHeader: (tc) => {
       const summary = summarizeToolCall(tc.name, tc.arguments);
       writeBuf(`  ● ${tc.name}  ${summary}\n`);
+      lastChar = '\n';
       // 实时写入主内容区:子 agent 的每次工具调用累计到摘要行计数。
       ensureQuietLine(opts.quietLabel ?? t('skill.executing', { name: opts.prompt.slice(0, 40) }));
       ensureLiveBatch();
