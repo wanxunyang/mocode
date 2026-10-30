@@ -177,6 +177,13 @@ export interface ToolDispatchRequest {
   readonly argumentErrorHint: (name: string) => string | undefined;
   /** 本 model turn 的归一化停止原因(见 ChatResult.finishReason);'length' 时透传给工具层做截断诊断。 */
   readonly finishReason?: string;
+  /**
+   * 当前用户轮文本,供 R3 前摄通道做匹配。
+   *
+   * 必须由调用方给:trigger 是自然语言场景描述,而工具参数只含路径/命令这类片段,
+   * 单靠参数重合度不足,通道会静默失效。
+   */
+  readonly proactiveContext?: string;
   readonly expandToolGroups?: (groups: readonly unknown[], reason: string) => ToolPolicyExpansion;
   /** 子 agent 等编排工具的并发上限覆写；缺省回落到全局 config.subAgentConcurrency。 */
   readonly orchestrationConcurrency?: number;

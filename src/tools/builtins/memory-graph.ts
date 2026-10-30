@@ -66,10 +66,21 @@ export const memoryGraphTool: Tool = {
 
     if (action === 'stats') {
       const s = graphStats();
+      const pct = (n: number, total: number) => (total === 0 ? '—' : `${Math.round((n / total) * 100)}%`);
+      const pv = s.vocab.project;
+      const gv = s.vocab.global;
+      const prov = Object.entries(s.provDistribution)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, n]) => `${k} ${n}`)
+        .join(', ');
       return [
-        `实体 ${s.entities} 条边(active ${s.edgesActive} / 已失效 ${s.edgesInvalid})`,
+        `实体 ${s.entities} 条边(active ${s.edgesActive} / 已失效 ${s.edgesInvalid}),已分型实体 ${s.typedEntities}`,
         `project: ${s.byScope.project.entities} 实体, ${s.byScope.project.edges} 边`,
         `global:  ${s.byScope.global.entities} 实体, ${s.byScope.global.edges} 边`,
+        `关系词表命中: project ${pv.inVocab}/${pv.total}(${pct(pv.inVocab, pv.total)}) | global ${gv.inVocab}/${gv.total}(${pct(gv.inVocab, gv.total)})`,
+        `溯源分布: ${prov || '(无)'}`,
+        `跨 scope 关系使用(观察用,非错误): project 用画像关系 ${s.crossScopeRelationUse.projectUsesProfileRel} 条 | global 用项目关系 ${s.crossScopeRelationUse.globalUsesProjectRel} 条`,
+        `global 图指向本仓库源码路径的边: ${s.globalRepoPathEdges}(守卫生效后应为 0)`,
         formatRecallStats(),
       ].join('\n');
     }

@@ -37,15 +37,24 @@ import {
   buildMemoryIndexSection,
   buildAboutYouSection,
   buildProjectGraphHint,
+  buildEpisodeSection,
   initPersona,
   gcMemories,
   kickoffReflection,
+  kickoffConsolidation,
   drainMemoryBackground,
   getLastReflectResult,
   clearLastReflectResult,
   snapshotTranscript,
   formatReflectResult,
+  flushRecallStats,
+  flushProactiveStats,
+  writeMemoryHealth,
+  resetProactiveTurn,
+  captureMemoryBaseline,
+  buildMemoryTailSection,
 } from '../memory/index.js';
+import { finalizeCurrentEpisode } from './episode-finalize.js';
 import { collectQueryHistory } from '../session/query-history.js';
 import { ToolPolicyController } from '../tools/policy.js';
 import { routeToolGroups } from '../tools/router.js';
@@ -273,6 +282,9 @@ export async function startRepl(
       // best-effort
     }
   }
+  // R17:会话内记忆尾注的基线在**会话边界**拍一次(启动 / /clear / /resume)。
+  // 放在 gcMemories 之后:GC 归档的条目刚落定,基线应以「会话真正开始时」的库为准。
+  captureMemoryBaseline();
   // 开关现读:运行时 /memory_switch 重建 history[0] 时,About you 与 Memory Index 同步显隐。
   const buildSystemMessage = (planMode: boolean): string => {
     const memoryOn = isMemoryEnabled();
@@ -281,6 +293,8 @@ export async function startRepl(
         buildAboutYouSection(memoryOn) +
         (planMode ? getPlanModeSuffix() : '') +
         buildMemoryIndexSection(memoryOn) +
+        // R6.3:情节走独立小节(不进 Memory Index / 不进 About you,理由见 episodic.ts)。
+        buildEpisodeSection(memoryOn) +
         buildProjectGraphHint(memoryOn),
     );
   };
@@ -649,6 +663,8 @@ export async function startRepl(
       if (imgs.length) messageAttachments.set(msgIndex, imgs);
       // 运行中每步 chat() 返回后刷新状态行 context 用量条(用 fresh lastUsage / 估算),
       // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
+      // 前摄通道的每轮限额在此重置(R3.4):按进程计会让常驻 REPL 几轮后永久静默。
+      resetProactiveTurn();
       const result = await runAgent(
         history,
         userInput,
@@ -659,6 +675,9 @@ export async function startRepl(
         },
         toolPolicy,
         initialToolRoute,
+        // R17:每用户轮现算一次「本会话内新增/更新的记忆」。走 ephemeral 尾注,不重建
+        // history[0](否则整段对话的前缀缓存每轮失效)。基线无变化时返回空串 → 零注入。
+        buildMemoryTailSection(isMemoryEnabled()),
         runtime,
       );
       // 撞限 salvage 摘要要在 TUI 落地:runAgent 只把 finalText 带回不渲染,主线撞限的
@@ -680,9 +699,21 @@ export async function startRepl(
       }
       // 后台反思:每 reflectEveryN 轮 fire-and-forget 一次(与下一轮 agent 并发,不阻塞)。
       // 已有在飞任务 / autoReflect 关 → kickoff 内部自守卫。快照同步取(避免下一轮 mutate history 竞态)。
+      // 召回计数脏集在此统一落盘:搜索本身不再写盘(纯读语义),一轮一次即可。
+      flushRecallStats();
+      // R4.1:前摄计数同样是内存累计(每次工具调用都写盘会变成写放大热点),
+      // 与召回计数一起在轮末落一次。健康快照仍只由 /memory health 与退出路径写,
+      // 因为它要读全库 + 算 stale,不该每轮付这个成本。
+      flushProactiveStats();
       turnCount++;
       if (turnCount % config.reflectEveryN === 0) {
         kickoffReflection(snapshotTranscript(history, 20));
+      } else {
+        // R11:非反思轮才轮到情节巩固。两者共用同一个在飞槽位(后台 LLM 任务串行,
+        // 不并压两条请求给后端),所以放在 else 里而不是紧跟其后 —— 否则反思刚占住
+        // 槽位,巩固这一轮必然被静默跳过,实际 cadence 会漂移成"只有反思没命中时才跑"。
+        // 无候选时它是纯本地计算,零成本返回。
+        kickoffConsolidation();
       }
     } catch (e) {
       ok = false;
@@ -757,6 +788,9 @@ export async function startRepl(
   /** 把 picker 选中的会话加载进 REPL(刷 history + 重建 snapshots + 重画)。/resume / /sessions 共用。 */
   async function resumeFromPick(pick: SessionPickerItem | null): Promise<void> {
     if (!pick) return; // Esc / Ctrl+D 取消
+    // R6.1:切换前把**当前**会话落成情节记忆——下面 history.length=0 之后内容就没了。
+    // 幂等,重复切换只会刷新同一条。
+    finalizeCurrentEpisode(currentSessionId, history, queryHistory);
     const loaded = runtime.session.resume(pick.id);
     if (!loaded || !loaded.history.length) {
       layout.contentWrite(`${ui.yellow}${t('repl.loadFailed')}${ui.reset}\n`);
@@ -770,6 +804,9 @@ export async function startRepl(
     history.length = 0;
     history.push(...loaded.history);
     queryHistory = loaded.queryHistory ? [...loaded.queryHistory] : queryHistoryFromMessages(loaded.history);
+    // R17:换会话是会话边界,尾注基线重拍——否则被切换掉的那段会话里写的条目,
+    // 会在续接会话的第一轮被当成「新学到的」重复播报。
+    captureMemoryBaseline();
     lastToolGroups = [...(loaded.lastToolGroups ?? [])];
     setAgentMode('auto'); // 续接重置为 auto(mode 不落盘;listener 重写 history[0] 回 auto,与 loaded 幂等)
     contextState.lastUsage = undefined;
@@ -1027,7 +1064,15 @@ export async function startRepl(
     }
   }
 
-  // 退出前等在飞反思收尾(Ctrl+C 走 SIGINT 直退不等;fire-and-forget 不承诺中断时完成)。
+  // R6.1:退出前落情节(纯本地、零 LLM,毫秒级;放在 drain 之前让两者并行收尾)。
+  finalizeCurrentEpisode(currentSessionId, history, queryHistory);
+  // R4.1:退出时写一份健康快照。放这里而不是每轮:它要读全库 + 算 stale,
+  // 每次退出一个文件,正好构成一条随时间推移的趋势线。
+  flushProactiveStats();
+  writeMemoryHealth(isMemoryEnabled());
+  // 退出前等在飞反思收尾。注意:Ctrl+C 在 TUI(raw 模式)下是按键不是 SIGINT,空输入框时
+  // 由主循环 catch { break } 接住,因此**会**走到这里等反思跑完;只有非 raw 模式下的
+  // 进程级 SIGINT → process.exit(130) 才跳过(fire-and-forget 不承诺中断时完成)。
   await drainMemoryBackground();
   await runtime.close();
   await closeAllMcp();

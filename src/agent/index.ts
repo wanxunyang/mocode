@@ -324,6 +324,11 @@ export async function runAgent(
   toolPolicy?: ToolPolicyController,
   /** 仅真实用户 turn 传入；合成 plan 执行轮继承 policy 但不重复记录初始路由。 */
   initialToolRoute?: Record<string, unknown>,
+  /**
+   * R17:会话内记忆尾注,由调用方每个用户轮现算(见 memory/tail.ts)。
+   * 走 ephemeral 段而非重建 history[0]——后者会让整段对话的前缀缓存每轮失效。
+   */
+  memoryTail?: string,
   /** TUI composition root 绑定的 Runtime；旧调用传 AgentRuntimeContext 仍兼容。 */
   runtimeOrContext: Runtime | AgentRuntimeContext = defaultRuntime,
 ): Promise<AgentRunResult> {
@@ -353,10 +358,8 @@ export async function runAgent(
   // lastChar 镜像:core 跟踪流式末字符决定补换行,但 TUI hooks 需读它决定 layout.contentWrite('\n')。
   // core 的 onTextEnd hook 只在 lastChar !== '\n' 时才调,调后置 '\n';镜像与此同步。
   let lastChar = '';
-  // 正文 -> 工具的边界由 core.onTextEnd 与本层 onToolCall 分两段完成。
-  // markdown 段末已经是完整物理行，因此再写 1 个 \n 就代表 1 条空白行；
-  // 不能按普通字符串的“两个换行才有一个空行”来计算。
-  let textBoundaryNewlines = 0;
+  // 正文 -> 工具的边界换行只在流末 onTextEnd 写一次:工具名 delta 可能在正文流到一半时
+  // 就先到(网关交错分片),绝不能在 onToolCall 里提前写 \n——那会在词中间封死 markdown 段。
   let hasPendingTextBoundary = false;
   let toolBatchFollowsText = false;
 
@@ -387,7 +390,6 @@ export async function runAgent(
       lastChar = visible[visible.length - 1];
       if (visible.trim().length > 0) {
         hasPendingTextBoundary = true;
-        textBoundaryNewlines = 0;
       }
     }
   }
@@ -431,17 +433,12 @@ export async function runAgent(
     onToolCall: (name) => {
       // 工具调用开始前，先 flush 被抑制的叙述缓冲（若是纯噪声则丢弃）。
       flushPendingNarrationIfAny();
-      // 文本/思考已流完,模型转而生成 tool_call 参数(可能很长,如 write_file 整篇内容):
-      // 补换行(让随后的 ● 行与 diff 不黏在正文末尾)+ 启「生成中」内联 spinner,内容区不再干等。
-      if (hasPendingTextBoundary) {
-        toolBatchFollowsText = true;
-        if (textBoundaryNewlines < 1) {
-          layout.contentWrite('\n');
-        }
-        lastChar = '\n';
-        textBoundaryNewlines = 1;
-        hasPendingTextBoundary = false;
-      }
+      // 模型转而生成 tool_call 参数(可能很长,如 write_file 整篇内容):启「生成中」spinner。
+      // 此处**不写换行、不封 markdown 段**:工具名 delta 可能在正文流到一半时先到(部分网关
+      // 交错下发 content / tool_calls,剩余 content 随后才补完),提前 contentWrite('\n') 会
+      // 在词中间硬换行(「d / ispatcher」断词 bug)。只标记「正文后随工具批」,真正的边界换行
+      // 由流末 onTextEnd 落、空行归一并到 onToolHeader——那时全部 content 已到齐。
+      if (hasPendingTextBoundary) toolBatchFollowsText = true;
       if (name) spinner.start(t('agent.generating', { tool: name }));
     },
     onStepStart: () => spinner.start(t('agent.thinking')),
@@ -472,19 +469,21 @@ export async function runAgent(
       );
     },
     onTextEnd: () => {
+      // 流末正文收尾换行(此刻 content 已全部到齐,不会再出现词中间断行)。
       if (lastChar && lastChar !== '\n') {
         layout.contentWrite('\n');
         lastChar = '\n';
-        if (hasPendingTextBoundary) textBoundaryNewlines = 1;
       }
     },
     onToolHeader: (tc) => {
       // mutation 的自动展开会把 current/committed 空行状态互相转换；在首摘要真正
       // 落屏前按视觉行归一，避免同样的文本→edit 边界偶发 1 行或 2 行。
+      // 普通工具的新建批在 writeToolHeader 内部同样归一,此处只保留 mutation 显式分支。
       if (toolBatchFollowsText && isMutationTool(tc.name, runtime.context.toolRuntime)) {
         layout.normalizeMutationBoundary();
       }
       toolBatchFollowsText = false;
+      hasPendingTextBoundary = false;
       writeToolHeader(tc, runtime.context.toolRuntime);
     },
     onToolStart: (name) => spinner.start(t('agent.executing', { tool: name })),
@@ -544,6 +543,7 @@ export async function runAgent(
       hooks: combinedHooks,
       toolPolicy,
       initialToolRoute,
+      memoryTail,
       onTraceEvent: appendCurrentSessionTraceEvent,
     });
   } finally {

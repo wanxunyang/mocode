@@ -9,12 +9,24 @@ import { ui } from '../../ui/theme.js';
 import { bannerLines } from '../../ui/render.js';
 import { t } from '../../i18n/index.js';
 import { promptSessionPicker, type SessionPickerItem } from '../../ui/prompt.js';
+import { finalizeCurrentEpisode } from '../episode-finalize.js';
+import { captureMemoryBaseline } from '../../memory/index.js';
 import { unhandled, next, type CommandHandler } from './types.js';
 
 export const sessionCommands: CommandHandler[] = [
   (ctx) => {
     if (ctx.line !== '/clear') return unhandled();
+    // R6.1:/clear 丢弃 history 之前落情节——否则这段会话在记忆里彻底消失。
+    // 幂等且零 LLM 成本(见 episodic.ts),失败静默:清理会话不该被记忆写入挡住。
+    try {
+      finalizeCurrentEpisode(ctx.state.currentSessionId, ctx.history, ctx.state.queryHistory);
+    } catch {
+      // best-effort
+    }
     ctx.history.length = 1; // 保留 system 提示
+    // R17:/clear 是新会话边界,尾注基线跟着重置——否则上一段会话里写的条目会
+    // 在新会话的第一轮被当成「本次新学到的」再讲一遍。
+    captureMemoryBaseline();
     ctx.state.currentSessionId = ctx.runtime.session.clear();
     ctx.state.turnCount = 0; // 反思 cadence 重新计数
     ctx.contextState.lastUsage = undefined;

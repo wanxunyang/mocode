@@ -1,6 +1,6 @@
 // relation-vocab.ts —— 受控关系词表(轻量,不含实体类型/domain-range)。
 //
-// 这是 memory-2.2 本体方案里"软封闭世界"的最小落地:只约束**关系名**,不引入实体类型
+// 这是 design-notes/memory/memory.md §3 D1("不做完整本体")的最小落地:只约束**关系名**,不引入实体类型
 // 体系或推理。反思抽取 triples/profile 时优先用词表内关系;词表外关系**仍允许写入**
 // (软策略,不阻断长尾),但会被计数为 relViolation 供观测。等真实数据证明需要,再升级
 // 为完整 ontology.ts(实体 type + domain/range + 逆/传递)。
@@ -48,7 +48,21 @@ export const PROFILE_RELATIONS = [
   'related_to',
 ] as const;
 
-/** 常见同义/拼写漂移 → 规范关系(反思落库前归范)。 */
+/**
+ * 同义/拼写漂移 → 规范关系(所有写入路径落库前归范,见 graph.addTriple)。
+ *
+ * 收录标准很窄,只收**一对一**的确定性变体:
+ *  ① 拼写错误(`cals`→`calls`、`suports_override`→`supports_override`);
+ *  ② 同一关系的不同词形,且**方向与语态不变**(`depends`→`depends_on`、`prefer`→`prefers`)。
+ *
+ * **刻意不收**语义近义词与方向反转的关系。实测踩过的坑:
+ *  - `implements` 指向的是**概念**(`vertex_provider --implements--> gemini_contents_protocol`),
+ *    而 `implemented_in` 指向的是**文件**;合并会把 `X implements Y` 误读成 `X 实现在 Y 里`;
+ *  - `tested_in`(`X 被 Y 测试`)与 `tests`(`X 测试 Y`)主语宾语对调;
+ *  - `configures`(`MOCODE_ARCHIVE_AFTER_DAYS --configures--> policy`)与
+ *    `configured_by`(`X --configured_by--> Y`)方向相反。
+ * 这三类留在词表外更安全——它们会进 `relViolations` 观测,而不是被静默改写。
+ */
 export const RELATION_ALIASES: Record<string, string> = {
   employed_by: 'works_at',
   employer: 'works_at',
@@ -62,11 +76,19 @@ export const RELATION_ALIASES: Record<string, string> = {
   port: 'listens_on',
   depends: 'depends_on',
   dependency: 'depends_on',
-  implements: 'implemented_in',
-  impl: 'implemented_in',
   decides: 'decided_by',
   conflict: 'conflicts_with',
   configure: 'configured_by',
+  // —— 确定性拼写错误(实测出现在真实图里的脏关系名)——
+  cals: 'calls',
+  suports_override: 'supports_override',
+  // —— 同关系不同词形(方向/语态不变)——
+  prefer: 'prefers',
+  use: 'uses',
+  call: 'calls',
+  read: 'reads',
+  write: 'writes',
+  test: 'tests',
 };
 
 const PROJECT_SET = new Set<string>(PROJECT_RELATIONS);

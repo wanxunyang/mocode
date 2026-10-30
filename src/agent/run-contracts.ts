@@ -104,4 +104,10 @@ export interface AgentRunOptions {
   onToolOutcome?: (tool: string, args: Record<string, unknown>, outcome: ToolOutcome) => void;
   suppressOpeningAnalysis?: boolean;
   suppressSessionState?: boolean;
+  /**
+   * R17:会话内记忆尾注。由调用方每个用户轮现算一次(基线差分),作为 ephemeral
+   * system 段追加在 history 末尾——**绝不重建 history[0]**,否则整段对话的前缀缓存每轮失效。
+   * 空串/undefined 时零注入。
+   */
+  memoryTail?: string;
 }

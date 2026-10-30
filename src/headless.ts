@@ -26,6 +26,14 @@ import { effectiveSystemPrompt } from './skills/index.js';
 import { buildMemoryIndexSection, gcMemories } from './memory/store.js';
 import { buildAboutYouSection, initPersona } from './memory/persona.js';
 import { buildProjectGraphHint } from './memory/recall.js';
+import {
+  buildEpisodeSection,
+  collectChangedFiles,
+  extractCompactionSummary,
+  recordSessionEpisode,
+} from './memory/episodic.js';
+import { flushProactiveStats } from './memory/proactive.js';
+import { writeMemoryHealth } from './memory/health.js';
 import { defaultRuntime, Runtime } from './runtime/index.js';
 import { runAgentCore, type AgentHooks } from './agent/core.js';
 import { summarizeToolCall, summarizeToolResult } from './ui/render.js';
@@ -214,6 +222,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     buildBasePrompt(sessionId) +
     buildAboutYouSection(memoryOn) +
     buildMemoryIndexSection(memoryOn) +
+    buildEpisodeSection(memoryOn) +
     buildProjectGraphHint(memoryOn);
   const systemContent = botInfo
     ? `# Role\n${botInfo.bot.systemPrompt}\n\n` +
@@ -323,7 +332,25 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     } catch {
       // 落盘失败不覆盖主结果
     }
+    // R6.1:一次性执行同样落情节——同一个工作区下次跑 `mocode -p` 才知道上次干到哪。
+    // 纯本地零 LLM,失败静默(记忆是增强,不能拖垮一次性执行的退出码)。
+    if (memoryOn) {
+      try {
+        recordSessionEpisode({
+          sessionId,
+          queries: [prompt],
+          changedFiles: collectChangedFiles(history),
+          summaryText: extractCompactionSummary(history),
+        });
+      } catch {
+        // best-effort
+      }
+    }
     closeAllMcp();
+    // R4.1:一次性执行同样留下度量 —— 否则 `mocode -p` 用的那一侧永远是空白。
+    // 只在前摄计数有增量时才落盘,健康快照失败静默。
+    flushProactiveStats();
+    writeMemoryHealth(memoryOn);
     await runtime.close();
     if (wt) {
       try {

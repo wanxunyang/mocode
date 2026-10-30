@@ -1,6 +1,6 @@
 // recall-stats.ts —— 项目图谱 pull 召回的轻量埋点。
 //
-// 目的(memory-2.2 决策):项目图谱曾"只写不读"。pull 通道(常驻 hint + memory_search
+// 目的(design-notes/memory/memory.md §2.1):项目图谱曾"只写不读"。pull 通道(常驻 hint + memory_search
 // 强化)上线后,用零依赖计数器回答"模型到底有没有在用图谱":搜了几次、图谱段有几次命中。
 // 数据只存项目 <cwd>/.mocode/memory-recall-stats.json,供 memory_graph stats 展示,据此
 // 决定要不要再加"turn 起步阈值注入"的安全网。全部静默容错、tmp+rename 原子写。

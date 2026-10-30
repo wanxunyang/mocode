@@ -169,6 +169,78 @@ test('runAgentCore: 单 tool_call → 文本回复,history 与 hooks 字节级�
   }
 });
 
+test('runAgentCore: content 与 tool_calls 交错分片时 onTextEnd 只在流末触发一次', async () => {
+  // 回归:部分 OpenAI 兼容网关把 content 与 tool_calls delta 交错下发(正文流到一半先到
+  // 工具名,剩余 content 随后补完)。onTextEnd 不能在工具名到达时就发,否则 TUI 会在
+  // 词中间硬换行并封死 markdown 段(「d / ispatcher」断词 bug);它只能在整个流结束后、
+  // onToolHeader 之前触发一次。
+  const root = mkdtempSync(join(tmpdir(), 'mocode-agent-interleave-test-'));
+  writeFileSync(join(root, 'fixture.txt'), 'mocode-fixture-content', 'utf8');
+  const prevRoot = setSandboxRoot(root);
+
+  let createCallCount = 0;
+  __setChatCreateImpl(async () => {
+    createCallCount++;
+    if (createCallCount === 1) {
+      return sseStream([
+        { delta: { content: '继续通读：d' } },
+        {
+          delta: {
+            tool_calls: [{ index: 0, id: 'call-1', function: { name: 'read_file', arguments: '' } }],
+          },
+        },
+        { delta: { tool_calls: [{ index: 0, function: { arguments: '{"path":"fixture.txt"}' } }] } },
+        { delta: { content: 'ispatcher 的执行段' } },
+        { usage: { prompt_tokens: 100, completion_tokens: 12, total_tokens: 112 } },
+      ]);
+    }
+    return sseStream([
+      { delta: { content: 'done' } },
+      { usage: { prompt_tokens: 200, completion_tokens: 5, total_tokens: 205 } },
+    ]);
+  });
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const events: string[] = [];
+    const hooks: AgentHooks = {
+      onToolCall: (name) => events.push(`tool_call:${name}`),
+      onToolHeader: (tc) => events.push(`tool_header:${tc.name}`),
+      onText: (delta) => events.push(`text:${delta}`),
+      onTextEnd: () => events.push('text_end'),
+      onDone: () => events.push('done'),
+    };
+
+    const result = await runAgentCore({
+      history,
+      userInput: 'hi',
+      hooks,
+      toolPolicy: new ToolPolicyController({ id: 'interleave-fixture', maxExpansions: 0 }),
+      permissionPrompt: () => Promise.resolve({ action: 'cancelled' }),
+    });
+
+    assert.equal(result.completed, true);
+    // 第一段 content 必须完整(两段 content 都在工具前后到达,history 不被工具名切断):
+    const firstAssistant = history[2] as { role?: string; content?: string };
+    assert.equal(firstAssistant.role, 'assistant');
+    assert.equal(firstAssistant.content, '继续通读：dispatcher 的执行段');
+
+    // 关键时序:工具名到达时不发 text_end;text_end 只在流末、tool_header 之前出现一次,
+    // 且两段 content 的 text 事件都在它之前。
+    const firstStep = events.slice(0, events.indexOf('tool_header:read_file') + 1);
+    assert.deepEqual(
+      firstStep,
+      ['text:继续通读：d', 'tool_call:read_file', 'text:ispatcher 的执行段', 'text_end', 'tool_header:read_file'],
+      `交错分片下 text_end 应只在流末触发:\n实际: ${JSON.stringify(firstStep)}`,
+    );
+    assert.equal(events.filter((e) => e === 'text_end').length, 2, '两次 chat 各一个 text_end');
+  } finally {
+    __setChatCreateImpl(null);
+    setSandboxRoot(prevRoot);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('runAgentCore: 无工具直接文本回复', async () => {
   __setChatCreateImpl(async () =>
     sseStream([
@@ -1448,4 +1520,74 @@ test('glob/grep 不取资源锁:workspace 写锁持有期间读枚举不被阻�
   const outcome = await grepPromise;
   assert.equal(grepFinishedDuringHold, true, 'workspace 写锁持有期间 grep 必须不被阻塞(读枚举容忍瞬时不一致)');
   assert.ok(typeof outcome === 'string' || typeof outcome === 'object');
+});
+test('R17: memoryTail 追加在请求末尾的 ephemeral system 段,且不触碰 history[0]', async () => {
+  // 钉的是 R17.3 的硬约束:尾注必须走「history 末尾追加一条 system」而不是重建 history[0]。
+  // 后者会让整段对话的前缀缓存每轮失效(每轮全价重算 prompt),而这件事在类型层面
+  // 完全看不出来——只有抓真实请求体才能证明。同时证明 history 本身不被追加。
+  const requests: Array<{ messages?: ChatMessage[] }> = [];
+  __setChatCreateImpl(async (body) => {
+    requests.push(body as unknown as { messages?: ChatMessage[] });
+    return sseStream([{ delta: { content: 'ok' } }]);
+  });
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys-original' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'hi',
+      hooks: {},
+      toolPolicy: new ToolPolicyController({ id: 'core-memory-tail', maxExpansions: 0 }),
+      runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+      memoryTail: '## Memory updated during this session\n- [pitfall] tail-id: 尾注条目',
+    });
+
+    assert.equal(result.completed, true);
+    const sent = requests[0].messages ?? [];
+    // 尾注作为最后一条 system 消息出现。
+    const last = sent[sent.length - 1];
+    assert.equal(last.role, 'system', '尾注应是请求末尾的 ephemeral system 消息');
+    assert.match(String(last.content), /Memory updated during this session/);
+    assert.match(String(last.content), /tail-id/);
+    // 前缀逐字节不变 —— 这是前缀缓存能否命中的分界。
+    assert.equal((sent[0] as { content?: string }).content, 'sys-original');
+    // history 本身不被追加(ephemeral 只作用于本次请求),且 system 仍是第一条。
+    assert.equal(history[0].role, 'system');
+    assert.equal((history[0] as { content?: string }).content, 'sys-original');
+    assert.ok(
+      !history.some((m) =>
+        String((m as { content?: string }).content ?? '').includes('Memory updated during this session'),
+      ),
+      'ephemeral 段不得落进 history',
+    );
+  } finally {
+    __setChatCreateImpl(null);
+  }
+});
+
+test('R17: 无 memoryTail 时请求里不出现该段(零注入)', async () => {
+  const requests: Array<{ messages?: ChatMessage[] }> = [];
+  __setChatCreateImpl(async (body) => {
+    requests.push(body as unknown as { messages?: ChatMessage[] });
+    return sseStream([{ delta: { content: 'ok' } }]);
+  });
+
+  try {
+    await runAgentCore({
+      history: [{ role: 'system', content: 'sys' }],
+      userInput: 'hi',
+      hooks: {},
+      toolPolicy: new ToolPolicyController({ id: 'core-no-tail', maxExpansions: 0 }),
+      runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+    });
+    const sent = requests[0].messages ?? [];
+    assert.ok(
+      !sent.some((m) =>
+        String((m as { content?: string }).content ?? '').includes('Memory updated during this session'),
+      ),
+      '没传 memoryTail 就不该出现尾注段',
+    );
+  } finally {
+    __setChatCreateImpl(null);
+  }
 });

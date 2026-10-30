@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "note": "R15 检索基线语料。由真实库脱敏导出:只保留 mocode 项目结构类记忆与可公开的工具踩坑。",
+  "entries": [
+    {
+      "id": "mocode-context-optimization-pipeline",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-context-optimization-pipeline",
+      "summary": "mocode 上下文压缩四闸:三层 compact + Relevance Pruner + Lifecycle Engine + Context Pipeline(C1+10 encoder)",
+      "body": "mocode 上下文四层节流(2026 当前已全部落地):\n\n1. **三层 compact**(`session/compact.ts`):trim 单结果 → compact 旧 tool 结果原地 → 摘要化旧轮;`maybeCompact` + `capToolResultForHistory` + `contextState`\n2. **10 encoder Context Optimization Pipeline**(`context/`,Phase 2.5 已落地):C1 收口 `optimizeToolResult` + `classifier` + `registry` + `pipeline` + `budget` + `relevance` + `lifecycle`;10 个 encoder 分布在 `context/encoders/`:code / doc / graph / log / memory / passthrough / search / summary / table / tree(`status` 不注册,本就一行);每个 encoder 接收工具原始输出 → 返回压缩表示\n3. **Relevance Pruner**(`session/drop.ts` + `context/relevance.ts`):read_file 类工具读入的相关性裁剪,Map 索引 + observePush/observeMutation + 保护区(最后 user 之后)\n4. **Lifecycle Engine**(`context/lifecycle.ts`):Observation 状态机 LIVE/REFERENCED/OBSOLETE/STUB;grep/glob/codegraph/web_search/web_fetch 等观察类永不到 STUB,孤立非观察类跨轮老化后 STUB;`check-lifecycle.ts` 27 断言全绿\n\n附加:`session/scheduler.ts` 实现\"真·强制 /compact + 旁路 autoCompact\"——manual 触发时绕开 autoCompact 阈值,reason 分类 7 类(noop-empty / noop-protected / noop-ml-only / noop-shrunk-too-large / noop-noold-noop / microcompact / summarize)。\n\n验证脚本:`npx tsx scripts/check-context.ts`。"
+    },
+    {
+      "id": "windows-docx-text-extract-gbk-encoding",
+      "scope": "project",
+      "type": "pitfall",
+      "name": "windows-docx-text-extract-gbk-encoding",
+      "summary": "Windows 下用 python 解 docx 提取文本打印中文会因 gbk 报UnicodeEncodeError，需设 PYTHONIOENCODING=utf-8",
+      "body": "在本环境（Windows + Git Bash）读取 .docx 二进制：用 zipfile 读 word/document.xml，把 </w:p> 替换为换行、去标签、html.unescape。直接 print 会因控制台 gbk 编码遇到 \\xa0 抛 UnicodeEncodeError。解决：命令前加 PYTHONIOENCODING=utf-8（或写入 utf-8 文件再用 read_file 读取）。readFile 不能直接读 docx。"
+    },
+    {
+      "id": "mocode-project-overview-doc",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-project-overview-doc",
+      "summary": "mocode 项目全景讲解文档在 design-notes/讲解/:MD 版(引用 figs/ 下 27 张 SVG)和 HTML 版(单文件、图片内嵌、可离线打开)内容一致,结构为 0-9 章",
+      "body": "位置:`design-notes/讲解/`\n- `mocode-项目全景.md`:约 11 万字符,图片引用 `figs/` 下的 27 张 SVG,适合在编辑器里阅读和后续修改。\n- `mocode-项目全景.html`:单文件,SVG 全部内嵌,不依赖外部资源,离线可开;左侧是目录,面试追问做成可折叠卡片。\n\n结构:\n- 0-2 章是总览:一分钟介绍、关键数字、六阶段时间线(带提交柱状图)、四层架构图、一轮对话的调用链。\n- 3-9 章是模块深挖,每章固定 8 节:一句话定位、要解决的问题、实现原理(配图)、关键代码导读(标文件和行号)、演进过程(带提交 hash)、踩过的坑(现象/根因/解法/启示)、现存问题和改进方案、面试追问。\n- 第 3 章 Agent 内核与子 Agent;第 4 章工具平面;第 5 章上下文工程;第 6 章记忆与技能;7-9 章是其余模块。\n\n用途:用户准备面试或讲解 mocode 时使用。代码有改动时,MD 和 HTML 两份要同步更新。"
+    },
+    {
+      "id": "mocode-memory-reflection-internals",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-memory-reflection-internals",
+      "summary": "src/memory 反思管线:reflect.ts 负责转录快照、反思、后台排空;反思时最多给模型 20 条既有记忆(按召回次数取前 10 条再补足),每条 body 截到 600 字符",
+      "body": "`src/memory/reflect.ts` 的导出:`snapshotTranscript(history, K)`、`runReflection(transcript, signal)` 返回 `ReflectResult`(saves/updates/forgets/triples)、`formatReflectResult`、`kickoffReflection(transcript)`(后台触发)、`drainMemoryBackground()`(退出前等待后台任务完成)。\n\n给反思模型看的既有记忆:先按 recallCount 取前 10 条,与其他候选合并去重后截到 20 条;body 超过 600 字符时截到 586 字符并加「…[截断]」;每条的格式为 `[id] name (type, recalled N)` 加 summary 和 body。\n\n`src/memory/store.ts`:`saveEntry` 用 slugify(name) 生成 id,id 在 project 和 global 两个文件间全局唯一;撞名时返回 `{ok:false, exists}`,工具层会提示改用 memory_update。entry 带 scope 和 source(session/turn)。\n\n评估(2026 调研):工程上扎实,但对照 Mem0、Zep/Graphiti、Letta(sleep-time compute)、A-MEM、MemOS、Hindsight,在「记忆科学」维度仍是入门级,可演进的方向包括重要性打分、巩固(consolidation)、按时间失效、从失败中学习(ReasoningBank)。"
+    },
+    {
+      "id": "memory-2-0-design-doc-single-source",
+      "scope": "project",
+      "type": "reference",
+      "name": "memory-2.0-design-doc-single-source",
+      "summary": "Memory 2.0 设计只在 design-notes/memory-2.0-pyramid.md 维护(Proposal,未实现);本体调研/MCO 已并入其 §4,memory-ontology.md 已删除",
+      "body": "design-notes/memory-2.0-pyramid.md 是 Memory 2.0 设计的唯一事实源,文档名是「无向量的代码锚定记忆金字塔」,状态为 Proposal(设计稿,未实现),2026-10-09 合并后约 810 行。\n\n原 design-notes/memory-ontology.md(本体调研与选型)已整篇并入该文档的 §4「本体层:给金字塔配一副骨架」,旧文件已删除,不再单独维护。文档头有「合并说明」一行记录这次合并。\n\n§4 结构:\n- 4.1 选型结论\n- 4.2 调研:代码/软件工程本体(SEON、SCIP 等)、通用轻量建模与约束标准(SKOS、PROV-O、LinkML、Wikidata 约束)、Agent 记忆框架里的本体实践(Cognee 等)\n- 4.3 推荐方案 MCO(mocode Coding Ontology):照 SEON 分三层金字塔,第 2 层定义类和关系,关系约束取自 Wikidata\n- 4.4 落地形态:一个 ontology.json(class/slot 写法借自 LinkML)加一个校验函数 validateTriple\n\n合并前的原 §4 及之后各章已顺延编号。金字塔、写入、前摄、锚点、探针、固化、里程碑、风险、评测各段都已按本体改写过。引用该设计时请用新章节号,不要再指向 memory-ontology.md。"
+    },
+    {
+      "id": "mocode-banner-logo-layout",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-banner-logo-layout",
+      "summary": "启动 banner 的 logo 在 src/ui/render.ts 的 LOGO_LINES,共 6 行,早期版本的作者小人坐在第一个 o 上;baner 行数和 content-write.ts 的 bannerH 是耦合的",
+      "body": "## Banner logo 布局\n\n- 文件:`src/ui/render.ts` 里的 `LOGO_LINES`、`LOGO_W=35`、`LOGO_GAP=0`。`bannerString(info)` 把 logo 和右侧信息区拼起来,信息区包括 MoCode 版本、模型、目录、记忆。`bannerLines()` 按 '\\n' 切行,只去掉末尾那个 \\n 切出的空串,中间的空行照样计入。\n- 现在一共 6 行 logo:前 2 行是小人的头 `[◕ᴗ◕]` 和身体 `●|   |●`。第 3 行是脚 `ＯＯ`,和 d 的升部 `▄` 在同一行。后 3 行是用上半块/下半块字符画的 M o C o d e。\n- 用户定的方案:小人(来自早期提交 6be25e8)坐在第一个 o 上,也就是第 6-9 列。原因是 o 的顶边 `█▀▀█` 用上半块,贴着格子顶部,脚落上去没有空隙。C 的顶边 `▄▄` 用下半块,会留出半格空隙,看起来像悬空。\n\n## 耦合(容易踩坑)\n\n- `src/ui/layout-internal/content-write.ts` 里的 `rewriteBaner` 只做原地等长替换,替换的是顶部 `bannerH` 行。`bannerH` 等于 `bannerLines(banner())` 的行数,现在是 7(6 行 logo+信息,加 1 行空行分隔)。\n- 改 logo 的行数时,调用方必须重新调用 `writeBanner` 来重设 `bannerH`,否则原地重写会错位。\n- 现有测试都没有覆盖 bannerLines/LOGO_LINES。改完要用 `npx tsx -e` 直接打印 `bannerLines` 并去掉 ANSI 转义,肉眼核对。"
+    },
+    {
+      "id": "mocode-computer-use-uia-element-tree",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-computer-use-uia-element-tree",
+      "summary": "Computer Use P1 UIA 元素树已落地：uia-selector 纯函数 + uia-service 常驻服务，computer 新增 inspect/click_element/set_value，危险按钮名触发审查",
+      "body": "Computer Use P1（设计见 design-notes/computer-use-rpa.md，审查规则见 §2.6）已实现，typecheck 和 626/626 测试全部通过：\n- src/runtime/uia-selector.ts：负责元素选择的纯函数，单测在 tests/uia-selector.test.ts。\n- src/runtime/uia-service.ts：UIA 常驻服务，提供 tree/act，元素消失时返回 ElementGone，已做过真机冒烟。\n- src/tools/builtins/computer.ts：新增 inspect、click_element、set_value 三个动作，validate、schema、execute 都已接线，并维护快照状态。\n- src/permissions/index.ts：computerTargetNeedsReview 按元素名中英文匹配删除、发送、支付类按钮（如 Delete、Send message、确认付款、删除文件），命中就进入审查。另有 computerArgsNeedReview 和 summarizeArgs。\n- src/session/gui-actions.ts：GUI 台账新增 UIA 动作的句式。\n- 生命周期：src/runtime/shutdown.ts 和 src/repl/commands/tool-group.ts 都调用 disposeUiaService 回收该服务。\n- 测试：tests/computer-permission.test.ts、tests/computer-validate.test.ts、tests/gui-actions.test.ts。"
+    },
+    {
+      "id": "mocode-computer-use-rpa-phases-map",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-computer-use-rpa-phases-map",
+      "summary": "Computer Use 借鉴影刀 RPA 的 P1-P4 已按计划全部落地;设计文档 design-notes/computer-use-rpa.md 与各期模块/测试位置速查",
+      "body": "设计文档:`design-notes/computer-use-rpa.md`。路线是「元素优先、像素兜底、截图验证」,不是替换原有纯视觉闭环(截图→norm1000 坐标→InputInjector→重截屏差分)。文档头部仍写着「状态:Proposal(未实现)」,但 notes.md 里 P1-P4 计划块均已 Done,以代码为准,不要被文档头部误导。\n\n各期落点(均为本会话所见):\n- P1 UIA 元素树:`src/runtime/uia-service.ts`(常驻进程)、`src/runtime/uia-selector.ts`(buildSelector/matchSelector/formatSnapshot 纯函数)、`tests/uia-selector.test.ts`。metric 名为 uiaMs 的说法只在文档里,grep src 无匹配,不要假设已实现。\n- P2 wait_until + paste:`src/runtime/wait-until.ts`(含 pickTypeMethod,computer.ts 的 type 动作调用)、`tests/wait-until.test.ts`。\n- P3 窗口作用域:已落地(细节未在本会话展开)。\n- P4 flow 录制与回放:`src/flows/trace.ts`(trace 层,computer.ts 包装,落盘 gui-trace.jsonl)、`src/flows/flow.ts`(flow 格式与导出)、回放器在 src/flows 下,无 LLM 回放;`run_flow` 工具与 `/flow run` 命令;测试 `tests/flow-trace.test.ts`、`tests/flow.test.ts`。\n\n设计决策:UIA 独立成常驻进程而非塞进注入器,原因是注入器请求走串行管道,慢 tree 遍历(数百 ms 到数秒)会让后面的 click 触发 10s OP_TIMEOUT_MS;UIAutomationClient 程序集加载是一次性成本;UIA 卡死只杀自己,不影响注入与抓屏。\n\n已知未真机验证路径(设计文档 §5.6):key ctrl+s 到另存为对话框再 wait_until element_present 的链路、click_element 回放、allowCoordinateFallback 回退、handoff 截图回灌、经模型与权限面板调用 run_flow 的端到端、100%/150% 缩放下回放。"
+    },
+    {
+      "id": "mocode-computer-use-flow-rpa",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-computer-use-flow-rpa",
+      "summary": "Computer Use 的 flow 录制/回放(RPA)设计在 design-notes/computer-use-rpa.md §5;代码在 src/flows/,含 --window 覆盖、trace 裁剪、mocode flow CLI 三项收尾能力",
+      "body": "Computer Use 录制→导出→回放(flow)的权威设计文档是 `design-notes/computer-use-rpa.md`(§5.0 现状、§5.4 CLI、§5.5 测试、§5.6 真机冒烟、§8 开放问题)。改 flow 相关行为后,这几节要同步,否则会留下“未实现/没真机跑过”的旧表述。\n\n已落地的收尾能力(2026-10):\n- 窗口覆盖:`runFlow` 接受 `opts.windowTitleRegex`;`run_flow` 工具参数 `window_title_regex`;REPL `/flow run --window`;flow-review 摘要会显示该覆盖。窗口选择逻辑为 `pickWindowForReplay`。\n- trace 保留策略:`trimTraceFile`,文件超过 256KB 时只保留最近 200 条。回放本身不会向 trace 追加条目。\n- `mocode flow` CLI:`src/flows/cli.ts`,在 `index.ts` 接入。特点是 fail-closed、有明确退出码、支持 `--sandbox-root` 复原。\n- 导出 flow 时会自动插入 `wait_until stable`;敏感文本在 trace 中用占位符;观察类动作不入 trace;元素动作缺快照不录。\n- runner 有 retry / skip / abort / handoff 四条失败路径;TIMEOUT 与 denied 不重试。\n\n验证方式:单测不碰屏幕(`tests/flow-trace|flow|flow-runner|flow-cli.test.ts`)。真机冒烟用临时 tsx 脚本直接调 `runFlowWithComputer`(Windows 记事本,窗口移到不同坐标后回放仍成功),跑完要清理临时脚本。"
+    },
+    {
+      "id": "mocode-expected-hash-optimistic-concurrency",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-expected-hash-optimistic-concurrency",
+      "summary": "edit_file/write_file 的 expected_hash 是 changeset 乐观并发冲突检测(66d2b3a,2026-07-19 引入);write_file 新建/append 免hash,覆盖已存在文件须带 hash",
+      "body": "expected_hash 机制来源与语义(2026-10 排查 edit_file 摩擦时确认):\n- 来源:commit 66d2b3a(2026-07-19,feat(artifacts): add changeset tracking...),同批引入 src/changeset/(types.ts、index.ts)、apply-patch 工具、staleFiles 追踪。\n- 数据结构:PreparedChange.expectedHash: ContentHash | null,null 表示目标路径必须不存在;冲突时返回 ChangeSetResult{status:'conflict'},带 ChangeConflict{path, expectedHash, actualHash, reason}。\n- 语义(tests/write-file-append.test.ts 钉死):write_file 新建文件省略 expected_hash = create-only;对已存在文件不给 hash 会拒绝覆盖(防误抹);带正确 hash 才全量替换;append 不需要 hash 也不需要先 read_file(hash 由工具自己算)。\n- edit_file 的 expected_hash 在 schema 里故意没放 required(src/tools/builtins/edit-file.ts:50-55),但运行时仍要求,模型从 read_file 头部抄 64 位 hash 时容易漏/抄错/过期。\n- README 把 edit_file 的 expected_hash 冲突列为'重试语义由工具自己决定'的例子;改 hash 机制时要同步 README.md:296 / README.zh-CN.md:312 以及 tests/argument-error-hint.test.ts、tests/write-file-append.test.ts。\n- 实测摩擦(跨会话 194 次 edit_file 调用,20 次失败,其中 18 次是 hash 缺失/格式错(11)或过期(7),仅 2 次是 old_string 匹配问题),长会话多次 compact 后 hash 尤其容易丢/过期。"
+    },
+    {
+      "id": "mocode-persona-identity-canonicalization",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-persona-identity-canonicalization",
+      "summary": "G0/G1 用户画像层:graph.ts canonicalizePrimaryPerson 归一到 person-primary,persona.ts buildAboutYouSection 常驻注入,runtime.ts 现读 memory 开关;真实库已迁移",
+      "body": "## 用户身份归一 + About you 常驻画像(M0/G0/G1,2026-10-16 落地,787/787 回归通过)\n\n**G0 身份归一** — `src/memory/graph.ts` 的 `canonicalizePrimaryPerson()`:幂等、best-effort,把全局图 `~/.mocode/memory-graph.json` 里的用户指称碎片(如 `mocode-user`、`ent-msr98vrj1`、`user-name-wanjizhu`)并入规范实体 `person-primary`,去重边;返回 `{primary, displayName, merged[], dedupedEdges}`。\n\n**G1 画像注入** — `src/memory/persona.ts` 的 `buildAboutYouSection(enabled)` 从 person-primary 渲染 `## About you(长期用户画像,跨项目始终生效)`。关键:别名为内部 slug 噪音(`/^(mocode user|user name)\\b/i`)时不作为「又称」展示,否则会渲染出 `mocode user、user name wanjizhu`。\n\n**接线** — `src/repl/runtime.ts`:启动时 `initPersona(isMemoryEnabled())` 做一次性归一;`buildSystemMessage()` 内部**每次构建现读** `isMemoryEnabled()`,不能在闭包里一次性捕获——否则运行时 `/memory_switch` 后 About you 不随 Memory Index 一起显隐(repl 与 headless 均已接入)。\n\n**迁移**:真实全局库已于 2026-10-16 一次性迁移(先备份 `memory-graph.bak.<时间戳>.json`),实测 merged 3 个碎片、dedupedEdges 1,渲染结果干净。\n\n**M0 反思止血**:memory reflect 路径加 repair 重试 + rawParseFailure 留证(失败时保留原始响应便于排查),覆盖在 memory-reflect 测试。\n\n**测试/构建坑**:本机 `npx tsx -e` 内联 import graph.js 会挂死(120s 超时);改用编译产物 `npx tsc -p tsconfig.test-build.json` 后 `node -e import('./dist-tests/...')`。跑测试:`node --test --experimental-test-isolation=none dist-tests/tests/*.test.js`;新增 tests/memory-persona.test.ts、memory-reflect.test.ts。"
+    },
+    {
+      "id": "mocode-image-context-aging-pipeline",
+      "scope": "project",
+      "type": "reference",
+      "name": "mocode-image-context-aging-pipeline",
+      "summary": "mocode 图片上下文处理:model-turn 里按 视觉窗口→轮次淘汰→总量字节预算→contextTrimer 的顺序;token 估算按像素,字节预算另算",
+      "body": "图片在 mocode 上下文里的处理(2026-10 实现按轮次淘汰后):\n\n1. 执行顺序(src/agent/model-turn.ts):computer- 屏幕帧视觉窗口 → applyImageTurnAging(新增,src/context/vision-window.ts)→ 请求体总量预算(约 500KB)→ contextTrimer.trim(historyManager.snapshot())。压缩判断看到的是淘汰后的 history。\n2. applyImageTurnAging:新的真实用户轮开始后,上一轮及更早的工具图换成文字卡(前缀 IMAGE_AGED_PLACEHOLDER_PREFIX,提示需要时用 read_file 重读);当前轮内的图、computer- 帧、用户粘贴图不动;淘汰后通知 readDedup,避免重读被「已在上方上下文」挡回。HistoryManager.ageToolImages + config imageTurnAgingEnabled 控制。用户轮判定依赖:摘要消息是 role:'system',合成 user 消息只有附件载体与 computer- 剪枝占位。\n3. token 估算:estimatePromptTokens → messageTokens → src/llm/index.ts 的 imageTokens,按像素面积约 w*h/750(最低 85,解析不出尺寸退回 85);base64 不当文本算。例:1568×878 约 1835 token。\n4. 两套机制分工:token 压力线(约 80% 上下文)管窗口是否满;请求体字节预算与上游拒收后的 overflow_retry 兜底管代理按字节拒收。字节上限不在 token 估算里,所以可能出现文字仅约 20k、估算 11% 却因 overflow_retry 触发 compact 的情况(用户曾在会话 trace 中观察到 5 次 overflow_retry 压缩)。用户认为图片预算不应导致低占用时压缩,视为 bug 方向;排查压缩触发先区分 trace 来源是压力线还是 overflow_retry。\n5. 测试:tests/vision-window.test.js 等含 #20-#25 用例。"
+    },
+    {
+      "id": "mocode-image-relief-and-request-byte-budget",
+      "scope": "project",
+      "type": "decision",
+      "name": "mocode-image-relief-and-request-byte-budget",
+      "summary": "mocode 图片压力处理:压缩前先剥图、overflow 先剥图重试、跨 step 断路器;请求体字节预算定为单一 0.8 系数、默认不限制",
+      "body": "## 已落地(typecheck 通过,相关测试全过)\n- src/session/scheduler.ts runStep:token 压力线(80%)触发时,先 applyImageBudget(maxChars:1) 把非 `computer-` 帧的图片换成文字卡(只留最新一张)并重估;低于线就不调摘要 LLM,仍高于线才走摘要。屏幕帧(computer-)不动,归视觉窗口管。\n- src/agent/model-turn.ts:上游报上下文超长(isContextLengthError,src/llm/index.ts)时,先剥图重发,仍超长才摘要。\n- 跨 step 断路器:ContextState.overflowCompaction(src/session/compact.ts)按用户轮计数;同一轮摘要过一次仍被拒,第二次直接抛错并写 trace `breaker_open`。model-turn 的 overflow 断路器没有直接单测。\n- 图片总量预算 500 KB(env MOCODE_IMAGE_BUDGET_KB,0 关闭):按轮次从最旧淘汰,不动当前轮,始终保留最新一张。\n## 背景事实\n- 用户的 Kiro-Go 代理限制整个请求体 900 KiB(proxy/translator.go:62)。token 估算在 256k 窗口下看不到字节超限,所以需要字节维度的预算。500 KB 是按 Kiro-Go 调的,直连官方 API 时会无谓丢图。\n\n## 已定设计(用户拍板,本会话开始实现,完成度未核实)\n- 请求体字节数升为与 token 并列的第二预算,在 trim 之前统一执行。\n- 只用一个系数 0.8:字节超过上限的 80% 就触发处理,自动学习也用同一系数。\n- 上限来源:显式配置 MOCODE_REQUEST_MAX_KB,其次从 context_length 类错误自动学习;默认不限制(用户选推荐的 A 方案)。\n- 度量用 estimateRequestBytes(文本长度 + 图片 data URL 长度 + 工具 schema JSON 长度)。\n- 可复用 src/context/token-calibration.ts 的按 baseURL 持久化校准存储。"
+    },
+    {
+      "id": "dev-server-empty-readyurl",
+      "scope": "project",
+      "type": "pitfall",
+      "name": "dev-server-empty-readyurl",
+      "summary": "dev_server 的 readyUrl 留空时启动结果 ready 恒为 false（不代表失败），需自行请求端口验证",
+      "body": "用 dev_server 工具 start 时若把 readyUrl 留空（例如只需临时起个静态/裸服务），返回值里的 ready 字段会一直是 false——它只是“没有健康检查目标”，并不表示服务没起来。判断服务可用性的可靠方式是自行请求端口（如 curl http://127.0.0.1:<port>）。\n\n配套事实：进程信息含 id/pid/state/command/cwd/logPath，logPath 形如 <root>/.mocode/dev-servers/<srv-id>.log，cwd 默认是项目根（F:\\mocode）。给 command 传 node -e 这种单行脚本即可，无需临建文件。"
+    },
+    {
+      "id": "mocode-memory-proactive-channel",
+      "scope": "project",
+      "type": "pitfall",
+      "name": "mocode-memory-proactive-channel",
+      "summary": "mocode R3 前摄通道：匹配上下文必须含当前用户轮文本（只靠工具参数不行）；trigger 供料是模型自助动作，缺口不可见就不会补",
+      "body": "mocode 记忆 R3 前摄通道（src/memory/proactive.ts，2026-10-30 落地）踩过的三个坑，改这块前必读：\n\n1. **匹配上下文不能只有工具参数**。trigger 是自然语言场景（\"构造工具 schema 发给 dashscope compatible-mode 时\"），工具参数只有 `{\"path\":\"src/llm/tool-schema.ts\"}`，两侧可重合词常常只有 1 个，达不到阈值 2 → 通道静默失效。必须把**当前用户轮文本**并入（`matchProactive(tool,args,contextText)`；`ToolDispatchRequest.proactiveContext` 由 run-coordinator 从 userInput 取纯文本 part 传入）。场景词几乎总出现在用户提问里。\n\n2. **中文分词会把一个词算三次命中**。`src/context/text-search.ts` 的 `tokenize()` 产出 CJK unigram+bigram，\"记忆\"→`记`/`忆`/`记忆`。索引侧与查询侧都必须过滤 `length>=2`，否则阈值形同虚设。另有 `GENERIC_TOKENS` 黑名单：泛化词可计分但不能是唯一的强信号。\n\n3. **\"每会话 N 次\"限流与常驻 REPL 矛盾**。进程开一整天时按进程限额等于几轮后永久静默。改为**每用户轮**限额（`resetProactiveTurn()` 在 repl/runtime.ts 轮首调用）+ 同条进程内只弹一次（`fired` map）。\n\n**供料缺口（最坑的一点）**：通道接线完全正确但索引为空——实测真实库 trigger 覆盖率 0/30 active。因为写 trigger 是**模型的自助动作**，缺口不可见模型就不会补。已做：`memory_list` 对缺 trigger 的条件式条目加 `[NO-TRIGGER]` 标记、`reflect.ts buildMemorySample()` 把 trigger 现状发给反思模型、真实库回填 7/7。\n\n注入点在 `tool-dispatcher.ts` 的 `execute()` 单一出口（四种调度分支全覆盖）；开关 `proactiveOn = isMemoryEnabled() && isProactiveEnabled()`（`MOCODE_MEMORY_PROACTIVE`）。测试 tests/memory-proactive.test.ts。"
+    },
+    {
+      "id": "mocode-llm-adapter-layer-architecture",
+      "scope": "global",
+      "type": "fact",
+      "name": "mocode-llm-adapter-layer-architecture",
+      "summary": "mocode LLM 适配层：reasoning.ts 归一化五档 effort 并翻译各家方言；tool-schema.ts 独立成叶子模块以避免 index.ts↔anthropic.ts 循环依赖；updateModelConfig 只管内存+env，持久化/重建客户端由调用方负责",
+      "body": "mocode 的 LLM 适配层结构（会话中通读源码确认，跨会话可直接复用，避免重新推导）：\n\n1. Reasoning Effort 适配层：src/llm/reasoning.ts\n   - 用户只面对归一化五档 `off | low | medium | high | auto`（parseReasoningEffort 归一化大小写/空白，非法返 undefined）。\n   - 按 provider + 模型名模式匹配翻译成各家方言：Anthropic 4.6+ 用 `output_config.effort` + `thinking:{type:'adaptive'}`；Anthropic 旧版 `thinking:{type:'enabled', budget_tokens}`；OpenAI 兼容路径用 `reasoningEffort`。\n   - 关键 API：`resolveReasoningParams`、`recognizesReasoning`、`runWithEffortScope`/`getScopedEffort`（作用域内临时覆盖）、`effectiveReasoningEffort`（在 src/config/index.ts）。\n   - 调用点：src/llm/index.ts 与 src/llm/providers/anthropic.ts、src/agent/stages/model-runner.ts（来自 contracts.ts 的 request.reasoningEffort）；/effort 命令在 src/repl/commands/effort.ts。\n   - 测试：tests/reasoning.test.ts（#token-efficiency P3）。\n\n2. 工具 Schema transport 边界消毒：src/llm/tool-schema.ts\n   - 纯函数、无副作用、不依赖 config/registry，必须是叶子模块：openai 路径（llm/index.ts）与 anthropic 路径（providers/anthropic.ts）都要用它，而 anthropic.ts 又被 index.ts import，放进 index.ts 会形成循环依赖。\n   - 职责：递归剔除工具参数 schema 中的 `uniqueItems` 等不被部分后端接受的关键字。\n\n3. 运行时改模型配置：src/config/index.ts 的 updateModelConfig()\n   - 只做两件事：更新内存 config 字段（chat() 即时读 config.model；reconfigureClient 读 config.baseURL/apiKey）+ 同步 process.env（使新值在下次启动 loadEnvFiles 时视为\"已设\"，不被文件回填覆盖）。\n   - 持久化（写 ~/.mocode/config）由调用方走 writeConfigKeys；重建 OpenAI 客户端（baseURL/apiKey 是构造时固化的实例字段）由调用方走 reconfigureClient。\n   - 配置优先级：shell 环境变量 > <cwd>/.env 或 <cwd>/.mocode/config > ~/.mocode/config；LLM_PROVIDER 在 src/config/index.ts 的 shell-keys 列表里，若无 shell 值则回落到 __activePreset.provider。\n\n4. 流式用量：src/llm/index.ts 在 runtimeConfig.includeUsage 为真时注入 `stream_options:{include_usage:true}`。"
+    },
+    {
+      "id": "kimi-k3-dashscope-rejects-uniqueitems",
+      "scope": "global",
+      "type": "pitfall",
+      "name": "kimi-k3-dashscope-rejects-uniqueitems",
+      "summary": "kimi-k3 经 dashscope compatible-mode 收到工具 schema 里的 uniqueItems 会整请求 400（InternalError.Algo: model serving），必须在 tool-schema.ts 递归剔除",
+      "body": "`uniqueItems` 是合法 JSON Schema 关键字，OpenAI / qwen / 多数兼容后端都接受；但 kimi-k3 经 dashscope compatible-mode 的模型服务层**不接受**它，收到即整请求 400，报错形如：\n`<400> InternalError.Algo: An error occurred in model serving, error message: ...`\n\n因此 mocode 在 transport 边界（src/llm/tool-schema.ts）递归剔除 `uniqueItems`，openai 与 anthropic 两条路径共用。\n\n排查提示：遇到\"某个具体模型才 400、换个后端就正常\"的工具调用报错，优先怀疑工具参数 schema 里的边缘关键字（uniqueItems 一类），而不是 prompt 或消息体；修复要放在共享的 schema 消毒层，不要在各 provider 里各写一份（否则又是循环依赖问题）。"
+    }
+  ]
+}

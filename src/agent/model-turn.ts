@@ -215,10 +215,11 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     if (text) stream.lastChar = text[text.length - 1];
   };
   const onToolCall = (name: string): void => {
-    if (stream.lastChar && stream.lastChar !== '\n') {
-      hooks.onTextEnd?.();
-      stream.lastChar = '\n';
-    }
+    // 注意:不能在这里因工具名到达就发 onTextEnd。部分 OpenAI 兼容网关会在同一响应里
+    // 交错下发 content 与 tool_calls delta(文字流到一半先到工具名,后续 content 才补完)。
+    // 流中即发 onTextEnd 会让 UI 在词中间硬换行并封死 markdown 段(「继续通读:d / ispatcher」
+    // 断词 bug)。onToolCall 此刻只驱动「生成中」spinner;正文收尾换行统一由流末
+    // (tool-turn / run-coordinator)依据 stream.lastChar 发一次 onTextEnd,届时全部 content 已到齐。
     hooks.onToolCall?.(name);
   };
 
@@ -249,6 +250,9 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
           '4. Before re-running a search/read you think you already did, check the summary and notes first; repeat only if the result is genuinely missing or the target changed.'
         : '',
       sessionStateText,
+      // R17:会话内记忆尾注。放最后——它是最"新"的信息,且每轮可能不同,
+      // 放在固定段之后能最大限度保住前缀缓存的可复用部分。
+      opts.memoryTail ?? '',
     ]
       .filter(Boolean)
       .join('\n\n');

@@ -28,6 +28,7 @@ import {
 import { updateConfigKey, CONFIG_PATH } from '../../config/file.js';
 import { getAgentMode } from '../../agent/mode.js';
 import { refreshChatTools } from '../../llm/index.js';
+import { captureMemoryBaseline } from '../../memory/index.js';
 import { registerToolsExtension } from '../../tools/registry.js';
 import { initializeAllMcp, getMcpTools, closeAllMcp } from '../../mcp/index.js';
 import { unhandled, next, type CommandHandler } from './types.js';
@@ -325,6 +326,10 @@ export const toolGroupCommands: CommandHandler[] = [
       updateConfigKey('MEMORY_ENABLED', nextEnabled ? 'true' : 'false');
       // 自动路由读取 env gate；legacy chatTools 同步刷新。
       refreshChatTools();
+      // R17:开关是会话边界。开启时**必须**重拍尾注基线——否则关闭期间没人拍基线,
+      // 此刻库里的全部存量条目都会被当成「本会话新学到的」一次性集中播报(最多 3 条),
+      // 而它们其实早就在 Memory Index 里了。关闭时也拍一次:重新开启后基线才是新的。
+      captureMemoryBaseline();
       ctx.history[0] = { role: 'system', content: ctx.buildSystemMessage(getAgentMode() === 'plan') };
       layout.contentWrite(
         `${nextEnabled ? ui.green : ui.yellow}${t(nextEnabled ? 'memory.changedOn' : 'memory.changedOff')}${ui.reset}\n`,
@@ -336,6 +341,7 @@ export const toolGroupCommands: CommandHandler[] = [
         })}${ui.reset}\n`,
       );
       // 即时刷新 banner；当前已发出的 immutable policy snapshot 不受影响。
+      // （memory 开关联动由上面的 captureMemoryBaseline 处理,不再重建 history[0] 之外的东西。）
       layout.rewriteBanner(bannerLines(ctx.banner()));
     } catch (error) {
       layout.contentWrite(

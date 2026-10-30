@@ -13,7 +13,17 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { chat, type ChatMessage } from '../llm/index.js';
 import { config, isMemoryEnabled } from '../config/index.js';
-import { saveEntry, updateEntry, forgetEntry, supersedeEntry, loadAll, gcMemories, type MemoryType } from './store.js';
+import {
+  saveEntry,
+  updateEntry,
+  forgetEntry,
+  supersedeEntry,
+  loadAll,
+  loadStalenessMap,
+  gcMemories,
+  wantsTrigger,
+  type MemoryType,
+} from './store.js';
 import {
   addTriple,
   ensurePrimaryPerson,
@@ -24,6 +34,14 @@ import {
 } from './graph.js';
 import { isInternalizedEdge } from './persona.js';
 import { normalizeRelation, isKnownRelation, relationCheatSheet } from './relation-vocab.js';
+import { formatPendingForReflect, loadPendingCandidates, trimPendingCandidates } from './pending.js';
+import {
+  applyConsolidation,
+  findConsolidationGroups,
+  isConsolidationEnabled,
+  type ConsolidationDraft,
+  type ConsolidationGroup,
+} from './episodic.js';
 
 export interface ReflectResult {
   ts: string;
@@ -38,6 +56,11 @@ export interface ReflectResult {
   profiles?: number;
   /** 词表外关系条数(软策略仍写入,仅观测)。 */
   relViolations?: number;
+  /**
+   * 作用域守卫改判条数:请求写 global、但目标形如本仓库源码路径而被改判到 project。
+   * 非零说明模型把源码结构事实误归了画像轨,是提示词质量的观测信号。
+   */
+  scopeEscalated?: number;
   /** 用户纠正桶应用条数(失效旧画像边 / 落新画像边)。 */
   corrections?: number;
   /** 本次反思是否因用户显式纠正改动了 L2 内化画像(行为自动转正/降级走 promotions/demotions)。 */
@@ -57,6 +80,8 @@ export interface ReflectResult {
   rawParseFailure?: string;
   /** 首轮解析失败后是否触发过一次「修复式重试」。 */
   repairAttempted?: boolean;
+  /** R13:本轮消化掉的压缩候选条数(压缩→记忆交接通道的观测值)。 */
+  pendingConsumed?: number;
 }
 
 // ── 日志(静默容错,裁尾保最近)─────────────────────────────────────────────
@@ -114,6 +139,9 @@ export function snapshotTranscript(history: ChatMessage[], K: number): string {
 function buildMemorySample(): string {
   const all = loadAll().filter((e) => e.status === 'active');
   if (all.length === 0) return '(无)';
+  // R14:派生条目要带上失效标记。反思看到"这条的根据已经变了"才会去复核或改写,
+  // 否则它会拿一条 stale 的抽象结论去跟新事实较劲(甚至因"不矛盾"而继续保留它)。
+  const stale = loadStalenessMap();
   const byCreated = [...all].sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
   const byRecall = [...all].sort((a, b) => a.recallCount - b.recallCount);
   const picked = new Map<string, (typeof all)[number]>();
@@ -123,7 +151,19 @@ function buildMemorySample(): string {
   return list
     .map((e) => {
       const body = e.body.length > 600 ? e.body.slice(0, 586) + '…[截断]' : e.body;
-      return `[${e.id}] ${e.name} (${e.type}, recalled ${e.recallCount})\nsummary: ${e.summary}\nbody: ${body}`;
+      // R3:把 trigger 现状一并给模型看。缺 trigger 的条件式条目在反思样本里显式标出,
+      // 模型才知道有机会借 updates 补上(否则 propmpt 里那条"可事后补 trigger"永远无从触发)。
+      const when = e.trigger ? `trigger: ${e.trigger}` : '';
+      const gap = !e.trigger && wantsTrigger(e.type) ? 'trigger: (缺,可借 updates 补)' : '';
+      const st = stale.get(e.id);
+      const staleNote = st?.stale
+        ? `derivedFrom: ${(e.derivedFrom ?? []).join(', ')} — 其中已失效: ${[
+            ...st.inactive,
+            ...st.missing.map((m: string) => `${m}(已删)`),
+          ].join(', ')} [此条可能已过期,请复核后 update 或 forget]`
+        : '';
+      const tail = [when, gap, e.action ? `action: ${e.action}` : '', staleNote].filter(Boolean).join('\n');
+      return `[${e.id}] ${e.name} (${e.type}, recalled ${e.recallCount})\nsummary: ${e.summary}\n${tail ? tail + '\n' : ''}body: ${body}`;
     })
     .join('\n---\n');
 }
@@ -180,7 +220,7 @@ const REFLECT_TIMEOUT_MS = 60_000;
 const REFLECT_MAX_ATTEMPTS = 3;
 
 const REFLECT_SYS = `You are mocode's memory reflector. Review the recent session and existing memories, producing **only** updates worth remembering long-term.
-Output strictly JSON (no markdown code blocks, no explanatory text): {"saves":[{"type":"...","name":"...","summary":"...","body":"...","supersedes":"old-id-or-empty"}],"updates":[{"id":"...","reason":"...","summary":"...","body":"..."}],"forgets":[{"id":"...","reason":"..."}],"triples":[{"src":"...","relation":"...","dst":"...","fact":"..."}],"profile":[{"relation":"...","dst":"...","fact":"..."}],"corrections":[{"relation":"...","dst":"...","fact":"...","old":"..."}],"evidence":[{"edgeId":"...","vote":"confirm|contradict","reason":"..."}]}
+Output strictly JSON (no markdown code blocks, no explanatory text): {"saves":[{"type":"...","name":"...","summary":"...","body":"...","trigger":"...","action":"...","supersedes":"old-id-or-empty","derivedFrom":["existing-id"]}],"updates":[{"id":"...","reason":"...","summary":"...","body":"..."}],"forgets":[{"id":"...","reason":"..."}],"triples":[{"src":"...","relation":"...","dst":"...","fact":"..."}],"profile":[{"relation":"...","dst":"...","fact":"..."}],"corrections":[{"relation":"...","dst":"...","fact":"...","old":"..."}],"evidence":[{"edgeId":"...","vote":"confirm|contradict","reason":"..."}]}
 Empty arrays are valid (if nothing is worth saving, all arrays are empty).
 Rules:
 ① Only store non-obvious, cross-session-useful facts/decisions/pitfalls; do not store current bugs, temp files, undecided TODOs, or volatile items;
@@ -192,14 +232,31 @@ Rules:
 ⑦ triples are PROJECT knowledge-graph facts about THIS CODEBASE distilled from this session: concise entity names (lowercase snake_case or proper nouns) plus a one-line fact. Prioritize the high-reuse structural relations in this order — dependency/ownership (depends_on, uses, used_by, calls, part_of), location (implemented_in, reads, writes, configured_by, runs_on, listens_on), verification (tests, documented_in), rationale/risk (decided_by, conflicts_with); full list: ${relationCheatSheet('project')}. Favor facts that would help a future session navigate or avoid re-deriving (which module implements X, what depends on Y, what conflicts with Z). A relation outside this list is allowed only when none fits (it gets flagged for review). Only emit triples that are stable, non-obvious and reusable in this repo (2-6 at most).
 ⑧ profile is for facts about THE USER (the human), which must apply across ALL projects — identity, role, expertise, language/communication style, stable preferences, current goals, constraints. They are attached to the single canonical person entity. Each item: dst is a short atomic value/entity, fact is one neutral Chinese sentence stating it. Prefer these relations: ${relationCheatSheet('global')}. A relation outside this list is allowed only when none fits. NEVER put repo paths, commands, file names, ports, secrets or one-task details in profile — those belong in triples. Only emit profile when the user explicitly revealed something durable about themselves (0-3 items); when unsure, omit. Profile items from your own inference are stored as LOW confidence and will NOT be internalized until the user confirms them — do not inflate them.
 ⑨ corrections is the HIGHEST signal channel: use it ONLY when the user explicitly corrects a prior belief about themselves ("不对/别这样/我已经不在 X 了/我更喜欢…"). Each correction invalidates the previous value for that relation and installs the new one as user-confirmed. "relation" is the profile relation being corrected, "dst"/"fact" are the NEW value (same shape as profile), "old" is the old value being withdrawn (short hint, may be empty). Do not put repo/code corrections here — those use updates/forgets.
-⑩ evidence is the ONLY channel that adjusts confidence of an EXISTING profile belief from observed behavior — it never creates facts. You are given "Profile beliefs under review" containing only votable edge ids with their current counts. Rules: vote only on ids from that list, at most one vote per id, and only when THIS session genuinely bears on the belief — "confirm" when the user acts/chooses/agrees consistently with it, "contradict" when they act against it or state something incompatible; mere non-mention is NEITHER (omit). NEVER vote on beliefs you are newly creating in profile/corrections this same turn. Be conservative: a few independent confirms (with zero contradicts) auto-internalize a candidate; repeated contradicts demote an internalized belief back to candidate, and every such move is surfaced to the user. When unsure, cast no vote.`;
+⑩ evidence is the ONLY channel that adjusts confidence of an EXISTING profile belief from observed behavior — it never creates facts. You are given "Profile beliefs under review" containing only votable edge ids with their current counts. Rules: vote only on ids from that list, at most one vote per id, and only when THIS session genuinely bears on the belief — "confirm" when the user acts/chooses/agrees consistently with it, "contradict" when they act against it or state something incompatible; mere non-mention is NEITHER (omit). NEVER vote on beliefs you are newly creating in profile/corrections this same turn. Be conservative: a few independent confirms (with zero contradicts) auto-internalize a candidate; repeated contradicts demote an internalized belief back to candidate, and every such move is surfaced to the user. When unsure, cast no vote.
+⑪ trigger/action — memory entries are CONDITION→ACTION, not just description. For pitfall / decision / feedback saves, write "trigger" = the SITUATION in which this will matter again, phrased as a condition a future session can recognise from its current task (e.g. "constructing a tool schema for kimi-k3 via dashscope compatible-mode", not "when editing code"), and "action" = what to DO once it holds. A vague trigger is WORSE than none — it pollutes proactive matching. Leaving trigger empty is correct when you genuinely cannot predict the situation: it will be filled in later, once the situation actually recurs. fact/reference usually need no trigger. You MAY also fill a missing trigger on an EXISTING entry via updates (just pass "trigger") when this session showed the real situation and the entry currently has none — that is the expected way to complete R1.5 after the fact; do not rewrite an entry's trigger merely to make it prettier.
+⑫ derivedFrom — when a save GENERALIZES several existing memories into one abstraction (the same lesson learned in 3 different places), put their ids in that save's "derivedFrom". Do NOT use it for a save that merely cites or supersedes a single entry (that is what "supersedes" is for). Only ids from the "existing memories" list are accepted; self-references and unknowns are dropped. Rationale: the derived entry then carries a live link back to its sources, so the system can tell a future session "the evidence behind this has changed" without deleting an abstraction that may still be true. Most saves should leave it empty.
+⑬ anchors — when a save describes HOW a specific piece of code works (a function's contract, a file's structure, a const's meaning, a call-order invariant), attach "anchors": [{"path":"src/foo/bar.ts","symbol":"functionOrConstName"}]. Paths are workspace-relative with forward slashes. Add a symbol whenever the fact is about one function/class/const — that keeps unrelated edits in the same file from marking it stale. Leave anchors empty for anything that is not about specific code (user preferences, process decisions, external services, tool-usage pitfalls). You do NOT write hashes: the content hash is captured at write time, and a later edit to that code makes the memory surface as STALE-CODE instead of silently serving an outdated fact. Paths/symbols that cannot be resolved are dropped. Anchors are the ONE channel that makes memory notice the code moved underneath it — use them whenever the memory would be wrong or misleading after a refactor.`;
 
-const REFLECT_USER = (transcript: string, sample: string, profileEdges: string) =>
-  `## Recent session\n${transcript}\n\n## Existing memories\n${sample}\n\n## Profile beliefs under review (evidence votes may only target these ids)\n${profileEdges}\n\nProduce JSON:`;
+const REFLECT_USER = (transcript: string, sample: string, profileEdges: string, pending = '') =>
+  `## Recent session\n${transcript}\n\n## Existing memories\n${sample}\n\n## Profile beliefs under review (evidence votes may only target these ids)\n${profileEdges}\n${pending}\n\nProduce JSON:`;
 
 interface ReflectPlan {
-  saves?: { type?: string; name?: string; summary?: string; body?: string; supersedes?: string }[];
-  updates?: { id?: string; reason?: string; summary?: string; body?: string }[];
+  saves?: {
+    type?: string;
+    name?: string;
+    summary?: string;
+    body?: string;
+    /** R1.5:适用条件。可空;允许事后经 updates 补。 */
+    trigger?: string;
+    /** R1.5:条件成立时的动作。 */
+    action?: string;
+    supersedes?: string;
+    /** R14:本条由哪些既有条目归纳而来(源条目 id)。只用 existing memories 里出现过的 id。 */
+    derivedFrom?: string[];
+    /** R2:本条讨论的代码位置。只给 path/symbol,内容哈希由写入时现算。 */
+    anchors?: { path?: string; symbol?: string }[];
+  }[];
+  updates?: { id?: string; reason?: string; summary?: string; body?: string; trigger?: string; action?: string }[];
   forgets?: { id?: string; reason?: string }[];
   triples?: { src?: string; relation?: string; dst?: string; fact?: string }[];
   /**
@@ -280,6 +337,10 @@ async function fetchReflection(
 export async function runReflection(transcript: string, signal?: AbortSignal): Promise<ReflectResult> {
   const ts = new Date().toISOString();
   const sample = buildMemorySample();
+  // R14:本轮开始前已存在的条目 id 集合。derivedFrom 只接受其中真实存在的 id——
+  // 模型偶尔会编 id,而编出来的 id 在 computeStaleness 里恒判 missing,
+  // 等于让这条新记忆天生就带 stale 标记。
+  const knownIds = new Set(loadAll().map((e) => e.id));
   // 本轮开始前的画像边快照:evidence 票只能投给这些 id(本轮新建边无法自我投票)。
   const evidenceSnap = buildProfileEvidenceSnapshot();
   const beforeInternalized = new Set(
@@ -288,9 +349,12 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
       .map((e) => e.id),
   );
   const sys = { role: 'system' as const, content: REFLECT_SYS } as ChatMessage;
+  // R13.3:压缩交接过来的候选。**读一次、只在成功裁决后清空**——反思失败(超时/解析失败)
+  // 时保留队列,下一轮还能再试;否则一次网络抖动就把压缩捞出的推理链永久丢掉。
+  const pending = loadPendingCandidates();
   const user = {
     role: 'user' as const,
-    content: REFLECT_USER(transcript, sample, evidenceSnap.text),
+    content: REFLECT_USER(transcript, sample, evidenceSnap.text, formatPendingForReflect(pending)),
   } as ChatMessage;
 
   const result: ReflectResult = {
@@ -359,6 +423,25 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
         summary: String(s.summary),
         body: String(s.body ?? s.summary),
         type: normalizeType(s.type),
+        trigger: s.trigger ? String(s.trigger) : undefined,
+        action: s.action ? String(s.action) : undefined,
+        // R14:归纳来源。只接受 existing memories 里真实存在的 id——模型偶尔会编 id,
+        // 而编出来的 id 在 computeStaleness 里恒判 missing,等于让这条记忆天生 stale。
+        // 这里不静默吞掉,而是过滤掉未知项(saveEntry 内部再滤自引用与重复)。
+        derivedFrom: Array.isArray(s.derivedFrom)
+          ? s.derivedFrom.map((x) => String(x ?? '').trim()).filter((x) => x && knownIds.has(x))
+          : undefined,
+        // R2:代码锚点。与 derivedFrom 同理只做**形状过滤**——path/symbol 指向不存在的
+        // 文件或符号时由 buildAnchors 丢弃(saveEntry 内),这里不预先校验:多一次
+        // 文件系统遍历,而且"文件暂时不存在"不该让整条记忆保存失败。
+        anchors: Array.isArray(s.anchors)
+          ? s.anchors
+              .map((a) => ({
+                path: String(a?.path ?? '').trim(),
+                symbol: a?.symbol ? String(a.symbol).trim() : undefined,
+              }))
+              .filter((a) => a.path)
+          : undefined,
       });
       if (r.ok) {
         saves++;
@@ -378,6 +461,9 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
         summary: u.summary ? String(u.summary) : undefined,
         body: u.body ? String(u.body) : undefined,
         reason: u.reason ? String(u.reason) : undefined,
+        // R1.5.5 存量兼容:老条目按 updates 逐批补 trigger,不阻断读取。
+        trigger: typeof u.trigger === 'string' ? u.trigger : undefined,
+        action: typeof u.action === 'string' ? u.action : undefined,
       });
       if (r.ok) updates++;
     }
@@ -393,16 +479,23 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
   // 关系名先归一(别名/拼写);词表外关系仍允许写(软封闭世界),但计 relViolations 供观测。
   let triples = 0;
   let relViolations = 0;
+  let scopeEscalated = 0;
   if (Array.isArray(plan.triples)) {
     for (const t of plan.triples.slice(0, 10)) {
       if (!t?.src || !t?.relation || !t?.dst) continue;
       const relation = normalizeRelation(String(t.relation));
       if (!isKnownRelation(relation, 'project')) relViolations++;
+      // 溯源:项目三元组同样由反思**推断**而来,与 global 画像一致地落 prov/confidence。
+      // 此前漏传导致项目图全部边 prov 为空,两轴模型(declared/inferred)在项目格无法生效。
+      // sourceEntry 保持 null:三元组源自会话转录,不对应任何内存条目的 id,伪造会污染溯源链。
       const r = addTriple({
         src: String(t.src),
         relation,
         dst: String(t.dst),
         fact: t.fact ? String(t.fact) : undefined,
+        scope: 'project',
+        prov: 'reflection',
+        confidence: 0.4,
       });
       if (r.ok && !r.duplicate) triples++;
     }
@@ -431,6 +524,8 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
         prov: 'reflection',
         confidence: 0.4,
       });
+      // 目标形如本仓库源码路径 → addTriple 已确定性改判到 project(画像轨收不下它)。
+      if (r.ok && r.scopeEscalated) scopeEscalated++;
       if (r.ok && !r.duplicate) profiles++;
     }
   }
@@ -501,6 +596,14 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
     }
   }
 
+  // R13.3:本轮成功裁决了这批候选 → 从队列里删掉**这一批**。传候选本身而不是条数:
+  // 队列有 40 条上限,满队时反思期间新增的候选把最旧的挤出去、长度不变,
+  // 按条数切会把整队清空并连带删掉这一轮没看过的新候选。失败路径早已 return,队列原样保留。
+  if (pending.length > 0) {
+    trimPendingCandidates(pending);
+    result.pendingConsumed = pending.length;
+  }
+
   const gc = gcMemories();
 
   result.saves = saves;
@@ -509,6 +612,7 @@ export async function runReflection(transcript: string, signal?: AbortSignal): P
   result.triples = triples;
   result.profiles = profiles;
   result.relViolations = relViolations;
+  if (scopeEscalated) result.scopeEscalated = scopeEscalated;
   result.corrections = corrections;
   result.profileChanged = corrections > 0;
   result.profileChangedFacts = profileChangedFacts.slice(0, 3);
@@ -636,4 +740,212 @@ export function getLastReflectResult(): ReflectResult | null {
 }
 export function clearLastReflectResult(): void {
   lastReflectResult = null;
+}
+
+// ── R11 情节巩固(episode → 语义)────────────────────────────────────────────
+//
+// 分工:分组是确定性的(见 episodic.ts 的 findConsolidationGroups),本段只负责
+// 「把一组成员说成一句可复用的话」。这是 memory 子系统里第二个调 LLM 的地方,
+// 但与反思共用同一个在飞槽位与 drain —— 不新开后台进程(R11.4)。
+
+export interface ConsolidationResult {
+  ts: string;
+  /** 本轮找到的候选组数。 */
+  groups: number;
+  /** 成功落库(新建或命中既有)的组数。 */
+  consolidated: number;
+  /** 模型判定「这几条只是凑巧」而跳过的组数。 */
+  skipped: number;
+  error?: string;
+  rawParseFailure?: string;
+}
+
+const CONSOLIDATE_SYS = `You are mocode's sleep-time consolidator. You are given SEVERAL past working sessions from the same workspace that appear to share a theme. Your job: decide whether they really share a reusable lesson, and if so, state it ONCE as a durable memory.
+
+Output strictly JSON (no markdown fences, no explanation):
+{"skip":false,"type":"...","name":"...","summary":"...","body":"...","trigger":"...","action":"..."}
+or, when these sessions share no real lesson:
+{"skip":true,"reason":"..."}
+
+Rules:
+① **Generalize only what actually recurs.** These episodes came from different sessions; the value is the pattern a future session can reuse. Do NOT just restate what each session did.
+② **If they merely touched the same files for unrelated reasons, output {"skip":true}.** A false generalization is worse than no memory: it turns coincidence into a rule. The "shared signals" section lists why they were grouped — use it as a hint, not as proof.
+③ Keep every concrete detail that would make the conclusion wrong when omitted (the actual constraint, the actual cause, the actual command/path). Drop the story: which session, in what order, how many times.
+④ type ∈ {${TYPES}}. Choose by nature: a repeatable approach → decision; something that bites → pitfall; a stable structural fact → fact; a preference/expectation of the user → feedback; external knowledge → reference.
+⑤ name: short, lowercase-kebab or a concise phrase, distinct from existing memories.
+⑥ summary: one line (< 120 chars) — the reusable claim itself.
+⑦ body: 3-6 lines. State the pattern, then the evidence in one line (e.g. "seen in 3 sessions across 2 weeks"), then the boundary (when it does NOT hold).
+⑧ trigger/action: for pitfall/decision/feedback, trigger = the SITUATION a future session can recognise from its current task; action = what to do then. Vague triggers ("when editing code") are worse than empty — omit them instead.
+⑨ Never mention memory ids, session ids, or that this came from consolidation. The entry must read as knowledge, not as a bookkeeping artifact.`;
+
+function consolidatePrompt(group: {
+  input: string;
+  sharedFiles: readonly string[];
+  sharedTokens: readonly string[];
+  sessions: number;
+  members: readonly unknown[];
+}): ChatMessage {
+  const signals: string[] = [`sessions: ${group.sessions}`, `episodes: ${group.members.length}`];
+  if (group.sharedFiles.length > 0) signals.push(`shared files: ${group.sharedFiles.join(', ')}`);
+  if (group.sharedTokens.length > 0) signals.push(`shared terms: ${group.sharedTokens.join(', ')}`);
+  return {
+    role: 'user',
+    content: `## Sessions that appear to share a theme\n${group.input}\n\n## Shared signals\n${signals.join('\n')}\n\nProduce JSON:`,
+  } as ChatMessage;
+}
+
+/** 解析巩固产物。`skip` 与残缺 JSON 都返回 null 之外的可判别结果。 */
+export function parseConsolidationPlan(
+  content: string | null,
+): { skip: true; reason?: string } | { skip: false; draft: ConsolidationDraft } | null {
+  if (!content) return null;
+  let s = content.trim();
+  const fences = [...s.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  if (fences.length) s = fences[fences.length - 1]![1].trim();
+  const first = s.indexOf('{');
+  const last = s.lastIndexOf('}');
+  if (first >= 0 && last > first) s = s.slice(first, last + 1);
+  let p: Record<string, unknown>;
+  try {
+    p = JSON.parse(s.replace(/,\s*([}\]])/g, '$1')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (!p || typeof p !== 'object') return null;
+  if (p.skip === true) return { skip: true, reason: typeof p.reason === 'string' ? p.reason : undefined };
+  const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+  const draft: ConsolidationDraft = {
+    type: normalizeType(p.type),
+    name: str(p.name),
+    summary: str(p.summary),
+    body: str(p.body),
+    trigger: str(p.trigger) || undefined,
+    action: str(p.action) || undefined,
+  };
+  // name/summary/body 缺一不可:残缺的产物写进库就是一条没有标题或没有内容的记忆,
+  // 而它还挂着 derivedFrom/derivedInto 双向链,比不巩固更糟。
+  if (!draft.name || !draft.summary || !draft.body) return null;
+  return { skip: false, draft };
+}
+
+/**
+ * 跑一轮巩固。`groups` 省略时现算候选(调用方通常省略)。
+ * 任一组失败不影响其它组:一组解析失败只损失那一组的归纳机会,不该连坐。
+ */
+export async function runConsolidation(
+  groups?: readonly ConsolidationGroup[],
+  signal?: AbortSignal,
+): Promise<ConsolidationResult> {
+  const ts = new Date().toISOString();
+  const list = groups ?? findConsolidationGroups();
+  const result: ConsolidationResult = { ts, groups: list.length, consolidated: 0, skipped: 0 };
+  if (list.length === 0) return result;
+  const timeoutSignal = signal ?? AbortSignal.timeout(REFLECT_TIMEOUT_MS);
+  for (const group of list) {
+    try {
+      const first = await fetchReflection(
+        [{ role: 'system' as const, content: CONSOLIDATE_SYS } as ChatMessage, consolidatePrompt(group)],
+        timeoutSignal,
+      );
+      let plan = parseConsolidationPlan(first.content);
+      if (plan === null) {
+        // 与反思同一套「修复式重试」:推理模型偶发把 JSON 混进说明文字。
+        const repair = await fetchReflection(
+          [
+            { role: 'system' as const, content: CONSOLIDATE_SYS } as ChatMessage,
+            consolidatePrompt(group),
+            { role: 'assistant' as const, content: first.content ?? '' } as ChatMessage,
+            {
+              role: 'user' as const,
+              content: '上一条无法解析。只输出一个 JSON 对象,不要围栏不要解释。无共同规律就输出 {"skip":true}。',
+            } as ChatMessage,
+          ],
+          timeoutSignal,
+        );
+        plan = parseConsolidationPlan(repair.content);
+        if (plan === null) {
+          result.error ??= 'parse-failed';
+          result.rawParseFailure ??= repair.raw ?? first.raw ?? undefined;
+          continue;
+        }
+      }
+      if (plan.skip) {
+        result.skipped++;
+        continue;
+      }
+      const applied = applyConsolidation(group, plan.draft);
+      if (applied.ok) result.consolidated++;
+      else result.error ??= applied.reason;
+    } catch (e) {
+      if (timeoutSignal.aborted) {
+        result.error = '巩固超时(后端持续失败或无响应)';
+        break; // 超时说明后端已不可用,继续下一组只会再等一次
+      }
+      result.error ??= e instanceof Error ? e.message : String(e);
+    }
+  }
+  return result;
+}
+
+/**
+ * fire-and-forget 触发巩固。与 kickoffReflection 共用 `inflight`:
+ * 后台 LLM 任务串行执行,不会同时压两条请求给后端(drain 也只需等一个槽位)。
+ *
+ * **无候选时零成本返回**:分组是纯本地计算,先算再看要不要发请求——
+ * 这是这条通道与反思的关键成本差异(反思每 N 轮必发一次,巩固只在真有材料时才发)。
+ */
+export function kickoffConsolidation(manual: boolean = false): void {
+  if (inflight) return;
+  if (!isMemoryEnabled()) return;
+  if (!isConsolidationEnabled()) return;
+  const groups = findConsolidationGroups();
+  if (groups.length === 0) return;
+  if (!manual) {
+    if (autoConsolidateCount >= MAX_AUTO_CONSOLIDATIONS) return;
+    autoConsolidateCount++;
+  }
+  inflight = (async () => {
+    try {
+      const r = await runConsolidation(groups);
+      lastConsolidationResult = r;
+      appendLog(`[${r.ts}] ${formatConsolidationResult(r)}`);
+      if (r.rawParseFailure) {
+        appendLog(`  ↳ 巩固 parse-failed 原始返回: ${r.rawParseFailure.replace(/\s+/g, ' ').slice(0, 500)}`);
+      }
+    } catch (e) {
+      appendLog(`[${new Date().toISOString()}] 巩固异常: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      inflight = null;
+    }
+  })();
+}
+
+/**
+ * 自动巩固的每进程次数上限。比反思的 3 次更紧:巩固一次最多两组请求,
+ * 而它的收益只在"情节攒够了"时才兑现,高频跑只会把同一批数据反复归纳。
+ * env:MOCODE_CONSOLIDATE_MAX_PER_SESSION 覆盖。
+ */
+const MAX_AUTO_CONSOLIDATIONS = Math.max(1, Number(process.env.MOCODE_CONSOLIDATE_MAX_PER_SESSION) || 2);
+let autoConsolidateCount = 0;
+let lastConsolidationResult: ConsolidationResult | null = null;
+
+export function getLastConsolidationResult(): ConsolidationResult | null {
+  return lastConsolidationResult;
+}
+export function clearLastConsolidationResult(): void {
+  lastConsolidationResult = null;
+}
+
+/** 测试用:清零自动巩固计数(模块级状态,共享进程里必须清)。 */
+export function __resetConsolidateThrottleForTests(): void {
+  autoConsolidateCount = 0;
+  lastConsolidationResult = null;
+}
+
+/** 摘要串(供 repl flush):巩固 N 组(跳过 M 条)。 */
+export function formatConsolidationResult(r: ConsolidationResult): string {
+  const parts = [`巩固 ${r.consolidated}/${r.groups} 组`];
+  if (r.skipped > 0) parts.push(`跳过 ${r.skipped}`);
+  if (r.error) parts.push(`错误 ${r.error}`);
+  return parts.join(' ');
 }

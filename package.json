@@ -40,6 +40,11 @@
     "eval:smoke": "tsx evals/smoke.ts && tsx evals/coding/smoke.ts && tsx evals/quality-metrics.ts && tsx evals/work-discipline.ts",
     "eval:coding": "tsx evals/coding/runner.ts",
     "eval:coding:list": "tsx evals/coding/runner.ts --list",
+    "eval:memory-handoff": "tsx evals/memory-compact-handoff.ts",
+    "eval:memory-retrieval": "tsx evals/memory-retrieval.ts",
+    "eval:memory-retrieval:live": "tsx evals/memory-retrieval.ts --live",
+    "eval:memory-multisession": "tsx evals/memory-multisession.ts",
+    "eval:memory-multisession:all": "tsx evals/memory-multisession.ts --all",
     "prepack": "npm run build",
     "prepare": "node -e \"try{require('child_process').execFileSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'})}catch(e){}\""
   },

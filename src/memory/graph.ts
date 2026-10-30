@@ -16,7 +16,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { MAX_GRAPH_EDGES, MAX_GRAPH_ENTITIES } from '../tools/constants.js';
 import type { MemoryScope } from './store.js';
-import { isSingleValueProfile, isKnownRelation } from './relation-vocab.js';
+import { isSingleValueProfile, isKnownRelation, normalizeRelation } from './relation-vocab.js';
+// R8.3/R8.5:写入总闸与条目库共用同一份状态(独立叶子模块,避免 graph → store 的运行时环)。
+import { memoryWriteBlockReason } from './write-gate.js';
 
 /** 边的溯源类型:谁让这条事实成立(可信度的来源先验)。 */
 export type EdgeProvenance = 'user_said' | 'user_confirmed' | 'tool_observed' | 'reflection';
@@ -27,13 +29,19 @@ export interface GraphEntity {
   aliases: string[];
   summary: string;
   /**
-   * 轻量实体类型(轻量本体,memory-2.2):缺省 'unknown'。当前仅用于 person 合并守卫等
+   * 轻量实体类型(轻量本体,见 design-notes/memory/memory.md §3 D1):缺省 'unknown'。当前仅用于 person 合并守卫等
    * 安全用途,不做 domain/range 强校验;将来完整 ontology 再扩展(Person/Tool/Port…)。
    */
   type?: string;
   createdAt: string; // ISO
   updatedAt: string; // ISO
   scope: MemoryScope;
+  /**
+   * 墓碑标记:该实体已被 mergeEntities 并入 `mergedInto` 指向的实体。
+   * 保留实体本身以维持可追溯与别名词命中,但查找时必须跟随到活实体
+   * (见 resolveTombstone),否则写入会挂回墓碑、碎片反复重现。
+   */
+  mergedInto?: string;
 }
 
 export interface GraphEdge {
@@ -59,9 +67,68 @@ export interface GraphEdge {
   invalidReason?: string;
 }
 
-interface GraphFile {
+export interface GraphFile {
   entities: GraphEntity[];
   edges: GraphEdge[];
+}
+
+// ── R8.1/R9.2 导入 ────────────────────────────────────────────────────────
+export interface GraphImportResult {
+  addedEntities: number;
+  addedEdges: number;
+  /** 同 id 已存在而跳过的条数(实体+边)。 */
+  skipped: number;
+}
+
+/**
+ * 合并导入实体与边(R8.1 导出的还原端)。
+ *
+ * 与条目库的 `importEntries` 刻意不同:图里同 id 意味着**同一条事实**,而实体/边
+ * 的时间语义(validAt/invalidAt)本身就承载了"何时成立/何时被取代"。按 id 直接跳过
+ * 是最安全的选择——覆盖一条边会抹掉它的 invalidAt,等于把一段历史"复活"。
+ * 新边仍可能因 (src,relation,dst) 与既有 active 边重复而出现两条,但那是既有
+ * `addTriple` 的去重职责,不该在这里重实现一遍(重复导入两次的结果应是幂等的:
+ * 第二次全部 skip)。
+ */
+export function importGraphPart(
+  entities: readonly GraphEntity[],
+  edges: readonly GraphEdge[],
+): GraphImportResult | { blocked: 'paused' | 'disabled' } {
+  const blocked = memoryWriteBlockReason();
+  if (blocked) return { blocked };
+  const result: GraphImportResult = { addedEntities: 0, addedEdges: 0, skipped: 0 };
+  for (const scope of ['global', 'project'] as const) {
+    const inScopeEnts = entities.filter((e) => (e.scope === 'global' ? 'global' : 'project') === scope);
+    const inScopeEdges = edges.filter((e) => (e.scope === 'global' ? 'global' : 'project') === scope);
+    if (inScopeEnts.length === 0 && inScopeEdges.length === 0) continue;
+    const g = loadScopeGraph(scope);
+    const entIds = new Set(g.entities.map((e) => e.id));
+    const edgeIds = new Set(g.edges.map((e) => e.id));
+    let dirty = false;
+    for (const e of inScopeEnts) {
+      if (entIds.has(e.id)) {
+        result.skipped++;
+        continue;
+      }
+      // scope 以文件为准,防止包里 scope 字段缺失/错标把实体挂到另一个库。
+      g.entities.push({ ...e, scope });
+      entIds.add(e.id);
+      result.addedEntities++;
+      dirty = true;
+    }
+    for (const e of inScopeEdges) {
+      if (edgeIds.has(e.id)) {
+        result.skipped++;
+        continue;
+      }
+      g.edges.push({ ...e, scope, invalidAt: e.invalidAt ?? null });
+      edgeIds.add(e.id);
+      result.addedEdges++;
+      dirty = true;
+    }
+    if (dirty) writeGraphForScope(scope, g);
+  }
+  return result;
 }
 
 // ── 路径 / 原子写(同 store.ts 风格)──────────────────────────────────────
@@ -138,6 +205,9 @@ export function loadAllGraph(): GraphFile {
 }
 
 function writeGraphForScope(scope: MemoryScope, g: GraphFile): void {
+  // 纵深防御:即便某条迁移路径忘了在入口判闸,也不能落盘。改动只发生在内存副本上,
+  // 下一次 loadScopeGraph 会重新读盘,因此 no-op 等价于「什么都没发生」。
+  if (memoryWriteBlockReason()) return;
   const p = graphPathForScope(scope);
   ensureDir(p);
   writeGraphAtomic(p, { entities: g.entities, edges: g.edges });
@@ -154,10 +224,33 @@ export function loadScopeGraph(scope: MemoryScope): GraphFile {
 // ── 实体 ─────────────────────────────────────────────────────────────────
 const norm = (s: string): string => s.trim().toLowerCase();
 
+/**
+ * 跟随 `mergedInto` 重定向到活实体。
+ *
+ * 为什么必须做:mergeEntities 保留 source 并标 `mergedInto`(可追溯),但 source 的
+ * name/别名仍留在它自己的字段里。若查找直接返回 source,后续写入会挂到墓碑实体上,
+ * 于是被并掉的碎片反复重现(实测:`万` 精确命中墓碑 ent-* 而非 person-primary)。
+ * 环与目标缺失都原地返回,不丢数据。
+ */
+function resolveTombstone(g: GraphFile, e: GraphEntity): GraphEntity {
+  let cur = e;
+  const seen = new Set<string>([cur.id]);
+  for (;;) {
+    const target = (cur as GraphEntity & { mergedInto?: string }).mergedInto;
+    if (!target) return cur;
+    if (seen.has(target)) return cur; // 环保护
+    const next = g.entities.find((x) => x.id === target);
+    if (!next) return cur; // 目标缺失(手工编辑/半迁移):保持原样
+    seen.add(target);
+    cur = next;
+  }
+}
+
 function findEntityIn(g: GraphFile, name: string): GraphEntity | undefined {
   const q = norm(name);
   if (!q) return undefined;
-  return g.entities.find((e) => e.id === q || norm(e.name) === q || e.aliases.some((a) => norm(a) === q));
+  const hit = g.entities.find((e) => e.id === q || norm(e.name) === q || e.aliases.some((a) => norm(a) === q));
+  return hit ? resolveTombstone(g, hit) : undefined;
 }
 
 /** 全局找实体(两 scope,project 优先——项目事实比全局更具体)。 */
@@ -181,6 +274,8 @@ export function upsertEntity(
   name: string,
   opts: { summary?: string; alias?: string; scope?: MemoryScope; type?: string } = {},
 ): UpsertEntityResult {
+  const blocked = memoryWriteBlockReason();
+  if (blocked) return { id: '', created: false, rejected: `write-${blocked}` };
   const scope: MemoryScope = opts.scope === 'global' ? 'global' : 'project';
   const trimmed = name.trim();
   if (!trimmed) return { id: '', created: false, rejected: 'empty-name' };
@@ -254,8 +349,32 @@ export interface TripleInput {
 }
 
 export type AddTripleResult =
-  | { ok: true; edgeId: string; superseded: number; duplicate?: boolean }
+  | {
+      ok: true;
+      edgeId: string;
+      superseded: number;
+      duplicate?: boolean;
+      /** 请求的是 global,但被确定性守卫改判到 project(见 isRepoSourcePath)。 */
+      scopeEscalated?: boolean;
+    }
   | { ok: false; reason: string };
+
+/**
+ * 目标是否为本仓库的源码相对路径(`src/...` / `tests/...`)。
+ *
+ * 作用域守卫的判定依据是**目标形态**,不是 src 身份——单机单用户下 global 承载
+ * 跨项目通用知识(相机、数据集、外部服务),那些本来就该在 global;只有描述
+ * 「本仓库哪个文件实现了什么」的边才属于 project 格。实测曾因此有 5 条源码结构边
+ * 落进 global 图(2026-10-30 已迁回)。
+ */
+export function isRepoSourcePath(raw: string): boolean {
+  const p = String(raw ?? '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .toLowerCase();
+  return /^(src|tests)\//.test(p);
+}
 
 /**
  * 写一条三元组。src/dst 自动 upsert 为实体。
@@ -267,14 +386,24 @@ export type AddTripleResult =
  * 容量保护:边超限先清已失效边;仍超 → 拒绝。
  */
 export function addTriple(input: TripleInput): AddTripleResult {
+  const blocked = memoryWriteBlockReason();
+  if (blocked) return { ok: false, reason: `write-${blocked}` };
   const src = input.src?.trim();
   const dst = input.dst?.trim();
-  const relation = input.relation?.trim().toLowerCase().replace(/\s+/g, '_');
+  // 关系名在此处(唯一写入漏斗)归一到规范形,而不是依赖各调用方:
+  // 曾经只有 reflect.ts 的三处抽取点调 normalizeRelation,memory_save.links 与
+  // memory_graph add 走内联小写,导致 `cals`/`suports_override`/`prefer` 这类
+  // 别名绕开归一直接落库(2026-10-30 实测)。
+  const relation = normalizeRelation(input.relation ?? '');
   if (!src || !dst || !relation) return { ok: false, reason: 'missing src/relation/dst' };
   if (src.length > 80 || dst.length > 80 || relation.length > 60) {
     return { ok: false, reason: 'src/dst/relation too long' };
   }
-  const scope: MemoryScope = input.scope === 'global' ? 'global' : 'project';
+  const requested: MemoryScope = input.scope === 'global' ? 'global' : 'project';
+  // 作用域守卫(R0.6.2):目标是本仓库源码路径的边只可能是 project 知识。
+  // 凭 dst 形态确定性改判,不信调用方——反思可能把源码结构事实误归画像轨。
+  const scopeEscalated = requested === 'global' && isRepoSourcePath(dst);
+  const scope: MemoryScope = scopeEscalated ? 'project' : requested;
   const s = upsertEntity(src, { scope });
   if (s.rejected) return { ok: false, reason: `src entity: ${s.rejected}` };
   const d = upsertEntity(dst, { scope });
@@ -293,7 +422,13 @@ export function addTriple(input: TripleInput): AddTripleResult {
   // 完全等价(src+relation+dst 全等且 fact 相同/空)→ 幂等跳过。
   const exact = sameKey.find((e) => e.dst === d.id && (!fact || e.fact === fact));
   if (exact) {
-    return { ok: true, edgeId: exact.id, superseded: 0, duplicate: true };
+    return {
+      ok: true,
+      edgeId: exact.id,
+      superseded: 0,
+      duplicate: true,
+      ...(scopeEscalated ? { scopeEscalated } : {}),
+    };
   }
   let superseded = 0;
   const ts = nowIso();
@@ -327,7 +462,7 @@ export function addTriple(input: TripleInput): AddTripleResult {
   }
   g.edges.push(edge);
   writeGraphForScope(scope, g);
-  return { ok: true, edgeId: edge.id, superseded };
+  return { ok: true, edgeId: edge.id, superseded, ...(scopeEscalated ? { scopeEscalated } : {}) };
 }
 
 // ── 信念修正:撤销 / 晋升 / 遗留迁移(M2/M3)────────────────────────────────
@@ -335,6 +470,8 @@ export type EdgeMutationResult = { ok: true } | { ok: false; reason: string };
 
 /** 按时序失效一条边(不删除,可审计);edge id 或 (src,relation,dst 候选) 定位。 */
 export function invalidateEdge(edgeId: string, reason: string = 'manual'): EdgeMutationResult {
+  const blocked = memoryWriteBlockReason();
+  if (blocked) return { ok: false, reason: `write-${blocked}` };
   const id = edgeId.trim();
   if (!id) return { ok: false, reason: 'missing edge id' };
   for (const scope of ['global', 'project'] as const) {
@@ -355,6 +492,8 @@ export function invalidateEdge(edgeId: string, reason: string = 'manual'): EdgeM
  * 仅对 person-primary 出发的画像边生效(/profile confirm 的落地点)。
  */
 export function promoteEdge(edgeId: string): EdgeMutationResult {
+  const blocked = memoryWriteBlockReason();
+  if (blocked) return { ok: false, reason: `write-${blocked}` };
   const id = edgeId.trim();
   if (!id) return { ok: false, reason: 'missing edge id' };
   const scope: MemoryScope = 'global';
@@ -396,6 +535,8 @@ export interface EdgeVoteResult {
  * 只对 person-primary 出发的 global 画像边开放;project triples 不参与画像分级。
  */
 export function voteEdge(edgeId: string, vote: EdgeVote): EdgeVoteResult {
+  const blocked = memoryWriteBlockReason();
+  if (blocked) return { ok: false, reason: `write-${blocked}` };
   const id = edgeId.trim();
   if (!id) return { ok: false, reason: 'missing edge id' };
   if (vote !== 'confirm' && vote !== 'contradict') return { ok: false, reason: 'bad-vote' };
@@ -426,6 +567,10 @@ export function voteEdge(edgeId: string, vote: EdgeVote): EdgeVoteResult {
  * 返回失效条数。
  */
 export function invalidateProfileEdges(relation: string, dst?: string): number {
+  // 返回条数的函数没有失败形状可报,只能返 0 —— 与「没有匹配的边」同形。
+  // 可接受:这是后台纠正动作,用户不会盯着它的返回值;
+  // 真正需要明确告知的写入口(saveEntry/updateEntry/addTriple)都带了 blocked 分支。
+  if (memoryWriteBlockReason()) return 0;
   const rel = relation.trim().toLowerCase().replace(/\s+/g, '_');
   if (!rel) return 0;
   const scope: MemoryScope = 'global';
@@ -735,24 +880,86 @@ export function pathBetween(aNameOrId: string, bNameOrId: string): PathResult | 
   return { from, to, path, edges: pathEdges };
 }
 
+/** 某 scope 内的关系词表命中情况。inVocab + outVocab = total。 */
+export interface VocabStats {
+  total: number;
+  inVocab: number;
+  outVocab: number;
+}
+
 export interface GraphStats {
   entities: number;
   edgesActive: number;
   edgesInvalid: number;
   byScope: { project: { entities: number; edges: number }; global: { entities: number; edges: number } };
+  /**
+   * global 图里指向本仓库源码路径的 active 边数。守卫(R0.6.2)生效后应恒为 0;
+   * 非零意味着有绕开 addTriple 的写入路径或历史脏数据残留。
+   */
+  globalRepoPathEdges: number;
+  /** 关系名落在该 scope 词表内的占比(R0.5.5)。词表外不是错误,但比例需被看见。 */
+  vocab: { project: VocabStats; global: VocabStats };
+  /** active 边的溯源分布(R0.5.5)。`none` = 引入 prov 之前的遗留边。 */
+  provDistribution: Record<string, number>;
+  /**
+   * 跨 scope 关系项使用数(R0.5.5)——**中性观测,不是错误计数**。
+   *
+   * 统计 project 图里用了画像轨关系、或 global 图里用了项目轨关系的 active 边。
+   * 曾叫 `scopeVocabMisuse`,实测后改名:单机单用户下 global 本就承载跨项目结构
+   * 知识(`laya-play --runs_on--> rtx_5070_ti_laptop`、A7C2 手册 --documented_in--> html),
+   * 「用了项目轨关系」完全不等于「放错格子」。同理 project 图里的 `works_at`
+   * (wan --works_at--> hongxiong_ai)是合法的人物关系,不是污染。
+   * 保留该指标只为观察双轨是否在向对方漂移,不作阈值告警。
+   * 双词表共有的 `related_to` 不计入任一侧。
+   */
+  crossScopeRelationUse: { projectUsesProfileRel: number; globalUsesProjectRel: number };
+  /** 已分型实体数 / 总实体数(R0.5.4 回填后应上升)。 */
+  typedEntities: number;
 }
 
 export function graphStats(): GraphStats {
   const g = loadAllGraph();
+  const active = g.edges.filter((e) => !e.invalidAt);
   const count = (scope: MemoryScope) => ({
     entities: g.entities.filter((e) => e.scope === scope).length,
-    edges: g.edges.filter((e) => e.scope === scope && !e.invalidAt).length,
+    edges: active.filter((e) => e.scope === scope).length,
   });
+  // 注意:边上的 dst 是**实体 id**(如 `src-llm-reasoning-ts`),不是原始路径。
+  // 必须解析回实体名(`src/llm/reasoning.ts`)再判定,否则该指标恒为 0(死指标)。
+  const nameOf = new Map(g.entities.map((e) => [e.id, e.name]));
+
+  const vocabOf = (scope: MemoryScope): VocabStats => {
+    const edges = active.filter((e) => e.scope === scope);
+    const inVocab = edges.filter((e) => isKnownRelation(e.relation, scope)).length;
+    return { total: edges.length, inVocab, outVocab: edges.length - inVocab };
+  };
+
+  const provDistribution: Record<string, number> = {};
+  for (const e of active) {
+    const k = e.prov ?? 'none';
+    provDistribution[k] = (provDistribution[k] ?? 0) + 1;
+  }
+
   return {
     entities: g.entities.length,
-    edgesActive: g.edges.filter((e) => !e.invalidAt).length,
-    edgesInvalid: g.edges.filter((e) => !!e.invalidAt).length,
+    edgesActive: active.length,
+    edgesInvalid: g.edges.length - active.length,
     byScope: { project: count('project'), global: count('global') },
+    globalRepoPathEdges: active.filter((e) => e.scope === 'global' && isRepoSourcePath(nameOf.get(e.dst) ?? e.dst))
+      .length,
+    vocab: { project: vocabOf('project'), global: vocabOf('global') },
+    provDistribution,
+    crossScopeRelationUse: {
+      // 用了 global 词表内、但 project 词表外的关系(中性观测,不代表写错)。
+      projectUsesProfileRel: active.filter(
+        (e) =>
+          e.scope === 'project' && isKnownRelation(e.relation, 'global') && !isKnownRelation(e.relation, 'project'),
+      ).length,
+      globalUsesProjectRel: active.filter(
+        (e) => e.scope === 'global' && isKnownRelation(e.relation, 'project') && !isKnownRelation(e.relation, 'global'),
+      ).length,
+    },
+    typedEntities: g.entities.filter((e) => entityType(e) !== UNKNOWN_TYPE).length,
   };
 }
 
@@ -849,6 +1056,8 @@ export interface MergeReport {
  * 幂等:source===target 或不存在则 no-op(null)。
  */
 export function mergeEntities(targetId: string, sourceId: string, scope: MemoryScope = 'global'): MergeReport | null {
+  const blocked = memoryWriteBlockReason();
+  if (blocked) return { target: targetId, merged: [], dedupedEdges: 0, rejected: `write-${blocked}` };
   if (targetId === sourceId) return null;
   const g = loadScopeGraph(scope);
   const target = g.entities.find((e) => e.id === targetId);
@@ -889,7 +1098,7 @@ export function mergeEntities(targetId: string, sourceId: string, scope: MemoryS
   };
   addAlias(source.name);
   for (const a of source.aliases) addAlias(a);
-  (source as GraphEntity & { mergedInto?: string }).mergedInto = targetId;
+  source.mergedInto = targetId;
   source.updatedAt = nowIso();
   target.updatedAt = nowIso();
 
@@ -977,4 +1186,81 @@ export function migrateLegacyProfileProvenance(force: boolean = false): LegacyPr
 /** 测试专用:重置遗留迁移的进程内守卫。 */
 export function __resetLegacyMigrationForTests(): void {
   legacyMigrationDone = false;
+}
+
+// ── R0.5.2 关系名历史回填 ──────────────────────────────────────────────────
+//
+// 别名归一现在收在 addTriple 里,只对**新写入**生效;图里存量边仍带着
+// `cals`/`suports_override`/`prefer` 这类旧写法。这里就地把 active 边的关系名
+// 重算一遍。只改 relation 字段——不新建、不删除、不动时间戳语义,因此 active
+// 边总数守恒,可随时重复执行(幂等)。
+
+export interface RelationAliasMigration {
+  migrated: number;
+  renamed: Array<{ from: string; to: string }>;
+}
+
+export function migrateRelationAliases(scope: MemoryScope): RelationAliasMigration {
+  const g = loadScopeGraph(scope);
+  const renamed: Array<{ from: string; to: string }> = [];
+  for (const e of g.edges) {
+    if (e.invalidAt) continue;
+    const next = normalizeRelation(e.relation);
+    if (next === e.relation) continue;
+    renamed.push({ from: e.relation, to: next });
+    e.relation = next;
+  }
+  if (renamed.length > 0) writeGraphForScope(scope, g);
+  return { migrated: renamed.length, renamed };
+}
+
+// ── R0.5.4 实体类型确定性回填 ──────────────────────────────────────────────
+//
+// 分型只走**确定性规则**,不猜:一条边若 (a) 关系语义指向"文件/目录"且
+// (b) dst 实体名确实是本仓库路径,才把 dst 标成 FilePath。两个条件缺一不可——
+// 只看关系名会把 `implemented_in → src/models` 之外的误标,只看名字形状则等于
+// 靠名字猜(设计文档明确反对)。
+//
+// 只写 type 缺失或为 unknown 的实体;已有类型的绝不覆盖(人工/其它规则优先)。
+
+/** 目标语义是"仓库文件/目录"的关系。 */
+const FILE_TARGET_RELATIONS = new Set<string>([
+  'implemented_in',
+  'tests',
+  'tested_in',
+  'documented_in',
+  'reads',
+  'writes',
+  'stored_in',
+  'configured_by',
+]);
+
+/** 文件类实体的类型标记。 */
+export const FILE_TYPE = 'FilePath';
+
+export interface EntityTypeMigration {
+  typed: number;
+}
+
+export function migrateEntityTypes(scope: MemoryScope): EntityTypeMigration {
+  const g = loadScopeGraph(scope);
+  const byId = new Map(g.entities.map((e) => [e.id, e]));
+  const patch = new Map<string, string>();
+  for (const e of g.edges) {
+    if (e.invalidAt) continue;
+    if (!FILE_TARGET_RELATIONS.has(normalizeRelation(e.relation))) continue;
+    const dst = byId.get(e.dst);
+    if (!dst) continue;
+    if (!isRepoSourcePath(dst.name)) continue;
+    if (entityType(dst) !== UNKNOWN_TYPE) continue;
+    patch.set(dst.id, FILE_TYPE);
+  }
+  for (const [id, type] of patch) {
+    const ent = byId.get(id);
+    if (!ent) continue;
+    ent.type = type;
+    ent.updatedAt = nowIso();
+  }
+  if (patch.size > 0) writeGraphForScope(scope, g);
+  return { typed: patch.size };
 }

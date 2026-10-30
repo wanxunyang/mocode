@@ -31,7 +31,20 @@ import {
   listProfileCandidates,
   listInternalizedProfile,
 } from '../src/memory/persona.js';
-import { saveEntry, supersedeEntry, loadAll, listEntries, gcMemories } from '../src/memory/store.js';
+import {
+  saveEntry,
+  supersedeEntry,
+  loadAll,
+  listEntries,
+  gcMemories,
+  computeDedupKey,
+  searchEntries,
+  flushRecallStats,
+  pendingRecallCount,
+  __resetPendingRecallForTests,
+  updateEntry,
+  wantsTrigger,
+} from '../src/memory/store.js';
 import {
   kickoffReflection,
   runReflection,
@@ -63,6 +76,7 @@ function isolated(fn: (t: TestContext) => void | Promise<void>): (t: TestContext
     } finally {
       __setChatCreateImpl(null);
       __resetReflectThrottleForTests();
+      __resetPendingRecallForTests(); // 召回脏集是模块级内存,不清会串到下一个用例
       process.env.HOME = home ?? '';
       process.env.USERPROFILE = up ?? '';
       if (home === undefined) delete process.env.HOME;
@@ -259,6 +273,123 @@ test(
     const gc = gcMemories(); // 不经过 runReflection,直接调用(模拟启动接线)
     assert.equal(gc.decayed, 1);
     assert.equal(loadAll().find((e) => e.id === r.id)?.status, 'archived');
+  }),
+);
+
+test(
+  'saveEntry 去重①:纯中文同名不再产生重复条目(旧实现 slug 带时间戳,同 id 检查失效)',
+  isolated(() => {
+    const a = saveEntry({ name: '万的语言偏好', summary: '中文对话', body: 'b1' });
+    const b = saveEntry({ name: '万的语言偏好', summary: '中文对话', body: 'b2' });
+    assert.ok(a.ok);
+    assert.equal(b.ok, false, '同一中文名第二次应被拦下');
+    // R8.3/R8.5 起 SaveResult 多了 blocked 分支:必须显式收窄到 exists,
+    // 否则「被总闸拦下」会被误认成「被去重拦下」——两者对调用方的含义完全不同。
+    assert.ok(!b.ok && 'exists' in b, '应是 exists 分支而非 blocked');
+    assert.equal(!b.ok && 'exists' in b ? b.exists : '', a.ok ? a.id : '');
+    assert.equal(loadAll().filter((e) => e.name === '万的语言偏好').length, 1);
+  }),
+);
+
+test(
+  'saveEntry 去重②:不同名但内容等价 → 命中 dedupKey 拦住(这才是 id 检查覆盖不到的一半)',
+  isolated(() => {
+    const a = saveEntry({ name: 'user-language-chinese-replies', summary: '要求中文回复', body: 'x' });
+    assert.ok(a.ok);
+    // **名字不同** → id 不同 → 只能靠 dedupKey 拦;内容归一化后等价
+    const b = saveEntry({ name: '万偏好中文回复', summary: '  要求中文回复  ', body: 'X ' });
+    assert.equal(b.ok, false, '同名内容应被 dedupKey 拦下');
+    assert.ok(!b.ok && 'exists' in b, '应是 exists 分支而非 blocked');
+    assert.equal(!b.ok && 'exists' in b ? b.exists : '', a.ok ? a.id : '');
+
+    // 内容不同(哪怕标题一样)→ 不拦,交给 id 检查;换标题则是全新条目
+    const c = saveEntry({ name: '另一条独立事实', summary: '要求英文回复', body: 'y' });
+    assert.ok(c.ok, '内容不同不应被误拦');
+  }),
+);
+
+test(
+  'saveEntry 去重③:dedupKey 只认内容,name 不参与;scope 内隔离',
+  isolated(() => {
+    // name 不进哈希:这是 dedupKey 能拦住"换个说法写"的前提
+    assert.equal(computeDedupKey('同一摘要', '同一正文'), computeDedupKey('同一摘要', '同一正文'), '同内容 → 同 key');
+    assert.equal(
+      computeDedupKey(' 同一摘要 ', '同一  正文'),
+      computeDedupKey('同一摘要', '同一 正文'),
+      '空白归一化后同 key',
+    );
+    assert.notEqual(computeDedupKey('摘要A', '正文'), computeDedupKey('摘要B', '正文'), '摘要不同 → key 不同');
+    assert.notEqual(computeDedupKey('摘要', '正文A'), computeDedupKey('摘要', '正文B'), '正文不同 → key 不同');
+
+    // scope 隔离:global 与 project 各存一份同内容条目是刻意的可见性差异
+    const g = saveEntry({ name: 'scope-test-global', summary: '共同摘要', body: '共同正文', scope: 'global' });
+    const p = saveEntry({ name: 'scope-test-project', summary: '共同摘要', body: '共同正文', scope: 'project' });
+    assert.ok(g.ok, 'global 可存');
+    assert.ok(p.ok, 'project 同内容也应可存(dedupKey 只在 scope 内比较)');
+
+    // 同 id 跨 scope 仍全局唯一(历史行为不变)
+    const dupId = saveEntry({ name: 'scope-test-global', summary: '别的摘要', body: '别的正文', scope: 'project' });
+    assert.equal(dupId.ok, false, '同 id 跨 scope 仍被拦');
+  }),
+);
+
+test(
+  'saveEntry 去重④:updateEntry 改了内容后 dedupKey 必须跟着重算',
+  isolated(() => {
+    const a = saveEntry({ name: 'dup-after-update', summary: '旧摘要', body: '旧正文' });
+    assert.ok(a.ok);
+    const id = a.ok ? a.id : '';
+
+    const up = updateEntry(id, { summary: '新摘要', body: '新正文' });
+    assert.ok(up.ok);
+    const stored = loadAll().find((e) => e.id === id)!;
+    assert.equal(
+      stored.dedupKey,
+      computeDedupKey('新摘要', '新正文'),
+      '落盘的 dedupKey 必须等于按新内容算出的 key(旧实现只在 saveEntry 时算一次)',
+    );
+
+    // ① 用**新内容**换个名字再存 → 必须被拦(否则同一件事重复入库)。
+    const dupNew = saveEntry({ name: 'another-name', summary: '新摘要', body: '新正文' });
+    assert.equal(dupNew.ok, false, '更新后的内容应参与去重');
+    assert.ok(!dupNew.ok && 'exists' in dupNew, '应是 exists 分支而非 blocked');
+    assert.equal(!dupNew.ok && 'exists' in dupNew ? dupNew.exists : '', id);
+
+    // ② 用**更新前的旧内容**再存 → 不该被拦(那条内容已经不存在了,不是重复)。
+    const oldContent = saveEntry({ name: 'restore-old', summary: '旧摘要', body: '旧正文' });
+    assert.ok(oldContent.ok, '被改掉的旧内容不应再占着 dedupKey');
+  }),
+);
+
+test(
+  'R0.2:memory_search 不再逐次写盘,增量读时可见、flush 后落盘',
+  isolated(() => {
+    const r = saveEntry({ name: 'recall-target', summary: '目标', body: '正文用于检索' });
+    assert.ok(r.ok);
+    const file = join(process.cwd(), '.mocode', 'memory.jsonl');
+    const before = readFileSync(file, 'utf8');
+
+    searchEntries('recall-target');
+    // 关键:搜索是纯读语义,文件内容此刻不应变化(旧实现会整文件重写并 bump 计数)
+    assert.equal(readFileSync(file, 'utf8'), before, 'searchEntries 不应写盘');
+    assert.equal(pendingRecallCount(), 1, '增量应在脏集里');
+
+    // 读路径仍能看见增量(计数立刻可见,不必等落盘)
+    assert.equal(loadAll().find((e) => e.id === (r.ok ? r.id : ''))?.recallCount, 1);
+    // 再次搜索 → 脏集内累加,而不是新增一条
+    searchEntries('recall-target');
+    assert.equal(pendingRecallCount(), 1);
+    assert.equal(loadAll().find((e) => e.id === (r.ok ? r.id : ''))?.recallCount, 2, '未落盘增量应累加而非丢失');
+
+    const n = flushRecallStats();
+    assert.equal(n, 1);
+    assert.equal(pendingRecallCount(), 0);
+    // 落盘后从裸文件读出的计数也是 2(没有重复累加)
+    const onDisk = JSON.parse(readFileSync(file, 'utf8').split('\n').filter(Boolean)[0]) as {
+      recallCount: number;
+    };
+    assert.equal(onDisk.recallCount, 2);
+    assert.equal(loadAll().find((e) => e.id === (r.ok ? r.id : ''))?.recallCount, 2, 'flush 后不得再叠加');
   }),
 );
 
@@ -461,5 +592,136 @@ test(
     // 用户显式确认 → 翻案恢复。
     assert.equal(promoteEdge(held.edgeId).ok, true);
     assert.match(buildAboutYouSection(true), /爬山/);
+  }),
+);
+
+// ── R1.5 条件-动作条目形态 ──────────────────────────────────────────────────
+
+test(
+  'R1.5:trigger/action 落盘并读回;空值不写空字段',
+  isolated(() => {
+    const a = saveEntry({
+      name: 'r15-with-trigger',
+      summary: '带条件的坑',
+      body: '正文',
+      type: 'pitfall',
+      trigger: '构造 kimi-k3 工具 schema 时',
+      action: '递归剔除 uniqueItems',
+    });
+    assert.ok(a.ok);
+    const e = loadAll().find((x) => x.id === (a.ok ? a.id : ''));
+    assert.equal(e?.trigger, '构造 kimi-k3 工具 schema 时');
+    assert.equal(e?.action, '递归剔除 uniqueItems');
+    assert.ok(e?.triggerUpdatedAt, '首次写入 trigger 应记时间戳');
+
+    // 空串/空白视为未填:不写字段,避免 JSONL 全是空键
+    const b = saveEntry({ name: 'r15-empty', summary: '无触发条件', body: '正文', trigger: '   ', action: '' });
+    assert.ok(b.ok);
+    const raw = readFileSync(join(process.cwd(), '.mocode', 'memory.jsonl'), 'utf8');
+    const line = raw.split('\n').find((l) => l.includes('r15-empty'));
+    assert.ok(line);
+    const parsed = JSON.parse(line!) as Record<string, unknown>;
+    assert.equal('trigger' in parsed, false, '空 trigger 不应写成字段');
+    assert.equal('action' in parsed, false, '空 action 不应写成字段');
+    assert.equal(parsed.dedupKey !== undefined, true, 'dedupKey 仍照常写');
+  }),
+);
+
+test(
+  'R1.5:事后补 trigger(updateEntry),清空用空串而非真值判断',
+  isolated(() => {
+    const r = saveEntry({ name: 'r15-late-trigger', summary: '先写后补', body: '正文', type: 'pitfall' });
+    assert.ok(r.ok);
+    const id = r.ok ? r.id : '';
+    assert.equal(loadAll().find((x) => x.id === id)?.trigger, undefined, '前置:首次未填');
+
+    // 事后补:这正是设计预期路径(不在信息最少时逼模型编泛化措辞)
+    assert.equal(updateEntry(id, { trigger: '同一后端再次 400 时', action: '先剥 schema' }).ok, true);
+    let e = loadAll().find((x) => x.id === id);
+    assert.equal(e?.trigger, '同一后端再次 400 时');
+    assert.equal(e?.action, '先剥 schema');
+
+    // 清空:空串必须真的删掉,不能被 `if (patch.trigger)` 真值判断吞掉
+    assert.equal(updateEntry(id, { trigger: '' }).ok, true);
+    e = loadAll().find((x) => x.id === id);
+    assert.equal(e?.trigger, undefined, '空串应清空 trigger');
+    assert.equal(e?.triggerUpdatedAt, undefined, '清空时时间戳一并移除');
+    assert.equal(e?.action, '先剥 schema', '未传 action 时不动它');
+  }),
+);
+
+test('R1.5:wantsTrigger 只在 pitfall/decision/feedback 为真', () => {
+  assert.equal(wantsTrigger('pitfall'), true);
+  assert.equal(wantsTrigger('decision'), true);
+  assert.equal(wantsTrigger('feedback'), true);
+  assert.equal(wantsTrigger('fact'), false);
+  assert.equal(wantsTrigger('reference'), false);
+});
+
+test(
+  'R1.5:旧条目无 trigger 字段仍可正常读、可搜索、可进索引',
+  isolated(() => {
+    // 直接写一行"老格式"JSON(模拟 R1.5 之前的存量数据)
+    const file = join(process.cwd(), '.mocode', 'memory.jsonl');
+    mkdirSync(join(process.cwd(), '.mocode'), { recursive: true });
+    const legacy = {
+      id: 'legacy-entry',
+      type: 'fact',
+      name: 'legacy-entry',
+      summary: '老格式条目',
+      body: '没有 trigger 也没有 dedupKey',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      lastRecalledAt: null,
+      recallCount: 0,
+      status: 'active',
+      supersededBy: null,
+      pinned: false,
+      scope: 'project',
+      source: null,
+    };
+    writeFileSync(file, JSON.stringify(legacy) + '\n', 'utf8');
+
+    const e = loadAll().find((x) => x.id === 'legacy-entry');
+    assert.ok(e, '存量条目必须仍能读出');
+    assert.equal(e?.trigger, undefined);
+    assert.equal(searchEntries('legacy-entry').length, 1, '缺 trigger 不影响检索');
+    assert.ok(
+      listEntries().some((i) => i.id === 'legacy-entry'),
+      '索引照常收录',
+    );
+  }),
+);
+// ── R15.5 相关性下限的接线 ──────────────────────────────────────────────────
+//
+// 索引层的下限语义由 tests/memory-retrieval.test.ts 钉住;这里钉的是**接线**:
+// store.ts:searchEntries 建索引时确实把下限传下去了。不加这条,某次重构把
+// `minEvidenceMatched` 参数删掉,索引层单测照样全绿,生产却退回「有词就返回」。
+
+test(
+  'R15.4:searchEntries 只重合一个证据词元的条目不算相关',
+  isolated(() => {
+    // 三个条目分别只命中 alpha、只命中 beta、两者都命中。查询有两个证据词元,
+    // 下限要求 2 → 前两个都该被挡掉,只有第三个算相关。
+    for (const name of ['alpha 样本一', 'beta 样本二', 'alpha beta 样本三']) {
+      assert.ok(saveEntry({ name, summary: `${name} 的摘要`, body: '无关正文' }).ok);
+    }
+
+    const hits = searchEntries('alpha beta', { limit: 5 });
+    assert.deepEqual(
+      hits.map((e) => e.name),
+      ['alpha beta 样本三'],
+      '各命中 1 个证据词元的条目应被下限挡掉',
+    );
+
+    // 对照:查询只有一个证据词元时按实际数量降级(need = min(2, 1) = 1),
+    // 所以单词查询仍然能命中——下限不能把短查询一起废掉。
+    const single = searchEntries('alpha', { limit: 5 })
+      .map((e) => e.name)
+      .sort();
+    assert.deepEqual(single, ['alpha beta 样本三', 'alpha 样本一']);
+
+    // 完全无关的查询必须空手而归(这正是下限要解决的问题:以前会返回一堆)。
+    assert.deepEqual(searchEntries('红烧肉怎么做', { limit: 5 }), []);
   }),
 );

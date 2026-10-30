@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "note": "R15.1 探针集。查询按「用户真的会这么问」写,期望值是正确答案而非当前实现的答案——跑出来不达标也算结论。kind 用于分组报数,negative 类不参与 recall,单独算误报率。",
+  "queries": [
+    { "id": "ctx-1", "kind": "cjk", "query": "上下文压缩有几层", "expect": ["mocode-context-optimization-pipeline"] },
+    { "id": "ctx-2", "kind": "english", "query": "Relevance Pruner 是干什么的", "expect": ["mocode-context-optimization-pipeline"] },
+    { "id": "ctx-3", "kind": "english", "query": "Context Pipeline 的 encoder", "expect": ["mocode-context-optimization-pipeline"] },
+
+    { "id": "docx-1", "kind": "cjk", "query": "python 读 docx 打印中文报错", "expect": ["windows-docx-text-extract-gbk-encoding"] },
+    { "id": "docx-2", "kind": "exact", "query": "UnicodeEncodeError gbk", "expect": ["windows-docx-text-extract-gbk-encoding"] },
+    { "id": "docx-3", "kind": "exact", "query": "PYTHONIOENCODING utf-8", "expect": ["windows-docx-text-extract-gbk-encoding"] },
+
+    { "id": "ovw-1", "kind": "cjk", "query": "项目全景讲解文档在哪里", "expect": ["mocode-project-overview-doc"] },
+    { "id": "ovw-2", "kind": "cross-field", "query": "27 张 SVG 的那份文档", "expect": ["mocode-project-overview-doc"] },
+    { "id": "ovw-3", "kind": "cjk", "query": "讲解文档 HTML 版能离线打开吗", "expect": ["mocode-project-overview-doc"] },
+
+    { "id": "refl-1", "kind": "cjk", "query": "反思时给模型看多少条既有记忆", "expect": ["mocode-memory-reflection-internals"] },
+    { "id": "refl-2", "kind": "cross-field", "query": "反思样本里 body 截到多少字符", "expect": ["mocode-memory-reflection-internals"] },
+    { "id": "refl-3", "kind": "english", "query": "reflect.ts 转录快照 snapshotTranscript", "expect": ["mocode-memory-reflection-internals"] },
+
+    { "id": "mem2-1", "kind": "cjk", "query": "Memory 2.0 设计文档只在哪维护", "expect": ["memory-2-0-design-doc-single-source"] },
+    { "id": "mem2-2", "kind": "mixed", "query": "memory-ontology.md 还在吗", "expect": ["memory-2-0-design-doc-single-source"] },
+    { "id": "mem2-3", "kind": "cjk", "query": "金字塔方案是 Proposal 没实现吧", "expect": ["memory-2-0-design-doc-single-source"] },
+
+    { "id": "ban-1", "kind": "cjk", "query": "启动 banner 的 logo 一共几行", "expect": ["mocode-banner-logo-layout"] },
+    { "id": "ban-2", "kind": "english", "query": "LOGO_LINES 在哪个文件", "expect": ["mocode-banner-logo-layout"] },
+    { "id": "ban-3", "kind": "cjk", "query": "小人坐在第一个 o 上", "expect": ["mocode-banner-logo-layout"] },
+
+    { "id": "uia-1", "kind": "exact", "query": "UIA 元素树", "expect": ["mocode-computer-use-uia-element-tree"] },
+    { "id": "uia-2", "kind": "mixed", "query": "click_element set_value 是新增的动作吗", "expect": ["mocode-computer-use-uia-element-tree"] },
+    { "id": "uia-3", "kind": "cjk", "query": "点到危险按钮名会触发审查", "expect": ["mocode-computer-use-uia-element-tree"] },
+
+    { "id": "rpa-1", "kind": "cjk", "query": "借鉴影刀 RPA 的那套", "expect": ["mocode-computer-use-rpa-phases-map"] },
+    { "id": "rpa-2", "kind": "mixed", "query": "P1 到 P4 各期落在哪些文件", "expect": ["mocode-computer-use-rpa-phases-map"] },
+    { "id": "rpa-3", "kind": "mixed", "query": "computer-use-rpa.md 能查各期位置吗", "expect": ["mocode-computer-use-rpa-phases-map"] },
+
+    { "id": "flow-1", "kind": "cjk", "query": "flow 录制和回放", "expect": ["mocode-computer-use-flow-rpa"] },
+    { "id": "flow-2", "kind": "exact", "query": "--window 覆盖窗口", "expect": ["mocode-computer-use-flow-rpa"] },
+    { "id": "flow-3", "kind": "mixed", "query": "trace 裁剪", "expect": ["mocode-computer-use-flow-rpa"] },
+
+    { "id": "hash-1", "kind": "exact", "query": "expected_hash 不一致会怎样", "expect": ["mocode-expected-hash-optimistic-concurrency"] },
+    { "id": "hash-2", "kind": "cjk", "query": "编辑文件时的乐观并发检测", "expect": ["mocode-expected-hash-optimistic-concurrency"] },
+    { "id": "hash-3", "kind": "cjk", "query": "write_file 覆盖已有文件要不要带 hash", "expect": ["mocode-expected-hash-optimistic-concurrency"] },
+
+    { "id": "per-1", "kind": "exact", "query": "person-primary 是谁", "expect": ["mocode-persona-identity-canonicalization"] },
+    { "id": "per-2", "kind": "english", "query": "About you 是怎么注入的", "expect": ["mocode-persona-identity-canonicalization"] },
+    { "id": "per-3", "kind": "cjk", "query": "身份碎片合并到规范实体", "expect": ["mocode-persona-identity-canonicalization"] },
+
+    { "id": "aging-1", "kind": "cjk", "query": "图片上下文是怎么淘汰的", "expect": ["mocode-image-context-aging-pipeline"] },
+    { "id": "aging-2", "kind": "cjk", "query": "视觉窗口和字节预算谁先", "expect": ["mocode-image-context-aging-pipeline"] },
+    { "id": "aging-3", "kind": "cjk", "query": "token 估算按像素还是按字符", "expect": ["mocode-image-context-aging-pipeline"] },
+
+    { "id": "relief-1", "kind": "cjk", "query": "上下文超长时先剥图", "expect": ["mocode-image-relief-and-request-byte-budget"] },
+    { "id": "relief-2", "kind": "mixed", "query": "请求体字节预算 0.8 系数", "expect": ["mocode-image-relief-and-request-byte-budget"] },
+    { "id": "relief-3", "kind": "mixed", "query": "跨 step 断路器 overflow", "expect": ["mocode-image-relief-and-request-byte-budget"] },
+
+    { "id": "dev-1", "kind": "mixed", "query": "dev_server ready 一直是 false", "expect": ["dev-server-empty-readyurl"] },
+    { "id": "dev-2", "kind": "exact", "query": "readyUrl 留空会怎样", "expect": ["dev-server-empty-readyurl"] },
+    { "id": "dev-3", "kind": "cjk", "query": "怎么确认 dev server 真的起来了", "expect": ["dev-server-empty-readyurl"] },
+
+    { "id": "pro-1", "kind": "cjk", "query": "前摄通道匹配要带当前用户轮文本吗", "expect": ["mocode-memory-proactive-channel"] },
+    { "id": "pro-2", "kind": "mixed", "query": "trigger 字段一条都没有", "expect": ["mocode-memory-proactive-channel"] },
+    { "id": "pro-3", "kind": "exact", "query": "matchProactive 的参数", "expect": ["mocode-memory-proactive-channel"] },
+
+    { "id": "llm-1", "kind": "mixed", "query": "reasoning.ts 归一化几档 effort", "expect": ["mocode-llm-adapter-layer-architecture"] },
+    { "id": "llm-2", "kind": "cjk", "query": "tool-schema 为什么独立成叶子模块", "expect": ["mocode-llm-adapter-layer-architecture"] },
+    { "id": "llm-3", "kind": "exact", "query": "updateModelConfig 会持久化吗", "expect": ["mocode-llm-adapter-layer-architecture"] },
+
+    { "id": "kimi-1", "kind": "mixed", "query": "kimi-k3 调 dashscope 报 400", "expect": ["kimi-k3-dashscope-rejects-uniqueitems"] },
+    { "id": "kimi-2", "kind": "exact", "query": "uniqueItems 要递归剔除", "expect": ["kimi-k3-dashscope-rejects-uniqueitems"] },
+    { "id": "kimi-3", "kind": "mixed", "query": "dashscope compatible-mode 工具 schema 报错", "expect": ["kimi-k3-dashscope-rejects-uniqueitems"] },
+
+    { "id": "neg-1", "kind": "negative", "query": "红烧肉怎么炖才好吃", "expect": [] },
+    { "id": "neg-2", "kind": "negative", "query": "申根签证需要什么材料", "expect": [] },
+    { "id": "neg-3", "kind": "negative", "query": "kubernetes pod 一直重启怎么排查", "expect": [] },
+    { "id": "neg-4", "kind": "negative", "query": "Photoshop 图层蒙版怎么用", "expect": [] },
+    { "id": "neg-5", "kind": "negative", "query": "lighthouse 性能评分怎么提高", "expect": [] },
+    { "id": "neg-6", "kind": "negative", "query": "如何给猫剪指甲", "expect": [] }
+  ]
+}

@@ -83,6 +83,18 @@ export const USER_DIRECTIVE_MAX_CONSTRAINTS = 3;
 // ── 记忆(Tier-2 JSONL 工具库)──────────────────────────────────────────────
 /** 单条记忆 body 上限(字符)。进 history 前 memory_search 结果另有 MAX_MEMORY_RESULT 兜底。 */
 export const MAX_MEMORY_ENTRY = 4000;
+
+/**
+ * 记忆检索的相关性下限:命中至少这么多个「证据词元」才算相关(R15 实测值)。
+ *
+ * 证据词元 = 长度 ≥ 2 的 token(ASCII 词或 CJK bigram),单个汉字不算 ——
+ * 「红烧肉怎么炖」里的「肉」「好」几乎必然出现在某条记忆正文里,这正是误报来源。
+ *
+ * 取值 2 的依据:`npm run eval:memory-retrieval` 的 6 条负例在 1 时仍会有 1 条漏过
+ * (只重合一个词就返回),取 2 后负例误报 100% → 0%,正例 recall@1 保持 98%。
+ * 代价是 1 条词面重合极弱的探针从 recall@3 掉出(pro-2),已记录在 R15 实施结果里。
+ */
+export const MEMORY_SEARCH_MIN_EVIDENCE = 2;
 /** 启动注入 systemPrompt 的索引条目上限(遗忘封顶后 active 条目 ≤ MAX_ACTIVE,索引再封一层)。 */
 export const MAX_INDEX_ENTRIES = 50;
 /** active 记忆封顶:超则按 recallCount 低 × lastRecalledAt 老 淘汰到 archived。 */
@@ -91,6 +103,56 @@ export const MAX_ACTIVE = 100;
 export const DECAY_DAYS = 30;
 /** GC:archived 超 GC_DAYS → 硬删。 */
 export const GC_DAYS = 90;
+/**
+ * R6 情节记忆的衰减周期,**刻意远短于事实记忆**。
+ *
+ * 情节是"最近发生了什么"的索引,价值随时间陡降:三天前的会话摘要还能帮你接上工作,
+ * 一个月前的只会挤占 token 并干扰判断。事实记忆(怎么配置、哪里有坑)则相反,
+ * 越久越该留。若共用 30/90 天,每会话一条 episode 会在两个月内堆到几百条,
+ * 把长期知识挤出 `MAX_ACTIVE` 的封顶——这是"情节淹没语义"的标准失败模式。
+ *
+ * 注意与 `buildEpisodeSection` 的注入上限配合:衰减周期决定**存多久**,
+ * 注入上限决定**每次显示几条**,两者必须同时生效才不会互相抵消。
+ */
+export const EPISODE_DECAY_DAYS = 7;
+/** 情节归档后多久硬删。比事实的 90 天短得多,理由同上。 */
+export const EPISODE_GC_DAYS = 30;
+/**
+ * R11 已巩固情节的衰减周期:被归纳进语义条目后,原始情节的价值只剩"哪次会话"的
+ * 追溯入口,主体知识已经在语义条目里。3 天足够覆盖"刚做完那次"的复盘窗口,
+ * 再久就是与已巩固的结论重复占 token。这是 R11.1 里「降权」的具体落法。
+ */
+export const EPISODE_CONSOLIDATED_DECAY_DAYS = 3;
+
+// ── R11 情节巩固(episode → 语义)──────────────────────────────────────────
+/**
+ * 触发巩固的最少同主题情节数。
+ *
+ * 2 条不巩固:两条情节的"共性"很可能只是一次性的上下文(同一个 bug 修了两轮),
+ * 过早抽象会把噪声固化成长期事实。3 条且跨 2 个会话才够看出重复模式。
+ */
+export const CONSOLIDATE_MIN_EPISODES = 3;
+/** 触发巩固的最少不同会话数(单会话内的多次情节是同一件事的续集,不是模式)。 */
+export const CONSOLIDATE_MIN_SESSIONS = 2;
+/** 单次巩固最多处理的组数:后台任务要可控,且一组一次 LLM 调用。 */
+export const CONSOLIDATE_MAX_GROUPS = 2;
+/**
+ * 单组的成员上限。受 `store.ts` 的 `MAX_DERIVED_FROM`(8)约束——超过 8 条时
+ * `derivedFrom` 会被截断,剩下的源条目查不到来源反而失去可追溯性。
+ */
+export const CONSOLIDATE_MAX_GROUP_SIZE = 8;
+/** 分组时最多扫描的情节条数(按 createdAt 降序取最近的一批)。 */
+export const CONSOLIDATE_SCAN_LIMIT = 40;
+/** 两条情节的请求文本至少共享多少个非泛化 token 才算同主题。 */
+export const CONSOLIDATE_MIN_TOKEN_OVERLAP = 2;
+/** 喂给巩固模型的总输入字符预算(超了就整组丢弃,不做中截——残缺的组会被归纳错)。 */
+export const CONSOLIDATE_INPUT_MAX_CHARS = 6000;
+/** 启动时注入的最近 episode 条数(硬上限,见 R6.3)。 */
+export const EPISODE_INJECT_LIMIT = 3;
+/** 单条 episode 里保留的请求条数上限:一次会话几十轮很常见,全列等于存全文(R6.4 禁止)。 */
+export const EPISODE_MAX_REQUESTS = 8;
+/** 单条请求在 episode 里的字符上限(压平成一行后的截断长度)。 */
+export const EPISODE_REQUEST_MAX_CHARS = 120;
 /** memory_search 结果(召回的记忆正文)的放宽上限:指令性内容,中截破坏语义,对齐 use_skill。 */
 export const MAX_MEMORY_RESULT = 64000;
 

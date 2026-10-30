@@ -1,6 +1,8 @@
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { contentHash } from '../../changeset/index.js';
+import { entriesAnchoredTo } from '../../memory/store.js';
+import { evaluateAnchorsAgainst, toAnchorPath } from '../../memory/anchor.js';
 import { IMAGE_READ_MARKER, MAX_FILE_LINES, MAX_HISTORY_RESULT } from '../constants.js';
 import {
   MAX_INLINE_BYTES_DEFAULT,
@@ -10,7 +12,7 @@ import {
   type ImageMime,
 } from '../../attachments/image.js';
 import type { Tool, ToolOutcome } from '../types.js';
-import { config } from '../../config/index.js';
+import { config, isMemoryEnabled } from '../../config/index.js';
 
 /** 默认单次 read_file 拉取的行数。刻意压低,逼 LLM 分块读大文件,
  * 配合 description 中的 PAGINATION IS MANDATORY 引导。
@@ -166,15 +168,22 @@ export const readFileTool: Tool = {
         };
       }
     }
-    const output =
+    const baseOutput =
       end < lines.length
         ? `${artifactHeader}\n${body}\n\n... (${lines.length - end} 行未显示,共 ${lines.length} 行)`
         : `${artifactHeader}\n${body}`;
+    // R2.4:回注锚定本文件的记忆(最多 3 条,只回 fresh)。
+    // 为什么放在 read_file 而不是 system prompt:prompt 每轮注入会撞 cache,而且
+    // 「正在看这个文件」这一刻才是这条记忆最有用的时机;读到不相关的文件时零成本。
+    // 判定用**刚读到的这份 data**,不会再碰磁盘。
+    const output = baseOutput + memoryHintFor(path, data);
     // dedup 只登记「确实会进 context 的区间」。pushToolResult 会把超长输出经
     // capToolResultForHistory 中截到 MAX_HISTORY_RESULT(丢中段)——若此处仍登记
     // 完整 [reqStart, reqEnd],后续对「被截掉的中段」的重读会被 findUnchanged 命中,
     // 模型拿到 unchanged 短指针却找不到内容,只能反复缩小区间撞墙、最终用 shell 绕过
     // (实测事故:会话 20261012-033757)。故输出超 cap 时只登记头/尾两段实际保留的行。
+    // 用 output(含回注段)判长度:最终进 history 的就是它,回注把长度顶过 cap 时
+    // 必须按截断口径登记,否则会记成"完整保留"而制造幽灵命中。
     if (dedup && config.readDedup && output.length > MAX_HISTORY_RESULT) {
       const fileHash = contentHash(data);
       const truncated = truncatedOutputRanges(lines, start, end, output.length, MAX_HISTORY_RESULT);
@@ -185,6 +194,44 @@ export const readFileTool: Tool = {
     return { status: 'success', code: 'OK', retryable: false, output };
   },
 };
+
+/** 回注条数上限。再多就变成噪音,模型会学会跳过这一段。 */
+const MEMORY_HINT_LIMIT = 3;
+/**
+ * 参与 fresh 判定的候选条数上限。
+ *
+ * 必须**先过滤 fresh、再截 3 条**:锚定同一个文件的记忆里,靠前的可能已经过期。
+ * 若先按 3 条截断再过滤,前 3 条恰好都 stale 时整段回注会静默消失,而第 4 条
+ * 明明仍然有效。这个上限只为防止上百条锚点时白跑一遍 hash 判定。
+ */
+const MEMORY_HINT_SCAN = 20;
+
+/**
+ * R2.4:本文件被哪些**仍然对得上**的记忆锚定。
+ *
+ * 只回 fresh 的:内容已经变了说明这条记忆过期,此刻提示它等于把旧事实塞进上下文;
+ * 它会在 `memory_search` 结果里带 `STALE-CODE` 标记出现,那里的语境更合适。
+ *
+ * 失败静默:记忆是增强通道,读文件本身的成功不能被它拖坏。
+ */
+function memoryHintFor(path: string, data: string): string {
+  try {
+    if (!isMemoryEnabled()) return '';
+    const anchorPath = toAnchorPath(path);
+    const hits = entriesAnchoredTo(anchorPath, { limit: MEMORY_HINT_SCAN });
+    if (hits.length === 0) return '';
+    // 只判**本文件**的锚点:一条记忆可能同时锚定多个文件,拿本文件的文本去判别的文件
+    // 必然判 missing,整条记忆会被误当过期(见 evaluateAnchorsAgainst 的 anchorPath 说明)。
+    const fresh = hits
+      .filter((e) => !evaluateAnchorsAgainst(e.anchors, data, anchorPath).stale)
+      .slice(0, MEMORY_HINT_LIMIT);
+    if (fresh.length === 0) return '';
+    const lines = fresh.map((e) => `- [${e.id}] ${e.name} — ${e.summary}`);
+    return `\n\n## Memory anchored to this file\n${lines.join('\n')}`;
+  } catch {
+    return '';
+  }
+}
 
 /**
  * 输出将被中截(头 60% / 尾 40%)时,反推真正保留进 context 的行区间。

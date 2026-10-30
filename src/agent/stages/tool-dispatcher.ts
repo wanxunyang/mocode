@@ -1,6 +1,7 @@
 import { ADD_TOOL_GROUPS_TOOL_NAME } from '../../config/profiles.js';
-import { config } from '../../config/index.js';
+import { config, isMemoryEnabled } from '../../config/index.js';
 import { t } from '../../i18n/index.js';
+import { isProactiveEnabled, proactiveHint } from '../../memory/proactive.js';
 import { checkPermission as defaultCheckPermission, type PermissionCheckOptions } from '../../permissions/index.js';
 import { jailResolve as defaultJailResolve } from '../../sandbox/index.js';
 import { summarizeToolArguments } from '../../session/index.js';
@@ -61,6 +62,9 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
   async dispatch(request: ToolDispatchRequest): Promise<ToolDispatchResult> {
     const { toolRuntime, checkPermission, jailResolve } = this.dependencies;
     const calls = request.calls;
+    // R3.5:每批只判一次开关。memory 总开关 veto 优先于前摄独立开关——用户关掉记忆就不该
+    // 再有记忆注入,否则"关闭"只关了一半。
+    const proactiveOn = isMemoryEnabled() && isProactiveEnabled();
     const argumentSummaries = calls.map((call) => summarizeToolArguments(call.arguments));
     const orderedResults: Array<OrderedToolCallResult | undefined> = new Array(calls.length);
     const modelAttachments: ToolDispatchResult['modelAttachments'][number][] = [];
@@ -85,8 +89,8 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
       call: ToolDispatchRequest['calls'][number],
       hint?: string,
       onLockAcquired?: (args: Record<string, unknown>) => void,
-    ) =>
-      toolRuntime.executeToolOutcome(call.name, call.arguments, request.signal, {
+    ) => {
+      const pending = toolRuntime.executeToolOutcome(call.name, call.arguments, request.signal, {
         callId: call.id,
         onOutput: (chunk) => request.onToolOutput?.(call, chunk),
         allowedToolNames: request.currentAllowedToolNames(),
@@ -96,6 +100,18 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         ...(request.finishReason ? { finishReason: request.finishReason } : {}),
         ...(onLockAcquired ? { onLockAcquired } : {}),
       });
+      if (!proactiveOn) return pending;
+      // R3.3:前摄注入挂在**这一个**统一出口上,四种调度分支(并行只读 / 编排 / 资源锁 /
+      // 串行)自然全覆盖,无须各写一遍。放在 outcome 落地后做:被拒绝或未执行的调用
+      // 根本不经过这里,不会白烧一次匹配。
+      return pending.then((outcome) => {
+        if (outcome.status !== 'success' && outcome.status !== 'error') return outcome;
+        const proactive = proactiveHint(call.name, parseArgs(call.arguments), true, request.proactiveContext);
+        if (!proactive) return outcome;
+        const base = outcome.output ?? '';
+        return { ...outcome, output: base ? `${base}\n\n${proactive}` : proactive };
+      });
+    };
     const executionEvents = (index: number, parsed: Record<string, unknown> | null, outcome: ToolOutcome): void => {
       request.onEvent({ type: 'usage', usage: outcome.usage });
       request.onEvent({ type: 'host_outcome', call: calls[index], parsed: parsed ?? {}, outcome });

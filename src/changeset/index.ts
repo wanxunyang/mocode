@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, copyFile, mkdir, readFile, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { jailResolve } from '../sandbox/index.js';
 import { beginPathMutation, endPathMutation } from '../rollback/index.js';
 import { canonicalFileResourceKey, toolResourceLockManager, type ResourceLockRequest } from '../tools/resource-lock.js';
@@ -31,16 +30,12 @@ export type {
   TextEdit,
 } from './types.js';
 
-export function contentHash(content: Buffer | string): ContentHash {
-  const data = typeof content === 'string' ? Buffer.from(content, 'utf8') : content;
-  return `sha256:${createHash('sha256').update(data).digest('hex')}`;
-}
-
-export function normalizeContentHash(value: string): ContentHash | null {
-  const normalized = value.trim().toLowerCase();
-  const hex = normalized.startsWith('sha256:') ? normalized.slice(7) : normalized;
-  return /^[a-f0-9]{64}$/.test(hex) ? `sha256:${hex}` : null;
-}
+// 哈希实现已下沉到 ./hash.ts(叶模块):memory/store.ts 要用同一口径算锚点 hash,
+// 但它不能依赖本文件(这里拉着 sandbox/rollback/resource-lock)。re-export 保证
+// 「同一个函数对象」,调用方无需改 import。
+export { contentHash, normalizeContentHash } from './hash.js';
+// re-export 不会把名字带进本模块作用域,内部仍在用 → 单独 import 一次。
+import { contentHash } from './hash.js';
 
 function applyTextEdits(source: string, edits: readonly TextEdit[]): string {
   const ordered = [...edits].sort((left, right) => left.start - right.start || left.end - right.end);

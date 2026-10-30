@@ -75,6 +75,11 @@ export async function runAgentCoreLegacy(
 ): Promise<AgentRunResult> {
   const { history, userInput, signal, hooks } = opts;
   const ctx: AgentRuntimeContext = opts.runtimeContext ?? defaultAgentRuntimeContext;
+  // R3:前摄匹配的上下文取本轮用户文本(纯文本部分)。图片等非文本 part 不参与。
+  const proactiveContext = (Array.isArray(userInput) ? userInput : [{ type: 'text' as const, text: userInput }])
+    .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+    .map((p) => p.text)
+    .join(' ');
   const runtimeToolSchemas: OpenAI.Chat.Completions.ChatCompletionTool[] = ctx.toolRuntime.tools.map((tool) => ({
     type: 'function',
     function: {
@@ -399,6 +404,7 @@ export async function runAgentCoreLegacy(
                   readDedup,
                   argumentErrorHint: (name) => argumentErrorHint(name, runtimeContextState),
                   ...(result.finishReason ? { finishReason: result.finishReason } : {}),
+                  proactiveContext,
                   onToolOutput: (call, chunk) => hooks.onToolOutput?.(call, chunk),
                   ...(opts.toolPolicy
                     ? {
