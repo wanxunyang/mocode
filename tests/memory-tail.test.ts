@@ -13,7 +13,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { __resetMemoryBaselineForTests, buildMemoryTailSection, captureMemoryBaseline } from '../src/memory/tail.js';
@@ -51,6 +51,30 @@ function isolated(fn: () => void | Promise<void>): () => Promise<void> {
       rmSync(root, { recursive: true, force: true });
     }
   };
+}
+
+/**
+ * 把某条目的 updatedAt 回拨 seconds 秒(直接改 JSONL,模拟时间流逝)。
+ *
+ * 为什么需要:尾注是「schema 差分」,只比对 updatedAt 字符串。测试里
+ * save → captureMemoryBaseline → update 三步若落在**同一毫秒**,updatedAt 逐字相同,
+ * 差分看不见这次修改。CI 的 Linux tmpfs 快到会撞进同一毫秒(本地 Windows NTFS 反而
+ * 每轮 I/O 超过 1ms,所以本地跑不出来)。把基线拍在回拨之后,先后关系就与文件系统
+ * 速度无关了。
+ */
+function backdateUpdatedAt(id: string, seconds: number): void {
+  const file = join(process.cwd(), '.mocode', 'memory.jsonl');
+  const iso = new Date(Date.now() - seconds * 1000).toISOString();
+  const lines = readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim());
+  const out = lines.map((l) => {
+    const e = JSON.parse(l) as Record<string, unknown>;
+    if (e.id !== id) return l;
+    e.updatedAt = iso;
+    return JSON.stringify(e);
+  });
+  writeFileSync(file, out.join('\n') + '\n', 'utf8');
 }
 
 const writeEntry = (over: Partial<Parameters<typeof saveEntry>[0]> = {}) => {
@@ -105,6 +129,9 @@ test(
   'R17:会话中被更新的条目也算变化(updatedAt 变即播报)',
   isolated(() => {
     const r = writeEntry({ name: 'to-update', summary: '旧结论' });
+    // 先把基线写成「1 分钟前」,再拍快照:否则 save 与 update 可能同毫秒,updatedAt
+    // 不变 → 差分漏报(CI 上稳定复现;本地因 I/O 慢而跑不出来)。
+    backdateUpdatedAt(r.ok ? r.id : '', 60);
     captureMemoryBaseline();
     const up = updateEntry(r.ok ? r.id : '', { summary: '被修正的新结论', reason: 'user correction' });
     assert.equal(up.ok, true);
