@@ -143,7 +143,17 @@ test(
         );
       });
     });
-    const r = await runReflection('user: hi', AbortSignal.timeout(50));
-    assert.match(r.error ?? '', /^反思超时/, `应归类为反思超时,实际: ${r.error}`);
+    // 必须用**被引用的** timer 驱动 abort,不能用 AbortSignal.timeout:后者的底层定时器是
+    // unref() 的,事件循环一旦没有别的东西撑着(CI 全量单进程跑到这里就是这种情况)它永远
+    // 不触发,测试以「Promise resolution is still pending but the event loop has already
+    // resolved」挂死,并把其后 500 个用例一并 cancelled(exit code 1)。
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 50);
+    try {
+      const r = await runReflection('user: hi', ac.signal);
+      assert.match(r.error ?? '', /^反思超时/, `应归类为反思超时,实际: ${r.error}`);
+    } finally {
+      clearTimeout(timer);
+    }
   }),
 );
