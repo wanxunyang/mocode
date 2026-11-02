@@ -7,4 +7,4 @@ export {
   promptThemePicker,
   promptRevertChoice,
 } from './prompt-internal/pickers.js';
-export type { SlashCommand, PromptOpts, SessionPickerItem, ImagePasteResult } from './prompt-internal/types.js';
+export type { SlashCommand, PromptOpts, SessionPickerItem, ImagePasteNotice } from './prompt-internal/types.js';

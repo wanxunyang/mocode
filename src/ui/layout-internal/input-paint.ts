@@ -9,7 +9,13 @@ import type { StatusBarData, InputView } from '../layout-types.js';
 import { state } from './state.js';
 import { esc, cup, getGeo, getEffectiveContentBottom, setRegion, runningCaretPos } from './screen.js';
 import { SEL_OPEN, SEL_OFF, normalizeInputSelection, inputViewSig } from './selection.js';
-import { composeSpinnerLine, composeModelLine, composePlanLines, drawStatusBar } from './statusbar.js';
+import {
+  composeSpinnerLine,
+  composeModelLine,
+  composePlanLines,
+  composePendingAttachLine,
+  drawStatusBar,
+} from './statusbar.js';
 
 // ── 输入区(底栏输入框 + 向上菜单)──
 
@@ -192,15 +198,10 @@ export function paintInput(view: InputView): void {
       buf += cup(g.contentBottom + 2, 1) + esc.clearLine;
       state.planRows = 1;
     }
-    // 无 plan 时:画待发附件 chip(多图截到列宽);有 plan 则让位(提交/撤回后才可能同时出现,
-    // 那一瞬被 plan 占掉可接受)。slash 菜单向上展开时最后一行也落在这一行,会互相覆盖——
-    // 菜单打开期间隐藏 chip(关菜单后下次 redraw 自然恢复)。
+    // 无 plan 时:画待发附件脚栏(chip + 降采样 badge + 非视觉预警,不进内容缓冲);
+    // slash 菜单向上展开时最后一行也落在这一行,会互相覆盖——菜单打开期间隐藏(关菜单恢复)。
     if (planBuf.length === 0) {
-      const showChips = !(view.menu && view.menu.lines.length > 0);
-      const attLine =
-        showChips && state.pendingAttachChips.length > 0
-          ? ui.dim + truncateDisplay(state.pendingAttachChips.join('  '), Math.max(1, g.cols)) + ui.reset
-          : '';
+      const attLine = view.menu && view.menu.lines.length > 0 ? '' : composePendingAttachLine(g.cols);
       buf += cup(g.contentBottom + 1, 1) + esc.clearLine + attLine;
     }
   }

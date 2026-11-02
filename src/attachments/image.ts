@@ -13,6 +13,8 @@ export interface ImageAttachment {
   bytes: number;
   mime: ImageMime;
   dataUrl: string;
+  /** 原图超预算/超限被降采样时记录原始尺寸,供气泡下正式回显「原图 WxH 已降采样」。 */
+  downscaledFrom?: { width: number; height: number };
 }
 
 export const MAX_INLINE_BYTES_DEFAULT = 4 * 1024 * 1024;
@@ -163,6 +165,7 @@ async function downscalePngFile(
         bytes: buf.length,
         mime: 'image/png',
         dataUrl: `data:image/png;base64,${buf.toString('base64')}`,
+        downscaledFrom: { width: png.width, height: png.height },
       },
     };
   } catch (error) {
@@ -267,6 +270,7 @@ export function buildImageAttachmentFromBuffer(
       bytes: out.length,
       mime,
       dataUrl: `data:${mime};base64,${out.toString('base64')}`,
+      ...(downscaledFrom ? { downscaledFrom } : {}),
     },
     ...(downscaledFrom ? { downscaledFrom } : {}),
   };

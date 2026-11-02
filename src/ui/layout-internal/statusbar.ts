@@ -248,12 +248,8 @@ export function drawStatusBar(status?: StatusBarData): void {
   // plan 从非空变成空(已结算为 ## Done:/ notes 里无活跃 ## Plan: 段)时,清掉残留的 plan 行 1。
   // 否则上轮渲染的「plan: 标题 (N/M) ▸ 当前步」会卡在底栏「虚拟空行」位置直到下一次重启 REPL。
   if (planLines.length === 0) {
-    // 无 plan 但有待发附件 chip:同一行位置画附件(不进内容缓冲,见 setPendingAttachChips)。
-    const attLine =
-      state.pendingAttachChips.length > 0
-        ? ui.dim + truncateDisplay(state.pendingAttachChips.join('  '), Math.max(1, g.cols)) + ui.reset
-        : '';
-    planBuf += cup(planRow1, 1) + esc.clearLine + attLine;
+    // 无 plan 但有待发附件:同一行位置画附件脚栏(不进内容缓冲,见 setPendingAttachChips)。
+    planBuf += cup(planRow1, 1) + esc.clearLine + composePendingAttachLine(g.cols);
   }
   let out =
     planBuf +
@@ -287,12 +283,24 @@ export function setStatus(status: string, frame?: string): void {
 }
 
 /**
- * 更新待发附件 chip 行(repl 的 pendingAttachments 真相源 → 脚栏)。
- * 只写 state,不主动重画——调用方随后的 paintInput(每次按键/状态切换都会调)自然带上,
- * 避免在非 TTY / 未进 alt screen 时凭空画。
+ * 更新待发附件脚栏行(repl 的 pendingAttachments 真相源 → 脚栏虚拟空行)。
+ * 只写 state,不主动重画——调用方随后的 paintInput/drawStatusBar 自然带上。
+ * @param chips    已带色 chip(可含降采样 badge),多个两空格分隔
+ * @param warning  已带色的行级警告(如非视觉模型预警),拼在 chip 末尾
  */
-export function setPendingAttachChips(chips: string[]): void {
+export function setPendingAttachChips(chips: string[], warning = ''): void {
   state.pendingAttachChips = chips;
+  state.pendingAttachWarning = warning;
+}
+
+/**
+ * 拼待发附件脚栏行(chips + 行级警告),整体截到列宽;无附件返回空串。
+ * paintInput 与 drawStatusBar 共用,保证两条重画路径输出一致。
+ */
+export function composePendingAttachLine(cols: number): string {
+  if (state.pendingAttachChips.length === 0) return '';
+  const warning = state.pendingAttachWarning ? `  ${state.pendingAttachWarning}` : '';
+  return truncateDisplay(`${ui.dim}${state.pendingAttachChips.join('  ')}${ui.reset}${warning}`, Math.max(1, cols));
 }
 
 /**

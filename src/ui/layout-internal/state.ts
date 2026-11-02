@@ -111,9 +111,11 @@ export const state = {
   /**
    * 待发图片附件的 chip 行(已带色、不带换行),画在 spinner 行上方的「虚拟空行」
    * (与 plan chip 同一位置;plan 非空时让位于 plan)。**不进内容缓冲**——提交后由
-   * echoInput 在用户气泡下正式回显一次,避免 Ctrl+Y 的反馈行成为无归属游离行/重复显示。
+   * echoInput 在用户气泡下正式回显一次,避免 Ctrl+Y/命令的反馈行成为无归属游离行。
    */
   pendingAttachChips: [] as string[],
+  /** 待发附件的附加警告(已带色,如非视觉模型预警/降采样提示),拼在 chip 行末尾。 */
+  pendingAttachWarning: '',
   /** 运行态实时 token 用量(agent core 流式推送,轮末 repl 清 undefined)。
    *  composeModelLine 在 RUNNING 态把它画成 chip 放 context 进度条左侧;
    *  不主动触发重画——RUNNING 态 turnTimer 80ms 心跳重画自然取最新值。 */

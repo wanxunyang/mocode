@@ -903,31 +903,20 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
 
   /**
    * Ctrl+Y:让 repl 从系统剪贴板抓图(repl 持有 pendingAttachments 与 config,editor 不直接依赖)。
-   * 成功后附件 chip 由脚栏虚拟空行显示(不写内容缓冲,提交后才在气泡下正式回显一次),
-   * 这里只需 redraw;仅「无图 / 失败 / 去重 / 降采样 / 非视觉模型」给一条瞬时提示。
-   * busy 期间连按只取第一次,避免重复抓图。
+   * 成功(含去重)完全静默——chip / 降采样 badge / 非视觉预警都在脚栏虚拟空行,提交后才在
+   * 气泡下正式回显;只有「剪贴板无图 / 抓图失败」给一条内容区瞬时提示。
+   * busy 期间连按只取第一次。
    */
   async function pasteClipboardImage(): Promise<void> {
     if (resolved || !opts.onPasteImage || pastingImage) return;
     pastingImage = true;
     try {
-      const r = await opts.onPasteImage();
-      if (resolved) return;
-      if (!r) {
+      const notice = await opts.onPasteImage();
+      if (resolved || !notice) return;
+      if (notice.kind === 'empty') {
         layout.contentWrite(`${ui.yellow}${t('prompt.imageEmpty')}${ui.reset}\n`);
-      } else if (!r.ok) {
-        layout.contentWrite(`${ui.red}${t('prompt.imageFailed', { reason: r.reason })}${ui.reset}\n`);
       } else {
-        if (r.duplicate) layout.contentWrite(`  ${ui.dim}${t('prompt.imageDuplicate')}${ui.reset}\n`);
-        if (r.downscaledFrom) {
-          layout.contentWrite(
-            `  ${ui.yellow}${t('prompt.imageDownscaled', {
-              width: r.downscaledFrom.width,
-              height: r.downscaledFrom.height,
-            })}${ui.reset}\n`,
-          );
-        }
-        if (r.visionWarning) layout.contentWrite(`  ${ui.yellow}${r.visionWarning}${ui.reset}\n`);
+        layout.contentWrite(`${ui.red}${t('prompt.imageFailed', { reason: notice.reason })}${ui.reset}\n`);
       }
     } catch {
       // 剪贴板工具异常不应打断输入循环;与 readClipboard 同口径静默降级为提示。

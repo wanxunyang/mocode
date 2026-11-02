@@ -13,29 +13,7 @@ import { config } from '../../config/index.js';
 import { t } from '../../i18n/index.js';
 import { loadImageAttachmentWithDownscale, renderChip, MAX_INLINE_BYTES_DEFAULT } from '../../attachments/image.js';
 import { readClipboardAsAttachment } from '../../attachments/clipboard.js';
-import { modelSupportsVision } from '../../llm/capabilities.js';
 import { unhandled, next, type CommandHandler } from './types.js';
-
-/** 成功附加后统一收尾:chip + 降采样提示 + 非视觉模型预警。 */
-function reportAttached(
-  att: Parameters<typeof renderChip>[0],
-  downscaledFrom?: { width: number; height: number },
-): void {
-  if (downscaledFrom) {
-    layout.contentWrite(
-      `  ${ui.yellow}${t('commands.imageClipDownscaled', {
-        width: downscaledFrom.width,
-        height: downscaledFrom.height,
-      })}${ui.reset}\n`,
-    );
-  }
-  layout.contentWrite(`  ${ui.dim}${renderChip(att)} — will attach to next message${ui.reset}\n`);
-  // 提前警告(不阻断附加):当前模型已知不支持视觉(如 MiniMax M2.x / gpt-3.5 等)时,
-  // 附加时就提示,而不是等发送后才在 catch 块里翻译 API 报错——减少一轮无意义请求。
-  if (!modelSupportsVision(config.model)) {
-    layout.contentWrite(`  ${ui.yellow}${t('prompt.imageVisionWarning', { model: config.model })}${ui.reset}\n`);
-  }
-}
 
 export const imageCommands: CommandHandler[] = [
   async (ctx) => {
@@ -71,6 +49,8 @@ export const imageCommands: CommandHandler[] = [
       return next();
     }
     // /image clip:从系统剪贴板抓截图(Ctrl+Y 快捷键的命令形态,供终端吞键时兜底)。
+    // 成功只更新脚栏(push 钩子已同步 chip/降采样 badge/视觉预警),不写内容缓冲——
+    // 否则确认行会游离在 banner 与气泡之间,提交后又在气泡下重复一次。
     if (line === '/image clip') {
       const r = await readClipboardAsAttachment();
       if (!r.ok) {
@@ -79,12 +59,9 @@ export const imageCommands: CommandHandler[] = [
         } else {
           layout.contentWrite(`${ui.red}[image] ${r.reason}${ui.reset}\n`);
         }
-        return next();
-      }
-      if (!ctx.attachments.list().find((a) => a.id === r.att.id)) {
+      } else if (!ctx.attachments.list().some((a) => a.id === r.att.id)) {
         ctx.attachments.push(r.att);
       }
-      reportAttached(r.att, r.downscaledFrom);
       return next();
     }
     const arg = line
@@ -101,10 +78,10 @@ export const imageCommands: CommandHandler[] = [
       layout.contentWrite(`${ui.red}[image] ${r.reason}${ui.reset}\n`);
       return next();
     }
-    if (!ctx.attachments.list().find((a) => a.id === r.att.id)) {
+    // 成功只更新脚栏(push 钩子同步 chip/降采样 badge/视觉预警),不写内容缓冲。
+    if (!ctx.attachments.list().some((a) => a.id === r.att.id)) {
       ctx.attachments.push(r.att);
     }
-    reportAttached(r.att, r.downscaledFrom);
     return next();
   },
 ];

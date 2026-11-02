@@ -42,24 +42,15 @@ export interface PromptOpts {
   onCycleMode?: () => void;
   /**
    * Ctrl+Y:从系统剪贴板抓截图并入待发附件队列(repl 注入:读剪贴板 → 构造 ImageAttachment
-   * → push pendingAttachments + 同步脚栏 chip)。
-   * 成功不上内容区(附件 chip 显示在脚栏虚拟空行,提交后才在气泡下正式回显);
-   * null=剪贴板里没有图片/工具不可用,由 editor 上屏提示;失败走 { ok:false }。
+   * → push pendingAttachments + 同步脚栏 chip/badge/预警)。
+   * 成功**不写内容区、不回 chip**——所有反馈都在脚栏虚拟空行,提交后才在气泡下正式回显;
+   * 返回 null=成功(含重复图,去重无额外提示);ImagePasteNotice=需上屏的瞬时提示。
    */
-  onPasteImage?: () => Promise<ImagePasteResult | null>;
+  onPasteImage?: () => Promise<ImagePasteNotice | null>;
 }
 
-export type ImagePasteResult =
-  | {
-      ok: true;
-      /** 同一张图已在待发队列(按 id 去重),本次未重复入队。 */
-      duplicate?: boolean;
-      /** 原图超限被降采样时给尺寸,用于提示(磁盘/剪贴板原图不受影响)。 */
-      downscaledFrom?: { width: number; height: number };
-      /** 当前模型不支持视觉时的可上屏警告文案;无警告为 undefined。 */
-      visionWarning?: string;
-    }
-  | { ok: false; reason: string };
+/** Ctrl+Y 抓图的非成功提示:'empty'=剪贴板无图(黄);'error'=失败(红)。 */
+export type ImagePasteNotice = { kind: 'empty' } | { kind: 'error'; reason: string };
 
 /** emitKeypressEvents 后 stdin 会发 'keypress',但该事件不在 ReadStream 类型里,单独声明。 */
 export interface KeypressEmitter {

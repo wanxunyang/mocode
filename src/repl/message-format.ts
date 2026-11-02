@@ -188,8 +188,20 @@ export function renderHistory(history: ChatMessage[]): void {
       if (atts && atts.length > 0) {
         for (const a of atts) {
           layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
+          if (a.downscaledFrom) {
+            const msg = a.path.startsWith('clipboard:')
+              ? t('prompt.imageDownscaled', {
+                  width: a.downscaledFrom.width,
+                  height: a.downscaledFrom.height,
+                })
+              : t('prompt.imageDownscaledFile', {
+                  width: a.downscaledFrom.width,
+                  height: a.downscaledFrom.height,
+                });
+            layout.contentWrite(`  ${ui.yellow}${msg}${ui.reset}\n`);
+          }
         }
-        // 与实时 echoInput 同口径:chip 后补一个空行再进 agent 正文。
+        // 与实时 echoInput 同口径:附件区后补一个空行再进 agent 正文。
         layout.contentWrite('\n');
       } else if (Array.isArray((m as { content?: unknown }).content)) {
         // 旧 session 没侧 channel:从 data URL 头抽 mime,显一个通用 chip

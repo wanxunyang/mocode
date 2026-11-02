@@ -135,11 +135,28 @@ let pendingTimer: NodeJS.Timeout | null = null;
 let pendingAttachments: ImageAttachment[] = [];
 
 /**
- * 把待发附件 chip 同步到脚栏「虚拟空行」(spinner 行上方,不进内容缓冲)。
- * 提交/撤回/清空/附加后都调一次;脚栏只作 pending 提示,真正的归属显示在 echoInput。
+ * 把待发附件同步到脚栏「虚拟空行」(spinner 行上方,不进内容缓冲):
+ * chip 后挂降采样 badge(↓WxH,黄色);当前模型不支持视觉时行尾再拼短预警。
+ * 提交/撤回/清空/附加后都调一次;真正的归属与完整降采样说明在 echoInput 气泡下显示。
  */
 function syncPendingAttachChips(): void {
-  layout.setPendingAttachChips(pendingAttachments.map((a) => renderChip(a)));
+  if (pendingAttachments.length === 0) {
+    layout.setPendingAttachChips([], '');
+    return;
+  }
+  const chips = pendingAttachments.map((a) => {
+    const badge = a.downscaledFrom
+      ? `${ui.yellow} ${t('prompt.imageDownscaledBadge', {
+          width: a.downscaledFrom.width,
+          height: a.downscaledFrom.height,
+        })}${ui.dim}`
+      : '';
+    return `${renderChip(a)}${badge}`;
+  });
+  const warning = modelSupportsVision(config.model)
+    ? ''
+    : `${ui.yellow}${t('prompt.imageVisionWarningShort', { model: config.model })}${ui.reset}`;
+  layout.setPendingAttachChips(chips, warning);
 }
 
 // ── onRunningKey / onRunningMousePaste / startRunningListener / stopRunningListener 已移到 ./running-input.ts ──
@@ -150,9 +167,17 @@ function syncPendingAttachChips(): void {
 function echoInput(lines: string[], trailingBlank = true): void {
   if (!layout.isActive()) return;
   layout.contentWrite(formatUserMessage(lines, trailingBlank));
-  // 多模态附件:每张一行 chip 跟在 user bubble 后(原 /rollback /resume 复显一致)
+  // 多模态附件:每张一行 chip 跟在 user bubble 后(原 /rollback /resume 复显一致);
+  // 被降采样的图下一行给完整说明(脚栏只有 ↓WxH badge,正式归属处要说清原图尺寸)。
   for (const a of pendingAttachments) {
     layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
+    if (a.downscaledFrom) {
+      // 文件附件(/image <path>)磁盘原图还在;剪贴板附件原图不落盘——措辞分开,避免误导。
+      const msg = a.path.startsWith('clipboard:')
+        ? t('prompt.imageDownscaled', { width: a.downscaledFrom.width, height: a.downscaledFrom.height })
+        : t('prompt.imageDownscaledFile', { width: a.downscaledFrom.width, height: a.downscaledFrom.height });
+      layout.contentWrite(`  ${ui.yellow}${msg}${ui.reset}\n`);
+    }
   }
   // 有附件时 formatUserMessage 的尾空行落在 chip 之前(气泡→空行→chip),chip 与 agent
   // 正文之间还需补一个空行,否则回复紧贴截图 chip(无附件时尾空行本就是分隔,不用补)。
@@ -163,30 +188,22 @@ function echoInput(lines: string[], trailingBlank = true): void {
   layout.repaintViewport();
   // chip 已在气泡下正式回显 → 清脚栏 pending 提示(不清 pendingAttachments:路由未完成,
   // flush 在 runTurn 里;若 500ms 撤回窗口内被 recall,rewindContent 后会重新 sync 回来)。
-  if (pendingAttachments.length > 0) layout.setPendingAttachChips([]);
+  if (pendingAttachments.length > 0) layout.setPendingAttachChips([], '');
 }
 
 /**
- * Ctrl+Y / /image clip:从系统剪贴板抓截图 → 构造附件 → push 待发队列。
+ * Ctrl+Y:从系统剪贴板抓截图 → 构造附件 → push 待发队列 → 同步脚栏。
  *
- * 无图(null)与失败({ok:false})分开:前者是用户最常犯的"没截图就按",editor 给操作提示;
- * 后者通常是图太大/格式不支持,直接透传 reason。视觉能力警告经 visionWarning 上屏(与
- * /image <path> 路径同口径,提前一轮挡住非视觉模型的无意义请求)。
+ * 成功(含重复图去重)返回 null——chip / ↓WxH 降采样 badge / 非视觉模型短预警都在脚栏
+ * 虚拟空行,不写内容缓冲;剪贴板无图返 {kind:'empty'}(黄提示),图太大/格式不支持返
+ * {kind:'error'}(红提示,透传 reason)。
  */
 async function pasteImageFromClipboard() {
   const r = await readClipboardAsAttachment();
-  if (!r.ok) return 'empty' in r ? null : { ok: false as const, reason: r.reason };
-  const duplicate = pendingAttachments.some((a) => a.id === r.att.id);
-  if (!duplicate) pendingAttachments.push(r.att);
+  if (!r.ok) return 'empty' in r ? { kind: 'empty' as const } : { kind: 'error' as const, reason: r.reason };
+  if (!pendingAttachments.some((a) => a.id === r.att.id)) pendingAttachments.push(r.att);
   syncPendingAttachChips();
-  return {
-    ok: true as const,
-    duplicate,
-    downscaledFrom: r.downscaledFrom,
-    visionWarning: modelSupportsVision(config.model)
-      ? undefined
-      : t('prompt.imageVisionWarning', { model: config.model }),
-  };
+  return null;
 }
 
 /**
@@ -1056,9 +1073,11 @@ export async function startRepl(
       continue; // 与其他命令一致:回 INPUT 态由循环顶部的 normalizeInputBoundary + enterInputMode 负责
     }
 
-    // N 行 message + 2 行尾随空(含 \n\n 留下的 open current 行) + 每附件 1 行
-    // + 有附件时 chip 与 agent 正文之间的 1 行分隔空行(echoInput 补的 \n)。
-    const bubbleRows = input.length + 2 + pendingAttachments.length + (pendingAttachments.length > 0 ? 1 : 0);
+    // N 行 message + 2 行尾随空(含 \n\n 留下的 open current 行) + 每附件 1 行 chip
+    // + 每降采样附件 1 行完整说明 + 有附件时 chip 区与 agent 正文间的 1 行分隔空行。
+    const downscaledCount = pendingAttachments.filter((a) => a.downscaledFrom).length;
+    const bubbleRows =
+      input.length + 2 + pendingAttachments.length + downscaledCount + (pendingAttachments.length > 0 ? 1 : 0);
     // 排队消息入队时即已确认 → 跳过 500ms 撤回窗口,直接发送。
     const shouldCommit = autoSend || (await awaitPendingRecall(input));
     if (!shouldCommit) {
