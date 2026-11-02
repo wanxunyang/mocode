@@ -1,5 +1,7 @@
 import { stdout, platform } from 'node:process';
 import { spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * 系统剪贴板读写(叶子模块,无 UI 依赖)。
@@ -151,4 +153,98 @@ export async function readClipboard(): Promise<string> {
   if (xc != null) return xc;
   const xs = await captureOutput('xsel', ['--clipboard', '--output'], 'utf8');
   return xs ?? '';
+}
+
+/** spawn 不吃 stdin 的命令,把 stdout 按二进制收集;空输出/失败返回 null(不抛)。 */
+function captureBinary(cmd: string, args: string[]): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    try {
+      const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+      const chunks: Buffer[] = [];
+      let settled = false;
+      const finish = (v: Buffer | null) => {
+        if (settled) return;
+        settled = true;
+        resolve(v);
+      };
+      p.stdout.on('data', (c: Buffer) => chunks.push(c));
+      p.stdout.on('error', () => finish(null));
+      p.on('error', () => finish(null));
+      p.on('close', (code) => {
+        if (code !== 0) return finish(null);
+        const buf = Buffer.concat(chunks);
+        finish(buf.length > 0 ? buf : null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * 读取系统剪贴板里的图片(截图后 Win+Shift+S / Ctrl+C 图片文件的常见落点)。
+ *
+ * 各端统一导出 PNG 字节:
+ *  - win32:STA 线程跑 WinForms `Clipboard::GetImage()` 存临时 PNG(剪贴板 API 要求 STA;
+ *    Bitmap.Save 写文件而非 stdout,避免 PowerShell 管道把 PNG 当文本编码破坏字节);
+ *  - darwin:osascript 让 Preview 风格的 `PNGf` TIFF 剪贴板项落到临时文件;
+ *  - linux:Wayland `wl-paste -t image/png`;X11 `xclip -t image/png -o`。
+ *
+ * 剪贴板无图 / 工具缺失均返回 null(不抛),调用方按"剪贴板里没有图片"提示。
+ */
+export async function readClipboardImage(): Promise<Buffer | null> {
+  if (platform === 'win32') {
+    const tmp = join(tmpdir(), `mocode-clip-${process.pid}-${Date.now()}.png`);
+    const out = await captureOutput(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-STA',
+        '-Command',
+        `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; ` +
+          `$img = $null; for ($i=0; $i -lt 5 -and $null -eq $img; $i++) { try { ` +
+          `$img = [System.Windows.Forms.Clipboard]::GetImage() } catch { Start-Sleep -Milliseconds 50 } }; ` +
+          `if ($null -ne $img) { $img.Save('${tmp.replace(/'/g, "''")}', [System.Drawing.Imaging.ImageFormat]::Png); $img.Dispose(); Write-Output OK }`,
+      ],
+      'utf8',
+    );
+    if (!out || !out.includes('OK')) return null;
+    try {
+      const { readFile, rm } = await import('node:fs/promises');
+      const buf = await readFile(tmp);
+      await rm(tmp, { force: true });
+      return buf.length > 0 ? buf : null;
+    } catch {
+      return null;
+    }
+  }
+  if (platform === 'darwin') {
+    // osascript 写文件用 HFS 冒号路径(Macintosh HD:Users:...),不能直接给 POSIX 斜线路径——
+    // `open for access POSIX file (...)` 在多数 macOS 版本上会解析失败。让 osascript 自己取
+    // 进程临时目录(POSIX file of (...)),再写 PNGf(raw data,ignore binary responses 必须关)。
+    const stamp = `mocode-clip-${process.pid}-${Date.now()}.png`;
+    const script =
+      `set outPath to (POSIX file ((POSIX path of (path to temp items from user domain)) & "${stamp}"))` +
+      `\nset png_data to (the clipboard as «class PNGf»)` +
+      `\nset fp to open for access outPath with write permission` +
+      `\nwrite png_data to fp\nclose access fp` +
+      `\nreturn (POSIX path of outPath)`;
+    const out = await captureOutput('osascript', ['-e', script], 'utf8');
+    const tmp = out?.trim();
+    if (!tmp) return null;
+    try {
+      const { readFile, rm } = await import('node:fs/promises');
+      const buf = await readFile(tmp);
+      await rm(tmp, { force: true });
+      return buf.length > 0 ? buf : null;
+    } catch {
+      return null;
+    }
+  }
+  // linux:Wayland 优先,X11 兜底
+  const wl = await captureBinary('wl-paste', ['-t', 'image/png']);
+  if (wl) return wl;
+  const xc = await captureBinary('xclip', ['-selection', 'clipboard', '-t', 'image/png', '-o']);
+  return xc;
 }

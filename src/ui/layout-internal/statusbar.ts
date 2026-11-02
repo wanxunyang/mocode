@@ -248,7 +248,12 @@ export function drawStatusBar(status?: StatusBarData): void {
   // plan 从非空变成空(已结算为 ## Done:/ notes 里无活跃 ## Plan: 段)时,清掉残留的 plan 行 1。
   // 否则上轮渲染的「plan: 标题 (N/M) ▸ 当前步」会卡在底栏「虚拟空行」位置直到下一次重启 REPL。
   if (planLines.length === 0) {
-    planBuf += cup(planRow1, 1) + esc.clearLine;
+    // 无 plan 但有待发附件 chip:同一行位置画附件(不进内容缓冲,见 setPendingAttachChips)。
+    const attLine =
+      state.pendingAttachChips.length > 0
+        ? ui.dim + truncateDisplay(state.pendingAttachChips.join('  '), Math.max(1, g.cols)) + ui.reset
+        : '';
+    planBuf += cup(planRow1, 1) + esc.clearLine + attLine;
   }
   let out =
     planBuf +
@@ -279,6 +284,15 @@ export function setStatus(status: string, frame?: string): void {
   state.statusText = status;
   state.spinnerFrame = frame;
   drawStatusBar();
+}
+
+/**
+ * 更新待发附件 chip 行(repl 的 pendingAttachments 真相源 → 脚栏)。
+ * 只写 state,不主动重画——调用方随后的 paintInput(每次按键/状态切换都会调)自然带上,
+ * 避免在非 TTY / 未进 alt screen 时凭空画。
+ */
+export function setPendingAttachChips(chips: string[]): void {
+  state.pendingAttachChips = chips;
 }
 
 /**

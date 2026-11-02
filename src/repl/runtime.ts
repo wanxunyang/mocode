@@ -29,6 +29,8 @@ import '../tools/builtins/index.js';
 import { initializeAllMcp, getMcpTools, closeAllMcp } from '../mcp/index.js';
 import { refreshChatTools, classifyChatError, type ChatMessage, type ChatUsage } from '../llm/index.js';
 import { renderChip, type ImageAttachment } from '../attachments/image.js';
+import { readClipboardAsAttachment } from '../attachments/clipboard.js';
+import { modelSupportsVision } from '../llm/capabilities.js';
 import type { ContentPart } from '../agent/core.js';
 import { contextState, appendCurrentSessionRuntimeEvent } from '../session/index.js';
 import { effectiveSystemPrompt, skillsChangedSinceLastObserve } from '../skills/index.js';
@@ -132,6 +134,14 @@ let pendingTimer: NodeJS.Timeout | null = null;
  *  messageAttachments 已移到 ./message-format.ts (共享 Map,renderHistory 与 runTurn 都用)。 */
 let pendingAttachments: ImageAttachment[] = [];
 
+/**
+ * 把待发附件 chip 同步到脚栏「虚拟空行」(spinner 行上方,不进内容缓冲)。
+ * 提交/撤回/清空/附加后都调一次;脚栏只作 pending 提示,真正的归属显示在 echoInput。
+ */
+function syncPendingAttachChips(): void {
+  layout.setPendingAttachChips(pendingAttachments.map((a) => renderChip(a)));
+}
+
 // ── onRunningKey / onRunningMousePaste / startRunningListener / stopRunningListener 已移到 ./running-input.ts ──
 
 // formatUserMessage 已移到 ./message-format.ts
@@ -144,10 +154,39 @@ function echoInput(lines: string[], trailingBlank = true): void {
   for (const a of pendingAttachments) {
     layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
   }
+  // 有附件时 formatUserMessage 的尾空行落在 chip 之前(气泡→空行→chip),chip 与 agent
+  // 正文之间还需补一个空行,否则回复紧贴截图 chip(无附件时尾空行本就是分隔,不用补)。
+  if (pendingAttachments.length > 0) layout.contentWrite('\n');
   // 用户气泡会填满终端整列宽；Windows Terminal 在末列进入 pending-wrap 后，紧随的 LF
   // 偶尔只更新内部滚屏状态，导致上一轮耗时行与新气泡暂时黏连。缓冲中的物理行始终正确，
   // 提交后立即按缓冲重绘，避免必须等滚动或 Agent 结束时的 repaint 才显示正确边界。
   layout.repaintViewport();
+  // chip 已在气泡下正式回显 → 清脚栏 pending 提示(不清 pendingAttachments:路由未完成,
+  // flush 在 runTurn 里;若 500ms 撤回窗口内被 recall,rewindContent 后会重新 sync 回来)。
+  if (pendingAttachments.length > 0) layout.setPendingAttachChips([]);
+}
+
+/**
+ * Ctrl+Y / /image clip:从系统剪贴板抓截图 → 构造附件 → push 待发队列。
+ *
+ * 无图(null)与失败({ok:false})分开:前者是用户最常犯的"没截图就按",editor 给操作提示;
+ * 后者通常是图太大/格式不支持,直接透传 reason。视觉能力警告经 visionWarning 上屏(与
+ * /image <path> 路径同口径,提前一轮挡住非视觉模型的无意义请求)。
+ */
+async function pasteImageFromClipboard() {
+  const r = await readClipboardAsAttachment();
+  if (!r.ok) return 'empty' in r ? null : { ok: false as const, reason: r.reason };
+  const duplicate = pendingAttachments.some((a) => a.id === r.att.id);
+  if (!duplicate) pendingAttachments.push(r.att);
+  syncPendingAttachChips();
+  return {
+    ok: true as const,
+    duplicate,
+    downscaledFrom: r.downscaledFrom,
+    visionWarning: modelSupportsVision(config.model)
+      ? undefined
+      : t('prompt.imageVisionWarning', { model: config.model }),
+  };
 }
 
 /**
@@ -645,6 +684,7 @@ export async function startRepl(
       // 回填后用户再发随消息一起带走;side channel 也不会在未 push user msg 时错写 index。
       const imgs = pendingAttachments;
       pendingAttachments = [];
+      syncPendingAttachChips(); // 已随消息提交:清脚栏 pending chip(归属显示在 echoInput 的气泡下)
       const userInput: string | ContentPart[] =
         imgs.length === 0
           ? input
@@ -867,6 +907,7 @@ export async function startRepl(
           prompt: PROMPT,
           commands: buildSlashCommands(),
           onCycleMode: cycleMode,
+          onPasteImage: pasteImageFromClipboard,
           // Ctrl+R / Ctrl+P 历史搜索候选源:惰性工厂——当前会话内存 queryHistory + 最近落盘会话,
           // 聚合要读盘,只有面板真正打开(Ctrl+R/P)才求值,平常轮次零开销
           history: () => collectQueryHistory(queryHistory).map((e) => e.text),
@@ -964,9 +1005,11 @@ export async function startRepl(
           list: () => pendingAttachments,
           clear: () => {
             pendingAttachments = [];
+            syncPendingAttachChips();
           },
           push: (att) => {
             pendingAttachments.push(att);
+            syncPendingAttachChips();
           },
         },
         buildSystemMessage,
@@ -1013,7 +1056,9 @@ export async function startRepl(
       continue; // 与其他命令一致:回 INPUT 态由循环顶部的 normalizeInputBoundary + enterInputMode 负责
     }
 
-    const bubbleRows = input.length + 2 + pendingAttachments.length; // N 行 message + 2 行尾随空(含 \n\n 留下的 open current 行) + 每附件 1 行
+    // N 行 message + 2 行尾随空(含 \n\n 留下的 open current 行) + 每附件 1 行
+    // + 有附件时 chip 与 agent 正文之间的 1 行分隔空行(echoInput 补的 \n)。
+    const bubbleRows = input.length + 2 + pendingAttachments.length + (pendingAttachments.length > 0 ? 1 : 0);
     // 排队消息入队时即已确认 → 跳过 500ms 撤回窗口,直接发送。
     const shouldCommit = autoSend || (await awaitPendingRecall(input));
     if (!shouldCommit) {
@@ -1022,6 +1067,7 @@ export async function startRepl(
       // (runTurn 入口的 pendingAttachments.flush 仍按现有逻辑把附件塞进 userInput)。
       layout.rewindContent(bubbleRows);
       pendingPrefill = input;
+      syncPendingAttachChips(); // 撤回:echoInput 清掉的脚栏 chip 按保留的 pendingAttachments 恢复
       layout.enterInputMode(t('repl.idle'));
       continue;
     }
@@ -1038,6 +1084,7 @@ export async function startRepl(
       queryHistory.pop();
       layout.rewindContent(bubbleRows);
       pendingPrefill = input;
+      syncPendingAttachChips(); // 撤回:脚栏 chip 按保留的 pendingAttachments 恢复
       layout.enterInputMode(t('repl.idle'));
       continue;
     }

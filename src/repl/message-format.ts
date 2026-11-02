@@ -189,16 +189,21 @@ export function renderHistory(history: ChatMessage[]): void {
         for (const a of atts) {
           layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
         }
+        // 与实时 echoInput 同口径:chip 后补一个空行再进 agent 正文。
+        layout.contentWrite('\n');
       } else if (Array.isArray((m as { content?: unknown }).content)) {
         // 旧 session 没侧 channel:从 data URL 头抽 mime,显一个通用 chip
         const c = (m as { content?: unknown }).content as unknown[];
+        let fallbackChips = 0;
         for (const p of c) {
           if (p && typeof p === 'object' && (p as { type?: string }).type === 'image_url') {
             const url = (p as { image_url?: { url?: string } }).image_url?.url ?? '';
             const mime = url.startsWith('data:') ? url.slice(5, url.indexOf(';')) : 'image';
             layout.contentWrite(`  ${ui.dim}📷 ${mime}${ui.reset}\n`);
+            fallbackChips++;
           }
         }
+        if (fallbackChips > 0) layout.contentWrite('\n');
       }
       continue;
     }

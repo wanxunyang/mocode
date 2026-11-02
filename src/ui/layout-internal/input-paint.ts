@@ -177,8 +177,9 @@ export function paintInput(view: InputView): void {
   }
 
   // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):
-  //     - 无活跃 plan:清空保留作分隔(原设计)
   //     - 有活跃 plan:渲染 plan chip(整帧重画时也要更新,避免 listener 漏触发后残留)
+  //     - 否则有待发图片附件:渲染附件 chip(不进内容缓冲,提交后由 echoInput 正式回显)
+  //     - 都没有:清空保留作分隔
   //     - plan 过长:占 2 行(planRows=2),spinner/上线/输入行随之整体下移 1 行
   //     paintInput 与 drawStatusBar 共享同一 planRows 模块态,setRegion 已据此把脚栏撑高。
   {
@@ -191,10 +192,16 @@ export function paintInput(view: InputView): void {
       buf += cup(g.contentBottom + 2, 1) + esc.clearLine;
       state.planRows = 1;
     }
-    // plan 从非空变成空(已结算/无活跃段)时,清掉残留的 plan 行 1。
-    // 上面 for 循环在 planBuf.length===0 时不写任何 cup,需要显式清一行回到「虚拟空行」。
+    // 无 plan 时:画待发附件 chip(多图截到列宽);有 plan 则让位(提交/撤回后才可能同时出现,
+    // 那一瞬被 plan 占掉可接受)。slash 菜单向上展开时最后一行也落在这一行,会互相覆盖——
+    // 菜单打开期间隐藏 chip(关菜单后下次 redraw 自然恢复)。
     if (planBuf.length === 0) {
-      buf += cup(g.contentBottom + 1, 1) + esc.clearLine;
+      const showChips = !(view.menu && view.menu.lines.length > 0);
+      const attLine =
+        showChips && state.pendingAttachChips.length > 0
+          ? ui.dim + truncateDisplay(state.pendingAttachChips.join('  '), Math.max(1, g.cols)) + ui.reset
+          : '';
+      buf += cup(g.contentBottom + 1, 1) + esc.clearLine + attLine;
     }
   }
 

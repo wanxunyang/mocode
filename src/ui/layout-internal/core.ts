@@ -65,6 +65,7 @@ export {
   setLiveUsage,
   setQueuedTurn,
   setStatusBase,
+  setPendingAttachChips,
 } from './statusbar.js';
 export { paintInput, paintRunningInput, repaint } from './input-paint.js';
 export {

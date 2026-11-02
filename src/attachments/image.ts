@@ -207,6 +207,71 @@ export async function loadImageAttachmentWithDownscale(
   return downscalePngFile(abs, opts.maxBytes, loaded.reason, opts.budgetBytes ?? INLINE_PNG_BUDGET_BYTES);
 }
 
+/**
+ * 从内存字节构造附件(剪贴板截图通道:PNG 由系统 API 直接给出,无落盘路径)。
+ *
+ * 与 loadImageAttachmentWithDownscale 同口径:魔数嗅探类型、4 MiB 硬上限、超软预算/超限
+ * 的 PNG 走同一套手写解码降采样(零原生依赖),JPEG/WebP/GIF 超限拒绝。`name` 仅用于
+ * chip 展示与去重,`source` 写进 path(发送时只读 dataUrl,path 不被打开)。
+ */
+export function buildImageAttachmentFromBuffer(
+  buf: Buffer,
+  source: string,
+  name: string,
+  opts: { maxBytes: number; budgetBytes?: number },
+): LoadImageWithFallbackResult {
+  const mime = sniffImageMime(buf);
+  if (!mime) return { ok: false, reason: 'unsupported: 剪贴板内容不是可识别的图片(png/jpg/gif/webp)' };
+  const budget = opts.budgetBytes ?? INLINE_PNG_BUDGET_BYTES;
+
+  let out = buf;
+  let downscaledFrom: { width: number; height: number } | undefined;
+  if (mime === 'image/png' && (out.length > opts.maxBytes || out.length > budget)) {
+    try {
+      const png = decodePng(buf);
+      let img = downscale(png, DOWNSCALE_MAX_EDGE).img;
+      let encoded = encodePng(img);
+      for (const edge of DOWNSCALE_FALLBACK_EDGES) {
+        if (encoded.length <= budget || edge >= Math.max(img.width, img.height)) continue;
+        img = downscale(png, edge).img;
+        encoded = encodePng(img);
+      }
+      if (encoded.length <= opts.maxBytes && encoded.length < out.length) {
+        downscaledFrom = { width: png.width, height: png.height };
+        out = encoded;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // 8-bit RGB/RGBA 之外的 PNG(如 16-bit/调色板)手写解码不支持:降采样失败时
+      // 不致命——未超硬上限就原样发,超了走下面的 too large 拒绝。
+      if (buf.length > opts.maxBytes) {
+        return {
+          ok: false,
+          reason: `too large: ${formatBytes(buf.length)} (max ${formatBytes(opts.maxBytes)});降采样失败: ${message}`,
+        };
+      }
+    }
+  }
+  if (out.length > opts.maxBytes) {
+    return { ok: false, reason: `too large: ${formatBytes(out.length)} (max ${formatBytes(opts.maxBytes)})` };
+  }
+  // id 只哈希内容(不含 source/name):同一张剪贴板截图连抓两次时间戳不同但字节相同,
+  // 去重仍能命中(pendingAttachments 按 id 判重)。
+  const id = createHash('sha1').update(out).digest('hex');
+  return {
+    ok: true,
+    att: {
+      id,
+      path: source,
+      name,
+      bytes: out.length,
+      mime,
+      dataUrl: `data:${mime};base64,${out.toString('base64')}`,
+    },
+    ...(downscaledFrom ? { downscaledFrom } : {}),
+  };
+}
+
 export async function loadImageAttachment(
   input: string,
   opts: { maxBytes: number; sniffedMime?: ImageMime | null },

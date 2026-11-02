@@ -70,6 +70,8 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
   } | null = null;
   /** 二次确认武装截止时刻(绝对 ms);0=未武装。见 submit() 与 MOCODE_CONFIRM_SEND。 */
   let confirmArmedUntil = 0;
+  /** Ctrl+Y 剪贴板抓图进行中:禁止重入(连按不重复入队同一张图)。 */
+  let pastingImage = false;
   let resolved = false;
   let resolve!: (v: string[] | null) => void;
   let reject!: (e: Error) => void;
@@ -658,6 +660,13 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
       return;
     }
 
+    // Ctrl+Y:从系统剪贴板抓截图并入待发附件(Win+Shift+S 截图后无需再存文件)。
+    // 多数终端会拦截 Ctrl+V 自己做文本粘贴,故用不被拦截的 Ctrl+Y(yank 语义)。
+    if (key.ctrl && key.name === 'y') {
+      void pasteClipboardImage();
+      return;
+    }
+
     const isReturn = key.name === 'return' || key.name === 'enter';
 
     // 换行:Ctrl+J / Ctrl+Enter / Alt+Enter(meta)/ Shift+Enter(终端区分时)/ lone LF
@@ -890,6 +899,43 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
       }
     }
     redraw();
+  }
+
+  /**
+   * Ctrl+Y:让 repl 从系统剪贴板抓图(repl 持有 pendingAttachments 与 config,editor 不直接依赖)。
+   * 成功后附件 chip 由脚栏虚拟空行显示(不写内容缓冲,提交后才在气泡下正式回显一次),
+   * 这里只需 redraw;仅「无图 / 失败 / 去重 / 降采样 / 非视觉模型」给一条瞬时提示。
+   * busy 期间连按只取第一次,避免重复抓图。
+   */
+  async function pasteClipboardImage(): Promise<void> {
+    if (resolved || !opts.onPasteImage || pastingImage) return;
+    pastingImage = true;
+    try {
+      const r = await opts.onPasteImage();
+      if (resolved) return;
+      if (!r) {
+        layout.contentWrite(`${ui.yellow}${t('prompt.imageEmpty')}${ui.reset}\n`);
+      } else if (!r.ok) {
+        layout.contentWrite(`${ui.red}${t('prompt.imageFailed', { reason: r.reason })}${ui.reset}\n`);
+      } else {
+        if (r.duplicate) layout.contentWrite(`  ${ui.dim}${t('prompt.imageDuplicate')}${ui.reset}\n`);
+        if (r.downscaledFrom) {
+          layout.contentWrite(
+            `  ${ui.yellow}${t('prompt.imageDownscaled', {
+              width: r.downscaledFrom.width,
+              height: r.downscaledFrom.height,
+            })}${ui.reset}\n`,
+          );
+        }
+        if (r.visionWarning) layout.contentWrite(`  ${ui.yellow}${r.visionWarning}${ui.reset}\n`);
+      }
+    } catch {
+      // 剪贴板工具异常不应打断输入循环;与 readClipboard 同口径静默降级为提示。
+      if (!resolved) layout.contentWrite(`${ui.yellow}${t('prompt.imageEmpty')}${ui.reset}\n`);
+    } finally {
+      pastingImage = false;
+      redraw();
+    }
   }
 
   return new Promise<string[] | null>((res, rej) => {

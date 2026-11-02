@@ -159,6 +159,7 @@ export function buildSlashCommands(): SlashCommand[] {
       desc: d('commands.image'),
       children: [
         { name: 'attach <path>', value: '/image ', submit: false, desc: d('commands.imageAttach') },
+        { name: 'clip', value: '/image clip', desc: d('commands.imageClip') },
         { name: 'list', value: '/image list', desc: d('commands.imageList') },
         { name: 'clear', value: '/image clear', desc: d('commands.imageClear') },
       ],

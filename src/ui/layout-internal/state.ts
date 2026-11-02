@@ -108,6 +108,12 @@ export const state = {
 
   // ── 状态栏(底栏文案 / spinner / 走时 / plan chip / live 帧位) ──
   base: null as StatusBase | null,
+  /**
+   * 待发图片附件的 chip 行(已带色、不带换行),画在 spinner 行上方的「虚拟空行」
+   * (与 plan chip 同一位置;plan 非空时让位于 plan)。**不进内容缓冲**——提交后由
+   * echoInput 在用户气泡下正式回显一次,避免 Ctrl+Y 的反馈行成为无归属游离行/重复显示。
+   */
+  pendingAttachChips: [] as string[],
   /** 运行态实时 token 用量(agent core 流式推送,轮末 repl 清 undefined)。
    *  composeModelLine 在 RUNNING 态把它画成 chip 放 context 进度条左侧;
    *  不主动触发重画——RUNNING 态 turnTimer 80ms 心跳重画自然取最新值。 */
