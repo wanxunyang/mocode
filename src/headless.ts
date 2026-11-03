@@ -33,6 +33,7 @@ import {
   recordSessionEpisode,
 } from './memory/episodic.js';
 import { flushProactiveStats } from './memory/proactive.js';
+import { flushTurnRecallStats, buildTurnRecallSection, isTurnRecallEnabled } from './memory/turn-recall.js';
 import { writeMemoryHealth } from './memory/health.js';
 import { defaultRuntime, Runtime } from './runtime/index.js';
 import { runAgentCore, type AgentHooks } from './agent/core.js';
@@ -313,11 +314,15 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   const startedAt = Date.now();
   let exitCode = 0;
   let result;
+  // R18:一次性执行也做一轮静默召回。放在这里而非 runAgentCore:core 不读记忆库,
+  // 否则所有 agent 单测都会读到本机真实记忆。子 agent(spawn)不经过这里,天然零注入。
+  const memoryRecall = memoryOn && isTurnRecallEnabled() ? buildTurnRecallSection(prompt) : '';
   const invokeCore = () =>
     runAgentCore({
       history,
       userInput: prompt,
       hooks,
+      ...(memoryRecall ? { memoryRecall } : {}),
       ...(jobSignal ? { signal: jobSignal } : {}),
       runtimeContext: runtime.context,
       ...(resumedFromCheckpoint ? { continueFromHistory: true } : {}),
@@ -350,6 +355,8 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     // R4.1:一次性执行同样留下度量 —— 否则 `mocode -p` 用的那一侧永远是空白。
     // 只在前摄计数有增量时才落盘,健康快照失败静默。
     flushProactiveStats();
+    // R18:一次性执行的静默召回计数同样落盘,否则 `mocode -p` 那一侧永远空白。
+    flushTurnRecallStats();
     writeMemoryHealth(memoryOn);
     await runtime.close();
     if (wt) {

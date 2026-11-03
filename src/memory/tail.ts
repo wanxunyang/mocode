@@ -85,6 +85,24 @@ export function buildMemoryTailSection(enabled: boolean = true): string {
     .join('\n');
 }
 
+/**
+ * 本会话内新增或变更过的条目 id。
+ *
+ * 给 R18 每轮静默召回用:这批条目已经由这里(尾注)负责播报,召回再讲一遍等于
+ * 同一轮把同一条记忆说两次——模型会以为那是两件事,而且白烧 token。
+ * 基线未拍过时返回空集(调用方未接线,此时不该替它推断谁是新条目)。
+ */
+export function memoryTailChangedIds(): Set<string> {
+  if (!baseline) return new Set();
+  const out = new Set<string>();
+  for (const e of loadAll()) {
+    if (e.type === 'episode') continue;
+    const before = baseline.get(e.id);
+    if (before === undefined || before !== e.updatedAt) out.add(e.id);
+  }
+  return out;
+}
+
 /** 仅供测试:清掉基线,避免共享进程里上一个测试的基线串味。 */
 export function __resetMemoryBaselineForTests(): void {
   baseline = null;

@@ -51,6 +51,12 @@ export interface ModelTurnInput {
   /** 本次 run 的步数上限(来自 opts.maxSteps,经 profile cap);用于剩余步数预警。 */
   maxSteps: number;
   readDedup: ReadDedup;
+  /**
+   * R18:本轮静默召回的记忆段。由 run-coordinator 在**每次 run 开头**算一次后传入,
+   * 而不是在 buildRequestHistory 里现算 —— 后者每个 step(含压缩后重建)都会被调用,
+   * 现算等于一轮跑 N 次检索、N 次建索引,还会把观测计数翻 N 倍。
+   */
+  memoryRecall?: string;
   cacheState: ModelTurnCacheState;
   turnLifecycle: TurnLifecycle;
   cancellationLifecycle: { restore(): void };
@@ -106,7 +112,19 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   runtimeContextState.activeTools = activeTools;
 
   let sessionStateText = opts.suppressSessionState ? '' : ctx.buildSessionStateReminder();
-  runtimeContextState.ephemeralText = sessionStateText || undefined;
+  // R18/R17:两个记忆附加段一旦非空,末尾就多出一条 system 消息。下面所有涉及
+  // 「history 长度 -1」与 ephemeral token 估算的地方必须用**同一个**判据,否则用量条
+  // 与压缩压力线会持续低估(召回段 + 尾注的字数并不小)。
+  const memoryRecallText = input.memoryRecall ?? '';
+  const memoryTailText = opts.memoryTail ?? '';
+  const ephemeralJoined = (): string =>
+    [sessionStateText, memoryRecallText, memoryTailText].filter((s) => s.length > 0).join('\n\n');
+  /** 与 ephemeralJoined() 同源,保证「发了多少」与「算多大」永不漂移。 */
+  const ephemeralTokenEstimate = (): number => {
+    const joined = ephemeralJoined();
+    return joined ? estimateTokens(joined) : 0;
+  };
+  runtimeContextState.ephemeralText = ephemeralJoined() || undefined;
   onContextUpdate?.();
 
   let historyRebuilt = false;
@@ -176,7 +194,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     history: historyManager.snapshot(),
     step,
     tools: activeTools,
-    ephemeralTokens: sessionStateText ? estimateTokens(sessionStateText) : 0,
+    ephemeralTokens: ephemeralTokenEstimate(),
     signal,
   });
   historyRebuilt = trimResult.kind === 'rebuild';
@@ -250,6 +268,9 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
           '4. Before re-running a search/read you think you already did, check the summary and notes first; repeat only if the result is genuinely missing or the target changed.'
         : '',
       sessionStateText,
+      // R18:每轮静默召回。放在 R17 尾注之前:尾注说的是「刚变了什么」(时间上最新),
+      // 召回说的是「这轮可能用得上什么」(topic 相关),新的信息靠后更能被看见。
+      input.memoryRecall ?? '',
       // R17:会话内记忆尾注。放最后——它是最"新"的信息,且每轮可能不同,
       // 放在固定段之后能最大限度保住前缀缓存的可复用部分。
       opts.memoryTail ?? '',
@@ -484,7 +505,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
           history: historyManager.snapshot(),
           step,
           tools: activeTools,
-          ephemeralTokens: sessionStateText ? estimateTokens(sessionStateText) : 0,
+          ephemeralTokens: ephemeralTokenEstimate(),
           signal,
         });
         const overflowStats = overflowResult.kind === 'aborted' ? {} : overflowResult.stats;
@@ -550,9 +571,9 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     runtimeContextState.promptAnchor = {
       measuredPromptTokens: result.usage.promptTokens,
       baseRaw: estimated,
-      historyLen: sessionStateText ? requestHistoryLen - 1 : requestHistoryLen,
+      historyLen: ephemeralJoined() ? requestHistoryLen - 1 : requestHistoryLen,
       tools: activeTools,
-      ephemeralText: sessionStateText,
+      ephemeralText: ephemeralJoined(),
     };
   }
   hooks.onChatDone?.();

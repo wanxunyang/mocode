@@ -104,6 +104,10 @@ export async function runAgentCoreLegacy(
     const base = outcome.output ?? '';
     return { ...outcome, output: base ? `${base}\n\n${proactive}` : proactive };
   };
+  // R18:每轮静默召回。段由**调用方**算(见 run-contracts 的 memoryRecall 注释):
+  // core 不读记忆库,否则每个 agent 单测都会去读真实的 ~/.mocode/memory.jsonl,
+  // 测试既失去隔离性、断言也会被本机记忆内容污染;spawn 不传即天然零注入。
+  const memoryRecall = opts.memoryRecall ?? '';
   const runtimeToolSchemas: OpenAI.Chat.Completions.ChatCompletionTool[] = ctx.toolRuntime.tools.map((tool) => ({
     type: 'function',
     function: {
@@ -249,6 +253,7 @@ export async function runAgentCoreLegacy(
           step,
           maxSteps,
           readDedup,
+          memoryRecall,
           cacheState: modelCacheState,
           turnLifecycle,
           cancellationLifecycle,

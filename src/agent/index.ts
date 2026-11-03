@@ -10,7 +10,7 @@ import { summarizeToolCall, summarizeToolResult, truncateDisplay, fmtElapsed, fm
 import { renderFileChange, renderMultiFileChange } from '../ui/diff.js';
 import * as layout from '../ui/layout.js';
 import * as batch from '../ui/batch.js';
-import { config } from '../config/index.js';
+import { config, isMemoryEnabled } from '../config/index.js';
 import { isMutationTool, type AgentHooks, type AgentRunResult, type ContentPart } from './core.js';
 import { createRuntime, defaultRuntime, Runtime } from '../runtime/index.js';
 import { createPetHooks } from '../pet/state.js';
@@ -19,6 +19,8 @@ import { t } from '../i18n/index.js';
 import { isToolErrorOutput } from '../tools/result.js';
 import { appendCurrentSessionTraceEvent } from '../session/index.js';
 import type { ToolPolicyController } from '../tools/policy.js';
+import { buildTurnRecallSection, isTurnRecallEnabled } from '../memory/turn-recall.js';
+import { memoryTailChangedIds } from '../memory/tail.js';
 
 /** 当前 turn 的 batch id(runAgent 内闭包变量;一条 turn 一轮 tool batch 结束即清空)。 */
 let currentBatchId: string | null = null;
@@ -532,6 +534,21 @@ export async function runAgent(
   const combinedHooks: AgentHooks = mergeHooks(hooks, petHooks);
 
   let result: AgentRunResult | undefined;
+  // R18:每轮静默召回。在这里(而非 runAgentCore)现算的理由:
+  // ① runAgent 是 TUI 组合根,只有真实用户轮会走到;runAgentCore 被全部 agent 单测
+  //    直接调用,在那儿读记忆库会让测试读到本机真实记忆、失去隔离性;
+  // ② spawn 走 runtime.run 不经过这里,子 agent 天然零注入。
+  // 排除 memoryTailChangedIds():那批条目由 R17 尾注播报,同一轮不应讲两遍。
+  const userText = Array.isArray(userInput)
+    ? userInput
+        .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+        .map((part) => part.text)
+        .join(' ')
+    : userInput;
+  const memoryRecall =
+    isMemoryEnabled() && isTurnRecallEnabled()
+      ? buildTurnRecallSection(userText, { excludeIds: memoryTailChangedIds() })
+      : '';
   try {
     result = await runtime.run({
       turn: 'new',
@@ -544,6 +561,7 @@ export async function runAgent(
       toolPolicy,
       initialToolRoute,
       memoryTail,
+      memoryRecall,
       onTraceEvent: appendCurrentSessionTraceEvent,
     });
   } finally {

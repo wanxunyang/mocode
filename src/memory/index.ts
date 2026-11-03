@@ -124,9 +124,20 @@ export {
 export {
   captureMemoryBaseline,
   buildMemoryTailSection,
+  memoryTailChangedIds,
   __resetMemoryBaselineForTests,
   type MemoryBaseline,
 } from './tail.js';
+
+export {
+  buildTurnRecallSection,
+  isTurnRecallEnabled,
+  flushTurnRecallStats,
+  turnRecallCounters,
+  __resetTurnRecallForTests,
+  type TurnRecallOptions,
+  type TurnRecallCounters,
+} from './turn-recall.js';
 
 export {
   isCompactHandoffEnabled,

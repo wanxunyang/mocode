@@ -51,6 +51,7 @@ import {
   formatReflectResult,
   flushRecallStats,
   flushProactiveStats,
+  flushTurnRecallStats,
   writeMemoryHealth,
   resetProactiveTurn,
   captureMemoryBaseline,
@@ -774,6 +775,8 @@ export async function startRepl(
       // 与召回计数一起在轮末落一次。健康快照仍只由 /memory health 与退出路径写,
       // 因为它要读全库 + 算 stale,不该每轮付这个成本。
       flushProactiveStats();
+      // R18:每轮静默召回的计数同样在内存累计,轮末落一次。
+      flushTurnRecallStats();
       turnCount++;
       if (turnCount % config.reflectEveryN === 0) {
         kickoffReflection(snapshotTranscript(history, 20));
@@ -1162,6 +1165,7 @@ export async function startRepl(
   // 快照却还是旧数字"的错位。
   await reflectOnExit(snapshotTranscript(history, 20));
   flushProactiveStats();
+  flushTurnRecallStats();
   writeMemoryHealth(isMemoryEnabled());
   await runtime.close();
   await closeAllMcp();

@@ -110,4 +110,15 @@ export interface AgentRunOptions {
    * 空串/undefined 时零注入。
    */
   memoryTail?: string;
+  /**
+   * R18:每轮静默召回段,由调用方按本用户轮文本现算(见 memory/turn-recall.ts)。
+   *
+   * 与 memoryTail 同一形态(调用方算、core 只负责拼),而不是在 core 里现算:
+   * ① core 不读记忆库 —— 否则每个 agent 单测都会去读真实的 `~/.mocode/memory.jsonl`,
+   *    测试失去隔离性,而且测试断言会被本机记忆内容污染;
+   * ② spawn 不传 → 子 agent 天然零注入(它有父 agent 筛过的任务上下文,再召回一遍
+   *    等于同一批记忆一轮两次,并发 spawn 还要各付一次全库建索引)。
+   * 空串/undefined 时零注入。
+   */
+  memoryRecall?: string;
 }
