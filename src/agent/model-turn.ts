@@ -13,7 +13,9 @@ import { countOversizedImagePlaceholders, countOversizedImages } from '../contex
 import type { ContextState } from '../session/compact.js';
 import { getActiveSessionStore } from '../session/store.js';
 import { getCurrentSessionId } from '../session/state.js';
+import { appendGlobalUsage } from '../session/global-usage.js';
 import { toUsageRecord } from '../session/usage-stats.js';
+import { getWorkspaceRoot } from '../workspace/index.js';
 import type { ReadDedup } from '../tools/read-dedup.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
 import type { AgentRunOptions, AgentRunResult } from './run-contracts.js';
@@ -550,6 +552,20 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   const record = toUsageRecord(step, 'main', result.usage, stepPromptEst);
   const sessionId = getCurrentSessionId();
   if (record && sessionId) getActiveSessionStore().appendUsage(sessionId, record);
+  // 全局跨工作空间账本(/usage 按天汇总);best-effort,见 global-usage.ts。
+  if (result.usage && sessionId) {
+    appendGlobalUsage({
+      workspace: getWorkspaceRoot(),
+      model: requestModel,
+      phase: 'main',
+      sessionId,
+      input: result.usage.promptTokens,
+      output: result.usage.completionTokens,
+      cached: result.usage.cachedTokens,
+      reasoning: result.usage.reasoningTokens,
+      cacheCreation: result.usage.cacheCreationTokens,
+    });
+  }
   if (result.usage) {
     cacheState.lastStepPromptTokens = result.usage.promptTokens;
     if (result.usage.cachedTokens > 0) cacheState.providerCacheSeen = true;

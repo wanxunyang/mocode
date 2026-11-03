@@ -45,7 +45,9 @@ import { collectArtifactRefs } from '../context/artifacts.js';
 import { writeCompactionSnapshot } from './notes.js';
 import { getActiveSessionStore } from './store.js';
 import { getCurrentSessionId } from './state.js';
+import { appendGlobalUsage } from './global-usage.js';
 import { toUsageRecord } from './usage-stats.js';
+import { getWorkspaceRoot } from '../workspace/index.js';
 
 /**
  * 上下文压缩子系统:
@@ -859,6 +861,20 @@ async function forkSummarize(
       const rec = toUsageRecord(state.currentStep ?? -1, 'compact', r.usage);
       const sessionId = getCurrentSessionId();
       if (rec && sessionId) getActiveSessionStore().appendUsage(sessionId, rec);
+      // 全局跨工作空间账本:压缩调用单列 phase=compact(/usage 汇总区分主对话与压缩开销)。
+      if (r.usage && sessionId) {
+        appendGlobalUsage({
+          workspace: getWorkspaceRoot(),
+          model: config.model,
+          phase: 'compact',
+          sessionId,
+          input: r.usage.promptTokens,
+          output: r.usage.completionTokens,
+          cached: r.usage.cachedTokens,
+          reasoning: r.usage.reasoningTokens,
+          cacheCreation: r.usage.cacheCreationTokens,
+        });
+      }
     }
     // 同 legacy:幻觉 tool_calls 或空 content → 失败(调用方回落 microcompact)。
     if (r.toolCalls.length > 0 || !r.content) return null;
