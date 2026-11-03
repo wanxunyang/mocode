@@ -14,7 +14,7 @@
 // 叶子依赖:node:fs / node:path / sandbox/root(共享叶子)/ changeset/hash(叶子)。
 // 不依赖 store.ts(反向依赖会成环:store 要用本模块在写入时算 hash)。
 
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { contentHash, type ContentHash } from '../changeset/hash.js';
 import { getSandboxRoot } from '../sandbox/root.js';
@@ -29,6 +29,17 @@ const MAX_ANCHOR_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_SYMBOL_FRAGMENT_LINES = 400;
 
 /**
+ * R7.1 目录锚点最多看多少个子项。
+ *
+ * 为什么要封顶:`evaluateAnchor` 在 `listEntries` / `searchEntries` / `proactive` 这些
+ * **每次召回都会走的同步函数**里被调用,递归整棵树会让一次启动变成全盘 stat。
+ * 只数直接子项的名字,足以发现「新增/删除/改名」,也就是「我记的这个目录已经不是
+ * 那个目录了」这一档最要紧的变化。`node_modules` 这类目录超过上限时只取前 N 个,
+ * 指纹退化为「前缀不变即 fresh」——比为了精确而把启动拖慢好几秒划算。
+ */
+const MAX_DIR_ENTRIES = 512;
+
+/**
  * 一条代码锚点。
  *
  * `path` 一律存**工作区相对路径 + 正斜杠**,这样同一条记忆在另一台机器、另一个 clone
@@ -36,11 +47,29 @@ const MAX_SYMBOL_FRAGMENT_LINES = 400;
  * 任意位置,如 `~/.mocode/config`)。
  */
 export interface MemoryAnchor {
+  /**
+   * R7.1 锚点种类。**缺省 `file`**——R2 时代的锚点全部是文件,见字段即知,
+   * 因此旧条目无需迁移,读入后按 `kind ?? 'file'` 解释。
+   *
+   * 三种的校验能力刻意不同(见 `evaluateAnchor`):
+   *  - `file`:内容哈希 + 符号片段,最准;
+   *  - `dir`:子项名字 + mtime 指纹,能发现「新增/删除/改名」,发现不了文件内部改动
+   *    (那要递归读全树,锚点判定在召回热路径上,付不起);
+   *  - `url`:只记录,恒判 `unknown`——判定必须同步,而网络请求不能出现在
+   *    `listEntries`/`searchEntries`/`proactive` 这些每次召回都会走的同步函数里。
+   */
+  kind?: 'file' | 'dir' | 'url';
+  /** 文件/目录路径(工作区相对,正斜杠)或 URL 原文。 */
   path: string;
   /** 可选符号名:有则只锚定该符号的片段,避免「文件里别的函数改了」造成误报。 */
   symbol?: string;
-  /** 原始内容哈希,**与 read_file artifact hash 同口径**。 */
-  contentHash: ContentHash;
+  /**
+   * 原始内容哈希,**与 read_file artifact hash 同口径**。
+   *
+   * `url` 锚点没有它(离线算不出来),故为可选。缺省时 `evaluateAnchor` 走
+   * kind 分派,不会拿 `undefined` 去比对。
+   */
+  contentHash?: ContentHash;
   /**
    * R2.5 抗格式化哈希:剥离注释与空白后再算。
    *
@@ -53,6 +82,8 @@ export interface MemoryAnchor {
 
 /** 调用方(memory_save / memory_update / 反思)提供的锚点意图,hash 由本模块现算。 */
 export interface AnchorInput {
+  /** R7.1:缺省 `file` —— 与 R2 的入参形状完全兼容,老调用方不必改。 */
+  kind?: 'file' | 'dir' | 'url';
   path: string;
   symbol?: string;
 }
@@ -261,9 +292,52 @@ function hashPair(text: string, path?: string): { contentHash: ContentHash; norm
  */
 export type BuildAnchorResult = { ok: true; anchor: MemoryAnchor } | { ok: false; reason: string };
 
+/**
+ * R7.1 目录指纹:只取**直接子项名单**(排序后)。
+ *
+ * 刻意**不含目录 mtime**——设计文档原写「子项名 + mtime」,实现时去掉:mtime 在
+ * 「往目录里写个临时文件再删掉」时也会变,而结构完全没变,那是一次假 stale;
+ * 反之文件内容改动本就不是目录锚点该管的事(那该锚文件)。宁可漏报不可误报,
+ * 与 `normHash` 的判据一致。
+ *
+ * 不递归的理由写在 `MAX_DIR_ENTRIES` 上面。名字列表负责「新增/删除/改名」,
+ * 子目录内部的变化看不见——这是为同步热路径付得起的价钱。
+ */
+function hashDir(abs: string): { ok: true; hash: ContentHash } | { ok: false; reason: string } {
+  let names: string[];
+  try {
+    const s = statSync(abs);
+    if (!s.isDirectory()) return { ok: false, reason: '不是目录' };
+    names = readdirSync(abs).sort();
+  } catch {
+    return { ok: false, reason: '目录不存在或不可读' };
+  }
+  const shown = names.slice(0, MAX_DIR_ENTRIES);
+  const over = names.length - shown.length;
+  const payload = `dir:${shown.join('\n')}${over > 0 ? `\n+${over}` : ''}`;
+  return { ok: true, hash: contentHash(payload) };
+}
+
 export function buildAnchor(input: AnchorInput, root?: string): BuildAnchorResult {
   const rawPath = String(input.path ?? '').trim();
   if (!rawPath) return { ok: false, reason: 'path 为空' };
+  const kind = input.kind ?? 'file';
+
+  // URL:只记录,不校验。判定必须同步(见 MemoryAnchor.kind),而 HTTP 请求不能出现在
+  // listEntries / searchEntries / proactive 里。存下来仍有价值——它让「这条记忆说的是
+  // 哪个页面」可追溯,也让将来的异步校验有据可依;但**绝不**假装它被验证过。
+  if (kind === 'url') {
+    if (!/^https?:\/\//i.test(rawPath)) return { ok: false, reason: 'URL 必须以 http(s):// 开头' };
+    return { ok: true, anchor: { kind: 'url', path: rawPath } };
+  }
+
+  if (kind === 'dir') {
+    const abs = resolveAnchorPath(rawPath, root);
+    const d = hashDir(abs);
+    if (!d.ok) return { ok: false, reason: d.reason };
+    return { ok: true, anchor: { kind: 'dir', path: toAnchorPath(rawPath, root), contentHash: d.hash } };
+  }
+
   const symbol = input.symbol?.trim() || undefined;
   const abs = resolveAnchorPath(rawPath, root);
   const file = readCached(abs);
@@ -282,7 +356,7 @@ export function buildAnchor(input: AnchorInput, root?: string): BuildAnchorResul
   };
 }
 
-/** 批量构建:丢弃失败项、按 path+symbol 去重、封顶 MAX_ANCHORS。 */
+/** 批量构建:丢弃失败项、按 kind+path+symbol 去重、封顶 MAX_ANCHORS。 */
 export function buildAnchors(inputs: readonly AnchorInput[] | undefined, root?: string): MemoryAnchor[] {
   if (!inputs || inputs.length === 0) return [];
   const out: MemoryAnchor[] = [];
@@ -290,7 +364,7 @@ export function buildAnchors(inputs: readonly AnchorInput[] | undefined, root?: 
   for (const input of inputs) {
     const r = buildAnchor(input, root);
     if (!r.ok) continue;
-    const key = `${r.anchor.path}\u0000${r.anchor.symbol ?? ''}`;
+    const key = `${r.anchor.kind ?? 'file'}\u0000${r.anchor.path}\u0000${r.anchor.symbol ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(r.anchor);
@@ -299,8 +373,25 @@ export function buildAnchors(inputs: readonly AnchorInput[] | undefined, root?: 
   return out;
 }
 
-/** 判定单个锚点的现状。 */
+/** 判定单个锚点的现状。按 `kind` 分派;缺省 `file`(R2 旧条目零迁移)。 */
 export function evaluateAnchor(anchor: MemoryAnchor, root?: string): AnchorEvaluation {
+  const kind = anchor.kind ?? 'file';
+
+  if (kind === 'url') {
+    // 刻意恒 unknown,不是「懒得做」:unknown 不算 stale(见 EntryAnchorState),
+    // 所以 URL 锚点既不会冤枉条目,也不会假装校验过。
+    return { anchor, status: 'unknown', detail: 'URL 锚点不做同步校验(需网络)' };
+  }
+
+  if (kind === 'dir') {
+    const d = hashDir(resolveAnchorPath(anchor.path, root));
+    if (!d.ok) return { anchor, status: 'missing', detail: d.reason };
+    if (anchor.contentHash && d.hash === anchor.contentHash) return { anchor, status: 'fresh' };
+    if (!anchor.contentHash) return { anchor, status: 'unknown', detail: '目录锚点缺指纹' };
+    return { anchor, status: 'stale', detail: '目录结构已变更' };
+  }
+
+  if (!anchor.contentHash) return { anchor, status: 'unknown', detail: '锚点缺内容哈希' };
   const abs = resolveAnchorPath(anchor.path, root);
   const file = readCached(abs);
   if (file.oversized) return { anchor, status: 'unknown', detail: '文件过大,未校验' };
@@ -314,6 +405,12 @@ export function evaluateAnchor(anchor: MemoryAnchor, root?: string): AnchorEvalu
   return { anchor, status: 'stale', detail: '内容已变更' };
 }
 
+/** 锚点标签(工具输出与 `/memory show` 共用)。URL 直接给原文,不加 `#symbol`。 */
+export function anchorLabel(anchor: MemoryAnchor): string {
+  if ((anchor.kind ?? 'file') !== 'file') return anchor.path;
+  return anchor.symbol ? `${anchor.path}#${anchor.symbol}` : anchor.path;
+}
+
 /** 判定一条记忆的全部锚点。 */
 export function evaluateAnchors(anchors: readonly MemoryAnchor[] | undefined, root?: string): EntryAnchorState {
   if (!anchors || anchors.length === 0) return NOT_ANCHOR_STALE;
@@ -321,7 +418,7 @@ export function evaluateAnchors(anchors: readonly MemoryAnchor[] | undefined, ro
   const missing: string[] = [];
   for (const anchor of anchors) {
     const r = evaluateAnchor(anchor, root);
-    const label = anchor.symbol ? `${anchor.path}#${anchor.symbol}` : anchor.path;
+    const label = anchorLabel(anchor);
     if (r.status === 'stale') changed.push(label);
     else if (r.status === 'missing') missing.push(label);
   }
@@ -355,13 +452,17 @@ export function evaluateAnchorsAgainst(
   anchorPath?: string,
 ): EntryAnchorState {
   if (!anchors || anchors.length === 0) return NOT_ANCHOR_STALE;
-  const scoped = anchorPath ? anchors.filter((a) => a.path === anchorPath) : anchors;
+  // 只判 `file` 类:调用方(或 `read_file`)手里握着的是**一段文件文本**,
+  // 拿它去判目录指纹或 URL 必然得出"对不上",那是假 stale。
+  const fileAnchors = anchors.filter((a) => (a.kind ?? 'file') === 'file' && !!a.contentHash);
+  if (fileAnchors.length === 0) return NOT_ANCHOR_STALE;
+  const scoped = anchorPath ? fileAnchors.filter((a) => a.path === anchorPath) : fileAnchors;
   if (scoped.length === 0) return NOT_ANCHOR_STALE;
   const changed: string[] = [];
   const missing: string[] = [];
   for (const anchor of scoped) {
     const target = anchor.symbol ? extractSymbolFragment(text, anchor.symbol) : text;
-    const label = anchor.symbol ? `${anchor.path}#${anchor.symbol}` : anchor.path;
+    const label = anchorLabel(anchor);
     if (target === null) {
       // 符号不在**这个文件**里(调用方已按 path 过滤):文件在、符号没了(重命名/删除),
       // 按 missing 处理。
@@ -375,8 +476,8 @@ export function evaluateAnchorsAgainst(
   return { stale: changed.length > 0 || missing.length > 0, changed, missing };
 }
 
-/** 该条目是否锚定了给定文件(供 read_file 反向查找)。 */
+/** 该条目是否锚定了给定文件(供 read_file 反向查找)。目录/URL 锚点不参与。 */
 export function anchorsFile(anchors: readonly MemoryAnchor[] | undefined, anchorPath: string): boolean {
   if (!anchors || anchors.length === 0) return false;
-  return anchors.some((a) => a.path === anchorPath);
+  return anchors.some((a) => (a.kind ?? 'file') === 'file' && a.path === anchorPath);
 }

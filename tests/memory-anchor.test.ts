@@ -23,10 +23,12 @@ import {
   extractSymbolFragment,
   normalizeForHash,
   toAnchorPath,
+  anchorsFile,
   MAX_ANCHORS,
   __resetAnchorCacheForTests,
 } from '../src/memory/anchor.js';
 import { contentHash } from '../src/changeset/index.js';
+import { buildMemoryHealth } from '../src/memory/health.js';
 import {
   saveEntry,
   updateEntry,
@@ -562,5 +564,131 @@ test(
     assert.equal(loadAll().find((e) => e.id === id)!.anchors, undefined);
     assert.equal(loadAnchorStaleMap().size, 0);
     assert.equal(evaluateAnchors(undefined).stale, false);
+  }),
+);
+// ── R7.1 锚点泛化 ─────────────────────────────────────────────────────────
+
+test(
+  'R7.1 dir 锚点:子项增删改名才 stale,文件内容改动不算（刻意的能力边界）',
+  isolated(() => {
+    mkdirSync(join(process.cwd(), 'assets'), { recursive: true });
+    write('assets/a.txt', 'one');
+    const r = buildAnchor({ kind: 'dir', path: 'assets' });
+    assert.ok(r.ok);
+    const anchor = (r as { ok: true; anchor: never }).anchor;
+    // 旧条目没有 kind 字段,读进来必须按 file 解释——这里显式存了 dir。
+    assert.equal((anchor as { kind?: string }).kind, 'dir');
+    assert.equal(evaluateAnchor(anchor).status, 'fresh');
+
+    // 新增子项 → 目录结构变了。
+    write('assets/b.txt', 'two');
+    assert.equal(evaluateAnchor(anchor).status, 'stale', '新增子项要判 stale');
+
+    // 重建锚点后,改**文件内容**不该让目录锚点失效——它管的是结构,不是内容。
+    const r2 = buildAnchor({ kind: 'dir', path: 'assets' });
+    assert.ok(r2.ok);
+    const anchor2 = (r2 as { ok: true; anchor: never }).anchor;
+    write('assets/a.txt', 'completely different content');
+    assert.equal(evaluateAnchor(anchor2).status, 'fresh', '内容改动不属于目录锚点的职责');
+
+    // 删子项 → stale。
+    rmSync(join(process.cwd(), 'assets', 'b.txt'));
+    assert.equal(evaluateAnchor(anchor2).status, 'stale', '删除子项要判 stale');
+  }),
+);
+
+test(
+  'R7.1 dir 锚点:目录消失判 missing，不是 stale（语义不同：东西没了 vs 变了）',
+  isolated(() => {
+    mkdirSync(join(process.cwd(), 'gone'), { recursive: true });
+    const r = buildAnchor({ kind: 'dir', path: 'gone' });
+    assert.ok(r.ok);
+    const anchor = (r as { ok: true; anchor: never }).anchor;
+    rmSync(join(process.cwd(), 'gone'), { recursive: true, force: true });
+    assert.equal(evaluateAnchor(anchor).status, 'missing');
+
+    // 路径存在但不是目录 → build 阶段就该拒掉,不能造出一个永远 missing 的锚点。
+    write('notadir.txt', 'x');
+    const bad = buildAnchor({ kind: 'dir', path: 'notadir.txt' });
+    assert.equal(bad.ok, false);
+  }),
+);
+
+test(
+  'R7.1 url 锚点:可记录但恒 unknown，且 unknown 不算 stale——绝不联网',
+  isolated(() => {
+    const r = buildAnchor({ kind: 'url', path: 'https://example.com/docs/api' });
+    assert.ok(r.ok);
+    const anchor = (r as { ok: true; anchor: never }).anchor;
+    assert.equal((anchor as { kind?: string }).kind, 'url');
+    assert.equal((anchor as { contentHash?: string }).contentHash, undefined, 'URL 不存 hash（离线算不出来）');
+
+    const ev = evaluateAnchor(anchor);
+    assert.equal(ev.status, 'unknown');
+    // unknown 不是 stale：entry 级判定不能被它拖成「过期」，否则每轮都会误报。
+    assert.equal(evaluateAnchors([anchor]).stale, false);
+
+    // 非 http(s) 不许当 URL 锚点。
+    assert.equal(buildAnchor({ kind: 'url', path: 'file:///etc/passwd' }).ok, false);
+    assert.equal(buildAnchor({ kind: 'url', path: './relative' }).ok, false);
+  }),
+);
+
+test(
+  'R7.1 同一路径可同时是 file 与 dir 锚点（去重键必须含 kind）',
+  isolated(() => {
+    mkdirSync(join(process.cwd(), 'pkg'), { recursive: true });
+    write('pkg/index.ts', 'export const a = 1;\n');
+    const built = buildAnchors([{ path: 'pkg' }, { kind: 'dir', path: 'pkg' }]);
+    // file 锚点指向目录 → build 失败被丢弃;dir 锚点成功。得到 1 条而不是把两条合并。
+    assert.equal(built.length, 1);
+    assert.notEqual(built[0].kind, undefined);
+
+    const both = buildAnchors([{ path: 'pkg/index.ts' }, { kind: 'file', path: 'pkg/index.ts' }]);
+    assert.equal(both.length, 1, '同 kind 同 path 才算重复');
+  }),
+);
+
+test(
+  'R7.1 evaluateAnchorsAgainst 只判 file 锚点：目录/URL 锚点不该让 read_file 回注消失',
+  isolated(() => {
+    mkdirSync(join(process.cwd(), 'src2'), { recursive: true });
+    write('src2/x.ts', 'export const x = 1;\n');
+    const f = buildAnchor({ path: 'src2/x.ts' });
+    const d = buildAnchor({ kind: 'dir', path: 'src2' });
+    const u = buildAnchor({ kind: 'url', path: 'https://example.com' });
+    assert.ok(f.ok && d.ok && u.ok);
+    const anchors = [
+      (f as { ok: true; anchor: never }).anchor,
+      (d as { ok: true; anchor: never }).anchor,
+      (u as { ok: true; anchor: never }).anchor,
+    ];
+    const text = 'export const x = 1;\n';
+    const st = evaluateAnchorsAgainst(anchors, text, 'src2/x.ts');
+    assert.equal(st.stale, false, '非 file 锚点不参与文本判定,否则必然假 stale');
+    assert.equal(anchorsFile(anchors, 'src2/x.ts'), true);
+    assert.equal(anchorsFile(anchors, 'src2'), false, '目录锚点不该被 read_file 反向索引命中');
+  }),
+);
+
+test(
+  'R7.1 health 按 kind 计数（逐锚点，不是逐条目）',
+  isolated(() => {
+    mkdirSync(join(process.cwd(), 'd1'), { recursive: true });
+    write('d1/f.ts', 'export const v = 1;\n');
+    saveEntry({
+      name: '多锚点条目',
+      summary: 's',
+      body: 'b',
+      type: 'reference',
+      anchors: [{ path: 'd1/f.ts' }, { kind: 'dir', path: 'd1' }, { kind: 'url', path: 'https://example.com' }],
+    });
+    const h = buildMemoryHealth();
+    assert.equal(h.anchors.byKind.file, 1);
+    assert.equal(h.anchors.byKind.dir, 1);
+    assert.equal(h.anchors.byKind.url, 1);
+    // 三条锚点只算一条「已锚条目」——两个数说的不是一件事。
+    assert.equal(h.anchors.anchored, 1);
+    assert.equal(h.anchors.stale, 0, 'URL 的 unknown 不许污染 stale 计数');
   }),
 );

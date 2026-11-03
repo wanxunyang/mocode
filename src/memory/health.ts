@@ -52,7 +52,17 @@ export interface MemoryHealth {
    */
   trigger: { required: number; withTrigger: number; coverage: number };
   /** R2 锚点失效情况。stale 率高说明符号片段切得太粗,或代码在快速重构。 */
-  anchors: { anchored: number; stale: number; staleRate: number };
+  anchors: {
+    anchored: number;
+    stale: number;
+    staleRate: number;
+    /**
+     * R7.1 按种类计数。**恒为 `file:N` 是最常见的形态**,但把 dir/url 单独列出来
+     * 才看得出泛化通道到底有没有被用上——否则"0 条已锚"与"全是 file 锚点"
+     * 在只有一个总数时长得一样。
+     */
+    byKind: Record<'file' | 'dir' | 'url', number>;
+  };
   /** R14 派生失效情况。恒为 0 有两种含义(没有派生条目 / 源都没失效),要连 anchored 一起看。 */
   derived: { total: number; stale: number; staleRate: number };
   /** R6/R11 情节:产出量与巩固量。consolidated 长期为 0 说明 R11 没真跑起来。 */
@@ -110,6 +120,13 @@ export function buildMemoryHealth(): MemoryHealth {
   const derivedEntries = active.filter((e) => (e.derivedFrom?.length ?? 0) > 0);
   const anchorEntries = active.filter((e) => (e.anchors?.length ?? 0) > 0);
 
+  // R7.1:按 kind 计数。逐锚点统计而不是逐条目——一条记忆可以同时锚定文件与目录,
+  // 只数条目会把「多用了一种锚点」这一事实抹掉。
+  const anchorByKind: Record<'file' | 'dir' | 'url', number> = { file: 0, dir: 0, url: 0 };
+  for (const e of active) {
+    for (const a of e.anchors ?? []) anchorByKind[a.kind ?? 'file'] += 1;
+  }
+
   const episodes = active.filter((e) => e.type === 'episode');
   const consolidated = episodes.filter((e) => !!e.derivedInto);
 
@@ -146,6 +163,7 @@ export function buildMemoryHealth(): MemoryHealth {
       anchored: anchorEntries.length,
       stale: anchorEntries.filter((e) => anchorStale.get(e.id)?.stale).length,
       staleRate: rate(anchorEntries.filter((e) => anchorStale.get(e.id)?.stale).length, anchorEntries.length),
+      byKind: anchorByKind,
     },
     derived: {
       total: derivedEntries.length,

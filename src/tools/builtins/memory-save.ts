@@ -16,11 +16,14 @@ function parseAnchorInputs(raw: unknown): AnchorInput[] {
   const out: AnchorInput[] = [];
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
-    const a = item as { path?: unknown; symbol?: unknown };
+    const a = item as { kind?: unknown; path?: unknown; symbol?: unknown };
     const p = typeof a.path === 'string' ? a.path.trim() : '';
     if (!p) continue;
+    // R7.1:非法 kind 一律按 file 处理。静默纠正比报错好——报错会让模型整条记忆都放弃写,
+    // 而它本来只是想锚一个文件,顺带把 kind 拼错了。
+    const k = a.kind === 'dir' || a.kind === 'url' ? a.kind : undefined;
     const s = typeof a.symbol === 'string' ? a.symbol.trim() : '';
-    out.push({ path: p, ...(s ? { symbol: s } : {}) });
+    out.push({ ...(k ? { kind: k } : {}), path: p, ...(s ? { symbol: s } : {}) });
   }
   return out;
 }
@@ -103,13 +106,19 @@ export const memorySaveTool: Tool = {
       anchors: {
         type: 'array',
         description:
-          'R2 code anchors: the code this memory talks about. Record them when the memory describes how a specific file/function works, so a later change to that code can mark the memory stale instead of silently serving an outdated fact. Pass paths/symbols only — the content hash is computed for you at write time. Anchors that cannot be resolved (file or symbol not found) are dropped.',
+          'Anchors: the thing this memory talks about, so a later change marks the memory stale instead of silently serving an outdated fact. kind=file (default) for a file or one of its symbols; kind=dir for a directory (detects added/removed/renamed entries, not edits inside files); kind=url for a web page (recorded as provenance only — it is never fetched, so it can never be verified). Pass paths/symbols only — hashes are computed for you at write time. Anchors that cannot be resolved are dropped.',
         items: {
           type: 'object',
           properties: {
+            kind: {
+              type: 'string',
+              enum: ['file', 'dir', 'url'],
+              description: 'Default "file". Use "dir" for a directory, "url" for a web page.',
+            },
             path: {
               type: 'string',
-              description: 'Workspace-relative file path, e.g. "src/memory/store.ts" (forward slashes)',
+              description:
+                'Workspace-relative file/directory path (forward slashes), e.g. "src/memory/store.ts" — or an http(s) URL when kind=url',
             },
             symbol: {
               type: 'string',

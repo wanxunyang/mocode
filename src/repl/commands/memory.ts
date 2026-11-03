@@ -39,7 +39,7 @@ import {
   type AuditRecord,
   type MemoryEntry,
 } from '../../memory/index.js';
-import { evaluateAnchors, evaluateAnchor } from '../../memory/anchor.js';
+import { evaluateAnchors, evaluateAnchor, anchorLabel } from '../../memory/anchor.js';
 import { unhandled, next, type CommandHandler } from './types.js';
 
 /** /profile 改动画像后,让 About you 段(history[0])立刻反映,不用等重启。 */
@@ -150,7 +150,7 @@ export function renderEntryDetail(e: MemoryEntry): string {
     );
     for (const a of e.anchors) {
       const r = evaluateAnchor(a);
-      const label = a.symbol ? `${a.path}#${a.symbol}` : a.path;
+      const label = anchorLabel(a);
       const flag = r.status === 'fresh' ? '' : ` ${ui.dim}[${r.status}${r.detail ? `: ${r.detail}` : ''}]${ui.reset}`;
       lines.push(`    ${ui.dim}${label}${ui.reset}${flag}`);
     }

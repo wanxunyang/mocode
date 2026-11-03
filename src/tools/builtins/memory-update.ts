@@ -11,11 +11,13 @@ function parseAnchorInputs(raw: unknown): AnchorInput[] {
   const out: AnchorInput[] = [];
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
-    const a = item as { path?: unknown; symbol?: unknown };
+    const a = item as { kind?: unknown; path?: unknown; symbol?: unknown };
     const p = typeof a.path === 'string' ? a.path.trim() : '';
     if (!p) continue;
+    // R7.1:非法 kind 按 file 处理(与 memory_save 同口径),不因此丢整条锚点。
+    const k = a.kind === 'dir' || a.kind === 'url' ? a.kind : undefined;
     const s = typeof a.symbol === 'string' ? a.symbol.trim() : '';
-    out.push({ path: p, ...(s ? { symbol: s } : {}) });
+    out.push({ ...(k ? { kind: k } : {}), path: p, ...(s ? { symbol: s } : {}) });
   }
   return out;
 }
@@ -48,11 +50,19 @@ export const memoryUpdateTool: Tool = {
       anchors: {
         type: 'array',
         description:
-          'R2 code anchors — REPLACES the whole set (pass [] to clear). Only paths/symbols; the content hash is recomputed at write time. Use this when the memory is about a specific file/function and you want a later edit to surface it as stale instead of silently serving an outdated fact.',
+          'Anchors — REPLACES the whole set (pass [] to clear). kind=file (default) for a file or symbol; dir for a directory (detects added/removed/renamed entries, not edits inside files); url for a web page (provenance only, never fetched so never verified). Pass paths/symbols only; hashes are recomputed at write time. Use this so a later change surfaces the memory as stale instead of silently serving an outdated fact.',
         items: {
           type: 'object',
           properties: {
-            path: { type: 'string', description: 'Workspace-relative file path, e.g. "src/memory/store.ts"' },
+            kind: {
+              type: 'string',
+              enum: ['file', 'dir', 'url'],
+              description: 'Default "file". Use "dir" for a directory, "url" for a web page.',
+            },
+            path: {
+              type: 'string',
+              description: 'Workspace-relative file/directory path, or an http(s) URL when kind=url',
+            },
             symbol: {
               type: 'string',
               description: 'Optional function/class/const name; prefers a fragment over the whole file',

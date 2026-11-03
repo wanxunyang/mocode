@@ -555,7 +555,10 @@ export function entriesAnchoredTo(
   for (const e of loadAll()) {
     if (!e.anchors || e.anchors.length === 0) continue;
     if (activeOnly && e.status !== 'active') continue;
-    if (!e.anchors.some((a) => a.path === anchorPath)) continue;
+    // R7.1:只认 file 锚点。调用方是 `read_file`(读到一个文件 → 找关于它的记忆),
+    // 目录/URL 锚点即便路径字符串相同也不是同一件事——一条「这条目录里有什么」的记忆
+    // 不该在有人读到同名文件时冒出来。
+    if (!e.anchors.some((a) => (a.kind ?? 'file') === 'file' && a.path === anchorPath)) continue;
     out.push(e);
     if (out.length >= limit) break;
   }
