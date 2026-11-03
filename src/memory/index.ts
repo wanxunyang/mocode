@@ -203,3 +203,15 @@ export {
   type SeedScan,
   type SeedWriteResult,
 } from './seed.js';
+
+export {
+  collectAnchorCandidates,
+  applyAnchorCandidates,
+  extractAnchorPaths,
+  looksLikePath,
+  ANCHOR_BACKFILL_MAX_ENTRIES,
+  ANCHOR_BACKFILL_MAX_PATHS,
+  type AnchorCandidate,
+  type AnchorScan,
+  type AnchorApplyResult,
+} from './anchor-backfill.js';

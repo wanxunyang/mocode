@@ -36,6 +36,9 @@ import {
   // R9.1 冷启动播种
   collectSeedCandidates,
   applySeedCandidates,
+  // R2.6 存量锚点回填
+  collectAnchorCandidates,
+  applyAnchorCandidates,
   type AuditRecord,
   type MemoryEntry,
 } from '../../memory/index.js';
@@ -529,6 +532,78 @@ export const memoryCommands: CommandHandler[] = [
     // 已存在不逐条列:那是「本来就记过了」,安静跳过比刷一屏更有用。
     for (const f of r.refused) {
       layout.contentWrite(`  ${ui.yellow}! ${f.name}${ui.reset}${ui.dim}(命中守卫 ${f.rule},未写入)${ui.reset}\n`);
+    }
+    return next();
+  },
+  // ── R2.6 存量锚点回填(只提议不自动写)──────────────────────────────────
+  (ctx) => {
+    if (ctx.line !== '/memory anchor' && !ctx.line.startsWith('/memory anchor ')) return unhandled();
+    if (!isMemoryEnabled()) {
+      layout.contentWrite(`${ui.dim}(记忆子系统已关闭,/memory anchor 无效。用 /memory_switch 打开)${ui.reset}\n`);
+      return next();
+    }
+    const arg = ctx.line.slice('/memory anchor'.length).trim();
+    const cwd = ctx.banner().cwd;
+    // 每次重扫:两次命令之间可能刚改过文件,列表必须反映此刻的磁盘。
+    const scan = collectAnchorCandidates(cwd);
+
+    if (!arg) {
+      if (scan.candidates.length === 0) {
+        layout.contentWrite(
+          `${ui.dim}(没有可回填的条目:${scan.alreadyAnchored} 条已有锚点,` +
+            `${scan.noPath} 条 body 里没有可解析的工作区路径)${ui.reset}\n`,
+        );
+        return next();
+      }
+      layout.contentWrite(
+        `${ui.accent}可为 ${scan.candidates.length} 条记忆回填代码锚点${ui.reset}` +
+          `${ui.dim}(已有锚点 ${scan.alreadyAnchored} 条已跳过;路径取自条目正文,且此刻文件存在)${ui.reset}\n`,
+      );
+      for (const c of scan.candidates) {
+        layout.contentWrite(`  ${ui.accent}${c.index}${ui.reset}  ${ui.dim}${c.id}${ui.reset}\n`);
+        layout.contentWrite(`      ${ui.dim}${c.paths.join('  ')}${ui.reset}\n`);
+      }
+      if (scan.truncated > 0) {
+        layout.contentWrite(`  ${ui.dim}… 另有 ${scan.truncated} 条超出上限未列出${ui.reset}\n`);
+      }
+      layout.contentWrite(
+        `${ui.dim}/memory anchor <序号>[,<序号>…] 写入选中的 · /memory anchor all 全部写入(${ui.reset}` +
+          `${ui.dim}锚点写入后,代码一改就会在这些条目上显示 STALE-CODE)${ui.reset}\n`,
+      );
+      return next();
+    }
+
+    const picks: number[] | 'all' = arg === 'all' ? 'all' : parseSeedPicks(arg);
+    if (picks !== 'all' && picks.length === 0) {
+      layout.contentWrite(`${ui.dim}用法:/memory anchor · /memory anchor all · /memory anchor 1,3,5${ui.reset}\n`);
+      return next();
+    }
+    if (scan.candidates.length === 0) {
+      layout.contentWrite(`${ui.dim}(没有可回填的条目;先跑 /memory anchor 看列表)${ui.reset}\n`);
+      return next();
+    }
+    if (picks !== 'all') {
+      const outOfRange = picks.filter((n) => !scan.candidates.some((c) => c.index === n));
+      if (outOfRange.length > 0) {
+        layout.contentWrite(
+          `${ui.dim}(序号 ${outOfRange.join(',')} 超出范围:只有 ${scan.candidates.length} 条;先跑 /memory anchor 看列表)${ui.reset}\n`,
+        );
+        return next();
+      }
+    }
+
+    const r = applyAnchorCandidates(scan.candidates, picks, cwd);
+    layout.contentWrite(
+      `${ui.dim}(回填完成:写入 ${r.saved.length} · 条目已消失 ${r.missing.length} · 路径已失效 ${r.lost.length})${ui.reset}\n`,
+    );
+    for (const s of r.saved) {
+      layout.contentWrite(`  ${ui.dim}+ ${s.id}  ${s.paths.join('  ')}${ui.reset}\n`);
+    }
+    // 路径在两次扫描之间消失:必须说出来,否则用户以为"选中的都写好了"。
+    for (const l of r.lost) {
+      layout.contentWrite(
+        `  ${ui.yellow}! ${l.id}${ui.reset}${ui.dim}(正文提到的路径已不存在:${l.paths.join(', ')};未写入)${ui.reset}\n`,
+      );
     }
     return next();
   },
