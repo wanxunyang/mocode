@@ -143,6 +143,7 @@ export {
 
 export {
   kickoffReflection,
+  reflectOnExit,
   drainMemoryBackground,
   getLastReflectResult,
   clearLastReflectResult,

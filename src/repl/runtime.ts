@@ -44,7 +44,7 @@ import {
   gcMemories,
   kickoffReflection,
   kickoffConsolidation,
-  drainMemoryBackground,
+  reflectOnExit,
   getLastReflectResult,
   clearLastReflectResult,
   snapshotTranscript,
@@ -1135,7 +1135,8 @@ export async function startRepl(
     }
   }
 
-  // R6.1:退出前落情节(纯本地、零 LLM,毫秒级;放在 drain 之前让两者并行收尾)。
+  // R6.1:退出前落情节(纯本地、零 LLM,毫秒级;放在反思之前——反思能从本轮情节里
+  // 读到「这个会话干了什么」,顺序反了就少一段素材)。
   finalizeCurrentEpisode(currentSessionId, history, queryHistory);
   // R4.1:退出时写一份健康快照。放这里而不是每轮:它要读全库 + 算 stale,
   // 每轮付这个成本不值当。
@@ -1143,12 +1144,13 @@ export async function startRepl(
   // 所以磁盘上只有「最后一次生成」的那份,不构成历史趋势线。想留存历史需自行按时间戳
   // 复制出去。快照只在退出与 /memory health 时生成,而 /memory health 是现场重算的,
   // 因此读这个文件判断现状前先看它的 generatedAt。
+  // 退出兜底反思:短会话(1–2 轮)永远到不了 cadence,退出是唯一能确保发生的边界。
+  // reflectOnExit 内部已含 drain(等在飞收尾),所以不必再单独调 drainMemoryBackground。
+  // 放在写健康快照**之前**:这样快照能看到本轮新增的条目与计数,不会留下"刚反思完、
+  // 快照却还是旧数字"的错位。
+  await reflectOnExit(snapshotTranscript(history, 20));
   flushProactiveStats();
   writeMemoryHealth(isMemoryEnabled());
-  // 退出前等在飞反思收尾。注意:Ctrl+C 在 TUI(raw 模式)下是按键不是 SIGINT,空输入框时
-  // 由主循环 catch { break } 接住,因此**会**走到这里等反思跑完;只有非 raw 模式下的
-  // 进程级 SIGINT → process.exit(130) 才跳过(fire-and-forget 不承诺中断时完成)。
-  await drainMemoryBackground();
   await runtime.close();
   await closeAllMcp();
   layout.exitAltScreen();

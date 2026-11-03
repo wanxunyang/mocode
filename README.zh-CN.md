@@ -214,8 +214,8 @@ LLM_MODEL=glm-4.6                              # 换成你的模型名
 | `CONTEXT_WINDOW_TOKENS`         | 模型上下文窗口,须对齐真实模型                                                | `256000`                    |
 | `LLM_STREAM_USAGE`              | 流式请求带 `stream_options.include_usage` 拿真实用量                         | `true`                      |
 | `AUTO_COMPACT`                  | 最终 history compact 安全保护                                                | `true`                      |
-| `AUTO_REFLECT`                  | 后台反思 pass（默认开启,每会话至多 3 次自动反思;显式 `false` 关闭）          | `true`                      |
-| `REFLECT_EVERY_N`               | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞)                                | `5`                         |
+| `AUTO_REFLECT`                  | 后台反思 pass（默认开启,每会话至多 5 次自动反思,退出时若一次未跑则补一次;显式 `false` 关闭） | `true`                      |
+| `REFLECT_EVERY_N`               | 每 N 轮触发一次后台反思(与 agent 并发,不阻塞)                                | `2`                         |
 | `ANYSEARCH_API_KEY`             | 联网搜索 API key(不配走匿名免费额度)                                         | 无                          |
 | `ANYSEARCH_BASE_URL`            | 搜索 API 端点                                                                | `https://api.anysearch.com` |
 | `SKILLS_DIRS`                   | 覆盖默认 skill 扫描目录(平台分隔符)                                          | 三目录自动扫描              |

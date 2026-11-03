@@ -643,10 +643,16 @@ let lastReflectResult: ReflectResult | null = null;
  *  - 每进程至多 N 次自动反思(/reflect 手动不受限);
  *  - 转录里 user 实质内容低于阈值不触发(纯工具轮/空轮没有可记的东西)。
  * env:MOCODE_REFLECT_MAX_PER_SESSION 覆盖次数。
+ *
+ * 上限曾为 3、cadence 曾为每 5 轮。实测(2026-11)真实用法是**一次会话 1–2 个用户轮**,
+ * 于是 cadence 永远到不了、反思整体停摆(memory.log 停在 10-30,R2 锚点 / R11 巩固 /
+ * R14 派生全为 0)。现调为 cadence 2 轮 + 上限 5 次,并由 reflectOnExit 兜住短会话。
  */
-const MAX_AUTO_REFLECTS = Math.max(1, Number(process.env.MOCODE_REFLECT_MAX_PER_SESSION) || 3);
+const MAX_AUTO_REFLECTS = Math.max(1, Number(process.env.MOCODE_REFLECT_MAX_PER_SESSION) || 5);
 const MIN_USER_CHARS = 40;
 let autoReflectCount = 0;
+/** 本会话是否已经发起过任何一次反思(自动或手动):退出兜底据此判"要不要补一次"。 */
+let anyReflectionStarted = false;
 
 /** 转录里是否有足够的"用户原话"值得反思(tool_call/assistant 行不计)。 */
 export function hasSubstantialUserContent(transcript: string): boolean {
@@ -659,9 +665,10 @@ export function hasSubstantialUserContent(transcript: string): boolean {
   return userText.length >= MIN_USER_CHARS;
 }
 
-/** 测试专用:重置自动反思计数。 */
+/** 测试专用:重置自动反思计数与"本会话已反思过"标记。 */
 export function __resetReflectThrottleForTests(): void {
   autoReflectCount = 0;
+  anyReflectionStarted = false;
 }
 
 /** 摘要串(供 repl flush):存N 改N 忘N 图N [画像N 纠N 违N];有错误附上。 */
@@ -707,9 +714,17 @@ export function kickoffReflection(transcript: string, manual: boolean = false): 
     if (!hasSubstantialUserContent(transcript)) return;
     autoReflectCount++;
   }
+  startReflection(transcript);
+}
+
+/** 真正发起一次后台反思,占用在飞槽位。kickoff 与退出兜底共用同一份落地逻辑。
+ *  `signal` 只给退出兜底用:它要在退出那一刻用短预算把请求掐断,不能让 Ctrl+C 卡一分钟。
+ */
+function startReflection(transcript: string, signal?: AbortSignal): void {
+  anyReflectionStarted = true;
   inflight = (async () => {
     try {
-      const r = await runReflection(transcript);
+      const r = await runReflection(transcript, signal);
       lastReflectResult = r;
       appendLog(`[${r.ts}] ${formatReflectResult(r)}`);
       if (r.error === 'parse-failed' && r.rawParseFailure) {
@@ -724,7 +739,13 @@ export function kickoffReflection(transcript: string, manual: boolean = false): 
   })();
 }
 
-/** 退出前等在飞反思收尾(startRepl 尾调;Ctrl+C 走 SIGINT 直退不等)。 */
+/**
+ * 退出前等在飞反思收尾(startRepl 尾调)。
+ *
+ * 注意 Ctrl+C 在 TUI(raw 模式)下只是按键、不产生 SIGINT,空输入框时由主循环
+ * `catch { break }` 接住并照常走到这里;真正跳过本函数的只有非 raw 模式下的进程级
+ * SIGINT → process.exit(130)。
+ */
 export async function drainMemoryBackground(): Promise<void> {
   if (inflight) {
     try {
@@ -733,6 +754,57 @@ export async function drainMemoryBackground(): Promise<void> {
       // 已在 kickoff 内 log
     }
   }
+}
+
+/**
+ * 退出兜底:本会话一次都没反思过,就**同步**补一次再走。
+ *
+ * 为什么需要:自动反思挂在下轮 cadence 上(`turnCount % reflectEveryN`),而实测真实用法
+ * 是一次会话 1–2 个用户轮——永远到不了 cadence,记忆写入链路等于停摆。退出是短会话唯一
+ * 能确保发生的边界,所以在这里补一次。
+ *
+ * 门控与自动反思同一套(记忆开关 / autoReflect / 用户实质内容),额外要求
+ * `anyReflectionStarted === false`:连同手动 /reflect 在内,只要本会话已经反思过就不再
+ * 重复花一次 LLM 调用。已有在飞任务时只等它收尾,不重新发起(共用同一槽位)。
+ *
+ * 必须 await:进程退出会砍掉未完成的请求。失败静默(记忆是增强,不能影响退出)。
+ */
+export async function reflectOnExit(transcript: string): Promise<void> {
+  if (!isMemoryEnabled()) return;
+  if (!config.autoReflect) return;
+  const shouldStart = hasSubstantialUserContent(transcript) && !anyReflectionStarted;
+  // 预算到点就掐断:退出是用户等着的边界,宁可丢弃这一次反思,也不能让 Ctrl+C 卡住。
+  // 用被引用的 timer + AbortController,而不是 AbortSignal.timeout——后者底层定时器是
+  // unref() 的,事件循环空闲时可能永不触发(见 memory 里那条 abort-signal-timeout-is-unref)。
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), exitReflectWaitMs());
+  try {
+    if (shouldStart) {
+      autoReflectCount++;
+      startReflection(transcript, ac.signal);
+    }
+    // race:在飞的可能是本轮 cadence 发起的长预算请求,同样不能被它拖住退出。
+    await Promise.race([drainMemoryBackground(), abortPromise(ac.signal)]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 退出时最多等多久让那次补跑的反思落地。
+ *
+ * 反思本身有 60s 预算(REFLECT_TIMEOUT_MS),但那是给后台用的;退出路径上用户就在终端前
+ * 等着,60s 等于卡死。8s 是「够一次短 prompt 往返、又不至于让人以为程序挂了」的折中。
+ * 到点即中止请求(已写好的条目不受影响,写库只在模型返回后才发生)。
+ */
+function exitReflectWaitMs(): number {
+  return Math.max(1_000, Number(process.env.MOCODE_EXIT_REFLECT_WAIT_MS) || 8_000);
+}
+
+/** signal 已中止则立刻 resolve,否则等 abort 事件——用于给 await 加个硬截止。 */
+function abortPromise(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
 }
 
 export function getLastReflectResult(): ReflectResult | null {

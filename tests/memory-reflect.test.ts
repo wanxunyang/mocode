@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { __setChatCreateImpl } from '../src/llm/index.js';
-import { runReflection, parsePlan } from '../src/memory/reflect.js';
+import { runReflection, parsePlan, reflectOnExit, __resetReflectThrottleForTests } from '../src/memory/reflect.js';
 
 function sse(content: string | null): AsyncIterable<unknown> {
   return {
@@ -155,5 +155,122 @@ test(
     } finally {
       clearTimeout(timer);
     }
+  }),
+);
+// ── 退出兜底反思 ────────────────────────────────────────────────────────────
+//
+// 背景:自动反思挂在下轮 cadence 上(turnCount % reflectEveryN),实测真实用法是
+// 一次会话 1–2 个用户轮 → 永远到不了 cadence,记忆写入整体停摆。退出是短会话唯一
+// 能确保发生的边界,故补 reflectOnExit。
+
+const LONG_TRANSCRIPT = 'user: ' + '我们来讨论一下记忆系统到底应该怎么做比较合适'.repeat(2) + '\nassistant: 好';
+
+/** 临时打开记忆开关:reflectOnExit 与 kickoffReflection 共用同一套门控。 */
+async function withMemoryEnabled<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.MEMORY_ENABLED;
+  process.env.MEMORY_ENABLED = 'true';
+  try {
+    return await fn();
+  } finally {
+    if (prev === undefined) delete process.env.MEMORY_ENABLED;
+    else process.env.MEMORY_ENABLED = prev;
+  }
+}
+
+test(
+  'reflectOnExit: 本会话从未反思过 → 退出时同步补跑一次',
+  isolated(async () => {
+    const prevAuto = process.env.AUTO_REFLECT;
+    delete process.env.AUTO_REFLECT;
+    await withMemoryEnabled(async () => {
+      let calls = 0;
+      __setChatCreateImpl(async () => {
+        calls++;
+        return sse('{"saves":[],"updates":[],"forgets":[],"triples":[]}');
+      });
+      try {
+        __resetReflectThrottleForTests();
+        await reflectOnExit(LONG_TRANSCRIPT);
+        assert.equal(calls, 1, '短会话退出应补一次反思');
+      } finally {
+        __resetReflectThrottleForTests();
+        if (prevAuto === undefined) delete process.env.AUTO_REFLECT;
+        else process.env.AUTO_REFLECT = prevAuto;
+      }
+    });
+  }),
+);
+
+test(
+  'reflectOnExit: 已反思过(含自动触发) → 不重复花第二次调用',
+  isolated(async () => {
+    await withMemoryEnabled(async () => {
+      let calls = 0;
+      __setChatCreateImpl(async () => {
+        calls++;
+        return sse('{"saves":[],"updates":[],"forgets":[],"triples":[]}');
+      });
+      try {
+        __resetReflectThrottleForTests();
+        await reflectOnExit(LONG_TRANSCRIPT); // 第一次:补跑
+        await reflectOnExit(LONG_TRANSCRIPT); // 第二次:已被标记,不再发起
+        assert.equal(calls, 1, '同一会话只补一次');
+      } finally {
+        __resetReflectThrottleForTests();
+      }
+    });
+  }),
+);
+
+test(
+  'reflectOnExit: 用户原话不足阈值 → 不发起请求',
+  isolated(async () => {
+    await withMemoryEnabled(async () => {
+      let calls = 0;
+      __setChatCreateImpl(async () => {
+        calls++;
+        return sse('{"saves":[],"updates":[],"forgets":[],"triples":[]}');
+      });
+      try {
+        __resetReflectThrottleForTests();
+        await reflectOnExit('assistant: [tool_call]\nuser: 嗯');
+        assert.equal(calls, 0, '纯工具轮/一句话轮没有可记的东西');
+      } finally {
+        __resetReflectThrottleForTests();
+      }
+    });
+  }),
+);
+test(
+  'reflectOnExit: 后端挂住时按退出预算掐断,不把 Ctrl+C 卡满 60s 反思超时',
+  isolated(async () => {
+    // 退出路径必须自带上限:反思默认预算是 60s(REFLECT_TIMEOUT_MS),那是给后台用的,
+    // 用户在终端前等着退出时等于卡死。这里把预算调到最小 1s,验证确实按它掐断。
+    const prevWait = process.env.MOCODE_EXIT_REFLECT_WAIT_MS;
+    process.env.MOCODE_EXIT_REFLECT_WAIT_MS = '1000';
+    await withMemoryEnabled(async () => {
+      __setChatCreateImpl((_body, opts) => {
+        // 模拟一个没有响应的后端:只有 abort 才会让它结束。
+        return new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('This operation was aborted', 'AbortError')),
+            { once: true },
+          );
+        });
+      });
+      try {
+        __resetReflectThrottleForTests();
+        const startedAt = Date.now();
+        await reflectOnExit(LONG_TRANSCRIPT);
+        const elapsed = Date.now() - startedAt;
+        assert.ok(elapsed >= 900, `应当真的等过预算,实际只用了 ${elapsed}ms`);
+        assert.ok(elapsed < 5_000, `不得被 60s 反思超时拖住,实际 ${elapsed}ms`);
+      } finally {
+        __resetReflectThrottleForTests();
+        if (prevWait === undefined) delete process.env.MOCODE_EXIT_REFLECT_WAIT_MS;
+        else process.env.MOCODE_EXIT_REFLECT_WAIT_MS = prevWait;
+      }
+    });
   }),
 );

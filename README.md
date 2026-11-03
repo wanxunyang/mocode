@@ -215,8 +215,8 @@ Common backend `base_url` values:
 | `CONTEXT_WINDOW_TOKENS`         | Model context window; must match the real model                                               | `256000`                    |
 | `LLM_STREAM_USAGE`              | Include `stream_options.include_usage` on streaming requests for real usage                   | `true`                      |
 | `AUTO_COMPACT`                  | Final history-compaction safety fallback                                                      | `true`                      |
-| `AUTO_REFLECT`                  | Background reflection pass (on by default, max 3 auto runs/session; set `false` to disable)   | `true`                      |
-| `REFLECT_EVERY_N`               | Trigger a background reflection every N turns (runs alongside the agent, non-blocking)        | `5`                         |
+| `AUTO_REFLECT`                  | Background reflection pass (on by default, max 5 auto runs/session + one at exit if none ran; set `false` to disable) | `true`      |
+| `REFLECT_EVERY_N`               | Trigger a background reflection every N turns (runs alongside the agent, non-blocking)        | `2`                         |
 | `ANYSEARCH_API_KEY`             | Web search API key (falls back to anonymous free quota if unset)                              | none                        |
 | `ANYSEARCH_BASE_URL`            | Search API endpoint                                                                           | `https://api.anysearch.com` |
 | `SKILLS_DIRS`                   | Override the default skill scan directories (platform path separator)                         | three default directories   |

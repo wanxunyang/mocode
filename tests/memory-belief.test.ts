@@ -411,15 +411,17 @@ test(
       return sse(EMPTY_PLAN);
     });
     const transcript = 'user: ' + '这是一段足够长的真实用户发言,包含值得反思的实质内容。'.repeat(3);
-    for (let i = 0; i < 5; i++) {
+    // 默认上限是 5(原为 3)。每次 kickoff 都先 await drain,确保在飞槽位已释放,
+    // 否则第二次起会被 `if (inflight) return` 静默吃掉,测到的就不是次数上限。
+    for (let i = 0; i < 8; i++) {
       kickoffReflection(transcript); // 自动
       await drainMemoryBackground();
     }
-    assert.equal(calls, 3, '每进程自动反思至多 3 次,后续自动触发被节流');
+    assert.equal(calls, 5, '每进程自动反思至多 5 次,后续自动触发被节流');
 
     kickoffReflection(transcript, true); // 手动 /reflect 绕过节流
     await drainMemoryBackground();
-    assert.equal(calls, 4, '手动反思不受自动次数上限约束');
+    assert.equal(calls, 6, '手动反思不受自动次数上限约束');
 
     // 实质内容闸门:空转录即便还有手动……自动次数已耗尽,这里直接验证纯函数已覆盖;
     // 重置后空转录不应发起请求。

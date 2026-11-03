@@ -750,7 +750,7 @@ export const config: Config = {
   toolClearing: process.env.MOCODE_TOOL_CLEARING !== 'false',
   autoReflect: process.env.AUTO_REFLECT !== 'false',
   memoryEnabled: process.env.MEMORY_ENABLED === 'true',
-  reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 5,
+  reflectEveryN: Number(process.env.REFLECT_EVERY_N) || 2,
   maxSteps: Number(process.env.MAX_STEPS) || 1000,
   subAgentEnabled: process.env.MOCODE_SUBAGENT_ENABLED === 'true',
   subAgentMaxSteps: Number(process.env.SUB_AGENT_MAX_STEPS) || Number(process.env.MAX_STEPS) || 1000,
