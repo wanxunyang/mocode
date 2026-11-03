@@ -11,9 +11,14 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runAgentCore } from '../src/agent/core.js';
+import { defaultAgentRuntimeContext } from '../src/agent/runtime-context.js';
+import { __setChatCreateImpl } from '../src/llm/index.js';
+import { setSandboxRoot } from '../src/sandbox/root.js';
+import '../src/tools/builtins/index.js';
 import {
   canonicalizeContext,
   isProactiveEnabled,
@@ -419,5 +424,136 @@ test(
     assert.ok(updateEntry('gap-entry', { trigger: '构造工具 schema 发给 dashscope compatible-mode 时' }).ok);
     const hits = matchProactive('write_file', { path: 'src/llm/tool-schema.ts' }, ctx).map((m) => m.entry.id);
     assert.ok(hits.includes('gap-entry'), '补齐 trigger 后应立刻可命中');
+  }),
+);
+
+// ── R3.3 legacy 生产链路端到端 ───────────────────────────────────────────────
+//
+// 上面那组 dispatcher 用例测的是 **staged** 实现,而生产入口 `runAgent → runAgentCore`
+// 不传 `pipeline`,`createAgentPipelineAssembly` 默认 'legacy' —— 注入原先只写在
+// staged dispatcher 里,于是线上前摄**从未通电**(证据:`.mocode/memory-proactive-stats.json`
+// 长期不存在,而同函数块里的 recall-stats 正常写入)。这组用例走完整 runAgentCore
+// 且**不传 pipeline**,锁住 legacy 分支也必须注入。
+
+test(
+  'R3.3 legacy: runAgentCore 默认 pipeline 下工具结果尾部带前摄提醒',
+  isolated(async () => {
+    seedPitfall();
+    const projDir = process.cwd();
+    writeFileSync(join(projDir, 'fixture.txt'), 'mocode-fixture-content', 'utf8');
+    const prevRoot = setSandboxRoot(projDir);
+    const outputs: string[] = [];
+    let call = 0;
+    __setChatCreateImpl(async () => {
+      call++;
+      if (call === 1) {
+        return (async function* () {
+          yield {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'legacy-read',
+                      function: { name: 'read_file', arguments: '{"path":"fixture.txt"}' },
+                    },
+                  ],
+                },
+              },
+            ],
+          };
+        })();
+      }
+      return (async function* () {
+        yield { choices: [{ delta: { content: 'done' } }] };
+      })();
+    });
+
+    try {
+      await runAgentCore({
+        history: [{ role: 'system', content: 'sys' }],
+        // 必须带场景词:trigger 是自然语言,只靠工具参数达不到阈值。
+        userInput: '构造工具 schema 发给 dashscope compatible-mode 时一直 400',
+        maxSteps: 2,
+        runtimeAllowedToolNames: new Set(['read_file']),
+        runtimeContext: {
+          ...defaultAgentRuntimeContext,
+          getAgentMode: () => 'auto' as const,
+          checkPermission: async () => 'allow' as const,
+        },
+        hooks: { onToolResult: (_tc, output) => outputs.push(output) },
+      });
+    } finally {
+      __setChatCreateImpl(null);
+      setSandboxRoot(prevRoot);
+    }
+
+    assert.equal(outputs.length, 1, '应执行一次 read_file');
+    assert.match(outputs[0], /mocode-fixture-content/, '原始结果必须保留');
+    assert.match(outputs[0], /\[proactive memory\]/, 'legacy 分支也必须注入前摄提醒');
+    assert.match(outputs[0], /kimi-k3-uniqueitems/);
+  }),
+);
+
+test(
+  'R3.5 legacy: MEMORY_ENABLED=false 时 runAgentCore 不注入(总开关 veto)',
+  isolated(async () => {
+    seedPitfall();
+    process.env.MEMORY_ENABLED = 'false';
+    const projDir = process.cwd();
+    writeFileSync(join(projDir, 'fixture2.txt'), 'plain-content', 'utf8');
+    const prevRoot = setSandboxRoot(projDir);
+    const outputs: string[] = [];
+    let call = 0;
+    __setChatCreateImpl(async () => {
+      call++;
+      if (call === 1) {
+        return (async function* () {
+          yield {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'legacy-read-off',
+                      function: { name: 'read_file', arguments: '{"path":"fixture2.txt"}' },
+                    },
+                  ],
+                },
+              },
+            ],
+          };
+        })();
+      }
+      return (async function* () {
+        yield { choices: [{ delta: { content: 'done' } }] };
+      })();
+    });
+
+    try {
+      await runAgentCore({
+        history: [{ role: 'system', content: 'sys' }],
+        userInput: '构造工具 schema 发给 dashscope compatible-mode 时一直 400',
+        maxSteps: 2,
+        runtimeAllowedToolNames: new Set(['read_file']),
+        runtimeContext: {
+          ...defaultAgentRuntimeContext,
+          getAgentMode: () => 'auto' as const,
+          checkPermission: async () => 'allow' as const,
+        },
+        hooks: { onToolResult: (_tc, output) => outputs.push(output) },
+      });
+    } finally {
+      __setChatCreateImpl(null);
+      setSandboxRoot(prevRoot);
+    }
+
+    assert.equal(outputs.length, 1);
+    // 注意不能断言等于纯正文:read_file 正常输出本就带 [artifact source=...] 头,
+    // 那是工具产物标记,与前摄注入无关。判据只能是"没有前摄段"。
+    assert.match(outputs[0], /plain-content/, '原始结果必须保留');
+    assert.doesNotMatch(outputs[0], /\[proactive memory\]/, '总开关关闭时不得追加任何提醒');
   }),
 );

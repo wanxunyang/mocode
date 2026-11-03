@@ -7,9 +7,11 @@
 
 import type OpenAI from 'openai';
 import { type ChatMessage, type ToolCallRef } from '../llm/index.js';
-import { type ToolOutcome } from '../tools/registry.js';
+import { type ToolExecutionOptions, type ToolOutcome } from '../tools/registry.js';
 import { validateToolArguments } from '../tools/validation.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools, getSkillRuntimeDisabledTools } from '../tools/constants.js';
+import { isMemoryEnabled } from '../config/index.js';
+import { isProactiveEnabled, proactiveHint } from '../memory/proactive.js';
 import { ADD_TOOL_GROUPS_TOOL_NAME } from '../config/profiles.js';
 import { defaultAgentRuntimeContext, type AgentRuntimeContext } from './runtime-context.js';
 import type { AgentRunOptions, AgentRunResult } from './run-contracts.js';
@@ -80,6 +82,28 @@ export async function runAgentCoreLegacy(
     .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
     .map((p) => p.text)
     .join(' ');
+  // R3.3:前摄注入的**唯一出口**。必须挂在这里,不能只挂在 StagedToolDispatcher 上:
+  // 生产入口 runAgent → runAgentCore 不传 `pipeline`,createAgentPipelineAssembly 默认
+  // 'legacy',而注入原先只写在 staged dispatcher 的 execute 里 → 线上前摄从未通电
+  // (证据:`.mocode/memory-proactive-stats.json` 从未生成,而同函数块里的
+  // `memory-recall-stats.json` 正常写入)。包一层执行出口而非逐处插桩,5 个调度分支
+  // (只读并发 / 串行 / 资源锁 / 编排 / 兜底)自然全覆盖。
+  const proactiveOn = isMemoryEnabled() && isProactiveEnabled();
+  const runToolWithProactive = async (
+    name: string,
+    argsRaw: string,
+    sig: AbortSignal | undefined,
+    execOpts?: ToolExecutionOptions,
+  ): Promise<ToolOutcome> => {
+    const outcome = await ctx.toolRuntime.executeToolOutcome(name, argsRaw, sig, execOpts);
+    if (!proactiveOn) return outcome;
+    // 被拒绝 / 未执行的调用不该白烧一次匹配。
+    if (outcome.status !== 'success' && outcome.status !== 'error') return outcome;
+    const proactive = proactiveHint(name, parseArgs(argsRaw), true, proactiveContext);
+    if (!proactive) return outcome;
+    const base = outcome.output ?? '';
+    return { ...outcome, output: base ? `${base}\n\n${proactive}` : proactive };
+  };
   const runtimeToolSchemas: OpenAI.Chat.Completions.ChatCompletionTool[] = ctx.toolRuntime.tools.map((tool) => ({
     type: 'function',
     function: {
@@ -487,19 +511,14 @@ export async function runAgentCoreLegacy(
                   if (eligibleReadonly.length > 0) {
                     hooks.onToolStart?.(calls[eligibleReadonly[0]].name);
                     for (const index of eligibleReadonly) {
-                      startedReadonly[index] = ctx.toolRuntime.executeToolOutcome(
-                        calls[index].name,
-                        calls[index].arguments,
-                        signal,
-                        {
-                          callId: calls[index].id,
-                          onOutput: (chunk) => hooks.onToolOutput?.(calls[index], chunk),
-                          allowedToolNames: currentAllowedToolNames(),
-                          delegation: delegationForOrchestrator(),
-                          readDedup,
-                          ...(result.finishReason ? { finishReason: result.finishReason } : {}),
-                        },
-                      );
+                      startedReadonly[index] = runToolWithProactive(calls[index].name, calls[index].arguments, signal, {
+                        callId: calls[index].id,
+                        onOutput: (chunk) => hooks.onToolOutput?.(calls[index], chunk),
+                        allowedToolNames: currentAllowedToolNames(),
+                        delegation: delegationForOrchestrator(),
+                        readDedup,
+                        ...(result.finishReason ? { finishReason: result.finishReason } : {}),
+                      });
                     }
                   }
                   const lastReadonlyIndex =
@@ -708,7 +727,7 @@ export async function runAgentCoreLegacy(
                     for (const tc of batch) hooks.onToolHeader?.(tc);
                     hooks.onToolStart?.(batch[0].name);
                     const started = batch.map((tc) =>
-                      ctx.toolRuntime.executeToolOutcome(tc.name, tc.arguments, signal, {
+                      runToolWithProactive(tc.name, tc.arguments, signal, {
                         callId: tc.id,
                         onOutput: (chunk) => hooks.onToolOutput?.(tc, chunk),
                         allowedToolNames: currentAllowedToolNames(),
@@ -836,7 +855,7 @@ export async function runAgentCoreLegacy(
                         const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
                         const outcome = entry.denied
                           ? entry.denied
-                          : await ctx.toolRuntime.executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
+                          : await runToolWithProactive(entry.tc.name, entry.tc.arguments, signal, {
                               callId: entry.tc.id,
                               onOutput: (chunk) => hooks.onToolOutput?.(entry.tc, chunk),
                               allowedToolNames: currentAllowedToolNames(),
@@ -953,7 +972,7 @@ export async function runAgentCoreLegacy(
                     const started = entries.map((entry) => {
                       if (entry.denied) return Promise.resolve(entry.denied);
                       const hint = argumentErrorHint(entry.tc.name, runtimeContextState);
-                      return ctx.toolRuntime.executeToolOutcome(entry.tc.name, entry.tc.arguments, signal, {
+                      return runToolWithProactive(entry.tc.name, entry.tc.arguments, signal, {
                         callId: entry.tc.id,
                         onOutput: (chunk) => hooks.onToolOutput?.(entry.tc, chunk),
                         allowedToolNames: currentAllowedToolNames(),
@@ -1080,7 +1099,7 @@ export async function runAgentCoreLegacy(
                     let diff = readDiffContext(tc, mutationParsed, ctx.jailResolve);
                     hooks.onToolStart?.(tc.name);
                     const serialHint = argumentErrorHint(tc.name, runtimeContextState);
-                    const outcome = await ctx.toolRuntime.executeToolOutcome(tc.name, tc.arguments, signal, {
+                    const outcome = await runToolWithProactive(tc.name, tc.arguments, signal, {
                       callId: tc.id,
                       onOutput: (chunk) => hooks.onToolOutput?.(tc, chunk),
                       allowedToolNames: currentAllowedToolNames(),
