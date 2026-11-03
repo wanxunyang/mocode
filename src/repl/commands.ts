@@ -32,6 +32,7 @@ export function buildSlashCommands(): SlashCommand[] {
     { name: '/stats', desc: '查看本会话 token 用量与缓存命中率' },
     { name: '/effort', desc: '设置思考强度(/effort [low|medium|high|auto])' },
     { name: '/resume', desc: d('commands.sessionResume') },
+    { name: '/fork', desc: d('commands.sessionFork') },
     { name: '/sessions', desc: d('commands.sessionBrowse') },
     { name: '/rollback', desc: d('commands.sessionRollback') },
     { name: '/diff', desc: '查看 agent 文件改动 diff(/diff [N]|all,快照 vs 工作区)' },
@@ -214,7 +215,7 @@ export const LLM_ERROR_HINT_KEYS: Record<ChatErrorKind, TranslationKey> = {
 /** /help 的分组:按使用场景归组,组内保持菜单树顺序。未列入的顶层命令兜底进「其他」。 */
 export const HELP_GROUPS: { key: TranslationKey; names: string[] }[] = [
   { key: 'help.groupFrequent', names: ['/help', '/clear', '/cd', '/context', '/compact', '/resume', '/model'] },
-  { key: 'help.groupSession', names: ['/sessions', '/rollback', '/memory', '/skills', '/skill', '/init'] },
+  { key: 'help.groupSession', names: ['/fork', '/sessions', '/rollback', '/memory', '/skills', '/skill', '/init'] },
   {
     key: 'help.groupConfig',
     names: [

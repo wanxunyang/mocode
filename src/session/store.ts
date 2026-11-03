@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -566,6 +568,83 @@ export class SessionStore {
       };
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * 分叉会话:把 `<sessionsRoot>/<sourceId>/` **整个目录**复制成一个新 id 会话
+   * (session.json/notes.md/snapshots.json/compacted/trace/usage 全带),
+   * 然后把副本里对旧会话的引用重写到新 id。原会话目录与当前 currentSessionId
+   * 均不动——fork 只在磁盘上产出一个独立副本,切不切过去由调用方决定。
+   *
+   * @returns 新会话 id;源会话目录不存在(如仅在归档 gz 中)时返回 null。
+   */
+  forkSession(sourceId: string): string | null {
+    const srcDir = path.join(this.sessionsRoot, sourceId);
+    if (!existsSync(srcDir) || !statSync(srcDir).isDirectory()) return null;
+    const newId = createTimestampId();
+    const dstDir = path.join(this.sessionsRoot, newId);
+    // 时间前缀碰撞概率忽略不计,撞了直接报错也不覆盖任何东西。
+    if (existsSync(dstDir)) throw new Error(`Fork target session already exists: ${newId}`);
+    // filter 在 cp 过程中对每个条目回调:跳过 tmp(原子写残留)。整个目录递归复制。
+    cpSync(srcDir, dstDir, {
+      recursive: true,
+      errorOnExist: true,
+      force: false,
+      filter: (p) => !p.endsWith('.tmp'),
+    });
+    try {
+      this.rewriteForkedReferences(dstDir, sourceId, newId);
+    } catch (error) {
+      // 不留下半成品会话目录(引用没改干净的副本比没有更危险)。
+      rmSync(dstDir, { recursive: true, force: true });
+      throw error;
+    }
+    return newId;
+  }
+
+  /**
+   * 重写分叉副本里的会话 id 引用:
+   *  - 历史指针(.mocode/sessions/<old>/...)按路径前缀精确替换,避免裸 id 误匹配;
+   *  - 跳过 .gz 二进制轮转;
+   *  - session.json 单独结构化处理:id/createdAt 改成新会话,history 内指针同样替换。
+   */
+  private rewriteForkedReferences(dir: string, oldId: string, newId: string): void {
+    const oldPrefix = `.mocode/sessions/${oldId}/`;
+    const newPrefix = `.mocode/sessions/${newId}/`;
+    const rewriteFile = (file: string): void => {
+      if (file.endsWith('.gz')) return;
+      const original = readFileSync(file, 'utf8');
+      const updated = original.split(oldPrefix).join(newPrefix);
+      if (updated !== original) writeFileSync(file, updated, 'utf8');
+    };
+    for (const entry of this.walkDirFiles(dir)) {
+      if (entry.endsWith('session.json')) continue; // 下面结构化处理
+      rewriteFile(entry);
+    }
+    // session.json:id/createdAt 是新会话身份;history 里的 compacted/result blob
+    // 指针按同样的前缀替换。
+    const sessionJsonPath = path.join(dir, 'session.json');
+    if (existsSync(sessionJsonPath)) {
+      const rec = JSON.parse(readFileSync(sessionJsonPath, 'utf8')) as SessionRecord;
+      rec.id = newId;
+      rec.createdAt = idToIso(newId);
+      if (Array.isArray(rec.history)) {
+        rec.history = JSON.parse(JSON.stringify(rec.history).split(oldPrefix).join(newPrefix)) as ChatMessage[];
+      }
+      writeFileSync(sessionJsonPath, JSON.stringify(rec), 'utf8');
+    }
+  }
+
+  /** 递归列出目录下全部文件(绝对路径)。 */
+  private *walkDirFiles(dir: string): Generator<string> {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        yield* this.walkDirFiles(full);
+      } else if (entry.isFile()) {
+        yield full;
+      }
     }
   }
 

@@ -43,6 +43,39 @@ export const sessionCommands: CommandHandler[] = [
     layout.writeWelcomeBlock(ctx.welcomeLines()); // 回到空会话状态,欢迎引导重新出现
     return next();
   },
+  // /fork:把当前会话整个目录复制成一个新 id 会话(继承全部上下文),**不切换**窗口——
+  // 原会话继续在本窗口对话;分叉会话可用新终端 `mocode --resume <id>` 或本窗口 /resume 进入。
+  async (ctx) => {
+    if (ctx.line !== '/fork' && !ctx.line.startsWith('/fork ')) return unhandled();
+    const args = ctx.line.replace(/^\/fork\s*/, '').trim();
+    if (args) {
+      layout.contentWrite(`${ui.yellow}${t('repl.forkUsage')}${ui.reset}\n`);
+      return next();
+    }
+    const sourceId = ctx.state.currentSessionId;
+    if (!sourceId || ctx.history.length <= 1) {
+      layout.contentWrite(`${ui.dim}${t('repl.forkEmpty')}${ui.reset}\n`);
+      return next();
+    }
+    // 先落盘内存里的最新对话,分叉副本才能包含尚未自动保存的尾部;persistSnapshots 一并刷新。
+    ctx.runtime.session.save(ctx.history, sourceId, ctx.state.queryHistory, ctx.state.lastToolGroups);
+    let newId: string | null;
+    try {
+      newId = ctx.runtime.session.fork(sourceId);
+    } catch (e) {
+      layout.contentWrite(
+        `${ui.red}${t('repl.forkFailed', { message: e instanceof Error ? e.message : String(e) })}${ui.reset}\n`,
+      );
+      return next();
+    }
+    if (!newId) {
+      layout.contentWrite(`${ui.yellow}${t('repl.forkMissing')}${ui.reset}\n`);
+      return next();
+    }
+    layout.contentWrite(`${ui.accent}${t('repl.forkDone', { id: newId })}${ui.reset}\n`);
+    layout.contentWrite(`${ui.dim}${t('repl.forkHint', { id: newId })}${ui.reset}\n`);
+    return next();
+  },
   // /sessions:浏览全部已保存会话(慢路径,readdir+全量 JSON.parse,目录 N 大时会有可感知卡顿)。
   // 默认走 /resume(仅最近 10 条,瞬开);要翻历史续接更早的会话才用这条。
   // picker 走全显(cap=items.length,无 a 展开提示),靠 picker 自身开窗(以选中为中心分屏)。

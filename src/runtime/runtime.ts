@@ -62,6 +62,7 @@ export type RuntimeEventType =
   | 'session.resumed'
   | 'session.saved'
   | 'session.cleared'
+  | 'session.forked'
   | 'session.gc'
   | 'rollback.planned'
   | 'rollback.applied'
@@ -97,6 +98,12 @@ export interface RuntimeSessionFacade {
   ): SessionMeta;
   list(limit?: number): SessionMeta[];
   clear(): string;
+  /**
+   * 分叉会话:把 sourceId(默认当前会话)的整个会话目录复制成新 id 会话,
+   * 重写副本内的历史指针。**不**切换 currentSessionId——窗口留在原会话。
+   * 返回新 id;源会话目录不存在(仅在归档 gz 等)时返回 null。
+   */
+  fork(sourceId?: string): string | null;
   /** 老会话 GC。dryRun(默认)仅返回计划不写盘;execute 执行归档/清除。当前会话永不归档。 */
   gc(opts: { dryRun: false }): Promise<RetentionResult>;
   gc(opts?: { dryRun?: boolean }): RetentionPlan;
@@ -180,6 +187,7 @@ export class Runtime {
         return this.context.sessionStore.list(limit);
       },
       clear: () => this.createSession(true),
+      fork: (sourceId) => this.forkSession(sourceId),
       gc: (async (opts: { dryRun?: boolean } = {}) => {
         this.assertIdle('gc sessions');
         const root = this.context.sessionStore.sessionsRoot;
@@ -391,6 +399,17 @@ export class Runtime {
     this.context.rollbackStore.resetState();
     this.emit(cleared ? 'session.cleared' : 'session.created', { sessionId: id });
     return id;
+  }
+
+  private forkSession(sourceId?: string): string | null {
+    this.assertIdle('fork session');
+    const srcId = sourceId ?? this.context.sessionStore.getCurrentSessionId();
+    if (!srcId) throw new Error('Cannot fork without an active session.');
+    const newId = this.context.sessionStore.forkSession(srcId);
+    if (!newId) return null;
+    // 注意:不 setCurrentSessionId、不重置 rollback 状态——当前窗口继续原会话。
+    this.emit('session.forked', { sourceSessionId: srcId, sessionId: newId });
+    return newId;
   }
 
   private resumeSession(id: string): SessionRecord | null {
