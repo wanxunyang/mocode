@@ -377,5 +377,8 @@ test(
     assert.ok(joined.includes('前摄'));
     assert.ok(joined.includes('情节'));
     assert.ok(!joined.includes('undefined'), '渲染不得出现 undefined');
+    // 首行必须是快照时间:这份 JSON 是覆盖写的单点快照,判断现状前要先知道它有多旧
+    // (实测踩过:磁盘上是 11-02 的快照仍写 searches=0,而 11-03 的 recall-stats 已是 4)。
+    assert.match(lines[0] ?? '', /^快照:\d{4}-\d{2}-\d{2}T[\d:.]+Z$/, `首行应为快照时间,实际: ${lines[0]}`);
   }),
 );

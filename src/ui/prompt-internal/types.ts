@@ -47,6 +47,10 @@ export interface PromptOpts {
    * 返回 null=成功(含重复图,去重无额外提示);ImagePasteNotice=需上屏的瞬时提示。
    */
   onPasteImage?: () => Promise<ImagePasteNotice | null>;
+  /** 是否有待发图片附件(Ctrl+C 在文本清空后用它决定下一级:清附件还是退出)。 */
+  hasPendingAttachments?: () => boolean;
+  /** 清空待发图片附件(repl 同步清脚栏 chip);Ctrl+C 第二级调用。 */
+  clearPendingAttachments?: () => void;
 }
 
 /** Ctrl+Y 抓图的非成功提示:'empty'=剪贴板无图(黄);'error'=失败(红)。 */

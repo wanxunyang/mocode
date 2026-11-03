@@ -534,12 +534,22 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
     redraw();
   }
 
-  /** Ctrl+C:有内容(已打字 / 多行 / 粘贴块 / 菜单草稿 / 粘贴缓冲 / 粘贴中)则清空,再按一次(空)才退出(仿 fish)。 */
+  /**
+   * Ctrl+C 分级清空(仿 fish,逐级放弃当前输入,最后一级才退出):
+   *   1. 有文本/菜单/粘贴缓冲 → 只清文本(留快照供 Ctrl+Z 还原);
+   *   2. 文本已空但有待发图片 → 清附件(Ctrl+Y 刚截的图,避免误清故单独一级);
+   *   3. 都空 → 退出(SIGINT)。
+   */
   function onCtrlC(): void {
     const flat = segs.map((s) => s.text).join('');
     const hasContent = flat.length > 0 || menuOpen || pasteState.pasteParts.length > 0 || pasteState.pasting;
     if (hasContent) {
       clearInput();
+      return;
+    }
+    if (opts.hasPendingAttachments?.()) {
+      opts.clearPendingAttachments?.();
+      redraw(); // 脚栏 chip 擦除(sync 已更新 layout state,这里触发重画)
       return;
     }
     cleanup();

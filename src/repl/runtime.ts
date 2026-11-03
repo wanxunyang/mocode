@@ -925,6 +925,11 @@ export async function startRepl(
           commands: buildSlashCommands(),
           onCycleMode: cycleMode,
           onPasteImage: pasteImageFromClipboard,
+          hasPendingAttachments: () => pendingAttachments.length > 0,
+          clearPendingAttachments: () => {
+            pendingAttachments = [];
+            syncPendingAttachChips();
+          },
           // Ctrl+R / Ctrl+P 历史搜索候选源:惰性工厂——当前会话内存 queryHistory + 最近落盘会话,
           // 聚合要读盘,只有面板真正打开(Ctrl+R/P)才求值,平常轮次零开销
           history: () => collectQueryHistory(queryHistory).map((e) => e.text),
@@ -1133,7 +1138,11 @@ export async function startRepl(
   // R6.1:退出前落情节(纯本地、零 LLM,毫秒级;放在 drain 之前让两者并行收尾)。
   finalizeCurrentEpisode(currentSessionId, history, queryHistory);
   // R4.1:退出时写一份健康快照。放这里而不是每轮:它要读全库 + 算 stale,
-  // 每次退出一个文件,正好构成一条随时间推移的趋势线。
+  // 每轮付这个成本不值当。
+  // 注意:healthPath() 是**固定路径**(.mocode/memory-health.json),每次都是覆盖写,
+  // 所以磁盘上只有「最后一次生成」的那份,不构成历史趋势线。想留存历史需自行按时间戳
+  // 复制出去。快照只在退出与 /memory health 时生成,而 /memory health 是现场重算的,
+  // 因此读这个文件判断现状前先看它的 generatedAt。
   flushProactiveStats();
   writeMemoryHealth(isMemoryEnabled());
   // 退出前等在飞反思收尾。注意:Ctrl+C 在 TUI(raw 模式)下是按键不是 SIGINT,空输入框时

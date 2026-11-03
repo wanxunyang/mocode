@@ -258,6 +258,11 @@ const pct = (v: number): string => `${Math.round(v * 100)}%`;
 /** 供 `/memory health` 渲染的多行文本(无 UI 依赖,命令层自己上色)。 */
 export function formatMemoryHealth(h: MemoryHealth = buildMemoryHealth()): string[] {
   const lines: string[] = [];
+  // 生成时间放首行:这份 JSON 是**覆盖写**的单点快照,不是历史趋势。
+  // 拿它判断现状前必须先看有多旧——实测踩过:磁盘上是 11-02 的快照,retrieval.searches 仍为 0、
+  // warning 还写着「memory_search 从未被调用」,而 11-03 的 recall-stats 已经是 4 次。
+  // `/memory health` 是现场重算的,所以命令输出里这个时间恒为当下;只有直接读文件时才有意义。
+  lines.push(`快照:${h.generatedAt}`);
   lines.push(
     `条目:active ${h.entries.active} / total ${h.entries.total}` +
       `(archived ${h.entries.archived}${h.entries.superseded ? `, superseded ${h.entries.superseded}` : ''})` +
