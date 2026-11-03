@@ -744,12 +744,60 @@ export interface NeighborResult {
   truncated: boolean;
 }
 
-/** active 边的无向邻接表(一次建表,O(V+E));可选 relation 过滤。 */
+/**
+ * R12.2 时间切片:`asOf` 时刻这条边是否成立。
+ *
+ * 语义完全由**已有字段**推出,不新增 schema:`validAt` 是「我开始这么认为」的时刻,
+ * `invalidAt` 是「我改主意」的时刻。于是在时刻 T:
+ *   validAt <= T < invalidAt(∞)
+ * 这就是 R12 想要的双时间轴读侧——`knownAt`/`validFrom` 那套字段在当前写法下
+ * 是 `validAt` 的冗余别名,改名要迁移全库边、双写要两处保持一致,收益只是名字更准,
+ * 不值得。真正缺的那一半(「事实在现实中成立」与「我何时得知」分离)在单机单用户
+ * 场景里没有观测来源:用户说「我上周就搬了」时,我们只知道说的时刻,
+ * 编一个 validFrom 出来等于造假数据。
+ *
+ * 缺 `validAt` / 坏时间戳的历史边按「一直在」处理:`unknown` 不冤枉,
+ * 与锚点 unknown 不算 stale 同一判据。
+ */
+export function edgeActiveAt(e: GraphEdge, atMs: number): boolean {
+  const v = Date.parse(e.validAt);
+  if (Number.isFinite(v) && atMs < v) return false;
+  if (e.invalidAt) {
+    const i = Date.parse(e.invalidAt);
+    if (Number.isFinite(i) && atMs >= i) return false;
+  }
+  return true;
+}
+
+export type ParsedAsOf = { ok: true; ms: number | null } | { ok: false; reason: string };
+
+/**
+ * 解析 `asOf` 参数。空/未传 → `ms: null`(当前视图,行为与不带参数完全一致)。
+ *
+ * 只写日期时按**本地**零点解释:图里的时间戳是 UTC,但用户说「10 月 26 日那天」
+ * 想的是自己的那一天;按 UTC 零点会把它变成北京时间 08:00,把当天早上发生的事
+ * 判成「那时还没发生」。
+ */
+export function parseAsOf(raw: unknown): ParsedAsOf {
+  if (raw === undefined || raw === null) return { ok: true, ms: null };
+  const s = String(raw).trim();
+  if (!s) return { ok: true, ms: null };
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const [y, m, d] = s.split('-').map(Number);
+    const t = new Date(y, m - 1, d).getTime();
+    return Number.isFinite(t) ? { ok: true, ms: t } : { ok: false, reason: `无法解析 asOf "${s}"` };
+  }
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? { ok: true, ms: t } : { ok: false, reason: `无法解析 asOf "${s}"` };
+}
+
+/** active 边的无向邻接表(一次建表,O(V+E));可选 relation 过滤与时间切片。 */
 type Adjacency = Map<string, GraphEdge[]>;
-function buildAdjacency(g: GraphFile, relation?: string): Adjacency {
+function buildAdjacency(g: GraphFile, relation?: string, atMs?: number | null): Adjacency {
   const adj: Adjacency = new Map();
   for (const e of g.edges) {
-    if (e.invalidAt) continue;
+    // R12.2:给了 asOf 就按「那时成立」筛,否则按「现在成立」筛(旧行为)。
+    if (atMs == null ? !!e.invalidAt : !edgeActiveAt(e, atMs)) continue;
     if (relation && e.relation !== relation) continue;
     const a = adj.get(e.src);
     if (a) a.push(e);
@@ -765,14 +813,19 @@ function buildAdjacency(g: GraphFile, relation?: string): Adjacency {
  * 邻居遍历:depth 1-3(BFS + 邻接表 O(V+E)),只看 active 边,边数封顶 40 防图爆炸。
  * relation 可选:只沿该类型的边走(深跳聚焦用,如沿 depends_on 链追踪)。
  */
-export function neighborsOf(nameOrId: string, depth: number = 1, relation?: string): NeighborResult {
+export function neighborsOf(
+  nameOrId: string,
+  depth: number = 1,
+  relation?: string,
+  asOfMs?: number | null,
+): NeighborResult {
   const g = loadAllGraph();
   const center = findEntityIn(g, nameOrId) ?? g.entities.find((e) => e.id === nameOrId);
   if (!center) return { center: null, entities: [], edges: [], truncated: false };
   const rel = relation?.trim().toLowerCase().replace(/\s+/g, '_') || undefined;
   const maxDepth = Math.max(1, Math.min(Math.floor(depth) || 1, 3));
   const MAX_EDGES_OUT = 40;
-  const adj = buildAdjacency(g, rel);
+  const adj = buildAdjacency(g, rel, asOfMs);
   const visited = new Set<string>([center.id]);
   const seenEdges = new Set<string>();
   const outEdges: GraphEdge[] = [];
@@ -815,7 +868,7 @@ const MAX_PATH_DEPTH = 6;
  * 两实体间最短路径:active 边视为无向,双向 BFS(每次展开较小前沿),
  * 总跳数封顶 MAX_PATH_DEPTH 防图爆炸。不连通 / 未知端 → null。
  */
-export function pathBetween(aNameOrId: string, bNameOrId: string): PathResult | null {
+export function pathBetween(aNameOrId: string, bNameOrId: string, asOfMs?: number | null): PathResult | null {
   const g = loadAllGraph();
   const from = findEntityIn(g, aNameOrId) ?? g.entities.find((e) => e.id === aNameOrId);
   const to = findEntityIn(g, bNameOrId) ?? g.entities.find((e) => e.id === bNameOrId);
@@ -830,7 +883,7 @@ export function pathBetween(aNameOrId: string, bNameOrId: string): PathResult | 
   const bwd = new Map<string, Trace>([[to.id, { prev: null, edge: null }]]);
   let fFront = [from.id];
   let bFront = [to.id];
-  const adj = buildAdjacency(g);
+  const adj = buildAdjacency(g, undefined, asOfMs);
   let meet: string | null = null;
 
   for (let d = 0; d < MAX_PATH_DEPTH && !meet; d++) {

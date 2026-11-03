@@ -1,5 +1,5 @@
 import type { Tool } from '../types.js';
-import { addTriple, graphStats, neighborsOf, pathBetween, type EdgeProvenance } from '../../memory/graph.js';
+import { addTriple, graphStats, neighborsOf, parseAsOf, pathBetween, type EdgeProvenance } from '../../memory/graph.js';
 import { formatRecallStats } from '../../memory/recall-stats.js';
 
 // ---------- memory_graph ----------
@@ -39,6 +39,11 @@ export const memoryGraphTool: Tool = {
       },
       query: { type: 'string', description: 'neighbors: entity name or id; path: start entity' },
       depth: { type: 'integer', description: 'neighbors: hops, 1-3, default 1' },
+      asOf: {
+        type: 'string',
+        description:
+          'neighbors/path: answer "what did I believe at THAT moment" instead of now. ISO timestamp or YYYY-MM-DD (local midnight). Edges are time-sliced by validAt/invalidAt: an edge counts iff validAt <= asOf < invalidAt. Use it when the current answer contradicts an older decision and you need to know which belief was held then. Omit for the current view.',
+      },
       src: { type: 'string', description: 'add: source entity name' },
       relation: {
         type: 'string',
@@ -90,13 +95,18 @@ export const memoryGraphTool: Tool = {
       if (!query) return '错误:neighbors 需要 query(实体名或 id)。';
       const depth = typeof args.depth === 'number' ? args.depth : 1;
       const rel = typeof args.relation === 'string' ? args.relation.trim() : '';
-      const r = neighborsOf(query, depth, rel || undefined);
+      const asOf = parseAsOf(args.asOf);
+      if (!asOf.ok) return `错误:${asOf.reason}`;
+      const r = neighborsOf(query, depth, rel || undefined, asOf.ms);
       if (!r.center) return `(图中没有实体 "${query}")`;
       const relNote = rel ? `,仅 ${rel} 边` : '';
+      const atNote = asOf.ms != null ? `,asOf ${new Date(asOf.ms).toISOString()}` : '';
       const lines = [
         `## ${r.center.name} (${r.center.id})${r.center.summary ? ` — ${r.center.summary}` : ''}`,
         r.entities.length > 0 ? `\n## 邻居实体\n${fmtEntities(r.entities)}` : '',
-        `\n## 边(${r.edges.length}${relNote}${r.truncated ? ',已截断' : ''})\n${fmtEdges(r.edges)}`,
+        `\n## 边(${r.edges.length}${relNote}${atNote}${r.truncated ? ',已截断' : ''})\n${fmtEdges(r.edges)}`,
+        // 「那一刻没有边」与「实体不存在」是两种完全不同的答案,不说清楚会被误读成后者。
+        asOf.ms != null && r.edges.length === 0 ? '\n(该时刻没有成立的边——实体在,但那时还没有这条关系)' : '',
       ].filter(Boolean);
       return lines.join('\n');
     }
@@ -105,11 +115,14 @@ export const memoryGraphTool: Tool = {
       const from = String(args.query ?? '').trim();
       const to = String(args.dst ?? '').trim();
       if (!from || !to) return '错误:path 需要 query(起点实体)和 dst(终点实体)。';
-      const r = pathBetween(from, to);
-      if (!r) return `(无 active 路径:${from} ⇸ ${to},或端点实体不存在)`;
+      const asOf = parseAsOf(args.asOf);
+      if (!asOf.ok) return `错误:${asOf.reason}`;
+      const r = pathBetween(from, to, asOf.ms);
+      const scope = asOf.ms != null ? `该时刻(${new Date(asOf.ms).toISOString()})` : '现在';
+      if (!r) return `(无 ${scope} 成立的路径:${from} ⇸ ${to},或端点实体不存在)`;
       const chain = r.path.map((e) => e.name).join(' → ');
       const lines = [
-        `## ${r.from.name} ⇢ ${r.to.name}(${r.edges.length} 跳)`,
+        `## ${r.from.name} ⇢ ${r.to.name}(${r.edges.length} 跳${asOf.ms != null ? `,asOf ${new Date(asOf.ms).toISOString()}` : ''})`,
         `路径:${chain}`,
         `\n## 边\n${fmtEdges(r.edges)}`,
       ];
