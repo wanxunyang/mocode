@@ -182,3 +182,13 @@ export {
   type ConsolidationDraft,
   type ConsolidationApplyResult,
 } from './episodic.js';
+export {
+  collectSeedCandidates,
+  applySeedCandidates,
+  extractConventionBullets,
+  seedNameOf,
+  SEED_MAX_CANDIDATES,
+  type SeedCandidate,
+  type SeedScan,
+  type SeedWriteResult,
+} from './seed.js';

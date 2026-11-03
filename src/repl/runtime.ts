@@ -55,6 +55,7 @@ import {
   resetProactiveTurn,
   captureMemoryBaseline,
   buildMemoryTailSection,
+  loadAll,
 } from '../memory/index.js';
 import { finalizeCurrentEpisode } from './episode-finalize.js';
 import { collectQueryHistory } from '../session/query-history.js';
@@ -484,6 +485,17 @@ export async function startRepl(
   // 新会话开场:banner 之后写欢迎引导块(--resume 有历史时不写,历史本身就是上下文)。
   if (!history.some((m) => m.role === 'user')) {
     layout.writeWelcomeBlock(welcomeLines());
+  }
+  // R9.4 空库提示:记忆开着但一条 active 都没有 → 说清「怎么让它有」,而不是让用户
+  // 对着空库空转。只在启动时提示一次(不是每轮),且不给 UI 常驻噪音:
+  // 「零感知」路线要求的是**行为**里有记忆,不是界面上反复提醒记忆的存在。
+  if (isMemoryEnabled()) {
+    try {
+      const hasActive = loadAll().some((e) => e.status === 'active');
+      if (!hasActive) layout.contentWrite(`${ui.dim}  ${t('memory.emptyHint')}${ui.reset}\n`);
+    } catch {
+      // 读库失败不阻塞启动(与 gcMemories 同口径)
+    }
   }
   // 启动时限频自动 GC(24h 闸门,归档+purge 全做):fire-and-forget,
   // 不阻塞进入主循环;runRetention 内部归档本地秒完、reflection 后台跑。可用 MOCODE_AUTO_GC=false 关闭。

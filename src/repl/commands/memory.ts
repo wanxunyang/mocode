@@ -33,6 +33,9 @@ import {
   isMemoryWritesPaused,
   appendAudit,
   readAudit,
+  // R9.1 冷启动播种
+  collectSeedCandidates,
+  applySeedCandidates,
   type AuditRecord,
   type MemoryEntry,
 } from '../../memory/index.js';
@@ -89,7 +92,11 @@ function renderProfile(): string {
 export function sourceMark(e: MemoryEntry): string {
   // R16.1:工具输出衍生的条目必须与“模型亲述”区分开——它可能是从网页里逐字抄来的一段话。
   // 不把两类混成一个标记：用户判断“要不要信这条”时，二手转述本来就该多一层怀疑。
-  const base = e.source?.session ? '[reflection]' : '[tool]';
+  //
+  // R9.1:`source.file` 是第三种来源——来自用户自己维护的文档(AGENTS.md/草稿)，
+  // 既不是模型判断、也不是反思推断。它单独一个标记，因为"我写的"与"它想的"
+  // 在可信度上正好相反：文档是用户的主权声明，反思是模型的猜测。
+  const base = e.source?.file ? '[seed]' : e.source?.session ? '[reflection]' : '[tool]';
   return e.origin === 'tool_output' ? `${base} [UNVERIFIED-ORIGIN]` : base;
 }
 
@@ -220,6 +227,22 @@ function parseForgetArgs(
 
 const FORGET_USAGE =
   '用法:/memory forget --all | --match <关键词> | --since <YYYY-MM-DD> [--scope global|project] [--dry-run]';
+
+/**
+ * 解析 `/memory seed 1,3,5` 的序号列表。
+ *
+ * 容忍中文逗号、空格分隔与重复(`1, 1, 3` → `[1,3]`)——用户从列表里抄序号时
+ * 这些写法都会出现,为格式差异报错纯属给用户添堵。非法输入返回空数组,调用方打用法。
+ */
+export function parseSeedPicks(raw: string): number[] {
+  const out = new Set<number>();
+  for (const tok of raw.split(/[,，\s]+/).filter(Boolean)) {
+    const n = Number(tok);
+    if (!Number.isInteger(n) || n < 1) return [];
+    out.add(n);
+  }
+  return [...out].sort((a, b) => a - b);
+}
 
 export const memoryCommands: CommandHandler[] = [
   (ctx) => {
@@ -431,6 +454,82 @@ export const memoryCommands: CommandHandler[] = [
       `${ui.dim}(导入完成:新增 ${r.added} · 更新 ${r.updated} · 跳过 ${r.skipped}(同 id 且更新时刻不更晚);` +
         `图谱 +${r.addedEntities} 实体/+${r.addedEdges} 边)${ui.reset}\n`,
     );
+    return next();
+  },
+  // ── R9.1 冷启动播种 ────────────────────────────────────────────────────
+  (ctx) => {
+    if (ctx.line !== '/memory seed' && !ctx.line.startsWith('/memory seed ')) return unhandled();
+    if (!isMemoryEnabled()) {
+      layout.contentWrite(`${ui.dim}(记忆子系统已关闭,/memory seed 无效。用 /memory_switch 打开)${ui.reset}\n`);
+      return next();
+    }
+    const arg = ctx.line.slice('/memory seed'.length).trim();
+    // 每次都重新扫:AGENTS.md 可能在上一轮被 /init 改写过,缓存反而制造"列表过期"的怪象。
+    const scan = collectSeedCandidates(ctx.banner().cwd);
+
+    // 无参数 = 只看不写。先让用户核对自己写了什么,再决定记哪些。
+    if (!arg) {
+      if (scan.files.length === 0) {
+        layout.contentWrite(
+          `${ui.dim}(工作区里没有 AGENTS.md / CLAUDE.md / .mocode/agents-draft.md,无可播种内容)${ui.reset}\n`,
+        );
+        return next();
+      }
+      if (scan.candidates.length === 0) {
+        layout.contentWrite(
+          `${ui.dim}(读了 ${scan.files.join('、')},但没找到「约定」段的 bullet;` +
+            `只抽 ## 约定 / ## Conventions 下的条目,或首个二级标题之前的 bullet)${ui.reset}\n`,
+        );
+        return next();
+      }
+      layout.contentWrite(
+        `${ui.accent}可从已有文档播种 ${scan.candidates.length} 条约定${ui.reset}` +
+          `${ui.dim}(来源:${scan.files.join('、')})${ui.reset}\n`,
+      );
+      for (const [i, c] of scan.candidates.entries()) {
+        layout.contentWrite(`  ${ui.accent}${i + 1}${ui.reset}  ${ui.dim}${c.name}${ui.reset}\n`);
+        layout.contentWrite(`      ${ui.dim}${c.summary}${ui.reset}\n`);
+      }
+      if (scan.truncated > 0) {
+        layout.contentWrite(`  ${ui.dim}… 另有 ${scan.truncated} 条超出上限未列出${ui.reset}\n`);
+      }
+      layout.contentWrite(
+        `${ui.dim}/memory seed <序号>[,<序号>…] 写入选中的 · /memory seed all 全部写入(${ui.reset}` +
+          `${ui.dim}只提议不自动写:这些是项目的约定,不是你的偏好)${ui.reset}\n`,
+      );
+      return next();
+    }
+
+    // 写入:解析 `all` 或逗号分隔的序号。
+    const picks: number[] | 'all' = arg === 'all' ? 'all' : parseSeedPicks(arg);
+    if (picks !== 'all' && picks.length === 0) {
+      layout.contentWrite(`${ui.dim}用法:/memory seed · /memory seed all · /memory seed 1,3,5${ui.reset}\n`);
+      return next();
+    }
+    if (scan.candidates.length === 0) {
+      layout.contentWrite(`${ui.dim}(没有可播种的约定;先跑 /memory seed 看列表)${ui.reset}\n`);
+      return next();
+    }
+    if (picks !== 'all') {
+      const outOfRange = picks.filter((n) => n > scan.candidates.length);
+      if (outOfRange.length > 0) {
+        layout.contentWrite(
+          `${ui.dim}(序号 ${outOfRange.join(',')} 超出范围:只有 ${scan.candidates.length} 条;先跑 /memory seed 看列表)${ui.reset}\n`,
+        );
+        return next();
+      }
+    }
+
+    const r = applySeedCandidates(scan.candidates, picks);
+    if (r.saved.length > 0) refreshSystemPrompt(ctx); // 新条目要进索引,下一轮就该看得见
+    layout.contentWrite(
+      `${ui.dim}(播种完成:新增 ${r.saved.length} · 已存在 ${r.existed.length} · 拒绝 ${r.refused.length})${ui.reset}\n`,
+    );
+    for (const s of r.saved) layout.contentWrite(`  ${ui.dim}+ [${s.id}] ${s.name}${ui.reset}\n`);
+    // 已存在不逐条列:那是「本来就记过了」,安静跳过比刷一屏更有用。
+    for (const f of r.refused) {
+      layout.contentWrite(`  ${ui.yellow}! ${f.name}${ui.reset}${ui.dim}(命中守卫 ${f.rule},未写入)${ui.reset}\n`);
+    }
     return next();
   },
   // ── R8.2 批量遗忘 ──────────────────────────────────────────────────────

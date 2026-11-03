@@ -68,7 +68,16 @@ export interface MemoryEntry {
   supersededBy: string | null;
   pinned: boolean;
   scope: MemoryScope;
-  source: { session?: string; turn?: number } | null;
+  /**
+   * 来源线索。三种形态:
+   *  - `session`(+`turn`):后台反思/情节在某个会话里产生的;
+   *  - `file`:从用户自己的文档播种进来的(R9.1,值是该文档的工作区相对路径);
+   *  - `null`:会话内 `memory_save` 直接写的。
+   *
+   * 三者必须可区分:`sourceMark()` 据此打 `[reflection]`/`[seed]`/`[tool]`,
+   * 而用户判断"凭什么信这条"的第一步就是这个归属。
+   */
+  source: { session?: string; turn?: number; file?: string } | null;
   lastUpdateReason?: string;
   /**
    * 内容等价键:归一化 summary+body 的哈希(见 computeDedupKey)。
@@ -572,7 +581,7 @@ export interface SaveInput {
   type?: MemoryType;
   pinned?: boolean;
   scope?: MemoryScope;
-  source?: { session?: string; turn?: number } | null;
+  source?: { session?: string; turn?: number; file?: string } | null;
   /** R1.5:适用条件(可空,允许事后补)。 */
   trigger?: string;
   /** R1.5:条件成立时该做什么。 */

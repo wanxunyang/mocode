@@ -430,6 +430,8 @@ const zhCN = {
   'memory.source': 'MEMORY_ENABLED={value} · {path}',
   'memory.statusHint':
     '路由 gate 决定 memory-read / memory-write 是否可选；Index 状态决定紧凑索引和后台反思是否启用。每个真实用户轮都会重新路由。',
+  // R9.4 空库提示:不能让用户对着空库静默空转,但也不能弹窗打断。
+  'memory.emptyHint': '记忆库还是空的：输入 /memory seed 可以从 AGENTS.md 播种已有约定（只提议，选中才写入）',
   'memory.usage': '用法：/memory_switch [on|off|status]（/memory_status 仅查看状态）',
   'memory.unchanged': 'Memory 已是{state}，未变更。',
   'memory.changedOn': '已允许按需路由 memory-read / memory-write，并开启 Memory Index。',
@@ -938,6 +940,9 @@ const en: Record<TranslationKey, string> = {
   'memory.source': 'MEMORY_ENABLED={value} · {path}',
   'memory.statusHint':
     'The route gate controls whether memory-read / memory-write may be selected; the Index state controls prompt injection and background reflection. Every real user turn is routed again.',
+  // R9.4 empty-store hint: never let the user sit in front of an empty store, never interrupt either.
+  'memory.emptyHint':
+    'Memory store is empty: /memory seed can propose entries from your AGENTS.md conventions (proposes only, writes only what you pick)',
   'memory.usage': 'Usage: /memory_switch [on|off|status] (/memory_status only reports state)',
   'memory.unchanged': 'Memory is already {state}; no change made.',
   'memory.changedOn': 'Memory-read / memory-write may now be routed on demand, and the Memory Index is enabled.',
