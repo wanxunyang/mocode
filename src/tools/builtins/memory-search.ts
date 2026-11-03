@@ -44,6 +44,10 @@ function statusMark(e: MemoryEntry, st: EntryStaleness | undefined, anchor: Entr
     const why = describeAnchorState(anchor);
     parts.push(`STALE-CODE${why ? ` (${why})` : ''}`);
   }
+  // R16.1:来源标记。只在**二手转述**时出现——内容逐字来自工具输出(网页/文件/命令),
+  // 模型没经用户确认就记了下来。给的是"引用前先核实"的提示,不是"这条是假的"。
+  // 默认路径(模型自己总结的事实)不加标记,保持零噪音。
+  if (e.origin === 'tool_output') parts.push('UNVERIFIED-ORIGIN');
   return parts.length > 0 ? ` [${parts.join(' | ')}]` : '';
 }
 

@@ -18,13 +18,25 @@ export interface AuditRecord {
   /** 发生时刻(ISO)。 */
   at: string;
   /** 动作类型。新增动作时同步扩这个联合,而不是塞进 detail 字符串。 */
-  action: 'forget' | 'purge' | 'pause' | 'resume' | 'import' | 'export';
+  action: 'forget' | 'purge' | 'pause' | 'resume' | 'import' | 'export' | 'write' | 'refuse';
   /** 人读的一句话。**不得包含记忆正文**——审计文件同样落在磁盘上。 */
   detail: string;
   /** 受影响的记忆 id(R8.2 批量删除时是完整名单)。 */
   ids?: string[];
   /** 作用域(批量操作时记录,便于事后判断删对了哪个库)。 */
   scope?: string;
+  /**
+   * R16 机器可读原因(如 `hijack:ignore-instructions` / `untrusted-source:tool`)。
+   * 与 `detail` 分工:detail 给人看,reason 给统计与回归断言用。
+   */
+  reason?: string;
+  /**
+   * R16:`refuse` 时被拒内容的**证据片段**(硬截 200 字符)。
+   *
+   * 为什么这里可以存正文而 detail 不行:被拒的内容**没有进记忆库**,不存下来就再也
+   * 查不到攻击长什么样。它仍然只落审计文件,不进检索池、不进 system prompt。
+   */
+  snippet?: string;
 }
 
 /**

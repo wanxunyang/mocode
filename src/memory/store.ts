@@ -132,6 +132,26 @@ export interface MemoryEntry {
    * 可选字段,旧条目读入即无(惰性迁移)。
    */
   anchors?: MemoryAnchor[];
+  /**
+   * R16.1:本条内容是否**逐字来自工具输出**(网页正文 / 文件内容 / 命令输出)。
+   *
+   * 为什么需要这个标记:转录里 `tool:` 行的内容是**不受用户控制**的输入。反思读整段
+   * 转录,于是网页里的一句话可能变成一条结论,而这条结论此后每次启动都进 system prompt。
+   * 标上它让「这条凭什么可信」变成可判定的:工具来源的条目置信上限更低,且在列表/详情里
+   * 显式带 `[UNVERIFIED-ORIGIN]`——用户与模型都能看见它是二手转述。
+   *
+   * 只在**逐字重合**时标(见 `guard.findSourceLine`)。概括性结论没有可靠的来源信号,
+   * 留空而不是猜——猜错会同时污染两个方向:把用户亲述降级,或给投毒条文背书。
+   */
+  origin?: 'tool_output';
+  /**
+   * R16.3:写入溯源的可读证据——这条内容的原文首次出现在哪里。
+   *
+   * 存的是一小段**截断的**原文(`工具输出: <前 120 字符>`),不是全文:审计要回答的是
+   * 「这句话从哪来」,不是把网页再存一遍。与 `origin` 分开:origin 是确定性标记
+   * (影响置信与展示),firstSeen 是给人看的线索(影响事后追溯)。
+   */
+  firstSeen?: string;
 }
 
 /** 这三类记忆天然是条件-动作式的;fact/reference 是纯陈述,可无 trigger。 */
@@ -174,6 +194,14 @@ export interface MemoryIndexItem {
   anchorStale?: boolean;
   /** R2:锚点数量(0 或未设置时不输出),供 `/memory` 概览与列表观测覆盖率。 */
   anchorCount?: number;
+  /**
+   * R16.1:内容逐字来自工具输出(网页/文件/命令结果),未经用户确认。
+   *
+   * 必须在索引里暴露:模型 LLM 判断"要不要引用这条"时看到的正是索引/搜索结果,
+   * 只有 `memory_list` 与 `memory_search` 都带上标记,二手转述才会被多核实一次。
+   * 只在该值存在时输出,普通条目保持零噪音。
+   */
+  origin?: 'tool_output';
 }
 
 // ── 路径 ──────────────────────────────────────────────────────────────────
@@ -557,6 +585,13 @@ export interface SaveInput {
    * 文件不存在/符号找不到的锚点会被静默丢弃(见 buildAnchors)。
    */
   anchors?: readonly AnchorInput[];
+  /**
+   * R16.1:标为工具输出衍生。传入后强制 `pinned=false`——模型读完网页后把自己抄来的
+   * 条文 pin 住,等于让它免于衰减与淘汰,是提权。
+   */
+  origin?: 'tool_output';
+  /** R16.3:来源证据(截断原文),见 MemoryEntry.firstSeen。 */
+  firstSeen?: string;
 }
 
 export type SaveResult = { ok: true; id: string } | { ok: false; exists: string } | MemoryWriteBlocked;
@@ -591,6 +626,13 @@ export function saveEntry(input: SaveInput): SaveResult {
   // R2:锚点在**写入时**现算 hash(调用方只给 path/symbol)。算不出来的(文件不存在、
   // 符号找不到)静默丢弃——存一条锚不住任何东西的锚点只会制造永久 unknown 噪音。
   const anchors = buildAnchors(input.anchors);
+  // R16.1:工具输出衍生的条目**不允许 pinned**。pinned 的语义是"免于衰减与封顶淘汰",
+  // 而"我从某个网页里抄来的一段话"恰恰最该被时间淘汰;允许自 pin 等于给投毒条文
+  // 一个永久席位。这里确定性降级,不提示也不报错——调用方拿到的是"写成功了",
+  // 只是它多要的那个特权没给。
+  const origin = input.origin === 'tool_output' ? ('tool_output' as const) : undefined;
+  const pinned = origin ? false : !!input.pinned;
+  const firstSeen = origin ? input.firstSeen?.trim() : undefined;
   const entry: MemoryEntry = {
     id,
     type: input.type ?? 'fact',
@@ -603,7 +645,7 @@ export function saveEntry(input: SaveInput): SaveResult {
     recallCount: 0,
     status: 'active',
     supersededBy: null,
-    pinned: !!input.pinned,
+    pinned,
     scope,
     source: input.source ?? null,
     dedupKey,
@@ -612,6 +654,8 @@ export function saveEntry(input: SaveInput): SaveResult {
     ...(trigger ? { triggerUpdatedAt: now } : {}),
     ...(derivedFrom.length > 0 ? { derivedFrom } : {}),
     ...(anchors.length > 0 ? { anchors } : {}),
+    ...(origin ? { origin } : {}),
+    ...(firstSeen ? { firstSeen } : {}),
   };
   const p = pathForScope(scope);
   // 用 all(已含未落盘召回增量)而非裸读文件:否则写回会把这些增量的实体版本覆盖掉。
@@ -724,6 +768,8 @@ export function listEntries(opts: { type?: MemoryType; status?: MemoryStatus | '
         type: e.type,
         status: e.status,
         hasTrigger: !!e.trigger,
+        // R16.1:同上,只在确实来自工具输出时才带——普通条目零噪音。
+        ...(e.origin === 'tool_output' ? { origin: 'tool_output' as const } : {}),
         // 只在确实是派生条目且确实失效时才带该字段:非派生条目占绝大多数,
         // 一律写 `stale: false` 会把可选字段变成噪音。
         ...(s?.stale ? { stale: true } : {}),

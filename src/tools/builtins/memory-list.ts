@@ -31,7 +31,9 @@ export const memoryListTool: Tool = {
     if (items.length === 0) return '(无记忆条目)';
     const lines = items.map((i) => {
       const gap = !i.hasTrigger && wantsTrigger(i.type) ? ' [NO-TRIGGER]' : '';
-      return `- ${i.id}: ${i.name} — ${i.summary} (${i.type}, ${i.status})${gap}`;
+      // R16.1:来源不可信的条目在这里也要露出来，否则一眼扫列表看不出哪条是"从网页上抄的"。
+      const origin = i.origin === 'tool_output' ? ' [UNVERIFIED-ORIGIN]' : '';
+      return `- ${i.id}: ${i.name} — ${i.summary} (${i.type}, ${i.status})${gap}${origin}`;
     });
     const gaps = items.filter((i) => !i.hasTrigger && wantsTrigger(i.type)).length;
     if (gaps > 0) {

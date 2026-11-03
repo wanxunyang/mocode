@@ -32,6 +32,8 @@ import {
   setMemoryWritesPaused,
   isMemoryWritesPaused,
   appendAudit,
+  readAudit,
+  type AuditRecord,
   type MemoryEntry,
 } from '../../memory/index.js';
 import { evaluateAnchors, evaluateAnchor } from '../../memory/anchor.js';
@@ -85,7 +87,10 @@ function renderProfile(): string {
  * 编一个出来比不显示更糟;要看得更细用 `/memory show <id>` 看图谱边的 prov/confidence。
  */
 export function sourceMark(e: MemoryEntry): string {
-  return e.source?.session ? '[reflection]' : '[tool]';
+  // R16.1:工具输出衍生的条目必须与“模型亲述”区分开——它可能是从网页里逐字抄来的一段话。
+  // 不把两类混成一个标记：用户判断“要不要信这条”时，二手转述本来就该多一层怀疑。
+  const base = e.source?.session ? '[reflection]' : '[tool]';
+  return e.origin === 'tool_output' ? `${base} [UNVERIFIED-ORIGIN]` : base;
 }
 
 /** `/memory show <id>`:一条记忆的全部出处。导出仅供测试断言渲染结果。 */
@@ -106,6 +111,12 @@ export function renderEntryDetail(e: MemoryEntry): string {
       ? `后台产生(反思/情节),会话 ${e.source.session.slice(0, 8)}${e.source.turn !== undefined ? ` 第 ${e.source.turn} 轮` : ''}`
       : '会话内工具写入(memory_save)',
   );
+  // R16.1:来源可信度单独一行，不与上面的“谁写的”混在一起——
+  // “反思写的”与“反思从网页上抄的”是两件完全不同的事。
+  if (e.origin === 'tool_output') {
+    kv('来源可信度', '工具输出衍生(内容逐字来自网页/文件/命令输出，未经用户确认)');
+  }
+  if (e.firstSeen) kv('首次出现', e.firstSeen);
   if (e.lastUpdateReason) kv('最近变更', e.lastUpdateReason);
   if (e.trigger) kv('trigger', e.trigger);
   if (e.action) kv('action', e.action);
@@ -142,6 +153,39 @@ export function renderEntryDetail(e: MemoryEntry): string {
   lines.push(`${ui.dim}${e.summary}${ui.reset}`);
   lines.push(`${ui.dim}${e.body}${ui.reset}`);
   return lines.join('\n') + '\n';
+}
+
+/**
+ * R16.4 来源链:该 id 相关的审计轨迹(写入/被拒/被遗忘/被导出)。
+ *
+ * 为什么按 id **过滤审计文件**而不是给条目加一个"历史版本"字段:审计是 append-only
+ * 的事件流,条目是当前状态。把历史塞进条目会让每次写入都重写正文,而审计行天然
+ * 可跨进程、可被 `--match` 批量操作一起记录——两者的生命周期根本不同。
+ *
+ * 被拒记录(`action: 'refuse'`)不挂 id(内容压根没进库),所以额外按名字前缀匹配
+ * `detail`:用户查一条"是不是曾经想写但被拦过"时,那是最有用的线索。
+ */
+export function renderAuditTrail(id: string, records: readonly AuditRecord[], nameHint?: string): string {
+  const lines: string[] = [];
+  const related = records.filter((r) => {
+    if (r.ids?.some((x) => x === id)) return true;
+    if (r.action !== 'refuse') return false;
+    // 被拒记录没有 id（内容压根没进库），只能按 detail 里的名字/被查串匹配。
+    if (r.detail.includes(id)) return true;
+    return !!nameHint && r.detail.includes(nameHint.slice(0, 60));
+  });
+  lines.push(`${ui.accent}来源链${ui.reset} ${ui.dim}(${related.length} 条审计记录)${ui.reset}`);
+  if (related.length === 0) {
+    lines.push(`${ui.dim}  (无:该条目没有写入/拒绝/遗忘轨迹。审计从 R8 起才有记录，更早的条目自然为空)${ui.reset}`);
+    return lines.join('\n');
+  }
+  for (const r of related.slice(-12)) {
+    const mark = r.action === 'refuse' ? `${ui.yellow}拒绝` : r.action === 'write' ? `${ui.accent}写入` : r.action;
+    lines.push(`  ${ui.dim}${r.at}${ui.reset}  ${mark}${ui.reset} ${ui.dim}${r.detail}${ui.reset}`);
+    if (r.reason) lines.push(`    ${ui.dim}原因: ${r.reason}${ui.reset}`);
+    if (r.snippet) lines.push(`    ${ui.dim}证据: ${r.snippet}${ui.reset}`);
+  }
+  return lines.join('\n');
 }
 
 /** 解析 `/memory forget` 的参数。返回 null 表示使用错误(调用方打用法)。 */
@@ -310,6 +354,23 @@ export const memoryCommands: CommandHandler[] = [
       return next();
     }
     layout.contentWrite(renderEntryDetail(hit) + '\n');
+    return next();
+  },
+  // ── R16.4 来源链 ────────────────────────────────────────────────────────
+  (ctx) => {
+    if (!ctx.line.startsWith('/memory audit')) return unhandled();
+    const id = ctx.line.slice('/memory audit'.length).trim();
+    if (!id) {
+      layout.contentWrite(`${ui.dim}用法:/memory audit <id>(条目详情 + 写入/拒绝轨迹)${ui.reset}\n`);
+      return next();
+    }
+    // 允许前缀，同 /memory show：概览里的 id 很长，用户常只记得前几个字符。
+    const all = loadAll();
+    const hit = all.find((e) => e.id === id) ?? all.find((e) => e.id.startsWith(id));
+    if (hit) layout.contentWrite(renderEntryDetail(hit) + '\n');
+    else layout.contentWrite(`${ui.dim}(找不到记忆 [${id}]；下面只显示审计轨迹)${ui.reset}\n`);
+    layout.contentWrite(renderAuditTrail(hit?.id ?? id, readAudit(300)) + '\n');
+    layout.contentWrite(`${ui.dim}(审计文件 .mocode/memory-audit.jsonl · 只记动作与 id，不存正文)${ui.reset}\n`);
     return next();
   },
   // ── R8.3 暂停写入 ──────────────────────────────────────────────────────
