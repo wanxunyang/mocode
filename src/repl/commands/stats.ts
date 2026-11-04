@@ -3,7 +3,8 @@
  *
  * /stats 读会话级 usage.jsonl,输出 cache 命中率 / 分层用量 / compact 次数。
  * /usage 读全局账本 ~/.mocode/usage-daily.jsonl(每次模型调用追加,含工作区/模型/
- * 本地日期),输出最近 N 天的按天表、总计、工作区与模型排行。
+ * 本地日期),以 GFM 表格输出最近 N 天的总览、按天、工作区与模型排行
+ * (经 contentWriteMdOnce 走 markdown 表格渲染,数字列右对齐)。
  */
 import * as layout from '../../ui/layout.js';
 import { ui } from '../../ui/theme.js';
@@ -16,6 +17,7 @@ import {
   summarizeGlobalUsage,
   type GlobalUsageSummary,
   type UsageBucket,
+  type UsageDayRow,
   type UsageGroupRow,
 } from '../../session/global-usage.js';
 import { unhandled, next, type CommandHandler } from './types.js';
@@ -30,88 +32,109 @@ function tok(v: number): string {
   return fmtCompactTokens(v);
 }
 
-/** 固定宽右对齐(数字串无 ANSI)。 */
-function col(v: string | number, width: number): string {
-  const s = String(v);
-  return s.length >= width ? s : ' '.repeat(width - s.length) + s;
-}
-
 function pct(part: number, whole: number): string {
   return whole > 0 ? `${((part / whole) * 100).toFixed(1)}%` : 'n/a';
 }
 
-/** 工作区/模型排行:名称左截断(保留尾部,工作区尾部目录更有辨识度),数值右对齐。 */
-function groupTable(title: string, rows: UsageGroupRow[], nameWidth: number): string[] {
-  const lines = [`${ui.accent}${title}${ui.reset}`];
-  if (rows.length === 0) {
-    lines.push(`  ${ui.dim}${t('repl.usageNone')}${ui.reset}`);
-    return lines;
-  }
-  for (const r of rows.slice(0, 8)) {
-    let name = r.key;
-    if (name.length > nameWidth) name = `…${name.slice(name.length - nameWidth + 1)}`;
-    lines.push(
-      `  ${ui.cyan}${name.padEnd(nameWidth)}${ui.reset}  ${col(tok(r.input), 7)} in  ${col(tok(r.output), 7)} out  ${col(n(r.calls), 5)} calls  ${ui.dim}${t('repl.usageSessions', { n: r.sessions })}${ui.reset}`,
-    );
-  }
-  if (rows.length > 8) lines.push(`  ${ui.dim}${t('repl.usageMore', { n: rows.length - 8 })}${ui.reset}`);
-  return lines;
-}
-
-function totalRow(b: UsageBucket): string {
-  return `${t('repl.usageTotalRow')}  ${col(tok(b.input), 7)} in · ${col(tok(b.output), 7)} out · ${col(tok(b.cached), 7)} cached · ${col(tok(b.reasoning), 7)} reasoning`;
-}
-
-function formatGlobal(s: GlobalUsageSummary): string {
-  const lines: string[] = [];
-  const b = s.total;
-  const grandTotal = b.input + b.output;
-  lines.push(`${ui.accent}${t('repl.usageTitle', { from: s.fromDay, to: s.toDay, days: s.days })}${ui.reset}`);
-  lines.push(
-    `  ${t('repl.usageTotal', {
-      total: tok(grandTotal),
-      input: tok(b.input),
-      output: tok(b.output),
-      calls: n(b.calls),
-      sessions: n(s.sessionCount),
-      workspaces: n(s.workspaceCount),
-    })}`,
-  );
-  lines.push(
-    `  ${t('repl.usageMetrics', {
-      hit: pct(b.cached, b.input),
-      reasoning: pct(b.reasoning, b.output),
-      cacheWrite: tok(b.cacheCreation),
-      daily: tok(Math.round(grandTotal / s.days)),
-    })}`,
-  );
-  if (s.compact.calls > 0) {
-    lines.push(
-      `  ${ui.dim}${t('repl.usageCompact', { input: tok(s.compact.input), output: tok(s.compact.output), calls: n(s.compact.calls) })}${ui.reset}`,
-    );
-  }
-  lines.push('');
-
-  // 按天表(列宽固定,终端对齐;token 一律缩写)
-  lines.push(
-    `  ${ui.dim}${t('repl.usageColDate').padEnd(10)} ${col('in', 7)} ${col('out', 7)} ${col('cached', 7)} ${col('reason', 7)} ${col('calls', 6)} hit${ui.reset}`,
-  );
-  for (const d of s.byDay) {
-    if (d.calls === 0) {
-      lines.push(`  ${ui.dim}${d.day}  ${t('repl.usageEmptyDay')}${ui.reset}`);
-      continue;
-    }
-    lines.push(
-      `  ${ui.cyan}${d.day}${ui.reset} ${col(tok(d.input), 7)} ${col(tok(d.output), 7)} ${col(tok(d.cached), 7)} ${col(tok(d.reasoning), 7)} ${col(n(d.calls), 6)} ${pct(d.cached, d.input)}`,
-    );
-  }
-  lines.push(`  ${ui.bold}${totalRow(b)}${ui.reset}`);
-  lines.push('');
-
-  lines.push(...groupTable(t('repl.usageByWorkspace'), s.byWorkspace, 40));
-  lines.push('');
-  lines.push(...groupTable(t('repl.usageByModel'), s.byModel, 32));
+/** 构造 GFM 表格:headers/rows 等宽;align 列 'l'(左,默认)或 'r'(右)。 */
+function mdTable(headers: string[], rows: string[][], align: ('l' | 'r')[]): string {
+  const sep = align.map((a) => (a === 'r' ? '---:' : ':---')).join('|');
+  const lines = [`| ${headers.join(' | ')} |`, `|${sep}|`];
+  for (const row of rows) lines.push(`| ${row.join(' | ')} |`);
   return lines.join('\n');
+}
+
+/** 汇总指标键值表(两列)。 */
+function overviewTable(s: GlobalUsageSummary): string {
+  const b = s.total;
+  const rows: string[][] = [
+    [`${ui.bold}${t('repl.usageKTotal')}${ui.reset}`, `${ui.bold}${tok(b.input + b.output)}${ui.reset}`],
+    [t('repl.usageKInput'), tok(b.input)],
+    [t('repl.usageKOutput'), tok(b.output)],
+    [t('repl.usageKRequests'), n(b.calls)],
+    [t('repl.usageKSessions'), n(s.sessionCount)],
+    [t('repl.usageKWorkspaces'), n(s.workspaceCount)],
+    [t('repl.usageKCacheHit'), pct(b.cached, b.input)],
+    [t('repl.usageKReasoningShare'), pct(b.reasoning, b.output)],
+    [t('repl.usageKCacheWrite'), tok(b.cacheCreation)],
+    [t('repl.usageKDailyAvg'), tok(Math.round((b.input + b.output) / s.days))],
+  ];
+  if (s.compact.calls > 0) {
+    rows.push([
+      t('repl.usageKCompact'),
+      `${tok(s.compact.input)} in / ${tok(s.compact.output)} out / ${n(s.compact.calls)}`,
+    ]);
+  }
+  return mdTable([t('repl.usageKMetric'), t('repl.usageKValue')], rows, ['l', 'r']);
+}
+
+function dayRows(byDay: UsageDayRow[]): string[][] {
+  return byDay.map((d) => {
+    if (d.calls === 0) {
+      const dash = `${ui.dim}—${ui.reset}`;
+      return [
+        `${ui.dim}${d.day}${ui.reset}`,
+        dash,
+        dash,
+        dash,
+        dash,
+        dash,
+        `${ui.dim}${t('repl.usageEmptyDay')}${ui.reset}`,
+      ];
+    }
+    return [
+      `${ui.cyan}${d.day}${ui.reset}`,
+      tok(d.input),
+      tok(d.output),
+      tok(d.cached),
+      tok(d.reasoning),
+      n(d.calls),
+      pct(d.cached, d.input),
+    ];
+  });
+}
+
+/** 按天表:无用量日整行 dim,数字列右对齐,末行合计(每个着色单元格自带 reset 防串色)。 */
+function dailyTable(s: GlobalUsageSummary): string {
+  const rows = dayRows(s.byDay);
+  const b: UsageBucket = s.total;
+  const bold = (v: string): string => `${ui.bold}${v}${ui.reset}`;
+  rows.push([
+    bold(t('repl.usageTotalRow')),
+    bold(tok(b.input)),
+    bold(tok(b.output)),
+    bold(tok(b.cached)),
+    bold(tok(b.reasoning)),
+    bold(n(b.calls)),
+    bold(pct(b.cached, b.input)),
+  ]);
+  return mdTable(
+    [
+      t('repl.usageColDate'),
+      t('repl.usageColIn'),
+      t('repl.usageColOut'),
+      t('repl.usageColCached'),
+      t('repl.usageColReason'),
+      t('repl.usageColCalls'),
+      t('repl.usageColHit'),
+    ],
+    rows,
+    ['l', 'r', 'r', 'r', 'r', 'r', 'r'],
+  );
+}
+
+/** 工作区/模型排行表(Top 8,按 input+output 降序已在聚合层排好)。 */
+function groupTable(title: string, colName: string, rows: UsageGroupRow[]): string {
+  const body = rows.slice(0, 8).map((r) => [r.key, tok(r.input), tok(r.output), n(r.calls), n(r.sessions)]);
+  return (
+    `${ui.accent}${title}${ui.reset}\n\n` +
+    mdTable(
+      [colName, t('repl.usageColIn'), t('repl.usageColOut'), t('repl.usageColCalls'), t('repl.usageColSessions')],
+      body,
+      ['l', 'r', 'r', 'r', 'r'],
+    ) +
+    (rows.length > 8 ? `\n\n${ui.dim}${t('repl.usageMore', { n: rows.length - 8 })}${ui.reset}` : '')
+  );
 }
 
 export const statsCommands: CommandHandler[] = [
@@ -133,7 +156,19 @@ export const statsCommands: CommandHandler[] = [
       layout.contentWrite(`${ui.dim}${t('repl.usageNoData')}${ui.reset}\n`);
       return next();
     }
-    layout.contentWrite(`  ${formatGlobal(summarizeGlobalUsage(records, days))}\n`);
+    const s = summarizeGlobalUsage(records, days);
+    // 标题与普通文案走裸通道;表格逐个走 md 通道(各自独立渲染,避免跨段识别问题)。
+    layout.contentWrite(
+      `\n${ui.accent}${t('repl.usageTitle', { from: s.fromDay, to: s.toDay, days: s.days })}${ui.reset}\n\n`,
+    );
+    layout.contentWriteMdOnce(overviewTable(s));
+    layout.contentWrite('\n\n');
+    layout.contentWriteMdOnce(dailyTable(s));
+    layout.contentWrite('\n\n');
+    layout.contentWriteMdOnce(groupTable(t('repl.usageByWorkspace'), t('repl.usageColWorkspace'), s.byWorkspace));
+    layout.contentWrite('\n\n');
+    layout.contentWriteMdOnce(groupTable(t('repl.usageByModel'), t('repl.usageColModel'), s.byModel));
+    layout.contentWrite('\n');
     return next();
   },
   (ctx) => {
