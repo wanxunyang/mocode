@@ -14,6 +14,7 @@ const zhCN = {
   'commands.skills': '列出已发现的 skill',
   'commands.compact': '压缩历史（可带焦点 /compact …）',
   'commands.usage': '跨工作空间按天统计 token 用量（/usage [天数]）',
+  'commands.usageImport': '回填各工作区历史会话的 token 用量（幂等）',
   'commands.session': '会话恢复与回滚',
   'commands.sessionResume': '续接最近 10 个已保存会话（快速）',
   'commands.sessionBrowse': '浏览全部已保存会话',
@@ -223,7 +224,11 @@ const zhCN = {
   'repl.usageByModel': '按模型',
   'repl.usageMore': '… 其余 {n} 项已省略',
   'repl.usageBadArg': '用法：/usage [天数 1-366]（默认 7）',
-  'repl.usageNoData': '（全局账本暂无数据；统计从此功能启用后的模型调用开始累积）',
+  'repl.usageImportDone':
+    '已回填 {records} 条历史记录（{sessions} 个会话 · {workspaces} 个工作空间；跳过 {skipped} 条已实时统计的记录）',
+  'repl.usageImportNothing': '没有可回填的历史记录（{skipped} 条已实时统计，重复执行是幂等的）',
+  'repl.usageImportZero': '没有找到可回填的历史会话用量（先在 mocode 里跑过任务的工作区才会产生 usage.jsonl）',
+  'repl.usageNoData': '（全局账本暂无数据；统计从此功能启用后的模型调用开始累积，或用 /usage import 回填历史）',
   'repl.planAlready': '（已在 plan 模式）',
   'repl.planChanged': '（已切到 plan 模式：只读探查 + 产出计划，审批后切 auto 执行。/auto 或 Shift+Tab 切回）',
   'repl.autoAlready': '（已在 auto 模式）',
@@ -544,6 +549,7 @@ const en: Record<TranslationKey, string> = {
   'commands.skills': 'List discovered skills',
   'commands.compact': 'Compact history (optional focus: /compact …)',
   'commands.usage': 'Cross-workspace daily token usage (/usage [days])',
+  'commands.usageImport': 'Backfill token usage from historical sessions (idempotent)',
   'commands.session': 'Resume sessions and roll back turns',
   'commands.sessionResume': 'Resume one of the 10 latest saved sessions',
   'commands.sessionBrowse': 'Browse all saved sessions',
@@ -754,7 +760,14 @@ const en: Record<TranslationKey, string> = {
   'repl.usageByModel': 'By model',
   'repl.usageMore': '… {n} more hidden',
   'repl.usageBadArg': 'Usage: /usage [days 1-366] (default 7)',
-  'repl.usageNoData': '(No global usage data yet; collection starts from model calls after this feature is enabled)',
+  'repl.usageImportDone':
+    'Backfilled {records} historical records ({sessions} sessions · {workspaces} workspaces; skipped {skipped} already-tracked records)',
+  'repl.usageImportNothing':
+    'Nothing to backfill ({skipped} records were already tracked live; re-running is idempotent)',
+  'repl.usageImportZero':
+    'No historical session usage found (a workspace only has usage.jsonl after tasks have run in mocode)',
+  'repl.usageNoData':
+    '(No global usage data yet; collection starts from model calls after this feature, or run /usage import to backfill history)',
   'repl.planAlready': '(already in plan mode)',
   'repl.planChanged':
     '(switched to plan mode: read-only research and planning; approval returns to auto. Use /auto or Shift+Tab to switch back)',

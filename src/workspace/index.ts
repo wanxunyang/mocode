@@ -21,6 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config/index.js';
 import { getSandboxRoot, setSandboxRoot } from '../sandbox/root.js';
+import { registerWorkspace } from './registry.js';
 
 /** 当前工作区根(绝对路径)。沙箱根优先,未初始化回退 process.cwd()。 */
 export function getWorkspaceRoot(): string {
@@ -104,5 +105,6 @@ export function switchWorkspaceRoot(root: string): WorkspaceSwitchResult {
   setSandboxRoot(abs);
   config.sessionDir = path.join(abs, '.mocode', 'sessions');
   previousRoot = previous;
+  registerWorkspace(abs); // 全局工作区溯源登记(best-effort,见 registry.ts)
   return { previous, root: abs };
 }

@@ -19,6 +19,11 @@ export interface UsageRecord {
   cacheCreationTokens?: number;
   /** 请求前裸估算(与压力线同口径),用于校验估算偏差。 */
   estimatedTotal?: number;
+  /**
+   * 该行是否已实时计入全局账本(~/.mocode/usage-daily.jsonl)。
+   * 历史回填据此跳过 live 行,避免新代码上线后的会话被重复导入;旧文件无此字段按未导入处理。
+   */
+  trackedInGlobal?: boolean;
 }
 
 /** 从 ChatUsage 构造记录;usage 缺失返 null。 */
@@ -27,6 +32,7 @@ export function toUsageRecord(
   phase: UsageRecord['phase'],
   usage: ChatUsage | undefined,
   estimatedTotal?: number,
+  trackedInGlobal = true,
 ): UsageRecord | null {
   if (!usage) return null;
   return {
@@ -38,6 +44,8 @@ export function toUsageRecord(
     reasoningTokens: usage.reasoningTokens,
     ...(usage.cacheCreationTokens ? { cacheCreationTokens: usage.cacheCreationTokens } : {}),
     ...(estimatedTotal != null ? { estimatedTotal } : {}),
+    // 仅在 true 时落字段:旧记录形状保持最小(且 summarize 不读它)。
+    ...(trackedInGlobal ? { trackedInGlobal: true } : {}),
   };
 }
 

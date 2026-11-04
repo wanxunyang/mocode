@@ -16,6 +16,7 @@ import { defaultRuntime } from '../runtime/index.js';
 import { getAgentMode, setAgentMode, onModeChange } from '../agent/mode.js';
 import { sendState } from '../pet/bridge.js';
 import { setSandboxRoot } from '../sandbox/root.js';
+import { registerWorkspace } from '../workspace/registry.js';
 import { ui, setTheme } from '../ui/theme.js';
 import { bannerLines } from '../ui/render.js';
 import * as layout from '../ui/layout.js';
@@ -302,6 +303,8 @@ export async function startRepl(
   // 沙箱根:文件操作边界。优先级 --sandbox-root > SANDBOX_ROOT env > process.cwd()。
   // 纯边界记录(不 chdir),jail.ts 内部 resolve。子 agent 同进程继承全局 root。
   setSandboxRoot(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
+  // 全局工作区溯源登记:启动(新会话与 --resume 同路径都算)留一条轻量记录,供历史回填扫描。
+  registerWorkspace(sandboxRootOverride ?? config.sandboxRoot ?? process.cwd());
   const runtime = defaultRuntime;
   await runtime.start();
   const runtimeContext = runtime.context;

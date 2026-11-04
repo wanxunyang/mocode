@@ -20,6 +20,8 @@ import {
   type UsageDayRow,
   type UsageGroupRow,
 } from '../../session/global-usage.js';
+import { backfillGlobalUsage } from '../../session/backfill-usage.js';
+import { getWorkspaceRoot } from '../../workspace/index.js';
 import { unhandled, next, type CommandHandler } from './types.js';
 
 /** 计数千分位(请求数/会话数等)。 */
@@ -138,6 +140,26 @@ function groupTable(title: string, colName: string, rows: UsageGroupRow[]): stri
 }
 
 export const statsCommands: CommandHandler[] = [
+  // /usage import:把各工作区旧会话的 usage.jsonl 回填进全局账本(幂等,可重复执行)。
+  (ctx) => {
+    if (ctx.line !== '/usage import' && ctx.line !== '/usage import ') return unhandled();
+    const r = backfillGlobalUsage({ extraRoots: [getWorkspaceRoot()] });
+    if (r.records === 0 && r.skippedTracked > 0) {
+      layout.contentWrite(`${ui.dim}${t('repl.usageImportNothing', { skipped: n(r.skippedTracked) })}${ui.reset}\n`);
+    } else if (r.records === 0) {
+      layout.contentWrite(`${ui.dim}${t('repl.usageImportZero')}${ui.reset}\n`);
+    } else {
+      layout.contentWrite(
+        `${ui.accent}${t('repl.usageImportDone', {
+          records: n(r.records),
+          sessions: n(r.sessions),
+          workspaces: n(r.workspaces),
+          skipped: n(r.skippedTracked),
+        })}${ui.reset}\n`,
+      );
+    }
+    return next();
+  },
   // /usage [days]:跨工作空间按天汇总。默认 7 天,可传天数(如 /usage 30);非法参数给用法提示。
   (ctx) => {
     if (ctx.line !== '/usage' && !ctx.line.startsWith('/usage ')) return unhandled();

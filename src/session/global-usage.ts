@@ -13,8 +13,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-/** 全局账本路径:跨工作空间,故放 ~/.mocode 而非项目目录。 */
+/** 全局账本默认路径:跨工作空间,故放 ~/.mocode 而非项目目录。 */
 export const GLOBAL_USAGE_PATH = path.join(os.homedir(), '.mocode', 'usage-daily.jsonl');
+
+/**
+ * 路径覆盖(仅测试用):让账本落到临时目录,避免污染真实 ~/.mocode。
+ * 模块在全量测试进程里可能被别的文件先静态 import 而绑定了真实 home,故不能靠改 env。
+ */
+let globalUsagePathOverride: string | undefined;
+export function __setGlobalUsagePath(p: string | undefined): void {
+  globalUsagePathOverride = p;
+}
+export function getGlobalUsagePath(): string {
+  return globalUsagePathOverride ?? GLOBAL_USAGE_PATH;
+}
 
 export type GlobalUsagePhase = 'main' | 'compact';
 
@@ -28,6 +40,8 @@ export interface GlobalUsageRecord {
   model: string;
   phase: GlobalUsagePhase;
   sessionId?: string;
+  /** 'live' = 实时记账(默认);'backfill' = 从历史会话 usage.jsonl 回填。 */
+  source?: 'live' | 'backfill';
   input: number;
   output: number;
   /** 缓存读(promptTokens 的子集,按真实请求计费口径直接求和,不再从 input 扣减)。 */
@@ -48,15 +62,20 @@ type AppendInput = Omit<GlobalUsageRecord, 'ts' | 'day' | 'cached' | 'reasoning'
   cached?: number;
   reasoning?: number;
   cacheCreation?: number;
+  /** 回填历史记录时指定发生时刻(ISO);缺省取当前时刻。day 按此本地日期归集。 */
+  ts?: string;
+  /** 显式指定归集日期 YYYY-MM-DD(回填按会话创建日);缺省取 ts 的本地日期。 */
+  day?: string;
 };
 
 /** 追加一行全局用量。任何 I/O 失败静默——记账不能拖垮主流程。 */
 export function appendGlobalUsage(input: AppendInput): void {
   try {
-    const now = new Date();
+    const when = input.ts ? new Date(input.ts) : new Date();
+    const day = input.day ?? (Number.isNaN(when.getTime()) ? localDay() : localDay(when));
     const rec: GlobalUsageRecord = {
-      ts: now.toISOString(),
-      day: localDay(now),
+      ts: Number.isNaN(when.getTime()) ? new Date().toISOString() : when.toISOString(),
+      day,
       input: input.input,
       output: input.output,
       cached: input.cached ?? 0,
@@ -66,9 +85,10 @@ export function appendGlobalUsage(input: AppendInput): void {
       model: input.model,
       phase: input.phase,
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.source === 'backfill' ? { source: 'backfill' as const } : {}),
     };
-    fs.mkdirSync(path.dirname(GLOBAL_USAGE_PATH), { recursive: true });
-    fs.appendFileSync(GLOBAL_USAGE_PATH, `${JSON.stringify(rec)}\n`, 'utf8');
+    fs.mkdirSync(path.dirname(getGlobalUsagePath()), { recursive: true });
+    fs.appendFileSync(getGlobalUsagePath(), `${JSON.stringify(rec)}\n`, 'utf8');
   } catch {
     // best-effort, see file header
   }
@@ -78,7 +98,7 @@ export function appendGlobalUsage(input: AppendInput): void {
 export function readGlobalUsage(): GlobalUsageRecord[] {
   let raw: string;
   try {
-    raw = fs.readFileSync(GLOBAL_USAGE_PATH, 'utf8');
+    raw = fs.readFileSync(getGlobalUsagePath(), 'utf8');
   } catch {
     return [];
   }
