@@ -252,8 +252,34 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     const remainingSteps = maxSteps - step;
     const ephemeralReminder = [
       runPolicy.reminder,
+      // 正文纪律:与 step 0 的 Opening analysis 互斥——两段永远不同框,不再需要白名单交叉引用。
+      // 原先这半句只挂在 step 0 的 Opening analysis 里,而本段是临时拼进本次请求、不写回 history
+      // 的(见下方 return),于是从每个用户轮的第 2 步起就彻底消失——长任务后半程等于裸奔
+      // (实测:同一结论换个措辞每步复述一遍,屏幕上像卡死循环)。
+      // step 0 由 Opening analysis 独自承担:那里既没有工具结果可复述,也没有"已说过的观点",
+      // 而"能直接答就直接答"的授权已写在 Answer-first 里,本段三条约束在 step 0 均无对象。
+      // 子 agent 静默执行、不写屏,沿用 suppressOpeningAnalysis 一并免注入。
+      !opts.suppressOpeningAnalysis && step > 0
+        ? '## Silent work\n' +
+          // 禁令范围收在「调用之间」,而不是「不要宣布你要做什么」:后者与 step 0 的
+          // Opening analysis(要求说明打算怎么入手)字面冲突,只能靠下面的白名单化解,
+          // 模型得读完清单才解开。开场分析发生在首次工具调用之前,天然不在本禁令范围内。
+          'Prefer doing over narrating. Do not narrate between tool calls: no sentence announcing ' +
+          'the next call, and no sentence restating what a result means — one such sentence per ' +
+          'call is noise, and repeated variants of ' +
+          'the same conclusion read to the user as a stuck loop. If something genuinely must be said ' +
+          'mid-task (a blocking decision, or a finding that changes what happens next), say it in one ' +
+          'short sentence and keep going. Never repeat a point already made in this turn. Text is for: ' +
+          "direct answers to the user's questions, blocking questions, " +
+          'findings that change the next action, and the final report.'
+        : '',
+      // 仅 step 0:先说明思路。与上面的正文纪律互斥(step > 0),两段永不同框。
+      // 曾经的结尾是"then start tool calls"——每个用户轮的第一步都无条件命令模型动手,
+      // 而 "Answer first" 在 history[0] 尾部隔了几万 token,权重被压过。结果:追问一件
+      // 已完成工作的细节时,模型也能答却先跑去排一堆工具调用。改为显式指向 Answer-first,
+      // 让近处指令与远处规则同向,而不是删掉动手要求(那会在真该干活的轮次矫枉过正)。
       !opts.suppressOpeningAnalysis && step === 0
-        ? '## Opening analysis\nStart your first response of this turn with a brief analysis of the request and approach (1-3 sentences, no filler), then start tool calls. This is the only expected pre-tool prose; afterwards work quietly, no narration between calls.'
+        ? '## Opening analysis\nStart your first response of this turn with a brief analysis of the request and approach (1-3 sentences, no filler). Then follow Answer-first: answer directly when the conversation above already contains what is needed, and start tool calls only when this turn actually needs work. Keep the analysis to 1-3 sentences.'
         : '',
       remainingSteps <= 3
         ? `## Step budget warning\nOnly ${remainingSteps} step(s) remain before the hard step limit (${maxSteps}). ` +

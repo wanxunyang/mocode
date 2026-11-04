@@ -1591,3 +1591,94 @@ test('R17: 无 memoryTail 时请求里不出现该段(零注入)', async () => {
     __setChatCreateImpl(null);
   }
 });
+
+test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后者(且都不落进 history)', async () => {
+  // 钉的是一条曾经静默失效的约束:ephemeralReminder 只拼进本次请求、不写回 history,
+  // 所以「安静干活」这半句若只挂在 step 0 的 Opening analysis 里,从第 2 步起就彻底
+  // 消失——模型只剩 history[0] 里那条最远的 Silent Execution,长任务后半程等于裸奔
+  // (实测:同一结论换个措辞每步复述一遍)。这里抓两次真实请求体证明:
+  //   ① step 0 同时有 Opening analysis 与 Silent work;
+  //   ② step 1 仍有无条件注入的 Silent work,但没有 Opening analysis;
+  //   ③ 两段都没有写进 history(否则会被压缩反复带下去,并在下一用户轮重复出现)。
+  const root = mkdtempSync(join(tmpdir(), 'mocode-silent-work-test-'));
+  writeFileSync(join(root, 'fixture.txt'), 'mocode-fixture-content', 'utf8');
+  const prevRoot = setSandboxRoot(root);
+
+  const requests: Array<{ messages?: ChatMessage[] }> = [];
+  let createCallCount = 0;
+  __setChatCreateImpl(async (body) => {
+    requests.push(body as unknown as { messages?: ChatMessage[] });
+    createCallCount++;
+    if (createCallCount === 1) {
+      return sseStream([
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call-silent',
+                function: { name: 'read_file', arguments: '{"path":"fixture.txt"}' },
+              },
+            ],
+          },
+        },
+        { usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } },
+      ]);
+    }
+    return sseStream([
+      { delta: { content: 'done' } },
+      { usage: { prompt_tokens: 200, completion_tokens: 5, total_tokens: 205 } },
+    ]);
+  });
+
+  try {
+    const history: ChatMessage[] = [{ role: 'system', content: 'sys-original' }];
+    const result = await runAgentCore({
+      history,
+      userInput: 'hi',
+      hooks: {},
+      toolPolicy: new ToolPolicyController({ id: 'core-silent-work', maxExpansions: 0 }),
+      permissionPrompt: () => Promise.resolve({ action: 'cancelled' }),
+    });
+    assert.equal(result.completed, true);
+    assert.equal(requests.length, 2, `应有两步请求,实际 ${requests.length}`);
+
+    const ephemeralOf = (i: number): string => {
+      const sent = requests[i].messages ?? [];
+      const last = sent[sent.length - 1] as { role?: string; content?: unknown };
+      assert.equal(last.role, 'system', `第 ${i + 1} 次请求末尾应是 ephemeral system 段`);
+      return String(last.content ?? '');
+    };
+
+    // ① step 0:只有开场分析。两段互斥后不再需要白名单交叉引用,也不再有
+    // 「不要宣布你要做什么」与「说说你打算怎么入手」的字面冲突。
+    const first = ephemeralOf(0);
+    assert.match(first, /## Opening analysis/, 'step 0 必须带开场分析');
+    assert.ok(!first.includes('## Silent work'), '互斥:step 0 不应同时出现正文纪律');
+    // 收尾必须是明确指代(约束"分析"),不能是悬空的 "those 1-3 sentences"——
+    // 中间插入了 Answer-first 之后,those 会被误读成"整轮回复只 1-3 句"。
+    assert.match(first, /Keep the analysis to 1-3 sentences/);
+
+    // ② step 1:开场分析消失,正文纪律登场——互斥的另一半。
+    const second = ephemeralOf(1);
+    assert.match(second, /## Silent work/, 'step≥1 必须带正文纪律');
+    assert.match(second, /Never repeat a point already made in this turn/);
+    // 互斥后白名单不该再提开场分析:它已不可能同框。
+    assert.ok(!second.includes('the step-0 opening analysis'), '互斥后正文纪律的白名单不应再引用 step-0 开场分析');
+    assert.ok(!second.includes('## Opening analysis'), 'Opening analysis 只该在 step 0 出现');
+
+    // ③ ephemeral 段不得落进 history:system 仍是第一条且逐字节未变。
+    assert.equal((history[0] as { content?: string }).content, 'sys-original');
+    assert.ok(
+      !history.some((m) => {
+        const text = String((m as { content?: unknown }).content ?? '');
+        return text.includes('## Silent work') || text.includes('## Opening analysis');
+      }),
+      'ephemeral 纪律段不得写进 history',
+    );
+  } finally {
+    __setChatCreateImpl(null);
+    setSandboxRoot(prevRoot);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
