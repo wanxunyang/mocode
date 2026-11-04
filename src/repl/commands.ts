@@ -32,7 +32,10 @@ export function buildSlashCommands(): SlashCommand[] {
     {
       name: '/usage',
       desc: d('commands.usage'),
-      children: [{ name: 'import', value: '/usage import', desc: d('commands.usageImport') }],
+      children: [
+        { name: 'overview', value: '/usage', desc: d('commands.usageOverview') },
+        { name: 'import', value: '/usage import', desc: d('commands.usageImport') },
+      ],
     },
     { name: '/stats', desc: '查看本会话 token 用量与缓存命中率' },
     { name: '/effort', desc: '设置思考强度(/effort [low|medium|high|auto])' },
