@@ -19,7 +19,7 @@ import { formatArtifactTokenSources } from '../context/artifacts.js';
 import { getAgentMode } from '../agent/mode.js';
 import { getCurrentSessionId } from '../session/state.js';
 import { getSandboxRoot } from '../sandbox/root.js';
-import { planStepLabel } from '../session/notes.js';
+import { planStepLabel, planStepParts } from '../session/notes.js';
 import type { ChatMessage, ChatUsage } from '../llm/index.js';
 import type { PlanStepView } from '../ui/layout-types.js';
 
@@ -171,6 +171,7 @@ export function readPlanStatusFromNotes(): NotesPlanStatus | null {
       steps.push({
         no: Number(m[2]),
         label: planStepLabel(m[3] ?? ''),
+        detail: planStepParts(m[3] ?? '').detail || undefined,
         done,
         current: isCurrent,
       });

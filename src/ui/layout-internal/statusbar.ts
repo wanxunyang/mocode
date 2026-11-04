@@ -6,9 +6,9 @@ import { displayWidth, truncateDisplay, ansiDisplayWidth, fmtElapsed, fmtCompact
 import { ui } from '../theme.js';
 import * as content from '../content.js';
 import { t } from '../../i18n/index.js';
-import type { StatusBarData } from '../layout-types.js';
+import type { StatusBarData, PlanStepView } from '../layout-types.js';
 import { state } from './state.js';
-import { esc, cup, getGeo, runningCaretPos, isStreamingPaused } from './screen.js';
+import { esc, cup, getGeo, setRegion, runningCaretPos, isStreamingPaused } from './screen.js';
 
 const RUNNING_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -192,34 +192,197 @@ function formatLiveUsageChip(u: { promptTokens: number; completionTokens: number
   return `${ui.dim}↑ ${fmt(billable)} ↓ ${fmt(u.completionTokens)}${cacheTag}${ui.reset}`;
 }
 
-/** spinner 行上方的「虚拟空行」(contentBottom+1)。
- *  - 有活跃 plan:显「plan: <summary> ▸ N. step」整行左对齐(yellow)
+/** plan chip 步骤行的缩进(箭头 1 + 空格 1,步骤行对齐到摘要标题之后两列)。 */
+const PLAN_STEP_INDENT = '  ';
+
+/** 判断屏幕行是否落在 plan chip 占用的脚栏行(contentBottom+1 .. +planRows)。鼠标命中用。 */
+export function isPlanRow(screenRow: number): boolean {
+  if (!state.active || !state.base?.planSummary) return false;
+  const g = getGeo();
+  return screenRow >= g.contentBottom + 1 && screenRow <= g.contentBottom + state.planRows;
+}
+
+/** 按显示宽度贪心折行(优先在空格断,宽字符/CJK 整字不拆)。plan 步骤详情用;纯展示,不处理 ANSI。 */
+function wrapDisplayText(text: string, width: number): string[] {
+  const out: string[] = [];
+  let line = '';
+  let lastSpace = -1; // line 内最后一个空格的 code-unit 下标
+  for (const ch of text.replace(/\s+/g, ' ').trim()) {
+    if (line && displayWidth(line) + displayWidth(ch) > width) {
+      if (lastSpace > 0) {
+        out.push(line.slice(0, lastSpace));
+        line = line.slice(lastSpace + 1);
+      } else {
+        out.push(line);
+        line = '';
+      }
+      lastSpace = -1;
+    }
+    if (ch === ' ') {
+      if (line) {
+        lastSpace = line.length;
+        line += ch;
+      }
+    } else {
+      line += ch;
+    }
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+/**
+ * spinner 行上方的「虚拟空行」(contentBottom+1)。
+ *  - 有活跃 plan 且折叠:显「▸ plan: <summary> (N/M) ▸ 当前步」整行(yellow),过长截 1 行 + "…"
+ *  - 有活跃 plan 且展开(点击标题行切换):首行「▾ plan: <标题> (N/M)」,下面逐行列全部步骤
+ *    「✓ N. label」(完成,dim green)/「▸ N. label」(当前,accent)/「· N. label」(待办,dim);
+ *    步骤带 detail 时行尾加 ▸ 提示可点,点击该步在下方缩进展开详情(dim,按宽折行),再点收起。
+ *    总行数按脚栏剩余高度(maxRows)钳制,放不下时末行显「… 还有 K 步」。
  *  - 无活跃 plan:空(保留原分隔视觉,避免内容贴输入区)
- *  - 过长(> cols):始终**截断保 1 行 + "…"**,不撑高脚栏、不拆 2 行——
- *    步进式任务标题/current step 通常是自然语言,即使切「 ▸ 」拆 2 行,第 2 行也大概率仍超长
- *    (实测「第三步:实现核心业务模块。…」本身就比 cols 长),拆完依然覆盖 spinner/输入区,得不偿失。
- *    截断 + "…" 一行内永远不溢出,脚栏恒 6 行,spinner/输入/下线/model 行偏移稳定。
- *  这行在 DECSTBM 滚动区外([1, contentBottom]),稳定不滚。 */
-export function composePlanLines(status: StatusBarData, cols: number): string[] {
+ *  脚栏高度 = 5 + 输入行 + (planRows-1),spinner/输入/下线/model 行偏移稳定。
+ *  这组行在 DECSTBM 滚动区外([1, contentBottom]),稳定不滚。
+ *  副作用:重建 state.planRowStep(行→步骤号映射,鼠标点击路由用)。
+ * @param maxRows plan 区域允许占用的最大行数;不传时按屏幕高度保守钳(只防顶到屏顶)。
+ */
+export function composePlanLines(status: StatusBarData, cols: number, maxRows?: number): string[] {
   const plan = (status.planSummary ?? '').trim();
   if (!plan) {
     state.planRows = 1;
+    state.planExpanded = false;
+    state.planStateKey = undefined;
+    state.planRowStep = [];
     return [];
   }
-  const w = displayWidth(stripAnsi(plan));
-  if (w <= cols) {
-    state.planRows = 1;
-    return [`${ui.yellow}${plan}${ui.reset}`];
+  // plan 身份变化(新计划 / 结算后新计划):自动收起展开态并清空步骤详情展开集,
+  // 避免把旧计划的多行展开套到新计划上。
+  if (status.planKey !== state.planStateKey) {
+    state.planStateKey = status.planKey;
+    state.planExpanded = false;
+    state.planOpenSteps.clear();
   }
-  // 溢出:截断为 1 行 + "…" 后缀(留 1 列空间给省略号)。
-  state.planRows = 1;
-  return [`${ui.yellow}${truncateDisplay(plan, Math.max(1, cols - 1))}…${ui.reset}`];
+  const collapsedLine = (caret: string): string => {
+    const w = displayWidth(stripAnsi(plan)) + 2; // 箭头 + 空格
+    // 颜色必须套在 plan 文本上且在 caret 之后:caret 自带 reset,若 yellow 放在
+    // caret 前面会被它清掉,plan 文本就裸奔成默认白(展开态首行尤明显)。
+    if (w <= cols) return `${caret} ${ui.yellow}${plan}${ui.reset}`;
+    return `${caret} ${ui.yellow}${truncateDisplay(plan, Math.max(1, cols - 3))}…${ui.reset}`;
+  };
+  if (!state.planExpanded) {
+    state.planRows = 1;
+    state.planRowStep = [null];
+    return [collapsedLine(`${ui.dim}▸${ui.reset}`)];
+  }
+  // ── 展开态:标题行 + 每步一行 + 点开的步骤渲染详情(钳高)──
+  const steps = status.planSteps ?? [];
+  // 不传 maxRows(drawStatusBar 路径):按屏幕高度保守钳,至少 2 行(标题 + 1 步);
+  // 传了(paintInput 路径,已知脚栏预算):精确钳,保证不覆盖 spinner/输入区。
+  const cap = Math.max(2, maxRows ?? Math.max(2, getGeo().rows - 5 - state.inputRows));
+  const header = collapsedLine(`${ui.accent}▾${ui.reset}`);
+  const lines = [header];
+  state.planRowStep = [null];
+  // 详情详情宽 = 减去详情缩进 4 列;先算好每个点开步骤的详情折行,供预算裁剪。
+  const detailIndent = '    ';
+  const detailOf = new Map<number, string[]>();
+  for (const s of steps) {
+    if (s.detail && state.planOpenSteps.has(s.no)) {
+      detailOf.set(
+        s.no,
+        wrapDisplayText(s.detail, Math.max(8, cols - displayWidth(detailIndent))).map(
+          (l) => `${detailIndent}${ui.dim}${l}${ui.reset}`,
+        ),
+      );
+    }
+  }
+  // 有步骤被裁掉时,末行要留给「… 还有 K 步」指示:先按「全部装得下」试探,
+  // 装不下则预扣 1 行给指示,再走一遍裁剪(保证 planRows ≤ cap)。
+  let budget = cap - 1;
+  const fits = (b: number): { visible: typeof steps; hidden: number } => {
+    let left = b;
+    const vis: typeof steps = [];
+    let hidden = 0;
+    for (const s of steps) {
+      const need = 1 + (detailOf.get(s.no)?.length ?? 0);
+      if (need <= left) {
+        vis.push(s);
+        left -= need;
+      } else {
+        hidden = steps.length - vis.length;
+        break;
+      }
+    }
+    return { visible: vis, hidden };
+  };
+  let { visible, hidden } = fits(budget);
+  if (hidden > 0 && visible.length > 0) {
+    // 预扣指示行后重裁;若连一个步骤都装不下(极端矮终端),放弃指示行保步骤。
+    const retry = fits(budget - 1);
+    if (retry.visible.length > 0) {
+      visible = retry.visible;
+      hidden = retry.hidden;
+      budget -= 1;
+    }
+  }
+  for (const s of visible) {
+    const mark = s.done ? `${ui.green}✓${ui.reset}` : s.current ? `${ui.accent}▸${ui.reset}` : `${ui.dim}·${ui.reset}`;
+    // 前缀 = 缩进2 + 标记1 + 空格1 + "N. "(编号位数 + 2);label 吃掉剩余列,保证整行不 wrap。
+    const prefixW = displayWidth(PLAN_STEP_INDENT) + 1 + 1 + String(s.no).length + 2;
+    const open = detailOf.has(s.no);
+    const hasDetail = s.detail != null && s.detail !== '';
+    // 行尾可展开提示:有详情未展开 ▸ / 已展开 ▾(与标题行的箭头语义一致)。
+    const endCaret = !hasDetail ? '' : open ? ` ${ui.dim}▾${ui.reset}` : ` ${ui.dim}▸${ui.reset}`;
+    const labelW = Math.max(1, cols - prefixW - (hasDetail ? 2 : 0));
+    const label = truncateDisplay(s.label, labelW);
+    const color = s.done ? ui.dim : s.current ? ui.yellow : ui.dim;
+    lines.push(`${PLAN_STEP_INDENT}${mark} ${color}${s.no}. ${label}${ui.reset}${endCaret}`);
+    state.planRowStep.push(s.no);
+    const d = detailOf.get(s.no);
+    if (d) {
+      lines.push(...d);
+      for (let i = 0; i < d.length; i++) state.planRowStep.push(s.no); // 点详情行=再点收起
+    }
+  }
+  if (hidden > 0) {
+    lines.push(`${PLAN_STEP_INDENT}${ui.dim}… ${t('status.planMoreSteps', { count: hidden })}${ui.reset}`);
+    state.planRowStep.push(null); // 指示行不可点
+  }
+  // 极端情况下 steps 为空(数据缺失):只有标题行,仍能点击收起。
+  state.planRows = Math.max(1, lines.length);
+  return lines;
 }
 
-/** 画状态行(plan 行 + spinner 行 + model 行,三行)。RUNNING 态 spinner 频繁调。
- *  行号(footerH=6 当 plan 单行;footerH=7 当 plan 撑 2 行):
- *    plan 行     = contentBottom+1          (单行)
- *    plan 第 2 行 = contentBottom+2          (双行,可选)
+/** plan 区域高度变化(展开/收起/结算)后的全幅重排回调,由 core.ts 注入
+ *  (paintInput 同步重设 DECSTBM + 重画脚栏):statusbar 不能静态 import input-paint(循环依赖),
+ *  也不能用动态 import——异步窗口内 80ms 心跳会按新 planRows + 旧 footerH 画错行。 */
+let planRelayout: (() => void) | null = null;
+export function setPlanRelayoutHandler(fn: (() => void) | null): void {
+  planRelayout = fn;
+}
+
+/** 切换 plan chip 展开/收起(鼠标点击标题行)。无活跃 plan / 无步骤数据时 no-op。
+ *  经注入的同步回调重设区域并重画整个脚栏;回调缺失时退化为 drawStatusBar。
+ *  收起时保留 planOpenSteps(重新展开还原各步详情展开状态),换计划才清空。 */
+export function togglePlanExpanded(): void {
+  if (!state.active || !state.base?.planSummary) return;
+  if (!state.planExpanded && !(state.base.planSteps && state.base.planSteps.length > 0)) return;
+  state.planExpanded = !state.planExpanded;
+  if (state.lastView && planRelayout) planRelayout();
+  else drawStatusBar();
+}
+
+/** 切换单个步骤的详情展开/收起(鼠标点击步骤行/详情行)。无详情数据时 no-op。 */
+export function togglePlanDetail(stepNo: number): void {
+  if (!state.active || !state.planExpanded) return;
+  const step = state.base?.planSteps?.find((s) => s.no === stepNo);
+  if (!step?.detail) return; // 无详情可看,点了也不给反应
+  if (state.planOpenSteps.has(stepNo)) state.planOpenSteps.delete(stepNo);
+  else state.planOpenSteps.add(stepNo);
+  if (state.lastView && planRelayout) planRelayout();
+  else drawStatusBar();
+}
+
+/** 画状态行(plan 行 + spinner 行 + model 行)。RUNNING 态 spinner 频繁调。
+ *  行号(footerH=5+inputRows+planRows-1):
+ *    plan 行 1..N = contentBottom+1 .. +planRows (折叠 1 行;展开 = 标题 + 步骤行)
  *    spinner 行  = contentBottom+1+planRows  (● 空闲 / ⠹ 思考中… / etc)
  *    上线        = contentBottom+2+planRows  (画在 paintInput)
  *    输入行      = contentBottom+3+planRows
@@ -230,20 +393,29 @@ export function drawStatusBar(status?: StatusBarData): void {
   // 覆盖层(composer)打开中照常刷底栏:弹窗只占内容区(2..contentBottom-1),底栏行在其外不冲突;
   // 仅末尾光标归位改为弹窗自报位(见下),防 80ms 心跳把弹窗光标拽到底栏输入框。
   const s = status ?? { ...state.base, status: state.statusText, spinnerFrame: state.spinnerFrame };
+  const g0 = getGeo();
+  const planLines = composePlanLines(s, g0.cols);
+  // planRows 与当前 footerH 不符(plan 在运行中被结算/换新,composePlanLines 自动收起展开态等):
+  // 心跳路径不会走 paintInput 的 setRegion,这里重设区域并交回调全幅重排(含被吃掉/归还的内容末行),
+  // 不能只画 spinner/model——旧上分隔线、输入行会残留在新行位。
+  const needFooterH = 5 + state.inputRows + (state.planRows - 1);
+  if (needFooterH !== g0.footerH) {
+    setRegion(needFooterH);
+    planRelayout?.();
+    return;
+  }
   const g = getGeo();
-  const planLines = composePlanLines(s, g.cols);
   const planRow1 = g.contentBottom + 1;
   const spinnerRow = g.contentBottom + 1 + state.planRows;
   const modelRow = g.rows; // 屏底:model 行
-  // plan 可能占 1 或 2 行(过长自动撑开);spinner/model 行随之平移。
-  // 一次写入:plan 1/2 行 + spinner 行 + model 行,末尾 cup 回续写位/输入框光标。
+  // 一次写入:plan 各行 + spinner 行 + model 行,末尾 cup 回续写位/输入框光标。
   let planBuf = '';
   for (let i = 0; i < planLines.length; i++) {
     planBuf += cup(planRow1 + i, 1) + esc.clearLine + planLines[i];
   }
-  // 计划行从 2 行降到 1 行时,清掉残留的第 2 行(撑高后回退不留尾巴)。
-  if (state.planRows === 1 && g.footerH > 6) {
-    planBuf += cup(planRow1 + 1, 1) + esc.clearLine;
+  // 上轮 plan 占的行数比本轮多(步骤变少,展开态被钳短):清掉本轮不再使用的残留行,不留尾巴。
+  for (let r = planRow1 + planLines.length; r < spinnerRow; r++) {
+    planBuf += cup(r, 1) + esc.clearLine;
   }
   // plan 从非空变成空(已结算为 ## Done:/ notes 里无活跃 ## Plan: 段)时,清掉残留的 plan 行 1。
   // 否则上轮渲染的「plan: 标题 (N/M) ▸ 当前步」会卡在底栏「虚拟空行」位置直到下一次重启 REPL。
@@ -458,6 +630,8 @@ export function setStatusBase(b: {
   modeTag?: string;
   effort?: string;
   planSummary?: string;
+  planKey?: string;
+  planSteps?: PlanStepView[];
   lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
 }): void {
   state.base = b;

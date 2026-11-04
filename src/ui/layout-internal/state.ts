@@ -12,7 +12,7 @@
 //    否则跨 await / 定时器会读到过期值。
 
 import type * as mouse from '../mouse.js';
-import type { InputView } from '../layout-types.js';
+import type { InputView, PlanStepView } from '../layout-types.js';
 
 /** token 用量(后端不开 include_usage 时 cachedTokens 缺省)。 */
 export interface TokenUsage {
@@ -32,6 +32,10 @@ export interface StatusBase {
   effort?: string;
   /** 活跃 plan 短摘要(无 plan=undefined,空串=有 plan 但 chip 不显)。 */
   planSummary?: string;
+  /** plan 身份标识(标题):新 plan 出现时自动收起展开态。 */
+  planKey?: string;
+  /** 完整步骤列表(展开 plan chip 时逐行显示)。 */
+  planSteps?: PlanStepView[];
   lastTurnUsage?: TokenUsage;
 }
 
@@ -130,10 +134,23 @@ export const state = {
   spinnerFrame: undefined as string | undefined,
   turnStart: null as number | null, // RUNNING 态起点(Date.now());INPUT 态为 null。composeStatus 据此拼走时。
   turnTimer: null as NodeJS.Timeout | null, // 走时刷新计时器(独立于 spinner):流式期间 spinner 停转,由它续刷状态行。
-  /** 当前 plan chip 占用脚栏行数(1 或 2)。composePlanLines 每次重算后写入。
-   *  驱动 paintInput setRegion(fh) 动态撑高脚栏;drawStatusBar 据此画 1/2 行 plan,
-   *  与 spinner/上线/输入/下线/model 行的 +1/+2/+3/+4/+5 偏移天然一致(contentBottom 自动重算)。 */
-  planRows: 1 as 1 | 2,
+  /** 当前 plan chip 占用脚栏行数:折叠=1(摘要行;超长仍单行截断),展开=1+步骤行数(按脚栏剩余高度钳制)。
+   *  composePlanLines 每次重算后写入。驱动 paintInput setRegion(fh) 动态撑高脚栏;drawStatusBar
+   *  据此画 plan 各行,与 spinner/上线/输入/下线/model 行的 +1/+2/+3/+4/+5 偏移天然一致(contentBottom 自动重算)。 */
+  planRows: 1,
+  /** plan chip 展开态(点击摘要行切换)。planKey 变化(新计划/结算消失)时自动回 false。 */
+  planExpanded: false,
+  /** 当前已渲染 plan 的身份(标题);与 base.planKey 不同说明 plan 换了,收起展开态。 */
+  planStateKey: undefined as string | undefined,
+  /** 当前输入框可视行数(paintInput 每帧写入):drawStatusBar 路径钳制展开 plan 高度时需要它算脚栏预算。 */
+  inputRows: 1,
+  /** 左键按下的屏幕行(release 未拖出 plan 区才触发,与内容区选区/折叠交互同构);null=未按在 plan 行上。 */
+  planPressRow: null as number | null,
+  /** 点击展开详情的步骤号集合(仅展开态有意义);planKey 变化时清空。 */
+  planOpenSteps: new Set<number>(),
+  /** 展开态行→步骤号映射(plan 区内第 i 行对应哪一步;0=标题行→null)。composePlanLines 每次重建,
+   *  鼠标 release 时据此把点击行路由到「折叠整个计划 / 切换某步详情」。 */
+  planRowStep: [] as (number | null)[],
   runningFrame: -1, // 运行态状态行 chip 心跳帧(转圈帧 明灭);INPUT 态 -1 退回静态 ●
   /** 上一次 paintLiveAtCursor 实际画帧的屏坐标(0=未画)。clearLiveAtCursor 清"这行"而非当前续写位——
    *  防 spinner 运行期间续写位漂移时清错行、旧帧行残留(见 557e678 移除 isStreamingPaused 后的间歇性 frame 泄漏)。 */

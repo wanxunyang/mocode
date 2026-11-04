@@ -1,4 +1,15 @@
 // 从 ui/layout.ts 提取的类型定义
+
+/** 活跃 plan 的单个步骤(展开 plan chip 时逐行展示)。 */
+export interface PlanStepView {
+  no: number;
+  label: string;
+  done: boolean;
+  current: boolean;
+  /** 详细描述(notes.md 步骤行 `**短标题** — 详细描述` 的后半);空=点击该步无可展开内容。 */
+  detail?: string;
+}
+
 export interface Geo {
   rows: number;
   cols: number;
@@ -18,6 +29,10 @@ export interface StatusBarData {
   effort?: string;
   /** 活跃 plan 短摘要(无 plan=undefined,空串=有 plan 但 chip 不显)。repl 透传 getActivePlanSummary()。 */
   planSummary?: string;
+  /** plan 身份标识(标题):切换成新 plan 时 UI 自动收起展开态;与 planSummary 同时存在。 */
+  planKey?: string;
+  /** 完整步骤列表(点击 plan chip 展开时逐行显示,带完成/当前状态)。 */
+  planSteps?: PlanStepView[];
   /** 本轮最后一条 token 用量(modeTag chip 右边显示)。后端不开 include_usage 时 undefined。
    *  cachedTokens 可选 —— 后端未报或老 ChatUsage 字面量不带此字段时 UI 不会显示缓存标记。 */
   lastTurnUsage?: { promptTokens: number; completionTokens: number; totalTokens: number; cachedTokens?: number };

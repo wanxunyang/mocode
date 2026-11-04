@@ -96,14 +96,25 @@ export function renderPlanSection(plan: PlanState): string {
  * 与 renderPlanSection 配对(一个写一个读),格式定义与解析同处,避免散落两处走样。
  */
 export function planStepLabel(raw: string): string {
+  const { label, detail } = planStepParts(raw);
+  return label || detail || raw.trim();
+}
+
+/**
+ * 步骤行正文的完整拆解:短标签 + 详情 + 进行中文案。planStepLabel 的无损版——
+ * 底栏 plan chip 点击步骤展开详情时需要 detail(不再只取短标签丢掉描述)。
+ * detail 取 `**title** — ` 之后的正文;无 title 的老 plan detail 为空串(整行已当 label)。
+ */
+export function planStepParts(raw: string): { label: string; detail: string; activeForm: string } {
   const body = raw.trim();
   const afIdx = body.lastIndexOf('◀');
   const activeForm = afIdx >= 0 ? body.slice(afIdx + 1).trim() : '';
   const main = (afIdx >= 0 ? body.slice(0, afIdx) : body).trim();
   const m = main.match(/^\*\*(.+?)\*\*(?:\s*—\s*)?([\s\S]*)$/);
   const title = m?.[1]?.trim() ?? '';
-  const content = (m ? (m[2] ?? '') : main).trim();
-  return title || activeForm || content || main;
+  const detail = (m ? (m[2] ?? '') : '').trim();
+  const content = m ? detail : main;
+  return { label: title || activeForm || content, detail, activeForm };
 }
 
 /** 读取当前活跃 `## Plan:` 段的标题;无活跃 plan 返 null。 */

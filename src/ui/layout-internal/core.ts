@@ -34,7 +34,16 @@ import {
   pasteIntoInput,
   inputScreenToInputPos,
 } from './selection.js';
-import { composePlanLines, drawStatusBar, startTurnTimer, stopTurnTimer } from './statusbar.js';
+import {
+  composePlanLines,
+  drawStatusBar,
+  startTurnTimer,
+  stopTurnTimer,
+  isPlanRow,
+  togglePlanExpanded,
+  togglePlanDetail,
+  setPlanRelayoutHandler,
+} from './statusbar.js';
 import { paintInput, repaint } from './input-paint.js';
 import {
   WHEEL_LINES,
@@ -66,6 +75,8 @@ export {
   setQueuedTurn,
   setStatusBase,
   setPendingAttachChips,
+  togglePlanExpanded,
+  togglePlanDetail,
 } from './statusbar.js';
 export { paintInput, paintRunningInput, repaint } from './input-paint.js';
 export {
@@ -306,6 +317,14 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     scrollWheel(e.dir);
     return;
   }
+  // plan chip 行点击(在滚动区外的固定脚栏):按下记录命中行,release 时按行路由——
+  // 标题行=折叠/展开整个计划,步骤行=展开/收起该步详情(见 release 分支)。
+  // 不走内容选区——plan 行不属于内容缓冲,screenRowToAbsLine 会把它错误钳到 contentBottom。
+  // 面板/picker 期间(mouseEnabled=false)不响应,与其它非滚轮鼠标交互一致,防重排覆盖弹窗。
+  if (state.mouseEnabled && e.button === 0 && e.type === 'press' && isPlanRow(e.row)) {
+    state.planPressRow = e.row;
+    return;
+  }
   // 输入行左键点击:INPUT 态(含 intervention 面板,其 cursorChangeHandler 已注册)允许定位光标,
   // 提升用户体验(点哪插哪)。RUNNING 态直接 no-op——光标定位是 INPUT 态交互,运行态
   // typeahead 由键盘体系管理(←/→/Home/End,running-input.ts),不应触发模式切换(见
@@ -373,6 +392,8 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
     return;
   }
   if (e.type === 'drag') {
+    // 从 plan 行拖出:视为取消点击(与 batch 摘要行"纯点击才折叠"一致),不展开。
+    if (state.planPressRow !== null && !isPlanRow(e.row)) state.planPressRow = null;
     if (state.inputSelection) {
       // 输入框拖动选区:更新 end,触边不动 scroll(输入框行数有限,无外滚概念);重画底栏。
       const pos = inputScreenToInputPos(e.row, e.col);
@@ -400,6 +421,18 @@ function handleMouseEvent(e: mouse.MouseEvent): void {
   }
   // release(左键)
   state.selecting = false;
+  // plan chip 纯点击(press 命中且未拖出):按 planRowStep 映射路由——
+  // 标题行(offset 0)= 折叠/展开整个计划;步骤行 = 展开/收起该步详情;指示行(null)= no-op。
+  if (state.planPressRow !== null) {
+    const pressRow = state.planPressRow;
+    state.planPressRow = null;
+    if (isPlanRow(e.row)) {
+      const stepNo = state.planRowStep[e.row - (g.contentBottom + 1)] ?? null;
+      if (stepNo !== null) togglePlanDetail(stepNo);
+      else if (pressRow === g.contentBottom + 1) togglePlanExpanded(); // 仅标题行折叠整个计划
+      return;
+    }
+  }
   // 输入框 release 优先:未拖动 → 清选区(光标已定好);拖动过 → 留高亮等右键复制
   if (state.inputSelection) {
     if (!state.inputSelection.dragged) {
@@ -562,6 +595,12 @@ export function enterAltScreen(): void {
   // 不动终端窗口背景:底色保持用户终端原色,主题只作用于我们画出的 SGR 颜色。
   stdout.write(esc.mouseOn); // 完整鼠标追踪(按下/拖动/释放/滚轮)→ mouse.swallow 重组 → handleMouseEvent
   mouse.setHandler(handleMouseEvent);
+  // plan 展开态导致脚栏高度变化时,drawStatusBar 心跳路径经此回调全幅重排(重画内容区 + 输入区),
+  // 避免在 statusbar 层静态 import input-paint 形成循环依赖。
+  setPlanRelayoutHandler(() => {
+    repaintViewport();
+    repaint();
+  });
   // 进入 alt screen 前 base 可能已设了 planSummary;按当前 planSummary 重算 planRows,
   // 让首次 setRegion 撑出正确脚栏高(否则 plan 撑 2 行时会被 spinner 行覆盖)。
   if (state.base) composePlanLines(state.base as StatusBarData, getGeo().cols);
@@ -646,6 +685,7 @@ export function exitAltScreen(): void {
   state.frameCol = 0;
   mouse.setHandler(null);
   mouse.resetMouse();
+  setPlanRelayoutHandler(null);
   state.selection = null;
   state.selecting = false;
   // raw 还原独立 try:非 TTY / 不支持时 setRawMode 抛错,不应阻断 stdout 恢复(alt 退屏必须执行)。

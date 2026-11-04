@@ -159,6 +159,14 @@ export function paintInput(view: InputView): void {
         startVis: 0,
       }
     : windowInputVis(view.lines, view.cursorLine, view.cursorCol, preGeo.cols, promptW, preGeo.rows);
+  // 先按本帧输入行数 + 屏幕高度给 plan 区域算精确行数预算(展开态可能占多行),
+  // composePlanLines 据此钳制 planRows,随后 needFooterH 才能与实际渲染行数一致。
+  // 约束:footerH = 5 + inputRows + (planRows-1) ≤ rows-1(至少留 1 行内容区)。
+  state.inputRows = vis.inputRows;
+  // 约束:needFooterH = 5+inputRows+(planRows-1) ≤ rows-1(至少留 1 行内容区)
+  // → planRows ≤ rows-5-inputRows。展开 20 步的大计划在矮终端里由此钳制。
+  const planMaxRows = Math.max(1, preGeo.rows - 5 - vis.inputRows);
+  const planLines = composePlanLines(state.base as StatusBarData, preGeo.cols, planMaxRows);
   const needFooterH = 5 + vis.inputRows + (state.planRows - 1); // 1 虚拟空 + 1 spinner 行 + 1 上线 + 输入行 + 1 下线 + 1 model 行 + plan 多出的行数
   let g = preGeo;
   if (needFooterH !== state.footerH) {
@@ -183,24 +191,18 @@ export function paintInput(view: InputView): void {
   }
 
   // 2c. 虚拟空行(内容区与状态栏之间的视觉间隔,属底栏非内容):
-  //     - 有活跃 plan:渲染 plan chip(整帧重画时也要更新,避免 listener 漏触发后残留)
+  //     - 有活跃 plan:渲染 plan chip——折叠 1 行摘要,点击展开后逐行列全部步骤(行数按 2. 的预算钳制)
   //     - 否则有待发图片附件:渲染附件 chip(不进内容缓冲,提交后由 echoInput 正式回显)
   //     - 都没有:清空保留作分隔
-  //     - plan 过长:占 2 行(planRows=2),spinner/上线/输入行随之整体下移 1 行
-  //     paintInput 与 drawStatusBar 共享同一 planRows 模块态,setRegion 已据此把脚栏撑高。
+  //     setRegion 已按 planRows 撑高脚栏,spinner/上线/输入行随之下移。
   {
-    const planBuf = composePlanLines(state.base as StatusBarData, preGeo.cols);
-    for (let i = 0; i < planBuf.length; i++) {
-      buf += cup(g.contentBottom + 1 + i, 1) + esc.clearLine + planBuf[i];
-    }
-    // 计划行从 2 行降到 1 行(plan 当前很短):清掉残留的第 2 行,不留尾巴。
-    if (planBuf.length < state.planRows && state.planRows === 2) {
-      buf += cup(g.contentBottom + 2, 1) + esc.clearLine;
-      state.planRows = 1;
+    // 复用步骤 2. 已按精确预算算好的 plan 行(planRows 已写入 state),此处不再重算。
+    for (let i = 0; i < planLines.length; i++) {
+      buf += cup(g.contentBottom + 1 + i, 1) + esc.clearLine + planLines[i];
     }
     // 无 plan 时:画待发附件脚栏(chip + 降采样 badge + 非视觉预警,不进内容缓冲);
     // slash 菜单向上展开时最后一行也落在这一行,会互相覆盖——菜单打开期间隐藏(关菜单恢复)。
-    if (planBuf.length === 0) {
+    if (planLines.length === 0) {
       const attLine = view.menu && view.menu.lines.length > 0 ? '' : composePendingAttachLine(g.cols);
       buf += cup(g.contentBottom + 1, 1) + esc.clearLine + attLine;
     }
