@@ -21,6 +21,7 @@ import { getCurrentSessionId } from '../session/state.js';
 import { getSandboxRoot } from '../sandbox/root.js';
 import { planStepLabel } from '../session/notes.js';
 import type { ChatMessage, ChatUsage } from '../llm/index.js';
+import type { PlanStepView } from '../ui/layout-types.js';
 
 /** /context 的用量条(详情版,进内容区):只算对话内容(不含 system prompt),方便用户感知自己发了多少、agent 回复了多少。 */
 export function renderContextBar(history: ChatMessage[]): string {
@@ -66,7 +67,7 @@ export function renderContextBar(history: ChatMessage[]): string {
  * 空对话(只有 system 提示、还没发任何消息)恒显 0% 0/window:固定 system prompt + 工具
  * schema 是每次请求的基础设施开销,不算用户占用的上下文,避免刚进 REPL 就显示十几 k。
  * 有对话后必须**用全 prompt 估算**(消息 + 工具 schema + 尾部 ephemeral 注入),与压缩触发器
- * evaluateBudget 的 system+history+toolOld+toolRecent 总账对齐——任何一段漏算都会让
+ * evaluateBudget 的 total / rawTotal 总账对齐——任何一段漏算都会让
  * bar 与触发器口径不一致、看着没到 80% 实际已经在压。
  * 触发器用 `Math.max(rawTotal, total) >= 0.8 * window`,bar 也照搬:校正后和校正前
  * 哪个大取哪个,确保不会因 correction<1 而低估。ephemeral 文本由 agent/core 每步写入
@@ -129,6 +130,8 @@ export function renderContextBarInline(history: ChatMessage[]): string {
 interface NotesPlanStatus {
   fingerprint: string;
   summary: string;
+  title: string;
+  steps: PlanStepView[];
 }
 
 // 宿主侧记录已结束轮次最后看到的 plan。notes.md 仍完整保留，只抑制未变化的旧 plan 状态栏，
@@ -149,20 +152,37 @@ export function readPlanStatusFromNotes(): NotesPlanStatus | null {
     if (start < 0) return null;
     const endOffset = lines.slice(start + 1).findIndex((line) => /^##\s/.test(line));
     const end = endOffset < 0 ? lines.length : start + 1 + endOffset;
-    const section = lines.slice(start, end).join('\n').trimEnd();
+    const sectionLines = lines.slice(start + 1, end);
+    const section = [lines[start], ...sectionLines].join('\n').trimEnd();
     const title = lines[start].match(/^## Plan:\s*(.+)$/)?.[1].trim();
     if (!title) return null;
 
-    const total = (section.match(/^\s*-\s*\[[ xX]\]\s*\d+\./gm) || []).length;
-    const currentMatch = section.match(/^\s*-\s*\[ \]\s*(\d+)\.\s*(.+)$/m);
-    const current = currentMatch ? planStepLabel(currentMatch[2]) : undefined;
+    const stepRe = /^\s*-\s*\[([ xX])\]\s*(\d+)\.\s*(.*)$/;
+    let total = 0;
+    let currentMatch: RegExpMatchArray | null = null;
+    const steps: PlanStepView[] = [];
+    for (const line of sectionLines) {
+      const m = line.match(stepRe);
+      if (!m) continue;
+      total++;
+      const done = m[1]!.toLowerCase() === 'x';
+      const isCurrent = !done && currentMatch === null;
+      if (isCurrent) currentMatch = m;
+      steps.push({
+        no: Number(m[2]),
+        label: planStepLabel(m[3] ?? ''),
+        done,
+        current: isCurrent,
+      });
+    }
+    const current = currentMatch ? planStepLabel(currentMatch[3] ?? '') : undefined;
     // 括号进度 = 「当前执行到的步骤序号/总数」(执行第 1 步显示 1/3),与 `▸ 当前步` 后缀自洽;
     // 旧语义 done/total 会永远慢一拍(执行第 2 步显示 1/3)。全勾选时显示 total/total(通常已自动结算为 Done,chip 消失)。
-    const activeNo = currentMatch ? Number(currentMatch[1]) : total;
+    const activeNo = currentMatch ? Number(currentMatch[2]) : total;
     const summary = `plan: ${title} (${activeNo}/${total})`;
     // mtime 让“相同内容被重写为一项新计划”也能重新出现，而不被旧轮次误抑制。
     const fingerprint = `${sessionId}\0${fs.statSync(p).mtimeMs}\0${section}`;
-    return { fingerprint, summary: current ? `${summary} ▸ ${current}` : summary };
+    return { fingerprint, title, steps, summary: current ? `${summary} ▸ ${current}` : summary };
   } catch {
     return null;
   }
@@ -173,22 +193,25 @@ export function settlePlanStatus(): void {
   settledPlanFingerprint = readPlanStatusFromNotes()?.fingerprint;
 }
 
-/** 从 notes.md 读取活跃 plan 摘要；已结算且未变化的旧 plan 不再显示。 */
-export function readPlanFromNotes(): string {
+/** 从 notes.md 读取活跃 plan;已结算且未变化的旧 plan 返回 null(状态栏不显示)。 */
+export function readPlanFromNotes(): { summary: string; key: string; steps: PlanStepView[] } | null {
   const plan = readPlanStatusFromNotes();
-  if (!plan || plan.fingerprint === settledPlanFingerprint) return '';
-  return plan.summary;
+  if (!plan || plan.fingerprint === settledPlanFingerprint) return null;
+  return { summary: plan.summary, key: plan.title, steps: plan.steps };
 }
 
 /** 状态行基线:模型 / context / cwd / 模式标识 / 活跃 plan chip / 本轮 token。repl 在轮次边界、切模式、plan 变更时调。 */
 export function refreshStatusBase(history: ChatMessage[], lastTurnUsage?: ChatUsage): void {
+  const plan = readPlanFromNotes();
   layout.setStatusBase({
     model: config.model,
     contextBar: renderContextBarInline(history),
     cwd: process.cwd(),
     modeTag: getAgentMode() === 'plan' ? 'Plan' : 'Auto',
     effort: getActiveEffort() === 'auto' ? undefined : getActiveEffort(),
-    planSummary: readPlanFromNotes(),
+    planSummary: plan?.summary ?? '',
+    planKey: plan?.key,
+    planSteps: plan?.steps,
     lastTurnUsage,
   });
 }

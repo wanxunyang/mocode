@@ -93,7 +93,7 @@ mocode 把代码层控制保持得尽量轻，把任务策略交给 agent：
 - **建议式工作纪律** — system prompt 只要求聚焦改动、避免重复检索、诚实报告不确定性；是否验证及验证范围由 agent 自主决定，不是完成硬门。
 - **有界重试，明确报告失败** — runtime 仅对显式声明 `idempotent` 的工具瞬时错误自动重试，最多两次；`TIMEOUT`、权限拒绝、中断和非幂等调用不自动重试。最终结构化结果交给 agent，由其决定后续恢复方式，详见[自动重试](#自动重试retryable-契约)。
 - **ask_human 决策与关键修改先问** — 用户尚未做出的决策（存在多个合理方案）和关键修改（公共 API、schema、依赖、文件移动/删除、架构、安全、大范围或不可逆改动）必须先询问用户；只有符合仓库惯例的琐碎细节才由 agent 自行决定。
-- **五区上下文控制 + token 自校准** — 独立旋钮管理上下文压力，token 估算根据真实 provider 用量校准。
+- **五个独立的上下文旋钮 + token 自校准** — `autoCompact` / `contextOptimize` / `contextRelprune` / `contextLifecycle` / `contextBudget` 各管一层上下文压力。触发条件是单一阈值：请求占用（裸估算与校正后取大者）到达窗口的 80%，不是分区配额——某个分区超配额本身不会改写任何内容。token 估算根据真实 provider 用量校准。
 
 ## 为什么用 mocode
 

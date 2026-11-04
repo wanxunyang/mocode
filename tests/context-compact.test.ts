@@ -205,7 +205,6 @@ test('automatic and manual compaction use the injected runtime config and transp
   const automaticResult = await maybeCompact(
     automatic.history,
     {
-      layers: { history: { overBudget: true } },
       totalOver: true,
       rawTotal: 100,
       window: 100,

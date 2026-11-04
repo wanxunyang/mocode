@@ -26,22 +26,5 @@ export type {
 export { registerEncoder, registerAll, getEncoder, registeredKinds } from './registry.js';
 
 // ── Context Budget Scheduler ───────────────────────────────────────────────
-export {
-  evaluateBudget,
-  scheduleActions,
-  formatReport,
-  quickEstimate,
-  userTurnBoundary,
-  BUDGET_LAYERS,
-  DEFAULT_BUDGET_POLICY,
-  BUDGET_RATIO,
-  HOT_TURN_WINDOW,
-} from './budget.js';
-export type {
-  BudgetLayer,
-  BudgetPolicy,
-  SystemCostBreakdown,
-  LayerBudget,
-  BudgetReport,
-  ScheduleAction,
-} from './budget.js';
+export { evaluateBudget, scheduleActions, userTurnBoundary, DEFAULT_BUDGET_POLICY, HOT_TURN_WINDOW } from './budget.js';
+export type { BudgetPolicy, SystemCostBreakdown, BudgetReport, ScheduleAction } from './budget.js';

@@ -4,7 +4,6 @@
 import {
   evaluateBudget,
   scheduleActions,
-  formatReport,
   DEFAULT_BUDGET_POLICY,
   type BudgetReport,
   type ScheduleAction,
@@ -22,6 +21,8 @@ import { pruneSuperseded } from '../context/relevance.js';
 import { clearRetrievableResults } from '../context/clearing.js';
 import { createAgeAwareEncodingState } from '../context/age-aware.js';
 import { applyImageBudget } from '../context/vision-window.js';
+import { ui } from '../ui/theme.js';
+import * as layout from '../ui/layout.js';
 
 export interface PressureCompressionLog {
   /** 80% 高压(动 LLM 摘要);60-80% 低压只跑确定性清理。 */
@@ -46,6 +47,8 @@ export interface SchedulerRunLog {
   pressure: PressureCompressionLog;
   compactHistoryCalled: boolean;
   historyMutation: 'none' | 'content' | 'rebuild';
+  /** 断路器已开:压缩压不下去,本 run 后续 step 不再尝试摘要。 */
+  breakerOpen?: boolean;
   ts: number;
 }
 
@@ -105,6 +108,15 @@ export function createBudgetScheduler(
     ephemeralTokens: number,
   ): BudgetReport =>
     evaluateBudget(history, runtime.config.contextWindowTokens, step, state.correction, activeTools, ephemeralTokens);
+
+  // 断路器:压缩跑完仍站在压力线之上,说明「压不下去」是结构性的(system prompt + 工具 schema
+  // 等固定开销本身超线,或存在超大单条)。调度器每个 run 新建一次(等价于一个用户轮),所以
+  // 这两个标志天然是 turn 作用域的——与 model-turn.ts 的 overflowCompaction 断路器同口径,
+  // 但那边按 turnId 计数是因为它挂在跨轮复用的 runtimeContextState 上,这里不需要。
+  // 不设此闸的后果:小窗口模型下每步都会付一次完整摘要(输入上限 0.55×window),并连带让
+  // readDedup 全量失效、history 前缀缓存归零,三步损耗叠加。
+  let compactStuck = false;
+  let compactStuckWarned = false;
 
   const scheduler: BudgetScheduler = {
     lastRunLog: null,
@@ -176,20 +188,37 @@ export function createBudgetScheduler(
         pressure.staleArtifacts > 0 ||
         pressure.encodedLogsAndSearches > 0 ||
         pressure.cleared > 0;
+      let skippedByBreaker = false;
       for (const _action of actions) {
+        if (compactStuck) {
+          skippedByBreaker = true;
+          break;
+        }
         const result = await maybeCompact(history, report, undefined, state, activeTools, signal, runtime);
         compactHistoryCalled = true;
         historyRebuilt ||= result?.historyRebuilt === true;
         contentMutated ||= result?.compacted === true;
+        // 压完仍在线上 → 本 run 不再重试。注意不能只判 summarized:noop-shrunk-too-large /
+        // noop-protected 同样是「束手无策」,重复调用只是白跑。
+        if (result && result.estimateAfter >= pressureLine) compactStuck = true;
+      }
+      // 首次压完超阈时 compact.ts 已经打过一行提示;这里只在**真的又触发、却被断路器挡下**
+      // 时补一句,说明"别指望再压一次",避免两次提示措辞打架。
+      if (skippedByBreaker && !compactStuckWarned) {
+        compactStuckWarned = true;
+        layout.contentWrite(
+          `  ${ui.yellow}●${ui.reset} ${ui.yellow}本回合已停止重复压缩(压不下去是结构性的:固定开销或超大单条超线);建议 /clear 或改用更大窗口的模型。${ui.reset}\n`,
+        );
       }
 
       const log: SchedulerRunLog = {
         step,
         report,
-        actions,
+        actions: compactStuck ? [] : actions,
         pressure,
         compactHistoryCalled,
         historyMutation: historyRebuilt ? 'rebuild' : contentMutated ? 'content' : 'none',
+        breakerOpen: compactStuck,
         ts: Date.now(),
       };
       scheduler.lastRunLog = log;
@@ -316,4 +345,4 @@ export async function manualCompact(
   return log;
 }
 
-export { evaluateBudget, scheduleActions, formatReport };
+export { evaluateBudget, scheduleActions };

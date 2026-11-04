@@ -3,47 +3,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fc from 'fast-check';
 import type { ChatMessage } from '../src/llm/index.js';
-import {
-  BUDGET_LAYERS,
-  BUDGET_RATIO,
-  DEFAULT_BUDGET_POLICY,
-  evaluateBudget,
-  scheduleActions,
-} from '../src/context/budget.js';
-import type { BudgetLayer, BudgetReport, LayerBudget } from '../src/context/budget.js';
+import { DEFAULT_BUDGET_POLICY, evaluateBudget, scheduleActions } from '../src/context/budget.js';
+import type { BudgetReport } from '../src/context/budget.js';
 import { system } from './helpers.js';
 
-function layer(overBudget = false, overRatio = 0): LayerBudget {
-  return { actual: overBudget ? 101 : 0, budget: 100, overBudget, overRatio };
-}
-
 function report(input: {
-  history?: boolean;
-  system?: boolean;
   totalOver?: boolean;
   total?: number;
   window?: number;
   rawTotal?: number;
   correction?: number;
 }): BudgetReport {
-  const layers = Object.fromEntries(BUDGET_LAYERS.map((name) => [name, layer()])) as Record<BudgetLayer, LayerBudget>;
-  layers.system = layer(input.system ?? false, input.system ? 1 : 0);
-  layers.history = layer(input.history ?? false, input.history ? 1 : 0);
   return {
     step: 0,
     total: input.total ?? 0,
     rawTotal: input.rawTotal ?? input.total ?? 0,
     window: input.window ?? 10_000,
-    layers,
     systemCosts: { prompt: 10, toolSchemas: 5, ephemeralInjection: 0 },
-    triggers: [],
     totalOver: input.totalOver ?? false,
     hotBoundary: 1,
     correction: input.correction ?? 1,
   };
 }
 
-test('evaluateBudget 正确分层、排序且不修改 history', () => {
+test('evaluateBudget 汇总总量且不修改 history', () => {
   const history: ChatMessage[] = [system('s'.repeat(40))];
   history.push({ role: 'system', content: '# 会话摘要\nsummary' } as ChatMessage);
   for (let turn = 0; turn < 5; turn++) {
@@ -55,24 +38,19 @@ test('evaluateBudget 正确分层、排序且不修改 history', () => {
 
   assert.equal(JSON.stringify(history), before);
   assert.equal(result.step, 7);
-  assert.ok(result.layers.summary.actual > 0);
-  assert.ok(result.layers.toolOld.actual > 0);
-  assert.ok(result.layers.toolRecent.actual > 0);
-  assert.equal(
-    result.total,
-    BUDGET_LAYERS.filter((name) => name !== 'reserve').reduce((sum, name) => sum + result.layers[name].actual, 0),
-  );
-  for (let index = 1; index < result.triggers.length; index++) {
-    assert.ok(result.layers[result.triggers[index - 1]].overRatio >= result.layers[result.triggers[index]].overRatio);
-  }
+  // 总量必须覆盖 summary + 冷热两段的 tool + 对话轨迹(system 固定开销另计且已含)。
+  assert.ok(result.total > result.systemCosts.prompt + result.systemCosts.toolSchemas);
+  assert.ok(result.rawTotal > 0);
+  // hotBoundary 与总量无关,仍按最近 4 个 user turn 划分:
+  // 布局 [0]=system [1]=summary,然后 turn0..turn4 各占 user+tool 两条;
+  // 从尾部往前数第 4 个 user 是 turn1 的 user,位于 index 4。
+  assert.equal(result.hotBoundary, 4);
 });
 
-test('scheduleActions 常规触发与窗口硬闸', () => {
+test('scheduleActions 只看总占用,无分层告警动作', () => {
   assert.deepEqual(scheduleActions(report({})), []);
-  // system 层超预算只是诊断,不再产出告警动作(唯一消费方是每步刷屏,小窗口下是常态噪声)
-  assert.deepEqual(scheduleActions(report({ system: true })), []);
-  // 常规:history 层超预算 + headroom 为负 → compact
-  assert.deepEqual(scheduleActions(report({ history: true, total: 10_000 })), [{ kind: 'compact_history' }]);
+  // 常规:总量达 80% 压力线 → compact
+  assert.deepEqual(scheduleActions(report({ total: 10_000 })), [{ kind: 'compact_history' }]);
   // 硬闸:校正后 total=0、history 层未超、totalOver=false,但 rawTotal 达触发线 → 照样 compact
   assert.deepEqual(
     scheduleActions(
@@ -132,8 +110,7 @@ test('ephemeralTokens 计入 system 层与总量(尾部注入不在 history 里)
 
   assert.equal(without.systemCosts.ephemeralInjection, 0);
   assert.equal(withEphemeral.systemCosts.ephemeralInjection, 5_000);
-  // 计入 system 层、总量与裸总量,三者同步增加。
-  assert.equal(withEphemeral.layers.system.actual - without.layers.system.actual, 5_000);
+  // 计入 total 与裸总量,两者同步增加。
   assert.equal(withEphemeral.total - without.total, 5_000);
   assert.equal(withEphemeral.rawTotal - without.rawTotal, 5_000);
   // 纯函数:不改 history。
@@ -176,14 +153,7 @@ test('evaluateBudget property: 300 组输入保持纯函数与报告不变量', 
         const before = JSON.stringify(history);
         const result = evaluateBudget(history, window, 3, correctionPercent / 100);
         assert.equal(JSON.stringify(history), before);
-        assert.equal(
-          result.total,
-          BUDGET_LAYERS.filter((name) => name !== 'reserve').reduce((sum, name) => sum + result.layers[name].actual, 0),
-        );
-        for (const name of BUDGET_LAYERS) {
-          assert.equal(result.layers[name].budget, Math.floor(BUDGET_RATIO[name] * window));
-          assert.ok(Number.isInteger(result.layers[name].actual) && result.layers[name].actual >= 0);
-        }
+        assert.ok(result.total >= 0 && Number.isInteger(result.total));
         // rawTotal ≈ correction=1 时的总量:adj() 每条消息 round(raw*corr) 再除回 corr,
         // 逐条误差 ≤ 0.5/corr ≤ 1(correction 已钳位到 ≥0.5),故容差取消息条数。
         const raw = evaluateBudget(history, window, 3, 1);
@@ -203,12 +173,10 @@ test('scheduleActions property: 300 组报告动作有序且硬闸不被校正�
       fc.integer({ min: 0, max: 100_000 }),
       fc.integer({ min: 0, max: 100_000 }),
       fc.boolean(),
-      fc.boolean(),
       fc.double({ min: 0.5, max: 2, noNaN: true }),
-      (total, rawTotal, historyOver, totalOver, correction) => {
+      (total, rawTotal, totalOver, correction) => {
         const actions = scheduleActions(
           report({
-            history: historyOver,
             total: totalOver && total === 0 ? 1 : total,
             totalOver,
             rawTotal,

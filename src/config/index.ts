@@ -135,7 +135,7 @@ export interface Config {
   /** Lifecycle provenance tracking only. It no longer ages or stubs history by
    * tool-call count. Default true; set MOCODE_LIFECYCLE=false to disable tracking. */
   contextLifecycle: boolean;
-  /** Context Budget Scheduler 总开关(五区分账 + 统一 80% pressure 调度)。
+  /** Context Budget Scheduler 总开关(统一 80% pressure 调度 + 分层清理阶段)。
    *  关掉仍由 maybeCompact(history) 使用同一 80% 基础保护线。
    *  默认 true;设 MOCODE_BUDGET_SCHEDULER=false 全局回退。 */
   contextBudget: boolean;

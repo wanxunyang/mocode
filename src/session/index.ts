@@ -15,8 +15,8 @@ export {
 export type { CompactOptions, CompactResult, ContextState } from './compact.js';
 
 // ── Context Budget Scheduler 接缝 ────────────────────────────────────────
-// agent/core.ts 在 age-aware sweep 后调用 runScheduler(history, step):评估五区预算，
-// 只执行可落地的 warn / compact_history；开关关闭时退化为 maybeCompact。
+// agent/core.ts 在 age-aware sweep 后调用 runScheduler(history, step):评估请求占用，
+// 唯一动作是 compact_history；开关关闭时退化为 maybeCompact。
 // repl /compact 命令调 manualCompact(history, focus?):与自动路径共享决策，focus 透传摘要 prompt。
 export { runScheduler, manualCompact, createBudgetScheduler } from './scheduler.js';
 export type { BudgetScheduler, SchedulerRunLog } from './scheduler.js';

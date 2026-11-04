@@ -1248,7 +1248,6 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
 export async function maybeCompact(
   history: ChatMessage[],
   report?: {
-    layers: { history: { overBudget: boolean } };
     totalOver: boolean;
     /** 硬闸输入:裸估算总量(不乘 correction)与窗口;两者齐备才参与硬闸判断。 */
     rawTotal?: number;

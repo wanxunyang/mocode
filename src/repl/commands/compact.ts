@@ -29,7 +29,7 @@ export const compactCommands: CommandHandler[] = [
       force = false;
       focus = rest.slice('--no-force '.length).trim() || undefined;
     } else if (rest) focus = rest;
-    // 走调度器路径:与自动每步压缩完全一致——五区按 ROI 压(cold tools 优先 → history 摘要最后)。
+    // 走调度器路径:与自动每步压缩完全一致——先跑零成本清理(cold tools 优先),最后才 LLM 摘要。
     // focus 透传到 compact_history action 的 LLM 摘要 prompt。
     // 返回 SchedulerRunLog 给 UI 显示决策;退化路径(开关关时)在 manualCompact 内部走 compactHistory。
     const log = await (async () => {
