@@ -72,6 +72,8 @@ export function buildSlashCommands(): SlashCommand[] {
         { name: 'profile', value: '/memory profile', desc: d('commands.memoryProfile') },
         { name: 'confirm', value: '/memory confirm ', submit: false, desc: d('commands.memoryProfileConfirm') },
         { name: 'drop', value: '/memory drop ', submit: false, desc: d('commands.memoryProfileDrop') },
+        { name: 'health', value: '/memory health', desc: '查看记忆健康与送达/采纳统计' },
+        { name: 'adoption', value: '/memory adoption', desc: '查看记忆送达与采纳观测明细' },
       ],
     },
     { name: '/init', desc: d('commands.memoryInit') },

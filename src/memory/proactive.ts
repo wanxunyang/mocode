@@ -21,6 +21,7 @@ import path from 'node:path';
 import { tokenize } from '../context/text-search.js';
 import { loadAll, wantsTrigger, type MemoryEntry } from './store.js';
 import { evaluateAnchors, toAnchorPath, type EntryAnchorState } from './anchor.js';
+import { recordMemoryDelivery, recordMemorySuppression } from './adoption.js';
 
 /** 每次工具调用最多注入的条数。 */
 const MAX_HINTS_PER_CALL = 1;
@@ -487,21 +488,30 @@ export function proactiveHint(
   contextText?: string,
 ): string {
   if (!enabled) return '';
-  if (turnCount >= MAX_PER_TURN) return '';
   if (SKIPPED_TOOLS.has(toolName)) return '';
   if (SKIPPED_TOOL_PREFIXES.some((p) => toolName.startsWith(p))) return '';
 
-  // R4.1:只有真正走到匹配的工具调用才计入分母。被开关/冷却/跳过工具挡掉的不算——
+  // R4.1:只有真正走到匹配的工具调用才计入分母。被开关/跳过工具挡掉的不算——
   // 否则「命中率」会被大量与记忆无关的几何式调用(如连续 read_file)稀释成无意义的数字。
   bump('toolCalls');
 
   const matches = matchProactive(toolName, args, contextText);
   const picked: ProactiveMatch[] = [];
-  for (const m of matches) {
-    if (picked.length >= MAX_HINTS_PER_CALL) break;
-    // 冷却:同一条在同一进程内只弹一次。反复弹同一条是"狼来了"的主要来源。
-    if (fired.has(m.entry.id)) continue;
-    picked.push(m);
+  for (const match of matches) {
+    const { entry } = match;
+    if (fired.has(entry.id)) {
+      recordMemorySuppression(entry.id, 'proactive_trigger', 'already_fired');
+      continue;
+    }
+    if (turnCount >= MAX_PER_TURN) {
+      recordMemorySuppression(entry.id, 'proactive_trigger', 'per_turn_limit');
+      continue;
+    }
+    if (picked.length >= MAX_HINTS_PER_CALL) {
+      recordMemorySuppression(entry.id, 'proactive_trigger', 'per_call_limit');
+      continue;
+    }
+    picked.push(match);
   }
 
   if (picked.length > 0) {
@@ -517,8 +527,9 @@ export function proactiveHint(
     let out = `[proactive memory] 以下记忆的触发条件与你刚刚这次调用相符(按需采用,不是强制):\n${lines.join('\n')}`;
     if (out.length > HINT_MAX_CHARS) out = out.slice(0, HINT_MAX_CHARS) + ' …';
 
-    for (const m of picked) {
-      fired.set(m.entry.id, (fired.get(m.entry.id) ?? 0) + 1);
+    for (const { entry } of picked) {
+      fired.set(entry.id, (fired.get(entry.id) ?? 0) + 1);
+      recordMemoryDelivery(entry.id, 'proactive_trigger');
       turnCount++;
     }
     bump('triggerHits');
@@ -532,10 +543,18 @@ export function proactiveHint(
   if (toolName === 'read_file') return '';
   const anchorHit = anchorHint(args);
   if (!anchorHit) return '';
+  if (turnCount >= MAX_PER_TURN) {
+    for (const entry of anchorHit.entries) recordMemorySuppression(entry.id, 'proactive_anchor', 'per_turn_limit');
+    return '';
+  }
   turnCount++;
   bump('anchorHits');
   bump('injections');
   if (anchorHit.stale) bump('staleAnchorHits');
+  for (const entry of anchorHit.entries) {
+    fired.set(entry.id, (fired.get(entry.id) ?? 0) + 1);
+    recordMemoryDelivery(entry.id, 'proactive_anchor');
+  }
   return anchorHit.text;
 }
 
@@ -550,7 +569,9 @@ export function proactiveHint(
  * 匹配是**路径相等**,不是模糊重合:同一个文件就是同一个文件,不需要阈值,
  * 也不会被 GENERIC_TOKENS 那套泛化词规则连累。
  */
-function anchorHint(args: Record<string, unknown> | null): { text: string; stale: boolean } | null {
+function anchorHint(
+  args: Record<string, unknown> | null,
+): { text: string; stale: boolean; entries: MemoryEntry[] } | null {
   const paths = extractAnchorPaths(args);
   if (paths.length === 0) return null;
   const index = buildIndex();
@@ -566,8 +587,13 @@ function anchorHint(args: Record<string, unknown> | null): { text: string; stale
       continue;
     }
     for (const entry of index.anchorDocs.get(p) ?? []) {
-      if (seen.has(entry.id) || fired.has(entry.id)) continue;
+      if (seen.has(entry.id)) continue;
       seen.add(entry.id);
+      // 与 trigger 通道一致:同条已经送达过时也要留下治理抑制记录，不能静默丢掉。
+      if (fired.has(entry.id)) {
+        recordMemorySuppression(entry.id, 'proactive_anchor', 'already_fired');
+        continue;
+      }
       // R4.1:stale 判定在挑选时就做掉,不再在渲染阶段重复 stat——一条命中要算一次
       // 「这次弹出的是不是已经过期的记忆」,而这个比例是锚点通道最关键的噪音指标。
       const state = evaluateAnchors(entry.anchors);
@@ -592,8 +618,7 @@ function anchorHint(args: Record<string, unknown> | null): { text: string; stale
 
   let out = `[proactive memory] 有记忆锚定了你即将操作的文件(按需采用,不是强制):\n${lines.join('\n')}`;
   if (out.length > HINT_MAX_CHARS) out = out.slice(0, HINT_MAX_CHARS) + ' …';
-  for (const { entry } of picked) fired.set(entry.id, (fired.get(entry.id) ?? 0) + 1);
-  return { text: out, stale: picked.some((p) => p.stale) };
+  return { text: out, stale: picked.some((p) => p.stale), entries: picked.map((p) => p.entry) };
 }
 
 function describeStale(state: EntryAnchorState): string {

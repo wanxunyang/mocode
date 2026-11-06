@@ -53,6 +53,7 @@ import {
   flushRecallStats,
   flushProactiveStats,
   flushTurnRecallStats,
+  pruneAdoptionLedger,
   writeMemoryHealth,
   resetProactiveTurn,
   captureMemoryBaseline,
@@ -1169,6 +1170,7 @@ export async function startRepl(
   await reflectOnExit(snapshotTranscript(history, 20));
   flushProactiveStats();
   flushTurnRecallStats();
+  pruneAdoptionLedger();
   writeMemoryHealth(isMemoryEnabled());
   await runtime.close();
   await closeAllMcp();

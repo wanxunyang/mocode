@@ -19,6 +19,11 @@ import {
   memoryCandidatesInstruction,
 } from '../memory/pending.js';
 import {
+  adoptionEvaluationInstruction,
+  applyAdoptionEvaluations,
+  extractAdoptionEvaluations,
+} from '../memory/adoption.js';
+import {
   COMPACT_USER_VERBATIM_MAX_TOKENS,
   COMPACT_USER_VERBATIM_WINDOW_RATIO,
   MAX_HISTORY_RESULT,
@@ -666,15 +671,18 @@ function capSummaryOutput(summary: string): string {
  * 子 agent 的压缩不入队:候选是项目级知识,子 agent 的中间推理不该污染主库
  * (与 archive/snapshot 的 main-agent-only 同一条边界)。
  */
-function finalizeSummaryOutput(raw: string, capture: boolean): string {
-  const { summary, candidates } = extractMemoryCandidates(raw);
-  if (capture && candidates.length > 0) {
+function finalizeSummaryOutput(raw: string, captureCandidates: boolean, captureAdoptions = false): string {
+  // R19 段与 R13 候选段都不属于交接摘要，先剥采纳段再剥候选段，避免相邻标题互相吞掉。
+  const { text, evaluations } = extractAdoptionEvaluations(raw);
+  const { summary, candidates } = extractMemoryCandidates(text);
+  if (captureCandidates && candidates.length > 0) {
     try {
       appendPendingCandidates(candidates);
     } catch {
       /* best-effort:入队失败只丢这一批候选,绝不阻塞压缩 */
     }
   }
+  if (captureAdoptions && evaluations.length > 0) applyAdoptionEvaluations(evaluations);
   return capSummaryOutput(summary);
 }
 
@@ -717,6 +725,7 @@ async function defaultSummarize(
   signal?: AbortSignal,
   runtime: CompactionRuntime = defaultCompactionRuntime,
   capture = false,
+  captureAdoptions = false,
 ): Promise<string | null> {
   // 已中断就别白拼转录了(几千 token 的字符串拼接 + 一去不回的 LLM 请求)。
   if (signal?.aborted) {
@@ -762,7 +771,8 @@ async function defaultSummarize(
       'Never invent facts, paths, or results that are not in the transcript; if unsure whether something happened, omit it.' +
       // R13:候选段是"附加要求",只在捕获开启时追加。它的内容不计入 400 词上限,
       // 且必须写在正文结构之后——解析端按 `## Memory Candidates` 标题切走。
-      (capture ? memoryCandidatesInstruction() : ''),
+      (capture ? memoryCandidatesInstruction() : '') +
+      (captureAdoptions ? adoptionEvaluationInstruction('compact') : ''),
   } as ChatMessage;
   const userMsg = {
     role: 'user' as const,
@@ -780,7 +790,7 @@ async function defaultSummarize(
     const r = await runtime.modelTransport([sysMsg, userMsg], {}, signal, [], { reasoningEffort: 'low' });
     // 推理模型可能只返 reasoning_content(content 为 null),或幻觉出 tool_calls → 视为失败
     if (r.toolCalls.length > 0 || !r.content) return null;
-    return finalizeSummaryOutput(r.content, capture);
+    return finalizeSummaryOutput(r.content, capture, captureAdoptions);
   } finally {
     spinner.stop();
   }
@@ -804,7 +814,7 @@ function buildForkMessages(history: ChatMessage[], kept: readonly Group[]): Chat
 }
 
 /** fork 尾部 user 消息:摘要任务指令(原 legacy sysMsg 的规则,措辞改为"上方对话")。 */
-function compactForkInstruction(focus?: string, capture = false): string {
+function compactForkInstruction(focus?: string, capture = false, captureAdoptions = false): string {
   const focusLine = focus ? `Focus: prioritize facts / decisions / file changes related to 「${focus}」.\n\n` : '';
   return (
     focusLine +
@@ -823,7 +833,8 @@ function compactForkInstruction(focus?: string, capture = false): string {
     'Rules: total ≤ 400 words. State conclusions and locations (path:line where useful), never paste content. ' +
     'Write each Key Fact as one self-contained line (no pronouns, no "as above", no cross-references). ' +
     'Do not emit tool calls and do not invent facts; if unsure whether something happened, omit it.' +
-    (capture ? memoryCandidatesInstruction() : '')
+    (capture ? memoryCandidatesInstruction() : '') +
+    (captureAdoptions ? adoptionEvaluationInstruction('compact') : '')
   );
 }
 
@@ -850,6 +861,7 @@ async function forkSummarize(
   activeTools: readonly ChatTool[],
   state: ContextState,
   capture = false,
+  captureAdoptions = false,
 ): Promise<string | null> {
   if (signal?.aborted) throw new DOMException('This operation is aborted', 'AbortError');
   const messages: ChatMessage[] = [...prefix, { role: 'user', content: instruction } as ChatMessage];
@@ -878,7 +890,7 @@ async function forkSummarize(
     }
     // 同 legacy:幻觉 tool_calls 或空 content → 失败(调用方回落 microcompact)。
     if (r.toolCalls.length > 0 || !r.content) return null;
-    return finalizeSummaryOutput(r.content, capture);
+    return finalizeSummaryOutput(r.content, capture, captureAdoptions);
   } finally {
     spinner.stop();
   }
@@ -1100,17 +1112,20 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
   //    archive/snapshot(子 agent 的中间推理不属于项目级知识);
   //  - 独立开关让它能单独关(压缩是高频路径,出问题要能立刻止血而不连带关记忆)。
   const captureCandidates = state === contextState && isMemoryEnabled() && isCompactHandoffEnabled();
+  // R19 与 R13 是独立供给：即使关闭压缩候选交接，只要主 agent 的既有压缩调用发生，
+  // 仍可评估已经送达的记忆；子 agent 不可写入主会话观测账本。
+  const captureAdoptions = state === contextState && isMemoryEnabled();
   const summarizeFn =
     opts.summarize ??
     (async (older: ChatMessage[], focus?: string, signal?: AbortSignal): Promise<string | null> => {
       const rt = opts.runtime ?? defaultCompactionRuntime;
       // P0:fork 关闭或 buffer 装不下 → 回落 legacy 独立 compressor 路径。
-      if (!config.compactFork) return defaultSummarize(older, focus, signal, rt, captureCandidates);
+      if (!config.compactFork) return defaultSummarize(older, focus, signal, rt, captureCandidates, captureAdoptions);
       const prefix = buildForkMessages(history, kept);
-      const instruction = compactForkInstruction(focus, captureCandidates);
+      const instruction = compactForkInstruction(focus, captureCandidates, captureAdoptions);
       if (!forkFits(prefix, instruction, activeTools, opts.window))
-        return defaultSummarize(older, focus, signal, rt, captureCandidates);
-      return forkSummarize(prefix, instruction, signal, rt, activeTools, state, captureCandidates);
+        return defaultSummarize(older, focus, signal, rt, captureCandidates, captureAdoptions);
+      return forkSummarize(prefix, instruction, signal, rt, activeTools, state, captureCandidates, captureAdoptions);
     });
   let summary: string | null = null;
   try {

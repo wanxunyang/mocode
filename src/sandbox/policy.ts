@@ -55,6 +55,8 @@ const MEMORY_STATE_FILES = [
   'memory-audit.jsonl', // R8 审计日志
   'memory-health.json', // 健康快照
   'memory-recall-stats.json', // 召回统计(R0.2)
+  'memory-adoption.jsonl', // R19 送达/采纳事件账本
+  'memory-adoption-summary.json', // R19 过期事件聚合
 ];
 
 /**

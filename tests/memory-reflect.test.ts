@@ -11,8 +11,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { __setChatCreateImpl } from '../src/llm/index.js';
+import { __setChatCreateImpl, type ChatMessage } from '../src/llm/index.js';
 import { runReflection, parsePlan, reflectOnExit, __resetReflectThrottleForTests } from '../src/memory/reflect.js';
+import { adoptionStats, recordMemoryDelivery } from '../src/memory/adoption.js';
 
 function sse(content: string | null): AsyncIterable<unknown> {
   return {
@@ -272,5 +273,39 @@ test(
         else process.env.MOCODE_EXIT_REFLECT_WAIT_MS = prevWait;
       }
     });
+  }),
+);
+
+test(
+  'R19:反思复用既有调用裁决真实送达，伪造 id 不会入账',
+  isolated(async () => {
+    const delivery = recordMemoryDelivery('reflection-memory', 'turn_recall');
+    assert.ok(delivery);
+    let calls = 0;
+    let prompt = '';
+    __setChatCreateImpl(async (params) => {
+      calls++;
+      const messages = (params as unknown as { messages: ChatMessage[] }).messages;
+      prompt = messages.map((message) => String(message.content ?? '')).join('\n');
+      return sse(
+        JSON.stringify({
+          saves: [],
+          updates: [],
+          forgets: [],
+          triples: [],
+          adoptions: [
+            { deliveryId: delivery, verdict: 'adopted', reason: '后续工具动作遵循了提醒' },
+            { deliveryId: 'forged', verdict: 'adopted' },
+          ],
+        }),
+      );
+    });
+
+    const result = await runReflection('user: 后续调用已经按提醒执行');
+    assert.equal(calls, 1, '采纳评估不得额外发起模型调用');
+    assert.match(prompt, new RegExp(`deliveryId=${delivery}`));
+    assert.equal(result.adoptionsEvaluated, 1);
+    assert.equal(adoptionStats().adopted, 1);
+    assert.equal(adoptionStats().pending, 0);
   }),
 );

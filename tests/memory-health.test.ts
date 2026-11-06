@@ -35,6 +35,7 @@ import {
 } from '../src/memory/proactive.js';
 import { recordRecallSearch } from '../src/memory/recall-stats.js';
 import { recordSessionEpisode } from '../src/memory/episodic.js';
+import { recordMemoryDelivery } from '../src/memory/adoption.js';
 
 interface Dirs {
   projDir: string;
@@ -380,5 +381,18 @@ test(
     // 首行必须是快照时间:这份 JSON 是覆盖写的单点快照,判断现状前要先知道它有多旧
     // (实测踩过:磁盘上是 11-02 的快照仍写 searches=0,而 11-03 的 recall-stats 已是 4)。
     assert.match(lines[0] ?? '', /^快照:\d{4}-\d{2}-\d{2}T[\d:.]+Z$/, `首行应为快照时间,实际: ${lines[0]}`);
+  }),
+);
+
+test(
+  'buildMemoryHealth:R19 展示送达/待评估，并对积压给出可执行提示',
+  isolated(() => {
+    for (let i = 0; i < 12; i++) assert.ok(recordMemoryDelivery(`pending-${i}`, 'turn_recall'));
+
+    const health = buildMemoryHealth();
+    assert.equal(health.adoption.delivered, 12);
+    assert.equal(health.adoption.pending, 12);
+    assert.ok(health.warnings.some((warning) => warning.includes('尚未评估')));
+    assert.match(formatMemoryHealth(health).join('\n'), /采纳:送达 12 .*待评估 12/);
   }),
 );

@@ -30,6 +30,7 @@ import {
 } from '../src/memory/pending.js';
 import { __setChatCreateImpl } from '../src/llm/index.js';
 import { runReflection } from '../src/memory/reflect.js';
+import { adoptionStats, recordMemoryDelivery } from '../src/memory/adoption.js';
 import { appendTool, system } from './helpers.js';
 
 /**
@@ -457,5 +458,38 @@ test(
     const r = await runReflection('user: hi');
     assert.equal(r.error, undefined, '坏行应被跳过而不是抛错');
     assert.equal(r.pendingConsumed, 1, '只有合法那一行算消费');
+  }),
+);
+
+test(
+  'compact:R19 复用摘要调用裁决送达，采纳段不进入压缩摘要',
+  isolated(async () => {
+    process.env.MEMORY_ENABLED = 'true';
+    const delivery = recordMemoryDelivery('compact-memory', 'proactive_trigger');
+    assert.ok(delivery);
+    const output = [
+      '## Completed',
+      '按提醒完成工具调用',
+      '',
+      '## Memory Adoptions',
+      `- {"deliveryId":"${delivery}","verdict":"adopted","reason":"摘要中的后续动作遵循提醒"}`,
+    ].join('\n');
+    const { transport, seen } = transportReturning(output);
+    const history = compactableHistory();
+    const result = await compactHistory(history, {
+      window: 100,
+      threshold: 0.0,
+      tools: [],
+      contextState: contextState,
+      runtime: runtimeFor(transport),
+    });
+
+    assert.equal(result.reason, 'summarize');
+    assert.equal(seen.length, 1, '采纳评估不得新增摘要模型调用');
+    const summary = history.find((m) => m.role === 'system' && String(m.content).startsWith('# 会话摘要'));
+    assert.ok(summary);
+    assert.doesNotMatch(String(summary.content), /Memory Adoptions|compact-memory/);
+    assert.equal(adoptionStats().adopted, 1);
+    assert.equal(adoptionStats().pending, 0);
   }),
 );

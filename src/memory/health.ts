@@ -26,11 +26,12 @@ import {
 } from './store.js';
 import { readRecallStats } from './recall-stats.js';
 import { proactiveCounters } from './proactive.js';
+import { adoptionStats, type AdoptionStats } from './adoption.js';
 import { listInternalizedProfile, listProfileCandidates } from './persona.js';
 import { MAX_ACTIVE } from '../tools/constants.js';
 
 /** 快照结构版本。字段增删时自增,让读旧文件的人能立刻发现口径变了。 */
-export const MEMORY_HEALTH_SCHEMA_VERSION = 1;
+export const MEMORY_HEALTH_SCHEMA_VERSION = 2;
 
 export interface MemoryHealth {
   schemaVersion: number;
@@ -89,6 +90,8 @@ export interface MemoryHealth {
     staleAnchorRate: number;
   };
   profile: { internalized: number; candidates: number };
+  /** R19:送达不等于采纳；pending 表示尚未搭载反思/压缩调用裁决。 */
+  adoption: AdoptionStats;
   /** 人可读的观测提示(按严重性排序,最多 6 条)。空数组 = 没有值得说的异常。 */
   warnings: string[];
 }
@@ -132,6 +135,7 @@ export function buildMemoryHealth(): MemoryHealth {
 
   const recall = readRecallStats();
   const pc = proactiveCounters();
+  const adoption = adoptionStats();
 
   let internalized = 0;
   let candidates = 0;
@@ -188,6 +192,7 @@ export function buildMemoryHealth(): MemoryHealth {
       staleAnchorRate: rate(pc.staleAnchorHits, pc.anchorHits),
     },
     profile: { internalized, candidates },
+    adoption,
     warnings: [],
   };
 
@@ -227,6 +232,9 @@ function collectWarnings(h: MemoryHealth): string[] {
   }
   if (h.derived.total > 0 && h.derived.staleRate > 0.5) {
     out.push(`派生条目 ${Math.round(h.derived.staleRate * 100)}% 已因源失效待复核:需要一轮反思去重写结论`);
+  }
+  if (h.adoption.pending >= 12) {
+    out.push(`已有 ${h.adoption.pending} 条送达记忆尚未评估:运行 /reflect 或等待下一次压缩以复用既有模型调用裁决`);
   }
   return out.slice(0, 6);
 }
@@ -307,6 +315,9 @@ export function formatMemoryHealth(h: MemoryHealth = buildMemoryHealth()): strin
       ` · trigger ${h.proactive.triggerHits} / 锚点 ${h.proactive.anchorHits}(其中失效 ${h.proactive.staleAnchorHits},${pct(h.proactive.staleAnchorRate)})`,
   );
   lines.push(`画像:内化 ${h.profile.internalized} · 候选 ${h.profile.candidates}`);
+  lines.push(
+    `采纳:送达 ${h.adoption.delivered} · 已评估 ${h.adoption.evaluated}(采纳 ${h.adoption.adopted} / 无关 ${h.adoption.notApplicable} / 不明 ${h.adoption.unclear}) · 待评估 ${h.adoption.pending} · 已抑制 ${h.adoption.suppressed}`,
+  );
   for (const w of h.warnings) lines.push(`⚠ ${w}`);
   return lines;
 }

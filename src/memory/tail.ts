@@ -17,6 +17,7 @@
 // 基线是模块级状态(与 proactive.ts 的 fired 一致),因为它的生命周期是**会话**而不是
 // 调用点:三处会话边界(启动 / /clear / /resume)各拍一次,期间所有用户轮共用同一份。
 
+import { recordMemoryDelivery } from './adoption.js';
 import { loadAll, type MemoryEntry } from './store.js';
 
 /** 基线:会话开始时的 id → updatedAt 快照。 */
@@ -67,6 +68,7 @@ export function buildMemoryTailSection(enabled: boolean = true): string {
 
   changed.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
   const shown = changed.slice(0, MAX_TAIL_ENTRIES);
+  for (const entry of shown) recordMemoryDelivery(entry.id, 'memory_tail');
   const lines = shown.map((e) => {
     const head = `- [${e.type}] ${e.id}: ${e.name} — ${e.summary}`;
     const body = (e.body ?? '').replace(/\s+/g, ' ').trim();

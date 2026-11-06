@@ -452,6 +452,8 @@ test(
         '.mocode/memory-audit.jsonl',
         '.mocode/memory-health.json',
         '.mocode/memory-recall-stats.json',
+        '.mocode/memory-adoption.jsonl',
+        '.mocode/memory-adoption-summary.json',
         // 原子写的半成品同样不能碰
         '.mocode/memory.jsonl.tmp',
       ]) {

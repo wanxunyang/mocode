@@ -23,6 +23,9 @@ import {
   writeMemoryHealth,
   formatMemoryHealth,
   flushProactiveStats,
+  adoptionEvents,
+  adoptionStats,
+  pruneAdoptionLedger,
   // R8 用户主权面
   purgeEntries,
   buildPack,
@@ -292,6 +295,44 @@ export const memoryCommands: CommandHandler[] = [
     return next();
   },
   (ctx) => {
+    if (ctx.line !== '/memory adoption' && !ctx.line.startsWith('/memory adoption ')) return unhandled();
+    if (!isMemoryEnabled()) {
+      layout.contentWrite(`${ui.dim}(记忆子系统已关闭,/memory adoption 无效。用 /memory_switch 打开)${ui.reset}\n`);
+      return next();
+    }
+    pruneAdoptionLedger();
+    const id = ctx.line.slice('/memory adoption'.length).trim();
+    const stats = adoptionStats();
+    layout.contentWrite(
+      `${ui.dim}送达 ${stats.delivered} · 已评估 ${stats.evaluated}(采纳 ${stats.adopted} / 无关 ${stats.notApplicable} / 不明 ${stats.unclear}) · 待评估 ${stats.pending} · 已抑制 ${stats.suppressed}${ui.reset}\n`,
+    );
+    const channels = Object.entries(stats.byChannel)
+      .filter(([, count]) => count > 0)
+      .map(([channel, count]) => `${channel} ${count}`)
+      .join('  ');
+    if (channels) layout.contentWrite(`${ui.dim}送达通道:${channels}${ui.reset}\n`);
+    const events = adoptionEvents(id || undefined);
+    if (events.length === 0) {
+      layout.contentWrite(`${ui.dim}(${id ? `没有 [${id}] 的送达/采纳记录` : '暂无送达/采纳记录'})${ui.reset}\n`);
+      return next();
+    }
+    for (const event of events) {
+      const outcome =
+        event.kind === 'evaluated'
+          ? ` ${event.verdict}${event.reason ? ` — ${event.reason}` : ''}`
+          : event.reason
+            ? ` (${event.reason})`
+            : '';
+      layout.contentWrite(
+        `${ui.dim}${event.at}  [${event.memoryId}] ${event.channel} · ${event.kind}${outcome}${ui.reset}\n`,
+      );
+    }
+    layout.contentWrite(
+      `${ui.dim}(最近 ${events.length} 条明细；/memory adoption <memory-id> 按条目过滤)${ui.reset}\n`,
+    );
+    return next();
+  },
+  (ctx) => {
     if (ctx.line !== '/memory health') return unhandled();
     // R4.1:先落一次盘再读,让本次会话的前摄计数也进快照(计数器是内存累计的)。
     if (!isMemoryEnabled()) {
@@ -299,6 +340,7 @@ export const memoryCommands: CommandHandler[] = [
       return next();
     }
     flushProactiveStats();
+    pruneAdoptionLedger();
     const health = writeMemoryHealth(true);
     if (!health) {
       layout.contentWrite(`${ui.dim}(健康快照生成失败,详见 .mocode/memory-health.json)${ui.reset}\n`);

@@ -27,6 +27,7 @@ import path from 'node:path';
 import { TextSearchIndex } from '../context/text-search.js';
 import { MEMORY_SEARCH_MIN_EVIDENCE } from '../tools/constants.js';
 import { evaluateAnchors } from './anchor.js';
+import { recordMemoryDelivery } from './adoption.js';
 import { loadAll, type MemoryEntry } from './store.js';
 
 /**
@@ -105,6 +106,7 @@ export function buildTurnRecallSection(query: string, opts: TurnRecallOptions = 
   if (hits.length === 0) return '';
 
   countHits(hits.length);
+  for (const entry of hits) recordMemoryDelivery(entry.id, 'turn_recall');
   const lines = hits.map(formatEntry);
   return [
     '## Possibly relevant memory (recalled for this turn)',

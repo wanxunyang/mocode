@@ -31,6 +31,7 @@ import {
   __resetProactiveForTests,
 } from '../src/memory/proactive.js';
 import { saveEntry, updateEntry } from '../src/memory/store.js';
+import { adoptionStats } from '../src/memory/adoption.js';
 import { memoryListTool } from '../src/tools/builtins/memory-list.js';
 import { createStagedToolDispatcher } from '../src/agent/stages/tool-dispatcher.js';
 import { clearToolsExtension, registerToolsExtension } from '../src/tools/registry.js';
@@ -493,6 +494,27 @@ test(
     assert.match(outputs[0], /mocode-fixture-content/, '原始结果必须保留');
     assert.match(outputs[0], /\[proactive memory\]/, 'legacy 分支也必须注入前摄提醒');
     assert.match(outputs[0], /kimi-k3-uniqueitems/);
+  }),
+);
+
+test(
+  'R19:锚点通道的已送达冷却也记录 already_fired 抑制',
+  isolated(() => {
+    mkdirSync(join(process.cwd(), 'src'), { recursive: true });
+    writeFileSync(join(process.cwd(), 'src', 'a.ts'), 'export const anchorCooldown = true;\n', 'utf8');
+    const r = saveEntry({
+      type: 'reference',
+      name: 'anchor-cooldown',
+      summary: '锚点冷却观测',
+      body: '同一锚点不应重复注入。',
+      anchors: [{ path: 'src/a.ts' }],
+    });
+    assert.ok(r.ok);
+
+    assert.match(proactiveHint('edit_file', { path: 'src/a.ts' }, true, '第一次编辑'), /anchor-cooldown/);
+    assert.equal(proactiveHint('edit_file', { path: 'src/a.ts' }, true, '第二次编辑'), '');
+    assert.equal(adoptionStats().byChannel.proactive_anchor, 1);
+    assert.equal(adoptionStats().suppressedByReason.already_fired, 1);
   }),
 );
 

@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { contentHash } from '../../changeset/index.js';
 import { entriesAnchoredTo } from '../../memory/store.js';
 import { evaluateAnchorsAgainst, toAnchorPath } from '../../memory/anchor.js';
+import { recordMemoryDelivery } from '../../memory/adoption.js';
 import { IMAGE_READ_MARKER, MAX_FILE_LINES, MAX_HISTORY_RESULT } from '../constants.js';
 import {
   MAX_INLINE_BYTES_DEFAULT,
@@ -226,6 +227,7 @@ function memoryHintFor(path: string, data: string): string {
       .filter((e) => !evaluateAnchorsAgainst(e.anchors, data, anchorPath).stale)
       .slice(0, MEMORY_HINT_LIMIT);
     if (fresh.length === 0) return '';
+    for (const entry of fresh) recordMemoryDelivery(entry.id, 'anchor_read');
     const lines = fresh.map((e) => `- [${e.id}] ${e.name} — ${e.summary}`);
     return `\n\n## Memory anchored to this file\n${lines.join('\n')}`;
   } catch {

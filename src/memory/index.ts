@@ -122,6 +122,23 @@ export {
 } from './health.js';
 
 export {
+  recordMemoryDelivery,
+  recordMemorySuppression,
+  adoptionEvaluationInstruction,
+  extractAdoptionEvaluations,
+  applyAdoptionEvaluations,
+  adoptionStats,
+  adoptionEvents,
+  pruneAdoptionLedger,
+  __resetAdoptionForTests,
+  type AdoptionChannel,
+  type AdoptionEvent,
+  type AdoptionStats,
+  type AdoptionVerdict,
+  type AdoptionSuppressionReason,
+} from './adoption.js';
+
+export {
   captureMemoryBaseline,
   buildMemoryTailSection,
   memoryTailChangedIds,
