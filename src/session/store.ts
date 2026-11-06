@@ -148,7 +148,7 @@ export class SessionStore {
    * 缓存的是「已 mkdir 成功」这件事,不是路径存在性。**代价**:外部删掉目录后缓存会失真。
    * 兜底是三个写盘方法统一的「失败 → invalidateEnsuredDir → 重试一次」模式
    * (见 appendTrace / appendUsage / save),既保住性能又不丢数据。
-   * 护栏见 tests/session-dir-cache.test.ts 的「外部删除后自愈」三例。
+   * 护栏见 tests/session/session-dir-cache.test.ts 的「外部删除后自愈」三例。
    */
   private ensuredDirs = new Set<string>();
 

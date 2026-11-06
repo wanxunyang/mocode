@@ -4,7 +4,7 @@
  * 只读概览 + 后台反思触发 + 长期画像检视/纠错 + **用户主权面**(R8:导出/导入/批量遗忘/暂停)。
  * /memory_switch /memory_status 是**配置写入**命令,与 /subagent /fe /mcp 同属 tool-group,
  * 放 tool-group.ts,不在这里。
- * 注意:顶层 /profile 被刻意禁用(见 tests/tool-profiles.test.ts),画像命令并入 /memory 组。
+ * 注意:顶层 /profile 被刻意禁用(见 tests/tools/tool-profiles.test.ts),画像命令并入 /memory 组。
  */
 import * as layout from '../../ui/layout.js';
 import { ui } from '../../ui/theme.js';

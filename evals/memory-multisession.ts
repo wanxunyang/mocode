@@ -359,7 +359,7 @@ const PROBES: Probe[] = [
       if (!proactiveOn()) return ok('前摄关闭,不可能重复注入');
       const text = proactiveHint('read_file', { path: SCHEMA_FILE }, true, '读一下');
       // read_file 被刻意排除出前摄通道(避免与回注重复),所以这里断言"前摄不弹";
-      // 回注本身由 read-file.ts 的 memoryHintFor 负责,单测在 tests/memory-anchor.test.ts。
+      // 回注本身由 read-file.ts 的 memoryHintFor 负责,单测在 tests/memory/memory-anchor.test.ts。
       return text === ''
         ? ok('前摄未重复注入(回注由 read_file 自己负责)')
         : no(`前摄对 read_file 也注入了,会与回注重复: ${text.slice(0, 60)}`);

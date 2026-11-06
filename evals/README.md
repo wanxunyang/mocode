@@ -199,13 +199,13 @@ npm run eval:memory-retrieval:live   # 同一组探针直读本机真实记忆�
 
 两份数据：
 
-- `evals/memory-retrieval/corpus.json`：17 条脱敏冻结语料（本仓库 project 15 条 + 可公开的 2 条 global 结构类）。**个人向条目一律不进**（职业、雇主、器材、所在地），`tests/memory-retrieval.test.ts` 有硬断言守这条边界。
+- `evals/memory-retrieval/corpus.json`：17 条脱敏冻结语料（本仓库 project 15 条 + 可公开的 2 条 global 结构类）。**个人向条目一律不进**（职业、雇主、器材、所在地），`tests/memory/memory-retrieval.test.ts` 有硬断言守这条边界。
 - `evals/memory-retrieval/queries.json`：57 条探针（51 有效 + 6 负例），按 `kind` 分为 `cjk` / `english` / `exact` / `cross-field` / `mixed` / `negative`。期望值写的是**正确答案**，不是当前实现的答案——跑出来不达标也是结论。
 
 输出三块：分词消融表（`both` / `bigram` / `unigram` 三档的 recall@1/3/5 + MRR + 负例误报）、生产配置的分项与未命中名单（recall@1 与 @3 分开列，因为「答案不在」和「答案在但没排第一」是两种问题）、相关性下限的分数分布与阈值扫描。
 
 评测**不走** `store.ts` 的 `searchEntries()`：那个函数会 bump `recallCount` 并往脏集写入，等于评测顺手改了被评测的数据。脚本改为在内存里直接建 `TextSearchIndex`，字段权重与生产抄一致（这份重复是刻意的——两边漂移时数字会立刻变化，而不是悄悄测成另一个系统）。
 
-`corpus.json` 需要扩语料时，从真实库导出后必须重新跑 `tests/memory-retrieval.test.ts`，隐私断言会把不该进来的条目挡下来。
+`corpus.json` 需要扩语料时，从真实库导出后必须重新跑 `tests/memory/memory-retrieval.test.ts`，隐私断言会把不该进来的条目挡下来。
 
 `evals/memory-compact-handoff.ts`（`npm run eval:memory-handoff`）是另一条记忆评测：压缩→记忆交接的真实验收，**需要 LLM 配置**，无密钥时打印 skip 并 exit 0。
