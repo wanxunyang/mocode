@@ -385,9 +385,17 @@ export function isContextLengthError(err: unknown): boolean {
   if (e.status === 413) return true;
   const msg = typeof e.message === 'string' ? e.message.toLowerCase() : '';
   if (!msg) return false;
+  const requestPayloadLimit =
+    /(?:request|payload|body|history|conversation|input|prompt).{0,48}(?:exceed(?:s|ed|ing)?|too (?:large|long)|(?:is )?(?:over|above)|(?:size|length) limit|limit exceeded|larger than|maximum|max(?:imum)?)/.test(
+      msg,
+    ) ||
+    /(?:exceed(?:s|ed|ing)?|too (?:large|long)|(?:is )?(?:over|above)|limit exceeded|maximum|max(?:imum)?).{0,48}(?:request|payload|body|history|conversation|input|prompt)/.test(
+      msg,
+    );
   return (
     /context[_ ]length|context window|maximum context|too many tokens|string_above_max_length/.test(msg) ||
     /(input|prompt|context|request).{0,20}too (long|large)|exceeds? the (model|maximum|context)/.test(msg) ||
+    requestPayloadLimit ||
     /reduce the length|上下文(长度)?(超|过)|超出.*上下文|请求过长|长度超过|token 数?超过/.test(msg)
   );
 }

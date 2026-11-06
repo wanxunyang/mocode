@@ -33,6 +33,25 @@ test('识别各家 provider 的上下文超长报错', () => {
       err: { status: 413, message: 'payload too large' },
     },
     {
+      name: 'Kiro-Go 上游请求体限制',
+      err: {
+        status: 400,
+        message: 'Request history exceeds the upstream payload limit: 55 conversation turns were dropped to fit.',
+      },
+    },
+    {
+      name: 'DeepSeek/OpenAI 兼容网关请求体上限',
+      err: { status: 400, message: 'Request body exceeds the maximum allowed size.' },
+    },
+    {
+      name: '通用网关 payload 大小限制',
+      err: { status: 422, message: 'Payload size limit exceeded.' },
+    },
+    {
+      name: '反向表述的 conversation 上限',
+      err: { status: 400, message: 'Maximum conversation length exceeded.' },
+    },
+    {
       name: 'status 缺失(代理折叠成普通 Error)',
       err: new Error('context length exceeded'),
     },
