@@ -21,6 +21,7 @@ import { appendCurrentSessionTraceEvent } from '../session/index.js';
 import type { ToolPolicyController } from '../tools/policy.js';
 import { buildTurnRecallSection, isTurnRecallEnabled } from '../memory/turn-recall.js';
 import { memoryTailChangedIds } from '../memory/tail.js';
+import { createHandoffStripper, handoffDisplaySuppressed } from '../ui/handoff-block.js';
 
 /** 当前 turn 的 batch id(runAgent 内闭包变量;一条 turn 一轮 tool batch 结束即清空)。 */
 let currentBatchId: string | null = null;
@@ -372,7 +373,28 @@ export async function runAgent(
   let narrationIsNoise = false;
   const TOOL_RESULTS_NOISE_RE = /^(?:\s*Tool results:\s*)+$/i;
 
+  // lane 窗口（supervise 派活）里摘掉机器协议块：它在 task-prompt 里被要求以
+  // `<mocode_handoff>…</mocode_handoff>` 收尾，控制面靠它入账，但摊在屏幕上对人有百害无一利。
+  // 只影响显示——`finalText` 仍由 core 原样带回，parseHandoff 一个字都不少。
+  const handoffStrip = handoffDisplaySuppressed() ? createHandoffStripper() : null;
+
   function writeAssistantText(s: string): void {
+    if (!handoffStrip) {
+      emitAssistantText(s);
+      return;
+    }
+    const visible = handoffStrip.push(s);
+    if (visible) emitAssistantText(visible);
+  }
+
+  /** 流末收尾：把仍被扣住的内容吐出（未闭合的块直接丢弃，绝不把半截 JSON 漏上屏）。 */
+  function flushHandoffBlock(): void {
+    if (!handoffStrip) return;
+    const rest = handoffStrip.flush();
+    if (rest) emitAssistantText(rest);
+  }
+
+  function emitAssistantText(s: string): void {
     const inToolBlock = currentBatchId !== null || subAgentGroupId !== null || subAgentGroupPendingSeparator;
     if (inToolBlock && s.trim().length === 0) return;
     const followsToolBatch = inToolBlock;
@@ -471,6 +493,9 @@ export async function runAgent(
       );
     },
     onTextEnd: () => {
+      // 流末：把 handoff 过滤器里扣住的尾巴处理掉（块内残渣丢弃，块外正常吐）。
+      // 必须在收尾换行之前——否则残留内容会落到换行之后。
+      flushHandoffBlock();
       // 流末正文收尾换行(此刻 content 已全部到齐,不会再出现词中间断行)。
       if (lastChar && lastChar !== '\n') {
         layout.contentWrite('\n');
@@ -508,11 +533,13 @@ export async function runAgent(
     },
     onAbort: () => {
       spinner.stop();
+      flushHandoffBlock(); // 中断时流末未必走到 onTextEnd，这里也要收场（否则扣住的内容永远不上屏）
       if (lastChar && lastChar !== '\n') layout.contentWrite('\n');
       flushToolBatch();
       layout.contentWrite(`${ui.dim}${t('agent.aborted')}${ui.reset}\n`);
     },
     onDone: (elapsedMs, usage) => {
+      flushHandoffBlock();
       flushPendingNarrationIfAny();
       flushToolBatch();
       writeChangeOverview();

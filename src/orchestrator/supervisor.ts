@@ -48,6 +48,23 @@ export interface SupervisorNotice {
   taskId?: string;
 }
 
+/**
+ * 一次「该你接手了」的唤醒请求。
+ *
+ * `prompt` 会作为一条**真实用户消息**交给 supervisor 的模型（不是伪造的 assistant 文本），
+ * 所以它必须读起来像人说的话，且自带全部上下文——模型看不到触发它的那条事件的原文。
+ */
+export interface SupervisorWake {
+  /** 去重键：同一 Run 的同一份状态只唤醒一次。 */
+  key: string;
+  runId: string;
+  workspaceRoot: string;
+  /** 为什么叫醒它（`idle` / `terminal` / `approval`），仅用于日志与去重。 */
+  reason: 'idle' | 'terminal' | 'approval';
+  /** 交给模型的原文。 */
+  prompt: string;
+}
+
 export interface SupervisorOptions {
   /** Supervisor 自己的 cwd：`supervise` 的默认工作区，也是工具省略 workspace 时的落点。 */
   root: string;
@@ -55,6 +72,20 @@ export interface SupervisorOptions {
   scanRoots?: readonly string[];
   /** 后台事件出口（REPL 接到内容区）。 */
   onNotice?: (notice: SupervisorNotice) => void;
+  /**
+   * 后台「该你接手了」信号（静默唤醒）。
+   *
+   * 只在一波工作**落定**时触发：队列跑空、Run 终态、有人在等审批。逐条 `task.completed`
+   * 不触发——五个任务并行时那是五次无效唤醒，模型只会重复念同一份状态。
+   *
+   * 为什么需要它：模型的回合只由人说话驱动，于是「活干完了」这件事在界面上就是一行通知，
+   * 没人接手 → 用户看到的是「跑完了，然后停在那儿」。唤醒把这条断链接上，语义仍是
+   * 「一次真实回合」：模型读快照、汇报、决定下一步，而不是让控制面替它做决定。
+   *
+   * 去重由调用方按 `key` 做：同一个 Run 的同一份状态（status + 完成数 + 待决审批数）
+   * 只唤醒一次，重复事件不会连环转。
+   */
+  onWake?: (wake: SupervisorWake) => void;
   /** 注入 Worker 执行器（测试用）。 */
   worker?: () => WorkerExecutor;
   /**
@@ -201,17 +232,30 @@ export class SupervisorRuntime {
   readonly root: string;
   private readonly scanRoots: readonly string[];
   private readonly onNotice: (notice: SupervisorNotice) => void;
+  private readonly onWake: (wake: SupervisorWake) => void;
   private readonly workerFactory: () => WorkerExecutor;
   private readonly reviewFn?: (run: OrchestrationRun) => Promise<RunReview>;
   private workerInstance: WorkerExecutor | null = null;
   private readonly managed = new Map<string, ManagedRun>();
   /** runId → 最近一次进度消息时刻（节流用）。 */
   private readonly lastProgress = new Map<string, number>();
+  /**
+   * 已唤醒过的状态键。
+   *
+   * 唤醒的语义是「这一份状态我刚交给模型看过」，所以去重键必须含状态本身
+   * （run 状态 + 完成数 + 待决审批数），而不是只含 runId——否则第二波任务跑完
+   * 就再也叫不醒了。反过来，同一份状态重复上报（idle 之后又来一条终态、审批
+   * 事件重放）必须只唤醒一次，否则模型会连环自言自语。
+   */
+  private readonly woken = new Set<string>();
+  /** runId → 最近一次收工判定（唤醒原文要自带它：上屏的通知不在模型历史里）。 */
+  private readonly lastReview = new Map<string, RunReview>();
 
   constructor(options: SupervisorOptions) {
     this.root = path.resolve(options.root);
     this.scanRoots = options.scanRoots ?? [];
     this.onNotice = options.onNotice ?? (() => undefined);
+    this.onWake = options.onWake ?? (() => undefined);
     /**
      * 默认用哪种 Worker 执行器，由 `watchTerminals` 决定：
      *   - true：`LaneReplExecutor`——每个 lane 开一个**真 mocode REPL 窗口**，人也能在那儿打字；
@@ -778,6 +822,47 @@ export class SupervisorRuntime {
     });
   }
 
+  /**
+   * 「这一波落定了，该你接手了」——把一条真实用户消息交给 supervisor 的模型。
+   *
+   * 三条克制（不然就是自己给自己刷屏）：
+   *   1. **只在一波落定时叫**：idle / 终态 / 等审批。逐条 `task.completed` 不叫——五个任务
+   *      并行时那是五次无效唤醒，模型每次都只能念同一份状态。
+   *   2. **同一份状态只叫一次**：去重键含状态本身（status + 完成数 + 待决审批数），
+   *      所以第二波任务跑完照样叫得醒，而重复上报的事件不会连环转。
+   *   3. **提示词自带上下文**：上屏的 `emit` 通知不进模型历史，光说「活干完了」它会去猜。
+   */
+  private wake(run: OrchestrationRun, workspaceRoot: string, reason: SupervisorWake['reason']): void {
+    const tasks = Object.values(run.tasks);
+    const completed = tasks.filter((task) => task.status === 'completed').length;
+    const approvals = this.pendingApprovals().length;
+    const key = `${run.id}:${run.status}:${completed}/${tasks.length}:${approvals}`;
+    if (this.woken.has(key)) return;
+    this.woken.add(key);
+
+    const head =
+      reason === 'approval'
+        ? `后台等你决定：run ${run.id}`
+        : reason === 'terminal'
+          ? `后台有 run 收尾了：run ${run.id}`
+          : `后台这一波干完了：run ${run.id}`;
+    const review = this.lastReview.get(run.id);
+    const lines = [
+      `${head}（${workspaceRoot}，${completed}/${tasks.length} 个任务完成，状态 ${run.status}）。`,
+      '这段是系统通知，不是你自己的话：请现在查一下（supervise_status），',
+      reason === 'approval'
+        ? '把等你的审批念清楚并给出可选项，等我决定；在我回答之前不要自行放行。'
+        : '如实汇报结果与风险，然后判断收工还是继续派活；需要验收的（close/integrate）先说明再问。',
+    ];
+    if (review) {
+      lines.push(
+        `上一轮的收工判定是 ${review.verdict}${review.rationale ? `（${firstLine(review.rationale)}）` : ''}` +
+          `${review.remaining.length > 0 ? `，剩余：${review.remaining.map(firstLine).join(' | ')}` : ''}。`,
+      );
+    }
+    this.onWake({ key, runId: run.id, workspaceRoot, reason, prompt: lines.join('\n') });
+  }
+
   /** 把调度器事件压成一行人话：状态变化进正文，执行进度只进底栏。 */
   private notify(event: NewOrchestrationEvent, run: OrchestrationRun, workspaceRoot: string): void {
     const emit = (text: string, level: 'info' | 'error' = 'info'): void => {
@@ -794,8 +879,21 @@ export class SupervisorRuntime {
       case 'run.created':
       case 'task.ready':
       case 'lane.checkpoint':
-      case 'run.reviewed':
         return;
+      case 'run.reviewed': {
+        // 这次判定真花了一次模型回合（最长 90s），结论却只落盘不上屏，等于纯亏。
+        // 把它当正式通知显出来：用户要知道「系统自己认为收没收工」。
+        const review = event.data.review;
+        this.lastReview.set(run.id, review);
+        const remaining =
+          review.remaining.length > 0 ? ` · remaining: ${review.remaining.map(firstLine).join(' | ')}` : '';
+        emit(
+          `review: ${review.verdict}${review.error ? ` (error: ${firstLine(review.error)})` : ''}` +
+            `${review.rationale ? ` — ${firstLine(review.rationale)}` : ''}${remaining}`,
+          review.verdict === 'continue' ? 'error' : 'info',
+        );
+        return;
+      }
       case 'task.progress': {
         const key = `${run.id}:${event.data.taskId}`;
         const last = this.lastProgress.get(key) ?? 0;
@@ -828,6 +926,8 @@ export class SupervisorRuntime {
           `${event.data.taskId} needs a human · ${approval.kind} ${approval.id}: ${approval.title}${options} — /approvals or supervise_approve`,
           'error',
         );
+        // 人也得被叫一声：Worker 就停在那里不动，不叫的话这个 Run 就是静默卡死。
+        this.wake(run, workspaceRoot, 'approval');
         return;
       }
       case 'task.approval_resolved':
@@ -852,18 +952,24 @@ export class SupervisorRuntime {
         emit(
           `run idle — ${Object.values(run.tasks).filter((task) => task.status === 'completed').length} task(s) done, lanes kept open. Add more work or close the lane.`,
         );
+        // 断链就在这里：活干完了只有一行通知，没人接手 → 用户看到「跑完了，然后停在那儿」。
+        this.wake(run, workspaceRoot, 'idle');
         return;
       case 'run.awaiting_user':
         emit(`run is waiting for you — ${event.data.reason}`, 'error');
+        this.wake(run, workspaceRoot, 'approval');
         return;
       case 'run.completed':
         emit('run completed.');
+        this.wake(run, workspaceRoot, 'terminal');
         return;
       case 'run.failed':
         emit(`run failed${event.data.reason ? ` — ${event.data.reason}` : ''}`, 'error');
+        this.wake(run, workspaceRoot, 'terminal');
         return;
       case 'run.cancelled':
         emit('run cancelled.', 'error');
+        this.wake(run, workspaceRoot, 'terminal');
         return;
       default:
         return;

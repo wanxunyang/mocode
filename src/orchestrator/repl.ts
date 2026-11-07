@@ -167,6 +167,17 @@ function echoUser(lines: readonly string[]): void {
 }
 
 /**
+ * 回显「这是后台唤醒，不是你打的字」。
+ *
+ * 唤醒正文确实作为用户消息进了 history（模型必须能读到），但它不是人说的话——
+ * 用同款用户气泡会让人以为刚才是自己打的。这里只显示一行来源提示 + 首行摘要。
+ */
+function echoWake(text: string): void {
+  const head = text.split('\n').find((line) => line.trim().length > 0) ?? '';
+  layout.contentWrite(`${ui.dim}  ↳ 后台唤醒${head ? ` · ${truncateDisplay(head, 96)}` : ''}${ui.reset}\n\n`);
+}
+
+/**
  * 进入 supervisor 对话。返回进程退出码。
  * 非 TTY：不启动（对话模式需要真实终端），提示改用 CLI 子命令。
  */
@@ -183,6 +194,21 @@ export async function runSupervisorChat(options: SupervisorChatOptions): Promise
     root: options.root,
     scanRoots: options.scanRoots,
     onNotice: writeNotice,
+    /**
+     * 静默唤醒：后台一波活落定（队列跑空 / Run 终态 / 有人等审批）时，控制面把一条
+     * **真实用户消息**推给我们。它不进输入框让人按 Enter，而是排队等输入框空着时自动发出
+     * ——见下面 promptWithSlashMenu 的 takeExternalTurn。
+     *
+     * 为什么不让控制面替模型做决定：唤醒只是一次真实回合，读快照、汇报、问人还是继续派活
+     * 全由模型判断；去重（同一份状态只叫一次）在 SupervisorRuntime 里做。
+     */
+    onWake: (wake) => {
+      wakeQueue.push(wake.prompt);
+      // 底栏立刻反映「有后台话等我接手」——否则用户只看到任务完成，不知道谁会动。
+      latestActivity = { taskId: wake.runId, text: `后台唤醒 · ${wake.reason}` };
+      refreshStatusBase();
+      layout.drawStatusBar();
+    },
     worker: options.worker,
     // 默认开窗（可用 --no-terminal / MOCODE_SUPERVISE_NO_TERMINAL=1 关）：
     // 「执行画面进独立终端」是入口的默认体验，库对象自己不做这个决定。
@@ -220,6 +246,18 @@ export async function runSupervisorChat(options: SupervisorChatOptions): Promise
    * Worker 每几百毫秒来一条 `tool: read_file`，写进正文就是刷屏。
    */
   let latestActivity: { taskId: string; text: string } | undefined;
+
+  /**
+   * 后台唤醒排的队（`SupervisorRuntime.onWake` 推入）。
+   *
+   * 为什么不立刻跑一轮：唤醒到达时可能正有一轮在跑，也可能人正在打字。输入框那条
+   * 第二输入源（`takeExternalTurn`）只在**空输入框**里取，所以这里的语义天然是
+   * 「等这一轮结束、且用户没在打字时，把它当作一条用户消息发出去」——
+   * 既不抢字，也不会和正在进行的回合撞车。
+   *
+   * 多条同时到达时合并成一条：五个 Run 同时跑完，合成一次查收比五次更清楚。
+   */
+  const wakeQueue: string[] = [];
 
   /**
    * 状态行右段：在跑的 Run 数 + 待决审批数 + 最近一条执行态。
@@ -281,6 +319,17 @@ export async function runSupervisorChat(options: SupervisorChatOptions): Promise
 
   let hasSubmitted = false;
   let pendingPrefill: string[] | null = null;
+  /**
+   * 本轮输入是不是后台唤醒（而非人敲的）。
+   *
+   * 只用于**回显样式**：唤醒正文作为用户消息进了模型 history（模型必须能读到它），
+   * 但它不是人说的话——用同款用户气泡回显会让人以为刚才是自己打的。
+   *
+   * 读的时候走一次函数调用：这个变量只在输入框闭包里被赋值，直接读会让控制流分析
+   * 把它窄化成 `null`（closure 赋值不算数），于是 `!== null` 分支成了 `never`。
+   */
+  let wakeText: string | null = null;
+  const pendingWake = (): string | null => wakeText;
   try {
     for (;;) {
       // 运行态打开的 Ctrl+G 面板可能在本轮结束时仍开着：等它关闭再进 INPUT 态，
@@ -312,6 +361,14 @@ export async function runSupervisorChat(options: SupervisorChatOptions): Promise
             prompt: PROMPT,
             commands: supervisorCommands(),
             history: () => collectQueryHistory(queryHistory).map((entry) => entry.text),
+            // 第二输入源（静默唤醒）：只在**空输入框**里取，人正在打字时绝不抢。
+            // 排队的多条合并成一条——五个 Run 同时跑完，合成一次查收比五次清楚。
+            takeExternalTurn: () => {
+              if (wakeQueue.length === 0) return null;
+              const batch = wakeQueue.splice(0, wakeQueue.length);
+              wakeText = batch.join('\n---\n');
+              return wakeText;
+            },
             // 预填：待确认的排队斜杠命令优先，否则运行中打的字。
             ...(pendingPrefill
               ? { initialLines: pendingPrefill }
@@ -332,19 +389,26 @@ export async function runSupervisorChat(options: SupervisorChatOptions): Promise
       if (!line) continue;
       hasSubmitted = true;
       layout.dismissWelcomeBlock();
-      queryHistory.push(line);
+      // 后台唤醒不是人打的字：不进 Ctrl+R / ↑ 历史（否则按上箭头会翻出一堆系统通知），
+      // 回显也不用用户气泡——否则用户会以为刚才是自己打的。
+      const wake = pendingWake();
+      const fromWake = wake !== null && wake.trim() === line;
+      wakeText = null;
+      if (!fromWake) queryHistory.push(line);
 
       const local = handleLocalCommand(line, supervisor);
       if (local.kind === 'exit') break;
       if (local.kind === 'handled') {
-        echoUser(input);
+        if (fromWake) echoWake(line);
+        else echoUser(input);
         layout.contentWrite(`${local.output.endsWith('\n') ? local.output : `${local.output}\n`}`);
         layout.contentWrite('\n');
         refreshStatusBase();
         continue;
       }
 
-      echoUser(input);
+      if (fromWake) echoWake(line);
+      else echoUser(input);
       // 运行态：底栏 spinner + 走时。滚动回看 / 滚轮 / typeahead / Ctrl+G / Ctrl+C 全交给
       // startRunningListener——supervisor 自己只描述「这轮在干什么」。
       layout.enterRunningMode('supervisor 正在编排…', RUNNING_PLACEHOLDER);

@@ -24,6 +24,7 @@ import {
 import { OrchestrationStore } from './store.js';
 import { switchWorkspaceRoot } from '../workspace/index.js';
 import { exitAltScreen } from '../ui/layout.js';
+import { setHandoffDisplaySuppressed } from '../ui/handoff-block.js';
 
 export interface LaneReplOptions {
   workspaceRoot: string;
@@ -132,6 +133,10 @@ export async function runLaneRepl(options: LaneReplOptions): Promise<number> {
     stopWatchdog.unref?.();
 
     const { startRepl } = await import('../repl/index.js');
+    // 这个进程就是「派出去的那个 mocode」：模型收尾时按协议吐的 `<mocode_handoff>` 块
+    // 只在显示层摘掉，`finalText` 保持完整，控制面照旧解析入账。
+    // 手敲 `mocode` 的窗口永远不开这个开关（默认 false）。
+    setHandoffDisplaySuppressed(true);
     await startRepl(
       loaded?.history,
       loaded?.id ?? target.sessionId,

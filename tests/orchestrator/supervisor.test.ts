@@ -285,6 +285,63 @@ test('dispatch: creates a run, runs the worker in a copy lane, and keeps the lan
   );
 });
 
+test('wake: a drained batch wakes the supervisor once with a self-contained prompt', async () => {
+  await withRegistryPath(() =>
+    withRoot(async (root) => {
+      const wakes: string[] = [];
+      const supervisor = new SupervisorRuntime({
+        root,
+        worker: () => new RecordingWorker(['read the README']),
+        review: stubReview,
+        onWake: (wake) => wakes.push(`${wake.reason}|${wake.prompt}`),
+      });
+      try {
+        await supervisor.dispatch({ workspace: root, objective: 'summarize the README' });
+        const runId = supervisor.liveRuns()[0].run.id;
+        await waitForSettled(supervisor, runId);
+        // 落定后再等一小会儿：验证「同一份状态不会重复唤醒」（idle 之后还有终态类事件时尤其）。
+        await new Promise((resolve) => setTimeout(resolve, 150));
+
+        assert.equal(wakes.length, 1, `expected exactly one wake, got ${JSON.stringify(wakes)}`);
+        assert.match(wakes[0], /^idle\|/);
+        // 唤醒原文必须自带上下文：上屏的通知不进模型历史，光说「干完了」它只能去猜。
+        assert.match(wakes[0], new RegExp(runId));
+        assert.match(wakes[0], /1\/1 个任务完成/);
+        assert.match(wakes[0], /stub review/, 'the收工 verdict must be inlined into the wake prompt');
+      } finally {
+        supervisor.shutdown();
+      }
+    }),
+  );
+});
+
+test('wake: a second batch on the same run wakes again (the dedupe key carries the state)', async () => {
+  await withRegistryPath(() =>
+    withRoot(async (root) => {
+      const wakes: string[] = [];
+      const supervisor = new SupervisorRuntime({
+        root,
+        worker: () => new RecordingWorker(['first', 'second']),
+        review: stubReview,
+        onWake: (wake) => wakes.push(wake.key),
+      });
+      try {
+        await supervisor.dispatch({ workspace: root, objective: 'first task' });
+        const runId = supervisor.liveRuns()[0].run.id;
+        await waitForSettled(supervisor, runId);
+        assert.equal(wakes.length, 1);
+
+        await supervisor.dispatch({ workspace: root, objective: 'second task', lane: 'task-1' });
+        await waitForSettled(supervisor, runId);
+        assert.equal(wakes.length, 2, 'a new state must wake again, otherwise the second batch is silent');
+        assert.notEqual(wakes[0], wakes[1]);
+      } finally {
+        supervisor.shutdown();
+      }
+    }),
+  );
+});
+
 test("dispatch: the workspace's live run is reused and the follow-up continues the same session", async () => {
   await withRegistryPath(() =>
     withRoot(async (root) => {
