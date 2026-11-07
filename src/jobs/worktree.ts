@@ -9,9 +9,14 @@ import { mkdirSync, rmdirSync, existsSync, symlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
-function git(args: string[], cwd: string): { ok: boolean; output: string } {
+function gitRaw(args: string[], cwd: string): { ok: boolean; stdout: string; stderr: string } {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
-  return { ok: r.status === 0, output: `${r.stdout ?? ''}${r.stderr ?? ''}`.trim() };
+  return { ok: r.status === 0, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+function git(args: string[], cwd: string): { ok: boolean; output: string } {
+  const result = gitRaw(args, cwd);
+  return { ok: result.ok, output: `${result.stdout}${result.stderr}`.trim() };
 }
 
 /** 当前 git 仓库根；不是 git 仓库时返回 null。 */
@@ -29,9 +34,9 @@ export interface Worktree {
  * 创建 detached worktree（基于 HEAD）。
  * 失败（非 git 仓库 / 有未跟踪冲突）抛错，由调用方决定是否回退普通模式。
  */
-export function createWorktree(): Worktree {
-  const repoRoot = gitTopLevel();
-  if (!repoRoot) throw new Error('not a git repository (worktree isolation requires git)');
+export function createWorktree(cwd: string = process.cwd()): Worktree {
+  const repoRoot = gitTopLevel(cwd);
+  if (!repoRoot) throw new Error(`not a git repository: ${cwd} (worktree isolation requires git)`);
 
   const id = `${Date.now()}-${randomBytes(2).toString('hex')}`;
   const wtPath = join(repoRoot, '.mocode', 'worktrees', `wt-${id}`);
@@ -55,23 +60,73 @@ export function createWorktree(): Worktree {
   return { path: wtPath, repoRoot };
 }
 
+/** 主仓库是否有未提交改动：worktree 基于 HEAD，看不到它们，调用方可据此提示 Worker 视角。 */
+export function gitRepositoryDirty(dir: string): boolean {
+  const status = git(['status', '--porcelain', '--untracked-files=normal'], dir);
+  return status.ok && status.output.length > 0;
+}
+
+export interface WorktreeChanges {
+  changedFiles: string[];
+  patch: string | null;
+  /** 当前内容的 tree 对象；同一条 lane 内可作为下一个 attempt 的 diff 基线。 */
+  tree: string;
+}
+
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+function headTree(wt: Worktree): string {
+  const head = git(['rev-parse', 'HEAD^{tree}'], wt.path);
+  // 空仓库没有 HEAD：以空 tree 为基线，未跟踪文件即全部改动。
+  return head.ok && head.output ? head.output : EMPTY_TREE;
+}
+
 /**
- * 把 worktree 相对 HEAD 的全部改动导出为 unified diff（含未跟踪文件，binary 标记为
- * Binary files differ）。无改动返回 null（调用方不写空 patch 文件）。
- *
- * 用 spawnSync 而非异步 spawn：本函数只在 headless/runner 的收尾路径调用（事件循环
- * 已无流式渲染在跑），且 removeWorktree 本身就是同步链，拆异步收益为零。
+ * 把 worktree 当前内容写成 tree 对象（只写 index，不提交），再相对 baselineTree 计算改动。
+ * 共享 worktree 的 lane 靠它把「本次 attempt 的产出」与之前 attempt 的成果区分开；
+ * baselineTree 省略时以 HEAD 为基线。
+ */
+export function snapshotWorktreeChanges(wt: Worktree, baselineTree?: string): WorktreeChanges {
+  // add -A 让修改、删除、未跟踪文件都进入 index，write-tree 才能给出完整内容。
+  const added = git(['add', '-A', '--', '.'], wt.path);
+  if (!added.ok) throw new Error(`git add -A failed: ${added.output}`);
+  const written = git(['write-tree'], wt.path);
+  if (!written.ok || !written.output) throw new Error(`git write-tree failed: ${written.output}`);
+  const tree = written.output;
+  const baseline = baselineTree ?? headTree(wt);
+  if (baseline === tree) return { changedFiles: [], patch: null, tree };
+  const names = gitRaw(['diff', '--name-only', '-z', baseline, tree, '--'], wt.path);
+  if (!names.ok) throw new Error(`git diff --name-only failed: ${names.stderr.trim()}`);
+  const changedFiles = [...new Set(names.stdout.split('\0').filter(Boolean))].sort();
+  const diff = gitRaw(['diff', '--binary', baseline, tree, '--'], wt.path);
+  if (!diff.ok) throw new Error(`git diff failed: ${diff.stderr.trim()}`);
+  if (!diff.stdout) throw new Error('git reported changes but produced an empty patch.');
+  return { changedFiles, patch: diff.stdout.endsWith('\n') ? diff.stdout : `${diff.stdout}\n`, tree };
+}
+
+/**
+ * 严格收集 worktree 相对 HEAD 的文件列表与 unified diff。无改动不是错误；Git 命令失败会
+ * 抛错，供需要保证成果不丢失的编排器决定保留 worktree。
+ */
+export function collectWorktreeChanges(wt: Worktree): WorktreeChanges {
+  return snapshotWorktreeChanges(wt);
+}
+
+/** worktree 目录是否仍然可用（被手工删掉或 prune 后不能复用）。 */
+export function worktreeIsUsable(wtPath: string): boolean {
+  return existsSync(join(wtPath, '.git'));
+}
+
+/**
+ * 兼容旧调用方：无改动或 Git 导出失败均返回 null。需要区分两者的新代码应使用
+ * collectWorktreeChanges，避免在成果未保存时销毁 worktree。
  */
 export function exportWorktreePatch(wt: Worktree): string | null {
-  const status = git(['status', '--porcelain'], wt.path);
-  if (!status.ok || !status.output) return null; // 无改动 / git 不可用
-  // 未跟踪文件：先 git add -N(intent-to-add) 让 diff 能覆盖新文件,否则 --worktree
-  // 默认跳过 untracked,新建的文件会随 worktree 一起消失。--intent-to-add 不改
-  // index 的实际内容、不产生对象,worktree remove --force 可正常清理。
-  git(['add', '-N', '.'], wt.path);
-  const diff = git(['diff', 'HEAD', '--binary'], wt.path);
-  if (!diff.ok || !diff.output) return null;
-  return `${diff.output}\n`;
+  try {
+    return collectWorktreeChanges(wt).patch;
+  } catch {
+    return null;
+  }
 }
 
 /** 先删 node_modules 链接（防误伤目标），再移除 worktree + prune。 */

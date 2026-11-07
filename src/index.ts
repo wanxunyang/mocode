@@ -140,6 +140,14 @@ async function main(): Promise<void> {
     process.exit(code);
   }
 
+  // Super Agent 编排：独立完整 mocode Worker + 可恢复任务 DAG（不进入普通 REPL）。
+  if (args[0] === 'supervise') {
+    const { runSuperviseCli } = await import('./orchestrator/cli.js');
+    const code = await runSuperviseCli(args.slice(1));
+    await shutdownRuntime();
+    process.exit(code);
+  }
+
   // Job runner 内部模式：detached 子进程入口。
   const runnerIdx = args.indexOf('--job-runner');
   if (runnerIdx !== -1) {

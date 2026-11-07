@@ -14,6 +14,7 @@ import type { ToolRouteGroupName } from '../config/profiles.js';
 // 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),host 入口须显式装配。
 import '../tools/builtins/index.js';
 import type { InterventionRequest, InterventionResult } from '../ui/intervention.js';
+import { setAskHumanHandler } from '../tools/builtins/ask-human.js';
 import { parseCommand, type HostCommand, type HostEnvelope } from './protocol.js';
 
 interface ApprovalWaiter {
@@ -60,12 +61,39 @@ async function initializeRuntime(): Promise<void> {
     createdRuntime.context.toolRuntime.registerToolsExtension('mcp', getMcpTools());
     await createdRuntime.start();
     if (closing) return;
+    // Supervised Worker：`ask_human` 不再是「不可用」，而是走同一条审批通道转给控制面。
+    // 只在受监管时注入——普通 Host（work-app）本来就有人盯着面板，不该多绕一层 NDJSON。
+    if (process.env.MOCODE_SUPERVISED_WORKER === '1') {
+      setAskHumanHandler((request) =>
+        waitForApproval(
+          activeRun?.id ?? '',
+          {
+            type: request.options.length > 0 ? 'choice' : 'input',
+            title: request.question,
+            ...(request.options.length > 0
+              ? {
+                  options: request.options.map((item) => ({
+                    label: item.label,
+                    ...(item.detail ? { detail: item.detail } : {}),
+                  })),
+                }
+              : {}),
+            ...(request.context ? { detail: request.context } : {}),
+            allowCustom: false,
+          },
+          'ask_human',
+        ),
+      );
+    }
     const runtimeConfig = createdRuntime.context.config;
     emit('runtime_ready', {
       projectRoot: createdRuntime.context.sandboxRoot,
       provider: runtimeConfig.provider,
       promptCache: runtimeConfig.provider === 'anthropic' && runtimeConfig.anthropicPromptCache,
       warnings: getMcpWarnings(),
+      // Supervised Worker 的控制面靠这两个字段确认「这个 host 是谁、还活着」。
+      pid: process.pid,
+      ...(process.env.MOCODE_WORKER_ID ? { workerId: process.env.MOCODE_WORKER_ID } : {}),
     });
   })();
   return initialized;
@@ -114,13 +142,20 @@ function prepareSession(requestedSessionId?: string): boolean | null {
   return restoreSession(requestedSessionId) ? true : null;
 }
 
-function waitForApproval(runId: string, request: InterventionRequest): Promise<InterventionResult> {
+function waitForApproval(
+  runId: string,
+  request: InterventionRequest,
+  kind: 'permission' | 'ask_human' = 'permission',
+): Promise<InterventionResult> {
   if (closing) return Promise.resolve({ action: 'cancelled' });
   const approvalId = randomUUID();
   emit(
     'approval_requested',
     {
       approvalId,
+      // `kind` 让控制面能区分「工具权限面板」与「Worker 主动提问」：措辞、默认选项、
+      // 以及回答后回给模型的话术都不一样。旧客户端不认识它会忽略，行为与以前一致。
+      kind,
       title: request.title,
       detail: request.detail ?? '',
       options: (request.options ?? []).map((option) => (typeof option === 'string' ? option : option.label)),
@@ -332,6 +367,23 @@ async function handle(command: HostCommand): Promise<void> {
   resolveApproval(command);
 }
 
+/** 心跳间隔：控制面用「最近一次心跳」判断 Worker 是卡死还是进程已死。 */
+const HEARTBEAT_MS = 5_000;
+
+/**
+ * Supervised Worker 才发心跳：普通 work-app 宿主不需要这份额外流量，
+ * 且旧客户端不认识这个事件（保持默认行为不变）。
+ */
+function startHeartbeat(): NodeJS.Timeout | undefined {
+  if (process.env.MOCODE_SUPERVISED_WORKER !== '1') return undefined;
+  const timer = setInterval(() => {
+    emit('heartbeat', { pid: process.pid, at: Date.now() });
+  }, HEARTBEAT_MS);
+  // 不因为心跳把进程钉在事件循环上：stdin 关闭时该退就退。
+  timer.unref?.();
+  return timer;
+}
+
 function requestShutdownCancellation(): void {
   activeRun?.controller.abort(hostClosedReason);
   runtimeFacade?.cancel(hostClosedReason);
@@ -343,6 +395,7 @@ function requestShutdownCancellation(): void {
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 const pendingCommands = new Set<Promise<void>>();
+const heartbeatTimer = startHeartbeat();
 const startupPromise = initializeRuntime();
 void startupPromise.catch((cause) => error(cause instanceof Error ? cause.message : String(cause)));
 for await (const line of input) {
@@ -372,3 +425,4 @@ await Promise.allSettled([...pendingCommands]);
 const runtimeAtShutdown = runtimeFacade as Runtime | null;
 await runtimeAtShutdown?.close().catch(() => undefined);
 await closeAllMcp().catch(() => undefined);
+if (heartbeatTimer) clearInterval(heartbeatTimer);

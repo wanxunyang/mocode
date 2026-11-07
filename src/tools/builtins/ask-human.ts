@@ -2,11 +2,35 @@ import type { Tool } from '../types.js';
 import { promptWithMail } from '../../mail/index.js';
 import { sendState } from '../../pet/bridge.js';
 import { t } from '../../i18n/index.js';
+import type { InterventionResult } from '../../ui/intervention.js';
 
 /** 单个选项:label 是选项本身,detail 是选它意味着什么/取舍(可选)。 */
 export interface ChoiceOption {
   label: string;
   detail?: string;
+}
+
+/** 宿主注入的问答通道：把问题交给上层（例如 Super Agent 控制面）去问真人。 */
+export interface AskHumanRequest {
+  question: string;
+  options: ChoiceOption[];
+  context?: string;
+}
+export type AskHumanHandler = (request: AskHumanRequest) => Promise<InterventionResult>;
+
+/**
+ * 进程级问答通道。缺省 null = 直接弹本地面板。
+ * Supervised Host 在启动时注入一条「转成 approval_requested 事件」的通道，
+ * 这样 Worker 里的 ask_human 就不是「不可用」，而是由控制面转给真人。
+ */
+let askHumanHandler: AskHumanHandler | null = null;
+
+export function setAskHumanHandler(handler: AskHumanHandler | null): void {
+  askHumanHandler = handler;
+}
+
+export function getAskHumanHandler(): AskHumanHandler | null {
+  return askHumanHandler;
 }
 
 /** 把单个选项元素安全地转成 {label, detail}。LLM 有时传对象而不是字符串,这里提取可读字段。 */
@@ -162,13 +186,23 @@ export const askHumanTool: Tool = {
     const options = coerceOptions(args.options);
     const context = args.context ? String(args.context) : undefined;
 
+    // 宿主注入了通道（Supervised Host）→ 把问题交上去由控制面转给真人。
+    // 没有通道又有 MOCODE_SUPERVISED_WORKER=1：说明这次派活没有能应答的人（单发 CLI），
+    // 非 TTY 面板会自动选首项，等于替用户做关键决定——所以明确报不可用，让 Worker 写进 handoff risks。
+    const handler = askHumanHandler;
+    if (!handler && process.env.MOCODE_SUPERVISED_WORKER === '1') {
+      return 'ask_human is unavailable in this supervised worker: no human can answer here. Do not guess a decision; record the open question and its options in your handoff risks and stop.';
+    }
+
     sendState('waiting_human');
-    const result = await promptWithMail({
-      type: options.length > 0 ? 'choice' : 'input',
-      title: question,
-      options: options.length > 0 ? options : undefined,
-      detail: context,
-    });
+    const result = handler
+      ? await handler({ question, options, ...(context ? { context } : {}) })
+      : await promptWithMail({
+          type: options.length > 0 ? 'choice' : 'input',
+          title: question,
+          options: options.length > 0 ? options : undefined,
+          detail: context,
+        });
 
     if (result.action === 'cancelled') {
       return t('askHuman.cancelled');
