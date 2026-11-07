@@ -102,7 +102,8 @@ export function composeModelLine(status: StatusBarData, cols: number): string {
   const modePart = modeTag ? `${modeColor}${modeTag}${ui.reset}` : '';
   const modeW = modeTag ? displayWidth(modeTag) : 0;
   // 切换提示:告诉用户怎么切模式。灰(dim)降优先级,不与 modeTag 抢色;只在有 modeTag 时出现。
-  const HINT = t('status.modeSwitch');
+  // modeHint 可覆盖(空串=不显示):没有模式切换的入口(supervisor)不该提示一个按了没反应的键。
+  const HINT = status.modeHint ?? t('status.modeSwitch');
   const hintW = modeTag ? displayWidth(HINT) : 0;
   const hintPart = modeTag ? `${ui.dim}${HINT}${ui.reset}` : '';
   // P3 effort chip:非 auto 时显示,与 modeTag 同级色(运行时状态),优先级在 hint 之上。
@@ -628,6 +629,8 @@ export function setStatusBase(b: {
   contextBar: string;
   cwd: string;
   modeTag?: string;
+  /** 覆盖 modeTag 右侧的切换提示；空串=不显示（没有模式切换的入口用）。 */
+  modeHint?: string;
   effort?: string;
   planSummary?: string;
   planKey?: string;

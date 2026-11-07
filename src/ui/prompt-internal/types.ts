@@ -51,6 +51,23 @@ export interface PromptOpts {
   hasPendingAttachments?: () => boolean;
   /** 清空待发图片附件(repl 同步清脚栏 chip);Ctrl+C 第二级调用。 */
   clearPendingAttachments?: () => void;
+  /**
+   * 第二输入源：空闲时轮询「有没有别处派来的话」（supervise 派活 / 插话）。
+   *
+   * 返回非 null 就当作用户提交了这段文字直接发出去——不是预填进输入框等人按 Enter。
+   * 只在输入框为空时取（人正在打字时绝不抢），取到就立刻发送。
+   * 不传 = 零行为变化，所有既有调用点不受影响。
+   */
+  takeExternalTurn?: () => string | null;
+  /**
+   * 第二输入源的另一半：外部请求关窗（supervise 收工 / 取消）。
+   *
+   * 返回 true 时输入框按 Ctrl+D 处理（返回 null），REPL 走自己的正常退出路径，
+   * 于是 alt screen / raw mode / 鼠标追踪都会被正确复原。
+   * **不能**用 `process.kill` 代替：Windows 上那是 TerminateProcess，目标进程拿不到
+   * 任何执行清理代码的机会，终端就烂在 alt screen 里（滚轮翻不动、点哪都没反应）。
+   */
+  externalExitRequested?: () => boolean;
 }
 
 /** Ctrl+Y 抓图的非成功提示:'empty'=剪贴板无图(黄);'error'=失败(红)。 */

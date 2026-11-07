@@ -1,0 +1,109 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  appendLaneCommand,
+  appendLaneEvent,
+  laneChannelPaths,
+  parseJsonLines,
+  readChannel,
+  readLinesFrom,
+  resetLaneEvents,
+} from '../../src/orchestrator/lane-channel.js';
+
+function withRoot<T>(fn: (root: string) => T): T {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mocode-lane-channel-'));
+  try {
+    return fn(root);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('laneChannelPaths: both channels live under the run artifacts so one run is self-contained', () => {
+  const paths = laneChannelPaths('C:/work', 'run-1', 'lane-a');
+  // 用 path 拼出来的期望值：这里断言的是目录结构，不是某个平台的分隔符。
+  assert.equal(path.dirname(paths.events), path.dirname(paths.commands));
+  assert.ok(paths.events.includes(path.join('orchestrations', 'run-1', 'artifacts', 'lanes', 'lane-a')));
+  assert.ok(paths.events.endsWith('lane.events'));
+  assert.ok(paths.commands.endsWith('lane.commands'));
+});
+
+test('commands: the supervisor can enqueue before the lane window exists', () => {
+  withRoot((root) => {
+    const paths = laneChannelPaths(root, 'run-1', 'lane-a');
+    // 目录都还不存在：append 必须自己建，窗口晚起来也不能丢指令。
+    appendLaneCommand(paths, { t: 1, id: 'c1', taskId: 'task-1', kind: 'task', text: 'do it' });
+    appendLaneCommand(paths, { t: 2, id: 'c2', kind: 'tell', text: 'also docs' });
+    const read = readChannel<{ id: string; text: string }>(paths.commands, 0);
+    assert.deepEqual(
+      read.items.map((item) => item.id),
+      ['c1', 'c2'],
+    );
+    assert.equal(read.consumed, 2);
+  });
+});
+
+test('events: a half-written trailing line is left for the next read, never parsed early', () => {
+  withRoot((root) => {
+    const paths = laneChannelPaths(root, 'run-1', 'lane-a');
+    fs.mkdirSync(path.dirname(paths.events), { recursive: true });
+    fs.writeFileSync(paths.events, '{"t":1,"kind":"ready"}\n{"t":2,"kin', 'utf8');
+
+    const first = readChannel<{ kind: string }>(paths.events, 0);
+    assert.deepEqual(
+      first.items.map((item) => item.kind),
+      ['ready'],
+    );
+    assert.equal(first.consumed, 1, 'the incomplete line must not be counted as consumed');
+
+    fs.appendFileSync(paths.events, 'd":"exit"}\n', 'utf8');
+    const second = readChannel<{ kind: string }>(paths.events, first.consumed);
+    assert.deepEqual(
+      second.items.map((item) => item.kind),
+      ['exit'],
+    );
+    assert.equal(second.consumed, 2);
+  });
+});
+
+test('readLinesFrom: a missing file is empty, not an error', () => {
+  withRoot((root) => {
+    const read = readLinesFrom(path.join(root, 'nope.jsonl'), 0);
+    assert.deepEqual(read, { lines: [], consumed: 0 });
+  });
+});
+
+test('parseJsonLines: a corrupt line inside the stream is skipped, not thrown', () => {
+  const items = parseJsonLines<{ kind: string }>('{"kind":"ready"}\nnot json\n{"kind":"exit"}');
+  assert.deepEqual(
+    items.map((item) => item.kind),
+    ['ready', 'exit'],
+  );
+});
+
+test('resetLaneEvents: a new window clears stale events but keeps pending commands', () => {
+  withRoot((root) => {
+    const paths = laneChannelPaths(root, 'run-1', 'lane-a');
+    appendLaneEvent(paths, { t: 1, kind: 'ready' });
+    appendLaneCommand(paths, { t: 1, id: 'c1', kind: 'task', text: 'do it' });
+
+    resetLaneEvents(paths);
+    assert.deepEqual(readChannel(paths.events, 0).items, []);
+    assert.equal(readChannel(paths.commands, 0).items.length, 1, 'unconsumed commands must survive a restart');
+  });
+});
+
+test('appendLaneEvent: an unwritable channel never throws into the turn', () => {
+  // 把 events 指到一个目录：append 会失败，但这是旁路日志，不能把正在跑的对话带崩。
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mocode-lane-channel-bad-'));
+  try {
+    const paths = laneChannelPaths(root, 'run-1', 'lane-a');
+    fs.mkdirSync(paths.events, { recursive: true });
+    assert.doesNotThrow(() => appendLaneEvent(paths, { t: 1, kind: 'ready' }));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

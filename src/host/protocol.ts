@@ -34,7 +34,11 @@ export function parseCommand(value: unknown): HostCommand | null {
       id: input.id,
       type: 'approval',
       approvalId: input.approvalId,
-      action: input.action === 'selected' ? 'selected' : 'cancelled',
+      // 白名单而不是强转：未知取值一律当取消（fail-closed），不给「拼错的 action 意外放行」留口子。
+      action:
+        input.action === 'selected' || input.action === 'submitted'
+          ? (input.action as 'selected' | 'submitted')
+          : 'cancelled',
       value: typeof input.value === 'string' ? input.value : undefined,
     };
   }

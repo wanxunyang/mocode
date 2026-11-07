@@ -284,6 +284,35 @@ function awaitPendingRecall(input: string[]): Promise<boolean> {
 // ── textOf / queryHistoryFromMessages / renderHistory 已移到 ./message-format.ts ──
 
 /**
+ * 把 REPL 接到外部输入源 / 外部观察者上（supervise 派活的 lane 用）。
+ *
+ * 三条约束决定了它是「钩子」而不是「模式」：
+ *   1. 人仍然是第一输入源——外部投喂只在输入框为空时取出，绝不抢人正在打的字；
+ *   2. UI 完全不变——这里没有任何画屏代码，同一个 startRepl 跑出来的就是手敲 mocode 的样子；
+ *   3. 不传就等于不存在——既有调用点（`mocode` / `--resume`）行为一个字都不变。
+ */
+export interface ReplHooks {
+  /**
+   * 空闲输入框里取一条外部派来的话（supervise 派活 / 插话）。返回 null 表示暂时没有。
+   * 取到就当作用户按了 Enter 直接发送，不需要任何人再确认。
+   */
+  takeExternalTurn?: () => string | null;
+  /**
+   * 外部请求关窗（supervise 收工 / 取消）。返回 true 时 REPL 按 Ctrl+D 正常退出，
+   * 于是 alt screen / raw mode / 鼠标追踪都会被正确复原。
+   *
+   * 为什么不能用 `process.kill`：Windows 上它是 TerminateProcess，目标进程的
+   * `exit` / `SIGTERM` 处理器一个都不跑，`exitAltScreen()` 永远执行不到——终端就烂在
+   * alt screen 里（画面还在、滚轮翻不动、点哪都没反应）。
+   */
+  externalExitRequested?: () => boolean;
+  /** 一轮跑完（真实用户轮与外部轮都算）。`finalText` 是本轮最后一条 assistant 文本。 */
+  onTurnFinished?: (info: { ok: boolean; finalText: string | null }) => void;
+  /** TUI 起好了、会话 id 已确定（外部据此判断「这个 lane 可以接活了」）。 */
+  onReady?: (info: { sessionId?: string; workspacePath: string }) => void;
+}
+
+/**
  * 交互式 REPL:全屏 TUI(alt screen + 固定底栏)。INPUT 态底栏=状态行+输入框(raw mode 等按键);
  * 提交后 enterRunningMode(底栏改 dim 占位、光标回内容续写位),命令分发与 runAgent 的流式输出经
  * contentWrite 落入内容区(滚动区域内自动滚动,底栏不动)。history 由本模块持有,在轮次间持久;
@@ -295,6 +324,7 @@ export async function startRepl(
   sandboxRootOverride?: string,
   initialQueryHistory?: readonly string[],
   initialLastToolGroups?: readonly ToolRouteGroupName[],
+  hooks: ReplHooks = {},
 ): Promise<void> {
   // 模式重置:agentMode 不落盘,每个 REPL 会话从 auto 开始(/resume / --resume 亦重置)。
   setAgentMode('auto');
@@ -491,6 +521,10 @@ export async function startRepl(
   if (!history.some((m) => m.role === 'user')) {
     layout.writeWelcomeBlock(welcomeLines());
   }
+  // 外部观察者（supervise 派活的 lane）：画面已就绪、会话 id 已确定，可以接活了。
+  // 放在首帧渲染之后而不是函数入口：否则 supervisor 会以为「已经能派」，
+  // 派来的话却要等人把那圈启动流程跑完才被消费，中间的空窗看起来像卡死。
+  hooks.onReady?.({ sessionId: currentSessionId, workspacePath: sandboxRootOverride ?? process.cwd() });
   // R9.4 空库提示:记忆开着但一条 active 都没有 → 说清「怎么让它有」,而不是让用户
   // 对着空库空转。只在启动时提示一次(不是每轮),且不给 UI 常驻噪音:
   // 「零感知」路线要求的是**行为**里有记忆,不是界面上反复提醒记忆的存在。
@@ -651,6 +685,8 @@ export async function startRepl(
     let signal: AbortSignal | undefined;
     let toolPolicy = inheritedToolPolicy;
     let initialToolRoute: Record<string, unknown> | undefined;
+    /** 本轮最后一条 assistant 正文（外部观察者要在轮末拿它当交接摘要）。 */
+    let finalText: string | null = null;
     // 继承 toolPolicy 的合成执行轮没有独立路由;真实用户轮在 await routeToolGroups 完成后置 true。
     // 路由完成前 Ctrl+C = 撤回本轮消息(routedCancel),之后才是"中断 agent 执行"(原 abort 语义)。
     let routingDone = toolPolicy != null;
@@ -759,6 +795,7 @@ export async function startRepl(
       if (result.terminationReason === 'max_steps' && result.finalText) {
         layout.contentWrite(result.finalText.endsWith('\n') ? result.finalText : `${result.finalText}\n`);
       }
+      finalText = result.finalText;
       if (toolPolicy) lastToolGroups = toolPolicy.groupNames;
       // 本轮 token 累计(底栏模式 chip 右边显示)。undefined = 后端不开 include_usage。
       // 状态栏统一在 finally 刷新，确保正常、中断、异常都经过同一 plan 收尾路径。
@@ -858,6 +895,9 @@ export async function startRepl(
       layout.drawStatusBar();
     }
     if (!routedCancel) layout.contentWrite('\n'); // 轮次之间空行(路由撤回由主循环 rewindContent 擦除,不补空行)
+    // 外部观察者（supervise 派活的 lane）：这一轮跑完了，交出结论。
+    // 撤回的轮次不算一轮——它什么都没执行，报上去会让控制面误判任务已完成。
+    if (!routedCancel) hooks.onTurnFinished?.({ ok, finalText });
     return { ok, toolPolicy, routedCancel };
   };
 
@@ -949,6 +989,10 @@ export async function startRepl(
             pendingAttachments = [];
             syncPendingAttachChips();
           },
+          // 第二输入源（supervise 派活 / 插话）：只在空闲输入框里取，人正在打字时不抢。
+          // 不传就是零行为变化——手敲 mocode 永远走不到这支分支。
+          ...(hooks.takeExternalTurn ? { takeExternalTurn: hooks.takeExternalTurn } : {}),
+          ...(hooks.externalExitRequested ? { externalExitRequested: hooks.externalExitRequested } : {}),
           // Ctrl+R / Ctrl+P 历史搜索候选源:惰性工厂——当前会话内存 queryHistory + 最近落盘会话,
           // 聚合要读盘,只有面板真正打开(Ctrl+R/P)才求值,平常轮次零开销
           history: () => collectQueryHistory(queryHistory).map((e) => e.text),

@@ -75,6 +75,8 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
   let resolved = false;
   let resolve!: (v: string[] | null) => void;
   let reject!: (e: Error) => void;
+  /** 第二输入源（supervise 派活）的轮询定时器；只有传了 takeExternalTurn 才存在。 */
+  let externalTimer: NodeJS.Timeout | null = null;
   /** 菜单行(预渲染,带色)——向上展开进内容区底,由 layout 贴入。最多显示 MENU_MAX_VISIBLE 条,支持上下滚动。 */
   function menuLines(): string[] {
     if (!menuOpen || filtered.length === 0) return [];
@@ -376,9 +378,47 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
     redraw();
   }
 
+  /**
+   * 第二输入源轮询：输入框为空时问一次「有没有别处派来的话」（supervise 派活 / 插话）。
+   *
+   * 三条克制：
+   *   1. 只有空输入框才取——人正在打字时绝不抢字，否则打一半被顶掉是最难受的体验；
+   *   2. 取到就直接提交（等同用户按 Enter），不是预填——派活的人不在这个终端前，没人按 Enter；
+   *   3. 轮询自身不画屏，只有真的要提交时才走 submit 路径，空闲时零可见开销。
+   */
+  function pollExternalTurn(): void {
+    if (resolved) return;
+    // 关窗请求优先于派活：已经收工了就不该再开新回合。
+    // 走 finish(null) 而不是自己复原终端：与 Ctrl+D 同一条退出路径，REPL 才会跑到
+    // exitAltScreen（alt screen / raw / 鼠标追踪 / margins 一处都不漏）。
+    if (opts.externalExitRequested?.()) {
+      finish(null);
+      return;
+    }
+    if (!opts.takeExternalTurn) return;
+    const isEmpty = segs.length === 1 && !segs[0].frozen && segs[0].text === '';
+    if (!isEmpty || pasteState.pasting) return;
+    let external: string | null = null;
+    try {
+      external = opts.takeExternalTurn();
+    } catch {
+      return; // 通道读失败不该打断输入
+    }
+    if (!external || external.trim() === '') return;
+    segs = [{ frozen: false, text: external }];
+    curSeg = 0;
+    curOff = segs[0].text.length;
+    computeFiltered();
+    submit();
+  }
+
   function cleanup(): void {
     layout.setPasteHandler(null);
     layout.setCursorChangeHandler(null);
+    if (externalTimer) {
+      clearInterval(externalTimer);
+      externalTimer = null;
+    }
     try {
       stdin.setRawMode(false);
     } catch {
@@ -970,6 +1010,11 @@ export async function promptWithSlashMenu(opts: PromptOpts): Promise<string[] | 
     layout.setCursorChangeHandler(applyExternalCursor); // 鼠标左键单击输入框(未拖动)→ 改 cl/cc 到点击位;cleanup 时注销
     stdin.resume();
     emitter.on('keypress', onKey);
+    // 第二输入源（supervise 派活 / 关窗请求）：只有传了任一回调才起定时器，其它调用点零开销。
+    if (opts.takeExternalTurn || opts.externalExitRequested) {
+      externalTimer = setInterval(pollExternalTurn, 400);
+      externalTimer.unref?.();
+    }
     computeFiltered();
     redraw();
   });

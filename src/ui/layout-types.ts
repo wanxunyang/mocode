@@ -25,6 +25,9 @@ export interface StatusBarData {
   status: string; // '空闲' | '思考中' | '执行 read_file' …
   spinnerFrame?: string; // 可选 spinner 帧(运行态)
   modeTag?: string; // 模式标识:repl 传 'Auto' / 'Plan'(两段式布局左段显示)
+  /** modeTag 右侧的切换提示覆盖:undefined=默认 'Shift+Tab 切换';空串=不显示。
+   *  supervisor 这类没有模式切换的入口用空串,避免提示一个按了没反应的键。 */
+  modeHint?: string;
   /** 思考强度 chip(P3);仅非 auto 时显示。 */
   effort?: string;
   /** 活跃 plan 短摘要(无 plan=undefined,空串=有 plan 但 chip 不显)。repl 透传 getActivePlanSummary()。 */
