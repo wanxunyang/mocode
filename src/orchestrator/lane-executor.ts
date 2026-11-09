@@ -22,6 +22,7 @@ import {
   laneChannelPaths,
   readChannel,
   requestLaneStop,
+  resetLaneChannel,
   type LaneChannelPaths,
   type LaneEvent,
 } from './lane-channel.js';
@@ -222,6 +223,12 @@ export class LaneReplExecutor implements WorkerExecutor {
     this.lanes.delete(key);
     this.cancelled.delete(key);
 
+    // 开窗前先把通道清干净：上一代窗口的事件里可能还躺着一条 `exit`（协作式关窗时它
+    // 一定会写），而新建的 LaneProcess 游标从 0 开始——第一轮 pump 就会读到那条旧 exit，
+    // 把刚拉起的窗口直接判死，报「did not become ready」。窗口自己起来后也会 reset，
+    // 但那时控制面可能已经读过了；清在开窗之前才是唯一没有窗口期的位置。
+    resetLaneChannel(paths);
+
     const launch = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const opened = this.openTerminal({
       title: `mocode · ${laneId} · ${request.run.id}`,
@@ -263,6 +270,11 @@ export class LaneReplExecutor implements WorkerExecutor {
     onProgress({ message: 'lane window opened', workspacePath: site.path });
     const ready = await this.waitReady(process_);
     if (!ready) {
+      // 超时的窗口必须从表里摘掉并判死：否则它已经死了/半死不活地留在 lanes 里，
+      // 下一次派活还会复用它（`existing && !existing.dead`），同一个 lane 上叠出两个
+      // 窗口抢同一份 lane.commands。真实事故：ready 超时后重试，旧窗口还活着并重跑了旧指令。
+      process_.dead = true;
+      if (this.lanes.get(key) === process_) this.lanes.delete(key);
       return {
         ok: false,
         error: `the lane window did not become ready within ${Math.round(this.readyTimeoutMs / 1000)}s.`,
@@ -320,7 +332,11 @@ export class LaneReplExecutor implements WorkerExecutor {
 
   /** 读一次通道：更新 ready / dead，并把匹配的 turn.finished 交给等待方。 */
   private pump(process_: LaneProcess, paths: LaneChannelPaths): void {
-    const read = readChannel<LaneEvent>(paths.events, process_.consumed);
+    let read = readChannel<LaneEvent>(paths.events, process_.consumed);
+    // 游标自愈：新窗口启动时会截断 events（resetLaneChannel）。文件比游标短 = 被截断过，
+    // 必须从头读，否则会一直 `slice(consumed)` 出空数组——真实事故就是 ready 明明写了、
+    // 控制面却等到 30s 超时判「窗口没起来」。
+    if (read.total < process_.consumed) read = readChannel<LaneEvent>(paths.events, 0);
     process_.consumed = read.consumed;
     for (const event of read.items) {
       if (!event || typeof event !== 'object') continue;
@@ -419,7 +435,7 @@ export class LaneReplExecutor implements WorkerExecutor {
       return;
     }
     if (!process_.ready) {
-      // 还没 ready 的窗口：既没有 pid 可杀，stop 信号也会被它的启动清理（resetLaneEvents）
+      // 还没 ready 的窗口：既没有 pid 可杀，stop 信号也会被它的启动清理（resetLaneChannel）
       // 抹掉——等下去只会白等一个宽限期。直接放弃，那个窗口起来后是个没人管的空 REPL，
       // 人按 Ctrl+D 就能关（它从未接过任务）。
       process_.dead = true;

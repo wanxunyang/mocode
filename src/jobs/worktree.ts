@@ -81,12 +81,22 @@ function headTree(wt: Worktree): string {
   return head.ok && head.output ? head.output : EMPTY_TREE;
 }
 
+/** 「什么算 Worker 的改动」的审计规则；由调用方决定哪些路径不计数。 */
+export interface WorktreeAuditOptions {
+  /** 返回 true 的相对路径不计入 `changedFiles` / `patch`。 */
+  ignore?: (rel: string) => boolean;
+}
+
 /**
  * 把 worktree 当前内容写成 tree 对象（只写 index，不提交），再相对 baselineTree 计算改动。
  * 共享 worktree 的 lane 靠它把「本次 attempt 的产出」与之前 attempt 的成果区分开；
  * baselineTree 省略时以 HEAD 为基线。
  */
-export function snapshotWorktreeChanges(wt: Worktree, baselineTree?: string): WorktreeChanges {
+export function snapshotWorktreeChanges(
+  wt: Worktree,
+  baselineTree?: string,
+  options: WorktreeAuditOptions = {},
+): WorktreeChanges {
   // add -A 让修改、删除、未跟踪文件都进入 index，write-tree 才能给出完整内容。
   const added = git(['add', '-A', '--', '.'], wt.path);
   if (!added.ok) throw new Error(`git add -A failed: ${added.output}`);
@@ -97,8 +107,20 @@ export function snapshotWorktreeChanges(wt: Worktree, baselineTree?: string): Wo
   if (baseline === tree) return { changedFiles: [], patch: null, tree };
   const names = gitRaw(['diff', '--name-only', '-z', baseline, tree, '--'], wt.path);
   if (!names.ok) throw new Error(`git diff --name-only failed: ${names.stderr.trim()}`);
-  const changedFiles = [...new Set(names.stdout.split('\0').filter(Boolean))].sort();
-  const diff = gitRaw(['diff', '--binary', baseline, tree, '--'], wt.path);
+  const all = [...new Set(names.stdout.split('\0').filter(Boolean))].sort();
+  // mocode 自己写出的会话/记忆/统计/便签不是 Worker 对用户代码的改动。不过滤的话，
+  // `read_only` 任务会被自己的运行时文件判成「改了文件」而整条失败——真实事故：git lane 里
+  // 三个只读调研任务连续失败，报的改动全是 `.mocode/sessions/**`。注意 worktree 基于 HEAD，
+  // 若仓库的 `.gitignore` 只在未提交的改动里加了 `.mocode/`，这些文件在 worktree 里既不被
+  // 跟踪也不被忽略，`add -A` 必然把它们收进来，所以这一层必须在代码里过滤。
+  const ignore = options.ignore;
+  const changedFiles = ignore ? all.filter((rel) => !ignore(rel)) : all;
+  if (changedFiles.length === 0) return { changedFiles: [], patch: null, tree };
+  // 剔除过文件时 patch 也要限在这组路径上，否则 `.mocode` 的 diff 会跟着 lane.patch 导出。
+  const diff =
+    ignore && changedFiles.length !== all.length
+      ? gitRaw(['diff', '--binary', baseline, tree, '--', ...changedFiles.map((rel) => `:(literal)${rel}`)], wt.path)
+      : gitRaw(['diff', '--binary', baseline, tree, '--'], wt.path);
   if (!diff.ok) throw new Error(`git diff failed: ${diff.stderr.trim()}`);
   if (!diff.stdout) throw new Error('git reported changes but produced an empty patch.');
   return { changedFiles, patch: diff.stdout.endsWith('\n') ? diff.stdout : `${diff.stdout}\n`, tree };
@@ -108,8 +130,8 @@ export function snapshotWorktreeChanges(wt: Worktree, baselineTree?: string): Wo
  * 严格收集 worktree 相对 HEAD 的文件列表与 unified diff。无改动不是错误；Git 命令失败会
  * 抛错，供需要保证成果不丢失的编排器决定保留 worktree。
  */
-export function collectWorktreeChanges(wt: Worktree): WorktreeChanges {
-  return snapshotWorktreeChanges(wt);
+export function collectWorktreeChanges(wt: Worktree, options: WorktreeAuditOptions = {}): WorktreeChanges {
+  return snapshotWorktreeChanges(wt, undefined, options);
 }
 
 /** worktree 目录是否仍然可用（被手工删掉或 prune 后不能复用）。 */

@@ -8,6 +8,7 @@ import {
   appendLaneEvent,
   laneStopRequested,
   readChannel,
+  resetLaneChannel,
   type LaneCommand,
 } from '../../src/orchestrator/lane-channel.js';
 import { LaneReplExecutor } from '../../src/orchestrator/lane-executor.js';
@@ -332,6 +333,123 @@ test('LaneReplExecutor: cancel turns the in-flight turn into a cancelled result'
     } finally {
       window_.stop();
     }
+  });
+});
+
+test('LaneReplExecutor: a window that truncates the event channel is still seen as ready', async () => {
+  await withRoot(async (root) => {
+    const { run, fakeWorktree } = makeRun(root, 'run-8');
+    const paths = laneChannelPaths(run.workspaceRoot, run.id, 'main');
+    const opened: Array<{ args: string[] }> = [];
+    const executor = new LaneReplExecutor({
+      createWorktree: () => ({ path: fakeWorktree, repoRoot: root }),
+      collectChanges: () => ({ changedFiles: [], patch: null, tree: 'tree-1' }),
+      removeWorktree: () => undefined,
+      openTerminal: (options) => {
+        opened.push(options);
+        const launch = options.args[options.args.indexOf('--launch') + 1];
+        // 阶段一：开窗后立刻冒出三条「上一代窗口」的残留事件（launch 对不上，会被忽略，
+        // 但行数照样被消费掉，游标推到 3）。模拟孤儿窗口还在往同一个通道写。
+        setTimeout(() => {
+          for (let i = 0; i < 3; i++) {
+            appendLaneEvent(paths, { t: Date.now(), kind: 'ready', launch: `stale-${i}` });
+          }
+        }, 5);
+        // 阶段二：真窗口启动时 resetLaneChannel 截断通道，再写自己的 ready。
+        // 此刻文件只有 1 行，而游标已经是 3 —— 不复位就永远 `slice(3)` 出空数组。
+        setTimeout(() => {
+          resetLaneChannel(paths);
+          appendLaneEvent(paths, { t: Date.now(), kind: 'ready', workspacePath: root, sessionId: 's-8', launch });
+        }, 120);
+        // 阶段三：收到派活指令后才回结论（真窗口就是这个时序；提前写会被执行器丢掉，
+        // 因为那时还没有 waiting 方认领这个 id）。
+        const replyTimer = setInterval(() => {
+          const read = readChannel<LaneCommand>(paths.commands, 0);
+          if (read.items.length === 0) return;
+          clearInterval(replyTimer);
+          appendLaneEvent(paths, {
+            t: Date.now(),
+            kind: 'turn.finished',
+            id: 'task-1#1',
+            outcome: 'completed',
+            summary: '<mocode_handoff>{"summary":"recovered","validation":[],"risks":[]}</mocode_handoff>',
+          });
+        }, 5);
+        replyTimer.unref?.();
+        return { opened: true, via: 'test' };
+      },
+      pollMs: 3,
+      readyTimeoutMs: 2000,
+    });
+
+    const result = await executor.run(
+      { run, task: run.tasks['task-1'], attempt: 1, workerId: 'w', lane: { ...run.lanes.main } },
+      () => undefined,
+    );
+    // 真实事故：游标停在被截断前的长度上，`slice(consumed)` 永远为空，ready 明明写了也看不见，
+    // 30s 后判「窗口没起来」（`task-6 failed — the lane window did not become ready within 30s`）。
+    assert.equal(result.outcome, 'completed', result.error);
+    assert.equal(result.summary, 'recovered');
+    assert.equal(opened.length, 1);
+  });
+});
+
+test('LaneReplExecutor: stale events left by the previous window are cleared before opening', async () => {
+  await withRoot(async (root) => {
+    const { run, fakeWorktree } = makeRun(root, 'run-10');
+    const paths = laneChannelPaths(run.workspaceRoot, run.id, 'main');
+    // 上一代窗口协作式关窗时会留下 exit。新 LaneProcess 的游标从 0 开始，
+    // 不清通道的话第一轮 pump 就会读到它，把刚拉起的窗口直接判死。
+    appendLaneEvent(paths, { t: Date.now(), kind: 'exit', reason: 'old window' });
+    appendLaneEvent(paths, { t: Date.now(), kind: 'ready', launch: 'old' });
+
+    const window_ = fakeWindow(root, run.id, 'main', () => [
+      {
+        kind: 'turn.finished',
+        id: 'task-1#1',
+        outcome: 'completed',
+        summary: '<mocode_handoff>{"summary":"fresh","validation":[],"risks":[]}</mocode_handoff>',
+      },
+    ]) as FakeWindow & { start: (args: string[]) => void };
+    const executor = makeExecutor(root, fakeWorktree, window_);
+    try {
+      const result = await executor.run(
+        { run, task: run.tasks['task-1'], attempt: 1, workerId: 'w', lane: { ...run.lanes.main } },
+        () => undefined,
+      );
+      assert.equal(result.outcome, 'completed', result.error);
+      assert.equal(result.summary, 'fresh');
+    } finally {
+      window_.stop();
+    }
+  });
+});
+
+test('LaneReplExecutor: a window that never got ready is dropped, so the next attempt opens a fresh one', async () => {
+  await withRoot(async (root) => {
+    const { run, fakeWorktree } = makeRun(root, 'run-9');
+    const opened: number[] = [];
+    const executor = new LaneReplExecutor({
+      createWorktree: () => ({ path: fakeWorktree, repoRoot: root }),
+      collectChanges: () => ({ changedFiles: [], patch: null, tree: 'tree-1' }),
+      removeWorktree: () => undefined,
+      // 开得出窗口但永远不写 ready。
+      openTerminal: () => {
+        opened.push(1);
+        return { opened: true, via: 'test' };
+      },
+      pollMs: 3,
+      readyTimeoutMs: 60,
+    });
+    const request = { run, task: run.tasks['task-1'], attempt: 1, workerId: 'w', lane: { ...run.lanes.main } };
+
+    await executor.run(request, () => undefined);
+    // 超时的窗口必须摘掉：留在 lanes 里会让下一次复用「一个从没 ready 的死人」，
+    // 也就是永远等不到 ready（真实事故里还叠出了两个窗口抢同一份 lane.commands）。
+    assert.equal(executor.laneWindowAlive(run.id, 'main'), false);
+
+    await executor.run({ ...request, attempt: 2 }, () => undefined);
+    assert.equal(opened.length, 2, 'the second attempt must open a new window instead of reusing the dead one');
   });
 });
 

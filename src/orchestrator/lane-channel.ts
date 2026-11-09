@@ -101,23 +101,27 @@ export function parseJsonLines<T>(text: string): T[] {
  * 用行数而不是字节做游标：这两条通道的行都很短（指令/事件），频率也低（一次任务几行），
  * 按行便宜且天然不怕尾部半行。`split('\n')` 的最后一个元素永远是没有结尾换行的那段，
  * 文件以 \n 结尾时是空串、否则是正在写的半行——两种都不该被消费。
+ *
+ * `total` 是文件当前**完整行数**。调用方要拿它和游标比：通道文件会被新窗口截断
+ * （见 `resetLaneChannel`），那时 `total < consumed`，游标必须归零，否则会一直读到空、
+ * 永远看不到新内容（真实事故：ready 事件明明写了，控制面等了 30s 判窗口没起来）。
  */
-export function readLinesFrom(file: string, consumed: number): { lines: string[]; consumed: number } {
+export function readLinesFrom(file: string, consumed: number): { lines: string[]; consumed: number; total: number } {
   let content: string;
   try {
     content = fs.readFileSync(file, 'utf8');
   } catch {
-    return { lines: [], consumed };
+    return { lines: [], consumed, total: 0 };
   }
   const complete = content.split('\n').slice(0, -1);
   const pending = complete.slice(consumed);
-  return { lines: pending, consumed: consumed + pending.length };
+  return { lines: pending, consumed: consumed + pending.length, total: complete.length };
 }
 
 /** 增量读通道文件里的结构化条目。 */
-export function readChannel<T>(file: string, consumed: number): { items: T[]; consumed: number } {
+export function readChannel<T>(file: string, consumed: number): { items: T[]; consumed: number; total: number } {
   const read = readLinesFrom(file, consumed);
-  return { items: parseJsonLines<T>(read.lines.join('\n')), consumed: read.consumed };
+  return { items: parseJsonLines<T>(read.lines.join('\n')), consumed: read.consumed, total: read.total };
 }
 
 function appendLine(file: string, value: unknown): void {
@@ -139,13 +143,28 @@ export function appendLaneEvent(paths: LaneChannelPaths, event: LaneEvent): void
   }
 }
 
-/** 通道重置：新的 lane 进程接手时清掉上一轮的残留事件（指令保留，未消费的仍该被执行）。 */
-export function resetLaneEvents(paths: LaneChannelPaths): void {
-  try {
-    fs.mkdirSync(path.dirname(paths.events), { recursive: true });
-    fs.writeFileSync(paths.events, '', 'utf8');
-  } catch {
-    // 同上：写不进去不影响主流程
+/**
+ * 通道重置：新的 lane 进程接手时清掉上一轮的残留。
+ *
+ * **两条通道都要清**，理由不同：
+ *   - `events` 是上一代窗口的日志，留着会让控制面把旧 ready / 旧 exit 当成这一代的；
+ *   - `commands` 更要清——它是只追加的，而新窗口的读游标从 0 开始，于是**已经执行过的
+ *     旧指令会被当成待办重放一遍**。真实事故：一个新窗口起来后重跑了一条 20 小时前的
+ *     任务，人在窗口里看到的任务和刚派的那条完全不是一个。
+ *
+ * 清 `commands` 之所以安全：控制面只在**确认 ready 之后**才投指令
+ * （`lane-executor.ts` 的 `appendLaneCommand` 在 `ensureWindow` 之后）。窗口启动这一刻
+ * 文件里剩下的必然是上一代窗口的遗留，不存在「投了但还没被执行」的指令——那种情况
+ * 控制面正等着 `turn.finished`，窗口死了那一次 attempt 直接判 failed、下一次换新 id 重派。
+ */
+export function resetLaneChannel(paths: LaneChannelPaths): void {
+  for (const file of [paths.events, paths.commands]) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, '', 'utf8');
+    } catch {
+      // 写不进去不影响主流程：最坏结果是重放，不是崩掉。
+    }
   }
   // 上一次窗口留下的关闭请求必须清掉，否则新窗口一起来就会立刻自尽。
   clearLaneStop(paths);

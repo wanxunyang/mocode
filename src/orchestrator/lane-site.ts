@@ -17,6 +17,7 @@ import {
   snapshotWorktreeChanges,
   worktreeIsUsable,
   type Worktree,
+  type WorktreeAuditOptions,
   type WorktreeChanges,
 } from '../jobs/worktree.js';
 import {
@@ -90,7 +91,7 @@ export function orchestrationDir(run: { id: string; workspaceRoot: string }): st
 
 export interface LaneSiteOptions {
   createWorktree?: (cwd: string) => Worktree;
-  collectChanges?: (worktree: Worktree, baselineTree?: string) => WorktreeChanges;
+  collectChanges?: (worktree: Worktree, baselineTree?: string, options?: WorktreeAuditOptions) => WorktreeChanges;
   removeWorktree?: (worktree: Worktree) => void;
   /** copy 档位的体积上限（字节），默认读 MOCODE_LANE_COPY_MAX_MB。 */
   copyLimitBytes?: number;
@@ -109,7 +110,11 @@ export interface CollectContext {
 /** 现场管理：打开 / 算基线 / 差分 / 写 attempt patch / 收尾归档。 */
 export class LaneSite {
   private readonly createIsolatedWorktree: (cwd: string) => Worktree;
-  private readonly collectChanges: (worktree: Worktree, baselineTree?: string) => WorktreeChanges;
+  private readonly collectChanges: (
+    worktree: Worktree,
+    baselineTree?: string,
+    options?: WorktreeAuditOptions,
+  ) => WorktreeChanges;
   private readonly removeIsolatedWorktree: (worktree: Worktree) => void;
   private readonly copyLimitBytes: number | undefined;
   private readonly copyRoot: string;
@@ -183,7 +188,13 @@ export class LaneSite {
     context: CollectContext,
   ): { changedFiles: string[]; patch: string | null; tree?: string; index?: string } {
     if (site.mode === 'worktree') {
-      const changes = this.collectChanges({ path: site.path, repoRoot: site.repoRoot }, context.baselineTree);
+      // 审计口径与 copy 档位保持一致：mocode 自己的运行时文件不算 Worker 的改动。
+      // 少了这一层，git lane 里的 `read_only` 任务会被自己的 `.mocode/sessions/**` 判死。
+      const changes = this.collectChanges(
+        { path: site.path, repoRoot: site.repoRoot },
+        context.baselineTree,
+        AUDIT_OPTIONS,
+      );
       return { changedFiles: changes.changedFiles, patch: changes.patch, tree: changes.tree };
     }
     const baselineFile = context.baselineIndex ?? this.artifact(context.run, context.laneId, 'base-index.json');

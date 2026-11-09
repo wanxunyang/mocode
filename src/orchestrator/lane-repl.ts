@@ -18,7 +18,7 @@ import {
   laneChannelPaths,
   laneStopRequested,
   readChannel,
-  resetLaneEvents,
+  resetLaneChannel,
   type LaneCommand,
 } from './lane-channel.js';
 import { OrchestrationStore } from './store.js';
@@ -76,7 +76,7 @@ export async function runLaneRepl(options: LaneReplOptions): Promise<number> {
   // （文件读写走 lane，会话却写回主工作区），这是 /cd 早就踩过的坑。
   if (fs.existsSync(target.execPath)) switchWorkspaceRoot(target.execPath);
   const paths = target.paths;
-  resetLaneEvents(paths);
+  resetLaneChannel(paths);
 
   const exit = (reason: string): void => {
     appendLaneEvent(paths, { t: Date.now(), kind: 'exit', reason });

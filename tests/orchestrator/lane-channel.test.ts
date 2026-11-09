@@ -10,7 +10,7 @@ import {
   parseJsonLines,
   readChannel,
   readLinesFrom,
-  resetLaneEvents,
+  resetLaneChannel,
 } from '../../src/orchestrator/lane-channel.js';
 
 function withRoot<T>(fn: (root: string) => T): T {
@@ -72,7 +72,7 @@ test('events: a half-written trailing line is left for the next read, never pars
 test('readLinesFrom: a missing file is empty, not an error', () => {
   withRoot((root) => {
     const read = readLinesFrom(path.join(root, 'nope.jsonl'), 0);
-    assert.deepEqual(read, { lines: [], consumed: 0 });
+    assert.deepEqual(read, { lines: [], consumed: 0, total: 0 });
   });
 });
 
@@ -84,15 +84,38 @@ test('parseJsonLines: a corrupt line inside the stream is skipped, not thrown', 
   );
 });
 
-test('resetLaneEvents: a new window clears stale events but keeps pending commands', () => {
+test('resetLaneChannel: a new window clears BOTH channels so old commands are not replayed', () => {
   withRoot((root) => {
     const paths = laneChannelPaths(root, 'run-1', 'lane-a');
     appendLaneEvent(paths, { t: 1, kind: 'ready' });
     appendLaneCommand(paths, { t: 1, id: 'c1', kind: 'task', text: 'do it' });
 
-    resetLaneEvents(paths);
+    resetLaneChannel(paths);
     assert.deepEqual(readChannel(paths.events, 0).items, []);
-    assert.equal(readChannel(paths.commands, 0).items.length, 1, 'unconsumed commands must survive a restart');
+    // 真实事故：只清 events 时，新窗口的读游标从 0 开始，于是把 20 小时前那条已经执行过的
+    // 指令当成待办又跑了一遍——人看到的任务是错的。所以 commands 必须一起清。
+    assert.deepEqual(readChannel(paths.commands, 0).items, [], 'stale commands must not survive a restart');
+  });
+});
+
+test('readChannel: total lets a caller notice the file was truncated under it', () => {
+  withRoot((root) => {
+    const paths = laneChannelPaths(root, 'run-1', 'lane-a');
+    appendLaneEvent(paths, { t: 1, kind: 'ready' });
+    appendLaneEvent(paths, { t: 2, kind: 'exit' });
+    appendLaneEvent(paths, { t: 3, kind: 'ready' });
+    const first = readChannel(paths.events, 0);
+    assert.equal(first.total, 3);
+    assert.equal(first.consumed, 3);
+
+    // 新窗口 reset 掉 events 后只写一行：total(1) < consumed(3)，调用方据此把游标归零。
+    resetLaneChannel(paths);
+    appendLaneEvent(paths, { t: 4, kind: 'ready' });
+    const stale = readChannel(paths.events, first.consumed);
+    assert.deepEqual(stale.items, [], 'a stale cursor sees nothing, which is exactly the bug');
+    assert.equal(stale.total, 1);
+    const reread = readChannel(paths.events, 0);
+    assert.equal(reread.items.length, 1, 'resetting the cursor recovers the new content');
   });
 });
 
