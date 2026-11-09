@@ -106,6 +106,8 @@ export interface RelieveRequestBytesInput {
   limitBytes: number;
   /** history 之外会追加进请求的字节(ephemeral 注入等)。 */
   extraBytes?: number;
+  /** 纳入旧 Computer Use 屏幕帧进行字节降载；最新一帧始终保留。 */
+  includeScreenFrames?: boolean;
   signal?: AbortSignal;
   describe: ImageDescriber;
   /** 确定要换图、描述请求发出之前触发一次(给界面显示「正在压缩图片」,避免描述期间像卡住)。 */
@@ -134,7 +136,11 @@ export async function relieveRequestBytes(input: RelieveRequestBytesInput): Prom
   });
   if (!(limitBytes > 0)) return idle('no_limit');
 
-  const plan = planImageRelief(listReplaceableImages(messages), bytesBefore, limitBytes);
+  const plan = planImageRelief(
+    listReplaceableImages(messages, { includeScreenFrames: input.includeScreenFrames }),
+    bytesBefore,
+    limitBytes,
+  );
   if (plan.kind !== 'replace') return idle(plan.kind);
   try {
     input.onStart?.({ images: plan.images.length, bytes: bytesBefore });

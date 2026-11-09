@@ -523,8 +523,15 @@ export interface ReplaceableImage {
   dataUrl: string;
   /** 附件前言里的文件名;用户粘贴图为 undefined。 */
   name?: string;
+  /** 是否为 Computer Use 产生的屏幕帧。 */
+  screenFrame: boolean;
   /** 从前一个 assistant tool_call 的 path 参数反查到的原路径;查不到为 undefined。 */
   path?: string;
+}
+
+export interface ListReplaceableImagesOptions {
+  /** 同时允许淘汰旧 Computer Use 屏幕帧；最新一帧始终保留。 */
+  includeScreenFrames?: boolean;
 }
 
 function imageUrlOf(part: MaybePart): string {
@@ -558,22 +565,28 @@ function findSourcePath(messages: readonly ChatMessage[], msgIndex: number, name
 
 /**
  * 列出 history 里可被换成文字卡的图片(按出现顺序,旧在前):非屏幕帧的工具图与用户粘贴图。
- * `computer-` 屏幕帧由 applyVisionWindow 管,这里不碰。纯函数、永不抛错。
+ * 请求体字节预算可显式纳入 Computer Use 屏幕帧,但始终保留最新一帧供当前操作 grounding。
+ * 纯函数、永不抛错。
  */
-export function listReplaceableImages(messages: readonly ChatMessage[]): ReplaceableImage[] {
+export function listReplaceableImages(
+  messages: readonly ChatMessage[],
+  opts: ListReplaceableImagesOptions = {},
+): ReplaceableImage[] {
   const out: ReplaceableImage[] = [];
   try {
     if (!Array.isArray(messages)) return out;
+    const includeScreenFrames = opts.includeScreenFrames === true;
     for (let i = 0; i < messages.length; i++) {
       const parts = userContentParts(messages[i]);
-      if (!parts || imagePartCount(parts) === 0 || isFrameCarrier(messages[i])) continue;
+      if (!parts || imagePartCount(parts) === 0) continue;
       const names = frameNames(messages[i]);
       let imageIndex = 0;
       for (let j = 0; j < parts.length; j++) {
         if (parts[j].type !== 'image_url') continue;
         const name = names ? names[imageIndex] : undefined;
         imageIndex++;
-        if (name !== undefined && VISION_FRAME_NAME_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
+        const screenFrame = name !== undefined && VISION_FRAME_NAME_PREFIXES.some((prefix) => name.startsWith(prefix));
+        if (screenFrame && !includeScreenFrames) continue;
         const dataUrl = imageUrlOf(parts[j]);
         out.push({
           key: `${i}:${j}`,
@@ -582,8 +595,18 @@ export function listReplaceableImages(messages: readonly ChatMessage[]): Replace
           chars: dataUrl.length,
           dataUrl,
           name,
+          screenFrame,
           path: name !== undefined ? findSourcePath(messages, i, name) : undefined,
         });
+      }
+    }
+    // 字节预算的兜底不能让模型丢失当前 GUI 状态。仅纳入旧帧，最后一帧不参与候选。
+    if (includeScreenFrames) {
+      for (let i = out.length - 1; i >= 0; i--) {
+        if (out[i].screenFrame) {
+          out.splice(i, 1);
+          break;
+        }
       }
     }
   } catch {
@@ -596,11 +619,13 @@ export function listReplaceableImages(messages: readonly ChatMessage[]): Replace
 export function buildImageCard(img: ReplaceableImage, description: string | null): string {
   const kb = Math.round(img.chars / 1024);
   const label = img.name ?? 'pasted image';
-  const reread = img.path
-    ? `For details, call read_file on "${img.path}" again.`
-    : img.name
-      ? `For details, call read_file on the file "${img.name}" again.`
-      : 'It has no file path and cannot be re-read.';
+  const reread = img.screenFrame
+    ? 'It was a past Computer Use screen frame. Call computer with action "screenshot" to capture the current screen if you need it.'
+    : img.path
+      ? `For details, call read_file on "${img.path}" again.`
+      : img.name
+        ? `For details, call read_file on the file "${img.name}" again.`
+        : 'It has no file path and cannot be re-read.';
   const body = description
     ? `Summary: ${description.trim().slice(0, IMAGE_CARD_MAX_DESCRIPTION_CHARS)}`
     : 'No summary is available (the image was not seen).';

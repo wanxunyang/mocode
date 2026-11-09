@@ -9,7 +9,7 @@ import {
 import { imageTurnAgingEnabled, visionBatch, visionKeep } from '../config/index.js';
 import { estimateRequestBytes, learnRequestByteLimit, requestByteLimit } from '../context/request-limit.js';
 import { createImageDescriber, relieveRequestBytes } from './request-governor.js';
-import { countOversizedImagePlaceholders, countOversizedImages } from '../context/vision-window.js';
+import { countOversizedImages } from '../context/vision-window.js';
 import type { ContextState } from '../session/compact.js';
 import { getActiveSessionStore } from '../session/store.js';
 import { getCurrentSessionId } from '../session/state.js';
@@ -159,6 +159,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       tools: activeTools,
       limitBytes: byteLimit,
       extraBytes: sessionStateText ? Buffer.byteLength(sessionStateText, 'utf8') : 0,
+      includeScreenFrames: true,
       signal,
       describe: createImageDescriber(modelRunner),
       onStart: (info) => {
@@ -401,6 +402,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
           limitBytes: learned,
           extraBytes:
             requestHistory.length > history.length ? failingBytes - estimateRequestBytes(history, activeTools) : 0,
+          includeScreenFrames: true,
           signal,
           describe: createImageDescriber(modelRunner),
           onStart: (info) => {
@@ -442,12 +444,11 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
         }
       }
     }
-    // 上游按请求体字节数拒收(而非 token):本地估算远低于窗口、history 里却有大图 → 病因是图,
-    // 摘要压缩救不了(摘要只会把图剥掉,模型没看过图又会重读,形成「读图→400→压缩」死循环)。
-    // 已经摘过 >=2 次仍被拒,直接抛错,不再循环。
+    // 上游按请求体字节数拒收(而非 token):本地估算远低于窗口、history 里却有大图 → 病因是图。
+    // 字节 governor 已先把旧图(含旧屏幕帧)换成卡片；若仍超限，继续落到下方的文本 compact，
+    // 不能因历史上已有占位就放弃恢复，否则会话会永久卡死。
     const oversizedImages =
       !byteResult && !overflowRetried && isContextLengthError(error) ? countOversizedImages(history) : 0;
-    if (oversizedImages > 0 && countOversizedImagePlaceholders(history) >= 2) throw error;
     const overflowLocalEstimate = oversizedImages > 0 ? estimatePromptTokens(requestHistory, activeTools) : 0;
     const overflowWindow = ctx.config.contextWindowTokens;
     if (byteResult) {

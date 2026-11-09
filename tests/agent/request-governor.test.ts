@@ -38,7 +38,7 @@ function toolImage(name: string, chars: number): ChatMessage {
 
 function img(key: string, chars: number): ReplaceableImage {
   const [msg, part] = key.split(':').map(Number);
-  return { key, msg, part, chars, dataUrl: '' };
+  return { key, msg, part, chars, dataUrl: '', screenFrame: false };
 }
 
 function countImages(messages: readonly ChatMessage[]): number {
@@ -80,7 +80,7 @@ test('planImageRelief: 从最旧挑起,挑到落回 0.8 线为止,保留较新�
 
 // ── 列出 / 卡片 / 应用 ──────────────────────────────────────────────────────
 
-test('listReplaceableImages: 工具图与用户粘贴图可换,computer- 屏幕帧不碰,并反查原路径', () => {
+test('listReplaceableImages: 工具图与用户粘贴图可换,默认不碰 computer- 屏幕帧,并反查原路径', () => {
   const messages: ChatMessage[] = [
     { role: 'user', content: '开始' } as ChatMessage,
     {
@@ -102,6 +102,20 @@ test('listReplaceableImages: 工具图与用户粘贴图可换,computer- 屏幕�
   assert.equal(list[1].name, undefined, '用户粘贴图没有文件名');
 });
 
+test('listReplaceableImages: 字节降载纳入旧 computer- 帧但保留最新帧', () => {
+  const messages: ChatMessage[] = [
+    toolImage('computer-result.png', 1000),
+    toolImage('computer-screenshot.png', 1000),
+    toolImage('computer-zoom.png', 1000),
+  ];
+  const list = listReplaceableImages(messages, { includeScreenFrames: true });
+  assert.deepEqual(
+    list.map((image) => image.key),
+    ['0:1', '1:1'],
+  );
+  assert.ok(list.every((image) => image.screenFrame));
+});
+
 test('buildImageCard: 带描述与路径;描述失败时诚实写明「未看过」;粘贴图写明无法重读', () => {
   const withPath: ReplaceableImage = {
     key: '3:1',
@@ -110,6 +124,7 @@ test('buildImageCard: 带描述与路径;描述失败时诚实写明「未看过
     chars: 300_000,
     dataUrl: '',
     name: 'foo.png',
+    screenFrame: false,
     path: 'assets/foo.png',
   };
   const ok = buildImageCard(withPath, '一个报错对话框,文字 "ECONNRESET"');
@@ -119,8 +134,14 @@ test('buildImageCard: 带描述与路径;描述失败时诚实写明「未看过
   const failed = buildImageCard(withPath, null);
   assert.ok(failed.includes('not seen') && failed.includes('assets/foo.png'));
 
-  const paste = buildImageCard({ key: '1:1', msg: 1, part: 1, chars: 1000, dataUrl: '' }, 'x');
+  const paste = buildImageCard({ key: '1:1', msg: 1, part: 1, chars: 1000, dataUrl: '', screenFrame: false }, 'x');
   assert.ok(paste.includes('cannot be re-read'));
+
+  const screen = buildImageCard(
+    { key: '1:1', msg: 1, part: 1, chars: 1000, dataUrl: '', name: 'computer-result.png', screenFrame: true },
+    '设置页面',
+  );
+  assert.ok(screen.includes('computer') && screen.includes('"screenshot"'));
 });
 
 test('applyImageCards: 只换命中的 part、保留其他 part、幂等、无改动返回入参引用', () => {
@@ -173,6 +194,30 @@ test('relieveRequestBytes: 超线且去图可达标 → 逐张描述、换成卡
   assert.equal(countImages(after), 1, '最新一张原样保留');
   assert.ok(JSON.stringify(after[1]).includes('SCREENSHOT OF A DIALOG'));
   assert.ok(estimateRequestBytes(after, []) <= 500_000 * 0.8);
+});
+
+test('relieveRequestBytes: 请求超限时也替换最旧的 Computer Use 帧,最新帧保持可见', async () => {
+  const backing: ChatMessage[] = Array.from({ length: 7 }, () => toolImage('computer-result.png', 200_000));
+  const manager = createStagedHistoryManager({ messages: backing });
+  const described: string[] = [];
+  const r = await relieveRequestBytes({
+    historyManager: manager,
+    tools: [],
+    limitBytes: 1_000_000,
+    includeScreenFrames: true,
+    describe: async (image) => {
+      described.push(image.key);
+      return 'OLD SCREEN';
+    },
+  });
+  assert.equal(r.reason, 'replaced');
+  assert.ok(r.replaced > 0);
+  assert.equal(described[0], '0:1', '最旧屏幕帧优先替换');
+  const after = manager.snapshot().messages as ChatMessage[];
+  assert.equal(countImages(after[after.length - 1] ? [after[after.length - 1]] : []), 1, '最新屏幕帧必须保留');
+  const firstFrameCard = after[0] as { content: Array<{ text?: string }> };
+  assert.ok(firstFrameCard.content.some((part) => part.text?.includes('Call computer with action "screenshot"')));
+  assert.ok(estimateRequestBytes(after, []) <= 1_000_000 * 0.8);
 });
 
 test('relieveRequestBytes: 文本占主导时不动图也不调模型', async () => {
