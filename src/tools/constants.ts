@@ -28,6 +28,16 @@ export const IMAGE_READ_MARKER = '[image]';
  * 防爆责任后移给分层清理:微压缩存根 → 60% 低压(REFETCHABLE)→ 80% 高压 LLM 摘要。
  */
 export const MAX_HISTORY_RESULT = 32000;
+/**
+ * run_command 结果进 history 的专属、更紧上限(字符)。
+ *
+ * 命令输出天然可重取(重跑同一命令或 grep 归档),且 run_command 工具侧已先采到
+ * MAX_OUTPUT(20000, head+tail),大日志是上下文膨胀的主源之一。这里在 push-time
+ * 再收一道,压低每步重发的 history 体积、推迟 80% 压力线;中段原文经 pushToolResult
+ * 归档到会话目录并在结果尾部留 grep/read_file 指针,不丢信息。
+ * read_file 仍走 MAX_HISTORY_RESULT 大上限,不在此列。
+ */
+export const MAX_COMMAND_HISTORY_RESULT = 8000;
 /** use_skill 结果(SKILL.md 正文)的放宽上限:指令须完整,中截会破坏语义。 */
 export const MAX_SKILL_RESULT = 64000;
 /** 微压缩时旧工具结果截到的存根长度(字符)。 */

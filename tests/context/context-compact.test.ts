@@ -3,6 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ChatMessage, ChatTransport } from '../../src/llm/index.js';
 import {
+  capToolResultForHistory,
   compactHistory,
   createContextState,
   extractProgressSnapshot,
@@ -14,7 +15,12 @@ import {
   type CompactionRuntime,
 } from '../../src/session/compact.js';
 import { manualCompact } from '../../src/session/scheduler.js';
-import { SUMMARY_KEYFACTS_MAX_CHARS, SUMMARY_KEYFACTS_MIN_CHARS } from '../../src/tools/constants.js';
+import {
+  MAX_COMMAND_HISTORY_RESULT,
+  MAX_HISTORY_RESULT,
+  SUMMARY_KEYFACTS_MAX_CHARS,
+  SUMMARY_KEYFACTS_MIN_CHARS,
+} from '../../src/tools/constants.js';
 import { appendTool, contentAt, system } from '../helpers.js';
 
 function compactableHistory(): { history: ChatMessage[]; oldIdx: number } {
@@ -60,6 +66,43 @@ test('splitSummaryText 无 Key Facts 段时整段归叙述', () => {
   const { keyFacts, rest } = splitSummaryText('# 会话摘要\n## Completed\ndid work');
   assert.equal(keyFacts, '');
   assert.equal(rest, '## Completed\ndid work');
+});
+
+test('capToolResultForHistory: run_command 短输出原样保留', () => {
+  const output = 'exit code: 0\nok';
+  assert.equal(capToolResultForHistory('run_command', output), output);
+});
+
+test('capToolResultForHistory: run_command 长输出按专属上限中截,保 head+tail', () => {
+  const head = 'exit code: 1\n';
+  const tail = '\nBUILD FAILED: see errors above';
+  const middle = 'm'.repeat(MAX_COMMAND_HISTORY_RESULT * 2);
+  // 中段深处的唯一锚点:中截后应随中段一起消失(验证不是简单尾截)。
+  const midAnchor = '[[MID-ANCHOR-7Q]]';
+  const withAnchor = head + middle.slice(0, middle.length / 2) + midAnchor + middle.slice(middle.length / 2) + tail;
+  const capped = capToolResultForHistory('run_command', withAnchor);
+  assert.ok(
+    capped.length <= MAX_COMMAND_HISTORY_RESULT,
+    `总长应 ≤ ${MAX_COMMAND_HISTORY_RESULT},实际 ${capped.length}`,
+  );
+  assert.ok(capped.startsWith(head), '头部(退出码)必须保留');
+  assert.ok(capped.endsWith(tail), '尾部(报错)必须保留');
+  assert.match(capped, /已截断/, '必须带截断标记');
+  assert.ok(!capped.includes(midAnchor), '中段深处内容应被截去');
+});
+
+test('capToolResultForHistory: run_command 上限比通用上限更紧', () => {
+  // 落在 (专属上限, 通用上限] 之间的长度:run_command 应被截,其它工具应原样保留。
+  const output = 'x'.repeat(MAX_COMMAND_HISTORY_RESULT + 100);
+  assert.ok(output.length < MAX_HISTORY_RESULT, '测试输入需在两个上限之间');
+  assert.ok(capToolResultForHistory('run_command', output).length < output.length, 'run_command 应触发专属裁剪');
+  assert.equal(capToolResultForHistory('grep', output), output, '非 run_command 工具仍走通用大上限');
+});
+
+test('capToolResultForHistory: read_file 不受专属上限影响,仍走 MAX_HISTORY_RESULT', () => {
+  const output = 'r'.repeat(MAX_COMMAND_HISTORY_RESULT + 100);
+  assert.ok(output.length < MAX_HISTORY_RESULT);
+  assert.equal(capToolResultForHistory('read_file', output), output, 'read_file 不被 run_command 的紧上限误伤');
 });
 
 test('mergeKeyFacts 跨代去重,超预算丢较新条目', () => {

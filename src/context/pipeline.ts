@@ -16,7 +16,12 @@ import { builtinEncoders } from './encoders/index.js';
 import { passthroughEncoder } from './encoders/passthrough.js';
 import { capToolResultForHistory } from '../session/compact.js';
 import { config } from '../config/index.js';
-import { MAX_HISTORY_RESULT, MAX_SKILL_RESULT, MAX_MEMORY_RESULT } from '../tools/constants.js';
+import {
+  MAX_COMMAND_HISTORY_RESULT,
+  MAX_HISTORY_RESULT,
+  MAX_SKILL_RESULT,
+  MAX_MEMORY_RESULT,
+} from '../tools/constants.js';
 
 let booted = false;
 /** 懒注册内置 encoder(首次调用 optimizeToolResult 时触发,避免模块加载期循环 import)。 */
@@ -36,13 +41,17 @@ function tryParseArgs(raw: string): Record<string, unknown> | null {
 }
 
 /**
- * 按工具名取软目标 budget(字符)。对齐 capToolResultForHistory 的放宽规则:
- * use_skill / memory_search 走放宽上限(指令 / 记忆正文须完整);其余走 MAX_HISTORY_RESULT。
+ * 按工具名取软目标 budget(字符)。对齐 capToolResultForHistory 的分工具规则:
+ * use_skill / memory_search 走放宽上限(指令 / 记忆正文须完整);run_command 走更紧的
+ * 专属上限;其余走 MAX_HISTORY_RESULT。
  * 仅作 encoder 软目标;最终裁剪仍由末尾 capToolResultForHistory 兜底,故两处常量偶有漂移不致命。
  */
 function budgetFor(name: string): number {
   if (name === 'use_skill' || name === 'run_skill') return MAX_SKILL_RESULT;
   if (name === 'memory_search') return MAX_MEMORY_RESULT;
+  // 与 capToolResultForHistory 的 run_command 专属上限同源,避免 encoder 仍按通用上限
+  // 产出过长文本、再被末尾硬裁一次。
+  if (name === 'run_command') return MAX_COMMAND_HISTORY_RESULT;
   return MAX_HISTORY_RESULT;
 }
 

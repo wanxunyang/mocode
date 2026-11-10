@@ -26,6 +26,7 @@ import {
 import {
   COMPACT_USER_VERBATIM_MAX_TOKENS,
   COMPACT_USER_VERBATIM_WINDOW_RATIO,
+  MAX_COMMAND_HISTORY_RESULT,
   MAX_HISTORY_RESULT,
   MAX_MEMORY_RESULT,
   MAX_OLD_TOOL_STUB,
@@ -280,6 +281,12 @@ export function capToolResultForHistory(name: string, output: string): string {
     const remain = MAX_MEMORY_RESULT - marker.length;
     if (remain <= 0) return marker.slice(0, MAX_MEMORY_RESULT);
     return output.slice(0, remain) + marker;
+  }
+  if (name === 'run_command') {
+    // 命令输出可重取且常是 build/测试/扫描日志:走比通用上限更紧的专属上限,中截保留
+    // head+tail(退出码在头部、报错常在尾部)。被截去的中段由 pushToolResult 归档,可回捞。
+    if (output.length <= MAX_COMMAND_HISTORY_RESULT) return output;
+    return truncateMid(output, MAX_COMMAND_HISTORY_RESULT);
   }
   if (output.length <= MAX_HISTORY_RESULT) return output;
   return truncateMid(output, MAX_HISTORY_RESULT);
