@@ -9,6 +9,17 @@ import dotenv from 'dotenv';
 import { truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
 import { tMain } from './i18n/main.js';
 import {
+  cancelVoiceDownload,
+  downloadVoiceModel,
+  isDownloading,
+  removeVoiceModel,
+  transcribe,
+  voiceModelStatus,
+  warmUpRecognizer,
+  type VoiceDownloadProgress,
+} from './voice/asr.js';
+import { SESSION_DIR_RE, countProjectSessions, isNoiseWorkspace, listProjectSessions, readSessionHistory, readWorkspaceRegistry } from './workspace-sync.js';
+import {
   deleteMcpServer,
   deleteSkill,
   importMcpJson,
@@ -38,6 +49,7 @@ import {
   type HostCommand,
   type HostEnvelope,
 } from '@mocode/runtime/host';
+import { isUserConfigEnvKey } from '@mocode/protocol';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
@@ -56,19 +68,14 @@ const IGNORED_DIRECTORIES = new Set(['.git', '.mocode', 'node_modules', 'dist', 
  *     → ~/.mocode/config(全局,/model 与 mocode config 写此)
  *     → <projectRoot>/.mocode/config(项目级覆盖,最高)。
  * shell 里 export 的同名键不被回填(/model 写文件的优先级语义与 REPL 一致)。
- * 只把 mocode 自己认识的键回填到 process.env,避免把无关 .env 字段塞进 host。
+ *
+ * 过滤规则来自 @mocode/protocol 的 USER_CONFIG_ENV_KEYS —— 与 core 读取的 106 个键逐一对齐。
+ * 此前这里是本文件内一份 30 键白名单,导致 MEMORY_ENABLED 之外的记忆子开关、
+ * MOCODE_COMPUTER_USE_ENABLED / MOCODE_FRONTEND_TOOLS_ENABLED / MOCODE_REQUEST_MAX_KB /
+ * MOCODE_ROUTER_* / HTTP(S)_PROXY 等写进配置文件后在 GUI 里完全不生效。
+ * 白名单仍保留（不做「全部回填」）：一个 work-app 进程服务多个项目空间，
+ * 不能把项目 A 的任意 .env 键漏给项目 B 的 host，也不能让它们被 run_command 子进程继承。
  */
-const MOCODE_CONFIG_KEYS = [
-  'LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'CONTEXT_WINDOW_TOKENS', 'MAX_TOKENS',
-  'ANTHROPIC_PROMPT_CACHE', 'LLM_STREAM_USAGE', 'AUTO_COMPACT',
-  'MOCODE_CONTEXT_OPTIMIZE', 'MOCODE_CONTEXT_RELPRUNE', 'MOCODE_LIFECYCLE',
-  'MOCODE_BUDGET_SCHEDULER', 'AUTO_REFLECT', 'MEMORY_ENABLED', 'REFLECT_EVERY_N',
-  'MAX_STEPS', 'MOCODE_SUBAGENT_ENABLED', 'SUB_AGENT_MAX_STEPS', 'SANDBOX_ROOT',
-  'ANYSEARCH_API_KEY', 'ANYSEARCH_BASE_URL', 'MOCODE_MAX_IMAGE_BYTES',
-  'MOCODE_PERMISSION', 'MOCODE_PERMISSION_NON_INTERACTIVE_ALLOW', 'MOCODE_THEME', 'MOCODE_LANGUAGE',
-  'MCP_CONFIG_PATH', 'MCP_SERVERS', 'MOCODE_MCP_ENABLED',
-] as const;
-
 function loadMocodeConfig(projectRoot?: string): { loaded: string[]; missing: string[] } {
   const candidates: string[] = [];
   if (projectRoot) candidates.push(path.join(projectRoot, '.env'));
@@ -78,10 +85,9 @@ function loadMocodeConfig(projectRoot?: string): { loaded: string[]; missing: st
   for (const p of candidates) {
     try { Object.assign(fromFiles, dotenv.parse(readFileSync(p, 'utf8'))); } catch { /* 文件不存在:跳过 */ }
   }
-  const allowed = new Set<string>(MOCODE_CONFIG_KEYS);
   const loaded: string[] = [];
   for (const [k, v] of Object.entries(fromFiles)) {
-    if (!allowed.has(k)) continue;
+    if (!isUserConfigEnvKey(k)) continue;
     if (process.env[k] === undefined) { process.env[k] = v; loaded.push(k); }
   }
   const missing: string[] = [];
@@ -91,13 +97,29 @@ function loadMocodeConfig(projectRoot?: string): { loaded: string[]; missing: st
 }
 
 type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
-interface Project { id: string; name: string; root: string; branch: string; }
+interface Project {
+  id: string; name: string; root: string; branch: string;
+  /**
+   * true = 由全局工作空间注册表（~/.mocode/workspaces.jsonl）自动并入的空间，
+   * 不是用户手动「添加项目」加进来的。手动加的空间为 undefined/false。
+   */
+  auto?: boolean;
+  /** 该工作空间 `.mocode/sessions` 下的会话目录数（登记表统计口径，best-effort）。 */
+  sessionCount?: number;
+}
 interface TaskRecord {
   // projectId 为空字符串 = 普通任务（不加入任何空间 / 项目文件夹），agent 在 scratch 目录运行
   id: string; projectId: string; title: string; status: TaskStatus; createdAt: string; updatedAt: string;
   sessionId?: string; changedFiles: string[]; lastError?: string;
 }
-interface StoredState { version: 1; projects: Project[]; selectedProjectId: string; tasks: TaskRecord[]; selectedTaskId?: string; }
+interface StoredState {
+  version: 1; projects: Project[]; selectedProjectId: string; tasks: TaskRecord[]; selectedTaskId?: string;
+  /**
+   * 用户显式移除过的「自动并入」空间（project id）。没有它的话，
+   * `remove-project` 删掉的空间下次启动会被注册表同步又加回来。
+   */
+  hiddenProjects?: string[];
+}
 interface CommandResult { ok: boolean; stdout: string; stderr: string; }
 
 /**
@@ -475,24 +497,60 @@ function restartAllAgents(): void {
 
 /* ── 行为开关（设置浮层用，语义对齐 mocode 终端的斜杠命令） ──
  * 读取顺序：process.env（host 启动时的快照来源）→ ~/.mocode/config → mocode 默认值。
- * mocode 默认：AUTO_COMPACT / AUTO_REFLECT 开（!== 'false'），其余显式 'true' 才开（=== 'true'）。 */
+ *
+ * 为什么开关写在主进程而不是走 host 的 `settings` 命令：主进程拥有 host 生命周期，
+ * 改完必须 restartAllAgents() 才对新起的 host 生效（host 启动期就把 env 固化进 config 快照）。
+ * host 侧那份 settings 命令是给无主进程的客户端（headless/CLI）用的，判定函数同源，
+ * 但**只影响自己那个进程**，不适合 GUI。
+ *
+ * 默认值口径与 core 一一对齐：
+ *   - AUTO_COMPACT / AUTO_REFLECT / MOCODE_ROUTER_ENABLED / MOCODE_MCP_ENABLED /
+ *     MOCODE_MEMORY_* 子通道：默认开，只有 0/false/off/no 才关（!== 'false' 不够，
+ *     因为 '0' 也是关，这里用 notOff 统一）。
+ *   - MEMORY_ENABLED / MOCODE_SUBAGENT_ENABLED / MOCODE_FRONTEND_TOOLS_ENABLED /
+ *     MOCODE_COMPUTER_USE_ENABLED：显式 'true' 才开（core 在 env 缺省时按 profile 决定，
+ *     主进程看不到 profile，所以在未配置时显示"关"——写 'true' 即可打开，不会误关已开的项）。
+ */
+const notOff = (value: string | undefined): boolean =>
+  value === undefined || !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
+const exactlyTrue = (value: string | undefined): boolean => (value ?? '').trim().toLowerCase() === 'true';
+
 const SETTING_TOGGLES = {
-  autoCompact: { env: 'AUTO_COMPACT', on: (v: string | undefined) => v !== 'false' },
-  memory: { env: 'MEMORY_ENABLED', on: (v: string | undefined) => v === 'true' },
-  subAgent: { env: 'MOCODE_SUBAGENT_ENABLED', on: (v: string | undefined) => v === 'true' },
-  autoReflect: { env: 'AUTO_REFLECT', on: (v: string | undefined) => v !== 'false' },
-  // MCP 总开关（core 的 readMcpServers 认 MOCODE_MCP_ENABLED=false）。默认开（!== 'false'）。
-  mcp: { env: 'MOCODE_MCP_ENABLED', on: (v: string | undefined) => v !== 'false' },
+  autoCompact: { env: 'AUTO_COMPACT', on: notOff },
+  memory: { env: 'MEMORY_ENABLED', on: exactlyTrue },
+  subAgent: { env: 'MOCODE_SUBAGENT_ENABLED', on: exactlyTrue },
+  autoReflect: { env: 'AUTO_REFLECT', on: notOff },
+  // MCP 总开关（core 的 readMcpServers 认 MOCODE_MCP_ENABLED=false）。
+  mcp: { env: 'MOCODE_MCP_ENABLED', on: notOff },
+  // 工具路由总开关（/router）：默认开，关闭后每轮暴露全部工具簇。
+  router: { env: 'MOCODE_ROUTER_ENABLED', on: notOff },
+  // 记忆四条 push/后台通道（R3/R6/R11/R17）：默认开，各自可单独关。
+  turnRecall: { env: 'MOCODE_MEMORY_TURN_RECALL', on: notOff },
+  proactive: { env: 'MOCODE_MEMORY_PROACTIVE', on: notOff },
+  episodic: { env: 'MOCODE_MEMORY_EPISODIC', on: notOff },
+  consolidate: { env: 'MOCODE_MEMORY_CONSOLIDATE', on: notOff },
+  // 默认不挂的工具簇（/fe、/cu）：显式 true 才进默认工具面。
+  frontendTools: { env: 'MOCODE_FRONTEND_TOOLS_ENABLED', on: exactlyTrue },
+  computerUse: { env: 'MOCODE_COMPUTER_USE_ENABLED', on: exactlyTrue },
 } as const;
 type SettingKey = keyof typeof SETTING_TOGGLES;
 
-function readSettings(): Record<SettingKey, boolean> {
-  const config = readUserConfig();
-  const out = {} as Record<SettingKey, boolean>;
+/** 思考强度五档（与 core 的 ReasoningEffort 同集合）；设置页作为单选呈现。 */
+const EFFORT_VALUES = ['off', 'low', 'medium', 'high', 'auto'] as const;
+type EffortValue = (typeof EFFORT_VALUES)[number];
+
+/** 来回读一份配置（env 优先，其次 ~/.mocode/config），开关与 effort 共用。 */
+function settingsValue(env: string): string | undefined {
+  return process.env[env] ?? readUserConfig()[env];
+}
+
+function readSettings(): Record<SettingKey, boolean> & { effort: EffortValue } {
+  const out = {} as Record<SettingKey, boolean> & { effort: EffortValue };
   for (const [key, def] of Object.entries(SETTING_TOGGLES)) {
-    const value = process.env[def.env] ?? config[def.env] ?? '';
-    out[key as SettingKey] = def.on(value || undefined);
+    out[key as SettingKey] = def.on(settingsValue(def.env));
   }
+  const raw = (settingsValue('REASONING_EFFORT') ?? '').trim().toLowerCase();
+  out.effort = (EFFORT_VALUES as readonly string[]).includes(raw) ? (raw as EffortValue) : 'auto';
   return out;
 }
 
@@ -515,12 +573,64 @@ async function projectFor(root: string): Promise<Project> {
   return { id: normalized.toLowerCase(), name: path.basename(normalized) || normalized, root: normalized, branch: await branchAt(normalized) };
 }
 
+/**
+ * 把全局注册表里的工作空间并入侧栏「空间」。
+ *
+ * 只并入**还存在于磁盘且确实有历史会话**的目录：注册表里 49 条里大半是临时目录
+ * （Electron/scratch、wt-xxxx 这类），全塞进侧栏只会把真正的项目挤下去。
+ * 用户手动「移除」过的空间记在 `hiddenProjects` 里，不会被同步加回来。
+ */
+const REGISTRY_SYNC_DEBOUNCE_MS = 15_000;
+let lastRegistrySyncAt = 0;
+
+async function syncWorkspaceRegistry(force = false): Promise<boolean> {
+  if (!force && Date.now() - lastRegistrySyncAt < REGISTRY_SYNC_DEBOUNCE_MS) return false;
+  lastRegistrySyncAt = Date.now();
+  const hidden = new Set((state.hiddenProjects ?? []).map((id) => id.toLowerCase()));
+  let changed = false;
+  for (const entry of readWorkspaceRegistry()) {
+    const id = path.resolve(entry.root).toLowerCase();
+    if (hidden.has(id) || !existsSync(entry.root)) continue;
+    // 临时工作区（%TEMP%\mocode-ws-*、.mocode/worktrees/wt-*、lanes/*/copy）不占侧栏，
+    // 否则十来个叫 copy / wt-xxxx 的空间会把真正的项目挤下去。
+    if (isNoiseWorkspace(entry.root)) continue;
+    const count = countProjectSessions(entry.root);
+    const existing = state.projects.find((item) => item.id === id);
+    if (existing) {
+      if (existing.sessionCount !== count) { existing.sessionCount = count; changed = true; }
+      continue;
+    }
+    if (count === 0) continue; // 没有历史会话的目录先不占位
+    const project = await projectFor(entry.root);
+    project.auto = true;
+    project.sessionCount = count;
+    state.projects.push(project);
+    changed = true;
+  }
+  // 手动添加、且不在注册表里的空间也要算一次：它们同样可能是用户之前用终端跑过的工作区
+  // （注册表里没有，但 `<root>/.mocode/sessions` 有会话）。不算的话这些空间永远展开不出历史。
+  for (const project of state.projects) {
+    const id = project.id.toLowerCase();
+    if (hidden.has(id)) continue;
+    const count = countProjectSessions(project.root);
+    if (project.sessionCount !== count) { project.sessionCount = count; changed = true; }
+  }
+  if (changed) { saveState(); broadcastState(); }
+  return changed;
+}
+
 function normalizeState(value: unknown): StoredState | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Partial<StoredState>;
   if (!Array.isArray(raw.projects) || raw.projects.length === 0) return null;
   const projects = raw.projects.filter((item): item is Project => !!item && typeof item.id === 'string' && typeof item.root === 'string')
-    .map((item) => ({ ...item, name: item.name || path.basename(item.root), branch: typeof item.branch === 'string' ? item.branch : '' }));
+    .map((item) => ({
+      ...item,
+      name: item.name || path.basename(item.root),
+      branch: typeof item.branch === 'string' ? item.branch : '',
+      ...(item.auto === true ? { auto: true } : {}),
+      ...(typeof item.sessionCount === 'number' ? { sessionCount: item.sessionCount } : {}),
+    }));
   if (!projects.length) return null;
   const tasks = Array.isArray(raw.tasks) ? raw.tasks.filter((item): item is TaskRecord => !!item && typeof item.id === 'string' && typeof item.projectId === 'string')
     .map((item) => {
@@ -598,15 +708,10 @@ function contentText(value: unknown): string {
  */
 function sessionHistory(project: Project, sessionId?: string): HistoryItem[] {
   if (!sessionId) return [];
-  const candidates = [path.join(project.root, '.mocode', 'sessions', sessionId, 'session.json'), path.join(project.root, '.mocode', 'sessions', `${sessionId}.json`)];
-  for (const candidate of candidates) {
-    try {
-      const record = JSON.parse(readFileSync(candidate, 'utf8')) as { history?: Array<Record<string, unknown>> };
-      if (!Array.isArray(record.history)) continue;
-      return flattenHistory(record.history);
-    } catch { /* Try old session layout. */ }
-  }
-  return [];
+  // readSessionHistory 除了活会话 / 旧版单文件，还会回退读 archive/<id>.json.gz——
+  // 接管一条已被 retention 归档的终端会话时，不补这条分支聊天区会是一片空白。
+  const messages = readSessionHistory(project.root, sessionId);
+  return messages ? flattenHistory(messages) : [];
 }
 
 type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string };
@@ -994,6 +1099,12 @@ class LocalAgent {
     if (envelope.type === 'event') updateTaskFromAgent(envelope);
     if (envelope.type === 'error') {
       this.errorSeq += 1;
+      // 面板命令（requestId = panel-*）的失败不属于任何一次 run：交给面板自己显示，
+      // 不能顺手把正在跑的任务判成 failed —— 用户只是点了一下用量统计。
+      if (envelope.requestId !== undefined && envelope.requestId !== this.taskId) {
+        pushRenderer('work:agent-event', envelope);
+        return;
+      }
       // host 起不来 / send 失败（尚未就绪、连续崩溃、管道断开等）也必须收敛任务，
       // 否则任务停在 running 等一个永远不会来的 run_completed。
       failTask(this.taskId, envelope.error || tMain('main.host.commFailed'));
@@ -1020,6 +1131,14 @@ function createWindow(): void {
     webPreferences: { preload: path.join(__dirname, 'renderer', 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
   windowRef.setMenuBarVisibility(false);
+  // 语音输入要 getUserMedia。窗口走 file:// 加载、无打包器，Chromium 默认会拒绝 media 权限请求，
+  // 表现为 NotAllowedError（且不弹系统框，用户完全不知道该点哪里）。
+  // 只放行 media 这一类；其它权限（通知、地理、串口…）一律拒绝，别开成白名单。
+  const session = windowRef.webContents.session;
+  session.setPermissionRequestHandler((_contents, permission, callback) => {
+    callback(permission === 'media');
+  });
+  session.setPermissionCheckHandler((_contents, permission) => permission === 'media');
   void windowRef.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // 窗口关掉立刻清掉引用,免得 agent 后续 stdout 还往里塞 → "Object has been destroyed"。
   windowRef.on('closed', () => { if (windowRef) windowRef = null; });
@@ -1281,8 +1400,53 @@ function installIpc(): void {
       if (agent) { agent.stop(); agents.delete(task.id); }
     }
     state.tasks = state.tasks.filter((task) => task.projectId !== projectId);
+    // 自动并入的空间被移除后必须记住：不然下次启动 registy 同步又把它加回来，
+    // 用户会看到「移除 → 重启 → 又出现了」，像是移除没生效。
+    if (removed.auto) {
+      state.hiddenProjects = [...(state.hiddenProjects ?? []).filter((id) => id !== projectId), projectId];
+    }
     saveState(); broadcastState();
     return { state, removed: removed.name };
+  });
+  /** 某个工作空间里终端留下的历史会话（供侧栏「历史会话」分组与接管）。 */
+  ipcMain.handle('work:project-sessions', (_event, projectId: string) => {
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project) return [];
+    return listProjectSessions(project.root, 40);
+  });
+  /**
+   * 接管一条终端历史会话：在对应空间里建一个绑定该 sessionId 的任务。
+   *
+   * 绑定 sessionId 后，第一次发指令时 host 的 `prepareSession(command.sessionId)` 会
+   * 直接把那条会话读回内存继续对话 —— 不是复制、不是导入，就是同一个会话。
+   * 已经接管过的（同 projectId + sessionId）不重复建，直接返回既有任务。
+   */
+  ipcMain.handle('work:adopt-session', async (_event, payload: { projectId?: unknown; sessionId?: unknown; title?: unknown }) => {
+    const projectId = typeof payload?.projectId === 'string' ? payload.projectId : '';
+    const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : '';
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project || !SESSION_DIR_RE.test(sessionId)) return { ok: false, message: tMain('main.task.projectNotExist') };
+    const existing = state.tasks.find((task) => task.projectId === projectId && task.sessionId === sessionId);
+    if (existing) {
+      state.selectedTaskId = existing.id;
+      saveState(); broadcastState();
+      return { ok: true, state, task: existing, ...currentTaskWorkspace(existing) };
+    }
+    const meta = listProjectSessions(project.root, 400).find((item) => item.id === sessionId);
+    const now = new Date().toISOString();
+    const title = typeof payload?.title === 'string' && payload.title.trim()
+      ? payload.title.trim().slice(0, 160)
+      : (meta?.firstUser?.replace(/\s+/g, ' ').trim().slice(0, 60) || sessionId);
+    const task: TaskRecord = {
+      id: randomUUID(), projectId, title, status: 'completed',
+      createdAt: meta?.createdAt || now, updatedAt: now, changedFiles: [], sessionId,
+    };
+    state.tasks.unshift(task);
+    state.selectedTaskId = task.id;
+    state.selectedProjectId = projectId;
+    saveState(); broadcastState();
+    // 接管不预热 host：用户可能只是想看历史，敲下第一句话时 ensureAgent 会按该会话恢复。
+    return { ok: true, state, task, ...currentTaskWorkspace(task) };
   });
   ipcMain.handle('work:project-overview', async () => {
     // 纯任务（无工作空间）没有 git 仓库可概览：返回一份空壳，避免 renderer 拿 scratch 目录
@@ -1416,6 +1580,15 @@ function installIpc(): void {
     if (!patch || typeof patch !== 'object') return readSettings();
     const configPatch: Record<string, string> = {};
     for (const [key, value] of Object.entries(patch)) {
+      // 思考强度是字符串键，不走 SETTING_TOGGLES 那张布尔表（它决定的是「默认开还是关」）。
+      if (key === 'effort') {
+        if (typeof value !== 'string') continue;
+        const effort = (EFFORT_VALUES as readonly string[]).includes(value) ? value : null;
+        if (!effort) continue;
+        configPatch.REASONING_EFFORT = effort;
+        process.env.REASONING_EFFORT = effort;
+        continue;
+      }
       const def = SETTING_TOGGLES[key as SettingKey];
       if (!def || typeof value !== 'boolean') continue;
       configPatch[def.env] = value ? 'true' : 'false';
@@ -1429,6 +1602,58 @@ function installIpc(): void {
       broadcastState();
     }
     return readSettings();
+  });
+  // ── 语音输入（本地 ASR）──────────────────────────────────────
+  // 模型不进安装包：用户在设置里显式开启后才下载到 userData。
+  // 这里只做薄封装，下载/校验/推理细节全在 voice/asr.ts。
+  ipcMain.handle('work:voice-status', () => ({
+    ...voiceModelStatus(),
+    downloading: isDownloading(),
+  }));
+  ipcMain.handle('work:voice-model-download', async () => {
+    if (isDownloading()) return { ok: false, message: tMain('voice.errBusy'), status: voiceModelStatus() };
+    try {
+      const status = await downloadVoiceModel((progress: VoiceDownloadProgress) => {
+        pushRenderer('work:voice-progress', progress);
+      });
+      // 下载完立刻预热：recognizer 构建要 1–2s（加载 onnxruntime + 226MB 权重），
+      // 放在用户第一次按住麦克风时说这句话才建，第一句必然卡顿。
+      warmUpRecognizer();
+      return { ok: true, status };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // 取消不是错误：UI 按 cancelled 收尾，别弹红色 toast。
+      if (message === 'cancelled') return { ok: false, cancelled: true, status: voiceModelStatus() };
+      return { ok: false, message, status: voiceModelStatus() };
+    }
+  });
+  ipcMain.handle('work:voice-model-cancel', () => {
+    cancelVoiceDownload();
+    return { ok: true };
+  });
+  ipcMain.handle('work:voice-model-remove', () => {
+    if (isDownloading()) cancelVoiceDownload();
+    return { ok: true, status: removeVoiceModel() };
+  });
+  // 识别。renderer 传 16kHz 单声道 Float32（WebAudio 直接给的就是它）。
+  // 同步解码放在 setImmediate 外面会卡住主进程消息循环 → 用 Promise 包一层不够，
+  // 必须让出事件循环再跑，否则下载进度/窗口重绘会在识别的几百毫秒里冻住。
+  ipcMain.handle('work:voice-transcribe', async (_event, payload: { samples?: Float32Array; sampleRate?: number }) => {
+    const samples = payload?.samples;
+    const sampleRate = Number(payload?.sampleRate ?? 16000);
+    if (!(samples instanceof Float32Array) || samples.length === 0) {
+      return { ok: false, message: tMain('voice.errNoAudio') };
+    }
+    const status = voiceModelStatus();
+    if (!status.ready) return { ok: false, message: tMain('voice.errNoModel') };
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const text = transcribe(samples, Number.isFinite(sampleRate) && sampleRate > 0 ? sampleRate : 16000);
+      return { ok: true, text };
+    } catch (error) {
+      console.error('[voice] transcribe failed:', error);
+      return { ok: false, message: tMain('voice.errTranscribe') };
+    }
   });
   // ── Skill 市场 / 扩展管理 ──────────────────────────────────────
   // skill 热重载由 core 的 skillsScanSignature 处理，装完即生效，无需重启 host；
@@ -1563,6 +1788,31 @@ function installIpc(): void {
     if (!agent) { reportTaskError(id, tMain('main.task.notRunning')); return; }
     void agent.send({ ...value, id } as HostCommand);
   });
+  /**
+   * 面板命令（会话 / 回滚 / 改动 / 用量 / 记忆 / 设置）。
+   *
+   * 与 run 的关键差别：requestId 是渲染层生成的 `panel-*`，**不是任务 id**。
+   * 所以这里不回任何任务状态，只把命令转给当前任务的 host，由 host 用同一个 id 回
+   * `*_report` 事件；渲染层按 id 配对自己的 pending 表。
+   *
+   * 路由目标跟随「当前选中的任务」：会话列表、回滚轮次、记忆库都挂在那个工作空间的
+   * host 上，换任务就是换 workspace —— 这是唯一正确的归属。
+   */
+  ipcMain.handle('work:panel', (_event, value: Record<string, unknown>) => {
+    const id = typeof value.id === 'string' && value.id ? value.id : randomUUID();
+    const type = typeof value.type === 'string' ? value.type : '';
+    const supported = ['sessions', 'changes', 'usage', 'memory', 'settings'];
+    if (!supported.includes(type)) return { ok: false, id, message: tMain('main.panel.unsupported') };
+    const task = taskById(state.selectedTaskId);
+    if (!task) {
+      pushRenderer('work:agent-event', { type: 'error', requestId: id, error: tMain('main.panel.noTask') });
+      return { ok: false, id };
+    }
+    // 面板命令不需要「这个任务在跑」状态，但需要它的 host 活着：没实例就地拉起（懒启动）。
+    const agent = agents.get(task.id) ?? ensureAgent(task);
+    void agent.send({ ...value, id } as HostCommand);
+    return { ok: true, id };
+  });
 }
 
 /** 构建（或按当前语言重建）原生应用菜单。切语言后必须调一次 —— 菜单是主进程资源，不随渲染层重绘。 */
@@ -1621,6 +1871,10 @@ app.whenReady().then(async () => {
     }
   }
   installIpc();
+  // 启动即把终端访问过、且确实留有会话的工作空间并入侧栏「空间」——
+  // 用户报的「终端会话在 work-app 里看不到」就出在这一步缺失上（此前侧栏只显示手动添加的项目）。
+  // 放在 createWindow 之前：首屏 getState 拿到的就是合并后的空间列表，不会先闪一次空侧栏。
+  try { await syncWorkspaceRegistry(true); } catch { /* 注册表是增强能力，读不了不能挡住启动 */ }
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

@@ -1,14 +1,7 @@
 import { emitKeypressEvents, type Key } from 'node:readline';
 import { stdin } from 'node:process';
-import {
-  config,
-  isModelConfigured,
-  isMemoryEnabled,
-  buildBasePrompt,
-  getPlanModeSuffix,
-  pinSessionModel,
-  pinSessionEffort,
-} from '../config/index.js';
+import { config, isModelConfigured, isMemoryEnabled, pinSessionModel, pinSessionEffort } from '../config/index.js';
+import { buildSystemMessage as buildSystemPrompt } from '../prompt/system-prompt.js';
 import { t } from '../i18n/index.js';
 import { listPresets, migrateCurrentToPreset } from '../config/presets.js';
 import { runAgent } from '../agent/index.js';
@@ -34,13 +27,9 @@ import { readClipboardAsAttachment } from '../attachments/clipboard.js';
 import { modelSupportsVision } from '../llm/capabilities.js';
 import type { ContentPart } from '../agent/core.js';
 import { contextState, appendCurrentSessionRuntimeEvent } from '../session/index.js';
-import { effectiveSystemPrompt, skillsChangedSinceLastObserve } from '../skills/index.js';
+import { skillsChangedSinceLastObserve } from '../skills/index.js';
 import { clearSkillActivation } from '../skills/activation.js';
 import {
-  buildMemoryIndexSection,
-  buildAboutYouSection,
-  buildProjectGraphHint,
-  buildEpisodeSection,
   initPersona,
   gcMemories,
   kickoffReflection,
@@ -53,6 +42,7 @@ import {
   flushRecallStats,
   flushProactiveStats,
   flushTurnRecallStats,
+  flushAdoptionSuppressions,
   pruneAdoptionLedger,
   writeMemoryHealth,
   resetProactiveTurn,
@@ -378,18 +368,10 @@ export async function startRepl(
   // 放在 gcMemories 之后:GC 归档的条目刚落定,基线应以「会话真正开始时」的库为准。
   captureMemoryBaseline();
   // 开关现读:运行时 /memory_switch 重建 history[0] 时,About you 与 Memory Index 同步显隐。
-  const buildSystemMessage = (planMode: boolean): string => {
-    const memoryOn = isMemoryEnabled();
-    return effectiveSystemPrompt(
-      buildBasePrompt(currentSessionId) +
-        buildAboutYouSection(memoryOn) +
-        (planMode ? getPlanModeSuffix() : '') +
-        buildMemoryIndexSection(memoryOn) +
-        // R6.3:情节走独立小节(不进 Memory Index / 不进 About you,理由见 episodic.ts)。
-        buildEpisodeSection(memoryOn) +
-        buildProjectGraphHint(memoryOn),
-    );
-  };
+  // 段组合的唯一事实源在 src/prompt/system-prompt.ts —— stdio host 走同一个函数,
+  // 两端口径不会再分叉(host 曾漏拼 5 段,导致记忆开关打开却不进上下文)。
+  const buildSystemMessage = (planMode: boolean): string =>
+    buildSystemPrompt({ sessionId: currentSessionId, planMode });
   // 有预加载(--resume)则用它,并把 history[0] 刷成当前 system prompt(config 可能已变);
   // 否则新会话只塞 system 提示(默认 auto)。
   const history: ChatMessage[] =
@@ -818,6 +800,9 @@ export async function startRepl(
       flushProactiveStats();
       // R18:每轮静默召回的计数同样在内存累计,轮末落一次。
       flushTurnRecallStats();
+      // R19:抑制事件按 (session, memoryId, channel, reason) 在内存聚合成一行,
+      // 轮末落一次。逐条落盘实测一周 14 MB,其中 99% 是重复的 already_fired/per_turn_limit。
+      flushAdoptionSuppressions();
       turnCount++;
       if (turnCount % config.reflectEveryN === 0) {
         kickoffReflection(snapshotTranscript(history, 20));
@@ -1214,6 +1199,7 @@ export async function startRepl(
   await reflectOnExit(snapshotTranscript(history, 20));
   flushProactiveStats();
   flushTurnRecallStats();
+  flushAdoptionSuppressions();
   pruneAdoptionLedger();
   writeMemoryHealth(isMemoryEnabled());
   await runtime.close();

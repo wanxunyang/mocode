@@ -1,5 +1,7 @@
 import { renderMarkdown, enhanceCodeBlocks, setMarkdownLabels } from './markdown.js';
+import { SendQueue } from './send-queue.js';
 import { mountIcons, icon } from './icons.js';
+import { initPanels, handlePanelEvent, renderPanel, renderTurnChanges, type PanelKind } from './panels.js';
 import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, MOD, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
 
 export {};
@@ -57,7 +59,9 @@ onLangChange(() => applyLanguage());
 
 
 type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
-type Project = { id: string; name: string; root: string; branch: string };
+type Project = { id: string; name: string; root: string; branch: string; auto?: boolean; sessionCount?: number };
+/** 终端留下的历史会话（work:project-sessions 的返回项）。 */
+type ProjectSession = { id: string; createdAt: string; model: string; firstUser: string };
 type Task = { id: string; projectId: string; title: string; status: TaskStatus; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string };
 type WorkState = { version: 1; projects: Project[]; selectedProjectId: string; tasks: Task[]; selectedTaskId?: string };
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
@@ -89,6 +93,10 @@ type McpDraft = {
   command?: string; argsText?: string; envText?: string;
   url?: string; headersText?: string; requestTimeoutMs?: number;
 };
+/** 语音模型状态快照（主进程 voice/asr.ts 的 VoiceModelStatus + downloading）。 */
+type VoiceStatus = { ready: boolean; bytes: number; dir: string; downloading?: boolean };
+/** 模型下载进度（主进程 work:voice-progress 推送）。 */
+type VoiceProgress = { receivedBytes: number; totalBytes: number; percent: number; file: string };
 
 declare global {
   interface Window {
@@ -110,6 +118,10 @@ declare global {
       openFolder: (projectId: string) => Promise<boolean>;
       removeProject: (projectId: string) => Promise<{ state: WorkState; removed: string } | null>;
       projectOverview: () => Promise<Record<string, unknown>>;
+      /** 某个空间里 mocode 终端留下的历史会话（只读列表）。 */
+      projectSessions: (projectId: string) => Promise<ProjectSession[]>;
+      /** 把一条终端历史会话接管成本空间的任务（绑定 sessionId，续同一会话）。 */
+      adoptSession: (payload: { projectId: string; sessionId: string; title?: string }) => Promise<{ ok: boolean; message?: string; state?: WorkState; task?: Task; history?: HistoryItem[] }>;
       readFile: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       pickAttachment: () => Promise<Attachment | null>;
@@ -138,14 +150,23 @@ declare global {
       mcpToggle: (name: string, disabled: boolean) => Promise<{ ok: boolean; message: string }>;
       mcpImportJson: (text: string) => Promise<{ ok: boolean; message: string }>;
       mcpConfigPath: () => Promise<string>;
-      getSettings: () => Promise<Record<string, boolean>>;
-      setSettings: (patch: Record<string, boolean>) => Promise<Record<string, boolean>>;
+      getSettings: () => Promise<Record<string, boolean | string>>;
+      setSettings: (patch: Record<string, boolean | string>) => Promise<Record<string, boolean | string>>;
+      /** ── 语音输入（本地 ASR）── */
+      voiceStatus: () => Promise<VoiceStatus>;
+      voiceDownload: () => Promise<{ ok: boolean; cancelled?: boolean; message?: string; status: VoiceStatus }>;
+      voiceCancelDownload: () => Promise<{ ok: boolean }>;
+      voiceRemoveModel: () => Promise<{ ok: boolean; status: VoiceStatus }>;
+      voiceTranscribe: (payload: { samples: Float32Array; sampleRate: number }) => Promise<{ ok: boolean; text?: string; message?: string }>;
+      onVoiceProgress: (callback: (progress: VoiceProgress) => void) => () => void;
       listBranches: () => Promise<{ ok: boolean; message: string; current: string; branches: string[] }>;
       switchBranch: (branch: string) => Promise<{ ok: boolean; message: string; branch?: string }>;
       setTheme: (theme: 'light' | 'dark' | 'system') => void;
       setTitleBarOverlay: (colors: { bg: string; symbol: string }) => void;
       setLanguage: (language: string) => Promise<{ ok: boolean; language?: string; message?: string }>;
       send: (value: Record<string, unknown>) => void;
+      /** 面板命令（会话/回滚/改动/用量/记忆/设置）；id 由渲染层生成，回执经 onAgentEvent 同 id 返回。 */
+      panel: (value: Record<string, unknown>) => Promise<{ ok: boolean; id?: string; message?: string }>;
       onAgentEvent: (callback: (event: AgentEnvelope) => void) => () => void;
       onState: (callback: (state: WorkState) => void) => () => void;
     };
@@ -166,7 +187,14 @@ let collapsedSections: Set<string> = new Set();
 let activeAssistant: HTMLElement | null = null;
 let activeTextBlock: HTMLElement | null = null;
 let attachments: Attachment[] = [];
-let activeInspectorTab: 'overview' | 'files' = 'overview';
+/** 检查器页签：概览 / 文件树 / 本轮改动（改动来自 changeset 快照，与回滚同源）。 */
+type InspectorTab = 'overview' | 'files' | 'changes';
+let activeInspectorTab: InspectorTab = 'overview';
+/**
+ * 当前是否 plan 模式（只读探查 + 出方案）。事实源在 host（进程级状态），
+ * 这里只是它推回来的镜像：切任务不回退、重启后回 auto（host 新建时即 auto）。
+ */
+let planMode = false;
 
 /* ── 多任务并行:每个任务一份事件流缓冲,后台任务照常累积,随时切换查看 ── */
 type StreamItem =
@@ -528,6 +556,7 @@ function renderTasks(): void {
     <span class="project-group-actions"><button class="project-menu-btn icon-button-square" data-new-task-project="${projectId}" title="${t('sidebar.newTaskInSpace')}" aria-label="${t('sidebar.newTaskInProject', { name: escapeHtml(project.name) })}">${icon('plus')}</button><button class="project-menu-btn icon-button-square" data-project-menu="${projectId}" title="${t('sidebar.moreActions')}" aria-label="${t('sidebar.moreActionsFor', { name: escapeHtml(project.name) })}">${icon('more')}</button></span>
   </div>
   <div class="project-group-tasks">${tasks.length ? tasks.map(taskItemHtml).join('') : `<p class="empty-tasks">${t('sidebar.emptyTasks')}</p>`}</div>
+  ${project.sessionCount ? `<div class="project-history"><button class="history-toggle" data-history="${projectId}"><span class="history-toggle-icon">${icon('branch')}</span><span class="history-toggle-label">${t('sidebar.historySessions', { n: project.sessionCount })}</span><span class="history-toggle-chevron">${icon('chevron-down')}</span></button><div class="history-list hidden"></div></div>` : ''}
 </div>`;
   }).join('')}</div>
 </div>`;
@@ -634,6 +663,55 @@ function renderTasks(): void {
     event.stopPropagation();
     void startNewTask(button.dataset.newTaskProject!);
   }));
+
+  /**
+   * 空间下的「历史会话」折叠区：展开时才向主进程要列表（一次 readdir + 少量 session.json 头）。
+   *
+   * 这些是 mocode 终端在该目录留下的会话，与 work-app 的任务是两套模型；点「接管」会
+   * 在该空间下建一个绑定该 sessionId 的任务，发第一句时 host 用 prepareSession 续上同一会话。
+   */
+  taskList.querySelectorAll<HTMLButtonElement>('[data-history]').forEach((button) =>
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const projectId = button.dataset.history ?? '';
+      const box = button.parentElement?.querySelector<HTMLElement>('.history-list');
+      if (!box) return;
+      if (!box.classList.contains('hidden')) {
+        box.classList.add('hidden');
+        button.classList.remove('open');
+        return;
+      }
+      box.classList.remove('hidden');
+      button.classList.add('open');
+      box.innerHTML = `<p class="empty-tasks">${t('sidebar.historyLoading')}</p>`;
+      const sessions = await window.mocodeWork.projectSessions(projectId);
+      if (!sessions.length) {
+        box.innerHTML = `<p class="empty-tasks">${t('sidebar.historyEmpty')}</p>`;
+        return;
+      }
+      box.innerHTML = sessions
+        .map((session) => {
+          const title = (session.firstUser || session.id).replace(/\s+/g, ' ').slice(0, 60);
+          return `<button class="history-item" data-adopt="${escapeHtml(session.id)}" data-adopt-project="${escapeHtml(projectId)}" title="${escapeHtml(`${session.id} · ${session.model}`)}"><span class="history-item-title">${escapeHtml(title)}</span><span class="history-item-meta">${timeAgo(session.createdAt)}</span></button>`;
+        })
+        .join('');
+      box.querySelectorAll<HTMLButtonElement>('[data-adopt]').forEach((item) =>
+        item.addEventListener('click', async (event) => {
+          event.stopPropagation();
+          const result = await window.mocodeWork.adoptSession({
+            projectId: item.dataset.adoptProject ?? '',
+            sessionId: item.dataset.adopt ?? '',
+          });
+          if (!result?.ok) { showToast('warn', result?.message ?? t('toast.adoptFailed')); return; }
+          if (result.state) updateState(result.state);
+          if (result.task) {
+            void openTask(result.task.id);
+            showToast('success', t('toast.adopted'));
+          }
+        }),
+      );
+    }),
+  );
 
   // 项目行「...」菜单：打开文件夹 / 从列表移除
   taskList.querySelectorAll<HTMLButtonElement>('[data-project-menu]').forEach((button) => button.addEventListener('click', (event) => {
@@ -951,6 +1029,34 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   }
   smartScrollToBottom();
 }
+/* ── 工具流式输出（tool_output）──────────────────────────
+   终端里边跑边出，GUI 若只在 tool_completed 时一次性画，用户就只能看最后一坨。
+   但每来一个 chunk 就重建 innerHTML 会拖垮渲染（build/test 一次几百个 chunk），
+   所以按 id 攒着、250ms 节流重绘一次；tool_completed 到达时会把最终 output 整体覆盖，
+   节流队列里剩的 chunk 因而无需保证不丢。 */
+const TOOL_OUTPUT_THROTTLE_MS = 250;
+const toolOutputPending = new Map<string, ReturnType<typeof setTimeout>>();
+
+function appendToolOutput(payload: Record<string, unknown>): void {
+  const id = payload.id == null ? '' : String(payload.id);
+  if (!id) return;
+  // 已有一次待重绘就合并——chunk 高频到达时只保留一个定时器。
+  if (toolOutputPending.has(id)) return;
+  toolOutputPending.set(
+    id,
+    setTimeout(() => {
+      toolOutputPending.delete(id);
+      // 累计文本以事件缓冲为准（切任务回来仍能还原），DOM 只按最终文本重绘一次。
+      const stream = streams.get(viewingTaskId() ?? '');
+      const item = stream
+        ? [...stream.items].reverse().find((entry) => entry.kind === 'tool' && entry.id === id)
+        : undefined;
+      if (!item || item.kind !== 'tool' || item.done) return;
+      addTool({ id, name: item.name, output: item.output }, false);
+    }, TOOL_OUTPUT_THROTTLE_MS),
+  );
+}
+
 /* ── 流式 markdown 渲染 ─────────────────────────────────
    流式期间不再展示裸 markdown 源码:文字段每 120ms 节流重渲染一次,
    结束时 finalizeTurn 再做最终渲染。原始文本存 WeakMap —— innerHTML
@@ -1074,28 +1180,130 @@ async function deleteTask(taskId: string): Promise<void> {
   const deletingSelectedTask = state?.selectedTaskId === taskId;
   const next = await window.mocodeWork.deleteTask(taskId);
   if (!next) return;
+  // 任务没了，排队里的输入也跟着没意义（host 侧会话已删，发出去只会报错）。
+  const dropped = pendingSends.clear(taskId);
+  if (dropped > 0) showToast('warn', t('toast.queueDropped', { n: dropped }), 3200);
   streams.delete(taskId);
   updateState(next);
   if (deletingSelectedTask && next.selectedTaskId !== taskId) clearWorkspace();
   showToast('info', t('toast.deletedTask'));
 }
 
+/**
+ * 审批 / 提问面板。
+ *
+ * 协议里 approval_requested 有两种来源，处理方式必须分开：
+ *   - permission（工具权限）：给几个选项让用户选，「允许一次 / 允许本次会话 / 拒绝」；
+ *   - ask_human（模型主动提问）：模型想要一个**值**，可能根本没有选项 → 必须露出输入框。
+ *
+ * 旧实现三个硬伤，全部已修：
+ *   ① 忽略 payload.type —— input 形态（无选项）被渲染成「确认」按钮，点下去
+ *      回的是 selected，模型拿到的是「确认」这两个字而不是用户想给的值；
+ *   ② 没有输入框 —— 用户无法在选项之外回答，模型给的预设选项不对时只能选个错的；
+ *   ③ 忽略 defaultIndex —— 危险操作（rm -rf 之类）本来已把默认落在「拒绝」上
+ *      （src/permissions/index.ts:279），面板却总把第一个按钮标成 approve 样式，
+ *      顺手回车就是放行。
+ */
 function showApproval(taskId: string, payload: Record<string, unknown>): void {
-  const approvalId = String(payload.approvalId ?? ''); const options = Array.isArray(payload.options) ? payload.options.map(String) : [];
+  const approvalId = String(payload.approvalId ?? '');
+  const options = Array.isArray(payload.options) ? payload.options.map(String) : [];
+  const isInput = String(payload.type ?? (options.length ? 'choice' : 'input')) === 'input';
+  const allowCustom = payload.allowCustom !== false;
+  const defaultIndex = Math.max(0, Math.min(Number(payload.defaultIndex) || 0, Math.max(0, options.length - 1)));
+  const seed = String(payload.seed ?? '');
   approvalPanel.classList.remove('hidden');
-  const buttons = options.length ? options.map((option, index) => `<button data-approval="${escapeHtml(option)}" class="${index === 0 ? 'approve' : ''}">${escapeHtml(option)}</button>`).join('') : `<button data-approval="approve" class="approve">${icon('check')}${t('approval.confirm')}</button>`;
-  approvalPanel.innerHTML = `<div class="approval-title">${icon('warn')}<span>${t('approval.title')}</span></div><p>${escapeHtml(String(payload.title ?? t('approval.default')))}</p><pre>${escapeHtml(String(payload.detail ?? ''))}</pre><div class="approval-actions">${buttons}<button data-cancel>${icon('close')}${t('approval.reject')}</button></div>`;
+  // 输入框在 input 形态下是主入口；choice 形态下只在 allowCustom 时作为「其他…」出现。
+  const showInput = isInput || allowCustom;
+  const buttons = options.length
+    ? options
+        .map(
+          (option, index) =>
+            `<button data-approval="${escapeHtml(option)}" class="${index === defaultIndex ? 'approve' : ''}">${escapeHtml(option)}</button>`,
+        )
+        .join('')
+    : isInput
+      ? ''
+      : `<button data-approval="approve" class="approve">${icon('check')}${t('approval.confirm')}</button>`;
+  approvalPanel.innerHTML = `<div class="approval-title">${icon('warn')}<span>${t('approval.title')}</span></div><p>${escapeHtml(String(payload.title ?? t('approval.default')))}</p><pre>${escapeHtml(String(payload.detail ?? ''))}</pre>${
+    showInput
+      ? `<textarea class="approval-input" rows="2" placeholder="${escapeHtml(t('approval.inputPlaceholder'))}">${escapeHtml(seed)}</textarea>`
+      : ''
+  }<div class="approval-actions">${buttons}<button data-cancel>${icon('close')}${t('approval.reject')}</button></div>`;
   const resolve = (value: Record<string, unknown>): void => {
     window.mocodeWork.send({ type: 'approval', id: taskId, approvalId, ...value });
     approvalPanel.classList.add('hidden');
     const stream = streams.get(taskId);
     if (stream) stream.pendingApproval = null;
   };
-  approvalPanel.querySelectorAll<HTMLButtonElement>('[data-approval]').forEach((button) => button.addEventListener('click', () => resolve({ action: 'selected', value: button.dataset.approval })));
+  const input = approvalPanel.querySelector<HTMLTextAreaElement>('.approval-input');
+  const submitInput = (): void => {
+    const value = input?.value.trim() ?? '';
+    // 空输入的「提交」等于没回答：退回让用户取消，不要给模型塞一个空串当答复。
+    if (!value) return resolve({ action: 'cancelled' });
+    resolve({ action: 'submitted', value });
+  };
+  if (input) {
+    // input 形态下自动聚焦：用户点开面板就该能直接打字，不用再点一次输入框。
+    if (isInput) queueMicrotask(() => input.focus());
+    input.addEventListener('keydown', (event) => {
+      // Enter 提交，Shift+Enter 换行（多行答案很常见）。
+      if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitInput(); }
+      if (event.key === 'Escape') { event.preventDefault(); resolve({ action: 'cancelled' }); }
+    });
+  }
+  approvalPanel.querySelectorAll<HTMLButtonElement>('[data-approval]').forEach((button) =>
+    button.addEventListener('click', () => resolve({ action: 'selected', value: button.dataset.approval })),
+  );
   approvalPanel.querySelector<HTMLButtonElement>('[data-cancel]')?.addEventListener('click', () => resolve({ action: 'cancelled' }));
+  if (isInput && !options.length) {
+    // 没有选项按钮时，「提交」需要一个显式出口（只有 textarea 的 Enter 不够可发现）。
+    const actions = approvalPanel.querySelector('.approval-actions');
+    if (actions) {
+      const submit = document.createElement('button');
+      submit.className = 'approve';
+      submit.textContent = t('approval.submit');
+      submit.addEventListener('click', submitInput);
+      actions.prepend(submit);
+    }
+  }
 }
 function setRunning(running: boolean): void { sendButton.innerHTML = icon(running ? 'square' : 'paper-airplane'); sendButton.classList.toggle('stop', running); sendButton.title = running ? t('composer.stop') : t('composer.send'); sendButton.setAttribute('aria-label', running ? t('composer.stopAria') : t('composer.sendAria')); }
 function resizePrompt(): void { promptInput.style.height = 'auto'; promptInput.style.height = `${Math.min(promptInput.scrollHeight, 128)}px`; }
+
+/**
+ * 把输入卡实测高度写进 `.workspace` 的 `--composer-h`，供 #conversation 与 #conv-rail
+ * 当作底边预留（CSS 里是 `inset: 0 0 var(--composer-h, 125px)`）。
+ *
+ * 为什么必须实测：输入卡高度随 textarea 行数（1–8 行，128px 上限）和附件 chip 行数变化，
+ * 实测 131 / 192 / 222.5px。写死像素时输入卡会向上长而会话区底边不动，
+ * 最后几条消息被压在输入卡下层且 scrollTop 已到 maxScroll —— 滚到底也顶不上来。
+ *
+ * 用 ResizeObserver 而不是在各个「可能变高」的调用点手动同步(resizePrompt /
+ * renderAttachments / 切换任务 / 拖入图片…):漏一处就复现 bug,而且 i18n 文案换行、
+ * 窗口缩放同样会改高度。
+ */
+function watchComposerHeight(): void {
+  const area = $('.composer-area');
+  if (!area) return;
+  const apply = () => {
+    // offsetHeight 取整数即可；小数会让 subpixel 抖动 → 滚动条反复出现/消失。
+    const height = Math.round(area.getBoundingClientRect().height);
+    if (height <= 0) return;
+    const workspace = document.querySelector<HTMLElement>('.workspace');
+    if (workspace) workspace.style.setProperty('--composer-h', `${height}px`);
+    // 高度变了可见区就变了：原本贴底的会话要重新贴底，否则底部会突然空出一截。
+    if (!userScrolled) smartScrollToBottom(true);
+  };
+  apply();
+  // 首次 apply 可能早于字体切换 / 首帧布局（实测留下 153px 的过期值，比真实 131px 多出
+  // 22px 空白），所以首帧后再测一次；字体就绪也再测一次（等宽字高变化会改 textarea 行高）。
+  requestAnimationFrame(apply);
+  if (typeof document !== 'undefined' && document.fonts?.ready) void document.fonts.ready.then(apply);
+  if (typeof ResizeObserver === 'undefined') return;
+  // 观察 .composer-area 自身：它是 absolute 定位、height 由内容撑，内容变化会触发回调。
+  const observer = new ResizeObserver(apply);
+  observer.observe(area);
+}
 function renderAttachments(): void {
   attachmentList.innerHTML = attachments.map((attachment, index) => `<span class="attachment-chip">${icon('image')}<span class="attachment-name">${escapeHtml(attachment.name)}</span><button class="attachment-remove" data-attachment="${index}" title="${t('composer.attachment')}" aria-label="${t('composer.attachmentRemove')}"><svg class="icon" data-icon="close"></svg></button></span>`).join('');
   mountIcons(attachmentList);
@@ -1289,6 +1497,9 @@ new MutationObserver(() => scheduleConvRail()).observe(conversation, { childList
 // 视口尺寸变了要重算间距上限(窄窗 / 拖侧栏 / 开 inspector 都会改会话高度)。
 new ResizeObserver(() => scheduleConvRail(true)).observe(conversation);
 let userScrolled = false;
+// 放在 userScrolled 声明之后：watchComposerHeight 内部会读它（贴底跟随判断），
+// 在声明之前调用会踩 TDZ（ESM 模块求值期直接抛 ReferenceError）。
+watchComposerHeight();
 
 /* ── Per-message actions (copy / regenerate / rollback) ── */
 function wireMessageActions(message: HTMLElement, text: string): void {
@@ -1690,27 +1901,24 @@ function summarizePrompt(prompt: string, maxWidth = 40): string {
   if (!text) text = prompt.replace(/\s+/g, ' ').trim();
   return text ? truncateByWidth(text, maxWidth) : t('empty.draft');
 }
-async function submit(): Promise<void> {
-  const viewing = viewingTaskId();
-  // 正在查看的任务在跑:点击 = 停止它(其它后台任务不受影响)。
-  if (isRunning(viewing)) { window.mocodeWork.send({ type: 'cancel', id: viewing }); return; }
-  const prompt = promptInput.value.trim(); if (!prompt) return;
-  let task = selectedTask();
-  // 只有在完全没有选中的任务时才新建；若已选中（含「新建任务」预建的 queued 任务，尚无 session），直接续用，避免重复建任务。
-  if (!task) {
-    // undefined 归属 = 跟随当前选中空间（全局默认）；纯任务走「任务」分组的 + 或 chip 解除关联。
-    const created = await window.mocodeWork.createTask('', undefined); updateState(created.state); task = created.task;
-  }
-  // 标题自动摘要：新建后还没命名的任务，用这一条指令就地命名（用户手动改过就不动）。
-  if (!task.title.trim() && !task.sessionId) {
-    const next = await window.mocodeWork.renameTask(task.id, summarizePrompt(prompt));
-    if (next) updateState(next);
-  }
+/**
+ * 每个任务一份待发队列（见 send-queue.ts）。
+ *
+ * 旧行为是「正在跑时点发送 = 取消当前运行」——而 Enter 也走 submit()，
+ * 于是「边看输出边想补一句」会直接把这一轮掐掉。现在拆成两条路径：
+ *   - **Enter / 发送键**：任务在跑就排队（沿用 FIFO），跑完自动接上；
+ *   - **停止键**（正在跑时发送按钮变成方框）：仍然立刻取消。
+ */
+const pendingSends = new SendQueue<{ prompt: string; attachments: Attachment[] }>();
+
+/** 真正发起一轮 run：渲染用户气泡、起状态行、挂看门狗、发协议命令。 */
+function startRun(task: Task, prompt: string, batch: Attachment[]): void {
   const stream = streamFor(task.id);
   stream.items.push({ kind: 'user', text: prompt });
   stream.running = true;
   stream.startedAt = Date.now();
-  addMessage('user', prompt); promptInput.value = ''; resizePrompt(); setRunning(true);
+  addMessage('user', prompt);
+  setRunning(true);
   // 助手消息就地建好:思考阶段就能看到头像与 "MoCode",状态行也稳定落在这条消息下面。
   startAssistantTurn();
   // 立刻上状态:此刻到首个 token 之间可能好几秒(工具组路由 + 首次 LLM 调用),
@@ -1718,7 +1926,54 @@ async function submit(): Promise<void> {
   applyStatus(stream, true, busyStatus('starting', 'status.starting'));
   // 同时挂看门狗:好几秒可以，一直没有动静不行（见 armRunWatchdog）。
   armRunWatchdog(task.id);
-  window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments }); attachments = []; renderAttachments();
+  window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments: batch });
+}
+
+/**
+ * 队列出队：上一条结束后自动接上下一条。
+ * 只在**确实空闲**时出队——run_completed 与 endTaskRun 两条路径都会调到这里，
+ * 靠 stream.running 去重，避免同一刻发两条 run（host 会以「已有任务在跑」拒掉第二条）。
+ */
+function drainSendQueue(taskId: string): void {
+  const stream = streams.get(taskId);
+  if (stream?.running) return;
+  const task = state?.tasks.find((item) => item.id === taskId);
+  if (!task) { pendingSends.clear(taskId); return; }
+  const next = pendingSends.dequeue(taskId);
+  if (!next) return;
+  startRun(task, next.payload.prompt, next.payload.attachments);
+  const left = pendingSends.size(taskId);
+  if (left > 0) showToast('info', t('toast.queuedLeft', { n: left }), 2200);
+}
+
+async function submit(): Promise<void> {
+  const prompt = promptInput.value.trim();
+  if (!prompt) return;
+  // 目标任务是当前查看的那个；没有就新建（第一次使用）。
+  let task = selectedTask();
+  if (!task) {
+    const created = await window.mocodeWork.createTask('', undefined);
+    updateState(created.state);
+    task = created.task;
+  }
+  // 标题自动摘要：新建后还没命名的任务，用这一条指令就地命名（用户手动改过就不动）。
+  if (!task.title.trim() && !task.sessionId) {
+    const next = await window.mocodeWork.renameTask(task.id, summarizePrompt(prompt));
+    if (next) updateState(next);
+  }
+  // 刚建的任务 stream 里不会有 running；这里用 isRunning 而不是 selectedTask().status，
+  // 因为后者是主进程异步刷新的，落后于「刚点发送」的瞬间。
+  if (isRunning(task.id)) {
+    const depth = pendingSends.enqueue(task.id, { prompt, attachments });
+    promptInput.value = ''; resizePrompt();
+    attachments = []; renderAttachments();
+    showToast('info', t('toast.queued', { n: depth }), 2600);
+    return;
+  }
+  const batch = attachments;
+  attachments = []; renderAttachments();
+  promptInput.value = ''; resizePrompt();
+  startRun(task, prompt, batch);
 }
 
 function endTaskRun(taskId: string): void {
@@ -1726,6 +1981,10 @@ function endTaskRun(taskId: string): void {
   const stream = streams.get(taskId);
   if (stream) stream.running = false;
   if (viewingTaskId() === taskId) setRunning(false);
+  // 队列里有东西就接着跑。**必须延到当前事件处理之后**：调用方紧接着还会
+  // finish()（收口本轮助手消息、把按钮恢复成发送），若在这里同步发下一轮，
+  // finish() 会把新一轮的 assistant 消息当上一轮收掉、并把运行态按钮按回静止。
+  if (pendingSends.size(taskId) > 0) setTimeout(() => drainSendQueue(taskId), 0);
 }
 
 function finish(): void {
@@ -1741,6 +2000,10 @@ function notifyBackground(taskId: string, note: string): void {
 }
 
 function handleAgentEvent(envelope: AgentEnvelope): void {
+  // 面板回执优先：请求 id 是渲染层生成的 `panel-*`，不属于任何任务。
+  // 必须抢在下面的任务错误分支之前拦下 —— 否则「用量查询失败」会把正在跑的任务判成 failed。
+  if (handlePanelEvent(envelope)) return;
+  if (typeof envelope.requestId === 'string' && envelope.requestId.startsWith('panel-')) return;
   if (envelope.type === 'error') {
     const message = humanizeError(envelope.error ?? '') ?? t('err.agentCommsFailed');
     console.error('[Agent]', message);
@@ -1766,9 +2029,12 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
   }
   const payload = envelope.payload ?? {};
   const taskId = envelope.requestId;
-  // host_log 等无归属事件走全局通道
+  // 无归属事件走全局通道：host_log 是日志，runtime_ready 是「host 起来了」的握手回执。
+  // runtime_ready 此前被整条丢弃，代价是 MCP 启动警告（配置写错、server 起不来）
+  // 永远到不了用户眼前，以及协议版本不一致时没有任何提示，只有「新按钮点了没反应」。
   if (!taskId) {
     if (envelope.event === 'host_log') handleHostLog(payload);
+    else if (envelope.event === 'runtime_ready') handleRuntimeReady(payload);
     return;
   }
   // 收到任何一条归属本任务的事件 = 「它活着」，看门狗下岗。
@@ -1776,6 +2042,19 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
   const stream = streamFor(taskId);
   const viewing = viewingTaskId() === taskId;
   switch (envelope.event) {
+    case 'mode_changed': {
+      // host 确认模式已切（并已重写 history[0] 的系统提示）。这里只镜像状态：
+      // 模式的事实源在 host，界面不做乐观更新，避免「按钮翻过去了但 host 没认」。
+      const mode = String(payload.mode ?? 'auto');
+      applyPlanToggle(mode === 'plan');
+      applyStatus(
+        stream,
+        viewing,
+        busyStatus(planMode ? 'thinking' : 'thinking', planMode ? 'status.planMode' : 'status.thinking'),
+      );
+      if (viewing) showToast('info', t(planMode ? 'status.planOn' : 'status.planOff'), 3200);
+      break;
+    }
     case 'run_started':
       // 「工具组路由」本身就是一次 LLM 调用 —— 首个 thinking 到来前的空窗必须有人交代。
       applyStatus(stream, viewing, busyStatus('starting', 'status.analyzing'));
@@ -1815,6 +2094,63 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
         stream.items.push({ kind: 'tool', id, name: String(payload.name ?? 'tool'), args, output, done: completed });
       }
       if (viewing) addTool(payload, completed);
+      break;
+    }
+    case 'tool_output': {
+      // 长命令（build / test / 大量 grep）的流式输出。终端边跑边出，GUI 若只等 tool_completed
+      // 就只能看最后一坨 —— 走同一份 stream.items 缓冲，切任务回来也能还原。
+      const id = payload.id == null ? '' : String(payload.id);
+      const chunk = String(payload.chunk ?? '');
+      if (!chunk) break;
+      const item = id ? [...stream.items].reverse().find((entry) => entry.kind === 'tool' && entry.id === id) : undefined;
+      if (item && item.kind === 'tool') item.output += chunk;
+      else stream.items.push({ kind: 'tool', id, name: String(payload.name ?? 'tool'), args: '', output: chunk, done: false });
+      if (viewing) appendToolOutput(payload);
+      break;
+    }
+    case 'model_retry': {
+      // 退避重试必须可见：否则是几十秒静止界面，与卡死无法区分。
+      const seconds = Math.max(1, Math.round((Number(payload.waitMs) || 0) / 1000));
+      applyStatus(
+        stream,
+        viewing,
+        busyStatus('thinking', 'status.retrying', { s: seconds, n: Number(payload.attempt) || 1 }),
+      );
+      break;
+    }
+    case 'live_usage': {
+      // 流式用量 → 上下文占比：终端在底栏 chip 上实时跳，只给轮末一次会让人以为进度条坏了。
+      const percent = typeof payload.percent === 'number' ? Math.round(payload.percent) : null;
+      if (percent !== null) {
+        stream.usagePercent = percent;
+        if (viewing) updateContextUsage(percent);
+      }
+      break;
+    }
+    case 'image_relief': {
+      const phase = String(payload.phase ?? '');
+      if (phase === 'start') {
+        const bytes = Number(payload.bytes) || 0;
+        const size = bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
+        applyStatus(stream, viewing, busyStatus('thinking', 'status.imageRelief', { n: Number(payload.images) || 0, size }));
+        break;
+      }
+      // done：replaced=0 表示这轮实际没改动，不该噪一声。
+      const replaced = Number(payload.replaced) || 0;
+      applyStatus(stream, viewing, busyStatus('thinking', 'status.thinking'));
+      if (replaced > 0 && viewing) showToast('info', t('toast.imageRelief', { n: replaced }), 3500);
+      break;
+    }
+    case 'no_reply':
+      // 「模型没吐任何内容」是一个有意义的终态，不能让它表现为「跑完了但空白」。
+      stream.items.push({ kind: 'error', message: t('status.noReply') });
+      if (viewing) { if (!currentTurn()) startAssistantTurn(); showTurnError(t('status.noReply')); }
+      break;
+    case 'max_steps': {
+      // onMaxSteps 不带次数（AgentHooks 的签名就是 () => void），文案也不能假装知道数字。
+      const message = t('status.maxSteps');
+      stream.items.push({ kind: 'error', message });
+      if (viewing) { if (!currentTurn()) startAssistantTurn(); showTurnError(message); }
       break;
     }
     case 'approval_requested': {
@@ -1885,6 +2221,17 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     // 那一轮要么马上被新 host 接着跑，要么调用方自己收敛了状态。
     case 'host_stopped':
       break;
+    // 点了停止但 host 那边没有在跑（已经结束了）。把界面从「正在停止」收回可用态，
+    // 否则按钮停在停止图标上，用户以为还在跑。
+    case 'run_idle':
+      applyStatus(stream, viewing, statusFromTask(selectedTask()));
+      endTaskRun(taskId);
+      if (viewing) finish();
+      break;
+    // 受监管 Worker 的心跳（每 30s 一条）。work-app 不走 supervised 模式，正常收不到；
+    // 真收到也只当「它还活着」，看门狗已经在上面的 clearRunWatchdog 里续过了。
+    case 'heartbeat':
+      break;
   }
 }
 /**
@@ -1904,6 +2251,22 @@ function handleHostLog(payload: Record<string, unknown>): void {
   if (HOST_LOG_CODES.has(String(payload.code ?? ''))) {
     showToast('warn', raw.replace(/^\[mocode-work\]\s*/, ''), 6000);
   }
+}
+
+/**
+ * host 起来的握手回执（无 requestId，全局通道）。
+ *
+ * 这条事件以前被整条丢弃，代价是：MCP 启动警告（server 命令写错、端口不通、配置解析失败）
+ * 永远到不了用户眼前，用户只知道「工具没反应」。
+ *
+ * 协议版本不匹配的检查**放在主进程**（packages/work-app/src/main.ts 的 receive）：
+ * HOST_PROTOCOL_VERSION 的事实源在 @mocode/protocol，而渲染层是浏览器环境、
+ * 不能 import 裸包名（没有打包器）。渲染层只负责把 main 推来的 host_log 弹出来。
+ */
+function handleRuntimeReady(payload: Record<string, unknown>): void {
+  const warnings = Array.isArray(payload.warnings) ? payload.warnings.map(String).filter(Boolean) : [];
+  for (const warning of warnings) showToast('warn', t('toast.mcpWarning', { warning }), 8000);
+  console.debug('[Agent Host] ready', payload);
 }
 
 /**
@@ -1952,11 +2315,13 @@ function switchToTask(taskId: string, history?: HistoryItem[]): void {
   promptInput.focus();
 }
 
-function openInspector(tab: 'overview' | 'files'): void {
+function openInspector(tab: InspectorTab): void {
   activeInspectorTab = tab; inspector.classList.remove('hidden'); void refreshInspector();
 }
-function setInspectorTab(tab: 'overview' | 'files'): void {
-  activeInspectorTab = tab; document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => button.classList.toggle('selected', button.dataset.tab === tab));
+function setInspectorTab(tab: InspectorTab): void {
+  activeInspectorTab = tab;
+  // 只动 inspector 自己的页签：记忆面板里也有 [data-tab]，全局选择器会误改它的选中态。
+  inspector.querySelectorAll<HTMLButtonElement>('.inspector-tabs [data-tab]').forEach((button) => button.classList.toggle('selected', button.dataset.tab === tab));
 }
 function inspectorButton(label: string, action: string, path?: string): string { return `<button class="inspector-row" data-action="${action}"${path ? ` data-path="${escapeHtml(path)}"` : ''}>${escapeHtml(label)}<span>›</span></button>`; }
 
@@ -2062,6 +2427,10 @@ async function refreshInspector(): Promise<void> {
     }
     const status = Array.isArray(overview.status) ? overview.status.map(String) : []; const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
     inspectorContent.innerHTML = `<section class="overview-card"><b>${escapeHtml(String(overview.branch || t('git.local')))}</b><span>${escapeHtml(String(overview.lastCommit ?? t('empty.lastCommit')))}</span></section><h3>${t('inspector.workChanges')}</h3>${status.length ? `<pre class="status-output">${escapeHtml(status.join('\n'))}</pre>` : `<p class="inspector-empty">${t('inspector.clean')}</p>`}${overview.diffStat ? `<pre class="status-output">${escapeHtml(String(overview.diffStat))}</pre>` : ''}<h3>${t('inspector.recentFiles')}</h3>${files.slice(0, 12).map((file) => inspectorButton(file, 'file', file)).join('') || `<p class="inspector-empty">${t('inspector.noFiles')}</p>`}`;
+  } else if (activeInspectorTab === 'changes') {
+    // 本轮改动：数据来自 host 的 changeset 快照（与「回滚」同源），不是 git。
+    inspectorTitle.textContent = t('inspector.changes');
+    await renderTurnChanges(inspectorContent);
   } else {
     inspectorTitle.textContent = t('inspector.files'); const overview = await window.mocodeWork.projectOverview();
     if (overview.noWorkspace) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('inspector.noWorkspace')}</p>`; return; }
@@ -2110,15 +2479,24 @@ $('#new-task').addEventListener('click', () => void startNewTask());
  * 渲染函数 renderSkillsView / renderMcpView 与弹窗解耦，接收容器参数。 */
 const extensionsView = $('#extensions-view');
 const extensionsViewBody = $('#extensions-view-body');
-type ExtensionsViewTab = 'skills' | 'mcp';
+/** 扩展整页视图承载两类内容：扩展（skills/mcp）与数据面板（会话/回滚/用量/记忆）。 */
+type ExtensionsViewTab = 'skills' | 'mcp' | PanelKind;
 let extensionsActiveTab: ExtensionsViewTab = 'skills';
+const PANEL_TABS: readonly PanelKind[] = ['sessions', 'usage', 'memory'];
+const PANEL_TITLE_KEYS: Record<PanelKind, LocaleKey> = {
+  sessions: 'nav.sessions',
+  usage: 'nav.usage',
+  memory: 'nav.memory',
+};
 
 /** 重绘扩展视图当前页的内容（tab 切换由侧栏入口负责，这里只刷新标题 + 列表）。 */
 async function renderExtensionsView(): Promise<void> {
   if (!extensionsViewBody) return;
   const title = document.querySelector('#extensions-view-title');
-  if (title) title.textContent = t(extensionsActiveTab === 'skills' ? 'nav.skills' : 'nav.mcp');
-  if (extensionsActiveTab === 'skills') await renderSkillsView(extensionsViewBody);
+  const tab = extensionsActiveTab;
+  if (title) title.textContent = t(PANEL_TABS.includes(tab as PanelKind) ? PANEL_TITLE_KEYS[tab as PanelKind] : tab === 'skills' ? 'nav.skills' : 'nav.mcp');
+  if (PANEL_TABS.includes(tab as PanelKind)) await renderPanel(tab as PanelKind, extensionsViewBody);
+  else if (tab === 'skills') await renderSkillsView(extensionsViewBody);
   else await renderMcpView(extensionsViewBody);
 }
 
@@ -2136,6 +2514,28 @@ function hideExtensionsView(): void {
 
 $('#nav-skills').addEventListener('click', () => showExtensionsView('skills'));
 $('#nav-mcp').addEventListener('click', () => showExtensionsView('mcp'));
+// 面板模块只依赖这几个注入函数（避免与 renderer 互相 import 成环）。
+initPanels({
+  t,
+  icon,
+  escapeHtml,
+  toast: (level, text, durationMs) => showToast(level, text, durationMs),
+  currentTaskId: () => viewingTaskId(),
+  // session 口径的用量必须显式带会话 id：面板命令可能落到刚懒启动的 host 上，
+  // 那时它进程内的 sessionId 还是空串。
+  currentSessionId: () => selectedTask()?.sessionId,
+  // 会话恢复 / 回滚之后历史变了：按磁盘重新回放这个任务，界面不能停在旧对话上。
+  reloadTask: (taskId) => void openTask(taskId),
+  send: (command) => window.mocodeWork.panel(command),
+});
+// 数据面板复用同一个整页视图：命令都打到「当前选中任务」的 host 上，
+// 所以没有任务时先提示（面板内容为空列表比空白页更难懂）。
+for (const kind of PANEL_TABS) {
+  $(`#nav-${kind}`).addEventListener('click', () => {
+    if (!viewingTaskId()) { showToast('warn', t('panel.noTask')); return; }
+    showExtensionsView(kind);
+  });
+}
 $('#extensions-view-back').addEventListener('click', hideExtensionsView);
 
 /**
@@ -2209,6 +2609,29 @@ $('#compact-button').addEventListener('click', () => {
   if (!viewing) return;
   window.mocodeWork.send({ type: 'compact', id: viewing });
 });
+/**
+ * 计划模式开关（对齐终端的 /plan、/auto 与 Shift+Tab）。
+ *
+ * 为什么必须有：work-app 之前完全没有 plan 模式——host 硬编码 initialMode:'auto'，
+ * 于是「只读探查 + 先给方案」这条路在桌面端不存在，模型一上手就改文件。
+ *
+ * 模式是 host 侧进程级状态，但**必须带 id 否则 host 报错**（要求 requestId 才能回 mode_changed）。
+ * 切任务不改模式（与终端一致：模式属于当前会话上下文，不属于界面）。
+ */
+$('#plan-toggle')?.addEventListener('click', () => {
+  const viewing = viewingTaskId();
+  if (!viewing) { showToast('info', t('status.planNeedsTask'), 2400); return; }
+  window.mocodeWork.send({ type: 'set_mode', id: viewing, mode: planMode ? 'auto' : 'plan' });
+});
+/** 计划模式开关的视觉与 aria（单一入口，避免两处各改一半）。 */
+function applyPlanToggle(next: boolean): void {
+  planMode = next;
+  const button = $('#plan-toggle');
+  if (!button) return;
+  button.classList.toggle('active', next);
+  button.setAttribute('aria-pressed', next ? 'true' : 'false');
+  button.title = t('composer.planToggleTitle');
+}
 // 唯一的文件面板入口（原来 toggle-inspector/show-files 两个按钮开同一个面板，已合并）：
 // 关着 → 打开文件 tab；开着但在别的 tab → 切到文件；已在文件 tab → 收起面板。
 $('#show-files').addEventListener('click', () => {
@@ -2217,7 +2640,8 @@ $('#show-files').addEventListener('click', () => {
   inspector.classList.add('hidden');
 });
 $('#close-inspector').addEventListener('click', () => inspector.classList.add('hidden'));
-document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((button) => button.addEventListener('click', () => { activeInspectorTab = button.dataset.tab as 'overview' | 'files'; void refreshInspector(); }));
+// 页签点击：只绑 inspector 自己的那组（记忆面板里也有 [data-tab]，不归这里管）。
+inspector.querySelectorAll<HTMLButtonElement>('.inspector-tabs [data-tab]').forEach((button) => button.addEventListener('click', () => { activeInspectorTab = button.dataset.tab as InspectorTab; void refreshInspector(); }));
 $('#search-button').addEventListener('click', () => { searchPanel.classList.remove('hidden'); searchInput.value = ''; refreshSearch(); searchInput.focus(); });
 $('#theme-toggle').addEventListener('click', () => {
   const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -2336,23 +2760,62 @@ function refreshLanguageSegmented(): void {
 }
 
 /* ── 设置弹窗:左侧分类导航 + 右侧内容 ─────────────────────── */
-type SettingsSectionId = 'model' | 'behavior' | 'appearance' | 'about';
+type SettingsSectionId = 'model' | 'behavior' | 'voice' | 'appearance' | 'about';
 /** 分类元数据存 i18n key（不存译文）—— 模块级常量在启动时求值一次，存译文会锁死语言。 */
 const SETTINGS_SECTIONS: Array<{ id: SettingsSectionId; labelKey: LocaleKey; icon: string; descKey: LocaleKey }> = [
   { id: 'model', labelKey: 'settings.model', icon: 'spark-bot', descKey: 'settings.modelDesc' },
   { id: 'behavior', labelKey: 'settings.behavior', icon: 'wrench', descKey: 'settings.behaviorDesc' },
+  { id: 'voice', labelKey: 'settings.voice', icon: 'mic', descKey: 'settings.voiceDesc' },
   { id: 'appearance', labelKey: 'settings.appearance', icon: 'sun', descKey: 'settings.appearanceDesc' },
   { id: 'about', labelKey: 'settings.about', icon: 'info', descKey: 'settings.aboutDesc' },
 ];
 let settingsActiveSection: SettingsSectionId = 'model';
-const SETTING_ITEMS: Array<{ key: string; labelKey: LocaleKey; hintKey: LocaleKey }> = [
-  { key: 'autoCompact', labelKey: 'setting.autoCompact', hintKey: 'setting.autoCompactHint' },
-  { key: 'memory', labelKey: 'setting.memory', hintKey: 'setting.memoryHint' },
-  { key: 'subAgent', labelKey: 'setting.subAgent', hintKey: 'setting.subAgentHint' },
-  { key: 'autoReflect', labelKey: 'setting.autoReflect', hintKey: 'setting.autoReflectHint' },
-  { key: 'mcp', labelKey: 'setting.mcp', hintKey: 'setting.mcpHint' },
+/**
+ * 行为开关清单。分组是为了让「上下文 / 记忆 / 工具面」三类一眼分开 ——
+ * 十几个开关平铺成一列，用户根本记不住哪个属于哪块。
+ */
+const SETTING_GROUPS: Array<{ titleKey: LocaleKey; hintKey: LocaleKey; items: Array<{ key: string; labelKey: LocaleKey; hintKey: LocaleKey }> }> = [
+  {
+    titleKey: 'settings.groupContext',
+    hintKey: 'settings.groupContextHint',
+    items: [
+      { key: 'autoCompact', labelKey: 'setting.autoCompact', hintKey: 'setting.autoCompactHint' },
+      { key: 'autoReflect', labelKey: 'setting.autoReflect', hintKey: 'setting.autoReflectHint' },
+    ],
+  },
+  {
+    titleKey: 'settings.groupMemory',
+    hintKey: 'settings.groupMemoryHint',
+    items: [
+      { key: 'memory', labelKey: 'setting.memory', hintKey: 'setting.memoryHint' },
+      { key: 'turnRecall', labelKey: 'setting.turnRecall', hintKey: 'setting.turnRecallHint' },
+      { key: 'proactive', labelKey: 'setting.proactive', hintKey: 'setting.proactiveHint' },
+      { key: 'episodic', labelKey: 'setting.episodic', hintKey: 'setting.episodicHint' },
+      { key: 'consolidate', labelKey: 'setting.consolidate', hintKey: 'setting.consolidateHint' },
+    ],
+  },
+  {
+    titleKey: 'settings.groupTools',
+    hintKey: 'settings.groupToolsHint',
+    items: [
+      { key: 'router', labelKey: 'setting.router', hintKey: 'setting.routerHint' },
+      { key: 'subAgent', labelKey: 'setting.subAgent', hintKey: 'setting.subAgentHint' },
+      { key: 'frontendTools', labelKey: 'setting.frontendTools', hintKey: 'setting.frontendToolsHint' },
+      { key: 'computerUse', labelKey: 'setting.computerUse', hintKey: 'setting.computerUseHint' },
+      { key: 'mcp', labelKey: 'setting.mcp', hintKey: 'setting.mcpHint' },
+    ],
+  },
 ];
-let settingsState: Record<string, boolean> = {};
+const SETTING_ITEMS = SETTING_GROUPS.flatMap((group) => group.items);
+/** 思考强度五档，与 core 的 ReasoningEffort 同集合（/effort 对应的用户面）。 */
+const EFFORT_ITEMS: Array<{ value: string; labelKey: LocaleKey; hintKey: LocaleKey }> = [
+  { value: 'off', labelKey: 'effort.off', hintKey: 'effort.offHint' },
+  { value: 'low', labelKey: 'effort.low', hintKey: 'effort.lowHint' },
+  { value: 'medium', labelKey: 'effort.medium', hintKey: 'effort.mediumHint' },
+  { value: 'high', labelKey: 'effort.high', hintKey: 'effort.highHint' },
+  { value: 'auto', labelKey: 'effort.auto', hintKey: 'effort.autoHint' },
+];
+let settingsState: Record<string, boolean | string> = {};
 
 /* ── 模型分组:按 API 地址归类到「提供商」 ────────────────────
  * 预设文件的 provider 字段只有 openai/anthropic 两种协议名,无法区分
@@ -3509,35 +3972,374 @@ async function deleteEditingModel(): Promise<void> {
   await renderSettingsModelSection();
 }
 
-/** 「行为」分类：mocode 终端斜杠命令对应的开关。 */
+/**
+ * 「行为」分类：mocode 终端的斜杠命令用户面（/effort、/router、/memory_switch、
+ * /memory 子开关、/subagent、/fe、/cu、MCP 总开关）。
+ *
+ * 每一行长成这样：标题 + 一句说明 + 右侧开关（或五档单选）。改动一律写 ~/.mocode/config
+ * 并重启后台 agent —— host 启动期就把 env 固化成 config 快照，只改内存等于「重启就丢」。
+ */
 function renderSettingsBehaviorSection(): void {
   if (!settingsSection) return;
+  const toggleRow = (item: { key: string; labelKey: LocaleKey; hintKey: LocaleKey }): string => `
+    <button class="settings-row settings-toggle" data-setting="${item.key}" role="switch" aria-checked="${settingsState[item.key] === true ? 'true' : 'false'}">
+      <span class="settings-row-body"><span class="settings-row-title">${escapeHtml(t(item.labelKey))}</span><span class="settings-row-sub">${escapeHtml(t(item.hintKey))}</span></span>
+      <span class="settings-switch" aria-hidden="true"></span>
+    </button>`;
+
   settingsSection.innerHTML = `
     <div class="settings-block">
-      <div class="settings-block-head"><b>${t('settings.agentBehavior')}</b><span>${t('settings.agentBehaviorHint')}</span></div>
+      <div class="settings-block-head"><b>${t('settings.effort')}</b><span>${t('settings.effortHint')}</span></div>
       <div class="settings-list">
-        ${SETTING_ITEMS.map((item) => `
-          <button class="settings-row settings-toggle" data-setting="${item.key}" role="switch" aria-checked="${settingsState[item.key] ? 'true' : 'false'}">
+        ${EFFORT_ITEMS.map((item) => `
+          <button class="settings-row settings-toggle" data-effort="${item.value}" role="radio" aria-checked="${settingsState.effort === item.value ? 'true' : 'false'}">
             <span class="settings-row-body"><span class="settings-row-title">${escapeHtml(t(item.labelKey))}</span><span class="settings-row-sub">${escapeHtml(t(item.hintKey))}</span></span>
-            <span class="settings-switch" aria-hidden="true"></span>
+            <span class="settings-radio" aria-hidden="true"></span>
           </button>
         `).join('')}
       </div>
     </div>
+    ${SETTING_GROUPS.map((group) => `
+      <div class="settings-block">
+        <div class="settings-block-head"><b>${t(group.titleKey)}</b><span>${t(group.hintKey)}</span></div>
+        <div class="settings-list">${group.items.map(toggleRow).join('')}</div>
+      </div>
+    `).join('')}
   `;
-  settingsSection.querySelectorAll<HTMLButtonElement>('.settings-toggle').forEach((button) => {
+
+  const hasRunning = (): boolean => (state?.tasks ?? []).some((task) => task.status === 'running' || task.status === 'waiting');
+
+  settingsSection.querySelectorAll<HTMLButtonElement>('[data-setting]').forEach((button) => {
     button.addEventListener('click', async () => {
       const key = button.dataset.setting;
       if (!key) return;
-      const next = !settingsState[key];
+      const next = settingsState[key] !== true;
       try { settingsState = await window.mocodeWork.setSettings({ [key]: next }); }
       catch (error) { console.error('[settings]', error); showToast('error', t('toast.settingsSaveFailed')); return; }
       renderSettingsBehaviorSection();
-      const hasRunning = (state?.tasks ?? []).some((task) => task.status === 'running' || task.status === 'waiting');
       const item = SETTING_ITEMS.find((entry) => entry.key === key);
       const label = item ? t(item.labelKey) : key;
       const stateText = next ? t('settings.enableVerb') : t('settings.disableVerb');
-      showToast('success', `${t('settings.toggled', { label: label, state: stateText })}${hasRunning ? t('settings.restartNote') : ''}`);
+      showToast('success', `${t('settings.toggled', { label: label, state: stateText })}${hasRunning() ? t('settings.restartNote') : ''}`);
+    });
+  });
+
+  settingsSection.querySelectorAll<HTMLButtonElement>('[data-effort]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const effort = button.dataset.effort ?? '';
+      if (!effort || settingsState.effort === effort) return;
+      try { settingsState = await window.mocodeWork.setSettings({ effort }); }
+      catch (error) { console.error('[settings]', error); showToast('error', t('toast.settingsSaveFailed')); return; }
+      renderSettingsBehaviorSection();
+      const label = EFFORT_ITEMS.find((entry) => entry.value === effort);
+      showToast('success', `${t('settings.effortApplied', { value: label ? t(label.labelKey) : effort })}${hasRunning() ? t('settings.restartNote') : ''}`);
+    });
+  });
+}
+
+/* ── 语音输入：本地 ASR（模型 226MB，用户开启后才下载）──────────── */
+/** 与主进程 voice/asr.ts 的 MODEL_TOTAL_BYTES 保持一致，只用于展示文案。 */
+const VOICE_MODEL_BYTES = 226 * 1024 * 1024 + 316 * 1024;
+/** 录音上限。SenseVoice 是非流式整段识别，太长会明显变慢，也给用户一个"忘了停"的兜底。 */
+const VOICE_MAX_MS = 60_000;
+/** 最近一条下载进度（只在设置页展示，主进程也会在重开设置页时给快照）。 */
+let voiceProgress: VoiceProgress | null = null;
+/** 录音态：null = 空闲。 */
+let voiceRecorder: {
+  ctx: AudioContext;
+  stream: MediaStream;
+  source: MediaStreamAudioSourceNode;
+  processor: ScriptProcessorNode;
+  chunks: Float32Array[];
+  startedAt: number;
+  timer: number;
+} | null = null;
+let voiceBusy = false;
+const micButton = document.querySelector<HTMLButtonElement>('[data-voice-mic]');
+
+/**
+ * 语音开关存 localStorage，不进 ~/.mocode/config。
+ * 原因：`~/.mocode/config` 的每个键都会被 core 当环境变量读取，voice 是纯 work-app 的
+ * UI 偏好；而且 setSettings 会顺带 restartAllAgents()，为一个本地开关重启所有 agent 不合理。
+ */
+const VOICE_ENABLED_KEY = 'mocode-work-voice-enabled';
+function readVoiceEnabled(): boolean {
+  try { return localStorage.getItem(VOICE_ENABLED_KEY) === '1'; } catch { return false; }
+}
+function setVoiceEnabled(enabled: boolean): void {
+  settingsState.voice = enabled;
+  try { localStorage.setItem(VOICE_ENABLED_KEY, enabled ? '1' : '0'); } catch { /* 忽略 */ }
+  if (!enabled && voiceRecorder) void stopVoiceRecording();
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(0)} MB`;
+}
+
+/** 麦克风按钮只在「开关打开」时出现；状态由 settingsState.voice 决定。 */
+function applyVoiceButtonVisibility(): void {
+  if (!micButton) return;
+  micButton.classList.toggle('hidden', settingsState.voice !== true);
+}
+
+/** 把识别结果插到光标处，保留用户已经打了一半的内容。 */
+function insertDictation(text: string): void {
+  const start = promptInput.selectionStart ?? promptInput.value.length;
+  const end = promptInput.selectionEnd ?? start;
+  const before = promptInput.value.slice(0, start);
+  const after = promptInput.value.slice(end);
+  // 中文与英文之间不硬塞空格，但两侧都是英文单词时补一个，避免单词粘在一起。
+  const needsSpace = /[A-Za-z0-9]$/.test(before) && /^[A-Za-z0-9]/.test(text);
+  const inserted = `${needsSpace ? ' ' : ''}${text}`;
+  promptInput.value = `${before}${inserted}${after}`;
+  const caret = start + inserted.length;
+  promptInput.setSelectionRange(caret, caret);
+  promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+  promptInput.focus();
+}
+
+function setVoiceButtonState(state: 'idle' | 'recording' | 'transcribing'): void {
+  if (!micButton) return;
+  micButton.classList.toggle('recording', state === 'recording');
+  micButton.classList.toggle('transcribing', state === 'transcribing');
+  micButton.setAttribute('aria-pressed', state === 'recording' ? 'true' : 'false');
+  micButton.title = state === 'recording' ? t('voice.recording') : state === 'transcribing' ? t('voice.transcribing') : t('voice.micTitle');
+}
+
+async function stopVoiceRecording(): Promise<void> {
+  const recorder = voiceRecorder;
+  if (!recorder) return;
+  voiceRecorder = null;
+  clearTimeout(recorder.timer);
+  try { recorder.processor.disconnect(); } catch { /* 已断开 */ }
+  try { recorder.source.disconnect(); } catch { /* 已断开 */ }
+  recorder.stream.getTracks().forEach((track) => track.stop());
+  try { await recorder.ctx.close(); } catch { /* 已关闭 */ }
+
+  const total = recorder.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const samples = new Float32Array(total);
+  let offset = 0;
+  for (const chunk of recorder.chunks) { samples.set(chunk, offset); offset += chunk.length; }
+  if (total === 0) { setVoiceButtonState('idle'); showToast('error', t('voice.errNoAudio')); return; }
+
+  setVoiceButtonState('transcribing');
+  voiceBusy = true;
+  try {
+    const result = await window.mocodeWork.voiceTranscribe({ samples, sampleRate: recorder.ctx.sampleRate || 16000 });
+    if (!result.ok) showToast('error', result.message ?? t('voice.errTranscribe'));
+    else if (!result.text) showToast('info', t('voice.empty'));
+    else insertDictation(result.text);
+  } catch (error) {
+    console.error('[voice] transcribe', error);
+    showToast('error', t('voice.errTranscribe'));
+  } finally {
+    voiceBusy = false;
+    setVoiceButtonState('idle');
+  }
+}
+
+async function startVoiceRecording(): Promise<void> {
+  if (voiceBusy || voiceRecorder) return;
+  // 先确认模型就绪：没模型时连麦克风都别开，否则用户说完才看到报错。
+  // 注意这里**不自动下载**——226MB 必须由用户在设置页里主动点「下载模型」。
+  try {
+    const status = await window.mocodeWork.voiceStatus();
+    if (!status.ready) {
+      showToast('error', t('voice.needModel'));
+      openSettings('voice');
+      return;
+    }
+  } catch (error) { console.error('[voice] status', error); return; }
+
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch (error) {
+    console.error('[voice] getUserMedia', error);
+    showToast('error', t('voice.micDenied'));
+    return;
+  }
+
+  // 16kHz 直接就是模型要的采样率；部分设备会忽略这个约束，所以真正的采样率从 ctx 读，
+  // 交给主进程兜底重采样。
+  const ctx = new AudioContext({ sampleRate: 16000 });
+  const source = ctx.createMediaStreamSource(stream);
+  const processor = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks: Float32Array[] = [];
+  processor.onaudioprocess = (event) => {
+    // 必须复制：WebAudio 复用同一个 inputBuffer，直接存引用会拿到同一段数据。
+    chunks.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+  };
+  source.connect(processor);
+  // ScriptProcessor 需要接到 destination 才会被驱动；接一个静音增益避免真的出声。
+  const sink = ctx.createGain();
+  sink.gain.value = 0;
+  processor.connect(sink);
+  sink.connect(ctx.destination);
+
+  const timer = window.setTimeout(() => {
+    void stopVoiceRecording().then(() => showToast('info', t('voice.tooLong', { seconds: String(VOICE_MAX_MS / 1000) })));
+  }, VOICE_MAX_MS);
+
+  voiceRecorder = { ctx, stream, source, processor, chunks, startedAt: Date.now(), timer };
+  setVoiceButtonState('recording');
+}
+
+micButton?.addEventListener('click', () => {
+  if (settingsState.voice !== true) { showToast('info', t('voice.off'), 1800); return; }
+  if (voiceRecorder) void stopVoiceRecording();
+  else void startVoiceRecording();
+});
+
+/**
+ * 下载前的规格确认。226MB 下载 + 约 350MB 常驻内存（实测 RSS 50MB→348MB）
+ * 不是随手就下的东西，所以先摊开要求，用户点「开始下载」才真的开始。
+ * 规格文案里的数字都来自实测，改模型时必须同步更新。
+ */
+function confirmVoiceDownload(): Promise<boolean> {
+  const modal = $('#voice-download-modal');
+  if (!modal) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (confirmed: boolean) => {
+      modal.classList.add('hidden');
+      modal.querySelectorAll('[data-voice-download-close]').forEach((el) => el.removeEventListener('click', onClose));
+      modal.removeEventListener('click', onBackdrop);
+      // keydown 用捕获阶段挂在 modal 上：全局 Esc 监听（closeSettings）在 document 的冒泡
+      // 阶段，捕获先跑，stopPropagation 才能真正把它挡住——否则一次 Esc 会连设置页一起关掉。
+      modal.removeEventListener('keydown', onKey, true);
+      confirmButton?.removeEventListener('click', onConfirm);
+      resolve(confirmed);
+    };
+    const confirmButton = modal.querySelector<HTMLButtonElement>('#voice-download-confirm');
+    const onConfirm = () => finish(true);
+    const onClose = () => finish(false);
+    // 点遮罩就算取消：这个弹窗是「确认才继续」，任何含糊操作都按不下载处理。
+    const onBackdrop = (event: MouseEvent) => { if (event.target === modal) finish(false); };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      event.preventDefault();
+      finish(false);
+    };
+    confirmButton?.addEventListener('click', onConfirm);
+    modal.querySelectorAll('[data-voice-download-close]').forEach((el) => el.addEventListener('click', onClose));
+    modal.addEventListener('click', onBackdrop);
+    modal.addEventListener('keydown', onKey, true);
+    // 规格里的体积用当前模型大小现填，避免文案与 asr.ts 的 MODEL_TOTAL_BYTES 漂移。
+    modal.querySelectorAll<HTMLElement>('[data-i18n="voice.specDiskValue"], [data-i18n="voice.specNetworkValue"]').forEach((el) => {
+      el.textContent = t(el.dataset.i18n as LocaleKey, { size: formatBytes(VOICE_MODEL_BYTES) });
+    });
+    modal.classList.remove('hidden');
+    confirmButton?.focus();
+  });
+}
+
+/** 「语音」分类：总开关 + 本地模型下载/删除。 */
+async function renderSettingsVoiceSection(): Promise<void> {
+  if (!settingsSection) return;
+  let status: VoiceStatus = { ready: false, bytes: 0, dir: '', downloading: false };
+  try { status = await window.mocodeWork.voiceStatus(); }
+  catch (error) { console.error('[voice] status', error); }
+  // 模型没下载就不允许开启：顺手把落盘的开关同步关掉，否则麦克风按钮会留在输入框边上，
+  // 用户点开只得到一句「模型未就绪」。删除模型后重进设置页也走这条路径收敛。
+  if (!status.ready && settingsState.voice === true) {
+    setVoiceEnabled(false);
+    applyVoiceButtonVisibility();
+  }
+  const enabled = settingsState.voice === true && status.ready;
+  // 下载进度只在「确实在下载」时才有意义；进度本身由 work:voice-progress 推过来，
+  // 这里先按主进程快照铺底，之后由订阅回调局部更新（不整页重绘，否则输入焦点会跳）。
+  const percent = voiceProgress ? voiceProgress.percent : 0;
+  const statusText = status.ready
+    ? t('voice.modelReady')
+    : status.bytes > 0
+      ? t('voice.modelPartial', { size: formatBytes(status.bytes) })
+      : t('voice.modelMissing');
+  const busy = status.downloading === true;
+
+  settingsSection.innerHTML = `
+    <div class="settings-block">
+      <div class="settings-block-head"><b>${t('voice.subtitle')}</b></div>
+      <div class="settings-list">
+        <button class="settings-row settings-toggle" data-setting="voice" role="switch" aria-checked="${enabled ? 'true' : 'false'}" aria-disabled="${status.ready ? 'false' : 'true'}">
+          <span class="settings-row-body"><span class="settings-row-title">${escapeHtml(t('voice.enable'))}</span><span class="settings-row-sub">${escapeHtml(status.ready ? t('voice.enableHint') : t('voice.enableLocked'))}</span></span>
+          <span class="settings-switch" aria-hidden="true"></span>
+        </button>
+      </div>
+    </div>
+    <div class="settings-block">
+      <div class="settings-block-head"><b>${t('voice.model')}</b><span>${escapeHtml(t('voice.modelName'))}</span></div>
+      <div class="settings-list">
+        <div class="settings-row settings-readonly">
+          <span class="settings-row-icon">${icon('layers-compress')}</span>
+          <span class="settings-row-body">
+            <span class="settings-row-title">${escapeHtml(t('voice.modelHint', { size: formatBytes(VOICE_MODEL_BYTES) }))}</span>
+            <span class="settings-row-sub">${escapeHtml(statusText)}${status.ready ? ` · ${escapeHtml(status.dir)}` : ''}</span>
+            ${busy
+              ? `<span class="settings-progress"><span class="settings-progress-bar" style="width:${percent}%"></span></span>
+                 <span class="settings-row-sub" data-voice-progress-label>${escapeHtml(voiceProgress ? t('voice.downloading', { file: voiceProgress.file, percent: String(voiceProgress.percent) }) : t('voice.download'))}</span>`
+              : ''}
+          </span>
+          <span class="settings-row-actions">
+            ${busy
+              ? `<button class="settings-action" data-voice="cancel">${escapeHtml(t('voice.cancelDownload'))}</button>`
+              : status.ready
+                ? `<button class="settings-action danger" data-voice="remove">${escapeHtml(t('voice.remove'))}</button>`
+                : `<button class="settings-action primary" data-voice="download">${escapeHtml(t('voice.download'))}</button>`}
+          </span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  settingsSection.querySelectorAll<HTMLButtonElement>('[data-setting]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      // 模型未下载时开关是锁的：不弹「下载」对话框，只提示并留在当前页，
+      // 因为用户此刻是来「开开关」不是来「下模型」，直接弹下载会把焦点抢走。
+      if (!status.ready) { showToast('info', t('voice.enableLocked'), 2200); return; }
+      // 语音开关是 work-app 自己的 UI 偏好，不能走 setSettings —— 那条路会写进
+      // ~/.mocode/config，而那个文件里所有键都是 core 读的环境变量（写进去等于
+      // 给 mocode 终端塞一个它不认识的键），且 setSettings 会顺带 restartAllAgents()。
+      setVoiceEnabled(settingsState.voice !== true);
+      applyVoiceButtonVisibility();
+      await renderSettingsVoiceSection();
+      showToast('success', settingsState.voice === true ? t('voice.enable') : t('voice.off'), 2000);
+    });
+  });
+
+  settingsSection.querySelectorAll<HTMLButtonElement>('[data-voice]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const action = button.dataset.voice;
+      if (action === 'download') {
+        // 226MB 下载 + 约 350MB 常驻内存，先摊开规格建议让用户判断，确认后才真的开始下。
+        if (!(await confirmVoiceDownload())) return;
+        button.disabled = true;
+        try {
+          const result = await window.mocodeWork.voiceDownload();
+          if (result.cancelled) { /* 取消不提示，静默重画 */ }
+          else if (!result.ok) showToast('error', result.message ?? t('voice.errTranscribe'));
+          else showToast('success', t('voice.downloaded'));
+        } catch (error) {
+          console.error('[voice] download', error);
+          showToast('error', t('voice.errTranscribe'));
+        }
+        await renderSettingsVoiceSection();
+        return;
+      }
+      if (action === 'cancel') {
+        await window.mocodeWork.voiceCancelDownload();
+        await renderSettingsVoiceSection();
+        return;
+      }
+      if (action === 'remove') {
+        const ok = window.confirm(t('voice.removeConfirm', { size: formatBytes(VOICE_MODEL_BYTES) }));
+        if (!ok) return;
+        try { await window.mocodeWork.voiceRemoveModel(); showToast('success', t('voice.removed')); }
+        catch (error) { console.error('[voice] remove', error); }
+        await renderSettingsVoiceSection();
+      }
     });
   });
 }
@@ -3669,6 +4471,7 @@ async function renderSettingsSection(): Promise<void> {
   // 按需渲染当前分类，避免一次性拉全部数据
   if (settingsActiveSection === 'model') await renderSettingsModelSection();
   else if (settingsActiveSection === 'behavior') renderSettingsBehaviorSection();
+  else if (settingsActiveSection === 'voice') await renderSettingsVoiceSection();
   else if (settingsActiveSection === 'appearance') renderSettingsAppearanceSection();
   else renderSettingsAboutSection();
 }
@@ -3697,6 +4500,9 @@ function openSettings(section?: SettingsSectionId): void {
     await refreshModelList();
     try { settingsState = await window.mocodeWork.getSettings(); }
     catch (error) { console.error('[settings]', error); settingsState = {}; }
+    // voice 不在主进程的 settings 快照里（它存在 localStorage），整份覆盖后必须补回来，
+    // 否则每次重开设置页开关都会显示成关闭状态。
+    settingsState.voice = readVoiceEnabled();
     await renderSettingsSection();
   })();
 }
@@ -4049,7 +4855,33 @@ void (async () => {
 })();
 searchInput.addEventListener('input', () => refreshSearch(searchInput.value));
 searchPanel.addEventListener('click', (event) => { if (event.target === searchPanel) searchPanel.classList.add('hidden'); });
-sendButton.addEventListener('click', () => void submit());
+
+// 语音：恢复开关状态（localStorage，不进 ~/.mocode/config）+ 订阅下载进度。
+// 注意这里**不做任何下载**：模型只在用户于设置页显式点「下载模型」时才拉，
+// 开启开关本身不会产生网络请求。
+setVoiceEnabled(readVoiceEnabled());
+applyVoiceButtonVisibility();
+window.mocodeWork.onVoiceProgress((progress) => {
+  voiceProgress = progress;
+  // 只在设置页停在「语音」分类时局部刷新进度，避免整页重绘抢走焦点。
+  if (!settingsModal?.classList.contains('hidden') && settingsActiveSection === 'voice') {
+    const bar = settingsSection?.querySelector<HTMLElement>('.settings-progress-bar');
+    if (bar) bar.style.width = `${progress.percent}%`;
+    const label = settingsSection?.querySelector<HTMLElement>('[data-voice-progress-label]');
+    if (label) label.textContent = t('voice.downloading', { file: progress.file, percent: String(progress.percent) });
+  }
+});
+/**
+ * 发送 / 停止是**两个不同动作**，共用一枚按钮但语义分开：
+ *   - 任务正在跑 → 按钮显示方框，点击 = 取消这一轮（Enter 仍是排队，见 submit）；
+ *   - 空闲 → 点击 = 发送（有队列残留时也走排队路径，不会被吞）。
+ * 以前两条路径都落到 submit()，导致「想接着说一句」直接掐掉正在跑的活。
+ */
+sendButton.addEventListener('click', () => {
+  const viewing = viewingTaskId();
+  if (isRunning(viewing)) { window.mocodeWork.send({ type: 'cancel', id: viewing }); return; }
+  void submit();
+});
 promptInput.addEventListener('input', resizePrompt);
 promptInput.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } });
 window.addEventListener('resize', () => {

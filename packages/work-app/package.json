@@ -27,7 +27,8 @@
   },
   "dependencies": {
     "@mocode/runtime": "0.1.0",
-    "dotenv": "16.0.0"
+    "dotenv": "16.0.0",
+    "sherpa-onnx-node": "^2.0.1"
   },
   "build": {
     "appId": "com.mocode.work",
@@ -52,7 +53,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icon.ico"
@@ -70,7 +73,10 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "icon": "assets/icon.icns",
@@ -81,7 +87,10 @@
       "title": "${productName} ${version}"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "icon": "assets/icons",
       "category": "Development",
       "artifactName": "${productName}-${version}.${ext}"

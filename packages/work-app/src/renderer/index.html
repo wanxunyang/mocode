@@ -33,6 +33,9 @@
           <button class="nav-item active" id="new-task"><svg class="icon" data-icon="circle-plus"></svg><span data-i18n="nav.newTask">新建任务</span></button>
           <button class="nav-item" id="nav-skills" data-i18n-title="nav.skills" aria-haspopup="dialog"><svg class="icon" data-icon="sparkles"></svg><span data-i18n="nav.skills">Skill 市场</span></button>
           <button class="nav-item" id="nav-mcp" data-i18n-title="nav.mcp" aria-haspopup="dialog"><svg class="icon" data-icon="globe"></svg><span data-i18n="nav.mcp">MCP 接入</span></button>
+          <button class="nav-item" id="nav-sessions"><svg class="icon" data-icon="branch"></svg><span data-i18n="nav.sessions">会话</span></button>
+          <button class="nav-item" id="nav-usage"><svg class="icon" data-icon="files"></svg><span data-i18n="nav.usage">用量</span></button>
+          <button class="nav-item" id="nav-memory"><svg class="icon" data-icon="spark-bot"></svg><span data-i18n="nav.memory">记忆</span></button>
         </nav>
         <section class="sidebar-section tasks-section"><div id="task-list" class="task-list"><p class="empty-tasks" data-i18n="sidebar.emptyTasks">无任务</p></div></section>
         <button class="sidebar-footer" id="settings-button" data-i18n-title="settings.title" aria-haspopup="dialog" aria-expanded="false">
@@ -54,7 +57,7 @@
         <section id="approval-panel" class="approval-panel hidden"></section>
         <aside id="inspector" class="inspector hidden">
           <header class="inspector-header"><b id="inspector-title" data-i18n="inspector.overview">项目概览</b><button id="close-inspector" data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button></header>
-          <nav class="inspector-tabs"><button data-tab="overview" class="selected" data-i18n="inspector.tabOverview">概览</button><button data-tab="files" data-i18n="inspector.files">文件</button></nav>
+          <nav class="inspector-tabs"><button data-tab="overview" class="selected" data-i18n="inspector.tabOverview">概览</button><button data-tab="files" data-i18n="inspector.files">文件</button><button data-tab="changes" data-i18n="inspector.changes">本轮改动</button></nav>
           <div id="inspector-content" class="inspector-content"></div>
         </aside>
         <section id="search-panel" class="search-panel hidden"><div class="search-dialog"><input id="search-input" data-i18n-placeholder="search.placeholder" /><div id="search-results"></div></div></section>
@@ -71,7 +74,7 @@
           <div class="composer">
             <div id="attachment-list" class="attachment-list"></div>
             <textarea id="prompt" rows="1" data-i18n-placeholder="composer.placeholder"></textarea>
-            <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" data-i18n-title="composer.addImage" data-i18n-aria="composer.addImage"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" data-i18n-title="composer.compactTitle"><svg class="icon icon-inline" data-icon="layers-compress"></svg><span data-i18n="composer.compact">压缩</span></button><span class="context-usage" id="context-usage" data-i18n-title="composer.contextUsage">--</span></div><div class="right-actions"><button id="mode-button" class="model-button" data-i18n-title="composer.switchModel" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">MoCode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" data-i18n-title="composer.send" data-i18n-aria="composer.sendAria"><svg class="icon" data-icon="arrow-up"></svg></button></div></div>
+            <div class="composer-actions"><div class="left-actions"><button class="plus-button icon-button-square" id="add-attachment" data-i18n-title="composer.addImage" data-i18n-aria="composer.addImage"><svg class="icon" data-icon="image"></svg></button><button class="compact-button" id="compact-button" data-i18n-title="composer.compactTitle"><svg class="icon icon-inline" data-icon="layers-compress"></svg><span data-i18n="composer.compact">压缩</span></button><span class="context-usage" id="context-usage" data-i18n-title="composer.contextUsage">--</span><button class="compact-button plan-toggle" id="plan-toggle" data-i18n-title="composer.planToggleTitle" aria-pressed="false"><svg class="icon icon-inline" data-icon="sparkles"></svg><span data-i18n="composer.planMode">计划</span></button></div><div class="right-actions"><button class="plus-button icon-button-square voice-button hidden" data-voice-mic data-i18n-title="voice.micTitle" data-i18n-aria="voice.micTitle" aria-pressed="false"><svg class="icon" data-icon="mic"></svg></button><button id="mode-button" class="model-button" data-i18n-title="composer.switchModel" aria-haspopup="listbox" aria-expanded="false"><span class="mode-label">MoCode Agent</span><svg class="icon icon-inline" data-icon="chevron-down"></svg></button><button id="send-button" class="send-button" data-i18n-title="composer.send" data-i18n-aria="composer.sendAria"><svg class="icon" data-icon="arrow-up"></svg></button></div></div>
           </div>
           <!-- 模型下拉必须挂在 .composer 之外：.composer 有 overflow: hidden，且它并不是定位祖先，
                挂在里面时包含块会随状态漂移（空态 .composer-area 是 static → 包含块退化成 .workspace，
@@ -281,6 +284,33 @@
             <p class="catalog-status hidden" id="skill-market-status"></p>
             <div class="catalog-list" id="skill-market-list" role="list" aria-label="skill market"></div>
           </div>
+        </div>
+      </section>
+
+      <!-- 语音模型下载确认：先告知规格建议，用户确认后才真的开始 226MB 下载 -->
+      <section id="voice-download-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="voice-download-title">
+        <div class="modal-card voice-download-card">
+          <header class="modal-head">
+            <b id="voice-download-title" data-i18n="voice.downloadTitle">下载语音模型</b>
+            <button class="modal-close icon-button muted" data-voice-download-close data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button>
+          </header>
+          <div class="modal-body">
+            <p class="voice-download-intro" data-i18n="voice.downloadIntro">SenseVoice Small int8 语音识别模型。下载一次后完全离线工作，音频不上传。</p>
+            <div class="voice-spec">
+              <div class="voice-spec-head" data-i18n="voice.specTitle">下载前请确认电脑规格</div>
+              <dl class="voice-spec-list">
+                <div class="voice-spec-row"><dt data-i18n="voice.specDisk">磁盘</dt><dd data-i18n="voice.specDiskValue">至少 500 MB 可用空间</dd></div>
+                <div class="voice-spec-row"><dt data-i18n="voice.specMemory">内存</dt><dd data-i18n="voice.specMemoryValue">系统可用 4 GB 以上</dd></div>
+                <div class="voice-spec-row"><dt data-i18n="voice.specCpu">处理器</dt><dd data-i18n="voice.specCpuValue">双核及以上</dd></div>
+                <div class="voice-spec-row"><dt data-i18n="voice.specNetwork">网络</dt><dd data-i18n="voice.specNetworkValue">首次下载需要联网</dd></div>
+              </dl>
+            </div>
+            <p class="voice-spec-note" data-i18n="voice.specNote">模型只保存在本机，删除后需重新下载。</p>
+          </div>
+          <footer class="modal-foot">
+            <button class="btn-ghost" data-voice-download-close data-i18n="taskModal.cancel">取消</button>
+            <button class="btn-primary" id="voice-download-confirm" data-i18n="voice.downloadConfirm">开始下载</button>
+          </footer>
         </div>
       </section>
 

@@ -17,11 +17,16 @@ import { readFileSync } from 'node:fs';
 import * as layout from '../../ui/layout.js';
 import { ui } from '../../ui/theme.js';
 import { getActiveRollbackStore, type Snapshot } from '../../rollback/index.js';
+// 实现已下沉到 src/changeset/unified-diff.ts（叶模块，无 ui/fs 依赖）：
+// host 的 `changes` 命令也要同一份 diff，而 host 进程不该为了 diff 拉进 layout。
+import { unifiedFileDiff } from '../../changeset/unified-diff.js';
 import { unhandled, next, type CommandHandler } from './types.js';
+
+// 保留旧的导出面（tests/ui/diff-commands.test.ts 直接从本模块取它）。
+export { unifiedFileDiff };
 
 const MAX_DIFF_LINES = 400; // 单文件输出上限:防止把万行生成文件刷满内容区
 const MAX_FILES = 60; // 单次命令最多渲染文件数(超出提示收窄)
-const CONTEXT = 3; // hunk 上下文行数
 
 /** 快照 before 内容 → 文本(null → 无内容/不可用;base64 解码失败按 null)。 */
 function snapshotText(snapshot: Snapshot): string | null {
@@ -39,53 +44,6 @@ function snapshotText(snapshot: Snapshot): string | null {
 /** 是否可当文本 diff:kind=file 且非 contentUnavailable(目录/软链/超预算跳过)。 */
 function diffable(snapshot: Snapshot): boolean {
   return snapshot.kind === 'file' && snapshot.contentUnavailable !== true;
-}
-
-/** 按行求公共前缀/后缀长度(与 lineDelta 同思路,但这里要保留行号做 hunk)。 */
-function hunkBoundaries(before: string[], after: string[]): { head: number; tail: number } {
-  let head = 0;
-  while (head < before.length && head < after.length && before[head] === after[head]) head++;
-  let tail = 0;
-  while (
-    tail < before.length - head &&
-    tail < after.length - head &&
-    before[before.length - 1 - tail] === after[after.length - 1 - tail]
-  )
-    tail++;
-  return { head, tail };
-}
-
-/**
- * 行级 unified diff 单文件段(纯文本,颜色渲染层加)。
- * 策略:前后缀等行消除后,中间区整段输出为「先删后加」的单 hunk。对单文件一次
- * 编辑(agent 编辑的绝大多数形态:改一处/几处)等价于标准 diff;全文重写时输出
- * 体积与正确 diff 同量级,只是 hunk 划分更粗。无变化返回 ''(指纹差异但文本相同)。
- */
-export function unifiedFileDiff(pathRel: string, beforeText: string | null, afterText: string | null): string {
-  const before = beforeText === null ? [] : beforeText.split('\n');
-  const after = afterText === null ? [] : afterText.split('\n');
-  const { head, tail } = hunkBoundaries(before, after);
-  const midBefore = before.slice(head, before.length - tail);
-  const midAfter = after.slice(head, after.length - tail);
-  if (midBefore.length === 0 && midAfter.length === 0) return '';
-
-  const contextStart = Math.max(0, head - CONTEXT);
-  const tailStartBefore = before.length - tail;
-  const tailStartAfter = after.length - tail;
-  const contextEndBefore = Math.min(before.length, tailStartBefore + CONTEXT);
-  const contextEndAfter = Math.min(after.length, tailStartAfter + CONTEXT);
-
-  const lines: string[] = [];
-  lines.push(`--- a/${pathRel}`);
-  lines.push(`+++ b/${pathRel}`);
-  lines.push(
-    `@@ -${contextStart + 1},${contextEndBefore - contextStart} +${contextStart + 1},${contextEndAfter - contextStart} @@`,
-  );
-  for (let i = contextStart; i < head; i++) lines.push(` ${before[i]}`);
-  for (const line of midBefore) lines.push(`-${line}`);
-  for (const line of midAfter) lines.push(`+${line}`);
-  for (let i = tailStartBefore; i < contextEndBefore; i++) lines.push(` ${before[i]}`);
-  return lines.join('\n');
 }
 
 /** 渲染一条 diff 行:加绿/删红/hunk 头青/上下文 dim。 */
