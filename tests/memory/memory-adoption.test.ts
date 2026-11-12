@@ -16,6 +16,7 @@ import {
   adoptionStats,
   applyAdoptionEvaluations,
   extractAdoptionEvaluations,
+  flushAdoptionSuppressions,
   pendingAdoptionDeliveries,
   pruneAdoptionLedger,
   recordMemoryDelivery,
@@ -145,6 +146,7 @@ test(
       [oldDelivery, oldEvaluation, recentDelivery].map((e) => JSON.stringify(e)).join('\n') + '\n',
       'utf8',
     );
+    // 注意:这条用例依赖 prune 同时做 90 天归档与抑制去重，两者不能互相吞掉。
 
     pruneAdoptionLedger(Date.now());
 
@@ -177,5 +179,112 @@ test(
     assert.equal(recordMemoryDelivery('paused', 'turn_recall'), null);
     recordMemorySuppression('paused', 'turn_recall', 'read_file_dedup');
     assert.equal(existsSync(ledgerFile()), false);
+  }),
+);
+
+test(
+  'R19:同一抑制在内存聚合成一行，flush 后才落盘且次数完整',
+  isolated(() => {
+    for (let i = 0; i < 25; i++) recordMemorySuppression('noisy', 'proactive_trigger', 'already_fired');
+    recordMemorySuppression('noisy', 'proactive_trigger', 'per_turn_limit');
+
+    // 未 flush 时账本还没写:抑制不再是每工具调用一次 appendFileSync。
+    assert.equal(existsSync(ledgerFile()), false, '抑制只进内存桶，不应逐条落盘');
+    // 但读路径要能看到本轮刚发生的抑制(未落盘也不能丢)。
+    assert.equal(adoptionStats().suppressed, 26);
+    assert.equal(adoptionStats().suppressedByReason.already_fired, 25);
+
+    flushAdoptionSuppressions();
+    const lines = readFileSync(ledgerFile(), 'utf8').split('\n').filter(Boolean);
+    assert.equal(lines.length, 2, '25 次 already_fired 压成 1 行，另一个 reason 另占 1 行');
+    const already = lines.map((l) => JSON.parse(l)).find((e) => e.reason === 'already_fired');
+    assert.equal(already.count, 25);
+    assert.equal(already.kind, 'suppressed');
+
+    // flush 后桶被清空，再统计不能翻倍。
+    assert.equal(adoptionStats().suppressed, 26);
+    flushAdoptionSuppressions();
+    assert.equal(readFileSync(ledgerFile(), 'utf8').split('\n').filter(Boolean).length, 2, '空桶 flush 不写任何行');
+  }),
+);
+
+test(
+  'R19:历史逐条抑制行在 prune 时被合并，不需要等到 90 天过期',
+  isolated(() => {
+    const now = Date.now();
+    const at = new Date(now - 60_000).toISOString();
+    const rows = [];
+    for (let i = 0; i < 12; i++)
+      rows.push({
+        id: `legacy-${i}`,
+        at,
+        sessionId: 's1',
+        memoryId: 'legacy',
+        channel: 'proactive_trigger',
+        kind: 'suppressed',
+        reason: 'already_fired',
+      });
+    rows.push({ id: 'keep-me', at, memoryId: 'kept', channel: 'turn_recall', kind: 'delivered' });
+    mkdirSync(join(process.cwd(), '.mocode'), { recursive: true });
+    writeFileSync(ledgerFile(), rows.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+
+    const before = adoptionStats();
+    pruneAdoptionLedger(now);
+
+    const lines = readFileSync(ledgerFile(), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    assert.equal(lines.length, 2, '12 条逐条抑制压成 1 条聚合行，delivered 原样保留');
+    assert.equal(lines.filter((e) => e.kind === 'delivered').length, 1);
+    assert.equal(lines.find((e) => e.kind === 'suppressed').count, 12);
+    assert.equal(existsSync(summaryFile()), false, '没有 90 天外事件时不该产生历史汇总');
+
+    // 压缩前后口径必须一致:计数不因合并而变。
+    const after = adoptionStats();
+    assert.equal(after.suppressed, before.suppressed);
+    assert.equal(after.suppressedByReason.already_fired, before.suppressedByReason.already_fired);
+    assert.equal(after.delivered, before.delivered);
+    assert.equal(after.pending, 1);
+  }),
+);
+
+test(
+  'R19:聚合行与逐条混存时按 count 累加，不会把一条算成一次',
+  isolated(() => {
+    const now = Date.now();
+    const at = new Date(now - 60_000).toISOString();
+    mkdirSync(join(process.cwd(), '.mocode'), { recursive: true });
+    writeFileSync(
+      ledgerFile(),
+      [
+        {
+          id: 'a',
+          at,
+          sessionId: 's',
+          memoryId: 'm',
+          channel: 'turn_recall',
+          kind: 'suppressed',
+          reason: 'per_turn_limit',
+          count: 9,
+        },
+        {
+          id: 'b',
+          at,
+          sessionId: 's',
+          memoryId: 'm',
+          channel: 'turn_recall',
+          kind: 'suppressed',
+          reason: 'per_turn_limit',
+        },
+      ]
+        .map((e) => JSON.stringify(e))
+        .join('\n') + '\n',
+      'utf8',
+    );
+
+    assert.equal(adoptionStats().suppressed, 10);
+    pruneAdoptionLedger(now);
+    assert.equal(adoptionStats().suppressed, 10, '合并后总数必须仍是 10');
   }),
 );

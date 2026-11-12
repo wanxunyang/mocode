@@ -23,8 +23,10 @@ import {
   writeMemoryHealth,
   formatMemoryHealth,
   flushProactiveStats,
+  pendingCandidateCount,
   adoptionEvents,
   adoptionStats,
+  flushAdoptionSuppressions,
   pruneAdoptionLedger,
   // R8 用户主权面
   purgeEntries,
@@ -287,6 +289,14 @@ export const memoryCommands: CommandHandler[] = [
     }
     if (active.length === 0)
       layout.contentWrite(`${ui.dim}(无 active 记忆;用 memory_save 存,或 /init 生成 AGENTS.md)${ui.reset}\n`);
+    // R13:压缩候选是"待裁决原料",积压时用户看到的是记忆库正常而通道在漏料。
+    // 只在真有积压时出一行——队列空是常态,常态不占屏幕。
+    const pendingCandidates = pendingCandidateCount();
+    if (pendingCandidates > 0) {
+      layout.contentWrite(
+        `${ui.dim}(压缩候选 ${pendingCandidates} 条待裁决:运行 /reflect 让既有反思调用处理)${ui.reset}\n`,
+      );
+    }
     // R8.3:暂停状态必须在概览里可见——否则用户以为在记,其实一条都没落盘。
     if (isMemoryWritesPaused()) {
       layout.contentWrite(`${ui.dim}(写入已暂停:本会话不再新增/修改记忆;用 /memory pause off 恢复)${ui.reset}\n`);
@@ -300,6 +310,8 @@ export const memoryCommands: CommandHandler[] = [
       layout.contentWrite(`${ui.dim}(记忆子系统已关闭,/memory adoption 无效。用 /memory_switch 打开)${ui.reset}\n`);
       return next();
     }
+    // 抑制计数在内存聚合(每工具调用一次"记录"会把账本撑到几十 MB),看之前先落盘。
+    flushAdoptionSuppressions();
     pruneAdoptionLedger();
     const id = ctx.line.slice('/memory adoption'.length).trim();
     const stats = adoptionStats();
@@ -340,6 +352,7 @@ export const memoryCommands: CommandHandler[] = [
       return next();
     }
     flushProactiveStats();
+    flushAdoptionSuppressions();
     pruneAdoptionLedger();
     const health = writeMemoryHealth(true);
     if (!health) {

@@ -12,7 +12,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { __setChatCreateImpl, type ChatMessage } from '../../src/llm/index.js';
-import { runReflection, parsePlan, reflectOnExit, __resetReflectThrottleForTests } from '../../src/memory/reflect.js';
+import {
+  runReflection,
+  parsePlan,
+  reflectOnExit,
+  formatReflectResult,
+  __resetReflectThrottleForTests,
+} from '../../src/memory/reflect.js';
+import { appendPendingCandidates } from '../../src/memory/pending.js';
 import { adoptionStats, recordMemoryDelivery } from '../../src/memory/adoption.js';
 
 function sse(content: string | null): AsyncIterable<unknown> {
@@ -307,5 +314,34 @@ test(
     assert.equal(result.adoptionsEvaluated, 1);
     assert.equal(adoptionStats().adopted, 1);
     assert.equal(adoptionStats().pending, 0);
+  }),
+);
+
+test(
+  'R13:反思摘要报出压缩候选消费量，未消费时不出现该字段',
+  isolated(async () => {
+    // 未消费(pendingConsumed undefined)→ 不输出,避免常态多一个恒为 0 的噪声字段。
+    const quiet = formatReflectResult({
+      ts: new Date().toISOString(),
+      saves: 0,
+      updates: 0,
+      forgets: 0,
+      triples: 0,
+      gcDecayed: 0,
+      gcCapped: 0,
+      gcGced: 0,
+    });
+    assert.doesNotMatch(quiet, /压缩候选/);
+
+    // 真实消费一轮:摘要必须带上条数,否则日志里「队列空」与「通道没产出」无法区分
+    // (实测就是这样把一条正常运转的通道误判成没通电的)。
+    appendPendingCandidates([
+      { kind: 'pitfall', text: 'R13 观测缺口:看不到消费量' },
+      { kind: 'decision', text: '候选消费量进反思摘要' },
+    ]);
+    __setChatCreateImpl(async () => sse('{"saves":[],"updates":[],"forgets":[],"triples":[]}'));
+    const r = await runReflection('user: hi');
+    assert.equal(r.pendingConsumed, 2);
+    assert.match(formatReflectResult(r), /压缩候选2/);
   }),
 );

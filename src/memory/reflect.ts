@@ -747,6 +747,10 @@ export function formatReflectResult(r: ReflectResult): string {
   if (r.promotions) parts.push(`印证转正${r.promotions}`);
   if (r.demotions) parts.push(`反证降级${r.demotions}`);
   if (r.relViolations) parts.push(`违${r.relViolations}`);
+  // R13:压缩候选的消费量必须出现在反思摘要里。不报这一项时，「候选队列空」与
+  // 「压缩这条通道压根没产出」在日志里长得一模一样——实测就是这样把一条正常运转的
+  // 通道误判成没通电的。只在真消费过时才输出，避免常态多一个恒为 0 的噪声字段。
+  if (r.pendingConsumed) parts.push(`压缩候选${r.pendingConsumed}`);
   if (r.adoptionsEvaluated) parts.push(`采纳评估${r.adoptionsEvaluated}`);
   if (r.gcDecayed || r.gcCapped || r.gcGced) {
     parts.push(`遗忘(衰减${r.gcDecayed}/封顶${r.gcCapped}/清除${r.gcGced})`);

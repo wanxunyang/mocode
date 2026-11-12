@@ -124,6 +124,7 @@ export {
 export {
   recordMemoryDelivery,
   recordMemorySuppression,
+  flushAdoptionSuppressions,
   adoptionEvaluationInstruction,
   extractAdoptionEvaluations,
   applyAdoptionEvaluations,

@@ -35,7 +35,7 @@ import {
 import { flushProactiveStats } from './memory/proactive.js';
 import { flushTurnRecallStats, buildTurnRecallSection, isTurnRecallEnabled } from './memory/turn-recall.js';
 import { writeMemoryHealth } from './memory/health.js';
-import { pruneAdoptionLedger } from './memory/adoption.js';
+import { flushAdoptionSuppressions, pruneAdoptionLedger } from './memory/adoption.js';
 import { defaultRuntime, Runtime } from './runtime/index.js';
 import { runAgentCore, type AgentHooks } from './agent/core.js';
 import { summarizeToolCall, summarizeToolResult } from './ui/render.js';
@@ -358,6 +358,8 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     flushProactiveStats();
     // R18:一次性执行的静默召回计数同样落盘,否则 `mocode -p` 那一侧永远空白。
     flushTurnRecallStats();
+    // R19:抑制计数在内存聚合成一行后再落盘,避免每次工具调用都追加一行。
+    flushAdoptionSuppressions();
     pruneAdoptionLedger();
     writeMemoryHealth(memoryOn);
     await runtime.close();

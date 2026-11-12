@@ -27,11 +27,12 @@ import {
 import { readRecallStats } from './recall-stats.js';
 import { proactiveCounters } from './proactive.js';
 import { adoptionStats, type AdoptionStats } from './adoption.js';
+import { loadPendingCandidates } from './pending.js';
 import { listInternalizedProfile, listProfileCandidates } from './persona.js';
 import { MAX_ACTIVE } from '../tools/constants.js';
 
 /** 快照结构版本。字段增删时自增,让读旧文件的人能立刻发现口径变了。 */
-export const MEMORY_HEALTH_SCHEMA_VERSION = 2;
+export const MEMORY_HEALTH_SCHEMA_VERSION = 3;
 
 export interface MemoryHealth {
   schemaVersion: number;
@@ -92,6 +93,17 @@ export interface MemoryHealth {
   profile: { internalized: number; candidates: number };
   /** R19:送达不等于采纳；pending 表示尚未搭载反思/压缩调用裁决。 */
   adoption: AdoptionStats;
+  /**
+   * R13 压缩→记忆交接队列。
+   *
+   * 三个数字缺一不可，因为它们分别回答三个不同的问题：
+   *  - `pending` 为 0 既可能是「压缩没产出候选」也可能是「产出后已被反思消费完」，
+   *    只看文件大小会把后者误读成前者（真实踩过：mocode 库 0 字节被当成通道没通电，
+   *    而 .mocode/memory-pending.jsonl 为空恰恰是 trimPendingCandidates 写入的结果）；
+   *  - `oldestAt/ageHours` 才是「积压」的信号：候选是给未来会话的原料，压了一整天还没被
+   *    裁决就等于丢了（队列上限 40 条会挤掉旧的）。
+   */
+  compaction: { pending: number; oldestAt: string | null; ageHours: number };
   /** 人可读的观测提示(按严重性排序,最多 6 条)。空数组 = 没有值得说的异常。 */
   warnings: string[];
 }
@@ -136,6 +148,17 @@ export function buildMemoryHealth(): MemoryHealth {
   const recall = readRecallStats();
   const pc = proactiveCounters();
   const adoption = adoptionStats();
+  // R13:候选队列只在记忆开启时才存在；读失败/不存在 → 0 条(与 load 的静默容错一致)。
+  const pendingCandidates = loadPendingCandidates();
+  const oldestPendingAt = pendingCandidates.reduce<string | null>((oldest, c) => {
+    const at = typeof c.at === 'string' ? c.at : '';
+    if (!at) return oldest;
+    return oldest === null || at < oldest ? at : oldest;
+  }, null);
+  const oldestMs = oldestPendingAt ? Date.parse(oldestPendingAt) : NaN;
+  const pendingAgeHours = Number.isFinite(oldestMs)
+    ? Math.max(0, Math.round(((Date.now() - oldestMs) / 3600000) * 10) / 10)
+    : 0;
 
   let internalized = 0;
   let candidates = 0;
@@ -193,6 +216,11 @@ export function buildMemoryHealth(): MemoryHealth {
     },
     profile: { internalized, candidates },
     adoption,
+    compaction: {
+      pending: pendingCandidates.length,
+      oldestAt: oldestPendingAt,
+      ageHours: pendingAgeHours,
+    },
     warnings: [],
   };
 
@@ -235,6 +263,13 @@ function collectWarnings(h: MemoryHealth): string[] {
   }
   if (h.adoption.pending >= 12) {
     out.push(`已有 ${h.adoption.pending} 条送达记忆尚未评估:运行 /reflect 或等待下一次压缩以复用既有模型调用裁决`);
+  }
+  // R13:队列积压与「没通电」是两件相反的事，告警要把方向说清。
+  // 只按条数告警会漏掉最坏形态：两三条候选晾了一整天，条数不够但原料已失效。
+  if (h.compaction.pending >= 10 || (h.compaction.pending > 0 && h.compaction.ageHours >= 24)) {
+    out.push(
+      `压缩候选已积压 ${h.compaction.pending} 条(最旧 ${h.compaction.ageHours}h):运行 /reflect 让既有反思调用裁决，否则队列上限会把旧的挤掉`,
+    );
   }
   return out.slice(0, 6);
 }
@@ -315,6 +350,15 @@ export function formatMemoryHealth(h: MemoryHealth = buildMemoryHealth()): strin
       ` · trigger ${h.proactive.triggerHits} / 锚点 ${h.proactive.anchorHits}(其中失效 ${h.proactive.staleAnchorHits},${pct(h.proactive.staleAnchorRate)})`,
   );
   lines.push(`画像:内化 ${h.profile.internalized} · 候选 ${h.profile.candidates}`);
+  // R13:0 条也照常输出 —— 「队列空」本身就是要观测的状态，藏起来就又回到
+  // 「看不见 = 不知道通没通电」。有积压时补上最旧时长。
+  // 兼容旧快照:这份 JSON 是覆盖写的单点文件，磁盘上可能还是 schemaVersion 2 的旧结构，
+  // 缺 compaction 时按 0 条渲染而不是抛 TypeError(渲染函数不该因为快照旧了而崩)。
+  const compaction = h.compaction ?? { pending: 0, oldestAt: null, ageHours: 0 };
+  lines.push(
+    `压缩候选:待裁决 ${compaction.pending}` +
+      (compaction.pending > 0 ? ` · 最旧 ${compaction.ageHours}h(${compaction.oldestAt})` : ''),
+  );
   lines.push(
     `采纳:送达 ${h.adoption.delivered} · 已评估 ${h.adoption.evaluated}(采纳 ${h.adoption.adopted} / 无关 ${h.adoption.notApplicable} / 不明 ${h.adoption.unclear}) · 待评估 ${h.adoption.pending} · 已抑制 ${h.adoption.suppressed}`,
   );

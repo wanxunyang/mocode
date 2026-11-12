@@ -36,6 +36,7 @@ import {
 import { recordRecallSearch } from '../../src/memory/recall-stats.js';
 import { recordSessionEpisode } from '../../src/memory/episodic.js';
 import { recordMemoryDelivery } from '../../src/memory/adoption.js';
+import { appendPendingCandidates, pendingCandidateCount } from '../../src/memory/pending.js';
 
 interface Dirs {
   projDir: string;
@@ -394,5 +395,59 @@ test(
     assert.equal(health.adoption.pending, 12);
     assert.ok(health.warnings.some((warning) => warning.includes('尚未评估')));
     assert.match(formatMemoryHealth(health).join('\n'), /采纳:送达 12 .*待评估 12/);
+  }),
+);
+
+// ── R13 压缩候选队列 ─────────────────────────────────────────────────
+
+test(
+  'buildMemoryHealth:R13 候选队列为零时也输出该行(空队列是正常状态,但要可见)',
+  isolated(() => {
+    const health = buildMemoryHealth();
+    assert.deepEqual(health.compaction, { pending: 0, oldestAt: null, ageHours: 0 });
+    // 0 条不得触发告警:空队列是常态,告警留给真积压。
+    assert.ok(!health.warnings.some((w) => w.includes('压缩候选')));
+    assert.match(formatMemoryHealth(health).join('\n'), /压缩候选:待裁决 0/);
+  }),
+);
+
+test(
+  'buildMemoryHealth:R13 候选积压时报条数与最旧时长,并给出可执行动作',
+  isolated(() => {
+    for (let i = 0; i < 10; i++) appendPendingCandidates([{ kind: 'pitfall', text: `候选 ${i} 的内容` }]);
+    // 把当条时间回拨 30 小时:条数不够时也要能被 ageHours 抓到(最坏形态是少量候选晾一整天)。
+    const dir = join(process.cwd(), '.mocode');
+    mkdirSync(dir, { recursive: true });
+    const old = new Date(Date.now() - 30 * 3600 * 1000).toISOString();
+    writeFileSync(
+      join(dir, 'memory-pending.jsonl'),
+      [{ kind: 'pitfall', text: '一条晾了 30 小时的候选', at: old, source: 'compact' }]
+        .map((c) => JSON.stringify(c))
+        .join('\n') + '\n',
+      'utf8',
+    );
+
+    const health = buildMemoryHealth();
+    assert.equal(health.compaction.pending, 1);
+    assert.equal(health.compaction.oldestAt, old);
+    assert.ok(
+      health.compaction.ageHours >= 29 && health.compaction.ageHours <= 31,
+      `ageHours 应≈30，实际 ${health.compaction.ageHours}`,
+    );
+    assert.ok(health.warnings.some((w) => w.includes('压缩候选已积压') && w.includes('/reflect')));
+    const rendered = formatMemoryHealth(health).join('\n');
+    assert.match(rendered, /压缩候选:待裁决 1 · 最旧 30h/);
+  }),
+);
+
+test(
+  'buildMemoryHealth:R13 候选条数多但都很新时也告警(队列上限会挤掉旧的)',
+  isolated(() => {
+    for (let i = 0; i < 10; i++) appendPendingCandidates([{ kind: 'decision', text: `新候选 ${i}` }]);
+    assert.equal(pendingCandidateCount(), 10);
+    const health = buildMemoryHealth();
+    assert.equal(health.compaction.pending, 10);
+    assert.ok(health.compaction.ageHours < 1);
+    assert.ok(health.warnings.some((w) => w.includes('压缩候选已积压 10 条')));
   }),
 );
