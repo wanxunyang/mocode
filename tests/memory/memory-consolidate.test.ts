@@ -29,7 +29,15 @@ import {
   runConsolidation,
   drainMemoryBackground,
   parseConsolidationPlan,
+  formatConsolidationResult,
 } from '../../src/memory/reflect.js';
+import {
+  __resetConsolidationSkipsForTests,
+  consolidationSignature,
+  consolidationSkipStats,
+  loadConsolidationSkips,
+} from '../../src/memory/consolidate-skips.js';
+import { setMemoryWritesPaused } from '../../src/memory/write-gate.js';
 
 function isolated(fn: () => void | Promise<void>): () => Promise<void> {
   return async () => {
@@ -51,6 +59,9 @@ function isolated(fn: () => void | Promise<void>): () => Promise<void> {
     process.env.MEMORY_ENABLED = 'true';
     delete process.env.MOCODE_MEMORY_EPISODIC;
     delete process.env.MOCODE_MEMORY_CONSOLIDATE;
+    // R11.5:跳过状态是**跨进程持久**的文件(cwd/.mocode/memory-consolidate-skips.json)。
+    // 不在这里清,mkdtemp 之外的手工落盘或前一个用例残留会让「第几次才停问」的断言随机化。
+    __resetConsolidationSkipsForTests();
     try {
       await fn();
     } finally {
@@ -503,6 +514,135 @@ test(
     assert.equal(loadAll().filter((e) => e.type !== 'episode').length, 1);
   }),
 );
+
+// ── R11.5 跳过记忆:理由留证 + 同一组不再重复花钱 ─────────────────────────
+
+test(
+  'runConsolidation:skip 理由进入结果与摘要(不再只是一串「跳过 1」)',
+  isolated(async () => {
+    seedTheme();
+    __setChatCreateImpl(async () => sse('{"skip":true,"reason":"共享词是「看看/功能」这类口语,不是主题"}'));
+    const r = await runConsolidation(undefined);
+    assert.equal(r.skipped, 1);
+    // 关键:理由必须留下。此前 plan.reason 解析出来就扔了,20 次 0 产出没有任何解释。
+    assert.deepEqual(r.skipReasons, ['共享词是「看看/功能」这类口语,不是主题']);
+    assert.match(formatConsolidationResult(r), /跳过 1:共享词是「看看\/功能」这类口语,不是主题/);
+    // 理由同时进状态文件,供 /memory health 事后查看(不依赖当时是否看了日志)
+    assert.equal(consolidationSkipStats().lastReason, '共享词是「看看/功能」这类口语,不是主题');
+  }),
+);
+
+test(
+  'runConsolidation:同一组连续两次被判凑巧 → 第三次不再发请求,只记「停问」',
+  isolated(async () => {
+    seedTheme();
+    let calls = 0;
+    __setChatCreateImpl(async () => {
+      calls++;
+      return sse('{"skip":true,"reason":"这三条只是碰巧都改了 tool-schema"}');
+    });
+
+    await runConsolidation(undefined);
+    assert.equal(calls, 1);
+    // 1 次不够:一次模型抖动或措辞漂移就会把一条真能用的通道永久焊死。
+    await runConsolidation(undefined);
+    assert.equal(calls, 2, '第二次仍要问——判据是「连续」而不是「曾经」');
+
+    const third = await runConsolidation(undefined);
+    assert.equal(calls, 2, '第三次必须停问,否则每轮末尾都在为同一批情节重复付调用');
+    assert.equal(third.skipped, 0);
+    assert.equal(third.muted, 1);
+    assert.match(formatConsolidationResult(third), /停问 1/);
+
+    const stats = consolidationSkipStats();
+    assert.equal(stats.asked, 2, '停问的组不得计入「问过」');
+    assert.equal(stats.skipped, 2);
+    assert.equal(stats.mutedHits, 1, '省下的请求要单独计数,否则止血措施不可见');
+    assert.equal(stats.muted, 1);
+    // 停问只是不发请求,绝不等于「偷偷写库」或「把情节标记成已巩固」
+    assert.equal(loadAll().filter((e) => e.type !== 'episode').length, 0);
+    for (const e of episodes()) assert.equal(e.derivedInto, undefined);
+  }),
+);
+
+test(
+  'runConsolidation:组成员变动后签名变化 → 必须重新问(新证据值得问)',
+  isolated(async () => {
+    seedTheme();
+    let calls = 0;
+    __setChatCreateImpl(async () => {
+      calls++;
+      return sse('{"skip":true,"reason":"凑巧"}');
+    });
+    await runConsolidation(undefined);
+    await runConsolidation(undefined);
+    assert.equal(calls, 2);
+    assert.equal(consolidationSkipStats().muted, 1);
+
+    // 新会话并入同一主题 → 组变成 4 条,提示词不再逐字相同
+    const extra = recordSessionEpisode({
+      sessionId: 's-d',
+      queries: ['tool schema 在 dashscope 下又被拒了,继续查 uniqueItems'],
+      changedFiles: ['src/llm/tool-schema.ts'],
+    });
+    assert.ok(extra.ok);
+
+    const after = await runConsolidation(undefined);
+    assert.equal(calls, 3, '成员变了就必须重新评估,不得沿用旧组的停问结论');
+    assert.equal(after.muted, undefined);
+    assert.equal(after.skipped, 1);
+  }),
+);
+
+test(
+  'runConsolidation:巩固成功时清除该组跳过记忆',
+  isolated(async () => {
+    seedTheme();
+    __setChatCreateImpl(async () => sse('{"skip":true,"reason":"凑巧"}'));
+    await runConsolidation(undefined);
+    assert.equal(consolidationSkipStats().muted, 1);
+
+    __setChatCreateImpl(async () => sse(DRAFT));
+    const r = await runConsolidation(undefined);
+    assert.equal(r.consolidated, 1);
+    // 必须清:若该组日后因故重新进池,残留 strikes 会让它一上来就被停问,
+    // 等于把一条曾经成功的通道永久焊死。
+    assert.deepEqual(loadConsolidationSkips().skips, {});
+    assert.equal(consolidationSkipStats().muted, 0);
+  }),
+);
+
+test(
+  'R11.5 停问状态受写入总闸约束:/memory pause 时不落状态、也不停问',
+  isolated(async () => {
+    seedTheme();
+    // 沙箱初始化时已写过一个空的停问状态文件,所以这里断言的是「内容没被写过」而非「文件不存在」。
+    const before = readFileSync(join(process.cwd(), '.mocode', 'memory-consolidate-skips.json'), 'utf8');
+    setMemoryWritesPaused(true);
+    try {
+      let calls = 0;
+      __setChatCreateImpl(async () => {
+        calls++;
+        return sse('{"skip":true,"reason":"凑巧"}');
+      });
+      await runConsolidation(undefined);
+      await runConsolidation(undefined);
+      await runConsolidation(undefined);
+      // 暂停语义是「本会话不落任何记忆文件」;停问状态同属这一族,不能偷偷累积。
+      const after = readFileSync(join(process.cwd(), '.mocode', 'memory-consolidate-skips.json'), 'utf8');
+      assert.equal(after, before, '暂停期间不得写入停问状态');
+      assert.equal(loadConsolidationSkips().totals.asked, 0, '令牌计数也不得落盘');
+      assert.equal(calls, 3, '没有状态就没有停问,三轮都照常问——暂停是临时的,不该留下持久副作用');
+    } finally {
+      setMemoryWritesPaused(false);
+    }
+  }),
+);
+
+test('consolidationSignature:成员顺序无关,成员集合不同则不同', () => {
+  assert.equal(consolidationSignature(['b', 'a']), consolidationSignature(['a', 'b']));
+  assert.notEqual(consolidationSignature(['a', 'b']), consolidationSignature(['a', 'b', 'c']));
+});
 
 // ── 纯函数:解析 ──────────────────────────────────────────────────────────
 

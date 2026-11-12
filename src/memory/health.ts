@@ -28,11 +28,12 @@ import { readRecallStats } from './recall-stats.js';
 import { proactiveCounters } from './proactive.js';
 import { adoptionStats, type AdoptionStats } from './adoption.js';
 import { loadPendingCandidates } from './pending.js';
+import { consolidationSkipStats } from './consolidate-skips.js';
 import { listInternalizedProfile, listProfileCandidates } from './persona.js';
 import { MAX_ACTIVE } from '../tools/constants.js';
 
 /** 快照结构版本。字段增删时自增,让读旧文件的人能立刻发现口径变了。 */
-export const MEMORY_HEALTH_SCHEMA_VERSION = 3;
+export const MEMORY_HEALTH_SCHEMA_VERSION = 4;
 
 export interface MemoryHealth {
   schemaVersion: number;
@@ -104,6 +105,23 @@ export interface MemoryHealth {
    *    裁决就等于丢了（队列上限 40 条会挤掉旧的）。
    */
   compaction: { pending: number; oldestAt: string | null; ageHours: number };
+  /**
+   * R11.5 巩固空转。`episodes.consolidationRate` 只回答「有没有巩固成果」,
+   * 回答不了「花了多少次调用去换」——真实情况就是 20 次请求全部 `跳过 1` 而该指标一直是 0,
+   * 于是没人能分辨「通道没通电」与「问了 20 次模型都说凑巧」。
+   *
+   * `asked/skipped/mutedHits` 三者缺一不可:asked 是成本,skipped/asked 是空转率,
+   * mutedHits 才是止血措施生效的证据(省下的请求数)。
+   */
+  consolidation: {
+    asked: number;
+    skipped: number;
+    /** 跳过 / 问过。1.0 = 一次都没换来巩固成果。 */
+    skipRate: number;
+    muted: number;
+    mutedHits: number;
+    lastReason: string | null;
+  };
   /** 人可读的观测提示(按严重性排序,最多 6 条)。空数组 = 没有值得说的异常。 */
   warnings: string[];
 }
@@ -159,6 +177,7 @@ export function buildMemoryHealth(): MemoryHealth {
   const pendingAgeHours = Number.isFinite(oldestMs)
     ? Math.max(0, Math.round(((Date.now() - oldestMs) / 3600000) * 10) / 10)
     : 0;
+  const consolidationSkips = consolidationSkipStats();
 
   let internalized = 0;
   let candidates = 0;
@@ -221,6 +240,14 @@ export function buildMemoryHealth(): MemoryHealth {
       oldestAt: oldestPendingAt,
       ageHours: pendingAgeHours,
     },
+    consolidation: {
+      asked: consolidationSkips.asked,
+      skipped: consolidationSkips.skipped,
+      skipRate: rate(consolidationSkips.skipped, consolidationSkips.asked),
+      muted: consolidationSkips.muted,
+      mutedHits: consolidationSkips.mutedHits,
+      lastReason: consolidationSkips.lastReason,
+    },
     warnings: [],
   };
 
@@ -266,6 +293,14 @@ function collectWarnings(h: MemoryHealth): string[] {
   }
   // R13:队列积压与「没通电」是两件相反的事，告警要把方向说清。
   // 只按条数告警会漏掉最坏形态：两三条候选晾了一整天，条数不够但原料已失效。
+  // R11.5:巩固空转。与上面那条「零巩固」告警不重复:那条说的是结果,这条说的是代价。
+  // 阈值放在 6 次:一次巩固最多两组请求,两轮自动触发就到 4 次,6 次已足以确认是系统性无效。
+  if (h.consolidation.asked >= 6 && h.consolidation.skipped === h.consolidation.asked) {
+    out.push(
+      `巩固已问 ${h.consolidation.asked} 次全被判「只是凑巧」(${h.consolidation.muted} 组停问):` +
+        `最近理由:${h.consolidation.lastReason ?? '未记录'}`,
+    );
+  }
   if (h.compaction.pending >= 10 || (h.compaction.pending > 0 && h.compaction.ageHours >= 24)) {
     out.push(
       `压缩候选已积压 ${h.compaction.pending} 条(最旧 ${h.compaction.ageHours}h):运行 /reflect 让既有反思调用裁决，否则队列上限会把旧的挤掉`,
@@ -358,6 +393,22 @@ export function formatMemoryHealth(h: MemoryHealth = buildMemoryHealth()): strin
   lines.push(
     `压缩候选:待裁决 ${compaction.pending}` +
       (compaction.pending > 0 ? ` · 最旧 ${compaction.ageHours}h(${compaction.oldestAt})` : ''),
+  );
+  // R11.5:asked 为 0 时说明「还没问过」,不显示 0% 空转率——
+  // 没数据与有数据但结果为零是两件不同的事,渲染上必须能区分。
+  // 同样兼容旧快照(缺 consolidation 时按零值渲染)。
+  const consolidation = h.consolidation ?? {
+    asked: 0,
+    skipped: 0,
+    skipRate: 0,
+    muted: 0,
+    mutedHits: 0,
+    lastReason: null,
+  };
+  lines.push(
+    `巩固:问过 ${consolidation.asked} 次 · 跳过 ${consolidation.skipped}(${pct(consolidation.skipRate)})` +
+      ` · 停问 ${consolidation.muted} 组(省 ${consolidation.mutedHits} 次)` +
+      (consolidation.lastReason ? ` | 最近理由:${consolidation.lastReason}` : ''),
   );
   lines.push(
     `采纳:送达 ${h.adoption.delivered} · 已评估 ${h.adoption.evaluated}(采纳 ${h.adoption.adopted} / 无关 ${h.adoption.notApplicable} / 不明 ${h.adoption.unclear}) · 待评估 ${h.adoption.pending} · 已抑制 ${h.adoption.suppressed}`,

@@ -37,6 +37,15 @@ import { detectHijack, findSourceLine, isUntrustedRole } from './guard.js';
 import { appendAudit } from './audit.js';
 import { normalizeRelation, isKnownRelation, relationCheatSheet } from './relation-vocab.js';
 import { formatPendingForReflect, loadPendingCandidates, trimPendingCandidates } from './pending.js';
+import {
+  clearConsolidationSkip,
+  consolidationSignature,
+  isConsolidationGroupMuted,
+  recordConsolidationAsk,
+  recordConsolidationMuteHit,
+  recordConsolidationSkip,
+} from './consolidate-skips.js';
+import { CONSOLIDATE_SKIP_STRIKES } from '../tools/constants.js';
 import { adoptionEvaluationInstruction, applyAdoptionEvaluations } from './adoption.js';
 import {
   applyConsolidation,
@@ -901,6 +910,20 @@ export interface ConsolidationResult {
   consolidated: number;
   /** 模型判定「这几条只是凑巧」而跳过的组数。 */
   skipped: number;
+  /**
+   * R11.5 跳过的理由(逐组一句)。
+   *
+   * 必须留下:此前这个字段解析出来就扔了,于是「20 次巩固全是 0 产出」在日志里只是
+   * 一串 `跳过 1`,没有任何人能回答「为什么」。理由是这个通道唯一能自证的证词。
+   */
+  skipReasons?: string[];
+  /**
+   * R11.5 因签名已停问而**没有**发请求的组数(省下的 LLM 调用)。
+   *
+   * 与 `skipped` 分开报:一个是「问了但没用」,一个是「没问、也没必要问」。
+   * 混在一起会让「空转率」永远上不去,反而把停问这条止血措施藏起来。
+   */
+  muted?: number;
   error?: string;
   rawParseFailure?: string;
 }
@@ -987,7 +1010,16 @@ export async function runConsolidation(
   if (list.length === 0) return result;
   const timeoutSignal = signal ?? AbortSignal.timeout(REFLECT_TIMEOUT_MS);
   for (const group of list) {
+    // R11.5:成员集合相同的组,喂给模型的提示词逐字相同,答案不会因为再问一次而变好。
+    // 连续被判「凑巧」达到阈值后直接跳过,省下一次真实 LLM 调用。
+    const signature = consolidationSignature(group.members.map((m) => m.entry.id));
+    if (isConsolidationGroupMuted(signature, CONSOLIDATE_SKIP_STRIKES)) {
+      result.muted = (result.muted ?? 0) + 1;
+      recordConsolidationMuteHit();
+      continue;
+    }
     try {
+      recordConsolidationAsk();
       const first = await fetchReflection(
         [{ role: 'system' as const, content: CONSOLIDATE_SYS } as ChatMessage, consolidatePrompt(group)],
         timeoutSignal,
@@ -1016,11 +1048,20 @@ export async function runConsolidation(
       }
       if (plan.skip) {
         result.skipped++;
+        // R11.5:理由必须留证。此前这里只 increment,于是 20 次 0 产出没有任何解释。
+        if (plan.reason) {
+          result.skipReasons ??= [];
+          result.skipReasons.push(plan.reason.replace(/\s+/g, ' ').slice(0, 160));
+        }
+        recordConsolidationSkip(signature, { reason: plan.reason, members: group.members.length });
         continue;
       }
       const applied = applyConsolidation(group, plan.draft);
-      if (applied.ok) result.consolidated++;
-      else result.error ??= applied.reason;
+      if (applied.ok) {
+        result.consolidated++;
+        // 成功即清记忆:成员已挂 derivedInto 不会再进池,若因故回来也不该一上来就被停问。
+        clearConsolidationSkip(signature);
+      } else result.error ??= applied.reason;
     } catch (e) {
       if (timeoutSignal.aborted) {
         result.error = '巩固超时(后端持续失败或无响应)';
@@ -1087,10 +1128,17 @@ export function __resetConsolidateThrottleForTests(): void {
   lastConsolidationResult = null;
 }
 
-/** 摘要串(供 repl flush):巩固 N 组(跳过 M 条)。 */
+/** 摘要串(供 repl flush 与 memory.log):巩固 N 组(跳过 M 条 · 停问 K 组)。 */
 export function formatConsolidationResult(r: ConsolidationResult): string {
   const parts = [`巩固 ${r.consolidated}/${r.groups} 组`];
-  if (r.skipped > 0) parts.push(`跳过 ${r.skipped}`);
+  if (r.skipped > 0) {
+    // 理由随摘要一起落 memory.log:跳过本身不是问题,无从得知为什么跳过才是问题
+    // (实测 20 次 `跳过 1` 连续 9 天没有一句理由,只能事后手工重放情节才看出来)。
+    const reasons = r.skipReasons?.length ? `:${r.skipReasons.join(' / ')}` : '';
+    parts.push(`跳过 ${r.skipped}${reasons}`);
+  }
+  // 停问是省下的请求,不是跳过;混为一谈会让空转率永远上不去。
+  if (r.muted) parts.push(`停问 ${r.muted}(已连续判凑巧)`);
   if (r.error) parts.push(`错误 ${r.error}`);
   return parts.join(' ');
 }

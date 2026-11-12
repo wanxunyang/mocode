@@ -37,6 +37,12 @@ import { recordRecallSearch } from '../../src/memory/recall-stats.js';
 import { recordSessionEpisode } from '../../src/memory/episodic.js';
 import { recordMemoryDelivery } from '../../src/memory/adoption.js';
 import { appendPendingCandidates, pendingCandidateCount } from '../../src/memory/pending.js';
+import {
+  consolidationSignature,
+  recordConsolidationAsk,
+  recordConsolidationMuteHit,
+  recordConsolidationSkip,
+} from '../../src/memory/consolidate-skips.js';
 
 interface Dirs {
   projDir: string;
@@ -449,5 +455,68 @@ test(
     assert.equal(health.compaction.pending, 10);
     assert.ok(health.compaction.ageHours < 1);
     assert.ok(health.warnings.some((w) => w.includes('压缩候选已积压 10 条')));
+  }),
+);
+
+// ── R11.5 巩固空转 ────────────────────────────────────────────────────
+
+test(
+  'buildMemoryHealth:R11.5 没问过时显示「问过 0 次」而不是 0% 空转率(没数据 ≠ 结果为零)',
+  isolated(() => {
+    const health = buildMemoryHealth();
+    assert.deepEqual(health.consolidation, {
+      asked: 0,
+      skipped: 0,
+      skipRate: 0,
+      muted: 0,
+      mutedHits: 0,
+      lastReason: null,
+    });
+    assert.ok(!health.warnings.some((w) => w.includes('巩固已问')), '没跑过巩固不该告警');
+    const rendered = formatMemoryHealth(health).join('\n');
+    assert.match(rendered, /巩固:问过 0 次/);
+    assert.doesNotMatch(rendered, /最近理由/);
+  }),
+);
+
+test(
+  'buildMemoryHealth:R11.5 反复判凑巧 → 报跳过率、停问数与最近理由，并告警',
+  isolated(() => {
+    // 真实形态:7 次请求、7 次「只是凑巧」(其中一组被问过两次)、一组已停问。
+    // asked ≥ skipped 恒成立(每次请求最多判一次凑巧),这条测试也顺带把这个不变量钉住。
+    for (let i = 0; i < 7; i++) recordConsolidationAsk();
+    for (let i = 0; i < 5; i++) {
+      recordConsolidationSkip(consolidationSignature([`e${i}`, `e${i + 1}`, `e${i + 2}`]), {
+        reason: '共享词是「看看/功能」这类口语,不是主题',
+        members: 3,
+      });
+    }
+    const sig = consolidationSignature(['x1', 'x2', 'x3']);
+    recordConsolidationSkip(sig, { reason: '只是碰巧都改了 tool-schema', members: 3 });
+    recordConsolidationSkip(sig, { reason: '只是碰巧都改了 tool-schema', members: 3 });
+    recordConsolidationMuteHit();
+
+    const health = buildMemoryHealth();
+    assert.equal(health.consolidation.asked, 7);
+    assert.equal(health.consolidation.skipped, 7, 'strikes 累加不改变「跳过次数」的语义');
+    assert.equal(health.consolidation.skipRate, 1);
+    assert.equal(health.consolidation.muted, 6, '5 个循环签名 + x 组');
+    assert.equal(health.consolidation.mutedHits, 1);
+    assert.equal(health.consolidation.lastReason, '只是碰巧都改了 tool-schema');
+    assert.ok(health.warnings.some((w) => w.includes('巩固已问') && w.includes('只是碰巧都改了 tool-schema')));
+    const rendered = formatMemoryHealth(health).join('\n');
+    assert.match(rendered, /巩固:问过 7 次 · 跳过 7/);
+    assert.match(rendered, /停问 6 组\(省 1 次\)/);
+  }),
+);
+
+test(
+  'buildMemoryHealth:R11.5 有成功巩固时不算空转,不告警',
+  isolated(() => {
+    for (let i = 0; i < 8; i++) recordConsolidationAsk();
+    recordConsolidationSkip(consolidationSignature(['a', 'b', 'c']), { reason: '凑巧', members: 3 });
+    const health = buildMemoryHealth();
+    assert.equal(health.consolidation.skipRate, 0.125);
+    assert.ok(!health.warnings.some((w) => w.includes('巩固已问')), '有过成功就不该判定为系统性无效');
   }),
 );

@@ -157,6 +157,14 @@ export const CONSOLIDATE_SCAN_LIMIT = 40;
 export const CONSOLIDATE_MIN_TOKEN_OVERLAP = 2;
 /** 喂给巩固模型的总输入字符预算(超了就整组丢弃,不做中截——残缺的组会被归纳错)。 */
 export const CONSOLIDATE_INPUT_MAX_CHARS = 6000;
+/**
+ * R11.5 同一组连续被判「只是凑巧」几次后停止再问。
+ *
+ * 为什么是 2:成员集合相同的组,喂给模型的提示词逐字相同,第二次判凑巧基本等于终审;
+ * 而 1 次就停问太激进——一次模型抖动或短暂的措辞变化会永久丢掉这条通道。
+ * 为什么不是 3:实测 20 次巩固全部 0 产出,每多问一轮就是一次纯浪费的 LLM 调用。
+ */
+export const CONSOLIDATE_SKIP_STRIKES = 2;
 /** 启动时注入的最近 episode 条数(硬上限,见 R6.3)。 */
 export const EPISODE_INJECT_LIMIT = 3;
 /** 单条 episode 里保留的请求条数上限:一次会话几十轮很常见,全列等于存全文(R6.4 禁止)。 */
