@@ -1155,6 +1155,12 @@ textarea::placeholder { color: var(--text-subtle); }
 .task-item.selected { background: var(--color-accent-soft); box-shadow: inset 2px 0 0 var(--color-accent); }
 .task-item.selected .task-title { color: var(--color-accent-ink); }
 .task-item.selected .task-meta, .task-item.selected .task-meta small { color: var(--color-accent-ink); }
+/* 空间内联区里的终端会话行：与任务行同高同级，但左侧是分支图标而不是状态点 ——
+   一眼能分清「这是 work-app 任务」还是「这是终端留下的会话，点一下会接管成任务」。 */
+.task-item.session-item .task-title { font-weight: 400; color: var(--color-muted); }
+.task-kind { flex: 0 0 auto; display: inline-grid; place-items: center; width: 12px; height: 12px; color: var(--text-subtle); }
+.task-kind .icon { width: 12px; height: 12px; }
+.task-item.session-item:hover .task-title { color: var(--text-default); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Approval ─────────────────────────────────────────── */
@@ -1168,15 +1174,21 @@ textarea::placeholder { color: var(--text-subtle); }
 @keyframes approval-in { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
 .approval-panel.hidden { display: none; }
 /* 头部一行永远可见:它是收起态的**全部**内容,也是展开态的标题栏。 */
-.approval-head { display: flex; align-items: center; gap: 8px; min-height: 30px; }
+/* 整条头部都是开关（监听在 renderer.ts 的 .approval-head）：收起态这一行就是卡片的全部内容，
+   而「展开回答」只是最右边一个胶囊 —— 只让它可点，用户得矄准才点得开。
+   所以整行给 pointer + hover 底色，胶囊本身留在右侧当可见的「有开关」提示。 */
+.approval-head { display: flex; align-items: center; gap: 8px; min-height: 30px; margin: 0 calc(var(--space-2xs) * -1); padding: 0 var(--space-2xs); border-radius: var(--radius-sm); cursor: pointer; user-select: none; transition: background var(--dur-micro) var(--ease-out); }
+.approval-head:hover { background: var(--surface-hover); }
 .approval-title { flex: 0 0 auto; color: var(--color-accent-ink); font-weight: 500; font-size: var(--text-sm); display: flex; align-items: center; gap: 6px; }
 .approval-title .icon { width: 14px; height: 14px; color: var(--color-warn); }
 /* 收起后用来替代正文的那一句:单行省略,悬停看全文。
    展开态不再显示它 —— 正文里的 <p> 已经是完整问题,两处同上显示一遍只是噪音。 */
 .approval-summary { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-subtle); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .approval-panel:not(.is-collapsed) .approval-summary { display: none; }
-.approval-collapse { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-subtle); font-family: var(--font-body); font-size: var(--text-2xs); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
-.approval-collapse:hover { background: var(--color-paper-3); color: var(--color-ink); }
+.approval-collapse { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-subtle); font-family: var(--font-body); font-size: var(--text-2xs); cursor: pointer; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+/* hover 高亮交给整条头部（.approval-head:hover）；胶囊自身不再刷一层，否则鼠标落在胶囊上
+   时会看到头部与胶囊两块深浅不一的底色。 */
+.approval-head:hover .approval-collapse { color: var(--color-ink); }
 .approval-collapse .icon { width: 12px; height: 12px; transition: transform var(--dur-micro) var(--ease-out); }
 /* 只有一个 chevron-down 图标：展开态翻上来指向「收起」，收起态朝下指向「展开」。 */
 .approval-panel:not(.is-collapsed) .approval-collapse .icon { transform: rotate(180deg); }

@@ -21,6 +21,8 @@ import { pendingByProject, pendingTasks } from '../attention.js';
 import { planPanelHtml } from './plan-panel.js';
 // 「检查」面板把 `pm run x` 拼成命令行：与主进程用同一份纯函数，避免两处拼法漂移。
 import { checkCommand, type PackageManager } from '../checks.js';
+// 空间内联区要把「任务」与「终端会话」按时间混排：规则单独成纯函数，可单测。
+import { splitSpaceEntries, type SpaceSplit } from './space-entries.js';
 
 export {};
 
@@ -97,6 +99,8 @@ type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'c
 type Project = { id: string; name: string; root: string; branch: string; auto?: boolean; sessionCount?: number };
 /** 终端留下的历史会话（work:project-sessions 的返回项）。 */
 type ProjectSession = { id: string; createdAt: string; model: string; firstUser: string };
+/** 各空间最近会话的批量快照（work:space-recent-sessions 的返回项）。 */
+type SpaceRecentSessions = Array<{ projectId: string; sessions: ProjectSession[] }>;
 type Task = { id: string; projectId: string; title: string; status: TaskStatus; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string; plan?: TaskPlanProgress };
 /** 侧栏任务行显示的计划进度（主进程写入，见 updateTaskFromAgent）。 */
 type TaskPlanProgress = { title: string; done: number; total: number; allDone: boolean };
@@ -164,6 +168,8 @@ declare global {
       projectOverview: () => Promise<Record<string, unknown>>;
       /** 某个空间里 mocode 终端留下的历史会话（只读列表）。 */
       projectSessions: (projectId: string) => Promise<ProjectSession[]>;
+      /** 各空间最近会话的一次性批量快照（侧栏内联区按时间与任务混排要用）。 */
+      spaceRecentSessions: () => Promise<SpaceRecentSessions>;
       /** 把一条终端历史会话接管成本空间的任务（绑定 sessionId，续同一会话）。 */
       adoptSession: (payload: { projectId: string; sessionId: string; title?: string }) => Promise<{ ok: boolean; message?: string; state?: WorkState; task?: Task; history?: HistoryItem[] }>;
       readFile: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
@@ -937,6 +943,37 @@ function paintTaskPlan(item: HTMLElement, task: Task): void {
   pill.title = `${plan.title} · ${label}`;
 }
 
+/**
+ * 各空间最近会话的缓存（主进程一次性批量给，见 work:space-recent-sessions）。
+ *
+ * 侧栏内联区要把「任务」和「终端会话」按时间混排，而混排要能在每次状态更新时同步重算 ——
+ * 逐个空间 await 会把侧栏卡成一顿一顿的。所以只在启动与 sessionCount 变化时取一次。
+ */
+let spaceSessions: Map<string, ProjectSession[]> = new Map();
+/** 上次取缓存时的「空间 + 会话数」指纹；变化了才重新取。 */
+let spaceSessionsKey = '';
+async function refreshSpaceSessions(): Promise<void> {
+  try {
+    const result = await window.mocodeWork.spaceRecentSessions();
+    spaceSessions = new Map(result.map((item) => [item.projectId, item.sessions]));
+  } catch (error) {
+    console.error('[sidebar] recent sessions', error);
+    spaceSessions = new Map();
+  }
+  renderTasks();
+}
+
+/** 各空间最近一次的内联拆分结果；历史会话列表按它剔除已内联/已接管的会话，避免重复。 */
+const spaceSplits = new Map<string, SpaceSplit>();
+
+/** 空间集合或会话数变了就重取一次缓存（首次启动也走这条路）。 */
+function syncSpaceSessionCache(): void {
+  const key = (state?.projects ?? []).map((project) => `${project.id}:${project.sessionCount ?? 0}`).join('|');
+  if (key === spaceSessionsKey) return;
+  spaceSessionsKey = key;
+  void refreshSpaceSessions();
+}
+
 function renderTasks(): void {
   const current = state; if (!current) return;
   const byUpdatedDesc = (left: Task, right: Task) => right.updatedAt.localeCompare(left.updatedAt);
@@ -946,11 +983,34 @@ function renderTasks(): void {
     project,
     tasks: current.tasks.filter((task) => task.projectId === project.id).sort(byUpdatedDesc),
   }));
+  // 空间内联区 = 任务 + 终端会话按时间混排（规则见 space-entries.ts）。
+  // 混排在渲染时现算，但会话本体来自缓存，所以结构签名里必须带上「内联了哪几条会话」，
+  // 否则缓存晚一步到达时侧栏不会重建，用户看到的内联区就停在「只有任务」。
+  const splits = new Map(spaces.map(({ project, tasks }) => [
+    project.id,
+    splitSpaceEntries(tasks, spaceSessions.get(project.id) ?? []),
+  ]));
+  spaceSplits.clear();
+  for (const [projectId, split] of splits) spaceSplits.set(projectId, split);
+  // 「历史会话 (N)」的 N = 还没内联、也还没被接管成任务的会话数。
+  // 会话总数以 project.sessionCount（磁盘真实条数）为准，缓存只取了最近 20 条，
+  // 所以不能拿缓存长度去减，否则大空间会显示成「历史会话 (6)」。
+  const historyRemaining = (project: Project, tasks: readonly Task[]): number => {
+    const split = splits.get(project.id);
+    const inlineSessions = split ? split.inline.filter((entry) => entry.kind === 'session').length : 0;
+    const adopted = new Set(tasks.filter((task) => task.sessionId).map((task) => task.sessionId!)).size;
+    return Math.max(0, (project.sessionCount ?? 0) - inlineSessions - adopted);
+  };
   // 只有增删、排序、归属变化才需要重建分组。状态、选中、标题变化走原地绘制。
   const structure = JSON.stringify([
     getLang(),
     normalTasks.map((task) => task.id),
-    spaces.map(({ project, tasks }) => [project.id, tasks.map((task) => task.id)]),
+    spaces.map(({ project, tasks }) => [
+      project.id,
+      tasks.map((task) => task.id),
+      splits.get(project.id)?.inline.map((entry) => `${entry.kind}:${entry.id}`) ?? [],
+      historyRemaining(project, tasks),
+    ]),
   ]);
   // 「谁在等我」只由 attention.ts 判定一次（侧栏 / 标题栏 / 主进程通知同口径）。
   const waitingByProject = pendingByProject(current.tasks);
@@ -982,7 +1042,9 @@ function renderTasks(): void {
       projectMenu.setAttribute('aria-label', t('sidebar.moreActionsFor', { name: project.name }));
     }
     const history = heading.parentElement?.querySelector<HTMLElement>('.history-toggle-label');
-    const historyLabel = project.sessionCount ? t('sidebar.historySessions', { n: project.sessionCount }) : t('sidebar.historySessionsEmpty');
+    const projectTasks = current.tasks.filter((task) => task.projectId === project.id);
+    const remaining = historyRemaining(project, projectTasks);
+    const historyLabel = remaining > 0 ? t('sidebar.historySessions', { n: remaining }) : t('sidebar.historySessionsEmpty');
     if (history && history.textContent !== historyLabel) history.textContent = historyLabel;
   };
   const existingItems = new Map<string, HTMLElement>();
@@ -1013,6 +1075,17 @@ function renderTasks(): void {
     const error = task.lastError ? ` title="${escapeHtml(taskErrorText(task))}"` : waiting ? ` title="${escapeHtml(t('task.needsYou'))}"` : '';
     const openTitle = waiting ? t('task.openNeedsYou', { name: escapeHtml(taskTitle(task)) }) : t('task.open', { name: escapeHtml(taskTitle(task)) });
     return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"${error}><button class="task-open" data-task="${id}" title="${openTitle}"><span class="task-title" title="${t('task.dblclickRename')}">${escapeHtml(taskTitle(task))}</span><span class="task-meta">${meta}</span></button><button class="task-menu-btn" data-task-menu="${id}" aria-label="${t('task.menu')}" title="${t('sidebar.moreActions')}">${icon('more')}</button></div>`;
+  };
+
+  /**
+   * 内联区里的终端会话行：只读，点一下即「接管」成本空间任务。
+   *
+   * 与任务行同高同级，但用分支图标代替状态点 —— 用户要能一眼分清「这是我在这里聊过的
+   * work-app 任务」还是「这是终端留下的会话，点了会接管」。
+   */
+  const spaceSessionItemHtml = (projectId: string, session: ProjectSession): string => {
+    const title = (session.firstUser || session.id).replace(/\s+/g, ' ').slice(0, 80);
+    return `<div class="task-item session-item" data-session-id="${escapeHtml(session.id)}"><button class="task-open" data-adopt="${escapeHtml(session.id)}" data-adopt-project="${projectId}" title="${escapeHtml(`${session.id} · ${session.model}`)}"><span class="task-kind">${icon('branch')}</span><span class="task-title">${escapeHtml(title)}</span><span class="task-meta"><small>${timeAgo(session.createdAt)}</small></span></button></div>`;
   };
 
   const tasksCollapsed = collapsedSections.has('tasks');
@@ -1050,16 +1123,30 @@ function renderTasks(): void {
     <span class="project-group-actions"><button class="project-menu-btn icon-button-square" data-new-task-project="${projectId}" title="${t('sidebar.newTaskInSpace')}" aria-label="${t('sidebar.newTaskInProject', { name: escapeHtml(project.name) })}">${icon('plus')}</button><button class="project-menu-btn icon-button-square" data-project-menu="${projectId}" title="${t('sidebar.moreActions')}" aria-label="${t('sidebar.moreActionsFor', { name: escapeHtml(project.name) })}">${icon('more')}</button></span>
   </div>
   <div class="project-group-tasks">${(() => {
-    const TASK_VISIBLE_LIMIT = 6;
-    const visible = tasks.slice(0, TASK_VISIBLE_LIMIT);
-    const hidden = tasks.length - visible.length;
-    const listHtml = visible.length ? visible.map(taskItemHtml).join('') : `<p class="empty-tasks">${t('sidebar.emptyTasks')}</p>`;
-    const moreHtml = hidden > 0
-      ? `<button class="task-more" data-more-tasks="${projectId}" data-more-count="${hidden}"><span class="task-more-label">${t('sidebar.moreTasks', { n: hidden })}</span><span class="task-more-chevron">${icon('chevron-down')}</span></button><div class="task-more-list hidden">${tasks.slice(TASK_VISIBLE_LIMIT).map(taskItemHtml).join('')}</div>`
+    const split = splits.get(project.id)!;
+    const inlineEntries = split.inline;
+    const taskById = new Map(tasks.map((task) => [task.id, task]));
+    const sessionById = new Map((spaceSessions.get(project.id) ?? []).map((session) => [session.id, session]));
+    // 内联区 = 任务与会话按时间混排的前 6 条（见 space-entries.ts）。
+    // 剩余任务仍按「还有 N 个任务」折叠；剩余会话留在下方的历史会话里。
+    const rows = inlineEntries.map((entry) => {
+      if (entry.kind === 'task') {
+        const task = taskById.get(entry.id);
+        return task ? taskItemHtml(task) : '';
+      }
+      const session = sessionById.get(entry.id);
+      return session ? spaceSessionItemHtml(project.id, session) : '';
+    }).join('');
+    const listHtml = rows || `<p class="empty-tasks">${t('sidebar.emptyTasks')}</p>`;
+    const hiddenTasks = split.hiddenTaskIds
+      .map((taskId) => taskById.get(taskId))
+      .filter((task): task is Task => !!task);
+    const moreHtml = hiddenTasks.length > 0
+      ? `<button class="task-more" data-more-tasks="${projectId}" data-more-count="${hiddenTasks.length}"><span class="task-more-label">${t('sidebar.moreTasks', { n: hiddenTasks.length })}</span><span class="task-more-chevron">${icon('chevron-down')}</span></button><div class="task-more-list hidden">${hiddenTasks.map(taskItemHtml).join('')}</div>`
       : '';
     return listHtml + moreHtml;
   })()}</div>
-  <div class="project-history"><button class="history-toggle" data-history="${projectId}"><span class="history-toggle-icon">${icon('branch')}</span><span class="history-toggle-label">${project.sessionCount ? t('sidebar.historySessions', { n: project.sessionCount }) : t('sidebar.historySessionsEmpty')}</span><span class="history-toggle-chevron">${icon('chevron-down')}</span></button><div class="history-list hidden"></div></div>
+  <div class="project-history"><button class="history-toggle" data-history="${projectId}"><span class="history-toggle-icon">${icon('branch')}</span><span class="history-toggle-label">${historyRemaining(project, tasks) > 0 ? t('sidebar.historySessions', { n: historyRemaining(project, tasks) }) : t('sidebar.historySessionsEmpty')}</span><span class="history-toggle-chevron">${icon('chevron-down')}</span></button><div class="history-list hidden"></div></div>
 </div>`;
   }).join('')}</div>
 </div>`;
@@ -1122,6 +1209,16 @@ function renderTasks(): void {
       const chevron = heading.querySelector<HTMLElement>('.project-group-chevron');
       if (chevron) chevron.innerHTML = icon(collapsed ? 'chevron-right' : 'chevron-down');
       heading.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    });
+  });
+
+  // 内联区的会话行：点一下即接管（与历史会话列表同一个动作，见 adoptSessionFrom）。
+  taskList.querySelectorAll<HTMLButtonElement>('.session-item [data-adopt]').forEach((button) => {
+    if (wiredInlineSessionButtons.has(button)) return;
+    wiredInlineSessionButtons.add(button);
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void adoptSessionFrom(button.dataset.adoptProject ?? '', button.dataset.adopt ?? '');
     });
   });
 
@@ -1230,29 +1327,32 @@ function renderTasks(): void {
       button.classList.add('open');
       box.innerHTML = `<p class="empty-tasks">${t('sidebar.historyLoading')}</p>`;
       const sessions = await window.mocodeWork.projectSessions(projectId);
-      if (!sessions.length) {
+      // 两类会话都不该再出现在历史里，口径与标题的「历史会话 (N)」严格同源：
+      //   · 内联区已经展示过的（space-entries.ts 的 inline）；
+      //   · 已经被某个任务接管的 —— 它以任务身份存在，再列一遍就是同一个会话两个入口。
+      const inlineIds = new Set(
+        (spaceSplits.get(projectId)?.inline ?? [])
+          .filter((entry) => entry.kind === 'session')
+          .map((entry) => entry.id),
+      );
+      for (const task of state?.tasks ?? []) {
+        if (task.projectId === projectId && task.sessionId) inlineIds.add(task.sessionId);
+      }
+      const rest = sessions.filter((session) => !inlineIds.has(session.id));
+      if (!rest.length) {
         box.innerHTML = `<p class="empty-tasks">${t('sidebar.historyEmpty')}</p>`;
         return;
       }
-      box.innerHTML = sessions
+      box.innerHTML = rest
         .map((session) => {
           const title = (session.firstUser || session.id).replace(/\s+/g, ' ').slice(0, 60);
           return `<button class="history-item" data-adopt="${escapeHtml(session.id)}" data-adopt-project="${escapeHtml(projectId)}" title="${escapeHtml(`${session.id} · ${session.model}`)}"><span class="history-item-title">${escapeHtml(title)}</span><span class="history-item-meta">${timeAgo(session.createdAt)}</span></button>`;
         })
         .join('');
       box.querySelectorAll<HTMLButtonElement>('[data-adopt]').forEach((item) =>
-        item.addEventListener('click', async (event) => {
+        item.addEventListener('click', (event) => {
           event.stopPropagation();
-          const result = await window.mocodeWork.adoptSession({
-            projectId: item.dataset.adoptProject ?? '',
-            sessionId: item.dataset.adopt ?? '',
-          });
-          if (!result?.ok) { showToast('warn', result?.message ?? t('toast.adoptFailed')); return; }
-          if (result.state) updateState(result.state);
-          if (result.task) {
-            void openTask(result.task.id);
-            showToast('success', t('toast.adopted'));
-          }
+          void adoptSessionFrom(item.dataset.adoptProject ?? '', item.dataset.adopt ?? '');
         }),
       );
     });
@@ -1291,13 +1391,41 @@ function renderTasks(): void {
       if (action === 'open-folder') {
         await window.mocodeWork.openFolder(pid);
       } else if (action === 'remove') {
+        const doomed = (state?.tasks ?? []).filter((task) => task.projectId === pid).map((task) => task.id);
         const hasRunning = (state?.tasks ?? []).some((task) => task.projectId === pid && (task.status === 'running' || task.status === 'waiting'));
         if (hasRunning) { showToast('warn', t('toast.cannotRemoveSpace')); return; }
+        // 删之前记下正在看的是哪个任务：只有它真被删掉了才允许清空会话区。
+        const viewingBefore = state?.selectedTaskId;
         const result = await window.mocodeWork.removeProject(pid);
-        if (result) { updateState(result.state); clearWorkspace(); showToast('info', t('toast.removedSpace', { removed: result.removed })); }
+        if (!result) return;
+        // 这些任务的记录没了 → 渲染层的流缓冲 / 排队输入也一起作废。否则已删任务的事件还会
+        // 继续 streamFor() 建缓冲，isRunning() 也会读到一个已经不存在的任务。
+        for (const taskId of doomed) dropTaskRuntime(taskId);
+        updateState(result.state);
+        // ⚠ 以前这里无条件 clearWorkspace()：删 A 空间会把**另一个空间里正在跑的那个会话**
+        // 一起清空（清 DOM、activeAssistant 置空、发送键按回「发送」）。紧接着它下一条
+        // text_delta 走到 appendText → ensureTextBlock → startAssistantTurn，界面上就凭空
+        // 冒出一条新 assistant 消息、继续流那个 agent 的输出 —— 看起来像「跑着的会话泄出来了」。
+        // 现在只有「正在看的那个任务确实属于被删空间」才清空，否则一像素都不动。
+        if (viewingBefore && doomed.includes(viewingBefore)) clearWorkspace();
+        showToast('info', t('toast.removedSpace', { removed: result.removed }));
       }
     }));
   }));
+}
+
+// 空间内联区里的会话行（.task-item.session-item）：点一下 = 接管成任务，与历史会话列表同一个动作。
+const wiredInlineSessionButtons = new WeakSet<HTMLButtonElement>();
+
+/** 接管一条终端会话：成功后就打开它建好的任务（历史列表与内联区共用）。 */
+async function adoptSessionFrom(projectId: string, sessionId: string): Promise<void> {
+  const result = await window.mocodeWork.adoptSession({ projectId, sessionId });
+  if (!result?.ok) { showToast('warn', result?.message ?? t('toast.adoptFailed')); return; }
+  if (result.state) updateState(result.state);
+  if (result.task) {
+    void openTask(result.task.id);
+    showToast('success', t('toast.adopted'));
+  }
 }
 
 function updateState(next: WorkState): void {
@@ -1305,6 +1433,8 @@ function updateState(next: WorkState): void {
   if (state && JSON.stringify(next) === JSON.stringify(state)) return;
   const previousProject = activeProjectId();
   state = next; renderProjects(); renderTasks(); renderEmptyChips(); syncAttention();
+  // 空间集合或会话数变了才重取内联区要用的会话快照（内部自己判断，不额外加 IPC）。
+  syncSpaceSessionCache();
   // 切空间 = 切浏览器分区 + 换一份 PTY（shell 的 cwd 绑在空间根上）。
   if (activeProjectId() !== previousProject) {
     refreshBrowserPanelProject();
@@ -1832,11 +1962,14 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
 </summary>`;
   mountIcons(entry);
   // 折叠优先：完成即收起。运行中的行也默认收起（用户手动展开过则保留其状态）。
-  // 例外三条：①文件编辑带 diff —— 终端里 diff 是直接铺在正文里的，收起等于让用户再点一次；
-  // ②失败的调用 —— 用户最需要看到的就是原因，折叠等于把错误藏起来；
-  // ③运行中的子 agent —— 它有进度行在长，收起就看不到「正在干什么」，与静止的卡片没区别。
+  // 例外两条：①文件编辑带 diff —— 终端里 diff 是直接铺在正文里的，收起等于让用户再点一次；
+  // ②运行中的子 agent —— 它有进度行在长，收起就看不到「正在干什么」，与静止的卡片没区别。
   // 「干净会话」下①不再成立：diff 不自动铺开，用户想看再点（改动量 +N/-N 仍在折叠行上）。
-  if (completed) entry.open = (Boolean(diff) && !cleanRunMode) || failed;
+  //
+  // 失败的调用**也**默认收起：失败已经在折叠行上标出来了（tool-failed 的红色「失败」标签），
+  // 再自动展开就会在一串调用里突然铺开一大块错误文本，把「一次工具调用 = 一行」的节奏打散；
+  // 想看原因点一下即可，与其他工具完全一致。这里只需要保持一致的收起行为。
+  if (completed) entry.open = Boolean(diff) && !cleanRunMode;
   else if (name === 'sub-agent' && view) entry.open = true;
   // detail 必须在 open 定下来之后再交出去：已展开的块要立刻插进 DOM，
   // 折叠的块只留构建器等 toggle（见上方 detailBuilders 注释）。
@@ -2039,6 +2172,22 @@ async function openTask(taskId: string): Promise<void> {
   switchToTask(taskId, workspace.history, workspace.recovery);
 }
 
+/**
+ * 丢弃一个「任务记录已经不存在」的任务在渲染层的运行时残留。
+ *
+ * 删任务、删空间都走这里。不清的后果很具体：已删任务的事件到达时 streamFor() 会照旧建出
+ * 缓冲，isRunning() 读到一个不存在的任务，排队面板里也留着一份永远不会再跑的输入。
+ *
+ * ⚠ 只清与任务绑定的内存状态，**不碰 DOM**：当前正在看的是谁由调用方按 viewingTaskId 判断
+ * —— 删空间时把别的空间正在跑的会话一并清空，就是「会话泄出来」那个 bug 的来源。
+ */
+function dropTaskRuntime(taskId: string): void {
+  pendingSends.clear(taskId);
+  queueExpanded.delete(taskId);
+  streams.delete(taskId);
+  clearRunWatchdog(taskId);
+}
+
 async function deleteTask(taskId: string): Promise<void> {
   const task = state?.tasks.find((item) => item.id === taskId);
   // 非运行中任务加一个轻量二次确认
@@ -2050,9 +2199,9 @@ async function deleteTask(taskId: string): Promise<void> {
   const next = await window.mocodeWork.deleteTask(taskId);
   if (!next) return;
   // 任务没了，排队里的输入也跟着没意义（host 侧会话已删，发出去只会报错）。
-  const dropped = pendingSends.clear(taskId);
+  const dropped = pendingSends.size(taskId);
+  dropTaskRuntime(taskId);
   if (dropped > 0) showToast('warn', t('toast.queueDropped', { n: dropped }), 3200);
-  streams.delete(taskId);
   updateState(next);
   if (deletingSelectedTask && next.selectedTaskId !== taskId) clearWorkspace();
   else refreshQueuePanel();
@@ -2171,7 +2320,11 @@ function showApproval(taskId: string, payload: Record<string, unknown>, intent?:
   approvalPanel.querySelectorAll<HTMLButtonElement>('[data-approval]').forEach((button) =>
     button.addEventListener('click', () => resolve({ action: 'selected', value: button.dataset.approval })),
   );
-  approvalPanel.querySelector<HTMLButtonElement>('[data-collapse]')?.addEventListener('click', () => {
+  // 整条头部都是点击目标。收起态下这一行就是卡片的**全部**内容，而「展开回答」只是最右边
+  // 一个几十像素宽的胶囊 —— 用户得瞄准它才点得开，实测很难点中（尤其是收起态只剩一行时）。
+  // 按钮节点保留：它是键盘可达的控件（tab 焦点环、Enter/Space 原生 click 会冒泡到头部），
+  // 事件只挂在头部一处，避免「点按钮 = 冒泡到头部再切一次」把状态掀回去。
+  approvalPanel.querySelector<HTMLElement>('.approval-head')?.addEventListener('click', () => {
     setCollapsed(!approvalPanel.classList.contains('is-collapsed'));
   });
   approvalPanel.querySelector<HTMLButtonElement>('[data-cancel]')?.addEventListener('click', () => resolve({ action: 'cancelled' }));

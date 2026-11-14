@@ -1910,10 +1910,15 @@ function installIpc(): void {
     const idx = state.projects.findIndex((item) => item.id === projectId);
     if (idx === -1) return null;
     const removed = state.projects.splice(idx, 1)[0];
-    // 如果移除的是当前选中项目，切到第一个剩余项目
+    // 如果移除的是当前选中项目，切到第一个剩余项目。
+    // ⚠ **不能顺手清 selectedTaskId**：正在查看的任务可能属于别的空间，或者是 projectId
+    // 为空的普通任务 —— 它根本没被删。把它一起取消选中，渲染层就会以为「当前没有任务」
+    // 并清空会话区，而那个任务其实还在跑、事件还在来，症状就是「跑着的会话突然冒出来」。
+    // 只有这个被查看的任务本身属于被删空间时才清。
     if (state.selectedProjectId === projectId) {
       state.selectedProjectId = state.projects[0]?.id ?? '';
-      state.selectedTaskId = undefined;
+      const viewing = state.selectedTaskId ? state.tasks.find((task) => task.id === state.selectedTaskId) : undefined;
+      if (!viewing || viewing.projectId === projectId) state.selectedTaskId = undefined;
     }
     // 先撤销未发出的请求，再停辅助 host；异步 diff 返回后也不能把它重新拉起来。
     for (const [id, pending] of pendingCommitMessages) {
@@ -1936,12 +1941,31 @@ function installIpc(): void {
     saveState(); broadcastState();
     return { state, removed: removed.name };
   });
-  /** 某个工作空间里终端留下的历史会话（供侧栏「历史会话」分组与接管）。 */
+  /**
+   * 某个工作空间里终端留下的历史会话（供侧栏「历史会话」分组与接管）。
+   *
+   * 上限 400 而不是 40：mocode 主仓库实测有 284 条会话，40 条会让「历史会话 (284)」
+   * 展开后只看到零头，看着像丢数据。
+   */
   ipcMain.handle('work:project-sessions', (_event, projectId: string) => {
     const project = state.projects.find((item) => item.id === projectId);
     if (!project) return [];
-    return listProjectSessions(project.root, 40);
+    return listProjectSessions(project.root, 400);
   });
+  /**
+   * 侧栏内联区要用的「每个空间最近几条会话」——一次 IPC 批量取回。
+   *
+   * 为什么要批量而不是让渲染层逐空间调 work:project-sessions：内联区在每次状态更新时
+   * 都要重算（任务变了排序就变），逐空间 await 会把侧栏滚动卡成一顿一顿的。这里只在
+   * 启动与 sessionCount 变化时取一次，渲染层缓存起来同步用。
+   * 每个空间只读 20 条：内联最多展示 6 行，留足余量应付「已接管的会话要跳过」。
+   */
+  ipcMain.handle('work:space-recent-sessions', () =>
+    state.projects.map((project) => ({
+      projectId: project.id,
+      sessions: listProjectSessions(project.root, 20),
+    })),
+  );
   /**
    * 接管一条终端历史会话：在对应空间里建一个绑定该 sessionId 的任务。
    *
