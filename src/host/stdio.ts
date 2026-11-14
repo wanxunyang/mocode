@@ -5,7 +5,8 @@ import readline from 'node:readline';
 import { type AgentHooks, type ContentPart } from '../agent/core.js';
 import { createRuntime, type Runtime } from '../runtime/index.js';
 import { config, isMemoryEnabled } from '../config/index.js';
-import { estimateMessagesTokens, type ChatMessage } from '../llm/index.js';
+import { type ChatMessage } from '../llm/index.js';
+import { measureContextUsage } from '../context/usage-snapshot.js';
 import { initializeAllMcp, getMcpTools, getMcpWarnings, closeAllMcp } from '../mcp/index.js';
 import {
   appendCurrentSessionTraceEvent,
@@ -105,6 +106,15 @@ function emit(event: string, payload: Record<string, unknown> = {}, requestId?: 
 function error(message: string, requestId?: string): void {
   write({ type: 'error', error: message, requestId });
 }
+
+/**
+ * 转发的「执行前文件内容」上限。
+ *
+ * write_file 覆盖写时旧内容是 diff 的删除侧，必须让 GUI 看得到改动前的样子；但这份内容要
+ * JSON 序列化穿过 stdio + IPC 两跳再进 DOM，几十万字符会把管道和渲染都拖垮。
+ * 超限就不转发，GUI 按「全部新增」展示（与终端 replay 路径同策略）。
+ */
+const MAX_FORWARDED_OLD_BYTES = 200_000;
 
 async function initializeRuntime(): Promise<void> {
   if (initialized) return initialized;
@@ -264,7 +274,13 @@ function restoreSession(id: string): boolean {
 
 function persistSession(): void {
   if (!sessionId) return;
-  runtime().session.save(history, sessionId, queryHistory, lastToolGroups);
+  // 工具批提交后的检查点仍处在 Runtime.run 内，runtime.session.save 的 assertIdle
+  // 会把它拒掉。host 每个任务独占一个 Runtime，这里沿同一条同步调用链写该 Runtime
+  // 自己的 store；不能为了绕过闸门另建全局 SessionStore，否则会写到别的工作区。
+  const activeRuntime = runtime();
+  activeRuntime.context.sessionStore.setCurrentSessionId(sessionId);
+  activeRuntime.context.sessionStore.save(history, sessionId, queryHistory, lastToolGroups);
+  activeRuntime.context.rollbackStore.persistSnapshots(sessionId);
 }
 
 function prepareSession(requestedSessionId?: string): boolean | null {
@@ -326,10 +342,44 @@ function hooksFor(runId: string): AgentHooks {
     onStepStart: () => emit('status', { value: 'thinking' }, runId),
     onText: (text) => emit('text_delta', { text }, runId),
     onToolCall: (name) => emit('status', { value: 'preparing_tool', tool: name }, runId),
+    // 用户消息追加后、第一批工具提交后各保存一次。崩溃留下的半个模型回答只由
+    // work-app 的 UI 日志回放，绝不能伪装成完整 assistant 消息写入可续聊的会话。
+    onCheckpoint: () => persistSession(),
     onToolHeader: (tool) => emit('tool_started', { id: tool.id, name: tool.name, arguments: tool.arguments }, runId),
     onToolStart: (name) => emit('status', { value: 'running_tool', tool: name }, runId),
     onToolOutput: (tool, chunk) => emit('tool_output', { id: tool.id, name: tool.name, chunk }, runId),
-    onToolResult: (tool, output) => emit('tool_completed', { id: tool.id, name: tool.name, output }, runId),
+    onToolResult: (tool, output, _parsed, preWriteOld, editStartLine, multiHunks, outcome) =>
+      emit(
+        'tool_completed',
+        {
+          id: tool.id,
+          name: tool.name,
+          output,
+          // 结构化结局：GUI 靠它区分成功/失败/被拒/中断、显示改动文件数，
+          // 而不是在 output 上嗅探 '错误:' / 'CHANGE_CONFLICT' 这类字符串前缀。
+          ...(outcome
+            ? {
+                status: outcome.status,
+                code: outcome.code,
+                retryable: outcome.retryable,
+                changedFiles: outcome.changedFiles ?? [],
+                ...(outcome.durationMs != null ? { durationMs: outcome.durationMs } : {}),
+                ...(outcome.changeSet
+                  ? { changeSetId: outcome.changeSet.id, changeSetFiles: outcome.changeSet.changedFiles }
+                  : {}),
+                ...(outcome.usage ? { nestedUsage: outcome.usage } : {}),
+              }
+            : {}),
+          // 真实行号：终端 diff 头行的行号来自执行前快照（src/agent/tool-helpers.ts:readDiffContext）。
+          // 不转发的话 GUI 只能用「相对本次改动的 1」重算，与终端对不上、也看不出改在文件哪一段。
+          ...(editStartLine > 1 ? { editStartLine } : {}),
+          ...(multiHunks && multiHunks.length > 0 ? { multiHunks } : {}),
+          // write_file 覆盖写：旧内容就是 diff 的「删除侧」。超过上限不转发（IPC 与 DOM 都吃不消），
+          // GUI 退回「全部按新增展示」，与终端 replay 同策略。
+          ...(preWriteOld != null && preWriteOld.length <= MAX_FORWARDED_OLD_BYTES ? { preWriteOld } : {}),
+        },
+        runId,
+      ),
     onModelRetry: (info) =>
       emit(
         'model_retry',
@@ -337,12 +387,8 @@ function hooksFor(runId: string): AgentHooks {
         runId,
       ),
     onLiveUsage: (usage) => {
-      // percent 在这里算而不是让客户端算：客户端不知道 contextWindow，也不该为了一格进度条
-      // 去猜 token 口径。与轮末 run_completed.usagePercent 用同一分子/分母（见 contextUsagePercent）。
-      const total = Number(usage.totalTokens) || 0;
-      const window = runtime().context.config.contextWindowTokens || 0;
-      const percent = window > 0 ? Math.min(100, Math.round((total / window) * 100)) : null;
-      emit('live_usage', { ...usage, percent }, runId);
+      // usage.totalTokens 是本轮累计消耗，绝不是上下文占用；详情统一读当前 prompt 快照。
+      emit('live_usage', { ...usage, contextUsage: contextUsageSnapshot() }, runId);
     },
     onImageRelief: (info) => emit('image_relief', { ...info }, runId),
     onNoReply: () => emit('no_reply', {}, runId),
@@ -355,7 +401,7 @@ function hooksFor(runId: string): AgentHooks {
 async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void> {
   if (closing) return;
   if (activeRun) return error('An agent run is already active for this project.', command.id);
-  if (!command.prompt.trim()) return;
+  if (!command.prompt.trim() && !command.attachments?.length) return;
   let toolPolicy: ToolPolicyController | undefined;
   try {
     await initializeRuntime();
@@ -367,15 +413,21 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
     const controller = new AbortController();
     activeRun = { id: command.id, controller };
     queryHistory.push(command.prompt);
+    // 首个模型请求前也要有可恢复的用户轮。run-coordinator 的 cancellation checkpoint
+    // 是内存快照、不会调用 onCheckpoint；这里追加 user 后再落盘，避免首轮崩溃只剩侧栏标题。
     const userInput: string | ContentPart[] = command.attachments?.length
       ? [
-          { type: 'text', text: command.prompt },
+          // 纯图片消息不塞空 text；文件名留在会话 part 上供 GUI 历史回放展示，不进模型正文。
+          ...(command.prompt ? [{ type: 'text' as const, text: command.prompt }] : []),
           ...command.attachments.map((attachment) => ({
             type: 'image_url' as const,
+            name: attachment.name,
             image_url: { url: attachment.dataUrl },
           })),
         ]
       : command.prompt;
+    history.push({ role: 'user', content: userInput });
+    persistSession();
     emit(
       'run_started',
       {
@@ -426,6 +478,8 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       turnLabel: command.prompt.split('\n')[0]?.slice(0, 40) ?? command.prompt.slice(0, 40),
       history,
       userInput,
+      // 上面已把用户轮写入首个持久化检查点，core 不能再 append 一次。
+      continueFromHistory: true,
       signal: controller.signal,
       hooks: hooksFor(command.id),
       contextState,
@@ -442,6 +496,7 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
     });
     lastToolGroups = toolPolicy.groupNames;
     persistSession();
+    const contextUsage = contextUsageSnapshot();
     emit(
       'run_completed',
       {
@@ -452,7 +507,8 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
         usage: result.usage,
         provider: runtime().context.config.provider,
         promptCache: runtime().context.config.provider === 'anthropic' && runtime().context.config.anthropicPromptCache,
-        usagePercent: Math.round(contextUsagePercent() * 100),
+        usagePercent: contextUsage.percent,
+        contextUsage,
         contextWindow: runtime().context.config.contextWindowTokens,
       },
       command.id,
@@ -494,11 +550,9 @@ function cancel(command: Extract<HostCommand, { type: 'cancel' }>): void {
   emit('cancelling', {}, command.id);
 }
 
-/** 计算当前上下文用量百分比(不含 system prompt)，用于 UI 展示。 */
-function contextUsagePercent(): number {
-  const dialog = history.filter((m) => m.role !== 'system');
-  const est = estimateMessagesTokens(dialog);
-  return Math.min(1, est / runtime().context.config.contextWindowTokens);
+/** 与终端底栏同源：system + 对话 + 实际工具 schema + ephemeral。 */
+function contextUsageSnapshot() {
+  return measureContextUsage(history, runtime().context.config.contextWindowTokens, contextState);
 }
 
 async function compact(command: Extract<HostCommand, { type: 'compact' }>): Promise<void> {
@@ -517,14 +571,17 @@ async function compact(command: Extract<HostCommand, { type: 'compact' }>): Prom
       signal: shutdownController.signal,
     });
     persistSession();
-    const pct = contextUsagePercent();
+    // 旧实测锚点属于压缩前请求，不能跨摘要边界继续外推。
+    contextState.promptAnchor = undefined;
+    const usage = contextUsageSnapshot();
     emit(
       'compact_done',
       {
         compacted: log.compactHistoryCalled,
         beforeTokens: log.compactDetail?.estimateBefore,
         afterTokens: log.compactDetail?.estimateAfter,
-        usagePercent: Math.round(pct * 100),
+        usagePercent: usage.percent,
+        contextUsage: usage,
         contextWindow: runtime().context.config.contextWindowTokens,
       },
       command.id,
@@ -918,6 +975,34 @@ async function changesCommand(command: Extract<HostCommand, { type: 'changes' }>
   }
 }
 
+/** 当前任务读内存中的实测锚点；旧任务只读自己的落盘 history，不篡改当前会话。 */
+async function contextUsageCommand(command: Extract<HostCommand, { type: 'context_usage' }>): Promise<void> {
+  if (!(await withRuntime(command.id, true))) return;
+  try {
+    const targetSessionId = command.sessionId?.trim() || sessionId;
+    if (!targetSessionId) return emit('context_usage', { contextUsage: null }, command.id);
+    if (targetSessionId === sessionId) {
+      return emit('context_usage', { sessionId: targetSessionId, contextUsage: contextUsageSnapshot() }, command.id);
+    }
+    const loaded = runtime().context.sessionStore.load(targetSessionId);
+    if (!loaded) return emit('context_usage', { sessionId: targetSessionId, contextUsage: null }, command.id);
+    const restored = [...loaded.history];
+    const system = buildSystemMessage({ sessionId: targetSessionId, planMode: isPlanMode() });
+    if (restored[0]?.role === 'system') restored[0] = { role: 'system', content: system };
+    else restored.unshift({ role: 'system', content: system });
+    const historicalState = createContextState();
+    const policy = new ToolPolicyController({
+      groups: loaded.lastToolGroups ?? [],
+      tools: runtime().context.toolRuntime.tools,
+    });
+    historicalState.activeTools = policy.snapshot(isPlanMode()).tools;
+    const contextUsage = measureContextUsage(restored, runtime().context.config.contextWindowTokens, historicalState);
+    emit('context_usage', { sessionId: targetSessionId, contextUsage }, command.id);
+  } catch (cause) {
+    error(cause instanceof Error ? cause.message : String(cause), command.id);
+  }
+}
+
 /**
  * 用量：session = 指定会话的 usage.jsonl；global = 跨工作空间账本（days 默认 7）。
  *
@@ -943,7 +1028,7 @@ async function usageCommand(command: Extract<HostCommand, { type: 'usage' }>): P
         'usage_report',
         {
           scope: 'session',
-          sessionId,
+          sessionId: targetSessionId,
           summary: summarizeUsage(
             records.map((row) => ({
               step: Number(row.step) || 0,
@@ -1270,6 +1355,8 @@ async function handle(command: HostCommand): Promise<void> {
       return changesCommand(command);
     case 'usage':
       return usageCommand(command);
+    case 'context_usage':
+      return contextUsageCommand(command);
     case 'memory':
       return memoryCommand(command);
     case 'settings':

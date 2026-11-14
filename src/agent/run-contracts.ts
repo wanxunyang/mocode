@@ -55,6 +55,12 @@ export interface AgentHooks {
     editStartLine: number,
     /** edit_file replacements[] 模式:每个替换段一个 diff hunk;缺省按单段 old/new 渲染。 */
     multiHunks?: ReadonlyArray<{ oldStr: string; newStr: string; startLine: number }>,
+    /**
+     * 本次调用的结构化结局。展示层（尤其 host → GUI）需要 status/code/changedFiles 才能
+     * 准确表达「成功 / 失败 / 被拒 / 已中断」与「改了几个文件」——没有它就只能靠在 output
+     * 上做字符串前缀嗅探（'错误:' / 'CHANGE_CONFLICT'），既漏判又会误判。可选参数，旧调用点不受影响。
+     */
+    outcome?: ToolOutcome,
   ) => void;
   onToolBatchEnd?: () => void;
   /** D3: after each committed tool batch, checkpoint full history for resume. */

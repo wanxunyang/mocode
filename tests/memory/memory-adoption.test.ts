@@ -23,6 +23,7 @@ import {
   recordMemorySuppression,
 } from '../../src/memory/adoption.js';
 import { setMemoryWritesPaused, __resetMemoryPauseForTests } from '../../src/memory/write-gate.js';
+import { setCurrentSessionId } from '../../src/session/state.js';
 
 function isolated(fn: () => void | Promise<void>): () => Promise<void> {
   return async () => {
@@ -33,9 +34,12 @@ function isolated(fn: () => void | Promise<void>): () => Promise<void> {
     process.env.MEMORY_ENABLED = 'true';
     __resetAdoptionForTests();
     __resetMemoryPauseForTests();
+    // 会话身份是进程级单例：不清就会泄漏给后面的用例（pending/stranded 的口径全看它）。
+    setCurrentSessionId(undefined, root);
     try {
       await fn();
     } finally {
+      setCurrentSessionId(undefined, cwd);
       setMemoryWritesPaused(false);
       __resetMemoryPauseForTests();
       __resetAdoptionForTests();
@@ -286,5 +290,61 @@ test(
     assert.equal(adoptionStats().suppressed, 10);
     pruneAdoptionLedger(now);
     assert.equal(adoptionStats().suppressed, 10, '合并后总数必须仍是 10');
+  }),
+);
+test(
+  'R19:pending 只算本会话可评估的送达，旧会话的计入 stranded 且不进告警',
+  isolated(() => {
+    const root = process.cwd();
+    // 会话 A：记一条送达，事后不再评估（模拟正常退出）。
+    setCurrentSessionId('session-a', root);
+    const a = recordMemoryDelivery('mem-a', 'turn_recall');
+    assert.ok(a);
+    // 会话 B：另一条送达，且是当前会话。
+    setCurrentSessionId('session-b', root);
+    const b = recordMemoryDelivery('mem-b', 'turn_recall');
+    assert.ok(b);
+
+    const stats = adoptionStats();
+    assert.equal(stats.delivered, 2);
+    // 这正是修掉的那个 bug：旧会话的送达永远进不了 pendingAdoptionDeliveries()，
+    // 合成一个数会得到一个永远降不下去的 pending，把 health 告警变成狼来了。
+    assert.equal(stats.pending, 1, '只有本会话的那条还能被裁决');
+    assert.equal(stats.stranded, 1, '旧会话的那条永久滞留');
+    assert.deepEqual(
+      pendingAdoptionDeliveries().map((e) => e.id),
+      [b],
+    );
+
+    // 评估掉本会话那条之后，pending 归零而 stranded 不变（它不会被任何动作消掉）。
+    applyAdoptionEvaluations([{ deliveryId: b!, verdict: 'adopted' }]);
+    const after = adoptionStats();
+    assert.equal(after.pending, 0);
+    assert.equal(after.stranded, 1);
+    assert.equal(after.adopted, 1);
+  }),
+);
+
+test(
+  'R19:无 sessionId 的历史送达按可评估计，不被误算成滞留',
+  isolated(() => {
+    const dir = join(process.cwd(), '.mocode');
+    mkdirSync(dir, { recursive: true });
+    // 手写一条不带 sessionId 的旧账（真实账本里存在这种历史行）。
+    writeFileSync(
+      ledgerFile(),
+      JSON.stringify({
+        id: 'legacy',
+        at: new Date().toISOString(),
+        memoryId: 'm',
+        channel: 'anchor_read',
+        kind: 'delivered',
+      }) + '\n',
+      'utf8',
+    );
+    const stats = adoptionStats();
+    // 宁可让告警偏亮，也不要把真能处理的一批藏进"滞留"里。
+    assert.equal(stats.pending, 1);
+    assert.equal(stats.stranded, 0);
   }),
 );

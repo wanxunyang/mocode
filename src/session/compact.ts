@@ -1067,6 +1067,7 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
         const estimateAfter = rawPromptTokens(history, activeTools);
         state.lastEstimate = estimatePromptTokens(history, activeTools, state.correction);
         state.lastUsage = undefined;
+        state.promptAnchor = undefined; // 单组微压缩后，旧实测锚点也不能继续外推。
         if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
         layout.contentWrite(compactionLogLine('强制微压缩(单组)', estimateBefore, estimateAfter, opts.window));
         return {
@@ -1196,6 +1197,7 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
     const estimateAfter = rawPromptTokens(history, activeTools);
     state.lastEstimate = estimatePromptTokens(history, activeTools, state.correction);
     state.lastUsage = undefined; // 压缩后旧 usage 失效,/context 改用估算
+    state.promptAnchor = undefined; // 摘要/保留区已替换，不能沿用压缩前请求的实测基线。
     // 压缩行与上一个工具批次摘要行之间补空行分隔(compact 在 core step 循环顶部触发,
     // 上一步的 batch 可能尚未 flush,缓冲末行仍是 ● 工具摘要行 → 两行黏在一起)。
     if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
@@ -1228,6 +1230,7 @@ export async function compactHistory(history: ChatMessage[], opts: CompactOption
   const estimateAfter = rawPromptTokens(history, activeTools);
   state.lastEstimate = estimatePromptTokens(history, activeTools, state.correction);
   state.lastUsage = undefined; // token 数已变,旧 usage 失效
+  state.promptAnchor = undefined; // 原地微压缩可能保持消息数不变，必须按内容失效。
   if (microcompactDone) {
     if (!layout.isLastContentRowBlank()) layout.contentWrite('\n');
     layout.contentWrite(compactionLogLine('微压缩旧工具结果', estimateBefore, estimateAfter, opts.window));

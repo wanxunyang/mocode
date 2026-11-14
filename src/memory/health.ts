@@ -33,7 +33,7 @@ import { listInternalizedProfile, listProfileCandidates } from './persona.js';
 import { MAX_ACTIVE } from '../tools/constants.js';
 
 /** 快照结构版本。字段增删时自增,让读旧文件的人能立刻发现口径变了。 */
-export const MEMORY_HEALTH_SCHEMA_VERSION = 4;
+export const MEMORY_HEALTH_SCHEMA_VERSION = 5;
 
 export interface MemoryHealth {
   schemaVersion: number;
@@ -54,11 +54,23 @@ export interface MemoryHealth {
    * 把它们算进分母会让覆盖率永远停在低位,看起来像"通道坏了"。
    */
   trigger: { required: number; withTrigger: number; coverage: number };
-  /** R2 锚点失效情况。stale 率高说明符号片段切得太粗,或代码在快速重构。 */
+  /**
+   * R2 锚点失效情况。
+   *
+   * `stale` 与 `missing` 必须分开：两者要求的动作相反。前者是「内容跟写入时不一样了」,
+   * 该做的是核对代码、必要时改记忆;后者是「文件已经不在了」,大多是文件搬家/改名,
+   * 该做的是重新锚定,而不是怀疑这条记忆错了。合成一个 staleRate 会把
+   * 「3 条记忆因为测试文件搬去 tests/agent/ 而报 missing」误读成「记忆大面积过期」——
+   * 实测真实库 16 条已锚里 10 条报警,其中 4 条就是这么来的。
+   */
   anchors: {
     anchored: number;
+    /** 内容已变（含符号片段已变）的条目数。 */
     stale: number;
     staleRate: number;
+    /** 文件/符号已不存在（多为搬家）的条目数。 */
+    missing: number;
+    missingRate: number;
     /**
      * R7.1 按种类计数。**恒为 `file:N` 是最常见的形态**,但把 dir/url 单独列出来
      * 才看得出泛化通道到底有没有被用上——否则"0 条已锚"与"全是 file 锚点"
@@ -207,8 +219,15 @@ export function buildMemoryHealth(): MemoryHealth {
     },
     anchors: {
       anchored: anchorEntries.length,
-      stale: anchorEntries.filter((e) => anchorStale.get(e.id)?.stale).length,
-      staleRate: rate(anchorEntries.filter((e) => anchorStale.get(e.id)?.stale).length, anchorEntries.length),
+      // 两个数不互斥:一条条目可以同时有内容变的锚点与已消失的锚点。
+      // 刻意不合成一个数——「去核对代码」与「去重新锚定」是两种完全不同的动作。
+      stale: anchorEntries.filter((e) => anchorStale.get(e.id)?.changed.length).length,
+      staleRate: rate(anchorEntries.filter((e) => anchorStale.get(e.id)?.changed.length).length, anchorEntries.length),
+      missing: anchorEntries.filter((e) => anchorStale.get(e.id)?.missing.length).length,
+      missingRate: rate(
+        anchorEntries.filter((e) => anchorStale.get(e.id)?.missing.length).length,
+        anchorEntries.length,
+      ),
       byKind: anchorByKind,
     },
     derived: {
@@ -289,7 +308,28 @@ function collectWarnings(h: MemoryHealth): string[] {
     out.push(`派生条目 ${Math.round(h.derived.staleRate * 100)}% 已因源失效待复核:需要一轮反思去重写结论`);
   }
   if (h.adoption.pending >= 12) {
-    out.push(`已有 ${h.adoption.pending} 条送达记忆尚未评估:运行 /reflect 或等待下一次压缩以复用既有模型调用裁决`);
+    out.push(
+      `本会话已有 ${h.adoption.pending} 条送达记忆尚未评估:运行 /reflect 或等待下一次压缩以复用既有模型调用裁决`,
+    );
+  }
+  // R2:missing 必须单独告警。它是「文件搬家」而不是「记忆过期」,混进 staleRate 会误导
+  // (实测真实库 4 条 missing 里 3 条是 tests/agent-core.test.ts → tests/agent/agent-core.test.ts)。
+  if (h.anchors.missing >= 3) {
+    out.push(
+      `${h.anchors.missing} 条记忆的锚点文件已不存在(多为文件搬家):用 /memory anchor relocate 重定位,不要当成记忆过期删掉`,
+    );
+  }
+  if (h.anchors.anchored >= 6 && h.anchors.staleRate >= 0.4) {
+    out.push(
+      `已锚定条目里 ${Math.round(h.anchors.staleRate * 100)}% 内容已变:这些记忆需核对代码后 update,否则会被当现状读`,
+    );
+  }
+  // R14:派生通道零产出时必须说清「不是坏了,是没人往里写」——否则每次看健康报告
+  // 都要重新推导一遍,而它唯一的自动生产者就是 R11 巩固。
+  if (h.derived.total === 0 && h.consolidation.asked > 0) {
+    out.push(
+      `派生条目为 0:唯一自动生产者是情节巩固(已问 ${h.consolidation.asked} 次、成 ${h.episodes.consolidated} 条),R14 的读时判定链路本身完整`,
+    );
   }
   // R13:队列积压与「没通电」是两件相反的事，告警要把方向说清。
   // 只按条数告警会漏掉最坏形态：两三条候选晾了一整天，条数不够但原料已失效。
@@ -370,7 +410,8 @@ export function formatMemoryHealth(h: MemoryHealth = buildMemoryHealth()): strin
   if (types) lines.push(`按类:${types}`);
   lines.push(`trigger 覆盖:${h.trigger.withTrigger}/${h.trigger.required}(${pct(h.trigger.coverage)})`);
   lines.push(
-    `锚点:${h.anchors.anchored} 条已锚 · stale ${h.anchors.stale}(${pct(h.anchors.staleRate)})` +
+    `锚点:${h.anchors.anchored} 条已锚 · 内容变 ${h.anchors.stale}(${pct(h.anchors.staleRate)})` +
+      ` · 文件缺失 ${h.anchors.missing ?? 0}(${pct(h.anchors.missingRate ?? 0)})` +
       `  |  派生:${h.derived.total} 条 · 待复核 ${h.derived.stale}(${pct(h.derived.staleRate)})`,
   );
   lines.push(
@@ -411,7 +452,11 @@ export function formatMemoryHealth(h: MemoryHealth = buildMemoryHealth()): strin
       (consolidation.lastReason ? ` | 最近理由:${consolidation.lastReason}` : ''),
   );
   lines.push(
-    `采纳:送达 ${h.adoption.delivered} · 已评估 ${h.adoption.evaluated}(采纳 ${h.adoption.adopted} / 无关 ${h.adoption.notApplicable} / 不明 ${h.adoption.unclear}) · 待评估 ${h.adoption.pending} · 已抑制 ${h.adoption.suppressed}`,
+    `采纳:送达 ${h.adoption.delivered} · 已评估 ${h.adoption.evaluated}(采纳 ${h.adoption.adopted} / 无关 ${h.adoption.notApplicable} / 不明 ${h.adoption.unclear})` +
+      ` · 本会话待评估 ${h.adoption.pending}` +
+      // stranded 单列并注明「不会再降」:它与 pending 长得像,要求的动作却完全相反。
+      (h.adoption.stranded ? ` · 已结束会话滞留 ${h.adoption.stranded}(只能等 90 天归档)` : '') +
+      ` · 已抑制 ${h.adoption.suppressed}`,
   );
   for (const w of h.warnings) lines.push(`⚠ ${w}`);
   return lines;

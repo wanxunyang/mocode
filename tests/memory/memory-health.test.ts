@@ -175,7 +175,7 @@ test(
 // ── 锚点(R2)────────────────────────────────────────────────────────────
 
 test(
-  'buildMemoryHealth:锚点 stale 率分母是已锚定条目,文件消失即计为 stale',
+  'buildMemoryHealth:锚点分母是已锚定条目;文件消失计 missing 而不是 stale',
   isolated(({ projDir }) => {
     const target = join(projDir, 'src', 'a.ts');
     writeFileSync(target, 'export const a = 1;\n', 'utf8');
@@ -193,13 +193,40 @@ test(
     const fresh = buildMemoryHealth();
     assert.equal(fresh.anchors.anchored, 1, '只有带 anchors 的条目进分母');
     assert.equal(fresh.anchors.stale, 0);
+    assert.equal(fresh.anchors.missing, 0);
 
-    // 删掉文件 → missing 也算 stale(记忆描述的东西已经不存在)
+    // 删掉文件 → 计 missing,不计 stale:两者要求的动作不同(重新锚定 vs 核对内容),
+    // 混成一个数会把"文件搬家"误报成"记忆过期"。
     rmSync(target);
     const after = buildMemoryHealth();
     assert.equal(after.anchors.anchored, 1);
-    assert.equal(after.anchors.stale, 1);
-    assert.equal(after.anchors.staleRate, 1);
+    assert.equal(after.anchors.missing, 1);
+    assert.equal(after.anchors.missingRate, 1);
+    assert.equal(after.anchors.stale, 0, 'missing 不并入 stale');
+  }),
+);
+
+test(
+  'buildMemoryHealth:文件内容变了计 stale、计 missing 为 0(与 missing 互不串台)',
+  isolated(({ projDir }) => {
+    const target = join(projDir, 'src', 'c.ts');
+    writeFileSync(target, 'export const c = 1;\n', 'utf8');
+    const saved = saveEntry({
+      type: 'reference',
+      name: 'c.ts 结构',
+      summary: 'c 是常量',
+      body: 'b',
+      anchors: [{ path: 'src/c.ts' }],
+    });
+    assert.ok(saved.ok);
+
+    writeFileSync(target, 'export const c = 2;\n', 'utf8');
+    const h = buildMemoryHealth();
+    assert.equal(h.anchors.anchored, 1);
+    assert.equal(h.anchors.stale, 1);
+    assert.equal(h.anchors.staleRate, 1);
+    assert.equal(h.anchors.missing, 0);
+    assert.equal(h.anchors.missingRate, 0);
   }),
 );
 

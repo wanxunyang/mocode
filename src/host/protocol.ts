@@ -172,6 +172,9 @@ export function parseCommand(value: unknown): HostCommand | null {
       sessionId: optionalString(input.sessionId, 200),
     };
   }
+  if (input.type === 'context_usage') {
+    return { id, type: 'context_usage', sessionId: optionalString(input.sessionId, 200) };
+  }
   if (input.type === 'memory') {
     const action = oneOf(input.action, MEMORY_ACTIONS);
     if (!action) return null;

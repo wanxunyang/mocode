@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import { truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
+import { deleteRecoveryLog, readRecovery, recoveryLog, type RecoveryAttachment, type RecoveryEnvelope, type RecoveryLog } from './recovery-log.js';
 import { tMain } from './i18n/main.js';
 import {
   cancelVoiceDownload,
@@ -138,6 +139,32 @@ let state: StoredState;
  * 互不干扰。renderer 随时切换查看的任务，后台任务的事件照常流入对应实例。
  */
 const agents = new Map<string, LocalAgent>();
+const recoveryLogs = new Map<string, RecoveryLog>();
+const recoveryRoot = (): string => app.getPath('userData');
+// 每个流式 token 都可能写日志；复用对象，避免每次都重读整份 JSONL 来恢复 seq。
+const taskRecovery = (taskId: string): RecoveryLog => {
+  let log = recoveryLogs.get(taskId);
+  if (!log) { log = recoveryLog(recoveryRoot(), taskId); recoveryLogs.set(taskId, log); }
+  return log;
+};
+const removeRecovery = (taskId: string): void => {
+  // 保留墓碑：已停止 host 的迟到事件不能重新建出刚删除的任务日志。
+  const discard = (): void => {};
+  recoveryLogs.set(taskId, { user: discard, event: discard, truncate: discard, regenerate: discard });
+  deleteRecoveryLog(recoveryRoot(), taskId);
+};
+const RECOVERED_EVENTS = new Set([
+  'run_started', 'text_delta', 'tool_started', 'tool_output', 'tool_completed',
+  'live_usage', 'no_reply', 'max_steps', 'approval_requested', 'run_aborted',
+  'run_completed', 'run_failed', 'host_exit',
+]);
+
+/** 持久化与 renderer 相同的事件语义；面板回执不属于任务对话，绝不混进恢复日志。 */
+function recordRecoveryEvent(taskId: string, envelope: RecoveryEnvelope): void {
+  if (envelope.type === 'error' || (envelope.type === 'event' && RECOVERED_EVENTS.has(envelope.event ?? ''))) {
+    taskRecovery(taskId).event({ ...envelope, requestId: taskId });
+  }
+}
 
 function statePath(): string { return path.join(app.getPath('userData'), 'work-projects.json'); }
 function modelsDir(): string { return path.join(os.homedir(), '.mocode', 'models'); }
@@ -714,7 +741,18 @@ function sessionHistory(project: Project, sessionId?: string): HistoryItem[] {
   return messages ? flattenHistory(messages) : [];
 }
 
-type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string };
+type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: Array<{ name: string; dataUrl: string }> };
+
+/** 会话中的 image_url → GUI 图片附件。旧版纯文本会话自然得到空数组。 */
+function historyImages(content: unknown): Array<{ name: string; dataUrl: string }> {
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part, index) => {
+    if (!part || part.type !== 'image_url' || typeof part.image_url?.url !== 'string') return [];
+    const dataUrl = part.image_url.url;
+    if (!dataUrl.startsWith('data:image/')) return [];
+    return [{ name: typeof part.name === 'string' && part.name ? part.name : `image-${index + 1}.png`, dataUrl }];
+  });
+}
 
 function flattenHistory(messages: Array<Record<string, unknown>>): HistoryItem[] {
   const items: HistoryItem[] = [];
@@ -723,7 +761,9 @@ function flattenHistory(messages: Array<Record<string, unknown>>): HistoryItem[]
     const role = message.role;
     if (role === 'user' || role === 'assistant') {
       const text = contentText(message.content);
-      if (text) items.push({ role, text });
+      const attachments = role === 'user' ? historyImages(message.content) : [];
+      // 纯图片用户消息也必须保留：否则会丢轮次，后续助手回答并入上一轮。
+      if (text || attachments.length) items.push({ role, text, ...(attachments.length ? { attachments } : {}) });
       if (role !== 'assistant' || !Array.isArray(message.tool_calls)) continue;
       for (const call of message.tool_calls) {
         const entry = call as { id?: unknown; function?: { name?: unknown; arguments?: unknown } };
@@ -838,7 +878,6 @@ function failTask(taskId: string, message: string): void {
   if (!task || (task.status !== 'running' && task.status !== 'waiting')) return;
   task.status = 'failed';
   task.lastError = message;
-  task.updatedAt = new Date().toISOString();
   saveState();
   broadcastState();
 }
@@ -848,6 +887,9 @@ function updateTaskFromAgent(envelope: HostEnvelope): void {
   const task = taskById(requestId);
   if (!task) return;
   const event = envelope.event;
+  // text_delta / tool_output 等事件不改变侧栏。先留快照，只有任务记录真的变化才落盘、广播；
+  // 否则每个正文 token 都会让 renderer 重画一次侧栏，鼠标按下与抬起之间按钮可能被替换而丢 click。
+  const before = JSON.stringify(task);
   const payload = envelope.payload && typeof envelope.payload === 'object' ? envelope.payload as Record<string, unknown> : {};
   if (event === 'run_started') { task.status = 'running'; if (typeof payload.sessionId === 'string') task.sessionId = payload.sessionId; }
   if (event === 'approval_requested') task.status = 'waiting';
@@ -858,7 +900,8 @@ function updateTaskFromAgent(envelope: HostEnvelope): void {
     task.changedFiles = Array.isArray(payload.changedFiles) ? payload.changedFiles.filter((item): item is string => typeof item === 'string') : [];
     task.status = payload.terminationReason === 'aborted' ? 'cancelled' : payload.terminationReason === 'completed' ? 'completed' : 'failed';
   }
-  task.updatedAt = new Date().toISOString();
+  // updatedAt 是侧栏的「最近用户消息」排序键：Agent 事件只更新运行状态，不能抢排序。
+  if (JSON.stringify(task) === before) return;
   saveState();
   broadcastState();
 }
@@ -1097,6 +1140,9 @@ class LocalAgent {
 
   private receive(envelope: HostEnvelope): void {
     if (envelope.type === 'event') updateTaskFromAgent(envelope);
+    const attributed = envelope.requestId === this.taskId || envelope.requestId === undefined
+      && (envelope.type === 'error' || envelope.event === 'host_exit');
+    if (attributed) recordRecoveryEvent(this.taskId, envelope);
     if (envelope.type === 'error') {
       this.errorSeq += 1;
       // 面板命令（requestId = panel-*）的失败不属于任何一次 run：交给面板自己显示，
@@ -1110,7 +1156,8 @@ class LocalAgent {
       failTask(this.taskId, envelope.error || tMain('main.host.commFailed'));
       // 一律补上 requestId(= 任务 id)：渲染层据此把失败归到正确的那条会话，
       // 而不是靠「当前正在看哪个任务」猜（切过任务就张冠李戴）。
-      pushRenderer('work:agent-event', { ...envelope, requestId: envelope.requestId ?? this.taskId });
+      const attributed = { ...envelope, requestId: envelope.requestId ?? this.taskId };
+      pushRenderer('work:agent-event', attributed);
       return;
     }
     pushRenderer('work:agent-event', envelope);
@@ -1131,14 +1178,14 @@ function createWindow(): void {
     webPreferences: { preload: path.join(__dirname, 'renderer', 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
   windowRef.setMenuBarVisibility(false);
-  // 语音输入要 getUserMedia。窗口走 file:// 加载、无打包器，Chromium 默认会拒绝 media 权限请求，
-  // 表现为 NotAllowedError（且不弹系统框，用户完全不知道该点哪里）。
-  // 只放行 media 这一类；其它权限（通知、地理、串口…）一律拒绝，别开成白名单。
+  // file:// 窗口必须显式放行 media（语音输入）和 clipboard-sanitized-write（复制按钮）。
+  // 后者只允许用户主动写入系统剪贴板，不开放 clipboard-read；其它权限仍一律拒绝。
   const session = windowRef.webContents.session;
+  const allowedPermissions = new Set(['media', 'clipboard-sanitized-write']);
   session.setPermissionRequestHandler((_contents, permission, callback) => {
-    callback(permission === 'media');
+    callback(allowedPermissions.has(permission));
   });
-  session.setPermissionCheckHandler((_contents, permission) => permission === 'media');
+  session.setPermissionCheckHandler((_contents, permission) => allowedPermissions.has(permission));
   void windowRef.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // 窗口关掉立刻清掉引用,免得 agent 后续 stdout 还往里塞 → "Object has been destroyed"。
   windowRef.on('closed', () => { if (windowRef) windowRef = null; });
@@ -1163,7 +1210,14 @@ function applyThemeBackground(theme: 'light' | 'dark' | 'system'): void {
 
 function currentTaskWorkspace(task: TaskRecord): Record<string, unknown> {
   const project = workspaceForTask(task);
-  return { task, history: project ? sessionHistory(project, task.sessionId) : [] };
+  const running = task.status === 'running' || task.status === 'waiting';
+  // 日志本身无法区分“正在执行”与“进程已消失”；只有主进程知道任务是否仍活着。
+  const recovery = readRecovery(recoveryRoot(), task.id, running);
+  if (recovery) {
+    recovery.running = running;
+    recovery.interrupted = !running && (recovery.interrupted === true || task.lastError === STALE_RUN_MARKER);
+  }
+  return { task, history: project ? sessionHistory(project, task.sessionId) : [], recovery };
 }
 
 /**
@@ -1294,7 +1348,6 @@ function installIpc(): void {
     // cwd 变了 → 旧 host（按旧目录启动）作废，下次 send 按新目录重启。
     if (agent) { agent.stop(); agents.delete(task.id); }
     task.projectId = target;
-    task.updatedAt = new Date().toISOString();
     if (target) state.selectedProjectId = target;
     saveState(); broadcastState();
     ensureAgent(task);
@@ -1330,7 +1383,7 @@ function installIpc(): void {
     if (agent) { agent.stop(); agents.delete(taskId); }
     if (task.status === 'running' || task.status === 'waiting') task.status = 'cancelled';
     task.lastError = undefined;
-    task.updatedAt = new Date().toISOString();
+    taskRecovery(taskId).truncate(userIndex);
     saveState(); broadcastState();
     return { ok: true, state, ...currentTaskWorkspace(task) };
   });
@@ -1344,6 +1397,7 @@ function installIpc(): void {
     const agent = agents.get(taskId);
     if (agent) { agent.stop(); agents.delete(taskId); }
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
+    removeRecovery(taskId);
     if (state.selectedTaskId === taskId) state.selectedTaskId = undefined;
     saveState(); broadcastState(); return state;
   });
@@ -1351,7 +1405,11 @@ function installIpc(): void {
     const targetProjectId = projectId ?? state.selectedProjectId;
     const selectedTaskId = state.selectedTaskId;
     const removed = state.tasks.filter((task) => task.projectId === targetProjectId && task.status !== 'running' && task.status !== 'waiting');
-    for (const task of removed) { const agent = agents.get(task.id); if (agent) { agent.stop(); agents.delete(task.id); } }
+    for (const task of removed) {
+      const agent = agents.get(task.id);
+      if (agent) { agent.stop(); agents.delete(task.id); }
+      removeRecovery(task.id);
+    }
     const removedIds = new Set(removed.map((task) => task.id));
     state.tasks = state.tasks.filter((task) => !removedIds.has(task.id));
     if (selectedTaskId && !state.tasks.some((task) => task.id === selectedTaskId)) state.selectedTaskId = undefined;
@@ -1363,7 +1421,6 @@ function installIpc(): void {
     const task = taskById(taskId);
     if (!task) return null;
     task.title = title.trim().slice(0, 160) || task.title;
-    task.updatedAt = new Date().toISOString();
     saveState(); broadcastState();
     return state;
   });
@@ -1398,6 +1455,7 @@ function installIpc(): void {
     for (const task of state.tasks.filter((task) => task.projectId === projectId)) {
       const agent = agents.get(task.id);
       if (agent) { agent.stop(); agents.delete(task.id); }
+      removeRecovery(task.id);
     }
     state.tasks = state.tasks.filter((task) => task.projectId !== projectId);
     // 自动并入的空间被移除后必须记住：不然下次启动 registy 同步又把它加回来，
@@ -1767,18 +1825,43 @@ function installIpc(): void {
     if (value.type === 'cancel' && !agents.has(id)) {
       if (task.status === 'running' || task.status === 'waiting') {
         task.status = 'cancelled';
-        task.updatedAt = new Date().toISOString();
         saveState();
         broadcastState();
       }
-      pushRenderer('work:agent-event', { type: 'event', event: 'run_aborted', requestId: id, payload: {} });
+      const aborted = { type: 'event', event: 'run_aborted', requestId: id, payload: {} };
+      recordRecoveryEvent(id, aborted);
+      pushRenderer('work:agent-event', aborted);
+      return;
+    }
+    // 用户消息提交与 run 执行分开：运行中发送的消息先排队，置顶时间必须记在点击发送时，
+    // 不能等稍后出队。此控制事件仅更新排序键，不转发给 host，也不改变任务运行状态。
+    if (value.type === 'user_message') {
+      task.updatedAt = new Date().toISOString();
+      saveState();
+      broadcastState();
       return;
     }
     if (value.type === 'run') {
+      const regenerate = value.regenerate === true;
+      const userIndex = Number(value.userIndex);
+      if (regenerate && Number.isInteger(userIndex) && userIndex >= 0) {
+        // host 协议只认识普通 run：先在主进程裁掉目标用户轮及其旧回答，再让 run 重新追加
+        // 同一条用户消息。只裁 UI 日志会让旧 assistant/tool 留在 host，续跑还会重复 user。
+        const rolled = rollbackSession(task, userIndex);
+        if (!rolled.ok) { reportTaskError(id, rolled.message ?? tMain('main.rollback.noHistory')); return; }
+        const previousAgent = agents.get(id);
+        if (previousAgent) { previousAgent.stop(); agents.delete(id); }
+        // UI 日志保留目标 user（renderer 没有删它），与磁盘会话的“删除后重发”殊途同归。
+        taskRecovery(id).regenerate(userIndex);
+      } else if (typeof value.prompt === 'string') {
+        const attachments = Array.isArray(value.attachments)
+          ? value.attachments.filter((item): item is RecoveryAttachment => !!item && typeof item.name === 'string' && typeof item.dataUrl === 'string')
+          : [];
+        taskRecovery(id).user(value.prompt, attachments);
+      }
       task.status = 'running';
       // 上一次的失败原因就此作废，否则侧栏会挂着「上次运行未正常结束」而状态却是正在运行。
       task.lastError = undefined;
-      task.updatedAt = new Date().toISOString();
       saveState();
       broadcastState();
     }
@@ -1786,7 +1869,9 @@ function installIpc(): void {
     // 只有 approval 必须打到原来那个 host 上（那个 host 才有等待中的审批）。
     const agent = agents.get(id) ?? (value.type === 'approval' ? null : ensureAgent(task));
     if (!agent) { reportTaskError(id, tMain('main.task.notRunning')); return; }
-    void agent.send({ ...value, id } as HostCommand);
+    const { regenerate: _regenerate, userIndex: _userIndex, ...rest } = value;
+    const command: Record<string, unknown> = { ...rest, id };
+    void agent.send(command as HostCommand);
   });
   /**
    * 面板命令（会话 / 回滚 / 改动 / 用量 / 记忆 / 设置）。
@@ -1801,16 +1886,20 @@ function installIpc(): void {
   ipcMain.handle('work:panel', (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' && value.id ? value.id : randomUUID();
     const type = typeof value.type === 'string' ? value.type : '';
-    const supported = ['sessions', 'changes', 'usage', 'memory', 'settings'];
+    const supported = ['sessions', 'changes', 'usage', 'context_usage', 'memory', 'settings'];
     if (!supported.includes(type)) return { ok: false, id, message: tMain('main.panel.unsupported') };
-    const task = taskById(state.selectedTaskId);
+    // 输入栏快照请求携带发起时的任务 id；快速切换任务时不能改发到新选中的 host。
+    const requestedTaskId = type === 'context_usage' && typeof value.taskId === 'string' ? value.taskId : undefined;
+    const task = taskById(requestedTaskId ?? state.selectedTaskId);
     if (!task) {
       pushRenderer('work:agent-event', { type: 'error', requestId: id, error: tMain('main.panel.noTask') });
       return { ok: false, id };
     }
     // 面板命令不需要「这个任务在跑」状态，但需要它的 host 活着：没实例就地拉起（懒启动）。
     const agent = agents.get(task.id) ?? ensureAgent(task);
-    void agent.send({ ...value, id } as HostCommand);
+    const { taskId: _taskId, ...rest } = value;
+    const command: Record<string, unknown> = { ...rest, id };
+    void agent.send(command as HostCommand);
     return { ok: true, id };
   });
 }
@@ -1819,7 +1908,14 @@ function installIpc(): void {
 function rebuildAppMenu(): void {
   appMenu = Menu.buildFromTemplate([
     { id: 'file', label: tMain('menu.file'), submenu: [{ role: 'close', label: tMain('menu.closeWindow') }] },
-    { id: 'edit', label: tMain('menu.edit'), submenu: [{ role: 'undo', label: tMain('menu.undo') }, { role: 'redo', label: tMain('menu.redo') }] },
+    {
+      id: 'edit', label: tMain('menu.edit'), submenu: [
+        { role: 'undo', label: tMain('menu.undo') }, { role: 'redo', label: tMain('menu.redo') },
+        { type: 'separator' },
+        // 窗口菜单虽隐藏，原生 role 仍负责 Ctrl/Cmd+C/V 等标准编辑操作；缺失时菜单与快捷键都会失灵。
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
+      ],
+    },
     { id: 'view', label: tMain('menu.view'), submenu: [{ role: 'reload', label: tMain('menu.reload') }, { role: 'toggleDevTools', label: tMain('menu.devTools') }] },
     { id: 'help', label: tMain('menu.help'), submenu: [{ label: 'MoCode Work', enabled: false }] },
   ]);
@@ -1850,7 +1946,8 @@ app.whenReady().then(async () => {
     if (value) process.env[key] = value;
   }
   rebuildAppMenu();
-  Menu.setApplicationMenu(null);
+  // 隐藏菜单栏 ≠ 卸载应用菜单：后者会带走标准复制/粘贴快捷键与菜单行为。
+  Menu.setApplicationMenu(appMenu);
   state = await loadState();
   // 启动时先让 .active 预设覆盖 config 裸键 —— 必须在 agent 启动之前，
   // 否则 host 会带着 config 里那个可能已过时的 LLM_MODEL 启动。

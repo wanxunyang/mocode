@@ -85,6 +85,15 @@ export interface SpawnOptions {
   quiet?: boolean;
   /** quiet 模式的标签文字;缺省从 prompt 截取(通常不够好,建议调用方显式传)。 */
   quietLabel?: string;
+  /**
+   * 运行期进度回调——只在不具备 TUI 实时渲染的宿主里生效(host/GUI、headless)。
+   *
+   * 为什么需要:子 agent 内部工具调用的实时渲染原本只有 TUI 一条路(TUI 激活时写 batch)。
+   * host 里 `isTuiActive()` 为 false,于是 GUI 上派了 3 个子 agent 后是一张静止的「执行中」
+   * 卡片,用户无法区分「在跑」和「卡死」。这里把每次内部工具调用/结果压成一行文本回调出去,
+   * 由宿主自己的通道(GUI 走 tool_output)展示。
+   */
+  progress?: (line: string) => void;
 }
 
 /** 子 agent 运行结果。自包含声明(原 `SubAgentResult` 基类随 overlay coordinator 一并删除)。 */
@@ -324,6 +333,13 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       const summary = summarizeToolCall(tc.name, tc.arguments);
       writeBuf(`  ● ${tc.name}  ${summary}\n`);
       lastChar = '\n';
+      // 无 TUI 的宿主(GUI/headless):把同一条信息经 progress 通道回吐。
+      // 子 agent 的中间过程在 GUI 里原本完全不可见 —— 派了任务之后只有一张静止的
+      // 「执行中」卡片,用户分不清在跑还是卡死。这里逐条吐出「工具名 + 对象」,
+      // 宿主自己决定怎么展示(work-app 走 tool_output 累积到那张卡片里)。
+      if (!live && opts.progress) {
+        opts.progress(`▸ ${tc.name}  ${summary}\n`);
+      }
       // 实时写入主内容区:子 agent 的每次工具调用累计到摘要行计数。
       ensureQuietLine(opts.quietLabel ?? t('skill.executing', { name: opts.prompt.slice(0, 40) }));
       ensureLiveBatch();

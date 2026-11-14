@@ -50,7 +50,7 @@ export const memoryUpdateTool: Tool = {
       anchors: {
         type: 'array',
         description:
-          'Anchors — REPLACES the whole set (pass [] to clear). kind=file (default) for a file or symbol; dir for a directory (detects added/removed/renamed entries, not edits inside files); url for a web page (provenance only, never fetched so never verified). Pass paths/symbols only; hashes are recomputed at write time. Use this so a later change surfaces the memory as stale instead of silently serving an outdated fact.',
+          'Anchors — REPLACES the whole set (pass [] to clear). Pass paths/symbols only; hashes are recomputed at write time. Choose kind by WHAT the memory is about: file (default) when it is about code in one file (prefer symbol); dir when the claim is about the shape of a directory — e.g. "scripts/ holds the release tooling" (notices added/removed/renamed entries, ignores edits inside files); url when the fact came from a specific web page (provenance only, never fetched so never verified or reported stale). Use this so a later change surfaces the memory as stale instead of silently serving an outdated fact.',
         items: {
           type: 'object',
           properties: {

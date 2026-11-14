@@ -1344,6 +1344,13 @@ test('runAgentCore legacy: 同轮多个编排调用并发执行,结果按 provid
     },
   }));
 
+  // 这两个用断言工具输出的**字节内容**与事件发生顺序，必须完全确定性。
+  // 前摄记忆注入会往工具结果尾部拼 `[proactive memory]` 段，且首次匹配要读真实记忆库
+  // （仓库 .mocode/memory.jsonl 与 ~/.mocode/memory.jsonl）建索引，既污染 content 断言，
+  // 又让首批任务多花几十毫秒、把动态补位的时序搅乱。共享进程下逐次 set/restore，
+  // 记忆通道本身由 tests/memory/** 覆盖。
+  const prevMemoryEnv = process.env.MEMORY_ENABLED;
+  process.env.MEMORY_ENABLED = 'false';
   try {
     const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
     const result = await runAgentCore({
@@ -1380,6 +1387,8 @@ test('runAgentCore legacy: 同轮多个编排调用并发执行,结果按 provid
       ['result:slow', 'result:fast'],
     );
   } finally {
+    if (prevMemoryEnv === undefined) delete process.env.MEMORY_ENABLED;
+    else process.env.MEMORY_ENABLED = prevMemoryEnv;
     __setChatCreateImpl(null);
     clearToolsExtension(source);
   }
@@ -1461,6 +1470,10 @@ test('runAgentCore legacy: 编排批动态补位——concurrency=2 时第三个
 
   const prevConcurrency = config.subAgentConcurrency;
   config.subAgentConcurrency = 2;
+  // 同上一例:断言的是事件发生顺序,而前摄记忆注入的首次索引构建（读真实记忆库）
+  // 会让首批任务多耗几十毫秒、吃掉补位窗口。关掉记忆通道,只测调度本身。
+  const prevMemoryEnv = process.env.MEMORY_ENABLED;
+  process.env.MEMORY_ENABLED = 'false';
   try {
     const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
     const result = await runAgentCore({
@@ -1497,6 +1510,8 @@ test('runAgentCore legacy: 编排批动态补位——concurrency=2 时第三个
     );
   } finally {
     config.subAgentConcurrency = prevConcurrency;
+    if (prevMemoryEnv === undefined) delete process.env.MEMORY_ENABLED;
+    else process.env.MEMORY_ENABLED = prevMemoryEnv;
     __setChatCreateImpl(null);
     clearToolsExtension(source);
   }

@@ -384,6 +384,7 @@ export async function runAgentCoreLegacy(
                         event.diff.preWriteOld,
                         event.diff.editStartLine,
                         event.diff.multiHunks,
+                        event.outcome,
                       );
                       if (event.call.name === 'ask_human' && event.outcome.status === 'success') {
                         askHumanCountThisTurn += 1;
@@ -537,7 +538,7 @@ export async function runAgentCoreLegacy(
                       usageMeter.add(outcome.usage);
                       opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
                       traceToolEnd(tc, index, outcome);
-                      hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+                      hooks.onToolResult?.(tc, outcome.output, null, null, 1, undefined, outcome);
                       pushToolResult(
                         history,
                         tc,
@@ -573,7 +574,7 @@ export async function runAgentCoreLegacy(
                         durationMs: 0,
                       };
                       opts.onToolOutcome?.(tc.name, parseArgs(tc.arguments) ?? {}, outcome);
-                      hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+                      hooks.onToolResult?.(tc, outcome.output, null, null, 1, undefined, outcome);
                       pushToolResult(
                         history,
                         tc,
@@ -664,7 +665,7 @@ export async function runAgentCoreLegacy(
                     }
 
                     opts.onToolOutcome?.(tc.name, parsed ?? {}, outcome);
-                    hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+                    hooks.onToolResult?.(tc, outcome.output, null, null, 1, undefined, outcome);
                     pushToolResult(
                       history,
                       tc,
@@ -700,7 +701,7 @@ export async function runAgentCoreLegacy(
                       changedFiles: [],
                       durationMs: 0,
                     };
-                    hooks.onToolResult?.(currentCall, error, null, null, 1);
+                    hooks.onToolResult?.(currentCall, error, null, null, 1, undefined, outcome);
                     pushToolResult(
                       history,
                       currentCall,
@@ -755,7 +756,7 @@ export async function runAgentCoreLegacy(
                       const tc = batch[k];
                       const outcome = await started[k];
                       const output = outcome.output;
-                      hooks.onToolResult?.(tc, output, null, null, 1); // 并行工具无 diff
+                      hooks.onToolResult?.(tc, output, null, null, 1, undefined, outcome); // 并行工具无 diff
                       if (tc.name === 'ask_human' && outcome.status === 'success') {
                         askHumanCountThisTurn += 1;
                         emitTrace(
@@ -890,6 +891,7 @@ export async function runAgentCoreLegacy(
                         entry.diff.preWriteOld,
                         entry.diff.editStartLine,
                         entry.diff.multiHunks,
+                        outcome,
                       );
                       pushToolResult(
                         history,
@@ -1011,6 +1013,7 @@ export async function runAgentCoreLegacy(
                         entry.diff.preWriteOld,
                         entry.diff.editStartLine,
                         entry.diff.multiHunks,
+                        outcome,
                       );
                       pushToolResult(
                         history,
@@ -1052,7 +1055,7 @@ export async function runAgentCoreLegacy(
                         changedFiles: [],
                         durationMs: 0,
                       };
-                      hooks.onToolResult?.(tc, err, null, null, 1);
+                      hooks.onToolResult?.(tc, err, null, null, 1, undefined, outcome);
                       pushToolResult(history, tc, err, relprune, lifecycle, scheduler);
                       traceToolEnd(tc, i, outcome);
                       i++;
@@ -1083,7 +1086,7 @@ export async function runAgentCoreLegacy(
                       if (perm === 'deny') {
                         hooks.onToolHeader?.(tc);
                         const outcome = deniedOutcome(tc.name);
-                        hooks.onToolResult?.(tc, outcome.output, null, null, 1);
+                        hooks.onToolResult?.(tc, outcome.output, null, null, 1, undefined, outcome);
                         pushToolResult(
                           history,
                           tc,
@@ -1128,6 +1131,7 @@ export async function runAgentCoreLegacy(
                       diff.preWriteOld,
                       diff.editStartLine,
                       diff.multiHunks,
+                      outcome,
                     );
                     if (tc.name === 'ask_human' && outcome.status === 'success') {
                       askHumanCountThisTurn += 1;

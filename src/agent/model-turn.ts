@@ -306,13 +306,30 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     ]
       .filter(Boolean)
       .join('\n\n');
+    // 快照必须统计真实请求里的整段临时 system，而不只是 memory/session 两段。
+    // 放在这里统一更新：首次请求与 overflow 重建都会经过，UI 不会拿旧一段继续外推。
+    runtimeContextState.ephemeralText = ephemeralReminder || undefined;
+    onContextUpdate?.();
     return ephemeralReminder ? [...history, { role: 'system', content: ephemeralReminder } as ChatMessage] : history;
   };
   let requestHistory = buildRequestHistory();
-  onContextUpdate?.();
+  // 每次真正发请求前刷新：overflow 去图/压缩会替换 requestHistory，锚点不能钉在首次尝试上。
+  let requestEphemeral = '';
+  let requestHistoryLen = history.length;
+  let requestBaseRaw = 0;
 
   let stepPromptEst = estimatePromptTokens(requestHistory, activeTools, runtimeContextState.correction);
   const reportLive = (progress: { completionTokens: number; promptTokens?: number; cachedTokens?: number }): void => {
+    // 流式首包可能已带真实 prompt usage：立刻钉住锚点，GUI 不能继续显示旧一轮的累计值。
+    if (progress.promptTokens && progress.promptTokens > 0) {
+      runtimeContextState.promptAnchor = {
+        measuredPromptTokens: progress.promptTokens,
+        baseRaw: requestBaseRaw,
+        historyLen: requestHistoryLen,
+        tools: activeTools,
+        ephemeralText: requestEphemeral,
+      };
+    }
     const completedUsage = usageMeter.snapshot();
     const curPrompt = progress.promptTokens ?? stepPromptEst;
     const curCached =
@@ -345,6 +362,13 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     },
   };
   const runChatOnce = async (): Promise<ChatResult> => {
+    // buildRequestHistory 还包含策略/步骤/恢复提醒，不能只取 memory/session 两段。
+    const appended = requestHistory.length > history.length ? requestHistory[requestHistory.length - 1] : undefined;
+    requestEphemeral = appended?.role === 'system' && typeof appended.content === 'string' ? appended.content : '';
+    requestHistoryLen = requestEphemeral ? requestHistory.length - 1 : requestHistory.length;
+    requestBaseRaw = estimatePromptTokens(requestHistory, activeTools);
+    // 让共享快照与真实请求使用同一份完整临时上下文，实测锚点才会命中。
+    runtimeContextState.ephemeralText = requestEphemeral || undefined;
     try {
       return await modelRunner.run({ history: requestHistory, handlers: chatHandlers, tools: activeTools }, signal);
     } catch (error) {
@@ -598,7 +622,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     if (result.usage.cachedTokens > 0) cacheState.providerCacheSeen = true;
   }
   if (result.usage?.promptTokens && result.usage.promptTokens > 100) {
-    const estimated = estimatePromptTokens(requestHistory, activeTools);
+    const estimated = requestBaseRaw;
     const updated = ctx.updateTokenCalibration(
       requestBaseURL,
       requestModel,
@@ -610,13 +634,12 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     runtimeContextState.calibrationSamples = updated.samples;
     // 钉住底栏用量条:此刻 requestHistory == 真实发出的请求,实测 promptTokens 是它的真实大小。
     // 记录基线裸估算/history 长度/工具集/ephemeral,供底栏对随后增长的消息做精确外推。
-    const requestHistoryLen = requestHistory.length;
     runtimeContextState.promptAnchor = {
       measuredPromptTokens: result.usage.promptTokens,
       baseRaw: estimated,
-      historyLen: ephemeralJoined() ? requestHistoryLen - 1 : requestHistoryLen,
+      historyLen: requestHistoryLen,
       tools: activeTools,
-      ephemeralText: ephemeralJoined(),
+      ephemeralText: requestEphemeral,
     };
   }
   hooks.onChatDone?.();

@@ -59,6 +59,10 @@ export const subAgentTool: Tool = {
       callId: ctx?.callId,
       parentAllowedToolNames: ctx?.allowedToolNames,
       delegation: ctx?.delegation,
+      // 子 agent 的内部步骤在无 TUI 的宿主(work-app / headless)里原本完全不可见:
+      // 派活之后只有一张静止的「执行中」卡片。经 ctx.onOutput 逐条回吐「工具名 + 对象」,
+      // 宿主把它们累积进这个 sub-agent 工具块(终端里这条路不会触发——TUI 走 batch 渲染)。
+      ...(ctx?.onOutput ? { progress: ctx.onOutput } : {}),
     });
 
     let output: string;

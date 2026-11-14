@@ -55,6 +55,12 @@ function isolated(fn: () => void | Promise<void>): () => Promise<void> {
     process.env.HOME = homeDir;
     process.env.USERPROFILE = homeDir;
     process.chdir(projDir);
+    // 沙箱根也必须是这份临时目录:锚点路径（`src/a.ts`）与 stale 判定都经
+    // `anchor.ts` 的 workspaceRoot（sandbox root 优先于 cwd）归一化。
+    // 共享进程下其它文件（如 tools/sandbox.test.ts）会改写这个全局单例并留下一个
+    // 已被删除的临时目录，此时本文件的用例会把锚点算到别处（saveEntry 静默丢锚点、
+    // 注入变空串）。只 chdir 不设 sandbox root 是挡不住这条泄漏的。
+    const prevRoot = setSandboxRoot(projDir);
     process.env.MEMORY_ENABLED = 'true';
     delete process.env.MOCODE_MEMORY_PROACTIVE;
     __resetProactiveForTests();
@@ -62,6 +68,7 @@ function isolated(fn: () => void | Promise<void>): () => Promise<void> {
       await fn();
     } finally {
       __resetProactiveForTests();
+      setSandboxRoot(prevRoot);
       process.env.HOME = home ?? '';
       process.env.USERPROFILE = up ?? '';
       if (home === undefined) delete process.env.HOME;

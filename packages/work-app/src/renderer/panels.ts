@@ -59,6 +59,7 @@ const PANEL_EVENTS = new Set([
   'session_forked',
   'changes_report',
   'usage_report',
+  'context_usage',
   'memory_report',
   'settings_state',
 ]);
@@ -128,6 +129,11 @@ async function request(command: Record<string, unknown>): Promise<PanelEnvelope>
     }
   }
   return promise;
+}
+
+/** 输入栏上下文快照复用面板请求/回执配对，但不进入任何整页面板。 */
+export function requestPanelCommand(command: Record<string, unknown>): Promise<PanelEnvelope> {
+  return request(command);
 }
 
 function payloadOf(envelope: PanelEnvelope): Record<string, unknown> {

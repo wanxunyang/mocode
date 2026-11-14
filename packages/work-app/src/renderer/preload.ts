@@ -1,4 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
+import type { RecoverySnapshot } from '../recovery-log.js';
+
+type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: Array<{ name: string; dataUrl: string }> };
 
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
 type Project = { id: string; name: string; root: string; branch: string; auto?: boolean; sessionCount?: number };
@@ -37,7 +40,7 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   selectProject: (id: string): Promise<ProjectState> => ipcRenderer.invoke('work:select-project', id),
   createTask: (title: string, projectId?: string): Promise<{ state: ProjectState; task: Task }> => ipcRenderer.invoke('work:create-task', title, projectId),
   setTaskProject: (id: string, projectId: string): Promise<{ ok: boolean; message?: string; state?: ProjectState; task?: Task }> => ipcRenderer.invoke('work:set-task-project', id, projectId),
-  selectTask: (id: string): Promise<{ state: ProjectState; task: Task; history: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> } | null> => ipcRenderer.invoke('work:select-task', id),
+  selectTask: (id: string): Promise<{ state: ProjectState; task: Task; history: HistoryItem[]; recovery: RecoverySnapshot | null } | null> => ipcRenderer.invoke('work:select-task', id),
   clearTasks: (projectId?: string): Promise<ProjectState> => ipcRenderer.invoke('work:clear-tasks', projectId),
   deleteTask: (id: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:delete-task', id),
   renameTask: (id: string, title: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:rename-task', id, title),
@@ -102,7 +105,7 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   setTitleBarOverlay: (colors: { bg: string; symbol: string }): void => ipcRenderer.send('work:set-titlebar-overlay', colors),
   setLanguage: (language: string): Promise<{ ok: boolean; language?: string; message?: string }> => ipcRenderer.invoke('work:set-language', language),
   // 回滚对话:把会话截断到指定用户消息之前(id + 该消息在当前会话里的序号)。
-  rollback: (value: { id: string; userIndex: number }): Promise<{ ok: boolean; message?: string; state?: ProjectState; history?: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> }> => ipcRenderer.invoke('work:rollback', value.id, value.userIndex),
+  rollback: (value: { id: string; userIndex: number }): Promise<{ ok: boolean; message?: string; state?: ProjectState; history?: HistoryItem[]; recovery?: RecoverySnapshot | null }> => ipcRenderer.invoke('work:rollback', value.id, value.userIndex),
   send: (value: Record<string, unknown>): void => ipcRenderer.send('work:agent-send', value),
   /**
    * 面板命令（会话 / 回滚 / 改动 / 用量 / 记忆 / 设置）。id 由渲染层生成，

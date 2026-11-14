@@ -106,7 +106,7 @@ export const memorySaveTool: Tool = {
       anchors: {
         type: 'array',
         description:
-          'Anchors: the thing this memory talks about, so a later change marks the memory stale instead of silently serving an outdated fact. kind=file (default) for a file or one of its symbols; kind=dir for a directory (detects added/removed/renamed entries, not edits inside files); kind=url for a web page (recorded as provenance only — it is never fetched, so it can never be verified). Pass paths/symbols only — hashes are computed for you at write time. Anchors that cannot be resolved are dropped.',
+          'Anchors: the thing this memory talks about, so a later change marks the memory stale instead of silently serving an outdated fact. Pass paths/symbols only — hashes are computed for you at write time. Anchors that cannot be resolved are dropped. Choose kind by WHAT the memory is about: kind=file (default) when it is about code in one file (prefer symbol); kind=dir when the claim is about the shape of a directory — e.g. "scripts/ holds the release tooling" or "no test lives under src/" — it notices added/removed/renamed entries but ignores edits inside files; kind=url when the fact came from a specific web page ("the vendor documents X at <url>") — it is recorded as provenance only, never fetched, so it can never be verified or reported stale.',
         items: {
           type: 'object',
           properties: {

@@ -881,6 +881,32 @@ export function updateEntry(id: string, patch: UpdatePatch): UpdateResult {
 }
 
 /**
+ * R2.7 只换锚点、不动内容：给重定位用。
+ *
+ * 为什么不复用 `updateEntry({anchors})`：那条路径会拿 `buildAnchors` 把**整批**锚点
+ * 重算一遍 hash。重定位只该改被搬走的那一条地址，若顺带重算，同一批里真正 stale 的锚点
+ * 会被静默洗成 fresh —— 等于未经核对就宣称「这条记忆讲的还是现在的代码」。
+ * 所以调用方自己组装好锚点对象（未变的原样保留、搬家的重新 build），这里只负责落盘。
+ */
+export function replaceAnchors(id: string, anchors: readonly MemoryAnchor[], reason?: string): UpdateResult {
+  const blocked = memoryWriteBlockReason();
+  if (blocked) return { ok: false, blocked };
+  const all = loadAll();
+  const e = all.find((x) => x.id === id);
+  if (!e) return { ok: false, notFound: true };
+  if (anchors.length > 0) e.anchors = [...anchors];
+  else delete e.anchors;
+  if (reason) e.lastUpdateReason = reason;
+  e.updatedAt = nowIso();
+  const p = pathForScope(e.scope);
+  const entries = all.filter((x) => x.scope === e.scope);
+  ensureDir(p);
+  writeAtomic(p, entries);
+  clearPendingScope(e.scope);
+  return { ok: true };
+}
+
+/**
  * 把旧条目标记为被新条目取代(status=superseded + supersededBy 链,不删除可审计)。
  * 与 forgetEntry 的区别:这是 belief-revision 语义——"旧信念被新事实取代",
  * 而不是"过期清理"。pinned 条目同样允许被取代(取代链是显式修正,不是自动遗忘)。

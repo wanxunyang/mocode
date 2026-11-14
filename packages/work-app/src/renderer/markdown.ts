@@ -320,18 +320,31 @@ const LANG_ALIAS: Record<string, keyof typeof TOKEN_KEYWORDS> = {
   text: 'markdown', txt: 'markdown', '': 'markdown',
 };
 
-function highlightCode(lines: string[], lang: string): string {
+/** 单行高亮(逐行调用,行内自成闭区间)。供代码块与 diff 视图共用,不另起一套高亮器。 */
+export function highlightCodeLine(line: string, lang: string): string {
   const key = LANG_ALIAS[lang] ?? (lang as keyof typeof TOKEN_KEYWORDS);
   const keywords = new Set(TOKEN_KEYWORDS[key] ?? []);
   const commentStyle = commentStyleFor(key);
+  // 先做整行的注释(简化处理)
+  if (commentStyle?.line && commentStyle.line.test(line)) {
+    return `<span class="hl-c">${escapeHtml(line)}</span>`;
+  }
+  return highlightLine(line, key, keywords, commentStyle);
+}
 
-  return lines.map((line) => {
-    // 先做整行的注释 / 整行字符串(简化处理)
-    if (commentStyle?.line && commentStyle.line.test(line)) {
-      return `<span class="hl-c">${escapeHtml(line)}</span>`;
-    }
-    return highlightLine(line, key, keywords, commentStyle);
-  }).join('\n');
+/** 文件路径 → 高亮语言 id(未命中返回 'text' 交给 LANG_ALIAS 归一)。 */
+export function langForPath(filePath: string): string {
+  const lower = filePath.toLowerCase();
+  const slash = Math.max(lower.lastIndexOf('/'), lower.lastIndexOf('\\'));
+  const base = slash >= 0 ? lower.slice(slash + 1) : lower;
+  const dot = base.lastIndexOf('.');
+  const ext = dot > 0 ? base.slice(dot + 1) : base;
+  if (ext in LANG_ALIAS) return LANG_ALIAS[ext]!;
+  return ext || 'text';
+}
+
+function highlightCode(lines: string[], lang: string): string {
+  return lines.map((line) => highlightCodeLine(line, lang)).join('\n');
 }
 
 interface CommentStyle { line?: RegExp; block?: { start: string; end: string }; strings: 'quote' | 'double' | 'single' | 'both' | 'none'; }
@@ -494,6 +507,18 @@ export function enhanceCodeBlocks(root: ParentNode): void {
     const collapseBtn = codeEl.querySelector<HTMLButtonElement>('.md-code-collapse');
     const pre = document.getElementById(id);
     const fade = codeEl.querySelector<HTMLElement>('.md-code-fade');
+
+    // 框选代码后走 Ctrl/Cmd+C 或原生「复制」时，只输出选中的纯文本。
+    // 不把语法高亮的 HTML 带进剪贴板，粘贴到聊天框/编辑器也不会丢换行、缩进或带上富文本样式。
+    pre?.addEventListener('copy', (event) => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !event.clipboardData) return;
+      const range = selection.getRangeAt(0);
+      // 跨出代码块的整段选择仍走浏览器默认复制，避免把其它正文意外压成纯代码文本。
+      if (!pre.contains(range.commonAncestorContainer)) return;
+      event.preventDefault();
+      event.clipboardData.setData('text/plain', selection.toString());
+    });
 
     const expand = (): void => {
       pre?.classList.remove('md-code-collapsed');

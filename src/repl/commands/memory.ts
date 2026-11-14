@@ -44,6 +44,9 @@ import {
   // R2.6 存量锚点回填
   collectAnchorCandidates,
   applyAnchorCandidates,
+  // R2.7 锚点重定位
+  collectRelocationProposals,
+  applyRelocations,
   type AuditRecord,
   type MemoryEntry,
 } from '../../memory/index.js';
@@ -315,8 +318,11 @@ export const memoryCommands: CommandHandler[] = [
     pruneAdoptionLedger();
     const id = ctx.line.slice('/memory adoption'.length).trim();
     const stats = adoptionStats();
+    // 「本会话待评估」与「已结束会话滞留」必须分开写：前者能靠 /reflect 消化，
+    // 后者永远不会再降（只有 90 天归档会带走），混成一个数会让人反复去跑无效动作。
     layout.contentWrite(
-      `${ui.dim}送达 ${stats.delivered} · 已评估 ${stats.evaluated}(采纳 ${stats.adopted} / 无关 ${stats.notApplicable} / 不明 ${stats.unclear}) · 待评估 ${stats.pending} · 已抑制 ${stats.suppressed}${ui.reset}\n`,
+      `${ui.dim}送达 ${stats.delivered} · 已评估 ${stats.evaluated}(采纳 ${stats.adopted} / 无关 ${stats.notApplicable} / 不明 ${stats.unclear}) · 本会话待评估 ${stats.pending}` +
+        `${stats.stranded ? ` · 已结束会话滞留 ${stats.stranded}(不会再降)` : ''} · 已抑制 ${stats.suppressed}${ui.reset}\n`,
     );
     const channels = Object.entries(stats.byChannel)
       .filter(([, count]) => count > 0)
@@ -628,9 +634,84 @@ export const memoryCommands: CommandHandler[] = [
       return next();
     }
 
+    // ── R2.7 锚点重定位(文件搬家)─────────────────────────────────────────
+    // 独立分支放在序号解析之前:`relocate` 不是序号,落到下面会被当成非法输入打用法。
+    if (arg === 'relocate' || arg.startsWith('relocate ')) {
+      const sub = arg.slice('relocate'.length).trim();
+      const rel = collectRelocationProposals(cwd);
+      if (!sub) {
+        if (rel.proposals.length === 0) {
+          layout.contentWrite(
+            `${ui.dim}(没有可重定位的锚点:${rel.weak.length} 条只有同名文件、${rel.ambiguous.length} 条同名多个、` +
+              `${rel.unresolved.length} 条连同名文件都没有)${ui.reset}\n`,
+          );
+          for (const w of rel.weak) {
+            layout.contentWrite(
+              `  ${ui.dim}${w.id}${ui.reset} ${ui.dim}${w.from} → ${w.candidate}(同名但父目录不符,需人工判断)${ui.reset}\n`,
+            );
+          }
+          return next();
+        }
+        layout.contentWrite(
+          `${ui.accent}可为 ${rel.proposals.length} 个失效锚点重定位${ui.reset}` +
+            `${ui.dim}(同名文件唯一且旧父目录名仍在新路径里;扫过 ${rel.files} 个文件${rel.truncated ? ',已达上限' : ''})${ui.reset}\n`,
+        );
+        for (const p of rel.proposals) {
+          layout.contentWrite(`  ${ui.accent}${p.index}${ui.reset}  ${ui.dim}${p.id}${ui.reset}\n`);
+          layout.contentWrite(`      ${ui.dim}${p.from} → ${p.to}${p.symbol ? `#${p.symbol}` : ''}${ui.reset}\n`);
+        }
+        if (rel.weak.length > 0) {
+          layout.contentWrite(`  ${ui.dim}另有 ${rel.weak.length} 条只有同名文件、父目录不符,未提议${ui.reset}\n`);
+        }
+        if (rel.ambiguous.length > 0) {
+          layout.contentWrite(`  ${ui.dim}另有 ${rel.ambiguous.length} 条同名文件多个,需人工判断${ui.reset}\n`);
+        }
+        if (rel.unresolved.length > 0) {
+          layout.contentWrite(
+            `  ${ui.dim}另有 ${rel.unresolved.length} 条工作区里找不到同名文件(多半是真删了,不是搬家)${ui.reset}\n`,
+          );
+        }
+        layout.contentWrite(
+          `${ui.dim}/memory anchor relocate <序号>[,<序号>…] 写入 · all 全部写入${ui.reset}` +
+            `${ui.dim}(只换路径;其它锚点与内容一律不动)${ui.reset}\n`,
+        );
+        return next();
+      }
+      const relPicks: number[] | 'all' = sub === 'all' ? 'all' : parseSeedPicks(sub);
+      if (relPicks !== 'all' && relPicks.length === 0) {
+        layout.contentWrite(
+          `${ui.dim}用法:/memory anchor relocate · /memory anchor relocate all · /memory anchor relocate 1,2${ui.reset}\n`,
+        );
+        return next();
+      }
+      if (rel.proposals.length === 0) {
+        layout.contentWrite(`${ui.dim}(没有可重定位的锚点;先跑 /memory anchor relocate 看扫描结果)${ui.reset}\n`);
+        return next();
+      }
+      if (relPicks !== 'all') {
+        const bad = relPicks.filter((n) => !rel.proposals.some((p) => p.index === n));
+        if (bad.length > 0) {
+          layout.contentWrite(
+            `${ui.dim}(序号 ${bad.join(',')} 超出范围:只有 ${rel.proposals.length} 条;先跑 /memory anchor relocate 看列表)${ui.reset}\n`,
+          );
+          return next();
+        }
+      }
+      const rr = applyRelocations(rel.proposals, relPicks, cwd);
+      layout.contentWrite(`${ui.dim}(重定位完成:写入 ${rr.saved.length} · 失败 ${rr.failed.length})${ui.reset}\n`);
+      for (const s of rr.saved) layout.contentWrite(`  ${ui.dim}+ ${s.id}  ${s.from} → ${s.to}${ui.reset}\n`);
+      // 失败必须逐条说清:静默跳过会让人以为锚点已经修好了。
+      for (const f of rr.failed) {
+        layout.contentWrite(`  ${ui.yellow}! ${f.id}${ui.reset}${ui.dim}(${f.from}:${f.reason};未写入)${ui.reset}\n`);
+      }
+      return next();
+    }
+
     const picks: number[] | 'all' = arg === 'all' ? 'all' : parseSeedPicks(arg);
     if (picks !== 'all' && picks.length === 0) {
-      layout.contentWrite(`${ui.dim}用法:/memory anchor · /memory anchor all · /memory anchor 1,3,5${ui.reset}\n`);
+      layout.contentWrite(
+        `${ui.dim}用法:/memory anchor · /memory anchor all · /memory anchor 1,3,5 · /memory anchor relocate${ui.reset}\n`,
+      );
       return next();
     }
     if (scan.candidates.length === 0) {

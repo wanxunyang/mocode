@@ -233,3 +233,14 @@ export {
   type AnchorScan,
   type AnchorApplyResult,
 } from './anchor-backfill.js';
+
+export {
+  collectRelocationProposals,
+  applyRelocations,
+  describeRelocation,
+  RELOCATE_MAX_FILES,
+  RELOCATE_MAX_PROPOSALS,
+  type RelocateProposal,
+  type RelocateScan,
+  type RelocateApplyResult,
+} from './anchor-relocate.js';

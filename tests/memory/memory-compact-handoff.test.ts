@@ -381,8 +381,11 @@ test('compact: 候选段超出摘要硬上限时仍能先被切走(顺序不能�
   const history = compactableHistory();
   const longCandidate = `- [pitfall] ${'很长的候选说明'.repeat(200)}`;
   const { transport } = transportReturning(`## Completed\n短正文\n\n${MEMORY_CANDIDATES_HEADING}\n${longCandidate}\n`);
-  process.env.MEMORY_ENABLED = 'true';
   await isolated(async () => {
+    // 必须写在 isolated 内部：它按「进入时的值」恢复环境变量，若在外部设置，
+    // isolated 记下的就是 'true'，恢复后 MEMORY_ENABLED 会永久留在开着状态，
+    // 把后续所有测试文件（含 agent-core 的编排用例）都拖进"真实记忆库参与匹配"的分支。
+    process.env.MEMORY_ENABLED = 'true';
     await compactHistory(history, {
       window: 100,
       threshold: 0.0,

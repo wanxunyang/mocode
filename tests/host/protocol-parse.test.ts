@@ -165,6 +165,20 @@ test('changes / usage 的缺省与枚举', () => {
   );
 });
 
+test('context_usage 保留显式 sessionId，空值回退当前会话', () => {
+  assert.deepEqual(parseCommand({ id: 'ctx-1', type: 'context_usage', sessionId: 'session-a' }), {
+    id: 'ctx-1',
+    type: 'context_usage',
+    sessionId: 'session-a',
+  });
+  assert.deepEqual(parseCommand({ id: 'ctx-2', type: 'context_usage', sessionId: 42 }), {
+    id: 'ctx-2',
+    type: 'context_usage',
+    sessionId: undefined,
+  });
+  assert.equal(parseCommand({ id: 'ctx-3', type: 'contextUsage', sessionId: 'session-a' }), null);
+});
+
 test('memory：写操作必须显式 confirm', () => {
   const read = parseCommand({ id: 'y1', type: 'memory', action: 'health' });
   assert.deepEqual(read, {

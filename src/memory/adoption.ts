@@ -43,8 +43,21 @@ export interface AdoptionStats {
   adopted: number;
   notApplicable: number;
   unclear: number;
-  /** 仅近期账本可知；被压缩进历史汇总的事件不可能再被评估。 */
+  /**
+   * **当前会话**尚未评估的送达数——唯一还能被裁决的那部分。
+   *
+   * 口径必须按会话切：`pendingAdoptionDeliveries()` 只把本会话的 delivered 交给模型，
+   * 所以旧会话的未评估永远等不到裁决。把两者合在一个数里会让这个指标永远降不下去，
+   * health 的「待评估过多」告警于是恒亮，成了狼来了（实测 460 里 298 条属这种情况）。
+   */
   pending: number;
+  /**
+   * 已结束会话留下的未评估送达：不会再被裁决，只会随 90 天 prune 消失。
+   *
+   * 与 `pending` 分开报，因为它们要求的动作不同：pending 该去跑 `/reflect`，
+   * stranded 做什么都没用——把它计入积压只会制造一个无法消除的假告警。
+   */
+  stranded: number;
   byChannel: Record<AdoptionChannel, number>;
   suppressedByReason: Partial<Record<AdoptionSuppressionReason, number>>;
 }
@@ -52,7 +65,7 @@ export interface AdoptionStats {
 interface AdoptionSummary {
   schemaVersion: 1;
   updatedAt: string;
-  totals: Omit<AdoptionStats, 'pending'>;
+  totals: Omit<AdoptionStats, 'pending' | 'stranded'>;
 }
 
 const CHANNELS: AdoptionChannel[] = [
@@ -110,6 +123,7 @@ function emptyStats(): AdoptionStats {
     notApplicable: 0,
     unclear: 0,
     pending: 0,
+    stranded: 0,
     byChannel: {
       proactive_trigger: 0,
       proactive_anchor: 0,
@@ -181,13 +195,13 @@ function readSummary(): AdoptionSummary | null {
   }
 }
 
-function summarize(events: readonly AdoptionEvent[]): AdoptionStats {
+function summarize(events: readonly AdoptionEvent[], currentSessionId = getCurrentSessionId()): AdoptionStats {
   const out = emptyStats();
-  const delivered = new Set<string>();
+  const delivered = new Map<string, AdoptionEvent>();
   const evaluated = new Set<string>();
   for (const e of events) {
     if (e.kind === 'delivered') {
-      delivered.add(e.id);
+      delivered.set(e.id, e);
       out.delivered++;
       out.byChannel[e.channel]++;
     } else if (e.kind === 'suppressed') {
@@ -205,11 +219,17 @@ function summarize(events: readonly AdoptionEvent[]): AdoptionStats {
       else out.unclear++;
     }
   }
-  out.pending = [...delivered].filter((id) => !evaluated.has(id)).length;
+  // 未评估的送达分两类:本会话的(还能裁决)与旧会话的(永远等不到)。
+  // 缺 sessionId 的历史事件按「可评估」算——宁可让告警偏亮,也不要把真能处理的一批藏起来。
+  for (const [id, e] of delivered) {
+    if (evaluated.has(id)) continue;
+    if (!currentSessionId || !e.sessionId || e.sessionId === currentSessionId) out.pending++;
+    else out.stranded++;
+  }
   return out;
 }
 
-function mergeStats(target: AdoptionStats, add: Omit<AdoptionStats, 'pending'>): void {
+function mergeStats(target: AdoptionStats, add: Omit<AdoptionStats, 'pending' | 'stranded'>): void {
   for (const key of ['delivered', 'suppressed', 'evaluated', 'adopted', 'notApplicable', 'unclear'] as const)
     target[key] += add[key];
   for (const channel of CHANNELS) target.byChannel[channel] += add.byChannel[channel];

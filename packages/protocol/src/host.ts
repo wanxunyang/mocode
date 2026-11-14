@@ -111,6 +111,8 @@ export type HostCommand =
    * 还是空的（那字段只在 run 期间有效），不带就永远查不到。
    */
   | { id: string; type: 'usage'; scope: 'session' | 'global'; days?: number; sessionId?: string }
+  /** 当前上下文占用快照；sessionId 指向未恢复的历史会话时按落盘 history 估算。 */
+  | { id: string; type: 'context_usage'; sessionId?: string }
   /** 记忆面板。写操作需带 confirm:true。 */
   | {
       id: string;
