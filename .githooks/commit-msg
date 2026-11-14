@@ -1,0 +1,7 @@
+#!/bin/sh
+# 提交信息校验：只允许英文（拒绝 CJK）。实现见 check-commit-msg.mjs。
+#
+# 由 core.hooksPath=.githooks 生效（package.json 的 prepare 脚本设置）。
+# 临时绕过：git commit --no-verify。
+dir=$(dirname "$0")
+exec node "$dir/check-commit-msg.mjs" "$1"
