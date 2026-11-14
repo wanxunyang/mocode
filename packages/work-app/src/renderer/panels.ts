@@ -498,6 +498,12 @@ function attachHeatmap(
 async function renderUsage(container: HTMLElement): Promise<void> {
   const api = need();
   /**
+   * 「本会话」页签需要一条会话：它的命令打到那个任务的 host，读的是该会话自己的
+   * usage.jsonl。没有选中任务时（例如刚启动就想看总用量）这一页签无处可去，直接不画 ——
+   * 画出来再点了报错，比不显示更让人困惑。global 口径任何时候都在。
+   */
+  const sessionAvailable = !!api.currentTaskId();
+  /**
    * 页签监听必须在**每个**分支都挂上，包括空态和错误态。
    *
    * 这正是这次的坑：session 口径没有用量（新任务 / 没带 sessionId）时会 early return，
@@ -514,6 +520,8 @@ async function renderUsage(container: HTMLElement): Promise<void> {
   const windowLabel = (n: number): string =>
     n === 180 ? api.t('usage.lastHalfYear') : n === 365 ? api.t('usage.lastYear') : api.t('usage.lastDays', { n });
   const draw = async (scope: 'session' | 'global', days = 7): Promise<void> => {
+    // 没有任务时「本会话」无从查起：任何调用方（包括旧的页签点击）都退到 global。
+    if (scope === 'session' && !sessionAvailable) scope = 'global';
     container.innerHTML = loading();
     // session 口径必须显式带 sessionId：面板命令可能落到一个刚懒启动的 host 上，
     // 那时它进程内的 sessionId 还是空串，查出来永远是 empty。
@@ -524,7 +532,7 @@ async function renderUsage(container: HTMLElement): Promise<void> {
       api.t('usage.title'),
       api.t('usage.hint'),
       `<div class="panel-tabs">
-        <button class="${scope === 'session' ? 'active' : ''}" data-scope="session">${api.t('usage.session')}</button>
+        ${sessionAvailable ? `<button class="${scope === 'session' ? 'active' : ''}" data-scope="session">${api.t('usage.session')}</button>` : ''}
         ${USAGE_WINDOWS.map(
           (n) =>
             `<button class="${scope === 'global' && days === n ? 'active' : ''}" data-scope="global" data-days="${n}">${windowLabel(n)}</button>`,
@@ -616,12 +624,13 @@ async function renderUsage(container: HTMLElement): Promise<void> {
       button.addEventListener('click', () => void draw(button.dataset.scope === 'global' ? 'global' : 'session', Number(button.dataset.days ?? 7))),
     );
   };
-  // 首屏默认「近 7 天（跨项目）」而不是「本会话」：
+  // 首屏永远进「近一年（跨项目）」：
   //   1) 热力图是跨项目的年视图，只有 global 口径才拿得到 calendar；
   //   2) 刚新建 / 刚切换的任务本会话还没有用量，进来先看到一个空白页 + 死页签，
-  //      用户会以为「用量根本查不到」（这正是反馈里那条）。
+  //      用户会以为「用量根本查不到」（这正是反馈里那条）；
+  //   3) 进来就是想看「一共用了多少」，7 天窗口把历史都藏在页签后面（用户要求默认一年）。
   // 本会话仍是一个页签，一处不漏。
-  await draw('global', 7);
+  await draw('global', 365);
 }
 
 /* ────────────────────────────── 记忆面板 ────────────────────────────── */
@@ -810,38 +819,7 @@ export async function renderPanel(kind: PanelKind, container: HTMLElement): Prom
   return renderMemory(container);
 }
 
-/**
- * inspector「本轮改动」页签：最近一轮的改动文件清单 + 点开看 diff。
- *
- * 用同一份 rollback 快照（不是 git），所以没有 git 的目录也能看，口径与回滚完全一致：
- * 这里列出来的文件，正是回滚时能勾选还原的那些。
- */
-export async function renderTurnChanges(container: HTMLElement): Promise<void> {
-  const api = need();
-  container.innerHTML = loading();
-  const env = await request({ type: 'changes', action: 'diff' });
-  const failure = errorOf(env);
-  if (failure) return void (container.innerHTML = errorBlock(failure));
-  const payload = payloadOf(env);
-  const files = Array.isArray(payload.files) ? (payload.files as Array<Record<string, unknown>>) : [];
-  if (!files.length) {
-    container.innerHTML = emptyBlock(api.t('inspector.noChanges'));
-    return;
-  }
-  container.innerHTML = files
-    .map((file, index) => {
-      const path = str(file.path);
-      const diff = str(file.diff);
-      return `<details class="panel-diff" data-index="${index}">
-        <summary>
-          <span class="panel-row-title">${api.escapeHtml(path)}</span>
-          <span class="panel-row-sub">${api.escapeHtml(file.unavailable === true ? api.t('rollback.noSnapshot') : diff ? api.t('inspector.changes') : api.t('inspector.noChanges'))}</span>
-        </summary>
-        <pre class="status-output diff-preview">${api.escapeHtml(diff)}</pre>
-      </details>`;
-    })
-    .join('');
-}
+
 
 /** 当前展示的是哪块面板（切语言时 renderer 据此重绘）。 */
 export function activePanelKind(): PanelKind | null {

@@ -99,3 +99,32 @@ export function truncateSessionAtUser(record: RawSessionRecord, userIndex: numbe
   record.firstUser = nextFirstUser ? contentTextOf(nextFirstUser).replace(/\n/g, ' ').trim().slice(0, 40) : '';
   return { ok: true };
 }
+
+/**
+ * 分叉用：把会话**保留到第 userIndex 轮结束**（含那一轮的助手回答），之后的所有轮次丢弃。
+ *
+ * 与 truncateSessionAtUser 恰好互补：那个砍掉第 userIndex 轮及之后，这个保留到它为止。
+ * 边界取「下一条真实 user 消息之前」而不是按 assistant 数 —— 一轮里可能夹任意多条
+ * assistant / tool 记录，按轮边界切才和设备无关。
+ *
+ * userIndex 越界（含压缩后老消息已被摘要替换）按失败返回，由调用方决定是否放弃这次分叉。
+ */
+export function truncateSessionAfterUser(
+  record: RawSessionRecord,
+  userIndex: number,
+  messages: TruncateMessages,
+): { ok: boolean; message?: string } {
+  if (!record || !Array.isArray(record.history)) return { ok: false, message: messages.noHistory };
+  const userAt: number[] = [];
+  record.history.forEach((message, index) => { if (isRealUserMessage(message)) userAt.push(index); });
+  if (!Number.isInteger(userIndex) || userIndex < 0 || userIndex >= userAt.length) {
+    return { ok: false, message: messages.compacted };
+  }
+  const cutAt = userAt[userIndex + 1] ?? record.history.length;
+  record.history = record.history.slice(0, cutAt);
+  // queryHistory 与 user 消息一一对应：留到第 userIndex 条（含）。
+  if (Array.isArray(record.queryHistory)) record.queryHistory = record.queryHistory.slice(0, userIndex + 1);
+  // lastToolGroups 不清：被保留的最后一轮就是它，下一条消息沿用同一批工具是对的。
+  // firstUser 也不动：第一条 user 消息仍在副本里。
+  return { ok: true };
+}

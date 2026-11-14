@@ -45,6 +45,15 @@ export class SendQueue<TPayload> {
   }
 
   /**
+   * 只读快照（FIFO 顺序）。给「输入框上方的排队面板」用：
+   * 面板要能一次画出全部待发消息，但不该通过 dequeue 改变队列，
+   * 也不该拿到内部数组的引用（调用方 push/sort 会直接把队列改坏）。
+   */
+  snapshot(taskId: string): QueuedSend<TPayload>[] {
+    return [...(this.queues.get(taskId) ?? [])];
+  }
+
+  /**
    * 清空某任务的队列（删除任务 / 回滚 / 用户手动取消排队时）。
    * 返回被丢弃的条数，供调用方提示——静默丢用户输入是不可接受的。
    */

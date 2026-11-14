@@ -40,6 +40,10 @@ export const ICONS: Record<string, string> = {
   'layout': `<svg ${SVG_ATTRS}><rect x="3" y="3" width="14" height="14" rx="1.5"/><path d="M3 8h14M8 8v9"/></svg>`,
   'files': `<svg ${SVG_ATTRS}><path d="M5 3h7l3 3v11H5z"/><path d="M12 3v3h3"/></svg>`,
   'grid': `<svg ${SVG_ATTRS}><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="12" y="3" width="5" height="5" rx="1"/><rect x="3" y="12" width="5" height="5" rx="1"/><rect x="12" y="12" width="5" height="5" rx="1"/></svg>`,
+  // 改动：一张纸上叠 +/− 两道横线，与「文件」区分开（不是同一张纸）。
+  'changes': `<svg ${SVG_ATTRS}><path d="M5 3h7l3 3v11H5z"/><path d="M12 3v3h3"/><path d="M7 11h3"/><path d="M8.5 9.5v3"/><path d="M11.5 14h3"/></svg>`,
+  // 检查：清单 + 对勾，语义是「该验哪些」而不是「已经验过」。
+  'checks': `<svg ${SVG_ATTRS}><path d="M4 5.5l1.5 1.5L8 4.5"/><path d="M4 11l1.5 1.5L8 10"/><path d="M4 16.5l1.5 1.5L8 15.5"/><path d="M11 6h5M11 11.5h5M11 17h5"/></svg>`,
 
   // composer
   'paper-airplane': `<svg ${SVG_ATTRS}><path d="M3 17L17 4M17 4l-3.5 12.5L9 12 3 17"/></svg>`,

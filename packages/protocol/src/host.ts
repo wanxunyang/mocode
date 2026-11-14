@@ -140,6 +140,10 @@ export type HostCommand =
       files: string[];
       truncated?: boolean;
       language?: 'zh-CN' | 'en-US';
+      /** 暂存改动所属的仓库（工作空间下可能存在多个仓库/工作树）。 */
+      repo?: string;
+      /** 该仓库当前检出的分支名；detached 时是短 sha。 */
+      branch?: string;
     }
   /** 取消指定的独立提交信息请求；与任务 run 的 cancel 完全隔离。 */
   | { id: string; type: 'cancel_commit_message'; targetId: string };

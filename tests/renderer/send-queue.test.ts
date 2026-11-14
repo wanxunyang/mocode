@@ -39,3 +39,25 @@ test('SendQueue: clear 返回丢弃条数，清空后 size 归零', () => {
   assert.equal(queue.clear('a'), 0, '重复 clear 不报错');
   assert.equal(queue.dequeue('a'), undefined);
 });
+
+test('SendQueue: snapshot 按 FIFO 返回且不泄漏内部数组', () => {
+  const queue = new SendQueue<string>();
+  queue.enqueue('a', 'first');
+  queue.enqueue('a', 'second');
+  const snapshot = queue.snapshot('a');
+  assert.deepEqual(
+    snapshot.map((item) => item.payload),
+    ['first', 'second'],
+    '排队面板按入队顺序展示',
+  );
+
+  // 面板只能读：改快照不能改队列（否则渲染层一次误改就吞掉用户的排队消息）。
+  snapshot.pop();
+  snapshot.push({ seq: 99, payload: 'injected' });
+  assert.equal(queue.size('a'), 2);
+  assert.deepEqual(
+    queue.snapshot('a').map((item) => item.payload),
+    ['first', 'second'],
+  );
+  assert.deepEqual(queue.snapshot('missing'), [], '没有队列的任务返回空数组');
+});

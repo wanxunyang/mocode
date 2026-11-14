@@ -1,15 +1,22 @@
-import { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, shell } from 'electron';
+import { app, BrowserWindow, Menu, Notification, dialog, ipcMain, nativeTheme, screen, session as electronSession, shell } from 'electron';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import { ATTACHMENT_EXTENSIONS, configureAttachmentModulePath, historyAttachments, readAttachment, type WorkAttachment } from './attachments.js';
-import { truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
-import { deleteRecoveryLog, readRecovery, recoveryLog, type RecoveryAttachment, type RecoveryEnvelope, type RecoveryLog } from './recovery-log.js';
+// 计划解析与渲染层共用同一份（renderer 走 ../plan.js），否则侧栏的 n/m 与面板会对不上。
+import { parsePlan } from './plan.js';
+import { truncateSessionAfterUser, truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
+import { clampToWorkArea } from './window-fit.js';
+import { compactRecoveryLogs, deleteRecoveryLog, readRecoveryAsync, recoveryLog, type RecoveryAttachment, type RecoveryEnvelope, type RecoveryLog } from './recovery-log.js';
 import { tMain } from './i18n/main.js';
+// 浏览器面板的分区名由主进程与渲染层共用，见 browser-panel.ts。
+import { panelPartitionFor } from './browser-panel.js';
+import { BrowserHost, denySessionPermissions, validatePanelUrl } from './browser-host.js';
+import { TerminalHost } from './terminal-host.js';
 import {
   cancelVoiceDownload,
   downloadVoiceModel,
@@ -52,7 +59,9 @@ import {
   type HostEnvelope,
 } from '@mocode/runtime/host';
 import { isUserConfigEnvKey } from '@mocode/protocol';
-import { commitStaged, gitDiff, gitStatus, stageFiles, stagedDiff, unstageFiles } from './git.js';
+import { commitStaged, gitDiff, gitFileDiff, gitFileStats, gitRepos, gitStatus, stageFiles, stagedDiff, unstageFiles, validateRepoRoot } from './git.js';
+import { buildCheckGroups, parsePackage, workspaceDirs } from './checks.js';
+import { readGlobalUsage, summarizeGlobalUsage } from './usage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 开发环境从 workspace/root node_modules 解析；安装版只读随包发布的独立资源目录。
@@ -115,6 +124,19 @@ interface TaskRecord {
   // projectId 为空字符串 = 普通任务（不加入任何空间 / 项目文件夹），agent 在 scratch 目录运行
   id: string; projectId: string; title: string; status: TaskStatus; createdAt: string; updatedAt: string;
   sessionId?: string; changedFiles: string[]; lastError?: string;
+  /**
+   * 最新一份执行计划的进度（由 plan_update 事件写入，见 updateTaskFromAgent）。
+   * 只存侧栏一行需要的数字：完整步骤清单在会话区顶部的计划面板里，不进状态文件
+   * （否则每步更新都要重写并广播整个 state）。
+   */
+  plan?: TaskPlanProgress;
+}
+/** 侧栏任务行显示的计划进度。 */
+interface TaskPlanProgress {
+  title: string;
+  done: number;
+  total: number;
+  allDone: boolean;
 }
 interface StoredState {
   version: 1; projects: Project[]; selectedProjectId: string; tasks: TaskRecord[]; selectedTaskId?: string;
@@ -125,6 +147,69 @@ interface StoredState {
   hiddenProjects?: string[];
 }
 interface CommandResult { ok: boolean; stdout: string; stderr: string; }
+
+/**
+ * 应用内浏览器面板与 agent 共用同一个真浏览器：面板是主进程持有的 WebContentsView，
+ * agent 通过 CDP（connectOverCDP）接管同一个视图（见 browser-host.ts 顶部说明）。
+ * 端口交给 Chromium 自己挑（`--remote-debugging-port=0`），实际端口它写进 userData 下的
+ * DevToolsActivePort —— 固定端口会和用户已有的 Chrome 调试实例/其它工具撞车。
+ */
+let browserCdpUrl: string | null = null;
+// 必须在 app ready 之前追加：ready 后再设这个 switch 不生效。
+app.commandLine.appendSwitch('remote-debugging-port', '0');
+
+/** 等 Chromium 把真实调试端口写入 DevToolsActivePort（首行是端口，第二行是 ws 路径）。 */
+async function resolveBrowserCdpUrl(timeoutMs = 5_000): Promise<string | null> {
+  const file = path.join(app.getPath('userData'), 'DevToolsActivePort');
+  const deadline = Date.now() + timeoutMs;
+  do {
+    try {
+      const port = Number(readFileSync(file, 'utf8').split(/\r?\n/)[0]);
+      if (Number.isInteger(port) && port > 0) return `http://127.0.0.1:${port}`;
+    } catch { /* 还没写出来：继续等 */ }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  return null;
+}
+
+/** 面板网页的权限一律拒绝：agent 可能打开任意站点，不能顺带拿到定位/通知/摄像头。 */
+function denyPanelPermissions(projectId: string | undefined): void {
+  denySessionPermissions(electronSession.fromPartition(panelPartitionFor(projectId)));
+}
+
+/**
+ * 浏览器面板的原生视图宿主。窗口重建时随之重建（视图挂在 window.contentView 上），
+ * 所以只保留一个引用 + 一个惰性 getter。
+ */
+let browserHost: BrowserHost | null = null;
+function browserHostFor(): BrowserHost {
+  if (browserHost) return browserHost;
+  browserHost = new BrowserHost(
+    () => windowRef,
+    (viewState) => pushRenderer('work:browser-state', viewState),
+  );
+  return browserHost;
+}
+
+/**
+ * 终端面板的 PTY 宿主。会话按空间缓存（同一空间来回切面板不重开 shell），
+ * cwd 恒为该空间的根目录 —— 与 agent 的 run_command 起点一致。
+ *
+ * 只在主进程：node-pty 是原生模块，渲染进程开着 contextIsolation + sandbox，
+ * 不该也不能 require 它。
+ */
+let terminalHost: TerminalHost | null = null;
+function terminalHostFor(): TerminalHost {
+  if (terminalHost) return terminalHost;
+  terminalHost = new TerminalHost((projectId) => {
+    // 空 projectId = 纯任务，落到 scratch（与 agent 的独立任务同一处）。
+    if (!projectId) return scratchProject().root;
+    return state.projects.find((item) => item.id === projectId)?.root ?? null;
+  });
+  terminalHost.on('data', (payload: { projectId: string; chunk: string }) => pushRenderer('work:terminal-data', payload));
+  terminalHost.on('exit', (payload: { projectId: string; exitCode: number }) => pushRenderer('work:terminal-exit', payload));
+  return terminalHost;
+}
 
 /**
  * 落盘用的「语言无关」错误标记。state 会写进 work-projects.json，
@@ -149,6 +234,31 @@ interface PendingCommitMessage {
   sent?: Promise<boolean>;
 }
 const pendingCommitMessages = new Map<string, PendingCommitMessage>();
+/**
+ * 正在等待 host 回执的「复制会话」请求（work:fork-task）。
+ *
+ * 与面板请求的区别：面板把回执一路推给渲染层由它自己配对，这里**必须就地拦下** ——
+ * fork 只是分叉流程的中间步，不是用户可见的事件，推到渲染层会冒出一句「会话已分叉」的
+ * 无关事件，而且渲染层也没有对应的 pending 表。
+ */
+interface PendingFork {
+  agent: LocalAgent | null;
+  resolve: (result: ForkResult) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+type ForkResult = { ok: boolean; sessionId?: string; message?: string };
+const pendingForks = new Map<string, PendingFork>();
+const FORK_TIMEOUT_MS = 30_000;
+
+/** host 退出 / 被 stop 时，在等它回执的 fork 永远不会来 —— 就地失败，别让调用方等到超时。 */
+function failPendingForks(agent: LocalAgent, message: string): void {
+  for (const [id, pending] of pendingForks) {
+    if (pending.agent !== agent) continue;
+    pendingForks.delete(id);
+    clearTimeout(pending.timer);
+    pending.resolve({ ok: false, message });
+  }
+}
 const recoveryLogs = new Map<string, RecoveryLog>();
 const recoveryRoot = (): string => app.getPath('userData');
 // 每个流式 token 都可能写日志；复用对象，避免每次都重读整份 JSONL 来恢复 seq。
@@ -881,6 +991,60 @@ function failTask(taskId: string, message: string): void {
   broadcastState();
 }
 
+/**
+ * 最近一次 plan_update 的入参，按任务缓存。
+ * 必要性：tool_completed 的 payload 里没有 arguments（host 的 onToolResult 只带 output），
+ * 侧栏要等「工具真的成功」才落账，就必须把 tool_started 的入参留到那一刻。
+ * 只对 plan_update 这一个工具做，不值得给所有工具建通用暂存。
+ */
+const pendingPlanArgs = new Map<string, unknown>();
+
+/* ── 需要人工介入的系统级提醒 ────────────────────────────────
+ * 只在「用户根本没在看这个应用」时打扰：窗口失焦 / 最小化。窗口在前台时侧栏的琥珀色
+ * 等待行、标题栏「N 个待处理」、会话区横条已经把话说清楚，再来一条系统通知纯属重复。
+ * 同一任务的等待期只提醒一次（一个 agent 可能连续发好几个审批，不该连环弹窗）；
+ * 它一旦重新跑起来（status / run_* ）就把记录清掉，下次卡住再提醒。
+ */
+const notifiedWaitingTasks = new Set<string>();
+let attentionFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 任务栏闪烁。Windows 上 flashFrame(true) 会一直闪到窗口获得焦点，兜底 8s 自己收掉。 */
+function flashTaskbar(): void {
+  const win = windowRef;
+  if (!win || win.isDestroyed()) return;
+  try { win.flashFrame(true); } catch { /* 某些平台不支持，静默 */ }
+  if (attentionFlashTimer) clearTimeout(attentionFlashTimer);
+  attentionFlashTimer = setTimeout(() => {
+    attentionFlashTimer = null;
+    try { win.flashFrame(false); } catch { /* 同上 */ }
+  }, 8000);
+}
+
+function notifyNeedsAttention(task: TaskRecord, detail: string): void {
+  const win = windowRef;
+  const looking = !!win && !win.isDestroyed() && win.isFocused() && !win.isMinimized();
+  if (looking || notifiedWaitingTasks.has(task.id)) return;
+  notifiedWaitingTasks.add(task.id);
+  flashTaskbar();
+  if (!Notification.isSupported()) return;
+  const title = task.title.trim() || tMain('empty.draft');
+  const notification = new Notification({
+    title: tMain('attention.notifyTitle'),
+    body: tMain('attention.notifyBody', { steps: detail ? `${title} · ${detail}` : title }),
+  });
+  // 点通知 = 把窗口拎到前台 + 让渲染层跳到这个任务并摆出审批卡。
+  // 渲染层是唯一知道「审批面板怎么摆」的地方，所以这里只发一个跳转信号。
+  notification.on('click', () => {
+    const target = windowRef;
+    if (target && !target.isDestroyed()) {
+      if (target.isMinimized()) target.restore();
+      target.focus();
+    }
+    pushRenderer('work:agent-event', { type: 'event', event: 'attention_open', requestId: task.id, payload: {} });
+  });
+  notification.show();
+}
+
 function updateTaskFromAgent(envelope: HostEnvelope): void {
   const requestId = typeof envelope.requestId === 'string' ? envelope.requestId : undefined;
   const task = taskById(requestId);
@@ -891,13 +1055,38 @@ function updateTaskFromAgent(envelope: HostEnvelope): void {
   const before = JSON.stringify(task);
   const payload = envelope.payload && typeof envelope.payload === 'object' ? envelope.payload as Record<string, unknown> : {};
   if (event === 'run_started') { task.status = 'running'; if (typeof payload.sessionId === 'string') task.sessionId = payload.sessionId; }
-  if (event === 'approval_requested') task.status = 'waiting';
+  if (event === 'approval_requested') {
+    task.status = 'waiting';
+    // 审批 / 提问的标题就是「它在等什么」，直接放进通知体，用户不点开也大致知道要答什么。
+    notifyNeedsAttention(task, String(payload.title ?? '').trim());
+  }
+  // 一旦它重新动起来，就把「提醒过」的记录清掉：下次再卡住要重新提醒一次。
+  if (event === 'status' || event === 'run_started' || event === 'run_aborted' || event === 'run_completed' || event === 'run_failed') {
+    notifiedWaitingTasks.delete(task.id);
+  }
   if (event === 'status') task.status = 'running';
   if (event === 'run_aborted') task.status = 'cancelled';
   if (event === 'run_failed') { task.status = 'failed'; task.lastError = String(payload.message ?? RUN_FAILED_MARKER); }
   if (event === 'run_completed') {
     task.changedFiles = Array.isArray(payload.changedFiles) ? payload.changedFiles.filter((item): item is string => typeof item === 'string') : [];
     task.status = payload.terminationReason === 'aborted' ? 'cancelled' : payload.terminationReason === 'completed' ? 'completed' : 'failed';
+  }
+  // 侧栏任务行的计划进度：只在 plan_update 出现时更新。
+  // 用 tool_started 暂存入参、tool_completed 才落账 —— tool_completed 的 payload 里
+  // 只有 output 没有 arguments（见 src/host/stdio.ts 的 onToolResult），直接在那里解析
+  // 会永远拿到 undefined；而被打断 / 校验失败的调用不该把侧栏写成一份没提交成功的计划
+  // （会话区面板是实时预览，两者口径不同是有意的）。
+  if (payload.name === 'plan_update') {
+    if (event === 'tool_started') {
+      pendingPlanArgs.set(task.id, payload.arguments);
+    } else if (event === 'tool_completed') {
+      const args = pendingPlanArgs.get(task.id);
+      pendingPlanArgs.delete(task.id);
+      const plan = parsePlan(args);
+      if (plan) task.plan = { title: plan.title, done: plan.done, total: plan.total, allDone: plan.allDone };
+    }
+  } else if (event === 'run_completed' || event === 'run_failed' || event === 'run_aborted') {
+    pendingPlanArgs.delete(task.id);
   }
   // updatedAt 是侧栏的「最近用户消息」排序键：Agent 事件只更新运行状态，不能抢排序。
   if (JSON.stringify(task) === before) return;
@@ -951,6 +1140,7 @@ class LocalAgent {
       for (const [id, pending] of pendingCommitMessages) {
         if (pending.agent === this) pendingCommitMessages.delete(id);
       }
+      failPendingForks(this, tMain('main.fork.hostGone'));
       // 预期内的退出全是**我们自己**发起的（stop / 切模型重启 / 被新一次 start 打断）：
       // 这时任务要么马上会被重新拉起（重启后紧接着的那条 send），要么调用方已经自己收敛了状态
       // （删任务 / 回滚 / 退出应用，见各自的 handler）。以前一律 failTask + 发 host_exit，会把
@@ -1021,7 +1211,12 @@ class LocalAgent {
     });
     const starting = this.client.start(spec, {
       cwd: project.root,
-      env: { ...process.env, NODE_NO_WARNINGS: '1' },
+      env: {
+        ...process.env,
+        NODE_NO_WARNINGS: '1',
+        // 让 host 的 browser 工具接管面板那个页面，而不是另开一个浏览器进程。
+        ...(browserCdpUrl ? { MOCODE_BROWSER_CDP_URL: browserCdpUrl } : {}),
+      },
     });
     this.starting = starting;
     let failure: string | null = null;
@@ -1119,6 +1314,32 @@ class LocalAgent {
     }
   }
 
+  /**
+   * 让 host 复制一份会话（终端的 /fork 同一条能力：整个会话目录复制 + 内部引用改写），等回执拿新 id。
+   * fork 不改 host 的当前会话，所以调用方可以继续用这个 host 跑别的活。
+   */
+  async forkSessionOnHost(sessionId: string): Promise<ForkResult> {
+    const requestId = `fork-${randomUUID()}`;
+    const result = new Promise<ForkResult>((resolve) => {
+      const timer = setTimeout(() => {
+        pendingForks.delete(requestId);
+        resolve({ ok: false, message: tMain('main.fork.timeout') });
+      }, FORK_TIMEOUT_MS);
+      pendingForks.set(requestId, { agent: this, resolve, timer });
+    });
+    const command: HostCommand = { id: requestId, type: 'sessions', action: 'fork', sessionId };
+    const sent = await this.send(command).catch(() => false);
+    if (!sent) {
+      const pending = pendingForks.get(requestId);
+      if (pending) {
+        pendingForks.delete(requestId);
+        clearTimeout(pending.timer);
+        pending.resolve({ ok: false, message: tMain('main.fork.failed') });
+      }
+    }
+    return result;
+  }
+
   /** host 现在是否活着（正在跑）。用于判断「停止」有没有必要发出去。 */
   get isRunning(): boolean {
     return this.client.isRunning;
@@ -1131,6 +1352,7 @@ class LocalAgent {
     for (const [id, pending] of pendingCommitMessages) {
       if (pending.agent === this) pendingCommitMessages.delete(id);
     }
+    failPendingForks(this, tMain('main.fork.hostGone'));
     void this.client.stop();
   }
 
@@ -1159,6 +1381,19 @@ class LocalAgent {
   private receive(envelope: HostEnvelope): void {
     if (envelope.requestId && (envelope.type === 'error' || envelope.event === 'commit_message_report')) {
       pendingCommitMessages.delete(envelope.requestId);
+    }
+    // 「复制会话」的回执必须就地拦下 —— 它只是分叉流程的中间步，不是给用户看的事件。
+    if (envelope.requestId && pendingForks.has(envelope.requestId)) {
+      if (envelope.event === 'session_forked' || envelope.type === 'error') {
+        const pending = pendingForks.get(envelope.requestId)!;
+        pendingForks.delete(envelope.requestId);
+        clearTimeout(pending.timer);
+        const payload = (envelope.payload ?? {}) as { sessionId?: unknown };
+        pending.resolve(envelope.type === 'error'
+          ? { ok: false, message: envelope.error || tMain('main.fork.failed') }
+          : { ok: true, sessionId: typeof payload.sessionId === 'string' ? payload.sessionId : undefined });
+        return;
+      }
     }
     if (this.taskId.startsWith('workspace:')) {
       // 辅助 host 只给面板回执，不存在可失败的任务或恢复日志。
@@ -1191,16 +1426,53 @@ class LocalAgent {
   }
 }
 
+/**
+ * Windows 原生窗口按钮区（最小化/最大化/关闭）的底色：**透明**。
+ *
+ * 为什么不让主进程上色：那块区域是 Electron 的 titleBarOverlay，画在网页内容之上，
+ * 只能吃一个十六进制值；而标题栏真实颜色来自 CSS `.titlebar` 的 `--surface-app`，
+ * 那是带 accent 色相的 oklch token —— 深浅两套 × 6 套主题色 = 12 个值，还会随主题色切换变。
+ * 写死 hex 永远追不上：浅色下 #f7f8f7 恰好接近 token 看不出问题，深色下 #202225 与
+ * 标题栏 #080c09 差一整档，右端明显两块色（用户反馈即此）。
+ * 传透明后该区域渗出网页自身的像素，按钮底色与 `.titlebar` 天然同色，无需任何同步。
+ * 实测（Electron 43 / Windows）：透明时按钮区取样 = 标题栏取样；symbolColor 仍可独立设置。
+ */
+const TRANSPARENT_OVERLAY = '#00000000';
+
+/**
+ * 把窗口收进它当前所在显示器的工作区（算法见 window-fit.ts）。
+ *
+ * 为什么必须做：Windows 跨显示器拖动时**保留窗口原尺寸**。把高 1067px 的窗口拖到
+ * 工作区只有 960px 的屏上，窗口就比自己所在的屏还高；而输入卡按设计贴在窗口底边
+ * （.workspace 是 flex column，.composer-area 是最后一项），整块输入框于是被推出屏幕外——
+ * 用户看到的就是「看不到输入框」，而且窗沿已顶到屏幕顶，拖也救不回来。渲染层无从修：
+ * 它只是忠实按窗口尺寸排版（实测 innerHeight=1060 vs availHeight=960）。
+ *
+ * 没溢出就什么都不做：用户的尺寸/位置偏好必须保住，而且我们的 setBounds 会再触发
+ * resize，无限改窗口会和用户拖拽打架。
+ */
+function fitWindowToDisplay(win: BrowserWindow): void {
+  if (win.isDestroyed() || win.isMinimized() || win.isMaximized() || win.isFullScreen()) return;
+  const bounds = win.getBounds();
+  // getDisplayMatching 按重叠面积最大的屏算：窗口跨两屏时跟着它主要所在的那块走。
+  const fitted = clampToWorkArea(bounds, screen.getDisplayMatching(bounds).workArea);
+  if (fitted) win.setBounds(fitted);
+}
+
 function createWindow(): void {
   // 应用图标(白底圆角正方形 + 像素兔)。dev 模式下用于窗口/Dock;Windows 任务栏 / 打包后的 .exe
   // 图标是 electron-builder 资源,需要打包时配 win.icon 才能换,这里管不到。
   const appIconPath = path.join(__dirname, 'assets', 'icon.png');
+  // 窗口底色仍需跟随系统明暗：createWindow 到首帧渲染之间的空白期用的是它。
+  const systemDark = nativeTheme.shouldUseDarkColors;
   windowRef = new BrowserWindow({
-    width: 1280, height: 820, minWidth: 980, minHeight: 620, title: 'MoCode Work', backgroundColor: '#ffffff', autoHideMenuBar: true,
+    width: 1280, height: 820, minWidth: 980, minHeight: 620, title: 'MoCode Work', backgroundColor: systemDark ? '#1b1c1f' : '#ffffff', autoHideMenuBar: true,
     ...(existsSync(appIconPath) ? { icon: appIconPath } : {}),
     ...(process.platform === 'win32' ? {
       titleBarStyle: 'hidden' as const,
-      titleBarOverlay: { color: '#f7f8f7', symbolColor: '#202124', height: 37 },
+      // 37 = titlebar 38px 减去 1px 底边线：overlay 若盖满 38，按钮区那段就缺少
+      // .titlebar 的 border-bottom，肉眼可见一条断口。
+      titleBarOverlay: { color: TRANSPARENT_OVERLAY, symbolColor: systemDark ? '#f5f5f5' : '#202124', height: 37 },
     } : {}),
     webPreferences: { preload: path.join(__dirname, 'renderer', 'preload.js'), contextIsolation: true, nodeIntegration: false },
   });
@@ -1213,12 +1485,43 @@ function createWindow(): void {
     callback(allowedPermissions.has(permission));
   });
   session.setPermissionCheckHandler((_contents, permission) => allowedPermissions.has(permission));
+  // 面板里的站点是任意网页：一律拒绝它的权限请求（定位/通知/摄像头等），
+  // 免得 agent 打开一个页面就顺带获得系统级能力。各个分区在 BrowserHost 建视图时还会装一次。
+  denyPanelPermissions(state.selectedProjectId);
   void windowRef.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // 窗口关掉立刻清掉引用,免得 agent 后续 stdout 还往里塞 → "Object has been destroyed"。
   windowRef.on('closed', () => { if (windowRef) windowRef = null; });
+
+  // 跨显示器自适应（见 fitWindowToDisplay 注释）。
+  // move / resize 在拖动与缩放过程中会连发几十次，必须防抖：只在手势结束、尺寸稳定后
+  // 收一次，否则窗口会在用户手指下不断被改尺寸。
+  // 必须用 move/resize 而不是 moved/resized：后者只在 WM_EXITSIZEMOVE（用户松手）时触发，
+  // 程序化改窗口（Snap、其它工具、本函数的 setBounds）一次都不会走到，实测漏事件。
+  const win = windowRef;
+  let settleTimer: ReturnType<typeof setTimeout> | undefined;
+  const settle = (): void => {
+    if (settleTimer) clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => { if (!win.isDestroyed()) fitWindowToDisplay(win); }, 180);
+  };
+  win.on('move', settle);
+  win.on('resize', settle);
+  // 系统侧变化（改缩放 / 拔插显示器 / 任务栏位置变了）也会让窗口溢出 —— 那时没有窗口事件。
+  const onDisplaysChanged = (): void => { if (!win.isDestroyed()) fitWindowToDisplay(win); };
+  screen.on('display-metrics-changed', onDisplaysChanged);
+  screen.on('display-added', onDisplaysChanged);
+  screen.on('display-removed', onDisplaysChanged);
+  win.on('closed', () => {
+    if (settleTimer) clearTimeout(settleTimer);
+    screen.removeListener('display-metrics-changed', onDisplaysChanged);
+    screen.removeListener('display-added', onDisplaysChanged);
+    screen.removeListener('display-removed', onDisplaysChanged);
+  });
 }
 
-/** 让窗口原生背景和 Windows 控制按钮跟随应用主题。 */
+/** 让窗口原生背景和 Windows 控制按钮的符号色跟随应用主题。
+ *
+ *  overlay 的**底色恒为透明**（见 TRANSPARENT_OVERLAY）：底色由 CSS `.titlebar` 决定，
+ *  主进程只负责按钮符号（— □ ✕）的深浅，否则深色主题下会得到一组看不见的深色符号。 */
 function applyThemeBackground(theme: 'light' | 'dark' | 'system'): void {
   nativeTheme.themeSource = theme;
   const isDark = theme === 'system' ? nativeTheme.shouldUseDarkColors : theme === 'dark';
@@ -1226,20 +1529,27 @@ function applyThemeBackground(theme: 'light' | 'dark' | 'system'): void {
   windowRef?.setBackgroundColor(bg);
   if (process.platform === 'win32' && windowRef && !windowRef.isDestroyed()) {
     windowRef.setTitleBarOverlay({
-      color: isDark ? '#202225' : '#f7f8f7',
+      color: TRANSPARENT_OVERLAY,
       symbolColor: isDark ? '#f5f5f5' : '#202124',
       // 37 = titlebar 38px - 1px CSS 底边线：overlay 若盖满 38，按钮区那段就没有
-      // .titlebar 的 border-bottom，肉眼可见一条断口。渲染层实测色会随后覆盖这里的兜底值。
+      // .titlebar 的 border-bottom，肉眼可见一条断口。
       height: 37,
     });
   }
 }
 
-function currentTaskWorkspace(task: TaskRecord): Record<string, unknown> {
+/**
+ * 打开任务时要回给渲染层的那份「现场」：任务记录 + 会话历史 + 恢复日志快照。
+ *
+ * 必须 async：readRecovery 要读整份 JSONL（真机实测 32MB = 240ms），同步读会把 Electron
+ * 主线程钉死，期间点击 / 输入 / 切会话全部排队 —— 用户看到的就是「agent 在跑的时候点哪都卡」。
+ * renderer 那边本来就在 await invoke，改成异步对它没有任何 API 变化。
+ */
+async function currentTaskWorkspace(task: TaskRecord): Promise<Record<string, unknown>> {
   const project = workspaceForTask(task);
   const running = task.status === 'running' || task.status === 'waiting';
   // 日志本身无法区分“正在执行”与“进程已消失”；只有主进程知道任务是否仍活着。
-  const recovery = readRecovery(recoveryRoot(), task.id, running);
+  const recovery = await readRecoveryAsync(recoveryRoot(), task.id, running);
   if (recovery) {
     recovery.running = running;
     recovery.interrupted = !running && (recovery.interrupted === true || task.lastError === STALE_RUN_MARKER);
@@ -1317,6 +1627,36 @@ function gitWorkspace(payload: unknown): Project | null {
   if (typeof input.projectId === 'string') return state.projects.find((item) => item.id === input.projectId) ?? null;
   return selectedProject() ?? null;
 }
+
+/**
+ * 解析一次 SCM 请求的目标仓库：`repoRoot` 缺省是工作空间自身，显式给出时必须是
+ * 工作空间/主仓库之内的真实仓库（见 validateRepoRoot），渲染层不能借此操作任意目录。
+ */
+async function repoFor(project: Project, payload: unknown): Promise<string | null> {
+  const input = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  if (input.repoRoot !== undefined && typeof input.repoRoot !== 'string') return null;
+  const requested = typeof input.repoRoot === 'string' && input.repoRoot ? input.repoRoot : project.root;
+  return validateRepoRoot(project.root, requested);
+}
+
+/**
+ * 「改动」「检查」两个面板的目标：**必须**是一个任务，而不是单纯的工作空间。
+ *
+ * 与 gitWorkspace 的区别就在这里：那两个面板回答的是「这个任务的 agent 干了什么」和
+ * 「这个任务的工作区该跑哪些校验」，没有任务就没有主语。没有任务时返回 null，
+ * 由调用方给出可读的空态，而不是退回到全局选中的空间去猜。
+ */
+function taskWorkspaceTarget(payload: unknown): { task: TaskRecord; project: Project } | null {
+  const input = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  const taskId = typeof input.taskId === 'string' && input.taskId ? input.taskId : state.selectedTaskId;
+  const task = taskById(taskId);
+  if (!task) return null;
+  const project = workspaceForTask(task);
+  return project ? { task, project } : null;
+}
+
+/** 判定包管理器用的锁文件（顺序无关：packageManagerFor 自己决定优先级）。 */
+const CHECK_LOCKFILES = ['pnpm-lock.yaml', 'yarn.lock', 'bun.lockb', 'bun.lock', 'package-lock.json'] as const;
 
 /** 把一条「无法执行」的失败送回渲染层（带任务 id，渲染层能归到正确的会话上）。 */
 function reportTaskError(taskId: string, message: string): void {
@@ -1425,12 +1765,12 @@ function installIpc(): void {
     // 打开任务（含应用重启后恢复出来的旧任务）就预热 host：不然用户敲下第一条指令时才开始
     // 冷启动（实测 ~8s，开 MCP 更久），且没有实例时指令会被丢掉。
     ensureAgent(task);
-    return { state, ...currentTaskWorkspace(task) };
+    return { state, ...await currentTaskWorkspace(task) };
   });
   // 回滚对话:截断会话到指定用户消息之前。
   // 落盘之后必须重启该任务的 host —— 它内存里还留着被回滚掉的历史,继续用同一个进程会
   // 在下一轮结束时把旧历史全量写回磁盘,回滚当场失效(这就是为什么这里不要走 online 通道)。
-  ipcMain.handle('work:rollback', (_event, taskId: string, userIndex: number) => {
+  ipcMain.handle('work:rollback', async (_event, taskId: string, userIndex: number) => {
     if (typeof taskId !== 'string' || !taskId || typeof userIndex !== 'number') return { ok: false, message: tMain('main.rollback.invalidParam') };
     const task = taskById(taskId);
     if (!task) return { ok: false, message: tMain('main.task.projectNotExist') };
@@ -1445,7 +1785,71 @@ function installIpc(): void {
     task.lastError = undefined;
     taskRecovery(taskId).truncate(userIndex);
     saveState(); broadcastState();
-    return { ok: true, state, ...currentTaskWorkspace(task) };
+    return { ok: true, state, ...await currentTaskWorkspace(task) };
+  });
+  /**
+   * 分叉会话：从这条 assistant 消息所在的那一轮之后开一个新分支。
+   *
+   * 做法（与终端 /fork 同一条能力，只是多一步截断）：
+   *   1. 让**原任务的 host** 复制会话目录（内存里最新的尾巴由 host 自己先落盘）；
+   *   2. 把副本截断到「第 userIndex 轮结束」——之后的对话不带过去；
+   *   3. 建一个新任务绑定副本的 sessionId，选中它并回放历史，界面直接跳过去。
+   *
+   * 为什么必须让原 host 来复制：会话是「活文件 + host 内存历史」两份，主进程直接 cp 只能拿到
+   * 上一次 checkpoint 的内容，最近一轮会丢。fork 不改 host 的当前会话，原任务继续可用。
+   */
+  ipcMain.handle('work:fork-task', async (_event, taskId: string, userIndex: number) => {
+    if (typeof taskId !== 'string' || !taskId || typeof userIndex !== 'number' || userIndex < 0) {
+      return { ok: false, message: tMain('main.fork.invalidParam') };
+    }
+    const task = taskById(taskId);
+    if (!task) return { ok: false, message: tMain('main.task.projectNotExist') };
+    if (!task.sessionId) return { ok: false, message: tMain('main.fork.noSession') };
+    if (task.status === 'running' || task.status === 'waiting') return { ok: false, message: tMain('main.fork.notIdle') };
+    const project = workspaceForTask(task);
+    if (!project) return { ok: false, message: tMain('main.rollback.noWorkspace') };
+    // 必须在停掉 host 之前复制：host 要先把内存里的最新对话落盘（与终端 /fork 同因）。
+    const agent = agents.get(task.id) ?? ensureAgent(task);
+    const forked = await agent.forkSessionOnHost(task.sessionId);
+    if (!forked.ok || !forked.sessionId) return { ok: false, message: forked.message ?? tMain('main.fork.failed') };
+    const newSessionId = forked.sessionId;
+    // 截断副本。失败就把刚烤出来的副本删掉——半成品会话（带着不该有的后续轮次）比没有更危险。
+    const copyFile = sessionFileFor(project, newSessionId);
+    if (!copyFile) return { ok: false, message: tMain('main.fork.copyMissing') };
+    let truncated = false;
+    try {
+      const record = JSON.parse(readFileSync(copyFile, 'utf8')) as RawSessionRecord;
+      const result = truncateSessionAfterUser(record, userIndex, {
+        noHistory: tMain('main.rollback.noHistory'),
+        compacted: tMain('main.rollback.compacted'),
+      });
+      if (result.ok) {
+        const tmp = `${copyFile}.fork-tmp`;
+        writeFileSync(tmp, JSON.stringify(record), 'utf8');
+        renameSync(tmp, copyFile);
+        truncated = true;
+      } else {
+        rmSync(path.dirname(copyFile), { recursive: true, force: true });
+        return { ok: false, message: result.message ?? tMain('main.fork.failed') };
+      }
+    } catch {
+      try { rmSync(path.dirname(copyFile), { recursive: true, force: true }); } catch { /* 清理失败不遮住真正的原因 */ }
+      return { ok: false, message: tMain('main.fork.truncateFailed') };
+    }
+    if (!truncated) return { ok: false, message: tMain('main.fork.failed') };
+    const now = new Date().toISOString();
+    const branch: TaskRecord = {
+      id: randomUUID(), projectId: task.projectId,
+      title: tMain('main.fork.title', { title: task.title }).slice(0, 160),
+      status: 'completed', createdAt: now, updatedAt: now, changedFiles: [], sessionId: newSessionId,
+    };
+    state.tasks.unshift(branch);
+    state.selectedTaskId = branch.id;
+    if (branch.projectId) state.selectedProjectId = branch.projectId;
+    saveState(); broadcastState();
+    // 新任务也预热 host：用户点了分支就是要立刻接着聊，不该再等一次冷启动。
+    ensureAgent(branch);
+    return { ok: true, state, ...await currentTaskWorkspace(branch) };
   });
   ipcMain.handle('work:delete-task', (_event, taskId: string) => {
     if (typeof taskId !== 'string' || !taskId) return null;
@@ -1554,7 +1958,7 @@ function installIpc(): void {
     if (existing) {
       state.selectedTaskId = existing.id;
       saveState(); broadcastState();
-      return { ok: true, state, task: existing, ...currentTaskWorkspace(existing) };
+      return { ok: true, state, task: existing, ...await currentTaskWorkspace(existing) };
     }
     const meta = listProjectSessions(project.root, 400).find((item) => item.id === sessionId);
     const now = new Date().toISOString();
@@ -1570,7 +1974,7 @@ function installIpc(): void {
     state.selectedProjectId = projectId;
     saveState(); broadcastState();
     // 接管不预热 host：用户可能只是想看历史，敲下第一句话时 ensureAgent 会按该会话恢复。
-    return { ok: true, state, task, ...currentTaskWorkspace(task) };
+    return { ok: true, state, task, ...await currentTaskWorkspace(task) };
   });
   ipcMain.handle('work:project-overview', async () => {
     // 纯任务（无工作空间）没有 git 仓库可概览：返回一份空壳，避免 renderer 拿 scratch 目录
@@ -1586,6 +1990,58 @@ function installIpc(): void {
   ipcMain.handle('work:file-diff', async (_event, relativePath: string) => {
     const target = resolvedProjectFile(selectedProject(), relativePath); if (!target) return { error: tMain('main.read.outside') };
     const result = await runCommand(selectedProject().root, 'git', ['diff', '--', relativePath]); return { path: relativePath, content: result.ok ? result.stdout || tMain('main.read.noDiff') : result.stderr };
+  });
+  /**
+   * 「改动」面板：本任务记录下来的 changedFiles + 每个文件相对 HEAD 的增删行数。
+   *
+   * 数据源是任务自己的 changedFiles（run_completed 时由 host 落盘），不是 git status ——
+   * 用户可能自己还有别的未提交改动，那些不属于「这次 agent 干了什么」。
+   */
+  ipcMain.handle('work:task-changes', async (_event, payload: Record<string, unknown>) => {
+    const target = taskWorkspaceTarget(payload);
+    if (!target) return { ok: false, files: [], message: tMain('main.task.projectNotExist') };
+    const files = target.task.changedFiles.filter((item): item is string => typeof item === 'string' && item !== '');
+    if (!files.length) return { ok: true, files: [], truncated: false };
+    const result = await gitFileStats(target.project.root, files);
+    return { ok: result.ok, files: result.stats, truncated: files.length > 200, message: result.message };
+  });
+  /** 「改动」面板里展开单个文件：与列表同一基准（HEAD），不要求该文件仍在 git status 里。 */
+  ipcMain.handle('work:task-change-diff', async (_event, payload: Record<string, unknown>) => {
+    const target = taskWorkspaceTarget(payload);
+    if (!target || typeof payload.path !== 'string') return { ok: false, message: tMain('main.task.projectNotExist') };
+    return gitFileDiff(target.project.root, payload.path);
+  });
+  /**
+   * 「检查」面板：从磁盘上的 package.json 发现校验命令（根 + workspace 子包）。
+   *
+   * 只读 package.json，**不执行任何命令** —— 点击后由渲染层把 `pm run x` 填进终端，
+   * 执行通道仍是用户自己的 shell（能看输出、能 Ctrl+C、能改一行再跑）。
+   */
+  ipcMain.handle('work:checks', async (_event, payload: Record<string, unknown>) => {
+    const target = taskWorkspaceTarget(payload);
+    if (!target) return { ok: false, groups: [], message: tMain('main.task.projectNotExist') };
+    const root = target.project.root;
+    const readManifest = (dir: string): string | null => {
+      try { return readFileSync(path.join(root, dir, 'package.json'), 'utf8'); } catch { return null; }
+    };
+    const rootText = readManifest('');
+    const lockfiles = CHECK_LOCKFILES.filter((name) => existsSync(path.join(root, name)));
+    // 子包目录由根 package.json 的 workspaces 推导；上限 40 组，防止大 monorepo 把面板刷爆。
+    const { literal, globs } = workspaceDirs(parsePackage(rootText)?.workspaces ?? []);
+    const dirs: string[] = [...literal];
+    for (const prefix of globs) {
+      try {
+        for (const entry of readdirSync(path.join(root, prefix), { withFileTypes: true })) {
+          if (entry.isDirectory()) dirs.push(`${prefix}/${entry.name}`);
+        }
+      } catch { /* 通配前缀不存在：跳过，不是错误 */ }
+    }
+    const entries = [
+      { dir: '', text: rootText, lockfiles },
+      ...dirs.sort().slice(0, 40).map((dir) => ({ dir, text: readManifest(dir), lockfiles: [] })),
+    ];
+    const { packageManager, groups } = buildCheckGroups(entries);
+    return { ok: true, packageManager, groups };
   });
   ipcMain.handle('work:pick-attachment', async () => {
     const result = await dialog.showOpenDialog(windowRef!, {
@@ -1875,12 +2331,14 @@ function installIpc(): void {
     return { ok: true, message: tMain('main.branch.switched', { branch: updated.branch }), branch: updated.branch };
   });
   ipcMain.on('work:set-theme', (_event, theme: 'light' | 'dark' | 'system') => applyThemeBackground(theme));
-  // 渲染层把它实测到的 titlebar CSS 颜色同步过来 —— 比主进程硬编码 hex 可靠：
-  // surface-app 是带 accent 色相的 oklch，主题色一换色调就变，硬编码永远追不上。
+  // 渲染层只同步**符号色**（按钮图标的深浅）；底色恒为透明，由 CSS .titlebar 供给。
+  // 历史：这里以前还会收 bg，于是「主进程硬编码 hex」和「渲染层实测 oklch 回传」两套颜色
+  // 互相追 —— 任一条链路失效（旧构建里 canvas 读色对 oklch 返回 null）按钮区就停在硬编码值，
+  // 深色主题下标题栏右端明显两块色。现在颜色只有一个来源，就没有能对不齐的地方。
   ipcMain.on('work:set-titlebar-overlay', (_event, colors: { bg?: string; symbol?: string }) => {
     if (process.platform !== 'win32' || !windowRef || windowRef.isDestroyed()) return;
-    if (!colors?.bg || !colors?.symbol) return;
-    try { windowRef.setTitleBarOverlay({ color: colors.bg, symbolColor: colors.symbol, height: 37 }); }
+    if (!colors?.symbol) return;
+    try { windowRef.setTitleBarOverlay({ color: TRANSPARENT_OVERLAY, symbolColor: colors.symbol, height: 37 }); }
     catch { /* 某些平台/版本不支持动态 overlay，静默即可 */ }
   });
   ipcMain.on('work:show-menu', (event, menuId: string, clientX: number, clientY: number) => {
@@ -1958,32 +2416,97 @@ function installIpc(): void {
    * 路由目标跟随「当前选中的任务」：会话列表、回滚轮次、记忆库都挂在那个工作空间的
    * host 上，换任务就是换 workspace —— 这是唯一正确的归属。
    */
-  ipcMain.handle('work:git-status', (_event, payload: Record<string, unknown>) => {
+  // 一个工作空间可能含多个仓库（嵌套仓库/子模块/工作树）；面板先拿这份清单再按仓库操作。
+  ipcMain.handle('work:git-repos', async (_event, payload: Record<string, unknown>) => {
     const project = gitWorkspace(payload);
-    return project ? gitStatus(project.root) : { ok: false, message: tMain('main.task.projectNotExist') };
+    if (!project) return { ok: false, repos: [], message: tMain('main.task.projectNotExist') };
+    return gitRepos(project.root);
   });
-  ipcMain.handle('work:git-diff', (_event, payload: Record<string, unknown>) => {
+  ipcMain.handle('work:git-status', async (_event, payload: Record<string, unknown>) => {
+    const project = gitWorkspace(payload);
+    if (!project) return { ok: false, message: tMain('main.task.projectNotExist') };
+    const root = await repoFor(project, payload);
+    return root ? gitStatus(root) : { ok: false, message: tMain('main.task.projectNotExist') };
+  });
+  ipcMain.handle('work:git-diff', async (_event, payload: Record<string, unknown>) => {
     const project = gitWorkspace(payload);
     if (!project || typeof payload.path !== 'string' || typeof payload.staged !== 'boolean') return { ok: false, message: tMain('main.task.projectNotExist') };
-    return gitDiff(project.root, payload.path, payload.staged);
+    const root = await repoFor(project, payload);
+    return root ? gitDiff(root, payload.path, payload.staged) : { ok: false, message: tMain('main.task.projectNotExist') };
   });
-  ipcMain.handle('work:git-stage', (_event, payload: Record<string, unknown>) => {
+  ipcMain.handle('work:git-stage', async (_event, payload: Record<string, unknown>) => {
     const project = gitWorkspace(payload);
     const paths = payload.paths;
     if (!project || (paths !== undefined && (!Array.isArray(paths) || paths.some((item) => typeof item !== 'string')))) return { ok: false, message: tMain('main.task.projectNotExist') };
-    return stageFiles(project.root, paths as string[] | undefined);
+    const root = await repoFor(project, payload);
+    return root ? stageFiles(root, paths as string[] | undefined) : { ok: false, message: tMain('main.task.projectNotExist') };
   });
-  ipcMain.handle('work:git-unstage', (_event, payload: Record<string, unknown>) => {
+  ipcMain.handle('work:git-unstage', async (_event, payload: Record<string, unknown>) => {
     const project = gitWorkspace(payload);
     const paths = payload.paths;
     if (!project || (paths !== undefined && (!Array.isArray(paths) || paths.some((item) => typeof item !== 'string')))) return { ok: false, message: tMain('main.task.projectNotExist') };
-    return unstageFiles(project.root, paths as string[] | undefined);
+    const root = await repoFor(project, payload);
+    return root ? unstageFiles(root, paths as string[] | undefined) : { ok: false, message: tMain('main.task.projectNotExist') };
   });
-  ipcMain.handle('work:git-commit', (_event, payload: Record<string, unknown>) => {
+  ipcMain.handle('work:git-commit', async (_event, payload: Record<string, unknown>) => {
     const project = gitWorkspace(payload);
     if (!project || typeof payload.message !== 'string') return { ok: false, message: tMain('main.task.projectNotExist') };
-    return commitStaged(project.root, payload.message);
+    const root = await repoFor(project, payload);
+    return root ? commitStaged(root, payload.message) : { ok: false, message: tMain('main.task.projectNotExist') };
   });
+  /**
+   * 浏览器面板：视图是主进程的原生 WebContentsView（见 browser-host.ts）。
+   * 渲染层只负责量出 stage 的矩形、画工具栏；页面本身不经过 DOM，
+   * 因为它必须同时是 CDP 里的一个 page 目标，agent 才能接管。
+   */
+  ipcMain.handle('work:browser-show', (_event, payload: Record<string, unknown>) => {
+    const bounds = payload?.bounds as Record<string, unknown> | undefined;
+    if (!bounds || !['x', 'y', 'width', 'height'].every((key) => Number.isFinite(Number(bounds[key])))) {
+      return { ok: false, message: tMain('main.browser.badBounds') };
+    }
+    // projectId 必须是我们登记过的空间：不能让渲染层传任意字符串去新建分区。
+    const rawProjectId = typeof payload.projectId === 'string' ? payload.projectId : '';
+    const projectId = rawProjectId && state.projects.some((item) => item.id === rawProjectId) ? rawProjectId : undefined;
+    browserHostFor().show(projectId, {
+      x: Number(bounds.x), y: Number(bounds.y), width: Number(bounds.width), height: Number(bounds.height),
+    });
+    return { ok: true };
+  });
+  ipcMain.handle('work:browser-hide', () => { browserHost?.hide(); return { ok: true }; });
+  ipcMain.handle('work:browser-navigate', (_event, url: string) => {
+    if (typeof url !== 'string' || !validatePanelUrl(url)) {
+      return { ok: false, message: tMain('main.browser.badUrl') };
+    }
+    return { ok: browserHostFor().navigate(url) };
+  });
+  ipcMain.handle('work:browser-command', (_event, command: string) => {
+    if (command !== 'back' && command !== 'forward' && command !== 'reload') return { ok: false };
+    return { ok: browserHostFor().command(command) };
+  });
+  /**
+   * 终端面板：PTY 在主进程（node-pty 是原生模块，渲染进程不 require 它）。
+   * projectId 必须是我们登记过的空间 —— 否则渲染层就能让主进程在任意目录起 shell。
+   */
+  const terminalProjectId = (payload: Record<string, unknown>): string | undefined => {
+    const raw = typeof payload.projectId === 'string' ? payload.projectId : '';
+    return raw && state.projects.some((item) => item.id === raw) ? raw : undefined;
+  };
+  ipcMain.handle('work:terminal-open', (_event, payload: Record<string, unknown>) => {
+    const size = (payload ?? {}) as Record<string, unknown>;
+    return terminalHostFor().open(terminalProjectId(size), Number(size.cols) || 80, Number(size.rows) || 24);
+  });
+  ipcMain.handle('work:terminal-write', (_event, payload: Record<string, unknown>) => {
+    // 单次按键/粘贴串：字符串校验即可，长度上限防一次粘贴几 MB 卡死 ConPTY。
+    const data = typeof payload?.data === 'string' ? payload.data : '';
+    if (!data || data.length > 200_000) return { ok: false };
+    return { ok: terminalHostFor().write(terminalProjectId(payload), data) };
+  });
+  ipcMain.handle('work:terminal-resize', (_event, payload: Record<string, unknown>) => ({
+    ok: terminalHostFor().resize(terminalProjectId(payload), Number(payload?.cols) || 80, Number(payload?.rows) || 24),
+  }));
+  ipcMain.handle('work:terminal-close', (_event, payload: Record<string, unknown>) => ({
+    ok: terminalHostFor().close(terminalProjectId(payload)),
+  }));
   ipcMain.handle('work:panel', async (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' && value.id ? value.id : randomUUID();
     const type = typeof value.type === 'string' ? value.type : '';
@@ -2002,8 +2525,16 @@ function installIpc(): void {
       // 在读 diff 之前登记：取消/移除空间后，慢 Git 操作返回时不得再启动 host。
       const pending: PendingCommitMessage = { projectId: project.id, agent: null };
       pendingCommitMessages.set(id, pending);
+      // 多仓库：diff 必须取点击生成时那个仓库的暂存区，不能一律取工作空间根。
+      const repoRoot = await repoFor(project, value);
+      if (!repoRoot) {
+        pendingCommitMessages.delete(id);
+        const message = tMain('main.task.projectNotExist');
+        pushRenderer('work:agent-event', { type: 'error', requestId: id, error: message });
+        return { ok: false, id, message };
+      }
       // 只读取点击生成时的暂存区；工作区剩余修改绝不混入提示词。
-      const draft = await stagedDiff(project.root);
+      const draft = await stagedDiff(repoRoot);
       if (pendingCommitMessages.get(id) !== pending) return { ok: true, id, cancelled: true };
       if (!draft.ok) {
         pendingCommitMessages.delete(id);
@@ -2023,6 +2554,10 @@ function installIpc(): void {
       const command = {
         type, id, diff: draft.diff, stat: draft.stat, files: draft.files, truncated: draft.truncated,
         language: value.language === 'en-US' ? 'en-US' : 'zh-CN',
+        // 仓库与分支一并交给 host：一个工作空间可能同时有多个仓库/分支，
+        // 提示词里不写明的话模型无法区分这条提交信息属于哪一批改动。
+        ...(typeof value.repo === 'string' && value.repo ? { repo: value.repo } : {}),
+        ...(draft.branch ? { branch: draft.branch } : {}),
       } as HostCommand;
       pending.sent = agent.send(command).catch(() => false);
       const sent = await pending.sent;
@@ -2033,6 +2568,27 @@ function installIpc(): void {
         pushRenderer('work:agent-event', { type: 'error', requestId: id, error: message });
         return { ok: false, id, message };
       }
+      return { ok: true, id };
+    }
+    // 全局用量与本机任何工作区/任务都无关：账本就是 ~/.mocode/usage-daily.jsonl。
+    // 就地算完直接回执，不为了读一个文件去冷启动 host（≈8s），也让「没有选中任务」时照样能看总量。
+    // 只有 session 口径仍走 host —— 它要读某条会话自己的 usage.jsonl，属于那个任务的工作区。
+    if (type === 'usage' && value.scope !== 'session') {
+      const requested = Number(value.days);
+      const days = Number.isFinite(requested) ? Math.min(366, Math.max(1, Math.round(requested))) : 7;
+      const summary = summarizeGlobalUsage(readGlobalUsage(), days);
+      pushRenderer('work:agent-event', {
+        type: 'event',
+        event: 'usage_report',
+        requestId: id,
+        payload: {
+          scope: 'global',
+          days,
+          summary,
+          // 热力图窗口 == 统计窗口，与 host 侧 usageCommand 的载荷同形（panels.ts 只认这一份）。
+          calendar: { fromDay: summary.fromDay, toDay: summary.toDay, days: summary.byDay },
+        },
+      });
       return { ok: true, id };
     }
     // 输入栏快照请求携带发起时的任务 id；快速切换任务时不能改发到新选中的 host。
@@ -2067,6 +2623,11 @@ function rebuildAppMenu(): void {
     { id: 'help', label: tMain('menu.help'), submenu: [{ label: 'MoCode Work', enabled: false }] },
   ]);
 }
+
+// Windows 上系统通知必须带 AppUserModelID 才会真的弹出来，否则 new Notification() 静默无效
+// （「需要人工介入」的提醒就永远到不了用户眼前）。打包后用 electron-builder 的 appId，
+// 与开始菜单快捷方式的 AUMID 一致；dev 下退到 electron.exe 自身路径。
+if (process.platform === 'win32') app.setAppUserModelId(app.isPackaged ? 'com.mocode.work' : process.execPath);
 
 // 单实例锁：第二个实例直接退出并把焦点还给已有窗口。不加的话，残留实例还握着
 // %APPDATA%\mocode-work 的 GPU/disk 缓存锁，新实例启动时报一串
@@ -2115,11 +2676,29 @@ app.whenReady().then(async () => {
     }
   }
   installIpc();
+  // 浏览器面板的 CDP 端点：必须在预热 agent 之前就绪，否则第一个任务起的 host 拿不到
+  // MOCODE_BROWSER_CDP_URL，browser 工具就会自己再拉一个浏览器（两套登录态）。
+  // 起不来只是面板降级（仍可浏览，agent 用独立浏览器），不该挡住启动。
+  browserCdpUrl = await resolveBrowserCdpUrl();
+  if (!browserCdpUrl) {
+    pushRenderer('work:agent-event', {
+      type: 'event', event: 'host_log',
+      payload: { code: 'browser_cdp_unavailable', message: `[mocode-work] ${tMain('toast.browserCdpMissing')}` },
+    });
+  }
   // 启动即把终端访问过、且确实留有会话的工作空间并入侧栏「空间」——
   // 用户报的「终端会话在 work-app 里看不到」就出在这一步缺失上（此前侧栏只显示手动添加的项目）。
   // 放在 createWindow 之前：首屏 getState 拿到的就是合并后的空间列表，不会先闪一次空侧栏。
   try { await syncWorkspaceRegistry(true); } catch { /* 注册表是增强能力，读不了不能挡住启动 */ }
   createWindow();
+  // 存量清理：历史上被 live_usage 撑大的恢复日志（真机 107MB / 25 万行，占 95%）就地瘦身。
+  // fire-and-forget —— 维护动作绝不能挡住首屏，也不能和正在写的任务抢主线程。
+  void compactRecoveryLogs(recoveryRoot()).then((n) => {
+    if (n > 0) pushRenderer('work:agent-event', {
+      type: 'event', event: 'host_log',
+      payload: { message: `[mocode-work] compacted ${n} recovery log(s)` },
+    });
+  }).catch(() => { /* 清理失败不影响任何功能 */ });
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => {

@@ -12,6 +12,15 @@
 
 import type { Browser, BrowserContext, ConsoleMessage, Page } from 'playwright';
 import { randomBytes } from 'node:crypto';
+import { getSandboxRoot } from '../sandbox/root.js';
+import {
+  createDiagnostics,
+  recordDiagnostic,
+  resolveDiagnosticsLogPath,
+  snapshotDiagnostics,
+  type BrowserDiagnostics,
+  type DiagnosticsState,
+} from './browser-diagnostics.js';
 
 export type BrowserErrorCode = 'INVALID_ARGUMENTS' | 'SANDBOX_DENIED' | 'TIMEOUT' | 'EXECUTION_ERROR';
 
@@ -25,11 +34,8 @@ export class BrowserManagerError extends Error {
   }
 }
 
-export interface BrowserDiagnostics {
-  console: string[];
-  pageErrors: string[];
-  failedRequests: string[];
-}
+// 诊断摘要的类型与采集实现都在 browser-diagnostics.ts（纯函数、无 playwright 依赖，可单测）。
+export type { BrowserDiagnostics } from './browser-diagnostics.js';
 
 export interface BrowserSessionSnapshot {
   sessionId: string;
@@ -37,6 +43,8 @@ export interface BrowserSessionSnapshot {
   title: string;
   headed: boolean;
   viewport: { width: number; height: number };
+  /** 与会话共享同一页面（应用内浏览器面板），而不是 mocode 自己拉起的浏览器。 */
+  attached?: boolean;
 }
 
 interface SessionRecord {
@@ -44,19 +52,25 @@ interface SessionRecord {
   context: BrowserContext;
   page: Page;
   headed: boolean;
-  console: string[];
-  pageErrors: string[];
-  failedRequests: string[];
+  /** 页面属于宿主应用的面板：关会话只解绑监听，不关闭页面与浏览器。 */
+  attached: boolean;
+  /** 计数 + 环缓冲 + 日志落盘，见 browser-diagnostics.ts。 */
+  diag: DiagnosticsState;
+  cleanup: Array<() => void>;
 }
 
+const ATTACHED_SESSION_ID = 'panel';
 const sessions = new Map<string, SessionRecord>();
-const DIAGNOSTIC_LIMIT = 200;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 60_000;
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
+/** 面板页可能还没导航完；attach 时轮询等待它出现。 */
+const ATTACH_WAIT_ATTEMPTS = 15;
+const ATTACH_WAIT_INTERVAL_MS = 200;
 
 let browserPromise: Promise<Browser> | null = null;
 let launchedHeaded = false;
+let attachPromise: Promise<Browser> | null = null;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -154,40 +168,166 @@ async function getBrowser(headed: boolean): Promise<Browser> {
 }
 
 function record(session: SessionRecord, bucket: 'console' | 'pageErrors' | 'failedRequests', line: string): void {
-  const target = session[bucket];
-  target.push(line);
-  if (target.length > DIAGNOSTIC_LIMIT) target.splice(0, target.length - DIAGNOSTIC_LIMIT);
+  recordDiagnostic(session.diag, bucket, line);
 }
 
-export async function openSession(opts: { headed?: boolean } = {}): Promise<BrowserSessionSnapshot> {
-  const headed = opts.headed === true;
-  const browser = await getBrowser(headed);
-  const context = await browser.newContext({ viewport: DEFAULT_VIEWPORT });
-  const page = await context.newPage();
-  page.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+/** 诊断日志落在工作区的 `.mocode/browser/` 下，模型可用 grep/read_file 按需取细节。 */
+function openDiagnostics(sessionId: string): DiagnosticsState {
+  const root = getSandboxRoot() ?? process.cwd();
+  try {
+    return createDiagnostics({ logPath: resolveDiagnosticsLogPath(root, sessionId) });
+  } catch {
+    // 只读工作区等场景建不了目录：降级成纯内存诊断，不影响浏览器功能。
+    return createDiagnostics({ logPath: null });
+  }
+}
 
-  const session: SessionRecord = {
-    sessionId: `page-${randomBytes(3).toString('hex')}`,
-    context,
-    page,
-    headed,
-    console: [],
-    pageErrors: [],
-    failedRequests: [],
-  };
+/** CDP 端点：由宿主应用（workspace 的浏览器面板）在启动时注入；CLI 下不存在。 */
+export function attachedEndpoint(): string | null {
+  const value = (process.env.MOCODE_BROWSER_CDP_URL ?? '').trim();
+  return value ? value : null;
+}
 
-  page.on('console', (message: ConsoleMessage) => {
+function bindPageListeners(session: SessionRecord): void {
+  const { page } = session;
+  const onConsole = (message: ConsoleMessage): void => {
     record(session, 'console', `[${message.type()}] ${message.text()}`);
-  });
-  page.on('pageerror', (error) => record(session, 'pageErrors', errorMessage(error)));
-  page.on('requestfailed', (request) => {
+  };
+  const onPageError = (error: Error): void => record(session, 'pageErrors', errorMessage(error));
+  const onRequestFailed = (request: {
+    method(): string;
+    url(): string;
+    failure(): { errorText: string } | null;
+  }): void => {
     record(
       session,
       'failedRequests',
       `${request.method()} ${request.url()} — ${request.failure()?.errorText ?? 'failed'}`,
     );
-  });
+  };
+  page.on('console', onConsole);
+  page.on('pageerror', onPageError);
+  page.on('requestfailed', onRequestFailed as never);
+  const offConsole = (): void => {
+    page.off('console', onConsole);
+  };
+  const offPageError = (): void => {
+    page.off('pageerror', onPageError);
+  };
+  const offRequestFailed = (): void => {
+    page.off('requestfailed', onRequestFailed as never);
+  };
+  session.cleanup = [offConsole, offPageError, offRequestFailed];
+}
 
+function createSessionRecord(input: {
+  sessionId: string;
+  context: BrowserContext;
+  page: Page;
+  headed: boolean;
+  attached: boolean;
+}): SessionRecord {
+  const session: SessionRecord = {
+    ...input,
+    diag: openDiagnostics(input.sessionId),
+    cleanup: [],
+  };
+  input.page.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
+  bindPageListeners(session);
+  return session;
+}
+
+/**
+ * 宿主应用浏览器面板的空白页哨兵。面板初始停在 `about:blank#mocode-browser-panel`：
+ * 它既能让 attach 拿到「一块属于面板的页面」，又不会让模型误以为用户已经打开了某个站点。
+ * 应用自身的 renderer 是 file://，永远不会命中这里。
+ * （对应实现在 packages/work-app/src/browser-host.ts 的 PANEL_BLANK_URL，改动需同步。）
+ */
+const PANEL_SENTINEL = '#mocode-browser-panel';
+
+/**
+ * 接管宿主应用面板里的页面（`connectOverCDP`）。
+ *
+ * 关键点：面板的网页必须是 CDP 里的 `page` 目标 —— `<webview>` 是 `webview` 目标，
+ * playwright 根本不会把它放进 BrowserContext，所以宿主一律用 WebContentsView 承载面板。
+ * 这里按优先级挑：先 http(s)（用户真正在看的站点），再面板哨兵空白页。
+ */
+async function openAttachedSession(endpoint: string): Promise<BrowserSessionSnapshot> {
+  const existing = sessions.get(ATTACHED_SESSION_ID);
+  if (existing && !existing.page.isClosed()) return describe(existing);
+
+  const playwright = await loadDriver();
+  if (!attachPromise) {
+    attachPromise = playwright.chromium.connectOverCDP(endpoint) as Promise<Browser>;
+  }
+  let browser: Browser;
+  try {
+    browser = await attachPromise;
+  } catch (error) {
+    attachPromise = null;
+    throw new BrowserManagerError(
+      'EXECUTION_ERROR',
+      `Unable to attach to the app browser panel at ${endpoint} (${errorMessage(error)}). ` +
+        'Open the browser panel in the app first, or unset MOCODE_BROWSER_CDP_URL.',
+    );
+  }
+
+  const wanted = process.env.MOCODE_BROWSER_PANEL_MATCH ?? '';
+  let picked: { context: BrowserContext; page: Page } | null = null;
+  for (let attempt = 0; attempt < ATTACH_WAIT_ATTEMPTS && !picked; attempt++) {
+    // 两轮：先找用户真正打开的站点，再退到面板哨兵空白页 —— 后者保证「用户刚打开面板、
+    // 还没输网址」时 agent 也能先拿到这块页面，navigate 下去就是同一个视图。
+    for (const pass of ['site', 'blank'] as const) {
+      for (const context of browser.contexts()) {
+        const page = context.pages().find((candidate) => {
+          const url = candidate.url();
+          if (pass === 'blank') return url.includes(PANEL_SENTINEL);
+          if (!url.startsWith('http:') && !url.startsWith('https:')) return false;
+          return wanted ? url.includes(wanted) : true;
+        });
+        if (page) {
+          picked = { context, page };
+          break;
+        }
+      }
+      if (picked) break;
+    }
+    if (!picked) await new Promise((resolve) => setTimeout(resolve, ATTACH_WAIT_INTERVAL_MS));
+  }
+  if (!picked) {
+    throw new BrowserManagerError(
+      'EXECUTION_ERROR',
+      'The app browser panel has no page open yet. Open the Browser view in the app and retry.',
+    );
+  }
+
+  const session = createSessionRecord({
+    sessionId: ATTACHED_SESSION_ID,
+    context: picked.context,
+    page: picked.page,
+    headed: true,
+    attached: true,
+  });
+  sessions.set(ATTACHED_SESSION_ID, session);
+  return describe(session);
+}
+
+export async function openSession(opts: { headed?: boolean } = {}): Promise<BrowserSessionSnapshot> {
+  const endpoint = attachedEndpoint();
+  if (endpoint) return openAttachedSession(endpoint);
+
+  const headed = opts.headed === true;
+  const browser = await getBrowser(headed);
+  const context = await browser.newContext({ viewport: DEFAULT_VIEWPORT });
+  const page = await context.newPage();
+
+  const session = createSessionRecord({
+    sessionId: `page-${randomBytes(3).toString('hex')}`,
+    context,
+    page,
+    headed,
+    attached: false,
+  });
   sessions.set(session.sessionId, session);
   return describe(session);
 }
@@ -226,6 +366,7 @@ function describe(session: SessionRecord): BrowserSessionSnapshot {
     title: '',
     headed: session.headed,
     viewport,
+    ...(session.attached ? { attached: true } : {}),
   };
 }
 
@@ -250,11 +391,7 @@ export interface ActionResult extends BrowserSessionSnapshot {
 }
 
 function diagnostics(session: SessionRecord): BrowserDiagnostics {
-  return {
-    console: session.console.slice(-20),
-    pageErrors: session.pageErrors.slice(-20),
-    failedRequests: session.failedRequests.slice(-20),
-  };
+  return snapshotDiagnostics(session.diag);
 }
 
 async function finish(session: SessionRecord, action: string): Promise<ActionResult> {
@@ -386,6 +523,11 @@ export function listSessions(): BrowserSessionSnapshot[] {
 export async function closeSession(sessionId?: string): Promise<{ sessionId: string; closed: boolean }> {
   const session = requireSession(sessionId);
   sessions.delete(session.sessionId);
+  for (const off of session.cleanup) off();
+  if (session.attached) {
+    // 面板里的页面属于用户：只解绑监听，绝不关闭 context/浏览器。
+    return { sessionId: session.sessionId, closed: true };
+  }
   await session.context.close().catch(() => {});
   if (sessions.size === 0 && browserPromise) {
     const browser = await browserPromise.catch(() => null);
@@ -399,6 +541,9 @@ export async function closeSession(sessionId?: string): Promise<{ sessionId: str
 export async function closeAllBrowsers(): Promise<void> {
   for (const session of [...sessions.values()]) {
     sessions.delete(session.sessionId);
+    for (const off of session.cleanup) off();
+    // attach 的页面不归我们所有，只解绑；否则关一次会话就把用户的面板页关了。
+    if (session.attached) continue;
     await session.context.close().catch(() => {});
   }
   const pending = browserPromise;
@@ -406,4 +551,9 @@ export async function closeAllBrowsers(): Promise<void> {
   if (!pending) return;
   const browser = await pending.catch(() => null);
   await browser?.close().catch(() => {});
+  // CDP 连接是「连到别人的浏览器」，断开即可，不 close。
+  const attached = attachPromise;
+  attachPromise = null;
+  const remote = await attached?.catch(() => null);
+  await remote?.close().catch(() => {});
 }

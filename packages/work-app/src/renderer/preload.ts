@@ -6,9 +6,9 @@ type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: s
 
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
 type Project = { id: string; name: string; root: string; branch: string; auto?: boolean; sessionCount?: number };
-type Task = { id: string; projectId: string; title: string; status: string; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string };
+type Task = { id: string; projectId: string; title: string; status: string; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string; plan?: { title: string; done: number; total: number; allDone: boolean } };
 type ProjectState = { version: 1; projects: Project[]; selectedProjectId: string; tasks: Task[]; selectedTaskId?: string };
-type GitTarget = { taskId?: string; projectId?: string };
+type GitTarget = { taskId?: string; projectId?: string; repoRoot?: string };
 type ModelDraft = { provider: 'openai' | 'anthropic'; baseURL: string; apiKey: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
 type ModelPresetDetail = ModelDraft & { name: string };
 type CatalogEntryView = {
@@ -32,6 +32,16 @@ type McpDraft = {
 };
 type VoiceStatus = { ready: boolean; bytes: number; dir: string; downloading?: boolean };
 type VoiceProgress = { receivedBytes: number; totalBytes: number; percent: number; file: string };
+/** 主进程推来的浏览器面板状态（browser-host.ts 的 BrowserViewState）。 */
+type BrowserViewState = {
+  projectId?: string;
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  error?: string;
+};
 
 contextBridge.exposeInMainWorld('mocodeWork', {
   // 渲染层拿它决定快捷键文案里的修饰键写法(Windows/Linux → Ctrl,macOS → Command)。
@@ -57,11 +67,21 @@ contextBridge.exposeInMainWorld('mocodeWork', {
     ipcRenderer.invoke('work:adopt-session', payload),
   readFile: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:read-file', file),
   fileDiff: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:file-diff', file),
+  gitRepos: (target?: GitTarget): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-repos', { ...target }),
   gitStatus: (target?: GitTarget): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-status', { ...target }),
   gitDiff: (target: GitTarget, path: string, staged: boolean): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-diff', { ...target, path, staged }),
   gitStage: (target: GitTarget, paths?: string[]): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-stage', { ...target, paths }),
   gitUnstage: (target: GitTarget, paths?: string[]): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-unstage', { ...target, paths }),
   gitCommit: (target: GitTarget, message: string): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-commit', { ...target, message }),
+  /** 「改动」面板：本任务的 changedFiles + 每文件相对 HEAD 的增删行数。 */
+  taskChanges: (payload: { taskId?: string }): Promise<{ ok: boolean; files: Array<{ path: string; added: number; removed: number; untracked: boolean }>; truncated?: boolean; message?: string }> =>
+    ipcRenderer.invoke('work:task-changes', payload),
+  /** 「改动」面板里展开单个文件（与列表同一基准：HEAD）。 */
+  taskChangeDiff: (payload: { taskId?: string; path: string }): Promise<{ ok: boolean; content?: string; truncated?: boolean; message?: string }> =>
+    ipcRenderer.invoke('work:task-change-diff', payload),
+  /** 「检查」面板：从 package.json 发现的校验命令（只读，点击后填进终端）。 */
+  checks: (payload: { taskId?: string }): Promise<{ ok: boolean; packageManager?: 'npm' | 'pnpm' | 'yarn' | 'bun'; groups?: Array<{ label: string; dir: string; packageManager: 'npm' | 'pnpm' | 'yarn' | 'bun'; scripts: Array<{ name: string; command: string }> }>; message?: string }> =>
+    ipcRenderer.invoke('work:checks', payload),
   pickAttachment: (): Promise<AttachmentResult[]> => ipcRenderer.invoke('work:pick-attachment'),
   readAttachments: (paths: string[]): Promise<AttachmentResult[]> => ipcRenderer.invoke('work:read-attachments', paths),
   droppedFilePaths: (files: File[]): string[] => files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
@@ -111,17 +131,54 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   listBranches: (): Promise<{ ok: boolean; message: string; current: string; branches: string[] }> => ipcRenderer.invoke('work:list-branches'),
   switchBranch: (branch: string): Promise<{ ok: boolean; message: string; branch?: string }> => ipcRenderer.invoke('work:switch-branch', branch),
   setTheme: (theme: 'light' | 'dark' | 'system'): void => ipcRenderer.send('work:set-theme', theme),
-  setTitleBarOverlay: (colors: { bg: string; symbol: string }): void => ipcRenderer.send('work:set-titlebar-overlay', colors),
+  setTitleBarOverlay: (colors: { bg?: string; symbol: string }): void => ipcRenderer.send('work:set-titlebar-overlay', colors),
   setLanguage: (language: string): Promise<{ ok: boolean; language?: string; message?: string }> => ipcRenderer.invoke('work:set-language', language),
   // 回滚对话:把会话截断到指定用户消息之前(id + 该消息在当前会话里的序号)。
   rollback: (value: { id: string; userIndex: number }): Promise<{ ok: boolean; message?: string; state?: ProjectState; history?: HistoryItem[]; recovery?: RecoverySnapshot | null }> => ipcRenderer.invoke('work:rollback', value.id, value.userIndex),
-  send: (value: Record<string, unknown>): void => ipcRenderer.send('work:agent-send', value),
   /**
-   * 面板命令（会话 / 回滚 / 改动 / 用量 / 记忆 / 设置）。id 由渲染层生成，
-   * 回执走 onAgentEvent 且 requestId === 该 id —— 与任务事件共用一条通道，靠 id 区分。
+   * 分叉会话：复制当前会话并在第 userIndex 轮之后截断，建一个绑到副本的新任务。
+   * 返回的是**新任务**的 state / task / history，调用方据此直接跳过去。
    */
+  forkTask: (value: { id: string; userIndex: number }): Promise<{ ok: boolean; message?: string; state?: ProjectState; task?: Task; history?: HistoryItem[]; recovery?: RecoverySnapshot | null }> =>
+    ipcRenderer.invoke('work:fork-task', value.id, value.userIndex),
+  send: (value: Record<string, unknown>): void => ipcRenderer.send('work:agent-send', value),
+  /** 面板命令（会话 / 回滚 / 改动 / 用量 / 记忆 / 设置）；id 由渲染层生成，回执经 onAgentEvent 同 id 返回。 */
   panel: (value: Record<string, unknown>): Promise<{ ok: boolean; id?: string; message?: string }> =>
     ipcRenderer.invoke('work:panel', value),
+  // ── 浏览器面板 ──
+  // 页面本身是主进程的 WebContentsView（agent 要能通过 CDP 接管它），渲染层只送 bounds、
+  // 画工具栏；状态（url/title/loading/前后退能力）由主进程推回来。
+  browserShow: (payload: { projectId?: string; bounds: { x: number; y: number; width: number; height: number } }): Promise<{ ok: boolean; message?: string }> =>
+    ipcRenderer.invoke('work:browser-show', payload),
+  browserHide: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('work:browser-hide'),
+  browserNavigate: (url: string): Promise<{ ok: boolean; message?: string }> => ipcRenderer.invoke('work:browser-navigate', url),
+  browserCommand: (command: 'back' | 'forward' | 'reload'): Promise<{ ok: boolean }> => ipcRenderer.invoke('work:browser-command', command),
+  onBrowserState: (callback: (state: BrowserViewState) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: BrowserViewState) => callback(payload);
+    ipcRenderer.on('work:browser-state', listener);
+    return () => ipcRenderer.removeListener('work:browser-state', listener);
+  },
+  // ── 终端面板 ──
+  // PTY 在主进程（node-pty 是原生模块，渲染进程开着 contextIsolation + sandbox）；
+  // 这里只收发字符串：按键过去、输出回来。
+  terminalOpen: (payload: { projectId?: string; cols: number; rows: number }): Promise<{ ok: boolean; shell?: string; cwd?: string; cols?: number; rows?: number; reused?: boolean; replay?: string; message?: string }> =>
+    ipcRenderer.invoke('work:terminal-open', payload),
+  terminalWrite: (payload: { projectId?: string; data: string }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('work:terminal-write', payload),
+  terminalResize: (payload: { projectId?: string; cols: number; rows: number }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('work:terminal-resize', payload),
+  terminalClose: (payload: { projectId?: string }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('work:terminal-close', payload),
+  onTerminalData: (callback: (payload: { projectId: string; chunk: string }) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: { projectId: string; chunk: string }) => callback(payload);
+    ipcRenderer.on('work:terminal-data', listener);
+    return () => ipcRenderer.removeListener('work:terminal-data', listener);
+  },
+  onTerminalExit: (callback: (payload: { projectId: string; exitCode: number }) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, payload: { projectId: string; exitCode: number }) => callback(payload);
+    ipcRenderer.on('work:terminal-exit', listener);
+    return () => ipcRenderer.removeListener('work:terminal-exit', listener);
+  },
   onAgentEvent: (callback: (event: AgentEnvelope) => void): (() => void) => {
     const listener = (_event: IpcRendererEvent, payload: AgentEnvelope) => callback(payload);
     ipcRenderer.on('work:agent-event', listener);

@@ -25,8 +25,10 @@ export interface DiffLine {
 
 /** 任一边超此行数就不做 O(n·m) 的 LCS（与终端 MAX_FULL_DIFF_LINES 同值）。 */
 const MAX_FULL_DIFF_LINES = 800;
-/** 单个 hunk 最多展示的行数，超出给尾注。 */
-const MAX_BODY_LINES = 24;
+/** 单个 hunk 最多展示的行数，超出给尾注。
+ *  200 与 tool-view.ts 的 MAX_RENDERED_LINES 同值：用户要能在一个块里看到完整改动。
+ *  块高由 CSS 的 .tool-diff-body max-height 兜住（固定高度 + 内部滚动），行数不再撑高布局。 */
+const MAX_BODY_LINES = 200;
 /** 连续未改动行超过这个数就折叠成一句「…(n 行不变)」。 */
 const CTX_RUN_KEEP = 3;
 

@@ -7,6 +7,25 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 for (const file of ['index.html', 'style.css', 'tokens.css']) {
   cpSync(path.join(root, 'src', 'renderer', file), path.join(root, 'dist', 'renderer', file));
 }
+// xterm 是 UMD 包:渲染层没有打包器,index.html 用 <script> 直接加载它。
+// 只拷 UMD 产物 + 样式表(不拷 .map / 源码),约 300KB。
+{
+  const vendorDir = path.join(root, 'dist', 'renderer', 'vendor');
+  mkdirSync(vendorDir, { recursive: true });
+  const assets = [
+    ['@xterm/xterm/lib/xterm.js', 'xterm.js'],
+    ['@xterm/xterm/css/xterm.css', 'xterm.css'],
+    ['@xterm/addon-fit/lib/addon-fit.js', 'addon-fit.js'],
+  ];
+  const require = createRequire(import.meta.url);
+  for (const [from, to] of assets) {
+    try {
+      copyFileSync(require.resolve(from), path.join(vendorDir, to));
+    } catch (error) {
+      console.warn(`[copy-static] 拷贝 ${from} 失败(终端面板将不可用):`, error?.message ?? error);
+    }
+  }
+}
 // 字体包(本地打包,离线可用)
 cpSync(path.join(root, 'src', 'renderer', 'fonts'), path.join(root, 'dist', 'renderer', 'fonts'), { recursive: true });
 // MiSans CJK(npm 包 misans,Apache-2.0):按字重拷贝 min.css + 分段 woff2。

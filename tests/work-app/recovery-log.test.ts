@@ -3,12 +3,20 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { deleteRecoveryLog, readRecovery, recoveryLog } from '../../packages/work-app/src/recovery-log.js';
+import {
+  compactRecoveryLog,
+  compactRecoveryLogs,
+  deleteRecoveryLog,
+  readRecovery,
+  readRecoveryAsync,
+  recoveryLog,
+} from '../../packages/work-app/src/recovery-log.js';
 
-function withRoot(run: (root: string) => void): void {
+/** 临时 root：同步 / 异步回调都支持（瘦身那几条要走 await）。 */
+async function withRoot(run: (root: string) => void | Promise<void>): Promise<void> {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mocode-work-recovery-'));
   try {
-    run(root);
+    await run(root);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -190,4 +198,119 @@ test('拒绝路径逃逸，损坏记录不会混入会话，删除后恢复为�
     assert.deepEqual(readRecovery(root, 'task-4')?.items, [{ kind: 'user', text: '有效消息' }]);
     deleteRecoveryLog(root, 'task-4');
     assert.equal(readRecovery(root, 'task-4'), null);
+  }));
+test('超长日志里的 truncate 不再抛 RangeError（展开传参上限）', () =>
+  withRoot((root) => {
+    // 真实事故：25 万条的恢复日志里只要有一条 truncate，`splice(0, len, ...cut)` 就会
+    // RangeError → work:select-task 整条 IPC reject → 用户点会话毫无反应。
+    const file = path.join(root, 'task-recovery', 'task-long.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const lines: string[] = [];
+    let seq = 0;
+    lines.push(JSON.stringify({ seq: ++seq, at: new Date().toISOString(), type: 'user', text: '第一轮' }));
+    lines.push(JSON.stringify({ seq: ++seq, at: new Date().toISOString(), type: 'user', text: '第二轮' }));
+    // 13 万条 text_delta 足够超过实参上限（≈125k），且不走 live_usage 前缀短路。
+    for (let i = 0; i < 130_000; i += 1) {
+      lines.push(
+        JSON.stringify({
+          seq: ++seq,
+          at: new Date().toISOString(),
+          type: 'event',
+          event: { type: 'event', event: 'text_delta', payload: { text: 'x' } },
+        }),
+      );
+    }
+    lines.push(JSON.stringify({ seq: ++seq, at: new Date().toISOString(), type: 'truncate', userIndex: 1 }));
+    fs.writeFileSync(file, `${lines.join('\n')}\n`, 'utf8');
+
+    const snapshot = readRecovery(root, 'task-long');
+    assert.ok(snapshot);
+    const users = snapshot.items.filter((item) => item.kind === 'user');
+    assert.equal(users.length, 1);
+    assert.equal(users[0]?.kind === 'user' ? users[0].text : '', '第一轮');
+  }));
+
+test('writer 只保留百分比变化了的 live_usage，恢复仍能拿到用量快照', () =>
+  withRoot((root) => {
+    const log = recoveryLog(root, 'task-usage');
+    log.user('跑起来');
+    log.event(event('run_started'));
+    // 同一百分比的 200 条进度只该落 1 条；百分比变化时再落。
+    for (let i = 0; i < 200; i += 1) log.event(event('live_usage', { contextUsage: { tokens: 100 + i, percent: 4 } }));
+    log.event(event('live_usage', { contextUsage: { tokens: 300, percent: 5 } }));
+    const file = path.join(root, 'task-recovery', 'task-usage.jsonl');
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    assert.equal(lines.filter((line) => line.includes('live_usage')).length, 2);
+    assert.deepEqual(readRecovery(root, 'task-usage')?.contextUsage, { tokens: 300, percent: 5 });
+  }));
+
+test('compactRecoveryLog 只删 live_usage 行、保留最后一条，且不改其它内容', () =>
+  withRoot(async (root) => {
+    const file = path.join(root, 'task-recovery', 'task-fat.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const lines: string[] = [];
+    let seq = 0;
+    const push = (entry: Record<string, unknown>): void => {
+      lines.push(JSON.stringify({ ...entry, seq: ++seq, at: new Date().toISOString() }));
+    };
+    push({ type: 'user', text: '第一轮' });
+    push({ type: 'event', event: { type: 'event', event: 'run_started', payload: {} } });
+    // 撑过 2MB 阈值：3000 条带填充文本的 live_usage。
+    const filler = 'x'.repeat(800);
+    for (let i = 0; i < 3000; i += 1) {
+      push({
+        type: 'event',
+        event: { type: 'event', event: 'live_usage', payload: { contextUsage: { percent: i % 60, filler } } },
+      });
+    }
+    push({ type: 'event', event: { type: 'event', event: 'text_delta', payload: { text: '回答' } } });
+    // 越界序号：cutAtUser 找不到目标时不清空日志，正好用它验证瘦身不破坏回滚语义。
+    push({ type: 'truncate', userIndex: 9 });
+    fs.writeFileSync(file, `${lines.join('\n')}\n`, 'utf8');
+    const beforeBytes = fs.statSync(file).size;
+    assert.ok(beforeBytes > 2 * 1024 * 1024, `样本应超过阈值，实际 ${beforeBytes}`);
+
+    assert.equal(await compactRecoveryLog(root, 'task-fat'), true);
+    assert.ok(fs.statSync(file).size < beforeBytes / 10);
+    const kept = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    assert.equal(kept.filter((line) => line.includes('"live_usage"')).length, 1);
+    // 其它记录一条不少、顺序不变：user + run_started + 保留的 live_usage + text_delta + truncate。
+    assert.equal(kept.length, 5);
+    assert.match(kept[0]!, /"第一轮"/);
+    assert.match(kept.at(-1)!, /"truncate"/);
+    const snapshot = await readRecoveryAsync(root, 'task-fat');
+    assert.ok(snapshot);
+    assert.deepEqual(
+      snapshot.items.filter((item) => item.kind === 'user').map((item) => item.kind === 'user' && item.text),
+      ['第一轮'],
+    );
+    assert.equal(snapshot.contextUsage?.percent, 59);
+  }));
+
+test('compactRecoveryLogs 扫描 root/task-recovery 并对超阈值日志瘦身', () =>
+  withRoot(async (root) => {
+    const file = path.join(root, 'task-recovery', 'task-scan.jsonl');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const lines: string[] = [];
+    let seq = 0;
+    lines.push(JSON.stringify({ seq: ++seq, at: new Date().toISOString(), type: 'user', text: '你好' }));
+    const filler = 'y'.repeat(800);
+    for (let i = 0; i < 3000; i += 1) {
+      lines.push(
+        JSON.stringify({
+          seq: ++seq,
+          at: new Date().toISOString(),
+          type: 'event',
+          event: { type: 'event', event: 'live_usage', payload: { contextUsage: { percent: i % 40, filler } } },
+        }),
+      );
+    }
+    fs.writeFileSync(file, `${lines.join('\n')}\n`, 'utf8');
+    const before = fs.statSync(file).size;
+    assert.equal(await compactRecoveryLogs(root), 1);
+    assert.ok(fs.statSync(file).size < before / 10);
+    // 再跑一次：已经没有可省的，返回 0 并且文件不再变。
+    const compactedOnce = fs.statSync(file).size;
+    assert.equal(await compactRecoveryLogs(root), 0);
+    assert.equal(fs.statSync(file).size, compactedOnce);
   }));

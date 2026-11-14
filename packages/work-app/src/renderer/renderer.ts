@@ -2,12 +2,22 @@ import { renderMarkdown, enhanceCodeBlocks, setMarkdownLabels } from './markdown
 import { buildFileChange, renderFileChangeHtml, summarizeFileChange, type FileChangeLabels } from './diff-view.js';
 import { buildToolView, type ToolViewLabels } from './tool-view.js';
 import { SendQueue } from './send-queue.js';
+import { renderQueuePanel, type QueuePanelItem } from './queue-view.js';
 import { mountIcons, icon } from './icons.js';
-import { initPanels, handlePanelEvent, renderPanel, renderTurnChanges, requestPanelCommand, type PanelKind } from './panels.js';
-import { initSourceControl, refreshSourceControl, reopenSourceControl, closeSourceControl, type GitStatusView, type SourceControlTarget } from './source-control.js';
+import { initPanels, handlePanelEvent, renderPanel, requestPanelCommand, type PanelKind } from './panels.js';
+import { initSourceControl, refreshSourceControl, reopenSourceControl, closeSourceControl, type GitRepoView, type GitStatusView, type SourceControlTarget } from './source-control.js';
+// 浏览器面板：页面是主进程的 WebContentsView（CDP 里必须是 page 目标，agent 才能接管）。
+import { initBrowserPanel, showBrowserPanel, hideBrowserPanel, rememberDevServerUrl, refreshBrowserPanelProject, refreshBrowserPanelLabels, type BrowserViewState } from './browser-panel.js';
+// 终端面板：PTY 在主进程（node-pty 是原生模块），这里是 xterm 显示层。
+import { initTerminalPanel, showTerminalPanel, hideTerminalPanel, refreshTerminalProject, refreshTerminalTheme, refreshTerminalLabels, fillTerminalCommand } from './terminal-panel.js';
 import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, MOD, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
 import type { RecoverySnapshot } from '../recovery-log.js';
 import type { WorkAttachment, AttachmentResult, AttachmentErrorCode } from '../attachment-types.js';
+import { parsePlan, type PlanSnapshot } from '../plan.js';
+import { pendingByProject, pendingTasks } from '../attention.js';
+import { planPanelHtml } from './plan-panel.js';
+// 「检查」面板把 `pm run x` 拼成命令行：与主进程用同一份纯函数，避免两处拼法漂移。
+import { checkCommand, type PackageManager } from '../checks.js';
 
 export {};
 
@@ -54,13 +64,22 @@ function applyLanguage(): void {
   setModeButtonFromCache();
   // 会话流不重放（消息内容与语言无关），只重画状态行与输入区。
   renderStatusCacheOnLang();
+  // 计划面板的标题 / 提示 / aria 都按语言现取 → 就地重画一次。
+  const plannedTask = viewingTaskId();
+  if (plannedTask) syncPlanPanel(plannedTask);
   setRunning(isRunning(viewingTaskId()));
   updateContextUsage(streams.get(viewingTaskId() ?? '')?.contextUsage ?? null);
   renderAttachments();
+  // 排队面板的文案（下一条 / 展开 / 附件数）按语言现取 → 就地重画。
+  refreshQueuePanel();
   // 轨道点的 title / aria-label 是生成时按当时语言写死的 → 强制重建一次。
   scheduleConvRail(true);
+  refreshBrowserPanelLabels();
+  refreshTerminalLabels();
   if (!inspector.classList.contains('hidden')) {
     if (activeInspectorTab === 'source') reopenSourceControl(inspectorContent);
+    else if (activeInspectorTab === 'browser') inspectorTitle.textContent = t('tools.browser');
+    else if (activeInspectorTab === 'terminal') inspectorTitle.textContent = t('tools.terminal');
     else void refreshInspector();
   }
 }
@@ -72,7 +91,9 @@ type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'c
 type Project = { id: string; name: string; root: string; branch: string; auto?: boolean; sessionCount?: number };
 /** 终端留下的历史会话（work:project-sessions 的返回项）。 */
 type ProjectSession = { id: string; createdAt: string; model: string; firstUser: string };
-type Task = { id: string; projectId: string; title: string; status: TaskStatus; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string };
+type Task = { id: string; projectId: string; title: string; status: TaskStatus; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string; plan?: TaskPlanProgress };
+/** 侧栏任务行显示的计划进度（主进程写入，见 updateTaskFromAgent）。 */
+type TaskPlanProgress = { title: string; done: number; total: number; allDone: boolean };
 type WorkState = { version: 1; projects: Project[]; selectedProjectId: string; tasks: Task[]; selectedTaskId?: string };
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
 type Attachment = WorkAttachment;
@@ -108,6 +129,10 @@ type McpDraft = {
 type VoiceStatus = { ready: boolean; bytes: number; dir: string; downloading?: boolean };
 /** 模型下载进度（主进程 work:voice-progress 推送）。 */
 type VoiceProgress = { receivedBytes: number; totalBytes: number; percent: number; file: string };
+/** 「改动」面板的一行：任务记录里的 changedFiles + 相对 HEAD 的增删行数。 */
+type TaskChangeFile = { path: string; added: number; removed: number; untracked: boolean };
+/** 「检查」面板的一组（根包或一个 workspace 子包）。见 packages/work-app/src/checks.ts。 */
+type CheckGroupView = { label: string; dir: string; packageManager: PackageManager; scripts: Array<{ name: string; command: string }> };
 
 declare global {
   interface Window {
@@ -122,6 +147,8 @@ declare global {
       selectTask: (id: string) => Promise<{ state: WorkState; task: Task; history: HistoryItem[]; recovery: RecoverySnapshot | null } | null>;
       /** 回滚对话:会话截断到「第 userIndex 条用户消息」之前。 */
       rollback: (value: { id: string; userIndex: number }) => Promise<{ ok: boolean; message?: string; state?: WorkState; history?: HistoryItem[]; recovery?: RecoverySnapshot | null }>;
+      /** 分叉会话:复制会话并保留到第 userIndex 轮结束,建一个新任务（返回它的 state/task/history）。 */
+      forkTask: (value: { id: string; userIndex: number }) => Promise<{ ok: boolean; message?: string; state?: WorkState; task?: Task; history?: HistoryItem[]; recovery?: RecoverySnapshot | null }>;
       clearTasks: (projectId?: string) => Promise<WorkState>;
       deleteTask: (id: string) => Promise<WorkState | null>;
       renameTask: (id: string, title: string) => Promise<WorkState | null>;
@@ -135,11 +162,18 @@ declare global {
       adoptSession: (payload: { projectId: string; sessionId: string; title?: string }) => Promise<{ ok: boolean; message?: string; state?: WorkState; task?: Task; history?: HistoryItem[] }>;
       readFile: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
+      gitRepos: (target?: SourceControlTarget) => Promise<{ ok: boolean; repos: GitRepoView[]; message?: string }>;
       gitStatus: (target?: SourceControlTarget) => Promise<GitStatusView>;
       gitDiff: (target: SourceControlTarget, path: string, staged: boolean) => Promise<{ ok: boolean; content?: string; truncated?: boolean; message?: string }>;
       gitStage: (target: SourceControlTarget, paths?: string[]) => Promise<{ ok: boolean; message?: string; status?: GitStatusView }>;
       gitUnstage: (target: SourceControlTarget, paths?: string[]) => Promise<{ ok: boolean; message?: string; status?: GitStatusView }>;
       gitCommit: (target: SourceControlTarget, message: string) => Promise<{ ok: boolean; message?: string; status?: GitStatusView; commit?: string }>;
+      /** 「改动」面板：本任务的 changedFiles + 每文件相对 HEAD 的增删行数。 */
+      taskChanges: (payload: { taskId?: string }) => Promise<{ ok: boolean; files: TaskChangeFile[]; truncated?: boolean; message?: string }>;
+      /** 「改动」面板里展开单个文件（与列表同一基准：HEAD）。 */
+      taskChangeDiff: (payload: { taskId?: string; path: string }) => Promise<{ ok: boolean; content?: string; truncated?: boolean; message?: string }>;
+      /** 「检查」面板：从 package.json 发现的校验命令（只读，点击后填进终端）。 */
+      checks: (payload: { taskId?: string }) => Promise<{ ok: boolean; packageManager?: string; groups?: CheckGroupView[]; message?: string }>;
       pickAttachment: () => Promise<AttachmentResult[]>;
       readAttachments: (paths: string[]) => Promise<AttachmentResult[]>;
       droppedFilePaths: (files: File[]) => string[];
@@ -180,13 +214,26 @@ declare global {
       listBranches: () => Promise<{ ok: boolean; message: string; current: string; branches: string[] }>;
       switchBranch: (branch: string) => Promise<{ ok: boolean; message: string; branch?: string }>;
       setTheme: (theme: 'light' | 'dark' | 'system') => void;
-      setTitleBarOverlay: (colors: { bg: string; symbol: string }) => void;
+      setTitleBarOverlay: (colors: { bg?: string; symbol: string }) => void;
       setLanguage: (language: string) => Promise<{ ok: boolean; language?: string; message?: string }>;
       send: (value: Record<string, unknown>) => void;
       /** 面板命令（会话/回滚/改动/用量/记忆/设置）；id 由渲染层生成，回执经 onAgentEvent 同 id 返回。 */
       panel: (value: Record<string, unknown>) => Promise<{ ok: boolean; id?: string; message?: string }>;
       onAgentEvent: (callback: (event: AgentEnvelope) => void) => () => void;
       onState: (callback: (state: WorkState) => void) => () => void;
+      /** ── 浏览器面板（页面是主进程的 WebContentsView，这里只送 bounds 与命令）── */
+      browserShow: (payload: { projectId?: string; bounds: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; message?: string }>;
+      browserHide: () => Promise<{ ok: boolean }>;
+      browserNavigate: (url: string) => Promise<{ ok: boolean; message?: string }>;
+      browserCommand: (command: 'back' | 'forward' | 'reload') => Promise<{ ok: boolean }>;
+      onBrowserState: (callback: (state: BrowserViewState) => void) => () => void;
+      /** ── 终端面板（PTY 在主进程，这里只收发字符串）── */
+      terminalOpen: (payload: { projectId?: string; cols: number; rows: number }) => Promise<{ ok: boolean; shell?: string; cwd?: string; cols?: number; rows?: number; reused?: boolean; replay?: string; message?: string }>;
+      terminalWrite: (payload: { projectId?: string; data: string }) => Promise<{ ok: boolean }>;
+      terminalResize: (payload: { projectId?: string; cols: number; rows: number }) => Promise<{ ok: boolean }>;
+      terminalClose: (payload: { projectId?: string }) => Promise<{ ok: boolean }>;
+      onTerminalData: (callback: (payload: { projectId: string; chunk: string }) => void) => () => void;
+      onTerminalExit: (callback: (payload: { projectId: string; exitCode: number }) => void) => () => void;
     };
   }
 }
@@ -199,6 +246,10 @@ const inspectorTitle = $('#inspector-title'); const attachmentList = $('#attachm
 const contextUsageEl = $('#context-usage') as HTMLButtonElement;
 const contextUsagePopover = $('#context-usage-popover');
 const convRail = $('#conv-rail') as HTMLElement;
+const planPanel = $('#plan-panel') as HTMLElement;
+const attentionBar = $('#attention-bar') as HTMLElement;
+const attentionBadge = $('#attention-badge') as HTMLButtonElement;
+const queuePanel = $('#queue-panel') as HTMLElement;
 
 let state: WorkState | null = null;
 let collapsedProjects: Set<string> = new Set();
@@ -206,9 +257,9 @@ let collapsedSections: Set<string> = new Set();
 let activeAssistant: HTMLElement | null = null;
 let activeTextBlock: HTMLElement | null = null;
 let attachments: Attachment[] = [];
-/** 检查器页签：概览 / 文件树 / 本轮改动（改动来自 changeset 快照，与回滚同源）。 */
-type InspectorTab = 'overview' | 'files' | 'changes' | 'source';
-let activeInspectorTab: InspectorTab = 'overview';
+/** 检查器视图：一个视图只承载一个工具，由工具箱菜单切换（不再有页签条）。 */
+type InspectorTab = 'files' | 'source' | 'browser' | 'terminal' | 'changes' | 'checks';
+let activeInspectorTab: InspectorTab = 'files';
 /**
  * 当前是否 plan 模式（只读探查 + 出方案）。事实源在 host（进程级状态），
  * 这里只是它推回来的镜像：切任务不回退、重启后回 auto（host 新建时即 auto）。
@@ -241,12 +292,23 @@ interface TaskStream {
   startedAt: number | null;
   /** 从崩溃/中止日志恢复的现场；只展示，不恢复可执行审批或自动重跑。 */
   interrupted?: boolean;
+  /** 最新一份执行计划（plan_update 的入参解析结果）—— 顶部计划面板的唯一事实源。 */
+  plan: PlanSnapshot | null;
+  /** 用户手动关闭 / 完成后自动收起：同一份计划(identity)不再弹出，换新计划才重开。 */
+  planDismissed?: boolean;
+  /** 步骤清单是否展开。默认收起 —— 一行就够看清「在做什么」，细节按需展开。 */
+  planExpanded?: boolean;
+  /** 完成态的停留计时器：全部完成先展示再收起，不瞬间消失。 */
+  planTimer?: ReturnType<typeof setTimeout> | null;
 }
 const streams = new Map<string, TaskStream>();
 
 function streamFor(taskId: string): TaskStream {
   let stream = streams.get(taskId);
-  if (!stream) { stream = { items: [], running: false, contextUsage: null, pendingApproval: null, status: null, startedAt: null }; streams.set(taskId, stream); }
+  if (!stream) {
+    stream = { items: [], running: false, contextUsage: null, pendingApproval: null, status: null, startedAt: null, plan: null };
+    streams.set(taskId, stream);
+  }
   return stream;
 }
 function isRunning(taskId: string | undefined): boolean { return !!taskId && streams.get(taskId)?.running === true; }
@@ -412,6 +474,175 @@ function statusFromTask(task: Task | undefined): AgentStatusState {
   return IDLE_STATUS;
 }
 
+/* ── 计划进度面板（plan_update）──────────────────────────────
+ * 位置：.thread 内、#conversation 之上（不进滚动盒）—— 计划是「这次任务做到哪一步」的
+ * 全局状态，跟着消息滚走就等于没有。切任务、崩溃恢复后都能一眼看到。
+ *
+ * 三条产品约束（用户定的）：
+ *   1. 实时：tool_started 就按入参渲染，不等 tool_completed（工具的入参里已是完整计划）；
+ *   2. 常驻：同一份计划反复更新只刷新同一块，不在会话流里堆一串卡片；
+ *   3. 全部完成 → 先显示完成态，再自动关闭；用户手动关掉的计划不因进度更新再弹出来，
+ *      只有换了一份新计划（identity 变化）才重新出现。
+ */
+/** 全部完成后完成态在屏幕上停留多久 —— 够看清「全绿了」，又不是赖着不走。 */
+const PLAN_DONE_LINGER_MS = 2400;
+
+/**
+ * 吃一条 plan_update 的工具入参。name 不是 plan_update 或解析不出完整计划时直接忽略
+ * （工具本身会以「steps 不能为空」失败，面板不该显示半份计划）。
+ */
+function ingestPlan(
+  taskId: string,
+  stream: TaskStream,
+  viewing: boolean,
+  payload: Record<string, unknown>,
+  args: string,
+): void {
+  if (String(payload.name ?? '') !== 'plan_update') return;
+  const parsed = parsePlan(args);
+  if (!parsed || (stream.plan && stream.plan.signature === parsed.signature)) return;
+  // 换了一份计划 → 之前的手动关闭作废；同一条计划只是进度变了，保持关闭状态不重开。
+  if (!stream.plan || stream.plan.identity !== parsed.identity) stream.planDismissed = false;
+  stream.plan = parsed;
+  if (stream.planTimer) { clearTimeout(stream.planTimer); stream.planTimer = null; }
+  if (parsed.allDone && !stream.planDismissed) {
+    stream.planTimer = setTimeout(() => {
+      stream.planTimer = null;
+      stream.planDismissed = true;
+      if (viewingTaskId() === taskId) syncPlanPanel(taskId);
+    }, PLAN_DONE_LINGER_MS);
+  }
+  if (viewing) syncPlanPanel(taskId);
+}
+
+/** 从事件缓冲里找最后一份可解析的 plan_update（切任务 / 崩溃恢复用）。 */
+function planFromItems(items: readonly StreamItem[] | undefined): PlanSnapshot | null {
+  if (!items) return null;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (item.kind !== 'tool' || item.name !== 'plan_update') continue;
+    const plan = parsePlan(item.args);
+    if (plan) return plan;
+  }
+  return null;
+}
+
+/** 从会话历史里找最后一份可解析的 plan_update（重启后打开旧任务，没有事件缓冲）。 */
+function planFromHistory(history: HistoryItem[] | undefined): PlanSnapshot | null {
+  if (!history) return null;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index]!;
+    if (item.role !== 'tool' || item.name !== 'plan_update') continue;
+    const plan = parsePlan(item.arguments ?? '');
+    if (plan) return plan;
+  }
+  return null;
+}
+
+/** 面板显示与否的唯一判定点：写视图只从这里走，避免两处各判一半。 */
+function syncPlanPanel(taskId: string): void {
+  const stream = streams.get(taskId);
+  const plan = stream?.plan ?? null;
+  if (!stream || !plan || stream.planDismissed || viewingTaskId() !== taskId) {
+    planPanel.classList.add('hidden');
+    planPanel.innerHTML = '';
+    return;
+  }
+  renderPlanPanel(taskId, stream, plan);
+}
+
+function renderPlanPanel(taskId: string, stream: TaskStream, plan: PlanSnapshot): void {
+  const entering = planPanel.classList.contains('hidden');
+  const expanded = stream.planExpanded === true;
+  // 完成态与进行中都用同一行：标题（在做什么）+ 当前步 / 完成提示 + n/m。
+  // 结构交给 plan-panel.ts 的纯函数（可单测），这里只负责语言、事件与显隐。
+  planPanel.innerHTML = planPanelHtml(plan, expanded, {
+    expand: t('plan.expand'),
+    collapse: t('plan.collapse'),
+    dismiss: t('plan.dismiss'),
+    progress: t('plan.progress', { done: plan.done, total: plan.total }),
+    subtitle: plan.allDone ? t('plan.doneHint', { n: plan.total }) : plan.currentLabel ?? '',
+  });
+  planPanel.classList.remove('hidden');
+  // 入场动画只在这一块「刚出现」时播一次；进度更新会重建 innerHTML，否则每次都会闪。
+  planPanel.classList.toggle('is-entering', entering);
+  planPanel.querySelector('.plan-head-main')?.addEventListener('click', () => {
+    stream.planExpanded = !stream.planExpanded;
+    syncPlanPanel(taskId);
+  });
+  planPanel.querySelector('.plan-dismiss')?.addEventListener('click', () => {
+    if (stream.planTimer) { clearTimeout(stream.planTimer); stream.planTimer = null; }
+    stream.planDismissed = true;
+    syncPlanPanel(taskId);
+  });
+}
+
+/* ── 需要人工介入：标题栏徽章 + 会话区横条 ──────────────────
+ * 为什么两处都要：审批卡本身是浮在会话底部的浮层，用户往上翻历史 / 在看别的任务时就
+ * 完全不知道 agent 已经停在那儿等人。侧栏只能提示「哪个任务」，徽章回答「有几个」，
+ * 横条回答「当前这个在等什么」。三者都从 attention.ts + stream.pendingApproval 读，不另存状态。
+ */
+
+/** 标题栏「N 个待处理」+ 当前任务横条的唯一写入口。 */
+function syncAttention(): void {
+  const pending = pendingTasks(state?.tasks ?? []);
+  // ── 标题栏徽章：跨任务的总数（窗口最外层，任何视图下都在）──
+  attentionBadge.classList.toggle('hidden', pending.length === 0);
+  if (pending.length) {
+    const badgeText = t('attention.badge', { n: pending.length });
+    if (attentionBadge.textContent !== badgeText) attentionBadge.textContent = badgeText;
+    const badgeTitle = t('attention.badgeTitle', { n: pending.length });
+    attentionBadge.title = badgeTitle;
+    attentionBadge.setAttribute('aria-label', badgeTitle);
+  }
+  // ── 会话区横条：只看当前任务在等什么 ──
+  const viewing = viewingTaskId();
+  const stream = viewing ? streams.get(viewing) : undefined;
+  const approval = stream?.pendingApproval ?? null;
+  if (!viewing || !approval || stream?.running !== true) {
+    attentionBar.classList.add('hidden');
+    attentionBar.innerHTML = '';
+    return;
+  }
+  const entering = attentionBar.classList.contains('hidden');
+  // 审批 / 提问的标题就是「在等什么」—— 模型给的文案比任何通用措辞都准确。
+  const title = String(approval.title ?? '').trim() || t('approval.default');
+  attentionBar.innerHTML =
+    `<span class="attention-bar-icon">${icon('warn')}</span>` +
+    `<span class="attention-bar-body"><b class="attention-bar-title">${escapeHtml(t('attention.barTitle'))}</b>` +
+    `<span class="attention-bar-detail">${escapeHtml(title)}</span></span>` +
+    `<span class="attention-bar-hint">${escapeHtml(t('attention.barHint'))}</span>` +
+    `<button class="attention-bar-jump" type="button">${escapeHtml(t('attention.jump'))}</button>`;
+  attentionBar.classList.remove('hidden');
+  // 与计划面板同一套入场动画语义：只在「刚出现」时播一次。
+  attentionBar.classList.toggle('is-entering', entering);
+  // 点横条（或「前往处理」）都把审批卡重新摆到用户眼前：它可能因切任务 / 滚动而不可见。
+  // 用 onclick 赋值而不是 addEventListener：横条每同步一次都会重跑这里，
+  // addEventListener 会累积一串同名监听（点一下弹多次、闭包里还握着旧的 taskId）。
+  attentionBar.onclick = () => {
+    const payload = streams.get(viewing)?.pendingApproval;
+    if (!payload) return;
+    // 横条 / 「前往处理」的语义就是「现在去回答」：用户可能刚把卡片收起在读正文，
+    // 这里必须反向展开，否则点了看起来没反应（卡片只是被重画成收起态）。
+    showApproval(viewing, payload, { expand: true });
+    approvalPanel.scrollIntoView({ block: 'nearest' });
+    approvalPanel.querySelector<HTMLTextAreaElement>('.approval-input')?.focus();
+  };
+}
+
+/**
+ * 跳到「最久等待」的那个任务（标题栏徽章、系统通知回执都走这里）。
+ * 打开任务后若审批卡没被摆出来（比如缓存流里刚被清过），再补一次。
+ */
+async function jumpToPendingTask(taskId?: string): Promise<void> {
+  const target = taskId ?? pendingTasks(state?.tasks ?? [])[0]?.id;
+  if (!target) return;
+  if (viewingTaskId() !== target) await openTask(target);
+  const stream = streams.get(target);
+  if (stream?.pendingApproval && stream.running) showApproval(target, stream.pendingApproval);
+  syncAttention();
+}
+
 /** 本轮跑了多久 —— 终态文案里给个「用时 Ns」,用户据此确认"确实跑完了一轮"。 */
 function elapsedDetail(startedAt: number | null): string {
   if (!startedAt) return '';
@@ -515,8 +746,20 @@ function contextUsageDetails(usage: ContextUsageSnapshot): string {
     <div class="context-usage-note">${escapeHtml(note)}</div>`;
 }
 
+/** 上一次真正写进 DOM 的上下文快照签名（见 updateContextUsage 的去重理由）。 */
+let lastContextUsageSignature = '';
+
 /** 更新输入栏的当前上下文快照；null 表示尚无会话或数据尚未返回。 */
 function updateContextUsage(usage: ContextUsageSnapshot | null): void {
+  // live_usage 是流式进度事件，实测每秒可达上百条（同一份恢复日志里 25 万条）。
+  // 数值一个字都没变时重建 popover 的 innerHTML 纯属浪费主线程 —— 而这恰好发生在
+  // 「agent 正在跑」的时候，用户点输入框卡的那一下就在这些无意义的重排里。
+  // 语言进签名：切语言时必须重算 label 与明细文案。
+  const signature = usage
+    ? `${getLang()}|${usage.percent}|${usage.tokens}|${usage.window}|${usage.remaining}|${usage.messages}|${usage.cachedTokens ?? ''}|${usage.source}`
+    : `${getLang()}|none`;
+  if (signature === lastContextUsageSignature) return;
+  lastContextUsageSignature = signature;
   contextUsageEl.textContent = t('composer.contextUsageValue', { percent: usage ? `${usage.percent}%` : '--' });
   contextUsageEl.classList.toggle('usage-high', (usage?.percent ?? 0) >= 70);
   contextUsageEl.tabIndex = usage ? 0 : -1;
@@ -618,28 +861,68 @@ const wiredTaskMenuButtons = new WeakSet<HTMLButtonElement>();
 const wiredHistoryButtons = new WeakSet<HTMLButtonElement>();
 let taskListStructure = '';
 
-/** 只更新任务行的可见状态，不替换按钮、标题或 meta 节点，保护 pointerdown → click。 */
+/**
+ * 任务行三态指示（只更新可见状态，不替换按钮、标题或 meta 节点，保护 pointerdown → click）：
+ *   - running：转圈（agent 在动，不用管）
+ *   - waiting：静止的琥珀色警示（agent 停在那儿等人，必须管）
+ *   - 其余：显示「N 分钟前」
+ * waiting 以前和 running 一样转圈 → 用户分不出「它在干活」和「它在等我」。
+ */
 function paintTaskItem(item: HTMLElement, task: Task, current: WorkState): void {
-  const running = task.status === 'running' || task.status === 'waiting';
+  const waiting = task.status === 'waiting';
+  const busy = task.status === 'running';
   const className = `task-item ${task.status}${task.id === current.selectedTaskId ? ' selected' : ''}`;
   if (item.className !== className) item.className = className;
   if (task.lastError) item.title = taskErrorText(task);
+  else if (waiting) item.title = t('task.needsYou');
   else item.removeAttribute('title');
   const open = item.querySelector<HTMLButtonElement>('.task-open');
   const title = item.querySelector<HTMLElement>('.task-title');
   const menu = item.querySelector<HTMLButtonElement>('.task-menu-btn');
   const label = taskTitle(task);
-  if (open) open.title = t('task.open', { name: label });
+  if (open) open.title = waiting ? t('task.openNeedsYou', { name: label }) : t('task.open', { name: label });
   if (title) {
     if (title.textContent !== label) title.textContent = label;
     title.title = t('task.dblclickRename');
   }
   if (menu) { menu.setAttribute('aria-label', t('task.menu')); menu.title = t('sidebar.moreActions'); }
   const spinner = item.querySelector<HTMLElement>('.task-spinner');
+  const waitMark = item.querySelector<HTMLElement>('.task-wait');
   const ago = item.querySelector<HTMLElement>('.task-meta small');
-  spinner?.toggleAttribute('hidden', !running);
-  ago?.toggleAttribute('hidden', running);
-  if (ago && !running) ago.textContent = timeAgo(task.updatedAt);
+  spinner?.toggleAttribute('hidden', !busy);
+  waitMark?.toggleAttribute('hidden', !waiting);
+  ago?.toggleAttribute('hidden', busy || waiting);
+  if (ago && !busy && !waiting) ago.textContent = timeAgo(task.updatedAt);
+  paintTaskPlan(item, task);
+}
+
+/**
+ * 任务行上的计划进度（n/m）。
+ * 与时间/转圈同处 .task-meta：运行中显示转圈 + n/m，结束后显示时间 + n/m。
+ * 后台任务也能看到进度 —— 这是会话区顶部计划面板看不到的那一半信息。
+ *
+ * ⚠ 计划跑完就**收起这颗 pill**，不显示「已完成」之类的字样：计划完成 ≠ 任务完成。
+ * 一轮 run 结束、计划 6/6 之后用户往往接着聊下一件事，而计划是上一轮的遗留数据
+ * （main.ts 的 updateTaskFromAgent 只在 plan_update 时写入，run 结束不清），
+ * 挂着「已完成」会和左上角的转圈自相矛盾。跑完的计划没有增量信息，隐藏即可。
+ */
+function paintTaskPlan(item: HTMLElement, task: Task): void {
+  const plan = task.plan;
+  const pill = item.querySelector<HTMLElement>('.task-plan');
+  if (!plan || plan.total <= 0 || plan.allDone) { pill?.remove(); return; }
+  const label = t('plan.sidebar', { done: plan.done, total: plan.total });
+  if (!pill) {
+    const meta = item.querySelector('.task-meta');
+    if (!meta) return;
+    const created = document.createElement('span');
+    created.className = 'task-plan';
+    created.textContent = label;
+    created.title = `${plan.title} · ${label}`;
+    meta.append(created);
+    return;
+  }
+  if (pill.textContent !== label) pill.textContent = label;
+  pill.title = `${plan.title} · ${label}`;
 }
 
 function renderTasks(): void {
@@ -657,12 +940,24 @@ function renderTasks(): void {
     normalTasks.map((task) => task.id),
     spaces.map(({ project, tasks }) => [project.id, tasks.map((task) => task.id)]),
   ]);
+  // 「谁在等我」只由 attention.ts 判定一次（侧栏 / 标题栏 / 主进程通知同口径）。
+  const waitingByProject = pendingByProject(current.tasks);
   const paintProject = (heading: HTMLElement, project: Project): void => {
     heading.classList.toggle('selected', project.id === current.selectedProjectId);
     const name = heading.querySelector<HTMLElement>('.project-group-name');
     if (name) {
       if (name.textContent !== project.name) name.textContent = project.name;
       name.title = project.root;
+    }
+    // 空间里有几个任务在等人：空间可能是折叠的、任务行根本不可见，这个计数是唯一线索。
+    const waitBadge = heading.querySelector<HTMLElement>('.project-group-wait');
+    const waiting = waitingByProject.get(project.id) ?? 0;
+    if (waitBadge) {
+      waitBadge.toggleAttribute('hidden', waiting === 0);
+      const waitLabel = String(waiting);
+      if (waitBadge.textContent !== waitLabel) waitBadge.textContent = waitLabel;
+      waitBadge.title = t('sidebar.spaceNeedsYou', { n: waiting });
+      waitBadge.setAttribute('aria-label', t('sidebar.spaceNeedsYou', { n: waiting }));
     }
     const newTask = heading.querySelector<HTMLButtonElement>('[data-new-task-project]');
     if (newTask) {
@@ -697,12 +992,15 @@ function renderTasks(): void {
 
   const taskItemHtml = (task: Task): string => {
     const id = escapeHtml(task.id);
-    const isRunning = task.status === 'running' || task.status === 'waiting';
-    const meta = `<span class="task-spinner"${isRunning ? '' : ' hidden'}>${icon('loader')}</span><small data-always="1"${isRunning ? ' hidden' : ''}>${timeAgo(task.updatedAt)}</small>`;
+    const waiting = task.status === 'waiting';
+    const isRunning = task.status === 'running';
+    // 转圈只给真正在跑的；waiting 用静止的琥珀色警示（不动的那个才是要你动手的）。
+    const meta = `<span class="task-spinner"${isRunning ? '' : ' hidden'}>${icon('loader')}</span><span class="task-wait"${waiting ? '' : ' hidden'}>${icon('warn')}</span><small data-always="1"${isRunning || waiting ? ' hidden' : ''}>${timeAgo(task.updatedAt)}</small>`;
     // 失败原因只挂在 title 上：侧栏一行放不下长文案，而 lastError 里存的是稳定标记，
-    // 必须过一层 taskErrorText 才能按当前语言显示。
-    const error = task.lastError ? ` title="${escapeHtml(taskErrorText(task))}"` : '';
-    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"${error}><button class="task-open" data-task="${id}" title="${t('task.open', { name: escapeHtml(taskTitle(task)) })}"><span class="task-title" title="${t('task.dblclickRename')}">${escapeHtml(taskTitle(task))}</span><span class="task-meta">${meta}</span></button><button class="task-menu-btn" data-task-menu="${id}" aria-label="${t('task.menu')}" title="${t('sidebar.moreActions')}">${icon('more')}</button></div>`;
+    // 必须过一层 taskErrorText 才能按当前语言显示。等待人工介入优先于失败原因（它更紧急）。
+    const error = task.lastError ? ` title="${escapeHtml(taskErrorText(task))}"` : waiting ? ` title="${escapeHtml(t('task.needsYou'))}"` : '';
+    const openTitle = waiting ? t('task.openNeedsYou', { name: escapeHtml(taskTitle(task)) }) : t('task.open', { name: escapeHtml(taskTitle(task)) });
+    return `<div class="task-item ${task.status} ${task.id === current.selectedTaskId ? 'selected' : ''}" data-task-id="${id}"${error}><button class="task-open" data-task="${id}" title="${openTitle}"><span class="task-title" title="${t('task.dblclickRename')}">${escapeHtml(taskTitle(task))}</span><span class="task-meta">${meta}</span></button><button class="task-menu-btn" data-task-menu="${id}" aria-label="${t('task.menu')}" title="${t('sidebar.moreActions')}">${icon('more')}</button></div>`;
   };
 
   const tasksCollapsed = collapsedSections.has('tasks');
@@ -735,6 +1033,7 @@ function renderTasks(): void {
   <div class="project-group-heading ${isSelectedProject ? 'selected' : ''}" data-toggle-project="${projectId}" title="${t('sidebar.toggleSection')}" aria-expanded="${!isCollapsed}">
     <span class="project-group-icon">${icon('folder')}</span>
     <span class="project-group-name" title="${escapeHtml(project.root)}">${escapeHtml(project.name)}</span>
+    <span class="project-group-wait"${(waitingByProject.get(project.id) ?? 0) ? '' : ' hidden'}>${icon('warn')}${waitingByProject.get(project.id) ?? 0}</span>
     <span class="project-group-chevron">${icon(isCollapsed ? 'chevron-right' : 'chevron-down')}</span>
     <span class="project-group-actions"><button class="project-menu-btn icon-button-square" data-new-task-project="${projectId}" title="${t('sidebar.newTaskInSpace')}" aria-label="${t('sidebar.newTaskInProject', { name: escapeHtml(project.name) })}">${icon('plus')}</button><button class="project-menu-btn icon-button-square" data-project-menu="${projectId}" title="${t('sidebar.moreActions')}" aria-label="${t('sidebar.moreActionsFor', { name: escapeHtml(project.name) })}">${icon('more')}</button></span>
   </div>
@@ -833,21 +1132,24 @@ function renderTasks(): void {
     const task = state?.tasks.find((item) => item.id === taskId);
     if (!task) return;
     const isRunning = task.status === 'running' || task.status === 'waiting';
-    // 归属只能在任务跑起来之前改（host cwd 固化 + 会话按目录落盘）。
-    const canMove = !task.sessionId && !isRunning;
-    const projects = state?.projects ?? [];
-    const moveItems = canMove && projects.length
-      ? `<div class="project-context-divider"></div><div class="project-context-label">${t('menu.moveTo')}</div>${!task.projectId ? '' : `<button class="project-context-item" data-action="move" data-tid="${taskId}" data-target=""><span class="project-context-icon">${icon('folder')}</span>${t('menu.noWorkspace')}</button>`}${projects.filter((p) => p.id !== task.projectId).map((p) => `<button class="project-context-item" data-action="move" data-tid="${taskId}" data-target="${escapeHtml(p.id)}"><span class="project-context-icon">${icon('folder')}</span>${escapeHtml(p.name)}</button>`).join('')}`
-      : '';
     const menu = document.createElement('div');
     menu.id = 'task-context-menu';
     menu.className = 'project-context-menu';
-    menu.innerHTML = `<button class="project-context-item" data-action="rename" data-tid="${taskId}"><span class="project-context-icon">${icon('edit')}</span>${t('menu.rename')}</button>${moveItems}<div class="project-context-divider"></div><button class="project-context-item" data-action="delete" data-tid="${taskId}"${isRunning ? ' data-running="1"' : ''}><span class="project-context-icon">${icon('trash')}</span>${isRunning ? t('menu.stopAndDelete') : t('menu.delete')}</button>`;
+    // ⚠ 「移动到别的空间」刻意不在这里：同一件事在底部工作空间 chip 的下拉里就能做，
+    // 而放这儿时每多一个空间就多一行 —— 实测 8 个空间就能把「删除」顶出视口、点不到。
+    // 菜单只留必然要用到的两条：重命名 / 删除。
+    menu.innerHTML = `<button class="project-context-item" data-action="rename" data-tid="${taskId}"><span class="project-context-icon">${icon('edit')}</span>${t('menu.rename')}</button><div class="project-context-divider"></div><button class="project-context-item" data-action="delete" data-tid="${taskId}"${isRunning ? ' data-running="1"' : ''}><span class="project-context-icon">${icon('trash')}</span>${isRunning ? t('menu.stopAndDelete') : t('menu.delete')}</button>`;
     document.body.appendChild(menu);
     const menuRect = menu.getBoundingClientRect();
-    let left = anchor.right - menuRect.width;
+    // 水平：右对齐到锚点，两侧各留 4px。
+    const left = Math.min(Math.max(4, anchor.right - menuRect.width), Math.max(4, window.innerWidth - menuRect.width - 4));
+    // 垂直：优先挂在锚点下方；下方不够就翻到上方；两边都不够（菜单比视口还高）就贴顶，
+    // 由 CSS 的 max-height + overflow 让它自己滚 —— 绝不能让最后一项跑到视口外点不到。
     let top = anchor.bottom + 4;
-    if (left < 4) left = 4;
+    if (top + menuRect.height > window.innerHeight - 4) {
+      const above = anchor.top - menuRect.height - 4;
+      top = above >= 4 ? above : Math.max(4, window.innerHeight - menuRect.height - 4);
+    }
     menu.style.left = `${left}px`;
     menu.style.top = `${top}px`;
     const close = () => { menu.remove(); document.removeEventListener('click', close); document.removeEventListener('keydown', close); };
@@ -861,13 +1163,6 @@ function renderTasks(): void {
         void startTaskRename(tid);
       } else if (action === 'delete') {
         void deleteTask(tid);
-      } else if (action === 'move') {
-        const target = item.dataset.target ?? '';
-        const result = await window.mocodeWork.setTaskProject(tid, target);
-        if (!result.ok) { showToast('warn', result.message ?? t('toast.cannotMoveTask')); return; }
-        if (result.state) updateState(result.state);
-        const label = target ? state?.projects.find((p) => p.id === target)?.name ?? target : t('menu.noWorkspace');
-        showToast('success', t('toast.movedTo', { label: label }));
       }
     }));
   };
@@ -996,10 +1291,16 @@ function renderTasks(): void {
 function updateState(next: WorkState): void {
   // IPC 的广播与 invoke 回执可能携带同一份状态；重复回执不做任何 DOM 工作。
   if (state && JSON.stringify(next) === JSON.stringify(state)) return;
-  state = next; renderProjects(); renderTasks(); renderEmptyChips();
+  const previousProject = activeProjectId();
+  state = next; renderProjects(); renderTasks(); renderEmptyChips(); syncAttention();
+  // 切空间 = 切浏览器分区 + 换一份 PTY（shell 的 cwd 绑在空间根上）。
+  if (activeProjectId() !== previousProject) {
+    refreshBrowserPanelProject();
+    refreshTerminalProject();
+  }
   if (activeInspectorTab === 'source' && !inspector.classList.contains('hidden')) void refreshSourceControl(inspectorContent);
 }
-function clearWorkspace(): void { hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); }
+function clearWorkspace(): void { hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); refreshQueuePanel(); }
 
 /**
  * 一轮 assistant 输出 = 一条 message 内的**有序 block 流**:
@@ -1049,6 +1350,14 @@ function ensureTextBlock(): HTMLElement {
  */
 let userTurnIndex = 0;
 
+/**
+ * 用户消息的原文与附件 —— 原地编辑必须能拿回它们。
+ * 不能从 DOM 反推：图片消息本来就没有 .message-body（正文为空），
+ * 而从 textContent 取文本会丢掉消息里的换行与首尾空白。
+ */
+const messageText = new WeakMap<HTMLElement, string>();
+const messageAttachments = new WeakMap<HTMLElement, Attachment[]>();
+
 function addMessage(kind: 'user' | 'assistant', text = '', images: Attachment[] = []): HTMLElement {
   emptyState.classList.add('hidden');
   const message = document.createElement('article'); message.className = `message ${kind}`;
@@ -1071,9 +1380,12 @@ function addMessage(kind: 'user' | 'assistant', text = '', images: Attachment[] 
     if (text) wrapper.append(body);
     wrapper.append(label);
     message.append(wrapper);
-    // 用户消息的「复制 + 回滚」:userIndex 是它在会话里的序号,回滚时靠它告诉主进程截到哪儿。
+    // 用户消息的「复制 + 编辑/回滚」:userIndex 是它在会话里的序号,截断时靠它告诉主进程停在哪。
     message.dataset.userIndex = String(userTurnIndex);
     userTurnIndex += 1;
+    // 原文与附件留档:原地编辑要从这里取,不能从 DOM 反推(纯图片消息没有 .message-body)。
+    messageText.set(message, text);
+    messageAttachments.set(message, images);
     wireMessageActions(message, text);
     activeTextBlock = null;
   } else {
@@ -1154,6 +1466,19 @@ function toolText(value: unknown): string {
   try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
+/** 取 run_command 入参里的命令串（联动入口：回填到终端面板）。 */
+function runCommandOf(args: string): string {
+  if (!args) return '';
+  try {
+    const parsed = JSON.parse(args) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const command = (parsed as Record<string, unknown>).command;
+      if (typeof command === 'string') return command.trim();
+    }
+  } catch { /* 非 JSON 入参没有可回填的命令 */ }
+  return '';
+}
+
 let activeToolGroup: HTMLElement | null = null;
 /** 有效的当前工具组:必须在文档里,且仍是消息内容区的最后一个 block(被文字打断后即失效)。 */
 function currentToolGroup(content: HTMLElement): HTMLElement | null {
@@ -1175,8 +1500,14 @@ function ensureToolGroup(content: HTMLElement): HTMLElement {
   refreshToolGroup(group);
   return group;
 }
-/** 重算集合行:名称(执行中/完成)、工具类型短语(读取文件 ×2 · 运行命令 ×3)、进度与总耗时。 */
+/** 批量渲染期间只登记脏集合行，收尾时每个只重算一次（见 batchRender）。 */
 function refreshToolGroup(group: HTMLElement): void {
+  if (batchRenderDepth > 0) { batchDirtyToolGroups.add(group); return; }
+  paintToolGroup(group);
+}
+
+/** 重算集合行:名称(执行中/完成)、工具类型短语(读取文件 ×2 · 运行命令 ×3)、进度与总耗时。 */
+function paintToolGroup(group: HTMLElement): void {
   const entries = Array.from(group.querySelectorAll<HTMLDetailsElement>(':scope > .tool-group-body > details.tool-entry'));
   if (!entries.length) return;
   const running = entries.filter((entry) => entry.classList.contains('tool-running'));
@@ -1281,6 +1612,10 @@ function toolViewLabels(): ToolViewLabels {
     changedFiles: (n) => t('tool.summaryChangedFiles', { n }),
     steps: (done, total) => t('tool.summarySteps', { done, total }),
     moreLines: (n) => t('tool.moreLines', { n }),
+    askOptions: (n) => t('tool.askOptions', { n }),
+    askAnswered: t('tool.askAnswered'),
+    askCancelled: t('tool.askCancelled'),
+    askAnswer: t('tool.askAnswer'),
   };
 }
 
@@ -1311,6 +1646,70 @@ function fileChangeDetail(
   return { html, added: stats.added, removed: stats.removed };
 }
 
+/* ── 折叠态工具块的 detail 延迟插入 ────────────────────────
+ * 一次会话里九成以上的工具块是收起状态,而 detail HTML 一次就有 1.2–1.8MB
+ * (实测 .mocode/sessions 里最大的几条):innerHTML 一插就是几万个节点参与样式与布局,
+ * 这些开销用户永远看不到 —— 切会话的体感主要花在这里。
+ * 所以只保存算好的 HTML 字符串,等用户真正点开那一条时才插进 DOM。
+ *
+ * 注意:字符串本身仍然会构建(折叠行右侧的「128 行 / +3 -1」摘要来自同一批解析),
+ * 这里省掉的是 DOM 解析 + 布局,不是字符串拼接。要做成全惰性得把 tool-view 拆成
+ * 「只算摘要」和「渲染 HTML」两趟,属于另一个量级的改动。 */
+const lazyDetails = new WeakMap<HTMLDetailsElement, string>();
+
+/** 存下 detail HTML;当前已展开的块立刻插进 DOM(否则就等 toggle)。 */
+function setToolDetail(entry: HTMLDetailsElement, html: string): void {
+  if (!html) {
+    lazyDetails.delete(entry);
+    entry.querySelector(':scope > .tool-detail')?.remove();
+    return;
+  }
+  lazyDetails.set(entry, html);
+  // force:同一 id 的块可能被原地更新(运行中 → 完成、流式输出重绘),
+  // 已展开的块必须换成新内容,否则用户看到的是上一版的半截输出。
+  if (entry.open) revealToolDetail(entry, true);
+}
+
+/** 展开时把 detail 插进 DOM;已存在则只在 force 时替换内容(重插会重置用户的滚动位置)。 */
+function revealToolDetail(entry: HTMLDetailsElement, force = false): void {
+  const html = lazyDetails.get(entry);
+  if (!html) return;
+  const existing = entry.querySelector<HTMLElement>(':scope > .tool-detail');
+  if (existing) {
+    if (!force) return;
+    existing.innerHTML = html;
+    mountIcons(existing);
+    return;
+  }
+  entry.insertAdjacentHTML('beforeend', `<div class="tool-detail">${html}</div>`);
+  // detail 里也可能有 data-icon 占位符,插完再挂一次图标。
+  mountIcons(entry);
+}
+
+// 原生 <details> 的 toggle 事件不冒泡,只能在容器上捕获(与文件树 toggle 同一套做法)。
+conversation.addEventListener(
+  'toggle',
+  (event) => {
+    const entry = event.target;
+    if (!(entry instanceof HTMLDetailsElement)) return;
+    if (!entry.classList.contains('tool-entry') || !entry.open) return;
+    revealToolDetail(entry);
+  },
+  true,
+);
+
+// 工具行上的「填入终端」：命令已经完整跑过一次，用户想手动复现/改一行再跑。
+// 按钮在 <summary> 里，原生点击会连带展开/收起 —— 必须在这里吃掉。
+conversation.addEventListener('click', (event) => {
+  const button = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-terminal-fill]');
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  // 面板没开、或停在别的视图，都要切到终端 —— 按钮的语义就是「给我终端里这条命令」。
+  if (inspector.classList.contains('hidden') || activeInspectorTab !== 'terminal') openInspector('terminal');
+  fillTerminalCommand(button.dataset.terminalFill ?? '');
+});
+
 /**
  * 追加 / 更新一条工具行。
  * - 工具行一律 append 到当前助手轮次的末尾 —— 顺序 = 发生顺序;
@@ -1319,7 +1718,8 @@ function fileChangeDetail(
  */
 function addTool(payload: Record<string, unknown>, completed = false): void {
   // 工具完成可能直接展开长 diff；必须在内容增高前保存贴底状态，否则会把新增高度误判为用户上滑。
-  const pinned = isAtBottom();
+  // 批量回放期间不逐条读 scrollHeight（每次读都是强制布局），用批量入口那一次判定。
+  const pinned = batchRenderDepth > 0 ? batchPinnedToBottom : isAtBottom();
   emptyState.classList.add('hidden');
   // 工具事件可能早于首个文字到达：先确保存在活跃的助手消息，工具行挂在其内容区内部
   const current = currentTurn() ?? startAssistantTurn();
@@ -1369,13 +1769,17 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
 
   entry.className = `tool-entry ${completed ? 'tool-done' : 'tool-running'}${detail ? '' : ' tool-empty'}${failed ? ' tool-failed' : ''}`;
   entry.dataset.toolLabel = meta.label;
+  // 联动入口：agent 跑过的命令可以一键回填到终端面板（不回车，等用户确认）。
+  // 只给 run_command：其他工具没有「一条能在 shell 里重跑的命令」。
+  const fillCommand = completed && name === 'run_command' ? runCommandOf(args) : '';
   entry.innerHTML = `<summary>
   <span class="tool-chevron" data-icon="chevron-right"></span>
   <span class="tool-kind" data-icon="${escapeHtml(meta.icon)}"></span>
   <span class="tool-name">${escapeHtml(meta.label)}</span>
   ${target ? `<span class="tool-target" title="${escapeHtml(target)}">${escapeHtml(target)}</span>` : ''}
   <span class="tool-meta">${changeStat}${completed ? '' : '<span class="tool-dot"></span>'}${timing}${escapeHtml(status)}</span>
-</summary>${detail ? `<div class="tool-detail">${detail}</div>` : ''}`;
+  ${fillCommand ? `<button class="tool-fill" type="button" data-terminal-fill="${escapeHtml(fillCommand)}" title="${escapeHtml(t('terminal.fill'))}" aria-label="${escapeHtml(t('terminal.fill'))}">${icon('terminal')}</button>` : ''}
+</summary>`;
   mountIcons(entry);
   // 折叠优先：完成即收起。运行中的行也默认收起（用户手动展开过则保留其状态）。
   // 例外三条：①文件编辑带 diff —— 终端里 diff 是直接铺在正文里的，收起等于让用户再点一次；
@@ -1383,6 +1787,9 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   // ③运行中的子 agent —— 它有进度行在长，收起就看不到「正在干什么」，与静止的卡片没区别。
   if (completed) entry.open = Boolean(diff) || failed;
   else if (name === 'sub-agent' && view?.html) entry.open = true;
+  // detail 必须在 open 定下来之后再交出去：已展开的块要立刻插进 DOM，
+  // 折叠的块只留字符串等 toggle（见上方 lazyDetails 注释）。
+  setToolDetail(entry, detail);
   if (id) {
     if (completed) { activeTools.delete(id); toolStartTimes.delete(id); }
     else if (isNew) { activeTools.set(id, entry); toolStartTimes.set(id, Date.now()); }
@@ -1473,33 +1880,47 @@ function appendText(text: string): void {
   const block = ensureTextBlock();
   textBlockRaw.set(block, (textBlockRaw.get(block) ?? '') + text);
   scheduleMdRender(block);
-  smartScrollToBottom();
+  // 每个 delta 都读一次 scrollHeight 会与「写 DOM」交替触发布局（layout thrash）——
+  // 打字/点按钮就在这个循环里排队。跟随滚动并到一帧一次。
+  scheduleFollowBottom();
 }
 function renderHistory(history: HistoryItem[]): void {
   hideExtensionsView();
   conversation.innerHTML = ''; activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
   if (!history.length) { emptyState.classList.remove('hidden'); return; }
   // 一条 user 消息之后的所有 assistant / tool 片段归为同一轮,按原始顺序铺成 block 流。
-  for (const item of history) {
-    if (item.role === 'user') {
-      finalizeTurn(activeAssistant);
-      activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
-      addMessage('user', item.text, item.attachments ?? []);
-      continue;
+  // 整段放进 batchRender：长会话几百条消息 + 上百个工具块，逐条各滚一次底、各重算一次集合行
+  // 会触发上百次强制布局 —— 那是「点开会话要卡一下」的渲染侧主因。
+  batchRender(() => {
+    for (const item of history) {
+      if (item.role === 'user') {
+        finalizeTurn(activeAssistant);
+        activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
+        addMessage('user', item.text, item.attachments ?? []);
+        continue;
+      }
+      // 模块级 let 在本函数内被赋过 null 后 TS 会收窄成 never,统一走 currentTurn()。
+      if (!currentTurn()) startAssistantTurn();
+      if (item.role === 'assistant') {
+        const block = ensureTextBlock();
+        textBlockRaw.set(block, item.text);
+        block.textContent = item.text;
+        activeTextBlock = null;
+      } else {
+        addTool({ name: item.name ?? 'tool', arguments: item.arguments ?? '', output: item.text }, true);
+      }
     }
-    // 模块级 let 在本函数内被赋过 null 后 TS 会收窄成 never,统一走 currentTurn()。
-    if (!currentTurn()) startAssistantTurn();
-    if (item.role === 'assistant') {
-      const block = ensureTextBlock();
-      textBlockRaw.set(block, item.text);
-      block.textContent = item.text;
-      activeTextBlock = null;
-    } else {
-      addTool({ name: item.name ?? 'tool', arguments: item.arguments ?? '', output: item.text }, true);
-    }
-  }
-  finalizeTurn(activeAssistant);
+    finalizeTurn(activeAssistant);
+  });
   activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
+  // 历史回放也要还原计划面板：重启后打开旧任务时没有事件缓冲，plan 只能从会话历史里捞。
+  const taskId = viewingTaskId();
+  if (taskId) {
+    const stream = streamFor(taskId);
+    const plan = planFromHistory(history);
+    if (plan) stream.plan = plan;
+    syncPlanPanel(taskId);
+  }
 }
 
 /**
@@ -1522,8 +1943,8 @@ function finalizeTurn(message: HTMLElement | null): void {
   // 待执行的节流渲染不再需要 —— 下面马上做最终渲染
   if (mdRenderTimer !== null) { clearTimeout(mdRenderTimer); mdRenderTimer = null; pendingMdBlocks.clear(); }
   const parts: string[] = [];
-  // 同理:渲染前的贴底状态才算数(见 scheduleMdRender 注释)
-  const pinned = isAtBottom();
+  // 同理:渲染前的贴底状态才算数(见 scheduleMdRender 注释)。批量回放期间复用入口的判定。
+  const pinned = batchRenderDepth > 0 ? batchPinnedToBottom : isAtBottom();
   for (const block of Array.from(message.querySelectorAll<HTMLElement>('.message-body'))) {
     // textContent 在 md 渲染后会丢 markdown 语法,原始文本以 WeakMap 为准
     const text = textBlockRaw.get(block) ?? block.textContent ?? '';
@@ -1547,7 +1968,18 @@ function finalizeTurn(message: HTMLElement | null): void {
 let openTaskSequence = 0;
 async function openTask(taskId: string): Promise<void> {
   const sequence = ++openTaskSequence;
-  const workspace = await window.mocodeWork.selectTask(taskId);
+  // 主进程读会话 / 恢复日志时可能抛异常（历史上就踩过 >125k 条日志展开传参的 RangeError）。
+  // 那条 invoke 会变成 rejected Promise：不接住的话点击**完全没有反馈**，用户只会觉得「点不动、
+  // 是不是卡了」，然后再点一次、再点一次。这里必须把它变成一句看得见的提示。
+  let workspace: Awaited<ReturnType<typeof window.mocodeWork.selectTask>> = null;
+  try {
+    workspace = await window.mocodeWork.selectTask(taskId);
+  } catch (cause) {
+    if (sequence === openTaskSequence) {
+      showToast('error', humanizeError(cause instanceof Error ? cause.message : String(cause)) ?? t('toast.openTaskFailed'), 6000);
+    }
+    return;
+  }
   // 快速连点以最后一次为准：旧会话读取慢时，不能把已经打开的新会话覆盖回去。
   if (!workspace || sequence !== openTaskSequence) return;
   updateState(workspace.state);
@@ -1571,6 +2003,7 @@ async function deleteTask(taskId: string): Promise<void> {
   streams.delete(taskId);
   updateState(next);
   if (deletingSelectedTask && next.selectedTaskId !== taskId) clearWorkspace();
+  else refreshQueuePanel();
   showToast('info', t('toast.deletedTask'));
 }
 
@@ -1589,7 +2022,13 @@ async function deleteTask(taskId: string): Promise<void> {
  *      （src/permissions/index.ts:279），面板却总把第一个按钮标成 approve 样式，
  *      顺手回车就是放行。
  */
-function showApproval(taskId: string, payload: Record<string, unknown>): void {
+/**
+ * 人工介入卡被用户收起时记下 approvalId：事件重放 / 横条点击会重绘同一张卡，
+ * 不能把用户「先收起来读正文」的意图重置回展开态。换了 approvalId 才算新卡片。
+ */
+let approvalCollapsedFor = '';
+
+function showApproval(taskId: string, payload: Record<string, unknown>, intent?: { expand?: boolean }): void {
   const approvalId = String(payload.approvalId ?? '');
   const options = Array.isArray(payload.options) ? payload.options.map(String) : [];
   const isInput = String(payload.type ?? (options.length ? 'choice' : 'input')) === 'input';
@@ -1609,18 +2048,57 @@ function showApproval(taskId: string, payload: Record<string, unknown>): void {
     : isInput
       ? ''
       : `<button data-approval="approve" class="approve">${icon('check')}${t('approval.confirm')}</button>`;
-  approvalPanel.innerHTML = `<div class="approval-title">${icon('warn')}<span>${t('approval.title')}</span></div><p>${escapeHtml(String(payload.title ?? t('approval.default')))}</p><pre>${escapeHtml(String(payload.detail ?? ''))}</pre>${
-    showInput
-      ? `<textarea class="approval-input" rows="2" placeholder="${escapeHtml(t('approval.inputPlaceholder'))}">${escapeHtml(seed)}</textarea>`
-      : ''
-  }<div class="approval-actions">${buttons}<button data-cancel>${icon('close')}${t('approval.reject')}</button></div>`;
+  const questionTitle = escapeHtml(String(payload.title ?? t('approval.default')));
+  // 卡片分「卡片头」与「卡片体」：收起时只留头部一行，正文、详情、输入框、按钮全藏起来。
+  // 目的是让人工介入不长期压住 agent 输出区底部 —— 用户先读正文做决定，读完再展开回答。
+  approvalPanel.innerHTML =
+    `<div class="approval-head">` +
+      `<div class="approval-title">${icon('warn')}<span>${t('approval.title')}</span></div>` +
+      `<span class="approval-summary" title="${questionTitle}">${questionTitle}</span>` +
+      `<button type="button" class="approval-collapse" data-collapse aria-expanded="true">${icon('chevron-down')}<span>${escapeHtml(t('approval.collapse'))}</span></button>` +
+    `</div>` +
+    `<div class="approval-body">` +
+      `<p>${questionTitle}</p>` +
+      `<pre>${escapeHtml(String(payload.detail ?? ''))}</pre>` +
+      (showInput
+        ? `<textarea class="approval-input" rows="1" placeholder="${escapeHtml(t('approval.inputPlaceholder'))}">${escapeHtml(seed)}</textarea>`
+        : '') +
+      `<div class="approval-actions">${buttons}<button data-cancel>${icon('close')}${t('approval.reject')}</button></div>` +
+    `</div>`;
   const resolve = (value: Record<string, unknown>): void => {
     window.mocodeWork.send({ type: 'approval', id: taskId, approvalId, ...value });
     approvalPanel.classList.add('hidden');
+    approvalPanel.classList.remove('is-collapsed');
+    approvalCollapsedFor = '';
     const stream = streams.get(taskId);
     if (stream) stream.pendingApproval = null;
+    syncAttention();
   };
   const input = approvalPanel.querySelector<HTMLTextAreaElement>('.approval-input');
+  // 单行起步、需要时才长高：多行答案（Shift+Enter）仍然能写，但平时不白占三行高度。
+  const autoGrowInput = (): void => {
+    // 收起态正文是 display:none，量到的 scrollHeight 恒为 0；此时不动高度，
+    // 等展开时 setCollapsed(false) 再量一次（否则收起再展开会得到一个 0 高的框）。
+    if (!input || approvalPanel.classList.contains('is-collapsed')) return;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 96)}px`;
+  };
+  const setCollapsed = (collapsed: boolean): void => {
+    approvalPanel.classList.toggle('is-collapsed', collapsed);
+    approvalCollapsedFor = collapsed ? approvalId : '';
+    const toggle = approvalPanel.querySelector<HTMLButtonElement>('[data-collapse]');
+    if (toggle) {
+      const label = collapsed ? t('approval.expand') : t('approval.collapse');
+      toggle.setAttribute('aria-expanded', String(!collapsed));
+      toggle.title = label;
+      toggle.innerHTML = `${icon('chevron-down')}<span>${escapeHtml(label)}</span>`;
+    }
+    // 展开后才有可见尺寸：此时才量 scrollHeight 并还给输入框焦点。
+    if (!collapsed) { autoGrowInput(); if (isInput) input?.focus(); }
+  };
+  // 同一张卡片被重复绘制（事件重放）时保留用户收起的意图；换了 approvalId 才复位。
+  // intent.expand 给「前往处理」用：横条点击的语义就是「现在要去回答」，必须展开。
+  setCollapsed(!intent?.expand && approvalCollapsedFor === approvalId && approvalCollapsedFor !== '');
   const submitInput = (): void => {
     const value = input?.value.trim() ?? '';
     // 空输入的「提交」等于没回答：退回让用户取消，不要给模型塞一个空串当答复。
@@ -1629,7 +2107,9 @@ function showApproval(taskId: string, payload: Record<string, unknown>): void {
   };
   if (input) {
     // input 形态下自动聚焦：用户点开面板就该能直接打字，不用再点一次输入框。
-    if (isInput) queueMicrotask(() => input.focus());
+    if (isInput && !approvalPanel.classList.contains('is-collapsed')) queueMicrotask(() => input.focus());
+    autoGrowInput();
+    input.addEventListener('input', autoGrowInput);
     input.addEventListener('keydown', (event) => {
       // Enter 提交，Shift+Enter 换行（多行答案很常见）。
       if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submitInput(); }
@@ -1639,6 +2119,9 @@ function showApproval(taskId: string, payload: Record<string, unknown>): void {
   approvalPanel.querySelectorAll<HTMLButtonElement>('[data-approval]').forEach((button) =>
     button.addEventListener('click', () => resolve({ action: 'selected', value: button.dataset.approval })),
   );
+  approvalPanel.querySelector<HTMLButtonElement>('[data-collapse]')?.addEventListener('click', () => {
+    setCollapsed(!approvalPanel.classList.contains('is-collapsed'));
+  });
   approvalPanel.querySelector<HTMLButtonElement>('[data-cancel]')?.addEventListener('click', () => resolve({ action: 'cancelled' }));
   if (isInput && !options.length) {
     // 没有选项按钮时，「提交」需要一个显式出口（只有 textarea 的 Enter 不够可发现）。
@@ -1843,19 +2326,97 @@ function renderAttachments(): void {
 }
 
 /* ── Smart scroll ──────────────────────────────────────── */
-/**
- * 用户没在底部时不再强制跳到底,长任务翻历史时不会被打断。
- * 距离底部 < 96px 视为"在底部",继续跟随;否则不打扰。
- */
+/** 距离底部 < 96px 视为"在底部",继续跟随;否则不打扰。 */
+const AT_BOTTOM_THRESHOLD = 96;
+
 function isAtBottom(): boolean {
   const distance = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
-  return distance < 96;
+  return distance < AT_BOTTOM_THRESHOLD;
 }
+
+/**
+ * 批量渲染闸：切任务 / 重放历史 / 重启后打开旧会话时，会一次性 append 几百条消息与工具块。
+ * 每个节点各自 `smartScrollToBottom()`（读 scrollHeight）+ `refreshToolGroup()`（querySelectorAll +
+ * innerHTML）的话，一次切换要触发上百次强制布局 —— 这就是「点会话卡一下」的渲染侧主因。
+ *
+ * 批量期间只记脏，末尾统一收尾一次：滚动只算一次底线位置，工具集合行每个只重算一次。
+ */
+let batchRenderDepth = 0;
+let batchPinnedToBottom = false;
+let batchNeedsFloorScroll = false;
+const batchDirtyToolGroups = new Set<HTMLElement>();
+
+function batchRender<T>(run: () => T): T {
+  if (batchRenderDepth === 0) batchPinnedToBottom = isAtBottom();
+  batchRenderDepth += 1;
+  try {
+    return run();
+  } finally {
+    batchRenderDepth -= 1;
+    if (batchRenderDepth === 0) {
+      for (const group of batchDirtyToolGroups) paintToolGroup(group);
+      batchDirtyToolGroups.clear();
+      if (batchNeedsFloorScroll || batchPinnedToBottom) {
+        conversation.scrollTop = conversation.scrollHeight;
+      }
+      batchNeedsFloorScroll = false;
+    }
+  }
+}
+
 function smartScrollToBottom(force = false): void {
+  // 批量期间不碰布局：批量入口已经读过一次「是否贴底」，末尾统一滚。
+  if (batchRenderDepth > 0) { batchNeedsFloorScroll ||= force; return; }
   if (force || isAtBottom()) conversation.scrollTop = conversation.scrollHeight;
 }
+
+/**
+ * 「合并到一帧执行一次」的小工具。
+ *
+ * ⚠ 必须有定时器兜底：rAF 只在真的有帧要画时才推进 —— 窗口最小化 / 离屏时它会**静默挂起**
+ * （实测踩过，见下方轨道注释）。只靠 rAF 的话「已排队」标志会永久卡住，
+ * 之后每一次合并调用都被「已经排了一帧」挡掉 —— 表现为最小化再回来以后再也不自动贴底、
+ * 高亮也不再跟着滚。超时兜底把这种情况收敛成「最多晚 50ms 跑一次」。
+ */
+const FRAME_FALLBACK_MS = 50;
+function frameThrottle(run: () => void): () => void {
+  let scheduled = false;
+  let frame = 0;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const fire = (): void => {
+    if (!scheduled) return;
+    scheduled = false;
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+    if (frame) { cancelAnimationFrame(frame); frame = 0; }
+    run();
+  };
+  return () => {
+    if (scheduled) return;
+    scheduled = true;
+    frame = requestAnimationFrame(fire);
+    timer = setTimeout(fire, FRAME_FALLBACK_MS);
+  };
+}
+
+/**
+ * 流式跟随的合并版：每来一个 token 都读一次 scrollHeight 会和「写 DOM → 触发布局」交替，
+ * 形成 layout thrash（打字/点按钮就在这个循环里排队）。改成一帧最多跟一次。
+ */
+const requestFollowBottom = frameThrottle(() => {
+  if (isAtBottom()) conversation.scrollTop = conversation.scrollHeight;
+});
+function scheduleFollowBottom(): void {
+  if (batchRenderDepth > 0) return;
+  requestFollowBottom();
+}
+
 // 用户主动滚动:离开底部超过阈值,直到再次回到底之前都不再自动跟。
-conversation.addEventListener('scroll', () => { userScrolled = !isAtBottom(); syncConvRailActive(); }, { passive: true });
+// 高亮重算要遍历每条用户消息的 offsetTop —— 滚动事件每秒几十次，必须并到一帧一次。
+const requestScrollSync = frameThrottle(() => {
+  userScrolled = !isAtBottom();
+  syncConvRailActive();
+});
+conversation.addEventListener('scroll', () => { requestScrollSync(); }, { passive: true });
 
 /* ── 消息导航轨(minimap rail)─────────────────────────────
  * 会话列左侧一排小圆点:一个用户消息一个点,点击滚到那条提问。
@@ -2033,7 +2594,10 @@ let userScrolled = false;
 // 在声明之前注册会踩 TDZ（ESM 模块求值期直接抛 ReferenceError）。
 keepBottomOnComposerResize();
 
-/* ── Per-message actions (copy / regenerate / rollback) ── */
+/* ── Per-message actions (copy / regenerate / 编辑·回滚菜单) ──
+ * 用户消息只留**一个**入口(铅笔):点开再选「编辑并重发」或「回滚到这条之前」。
+ * 两个动作都要截断这段对话,区别只在截完是否立刻用改过的文本重跑一轮;
+ * 并排成两个按钮会让「改一个字重问」和「丢掉这一轮」看起来同等危险,而前者是日常操作。 */
 function wireMessageActions(message: HTMLElement, text: string): void {
   const actions = message.querySelector('.message-actions') as HTMLElement;
   if (!actions || actions.childElementCount) return;
@@ -2041,9 +2605,11 @@ function wireMessageActions(message: HTMLElement, text: string): void {
   // 失败轮次可能只有一行错误、没有正文:那就没有可复制的东西,只留「重新生成」。
   const copy = text.trim() ? `<button data-act="copy" title="${t('msg.copy')}" aria-label="${t('msg.copy')}">${icon('copy')}</button>` : '';
   if (isAssistant) {
-    actions.innerHTML = `${copy}<button data-act="regen" title="${t('msg.regenerate')}" aria-label="${t('msg.regenerate')}">${icon('regen')}</button>`;
+    // 分支按钮:从这一轮之后开一条新会话。图标用「分叉」形态(git branch),与「重新生成」区分开,
+    // 后者是原地重跑,前者是另开一条线、原会话保持不动。
+    actions.innerHTML = `${copy}<button data-act="regen" title="${t('msg.regenerate')}" aria-label="${t('msg.regenerate')}">${icon('regen')}</button><button data-act="branch" title="${t('msg.branch')}" aria-label="${t('msg.branch')}">${icon('branch')}</button>`;
   } else {
-    actions.innerHTML = `<button data-act="copy" title="${t('msg.copy')}" aria-label="${t('msg.copy')}">${icon('copy')}</button><button data-act="rollback" title="${t('msg.rollback')}" aria-label="${t('msg.rollback')}">${icon('rollback')}</button>`;
+    actions.innerHTML = `${copy}<button data-act="edit-menu" title="${t('msg.editMenu')}" aria-label="${t('msg.editMenu')}">${icon('edit')}</button>`;
   }
   actions.addEventListener('click', async (event) => {
     const target = event.target as HTMLElement;
@@ -2056,43 +2622,84 @@ function wireMessageActions(message: HTMLElement, text: string): void {
       return;
     }
     if (act === 'regen') { void regenerate(); return; }
-    if (act === 'rollback') { void handleRollbackClick(message, button); return; }
+    if (act === 'branch') { void branchFromMessage(message, button); return; }
+    // 菜单本身就是"确认"这一步:选回滚已经是一次明确的二次动作,不再需要「回滚?」状态。
+    if (act === 'edit-menu') { openMessageMenu(message, button); return; }
   });
 }
 
-/** 「回滚?」的二次确认停留时长 —— 之后自动复位，避免按钮一直挂 Armed 态。 */
-const ROLLBACK_ARM_MS = 3500;
-const rollbackArmTimers = new Map<HTMLButtonElement, ReturnType<typeof setTimeout>>();
-
-function disarmRollback(button: HTMLButtonElement): void {
-  const timer = rollbackArmTimers.get(button);
-  if (timer) { clearTimeout(timer); rollbackArmTimers.delete(button); }
-  if (button.dataset.armed !== '1') return;
-  button.dataset.armed = '0';
-  button.classList.remove('armed');
-  button.innerHTML = icon('rollback');
-}
-
 /**
- * 回滚会删掉这段对话,所以首次点击只进入确认态 —— 抹掉历史不该一鼠标就发生。
+ * 从这条助手消息所在的轮次分叉出一条新会话。
+ *
+ * userIndex 取自**前方最近的那条用户消息**的 data-user-index —— 分叉点就是「这一问的回答」，
+ * 而不是 assistant 的序号（一条轮次里有几条 assistant 取决于工具调用次数，不可靠）。
+ * 原任务保持不变；成功后界面直接切到新任务，用户接着在那里往下聊。
  */
-function armRollback(button: HTMLButtonElement): void {
-  for (const other of Array.from(rollbackArmTimers.keys())) disarmRollback(other);
-  button.dataset.armed = '1';
-  button.classList.add('armed');
-  button.innerHTML = `<span class="armed-label">${t('msg.rollbackArm')}</span>`;
-  rollbackArmTimers.set(button, setTimeout(() => disarmRollback(button), ROLLBACK_ARM_MS));
+async function branchFromMessage(message: HTMLElement, button: HTMLButtonElement): Promise<void> {
+  const viewing = viewingTaskId();
+  if (!viewing) { showToast('warn', t('toast.noSession')); return; }
+  if (isRunning(viewing)) { showToast('warn', t('toast.taskRunning')); return; }
+  // 往前找同一轮的用户消息：会话 DOM 里 user 与 assistant 是平级的兄弟节点。
+  let userIndex = -1;
+  let node: Element | null = message.previousElementSibling;
+  while (node) {
+    const element = node as HTMLElement;
+    if (element.classList.contains('message') && element.classList.contains('user')) {
+      const parsed = Number(element.dataset.userIndex ?? '');
+      if (Number.isInteger(parsed) && parsed >= 0) userIndex = parsed;
+      break;
+    }
+    node = node.previousElementSibling;
+  }
+  if (userIndex < 0) { showToast('warn', t('toast.noUserMsg')); return; }
+  button.disabled = true;
+  try {
+    const result = await window.mocodeWork.forkTask({ id: viewing, userIndex });
+    if (!result.ok || !result.task) { showToast('error', result.message ?? t('toast.branchFail')); return; }
+    if (result.state) updateState(result.state);
+    // 主进程已经把新任务选中并预热 host；这里只需把会话区换成它的历史。
+    await openTask(result.task.id);
+    showToast('success', t('toast.branched'));
+  } finally {
+    button.disabled = false;
+  }
 }
 
-async function handleRollbackClick(message: HTMLElement, button: HTMLButtonElement): Promise<void> {
-  if (button.dataset.armed !== '1') { armRollback(button); return; }
-  disarmRollback(button);
+/** 用户消息的操作菜单:编辑并重发 / 回滚到这条之前。 */
+function openMessageMenu(message: HTMLElement, anchor: HTMLElement): void {
+  document.getElementById('message-context-menu')?.remove();
+  const menu = document.createElement('div');
+  menu.id = 'message-context-menu';
+  menu.className = 'project-context-menu';
+  menu.innerHTML = `<button class="project-context-item" data-action="edit"><span class="project-context-icon">${icon('edit')}</span>${t('msg.edit')}</button><button class="project-context-item" data-action="rollback"><span class="project-context-icon">${icon('rollback')}</span>${t('msg.rollback')}</button>`;
+  document.body.append(menu);
+  const menuRect = menu.getBoundingClientRect();
+  const box = anchor.getBoundingClientRect();
+  const left = Math.min(Math.max(4, box.right - menuRect.width), window.innerWidth - menuRect.width - 4);
+  let top = box.bottom + 4;
+  // 贴底的消息(最新一条)往下没有空间了,翻到按钮上方。
+  if (top + menuRect.height > window.innerHeight - 4) top = Math.max(4, box.top - menuRect.height - 4);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') close(); };
+  const close = (): void => { menu.remove(); document.removeEventListener('click', close); document.removeEventListener('keydown', onKey); };
+  requestAnimationFrame(() => { document.addEventListener('click', close); document.addEventListener('keydown', onKey); });
+  menu.querySelectorAll<HTMLButtonElement>('.project-context-item').forEach((item) => item.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const action = item.dataset.action;
+    close();
+    if (action === 'edit') startMessageEdit(message);
+    else if (action === 'rollback') void rollbackToMessage(message);
+  }));
+}
+
+/** 回滚:截断这段对话(含这条用户消息),原文回填输入框,改完可再发一次。 */
+async function rollbackToMessage(message: HTMLElement): Promise<void> {
   const viewing = viewingTaskId();
   const userIndex = Number(message.dataset.userIndex ?? '');
   if (!viewing || !Number.isInteger(userIndex)) { showToast('warn', t('toast.cannotRollback')); return; }
-  // 回滚会连这条用户消息一起抹掉 —— 先把原文捞出来,成功后回填输入框,改完就能直接重发。
-  // 用户消息是纯文本气泡(.message-body 的 textContent),没有 markdown 渲染,取到的就是原文。
-  const rolledBackText = (message.querySelector('.message-body')?.textContent ?? '').trim();
+  // 回滚会连这条用户消息一起抹掉 —— 先把原文捞出来,成功后回填输入框。
+  const rolledBackText = (messageText.get(message) ?? '').trim();
   const result = await window.mocodeWork.rollback({ id: viewing, userIndex });
   if (!result.ok) { showToast('error', result.message ?? t('toast.rollbackFail')); return; }
   // 本周期的事件缓冲已经不可信 —— 落盘的会话才是新真相,作废后按它重放。
@@ -2113,6 +2720,98 @@ async function handleRollbackClick(message: HTMLElement, button: HTMLButtonEleme
     return;
   }
   showToast('info', t('toast.rolledBack'));
+}
+
+/**
+ * 原地编辑这条用户消息:气泡换成输入框,Enter 发送、Shift+Enter 换行、Esc 取消。
+ * 发送时先截断到这条消息之前(与回滚同一个主进程接口),再用编辑后的文本重跑一轮 ——
+ * 所以"改一个字重问"不用再去底部输入框里粘贴一遍。
+ * 截断失败时输入框与文字原样留着,不吞用户的编辑。
+ */
+function startMessageEdit(message: HTMLElement): void {
+  if (message.classList.contains('is-editing')) return;
+  if (isRunning(viewingTaskId())) { showToast('warn', t('toast.taskRunning')); return; }
+  const wrapper = message.querySelector<HTMLElement>('.message-content');
+  if (!wrapper) return;
+  const body = wrapper.querySelector<HTMLElement>('.message-body');
+  const editor = document.createElement('div');
+  editor.className = 'message-editor';
+  editor.innerHTML = `<textarea class="message-editor-input" spellcheck="false"></textarea><div class="message-editor-actions"><button type="button" data-editor="cancel">${t('msg.editCancel')}</button><button type="button" class="primary" data-editor="send">${t('msg.editSend')}</button></div>`;
+  const input = editor.querySelector('textarea')!;
+  const send = editor.querySelector<HTMLButtonElement>('[data-editor="send"]')!;
+  const cancel = editor.querySelector<HTMLButtonElement>('[data-editor="cancel"]')!;
+  input.value = messageText.get(message) ?? '';
+  const resizeEditor = (): void => {
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 320)}px`;
+  };
+  message.classList.add('is-editing');
+  if (body) body.replaceWith(editor); else wrapper.insertBefore(editor, wrapper.querySelector('.message-label'));
+  resizeEditor();
+  input.focus();
+  // 光标落到末尾:编辑既有消息时最常做的就是补一句 / 改最后几个字。
+  input.setSelectionRange(input.value.length, input.value.length);
+
+  const end = (): void => {
+    message.classList.remove('is-editing');
+    if (body) editor.replaceWith(body); else editor.remove();
+  };
+  const commit = async (): Promise<void> => {
+    const value = input.value.trim();
+    if (!value) { input.focus(); return; }
+    send.disabled = true; cancel.disabled = true;
+    const ok = await submitEdited(message, value);
+    if (!ok) { send.disabled = false; cancel.disabled = false; input.focus(); return; }
+    // 成功时这条消息本身已被移除(由 startRun 重新渲染编辑后的版本),无需收尾。
+  };
+  send.addEventListener('click', () => { void commit(); });
+  cancel.addEventListener('click', end);
+  input.addEventListener('input', resizeEditor);
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); end(); return; }
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void commit(); }
+  });
+}
+
+/**
+ * 截断到这条用户消息之前,再用编辑后的文本重发。
+ * 返回 false 表示截断失败(此时 DOM、输入框都保持原样)。
+ */
+async function submitEdited(message: HTMLElement, text: string): Promise<boolean> {
+  const viewing = viewingTaskId();
+  const userIndex = Number(message.dataset.userIndex ?? '');
+  if (!viewing || !Number.isInteger(userIndex)) { showToast('warn', t('toast.noUserMsg')); return false; }
+  const task = state?.tasks.find((item) => item.id === viewing);
+  if (!task) { showToast('warn', t('toast.noUserMsg')); return false; }
+  const attachments = messageAttachments.get(message) ?? [];
+  // 先让主进程裁剪会话与恢复日志;失败时原现场一字不动。
+  const prepared = await window.mocodeWork.rollback({ id: viewing, userIndex });
+  if (!prepared.ok) { showToast('error', prepared.message ?? t('toast.rollbackFail')); return false; }
+  // 期间用户切走了任务:截断已生效,但不要再往当前视图里画。
+  if (viewingTaskId() !== viewing) return true;
+  if (prepared.state) updateState(prepared.state);
+  const all = Array.from(conversation.querySelectorAll<HTMLElement>('.message'));
+  const index = all.indexOf(message);
+  // 这条消息与它之后的一整轮全部作废 —— 编辑后的版本由 startRun 重新渲染在末尾。
+  if (index >= 0) for (let i = all.length - 1; i >= index; i -= 1) all[i]!.remove();
+  // ⚠ 序号必须跟着 DOM 一起回退,否则下一条用户消息拿到偏移的 userIndex,
+  // 之后任何截断都会切错位置(regenerate 早年漏了这一步,是同一个坑)。
+  userTurnIndex = userIndex;
+  // 被删掉的那一轮里可能还有「运行中」的工具行挂在 activeTools 上:
+  // 不清就会留下指向已脱离文档的节点,后面同 id 的事件会往空气里更新。
+  activeTools.clear(); toolStartTimes.clear();
+  activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
+  const stream = streamFor(viewing);
+  const targetUser = stream.items.map((item, i) => ({ item, i })).filter(({ item }) => item.kind === 'user')[userIndex];
+  stream.items.length = targetUser ? targetUser.i : 0;
+  stream.interrupted = false;
+  stream.pendingApproval = null;
+  approvalPanel.classList.add('hidden');
+  // 截断会重启 host(main.ts 的 work:rollback),sessionId 不变,续同一个会话。
+  window.mocodeWork.send({ type: 'user_message', id: task.id });
+  startRun(task, text, attachments);
+  showToast('info', t('toast.edited'));
+  return true;
 }
 
 /**
@@ -2150,6 +2849,10 @@ async function regenerate(): Promise<void> {
   if (prepared.state) updateState(prepared.state);
   // 裁剪已成功才删除目标起的旧回答；目标 user 保留，普通 run 会把它写回会话与恢复日志。
   for (let i = messages.length - 1; i >= index; i -= 1) messages[i]!.remove();
+  // 目标 user 留在 DOM 里，序号要回到「它之后」——否则下一次截断会按偏移的序号切错位置。
+  userTurnIndex = regenerationUserIndex + 1;
+  // 被删掉的回答里可能有仍在运行的随身工具行，一并作废，避免更新到已脱离文档的节点。
+  activeTools.clear(); toolStartTimes.clear();
   const stream = streamFor(viewing);
   const targetUser = [...stream.items].map((item, i) => ({ item, i })).filter(({ item }) => item.kind === 'user')[regenerationUserIndex];
   if (targetUser) stream.items.length = targetUser.i + 1;
@@ -2481,6 +3184,46 @@ function summarizePrompt(prompt: string, maxWidth = 40): string {
  */
 const pendingSends = new SendQueue<{ prompt: string; attachments: Attachment[] }>();
 
+/** 排队面板的展开态按任务记：切走再回来时保留用户当时的选择。 */
+const queueExpanded = new Map<string, boolean>();
+
+/** 面板里一条排队消息的正文；纯附件消息没有 prompt，得说清它带了什么。 */
+function queueItemText(payload: { prompt: string; attachments: Attachment[] }): string {
+  const prompt = payload.prompt.replace(/\s+/g, ' ').trim();
+  if (prompt) return prompt;
+  const first = payload.attachments[0]?.name;
+  return first ? t('queue.attachmentsOnlyName', { name: first }) : t('queue.attachmentsOnly');
+}
+
+/**
+ * 重画排队面板（输入卡正上方）。只跟随「队列变化 + 是否展开」，
+ * 不接流式事件 —— 否则用户点开列表的那一下会被状态推送打断。
+ */
+function refreshQueuePanel(): void {
+  const taskId = viewingTaskId();
+  const items: QueuePanelItem[] = taskId
+    ? pendingSends.snapshot(taskId).map((entry) => ({
+      key: entry.seq,
+      text: queueItemText(entry.payload),
+      attachmentCount: entry.payload.attachments.length,
+    }))
+    : [];
+  renderQueuePanel(queuePanel, items, {
+    expanded: taskId ? queueExpanded.get(taskId) === true : false,
+    labels: {
+      next: t('queue.next'),
+      expand: t('queue.expand'),
+      collapse: t('queue.collapse'),
+      attachments: (n) => t('queue.attachments', { n }),
+    },
+    onToggle: () => {
+      if (!taskId) return;
+      queueExpanded.set(taskId, queueExpanded.get(taskId) !== true);
+      refreshQueuePanel();
+    },
+  });
+}
+
 /** 真正发起一轮 run：渲染用户气泡、起状态行、挂看门狗、发协议命令。 */
 function startRun(task: Task, prompt: string, batch: Attachment[]): void {
   const stream = streamFor(task.id);
@@ -2519,6 +3262,7 @@ function drainSendQueue(taskId: string): void {
   const next = pendingSends.dequeue(taskId);
   if (!next) return;
   startRun(task, next.payload.prompt, next.payload.attachments);
+  if (viewingTaskId() === taskId) refreshQueuePanel();
   const left = pendingSends.size(taskId);
   if (left > 0) showToast('info', t('toast.queuedLeft', { n: left }), 2200);
 }
@@ -2546,6 +3290,7 @@ async function submit(): Promise<void> {
     const depth = pendingSends.enqueue(task.id, { prompt, attachments });
     promptInput.value = ''; resizePrompt();
     attachments = []; renderAttachments();
+    refreshQueuePanel();
     showToast('info', t('toast.queued', { n: depth }), 2600);
     return;
   }
@@ -2624,13 +3369,11 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     case 'mode_changed': {
       // host 确认模式已切（并已重写 history[0] 的系统提示）。这里只镜像状态：
       // 模式的事实源在 host，界面不做乐观更新，避免「按钮翻过去了但 host 没认」。
-      const mode = String(payload.mode ?? 'auto');
-      applyPlanToggle(mode === 'plan');
-      applyStatus(
-        stream,
-        viewing,
-        busyStatus(planMode ? 'thinking' : 'thinking', planMode ? 'status.planMode' : 'status.thinking'),
-      );
+      applyPlanToggle(String(payload.mode ?? 'auto') === 'plan');
+      // ⚠ 不要在这里写状态行。mode_changed 只是一次模式回执，**没有启动任何 run**；
+      // 以前这里调 busyStatus(...) 会带上 since 时间戳并开 1 秒心跳，于是点一下「计划」
+      // 按钮就永远停在「思考中 · Ns」—— 而能收掉 busy 的只有 run_completed/failed/aborted，
+      // 没跑 run 就永远收不掉。模式变化的反馈由按钮高亮 + 下面的 toast 承担。
       if (viewing) showToast('info', t(planMode ? 'status.planOn' : 'status.planOff'), 3200);
       break;
     }
@@ -2682,6 +3425,13 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
         stream.items.push({ kind: 'tool', id, name: String(payload.name ?? 'tool'), args, output, done: completed, payload });
       }
       if (viewing) addTool(payload, completed);
+      // dev_server 就绪时把 readyUrl 记下来：浏览器面板地址栏旁边给一个一键入口。
+      if (completed && String(payload.name ?? '') === 'dev_server') {
+        const ready = /"readyUrl"\s*:\s*"(https?:\/\/[^"\\]+)"/.exec(output);
+        if (ready) rememberDevServerUrl(ready[1]);
+      }
+      // 计划面板吃 tool_started 的入参（那一刻计划就已经完整），不必等工具结束。
+      ingestPlan(taskId, stream, viewing, payload, args);
       break;
     }
     case 'tool_output': {
@@ -2746,6 +3496,15 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       applyStatus(stream, viewing, settledStatus('waiting', 'status.waitingLabel', 'warn'));
       if (viewing) showApproval(taskId, payload);
       else notifyBackground(taskId, t('status.approvalWait'));
+      // 侧栏 / 标题栏 / 横条都靠这一步刷新：任务的 status 由主进程广播过来（waiting），
+      // 但当前任务的横条吃的是 stream.pendingApproval，两者在同一个事件里到位。
+      syncAttention();
+      break;
+    }
+    // 系统通知被点击：主进程只发「去这个任务」的信号，怎么摆审批卡是渲染层的事。
+    // 窗口已在主进程里 restore + focus 过，这里只负责切任务并把审批卡摆出来。
+    case 'attention_open': {
+      void jumpToPendingTask(taskId);
       break;
     }
     case 'run_aborted':
@@ -2883,19 +3642,23 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   }
   stream ??= cached;
   if (stream && stream.items.length) {
-    for (const item of stream.items) {
-      if (item.kind === 'user') addMessage('user', item.text, item.attachments ?? []);
-      else if (item.kind === 'text') appendText(item.text);
-      else if (item.kind === 'tool') {
-        // 中断时未完成的调用只标记为中止，保留参数、输出和 diff；绝不重新执行。
-        const interruptedTool = stream.interrupted === true && !item.done;
-        addTool({ ...item.payload, id: item.id, name: item.name, arguments: item.args, output: item.output,
-          ...(interruptedTool ? { status: 'aborted' } : {}) }, item.done || interruptedTool);
-      } else if (item.kind === 'error') {
-        if (!currentTurn()) startAssistantTurn();
-        showTurnError(item.message);
+    // 回放整段放进 batchRender：一次切换要重建几百条消息与工具块，逐条各滚一次底、
+    // 各重算一次工具集合行会触发上百次强制布局（用户感受就是「点会话卡一下」）。
+    batchRender(() => {
+      for (const item of stream!.items) {
+        if (item.kind === 'user') addMessage('user', item.text, item.attachments ?? []);
+        else if (item.kind === 'text') appendText(item.text);
+        else if (item.kind === 'tool') {
+          // 中断时未完成的调用只标记为中止，保留参数、输出和 diff；绝不重新执行。
+          const interruptedTool = stream!.interrupted === true && !item.done;
+          addTool({ ...item.payload, id: item.id, name: item.name, arguments: item.args, output: item.output,
+            ...(interruptedTool ? { status: 'aborted' } : {}) }, item.done || interruptedTool);
+        } else if (item.kind === 'error') {
+          if (!currentTurn()) startAssistantTurn();
+          showTurnError(item.message);
+        }
       }
-    }
+    });
     if (!stream.running) finish();
     else {
       setRunning(true);
@@ -2909,9 +3672,18 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   hideContextUsageDetails();
   updateContextUsage(stream?.contextUsage ?? null);
   void refreshContextUsage(taskId);
+  // 计划面板按这个任务的缓冲还原（切任务时其它任务的计划不该留在屏上）。
+  if (!stream?.plan) {
+    const recovered = planFromItems(stream?.items) ?? planFromHistory(history);
+    if (recovered) streamFor(taskId).plan = recovered;
+  }
+  syncPlanPanel(taskId);
+  syncAttention();
   renderStatus(stream?.status ?? statusFromTask(selectedTask()), { replay: true });
   smartScrollToBottom(true);
   attachments = []; renderAttachments();
+  // 排队面板跟着切换:每个任务一份队列,切走就不该再显示上一个任务的待发消息。
+  refreshQueuePanel();
   emptyState.classList.toggle('hidden', conversation.querySelector('.message') != null);
   promptInput.focus();
 }
@@ -2919,12 +3691,6 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
 function openInspector(tab: InspectorTab): void {
   activeInspectorTab = tab; inspector.classList.remove('hidden'); void refreshInspector();
 }
-function setInspectorTab(tab: InspectorTab): void {
-  activeInspectorTab = tab;
-  // 只动 inspector 自己的页签：记忆面板里也有 [data-tab]，全局选择器会误改它的选中态。
-  inspector.querySelectorAll<HTMLButtonElement>('.inspector-tabs [data-tab]').forEach((button) => button.classList.toggle('selected', button.dataset.tab === tab));
-}
-function inspectorButton(label: string, action: string, path?: string): string { return `<button class="inspector-row" data-action="${action}"${path ? ` data-path="${escapeHtml(path)}"` : ''}>${escapeHtml(label)}<span>›</span></button>`; }
 
 /**
  * 文件树的展开状态按 **项目根** 持久化在 localStorage。
@@ -3018,39 +3784,60 @@ function renderFileTree(files: string[], openPaths: Set<string>): string {
     : render(root, 0);
 }
 async function refreshInspector(): Promise<void> {
+  // 浏览器视图不复用这块 innerHTML：<webview> 被移除就等于换 guest 进程，登录态与
+  // agent 正在操作的那一页会一起丢（见 browser-panel.ts 顶部约束）。
+  if (activeInspectorTab === 'browser') {
+    closeSourceControl();
+    hideTerminalPanel();
+    inspectorContent.classList.add('hidden');
+    inspectorContent.innerHTML = '';
+    inspectorTitle.textContent = t('tools.browser');
+    showBrowserPanel();
+    return;
+  }
+  // 终端同理：xterm 实例与 PTY 都不能随视图切换重建 —— 重建等于换一个 shell，
+  // 正在跑的东西（dev server / 测试）会一起没。
+  if (activeInspectorTab === 'terminal') {
+    closeSourceControl();
+    hideBrowserPanel();
+    inspectorContent.classList.add('hidden');
+    inspectorContent.innerHTML = '';
+    inspectorTitle.textContent = t('tools.terminal');
+    showTerminalPanel();
+    return;
+  }
+  inspectorContent.classList.remove('hidden');
+  hideBrowserPanel();
+  hideTerminalPanel();
+  // 离开源代码管理视图时立刻停掉它的轮询，别让后台计时器继续拉 git status。
   if (activeInspectorTab !== 'source') closeSourceControl();
-  setInspectorTab(activeInspectorTab); inspectorContent.innerHTML = `<p class="inspector-loading">${t('inspector.loading')}</p>`;
+  inspectorContent.innerHTML = `<p class="inspector-loading">${t('inspector.loading')}</p>`;
   if (activeInspectorTab === 'source') {
     inspectorTitle.textContent = t('scm.title');
     await refreshSourceControl(inspectorContent);
     return;
   }
-  if (activeInspectorTab === 'overview') {
-    inspectorTitle.textContent = t('inspector.overview'); const overview = await window.mocodeWork.projectOverview();
-    // 纯任务没有工作空间：明说，别让用户对着一堆"未发现文件"猜哪里出了问题。
-    if (overview.noWorkspace) {
-      inspectorContent.innerHTML = `<p class="inspector-empty">${t('inspector.noWorkspaceHint')}</p>`;
-      return;
-    }
-    const status = Array.isArray(overview.status) ? overview.status.map(String) : []; const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
-    inspectorContent.innerHTML = `<section class="overview-card"><b>${escapeHtml(String(overview.branch || t('git.local')))}</b><span>${escapeHtml(String(overview.lastCommit ?? t('empty.lastCommit')))}</span></section><h3>${t('inspector.workChanges')}</h3>${status.length ? `<pre class="status-output">${escapeHtml(status.join('\n'))}</pre>` : `<p class="inspector-empty">${t('inspector.clean')}</p>`}${overview.diffStat ? `<pre class="status-output">${escapeHtml(String(overview.diffStat))}</pre>` : ''}<h3>${t('inspector.recentFiles')}</h3>${files.slice(0, 12).map((file) => inspectorButton(file, 'file', file)).join('') || `<p class="inspector-empty">${t('inspector.noFiles')}</p>`}`;
-  } else if (activeInspectorTab === 'changes') {
-    // 本轮改动：数据来自 host 的 changeset 快照（与「回滚」同源），不是 git。
-    inspectorTitle.textContent = t('inspector.changes');
-    await renderTurnChanges(inspectorContent);
-  } else {
-    inspectorTitle.textContent = t('inspector.files'); const overview = await window.mocodeWork.projectOverview();
-    if (overview.noWorkspace) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('inspector.noWorkspace')}</p>`; return; }
-    const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
-    // IDE 风格目录树：不是拍平的路径列表 —— 目录可折叠、文件按名落位、单链目录压缩。
-    // 触到后端上限时明说"还有更多"，别让截断看起来像"项目里没这些文件"。
-    const truncated = overview.filesTruncated === true;
-    const root = String((overview.project as { root?: string } | undefined)?.root ?? '');
-    const openPaths = fileTreeOpenSet(root);
-    fileTreeRoot = root; fileTreeOpen = openPaths;
-    inspectorContent.innerHTML = (files.length ? `<p class="tree-note">${escapeHtml(t('inspector.fileCount', { n: String(files.length) }))}</p>${renderFileTree(files, openPaths)}` : `<p class="inspector-empty">${t('inspector.noFiles')}</p>`)
-      + (truncated ? `<p class="inspector-empty">${t('inspector.filesTruncated')}</p>` : '');
+  if (activeInspectorTab === 'changes') {
+    inspectorTitle.textContent = t('tools.changes');
+    await renderChangesPanel();
+    return;
   }
+  if (activeInspectorTab === 'checks') {
+    inspectorTitle.textContent = t('tools.checks');
+    await renderChecksPanel();
+    return;
+  }
+  inspectorTitle.textContent = t('inspector.files'); const overview = await window.mocodeWork.projectOverview();
+  if (overview.noWorkspace) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('inspector.noWorkspace')}</p>`; return; }
+  const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
+  // IDE 风格目录树：不是拍平的路径列表 —— 目录可折叠、文件按名落位、单链目录压缩。
+  // 触到后端上限时明说"还有更多"，别让截断看起来像"项目里没这些文件"。
+  const truncated = overview.filesTruncated === true;
+  const root = String((overview.project as { root?: string } | undefined)?.root ?? '');
+  const openPaths = fileTreeOpenSet(root);
+  fileTreeRoot = root; fileTreeOpen = openPaths;
+  inspectorContent.innerHTML = (files.length ? `<p class="tree-note">${escapeHtml(t('inspector.fileCount', { n: String(files.length) }))}</p>${renderFileTree(files, openPaths)}` : `<p class="inspector-empty">${t('inspector.noFiles')}</p>`)
+    + (truncated ? `<p class="inspector-empty">${t('inspector.filesTruncated')}</p>` : '');
   inspectorContent.querySelectorAll<HTMLButtonElement>('[data-action="file"]').forEach((button) => button.addEventListener('click', () => void previewFile(button.dataset.path!)));
 }
 async function previewFile(file: string): Promise<void> {
@@ -3058,6 +3845,97 @@ async function previewFile(file: string): Promise<void> {
   inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button><button id="show-diff">${t('inspector.gitDiff')}</button></div><pre class="file-preview">${escapeHtml(content.error ?? content.content ?? '')}</pre>`;
   $('#back-to-files').addEventListener('click', () => { activeInspectorTab = 'files'; void refreshInspector(); });
   $('#show-diff').addEventListener('click', () => { inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button></div><pre class="file-preview diff-preview">${escapeHtml(diff.error ?? diff.content ?? '')}</pre>`; $('#back-to-files').addEventListener('click', () => void previewFile(file)); });
+}
+
+/* ── 「改动」面板 ──────────────────────────────────────────────
+ * 数据源是任务自己的 `changedFiles`（host 在 run_completed 时落盘），不是 git status ——
+ * 用户可能还有别的未提交改动，那些不属于「这次 agent 干了什么」。
+ *
+ * **只读，不提供文件回退**。回退是破坏性操作，正确的实现要能区分「agent 这轮改的」与
+ * 「用户之后自己又动的」，还要有变更集级别的原子性 —— 那是另一件事，得单独评估。
+ * 这一版先把「改了什么、改成什么样」摆出来，用户据此自己去终端 / 源代码管理里操作。
+ */
+async function renderChangesPanel(): Promise<void> {
+  const taskId = viewingTaskId();
+  if (!taskId) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('changes.noTask')}</p>`; return; }
+  inspectorContent.innerHTML = `<p class="inspector-loading">${t('inspector.loading')}</p>`;
+  const result = await window.mocodeWork.taskChanges({ taskId });
+  // 请求期间用户可能切了任务或换了视图：旧结果绝不能画到新上下文里。
+  if (activeInspectorTab !== 'changes' || viewingTaskId() !== taskId) return;
+  if (!result.ok) {
+    // 普通任务（无空间）跑在 scratch 目录里，那里不是 git 仓库 —— 没有 HEAD 可比，
+    // 这不是错误，只是这个面板在那种任务上没有可展示的基准。
+    const message = result.message === 'NOT_REPOSITORY' ? t('changes.noRepo') : (result.message ?? t('changes.failed'));
+    inspectorContent.innerHTML = `<p class="inspector-empty">${escapeHtml(message)}</p>`;
+    return;
+  }
+  const files = result.files ?? [];
+  if (!files.length) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('changes.empty')}</p>`; return; }
+  const rows = files.map((file) => {
+    const added = file.added > 0 ? `<span class="diff-add">+${file.added}</span>` : '';
+    const removed = file.removed > 0 ? `<span class="diff-del">-${file.removed}</span>` : '';
+    const badge = file.untracked ? `<span class="changes-badge">${t('changes.untracked')}</span>` : '';
+    return `<button class="inspector-row changes-row" data-change-path="${escapeHtml(file.path)}" title="${escapeHtml(file.path)}"><span class="changes-path">${escapeHtml(file.path)}</span><span class="changes-stat">${badge}${added}${removed}</span></button>`;
+  }).join('');
+  inspectorContent.innerHTML = `<p class="tree-note">${escapeHtml(t('changes.count', { n: String(files.length) }))}</p>`
+    + `<div class="changes-list">${rows}</div>`
+    + (result.truncated ? `<p class="inspector-empty">${t('changes.truncated')}</p>` : '')
+    + `<p class="inspector-hint">${t('changes.hint')}</p>`;
+  inspectorContent.querySelectorAll<HTMLButtonElement>('[data-change-path]').forEach((button) =>
+    button.addEventListener('click', () => void showChangeDiff(taskId, button.dataset.changePath ?? '')),
+  );
+}
+
+async function showChangeDiff(taskId: string, path: string): Promise<void> {
+  if (!path) return;
+  inspectorTitle.textContent = path;
+  inspectorContent.innerHTML = `<p class="inspector-loading">${t('inspector.loading')}</p>`;
+  const result = await window.mocodeWork.taskChangeDiff({ taskId, path });
+  if (activeInspectorTab !== 'changes' || viewingTaskId() !== taskId) return;
+  const body = result.ok ? (result.content ?? '') : (result.message ?? t('changes.failed'));
+  inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-changes">${t('changes.back')}</button></div>`
+    + (body.trim() ? `<pre class="file-preview diff-preview">${escapeHtml(body)}</pre>` : `<p class="inspector-empty">${t('changes.noDiff')}</p>`)
+    + (result.truncated ? `<p class="inspector-empty">${t('changes.diffTruncated')}</p>` : '');
+  $('#back-to-changes').addEventListener('click', () => {
+    inspectorTitle.textContent = t('tools.changes');
+    void renderChangesPanel();
+  });
+}
+
+/* ── 「检查」面板 ──────────────────────────────────────────────
+ * 列出从 package.json 发现的校验脚本，点击把命令**填进终端**（不直接执行）。
+ * 为什么不在面板里自己跑：那需要一条全新的执行通道（超时、输出上限、并发、取消），
+ * 而终端本来就已经跑着用户自己的 shell —— 命令填进去，能看输出、能 Ctrl+C、能改一行再跑。
+ */
+async function renderChecksPanel(): Promise<void> {
+  const taskId = viewingTaskId();
+  if (!taskId) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('checks.noTask')}</p>`; return; }
+  inspectorContent.innerHTML = `<p class="inspector-loading">${t('inspector.loading')}</p>`;
+  const result = await window.mocodeWork.checks({ taskId });
+  if (activeInspectorTab !== 'checks' || viewingTaskId() !== taskId) return;
+  if (!result.ok) {
+    inspectorContent.innerHTML = `<p class="inspector-empty">${escapeHtml(result.message ?? t('checks.failed'))}</p>`;
+    return;
+  }
+  const groups = (result.groups ?? []).filter((group) => group.scripts.length > 0);
+  if (!groups.length) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('checks.empty')}</p>`; return; }
+  const sections = groups.map((group) => {
+    // 根包用 package.json 的 name；没写 name 的 monorepo 根退回一个中性文案。
+    const title = group.label || t('checks.root');
+    const rows = group.scripts.map((script) => {
+      const command = checkCommand(group.packageManager, script.name, group.dir);
+      return `<button class="inspector-row checks-row" data-check-command="${escapeHtml(command)}" title="${escapeHtml(command)}"><span class="checks-name">${escapeHtml(script.name)}</span><span class="checks-cmd">${escapeHtml(command)}</span></button>`;
+    }).join('');
+    return `<section class="checks-group"><h3>${escapeHtml(title)}${group.dir ? `<span>${escapeHtml(group.dir)}</span>` : ''}</h3>${rows}</section>`;
+  }).join('');
+  inspectorContent.innerHTML = `${sections}<p class="inspector-hint">${t('checks.hint')}</p>`;
+  inspectorContent.querySelectorAll<HTMLButtonElement>('[data-check-command]').forEach((button) =>
+    button.addEventListener('click', () => {
+      // 语义就是「给我终端里这条命令」：面板没开或停在别的视图都先切过去。
+      if (inspector.classList.contains('hidden') || activeInspectorTab !== 'terminal') openInspector('terminal');
+      fillTerminalCommand(button.dataset.checkCommand ?? '');
+    }),
+  );
 }
 
 function refreshSearch(query = ''): void {
@@ -3135,11 +4013,13 @@ initPanels({
   reloadTask: (taskId) => void openTask(taskId),
   send: (command) => window.mocodeWork.panel(command),
 });
-// 数据面板复用同一个整页视图：命令都打到「当前选中任务」的 host 上，
-// 所以没有任务时先提示（面板内容为空列表比空白页更难懂）。
+// 数据面板复用同一个整页视图。会话 / 记忆仍必须有任务：它们的命令都打到「当前选中任务」的
+// host 上，没有任务就是空列表，提示一句比空白页好懂。
+// 用量例外：跨项目口径读的是全局账本 ~/.mocode/usage-daily.jsonl，与任何工作区无关
+// （主进程直接算完回执，见 main.ts 的 work:panel），所以任何时候都能打开。
 for (const kind of PANEL_TABS) {
   $(`#nav-${kind}`).addEventListener('click', () => {
-    if (!viewingTaskId()) { showToast('warn', t('panel.noTask')); return; }
+    if (kind !== 'usage' && !viewingTaskId()) { showToast('warn', t('panel.noTask')); return; }
     showExtensionsView(kind);
   });
 }
@@ -3264,15 +4144,50 @@ toolsButton.addEventListener('click', (event) => {
 });
 toolsMenu.addEventListener('click', (event) => event.stopPropagation());
 document.addEventListener('click', hideToolsMenu);
-for (const [selector, tab] of [['#show-files', 'files'], ['#show-source-control', 'source']] as const) {
+for (const [selector, tab] of [['#show-files', 'files'], ['#show-source-control', 'source'], ['#show-browser', 'browser'], ['#show-terminal', 'terminal'], ['#show-changes', 'changes'], ['#show-checks', 'checks']] as const) {
   $(selector).addEventListener('click', () => {
     hideToolsMenu();
     if (inspector.classList.contains('hidden')) { openInspector(tab); return; }
-    if (activeInspectorTab !== tab) { setInspectorTab(tab); void refreshInspector(); return; }
+    if (activeInspectorTab !== tab) { activeInspectorTab = tab; void refreshInspector(); return; }
     inspector.classList.add('hidden');
     closeSourceControl();
+    hideBrowserPanel();
+    hideTerminalPanel();
   });
 }
+// 面板的 key 是动态字符串（状态行、占位文案），这里收敛到 LocaleKey 再交给 t()。
+const activeProjectId = (): string | undefined => {
+  const task = selectedTask();
+  return task?.projectId
+    ? state?.projects.find((project) => project.id === task.projectId)?.id
+    : selectedProject()?.id;
+};
+initBrowserPanel($('#browser-panel'), {
+  t: (key, vars) => t(key as LocaleKey, vars),
+  icon,
+  escapeHtml,
+  currentProjectId: activeProjectId,
+  show: (payload) => window.mocodeWork.browserShow(payload),
+  hide: () => window.mocodeWork.browserHide(),
+  navigate: (url) => window.mocodeWork.browserNavigate(url),
+  command: (command) => window.mocodeWork.browserCommand(command),
+  onState: (callback) => window.mocodeWork.onBrowserState(callback),
+});
+// PTY 在主进程，这里只收发字符串；cwd 跟当前空间走，和 agent 的 run_command 同起点。
+initTerminalPanel($('#terminal-panel'), {
+  t: (key, vars) => t(key as LocaleKey, vars),
+  icon,
+  escapeHtml,
+  currentProjectId: activeProjectId,
+  open: (payload) => window.mocodeWork.terminalOpen(payload),
+  write: (data) => window.mocodeWork.terminalWrite({ ...(activeProjectId() ? { projectId: activeProjectId()! } : {}), data }),
+  resize: (cols, rows) => window.mocodeWork.terminalResize({ ...(activeProjectId() ? { projectId: activeProjectId()! } : {}), cols, rows }),
+  close: () => window.mocodeWork.terminalClose(activeProjectId() ? { projectId: activeProjectId()! } : {}),
+  onData: (callback) => window.mocodeWork.onTerminalData(callback),
+  onExit: (callback) => window.mocodeWork.onTerminalExit(callback),
+  insertPrompt: (text) => insertIntoPrompt(text),
+  toast: (level, text) => showToast(level, text, 2200),
+});
 initSourceControl({
   t,
   icon,
@@ -3286,16 +4201,14 @@ initSourceControl({
       ? state?.projects.find((project) => project.id === task.projectId)?.id
       : selectedProject()?.id;
   },
-  status: (target) => window.mocodeWork.gitStatus(target),
+  repos: (target) => window.mocodeWork.gitRepos(target),
   diff: (target, path, staged) => window.mocodeWork.gitDiff(target, path, staged),
   stage: (target, paths) => window.mocodeWork.gitStage(target, paths),
   unstage: (target, paths) => window.mocodeWork.gitUnstage(target, paths),
   commit: (target, message) => window.mocodeWork.gitCommit(target, message),
   generate: (command, options) => requestPanelCommand(command, options),
 });
-$('#close-inspector').addEventListener('click', () => { inspector.classList.add('hidden'); closeSourceControl(); });
-// 页签点击：只绑 inspector 自己的那组（记忆面板里也有 [data-tab]，不归这里管）。
-inspector.querySelectorAll<HTMLButtonElement>('.inspector-tabs [data-tab]').forEach((button) => button.addEventListener('click', () => { activeInspectorTab = button.dataset.tab as InspectorTab; void refreshInspector(); }));
+$('#close-inspector').addEventListener('click', () => { inspector.classList.add('hidden'); closeSourceControl(); hideBrowserPanel(); hideTerminalPanel(); });
 $('#search-button').addEventListener('click', () => { searchPanel.classList.remove('hidden'); searchInput.value = ''; refreshSearch(); searchInput.focus(); });
 $('#theme-toggle').addEventListener('click', () => {
   const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -3304,33 +4217,40 @@ $('#theme-toggle').addEventListener('click', () => {
 });
 
 /** 应用并持久化主题。saved 可为 light/dark/system; dataset 始终写入实际生效的 light/dark。 */
-/** 把渲染层实测的 titlebar 颜色同步给主进程，让 Windows 原生窗口控制按钮
- *  （右上角最小化/最大化/关闭那一块）跟 CSS 的 .titlebar 同色。
- *  颜色读 getComputedStyle 而非硬编码：surface-app 是带 accent 色相的 oklch，
- *  换主题/换主题色都会变，主进程侧硬编码 hex 永远对不齐。
- *  注意 computed style 返回的是 oklch(...) 字符串，setTitleBarOverlay 对它解析不可靠，
- *  必须经 canvas 规范化成 #rrggbb 再传。 */
+/**
+ * Windows 原生窗口按钮（右上角 — □ ✕）的**符号色**跟着主题走。
+ *
+ * 底色不在这里管：主进程把 overlay 底色设成透明（见 main.ts 的 TRANSPARENT_OVERLAY），
+ * 那块区域露出的是网页自身的 `.titlebar` 背景。曾经这里把 `.titlebar` 的实测底色也传过去，
+ * 结果是「两套颜色互相追」：一旦某条链路失效（比如 canvas 读色在旧构建里恒为 null），
+ * 按钮区就停在主进程的硬编码值上，深色主题下标题栏右端明显两块色。
+ * 现在颜色只有一个来源（CSS），这里只负责符号深浅。
+ *
+ * 符号色必须规范化成 #rrggbb：computed style 给的是 oklch(...)，原生侧解析不可靠。
+ * 不能靠 canvas.fillStyle 读回字符串（它会把 oklch 原样存回），要画 1px 再读像素，
+ * 让 Chromium 自己做色域转换。
+ */
 function toSrgbHex(color: string): string | null {
-  const ctx = document.createElement('canvas').getContext('2d');
+  if (!color || !CSS.supports('color', color)) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return null;
+  ctx.clearRect(0, 0, 1, 1);
   ctx.fillStyle = color;
-  const normalized = ctx.fillStyle;
-  if (normalized.startsWith('#')) {
-    if (normalized.length === 7) return normalized;
-    if (normalized.length === 4) return `#${[...normalized.slice(1)].map((c) => c + c).join('')}`;
-    return null;
-  }
-  const m = normalized.match(/rgba?\((\d+)[,\s]+(\d+)[,\s]+(\d+)/);
-  return m ? `#${[m[1]!, m[2]!, m[3]!].map((n) => Number(n).toString(16).padStart(2, '0')).join('')}` : null;
+  ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+  if (!a) return null;
+  return `#${[r!, g!, b!].map((n) => n.toString(16).padStart(2, '0')).join('')}`;
 }
 
 function syncTitleBarOverlay(): void {
   const bar = document.querySelector('.titlebar');
   if (!bar) return;
-  const bg = toSrgbHex(getComputedStyle(bar).backgroundColor);
   const brandText = bar.querySelector('.titlebar-brand-text');
   const symbol = toSrgbHex((brandText ? getComputedStyle(brandText).color : '') || getComputedStyle(bar).color);
-  if (bg && symbol) window.mocodeWork.setTitleBarOverlay({ bg, symbol });
+  if (symbol) window.mocodeWork.setTitleBarOverlay({ symbol });
 }
 
 function applyTheme(saved: 'light' | 'dark' | 'system'): void {
@@ -3339,6 +4259,8 @@ function applyTheme(saved: 'light' | 'dark' | 'system'): void {
   try { localStorage.setItem('mocode-work-theme', saved); } catch { /* 无 localStorage 则仅本次生效 */ }
   window.mocodeWork.setTheme(saved);
   syncTitleBarOverlay();
+  // xterm 只在创建时吃 theme；换主题必须显式重设，否则终端永远停在旧配色。
+  refreshTerminalTheme();
   refreshThemeSegmented();
 }
 
@@ -4738,6 +5660,27 @@ function applyVoiceButtonVisibility(): void {
   micButton.classList.toggle('hidden', settingsState.voice !== true);
 }
 
+/**
+ * 把一段外部文本（终端选中的输出）插到输入框光标处：与语音听写同一套插入语义，
+ * 区别只是「终端输出多为多行命令/报错」——原样插入，不补空格。
+ */
+function insertIntoPrompt(text: string): void {
+  const value = text.trimEnd();
+  if (!value) return;
+  const start = promptInput.selectionStart ?? promptInput.value.length;
+  const end = promptInput.selectionEnd ?? start;
+  const before = promptInput.value.slice(0, start);
+  const after = promptInput.value.slice(end);
+  // 前后空一行：终端输出多半是代码块，粘在句子里会被当成同一句读。
+  const leading = before && !before.endsWith('\n') ? '\n\n' : '';
+  const inserted = `${leading}${value}${after ? '\n\n' : ''}`;
+  promptInput.value = `${before}${inserted}${after}`;
+  const caret = start + inserted.length;
+  promptInput.setSelectionRange(caret, caret);
+  promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+  promptInput.focus();
+}
+
 /** 把识别结果插到光标处，保留用户已经打了一半的内容。 */
 function insertDictation(text: string): void {
   const start = promptInput.selectionStart ?? promptInput.value.length;
@@ -5300,6 +6243,80 @@ if (sidebarResize) {
     saveSidebarWidth(SIDEBAR_DEFAULT);
   });
 }
+/* ── Inspector resize (拖拽调面板宽度) ───────────────────
+ * 与侧栏同一套交互：拖左沿改宽、双击复位、宽度持久化。
+ *
+ * 宽度必须写成 CSS 变量而不是 inline width：`.workspace-actions`（右上角工具箱）
+ * 的 right 也算 `var(--inspector-width)` —— 只改面板自身宽度的话，面板拖窄后
+ * 按钮会浮在面板上。变量挂在 .app-body 上，两者都在它的子树里。
+ *
+ * 窄屏（@media ≤ 60rem / 40rem）里 .inspector 有自己的固定宽度，媒体查询会赢，
+ * 用户拖出来的值在窄屏不生效，这是刻意的：窄屏本来就该铺满。
+ */
+const INSPECTOR_WIDTH_KEY = 'mocode-work-inspector-width';
+const INSPECTOR_MIN = 260;
+const INSPECTOR_MAX = 720;
+const INSPECTOR_DEFAULT = 340;
+/** 会话区至少留这么宽，面板不能把正文挤没。 */
+const CONVERSATION_MIN = 320;
+const inspectorResize = $('#inspector-resize') as HTMLElement | null;
+function clampInspectorWidth(width: number): number {
+  const workspace = inspector?.parentElement;
+  const available = workspace ? workspace.clientWidth - CONVERSATION_MIN : INSPECTOR_MAX;
+  const max = Math.max(INSPECTOR_MIN, Math.min(INSPECTOR_MAX, available));
+  return Math.round(Math.max(INSPECTOR_MIN, Math.min(max, width)));
+}
+function applyInspectorWidth(width: number): void {
+  if (!appBody) return;
+  appBody.style.setProperty('--inspector-width', `${clampInspectorWidth(width)}px`);
+}
+function getSavedInspectorWidth(): number {
+  try {
+    const raw = localStorage.getItem(INSPECTOR_WIDTH_KEY);
+    if (raw) {
+      const n = parseInt(raw, 10);
+      if (Number.isFinite(n) && n > 0) return clampInspectorWidth(n);
+    }
+  } catch { /* 忽略 */ }
+  return INSPECTOR_DEFAULT;
+}
+function saveInspectorWidth(width: number): void {
+  try { localStorage.setItem(INSPECTOR_WIDTH_KEY, String(width)); } catch { /* 忽略 */ }
+}
+applyInspectorWidth(getSavedInspectorWidth());
+if (inspectorResize) {
+  let resizing = false;
+  let startX = 0;
+  let startWidth = INSPECTOR_DEFAULT;
+  inspectorResize.addEventListener('pointerdown', (event) => {
+    resizing = true;
+    startX = event.clientX;
+    startWidth = inspector?.offsetWidth ?? INSPECTOR_DEFAULT;
+    try { inspectorResize.setPointerCapture(event.pointerId); } catch { /* 忽略 */ }
+    document.body.classList.add('inspector-resizing');
+    event.preventDefault();
+  });
+  inspectorResize.addEventListener('pointermove', (event) => {
+    if (!resizing) return;
+    // 往左拖 = 变宽，所以 delta 取反。
+    applyInspectorWidth(startWidth - (event.clientX - startX));
+  });
+  const endResize = (event: PointerEvent) => {
+    if (!resizing) return;
+    resizing = false;
+    try { inspectorResize.releasePointerCapture(event.pointerId); } catch { /* 忽略 */ }
+    document.body.classList.remove('inspector-resizing');
+    if (inspector) saveInspectorWidth(inspector.offsetWidth);
+  };
+  inspectorResize.addEventListener('pointerup', endResize);
+  inspectorResize.addEventListener('pointercancel', endResize);
+  inspectorResize.addEventListener('dblclick', () => {
+    applyInspectorWidth(INSPECTOR_DEFAULT);
+    saveInspectorWidth(INSPECTOR_DEFAULT);
+  });
+}
+// 窗口变窄后旧宽度可能把正文挤没：只收紧，不放大用户的偏好。
+window.addEventListener('resize', () => { applyInspectorWidth(getSavedInspectorWidth()); });
 /* ── Model picker ─────────────────────────────────────── */
 let modelPickerEl: HTMLElement | null = null;
 let modelList: ModelItem[] = [];
@@ -5603,6 +6620,9 @@ window.addEventListener('keydown', (event) => {
 
 window.mocodeWork.onAgentEvent(handleAgentEvent);
 window.mocodeWork.onState((next) => updateState(next));
+// 标题栏徽章 → 跳到「最久等待」的那个任务并把审批卡摆出来。
+// 主进程的系统通知被点击时也走同一条路径（见 handleAgentEvent 的 attention_open）。
+attentionBadge.addEventListener('click', () => { void jumpToPendingTask(); });
 void window.mocodeWork.getState().then((next) => {
   updateState(next);
   // 进程重启后不仅恢复侧栏选中态，也立即恢复该任务的可见输出与工具调用。

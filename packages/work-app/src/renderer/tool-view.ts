@@ -40,6 +40,11 @@ export interface ToolViewLabels {
   steps: (done: number, total: number) => string;
   /** 代码块里「还有 n 行未显示」 */
   moreLines: (n: number) => string;
+  /** ask_human：选项条数 / 已回答 / 已取消 / 自由文本回答的标题。 */
+  askOptions: (n: number) => string;
+  askAnswered: string;
+  askCancelled: string;
+  askAnswer: string;
 }
 
 export interface ToolView {
@@ -372,6 +377,72 @@ function statusView(info: ToolOutcomeInfo, output: string, labels: ToolViewLabel
 }
 
 /**
+ * ask_human：模型问的是一道人读得懂的选择题，不该把入参 JSON 原样倒出来。
+ * 还原成「问题 → 上下文 → 选项清单 → 用户的答复」四段：
+ *   · 以前整块是一个 <pre>，`\n\n` 和 `{"label":…}` 混在一起，用户得自己在转义里找选项；
+ *   · 选项带 description 时逐条列出（那是「选它意味着什么」，比 label 更重要）；
+ *   · 答复从 output 前缀里剥出来单列一行 —— 这是折叠后最想知道的那一个值。
+ */
+function askHumanView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): ToolView {
+  const question = typeof args?.question === 'string' ? args.question.trim() : '';
+  const context = typeof args?.context === 'string' ? args.context.trim() : '';
+  const rawOptions = Array.isArray(args?.options) ? args.options : [];
+  const options = rawOptions.flatMap((option) => {
+    if (!option || typeof option !== 'object') return [];
+    const record = option as Record<string, unknown>;
+    const label = typeof record.label === 'string' ? record.label.trim() : '';
+    if (!label) return [];
+    const description = typeof record.description === 'string' ? record.description.trim() : '';
+    return [{ label, description }];
+  });
+
+  // 答复行：host 的模板是「用户选择：X」「用户回答：X」/「User selected: X」。
+  const answered = /^(?:用户选择|用户回答|User selected|User response)\s*[:：]\s*([\s\S]*)$/.exec(output.trim());
+  const answer = answered ? answered[1]!.trim() : '';
+  const cancelled = !answered && /^(?:用户取消了选择|The user cancelled)/.test(output.trim());
+  const unanswered = output.trim() && !answered && !cancelled ? output.trim() : '';
+
+  const questionHtml = question
+    ? `<div class="tool-ask-question">${escapeHtml(question)}</div>`
+    : '';
+  const contextHtml = context
+    ? `<div class="tool-ask-context">${escapeHtml(context).replace(/\n/g, '<br>')}</div>`
+    : '';
+  const optionsHtml = options.length
+    ? `<ol class="tool-ask-options">${options
+        .map((option, index) => {
+          // 用户选中的那条要高亮：label 与答复完全一致（host 回传的就是 label 本身）。
+          const chosen = answer && option.label === answer;
+          const tone = chosen ? ' is-chosen' : '';
+          const description = option.description
+            ? `<span class="tool-ask-option-detail">${escapeHtml(option.description).replace(/\n/g, '<br>')}</span>`
+            : '';
+          return `<li class="tool-ask-option${tone}"><span class="tool-ask-option-index">${index + 1}</span><span class="tool-ask-option-body"><span class="tool-ask-option-label">${escapeHtml(option.label)}</span>${description}</span></li>`;
+        })
+        .join('')}</ol>`
+    : '';
+  const answerHtml = answer
+    ? `<div class="tool-ask-answer"><span class="tool-ask-answer-head">${escapeHtml(labels.askAnswer)}</span><span class="tool-ask-answer-text">${escapeHtml(answer)}</span></div>`
+    : cancelled
+      ? `<div class="tool-ask-answer is-cancelled"><span class="tool-ask-answer-head">${escapeHtml(labels.askCancelled)}</span></div>`
+      : '';
+
+  // 结构识别失败时兜底显示原文，不吞掉任何信息。
+  const rawHtml = unanswered || (!question && !options.length)
+    ? `<pre class="tool-preview">${escapeHtml((unanswered || output.trim()).slice(0, 4000))}</pre>`
+    : '';
+  const html = questionHtml || contextHtml || optionsHtml || answerHtml || rawHtml
+    ? `<div class="tool-ask">${questionHtml}${contextHtml}${optionsHtml}${answerHtml}${rawHtml}</div>`
+    : `<pre class="tool-preview">${escapeHtml(labels.noOutput)}</pre>`;
+  const summary = cancelled
+    ? labels.askCancelled
+    : answer
+      ? `${labels.askAnswered} · ${clipLine(answer).slice(0, 48)}`
+      : labels.askOptions(options.length);
+  return { summary, html };
+}
+
+/**
  * 主入口：按工具名挑渲染器。
  * 返回 null 表示「这类输出我没有可靠解读」——调用方回退原始参数 + 原文（宁可朴素，不能误导）。
  */
@@ -392,6 +463,10 @@ export function buildToolView(
     // 失败时仍然尽量给「它在干什么」的上下文：错误文本 + 该工具的对象。
     return failed;
   }
+  // ask_human 要在「输出为空」之前处理：等待用户回答的那一刻还没有任何 output，
+  // 但问题和选项正是这时候最该看见的东西（以前这里直接返回「（无输出）」）。
+  if (name === 'ask_human') return askHumanView(args, output.trim(), labels);
+
   const text = output.trim();
   if (!text) return { summary: labels.noOutput, html: `<pre class="tool-preview">${escapeHtml(labels.noOutput)}</pre>` };
 

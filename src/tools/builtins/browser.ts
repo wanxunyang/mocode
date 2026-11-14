@@ -48,7 +48,10 @@ export const browserTool: Tool = {
     'so open once and then navigate, interact, and screenshot the same page.\n' +
     'Actions: open, navigate, click, fill, press, wait_for, text, screenshot, console, list, close.\n' +
     'screenshot returns the rendered page as visual input, so you can actually see layout and styling issues. ' +
-    'Every result also reports recent console messages, page errors, and failed requests.\n' +
+    'Every result reports console/page-error/failed-request COUNTS plus the last few lines and a logPath: ' +
+    'when you need detail, grep or read that file instead of asking for a full dump.\n' +
+    'When the app has a browser panel open, open attaches to that page (sessionId "panel"), so you and the user ' +
+    'see and drive the same page and share its login state.\n' +
     'Start the app with dev_server first. Only localhost URLs are allowed by default.',
   risk: 'confirm',
   parameters: {

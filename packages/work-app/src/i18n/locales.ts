@@ -32,15 +32,28 @@ export const zhCN = {
   'sidebar.historyLoading': '读取中…',
   'sidebar.historyEmpty': '该空间还没有终端会话',
   'sidebar.moreTasks': '还有 {n} 个任务',
+  'sidebar.spaceNeedsYou': '该空间有 {n} 个任务在等你确认',
 
   // ── 任务行 ──
   'task.open': '打开 {name}',
+  'task.openNeedsYou': '打开 {name}（等你确认）',
   'task.dblclickRename': '双击重命名',
   'task.menu': '任务菜单',
+  'task.needsYou': '等你确认：agent 已暂停，需要你点一下',
+
+  // ── 需要人工介入（标题栏徽章 / 会话区横条） ──
+  'attention.badge': '{n} 个待处理',
+  'attention.badgeTitle': '{n} 个任务在等你确认，点击前往最早的那个',
+  'attention.barTitle': '需要你确认',
+  'attention.barHint': 'agent 已暂停，处理后会继续',
+  'attention.jump': '前往处理',
+  'attention.notifyTitle': 'MoCode Work：需要你确认',
+  'attention.notifyBody': '{steps}',
 
   // ── 无障碍标签（静态 HTML 兜底） ──
   'a11y.primaryNav': '主导航',
   'a11y.sidebarResize': '拖动调整侧栏宽度',
+  'a11y.inspectorResize': '拖动调整面板宽度',
   'a11y.viewActions': '视图操作',
   'a11y.conversationContext': '会话上下文',
   'a11y.convRail': '消息导航',
@@ -237,7 +250,6 @@ export const zhCN = {
 
   // ── 任务 / 空间右键菜单 ──
   'menu.rename': '重命名',
-  'menu.moveTo': '移动到',
   'menu.noWorkspace': '不使用工作空间',
   'menu.delete': '删除',
   'menu.stopAndDelete': '停止并删除',
@@ -322,14 +334,34 @@ export const zhCN = {
   'tool.summarySteps': '{done}/{total} 步',
   'tool.summaryChangedFiles': '{n} 个文件改动',
   'tool.moreLines': '…（还有 {n} 行未显示）',
+  'tool.askOptions': '{n} 个选项',
+  'tool.askAnswered': '已回答',
+  'tool.askCancelled': '已取消',
+  'tool.askAnswer': '你的答复',
+
+  // ── 计划进度（会话区顶部面板 + 侧栏任务行）──
+  'plan.title': '执行计划',
+  'plan.progress': '{done}/{total}',
+  'plan.percent': '{n}%',
+  'plan.current': '当前：{step}',
+  'plan.done': '计划已完成',
+  'plan.doneHint': '全部 {n} 步已完成',
+  'plan.expand': '展开步骤',
+  'plan.collapse': '收起步骤',
+  'plan.dismiss': '关闭计划面板',
+  'plan.sidebar': '{done}/{total} 步',
 
   // ── 消息气泡操作 ──
   'msg.copy': '复制内容',
   'msg.regenerate': '基于这条重新生成',
+  'msg.branch': '从这里分叉出新会话',
   'msg.rollback': '回滚到这条消息之前',
   'msg.copied': '已复制到剪贴板',
   'msg.copyFailed': '复制失败',
-  'msg.rollbackArm': '回滚?',
+  'msg.editMenu': '编辑或回滚这条消息',
+  'msg.edit': '编辑并重发',
+  'msg.editSend': '发送',
+  'msg.editCancel': '取消',
   'msg.railTip': '第 {n} 条提问',
 
   // ── Markdown 代码块 ──
@@ -346,14 +378,16 @@ export const zhCN = {
   'approval.reject': '拒绝',
   'approval.submit': '提交',
   'approval.inputPlaceholder': '输入回答（Enter 提交，Shift+Enter 换行）',
+  'approval.collapse': '收起',
+  'approval.expand': '展开回答',
 
   // ── Toast ─
   'toast.deletedTask': '已删除任务',
-  'toast.movedTo': '已移动到「{label}」',
   'toast.removedSpace': '已移除空间 “{removed}”',
   'toast.cannotRemoveSpace': '该空间下有任务运行中，无法移除',
   'toast.adoptFailed': '接管这条会话失败',
   'toast.adopted': '已接管，继续发消息即可',
+  'toast.openTaskFailed': '打开这条会话失败，请重试。',
   'toast.themeSwitched': '已切换到{theme}主题',
   'toast.accentApplied': '主题色已切换为{accent}',
   'toast.imageNotImage': '{label} 不是图片,已跳过',
@@ -368,13 +402,15 @@ export const zhCN = {
   'toast.attachmentTruncated': '{label} 内容较长，只提供前 100000 字符',
   'toast.attachmentLimit': '一次最多添加 {n} 个附件',
   'toast.regenerated': '已重新生成',
+  'toast.branched': '已从这一轮分叉出新会话',
+  'toast.branchFail': '分叉失败',
   'toast.queued': '已排队（第 {n} 条），上一轮结束后自动发送',
   'toast.queuedLeft': '已发出，还有 {n} 条在排队',
   'toast.queueDropped': '任务已删除，丢弃了 {n} 条排队消息',
   'toast.rolledBack': '已回滚到这条消息之前',
   'toast.rolledBackRefill': '已回滚,原文已放回输入框,改完可再发一次',
+  'toast.edited': '已按修改后的内容重新开始这一轮',
   'toast.cannotRollback': '这条消息找不到可回滚的位置。',
-  'toast.cannotMoveTask': '无法移动任务',
   'toast.taskRunning': '当前还有任务在跑,请先停止。',
   'toast.noSession': '这条消息没有可用的会话,无法重新生成。',
   'toast.noUserMsg': '找不到可重新生成的用户消息。',
@@ -390,6 +426,7 @@ export const zhCN = {
   'toast.configMissing': 'mocode 配置缺少 {missing}，请先在终端跑 mocode /model 配好模型再启动任务。',
   'toast.configLoaded': '已加载 mocode 配置: {loaded}',
   'toast.imageRelief': '已把 {n} 张图片转为文字卡',
+  'toast.browserCdpMissing': '浏览器面板未能开启调试端口，agent 将使用独立浏览器（不共享面板登录态）。',
   // 协议版本不匹配：客户端比 host 旧（或反之），新命令会被 host fail-closed 拒掉。
   'toast.protocolMismatch': '界面与 agent 的协议版本不一致（界面 {client}，agent {host}），部分新功能可能不可用，请更新到同一版本。',
   'toast.mcpWarning': 'MCP 警告: {warning}',
@@ -415,7 +452,6 @@ export const zhCN = {
   'composer.compactTitle': '压缩会话上下文',
   'composer.planMode': '计划',
   'composer.planToggleTitle': '计划模式：只读探查并给出方案，你批准后再切回自动执行',
-  'status.planMode': '计划模式（只读）',
   'status.planNeedsTask': '先选中或新建一个任务，再切换计划模式',
   'status.planOn': '已切到计划模式：只读探查并给出方案，批准后切回自动执行',
   'status.planOff': '已切回自动模式：工具按任务自动路由',
@@ -441,26 +477,33 @@ export const zhCN = {
   'composer.attachment': '移除',
   'composer.imagePreview': '预览图片：{name}',
 
-  // ── 空状态 / 概览 / 文件 ──
-  'empty.lastCommit': '尚无 Git 提交',
+  // ── 排队消息（agent 运行时发出的下一条）──
+  'queue.next': '下一条',
+  'queue.expand': '展开全部排队消息',
+  'queue.collapse': '收起排队消息',
+  'queue.attachments': '{n} 个附件',
+  'queue.attachmentsOnly': '（仅附件）',
+  'queue.attachmentsOnlyName': '（仅附件：{name}）',
+
+  // ── 空状态 / 文件 ──
   'empty.project': '项目',
   'empty.draft': '新任务',
 
-  // ── 概览 ──
-  'inspector.overview': '项目概览',
-  'inspector.tabOverview': '概览',
+  // ── 检查器（一个视图只承载一个工具） ──
   'inspector.files': '文件',
   'inspector.loading': '正在读取…',
   'inspector.backToFiles': '← 文件',
   'inspector.gitDiff': 'Git Diff',
-  'inspector.workChanges': '工作区变更',
-  'inspector.recentFiles': '最近文件',
   'inspector.filesTruncated': '文件过多，仅列出前 5000 个。',
   'inspector.noWorkspace': '当前任务没有关联工作空间。',
-  'inspector.noWorkspaceHint': '当前任务没有关联工作空间。<br />用输入框下方的 chip 选择一个目录后，这里会显示分支、变更与文件。',
-  'inspector.clean': '工作区干净',
   'inspector.noFiles': '未发现可预览的文件',
   'inspector.fileCount': '共 {n} 个文件（已隐藏 node_modules / dist / target 等构建产物）',
+
+  // ── 浏览器面板（用户看页面，agent 通过 CDP 操作同一页） ──
+  'browser.addressPlaceholder': '输入网址后回车，例如 localhost:5173',
+  'browser.loading': '正在加载…',
+  'browser.loadFailed': '页面加载失败',
+  'browser.devServer': '本地服务',
 
   // ── 搜索面板 ──
   'search.placeholder': '搜索项目或任务',
@@ -543,7 +586,42 @@ export const zhCN = {
   // ── 工具箱 / 源代码管理 ──
   'tools.title': '工具箱',
   'tools.files': '文件',
+  'tools.browser': '浏览器',
+  'tools.terminal': '终端',
   'tools.sourceControl': '源代码管理',
+  'tools.changes': '改动',
+  'tools.checks': '检查',
+
+  // ── 「改动」面板（只读：本任务 agent 改过的文件 + 逐文件 diff）──
+  'changes.noTask': '先选中一个任务，再看它改了什么。',
+  'changes.failed': '读取改动失败。',
+  'changes.empty': '这个任务还没有记录到文件改动。',
+  'changes.noRepo': '这个工作区不是 git 仓库，没有 HEAD 可作比较基准。',
+  'changes.count': '共 {n} 个文件（基准：HEAD）',
+  'changes.truncated': '文件过多，只列出前 200 个。',
+  'changes.untracked': '新文件',
+  'changes.hint': '只读视图。回退文件请走源代码管理面板或终端 /rollback。',
+  'changes.back': '← 改动',
+  'changes.noDiff': '没有文本差异（二进制文件或仅权限变更）。',
+  'changes.diffTruncated': '差异过长，已截断。',
+
+  // ── 「检查」面板（从 package.json 发现校验命令，点击填入终端）──
+  'checks.noTask': '先选中一个任务，再看它的工作区该验什么。',
+  'checks.failed': '读取 package.json 失败。',
+  'checks.empty': '这个工作区没有 typecheck / lint / build / test 这类脚本。',
+  'checks.root': '工作空间',
+  'checks.hint': '点击一行会把命令填进终端，回车执行。',
+
+  // ── 终端面板（PTY 在主进程，这里是 xterm 显示层）──
+  'terminal.placeholder': '正在启动 shell…',
+  'terminal.failed': '终端启动失败',
+  'terminal.unavailable': '终端组件未能加载，请重新构建应用。',
+  'terminal.exited': 'shell 已退出（退出码 {code}）',
+  'terminal.restart': '重启终端',
+  'terminal.clear': '清屏',
+  'terminal.sendToAgent': '把选中内容（无选中则最近一屏）发给 agent',
+  'terminal.nothingToSend': '终端里没有可发送的内容',
+  'terminal.fill': '填入终端',
   'scm.title': '源代码管理',
   'scm.notRepo': '当前空间不是 Git 仓库',
   'scm.noStaged': '没有已暂存的更改',
@@ -563,6 +641,7 @@ export const zhCN = {
   'scm.all': '全部',
   'scm.stageAll': '全部暂存',
   'scm.unstageAll': '全部取消暂存',
+  'scm.toggleGroup': '点击展开 / 折叠',
   'scm.messageLabel': '提交信息',
   'scm.messagePlaceholder': '描述此次更改…',
   'scm.commitHint': '提交只包含已暂存的更改，不会推送。',
@@ -579,6 +658,10 @@ export const zhCN = {
   'scm.langZh': '中文',
   'scm.generated': '已生成，请检查后手动提交。',
   'scm.committed': '已提交 {commit}',
+  'scm.branchLabel': '工作空间',
+  'scm.kindNested': '嵌套仓库',
+  'scm.kindSubmodule': '子模块',
+  'scm.kindWorktree': '工作树',
 
   // ── 错误本地化 ──
   'err.connectionLost': '与 AI 服务的连接中断了，请稍后重试或检查网络/模型配置。',
@@ -639,6 +722,15 @@ export const zhCN = {
   'main.rollback.noFile': '找不到这个任务的会话文件。',
   'main.rollback.corrupt': '会话文件已损坏,无法回滚。',
   'main.rollback.invalidParam': '参数不合法。',
+  'main.fork.invalidParam': '分叉参数不合法。',
+  'main.fork.noSession': '这条消息还没落盘成会话,无法分叉。',
+  'main.fork.notIdle': '任务正在运行,请先停止再分叉。',
+  'main.fork.failed': '分叉失败。',
+  'main.fork.copyMissing': '分叉出的会话副本没有落盘,无法继续。',
+  'main.fork.truncateFailed': '会话副本截断失败,已放弃这次分叉。',
+  'main.fork.timeout': '分叉超时:Agent 没有响应。',
+  'main.fork.hostGone': 'Agent 已停止,分叉中断。',
+  'main.fork.title': '{title} · 分支',
   'main.panel.unsupported': '不支持的面板命令。',
   'main.panel.noTask': '请先选择或创建一个任务，面板命令需要一个工作空间。',
   'main.rollback.noHistory': '会话文件里没有历史记录。',
@@ -646,6 +738,8 @@ export const zhCN = {
   'main.read.outside': '不允许读取项目目录外的文件。',
   'main.read.unreadable': '文件不可读取或不是文本文件。',
   'main.read.noDiff': '该文件没有已跟踪的 Git Diff。',
+  'main.browser.badUrl': '浏览器面板只接受 http/https 地址。',
+  'main.browser.badBounds': '浏览器面板尺寸无效。',
   'main.lang.unsupported': '不支持的语言',
   'main.lang.writeFail': '写入配置失败: {msg}',
 
@@ -854,10 +948,6 @@ export const zhCN = {
   'sessions.restored': '已恢复该会话',
   'sessions.forked': '已从该会话分叉',
 
-  // ── 回滚 ──
-  // 入口只有消息气泡上的按钮（不在侧栏）：回滚是「回到这条消息之前」，语义绑在某条消息上。
-  'rollback.noSnapshot': '无快照',
-
   // ── 用量面板 ──
   'usage.title': '用量',
   'usage.hint': '本会话或跨项目的 token 消耗。',
@@ -926,10 +1016,6 @@ export const zhCN = {
   'memory.confidence': '置信度',
   'memory.reflected': '已触发一次反思',
 
-  // ── 改动面板（inspector「本轮改动」） ──
-  'inspector.changes': '本轮改动',
-  'inspector.changesHint': '数据来自本轮 changeset 快照（不是 git），没有 git 的目录也能看。',
-  'inspector.noChanges': '本轮没有文件改动。',
 } as const;
 
 export type LocaleKey = keyof typeof zhCN;
@@ -961,15 +1047,28 @@ export const enUS: Record<LocaleKey, string> = {
   'sidebar.historyLoading': 'Loading…',
   'sidebar.historyEmpty': 'No terminal sessions in this space yet',
   'sidebar.moreTasks': '{n} more tasks',
+  'sidebar.spaceNeedsYou': '{n} task(s) in this space need your confirmation',
 
   // ── Task rows ─
   'task.open': 'Open {name}',
+  'task.openNeedsYou': 'Open {name} (waiting for you)',
   'task.dblclickRename': 'Double-click to rename',
   'task.menu': 'Task menu',
+  'task.needsYou': 'Waiting for you: the agent is paused and needs one click',
+
+  // ── Needs attention (titlebar badge / in-thread bar) ──
+  'attention.badge': '{n} pending',
+  'attention.badgeTitle': '{n} task(s) waiting for your confirmation — click to open the oldest one',
+  'attention.barTitle': 'Needs your confirmation',
+  'attention.barHint': 'The agent is paused and will continue once you respond',
+  'attention.jump': 'Handle it',
+  'attention.notifyTitle': 'MoCode Work: needs you',
+  'attention.notifyBody': '{steps}',
 
   // ─ Accessibility labels (static HTML fallback) ──
   'a11y.primaryNav': 'Primary navigation',
   'a11y.sidebarResize': 'Drag to resize sidebar',
+  'a11y.inspectorResize': 'Drag to resize panel',
   'a11y.viewActions': 'View actions',
   'a11y.conversationContext': 'Conversation context',
   'a11y.convRail': 'Message navigation',
@@ -1166,7 +1265,6 @@ export const enUS: Record<LocaleKey, string> = {
 
   // ── Task / space context menu ──
   'menu.rename': 'Rename',
-  'menu.moveTo': 'Move to',
   'menu.noWorkspace': 'No workspace',
   'menu.delete': 'Delete',
   'menu.stopAndDelete': 'Stop & delete',
@@ -1249,14 +1347,34 @@ export const enUS: Record<LocaleKey, string> = {
   'tool.summarySteps': '{done}/{total} steps',
   'tool.summaryChangedFiles': '{n} files changed',
   'tool.moreLines': '… ({n} more lines)',
+  'tool.askOptions': '{n} option(s)',
+  'tool.askAnswered': 'Answered',
+  'tool.askCancelled': 'Cancelled',
+  'tool.askAnswer': 'Your answer',
+
+  // ── Plan progress (conversation panel + sidebar task row) ──
+  'plan.title': 'Execution plan',
+  'plan.progress': '{done}/{total}',
+  'plan.percent': '{n}%',
+  'plan.current': 'Now: {step}',
+  'plan.done': 'Plan complete',
+  'plan.doneHint': 'All {n} steps done',
+  'plan.expand': 'Show steps',
+  'plan.collapse': 'Hide steps',
+  'plan.dismiss': 'Dismiss plan panel',
+  'plan.sidebar': '{done}/{total} steps',
 
   // ── Message bubble actions ──
   'msg.copy': 'Copy',
   'msg.regenerate': 'Regenerate from here',
+  'msg.branch': 'Branch into a new conversation from here',
   'msg.rollback': 'Roll back to before this',
   'msg.copied': 'Copied to clipboard',
   'msg.copyFailed': 'Copy failed',
-  'msg.rollbackArm': 'Roll back?',
+  'msg.editMenu': 'Edit or roll back this message',
+  'msg.edit': 'Edit and resend',
+  'msg.editSend': 'Send',
+  'msg.editCancel': 'Cancel',
   'msg.railTip': 'Question {n}',
 
   // ── Markdown code block ──
@@ -1273,14 +1391,16 @@ export const enUS: Record<LocaleKey, string> = {
   'approval.reject': 'Reject',
   'approval.submit': 'Submit',
   'approval.inputPlaceholder': 'Type your answer (Enter to submit, Shift+Enter for a new line)',
+  'approval.collapse': 'Collapse',
+  'approval.expand': 'Answer',
 
   // ── Toast ─
   'toast.deletedTask': 'Task deleted',
-  'toast.movedTo': 'Moved to “{label}”',
   'toast.removedSpace': 'Removed space “{removed}”',
   'toast.cannotRemoveSpace': 'Cannot remove: a task is running in this space',
   'toast.adoptFailed': 'Could not adopt that session',
   'toast.adopted': 'Adopted — keep chatting to continue',
+  'toast.openTaskFailed': 'Could not open that session. Please retry.',
   'toast.themeSwitched': 'Switched to {theme} theme',
   'toast.accentApplied': 'Accent set to {accent}',
   'toast.imageNotImage': '{label} is not an image, skipped',
@@ -1295,13 +1415,15 @@ export const enUS: Record<LocaleKey, string> = {
   'toast.attachmentTruncated': '{label} is long; only the first 100000 characters will be provided',
   'toast.attachmentLimit': 'Add up to {n} attachments at a time',
   'toast.regenerated': 'Regenerating',
+  'toast.branched': 'Branched into a new conversation from this turn',
+  'toast.branchFail': 'Branch failed',
   'toast.queued': 'Queued (#{n}); it will be sent when the current turn finishes',
   'toast.queuedLeft': 'Sent; {n} more queued',
   'toast.queueDropped': 'Task deleted — discarded {n} queued message(s)',
   'toast.rolledBack': 'Rolled back to before this message',
   'toast.rolledBackRefill': 'Rolled back — the message is back in the composer, edit and resend',
+  'toast.edited': 'This turn restarted with your edited message',
   'toast.cannotRollback': 'Cannot find a rollback point for this message.',
-  'toast.cannotMoveTask': 'Cannot move this task',
   'toast.taskRunning': 'A task is still running. Stop it first.',
   'toast.noSession': 'No session available for this message; cannot regenerate.',
   'toast.noUserMsg': 'No user message found to regenerate from.',
@@ -1317,6 +1439,7 @@ export const enUS: Record<LocaleKey, string> = {
   'toast.configMissing': 'mocode config is missing {missing}. Run mocode /model in the terminal to set up a model before starting a task.',
   'toast.configLoaded': 'Loaded mocode config: {loaded}',
   'toast.imageRelief': 'Converted {n} image(s) to text cards',
+  'toast.browserCdpMissing': 'The browser panel could not open a debugging port; the agent will use its own browser (panel logins won’t be shared).',
   'toast.protocolMismatch': 'UI and agent speak different protocol versions (UI {client}, agent {host}); some new features may be unavailable. Update both to the same version.',
   'toast.mcpWarning': 'MCP warning: {warning}',
   'toast.hostNotBuilt': 'The Agent Host isn’t built yet. Run npm run build in the mocode repo root first.',
@@ -1341,7 +1464,6 @@ export const enUS: Record<LocaleKey, string> = {
   'composer.compactTitle': 'Compact conversation context',
   'composer.planMode': 'Plan',
   'composer.planToggleTitle': 'Plan mode: read-only exploration and a plan; switch back to auto to execute',
-  'status.planMode': 'Plan mode (read-only)',
   'status.planNeedsTask': 'Select or create a task before switching plan mode',
   'status.planOn': 'Plan mode on: read-only exploration and a plan; switch back to auto to execute',
   'status.planOff': 'Auto mode on: tools are routed per task',
@@ -1367,26 +1489,33 @@ export const enUS: Record<LocaleKey, string> = {
   'composer.attachment': 'Remove',
   'composer.imagePreview': 'Preview image: {name}',
 
-  // ── Empty state / inspector / files ──
-  'empty.lastCommit': 'No Git commits yet',
+  // ── Queued messages (sent while the agent is running) ──
+  'queue.next': 'Next up',
+  'queue.expand': 'Show all queued messages',
+  'queue.collapse': 'Collapse queued messages',
+  'queue.attachments': '{n} attachment(s)',
+  'queue.attachmentsOnly': '(attachments only)',
+  'queue.attachmentsOnlyName': '(attachments only: {name})',
+
+  // ── Empty state / files ──
   'empty.project': 'Project',
   'empty.draft': 'New Task',
 
-  // ── Inspector ──
-  'inspector.overview': 'Project Overview',
-  'inspector.tabOverview': 'Overview',
+  // ── Inspector (one tool per view) ──
   'inspector.files': 'Files',
   'inspector.loading': 'Loading…',
   'inspector.backToFiles': '← Files',
   'inspector.gitDiff': 'Git Diff',
-  'inspector.workChanges': 'Working tree changes',
-  'inspector.recentFiles': 'Recent files',
   'inspector.filesTruncated': 'Too many files — only the first 5000 are listed.',
   'inspector.noWorkspace': 'The current task has no associated workspace.',
-  'inspector.noWorkspaceHint': 'The current task has no associated workspace.<br />Select a directory using the chip below the input box to see branches, changes, and files.',
-  'inspector.clean': 'Workspace clean',
   'inspector.noFiles': 'No previewable files found',
   'inspector.fileCount': '{n} files (build output such as node_modules / dist / target is hidden)',
+
+  // ── Browser panel (the user sees the page, the agent drives the same page over CDP) ──
+  'browser.addressPlaceholder': 'Type a URL and press Enter, e.g. localhost:5173',
+  'browser.loading': 'Loading…',
+  'browser.loadFailed': 'Failed to load the page',
+  'browser.devServer': 'Dev server',
 
   // ── Search panel ──
   'search.placeholder': 'Search projects or tasks',
@@ -1468,7 +1597,42 @@ export const enUS: Record<LocaleKey, string> = {
   // ── Toolbox / source control ──
   'tools.title': 'Tools',
   'tools.files': 'Files',
+  'tools.browser': 'Browser',
+  'tools.terminal': 'Terminal',
   'tools.sourceControl': 'Source Control',
+  'tools.changes': 'Changes',
+  'tools.checks': 'Checks',
+
+  // ── Changes panel (read-only: files this task's agent touched + per-file diff) ──
+  'changes.noTask': 'Select a task first to see what it changed.',
+  'changes.failed': 'Failed to read changes.',
+  'changes.empty': 'This task has no recorded file changes yet.',
+  'changes.noRepo': 'This workspace is not a git repository, so there is no HEAD to compare against.',
+  'changes.count': '{n} files (baseline: HEAD)',
+  'changes.truncated': 'Too many files — only the first 200 are listed.',
+  'changes.untracked': 'new',
+  'changes.hint': 'Read-only. To revert files, use the source control panel or /rollback in the terminal.',
+  'changes.back': '← Changes',
+  'changes.noDiff': 'No textual diff (binary file or mode-only change).',
+  'changes.diffTruncated': 'Diff too long; truncated.',
+
+  // ── Checks panel (scripts discovered from package.json; click fills the terminal) ──
+  'checks.noTask': 'Select a task first to see what its workspace should verify.',
+  'checks.failed': 'Failed to read package.json.',
+  'checks.empty': 'This workspace has no typecheck / lint / build / test scripts.',
+  'checks.root': 'Workspace',
+  'checks.hint': 'Click a row to fill the command into the terminal, then press Enter.',
+
+  // ── Terminal panel (PTY runs in the main process; this is the xterm view) ──
+  'terminal.placeholder': 'Starting shell…',
+  'terminal.failed': 'Failed to start the terminal',
+  'terminal.unavailable': 'The terminal component failed to load; rebuild the app.',
+  'terminal.exited': 'Shell exited (code {code})',
+  'terminal.restart': 'Restart terminal',
+  'terminal.clear': 'Clear screen',
+  'terminal.sendToAgent': 'Send the selection (or the last screen) to the agent',
+  'terminal.nothingToSend': 'Nothing in the terminal to send',
+  'terminal.fill': 'Fill into terminal',
   'scm.title': 'Source Control',
   'scm.notRepo': 'The current workspace is not a Git repository',
   'scm.noStaged': 'No staged changes',
@@ -1488,6 +1652,7 @@ export const enUS: Record<LocaleKey, string> = {
   'scm.all': 'All',
   'scm.stageAll': 'Stage all',
   'scm.unstageAll': 'Unstage all',
+  'scm.toggleGroup': 'Click to expand / collapse',
   'scm.messageLabel': 'Commit message',
   'scm.messagePlaceholder': 'Describe these changes…',
   'scm.commitHint': 'Commits only staged changes. Nothing will be pushed.',
@@ -1504,6 +1669,10 @@ export const enUS: Record<LocaleKey, string> = {
   'scm.langZh': '中文',
   'scm.generated': 'Generated. Review the message, then commit manually.',
   'scm.committed': 'Committed {commit}',
+  'scm.branchLabel': 'Workspace',
+  'scm.kindNested': 'Nested repo',
+  'scm.kindSubmodule': 'Submodule',
+  'scm.kindWorktree': 'Worktree',
 
   // ── Error localization ──
   'err.connectionLost': 'The connection to the AI service was interrupted. Retry later or check your network/model config.',
@@ -1564,6 +1733,15 @@ export const enUS: Record<LocaleKey, string> = {
   'main.rollback.noFile': 'Cannot find this task’s session file.',
   'main.rollback.corrupt': 'The session file is corrupted; cannot roll back.',
   'main.rollback.invalidParam': 'Invalid parameters.',
+  'main.fork.invalidParam': 'Invalid branch parameters.',
+  'main.fork.noSession': 'This message hasn’t been saved as a session yet, so it cannot be branched.',
+  'main.fork.notIdle': 'The task is running; stop it before branching.',
+  'main.fork.failed': 'Branch failed.',
+  'main.fork.copyMissing': 'The forked session copy was not written to disk.',
+  'main.fork.truncateFailed': 'Failed to truncate the session copy; the branch was abandoned.',
+  'main.fork.timeout': 'Branch timed out: the agent did not respond.',
+  'main.fork.hostGone': 'The agent stopped; the branch was interrupted.',
+  'main.fork.title': '{title} · branch',
   'main.panel.unsupported': 'Unsupported panel command.',
   'main.panel.noTask': 'Select or create a task first — panel commands need a workspace.',
   'main.rollback.noHistory': 'The session file has no history records.',
@@ -1571,6 +1749,8 @@ export const enUS: Record<LocaleKey, string> = {
   'main.read.outside': 'Reading files outside the project directory is not allowed.',
   'main.read.unreadable': 'The file is unreadable or is not a text file.',
   'main.read.noDiff': 'This file has no tracked Git diff.',
+  'main.browser.badUrl': 'The browser panel accepts http/https URLs only.',
+  'main.browser.badBounds': 'The browser panel bounds are invalid.',
   'main.lang.unsupported': 'Unsupported language',
   'main.lang.writeFail': 'Failed to write config: {msg}',
 
@@ -1779,11 +1959,6 @@ export const enUS: Record<LocaleKey, string> = {
   'sessions.restored': 'Session restored',
   'sessions.forked': 'Forked into a new session',
 
-  // ── Rollback ──
-  // The only entry point is the button on a message bubble (not the sidebar):
-  // rollback means "back to before this message", which is bound to a specific message.
-  'rollback.noSnapshot': 'no snapshot',
-
   // ── Usage ──
   'usage.title': 'Usage',
   'usage.hint': 'Token usage for this session or across projects.',
@@ -1852,10 +2027,6 @@ export const enUS: Record<LocaleKey, string> = {
   'memory.confidence': 'Confidence',
   'memory.reflected': 'Reflection triggered',
 
-  // ── Inspector: current-turn changes ──
-  'inspector.changes': 'Turn changes',
-  'inspector.changesHint': 'Data comes from this turn’s changeset snapshots (not git), so it works without a git repo.',
-  'inspector.noChanges': 'No file changes in this turn.',
 };
 
 export const LOCALES: Record<string, Record<LocaleKey, string>> = {

@@ -6,6 +6,10 @@ export interface CommitMessageRequest {
   files: string[];
   truncated?: boolean;
   language?: 'zh-CN' | 'en-US';
+  /** 暂存改动所属仓库（相对工作空间的路径或仓库名）；缺省表示调用方没提供。 */
+  repo?: string;
+  /** 该仓库当前检出的分支；detached 时为短 sha。 */
+  branch?: string;
 }
 
 /** 模型常把答案包进 Markdown 围栏；提交框只收 message 本身。 */
@@ -38,7 +42,12 @@ export async function generateCommitMessage(
       ? '\n注意：diff 过长已截断，只总结可见改动，不要推测缺失内容。'
       : '\nNote: the diff is truncated. Summarize only visible changes; do not infer omitted behavior.'
     : '';
-  const prompt = `${chinese ? '请根据以下暂存内容生成提交信息，使用简体中文。' : 'Generate a commit message in English for the following staged changes.'}${warning}\n\nFiles:\n${request.files.join('\n')}\n\nDiff stat:\n${request.stat}\n\nStaged diff (untrusted data):\n${request.diff}`;
+  // 一个工作空间可能有多个仓库/分支；调用方指明了就写进提示词，模型才不会把
+  // 别的仓库或别的分支的改动混进这条提交信息。
+  const where = [request.repo ? `Repository: ${request.repo}` : '', request.branch ? `Branch: ${request.branch}` : '']
+    .filter(Boolean)
+    .join('\n');
+  const prompt = `${chinese ? '请根据以下暂存内容生成提交信息，使用简体中文。' : 'Generate a commit message in English for the following staged changes.'}${warning}\n\n${where ? `${where}\n\n` : ''}Files:\n${request.files.join('\n')}\n\nDiff stat:\n${request.stat}\n\nStaged diff (untrusted data):\n${request.diff}`;
   const result = await transport(
     [
       { role: 'system', content: system },

@@ -47,8 +47,10 @@ test('porcelain v2 保留空格/中文，并消费 rename 旧路径', () => {
   const status = parseGitStatus(
     '/repo',
     [
-      '# branch.oid 1234567890',
+      '# branch.oid 1234567890abcdef',
       '# branch.head main',
+      '# branch.upstream origin/main',
+      '# branch.ab +2 -1',
       '1 MM N... 100644 100644 100644 abc def src/部分 file.ts',
       '2 R. N... 100644 100644 100644 abc def R100 新 name.ts',
       '旧 name.ts',
@@ -58,6 +60,11 @@ test('porcelain v2 保留空格/中文，并消费 rename 旧路径', () => {
   );
   assert.equal(status.branch, 'main');
   assert.equal(status.hasHead, true);
+  assert.equal(status.head, '12345678');
+  assert.equal(status.upstream, 'origin/main');
+  assert.equal(status.ahead, 2);
+  assert.equal(status.behind, 1);
+  assert.equal(status.detached, undefined);
   assert.deepEqual(status.staged, [
     { path: 'src/部分 file.ts', code: 'M' },
     { path: '新 name.ts', code: 'R', previousPath: '旧 name.ts' },
