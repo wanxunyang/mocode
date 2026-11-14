@@ -71,10 +71,10 @@ export interface AgentHooks {
   onDone?: (elapsedMs: number, usage?: ChatUsage) => void;
 }
 
-/** OpenAI content array 的受支持子集。 */
+/** OpenAI content array 的受支持子集；name/attachment 仅供会话回放，transport 发送前剔除。 */
 export type ContentPart =
-  | { type: 'text'; text: string }
-  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
+  | { type: 'text'; text: string; name?: string; attachment?: boolean; truncated?: boolean }
+  | { type: 'image_url'; name?: string; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
 
 export type AgentTerminationReason = 'completed' | 'aborted' | 'max_steps';
 

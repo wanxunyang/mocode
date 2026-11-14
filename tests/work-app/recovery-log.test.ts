@@ -20,7 +20,8 @@ test('恢复多轮用户消息、附件、正文、工具结构化结果和上�
   withRoot((root) => {
     const log = recoveryLog(root, 'task-1');
     const image = { name: 'shot.png', dataUrl: 'data:image/png;base64,AAAA' };
-    log.user('先看这张图', [image]);
+    const document = { name: 'spec.pdf', text: 'PDF 提取正文', truncated: true };
+    log.user('先看这张图', [image, document]);
     log.event(event('run_started', { sessionId: 'session-1' }));
     log.event(event('text_delta', { text: '第一段' }));
     log.event(event('approval_requested', { approvalId: 'approval-1', title: '允许读取？' }));
@@ -45,7 +46,7 @@ test('恢复多轮用户消息、附件、正文、工具结构化结果和上�
 
     const snapshot = readRecovery(root, 'task-1');
     assert.ok(snapshot);
-    assert.deepEqual(snapshot.items[0], { kind: 'user', text: '先看这张图', attachments: [image] });
+    assert.deepEqual(snapshot.items[0], { kind: 'user', text: '先看这张图', attachments: [image, document] });
     assert.deepEqual(
       snapshot.items.slice(1).map((item) => item.kind),
       ['text', 'tool', 'user', 'text'],

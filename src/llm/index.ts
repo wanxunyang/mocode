@@ -5,7 +5,7 @@ import { getPlanDisabledTools, getProfileDisabledTools } from '../tools/constant
 import { imageSizeFromDataUrl } from '../attachments/image.js';
 import { ThinkTagFilter } from './think-filter.js';
 import { sanitizeToolSchemas } from './tool-schema.js';
-import { sanitizeAssistantContent } from './message-shape.js';
+import { sanitizeAssistantContent, sanitizeContentParts } from './message-shape.js';
 import { isMarkedStreamInterrupted } from './stream-interrupt.js';
 import { defaultAnthropicFetch, anthropicChatOnce } from './providers/anthropic.js';
 import { vertexChatOnce } from './providers/vertex.js';
@@ -841,6 +841,7 @@ async function chatWithRuntime(
  * 无需改写时返回原数组引用 —— 图片消息含大段 base64,不能无条件深拷贝。
  */
 export function normalizeImageDetail(messages: ChatMessage[]): ChatMessage[] {
+  messages = sanitizeContentParts(messages);
   let changed = false;
   const next = messages.map((message) => {
     const content = (message as { content?: unknown }).content;
@@ -933,7 +934,7 @@ async function chatOnce(
   const stream = await create(
     {
       model: runtime.getModel(),
-      messages: sanitizeAssistantContent(normalizeImageDetail(messages)),
+      messages: sanitizeContentParts(sanitizeAssistantContent(normalizeImageDetail(messages))),
       stream: true,
       // 空工具表(如摘要请求)不发 tools 字段——部分网关拒绝空数组。
       ...(activeTools.length > 0

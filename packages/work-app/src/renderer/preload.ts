@@ -1,7 +1,8 @@
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { RecoverySnapshot } from '../recovery-log.js';
+import type { AttachmentResult, WorkAttachment } from '../attachment-types.js';
 
-type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: Array<{ name: string; dataUrl: string }> };
+type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: WorkAttachment[] };
 
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
 type Project = { id: string; name: string; root: string; branch: string; auto?: boolean; sessionCount?: number };
@@ -55,7 +56,9 @@ contextBridge.exposeInMainWorld('mocodeWork', {
     ipcRenderer.invoke('work:adopt-session', payload),
   readFile: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:read-file', file),
   fileDiff: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:file-diff', file),
-  pickAttachment: (): Promise<{ name: string; dataUrl: string } | null> => ipcRenderer.invoke('work:pick-attachment'),
+  pickAttachment: (): Promise<AttachmentResult[]> => ipcRenderer.invoke('work:pick-attachment'),
+  readAttachments: (paths: string[]): Promise<AttachmentResult[]> => ipcRenderer.invoke('work:read-attachments', paths),
+  droppedFilePaths: (files: File[]): string[] => files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
   getConfig: (): Promise<{ model: string; label: string; provider: 'openai' | 'anthropic'; promptCache: boolean; baseUrl: string; contextWindow: number | null; language: string; theme: string }> => ipcRenderer.invoke('work:get-config'),
   listModels: (): Promise<Array<{ name: string; label: string; provider: 'openai' | 'anthropic'; promptCache: boolean; baseURL: string; providerHost: string; contextWindow: number; isActive: boolean }>> => ipcRenderer.invoke('work:list-models'),
   switchModel: (name: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:switch-model', name),

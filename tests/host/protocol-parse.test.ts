@@ -30,14 +30,21 @@ test('原有四条命令行为不变', () => {
   assert.equal(run?.type, 'run');
   assert.equal((run as { attachments?: unknown[] }).attachments?.length, 1);
 
-  // 非图片 dataUrl 被丢弃（沿用既有白名单）。
+  // 非图片 dataUrl 仍被丢弃；文档走经过主进程解析的文本通道。
   const textAttachment = parseCommand({
     id: 'r3',
     type: 'run',
     prompt: 'hi',
-    attachments: [{ name: 'a.txt', dataUrl: 'data:text/plain;base64,AAA' }],
+    attachments: [
+      { name: 'a.txt', dataUrl: 'data:text/plain;base64,AAA' },
+      { name: 'a.pdf', text: 'PDF 正文', truncated: true },
+      { name: 'empty.txt', text: '  ' },
+      { name: 'too-long.txt', text: 'x'.repeat(100_001) },
+    ],
   });
-  assert.deepEqual((textAttachment as { attachments?: unknown[] }).attachments, []);
+  assert.deepEqual((textAttachment as { attachments?: unknown[] }).attachments, [
+    { name: 'a.pdf', text: 'PDF 正文', truncated: true },
+  ]);
 
   // 拼错的 approval action 一律当取消。
   assert.equal(

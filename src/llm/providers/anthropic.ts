@@ -11,6 +11,7 @@ import type {
 import { resolveReasoningParams } from '../reasoning.js';
 import type { AnthropicFetchImpl, ModelProviderRuntime } from '../runtime.js';
 import { markStreamInterrupted } from '../stream-interrupt.js';
+import { sanitizeContentParts } from '../message-shape.js';
 
 type JsonObject = Record<string, unknown>;
 type AnthropicRole = 'user' | 'assistant';
@@ -86,6 +87,7 @@ export function encodeAnthropicMessages(
   input: ChatMessage[],
   promptCache = config.anthropicPromptCache,
 ): { system: AnthropicBlock[]; messages: AnthropicMessage[] } {
+  input = sanitizeContentParts(input);
   const system: AnthropicBlock[] = [];
   const messages: AnthropicMessage[] = [];
   const cacheCandidates: AnthropicBlock[] = [];

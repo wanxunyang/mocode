@@ -205,8 +205,9 @@ test('真实 host 强杀后保留工具检查点和半截 UI，重启续聊不�
     current = startHost(workspace, home, baseURL, events, diagnostics, record);
     await waitForEvent(events, (event) => event.event === 'runtime_ready', diagnostics, 'runtime_ready');
     const attachment = { name: 'before-crash.png', dataUrl: 'data:image/png;base64,AAAA' };
-    log.user('first crash prompt', [attachment]);
-    current.send({ id: 'task-real', type: 'run', prompt: 'first crash prompt', attachments: [attachment] });
+    const document = { name: 'before-crash.pdf', text: '崩溃前 PDF 附件正文', truncated: true };
+    log.user('first crash prompt', [attachment, document]);
+    current.send({ id: 'task-real', type: 'run', prompt: 'first crash prompt', attachments: [attachment, document] });
     const started = await waitForEvent(
       events,
       (event) => event.event === 'run_started' && event.requestId === 'task-real',
@@ -239,6 +240,20 @@ test('真实 host 强杀后保留工具检查点和半截 UI，重启续聊不�
       crashed.history.filter((message) => message.role === 'assistant' && message.tool_calls?.length).length,
       1,
     );
+    const savedUser = crashed.history.find(
+      (message) => message.role === 'user' && textOf(message).includes('first crash prompt'),
+    );
+    assert.ok(savedUser, '当前 run 的用户消息应在工具检查点里');
+    assert.ok(
+      Array.isArray(savedUser.content) &&
+        savedUser.content.some(
+          (part) =>
+            part &&
+            typeof part === 'object' &&
+            (part as { text?: unknown }).text?.toString().includes('崩溃前 PDF 附件正文'),
+        ),
+      `附件正文未保存：${JSON.stringify(crashed.history)}`,
+    );
     const savedTool = crashed.history.find(
       (message) => message.role === 'tool' && message.tool_call_id === 'call-crash-real',
     );
@@ -256,6 +271,7 @@ test('真实 host 强杀后保留工具检查点和半截 UI，重启续聊不�
     assert.equal(snapshot.interrupted, true);
     assert.equal(snapshot.pendingApproval, null);
     assert.equal(snapshot.items.filter((item) => item.kind === 'user').length, 1);
+    assert.deepEqual(snapshot.items[0]?.kind === 'user' ? snapshot.items[0].attachments : [], [attachment, document]);
     assert.ok(snapshot.items.some((item) => item.kind === 'text' && item.text.includes('崩溃前已经显示')));
     assert.ok(snapshot.items.some((item) => item.kind === 'text' && item.text.includes('工具后的半截正文')));
     const restoredTool = snapshot.items.find((item) => item.kind === 'tool' && item.id === 'call-crash-real');
@@ -300,6 +316,16 @@ test('真实 host 强杀后保留工具检查点和半截 UI，重启续聊不�
       1,
     );
     assert.ok(continuedRequest.some((message) => message.role === 'assistant' && message.tool_calls?.length));
+    assert.equal(textOf(savedUser).includes('崩溃前 PDF 附件正文'), true);
+    const requestUser = continuedRequest.find((message) => textOf(message).includes('first crash prompt'));
+    assert.ok(requestUser && Array.isArray(requestUser.content));
+    assert.equal(
+      requestUser.content.some(
+        (part) => part && typeof part === 'object' && (part as { name?: unknown }).name !== undefined,
+      ),
+      false,
+      '回放元数据不得发给模型',
+    );
     assert.equal(fs.readFileSync(path.join(workspace, 'crash-target.txt'), 'utf8'), 'checkpoint-content');
 
     const continued = JSON.parse(fs.readFileSync(sessionFile, 'utf8')) as SessionRecord;

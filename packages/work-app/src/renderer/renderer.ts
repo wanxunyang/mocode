@@ -6,6 +6,7 @@ import { mountIcons, icon } from './icons.js';
 import { initPanels, handlePanelEvent, renderPanel, renderTurnChanges, requestPanelCommand, type PanelKind } from './panels.js';
 import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, MOD, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
 import type { RecoverySnapshot } from '../recovery-log.js';
+import type { WorkAttachment, AttachmentResult, AttachmentErrorCode } from '../attachment-types.js';
 
 export {};
 
@@ -69,7 +70,8 @@ type ProjectSession = { id: string; createdAt: string; model: string; firstUser:
 type Task = { id: string; projectId: string; title: string; status: TaskStatus; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string };
 type WorkState = { version: 1; projects: Project[]; selectedProjectId: string; tasks: Task[]; selectedTaskId?: string };
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
-type Attachment = { name: string; dataUrl: string };
+type Attachment = WorkAttachment;
+type ImageAttachment = WorkAttachment & { dataUrl: string };
 type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: Attachment[] };
 type LlmProvider = 'openai' | 'anthropic';
 type ModelConfig = { model: string; label: string; provider: LlmProvider; promptCache: boolean; baseUrl: string; contextWindow: number | null; language: string; theme: string };
@@ -128,7 +130,9 @@ declare global {
       adoptSession: (payload: { projectId: string; sessionId: string; title?: string }) => Promise<{ ok: boolean; message?: string; state?: WorkState; task?: Task; history?: HistoryItem[] }>;
       readFile: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
-      pickAttachment: () => Promise<Attachment | null>;
+      pickAttachment: () => Promise<AttachmentResult[]>;
+      readAttachments: (paths: string[]) => Promise<AttachmentResult[]>;
+      droppedFilePaths: (files: File[]) => string[];
       getConfig: () => Promise<ModelConfig>;
       listModels: () => Promise<ModelItem[]>;
       switchModel: (name: string) => Promise<{ ok: boolean; message: string }>;
@@ -503,7 +507,7 @@ function contextUsageDetails(usage: ContextUsageSnapshot): string {
 
 /** 更新输入栏的当前上下文快照；null 表示尚无会话或数据尚未返回。 */
 function updateContextUsage(usage: ContextUsageSnapshot | null): void {
-  contextUsageEl.textContent = usage ? `${usage.percent}%` : '--';
+  contextUsageEl.textContent = t('composer.contextUsageValue', { percent: usage ? `${usage.percent}%` : '--' });
   contextUsageEl.classList.toggle('usage-high', (usage?.percent ?? 0) >= 70);
   contextUsageEl.tabIndex = usage ? 0 : -1;
   contextUsagePopover.innerHTML = usage ? contextUsageDetails(usage) : '';
@@ -1682,7 +1686,7 @@ function ensureImageHover(): HTMLElement {
   return preview;
 }
 
-function showImageHover(attachment: Attachment, anchor: HTMLElement): void {
+function showImageHover(attachment: ImageAttachment, anchor: HTMLElement): void {
   const preview = ensureImageHover();
   const image = preview.querySelector('img') as HTMLImageElement;
   (preview.querySelector('figcaption') as HTMLElement).textContent = attachment.name;
@@ -1715,13 +1719,13 @@ function closeImageViewer(): void {
   imageViewerReturnFocus = null;
 }
 
-function openImageViewer(attachment: Attachment, trigger: HTMLElement): void {
+function openImageViewer(attachment: ImageAttachment, trigger: HTMLElement): void {
   if (!imageViewerEl) {
     const viewer = document.createElement('section');
     viewer.className = 'image-viewer hidden';
     viewer.setAttribute('role', 'dialog');
     viewer.setAttribute('aria-modal', 'true');
-    viewer.innerHTML = `<button type="button" class="image-viewer-close" title="${t('common.close')}" aria-label="${t('common.close')}">${icon('close')}</button><figure><img alt=""><figcaption></figcaption></figure>`;
+    viewer.innerHTML = `<div class="image-viewer-card"><button type="button" class="image-viewer-close" title="${t('common.close')}" aria-label="${t('common.close')}">${icon('close')}</button><figure><img alt=""><figcaption></figcaption></figure></div>`;
     viewer.querySelector('.image-viewer-close')?.addEventListener('click', closeImageViewer);
     viewer.addEventListener('click', (event) => { if (event.target === viewer) closeImageViewer(); });
     document.body.append(viewer);
@@ -1744,7 +1748,7 @@ document.addEventListener('keydown', (event) => {
   closeImageViewer();
 });
 
-function imagePreviewButton(attachment: Attachment, showName = false): HTMLButtonElement {
+function imagePreviewButton(attachment: ImageAttachment, showName = false): HTMLButtonElement {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = showName ? 'image-preview-trigger attachment-preview' : 'image-preview-trigger';
@@ -1772,11 +1776,36 @@ function imagePreviewButton(attachment: Attachment, showName = false): HTMLButto
   return button;
 }
 
-/** 用户消息图片网格；实时消息与历史回放都走这里，不能各自维护一套 DOM。 */
-function imageGallery(images: Attachment[], className = 'message-image'): HTMLElement {
+/** 文档与图片使用同一附件模型；文档显示文件卡片，绝不送进 <img>。 */
+function filePreview(attachment: Attachment): HTMLSpanElement {
+  const card = document.createElement('span');
+  card.className = 'file-attachment';
+  card.title = attachment.truncated ? t('composer.fileTruncated', { name: attachment.name }) : attachment.name;
+  const symbol = document.createElement('span');
+  symbol.className = 'file-attachment-icon';
+  symbol.innerHTML = icon('files');
+  const name = document.createElement('span');
+  name.className = 'file-attachment-name';
+  name.textContent = attachment.name;
+  card.append(symbol, name);
+  if (attachment.truncated) {
+    const mark = document.createElement('span');
+    mark.className = 'file-attachment-truncated';
+    mark.textContent = t('composer.truncated');
+    card.append(mark);
+  }
+  return card;
+}
+
+function attachmentPreview(attachment: Attachment, showName = false): HTMLElement {
+  return attachment.dataUrl ? imagePreviewButton({ ...attachment, dataUrl: attachment.dataUrl }, showName) : filePreview(attachment);
+}
+
+/** 用户消息附件网格；实时消息与历史回放共用。 */
+function imageGallery(items: Attachment[], className = 'message-image'): HTMLElement {
   const gallery = document.createElement('div');
   gallery.className = `image-gallery ${className}`;
-  for (const attachment of images) gallery.append(imagePreviewButton(attachment));
+  for (const attachment of items) gallery.append(attachmentPreview(attachment));
   return gallery;
 }
 
@@ -1786,7 +1815,7 @@ function renderAttachments(): void {
   attachments.forEach((attachment, index) => {
     const chip = document.createElement('span');
     chip.className = 'attachment-chip';
-    chip.append(imagePreviewButton(attachment, true));
+    chip.append(attachmentPreview(attachment, true));
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'attachment-remove';
@@ -2200,13 +2229,32 @@ function ensureCheatsheet(): HTMLElement {
 function showCheatsheet(): void { ensureCheatsheet()!.classList.remove('hidden'); }
 function hideCheatsheet(): void { cheatsheetEl?.classList.add('hidden'); }
 
-/* ── 图片附件：拖入 / 粘贴共用同一套入队逻辑 ───────────── */
+/* ── 通用附件：选择与拖入统一由主进程解析，图片粘贴留在 renderer ───────────── */
 const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
+const MAX_ATTACHMENTS = 8;
+
+function addAttachmentResults(results: AttachmentResult[]): void {
+  for (const result of results) {
+    if ('error' in result) {
+      const keys: Record<AttachmentErrorCode, Parameters<typeof t>[0]> = {
+        unsupported: 'toast.attachmentUnsupported', too_large: 'toast.attachmentTooLarge',
+        invalid_utf8: 'toast.attachmentInvalidUtf8', empty_text: 'toast.attachmentEmpty', read_failed: 'toast.attachmentReadFail',
+      };
+      showToast('warn', t(keys[result.error], { label: result.name }), 5000);
+      continue;
+    }
+    if (attachments.length >= MAX_ATTACHMENTS) { showToast('warn', t('toast.attachmentLimit', { n: MAX_ATTACHMENTS })); break; }
+    attachments.push(result.attachment);
+    if (result.attachment.truncated) showToast('info', t('toast.attachmentTruncated', { label: result.attachment.name }), 5000);
+  }
+  renderAttachments();
+}
 
 /** 把一张图片加入待发送附件。非图片或超限会提示并跳过，返回是否入队成功。 */
 async function addImageFile(file: File, fallbackName = t('composer.imageFallback')): Promise<boolean> {
   const label = file.name || fallbackName;
-  if (file.type && !/^image\//.test(file.type)) { showToast('warn', t('toast.imageNotImage', { label: label })); return false; }
+  if (attachments.length >= MAX_ATTACHMENTS) { showToast('warn', t('toast.attachmentLimit', { n: MAX_ATTACHMENTS })); return false; }
+  if (file.type && !/^image\/(?:png|jpeg|gif|webp)$/.test(file.type)) { showToast('warn', t('toast.imageNotImage', { label: label })); return false; }
   if (file.size > MAX_ATTACHMENT_BYTES) { showToast('error', t('toast.imageTooLarge', { label: label })); return false; }
   try {
     const dataUrl = await new Promise<string>((resolve, reject) => {
@@ -2270,8 +2318,8 @@ function setupDragDrop(): void {
     event.preventDefault();
     depth = 0;
     composer.classList.remove('composer-drag');
-    for (const file of Array.from(event.dataTransfer.files)) await addImageFile(file);
-    renderAttachments();
+    const paths = window.mocodeWork.droppedFilePaths(Array.from(event.dataTransfer.files));
+    addAttachmentResults(await window.mocodeWork.readAttachments(paths));
     promptInput.focus();
   });
 }
@@ -2474,7 +2522,7 @@ async function submit(): Promise<void> {
   }
   // 标题自动摘要：新建后还没命名的任务，用这一条指令就地命名（用户手动改过就不动）。
   if (!task.title.trim() && !task.sessionId) {
-    const next = await window.mocodeWork.renameTask(task.id, prompt ? summarizePrompt(prompt) : t('composer.imageFallback'));
+    const next = await window.mocodeWork.renameTask(task.id, prompt ? summarizePrompt(prompt) : attachments[0]?.name ?? t('composer.fileFallback'));
     if (next) updateState(next);
   }
   // 排序记在用户实际提交时：即使消息排队，也立即置顶；稍后出队不会再次刷新。
@@ -3143,7 +3191,9 @@ $('#task-name-input')?.addEventListener('keydown', (event) => {
   event.preventDefault();
   void submitRenameModal();
 });
-$('#add-attachment').addEventListener('click', async () => { const attachment = await window.mocodeWork.pickAttachment(); if (attachment) { attachments.push(attachment); renderAttachments(); } });
+$('#add-attachment').addEventListener('click', async () => {
+  addAttachmentResults(await window.mocodeWork.pickAttachment());
+});
 $('#compact-button').addEventListener('click', () => {
   const viewing = viewingTaskId();
   if (!viewing) return;

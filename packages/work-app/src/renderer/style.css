@@ -452,6 +452,9 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 
 /* 隐藏非空状态下也能用的元素 */
 .workspace:not(:has(> #empty-state:not(.hidden))) .empty-chips { display: none; }
+/* 开场尚未产生会话：计划仍可预先选择；压缩和上下文占比都还没有意义。 */
+.workspace:has(> #empty-state:not(.hidden)) #compact-button,
+.workspace:has(> #empty-state:not(.hidden)) #context-usage { display: none; }
 
 /* 聚焦:主题色描边 + ring —— 这是"光标在哪"的唯一视觉线索,不加位移、不加粗。 */
 .composer:focus-within { border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent-ring), var(--shadow-soft); }
@@ -460,8 +463,10 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
    空文本时它算出的 height 小于这个值,会被 min-height 兜住 → 输入框不会扁回去。 */
 textarea { display: block; width: 100%; min-height: calc(2 * 1.7em + var(--space-sm) + var(--space-2xs)); max-height: 168px; resize: none; border: 0; outline: none; padding: 12px var(--space-md) var(--space-2xs); color: var(--text-strong); line-height: var(--leading-relaxed); background: transparent; font-size: var(--text-md); }
 textarea::placeholder { color: var(--text-subtle); }
-.composer-actions { min-height: 44px; padding: 6px 8px 8px; display: flex; align-items: center; justify-content: space-between; }
+.composer-actions { min-height: 44px; padding: 6px 8px 8px; display: flex; align-items: center; justify-content: space-between; gap: var(--space-xs); }
 .left-actions, .right-actions { display: flex; align-items: center; gap: 4px; }
+.left-actions { flex-shrink: 0; }
+.right-actions { min-width: 0; justify-content: flex-end; }
 .plus-button { width: 30px; height: 30px; color: var(--text-muted); border-radius: var(--radius-sm); display: grid; place-items: center; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
 .plus-button .icon { width: 16px; height: 16px; }
 .plus-button:hover { background: var(--surface-hover); color: var(--text-strong); }
@@ -488,7 +493,7 @@ textarea::placeholder { color: var(--text-subtle); }
 .plan-toggle.active:hover { background: var(--color-accent-ink); border-color: var(--color-accent-ink); color: var(--color-paper); }
 .compact-button .icon, .model-button .icon { width: 13px; height: 13px; color: var(--text-muted); }
 .compact-button:hover, .model-button:hover { background: var(--surface-hover); color: var(--text-strong); border-color: var(--border-default); }
-.context-usage { font-size: var(--text-2xs); font-family: var(--font-outlier); color: var(--text-subtle); padding: 5px var(--space-2xs); min-width: 30px; text-align: center; border-radius: var(--radius-sm); cursor: help; transition: color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out); flex-shrink: 0; }
+.context-usage { font-size: var(--text-2xs); font-family: var(--font-outlier); color: var(--text-subtle); padding: 5px var(--space-2xs); min-width: 30px; text-align: center; border-radius: var(--radius-sm); cursor: help; transition: color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out); flex-shrink: 0; white-space: nowrap; }
 .context-usage:hover, .context-usage:focus-visible { color: var(--text-strong); background: var(--surface-hover); }
 .context-usage.usage-high { color: var(--color-warn); font-weight: 500; }
 .context-usage-popover { position: fixed; z-index: var(--z-tooltip); width: min(320px, calc(100vw - 24px)); padding: 14px; border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text-default); box-shadow: var(--shadow-raised); pointer-events: none; animation: fade-in var(--dur-micro) var(--ease-out) both; }
@@ -502,7 +507,8 @@ textarea::placeholder { color: var(--text-subtle); }
 .context-usage-row strong { color: var(--text-default); font-family: var(--font-outlier); font-weight: 500; white-space: nowrap; }
 .context-usage-source { margin-top: 10px; color: var(--text-default); font-size: var(--text-xs); font-weight: 500; }
 .context-usage-note { margin-top: 4px; color: var(--text-subtle); font-size: var(--text-2xs); line-height: 1.6; }
-.model-button .mode-label { display: inline-block; }
+.model-button { min-width: 0; }
+.model-button .mode-label { display: inline-block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 发送:32×32 圆角方钮 + 主题色实底。
    ⚠ hover 只加深底色与阴影:**不做 translateY** —— 位移过的按钮和它自己的描边/阴影会错位。 */
 .send-button { width: 32px; height: 32px; display: grid; place-items: center; border-radius: var(--radius-md); background: var(--color-accent); color: var(--text-on-accent); box-shadow: var(--shadow-whisper); transition: background var(--dur-micro) var(--ease-out), box-shadow var(--dur-micro) var(--ease-out); }
@@ -1004,7 +1010,7 @@ textarea::placeholder { color: var(--text-subtle); }
 .attachment-list:empty { display: none; }
 .attachment-chip { display: flex; align-items: center; gap: var(--space-2xs); max-width: 280px; padding: 4px; border: var(--rule-hair); border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--text-default); font-size: var(--text-2xs); }
 .attachment-preview { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--space-2xs); padding: 0; text-align: left; }
-.attachment-preview .image-thumb { width: 48px; height: 48px; flex: 0 0 48px; border-radius: var(--radius-sm); }
+.attachment-preview.image-preview-trigger .image-thumb { width: 32px; height: 32px; flex: 0 0 32px; border-radius: var(--radius-sm); }
 .attachment-image-name { min-width: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-remove { width: 24px; height: 24px; flex: 0 0 24px; padding: 0; color: var(--color-subtle); display: grid; place-items: center; border-radius: var(--radius-sm); transition: color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out); }
 .attachment-remove .icon { width: 12px; height: 12px; }
@@ -1014,19 +1020,24 @@ textarea::placeholder { color: var(--text-subtle); }
 .image-preview-trigger .image-thumb { display: block; width: 100%; height: 100%; object-fit: cover; }
 .image-preview-trigger:hover .image-thumb { filter: brightness(0.94); }
 .image-gallery { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2xs); width: fit-content; max-width: 100%; margin-bottom: var(--space-2xs); }
-.image-gallery > .image-preview-trigger { width: 180px; height: 180px; border: var(--rule-hair); }
-.image-gallery:has(> :only-child) > .image-preview-trigger { width: min(320px, 100%); height: auto; max-height: 360px; aspect-ratio: 4 / 3; }
-.image-gallery:has(> :only-child) .image-thumb { object-fit: contain; }
-.image-hover-preview { position: fixed; z-index: var(--z-tooltip); width: min(360px, calc(100vw - 24px)); margin: 0; padding: var(--space-2xs); pointer-events: none; border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-raised); }
+.image-gallery > .image-preview-trigger { width: 64px; height: 64px; border: var(--rule-hair); }
+.file-attachment { display: inline-flex; align-items: center; gap: var(--space-2xs); min-width: 0; max-width: 280px; padding: 7px 9px; border: var(--rule-hair); border-radius: var(--radius-sm); background: var(--surface-sunken); color: var(--text-default); font-size: var(--text-xs); }
+.file-attachment-icon { display: grid; place-items: center; flex: 0 0 auto; color: var(--color-accent); }
+.file-attachment-icon .icon { width: 16px; height: 16px; }
+.file-attachment-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-attachment-truncated { flex: 0 0 auto; color: var(--color-warn); font-size: var(--text-2xs); }
+.message.user .file-attachment { background: var(--surface-raised); }
+.image-hover-preview { position: fixed; z-index: var(--z-tooltip); width: min(320px, calc(100vw - 24px)); margin: 0; padding: var(--space-2xs); pointer-events: none; border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-raised); }
 .image-hover-preview.hidden, .image-viewer.hidden { display: none; }
-.image-hover-preview img { display: block; width: auto; height: auto; max-width: 100%; max-height: min(420px, 50vh); margin: 0 auto; object-fit: contain; border-radius: var(--radius-sm); background: var(--surface-sunken); }
+.image-hover-preview img { display: block; width: auto; height: auto; max-width: 100%; max-height: min(360px, 50vh); margin: 0 auto; object-fit: contain; border-radius: var(--radius-sm); background: var(--surface-sunken); }
 .image-hover-preview figcaption { padding: var(--space-2xs) var(--space-2xs) 0; overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
-.image-viewer { position: fixed; z-index: var(--z-tooltip); inset: 0; display: grid; place-items: center; padding: 56px var(--space-xl) var(--space-xl); background: var(--color-scrim); backdrop-filter: blur(10px); }
-.image-viewer figure { min-width: 0; max-width: 100%; max-height: 100%; display: flex; flex-direction: column; align-items: center; gap: var(--space-sm); margin: 0; }
-.image-viewer figure img { display: block; min-width: 0; min-height: 0; max-width: 100%; max-height: calc(100vh - 128px); object-fit: contain; border-radius: var(--radius-sm); box-shadow: var(--shadow-raised); }
-.image-viewer figcaption { max-width: min(720px, 80vw); overflow: hidden; color: var(--text-on-accent); font-size: var(--text-sm); text-overflow: ellipsis; white-space: nowrap; }
-.image-viewer-close { position: fixed; top: var(--space-md); right: var(--space-md); width: 36px; height: 36px; display: grid; place-items: center; border: var(--rule-hair); border-radius: var(--radius-full); background: var(--surface-raised); color: var(--text-strong); box-shadow: var(--shadow-soft); }
-.image-viewer-close .icon { width: 18px; height: 18px; }
+.image-viewer { position: fixed; z-index: var(--z-modal); inset: 37px 0 0; display: grid; place-items: center; padding: var(--space-lg); background: var(--color-scrim); backdrop-filter: blur(6px); }
+.image-viewer-card { position: relative; width: fit-content; max-width: min(720px, calc(100vw - 48px)); max-height: 100%; padding: 44px var(--space-xs) var(--space-xs); border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-raised); }
+.image-viewer figure { min-width: 0; max-width: 100%; max-height: 100%; display: flex; flex-direction: column; align-items: center; gap: var(--space-2xs); margin: 0; }
+.image-viewer figure img { display: block; width: auto; height: auto; min-width: 0; min-height: 0; max-width: min(680px, calc(100vw - 72px)); max-height: calc(100vh - 205px); margin: 0 auto; object-fit: contain; border-radius: var(--radius-sm); background: var(--surface-sunken); }
+.image-viewer figcaption { max-width: min(680px, calc(100vw - 72px)); overflow: hidden; color: var(--text-muted); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.image-viewer-close { position: absolute; z-index: 1; top: var(--space-2xs); right: var(--space-2xs); width: 32px; height: 32px; display: grid; place-items: center; border: var(--rule-hair); border-radius: var(--radius-full); background: var(--surface-raised); color: var(--text-strong); box-shadow: var(--shadow-soft); }
+.image-viewer-close .icon { width: 16px; height: 16px; }
 .image-viewer-close:hover { background: var(--surface-hover); }
 
 /* ── Inspector ───────────────────────────────────────── */

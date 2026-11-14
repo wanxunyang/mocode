@@ -135,6 +135,12 @@ if (manifest.name !== 'mocode-ai') {
 }
 const entries = Object.keys(manifest.dependencies ?? {}).filter((name) => !shouldSkip(name));
 entries.push('playwright-core');
+// 主进程动态加载的 PDF/DOCX 解析器。它们不由 host import，但必须随独立资源目录发布；
+// main.ts 通过 configureAttachmentModulePath 指向这里的 node_modules。
+const workManifest = JSON.parse(readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+for (const name of ['pdfjs-dist', 'mammoth']) {
+  if (workManifest.dependencies?.[name]) entries.push(name);
+}
 
 const { resolved, missing } = collectClosure(entries);
 if (missing.length) {

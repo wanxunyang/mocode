@@ -9,6 +9,30 @@ import type OpenAI from 'openai';
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 
 /**
+ * 会话 part 上的文件名、附件标记、截断标记只供 GUI 回放，不属于 OpenAI 协议。
+ * 在 provider 边界移除，避免续聊时严格网关把整请求拒掉；原 history 保留元数据。
+ */
+export function sanitizeContentParts(messages: ChatMessage[]): ChatMessage[] {
+  let changed = false;
+  const next = messages.map((message) => {
+    if (!Array.isArray(message.content)) return message;
+    let messageChanged = false;
+    const content = message.content.map((raw) => {
+      if (!raw || typeof raw !== 'object') return raw;
+      const part = raw as unknown as Record<string, unknown>;
+      if (part.name === undefined && part.attachment === undefined && part.truncated === undefined) return raw;
+      messageChanged = true;
+      const { name: _name, attachment: _attachment, truncated: _truncated, ...clean } = part;
+      return clean as unknown as typeof raw;
+    });
+    if (!messageChanged) return message;
+    changed = true;
+    return { ...message, content } as ChatMessage;
+  });
+  return changed ? next : messages;
+}
+
+/**
  * 把「无文本、无 tool_calls」的 assistant 消息的 `content: null` 改写成空字符串。
  *
  * 背景:`content: null` 在 assistant 消息上**只在携带 tool_calls 时合法**(那是 OpenAI 自己

@@ -14,13 +14,19 @@ export { HOST_PROTOCOL_VERSION };
 
 function parseAttachments(value: unknown): HostAttachment[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  return value.flatMap((item) => {
-    if (!item || typeof item !== 'object') return [];
+  const out: HostAttachment[] = [];
+  for (const item of value.slice(0, 8)) {
+    if (!item || typeof item !== 'object') continue;
     const entry = item as Record<string, unknown>;
-    if (typeof entry.name !== 'string' || typeof entry.dataUrl !== 'string' || !entry.dataUrl.startsWith('data:image/'))
-      return [];
-    return [{ name: entry.name.slice(0, 240), dataUrl: entry.dataUrl }];
-  });
+    if (typeof entry.name !== 'string') continue;
+    const name = entry.name.slice(0, 240);
+    if (typeof entry.dataUrl === 'string' && /^data:image\/(?:png|jpeg|gif|webp);base64,/.test(entry.dataUrl)) {
+      out.push({ name, dataUrl: entry.dataUrl });
+    } else if (typeof entry.text === 'string' && entry.text.trim() && entry.text.length <= 100_000) {
+      out.push({ name, text: entry.text, truncated: entry.truncated === true });
+    }
+  }
+  return out;
 }
 
 /** 有限枚举白名单：拼错/未知取值一律 null，由调用方当作非法命令拒掉（fail-closed）。 */

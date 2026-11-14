@@ -1,7 +1,8 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 
-export interface RecoveryAttachment { name: string; dataUrl: string }
+import type { WorkAttachment } from './attachment-types.js';
+export type RecoveryAttachment = WorkAttachment;
 export interface RecoveryEnvelope {
   type: string;
   event?: string;
@@ -126,7 +127,9 @@ function validEntry(value: unknown): value is LogEntry {
   if (!isRecord(value) || !Number.isInteger(value.seq) || Number(value.seq) <= 0 || typeof value.at !== 'string') return false;
   if (value.type === 'user') {
     return typeof value.text === 'string' && (value.attachments === undefined || Array.isArray(value.attachments)
-      && value.attachments.every((item) => isRecord(item) && typeof item.name === 'string' && typeof item.dataUrl === 'string'));
+      && value.attachments.every((item) => isRecord(item) && typeof item.name === 'string'
+        && ((typeof item.dataUrl === 'string' && item.text === undefined)
+          || (typeof item.text === 'string' && item.text.length <= 100_000 && item.dataUrl === undefined))));
   }
   if (value.type === 'truncate' || value.type === 'regenerate') return validUserIndex(value.userIndex);
   if (value.type !== 'event' || !isRecord(value.event) || typeof value.event.type !== 'string') return false;

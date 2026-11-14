@@ -417,13 +417,22 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
     // 是内存快照、不会调用 onCheckpoint；这里追加 user 后再落盘，避免首轮崩溃只剩侧栏标题。
     const userInput: string | ContentPart[] = command.attachments?.length
       ? [
-          // 纯图片消息不塞空 text；文件名留在会话 part 上供 GUI 历史回放展示，不进模型正文。
           ...(command.prompt ? [{ type: 'text' as const, text: command.prompt }] : []),
-          ...command.attachments.map((attachment) => ({
-            type: 'image_url' as const,
-            name: attachment.name,
-            image_url: { url: attachment.dataUrl },
-          })),
+          ...command.attachments.flatMap((attachment): ContentPart[] => {
+            if (attachment.dataUrl)
+              return [{ type: 'image_url', name: attachment.name, image_url: { url: attachment.dataUrl } }];
+            if (typeof attachment.text !== 'string') return [];
+            // name/attachment/truncated 是会话回放元数据，transport 发送前统一移除。
+            return [
+              {
+                type: 'text',
+                name: attachment.name,
+                attachment: true,
+                truncated: attachment.truncated === true,
+                text: `用户附件 ${JSON.stringify(attachment.name)} 的提取文本如下。${attachment.truncated ? '（内容已截断，仅提供前 100000 字符）' : ''}\n\n${attachment.text}`,
+              },
+            ];
+          }),
         ]
       : command.prompt;
     history.push({ role: 'user', content: userInput });

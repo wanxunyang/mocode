@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import { ATTACHMENT_EXTENSIONS, configureAttachmentModulePath, historyAttachments, readAttachment, type WorkAttachment } from './attachments.js';
 import { truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
 import { deleteRecoveryLog, readRecovery, recoveryLog, type RecoveryAttachment, type RecoveryEnvelope, type RecoveryLog } from './recovery-log.js';
 import { tMain } from './i18n/main.js';
@@ -53,7 +54,8 @@ import {
 import { isUserConfigEnvKey } from '@mocode/protocol';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MAX_ATTACHMENT_BYTES = 4 * 1024 * 1024;
+// 开发环境从 workspace/root node_modules 解析；安装版只读随包发布的独立资源目录。
+if (app.isPackaged) configureAttachmentModulePath(path.join(process.resourcesPath, 'mocode-ai'));
 /**
  * 不进文件树的目录：依赖、构建产物、缓存。
  * `target` 是 Cargo/Maven/Gradle 的产物目录（mocode 仓库里它一家就占 7200 个 .o/.rlib，
@@ -722,7 +724,7 @@ function workspaceForTask(task: TaskRecord): Project | undefined {
 
 function contentText(value: unknown): string {
   if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value.map((part) => typeof part?.text === 'string' ? part.text : '').join('');
+  if (Array.isArray(value)) return value.map((part) => part?.type === 'text' && part.attachment !== true && typeof part.text === 'string' ? part.text : '').join('');
   return value == null ? '' : JSON.stringify(value);
 }
 
@@ -741,18 +743,7 @@ function sessionHistory(project: Project, sessionId?: string): HistoryItem[] {
   return messages ? flattenHistory(messages) : [];
 }
 
-type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: Array<{ name: string; dataUrl: string }> };
-
-/** 会话中的 image_url → GUI 图片附件。旧版纯文本会话自然得到空数组。 */
-function historyImages(content: unknown): Array<{ name: string; dataUrl: string }> {
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((part, index) => {
-    if (!part || part.type !== 'image_url' || typeof part.image_url?.url !== 'string') return [];
-    const dataUrl = part.image_url.url;
-    if (!dataUrl.startsWith('data:image/')) return [];
-    return [{ name: typeof part.name === 'string' && part.name ? part.name : `image-${index + 1}.png`, dataUrl }];
-  });
-}
+type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: WorkAttachment[] };
 
 function flattenHistory(messages: Array<Record<string, unknown>>): HistoryItem[] {
   const items: HistoryItem[] = [];
@@ -761,7 +752,7 @@ function flattenHistory(messages: Array<Record<string, unknown>>): HistoryItem[]
     const role = message.role;
     if (role === 'user' || role === 'assistant') {
       const text = contentText(message.content);
-      const attachments = role === 'user' ? historyImages(message.content) : [];
+      const attachments = role === 'user' ? historyAttachments(message.content) : [];
       // 纯图片用户消息也必须保留：否则会丢轮次，后续助手回答并入上一轮。
       if (text || attachments.length) items.push({ role, text, ...(attachments.length ? { attachments } : {}) });
       if (role !== 'assistant' || !Array.isArray(message.tool_calls)) continue;
@@ -1282,16 +1273,6 @@ function providerHostOf(raw: string): string {
   return parts.join('.');
 }
 
-function attachmentFor(filePath: string): { name: string; dataUrl: string } | null {
-  try {
-    const data = readFileSync(filePath);
-    if (data.byteLength > MAX_ATTACHMENT_BYTES) return null;
-    const extension = path.extname(filePath).toLowerCase();
-    const mime = extension === '.png' ? 'image/png' : extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : extension === '.gif' ? 'image/gif' : extension === '.webp' ? 'image/webp' : null;
-    return mime ? { name: path.basename(filePath), dataUrl: `data:${mime};base64,${data.toString('base64')}` } : null;
-  } catch { return null; }
-}
-
 function installIpc(): void {
   ipcMain.handle('work:get-state', () => state);
   ipcMain.handle('work:pick-project', async () => {
@@ -1522,8 +1503,17 @@ function installIpc(): void {
     const result = await runCommand(selectedProject().root, 'git', ['diff', '--', relativePath]); return { path: relativePath, content: result.ok ? result.stdout || tMain('main.read.noDiff') : result.stderr };
   });
   ipcMain.handle('work:pick-attachment', async () => {
-    const result = await dialog.showOpenDialog(windowRef!, { properties: ['openFile'], filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
-    return result.canceled || !result.filePaths[0] ? null : attachmentFor(result.filePaths[0]);
+    const result = await dialog.showOpenDialog(windowRef!, {
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'Images & documents', extensions: ATTACHMENT_EXTENSIONS }],
+    });
+    return result.canceled ? [] : Promise.all(result.filePaths.map(readAttachment));
+  });
+  // 拖入文件由 preload 从 Electron File.path 取真实路径；解析只在主进程做，renderer 不碰 fs。
+  ipcMain.handle('work:read-attachments', async (_event, paths: unknown) => {
+    if (!Array.isArray(paths)) return [];
+    const files = paths.filter((item): item is string => typeof item === 'string' && path.isAbsolute(item)).slice(0, 32);
+    return Promise.all(files.map(readAttachment));
   });
   // 把模型 / 上下文等关键配置透出给 renderer,用于在 UI 上显示真实信息。
   // 注意:不返回 LLM_API_KEY 等敏感字段。
@@ -1855,7 +1845,7 @@ function installIpc(): void {
         taskRecovery(id).regenerate(userIndex);
       } else if (typeof value.prompt === 'string') {
         const attachments = Array.isArray(value.attachments)
-          ? value.attachments.filter((item): item is RecoveryAttachment => !!item && typeof item.name === 'string' && typeof item.dataUrl === 'string')
+          ? value.attachments.filter((item): item is RecoveryAttachment => !!item && typeof item.name === 'string' && (typeof item.dataUrl === 'string' || typeof item.text === 'string'))
           : [];
         taskRecovery(id).user(value.prompt, attachments);
       }

@@ -11,7 +11,10 @@ export const HOST_PROTOCOL_VERSION = 2;
 
 export interface HostAttachment {
   name: string;
-  dataUrl: string;
+  /** 图片走 dataUrl；文档已在客户端提取为 UTF-8 文本，两种通道互斥。 */
+  dataUrl?: string;
+  text?: string;
+  truncated?: boolean;
 }
 
 /** agent 运行模式：auto=可写可执行；plan=只读探查并产出计划。 */

@@ -7,11 +7,27 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeAssistantContent } from '../../src/llm/message-shape.js';
+import { sanitizeAssistantContent, sanitizeContentParts } from '../../src/llm/message-shape.js';
 import { createLegacyHistoryManager, createStagedHistoryManager } from '../../src/agent/stages/history-manager.js';
 import type { ChatMessage } from '../../src/llm/index.js';
 
 const user = (content: string): ChatMessage => ({ role: 'user', content });
+
+test('sanitizeContentParts: 附件回放元数据不进模型请求，原 history 保留', () => {
+  const content = [
+    { type: 'text', text: '请读附件' },
+    { type: 'text', name: 'spec.pdf', attachment: true, truncated: true, text: 'PDF 正文' },
+    { type: 'image_url', name: 'shot.png', image_url: { url: 'data:image/png;base64,AAAA' } },
+  ];
+  const messages = [{ role: 'user', content }] as unknown as ChatMessage[];
+  const out = sanitizeContentParts(messages);
+  assert.deepEqual((out[0] as { content: unknown }).content, [
+    { type: 'text', text: '请读附件' },
+    { type: 'text', text: 'PDF 正文' },
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+  ]);
+  assert.equal((messages[0] as { content: unknown }).content, content, '不得破坏用于 GUI 回放的原会话');
+});
 
 test('sanitizeAssistantContent: 无 tool_calls 的 assistant content:null 改写为 ""', () => {
   const messages: ChatMessage[] = [
