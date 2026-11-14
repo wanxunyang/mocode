@@ -10,6 +10,7 @@
  */
 import type { LocaleKey } from '../i18n/index.js';
 import { GraphWalker, type GraphRow } from '../git-graph.js';
+import { graphSvg } from './lane-svg.js';
 import type { GitRepoView, SourceControlTarget } from './source-control.js';
 import { renderUnifiedDiff } from './unified-diff.js';
 
@@ -46,10 +47,6 @@ export interface HistoryDeps {
 
 /** 一页多少条。100 条 × 每行一个 SVG 在 inspector 宽度下够用，再多就要滚很久才到底。 */
 const PAGE_SIZE = 100;
-/** 泳道图几何：必须与 style.css 的 .history-row 高度、.history-graph 宽度规则一致。 */
-const LANE_W = 12;
-const ROW_H = 26;
-const NODE_R = 3.5;
 
 let deps: HistoryDeps | null = null;
 let repoList: GitRepoView[] = [];
@@ -98,50 +95,6 @@ function resetState(): void {
   view = 'log';
   selectedSha = '';
   selectedPath = '';
-}
-
-/* ── 泳道图 ─────────────────────────────────────────────── */
-
-function laneColor(index: number): string {
-  // 颜色只选 class，具体色值在 style.css（跟随主题，亮/暗各一套）。
-  return `lane-${index}`;
-}
-
-function laneX(lane: number): number {
-  return lane * LANE_W + LANE_W / 2;
-}
-
-/**
- * 一行泳道图。
- *
- * 只画三种东西（见 git-graph.ts 的说明，非节点 lane 不会半路消失）：
- *   1. 直通线（贯穿本行，不经过节点）；
- *   2. 节点到父提交的连接（第一父继承列 → 竖线；并到别的列 → 曲线）；
- *   3. 节点本身。
- * 行的上下沿各让出半步，让相邻行的线自然接上，不留缝。
- */
-function graphSvg(row: GraphRow): string {
-  const width = Math.max(1, row.lanes) * LANE_W;
-  const cx = laneX(row.lane);
-  const cy = ROW_H / 2;
-  const parts: string[] = [];
-  for (const line of row.through) {
-    const x = laneX(line.lane);
-    parts.push(`<path class="lane-line ${laneColor(line.color)}" d="M${x} 0V${ROW_H}"/>`);
-  }
-  // 有 lane 在等这个提交 → 从行顶连到节点；尖端（没有任何子提交指向它）则从节点起笔。
-  if (row.fromTop) parts.push(`<path class="lane-line ${laneColor(row.color)}" d="M${cx} 0V${cy}"/>`);
-  for (const edge of row.edges) {
-    const from = laneX(edge.from);
-    const to = laneX(edge.to);
-    const d = from === to
-      ? `M${from} ${cy}V${ROW_H}`
-      // 半个行高的控制点：弯得太急会像折线，太缓又会压到相邻 lane。
-      : `M${from} ${cy}C${from} ${cy + ROW_H / 4} ${to} ${ROW_H - ROW_H / 4} ${to} ${ROW_H}`;
-    parts.push(`<path class="lane-line ${laneColor(edge.color)}" d="${d}"/>`);
-  }
-  parts.push(`<circle class="lane-node ${laneColor(row.color)}" cx="${cx}" cy="${cy}" r="${NODE_R}"/>`);
-  return `<svg class="history-graph" width="${width}" height="${ROW_H}" viewBox="0 0 ${width} ${ROW_H}" aria-hidden="true">${parts.join('')}</svg>`;
 }
 
 /* ── 各级视图 ───────────────────────────────────────────── */
@@ -390,6 +343,50 @@ export async function refreshHistory(container: HTMLElement): Promise<void> {
   // 默认选第一个仓库（主仓库）；嵌套仓库/子模块用顶部按钮切。
   if (!repoList.some((repo) => repo.root === repoRoot)) repoRoot = repoList[0].root;
   await loadPage(container);
+}
+
+/**
+ * 从别的面板（源代码管理顶部的「最近提交」）跳到某条提交。
+ *
+ * 不假设调用方已经加载过历史：目标提交不在内存里就先按页拉，命中即停；
+ * 目标仓库与当前仓库不同则整份丢掉重来（提交列表与泳道游标都属于某个仓库）。
+ *
+ * 页数有上限（5 页 = 500 条）：点进来的一定是「最近提交」里的那 12 条，正常第一页就命中；
+ * 万一没命中（历史被改写等），退化成普通列表比无限翻页把 UI 卡住更好。
+ */
+export async function focusCommit(container: HTMLElement, targetRoot: string, sha: string): Promise<void> {
+  const api = need();
+  visible = true;
+  const nextKey = currentKey();
+  if (nextKey !== workspaceKey) {
+    workspaceKey = nextKey;
+    resetState();
+  }
+  if (targetRoot && targetRoot !== repoRoot) {
+    repoRoot = targetRoot;
+    commits = [];
+    rows = [];
+    walker = new GraphWalker();
+    truncated = false;
+    view = 'log';
+    selectedSha = '';
+    selectedPath = '';
+  }
+  // 顶部多仓库按钮要靠 repoList 渲染；没有就先取一次（多数情况调用方刚渲染过，直接跳过）。
+  if (!repoList.length) {
+    const result = await api.repos(currentTarget());
+    if (!visible) return;
+    repoList = result.repos ?? [];
+  }
+  if (!repoRoot && repoList.length) repoRoot = repoList[0].root;
+  const contains = (): boolean => commits.some((commit) => commit.sha === sha);
+  for (let page = 0; page < 5 && !contains(); page += 1) {
+    if (page > 0 && !truncated) break;
+    await loadPage(container);
+    // 期间用户切了空间/关掉面板：回执已经作废，别再往下跳。
+    if (workspaceKey !== nextKey || !visible) return;
+  }
+  if (contains()) await openCommit(container, sha);
 }
 
 export function closeHistory(): void {

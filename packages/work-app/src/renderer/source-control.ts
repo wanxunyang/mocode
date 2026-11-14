@@ -1,6 +1,11 @@
 import type { LocaleKey } from '../i18n/index.js';
 import type { PanelEnvelope } from './panels.js';
 import { renderUnifiedDiff } from './unified-diff.js';
+import { GraphWalker, type GraphRow } from '../git-graph.js';
+import { graphSvg } from './lane-svg.js';
+// 只借类型：history-panel 也 type-only 引用本文件的 GitRepoView/SourceControlTarget，
+// 两边都是 `import type`，编译后一并擦除，所以没有运行时循环依赖。
+import type { GitCommitEntry } from './history-panel.js';
 
 export interface GitFileView {
   path: string;
@@ -58,8 +63,17 @@ export interface SourceControlDeps {
   toast: (level: 'info' | 'success' | 'warn' | 'error', text: string, durationMs?: number) => void;
   currentTaskId: () => string | undefined;
   currentProjectId: () => string | undefined;
+  /** 「3 天前」这类相对时间（与 Git 历史面板同一套文案）。 */
+  relativeTime: (iso: string) => string;
   /** 工作空间里全部仓库及各自的 status。 */
   repos: (target: SourceControlTarget) => Promise<{ ok: boolean; repos: GitRepoView[]; message?: string }>;
+  /**
+   * 最近提交，只喂顶部列表：打开面板时取一次、提交成功后重取一次，
+   * **不进 5 秒轮询** —— 历史不会自己变，每 5 秒读一遍 log 是纯浪费。
+   */
+  log: (target: SourceControlTarget, options: { limit: number; skip: number }) => Promise<{ ok: boolean; commits: GitCommitEntry[]; truncated: boolean; message?: string }>;
+  /** 点某条提交：跳到 Git 历史面板并定位它（详情视图不在这里重复实现）。 */
+  openCommit: (repoRoot: string, sha: string) => void;
   diff: (target: SourceControlTarget, path: string, staged: boolean) => Promise<{ ok: boolean; content?: string; truncated?: boolean; message?: string }>;
   stage: (target: SourceControlTarget, paths?: string[]) => Promise<GitMutationView>;
   unstage: (target: SourceControlTarget, paths?: string[]) => Promise<GitMutationView>;
@@ -85,6 +99,23 @@ let selectedFile: { repoRoot: string; path: string; staged: boolean } | null = n
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 /** 提交信息草稿按「工作空间 + 仓库」隔离：多个仓库各自一份，互不覆盖。 */
 const draftMemory = new Map<string, string>();
+
+/** 顶部「最近提交」一页多少条：面板里只是「我刚提交了什么」的确认，不需要翻页。 */
+const RECENT_LIMIT = 12;
+interface RecentCommits {
+  commits: GitCommitEntry[];
+  /** 与 commits 同序的泳道行（GraphWalker 顺序推到，不能只存 commits 再重算）。 */
+  rows: GraphRow[];
+  failed: boolean;
+}
+/**
+ * 每个仓库的最近提交缓存（键 = repoRoot）。
+ *
+ * 有这份缓存才谈得上「不进轮询」：5 秒一次的 refreshSourceControl 走到 loadRecentCommits
+ * 时全部命中，只读内存。命中条件刻意做成「有没有这一项」而不是时间戳 —— 失效只有三个来源，
+ * 且都由显式动作触发：提交成功、点刷新、换工作空间（resetForWorkspace 清空）。
+ */
+const recentMemory = new Map<string, RecentCommits>();
 
 /**
  * AI 生成提交信息的语言。与界面语言解耦：默认英文（提交信息恒英文是既定口径），
@@ -269,7 +300,64 @@ function upstreamMarkup(status: GitStatusView): string {
 }
 
 /**
- * 一个仓库一块：仓库名 + 分支/上游标识 + 自己的暂存区/更改 + 自己的提交框与 AI 生成。
+ * 顶部「最近提交」：两栏行 —— 左栏泳道 + 提交信息，右栏时间 + 短 sha。
+ *
+ * 为什么不是完整历史视图：这里只回答「我刚提交了什么」，一屏 12 条足够；
+ * 要看某个提交改了哪些文件、diff 长什么样，点一下跳去 Git 历史面板
+ * （那边已经有分页、文件列表与行级 diff，不在这里再实现一遍）。
+ */
+function recentMarkup(repo: GitRepoView): string {
+  const { t, escapeHtml, relativeTime } = need();
+  const recent = recentMemory.get(repo.root);
+  // 还没取到：宁可不渲染，也不要先亮一个「还没有提交」再把内容顶下来。
+  if (!recent) return '';
+  const head = `<header class="scm-recent-head"><span class="scm-group-title">${t('scm.recentCommits')}</span></header>`;
+  if (recent.failed) return `<section class="scm-recent">${head}<p class="scm-empty">${t('scm.recentFailed')}</p></section>`;
+  if (!recent.commits.length) return `<section class="scm-recent">${head}<p class="scm-empty">${t('scm.noCommits')}</p></section>`;
+  const repoRoot = escapeHtml(repo.root);
+  const rows = recent.commits.map((commit, index) => {
+    const label = commit.subject || t('history.noSubject');
+    return `<button class="scm-recent-row" data-scm-commit="${escapeHtml(commit.sha)}" data-scm-repo="${repoRoot}" title="${escapeHtml(`${commit.shortSha} ${label}`)}">${graphSvg(recent.rows[index])}<span class="scm-recent-subject">${escapeHtml(label)}</span><span class="scm-recent-meta"><span class="scm-recent-time">${escapeHtml(relativeTime(commit.date))}</span><span class="scm-recent-sha">${escapeHtml(commit.shortSha)}</span></span></button>`;
+  }).join('');
+  return `<section class="scm-recent">${head}<div class="scm-recent-list">${rows}</div></section>`;
+}
+
+/**
+ * 只为「缓存里没有」的仓库拉一次最近提交。
+ *
+ * 5 秒轮询也会走到这里，但全部命中缓存 —— 这是「历史不进轮询」的落地点：
+ * 失效只能由显式动作触发（提交成功 / 点刷新 / 换工作空间）。
+ */
+async function ensureRecentCommits(repos: GitRepoView[]): Promise<void> {
+  const api = need();
+  const missing = repos.filter((repo) => repo.status?.ok && repo.status.isRepo && !recentMemory.has(repo.root));
+  if (!missing.length) return;
+  const key = workspaceKey;
+  await Promise.all(missing.map(async (repo) => {
+    try {
+      const result = await api.log({ ...currentTarget(), repoRoot: repo.root }, { limit: RECENT_LIMIT, skip: 0 });
+      // 切过空间：回执已经不属于当前视图，丢掉比写进新空间的缓存好。
+      if (key !== workspaceKey) return;
+      if (!result.ok) { recentMemory.set(repo.root, { commits: [], rows: [], failed: true }); return; }
+      // 泳道必须顺序推：GraphWalker 的状态跨行累积，只存 commits 事后重算会画错线。
+      const walker = new GraphWalker();
+      const rows = result.commits.map((commit) => walker.push({ sha: commit.sha, parents: commit.parents }));
+      recentMemory.set(repo.root, { commits: result.commits, rows, failed: false });
+    } catch {
+      if (key !== workspaceKey) return;
+      // 失败也缓存：否则轮询会每 5 秒重试一次打爆 git；用户点刷新即可重来。
+      recentMemory.set(repo.root, { commits: [], rows: [], failed: true });
+    }
+  }));
+}
+
+/** 让某仓库（缺省 = 全部）的最近提交下次刷新时重取。 */
+function invalidateRecent(repoRoot?: string): void {
+  if (repoRoot === undefined) recentMemory.clear(); else recentMemory.delete(repoRoot);
+}
+
+/**
+ * 一个仓库一块：仓库名 + 分支/上游标识 + 最近提交 + 自己的暂存区/更改 + 自己的提交框与 AI 生成。
  * 多仓库时各块互不影响：提交只动这个仓库的 index，AI 生成也只读这个仓库的暂存 diff。
  */
 function repoMarkup(repo: GitRepoView): string {
@@ -291,6 +379,7 @@ function repoMarkup(repo: GitRepoView): string {
       ${upstreamMarkup(status)}
       <button data-scm-action="refresh" data-scm-repo="${root}" class="scm-icon-button" title="${t('scm.refresh')}" aria-label="${t('scm.refresh')}">${icon('regen')}</button>
     </header>
+    ${recentMarkup(repo)}
     ${status.conflicted ? `<p class="scm-warning">${t('scm.conflicts')}</p>` : ''}
     ${groupMarkup(repo.root, status.staged, true)}
     ${groupMarkup(repo.root, status.changes, false)}
@@ -415,6 +504,8 @@ async function commit(container: HTMLElement, repoRoot: string): Promise<void> {
     if (operation !== operationSequence || key !== workspaceKey || !visible) return;
     if (!result.ok) { api.toast('error', errorText(result.message), 6500); return; }
     setDraft(repoRoot, '');
+    // 新提交必须立刻出现在顶部列表：失效这条缓存，finally 里的刷新会重取（只这一个仓库）。
+    invalidateRecent(repoRoot);
     api.toast('success', api.t('scm.committed', { commit: result.commit ?? '' }), 6500);
   } catch (cause) {
     if (operation !== operationSequence || key !== workspaceKey || !visible) return;
@@ -495,10 +586,17 @@ function renderSourceControl(container: HTMLElement): void {
     const repoRoot = button.dataset.scmRepo ?? '';
     if (path && repoRoot) void showFileDiff(container, repoRoot, path, button.dataset.staged === 'true');
   }));
+  container.querySelectorAll<HTMLButtonElement>('[data-scm-commit]').forEach((button) => button.addEventListener('click', () => {
+    const repoRoot = button.dataset.scmRepo ?? '';
+    const sha = button.dataset.scmCommit ?? '';
+    // 详情不在本面板实现：跳去 Git 历史并定位到这条提交。
+    if (repoRoot && sha) need().openCommit(repoRoot, sha);
+  }));
   container.querySelectorAll<HTMLButtonElement>('[data-scm-action]').forEach((button) => button.addEventListener('click', () => {
     const action = button.dataset.scmAction;
     const repoRoot = button.dataset.scmRepo ?? '';
-    if (action === 'refresh') void refreshSourceControl(container);
+    // 刷新 = 用户主动要最新状态，顶部列表也跟着重取（轮询则不会）。
+    if (action === 'refresh') { invalidateRecent(repoRoot || undefined); void refreshSourceControl(container); }
     else if (!repoRoot) return;
     else if (action === 'stage') void mutate(container, repoRoot, 'stage', [button.dataset.path!]);
     else if (action === 'unstage') void mutate(container, repoRoot, 'unstage', [button.dataset.path!]);
@@ -521,6 +619,8 @@ function resetForWorkspace(nextKey: string): void {
   showingDiff = false;
   generating = false;
   busy = false;
+  // 最近提交按仓库缓存，跨空间绝不能串（同名 root 在不同空间是两回事）。
+  recentMemory.clear();
 }
 
 export async function refreshSourceControl(container: HTMLElement): Promise<void> {
@@ -540,6 +640,9 @@ export async function refreshSourceControl(container: HTMLElement): Promise<void
     repoList = result.repos;
     reposLoaded = true;
     reposMessage = result.message ?? '';
+    // 只在缺缓存时真的读 git log；轮询走到这里全部命中，不会每 5 秒读一遍历史。
+    await ensureRecentCommits(repoList);
+    if (seq !== requestSequence || key !== workspaceKey || !visible) return;
     renderSourceControl(container);
     if (!generating && !busy && refreshTimer === null) {
       refreshTimer = setInterval(() => {

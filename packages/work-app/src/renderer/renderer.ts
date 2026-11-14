@@ -8,7 +8,7 @@ import { mountIcons, icon } from './icons.js';
 import { initPanels, handlePanelEvent, renderPanel, requestPanelCommand, type PanelKind } from './panels.js';
 import { initSourceControl, refreshSourceControl, reopenSourceControl, closeSourceControl, type GitRepoView, type GitStatusView, type SourceControlTarget } from './source-control.js';
 // 历史视图（只读）：提交泳道图 + 某提交的文件 + 文件内容/diff。
-import { initHistory, refreshHistory, closeHistory, repaintHistory } from './history-panel.js';
+import { initHistory, refreshHistory, closeHistory, repaintHistory, focusCommit } from './history-panel.js';
 // 浏览器面板：页面是主进程的 WebContentsView（CDP 里必须是 page 目标，agent 才能接管）。
 import { initBrowserPanel, showBrowserPanel, hideBrowserPanel, rememberDevServerUrl, refreshBrowserPanelProject, refreshBrowserPanelLabels, type BrowserViewState } from './browser-panel.js';
 // 终端面板：PTY 在主进程（node-pty 是原生模块），这里是 xterm 显示层。
@@ -4416,6 +4416,7 @@ initSourceControl({
   icon,
   escapeHtml,
   toast: (level, text, durationMs) => showToast(level, text, durationMs),
+  relativeTime: timeAgo,
   currentTaskId: () => viewingTaskId(),
   // 任务面板归属任务自己的空间；仅无任务时跟随全局选中的空间。
   currentProjectId: () => {
@@ -4425,6 +4426,21 @@ initSourceControl({
       : selectedProject()?.id;
   },
   repos: (target) => window.mocodeWork.gitRepos(target),
+  log: (target, options) => window.mocodeWork.gitLog(target, options),
+  // 点顶部「最近提交」= 跳到 Git 历史并就地打开这条提交。这里不走 refreshInspector：
+  // 那条路会把历史从仓库列表重来一遍，用户点的那条提交会被弹回顶部。
+  openCommit: (repoRoot, sha) => {
+    hideToolsMenu();
+    activeInspectorTab = 'history';
+    inspector.classList.remove('hidden');
+    inspectorTitle.textContent = t('history.title');
+    // 离开源代码管理视图必须停掉它的 5 秒轮询。
+    closeSourceControl();
+    hideBrowserPanel();
+    hideTerminalPanel();
+    inspectorContent.classList.remove('hidden');
+    void focusCommit(inspectorContent, repoRoot, sha);
+  },
   diff: (target, path, staged) => window.mocodeWork.gitDiff(target, path, staged),
   stage: (target, paths) => window.mocodeWork.gitStage(target, paths),
   unstage: (target, paths) => window.mocodeWork.gitUnstage(target, paths),

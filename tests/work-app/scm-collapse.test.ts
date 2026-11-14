@@ -42,7 +42,11 @@ const deps = {
   toast: () => {},
   currentTaskId: () => 'task-1',
   currentProjectId: () => 'proj-1',
+  relativeTime: () => '刚刚',
   repos: async () => ({ ok: true, repos: [repo] }),
+  // 顶部「最近提交」的数据源：这些用例不关心历史，给空列表即可。
+  log: async () => ({ ok: true, commits: [], truncated: false }),
+  openCommit: () => {},
   diff: async () => ({ ok: true }),
   stage: async () => ({ ok: true }),
   unstage: async () => ({ ok: true }),

@@ -1356,6 +1356,21 @@ body.inspector-resizing * { cursor: ew-resize !important; }
 .scm-icon-button { width: 26px; height: 26px; flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--radius-sm); color: var(--color-subtle); }
 .scm-icon-button:hover { background: var(--surface-hover); color: var(--text-strong); }
 .scm-icon-button .icon { width: 14px; height: 14px; }
+/* 顶部「最近提交」：两栏行 —— 左栏泳道 + 提交信息（可省略），右栏时间 + 短 sha（不压缩）。
+   行高必须等于 lane-svg.ts 的 ROW_H（26px），否则相邻行的泳道线接不上。 */
+.scm-recent { margin: var(--space-xs) 0 var(--space-sm); }
+.scm-recent-head { display: flex; align-items: center; min-height: 30px; color: var(--color-subtle); }
+.scm-recent-head .scm-group-title { font-weight: 500; letter-spacing: 0.01em; }
+.scm-recent-list { display: flex; flex-direction: column; gap: 2px; }
+.scm-recent-row { display: flex; align-items: center; gap: var(--space-2xs); width: 100%; height: 26px; padding: 0 var(--space-2xs) 0 0; border-radius: var(--radius-sm); text-align: left; transition: background var(--dur-micro) var(--ease-out); }
+.scm-recent-row:hover { background: var(--surface-hover); }
+.scm-recent-row .history-graph { flex: 0 0 auto; overflow: visible; }
+/* 左栏：提交信息占满剩余宽度，超长省略 —— 缩到 340px 也不把右栏挤掉。 */
+.scm-recent-subject { min-width: 0; flex: 1; overflow: hidden; color: var(--color-ink); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+/* 右栏：时间 + 短 sha 各自定宽不收缩，数字用 tabular-nums 让多行竖直对齐。 */
+.scm-recent-meta { display: flex; flex: 0 0 auto; align-items: baseline; gap: 5px; color: var(--color-subtle); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; }
+.scm-recent-time { white-space: nowrap; }
+.scm-recent-sha { color: var(--color-muted); font-family: var(--font-outlier); }
 .scm-group { margin: var(--space-xs) 0 var(--space-sm); }
 .scm-group > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2xs); min-height: 30px; }
 .scm-group > header > button { display: flex; align-items: center; gap: 2px; padding: 3px var(--space-2xs); border-radius: var(--radius-sm); color: var(--color-subtle); font-size: var(--text-2xs); }
