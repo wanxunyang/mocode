@@ -623,6 +623,28 @@ function resetForWorkspace(nextKey: string): void {
   recentMemory.clear();
 }
 
+/**
+ * 跑一次渲染，失败就换成「渲染失败」空态并返回 false。
+ *
+ * 与「读 repos 失败」严格分开：渲染抛异常意味着这段 UI 代码自身有 bug，
+ * 此时 repoList 里往往**有**数据，清空它只会把 bug 伪装成「不是 Git 仓库」。
+ */
+function paintSafely(container: HTMLElement, paint: () => void): boolean {
+  try {
+    paint();
+    return true;
+  } catch (cause) {
+    const api = need();
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    // 栈留在控制台：界面只给可行动的提示，细节归日志。
+    console.error('[source-control] 渲染面板失败：', cause);
+    // 兜底文案里刻意不调 icon()：渲染崩的原因可能就是它，错误处理里再抛一次
+    // 会把原始异常整个吃掉，反倒只剩一个白面板。
+    container.innerHTML = `<section class="scm-unavailable"><p>${api.t('scm.paintFailed')}</p><small>${api.escapeHtml(detail)}</small></section>`;
+    return false;
+  }
+}
+
 export async function refreshSourceControl(container: HTMLElement): Promise<void> {
   const api = need();
   const nextKey = currentKey();
@@ -634,27 +656,33 @@ export async function refreshSourceControl(container: HTMLElement): Promise<void
   const target = currentTarget();
   // 定时刷新不能把正在输入的内容或已渲染的面板重置成 loading。
   if (!reposLoaded) container.innerHTML = `<p class="inspector-loading">${api.t('inspector.loading')}</p>`;
+  let result: { ok: boolean; repos: GitRepoView[]; message?: string };
   try {
-    const result = await api.repos(target);
-    if (seq !== requestSequence || key !== workspaceKey || !visible) return;
-    repoList = result.repos;
-    reposLoaded = true;
-    reposMessage = result.message ?? '';
-    // 只在缺缓存时真的读 git log；轮询走到这里全部命中，不会每 5 秒读一遍历史。
-    await ensureRecentCommits(repoList);
-    if (seq !== requestSequence || key !== workspaceKey || !visible) return;
-    renderSourceControl(container);
-    if (!generating && !busy && refreshTimer === null) {
-      refreshTimer = setInterval(() => {
-        if (visible && !busy && !generating && !document.hidden) void refreshSourceControl(container);
-      }, 5_000);
-    }
+    result = await api.repos(target);
   } catch (cause) {
+    // 读不到仓库列表（git 不在、目录被删…）：这才是「读不到仓库」的正确来源。
     if (seq !== requestSequence || key !== workspaceKey || !visible) return;
     reposLoaded = true;
     repoList = [];
     reposMessage = cause instanceof Error ? cause.message : String(cause);
-    renderSourceControl(container);
+    paintSafely(container, () => renderSourceControl(container));
+    return;
+  }
+  if (seq !== requestSequence || key !== workspaceKey || !visible) return;
+  repoList = result.repos;
+  reposLoaded = true;
+  reposMessage = result.message ?? '';
+  // 只在缺缓存时真的读 git log；轮询走到这里全部命中，不会每 5 秒读一遍历史。
+  await ensureRecentCommits(repoList);
+  if (seq !== requestSequence || key !== workspaceKey || !visible) return;
+  // ⚠ 渲染必须单独兜底：它抛的是渲染器自己的 bug，与「这个目录不是 Git 仓库」无关。
+  // 二者曾共用一个 catch —— 于是渲染一崩就清空 repoList 并显示「当前空间不是 Git 仓库」，
+  // 真实原因只缩在 <small> 里，排查时几乎只能靠猜。
+  if (!paintSafely(container, () => renderSourceControl(container))) return;
+  if (!generating && !busy && refreshTimer === null) {
+    refreshTimer = setInterval(() => {
+      if (visible && !busy && !generating && !document.hidden) void refreshSourceControl(container);
+    }, 5_000);
   }
 }
 

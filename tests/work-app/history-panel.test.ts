@@ -12,79 +12,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { initHistory, refreshHistory, closeHistory } from '../../packages/work-app/src/renderer/history-panel.js';
-
-interface FakeButton {
-  dataset: Record<string, string>;
-  addEventListener: (type: string, handler: () => void) => void;
-  click: () => void;
-}
-
-/** selector → HTML 属性名。属性既是渲染的接线契约，也是桩解析的依据。 */
-const ATTR: Record<string, string> = {
-  '[data-history-repo]': 'data-history-repo',
-  '[data-history-commit]': 'data-history-commit',
-  '[data-history-file]': 'data-history-file',
-  '[data-history-back]': 'data-history-back',
-  '[data-history-more]': 'data-history-more',
-  '[data-history-refresh]': 'data-history-refresh',
-};
-
-/**
- * 容器桩：`innerHTML` 一写就等同真实 DOM 的整块重建 —— 旧的按钮与其监听全部作废，
- * 之后 `querySelectorAll` 从新的 HTML 里解析出按钮（同一实例缓存，这样 wire 挂上的监听
- * 和测试 click 的是同一个对象）。
- *
- * 不做成「测试手动 mount」：那样 wire() 与 mount() 的先后顺序会变成隐式约定，
- * 与浏览器的行为不符，也正是这一版最先写错的地方。
- */
-function makeContainer() {
-  const cache = new Map<string, FakeButton>();
-  const container = {
-    scrollTop: 0,
-    html: '',
-    get innerHTML() {
-      return this.html;
-    },
-    set innerHTML(value: string) {
-      this.html = value;
-      cache.clear();
-    },
-    querySelectorAll(selector: string) {
-      const attr = ATTR[selector];
-      if (!attr) return [];
-      const pattern = new RegExp(`${attr}="([^"]*)"`, 'g');
-      const values = [...container.html.matchAll(pattern)].map((match) => match[1]);
-      // 无值标记（加载更多 / 刷新）只出现一次，其余按出现次数逐个给。
-      const list = values.length ? values : container.html.includes(attr) ? [''] : [];
-      return list.map((value) => {
-        const key = `${attr}|${value}`;
-        const existing = cache.get(key);
-        if (existing) return existing;
-        const handlers: Array<() => void> = [];
-        const datasetKey = attr.replace(/^data-/, '').replace(/-([a-z])/g, (_all, char: string) => char.toUpperCase());
-        const created: FakeButton = {
-          dataset: { [datasetKey]: value },
-          addEventListener: (_type, handler) => handlers.push(handler),
-          click: () => handlers.forEach((handler) => handler()),
-        };
-        cache.set(key, created);
-        return created;
-      });
-    },
-    /** 点当前视图里的某个按钮。 */
-    click(selector: string, value = '') {
-      const attr = ATTR[selector];
-      const target = cache.get(`${attr}|${value}`);
-      if (!target) throw new Error(`按钮不存在：${selector} ${value}`);
-      target.click();
-    },
-    /** 等一轮宏任务：面板的点击处理是 void 出去的 async。 */
-    async settle() {
-      await new Promise((resolve) => setImmediate(resolve));
-    },
-  };
-  return container;
-}
+import { FakeContainer } from './dom-stub.js';
 
 const SHA_TIP = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const SHA_MID = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -172,7 +100,7 @@ function makeDeps(projectId: string) {
 test('提交列表：每行一根泳道 SVG，合并提交有标记，refs 可见', async () => {
   const { deps, logCalls } = makeDeps('proj-list');
   initHistory(deps);
-  const container = makeContainer();
+  const container = new FakeContainer();
   await refreshHistory(container as unknown as HTMLElement);
   assert.deepEqual(logCalls, [{ limit: 100, skip: 0 }]);
   const html = container.innerHTML;
@@ -194,7 +122,7 @@ test('三级跳：点提交列文件、点文件看 diff + 内容、返回逐级
   initHistory(deps);
 
   // ① 列表 → 某提交：只拉这一次的文件列表。
-  const container = makeContainer();
+  const container = new FakeContainer();
   await refreshHistory(container as unknown as HTMLElement);
   container.click('[data-history-commit]', SHA_TIP);
   await container.settle();
@@ -248,7 +176,7 @@ test('「加载更多」用 skip 游标续拉，并接着上一页的泳道继�
       return { ok: true, commits: [commitOf(SHA_BASE, 'ccccccc', 'base', [])], truncated: false };
     },
   });
-  const container = makeContainer();
+  const container = new FakeContainer();
   await refreshHistory(container as unknown as HTMLElement);
   assert.equal((container.innerHTML.match(/class="history-row"/g) ?? []).length, 2);
   assert.ok(container.innerHTML.includes('history.loadMore'));
@@ -267,7 +195,7 @@ test('「加载更多」用 skip 游标续拉，并接着上一页的泳道继�
 test('点「刷新」丢掉已有分页，从最新一条重来', async () => {
   const { deps, logCalls } = makeDeps('proj-refresh');
   initHistory(deps);
-  const container = makeContainer();
+  const container = new FakeContainer();
   await refreshHistory(container as unknown as HTMLElement);
   assert.equal(logCalls.length, 1);
   container.click('[data-history-refresh]');
@@ -328,7 +256,7 @@ test('多仓库工作空间：顶部按钮切换仓库，切过去从第一页�
       return { ok: true, commits: [commitOf(SHA_TIP, 'aaaaaaa', `log for ${repoRoots.length}`, [])], truncated: false };
     },
   });
-  const container = makeContainer();
+  const container = new FakeContainer();
   await refreshHistory(container as unknown as HTMLElement);
   assert.ok(container.innerHTML.includes('history-repos'));
   container.click('[data-history-repo]', 'F:/proj/packages/sub');
@@ -344,7 +272,7 @@ test('多仓库工作空间：顶部按钮切换仓库，切过去从第一页�
 test('没有提交的仓库显示空态，而不是空白面板', async () => {
   const { deps } = makeDeps('proj-empty');
   initHistory({ ...deps, log: async () => ({ ok: true, commits: [], truncated: false }) });
-  const container = makeContainer();
+  const container = new FakeContainer();
   await refreshHistory(container as unknown as HTMLElement);
   assert.ok(container.innerHTML.includes('history.empty'));
   closeHistory();
@@ -353,7 +281,7 @@ test('没有提交的仓库显示空态，而不是空白面板', async () => {
 test('工作空间里没有 git 仓库时给出可读空态', async () => {
   const { deps } = makeDeps('proj-norepo');
   initHistory({ ...deps, repos: async () => ({ ok: true, repos: [] }) });
-  const container = makeContainer();
+  const container = new FakeContainer();
   await refreshHistory(container as unknown as HTMLElement);
   assert.ok(container.innerHTML.includes('history.noRepo'));
   closeHistory();
@@ -365,7 +293,7 @@ test('git log 失败时显示错误文案，不是假装空历史', async () => 
     ...deps,
     log: async () => ({ ok: false, commits: [], truncated: false, message: 'fatal: bad object' }),
   });
-  const container = makeContainer();
+  const container = new FakeContainer();
   await refreshHistory(container as unknown as HTMLElement);
   assert.ok(container.innerHTML.includes('fatal: bad object'));
   closeHistory();
