@@ -30,9 +30,9 @@ npm run build:electron              # 根包 + protocol/runtime + 两个 Electro
 npm run pack:win --workspace mocode-work
 ```
 
-`pack:win` = `build:electron`（`npm --prefix ../.. run build` 重建根包 dist + protocol/runtime，再编 work-app 自身）→ `stage:host` → `electron-builder --win`，从仓库任何状态跑都自包含，不依赖上次构建的残留 dist。产物在 `packages/work-app/release/`：
+`pack:win` = `build:electron`（`npm --prefix ../.. run build` 重建根包 dist + protocol/runtime，再编 work-app 自身）→ `stage:host` → `electron-builder --win -c.npmRebuild=false` → `node scripts/verify-pack.mjs`，从仓库任何状态跑都自包含，不依赖上次构建的残留 dist。产物在 `packages/work-app/release/`：
 
-- `MoCode Work-1.0.0-setup.exe`（NSIS 安装向导，约 116MB）
+- `MoCode Work-1.0.0-setup.exe`（NSIS 安装向导，约 146MB）
 - `MoCode Work-1.0.0-setup.exe.blockmap`（增量更新用）
 - `win-unpacked/`（免安装形态，便于调试）
 
@@ -106,29 +106,31 @@ npm run pack:linux --workspace mocode-work    # 需 Linux / WSL
 
 mac 分发还需要签名与公证（Apple Developer 证书），否则用户首次打开会被 Gatekeeper 拦。这一块配置（`mac.hardenedRuntime`、`notarize`）需拿到证书后再补。
 
-## 9. 打包后必查
+## 9. 打包后必查（已自动化）
+
+`pack:*` 脚本末尾自动跑 `node scripts/verify-pack.mjs`，任一项不过就以非零码退出、打包算失败。它检查：
+
+1. **目录分层**：`resources/app.asar` + `resources/mocode-ai`（宿主必须在 asar 之外）
+2. **宿主入口**：`bin/mocode-agent-host.js`、`dist/host/stdio.js`、`package.json`，以及 `node_modules/@mocode/protocol/dist`
+3. **原生模块已解包**：`app.asar.unpacked/node_modules/node-pty/**` 下有 `.node`/`.dll`（asar 内的原生模块无法 dlopen），语音的 `sherpa-onnx-*` 同理
+4. **宿主冒烟**：把 `mocode-ai` 拷到系统临时目录（**仓库外**）再拉起，等它自报 `runtime_ready`
+5. **产物清单**：安装包文件名与体积
 
 ```powershell
-# 1. 目录分层对不对
-dir packages\work-app\release\win-unpacked\resources
-#    期望：app.asar + mocode-ai
+cd packages\work-app
+node scripts\verify-pack.mjs            # 只验已有产物
+node scripts/verify-pack.mjs --skip-smoke   # 跳过拉起宿主
+```
 
-# 2. host 入口齐不齐（workspace 包也要在）
-dir packages\work-app\release\win-unpacked\resources\mocode-ai\bin
-dir packages\work-app\release\win-unpacked\resources\mocode-ai\node_modules\@mocode\protocol\dist
-#    期望：mocode-agent-host.js + mocode.js / host.js 等 protocol 产物
+第 4 条的关键是**不能在仓库内测**：`win-unpacked` 留在 `F:\mocode` 里时，Node 会沿目录向上撞到仓库根 `node_modules`，缺包也侥幸解析通过 —— 历史上 `@mocode/protocol` 缺包就是这样漏检的。脚本会断言临时目录在仓库外。
 
-# 3. 用户不装 Node 也能跑：把 exe 当 node 用
+手工复核仍在需要时可用（脚本不做的事）：
+
+```powershell
+# 用户不装 Node 也能跑：把 exe 当 node 用
 $env:ELECTRON_RUN_AS_NODE = "1"
 & "packages\work-app\release\win-unpacked\MoCode Work.exe" -v
 #    期望：打印 node 版本号
-
-# 4. host 能被拉起（**必须挪到仓库外**：win-unpacked 留在 F:\mocode 里时，
-#    Node 会沿目录向上撞到仓库根 node_modules，缺包也侥幸解析通过 ——
-#    历史上 @mocode/protocol 缺包就是这样漏检的）
-Copy-Item -Recurse "packages\work-app\release\win-unpacked\resources\mocode-ai" "$env:TEMP\mocode-smoke\mocode-ai"
-& "packages\work-app\release\win-unpacked\MoCode Work.exe" "$env:TEMP\mocode-smoke\mocode-ai\bin\mocode-agent-host.js"
-#    期望：stdout 出一行 {"type":"event","event":"runtime_ready",...}，stderr 为空
 Remove-Item Env:\ELECTRON_RUN_AS_NODE
 ```
 
@@ -136,6 +138,10 @@ Remove-Item Env:\ELECTRON_RUN_AS_NODE
 
 ## 10. 环境相关的坑
 
+- **不要写 `build.asarUnpack`**（本仓踩过，2026-11-15）：npm workspaces 下 `node_modules/@mocode/*` 是指向 `packages/*` 的软链，而 `asarUnpack` 一旦配置，builder 会对**每一个**待打包文件调用 unpack 过滤器，过滤器用真实路径算相对路径 → `F:\mocode\packages\protocol\dist\*.map must be under F:\mocode\packages\work-app\`，打包直接失败（`-c.asarUnpack=null` 也救不了，过滤器创建即抛）。
+  原生模块的解包交给默认的 `smartUnpack` 即可：它按「路径含 `node_modules` + 文件是 `.node`/`.dll`/`.exe` 或二进制无扩展名」判定，node-pty 与 sherpa-onnx 都能命中。解包结果由 `scripts/verify-pack.mjs` 第 3 项验收 —— **用产物验收代替配置声明**，以后新增原生依赖也不必再改 build 字段。
+- **`-c.npmRebuild=false` 必须带**：workspaces 下 builder 会给 appDir 跑 `npm install --production`，作用域是根项目，会把 hoisted 的 devDependencies 删掉（之后报「找不到 tsc」）。脚本里已固化。
 - **打包产物删不掉**（`EBUSY` / `WinError 32` / 回收站失败）：本机有 safe-delete 钩子把删除路由到回收站且 fail-closed，加上 Windows 安全软件对新文件的短暂句柄，会让单次 `rmtree` 失败。带退避重试可解；必要时 `CODEBUDDY_SAFE_DELETE_ENABLED=0` 关掉钩子。文件本身没被锁（`r+` 能打开）——别去杀进程。
 - **release 目录残留会打断重跑**：第二次打包时 app-builder 清空 `win-unpacked` 会撞上残留锁。换 `-c.directories.output=<新目录>` 或先清干净。
 - **`signAndEditExecutable: false`** 只在无法补齐 winCodeSign 缓存时作为临时退路；关掉后 exe 图标不会换（仍是默认 Electron 图标）。正常应保持开启。
+- **临时目录删不掉（EPERM）**：冒烟拉起宿主后立刻删 `<tmp>/mocode-pack-smoke-*` 会撞锁。`verify-pack.mjs` 已等子进程真正退出再删，删不掉只打 note 不算失败。

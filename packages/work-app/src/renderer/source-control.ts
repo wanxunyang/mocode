@@ -1,5 +1,6 @@
 import type { LocaleKey } from '../i18n/index.js';
 import type { PanelEnvelope } from './panels.js';
+import { renderUnifiedDiff } from './unified-diff.js';
 
 export interface GitFileView {
   path: string;
@@ -317,7 +318,12 @@ async function showFileDiff(container: HTMLElement, repoRoot: string, path: stri
     const result = await api.diff(target, path, staged);
     if (seq !== requestSequence || key !== workspaceKey || !visible) return;
     const title = staged ? api.t('scm.stagedDiff') : api.t('scm.workingDiff');
-    container.innerHTML = `<div class="scm-diff-header"><button data-scm-action="back">${api.icon('arrow-left')}<span>${api.t('scm.back')}</span></button><span>${api.escapeHtml(title)}</span></div><h3 class="scm-diff-path">${api.escapeHtml(path)}</h3><pre class="file-preview diff-preview scm-diff">${api.escapeHtml(result.content ?? errorText(result.message))}</pre>${result.truncated ? `<p class="scm-hint">${api.t('scm.diffTruncated')}</p>` : ''}`;
+    const text = result.content ?? errorText(result.message);
+    // 统一 diff 走行级渲染（行号 + 红绿底 + 语法高亮）；解析不了才退回原文 <pre>，
+    // 例如二进制文件、mode-only 改动、冲突提示 —— 那几种本来就没有可染色的行。
+    const rendered = renderUnifiedDiff(text, { moreLines: (n) => api.t('tool.moreLines', { n }) });
+    const body = rendered ?? `<pre class="file-preview diff-preview scm-diff">${api.escapeHtml(text)}</pre>`;
+    container.innerHTML = `<div class="scm-diff-header"><button data-scm-action="back">${api.icon('arrow-left')}<span>${api.t('scm.back')}</span></button><span>${api.escapeHtml(title)}</span></div><h3 class="scm-diff-path">${api.escapeHtml(path)}</h3>${body}${result.truncated ? `<p class="scm-hint">${api.t('scm.diffTruncated')}</p>` : ''}`;
     wireDiff(container);
   } catch (cause) {
     if (seq !== requestSequence || !visible) return;

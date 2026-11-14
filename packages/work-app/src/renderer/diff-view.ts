@@ -33,8 +33,6 @@ const MAX_BODY_LINES = 200;
 const CTX_RUN_KEEP = 3;
 
 export interface FileChangeLabels {
-  update: string;
-  create: string;
   unchanged: (n: number) => string;
   noChanges: string;
   tooLarge: string;
@@ -297,24 +295,19 @@ export function summarizeFileChange(change: FileChange): HunkStats | null {
 }
 
 /**
- * 渲染成工具块展开区里的一段 HTML。返回 '' 表示没有可展示的改动（调用方回退原视图）。
+ * 渲染成工具块展开区里的一段 HTML。
+ *
+ * **只有正文，没有头行**：折叠行上已经是「编辑文件 + 路径 + +2 -1」，展开区再画一遍验证
+ * 同一句话写两遍（用户反馈「感觉被包了两层」）；而且 `.tool-entry` 自己就是一张卡片，
+ * 这里再套一层边框 + 另一种底色，视觉上就是框里套框。路径与改动量以折叠行为准。
+ * 「改动过大」「无可展示改动」这两种情况折叠行看不出来，所以仍各占一行提示。
  */
 export function renderFileChangeHtml(change: FileChange, labels: FileChangeLabels): string {
   const lang = langForPath(change.path);
   const stats = change.hunks.map(hunkStats);
   if (stats.some((s) => s === null)) {
-    return `<div class="tool-diff"><div class="tool-diff-head"><span class="tool-diff-path">${escapeHtml(change.path)}</span><span class="tool-diff-sub">${escapeHtml(labels.tooLarge)}</span></div></div>`;
+    return `<div class="tool-diff-note">${escapeHtml(labels.tooLarge)}</div>`;
   }
-  // 已确认无 null（上面提前返回），这里显式收窄给 TS。
-  const total = (stats as HunkStats[]).reduce(
-    (acc, s) => ({ added: acc.added + s.added, removed: acc.removed + s.removed }),
-    { added: 0, removed: 0 },
-  );
-
-  const verb = change.kind === 'create' ? labels.create : labels.update;
-  const statParts: string[] = [];
-  if (total.added > 0) statParts.push(`<span class="diff-add">+${total.added}</span>`);
-  if (total.removed > 0) statParts.push(`<span class="diff-del">-${total.removed}</span>`);
 
   const bodies: string[] = [];
   change.hunks.forEach((hunk, index) => {
@@ -333,11 +326,8 @@ export function renderFileChangeHtml(change: FileChange, labels: FileChangeLabel
     );
   });
   if (!bodies.length) {
-    return `<div class="tool-diff"><div class="tool-diff-head"><span class="tool-diff-verb">${escapeHtml(verb)}</span><span class="tool-diff-path">${escapeHtml(change.path)}</span><span class="tool-diff-sub">${escapeHtml(labels.noChanges)}</span></div></div>`;
+    return `<div class="tool-diff-note">${escapeHtml(labels.noChanges)}</div>`;
   }
 
-  return `<div class="tool-diff">
-  <div class="tool-diff-head"><span class="tool-diff-verb">${escapeHtml(verb)}</span><span class="tool-diff-path" title="${escapeHtml(change.path)}">${escapeHtml(change.path)}</span><span class="tool-diff-stat">${statParts.join('')}</span></div>
-  <div class="tool-diff-body">${bodies.join('')}</div>
-</div>`;
+  return `<div class="tool-diff"><div class="tool-diff-body">${bodies.join('')}</div></div>`;
 }

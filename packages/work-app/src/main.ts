@@ -59,7 +59,7 @@ import {
   type HostEnvelope,
 } from '@mocode/runtime/host';
 import { isUserConfigEnvKey } from '@mocode/protocol';
-import { commitStaged, gitDiff, gitFileDiff, gitFileStats, gitRepos, gitStatus, stageFiles, stagedDiff, unstageFiles, validateRepoRoot } from './git.js';
+import { commitStaged, gitCommitFile, gitCommitFiles, gitDiff, gitFileDiff, gitFileStats, gitLog, gitRepos, gitStatus, stageFiles, stagedDiff, unstageFiles, validateRepoRoot } from './git.js';
 import { buildCheckGroups, parsePackage, workspaceDirs } from './checks.js';
 import { readGlobalUsage, summarizeGlobalUsage } from './usage.js';
 
@@ -2453,6 +2453,31 @@ function installIpc(): void {
     if (!project || typeof payload.message !== 'string') return { ok: false, message: tMain('main.task.projectNotExist') };
     const root = await repoFor(project, payload);
     return root ? commitStaged(root, payload.message) : { ok: false, message: tMain('main.task.projectNotExist') };
+  });
+  /**
+   * 历史视图（只读）：提交列表分页、某提交改动的文件、某提交里某个文件的内容 + diff。
+   * 与其它 `work:git-*` 同一套目标解析 —— 仓库必须属于这个工作空间，渲染层不能借它读任意目录。
+   */
+  ipcMain.handle('work:git-log', async (_event, payload: Record<string, unknown>) => {
+    const project = gitWorkspace(payload);
+    if (!project) return { ok: false, commits: [], truncated: false, message: tMain('main.task.projectNotExist') };
+    const root = await repoFor(project, payload);
+    if (!root) return { ok: false, commits: [], truncated: false, message: tMain('main.task.projectNotExist') };
+    const limit = Number.isFinite(Number(payload.limit)) ? Number(payload.limit) : undefined;
+    const skip = Number.isFinite(Number(payload.skip)) ? Number(payload.skip) : undefined;
+    return gitLog(root, { limit, skip });
+  });
+  ipcMain.handle('work:git-commit-files', async (_event, payload: Record<string, unknown>) => {
+    const project = gitWorkspace(payload);
+    if (!project || typeof payload.sha !== 'string') return { ok: false, files: [], message: tMain('main.task.projectNotExist') };
+    const root = await repoFor(project, payload);
+    return root ? gitCommitFiles(root, payload.sha) : { ok: false, files: [], message: tMain('main.task.projectNotExist') };
+  });
+  ipcMain.handle('work:git-commit-file', async (_event, payload: Record<string, unknown>) => {
+    const project = gitWorkspace(payload);
+    if (!project || typeof payload.sha !== 'string' || typeof payload.path !== 'string') return { ok: false, message: tMain('main.task.projectNotExist') };
+    const root = await repoFor(project, payload);
+    return root ? gitCommitFile(root, payload.sha, payload.path) : { ok: false, message: tMain('main.task.projectNotExist') };
   });
   /**
    * 浏览器面板：视图是主进程的原生 WebContentsView（见 browser-host.ts）。

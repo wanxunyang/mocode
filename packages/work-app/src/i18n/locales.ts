@@ -136,6 +136,13 @@ export const zhCN = {
   'appearance.themeSystemHint': '跟随系统偏好设置',
   'appearance.language': '语言',
   'appearance.languageHint': '界面显示语言',
+  // ── 会话显示：只影响渲染，不影响 agent 行为 ──
+  'appearance.session': '会话显示',
+  'appearance.sessionHint': '怎么把 agent 的干活过程画出来',
+  'appearance.cleanRun': '干净会话',
+  'appearance.cleanRunHint': '文件编辑不单独展开 diff，并入工具调用集合，想看再点开',
+  'appearance.cleanRunOn': '已开启干净会话：新工具块并入调用集合（切换会话可重画历史）',
+  'appearance.cleanRunOff': '已关闭干净会话：文件编辑恢复独立展示并展开 diff',
   // ── 主题色(accent):与深浅主题相乘,共 2 × 6 套外观 ──
   'appearance.accent': '主题色',
   'appearance.accentHint': '按钮、选中态与强调元素都跟着变',
@@ -312,8 +319,6 @@ export const zhCN = {
   'tool.memory': '记忆',
   'tool.args': '参数',
   'tool.result': '结果',
-  'tool.diffUpdate': '更新',
-  'tool.diffCreate': '新建',
   'tool.diffUnchanged': '…（{n} 行未改动）',
   'tool.diffNoChanges': '无改动',
   'tool.diffTooLarge': '（文件过大，已省略 diff）',
@@ -662,6 +667,23 @@ export const zhCN = {
   'scm.kindNested': '嵌套仓库',
   'scm.kindSubmodule': '子模块',
   'scm.kindWorktree': '工作树',
+
+  // ── Git 历史（只读）──
+  'history.title': 'Git 历史',
+  'history.empty': '这个仓库还没有提交。',
+  'history.noRepo': '当前空间没有找到 Git 仓库。',
+  'history.failed': '读取 Git 历史失败。',
+  'history.loadMore': '加载更多',
+  'history.refresh': '刷新',
+  'history.noSubject': '（无提交信息）',
+  'history.merge': '合并提交',
+  'history.noFiles': '这个提交没有文件改动（例如空提交）。',
+  'history.noDiff': '没有可显示的差异（新增/删除/二进制改动）。',
+  'history.binary': '二进制文件，不显示内容。',
+  'history.emptyFile': '该提交里这个文件为空。',
+  'history.diffTitle': '本提交的改动',
+  'history.contentTitle': '该提交时的文件内容',
+  'history.truncated': '文件过大，仅显示前一部分。',
 
   // ── 错误本地化 ──
   'err.connectionLost': '与 AI 服务的连接中断了，请稍后重试或检查网络/模型配置。',
@@ -1151,6 +1173,13 @@ export const enUS: Record<LocaleKey, string> = {
   'appearance.themeSystemHint': 'Follow system preference',
   'appearance.language': 'Language',
   'appearance.languageHint': 'Interface display language',
+  // ── Session display: rendering only, never changes agent behavior ──
+  'appearance.session': 'Session display',
+  'appearance.sessionHint': 'How the agent’s work is drawn',
+  'appearance.cleanRun': 'Clean session',
+  'appearance.cleanRunHint': 'File edits no longer expand as their own diff block — they fold into the tool-call group, expand on demand',
+  'appearance.cleanRunOn': 'Clean session on: new tool blocks join the call group (switch sessions to redraw history)',
+  'appearance.cleanRunOff': 'Clean session off: file edits are standalone again and expand their diff',
   // ── Accent: multiplied with light/dark → 12 appearances ──
   'appearance.accent': 'Accent',
   'appearance.accentHint': 'Buttons, selection and highlights all follow it',
@@ -1325,8 +1354,6 @@ export const enUS: Record<LocaleKey, string> = {
   'tool.memory': 'Memory',
   'tool.args': 'Arguments',
   'tool.result': 'Result',
-  'tool.diffUpdate': 'Update',
-  'tool.diffCreate': 'Create',
   'tool.diffUnchanged': '… ({n} unchanged lines)',
   'tool.diffNoChanges': 'No changes',
   'tool.diffTooLarge': '(file too large, diff omitted)',
@@ -1673,6 +1700,23 @@ export const enUS: Record<LocaleKey, string> = {
   'scm.kindNested': 'Nested repo',
   'scm.kindSubmodule': 'Submodule',
   'scm.kindWorktree': 'Worktree',
+
+  // ── Git history (read-only) ──
+  'history.title': 'Git History',
+  'history.empty': 'This repository has no commits yet.',
+  'history.noRepo': 'No Git repository found in the current workspace.',
+  'history.failed': 'Failed to read Git history.',
+  'history.loadMore': 'Load more',
+  'history.refresh': 'Refresh',
+  'history.noSubject': '(no commit message)',
+  'history.merge': 'Merge',
+  'history.noFiles': 'This commit changed no files (e.g. an empty commit).',
+  'history.noDiff': 'No diff to show (added, deleted, or binary change).',
+  'history.binary': 'Binary file — content not shown.',
+  'history.emptyFile': 'This file was empty at that commit.',
+  'history.diffTitle': 'Changes in this commit',
+  'history.contentTitle': 'File content at this commit',
+  'history.truncated': 'File is large; only the beginning is shown.',
 
   // ── Error localization ──
   'err.connectionLost': 'The connection to the AI service was interrupted. Retry later or check your network/model config.',

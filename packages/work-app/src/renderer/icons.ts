@@ -63,6 +63,8 @@ export const ICONS: Record<string, string> = {
   // composer context
   'home': `<svg ${SVG_ATTRS}><path d="M3 9l7-5 7 5v8a1 1 0 0 1-1 1h-4v-5H8v5H4a1 1 0 0 1-1-1V9z"/></svg>`,
   'branch': `<svg ${SVG_ATTRS}><circle cx="6" cy="4" r="1.5"/><circle cx="6" cy="16" r="1.5"/><circle cx="14" cy="9" r="1.5"/><path d="M6 5.5v9"/><path d="M14 10.5V8a3 3 0 0 0-3-3H7.5"/></svg>`,
+  // 历史：三个节点 + 一条竖直连线，读起来是「提交时间线」而不是时钟/回退。
+  'history': `<svg ${SVG_ATTRS}><circle cx="5" cy="5" r="1.5"/><circle cx="5" cy="10" r="1.5"/><circle cx="5" cy="15" r="1.5"/><path d="M5 6.5v2M5 11.5v2"/><path d="M7.5 5H15M7.5 10H15M7.5 15H12"/></svg>`,
   'globe': `<svg ${SVG_ATTRS}><circle cx="10" cy="10" r="6.5"/><path d="M3.5 10h13M10 3.5a9 9 0 0 1 0 13M10 3.5a9 9 0 0 0 0 13"/></svg>`,
 
   // 消息头像

@@ -9,6 +9,10 @@ type Project = { id: string; name: string; root: string; branch: string; auto?: 
 type Task = { id: string; projectId: string; title: string; status: string; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string; plan?: { title: string; done: number; total: number; allDone: boolean } };
 type ProjectState = { version: 1; projects: Project[]; selectedProjectId: string; tasks: Task[]; selectedTaskId?: string };
 type GitTarget = { taskId?: string; projectId?: string; repoRoot?: string };
+/** 历史视图一行：字段与 git.ts 的 GitCommitSummary 对齐。 */
+type GitCommitLogEntry = { sha: string; shortSha: string; parents: string[]; author: string; email: string; date: string; refs: string[]; subject: string };
+/** 历史视图里一个提交改动的文件。 */
+type GitCommitFileEntry = { path: string; previousPath?: string; code: string };
 type ModelDraft = { provider: 'openai' | 'anthropic'; baseURL: string; apiKey: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
 type ModelPresetDetail = ModelDraft & { name: string };
 type CatalogEntryView = {
@@ -73,6 +77,15 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   gitStage: (target: GitTarget, paths?: string[]): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-stage', { ...target, paths }),
   gitUnstage: (target: GitTarget, paths?: string[]): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-unstage', { ...target, paths }),
   gitCommit: (target: GitTarget, message: string): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-commit', { ...target, message }),
+  /** 历史视图：提交列表（分页，skip 用于「加载更多」）。 */
+  gitLog: (target: GitTarget, options?: { limit?: number; skip?: number }): Promise<{ ok: boolean; commits: GitCommitLogEntry[]; truncated: boolean; message?: string }> =>
+    ipcRenderer.invoke('work:git-log', { ...target, ...options }),
+  /** 历史视图：某个提交改了哪些文件。 */
+  gitCommitFiles: (target: GitTarget, sha: string): Promise<{ ok: boolean; files: GitCommitFileEntry[]; message?: string }> =>
+    ipcRenderer.invoke('work:git-commit-files', { ...target, sha }),
+  /** 历史视图：某个提交里某个文件的内容 + 该文件在这个提交里的 diff。 */
+  gitCommitFile: (target: GitTarget, sha: string, path: string): Promise<{ ok: boolean; content?: string; diff?: string; binary?: boolean; truncated?: boolean; message?: string }> =>
+    ipcRenderer.invoke('work:git-commit-file', { ...target, sha, path }),
   /** 「改动」面板：本任务的 changedFiles + 每文件相对 HEAD 的增删行数。 */
   taskChanges: (payload: { taskId?: string }): Promise<{ ok: boolean; files: Array<{ path: string; added: number; removed: number; untracked: boolean }>; truncated?: boolean; message?: string }> =>
     ipcRenderer.invoke('work:task-changes', payload),

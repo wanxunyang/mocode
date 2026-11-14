@@ -1,11 +1,14 @@
 import { renderMarkdown, enhanceCodeBlocks, setMarkdownLabels } from './markdown.js';
 import { buildFileChange, renderFileChangeHtml, summarizeFileChange, type FileChangeLabels } from './diff-view.js';
 import { buildToolView, type ToolViewLabels } from './tool-view.js';
+import { renderUnifiedDiff } from './unified-diff.js';
 import { SendQueue } from './send-queue.js';
 import { renderQueuePanel, type QueuePanelItem } from './queue-view.js';
 import { mountIcons, icon } from './icons.js';
 import { initPanels, handlePanelEvent, renderPanel, requestPanelCommand, type PanelKind } from './panels.js';
 import { initSourceControl, refreshSourceControl, reopenSourceControl, closeSourceControl, type GitRepoView, type GitStatusView, type SourceControlTarget } from './source-control.js';
+// 历史视图（只读）：提交泳道图 + 某提交的文件 + 文件内容/diff。
+import { initHistory, refreshHistory, closeHistory, repaintHistory } from './history-panel.js';
 // 浏览器面板：页面是主进程的 WebContentsView（CDP 里必须是 page 目标，agent 才能接管）。
 import { initBrowserPanel, showBrowserPanel, hideBrowserPanel, rememberDevServerUrl, refreshBrowserPanelProject, refreshBrowserPanelLabels, type BrowserViewState } from './browser-panel.js';
 // 终端面板：PTY 在主进程（node-pty 是原生模块），这里是 xterm 显示层。
@@ -78,6 +81,9 @@ function applyLanguage(): void {
   refreshTerminalLabels();
   if (!inspector.classList.contains('hidden')) {
     if (activeInspectorTab === 'source') reopenSourceControl(inspectorContent);
+    // 历史视图要原地重绘：refreshInspector 会从仓库列表重来，把用户正在看的
+    //「某提交 / 某文件」弹回顶部列表。
+    else if (activeInspectorTab === 'history') repaintHistory(inspectorContent);
     else if (activeInspectorTab === 'browser') inspectorTitle.textContent = t('tools.browser');
     else if (activeInspectorTab === 'terminal') inspectorTitle.textContent = t('tools.terminal');
     else void refreshInspector();
@@ -168,6 +174,12 @@ declare global {
       gitStage: (target: SourceControlTarget, paths?: string[]) => Promise<{ ok: boolean; message?: string; status?: GitStatusView }>;
       gitUnstage: (target: SourceControlTarget, paths?: string[]) => Promise<{ ok: boolean; message?: string; status?: GitStatusView }>;
       gitCommit: (target: SourceControlTarget, message: string) => Promise<{ ok: boolean; message?: string; status?: GitStatusView; commit?: string }>;
+      /** 历史视图：提交列表分页（只读）。 */
+      gitLog: (target: SourceControlTarget, options?: { limit?: number; skip?: number }) => Promise<{ ok: boolean; commits: Array<{ sha: string; shortSha: string; parents: string[]; author: string; email: string; date: string; refs: string[]; subject: string }>; truncated: boolean; message?: string }>;
+      /** 历史视图：某个提交改了哪些文件。 */
+      gitCommitFiles: (target: SourceControlTarget, sha: string) => Promise<{ ok: boolean; files: Array<{ path: string; previousPath?: string; code: string }>; message?: string }>;
+      /** 历史视图：某个提交里某个文件的内容 + diff。 */
+      gitCommitFile: (target: SourceControlTarget, sha: string, path: string) => Promise<{ ok: boolean; content?: string; diff?: string; binary?: boolean; truncated?: boolean; message?: string }>;
       /** 「改动」面板：本任务的 changedFiles + 每文件相对 HEAD 的增删行数。 */
       taskChanges: (payload: { taskId?: string }) => Promise<{ ok: boolean; files: TaskChangeFile[]; truncated?: boolean; message?: string }>;
       /** 「改动」面板里展开单个文件（与列表同一基准：HEAD）。 */
@@ -258,7 +270,7 @@ let activeAssistant: HTMLElement | null = null;
 let activeTextBlock: HTMLElement | null = null;
 let attachments: Attachment[] = [];
 /** 检查器视图：一个视图只承载一个工具，由工具箱菜单切换（不再有页签条）。 */
-type InspectorTab = 'files' | 'source' | 'browser' | 'terminal' | 'changes' | 'checks';
+type InspectorTab = 'files' | 'source' | 'history' | 'browser' | 'terminal' | 'changes' | 'checks';
 let activeInspectorTab: InspectorTab = 'files';
 /**
  * 当前是否 plan 模式（只读探查 + 出方案）。事实源在 host（进程级状态），
@@ -1411,6 +1423,25 @@ const toolStartTimes = new Map<string, number>();
 /** 文件编辑类工具不进「工具调用集合」:改了什么必须让用户第一眼看到,不能埋进组里。 */
 const STANDALONE_TOOLS = new Set(['write_file', 'edit_file']);
 
+/**
+ * 「干净会话」：文件编辑不再单独成行、也不自动展开 diff，而是当成普通工具并进工具调用集合。
+ *
+ * 与 STANDALONE_TOOLS 是同一件事的两档：默认档认为「改动必须第一眼看到」，干净档认为
+ * 「一次任务改十几个文件时，铺开的 diff 把整段对话埋了」。所以做成开关而不是改死其中一边。
+ *
+ * 纯渲染层偏好，存 localStorage 而不进 `~/.mocode/config` —— 后者每个键都会被 core 当环境变量
+ * 读，而且 setSettings 会顺带 restartAllAgents()，为一个显示开关重启所有后台 agent 不合理。
+ * 默认关闭 = 保持既有行为。
+ */
+const CLEAN_RUN_KEY = 'mocode-work-clean-run';
+let cleanRunMode = ((): boolean => {
+  try { return localStorage.getItem(CLEAN_RUN_KEY) === '1'; } catch { return false; }
+})();
+function setCleanRun(enabled: boolean): void {
+  cleanRunMode = enabled;
+  try { localStorage.setItem(CLEAN_RUN_KEY, enabled ? '1' : '0'); } catch { /* 无 localStorage 则仅本次生效 */ }
+}
+
 /** 工具名 → 折叠行上的图标。标签在调用时按当前语言实时翻译（见 toolMeta），保证切语言即时生效。 */
 const TOOL_ICONS: Record<string, string> = {
   read_file: 'files', write_file: 'edit', edit_file: 'edit', run_command: 'terminal',
@@ -1540,8 +1571,6 @@ function paintToolGroup(group: HTMLElement): void {
 /** 文件改动的 diff 视图文案（每次渲染时按当前语言取，切语言即时生效）。 */
 function fileChangeLabels(): FileChangeLabels {
   return {
-    update: t('tool.diffUpdate'),
-    create: t('tool.diffCreate'),
     unchanged: (n) => t('tool.diffUnchanged', { n }),
     noChanges: t('tool.diffNoChanges'),
     tooLarge: t('tool.diffTooLarge'),
@@ -1806,7 +1835,8 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   // 例外三条：①文件编辑带 diff —— 终端里 diff 是直接铺在正文里的，收起等于让用户再点一次；
   // ②失败的调用 —— 用户最需要看到的就是原因，折叠等于把错误藏起来；
   // ③运行中的子 agent —— 它有进度行在长，收起就看不到「正在干什么」，与静止的卡片没区别。
-  if (completed) entry.open = Boolean(diff) || failed;
+  // 「干净会话」下①不再成立：diff 不自动铺开，用户想看再点（改动量 +N/-N 仍在折叠行上）。
+  if (completed) entry.open = (Boolean(diff) && !cleanRunMode) || failed;
   else if (name === 'sub-agent' && view) entry.open = true;
   // detail 必须在 open 定下来之后再交出去：已展开的块要立刻插进 DOM，
   // 折叠的块只留构建器等 toggle（见上方 detailBuilders 注释）。
@@ -1817,8 +1847,9 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   }
   if (isNew) {
     const content = (current.querySelector('.message-content') ?? current) as HTMLElement;
-    if (STANDALONE_TOOLS.has(name)) {
+    if (!cleanRunMode && STANDALONE_TOOLS.has(name)) {
       // 文件编辑独立成行展示(不进集合):编辑内容用户必须能直接找到。
+      // 「干净会话」下反过来——并进集合，让对话本身保持连续（diff 仍在，点击才展开）。
       content.append(entry);
       activeToolGroup = null;
     } else {
@@ -3809,6 +3840,7 @@ async function refreshInspector(): Promise<void> {
   // agent 正在操作的那一页会一起丢（见 browser-panel.ts 顶部约束）。
   if (activeInspectorTab === 'browser') {
     closeSourceControl();
+    closeHistory();
     hideTerminalPanel();
     inspectorContent.classList.add('hidden');
     inspectorContent.innerHTML = '';
@@ -3820,6 +3852,7 @@ async function refreshInspector(): Promise<void> {
   // 正在跑的东西（dev server / 测试）会一起没。
   if (activeInspectorTab === 'terminal') {
     closeSourceControl();
+    closeHistory();
     hideBrowserPanel();
     inspectorContent.classList.add('hidden');
     inspectorContent.innerHTML = '';
@@ -3832,10 +3865,16 @@ async function refreshInspector(): Promise<void> {
   hideTerminalPanel();
   // 离开源代码管理视图时立刻停掉它的轮询，别让后台计时器继续拉 git status。
   if (activeInspectorTab !== 'source') closeSourceControl();
+  if (activeInspectorTab !== 'history') closeHistory();
   inspectorContent.innerHTML = `<p class="inspector-loading">${t('inspector.loading')}</p>`;
   if (activeInspectorTab === 'source') {
     inspectorTitle.textContent = t('scm.title');
     await refreshSourceControl(inspectorContent);
+    return;
+  }
+  if (activeInspectorTab === 'history') {
+    inspectorTitle.textContent = t('history.title');
+    await refreshHistory(inspectorContent);
     return;
   }
   if (activeInspectorTab === 'changes') {
@@ -3865,7 +3904,13 @@ async function previewFile(file: string): Promise<void> {
   const [content, diff] = await Promise.all([window.mocodeWork.readFile(file), window.mocodeWork.fileDiff(file)]); inspectorTitle.textContent = file;
   inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button><button id="show-diff">${t('inspector.gitDiff')}</button></div><pre class="file-preview">${escapeHtml(content.error ?? content.content ?? '')}</pre>`;
   $('#back-to-files').addEventListener('click', () => { activeInspectorTab = 'files'; void refreshInspector(); });
-  $('#show-diff').addEventListener('click', () => { inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button></div><pre class="file-preview diff-preview">${escapeHtml(diff.error ?? diff.content ?? '')}</pre>`; $('#back-to-files').addEventListener('click', () => void previewFile(file)); });
+  $('#show-diff').addEventListener('click', () => {
+    // 与源代码管理面板同一套行级渲染：红绿底色 + 双行号。解析不了才退回原文。
+    const raw = diff.error ?? diff.content ?? '';
+    const rendered = diff.error ? null : renderUnifiedDiff(raw, { moreLines: (n) => t('tool.moreLines', { n }) });
+    inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button></div>${rendered ?? `<pre class="file-preview diff-preview">${escapeHtml(raw)}</pre>`}`;
+    $('#back-to-files').addEventListener('click', () => void previewFile(file));
+  });
 }
 
 /* ── 「改动」面板 ──────────────────────────────────────────────
@@ -3914,8 +3959,11 @@ async function showChangeDiff(taskId: string, path: string): Promise<void> {
   const result = await window.mocodeWork.taskChangeDiff({ taskId, path });
   if (activeInspectorTab !== 'changes' || viewingTaskId() !== taskId) return;
   const body = result.ok ? (result.content ?? '') : (result.message ?? t('changes.failed'));
+  // 统一 diff 走行级渲染：红绿底色 + 双行号，一眼能看出哪几行增删。解析不了（二进制、
+  // mode-only、错误文案）才退回原文 <pre>。
+  const rendered = result.ok ? renderUnifiedDiff(body, { moreLines: (n) => t('tool.moreLines', { n }) }) : null;
   inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-changes">${t('changes.back')}</button></div>`
-    + (body.trim() ? `<pre class="file-preview diff-preview">${escapeHtml(body)}</pre>` : `<p class="inspector-empty">${t('changes.noDiff')}</p>`)
+    + (rendered ?? (body.trim() ? `<pre class="file-preview diff-preview">${escapeHtml(body)}</pre>` : `<p class="inspector-empty">${t('changes.noDiff')}</p>`))
     + (result.truncated ? `<p class="inspector-empty">${t('changes.diffTruncated')}</p>` : '');
   $('#back-to-changes').addEventListener('click', () => {
     inspectorTitle.textContent = t('tools.changes');
@@ -4165,13 +4213,14 @@ toolsButton.addEventListener('click', (event) => {
 });
 toolsMenu.addEventListener('click', (event) => event.stopPropagation());
 document.addEventListener('click', hideToolsMenu);
-for (const [selector, tab] of [['#show-files', 'files'], ['#show-source-control', 'source'], ['#show-browser', 'browser'], ['#show-terminal', 'terminal'], ['#show-changes', 'changes'], ['#show-checks', 'checks']] as const) {
+for (const [selector, tab] of [['#show-files', 'files'], ['#show-source-control', 'source'], ['#show-history', 'history'], ['#show-browser', 'browser'], ['#show-terminal', 'terminal'], ['#show-changes', 'changes'], ['#show-checks', 'checks']] as const) {
   $(selector).addEventListener('click', () => {
     hideToolsMenu();
     if (inspector.classList.contains('hidden')) { openInspector(tab); return; }
     if (activeInspectorTab !== tab) { activeInspectorTab = tab; void refreshInspector(); return; }
     inspector.classList.add('hidden');
     closeSourceControl();
+    closeHistory();
     hideBrowserPanel();
     hideTerminalPanel();
   });
@@ -4229,7 +4278,25 @@ initSourceControl({
   commit: (target, message) => window.mocodeWork.gitCommit(target, message),
   generate: (command, options) => requestPanelCommand(command, options),
 });
-$('#close-inspector').addEventListener('click', () => { inspector.classList.add('hidden'); closeSourceControl(); hideBrowserPanel(); hideTerminalPanel(); });
+// 历史视图：与源代码管理共用仓库解析，但不轮询（历史不会自己变）。
+initHistory({
+  t,
+  icon,
+  escapeHtml,
+  relativeTime: timeAgo,
+  currentTaskId: () => viewingTaskId(),
+  currentProjectId: () => {
+    const task = selectedTask();
+    return task?.projectId
+      ? state?.projects.find((project) => project.id === task.projectId)?.id
+      : selectedProject()?.id;
+  },
+  repos: (target) => window.mocodeWork.gitRepos(target),
+  log: (target, options) => window.mocodeWork.gitLog(target, options),
+  commitFiles: (target, sha) => window.mocodeWork.gitCommitFiles(target, sha),
+  commitFile: (target, sha, path) => window.mocodeWork.gitCommitFile(target, sha, path),
+});
+$('#close-inspector').addEventListener('click', () => { inspector.classList.add('hidden'); closeSourceControl(); closeHistory(); hideBrowserPanel(); hideTerminalPanel(); });
 $('#search-button').addEventListener('click', () => { searchPanel.classList.remove('hidden'); searchInput.value = ''; refreshSearch(); searchInput.focus(); });
 $('#theme-toggle').addEventListener('click', () => {
   const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -6000,6 +6067,15 @@ function renderSettingsAppearanceSection(): void {
       </div>
     </div>
     <div class="settings-block">
+      <div class="settings-block-head"><b>${t('appearance.session')}</b><span>${t('appearance.sessionHint')}</span></div>
+      <div class="settings-list">
+        <button class="settings-row settings-toggle" data-clean-run role="switch" aria-checked="${cleanRunMode ? 'true' : 'false'}">
+          <span class="settings-row-body"><span class="settings-row-title">${t('appearance.cleanRun')}</span><span class="settings-row-sub">${t('appearance.cleanRunHint')}</span></span>
+          <span class="settings-switch" aria-hidden="true"></span>
+        </button>
+      </div>
+    </div>
+    <div class="settings-block">
       <div class="settings-block-head"><b>${t('appearance.language')}</b><span>${t('appearance.languageHint')}</span></div>
       <div class="settings-list">
         ${languages.map(({ code, label, sub }) => `
@@ -6028,6 +6104,15 @@ function renderSettingsAppearanceSection(): void {
       applyAccent(id);
       const meta = ACCENTS.find((item) => item.id === id);
       showToast('info', t('toast.accentApplied', { accent: meta ? t(meta.labelKey) : id }), 1600);
+    });
+  });
+  settingsSection.querySelectorAll<HTMLButtonElement>('[data-clean-run]').forEach((button) => {
+    button.addEventListener('click', () => {
+      setCleanRun(!cleanRunMode);
+      renderSettingsAppearanceSection();
+      // 只影响「之后重绘的块」：已经在屏上的历史块保持原样（重排会让视图跳走）。
+      // 想让旧块也按新档重画，切一下任务即可 —— 那是显式动作，用户自己按节奏来。
+      showToast('success', cleanRunMode ? t('appearance.cleanRunOn') : t('appearance.cleanRunOff'), 2400);
     });
   });
   settingsSection.querySelectorAll<HTMLButtonElement>('.settings-language').forEach((button) => {

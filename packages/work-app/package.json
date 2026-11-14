@@ -11,10 +11,10 @@
     "typecheck": "tsc --noEmit",
     "build:electron": "npm --prefix ../.. run build && npm run build",
     "stage:host": "node scripts/stage-host.mjs",
-    "pack:dir": "npm run build:electron && npm run stage:host && electron-builder --dir",
-    "pack:win": "npm run build:electron && npm run stage:host && electron-builder --win",
-    "pack:mac": "npm run build:electron && npm run stage:host && electron-builder --mac",
-    "pack:linux": "npm run build:electron && npm run stage:host && electron-builder --linux"
+    "pack:dir": "npm run build:electron && npm run stage:host && electron-builder --dir -c.npmRebuild=false && node scripts/verify-pack.mjs",
+    "pack:win": "npm run build:electron && npm run stage:host && electron-builder --win -c.npmRebuild=false && node scripts/verify-pack.mjs",
+    "pack:mac": "npm run build:electron && npm run stage:host && electron-builder --mac -c.npmRebuild=false && node scripts/verify-pack.mjs",
+    "pack:linux": "npm run build:electron && npm run stage:host && electron-builder --linux -c.npmRebuild=false && node scripts/verify-pack.mjs"
   },
   "devDependencies": {
     "@types/node": "22.0.0",
@@ -55,9 +55,6 @@
       }
     ],
     "asar": true,
-    "asarUnpack": [
-      "**/node_modules/node-pty/**"
-    ],
     "win": {
       "target": [
         {

@@ -574,6 +574,167 @@ export async function gitFileStats(workspaceRoot: string, files: readonly string
   return { ok: true, stats: stats.map((item) => ({ ...item, path: item.path.replaceAll('\\', '/') })) };
 }
 
+/* ── 历史视图（只读）───────────────────────────────────────
+ * 三条通道：提交列表（分页）、一个提交改了哪些文件、某个提交里的文件内容 + 该文件的 diff。
+ * 全部只读，因此不进 `serialized` 队列 —— 与 stage/commit 抢锁只会让历史面板点开就卡。
+ */
+
+/** 提交列表里一行需要的全部字段。 */
+export interface GitCommitSummary {
+  sha: string;
+  shortSha: string;
+  parents: string[];
+  author: string;
+  email: string;
+  /** ISO 8601（作者时间），渲染侧自己算「几天前」。 */
+  date: string;
+  /** 指向这个提交的 ref（HEAD -> main / origin/main / v1.0…），已去掉 `tag: ` 前缀。 */
+  refs: string[];
+  subject: string;
+}
+
+export interface GitCommitFile {
+  path: string;
+  previousPath?: string;
+  /** 与 git status 同口径的单字母状态：A/M/D/R/C/T。 */
+  code: string;
+}
+
+const LOG_FIELD = '\x1f';
+const LOG_RECORD = '\x1e';
+const LOG_LIMIT_MAX = 300;
+/** 单个文件内容预览上限；超过就截断（大文件 / minified bundle 不该整份进渲染层）。 */
+const FILE_PREVIEW_LIMIT = 200_000;
+
+/**
+ * 提交列表。用 `-z` 不行（字段里含 `%x00` 会和记录分隔打架），改用 0x1f 分字段、0x1e 分记录：
+ * 这两个字符在提交标题与作者名里出现的概率可以忽略，而 `\n` 不行（多行 git 输出本来就按行列）。
+ *
+ * `skip` 而非 `--skip` 之外的分页手段：历史面板一次拉 100 条，滚到底再拉下一页。
+ */
+export async function gitLog(root: string, options: { limit?: number; skip?: number } = {}): Promise<{ ok: boolean; commits: GitCommitSummary[]; truncated: boolean; message?: string }> {
+  const limit = Math.min(LOG_LIMIT_MAX, Math.max(1, Math.round(options.limit ?? 100)));
+  const skip = Math.max(0, Math.round(options.skip ?? 0));
+  const format = ['%H', '%h', '%P', '%an', '%ae', '%aI', '%D', '%s'].join(`%x${LOG_FIELD.charCodeAt(0).toString(16)}`);
+  const result = await runGit(root, [
+    '-c', 'core.quotepath=false',
+    // date-order：父提交恒在子提交之后，泳道算法依赖这个前提（见 git-graph.ts）。
+    'log', '--date-order', '--no-show-signature',
+    `--max-count=${limit + 1}`, `--skip=${skip}`,
+    `--format=${format}${LOG_RECORD}`,
+  ]);
+  if (!result.ok) return { ok: false, commits: [], truncated: false, message: errorText(result) };
+  const commits: GitCommitSummary[] = [];
+  for (const record of result.stdout.split(LOG_RECORD)) {
+    const line = record.replace(/^\r?\n/, '').trimEnd();
+    if (!line) continue;
+    const fields = line.split(LOG_FIELD);
+    if (fields.length < 8) continue;
+    const [sha, shortSha, parents, author, email, date, refs, ...rest] = fields;
+    commits.push({
+      sha,
+      shortSha,
+      parents: parents ? parents.split(' ').filter(Boolean) : [],
+      author,
+      email,
+      date,
+      refs: refs ? refs.split(',').map((item) => item.trim().replace(/^tag:\s*/, '')).filter(Boolean) : [],
+      // 标题里可能有 0x1f 以外的任何字符；用剩余字段拼回，避免被 split 切碎。
+      subject: rest.join(LOG_FIELD),
+    });
+  }
+  // 多取一条只为判断「还有下一页」，不要把它交给 UI。
+  const truncated = commits.length > limit;
+  return { ok: true, commits: truncated ? commits.slice(0, limit) : commits, truncated };
+}
+
+/** 提交 sha 的合法形态：full / 短 sha 都接受，但必须是十六进制。 */
+function assertSha(sha: unknown): string {
+  if (typeof sha !== 'string' || !/^[0-9a-f]{4,64}$/i.test(sha)) throw new Error('INVALID_SHA');
+  return sha;
+}
+
+/**
+ * 一个提交改了哪些文件。
+ *
+ * 合并提交必须带 `--first-parent`：不带的话 `diff-tree` 对 merge 输出的是相对**所有**父提交的
+ * 组合差异（`-c`/`-m` 语义），会出现「文件列了两遍」甚至空表；面板上的直觉是
+ * 「这个提交相对它并进来的那条主线改了什么」。
+ */
+export async function gitCommitFiles(root: string, sha: string): Promise<{ ok: boolean; files: GitCommitFile[]; message?: string }> {
+  let target: string;
+  try { target = assertSha(sha); }
+  catch { return { ok: false, files: [], message: 'INVALID_SHA' }; }
+  // -M 打开重命名检测：不带的话 `git mv` 会显示成「删一个 + 加一个」，历史面板里读不出
+  // 「这个文件被改名了」，而重命名恰恰是最需要保留旧路径的场景。
+  const result = await runGit(root, ['-c', 'core.quotepath=false', 'diff-tree', '--no-commit-id', '--name-status', '-M', '-r', '-z', '--first-parent', target]);
+  if (!result.ok) return { ok: false, files: [], message: errorText(result) };
+  const tokens = result.stdout.split('\0').filter((token) => token !== '');
+  const files: GitCommitFile[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const status = tokens[i];
+    const code = status.charAt(0).toUpperCase();
+    if (!/^[AMDRCT]$/.test(code)) continue;
+    // R / C 带「旧路径 新路径」两段（额外两列），其余只有一段。
+    if (code === 'R' || code === 'C') {
+      const previousPath = tokens[i + 1];
+      const next = tokens[i + 2];
+      i += 2;
+      if (!next) break;
+      files.push({ path: next, code, ...(previousPath ? { previousPath } : {}) });
+      continue;
+    }
+    const next = tokens[i + 1];
+    i += 1;
+    if (!next) break;
+    files.push({ path: next, code });
+  }
+  return { ok: true, files };
+}
+
+/**
+ * 某个提交里的一个文件：内容 + 它在**这个提交里**的改动。
+ *
+ * 两者都给，是因为看历史时用户追问的通常是「这行当时长什么样」和「这次改了哪几行」，
+ * 来回切两次比一次给全更烦。二进制（含 NUL）只给 diff 里的 Git 说明，不塞乱码进 DOM。
+ */
+export async function gitCommitFile(root: string, sha: string, file: string): Promise<GitDiffResult & { content?: string; diff?: string; binary?: boolean }> {
+  let target: string;
+  try { target = assertSha(sha); }
+  catch { return { ok: false, message: 'INVALID_SHA' }; }
+  const normalized = path.posix.normalize(file.split(path.sep).join('/'));
+  if (!file || file.includes('\0') || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) {
+    return { ok: false, message: 'INVALID_PATH' };
+  }
+  const absolute = path.resolve(root, normalized);
+  const relative = path.relative(path.resolve(root), absolute);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return { ok: false, message: 'INVALID_PATH' };
+
+  const [show, diff] = await Promise.all([
+    runGit(root, ['show', `${target}:${normalized}`]),
+    runGit(root, ['-c', 'core.quotepath=false', 'show', '--format=', '--no-ext-diff', '--no-textconv', `${target}`, '--', normalized]),
+  ]);
+  const diffSlice = bounded(diff.ok ? diff.stdout : '', FILE_PREVIEW_LIMIT);
+  if (!show.ok) {
+    // 这个提交里文件被删了 → `show sha:path` 必然失败，但删除 diff 仍有价值
+    // （用户点进去就是想看删掉了什么）。只在这一种情况下放行，其它失败照原样报错。
+    if (diff.ok && /deleted file mode/.test(diffSlice.text)) {
+      return { ok: true, content: '', truncated: diffSlice.truncated, ...(diffSlice.text ? { diff: diffSlice.text } : {}) };
+    }
+    return { ok: false, message: errorText(show) };
+  }
+  const slice = bounded(show.stdout, FILE_PREVIEW_LIMIT);
+  const binary = slice.text.includes('\0');
+  return {
+    ok: true,
+    content: binary ? '' : slice.text,
+    ...(binary ? { binary: true } : {}),
+    truncated: slice.truncated || diffSlice.truncated,
+    // diff 在「新增文件」「合并提交该文件无变化」时可能为空，UI 据此显示占位文案。
+    ...(diffSlice.text ? { diff: diffSlice.text } : {}),
+  };
+}
+
 export function commitStaged(root: string, message: string): Promise<GitMutationResult> {
   const commitMessage = message.trim();
   if (!commitMessage) return Promise.resolve({ ok: false, message: 'EMPTY_COMMIT_MESSAGE' });
