@@ -7,7 +7,7 @@
  * `HOST_PROTOCOL_VERSION` 由 host 在 `runtime_ready` 里回报，客户端据此提示不匹配，
  * 而不是靠猜。
  */
-export const HOST_PROTOCOL_VERSION = 2;
+export const HOST_PROTOCOL_VERSION = 4;
 
 export interface HostAttachment {
   name: string;
@@ -130,7 +130,19 @@ export type HostCommand =
    * 运行时设置。get 返回当前快照；set 应用 patch 并持久化到 ~/.mocode/config，
    * 应答 `settings_state`。调用方负责重启 host 让启动期固化的项生效。
    */
-  | { id: string; type: 'settings'; action: 'get' | 'set'; patch?: Record<string, HostSettingValue> };
+  | { id: string; type: 'settings'; action: 'get' | 'set'; patch?: Record<string, HostSettingValue> }
+  /** 独立提交信息生成；只消费调用方提供的暂存 diff，绝不进入任务 history 或执行 git。 */
+  | {
+      id: string;
+      type: 'commit_message';
+      diff: string;
+      stat: string;
+      files: string[];
+      truncated?: boolean;
+      language?: 'zh-CN' | 'en-US';
+    }
+  /** 取消指定的独立提交信息请求；与任务 run 的 cancel 完全隔离。 */
+  | { id: string; type: 'cancel_commit_message'; targetId: string };
 
 export interface HostEnvelope {
   type: 'event' | 'error';

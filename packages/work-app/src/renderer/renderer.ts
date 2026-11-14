@@ -4,6 +4,7 @@ import { buildToolView, type ToolViewLabels } from './tool-view.js';
 import { SendQueue } from './send-queue.js';
 import { mountIcons, icon } from './icons.js';
 import { initPanels, handlePanelEvent, renderPanel, renderTurnChanges, requestPanelCommand, type PanelKind } from './panels.js';
+import { initSourceControl, refreshSourceControl, reopenSourceControl, closeSourceControl, type GitStatusView, type SourceControlTarget } from './source-control.js';
 import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, MOD, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
 import type { RecoverySnapshot } from '../recovery-log.js';
 import type { WorkAttachment, AttachmentResult, AttachmentErrorCode } from '../attachment-types.js';
@@ -58,6 +59,10 @@ function applyLanguage(): void {
   renderAttachments();
   // 轨道点的 title / aria-label 是生成时按当时语言写死的 → 强制重建一次。
   scheduleConvRail(true);
+  if (!inspector.classList.contains('hidden')) {
+    if (activeInspectorTab === 'source') reopenSourceControl(inspectorContent);
+    else void refreshInspector();
+  }
 }
 onLangChange(() => applyLanguage());
 
@@ -130,6 +135,11 @@ declare global {
       adoptSession: (payload: { projectId: string; sessionId: string; title?: string }) => Promise<{ ok: boolean; message?: string; state?: WorkState; task?: Task; history?: HistoryItem[] }>;
       readFile: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
       fileDiff: (path: string) => Promise<{ path?: string; content?: string; error?: string }>;
+      gitStatus: (target?: SourceControlTarget) => Promise<GitStatusView>;
+      gitDiff: (target: SourceControlTarget, path: string, staged: boolean) => Promise<{ ok: boolean; content?: string; truncated?: boolean; message?: string }>;
+      gitStage: (target: SourceControlTarget, paths?: string[]) => Promise<{ ok: boolean; message?: string; status?: GitStatusView }>;
+      gitUnstage: (target: SourceControlTarget, paths?: string[]) => Promise<{ ok: boolean; message?: string; status?: GitStatusView }>;
+      gitCommit: (target: SourceControlTarget, message: string) => Promise<{ ok: boolean; message?: string; status?: GitStatusView; commit?: string }>;
       pickAttachment: () => Promise<AttachmentResult[]>;
       readAttachments: (paths: string[]) => Promise<AttachmentResult[]>;
       droppedFilePaths: (files: File[]) => string[];
@@ -197,7 +207,7 @@ let activeAssistant: HTMLElement | null = null;
 let activeTextBlock: HTMLElement | null = null;
 let attachments: Attachment[] = [];
 /** 检查器页签：概览 / 文件树 / 本轮改动（改动来自 changeset 快照，与回滚同源）。 */
-type InspectorTab = 'overview' | 'files' | 'changes';
+type InspectorTab = 'overview' | 'files' | 'changes' | 'source';
 let activeInspectorTab: InspectorTab = 'overview';
 /**
  * 当前是否 plan 模式（只读探查 + 出方案）。事实源在 host（进程级状态），
@@ -987,6 +997,7 @@ function updateState(next: WorkState): void {
   // IPC 的广播与 invoke 回执可能携带同一份状态；重复回执不做任何 DOM 工作。
   if (state && JSON.stringify(next) === JSON.stringify(state)) return;
   state = next; renderProjects(); renderTasks(); renderEmptyChips();
+  if (activeInspectorTab === 'source' && !inspector.classList.contains('hidden')) void refreshSourceControl(inspectorContent);
 }
 function clearWorkspace(): void { hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); }
 
@@ -1307,6 +1318,8 @@ function fileChangeDetail(
  * - 同一 id 的 tool_started → tool_completed 原地更新,不新增行。
  */
 function addTool(payload: Record<string, unknown>, completed = false): void {
+  // 工具完成可能直接展开长 diff；必须在内容增高前保存贴底状态，否则会把新增高度误判为用户上滑。
+  const pinned = isAtBottom();
   emptyState.classList.add('hidden');
   // 工具事件可能早于首个文字到达：先确保存在活跃的助手消息，工具行挂在其内容区内部
   const current = currentTurn() ?? startAssistantTurn();
@@ -1396,7 +1409,7 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
     const group = entry.closest<HTMLElement>('.tool-group');
     if (group) refreshToolGroup(group);
   }
-  smartScrollToBottom();
+  if (pinned) smartScrollToBottom(true);
 }
 /* ── 工具流式输出（tool_output）──────────────────────────
    终端里边跑边出，GUI 若只在 tool_completed 时一次性画，用户就只能看最后一坨。
@@ -3005,7 +3018,13 @@ function renderFileTree(files: string[], openPaths: Set<string>): string {
     : render(root, 0);
 }
 async function refreshInspector(): Promise<void> {
+  if (activeInspectorTab !== 'source') closeSourceControl();
   setInspectorTab(activeInspectorTab); inspectorContent.innerHTML = `<p class="inspector-loading">${t('inspector.loading')}</p>`;
+  if (activeInspectorTab === 'source') {
+    inspectorTitle.textContent = t('scm.title');
+    await refreshSourceControl(inspectorContent);
+    return;
+  }
   if (activeInspectorTab === 'overview') {
     inspectorTitle.textContent = t('inspector.overview'); const overview = await window.mocodeWork.projectOverview();
     // 纯任务没有工作空间：明说，别让用户对着一堆"未发现文件"猜哪里出了问题。
@@ -3222,14 +3241,59 @@ function applyPlanToggle(next: boolean): void {
   button.setAttribute('aria-pressed', next ? 'true' : 'false');
   button.title = t('composer.planToggleTitle');
 }
-// 唯一的文件面板入口（原来 toggle-inspector/show-files 两个按钮开同一个面板，已合并）：
-// 关着 → 打开文件 tab；开着但在别的 tab → 切到文件；已在文件 tab → 收起面板。
-$('#show-files').addEventListener('click', () => {
-  if (inspector.classList.contains('hidden')) { openInspector('files'); return; }
-  if (activeInspectorTab !== 'files') { setInspectorTab('files'); void refreshInspector(); return; }
-  inspector.classList.add('hidden');
+/** 右上角工具箱：菜单只负责选工具，文件与源代码管理仍复用同一个右侧 inspector。 */
+const toolsMenu = $('#tools-menu');
+const toolsButton = $('#show-tools');
+function hideToolsMenu(): void {
+  toolsMenu.classList.add('hidden');
+  toolsButton.setAttribute('aria-expanded', 'false');
+}
+function positionToolsMenu(): void {
+  if (toolsMenu.classList.contains('hidden')) return;
+  const anchor = toolsButton.getBoundingClientRect();
+  toolsMenu.style.right = `${Math.max(8, window.innerWidth - anchor.right)}px`;
+  toolsMenu.style.top = `${Math.round(anchor.bottom + 6)}px`;
+}
+toolsButton.addEventListener('click', (event) => {
+  event.stopPropagation();
+  if (!toolsMenu.classList.contains('hidden')) { hideToolsMenu(); return; }
+  hideModelPicker();
+  toolsMenu.classList.remove('hidden');
+  toolsButton.setAttribute('aria-expanded', 'true');
+  positionToolsMenu();
 });
-$('#close-inspector').addEventListener('click', () => inspector.classList.add('hidden'));
+toolsMenu.addEventListener('click', (event) => event.stopPropagation());
+document.addEventListener('click', hideToolsMenu);
+for (const [selector, tab] of [['#show-files', 'files'], ['#show-source-control', 'source']] as const) {
+  $(selector).addEventListener('click', () => {
+    hideToolsMenu();
+    if (inspector.classList.contains('hidden')) { openInspector(tab); return; }
+    if (activeInspectorTab !== tab) { setInspectorTab(tab); void refreshInspector(); return; }
+    inspector.classList.add('hidden');
+    closeSourceControl();
+  });
+}
+initSourceControl({
+  t,
+  icon,
+  escapeHtml,
+  toast: (level, text, durationMs) => showToast(level, text, durationMs),
+  currentTaskId: () => viewingTaskId(),
+  // 任务面板归属任务自己的空间；仅无任务时跟随全局选中的空间。
+  currentProjectId: () => {
+    const task = selectedTask();
+    return task?.projectId
+      ? state?.projects.find((project) => project.id === task.projectId)?.id
+      : selectedProject()?.id;
+  },
+  status: (target) => window.mocodeWork.gitStatus(target),
+  diff: (target, path, staged) => window.mocodeWork.gitDiff(target, path, staged),
+  stage: (target, paths) => window.mocodeWork.gitStage(target, paths),
+  unstage: (target, paths) => window.mocodeWork.gitUnstage(target, paths),
+  commit: (target, message) => window.mocodeWork.gitCommit(target, message),
+  generate: (command, options) => requestPanelCommand(command, options),
+});
+$('#close-inspector').addEventListener('click', () => { inspector.classList.add('hidden'); closeSourceControl(); });
 // 页签点击：只绑 inspector 自己的那组（记忆面板里也有 [data-tab]，不归这里管）。
 inspector.querySelectorAll<HTMLButtonElement>('.inspector-tabs [data-tab]').forEach((button) => button.addEventListener('click', () => { activeInspectorTab = button.dataset.tab as InspectorTab; void refreshInspector(); }));
 $('#search-button').addEventListener('click', () => { searchPanel.classList.remove('hidden'); searchInput.value = ''; refreshSearch(); searchInput.focus(); });
@@ -5476,6 +5540,7 @@ promptInput.addEventListener('input', resizePrompt);
 promptInput.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } });
 window.addEventListener('resize', () => {
   if (modelPickerEl && !modelPickerEl.classList.contains('hidden')) positionModelPicker();
+  positionToolsMenu();
 });
 window.addEventListener('keydown', (event) => {
   const cmd = event.ctrlKey || event.metaKey;
@@ -5490,6 +5555,8 @@ window.addEventListener('keydown', (event) => {
     if (cheatsheetEl && !cheatsheetEl.classList.contains('hidden')) { hideCheatsheet(); return; }
     if (searchOverlay && !searchOverlay.classList.contains('hidden')) { closeConvSearch(); return; }
     if (modelPickerEl && !modelPickerEl.classList.contains('hidden')) { hideModelPicker(); return; }
+    const toolsMenu = $('#tools-menu');
+    if (toolsMenu && !toolsMenu.classList.contains('hidden')) { toolsMenu.classList.add('hidden'); $('#show-tools').setAttribute('aria-expanded', 'false'); return; }
     if (!searchPanel.classList.contains('hidden')) { searchPanel.classList.add('hidden'); return; }
     if (!approvalPanel.classList.contains('hidden')) { approvalPanel.classList.add('hidden'); return; }
     // 快捷键面板里 Esc 那行写的是「关闭弹窗 / 取消输入焦点」——后半句此前没有实现
@@ -5600,9 +5667,9 @@ function renderWorkspacePicker(): void {
   if (!el) return;
   const projects = state?.projects ?? [];
   const task = chipTask();
-  const currentId = task?.projectId ?? '';
+  const currentId = task ? task.projectId : (state?.selectedProjectId ?? '');
   const fixed = chipTaskFixed();
-  // 选中项 = 任务当前的归属空间；纯任务则选中「不使用工作空间」那一行。
+  // 有任务时选中它的归属；没有任务时选中浏览上下文，点击即切换 SCM 所属空间。
   const items = projects.length
     ? projects.map((project) => `
         <button class="chip-picker-item ${project.id === currentId ? 'active' : ''}" data-workspace="${escapeHtml(project.id)}" role="option" aria-selected="${project.id === currentId}"${fixed ? ' disabled' : ''}>
@@ -5656,6 +5723,11 @@ function renderWorkspacePicker(): void {
       hideWorkspacePicker();
       if (!id || id === currentId) return;
       const project = state?.projects.find((p) => p.id === id);
+      if (!chipTask()) {
+        updateState(await window.mocodeWork.selectProject(id));
+        showToast('success', t('toast.switchedProject', { name: project?.name ?? id }));
+        return;
+      }
       await applyProject(id, t('toast.associated', { name: project?.name ?? id }));
     });
   });

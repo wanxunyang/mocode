@@ -52,6 +52,7 @@ import {
   type HostEnvelope,
 } from '@mocode/runtime/host';
 import { isUserConfigEnvKey } from '@mocode/protocol';
+import { commitStaged, gitDiff, gitStatus, stageFiles, stagedDiff, unstageFiles } from './git.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 开发环境从 workspace/root node_modules 解析；安装版只读随包发布的独立资源目录。
@@ -141,6 +142,13 @@ let state: StoredState;
  * 互不干扰。renderer 随时切换查看的任务，后台任务的事件照常流入对应实例。
  */
 const agents = new Map<string, LocalAgent>();
+/** 面板取消与空间移除共用这张路由表；请求结束后由 host 回执清除。 */
+interface PendingCommitMessage {
+  projectId: string;
+  agent: LocalAgent | null;
+  sent?: Promise<boolean>;
+}
+const pendingCommitMessages = new Map<string, PendingCommitMessage>();
 const recoveryLogs = new Map<string, RecoveryLog>();
 const recoveryRoot = (): string => app.getPath('userData');
 // 每个流式 token 都可能写日志；复用对象，避免每次都重读整份 JSONL 来恢复 seq。
@@ -939,15 +947,23 @@ class LocalAgent {
       this.receive({ type: 'event', event: 'host_log', payload: { message } }),
     );
     this.client.onExit(({ code, expected }) => {
+      // host 一旦退出，未回执的面板请求已随进程终止，不能留在路由表里。
+      for (const [id, pending] of pendingCommitMessages) {
+        if (pending.agent === this) pendingCommitMessages.delete(id);
+      }
       // 预期内的退出全是**我们自己**发起的（stop / 切模型重启 / 被新一次 start 打断）：
       // 这时任务要么马上会被重新拉起（重启后紧接着的那条 send），要么调用方已经自己收敛了状态
       // （删任务 / 回滚 / 退出应用，见各自的 handler）。以前一律 failTask + 发 host_exit，会把
       // 「重启后正常接着跑」的那一轮误报成「运行失败 / Agent 进程已停止」—— 用户看到的就是莫名的失败。
       if (expected) {
-        pushRenderer('work:agent-event', { type: 'event', event: 'host_stopped', requestId: this.taskId, payload: { code } });
+        if (!this.taskId.startsWith('workspace:')) {
+          pushRenderer('work:agent-event', { type: 'event', event: 'host_stopped', requestId: this.taskId, payload: { code } });
+        }
         return;
       }
       this.receive({ type: 'event', event: 'host_exit', payload: { code } });
+      // 辅助 host 不属于任何任务，崩溃只让面板请求失败，不能弹出假任务失败。
+      if (this.taskId.startsWith('workspace:')) return;
       // 真崩了：本任务的 run 不会再有 run_completed，就地收敛 + 自动重启一次。
       failTask(this.taskId, tMain('main.host.crashed', { code: code ?? 'null' }));
       const project = this.currentProject;
@@ -965,6 +981,7 @@ class LocalAgent {
 
   /** 启动 host。返回是否真的起来了 —— 调用方据此决定要不要报错，绝不允许「没起来还往下走」。 */
   async start(project: Project): Promise<boolean> {
+    if (this.stopped) return false;
     this.currentProject = project;
     const { loaded, missing } = loadMocodeConfig(project.root);
     // host_log 的 message 是**给人看**的（已按当前语言本地化），渲染层要据此决定弹不弹 toast。
@@ -1015,6 +1032,8 @@ class LocalAgent {
     } finally {
       if (this.starting === starting) this.starting = null;
     }
+    // stop 可能与 readiness 同时发生；主动报废不能报错，也不能被后续 send 重启。
+    if (this.stopped) return false;
     if (failure) {
       this.fail(failure);
       return false;
@@ -1046,27 +1065,29 @@ class LocalAgent {
     this.receive({ type: 'error', error: message });
   }
 
-  async send(value: HostCommand): Promise<void> {
+  async send(value: HostCommand): Promise<boolean> {
     // stop() 之后实例已报废:任何未送达的指令本来就不再需要送达(调用方正在拆这个任务),
     // 直接静默返回 —— 否则 client 换代会让在飞的 send 抛「was replaced」,炸出一条假故障 toast。
-    if (this.stopped) return;
+    if (this.stopped) return false;
     // 先等正在进行的 restart 收尾:client.stop() 只发了 kill,子进程尚未退出时
     // isRunning 仍为 true,若直接发会落到正在死掉的旧进程上(切换模型后最易踩)。
     if (this.restarting) await this.restarting;
+    if (this.stopped) return false;
     if (!this.client.isRunning) {
       const project = this.currentProject;
       if (!project) {
         this.fail(tMain('main.host.couldNotStart'));
-        return;
+        return false;
       }
       if (this.crashStreak >= LocalAgent.MAX_CRASH_STREAK) {
         this.fail(tMain('main.host.continuousCrash'));
-        return;
+        return false;
       }
       // 已经有一次 start 在飞（创建任务时的预热还没起完）→ **等它**，别再发一次：
       // 再发会让 AgentHostClient 顶掉生成号，把正在启动的那个 host 杀掉
       // —— 用户看到的就是莫名其妙的「Agent 进程已停止」，还白搭一次冷启动。
       if (this.starting) await this.starting.catch(() => undefined);
+      if (this.stopped) return false;
       if (!this.client.isRunning) {
         const reportedErrors = this.errorSeq;
         await this.start(project);
@@ -1075,23 +1096,26 @@ class LocalAgent {
           if (this.errorSeq === reportedErrors) {
             this.fail(this.lastStartError ?? tMain('main.host.couldNotStart'));
           }
-          return;
+          return false;
         }
       }
     }
     if (this.starting) await this.starting.catch(() => undefined);
+    if (this.stopped) return false;
     if (!this.client.isRunning) {
       this.fail(tMain('main.host.couldNotStart'));
-      return;
+      return false;
     }
     try {
       await this.client.send(value);
       this.crashStreak = 0;
+      return true;
     } catch (cause) {
       // 与入口的 stopped 检查同理:stop() 与在飞的 send 竞态胜出时,client 换代抛
       // 「was replaced before the command could be sent」—— 这是主动报废,不该报给用户。
-      if (this.stopped) return;
+      if (this.stopped) return false;
       this.fail(tMain('main.host.sendFail', { raw: cause instanceof Error ? cause.message : String(cause) }));
+      return false;
     }
   }
 
@@ -1104,6 +1128,9 @@ class LocalAgent {
     this.stopped = true;
     this.currentProject = null;
     this.starting = null;
+    for (const [id, pending] of pendingCommitMessages) {
+      if (pending.agent === this) pendingCommitMessages.delete(id);
+    }
     void this.client.stop();
   }
 
@@ -1130,6 +1157,15 @@ class LocalAgent {
   }
 
   private receive(envelope: HostEnvelope): void {
+    if (envelope.requestId && (envelope.type === 'error' || envelope.event === 'commit_message_report')) {
+      pendingCommitMessages.delete(envelope.requestId);
+    }
+    if (this.taskId.startsWith('workspace:')) {
+      // 辅助 host 只给面板回执，不存在可失败的任务或恢复日志。
+      if (envelope.type === 'error' && envelope.requestId?.startsWith('panel-')) this.errorSeq += 1;
+      pushRenderer('work:agent-event', envelope);
+      return;
+    }
     if (envelope.type === 'event') updateTaskFromAgent(envelope);
     const attributed = envelope.requestId === this.taskId || envelope.requestId === undefined
       && (envelope.type === 'error' || envelope.event === 'host_exit');
@@ -1237,6 +1273,49 @@ function ensureAgent(task: TaskRecord): LocalAgent {
   agents.set(task.id, agent);
   if (workspace) void agent.start(workspace);
   return agent;
+}
+
+/**
+ * 没有任务时，源代码管理仍可使用当前空间。辅助 host 以工作空间为键，
+ * 只处理独立面板请求，没有用户任务记录，也不会创建或写入任何会话。
+ */
+function ensureProjectAgent(project: Project): LocalAgent {
+  const key = `workspace:${project.id}`;
+  const existing = agents.get(key);
+  if (existing && !existing.isStopped) return existing;
+  return ensureAgent({ id: key, projectId: project.id, title: '', status: 'queued', createdAt: '', updatedAt: '', changedFiles: [] });
+}
+
+/** 取消仅命中已经登记的面板请求，绝不能把目标 id 当成任务 id 转发。 */
+function cancelPendingCommitMessage(targetId: string): void {
+  const pending = pendingCommitMessages.get(targetId);
+  if (!pending) return;
+  pendingCommitMessages.delete(targetId);
+  const agent = pending.agent;
+  if (!agent || agent.isStopped) return;
+  const command = { id: `${targetId}-cancel-host`, type: 'cancel_commit_message', targetId } as HostCommand;
+  if (pending.sent) {
+    // 等原命令送达后再取消，避免两次懒启动互相顶掉 host 世代。
+    void pending.sent.then((sent) => sent && !agent.isStopped ? agent.send(command) : false).catch(() => false);
+  } else if (agent.isRunning) {
+    void agent.send(command);
+  }
+}
+
+/** Git 工作空间只从已登记的任务 / 项目解析，renderer 不能传任意目录。 */
+function gitWorkspace(payload: unknown): Project | null {
+  const input = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  if (input.taskId !== undefined && typeof input.taskId !== 'string') return null;
+  if (input.projectId !== undefined && typeof input.projectId !== 'string') return null;
+  if (typeof input.taskId === 'string' && input.taskId) {
+    const task = taskById(input.taskId);
+    const project = task ? workspaceForTask(task) : undefined;
+    // 任务换绑空间后，旧面板请求也不能落到新空间。
+    return project && (input.projectId === undefined || project.id === input.projectId) ? project : null;
+  }
+  // 无任务请求固定到点击时的空间，不跟随 IPC 到达时的全局选择漂移。
+  if (typeof input.projectId === 'string') return state.projects.find((item) => item.id === input.projectId) ?? null;
+  return selectedProject() ?? null;
 }
 
 /** 把一条「无法执行」的失败送回渲染层（带任务 id，渲染层能归到正确的会话上）。 */
@@ -1432,6 +1511,12 @@ function installIpc(): void {
       state.selectedProjectId = state.projects[0]?.id ?? '';
       state.selectedTaskId = undefined;
     }
+    // 先撤销未发出的请求，再停辅助 host；异步 diff 返回后也不能把它重新拉起来。
+    for (const [id, pending] of pendingCommitMessages) {
+      if (pending.projectId === projectId) cancelPendingCommitMessage(id);
+    }
+    const projectAgent = agents.get(`workspace:${projectId}`);
+    if (projectAgent) { projectAgent.stop(); agents.delete(`workspace:${projectId}`); }
     // 清理该项目的任务与其 agent 实例(直接杀,理由同 delete-task)
     for (const task of state.tasks.filter((task) => task.projectId === projectId)) {
       const agent = agents.get(task.id);
@@ -1873,11 +1958,83 @@ function installIpc(): void {
    * 路由目标跟随「当前选中的任务」：会话列表、回滚轮次、记忆库都挂在那个工作空间的
    * host 上，换任务就是换 workspace —— 这是唯一正确的归属。
    */
-  ipcMain.handle('work:panel', (_event, value: Record<string, unknown>) => {
+  ipcMain.handle('work:git-status', (_event, payload: Record<string, unknown>) => {
+    const project = gitWorkspace(payload);
+    return project ? gitStatus(project.root) : { ok: false, message: tMain('main.task.projectNotExist') };
+  });
+  ipcMain.handle('work:git-diff', (_event, payload: Record<string, unknown>) => {
+    const project = gitWorkspace(payload);
+    if (!project || typeof payload.path !== 'string' || typeof payload.staged !== 'boolean') return { ok: false, message: tMain('main.task.projectNotExist') };
+    return gitDiff(project.root, payload.path, payload.staged);
+  });
+  ipcMain.handle('work:git-stage', (_event, payload: Record<string, unknown>) => {
+    const project = gitWorkspace(payload);
+    const paths = payload.paths;
+    if (!project || (paths !== undefined && (!Array.isArray(paths) || paths.some((item) => typeof item !== 'string')))) return { ok: false, message: tMain('main.task.projectNotExist') };
+    return stageFiles(project.root, paths as string[] | undefined);
+  });
+  ipcMain.handle('work:git-unstage', (_event, payload: Record<string, unknown>) => {
+    const project = gitWorkspace(payload);
+    const paths = payload.paths;
+    if (!project || (paths !== undefined && (!Array.isArray(paths) || paths.some((item) => typeof item !== 'string')))) return { ok: false, message: tMain('main.task.projectNotExist') };
+    return unstageFiles(project.root, paths as string[] | undefined);
+  });
+  ipcMain.handle('work:git-commit', (_event, payload: Record<string, unknown>) => {
+    const project = gitWorkspace(payload);
+    if (!project || typeof payload.message !== 'string') return { ok: false, message: tMain('main.task.projectNotExist') };
+    return commitStaged(project.root, payload.message);
+  });
+  ipcMain.handle('work:panel', async (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' && value.id ? value.id : randomUUID();
     const type = typeof value.type === 'string' ? value.type : '';
-    const supported = ['sessions', 'changes', 'usage', 'context_usage', 'memory', 'settings'];
+    const supported = ['sessions', 'changes', 'usage', 'context_usage', 'memory', 'settings', 'commit_message', 'cancel_commit_message'];
     if (!supported.includes(type)) return { ok: false, id, message: tMain('main.panel.unsupported') };
+    if (type === 'cancel_commit_message') {
+      if (typeof value.targetId === 'string' && value.targetId) cancelPendingCommitMessage(value.targetId);
+      return { ok: true, id, cancelled: true };
+    }
+    if (type === 'commit_message') {
+      const project = gitWorkspace(value);
+      if (!project) {
+        pushRenderer('work:agent-event', { type: 'error', requestId: id, error: tMain('main.task.projectNotExist') });
+        return { ok: false, id };
+      }
+      // 在读 diff 之前登记：取消/移除空间后，慢 Git 操作返回时不得再启动 host。
+      const pending: PendingCommitMessage = { projectId: project.id, agent: null };
+      pendingCommitMessages.set(id, pending);
+      // 只读取点击生成时的暂存区；工作区剩余修改绝不混入提示词。
+      const draft = await stagedDiff(project.root);
+      if (pendingCommitMessages.get(id) !== pending) return { ok: true, id, cancelled: true };
+      if (!draft.ok) {
+        pendingCommitMessages.delete(id);
+        pushRenderer('work:agent-event', { type: 'error', requestId: id, error: draft.message ?? 'NO_STAGED_CHANGES' });
+        return { ok: false, id };
+      }
+      const currentProject = gitWorkspace(value);
+      if (!currentProject || currentProject.id !== project.id) {
+        pendingCommitMessages.delete(id);
+        const message = tMain('main.task.projectNotExist');
+        pushRenderer('work:agent-event', { type: 'error', requestId: id, error: message });
+        return { ok: false, id, message };
+      }
+      const requestedTask = typeof value.taskId === 'string' && value.taskId ? taskById(value.taskId) : undefined;
+      const agent = requestedTask ? ensureAgent(requestedTask) : ensureProjectAgent(project);
+      pending.agent = agent;
+      const command = {
+        type, id, diff: draft.diff, stat: draft.stat, files: draft.files, truncated: draft.truncated,
+        language: value.language === 'en-US' ? 'en-US' : 'zh-CN',
+      } as HostCommand;
+      pending.sent = agent.send(command).catch(() => false);
+      const sent = await pending.sent;
+      if (pendingCommitMessages.get(id) !== pending) return { ok: true, id, cancelled: true };
+      if (!sent) {
+        pendingCommitMessages.delete(id);
+        const message = tMain('main.host.commFailed');
+        pushRenderer('work:agent-event', { type: 'error', requestId: id, error: message });
+        return { ok: false, id, message };
+      }
+      return { ok: true, id };
+    }
     // 输入栏快照请求携带发起时的任务 id；快速切换任务时不能改发到新选中的 host。
     const requestedTaskId = type === 'context_usage' && typeof value.taskId === 'string' ? value.taskId : undefined;
     const task = taskById(requestedTaskId ?? state.selectedTaskId);

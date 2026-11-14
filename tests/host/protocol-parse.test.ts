@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { HOST_PROTOCOL_VERSION, parseCommand } from '../../src/host/protocol.js';
 
 test('协议版本常量可用（客户端据此提示不匹配）', () => {
-  assert.equal(HOST_PROTOCOL_VERSION, 2);
+  assert.equal(HOST_PROTOCOL_VERSION, 4);
 });
 
 test('原有四条命令行为不变', () => {
@@ -241,6 +241,49 @@ test('settings：patch 只收合法键与标量值', () => {
     action: 'get',
     patch: undefined,
   });
+});
+
+test('commit_message 保留暂存 diff 并拒绝缺参', () => {
+  assert.deepEqual(
+    parseCommand({
+      id: 'cm1',
+      type: 'commit_message',
+      diff: '+change',
+      stat: 'a.ts | 1 +',
+      files: ['src/a.ts', 'src/a.ts', '中文 file.ts'],
+      truncated: true,
+      language: 'zh-CN',
+    }),
+    {
+      id: 'cm1',
+      type: 'commit_message',
+      diff: '+change',
+      stat: 'a.ts | 1 +',
+      files: ['src/a.ts', '中文 file.ts'],
+      truncated: true,
+      language: 'zh-CN',
+    },
+  );
+  assert.equal(parseCommand({ id: 'cm2', type: 'commit_message', stat: 'a.ts | 1 +', files: ['a.ts'] }), null);
+  assert.equal(
+    parseCommand({ id: 'cm3', type: 'commit_message', diff: '', stat: 'a.ts | 1 +', files: ['a.ts'] }),
+    null,
+  );
+  assert.equal(parseCommand({ id: 'cm4', type: 'commit_message', diff: '+change', stat: '', files: ['a.ts'] }), null);
+  assert.equal(
+    parseCommand({ id: 'cm5', type: 'commit_message', diff: '+change', stat: 'a.ts | 1 +', files: [] }),
+    null,
+  );
+});
+
+test('独立提交信息取消只路由目标 requestId，缺目标 fail-closed', () => {
+  assert.deepEqual(parseCommand({ id: 'cancel-1', type: 'cancel_commit_message', targetId: 'panel-1' }), {
+    id: 'cancel-1',
+    type: 'cancel_commit_message',
+    targetId: 'panel-1',
+  });
+  assert.equal(parseCommand({ id: 'cancel-2', type: 'cancel_commit_message' }), null);
+  assert.equal(parseCommand({ id: 'cancel-3', type: 'cancel_commit_message', targetId: '' }), null);
 });
 
 test('未知 type / 缺 id 一律 null', () => {

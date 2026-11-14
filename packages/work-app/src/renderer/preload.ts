@@ -8,6 +8,7 @@ type AgentEnvelope = { type: string; event?: string; requestId?: string; payload
 type Project = { id: string; name: string; root: string; branch: string; auto?: boolean; sessionCount?: number };
 type Task = { id: string; projectId: string; title: string; status: string; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string };
 type ProjectState = { version: 1; projects: Project[]; selectedProjectId: string; tasks: Task[]; selectedTaskId?: string };
+type GitTarget = { taskId?: string; projectId?: string };
 type ModelDraft = { provider: 'openai' | 'anthropic'; baseURL: string; apiKey: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
 type ModelPresetDetail = ModelDraft & { name: string };
 type CatalogEntryView = {
@@ -56,6 +57,11 @@ contextBridge.exposeInMainWorld('mocodeWork', {
     ipcRenderer.invoke('work:adopt-session', payload),
   readFile: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:read-file', file),
   fileDiff: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:file-diff', file),
+  gitStatus: (target?: GitTarget): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-status', { ...target }),
+  gitDiff: (target: GitTarget, path: string, staged: boolean): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-diff', { ...target, path, staged }),
+  gitStage: (target: GitTarget, paths?: string[]): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-stage', { ...target, paths }),
+  gitUnstage: (target: GitTarget, paths?: string[]): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-unstage', { ...target, paths }),
+  gitCommit: (target: GitTarget, message: string): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:git-commit', { ...target, message }),
   pickAttachment: (): Promise<AttachmentResult[]> => ipcRenderer.invoke('work:pick-attachment'),
   readAttachments: (paths: string[]): Promise<AttachmentResult[]> => ipcRenderer.invoke('work:read-attachments', paths),
   droppedFilePaths: (files: File[]): string[] => files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),

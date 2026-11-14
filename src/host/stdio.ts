@@ -73,6 +73,7 @@ import {
 } from '../config/index.js';
 import { parseReasoningEffort } from '../llm/reasoning.js';
 import { writeConfigKeys } from '../config/file.js';
+import { generateCommitMessage } from './commit-message.js';
 
 interface ApprovalWaiter {
   resolve: (result: InterventionResult) => void;
@@ -91,6 +92,8 @@ let queryHistory: string[] = [];
 let lastToolGroups: ToolRouteGroupName[] = [];
 let contextState = createContextState();
 const approvals = new Map<string, ApprovalWaiter>();
+/** 独立 AI 请求按面板 requestId 取消；不得复用任务 run 的 activeRun。 */
+const commitMessageRequests = new Map<string, AbortController>();
 
 function runtime(): Runtime {
   if (!runtimeFacade) throw new Error('Runtime is not initialized.');
@@ -1337,6 +1340,28 @@ async function settingsCommand(command: Extract<HostCommand, { type: 'settings' 
   }
 }
 
+async function commitMessageCommand(command: Extract<HostCommand, { type: 'commit_message' }>): Promise<void> {
+  const previous = commitMessageRequests.get(command.id);
+  if (previous) return error('Duplicate commit message request id.', command.id);
+  const controller = new AbortController();
+  commitMessageRequests.set(command.id, controller);
+  try {
+    await initializeRuntime();
+    if (closing || controller.signal.aborted) return;
+    // 独立无工具请求：绝不把 diff 或结果追加到任务 history，也不执行 commit。
+    const message = await generateCommitMessage(command, runtime().context.modelTransport, controller.signal);
+    if (!controller.signal.aborted) emit('commit_message_report', { message }, command.id);
+  } catch (cause) {
+    if (!controller.signal.aborted) error(cause instanceof Error ? cause.message : String(cause), command.id);
+  } finally {
+    commitMessageRequests.delete(command.id);
+  }
+}
+
+function cancelCommitMessage(command: Extract<HostCommand, { type: 'cancel_commit_message' }>): void {
+  commitMessageRequests.get(command.targetId)?.abort();
+}
+
 /**
  * 命令分发。default 分支显式报错而不是静默丢弃：新客户端发来本 host 不认识的命令时，
  * 用户要能看到「这条指令没生效」，而不是盯着一个没有反应的界面。
@@ -1370,6 +1395,10 @@ async function handle(command: HostCommand): Promise<void> {
       return memoryCommand(command);
     case 'settings':
       return settingsCommand(command);
+    case 'commit_message':
+      return commitMessageCommand(command);
+    case 'cancel_commit_message':
+      return cancelCommitMessage(command);
     default:
       return error(`Host does not support command type "${type}" (protocol v${HOST_PROTOCOL_VERSION}).`, id);
   }
@@ -1394,6 +1423,7 @@ function startHeartbeat(): NodeJS.Timeout | undefined {
 
 function requestShutdownCancellation(): void {
   activeRun?.controller.abort(hostClosedReason);
+  for (const controller of commitMessageRequests.values()) controller.abort(hostClosedReason);
   runtimeFacade?.cancel(hostClosedReason);
   for (const [approvalId, waiter] of approvals) {
     waiter.resolve({ action: 'cancelled' });

@@ -62,14 +62,17 @@ const PANEL_EVENTS = new Set([
   'context_usage',
   'memory_report',
   'settings_state',
+  'commit_message_report',
 ]);
 
 /** 正在等回执的请求。key = 渲染层生成的 requestId。 */
 const pending = new Map<
   string,
-  { resolve: (envelope: PanelEnvelope) => void; timer: ReturnType<typeof setTimeout> }
+  { resolve: (envelope: PanelEnvelope) => void; timer: ReturnType<typeof setTimeout>; cleanup?: () => void }
 >();
 const REQUEST_TIMEOUT_MS = 20_000;
+// 提交流程之外还有模型网络重试；真实 LLM 不能套用普通面板查询的 20 秒预算。
+const COMMIT_MESSAGE_TIMEOUT_MS = 120_000;
 
 let deps: PanelDeps | null = null;
 let activeKind: PanelKind | null = null;
@@ -99,6 +102,7 @@ export function handlePanelEvent(envelope: PanelEnvelope): boolean {
   if (!waiter) return false;
   pending.delete(id);
   clearTimeout(waiter.timer);
+  waiter.cleanup?.();
   waiter.resolve(envelope);
   return true;
 }
@@ -109,22 +113,37 @@ export function handlePanelEvent(envelope: PanelEnvelope): boolean {
  * 超时必须有：host 崩了 / 命令没被识别时不会有任何回执，没有兜底的话
  *「正在加载…」会永久挂在面板上。
  */
-async function request(command: Record<string, unknown>): Promise<PanelEnvelope> {
+async function request(command: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<PanelEnvelope> {
   const api = need();
   const id = `panel-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const cancel = (envelope: PanelEnvelope): void => {
+    const waiter = pending.get(id);
+    if (!waiter) return;
+    pending.delete(id);
+    clearTimeout(waiter.timer);
+    waiter.cleanup?.();
+    if (command.type === 'commit_message') {
+      // 回执取消是尽力而为；关闭面板后没有接收错误提示的上下文。
+      void api.send({ type: 'cancel_commit_message', id: `${id}-cancel`, targetId: id }).catch(() => {});
+    }
+    waiter.resolve(envelope);
+  };
+  if (options?.signal?.aborted) return { type: 'cancelled', requestId: id };
+  const signal = options?.signal;
+  const onAbort = (): void => cancel({ type: 'cancelled', requestId: id });
   const promise = new Promise<PanelEnvelope>((resolve) => {
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      resolve({ type: 'error', error: api.t('panel.timeout'), requestId: id });
-    }, REQUEST_TIMEOUT_MS);
-    pending.set(id, { resolve, timer });
+    const timer = setTimeout(() => cancel({ type: 'error', error: api.t('panel.timeout'), requestId: id }),
+      command.type === 'commit_message' ? COMMIT_MESSAGE_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
+    pending.set(id, { resolve, timer, cleanup: () => signal?.removeEventListener('abort', onAbort) });
   });
+  signal?.addEventListener('abort', onAbort, { once: true });
   const sent = await api.send({ ...command, id });
   if (!sent.ok) {
     const waiter = pending.get(id);
     if (waiter) {
       pending.delete(id);
       clearTimeout(waiter.timer);
+      waiter.cleanup?.();
       waiter.resolve({ type: 'error', error: sent.message ?? api.t('panel.failed'), requestId: id });
     }
   }
@@ -132,8 +151,8 @@ async function request(command: Record<string, unknown>): Promise<PanelEnvelope>
 }
 
 /** 输入栏上下文快照复用面板请求/回执配对，但不进入任何整页面板。 */
-export function requestPanelCommand(command: Record<string, unknown>): Promise<PanelEnvelope> {
-  return request(command);
+export function requestPanelCommand(command: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<PanelEnvelope> {
+  return request(command, options);
 }
 
 function payloadOf(envelope: PanelEnvelope): Record<string, unknown> {

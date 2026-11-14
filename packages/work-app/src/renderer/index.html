@@ -46,7 +46,7 @@
       </aside>
       <main class="workspace">
         <button class="sidebar-floating-toggle" id="sidebar-toggle-floating" data-sidebar-toggle data-i18n-title="sidebar.expand" data-i18n-aria="sidebar.expand"><svg class="icon" data-icon="panel-left"></svg></button>
-        <div class="workspace-actions" aria-label="视图操作" data-i18n-aria="a11y.viewActions"><button id="show-files" data-i18n-title="workspace.browseFiles"><svg class="icon" data-icon="files"></svg></button></div>
+        <div class="workspace-actions" aria-label="视图操作" data-i18n-aria="a11y.viewActions"><button id="show-tools" data-i18n-title="tools.title" data-i18n-aria="tools.title" aria-haspopup="menu" aria-expanded="false" aria-controls="tools-menu"><svg class="icon" data-icon="grid"></svg></button><div id="tools-menu" class="tools-menu hidden" role="menu"><button id="show-files" role="menuitem"><svg class="icon" data-icon="files"></svg><span data-i18n="tools.files">文件</span></button><button id="show-source-control" role="menuitem"><svg class="icon" data-icon="branch"></svg><span data-i18n="scm.title">源代码管理</span></button><button disabled aria-hidden="true" tabindex="-1"></button><button disabled aria-hidden="true" tabindex="-1"></button></div></div>
           <section id="empty-state" class="empty-state">
           <h1 class="empty-lockup"><img class="empty-mark" src="../assets/icon-mark.png" alt="" aria-hidden="true" /><span class="empty-wordmark" data-i18n="app.emptyWordmark">让 MoCode 为你工作</span></h1>
         </section>
@@ -64,7 +64,7 @@
         </div>
         <aside id="inspector" class="inspector hidden">
           <header class="inspector-header"><b id="inspector-title" data-i18n="inspector.overview">项目概览</b><button id="close-inspector" data-i18n-title="common.close" data-i18n-aria="common.close"><svg class="icon" data-icon="close"></svg></button></header>
-          <nav class="inspector-tabs"><button data-tab="overview" class="selected" data-i18n="inspector.tabOverview">概览</button><button data-tab="files" data-i18n="inspector.files">文件</button><button data-tab="changes" data-i18n="inspector.changes">本轮改动</button></nav>
+          <nav class="inspector-tabs"><button data-tab="overview" class="selected" data-i18n="inspector.tabOverview">概览</button><button data-tab="files" data-i18n="inspector.files">文件</button><button data-tab="changes" data-i18n="inspector.changes">本轮改动</button><button data-tab="source" data-i18n="scm.title">源代码管理</button></nav>
           <div id="inspector-content" class="inspector-content"></div>
         </aside>
         <section id="search-panel" class="search-panel hidden"><div class="search-dialog"><input id="search-input" data-i18n-placeholder="search.placeholder" /><div id="search-results"></div></div></section>

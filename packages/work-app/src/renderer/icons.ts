@@ -24,6 +24,7 @@ export const ICONS: Record<string, string> = {
   'folder': `<svg ${SVG_ATTRS}><path d="M2.5 6.8a1 1 0 0 1 1-1h4l1.5 1.5h7.5a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V6.8z"/></svg>`,
   'folder-open': `<svg ${SVG_ATTRS}><path d="M2.5 6.8a1 1 0 0 1 1-1h4l1.5 1.5h7.5a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V6.8z"/><path d="M2 8h16"/></svg>`,
   'plus': `<svg ${SVG_ATTRS}><path d="M10 4v12M4 10h12"/></svg>`,
+  'minus': `<svg ${SVG_ATTRS}><path d="M4 10h12"/></svg>`,
   'close': `<svg ${SVG_ATTRS}><path d="M5 5l10 10M15 5L5 15"/></svg>`,
   'arrow-left': `<svg ${SVG_ATTRS}><path d="M13.5 4.5L8 10l5.5 5.5"/><path d="M8 10h8.5"/></svg>`,
   'more': `<svg ${SVG_ATTRS}><circle cx="5.5" cy="10" r="1"/><circle cx="10" cy="10" r="1"/><circle cx="14.5" cy="10" r="1"/></svg>`,
@@ -38,6 +39,7 @@ export const ICONS: Record<string, string> = {
   // workspace actions
   'layout': `<svg ${SVG_ATTRS}><rect x="3" y="3" width="14" height="14" rx="1.5"/><path d="M3 8h14M8 8v9"/></svg>`,
   'files': `<svg ${SVG_ATTRS}><path d="M5 3h7l3 3v11H5z"/><path d="M12 3v3h3"/></svg>`,
+  'grid': `<svg ${SVG_ATTRS}><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="12" y="3" width="5" height="5" rx="1"/><rect x="3" y="12" width="5" height="5" rx="1"/><rect x="12" y="12" width="5" height="5" rx="1"/></svg>`,
 
   // composer
   'paper-airplane': `<svg ${SVG_ATTRS}><path d="M3 17L17 4M17 4l-3.5 12.5L9 12 3 17"/></svg>`,

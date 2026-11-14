@@ -194,6 +194,25 @@ export function parseCommand(value: unknown): HostCommand | null {
       confirm: input.confirm === true,
     };
   }
+  if (input.type === 'commit_message') {
+    const diff = optionalString(input.diff, 120_000);
+    const stat = optionalString(input.stat, 24_000);
+    const files = parsePaths(input.files, 2_000);
+    if (!diff || !stat || !files?.length) return null;
+    return {
+      id,
+      type: 'commit_message',
+      diff,
+      stat,
+      files,
+      truncated: input.truncated === true,
+      language: oneOf(input.language, ['zh-CN', 'en-US'] as const) ?? undefined,
+    };
+  }
+  if (input.type === 'cancel_commit_message') {
+    const targetId = optionalString(input.targetId, 200);
+    return targetId ? { id, type: 'cancel_commit_message', targetId } : null;
+  }
   if (input.type === 'settings') {
     const action = oneOf(input.action, ['get', 'set'] as const);
     if (!action) return null;
