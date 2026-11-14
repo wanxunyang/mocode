@@ -22,34 +22,45 @@ function fakeSpawn(calls: Call[]): typeof spawn {
   }) as unknown as typeof spawn;
 }
 
-test('openTerminalWindow: asks the desktop helper to push the new window to the taskbar', () => {
-  const calls: Call[] = [];
-  const minimized: string[] = [];
-  const result = openTerminalWindow({
-    title: 'mocode · main · run-1',
-    args: ['supervise', 'lane', 'run-1', '--lane', 'main'],
-    spawnImpl: fakeSpawn(calls),
-    minimizeImpl: (title) => minimized.push(title),
-  });
+// 这两条断言的是 Windows 专用路径（wt.exe --title / cmd start <title> / 压任务栏 helper
+// 只认 HWND）。Linux 上 launchLinux 走 x-terminal-emulator，命令行里本来就没有标题，
+// 也压根没有压任务栏这一步 —— 在那些平台上跑只会误报。
+test(
+  'openTerminalWindow: asks the desktop helper to push the new window to the taskbar',
+  { skip: process.platform !== 'win32' ? '仅 Windows 有压任务栏路径' : false },
+  () => {
+    const calls: Call[] = [];
+    const minimized: string[] = [];
+    const result = openTerminalWindow({
+      title: 'mocode · main · run-1',
+      args: ['supervise', 'lane', 'run-1', '--lane', 'main'],
+      spawnImpl: fakeSpawn(calls),
+      minimizeImpl: (title) => minimized.push(title),
+    });
 
-  assert.equal(result.opened, true);
-  // 标题必须和拉窗口时用的完全一致：helper 只靠标题匹配 HWND。
-  assert.deepEqual(minimized, ['mocode · main · run-1']);
-});
+    assert.equal(result.opened, true);
+    // 标题必须和拉窗口时用的完全一致：helper 只靠标题匹配 HWND。
+    assert.deepEqual(minimized, ['mocode · main · run-1']);
+  },
+);
 
-test('openTerminalWindow: the window title reaches the terminal launcher', () => {
-  const calls: Call[] = [];
-  openTerminalWindow({
-    title: 'probe-title-42',
-    args: ['supervise', 'lane', 'run-1', '--lane', 'main'],
-    spawnImpl: fakeSpawn(calls),
-    minimizeImpl: () => undefined,
-  });
+test(
+  'openTerminalWindow: the window title reaches the terminal launcher',
+  { skip: process.platform !== 'win32' ? '仅 Windows 的 launcher 接受标题参数' : false },
+  () => {
+    const calls: Call[] = [];
+    openTerminalWindow({
+      title: 'probe-title-42',
+      args: ['supervise', 'lane', 'run-1', '--lane', 'main'],
+      spawnImpl: fakeSpawn(calls),
+      minimizeImpl: () => undefined,
+    });
 
-  // Windows 上走 wt.exe --title 或 cmd start <title>；两者都把标题写进 argv。
-  const flat = calls.flatMap((call) => [call.bin, ...call.args]).join(' ');
-  assert.match(flat, /probe-title-42/);
-});
+    // Windows 上走 wt.exe --title 或 cmd start <title>；两者都把标题写进 argv。
+    const flat = calls.flatMap((call) => [call.bin, ...call.args]).join(' ');
+    assert.match(flat, /probe-title-42/);
+  },
+);
 
 test('minimizeWindowByTitle: launches through `cmd /c start /min` instead of a detached spawn', () => {
   // 关键回归：直接 `spawn(powershell, {detached:true})` 会让 helper 静默死掉

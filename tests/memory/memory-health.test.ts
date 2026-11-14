@@ -44,6 +44,22 @@ import {
   recordConsolidationSkip,
 } from '../../src/memory/consolidate-skips.js';
 
+/**
+ * 把已记录的跳过条目时间整体回拨，让后续写入成为唯一「最近」的一条。
+ *
+ * 必须回拨而不能靠 I/O 速度：`lastAt` 是毫秒精度，`consolidationSkipStats` 取最大值时
+ * 同毫秒的条目分不出先后（保留先插入的那条）。Windows 上每次落盘 >1ms 恰好能分开，
+ * Linux tmpfs 上几百微秒就写完 → 前 5 组和后面 x 组撞同一毫秒，断言随机失败。
+ * 这与 memory-timestamp-ms-collision-in-tests 那条坑是同一个根因。
+ */
+function backdateSkips(ms: number): void {
+  const file = join(process.cwd(), '.mocode', 'memory-consolidate-skips.json');
+  const raw = JSON.parse(readFileSync(file, 'utf8')) as { skips: Record<string, { lastAt: string }> };
+  const stamp = new Date(Date.now() - ms).toISOString();
+  for (const entry of Object.values(raw.skips)) entry.lastAt = stamp;
+  writeFileSync(file, JSON.stringify(raw, null, 2) + '\n', 'utf8');
+}
+
 interface Dirs {
   projDir: string;
   homeDir: string;
@@ -518,6 +534,7 @@ test(
         members: 3,
       });
     }
+    backdateSkips(60_000);
     const sig = consolidationSignature(['x1', 'x2', 'x3']);
     recordConsolidationSkip(sig, { reason: '只是碰巧都改了 tool-schema', members: 3 });
     recordConsolidationSkip(sig, { reason: '只是碰巧都改了 tool-schema', members: 3 });
