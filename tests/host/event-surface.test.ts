@@ -122,7 +122,18 @@ test('渲染层的每个 case 都是 host 真的会发的事件（不留死分�
   //   host_stopped / host_exit 由 main.ts（LocalAgent 的 onExit）产生；
   //   cheatsheet / search 是纯 UI 交互（快捷键面板、会话内搜索）。
   // host_log 同时存在于全局通道与 switch 内（运行期日志也带 requestId），两侧都合法。
-  const locallySynthesized = new Set(['host_stopped', 'host_exit', 'cheatsheet', 'search', 'host_log']);
+  // attention_open 同样由主进程产生（packages/work-app/src/main.ts 的 notification.on('click')
+  // → pushRenderer('work:agent-event')）：系统通知被点击时让渲染层跳到那个任务并摆出审批卡。
+  // 它走的是同一条 onAgentEvent 通道，只是**没有** host 侧 emit —— 系统通知是 Electron 的能力，
+  // host 是纯 stdio 进程，发不出也收不到通知点击。
+  const locallySynthesized = new Set([
+    'host_stopped',
+    'host_exit',
+    'cheatsheet',
+    'search',
+    'host_log',
+    'attention_open',
+  ]);
   const orphan = [...cases].filter((name) => !emitted.has(name) && !locallySynthesized.has(name)).sort();
   assert.deepEqual(orphan, [], `渲染层的这些 case 永远收不到 host 事件：${orphan.join(', ')}`);
 });

@@ -7,7 +7,8 @@
 // 用法：node scripts/verify-pack.mjs [--dir <解包目录>] [--skip-smoke]
 
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,14 +59,68 @@ check(existsSync(path.join(resources, 'app.asar')), 'resources/app.asar');
 const hostRoot = path.join(resources, 'mocode-ai');
 check(existsSync(hostRoot), 'resources/mocode-ai（宿主在 asar 之外，否则 spawn 无真实路径）');
 
-// ── 2. 宿主入口三件套 + workspace 内部包 ──
+// ── 2. 宿主入口三件套 + 产物里的裸导入必须全部自洽 ──
 console.log('\n宿主入口');
 for (const relative of ['bin/mocode-agent-host.js', 'dist/host/stdio.js', 'package.json']) {
   check(existsSync(path.join(hostRoot, relative)), `mocode-ai/${relative}`);
 }
-// @mocode/protocol 不在 npm 闭包里（挂在根 devDependencies），靠 stage-host 扫产物导入补进去。
-// 只查 protocol：host 的 dist 不 import @mocode/runtime（那是 work-app 主进程的依赖，走 app.asar）。
-check(existsSync(path.join(hostRoot, 'node_modules', '@mocode', 'protocol', 'dist')), 'mocode-ai/node_modules/@mocode/protocol/dist');
+/**
+ * 产物里的每个裸导入都必须解析到 hostRoot 之内。
+ *
+ * 这条检查以前写死成「@mocode/protocol/dist 必须存在」——那是宿主**值导入** protocol 包时的
+ * 补丁（该包 private，不进 npm 闭包，靠 stage-host 扫产物补拷）。1.10.0 把常量收回根包内在
+ * 定义后，运行时已不再依赖它，写死的断言就变成了误报。所以这里改成从产物反推，与
+ * stage-host 的口径一致：产物导入什么就要求什么，故意不维护白名单。
+ *
+ * 关键是**解析必须在 hostRoot 之内落点**：`win-unpacked` 留在仓库里时 Node 会沿目录向上撞到
+ * 仓库根 node_modules 而侥幸通过，装到用户机器上就炸 —— 那正是这条检查存在的理由。
+ */
+function checkHostBareImports() {
+  const patterns = [
+    /(?:^|[\n;])\s*(?:import|export)\s[^;]*?from\s*['"]([^'"]+)['"]/g,
+    /(?:^|[\n;])\s*import\s*['"]([^'"]+)['"]/g,
+    /\bimport\(\s*['"]([^'"]+)['"]\s*\)/g,
+  ];
+  const files = [];
+  const collect = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === 'node_modules') continue;
+        collect(full);
+      } else if (entry.name.endsWith('.js')) files.push(full);
+    }
+  };
+  for (const sub of ['bin', 'dist']) {
+    const dir = path.join(hostRoot, sub);
+    if (existsSync(dir)) collect(dir);
+  }
+
+  const problems = [];
+  for (const file of files) {
+    const source = readFileSync(file, 'utf8');
+    for (const pattern of patterns) {
+      for (const match of source.matchAll(pattern)) {
+        const specifier = match[1];
+        if (specifier.startsWith('.') || specifier.startsWith('/')) continue;
+        if (specifier.startsWith('node:') || specifier.startsWith('file:')) continue;
+        let resolvedPath;
+        try {
+          resolvedPath = createRequire(file).resolve(specifier);
+        } catch {
+          problems.push(`${path.relative(hostRoot, file)} → ${specifier}（无法解析）`);
+          continue;
+        }
+        const relative = path.relative(hostRoot, resolvedPath);
+        if (relative.startsWith('..') || path.isAbsolute(relative)) {
+          problems.push(`${path.relative(hostRoot, file)} → ${specifier}（解析到包外：${resolvedPath}）`);
+        }
+      }
+    }
+  }
+  check(problems.length === 0, `宿主产物裸导入全部落在包内${problems.length ? `：\n        ${problems.join('\n        ')}` : ''}`);
+}
+checkHostBareImports();
 
 // ── 3. 原生模块必须被解包（asar 里的 .node 无法 dlopen）──
 // 这条以前由 build.asarUnpack 显式保证；现在依赖 electron-builder 默认的 smartUnpack

@@ -28,6 +28,12 @@ export const INTERNAL_ENV_KEYS: readonly string[] = [
   'MOCODE_SUPERVISED_WORKER',
   'MOCODE_WORKER_ID',
   'MOCODE_NO_SPAWN',
+  // 浏览器面板的附着端点：由宿主应用（work-app 主进程）在 spawn host 时注入，
+  // 见 packages/work-app/src/main.ts 的 MOCODE_BROWSER_CDP_URL。**不能**从配置回填：
+  // 那是「当前应该附着到哪个 Chromium」的运行期事实，磁盘配置写一个就会把 CLI 也拖去
+  // attach 一个不存在的端点（browser 工具直接 EXECUTION_ERROR）。
+  'MOCODE_BROWSER_CDP_URL',
+  'MOCODE_BROWSER_PANEL_MATCH',
 ];
 
 /** 可由 ~/.mocode/config、项目 .mocode/config 或 .env 提供的用户级键。 */

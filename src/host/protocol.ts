@@ -7,10 +7,22 @@ import type {
   HostSessionScope,
   HostSettingValue,
 } from '@mocode/protocol/host';
-import { HOST_PROTOCOL_VERSION } from '@mocode/protocol/host';
 
 export type { HostAttachment, HostCommand, HostEnvelope } from '@mocode/protocol/host';
-export { HOST_PROTOCOL_VERSION };
+
+/**
+ * 宿主协议版本 —— **在这里定义**，不从 `@mocode/protocol` 值导入。
+ *
+ * 为什么不能 import 值：`@mocode/protocol` 是 private workspace 包，不随根包发到 npm。
+ * 根包的 `dependencies` 里没有它，而 `bin/mocode-agent-host.js` 是用户真正会执行的入口。
+ * 一旦这里出现值导入，编译产物 `dist/host/protocol.js` 会留下裸 import，tarball 安装后
+ * 宿主一启动就是 `ERR_MODULE_NOT_FOUND: Cannot find package '@mocode/protocol'` ——
+ * 1.10.0 的隔离安装 smoke 就是这么发现的（类型导入会被编译期擦除，所以以前没暴露）。
+ *
+ * 版本号的事实源仍是 `packages/protocol/src/host.ts`；两处相等由
+ * `tests/host/protocol-version.test.ts` 扫描源码断言，改一处忘另一处会直接红。
+ */
+export const HOST_PROTOCOL_VERSION = 4;
 
 function parseAttachments(value: unknown): HostAttachment[] | undefined {
   if (!Array.isArray(value)) return undefined;

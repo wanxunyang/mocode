@@ -45,15 +45,15 @@ npm run pack:win --workspace mocode-work
 1. 拷 `bin/` + `dist/` + `package.json`（三者缺一 host 起不来）
 2. 从 `mocode-ai` 的 dependencies 出发算**依赖闭包**（Node 解析规则逐级向上找 `node_modules`），输出 114 个包
 3. 排除 `playwright`（换 `playwright-core`）、`misans`（43MB，字体已拷进 renderer）、构建期依赖
-4. **workspace 内部包**：扫 `dist`/`bin` 产物里的链接期裸导入（静态 import、动态 import()、require()），`@mocode/*` 不在 npm 闭包里（`@mocode/protocol` 挂在根 devDependencies），从 `packages/<name>` 拷 `dist + package.json` 进 stage 的 `node_modules/`
-5. **导入终检**：用 `createRequire` 从每个产物文件真实解析它的全部裸导入，解析结果必须落在 `build/mocode-ai/` 之内 —— 否则说明闭包有缺口、在仓库里靠上层 `node_modules` 侥幸通过，直接**抛错中断**
-6. **workspace 内部包**：扫 `dist`/`bin` 产物里的链接期裸导入（静态 import 含多行形态、动态 import()、require()/require.resolve()），`@mocode/*` 不在 npm 闭包里（`@mocode/protocol` 挂在根 devDependencies），从 `packages/<name>` 拷 `dist + package.json` 进 stage 的 `node_modules/`
-7. **导入终检**：用 `createRequire` 从每个产物文件真实解析它的全部裸导入（`OPTIONAL_BARE_IMPORTS` 里的可选运行期依赖除外，如 `mocode-pet-app`——解析失败有降级路径），解析结果必须落在 `build/mocode-ai/` 之内 —— 否则说明闭包有缺口、在仓库里靠上层 `node_modules` 侥幸通过，直接**抛错中断**
-8. 缺任何一个依赖直接**抛错中断**——不能在用户机器上才暴露
+4. **workspace 内部包**：扫 `dist`/`bin` 产物里的链接期裸导入（静态 import 含多行形态、动态 import()、`require()`/`require.resolve()`），`@mocode/*` 不在 npm 闭包里（`@mocode/protocol` 挂在根 devDependencies），从 `packages/<name>` 拷 `dist + package.json` 进 stage 的 `node_modules/`
+5. **导入终检**：用 `createRequire` 从每个产物文件真实解析它的全部裸导入（`OPTIONAL_BARE_IMPORTS` 里的可选运行期依赖除外，如 `mocode-pet-app`——解析失败有降级路径），解析结果必须落在 `build/mocode-ai/` 之内 —— 否则说明闭包有缺口、在仓库里靠上层 `node_modules` 侥幸通过，直接**抛错中断**
+6. 缺任何一个依赖直接**抛错中断**——不能在用户机器上才暴露
 
 产出 `STAGED-DEPENDENCIES.json` 记账（含 `workspacePackages` 字段），便于核对与排查缺包。
 
 > **历史教训（第 4/5 步的由来）**：`src/host/protocol.ts` 值导入 `@mocode/protocol/host`，但它是 devDep 不在闭包里 → 打出来的包缺它 → host 在用户机器上起来即退（`ERR_MODULE_NOT_FOUND`）。而仓库内的 `win-unpacked` 自测发现不了：Node 沿目录向上解析撞到 `F:\mocode\node_modules`（workspace 链接）就侥幸过了。所以冒烟必须在**仓库外**做（见 §9）。
+>
+> **2026-11-15 之后**：根包已把 `HOST_PROTOCOL_VERSION` 收回 `src/host/protocol.ts` 内定义，宿主不再对 `@mocode/protocol` 有**运行时**依赖（只剩 `import type`，编译期擦除）。于是 `stage-host` 不再拷它、`verify-pack` 也不再断言它存在 —— 那一项改成了「产物裸导入全部落在包内」的通用检查。`tests/host/protocol-version.test.ts` 守住两处版本号一致，并禁止宿主入口再出现对 `@mocode/protocol` 的值导入。
 
 ## 5. 浏览器能力的降级链（关键设计）
 
@@ -111,7 +111,7 @@ mac 分发还需要签名与公证（Apple Developer 证书），否则用户首
 `pack:*` 脚本末尾自动跑 `node scripts/verify-pack.mjs`，任一项不过就以非零码退出、打包算失败。它检查：
 
 1. **目录分层**：`resources/app.asar` + `resources/mocode-ai`（宿主必须在 asar 之外）
-2. **宿主入口**：`bin/mocode-agent-host.js`、`dist/host/stdio.js`、`package.json`，以及 `node_modules/@mocode/protocol/dist`
+2. **宿主入口 + 裸导入自洽**：`bin/mocode-agent-host.js`、`dist/host/stdio.js`、`package.json`；再把 `bin/`+`dist/` 里每个裸导入用 `createRequire` 真实解析一遍，落点必须在 `resources/mocode-ai/` 之内（不维护包白名单，产物导入什么就要求什么）
 3. **原生模块已解包**：`app.asar.unpacked/node_modules/node-pty/**` 下有 `.node`/`.dll`（asar 内的原生模块无法 dlopen），语音的 `sherpa-onnx-*` 同理
 4. **宿主冒烟**：把 `mocode-ai` 拷到系统临时目录（**仓库外**）再拉起，等它自报 `runtime_ready`
 5. **产物清单**：安装包文件名与体积

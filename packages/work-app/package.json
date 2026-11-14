@@ -1,6 +1,6 @@
 {
   "name": "mocode-work",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MoCode Work desktop client backed by the local MoCode Agent runtime.",
   "private": true,
   "type": "module",
