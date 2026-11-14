@@ -313,7 +313,13 @@ export class LaneReplExecutor implements WorkerExecutor {
       // 取消 / 窗口消失时 pump 未必能 settle（它只在「有等待方」时发结论），这里补一刀。
       if (this.cancelled.has(process_.key) || process_.dead) this.settle(process_, null);
     }, this.pollMs);
-    timer.unref?.();
+    // ⚠ 这里**不能** unref：`result` 只能由这个 interval 结算，而等待一轮是"有活在跑"，
+    // 进程就该活着。unref 之后一旦事件循环没有别的 ref 句柄，Node 会直接排空 ——
+    // 这个 Promise 永不 resolve，`node --test` 报
+    // "Promise resolution is still pending but the event loop has already resolved"
+    // 并把它记成 cancelledByParent（CI 从 1.9.5 起就是被这条连锁拖垮的：本地 Windows
+    // 因为 Go 测试等残留 ref 句柄恰好托住了循环，所以一直没复现）。
+    // 对照：同文件的 waitReady 用 `await sleep()`（ref 句柄），语义一致。
     try {
       return await result;
     } finally {
