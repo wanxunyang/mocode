@@ -47,11 +47,27 @@ export interface ToolViewLabels {
   askAnswer: string;
 }
 
-export interface ToolView {
+/** 各视图函数内部的产物：摘要 + 已经建好的 HTML。 */
+interface EagerToolView {
   /** 折叠行右侧的状态文本（"128 行" / "3 处匹配" / "失败"）。 */
   summary: string;
   /** 展开区 HTML。 */
   html: string;
+}
+
+/**
+ * 对外产物：摘要 + **惰性**展开区。
+ *
+ * 回放一次会话时每个工具块都要摘要（折叠行右侧那一行字），但展开区几乎没人看，
+ * 而它的成本比摘要贵两个数量级：read_file 的语法高亮实测 1.3ms/块，一份真实会话里
+ * 514 个 read_file 合计 279ms —— 占「点开会话」主线程开销的 97%（实测 910 块总计 287ms）。
+ * 所以 HTML 走闭包，只有用户真正展开那一条时才构建。
+ */
+export interface ToolView {
+  /** 折叠行右侧的状态文本（"128 行" / "3 处匹配" / "失败"）。 */
+  summary: string;
+  /** 展开区 HTML；调用一次构建一次（调用方负责记住结果）。 */
+  html: () => string;
 }
 
 /** 展开区里最多渲染的行数：超长输出一律走「还有 n 行」尾注，避免一个块撑爆整个会话。 */
@@ -116,8 +132,16 @@ function terminalHtml(command: string, body: string, labels: ToolViewLabels): st
   return `<div class="tool-term">${head}<pre class="tool-term-out">${escapeHtml(shown.map(clipLine).join('\n'))}${hidden > 0 ? `\n${escapeHtml(labels.moreLines(hidden))}` : ''}</pre></div>`;
 }
 
-/** read_file：剥掉给模型看的 artifact 头，正文按行号 + 语法高亮渲染。 */
-function readFileView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): ToolView {
+/** read_file 的解析结果。摘要与 HTML 共用同一套解析（解析只占这个视图成本的 4%）。 */
+interface ReadFileParts {
+  numbered: string[];
+  firstLine: number;
+  rawPath: string;
+  body: string;
+}
+
+/** 剥掉给模型看的 artifact 头，把 `行号\t正文` 还原成纯正文行。 */
+function readFileParts(args: Record<string, unknown> | null, output: string): ReadFileParts {
   const header = /^\[artifact[^\]]*path=(.+?) hash=[^\]]*\]\s*/i.exec(output);
   const body = header ? output.slice(header[0].length) : output;
   const rawPath = typeof args?.path === 'string' ? args.path : header?.[1] ?? '';
@@ -134,15 +158,29 @@ function readFileView(args: Record<string, unknown> | null, output: string, labe
       numbered.push(line);
     }
   }
-  if (!numbered.length) {
-    return { summary: labels.lines(0), html: `<pre class="tool-preview">${escapeHtml(labels.noOutput)}</pre>` };
-  }
-  const html = codeBlockHtml(numbered, { lang: langForPath(rawPath), startLine: firstLine, labels });
-  return { summary: labels.lines(nonEmptyLines(body).length), html };
+  return { numbered, firstLine, rawPath, body };
+}
+
+function readFileSummary(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): string {
+  const parts = readFileParts(args, output);
+  return parts.numbered.length ? labels.lines(nonEmptyLines(parts.body).length) : labels.lines(0);
+}
+
+/**
+ * 展开时才做：按行号 + 语法高亮渲染正文。
+ *
+ * 这里**重新解析一遍**而不是让闭包捕获上面那份 parts：捕获会为一个可能永远不展开的块
+ * 留住整份切好的行数组（长会话里 read_file 块有几百个，等于把正文再存一份）。
+ * 重复解析的代价实测 0.05ms/200 行 —— 只在用户真的点开那一下付一次。
+ */
+function readFileHtml(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): string {
+  const parts = readFileParts(args, output);
+  if (!parts.numbered.length) return `<pre class="tool-preview">${escapeHtml(labels.noOutput)}</pre>`;
+  return codeBlockHtml(parts.numbered, { lang: langForPath(parts.rawPath), startLine: parts.firstLine, labels });
 }
 
 /** glob：纯路径列表。 */
-function globView(output: string, labels: ToolViewLabels): ToolView {
+function globView(output: string, labels: ToolViewLabels): EagerToolView {
   const files = nonEmptyLines(output).filter((line) => !line.startsWith('...'));
   if (!files.length) return { summary: labels.files(0), html: `<pre class="tool-preview">${escapeHtml(output.trim())}</pre>` };
   const items = files.slice(0, MAX_RENDERED_LINES)
@@ -155,7 +193,7 @@ function globView(output: string, labels: ToolViewLabels): ToolView {
  * grep：每文件一个分组头（`path: N 处匹配,行号 [...]`）+ 命中行（`  L3: 文本` / `  L3- 上下文`）。
  * 行号前缀剥进 gutter，与终端可读性一致；`--` 分隔保留为空行。
  */
-function grepView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): ToolView {
+function grepView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): EagerToolView {
   const lang = typeof args?.path === 'string' ? langForPath(args.path) : 'text';
   const groups: string[] = [];
   let current: { header: string; rows: string[] } | null = null;
@@ -195,7 +233,7 @@ function grepView(args: Record<string, unknown> | null, output: string, labels: 
 }
 
 /** run_command：首行是 `[退出码 N]` 这类状态徽标，其余是命令输出。 */
-function runCommandView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): ToolView {
+function runCommandView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): EagerToolView {
   const command = typeof args?.command === 'string' ? args.command : '';
   const lines = splitLines(output.trim());
   let badge = '';
@@ -210,7 +248,7 @@ function runCommandView(args: Record<string, unknown> | null, output: string, la
 }
 
 /** plan_update：把 `- [x] N. **标题** — 内容` 清单还原成复选框列表。 */
-function planView(output: string, labels: ToolViewLabels): ToolView {
+function planView(output: string, labels: ToolViewLabels): EagerToolView {
   const steps: Array<{ done: boolean; current: boolean; title: string; detail: string }> = [];
   for (const line of splitLines(output)) {
     const match = /^- \[(x| )]\s*(?:\d+\.\s*)?(.*)$/.exec(line.trim());
@@ -239,7 +277,7 @@ function planView(output: string, labels: ToolViewLabels): ToolView {
 }
 
 /** note_append：剥掉那行元信息，只留笔记正文。 */
-function noteView(output: string, labels: ToolViewLabels): ToolView {
+function noteView(output: string, labels: ToolViewLabels): EagerToolView {
   const lines = splitLines(output.trim());
   const head = lines[0] ?? '';
   const body = lines.slice(1).join('\n').trim();
@@ -248,7 +286,7 @@ function noteView(output: string, labels: ToolViewLabels): ToolView {
 }
 
 /** web_search：`[1] 标题` / `    url` / `    snippet` 还原成结果列表。 */
-function webSearchView(output: string, labels: ToolViewLabels): ToolView {
+function webSearchView(output: string, labels: ToolViewLabels): EagerToolView {
   const results: Array<{ index: string; title: string; url: string; body: string[] }> = [];
   for (const line of splitLines(output)) {
     const head = /^\[(\d+)]\s*(.*)$/.exec(line);
@@ -282,7 +320,7 @@ function webSearchView(output: string, labels: ToolViewLabels): ToolView {
 }
 
 /** web_fetch：首行 `url (HTTP 200, text/html)` 当标题，其余是正文。 */
-function webFetchView(output: string, labels: ToolViewLabels): ToolView {
+function webFetchView(output: string, labels: ToolViewLabels): EagerToolView {
   const lines = splitLines(output.trim());
   const head = /^(https?:\/\/\S+)\s*\((.*)\)$/.exec((lines[0] ?? '').trim());
   const title = head
@@ -294,7 +332,7 @@ function webFetchView(output: string, labels: ToolViewLabels): ToolView {
 }
 
 /** browser / dev_server：输出是 JSON，转成键值行让人扫得动。 */
-function jsonView(output: string, labels: ToolViewLabels): ToolView | null {
+function jsonView(output: string, labels: ToolViewLabels): EagerToolView | null {
   const trimmed = output.trim();
   if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
   let value: unknown;
@@ -328,7 +366,7 @@ function jsonView(output: string, labels: ToolViewLabels): ToolView | null {
  * 那时还没有结论 —— 渲染成一份「它正在干什么」的清单，而不是一坨纯文本。
  * 这是 GUI 里唯一能看到子 agent 内部动作的地方（终端走 batch 实时渲染，GUI 没有那条路）。
  */
-function subAgentView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): ToolView {
+function subAgentView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): EagerToolView {
   const marker = /^\[SubAgentResult[^\]]*]\s*/.exec(output.trim());
   const body = marker ? output.trim().slice(marker[0].length) : output.trim();
   const prompt = typeof args?.prompt === 'string' ? args.prompt : '';
@@ -362,7 +400,7 @@ function subAgentView(args: Record<string, unknown> | null, output: string, labe
  * 工具失败 / 被拒 / 中断：这三种结局的正文本身就是给人看的原因，
  * 不做结构化解读，只保证视觉上区分得开（不再是「成功但输出很怪」）。
  */
-function statusView(info: ToolOutcomeInfo, output: string, labels: ToolViewLabels): ToolView | null {
+function statusView(info: ToolOutcomeInfo, output: string, labels: ToolViewLabels): EagerToolView | null {
   const status = info.status;
   if (status === 'denied') {
     return { summary: labels.denied, html: `<pre class="tool-preview tool-preview-error">${escapeHtml(output.trim() || labels.denied)}</pre>` };
@@ -383,7 +421,7 @@ function statusView(info: ToolOutcomeInfo, output: string, labels: ToolViewLabel
  *   · 选项带 description 时逐条列出（那是「选它意味着什么」，比 label 更重要）；
  *   · 答复从 output 前缀里剥出来单列一行 —— 这是折叠后最想知道的那一个值。
  */
-function askHumanView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): ToolView {
+function askHumanView(args: Record<string, unknown> | null, output: string, labels: ToolViewLabels): EagerToolView {
   const question = typeof args?.question === 'string' ? args.question.trim() : '';
   const context = typeof args?.context === 'string' ? args.context.trim() : '';
   const rawOptions = Array.isArray(args?.options) ? args.options : [];
@@ -442,9 +480,17 @@ function askHumanView(args: Record<string, unknown> | null, output: string, labe
   return { summary, html };
 }
 
+/** 把已经建好的 HTML 包成惰性接口：值本身已经付过代价的视图走这条。 */
+function eager(view: EagerToolView): ToolView {
+  return { summary: view.summary, html: () => view.html };
+}
+
 /**
  * 主入口：按工具名挑渲染器。
  * 返回 null 表示「这类输出我没有可靠解读」——调用方回退原始参数 + 原文（宁可朴素，不能误导）。
+ *
+ * ⚠ 约定：只保证 `summary` 现算好，`html` 是个待调用的闭包。回放会话时每个块都会问摘要、
+ * 几乎没人展开，所以 read_file 这条最贵的路径（语法高亮）只在展开时才算。
  */
 export function buildToolView(
   name: string,
@@ -457,43 +503,48 @@ export function buildToolView(
   const failed = statusView(info, output, labels);
 
   // 文件编辑走 diff 视图（renderer 侧先试），这里不重复实现。
-  if (name === 'edit_file' || name === 'write_file') return failed;
+  if (name === 'edit_file' || name === 'write_file') return failed && eager(failed);
 
   if (failed) {
     // 失败时仍然尽量给「它在干什么」的上下文：错误文本 + 该工具的对象。
-    return failed;
+    return eager(failed);
   }
   // ask_human 要在「输出为空」之前处理：等待用户回答的那一刻还没有任何 output，
   // 但问题和选项正是这时候最该看见的东西（以前这里直接返回「（无输出）」）。
-  if (name === 'ask_human') return askHumanView(args, output.trim(), labels);
+  if (name === 'ask_human') return eager(askHumanView(args, output.trim(), labels));
 
   const text = output.trim();
-  if (!text) return { summary: labels.noOutput, html: `<pre class="tool-preview">${escapeHtml(labels.noOutput)}</pre>` };
+  if (!text) return { summary: labels.noOutput, html: () => `<pre class="tool-preview">${escapeHtml(labels.noOutput)}</pre>` };
 
   switch (name) {
     case 'read_file':
     case 'view_image':
-      return readFileView(args, text, labels);
+      // 唯一拆两趟的视图：摘要现在算，高亮 + 拼串推迟到展开时（闭包只捕获原文，不留行数组）。
+      return { summary: readFileSummary(args, text, labels), html: () => readFileHtml(args, text, labels) };
     case 'run_command':
-      return runCommandView(args, text, labels);
+      return eager(runCommandView(args, text, labels));
     case 'dev_server':
     case 'browser':
-    case 'computer':
-      return jsonView(text, labels) ?? { summary: labels.lines(nonEmptyLines(text).length), html: `<pre class="tool-preview">${escapeHtml(text.slice(0, 8000))}</pre>` };
+    case 'computer': {
+      const structured = jsonView(text, labels);
+      return structured
+        ? eager(structured)
+        : { summary: labels.lines(nonEmptyLines(text).length), html: () => `<pre class="tool-preview">${escapeHtml(text.slice(0, 8000))}</pre>` };
+    }
     case 'glob':
-      return globView(text, labels);
+      return eager(globView(text, labels));
     case 'grep':
-      return grepView(args, text, labels);
+      return eager(grepView(args, text, labels));
     case 'web_search':
-      return webSearchView(text, labels);
+      return eager(webSearchView(text, labels));
     case 'web_fetch':
-      return webFetchView(text, labels);
+      return eager(webFetchView(text, labels));
     case 'plan_update':
-      return planView(text, labels);
+      return eager(planView(text, labels));
     case 'note_append':
-      return noteView(text, labels);
+      return eager(noteView(text, labels));
     case 'sub-agent':
-      return subAgentView(args, text, labels);
+      return eager(subAgentView(args, text, labels));
     default:
       return null;
   }

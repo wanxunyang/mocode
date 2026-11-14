@@ -221,6 +221,28 @@ function isLiveUsageLine(line: string): boolean {
   }
 }
 
+/**
+ * 剥掉工具项 payload 里与顶层字段重复的三个键：`arguments` / `output` / `chunk`。
+ *
+ * `payload` 是整个事件的原始 payload 拷贝，而 `arguments`/`output` 已经提到了
+ * `RecoveryStreamItem` 的顶层（args/output）—— 实测真实会话 905/910 个工具项两处内容
+ * 逐字相同，占一份 6.54MB 快照的 47%（3.1MB）。这份重复要 stringify、过 IPC、再 parse
+ * 一遍，全部发生在点会话那一瞬间。
+ *
+ * 安全性：渲染层回放时显式传 `arguments: item.args, output: item.output`（覆盖顺序不依赖
+ * payload），`chunk` 只在实时 tool_output 事件里用、不走快照。其余只有 payload 才有的
+ * 结构化字段（status / code / changedFiles / editStartLine / preWriteOld / multiHunks…）全部保留。
+ */
+function stripRedundantToolPayload(payload: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!payload) return payload;
+  if (payload.arguments === undefined && payload.output === undefined && payload.chunk === undefined) return payload;
+  const trimmed = { ...payload };
+  delete trimmed.arguments;
+  delete trimmed.output;
+  delete trimmed.chunk;
+  return trimmed;
+}
+
 /** 纯函数：JSONL 正文 → 现场快照；running 表示主进程确认 host 仍活着（由调用方判断）。 */
 function parseRecovery(source: string, running = false): RecoverySnapshot | null {
   const entries: LogEntry[] = [];
@@ -375,6 +397,9 @@ function parseRecovery(source: string, running = false): RecoverySnapshot | null
   if (!running) {
     pendingApproval = null;
     settleOpenTools();
+  }
+  for (const item of items) {
+    if (item.kind === 'tool') item.payload = stripRedundantToolPayload(item.payload);
   }
   return { items, usagePercent, contextUsage, startedAt, pendingApproval, interrupted: interrupted || runOpen };
 }

@@ -104,10 +104,10 @@ textarea:focus-visible, input:focus-visible { outline-offset: 0; }
 /* 侧栏 = 框架面(--surface-app),主区 = 纸面(--surface-content)。
    两者必须能一眼分开:这是"有设计的 app"和"一堆白块"的分界线。 */
 .sidebar { width: var(--sidebar-width, 260px); flex: 0 0 var(--sidebar-width, 260px); display: flex; flex-direction: column; background: var(--surface-app); border-right: var(--rule-hair); padding: var(--space-xs) var(--space-xs) var(--space-xs); gap: var(--space-2xs); color: var(--text-default); position: relative; }
-/* 侧栏右沿的拖拽手柄:跨在 sidebar 边界,鼠标变 ew-resize;hover/active 出现细线高亮 */
-.sidebar-resize { position: absolute; right: -3px; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 5; background: transparent; transition: background var(--dur-micro) var(--ease-out); touch-action: none; }
-.sidebar-resize:hover { background: var(--color-rule); }
-.sidebar-resize:active { background: var(--color-neutral); }
+/* 侧栏右沿的拖拽手柄:跨在 sidebar 边界,鼠标变 ew-resize。
+   手柄本身**不可见**：hover / 拖动时都不再冒出一条高亮竖条(以前 hover 变亮、active 变粗,
+   看着像边界在闪)；唯一的反馈就是光标变成 ew-resize。 */
+.sidebar-resize { position: absolute; right: -3px; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 5; background: transparent; touch-action: none; }
 /* 折叠态:sidebar 整个 display:none,resize 也跟着消失 */
 .app-body.sidebar-collapsed .sidebar-resize { display: none; }
 /* 拖拽中:全局禁掉文字选择和默认光标,避免误选 */
@@ -1242,10 +1242,8 @@ textarea::placeholder { color: var(--text-subtle); }
 /* 宽度走 CSS 变量：拖拽只改 --inspector-width（见 renderer 的 inspector resize），
    默认 340px 落在变量缺省值里，窄屏 @media 仍可覆盖成 280px / 100%。 */
 .inspector { position: absolute; z-index: var(--z-page); top: 0; right: 0; bottom: 0; width: var(--inspector-width, 340px); display: flex; flex-direction: column; background: var(--surface-raised); border-left: var(--rule-hair); box-shadow: var(--shadow-soft); }
-/* 左沿拖拽手柄：跨在面板边界上，与 .sidebar-resize 同一套视觉与交互。 */
-.inspector-resize { position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 5; background: transparent; transition: background var(--dur-micro) var(--ease-out); touch-action: none; }
-.inspector-resize:hover { background: var(--color-rule); }
-.inspector-resize:active { background: var(--color-neutral); }
+/* 左沿拖拽手柄：跨在面板边界上，与 .sidebar-resize 同一套行为 —— 不可见，只有 ew-resize 光标。 */
+.inspector-resize { position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: ew-resize; z-index: 5; background: transparent; touch-action: none; }
 body.inspector-resizing { user-select: none; cursor: ew-resize; }
 body.inspector-resizing * { cursor: ew-resize !important; }
 .inspector.hidden { display: none; }

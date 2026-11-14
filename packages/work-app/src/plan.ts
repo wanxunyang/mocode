@@ -95,6 +95,20 @@ function parseSteps(raw: unknown): PlanStepView[] {
 }
 
 /**
+ * 从历史 / 事件缓冲里复原计划时，**只接受还没做完的那份**。
+ *
+ * 实时路径里「全部完成」是有生命周期的：停在屏上 2.4s（renderer 的 PLAN_DONE_LINGER_MS）
+ * 让用户看清全绿，然后收起。复原路径（重开窗口、切任务回来、历史回放）原先无脑照收，
+ * 于是已经收尾的计划会被重新捞出来永久钉在会话顶部 —— 用户看到的就是「任务都完事了，
+ * 计划条还挂着」。完成态没有增量信息（进度条已满、n/m 已拉满），复原时丢掉最合适。
+ *
+ * 判断放这里而不是 renderer：复原规则属于计划语义，且渲染层没有 DOM 之外的测试环境。
+ */
+export function planForRestore(plan: PlanSnapshot | null): PlanSnapshot | null {
+  return plan && !plan.allDone ? plan : null;
+}
+
+/**
  * 解析 plan_update 的 arguments。接受 JSON 字符串（事件里的原样入参）或已解析的对象。
  * 无有效 steps 时返回 null —— 工具本身会以「steps 不能为空」失败，面板不该显示半份计划。
  */

@@ -230,6 +230,47 @@ test('超长日志里的 truncate 不再抛 RangeError（展开传参上限）',
     assert.equal(users[0]?.kind === 'user' ? users[0].text : '', '第一轮');
   }));
 
+test('快照剥掉 payload 里与顶层重复的 arguments/output/chunk，结构化字段全留', () =>
+  withRoot((root) => {
+    // 回归背景：payload 是事件原文的拷贝，而 arguments/output 已经提到 item 顶层。
+    // 真实会话 905/910 个工具项两处逐字相同 —— 占一份 6.54MB 快照的 47%，白白 stringify + 过 IPC。
+    const log = recoveryLog(root, 'task-dedup');
+    log.user('读文件');
+    log.event(event('run_started'));
+    log.event(event('tool_started', { id: 'c1', name: 'read_file', arguments: '{"path":"a.ts"}' }));
+    log.event(event('tool_output', { id: 'c1', name: 'read_file', chunk: 'partial' }));
+    log.event(
+      event('tool_completed', {
+        id: 'c1',
+        name: 'read_file',
+        arguments: '{"path":"a.ts"}',
+        output: 'complete output',
+        status: 'success',
+        code: 'OK',
+        changedFiles: ['a.ts'],
+        editStartLine: 12,
+        durationMs: 34,
+      }),
+    );
+    const snapshot = readRecovery(root, 'task-dedup');
+    assert.ok(snapshot);
+    const tool = snapshot.items[1];
+    assert.ok(tool?.kind === 'tool');
+    // 顶层仍是完整内容（渲染层回放靠它）。
+    assert.equal(tool.args, '{"path":"a.ts"}');
+    assert.equal(tool.output, 'complete output');
+    // payload 里不再留同一份拷贝。
+    assert.equal('output' in (tool.payload ?? {}), false);
+    assert.equal('arguments' in (tool.payload ?? {}), false);
+    assert.equal('chunk' in (tool.payload ?? {}), false);
+    // 只有 payload 才有的结构化信息一个字都不能少（toolOutcomeInfo / diff 视图全靠这些）。
+    assert.equal(tool.payload?.status, 'success');
+    assert.equal(tool.payload?.code, 'OK');
+    assert.deepEqual(tool.payload?.changedFiles, ['a.ts']);
+    assert.equal(tool.payload?.editStartLine, 12);
+    assert.equal(tool.payload?.durationMs, 34);
+  }));
+
 test('writer 只保留百分比变化了的 live_usage，恢复仍能拿到用量快照', () =>
   withRoot((root) => {
     const log = recoveryLog(root, 'task-usage');

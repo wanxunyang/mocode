@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizePlanStatus, parsePlan } from '../../packages/work-app/src/plan.js';
+import { normalizePlanStatus, parsePlan, planForRestore } from '../../packages/work-app/src/plan.js';
 
 test('parsePlan 读标准入参：进度、当前步、全部完成', () => {
   const plan = parsePlan(
@@ -88,4 +88,32 @@ test('normalizePlanStatus 对未知值保守退回 pending', () => {
   assert.equal(normalizePlanStatus('finished'), 'completed');
   assert.equal(normalizePlanStatus('blocked'), 'pending');
   assert.equal(normalizePlanStatus(undefined), 'pending');
+});
+
+test('planForRestore：复原时丢掉已完成计划，进行中的照常还原', () => {
+  const running = parsePlan({
+    title: '在跑',
+    steps: [
+      { content: 'A', status: 'completed' },
+      { content: 'B', status: 'in_progress' },
+    ],
+  });
+  assert.ok(running);
+  // 复原路径接受未完的计划（切任务回来要接着看进度）。
+  assert.equal(planForRestore(running), running);
+
+  // 全部完成：实时路径靠 PLAN_DONE_LINGER_MS 自动收起，复原路径必须同样不收，
+  // 否则重开窗口 / 切回任务时已完成计划会被重新钉在会话顶部。
+  const done = parsePlan({
+    title: '收尾',
+    steps: [
+      { content: 'A', status: 'completed' },
+      { content: 'B', status: 'completed' },
+    ],
+  });
+  assert.ok(done);
+  assert.equal(done.allDone, true);
+  assert.equal(planForRestore(done), null);
+
+  assert.equal(planForRestore(null), null);
 });

@@ -13,7 +13,7 @@ import { initTerminalPanel, showTerminalPanel, hideTerminalPanel, refreshTermina
 import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, MOD, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
 import type { RecoverySnapshot } from '../recovery-log.js';
 import type { WorkAttachment, AttachmentResult, AttachmentErrorCode } from '../attachment-types.js';
-import { parsePlan, type PlanSnapshot } from '../plan.js';
+import { parsePlan, planForRestore, type PlanSnapshot } from '../plan.js';
 import { pendingByProject, pendingTasks } from '../attention.js';
 import { planPanelHtml } from './plan-panel.js';
 // 「检查」面板把 `pm run x` 拼成命令行：与主进程用同一份纯函数，避免两处拼法漂移。
@@ -1625,13 +1625,17 @@ function toolViewLabels(): ToolViewLabels {
  * ③解析不出改动片段（例如只给了未知字段）。
  *
  * 同时带上改动量：折叠行上要显示 `+3 -1`，用户不用展开就知道这次改了多少。
+ *
+ * ⚠ 只算「改动量」，HTML 交给 `build` 惰性构建：回放一次真实会话有 126 个 edit/write 块，
+ * 全量渲染实测 28.4ms / 0.81MB，而 LCS（buildFileChange）+ 统计（summarizeFileChange）
+ * 合计只有 2.3ms。折叠行要的是 `+3 -1`，展开区没人看 —— 与 tool-view 的 read_file 同一诉求。
  */
 function fileChangeDetail(
   name: string,
   args: string,
   output: string,
   info: ToolOutcomeEnvelope,
-): { html: string; added: number; removed: number } | null {
+): { build: () => string; added: number; removed: number } | null {
   if (name !== 'edit_file' && name !== 'write_file') return null;
   if (!args || toolFailed(info, output)) return null;
   const change = buildFileChange(name, args, {
@@ -1640,31 +1644,37 @@ function fileChangeDetail(
     multiHunks: info.multiHunks,
   });
   if (!change) return null;
-  const html = renderFileChangeHtml(change, fileChangeLabels());
-  if (!html) return null;
   const stats = summarizeFileChange(change) ?? { added: 0, removed: 0 };
-  return { html, added: stats.added, removed: stats.removed };
+  // 文案每次展开时现取（切语言即时生效，与原先每条都调 fileChangeLabels() 一致）。
+  const build = (): string => renderFileChangeHtml(change, fileChangeLabels());
+  return { build, added: stats.added, removed: stats.removed };
 }
 
-/* ── 折叠态工具块的 detail 延迟插入 ────────────────────────
+/* ── 工具块 detail 的两级惰性 ────────────────────────
  * 一次会话里九成以上的工具块是收起状态,而 detail HTML 一次就有 1.2–1.8MB
  * (实测 .mocode/sessions 里最大的几条):innerHTML 一插就是几万个节点参与样式与布局,
  * 这些开销用户永远看不到 —— 切会话的体感主要花在这里。
- * 所以只保存算好的 HTML 字符串,等用户真正点开那一条时才插进 DOM。
  *
- * 注意:字符串本身仍然会构建(折叠行右侧的「128 行 / +3 -1」摘要来自同一批解析),
- * 这里省掉的是 DOM 解析 + 布局,不是字符串拼接。要做成全惰性得把 tool-view 拆成
- * 「只算摘要」和「渲染 HTML」两趟,属于另一个量级的改动。 */
-const lazyDetails = new WeakMap<HTMLDetailsElement, string>();
+ * 两级:
+ *   ① 字符串级(buildToolView 返回闭包):read_file 的语法高亮最贵(实测 1.3ms/块,
+ *      一份真实会话 514 个 read_file 合计 279ms),折叠行只要摘要,所以 HTML 字符串
+ *      根本不在回放时拼 —— 实测 910 块的工具视图构建从 287ms 降到十几毫秒;
+ *   ② DOM 级(本组 WeakMap):已经拼好的字符串也只存着,用户点开那一条才插进 DOM。
+ * 展开一次后就缓存结果;同一块可能被原地更新(运行中 → 完成、流式重绘),
+ * 每次 setToolDetail 会换掉 builder 并作废缓存。 */
+const detailBuilders = new WeakMap<HTMLDetailsElement, () => string>();
+const detailReady = new WeakMap<HTMLDetailsElement, string>();
 
-/** 存下 detail HTML;当前已展开的块立刻插进 DOM(否则就等 toggle)。 */
-function setToolDetail(entry: HTMLDetailsElement, html: string): void {
-  if (!html) {
-    lazyDetails.delete(entry);
+/** 存下 detail 的构建器;当前已展开的块立刻建好并插进 DOM(否则就等 toggle)。 */
+function setToolDetail(entry: HTMLDetailsElement, build: (() => string) | null): void {
+  if (!build) {
+    detailBuilders.delete(entry);
+    detailReady.delete(entry);
     entry.querySelector(':scope > .tool-detail')?.remove();
     return;
   }
-  lazyDetails.set(entry, html);
+  detailBuilders.set(entry, build);
+  detailReady.delete(entry);
   // force:同一 id 的块可能被原地更新(运行中 → 完成、流式输出重绘),
   // 已展开的块必须换成新内容,否则用户看到的是上一版的半截输出。
   if (entry.open) revealToolDetail(entry, true);
@@ -1672,11 +1682,16 @@ function setToolDetail(entry: HTMLDetailsElement, html: string): void {
 
 /** 展开时把 detail 插进 DOM;已存在则只在 force 时替换内容(重插会重置用户的滚动位置)。 */
 function revealToolDetail(entry: HTMLDetailsElement, force = false): void {
-  const html = lazyDetails.get(entry);
-  if (!html) return;
+  const build = detailBuilders.get(entry);
+  if (!build) return;
   const existing = entry.querySelector<HTMLElement>(':scope > .tool-detail');
+  if (existing && !force) return;
+  let html = detailReady.get(entry);
+  if (html === undefined) {
+    html = build();
+    detailReady.set(entry, html);
+  }
   if (existing) {
-    if (!force) return;
     existing.innerHTML = html;
     mountIcons(existing);
     return;
@@ -1744,11 +1759,17 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   // 返回 null 表示这类输出没有可靠解读，此时才回退「原始参数 + 原文」——宁可朴素，不能误导。
   const view = diff ? null : buildToolView(name, args, output, info, toolViewLabels());
   const failed = completed && toolFailed(info, output);
-  const fallback = [
+  const fallbackHtml = (): string => [
     args ? `<section><span>${t('tool.args')}</span><pre>${escapeHtml(args.slice(0, 2000))}</pre></section>` : '',
     output ? `<section><span>${t('tool.result')}</span><pre>${escapeHtml(output.slice(0, 6000))}${output.length > 6000 ? `\n${t('tool.truncated')}` : ''}</pre></section>` : '',
   ].join('');
-  const detail = diff?.html ?? view?.html ?? fallback;
+  // detail 一律以「构建器」形式传下去:view.html 是闭包,折叠状态下永远不会被调用。
+  const detailBuilder: (() => string) | null = diff
+    ? diff.build
+    : view
+      ? view.html
+      : args || output ? fallbackHtml : null;
+  const hasDetail = detailBuilder !== null;
   // 折叠行右侧状态：先给「这次干了什么」的量化结论，再退到行数/完成。
   // 以 output 行数当状态是错的（读 3000 行文件会显示「3000 行」、grep 20 处命中显示「45 行」）。
   const changedCount = info.changedFiles?.length ?? 0;
@@ -1767,7 +1788,7 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
     ? `<span class="tool-changes">${diff.added > 0 ? `<span class="diff-add">+${diff.added}</span>` : ''}${diff.removed > 0 ? `<span class="diff-del">-${diff.removed}</span>` : ''}</span>`
     : '';
 
-  entry.className = `tool-entry ${completed ? 'tool-done' : 'tool-running'}${detail ? '' : ' tool-empty'}${failed ? ' tool-failed' : ''}`;
+  entry.className = `tool-entry ${completed ? 'tool-done' : 'tool-running'}${hasDetail ? '' : ' tool-empty'}${failed ? ' tool-failed' : ''}`;
   entry.dataset.toolLabel = meta.label;
   // 联动入口：agent 跑过的命令可以一键回填到终端面板（不回车，等用户确认）。
   // 只给 run_command：其他工具没有「一条能在 shell 里重跑的命令」。
@@ -1786,10 +1807,10 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   // ②失败的调用 —— 用户最需要看到的就是原因，折叠等于把错误藏起来；
   // ③运行中的子 agent —— 它有进度行在长，收起就看不到「正在干什么」，与静止的卡片没区别。
   if (completed) entry.open = Boolean(diff) || failed;
-  else if (name === 'sub-agent' && view?.html) entry.open = true;
+  else if (name === 'sub-agent' && view) entry.open = true;
   // detail 必须在 open 定下来之后再交出去：已展开的块要立刻插进 DOM，
-  // 折叠的块只留字符串等 toggle（见上方 lazyDetails 注释）。
-  setToolDetail(entry, detail);
+  // 折叠的块只留构建器等 toggle（见上方 detailBuilders 注释）。
+  setToolDetail(entry, detailBuilder);
   if (id) {
     if (completed) { activeTools.delete(id); toolStartTimes.delete(id); }
     else if (isNew) { activeTools.set(id, entry); toolStartTimes.set(id, Date.now()); }
@@ -1917,7 +1938,7 @@ function renderHistory(history: HistoryItem[]): void {
   const taskId = viewingTaskId();
   if (taskId) {
     const stream = streamFor(taskId);
-    const plan = planFromHistory(history);
+    const plan = planForRestore(planFromHistory(history));
     if (plan) stream.plan = plan;
     syncPlanPanel(taskId);
   }
@@ -3674,7 +3695,7 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   void refreshContextUsage(taskId);
   // 计划面板按这个任务的缓冲还原（切任务时其它任务的计划不该留在屏上）。
   if (!stream?.plan) {
-    const recovered = planFromItems(stream?.items) ?? planFromHistory(history);
+    const recovered = planForRestore(planFromItems(stream?.items) ?? planFromHistory(history));
     if (recovered) streamFor(taskId).plan = recovered;
   }
   syncPlanPanel(taskId);
@@ -6797,6 +6818,10 @@ document.addEventListener('click', (event) => {
   hideWorkspacePicker();
 });
 
-// 启动即对一次 titlebar overlay 的色：首屏脚本只落了 dataset.theme/accent，
-// 不在这里同步的话，深色主题用户开窗到第一次碰主题设置前，右上角控制按钮一直是初始浅色底。
+// 启动即把**保存的主题**推给主进程，再对一次 titlebar overlay 的符号色。
+// 窗口的明暗状态（原生最小化/最大化/关闭按钮的 hover 高亮、窗口底色）由主进程的
+// nativeTheme.themeSource 决定，它默认停在 'system'；而应用主题存在 localStorage，原先
+// 只有用户手动切主题时才经 work:set-theme 同步过去。于是系统浅色 + 应用深色时，按钮的
+// hover 高亮按浅色算（近黑半透明），压在深色标题栏上完全看不见，切一次主题才对齐。
 syncTitleBarOverlay();
+window.mocodeWork.setTheme(currentSavedTheme());
