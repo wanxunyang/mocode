@@ -2,16 +2,14 @@
  * 提交泳道图的 SVG 渲染（纯函数）：吃一行 `GraphRow`，吐一段 `<svg>`。
  *
  * 单独成模块的理由与 `../git-graph.ts` 相同：几何常量必须只有一份。
- * 两处用图 —— Git 历史面板的提交列表、源代码管理面板顶部的「最近提交」——
- * 高度（`ROW_H`）与列宽（`LANE_W`）若各写一遍，两边行高一改就对不齐，
- * 而且颜色 class 也会分叉。**对应行高必须等于 `ROW_H`**：
- * `.history-row` 与 `.scm-recent-row` 都是 26px（见 style.css）。
+ * 高度（`ROW_H`）与列宽（`LANE_W`）若各处写一遍，行高一改泳道线就接不上，
+ * 而且颜色 class 也会分叉。**宿主行高必须等于 `ROW_H`**：`.history-row` 是 26px（见 style.css）。
  */
 import type { GraphRow } from '../git-graph.js';
 
 /** 每条 lane 的列宽。 */
 export const LANE_W = 12;
-/** 一行的高度；宿主行（.history-row / .scm-recent-row）必须与它一致。 */
+/** 一行的高度；宿主行（.history-row）必须与它一致。 */
 export const ROW_H = 26;
 /** 节点半径。 */
 export const NODE_R = 3.5;

@@ -198,6 +198,20 @@ function parseBlocks(input: string, options: Required<RenderOptions>): string {
       para.push(lines[i]!);
       i += 1;
     }
+    // ⚠ 兜底必须推进 i，否则死循环。
+    //
+    // 排除正则里含 `#{1,6}\s`，而标题分支要求 `\s+(.+?)`（标题文字非空）。于是「`# ` 这种
+    // 只有井号 + 空白的行」两边都落空：标题分支不认，段落分支又被排除正则挡住，while 一次
+    // 都不进 —— i 停在原地，外层 while 空转，主线程彻底占死。
+    //
+    // 这不是理论边界：流式渲染是逐字符到达的，`## 打包` 必经 `##` → `## ` 这一两帧，
+    // 那一刻缓冲区最后一行恰好就是 `## `。实测整套渲染器只在标题类前缀上挂死，
+    // `- ` / `1. ` / `> ` / `| ` 等都有各自分支接住。
+    if (para.length === 0) {
+      out.push(`<p>${parseInline(lines[i]!)}</p>`);
+      i += 1;
+      continue;
+    }
     out.push(`<p>${parseInline(para.join('\n'))}</p>`);
   }
 

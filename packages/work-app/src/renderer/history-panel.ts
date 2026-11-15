@@ -351,50 +351,6 @@ export async function refreshHistory(container: HTMLElement): Promise<void> {
   await loadPage(container);
 }
 
-/**
- * 从别的面板（源代码管理顶部的「最近提交」）跳到某条提交。
- *
- * 不假设调用方已经加载过历史：目标提交不在内存里就先按页拉，命中即停；
- * 目标仓库与当前仓库不同则整份丢掉重来（提交列表与泳道游标都属于某个仓库）。
- *
- * 页数有上限（5 页 = 500 条）：点进来的一定是「最近提交」里的那 12 条，正常第一页就命中；
- * 万一没命中（历史被改写等），退化成普通列表比无限翻页把 UI 卡住更好。
- */
-export async function focusCommit(container: HTMLElement, targetRoot: string, sha: string): Promise<void> {
-  const api = need();
-  visible = true;
-  const nextKey = currentKey();
-  if (nextKey !== workspaceKey) {
-    workspaceKey = nextKey;
-    resetState();
-  }
-  if (targetRoot && targetRoot !== repoRoot) {
-    repoRoot = targetRoot;
-    commits = [];
-    rows = [];
-    walker = new GraphWalker();
-    truncated = false;
-    view = 'log';
-    selectedSha = '';
-    selectedPath = '';
-  }
-  // 顶部多仓库按钮要靠 repoList 渲染；没有就先取一次（多数情况调用方刚渲染过，直接跳过）。
-  if (!repoList.length) {
-    const result = await api.repos(currentTarget());
-    if (!visible) return;
-    repoList = result.repos ?? [];
-  }
-  if (!repoRoot && repoList.length) repoRoot = repoList[0].root;
-  const contains = (): boolean => commits.some((commit) => commit.sha === sha);
-  for (let page = 0; page < 5 && !contains(); page += 1) {
-    if (page > 0 && !truncated) break;
-    await loadPage(container);
-    // 期间用户切了空间/关掉面板：回执已经作废，别再往下跳。
-    if (workspaceKey !== nextKey || !visible) return;
-  }
-  if (contains()) await openCommit(container, sha);
-}
-
 export function closeHistory(): void {
   visible = false;
   // 递增序号让在途请求的回执全部作废：关掉面板后再回写 DOM 会闪。
