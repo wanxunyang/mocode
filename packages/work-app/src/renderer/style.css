@@ -1264,6 +1264,12 @@ body.inspector-resizing * { cursor: ew-resize !important; }
 .inspector-header button:hover { background: var(--surface-hover); color: var(--text-strong); }
 .inspector-content { flex: 1; overflow: auto; padding: var(--space-sm); }
 .inspector-content.hidden { display: none; }
+/* 源代码管理内部的页签（更改 / 历史）：九宫格里只有一个入口，这里切两面的内容。 */
+.inspector-tabs { display: flex; gap: var(--space-2xs); padding: var(--space-2xs) var(--space-sm); border-bottom: var(--rule-soft); }
+.inspector-tabs.hidden { display: none; }
+.inspector-tab { height: 26px; padding: 0 var(--space-xs); border-radius: var(--radius-sm); color: var(--color-subtle); font-size: var(--text-sm); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.inspector-tab:hover { background: var(--surface-hover); color: var(--text-strong); }
+.inspector-tab.active { background: var(--surface-hover); color: var(--text-strong); font-weight: 500; }
 /* ── 浏览器面板 ── 页面本身是主进程的 WebContentsView（agent 要从 CDP 接管它），
    这里只有工具栏的骨架：stage 是个占位矩形，bounds 由渲染层量给主进程，
    原生视图就盖在这块矩形上。所以 stage 绝不能有圆角/内边距/缩放。 */
@@ -1991,7 +1997,7 @@ select.field-input { appearance: none; cursor: pointer; background-image: linear
  * 三件事：泳道图（SVG，几何由 history-panel.ts 给、颜色留在这里）、提交行、
  * 以及点开后的「文件列表 / 文件内容」两级。
  * 行高必须与 history-panel.ts 的 ROW_H 一致（26px），否则泳道连线会错位。 */
-.history-head { display: flex; align-items: center; gap: var(--space-2xs); margin-bottom: var(--space-2xs); }
+.history-head { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2xs); margin-bottom: var(--space-2xs); }
 .history-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-outlier); font-size: var(--text-xs); font-weight: 500; color: var(--color-ink-soft); }
 .history-back { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; padding: 3px var(--space-2xs); border-radius: var(--radius-sm); color: var(--color-muted); font-size: var(--text-2xs); }
 .history-back:hover { background: var(--surface-hover); color: var(--color-ink); }

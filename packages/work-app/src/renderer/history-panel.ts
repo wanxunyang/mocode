@@ -130,11 +130,17 @@ function logMarkup(): string {
   return `${logHeaderMarkup()}<div class="history-list-wrap">${items}${more}</div>`;
 }
 
-/** 列表页头：标题 + 刷新。历史不会自己变，所以不轮询，只留一个显式刷新。 */
+/**
+ * 列表页头：只剩刷新。
+ *
+ * 标题不再画：历史现在挂在「源代码管理」的页签下，页签本身就是标题，
+ * 面板里再画一遍「Git 历史」等于同一句话出现两次。刷新要留 —— 历史不会自己变，
+ * 只有用户主动要时才重读。
+ */
 function logHeaderMarkup(): string {
   const api = need();
   const label = api.t('history.refresh');
-  return `<div class="history-head"><b class="history-title">${api.t('history.title')}</b><button class="history-refresh" data-history-refresh title="${label}" aria-label="${label}">${api.icon('regen')}</button></div>`;
+  return `<div class="history-head"><button class="history-refresh" data-history-refresh title="${label}" aria-label="${label}">${api.icon('regen')}</button></div>`;
 }
 
 function headerMarkup(title: string, back?: 'log' | 'files'): string {

@@ -260,7 +260,8 @@ const $ = <T extends HTMLElement>(selector: string): T => document.querySelector
 const taskList = $('#task-list'); const conversation = $('#conversation');
 const emptyState = $('#empty-state'); const approvalPanel = $('#approval-panel'); const promptInput = $('#prompt') as HTMLTextAreaElement;
 const sendButton = $('#send-button') as HTMLButtonElement; const inspector = $('#inspector'); const inspectorContent = $('#inspector-content');
-const inspectorTitle = $('#inspector-title'); const attachmentList = $('#attachment-list'); const searchPanel = $('#search-panel'); const searchInput = $('#search-input') as HTMLInputElement;
+const inspectorTitle = $('#inspector-title'); const inspectorTabs = $('#inspector-tabs');
+const attachmentList = $('#attachment-list'); const searchPanel = $('#search-panel'); const searchInput = $('#search-input') as HTMLInputElement;
 const contextUsageEl = $('#context-usage') as HTMLButtonElement;
 const contextUsagePopover = $('#context-usage-popover');
 const convRail = $('#conv-rail') as HTMLElement;
@@ -3898,6 +3899,32 @@ function openInspector(tab: InspectorTab): void {
 }
 
 /**
+ * 「更改 / 历史」页签条的显隐与选中态。
+ *
+ * 只在这两个视图里出现：它们本是同一件事（源代码管理的现状与过去），
+ * 所以在九宫格里只留一个入口，用页签切换，而不是两个平级菜单项。
+ */
+function syncScmTabs(): void {
+  const onScm = activeInspectorTab === 'source' || activeInspectorTab === 'history';
+  inspectorTabs.classList.toggle('hidden', !onScm);
+  if (!onScm) return;
+  const changes = $('#scm-tab-changes');
+  const history = $('#scm-tab-history');
+  const isHistory = activeInspectorTab === 'history';
+  changes.classList.toggle('active', !isHistory);
+  history.classList.toggle('active', isHistory);
+  changes.setAttribute('aria-selected', String(!isHistory));
+  history.setAttribute('aria-selected', String(isHistory));
+}
+for (const [selector, tab] of [['#scm-tab-changes', 'source'], ['#scm-tab-history', 'history']] as const) {
+  $(selector).addEventListener('click', () => {
+    if (activeInspectorTab === tab) return;
+    activeInspectorTab = tab;
+    void refreshInspector();
+  });
+}
+
+/**
  * 文件树的展开状态按 **项目根** 持久化在 localStorage。
  * 必要性：每次 refreshInspector 都是整块 innerHTML 重建，没有这份状态的话，
  * 面板一刷新（切 tab、预览文件后返回、任务切换回来）用户刚展开的目录会全部塌回去。
@@ -3995,6 +4022,7 @@ async function refreshInspector(): Promise<void> {
     closeSourceControl();
     closeHistory();
     hideTerminalPanel();
+    inspectorTabs.classList.add('hidden');
     inspectorContent.classList.add('hidden');
     inspectorContent.innerHTML = '';
     inspectorTitle.textContent = t('tools.browser');
@@ -4007,6 +4035,7 @@ async function refreshInspector(): Promise<void> {
     closeSourceControl();
     closeHistory();
     hideBrowserPanel();
+    inspectorTabs.classList.add('hidden');
     inspectorContent.classList.add('hidden');
     inspectorContent.innerHTML = '';
     inspectorTitle.textContent = t('tools.terminal');
@@ -4016,6 +4045,9 @@ async function refreshInspector(): Promise<void> {
   inspectorContent.classList.remove('hidden');
   hideBrowserPanel();
   hideTerminalPanel();
+  // 「更改」与「历史」是源代码管理内部的两个页签：九宫格里只有一个入口，
+  // 这里按当前页签显示/隐藏切换条，并同步选中态。
+  syncScmTabs();
   // 离开源代码管理视图时立刻停掉它的轮询，别让后台计时器继续拉 git status。
   if (activeInspectorTab !== 'source') closeSourceControl();
   if (activeInspectorTab !== 'history') closeHistory();
@@ -4026,7 +4058,8 @@ async function refreshInspector(): Promise<void> {
     return;
   }
   if (activeInspectorTab === 'history') {
-    inspectorTitle.textContent = t('history.title');
+    // 同一个面板，标题保持「源代码管理」，具体在看历史由页签选中态表达。
+    inspectorTitle.textContent = t('scm.title');
     await refreshHistory(inspectorContent);
     return;
   }
@@ -4366,7 +4399,7 @@ toolsButton.addEventListener('click', (event) => {
 });
 toolsMenu.addEventListener('click', (event) => event.stopPropagation());
 document.addEventListener('click', hideToolsMenu);
-for (const [selector, tab] of [['#show-files', 'files'], ['#show-source-control', 'source'], ['#show-history', 'history'], ['#show-browser', 'browser'], ['#show-terminal', 'terminal'], ['#show-changes', 'changes'], ['#show-checks', 'checks']] as const) {
+for (const [selector, tab] of [['#show-files', 'files'], ['#show-source-control', 'source'], ['#show-browser', 'browser'], ['#show-terminal', 'terminal'], ['#show-changes', 'changes'], ['#show-checks', 'checks']] as const) {
   $(selector).addEventListener('click', () => {
     hideToolsMenu();
     if (inspector.classList.contains('hidden')) { openInspector(tab); return; }
@@ -4433,7 +4466,8 @@ initSourceControl({
     hideToolsMenu();
     activeInspectorTab = 'history';
     inspector.classList.remove('hidden');
-    inspectorTitle.textContent = t('history.title');
+    inspectorTitle.textContent = t('scm.title');
+    syncScmTabs();
     // 离开源代码管理视图必须停掉它的 5 秒轮询。
     closeSourceControl();
     hideBrowserPanel();
