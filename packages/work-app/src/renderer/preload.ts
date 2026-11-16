@@ -185,6 +185,10 @@ contextBridge.exposeInMainWorld('mocodeWork', {
     ipcRenderer.invoke('work:terminal-resize', payload),
   terminalClose: (payload: { projectId?: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('work:terminal-close', payload),
+  /** 读系统剪贴板纯文本：终端面板「右键无选区 = 粘贴」用（渲染进程没有 clipboard-read 权限）。 */
+  clipboardRead: (): Promise<string> => ipcRenderer.invoke('work:clipboard-read'),
+  /** 写系统剪贴板：渲染层的 clipboard-sanitized-write 在文档失焦时会失败，终端复制改走主进程。 */
+  clipboardWrite: (text: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('work:clipboard-write', text),
   onTerminalData: (callback: (payload: { projectId: string; chunk: string }) => void): (() => void) => {
     const listener = (_event: IpcRendererEvent, payload: { projectId: string; chunk: string }) => callback(payload);
     ipcRenderer.on('work:terminal-data', listener);

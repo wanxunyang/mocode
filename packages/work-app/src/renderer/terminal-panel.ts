@@ -26,6 +26,10 @@ export interface TerminalPanelApi {
   write: (data: string) => Promise<{ ok: boolean }>;
   resize: (cols: number, rows: number) => Promise<{ ok: boolean }>;
   close: () => Promise<{ ok: boolean }>;
+  /** 读系统剪贴板文本：右键无选区时粘贴用（渲染进程没有 clipboard-read 权限，必须经主进程）。 */
+  clipboardRead: () => Promise<string>;
+  /** 写系统剪贴板：渲染层的 clipboard write 在文档失焦时会抛 Document is not focused，复制改走主进程。 */
+  clipboardWrite: (text: string) => Promise<{ ok: boolean }>;
   onData: (callback: (payload: { projectId: string; chunk: string }) => void) => () => void;
   onExit: (callback: (payload: { projectId: string; exitCode: number }) => void) => () => void;
   /** 把一段文本追加到输入框（「发给 agent」）。 */
@@ -251,6 +255,28 @@ export function initTerminalPanel(container: HTMLElement, terminalApi: TerminalP
   // 终端里的程序改尺寸（vim / top）时 xterm 会报告 cols/rows 变化。
   term.onResize(({ cols, rows }) => { if (ready) void need().resize(cols, rows); });
 
+  // Ctrl+C 在终端里必须是 SIGINT，复制只能走 Ctrl+Shift+C（Windows Terminal / VS Code 同款约定）。
+  // 返回 false = 不再交给 xterm，否则这一组键会被当普通按键写进 PTY。
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown') return true;
+    if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return true;
+    const key = event.key.toLowerCase();
+    if (key === 'c') { copyTerminalSelection(); return false; }
+    if (key === 'v') { void pasteIntoTerminal(); return false; }
+    return true;
+  });
+
+  // 右键：有选区 → 复制；无选区 → 粘贴。这是 Windows 终端用户的肌肉记忆，
+  // 而 xterm 自己**没有**任何右键行为，占掉它没有损失。
+  // 必须 preventDefault：否则主进程的 context-menu 会再弹一个「复制/全选」菜单，
+  // 与终端自己的语义打架（实测：渲染层 preventDefault 后主进程那个事件不触发）。
+  stage?.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (term?.hasSelection()) copyTerminalSelection();
+    else void pasteIntoTerminal();
+  });
+
   // 尺寸变化（侧栏拖拽 / 窗口缩放）= 重排 + 重报给 PTY，否则 shell 的换行位置会错。
   observer?.disconnect();
   observer = new ResizeObserver(() => {
@@ -312,4 +338,51 @@ function lastScreenText(): string {
     if (line.trim()) lines.push(line.trimEnd());
   }
   return lines.join('\n');
+}
+
+/**
+ * 复制终端选区。
+ *
+ * 走主进程写剪贴板，不用 navigator.clipboard：xterm 在 Electron 里没有原生复制路径，
+ * 而渲染层的 clipboard 写入即使有 clipboard-sanitized-write 权限，实测在窗口未聚焦时
+ * 直接抛 `Document is not focused`（右键菜单弹出/被终端抢焦点时都可能发生）。
+ * 主进程 clipboard 没有这个前提，用户按了复制就一定进剪贴板。
+ *
+ * 复制后清掉高亮并 toast —— 否则用户完全无法确认「到底复制成功没有」。
+ */
+function copyTerminalSelection(): void {
+  if (!term || !api) return;
+  const text = term.getSelection();
+  if (!text.trim()) {
+    api.toast('info', api.t('terminal.nothingToCopy'));
+    return;
+  }
+  void api
+    .clipboardWrite(text)
+    .then((result) => {
+      if (!result.ok) {
+        api?.toast('error', api.t('terminal.copyFailed'));
+        return;
+      }
+      term?.clearSelection();
+      api?.toast('info', api.t('terminal.copied', { n: text.split('\n').length }));
+    })
+    .catch(() => api?.toast('error', api.t('terminal.copyFailed')));
+}
+
+/**
+ * 把系统剪贴板内容贴进终端。
+ *
+ * 走 term.paste() 而不是直接写 PTY：xterm 会按当前 bracketed paste 状态包一层，
+ * vim / less 这类程序才不会把多行粘贴当成一串命令逐个执行。
+ */
+async function pasteIntoTerminal(): Promise<void> {
+  if (!term || !api) return;
+  const text = await api.clipboardRead().catch(() => '');
+  if (!text) {
+    api.toast('info', api.t('terminal.nothingToPaste'));
+    return;
+  }
+  term.paste(text);
+  term.focus();
 }

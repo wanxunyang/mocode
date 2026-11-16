@@ -638,6 +638,11 @@ export const zhCN = {
   'terminal.sendToAgent': '把选中内容（无选中则最近一屏）发给 agent',
   'terminal.nothingToSend': '终端里没有可发送的内容',
   'terminal.fill': '填入终端',
+  // 右键 / Ctrl+Shift+C 复制与粘贴（终端选区不给反馈，用户无法确认复制成功）
+  'terminal.copied': '已复制 {n} 行',
+  'terminal.copyFailed': '复制失败',
+  'terminal.nothingToCopy': '没有选中内容',
+  'terminal.nothingToPaste': '剪贴板是空的',
   'scm.title': '源代码管理',
   'scm.tabChanges': '更改',
   'scm.tabHistory': '历史',
@@ -789,6 +794,11 @@ export const zhCN = {
   'menu.redo': '重做',
   'menu.reload': '重新加载',
   'menu.devTools': '开发者工具',
+  // 右键菜单（会话区 / 输入框）
+  'menu.cut': '剪切',
+  'menu.copy': '复制',
+  'menu.paste': '粘贴',
+  'menu.selectAll': '全选',
 
   // ── 扩展：Skills / MCP 设置导航 ──
   'settings.skills': 'Skills',
@@ -1685,6 +1695,11 @@ export const enUS: Record<LocaleKey, string> = {
   'terminal.sendToAgent': 'Send the selection (or the last screen) to the agent',
   'terminal.nothingToSend': 'Nothing in the terminal to send',
   'terminal.fill': 'Fill into terminal',
+  // Right-click / Ctrl+Shift+C copy & paste (a silent copy leaves the user unsure it worked)
+  'terminal.copied': 'Copied {n} line(s)',
+  'terminal.copyFailed': 'Copy failed',
+  'terminal.nothingToCopy': 'Nothing selected',
+  'terminal.nothingToPaste': 'Clipboard is empty',
   'scm.title': 'Source Control',
   'scm.tabChanges': 'Changes',
   'scm.tabHistory': 'History',
@@ -1836,6 +1851,11 @@ export const enUS: Record<LocaleKey, string> = {
   'menu.redo': 'Redo',
   'menu.reload': 'Reload',
   'menu.devTools': 'Developer Tools',
+  // Context menu (conversation / inputs)
+  'menu.cut': 'Cut',
+  'menu.copy': 'Copy',
+  'menu.paste': 'Paste',
+  'menu.selectAll': 'Select all',
 
   // ── Extensions: Skills / MCP settings nav ──
   'settings.skills': 'Skills',

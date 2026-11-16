@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, Notification, dialog, ipcMain, nativeTheme, screen, session as electronSession, shell } from 'electron';
+import { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, nativeTheme, screen, session as electronSession, shell, type MenuItemConstructorOptions } from 'electron';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -9,6 +9,8 @@ import dotenv from 'dotenv';
 import { ATTACHMENT_EXTENSIONS, configureAttachmentModulePath, historyAttachments, readAttachment, type WorkAttachment } from './attachments.js';
 // 计划解析与渲染层共用同一份（renderer 走 ../plan.js），否则侧栏的 n/m 与面板会对不上。
 import { parsePlan } from './plan.js';
+// 右键菜单的「弹哪些项」是纯决策，抽成纯函数便于单测（Menu 在无头环境造不出来）。
+import { contextMenuPlan } from './context-menu.js';
 import { truncateSessionAfterUser, truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
 import { clampToWorkArea } from './window-fit.js';
 import { compactRecoveryLogs, deleteRecoveryLog, readRecoveryAsync, recoveryLog, type RecoveryAttachment, type RecoveryEnvelope, type RecoveryLog } from './recovery-log.js';
@@ -1459,6 +1461,52 @@ function fitWindowToDisplay(win: BrowserWindow): void {
   if (fitted) win.setBounds(fitted);
 }
 
+/**
+ * 主窗口的右键菜单。
+ *
+ * 为什么必须有：Electron 默认**不弹任何菜单**（浏览器原生菜单不属于 web 内容），
+ * 于是用户拖选一段回答后右键是彻底没反应 —— 只能去找每条消息右上角那个「复制内容」按钮，
+ * 而它复制的是整段、不是选区。
+ *
+ * 「弹哪些项」的决策在 context-menu.ts（纯函数、有单测），这里只做 Electron 侧的翻译。
+ * 无可用项时按 contextMenuPlan 返回空数组 → 不弹，否则满屏右键都弹一个「全选」会让人以为点错了。
+ *
+ * 注意与渲染层的分工：xterm 终端面板自己 `preventDefault` 了 contextmenu（它有选区复制/
+ * 无选区粘贴的专用语义），实测渲染层 preventDefault 后主进程这个事件**不会触发**，
+ * 所以两者不会同时弹菜单。
+ */
+function installContextMenu(win: BrowserWindow): void {
+  win.webContents.on('context-menu', (_event, params) => {
+    const selection = params.selectionText;
+    const plan = contextMenuPlan({
+      isEditable: params.isEditable,
+      selectionText: selection,
+      editFlags: {
+        canCut: params.editFlags.canCut,
+        canCopy: params.editFlags.canCopy,
+        canPaste: params.editFlags.canPaste,
+        canSelectAll: params.editFlags.canSelectAll,
+      },
+    });
+    if (!plan.length) return;
+    const contents = win.webContents;
+    const items: MenuItemConstructorOptions[] = plan.map((entry) => {
+      if (entry.id === 'separator') return { type: 'separator' };
+      if (entry.id === 'cut') return { label: tMain('menu.cut'), enabled: !entry.disabled, click: () => contents.cut() };
+      if (entry.id === 'paste') return { label: tMain('menu.paste'), enabled: !entry.disabled, click: () => contents.paste() };
+      if (entry.id === 'selectAll') return { label: tMain('menu.selectAll'), enabled: !entry.disabled, click: () => contents.selectAll() };
+      // 只读文字的复制走主进程 clipboard：webContents.copy() 依赖焦点元素，
+      // 而用户此刻的焦点可能还在输入框上，显式写剪贴板才不会复制错东西。
+      return {
+        label: tMain('menu.copy'),
+        enabled: !entry.disabled,
+        click: () => (params.isEditable ? contents.copy() : clipboard.writeText(selection)),
+      };
+    });
+    Menu.buildFromTemplate(items).popup({ window: win });
+  });
+}
+
 function createWindow(): void {
   // 应用图标(白底圆角正方形 + 像素兔)。dev 模式下用于窗口/Dock;Windows 任务栏 / 打包后的 .exe
   // 图标是 electron-builder 资源,需要打包时配 win.icon 才能换,这里管不到。
@@ -1488,6 +1536,7 @@ function createWindow(): void {
   // 面板里的站点是任意网页：一律拒绝它的权限请求（定位/通知/摄像头等），
   // 免得 agent 打开一个页面就顺带获得系统级能力。各个分区在 BrowserHost 建视图时还会装一次。
   denyPanelPermissions(state.selectedProjectId);
+  installContextMenu(windowRef);
   void windowRef.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // 窗口关掉立刻清掉引用,免得 agent 后续 stdout 还往里塞 → "Object has been destroyed"。
   windowRef.on('closed', () => { if (windowRef) windowRef = null; });
@@ -2556,6 +2605,17 @@ function installIpc(): void {
   ipcMain.handle('work:terminal-close', (_event, payload: Record<string, unknown>) => ({
     ok: terminalHostFor().close(terminalProjectId(payload)),
   }));
+  ipcMain.handle('work:clipboard-read', () => clipboard.readText());
+  // 终端面板复制走这里：渲染层只有 clipboard-sanitized-write 权限，且写失败最常见的原因是
+  // 「文档没有焦点」（实测 show 前的窗口 / 焦点在别的 webview 上都会报 Document is not focused）。
+  // 主进程写剪贴板没有这两个限制，用户按了复制就一定会进剪贴板。
+  ipcMain.handle('work:clipboard-write', (_event, text: unknown) => {
+    if (typeof text !== 'string' || !text) return { ok: false };
+    // 上限防渲染层一次塞几百 MB 进系统剪贴板。
+    if (text.length > 1_000_000) return { ok: false };
+    clipboard.writeText(text);
+    return { ok: true };
+  });
   ipcMain.handle('work:panel', async (_event, value: Record<string, unknown>) => {
     const id = typeof value.id === 'string' && value.id ? value.id : randomUUID();
     const type = typeof value.type === 'string' ? value.type : '';

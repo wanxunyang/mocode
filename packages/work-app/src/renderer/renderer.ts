@@ -258,6 +258,10 @@ declare global {
       terminalWrite: (payload: { projectId?: string; data: string }) => Promise<{ ok: boolean }>;
       terminalResize: (payload: { projectId?: string; cols: number; rows: number }) => Promise<{ ok: boolean }>;
       terminalClose: (payload: { projectId?: string }) => Promise<{ ok: boolean }>;
+      /** 读系统剪贴板纯文本（终端面板右键粘贴用；渲染进程没有 clipboard-read 权限）。 */
+      clipboardRead: () => Promise<string>;
+      /** 写系统剪贴板（终端复制用；渲染层的 clipboard 写入在文档失焦时失败）。 */
+      clipboardWrite: (text: string) => Promise<{ ok: boolean }>;
       onTerminalData: (callback: (payload: { projectId: string; chunk: string }) => void) => () => void;
       onTerminalExit: (callback: (payload: { projectId: string; exitCode: number }) => void) => () => void;
     };
@@ -4668,6 +4672,8 @@ initTerminalPanel($('#terminal-panel'), {
   write: (data) => window.mocodeWork.terminalWrite({ ...(activeProjectId() ? { projectId: activeProjectId()! } : {}), data }),
   resize: (cols, rows) => window.mocodeWork.terminalResize({ ...(activeProjectId() ? { projectId: activeProjectId()! } : {}), cols, rows }),
   close: () => window.mocodeWork.terminalClose(activeProjectId() ? { projectId: activeProjectId()! } : {}),
+  clipboardRead: () => window.mocodeWork.clipboardRead(),
+  clipboardWrite: (text) => window.mocodeWork.clipboardWrite(text),
   onData: (callback) => window.mocodeWork.onTerminalData(callback),
   onExit: (callback) => window.mocodeWork.onTerminalExit(callback),
   insertPrompt: (text) => insertIntoPrompt(text),
