@@ -1,6 +1,9 @@
 import { renderMarkdown, enhanceCodeBlocks, setMarkdownLabels } from './markdown.js';
+// 正文里的文件路径 → 可点击入口（点击后在本应用的右侧面板里预览）。
+import { linkifyFilePaths } from './file-links.js';
 import { buildFileChange, renderFileChangeHtml, summarizeFileChange, type FileChangeLabels } from './diff-view.js';
 import { buildToolView, type ToolViewLabels } from './tool-view.js';
+import { hasSubAgentProgressLine, isSubAgentProgressLine } from '../sub-agent-progress.js';
 import { renderUnifiedDiff } from './unified-diff.js';
 import { SendQueue } from './send-queue.js';
 import { renderQueuePanel, type QueuePanelItem } from './queue-view.js';
@@ -19,6 +22,8 @@ import type { WorkAttachment, AttachmentResult, AttachmentErrorCode } from '../a
 import { parsePlan, planForRestore, type PlanSnapshot } from '../plan.js';
 import { pendingByProject, pendingTasks } from '../attention.js';
 import { planPanelHtml } from './plan-panel.js';
+// 一轮跑完后摆在会话下方的「本轮改动」长条列表（结构纯函数，事件与语言由本文件提供）。
+import { changesBarHtml, type ChangesBarFile, type ChangesBarLabels } from './changes-bar.js';
 // 「检查」面板把 `pm run x` 拼成命令行：与主进程用同一份纯函数，避免两处拼法漂移。
 import { checkCommand, type PackageManager } from '../checks.js';
 // 空间内联区要把「任务」与「终端会话」按时间混排：规则单独成纯函数，可单测。
@@ -77,6 +82,9 @@ function applyLanguage(): void {
   renderAttachments();
   // 排队面板的文案（下一条 / 展开 / 附件数）按语言现取 → 就地重画。
   refreshQueuePanel();
+  // 改动长条的标题 / title / aria 也是生成时写死的 → 清掉签名强制重建一次。
+  changesBarKey = '';
+  syncChangesBar();
   // 轨道点的 title / aria-label 是生成时按当时语言写死的 → 强制重建一次。
   scheduleConvRail(true);
   refreshBrowserPanelLabels();
@@ -269,6 +277,7 @@ const planPanel = $('#plan-panel') as HTMLElement;
 const attentionBar = $('#attention-bar') as HTMLElement;
 const attentionBadge = $('#attention-badge') as HTMLButtonElement;
 const queuePanel = $('#queue-panel') as HTMLElement;
+const changesBar = $('#changes-bar') as HTMLElement;
 
 let state: WorkState | null = null;
 let collapsedProjects: Set<string> = new Set();
@@ -277,8 +286,14 @@ let activeAssistant: HTMLElement | null = null;
 let activeTextBlock: HTMLElement | null = null;
 let attachments: Attachment[] = [];
 /** 检查器视图：一个视图只承载一个工具，由工具箱菜单切换（不再有页签条）。 */
-type InspectorTab = 'files' | 'source' | 'history' | 'browser' | 'terminal' | 'changes' | 'checks';
+type InspectorTab = 'files' | 'source' | 'history' | 'browser' | 'terminal' | 'changes' | 'checks' | 'file';
 let activeInspectorTab: InspectorTab = 'files';
+/**
+ * 当前预览的文件路径（activeInspectorTab === 'file' 时的事实源）。
+ * 单独存一份的理由：refreshInspector 是「按 tab 重画」的，切语言、重开面板都会再进来一次，
+ * 没有它就没法复原用户正在看的那份文档。
+ */
+let previewFilePath: string | null = null;
 /**
  * 当前是否 plan 模式（只读探查 + 出方案）。事实源在 host（进程级状态），
  * 这里只是它推回来的镜像：切任务不回退、重启后回 auto（host 新建时即 auto）。
@@ -594,6 +609,111 @@ function renderPlanPanel(taskId: string, stream: TaskStream, plan: PlanSnapshot)
     stream.planDismissed = true;
     syncPlanPanel(taskId);
   });
+}
+
+/* ── 本轮改动清单（会话下方、输入卡上方）─────────────────────
+ * 语义：一次任务跑完，把这一轮 agent 改过的文件一条条摆出来，点一条看该文件的 diff。
+ * 为什么挂在 #conversation 之外：它是**这一轮的结果**，不是会话里的一句话 —— 跟着消息
+ * 滚上去就找不到了，而「刚才它改了什么」恰恰是用户回来第一件要看的事。
+ *
+ * 数据源与右侧「改动」面板同源（task.changedFiles + work:task-changes 的逐文件统计），
+ * 不另建事实源：主进程在 run_completed 时落盘，这里只负责展示与点击。
+ * 只保留**最新一轮**：新的一轮跑完直接替换，会话里不留历史轮次的清单（翻旧账走「改动」面板）。
+ */
+const changesBarLabels = (): ChangesBarLabels => ({
+  title: (n) => t('changesBar.title', { n: String(n) }),
+  all: t('changesBar.all'),
+  untracked: t('changes.untracked'),
+  open: (path) => t('changesBar.open', { path }),
+});
+
+/** 当前长条对应的数据签名（taskId + 路径列表）；相同就不重建 DOM，避免 hover/滚动被重置。 */
+let changesBarKey = '';
+/**
+ * 逐文件增删统计的缓存（按任务）。
+ *
+ * ⚠ 必须与「这一轮」绑定，不能只按路径缓存：连续两轮改同一批文件时路径完全一样，
+ * 但 +N/-N 已经变了 —— 只按路径命中缓存就会把上一轮的行数当成这一轮的展示。
+ * 所以每次 run_completed（带 explicitPaths 的调用）都把该任务的条目作废重取。
+ */
+const changesBarStats = new Map<string, { pathsKey: string; files: TaskChangeFile[] }>();
+
+function hideChangesBar(): void {
+  changesBar.classList.add('hidden');
+  changesBar.innerHTML = '';
+  changesBarKey = '';
+}
+
+function paintChangesBar(key: string, taskId: string, files: ChangesBarFile[]): void {
+  const entering = changesBar.classList.contains('hidden');
+  changesBarKey = key;
+  changesBar.innerHTML = changesBarHtml(files, changesBarLabels());
+  changesBar.classList.remove('hidden');
+  // 入场动画只在「从无到有」这一下播；同一轮重画（统计回来 / 切语言）不该重播，否则看着像闪。
+  changesBar.classList.toggle('is-entering', entering);
+  mountIcons(changesBar);
+  changesBar.querySelectorAll<HTMLButtonElement>('[data-change-path]').forEach((row) => {
+    row.addEventListener('click', () => openChangeDiff(taskId, row.dataset.changePath ?? ''));
+  });
+  changesBar.querySelector('[data-changes-all]')?.addEventListener('click', () => openInspector('changes'));
+}
+
+/**
+ * 按「这一轮改了哪些文件」刷新长条。三个调用点：run_completed（本轮结果）、
+ * switchToTask（切任务时还原）、updateState（主进程广播的 changedFiles 更新）。
+ *
+ * `explicitPaths` 用于 run_completed：那一刻的 state 广播可能还没到渲染层，
+ * 直接用事件里带的路径，别让第一条渲染空着。
+ */
+function syncChangesBar(taskId: string | undefined = viewingTaskId(), explicitPaths?: string[]): void {
+  const task = taskId ? state?.tasks.find((item) => item.id === taskId) : undefined;
+  const paths = (explicitPaths ?? task?.changedFiles ?? []).filter((path) => typeof path === 'string' && path !== '');
+  // 跑着的这一轮还没收口：此时屏上那批文件属于**上一轮**，摆出来只会误导（用户会以为
+  // 这就是这一轮的结果）。等 run_completed 再出现 —— 反正那一刻它才真正成立。
+  if (!taskId || !paths.length || isRunning(taskId)) { hideChangesBar(); return; }
+  const pathsKey = paths.join('\u0000');
+  const key = `${taskId}\u0000${pathsKey}`;
+  // 同一轮被反复通知（状态广播 / 重新进入视图）时不重建 DOM，保住 hover 与滚动位置；
+  // 但新一轮（调用方给了 explicitPaths）必须重画 + 重取统计 —— 连续两轮改同一批文件时
+  // 路径一字不差而 +N/-N 已经变了，只按路径命中缓存就会把上一轮的行数当成这一轮的。
+  if (!explicitPaths && key === changesBarKey && !changesBar.classList.contains('hidden')) return;
+  const cached = changesBarStats.get(taskId);
+  const fresh = cached && cached.pathsKey === pathsKey && !explicitPaths;
+  // 先按路径画出来（没有 +N/-N 时先给上一轮的数），统计回来再补 —— 不让用户对着空白等。
+  paintChangesBar(key, taskId, cached && cached.pathsKey === pathsKey
+    ? cached.files
+    : paths.map((path) => ({ path, added: 0, removed: 0, untracked: false })));
+  if (fresh) return;
+  void (async () => {
+    const result = await window.mocodeWork.taskChanges({ taskId });
+    // 非 git 仓库（普通任务的 scratch 目录）没有基准，这不影响「改了哪些文件」本身。
+    if (!result.ok) return;
+    const files = result.files ?? [];
+    changesBarStats.set(taskId, { pathsKey, files });
+    // 期间换了任务或又跑完一轮：这份统计已经不属于屏上那条。
+    if (changesBarKey !== key) return;
+    paintChangesBar(key, taskId, files);
+  })();
+}
+
+/**
+ * 打开右侧面板看某个文件的改动（长条点击）。
+ *
+ * 走「改动」面板那套逐文件 diff：先把它需要的视图前置条件摆好（面板可见、浏览器 / 终端
+ * 让位、页签同步），再直接铺这一条 —— 不能让 refreshInspector 先画一遍列表再被覆盖，
+ * 那会出现「点一下先闪一下列表」。
+ */
+function openChangeDiff(taskId: string, path: string): void {
+  if (!path) return;
+  activeInspectorTab = 'changes';
+  inspector.classList.remove('hidden');
+  inspectorContent.classList.remove('hidden');
+  hideBrowserPanel();
+  hideTerminalPanel();
+  syncScmTabs();
+  closeSourceControl();
+  closeHistory();
+  void showChangeDiff(taskId, path);
 }
 
 /* ── 需要人工介入：标题栏徽章 + 会话区横条 ──────────────────
@@ -1442,8 +1562,10 @@ function updateState(next: WorkState): void {
     refreshTerminalProject();
   }
   if (activeInspectorTab === 'source' && !inspector.classList.contains('hidden')) void refreshSourceControl(inspectorContent);
+  // changedFiles 会随 run_completed 的广播更新（主进程落盘）→ 长条按最新一轮跟着变。
+  syncChangesBar();
 }
-function clearWorkspace(): void { hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); refreshQueuePanel(); }
+function clearWorkspace(): void { hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); refreshQueuePanel(); hideChangesBar(); }
 
 /**
  * 一轮 assistant 输出 = 一条 message 内的**有序 block 流**:
@@ -1602,7 +1724,30 @@ function clip(value: string, max: number): string {
   const flat = value.replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
+/** 入参里带文件路径的工具 —— 折叠行上的路径因此可以点开预览。 */
+const FILE_PATH_TOOLS = new Set(['read_file', 'write_file', 'edit_file']);
+
+/**
+ * 取工具入参里的**原始**文件路径（不截断）。
+ * 与 toolTargetText 分开：展示用的那份会被 clip 成 120 字，拿去打开文件就找不到目标了。
+ */
+function toolFilePath(name: string, args: string): string {
+  if (!FILE_PATH_TOOLS.has(name) || !args.trim()) return '';
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const value = JSON.parse(args) as unknown;
+    if (value && typeof value === 'object' && !Array.isArray(value)) parsed = value as Record<string, unknown>;
+  } catch { return ''; }
+  if (!parsed) return '';
+  for (const key of TOOL_ARG_KEYS[name] ?? ['path']) {
+    const value = parsed[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
 /** 折叠行上的"对象"文本:路径 / 命令 / 关键词等,让工具行不只是一个工具名。 */
+const TOOL_ARG_KEYS_DEFAULT = ['path', 'file', 'filePath', 'command', 'query', 'pattern', 'url', 'name', 'target'];
 function toolTargetText(name: string, args: string): string {
   const raw = args.trim();
   if (!raw) return '';
@@ -1612,7 +1757,7 @@ function toolTargetText(name: string, args: string): string {
     if (value && typeof value === 'object' && !Array.isArray(value)) parsed = value as Record<string, unknown>;
   } catch { /* 非 JSON 入参按纯文本处理 */ }
   if (parsed) {
-    for (const key of TOOL_ARG_KEYS[name] ?? ['path', 'file', 'filePath', 'command', 'query', 'pattern', 'url', 'name', 'target']) {
+    for (const key of TOOL_ARG_KEYS[name] ?? TOOL_ARG_KEYS_DEFAULT) {
       const value = parsed[key];
       if (typeof value === 'string' && value) return clip(value, 120);
     }
@@ -1776,6 +1921,9 @@ function toolViewLabels(): ToolViewLabels {
     askAnswered: t('tool.askAnswered'),
     askCancelled: t('tool.askCancelled'),
     askAnswer: t('tool.askAnswer'),
+    stepArgs: t('tool.subStepArgs'),
+    stepResult: t('tool.subStepResult'),
+    stepRunning: t('tool.subStepRunning'),
   };
 }
 
@@ -1885,6 +2033,17 @@ conversation.addEventListener('click', (event) => {
   fillTerminalCommand(button.dataset.terminalFill ?? '');
 });
 
+// 正文里的文件路径（`docs/x.md` 这类裸文本，由 file-links 包成 <a data-file-path>）：
+// 点击就地打开右侧面板的预览。href 恒为 `#`，不吃掉默认行为会让窗口滚到顶部。
+conversation.addEventListener('click', (event) => {
+  const link = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-file-path]');
+  if (!link) return;
+  event.preventDefault();
+  // 工具行上的路径挂在 <summary> 里：不拦住冒泡，点它还会连带展开/收起那一行。
+  event.stopPropagation();
+  void openFilePreview(link.dataset.filePath ?? '');
+});
+
 /**
  * 追加 / 更新一条工具行。
  * - 工具行一律 append 到当前助手轮次的末尾 —— 顺序 = 发生顺序;
@@ -1953,11 +2112,19 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   // 联动入口：agent 跑过的命令可以一键回填到终端面板（不回车，等用户确认）。
   // 只给 run_command：其他工具没有「一条能在 shell 里重跑的命令」。
   const fillCommand = completed && name === 'run_command' ? runCommandOf(args) : '';
+  // 文件类工具的路径本身也是入口：点了就在右侧面板预览，不必去正文里找那句「已写完：…」。
+  // 用 <a data-file-path> 而不是 <span>，沿用正文里路径链接的同一条点击通道。
+  const filePath = toolFilePath(name, args);
+  const targetHtml = !target
+    ? ''
+    : filePath
+      ? `<a class="tool-target tool-target-file" href="#" data-file-path="${escapeHtml(filePath)}" title="${escapeHtml(t('tool.openFile', { path: filePath }))}">${escapeHtml(target)}</a>`
+      : `<span class="tool-target" title="${escapeHtml(target)}">${escapeHtml(target)}</span>`;
   entry.innerHTML = `<summary>
   <span class="tool-chevron" data-icon="chevron-right"></span>
   <span class="tool-kind" data-icon="${escapeHtml(meta.icon)}"></span>
   <span class="tool-name">${escapeHtml(meta.label)}</span>
-  ${target ? `<span class="tool-target" title="${escapeHtml(target)}">${escapeHtml(target)}</span>` : ''}
+  ${targetHtml}
   <span class="tool-meta">${changeStat}${completed ? '' : '<span class="tool-dot"></span>'}${timing}${escapeHtml(status)}</span>
   ${fillCommand ? `<button class="tool-fill" type="button" data-terminal-fill="${escapeHtml(fillCommand)}" title="${escapeHtml(t('terminal.fill'))}" aria-label="${escapeHtml(t('terminal.fill'))}">${icon('terminal')}</button>` : ''}
 </summary>`;
@@ -2117,6 +2284,9 @@ function renderMessageBody(body: HTMLElement, text: string): void {
   body.classList.add('md-rendered');
   body.innerHTML = renderMarkdown(closeOpenFence(text));
   enhanceCodeBlocks(body);
+  // 正文里裸写的路径（「文档已写完：docs/xxx.md」）做成可点击入口。
+  // 放在 md 渲染之后：代码块 / 行内代码 / 已有链接都在 DOM 里，file-links 才能跳过它们。
+  linkifyFilePaths(body);
 }
 
 /**
@@ -3618,19 +3788,29 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
         existing.done = completed;
         existing.payload = { ...existing.payload, ...payload };
         if (output) {
-          // 子 agent 的进度行（tool_output 累积的 `▸ read_file …`）不能被最终结论覆盖掉：
-          // 那张卡片的价值一半在「它做完了什么」，另一半在「它做过什么」。
+          // 子 agent 的进度行（tool_output 累积的 `▸ read_file …` 与 `[sub-tool]{…}` 机器行）
+          // 不能被最终结论覆盖掉：那张卡片的价值一半在「它做完了什么」，另一半在「它做过什么」。
+          // 机器行还承载每次内部调用的完整入参与输出 —— 丢了它们，展开区就什么都不剩。
           const progress = existing.output
             .split('\n')
-            .filter((line) => /^[▸●↳]\s/.test(line.trim()))
+            .filter(isSubAgentProgressLine)
             .join('\n');
-          existing.output = progress && !/^[▸●↳]\s/m.test(output) ? `${output}\n${progress}` : output;
+          existing.output = progress && !hasSubAgentProgressLine(output) ? `${output}\n${progress}` : output;
         }
         if (args) existing.args = args;
       } else {
         stream.items.push({ kind: 'tool', id, name: String(payload.name ?? 'tool'), args, output, done: completed, payload });
       }
-      if (viewing) addTool(payload, completed);
+      if (viewing) {
+        // 子 agent 卡片收尾要走「合并后的 output」：进度行（含 `[sub-tool]` 机器行）只存在于
+        // stream.items 里，pass 原始 payload 会让 live DOM 只显示结论、内部步骤当场消失
+        // ——切走再切回来又能看见，属于最难定位的那种「时有时无」。
+        const mergedForDom =
+          existing && existing.kind === 'tool' && existing.output !== output && hasSubAgentProgressLine(existing.output)
+            ? { ...payload, output: existing.output }
+            : payload;
+        addTool(mergedForDom, completed);
+      }
       // dev_server 就绪时把 readyUrl 记下来：浏览器面板地址栏旁边给一个一键入口。
       if (completed && String(payload.name ?? '') === 'dev_server') {
         const ready = /"readyUrl"\s*:\s*"(https?:\/\/[^"\\]+)"/.exec(output);
@@ -3732,6 +3912,11 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       }
       applyStatus(stream, viewing, settledStatus('done', 'status.completed', 'ok', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
+      // 本轮改动清单：事件里自带路径，直接用 —— 主进程的 state 广播可能还没到渲染层，
+      // 等广播再画会让「跑完了」和「改了什么」之间空一拍。
+      if (viewing) {
+        syncChangesBar(taskId, Array.isArray(payload.changedFiles) ? payload.changedFiles.map(String) : []);
+      }
       if (viewing) { updateContextUsage(stream.contextUsage); finish(); }
       else notifyBackground(taskId, t('status.completed'));
       break;
@@ -3885,6 +4070,8 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   }
   syncPlanPanel(taskId);
   syncAttention();
+  // 切任务时把这一轮的改动清单一起还原（数据来自任务记录，重启后也在）。
+  syncChangesBar(taskId);
   renderStatus(stream?.status ?? statusFromTask(selectedTask()), { replay: true });
   smartScrollToBottom(true);
   attachments = []; renderAttachments();
@@ -4073,6 +4260,11 @@ async function refreshInspector(): Promise<void> {
     await renderChecksPanel();
     return;
   }
+  // 单文件预览：没有记录下路径（例如刚被清空）就退回文件树，而不是留一块空白。
+  if (activeInspectorTab === 'file') {
+    if (previewFilePath) { await previewFile(previewFilePath); return; }
+    activeInspectorTab = 'files';
+  }
   inspectorTitle.textContent = t('inspector.files'); const overview = await window.mocodeWork.projectOverview();
   if (overview.noWorkspace) { inspectorContent.innerHTML = `<p class="inspector-empty">${t('inspector.noWorkspace')}</p>`; return; }
   const files = Array.isArray(overview.files) ? overview.files.map(String) : [];
@@ -4086,10 +4278,47 @@ async function refreshInspector(): Promise<void> {
     + (truncated ? `<p class="inspector-empty">${t('inspector.filesTruncated')}</p>` : '');
   inspectorContent.querySelectorAll<HTMLButtonElement>('[data-action="file"]').forEach((button) => button.addEventListener('click', () => void previewFile(button.dataset.path!)));
 }
+/** 走富文本预览的文档扩展名：markdown 系一律按渲染后的排版看，而不是等宽原文。 */
+const DOC_FILE_PATTERN = /\.(md|markdown|mdx)$/i;
+
+/**
+ * 打开右侧面板预览一个文件 —— 正文里的路径链接、工具行上的路径共用这一条通道。
+ *
+ * 刻意不做 `shell.openPath`：那会把文档甩给系统默认应用（记事本、Typora、浏览器各不同），
+ * 用户在应用里读文档又得切一次窗口。预览留在本面板内，读完接着对话。
+ */
+function openFilePreview(file: string): Promise<void> {
+  if (!file) return Promise.resolve();
+  previewFilePath = file;
+  activeInspectorTab = 'file';
+  inspector.classList.remove('hidden');
+  return refreshInspector();
+}
+
 async function previewFile(file: string): Promise<void> {
   const [content, diff] = await Promise.all([window.mocodeWork.readFile(file), window.mocodeWork.fileDiff(file)]); inspectorTitle.textContent = file;
-  inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button><button id="show-diff">${t('inspector.gitDiff')}</button></div><pre class="file-preview">${escapeHtml(content.error ?? content.content ?? '')}</pre>`;
-  $('#back-to-files').addEventListener('click', () => { activeInspectorTab = 'files'; void refreshInspector(); });
+  const raw = content.error ?? content.content ?? '';
+  // 文档走 markdown 渲染（与正文共用 .message-body.md-rendered 那套排版，见 style.css），
+  // 其余仍是等宽原文：代码 / 日志的换行与缩进必须原样保留。
+  const asDoc = !content.error && DOC_FILE_PATTERN.test(file);
+  const body = asDoc ? `<div class="message-body md-rendered file-doc">${renderMarkdown(raw)}</div>` : `<pre class="file-preview">${escapeHtml(raw)}</pre>`;
+  inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button><button id="show-diff">${t('inspector.gitDiff')}</button></div>${body}`;
+  if (asDoc) {
+    enhanceCodeBlocks(inspectorContent);
+    // 文档里引用的其它文件（例如方案里提到的 `src/...`）也能继续点开，形成一条链路。
+    const doc = inspectorContent.querySelector<HTMLElement>('.file-doc');
+    if (doc) {
+      linkifyFilePaths(doc);
+      // 面板内的路径链接不走会话流的代理（那块 DOM 在 .thread 里，不在 inspector 里）。
+      doc.addEventListener('click', (event) => {
+        const link = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-file-path]');
+        if (!link) return;
+        event.preventDefault();
+        void openFilePreview(link.dataset.filePath ?? '');
+      });
+    }
+  }
+  $('#back-to-files').addEventListener('click', () => { previewFilePath = null; activeInspectorTab = 'files'; void refreshInspector(); });
   $('#show-diff').addEventListener('click', () => {
     // 与源代码管理面板同一套行级渲染：红绿底色 + 双行号。解析不了才退回原文。
     const raw = diff.error ?? diff.content ?? '';

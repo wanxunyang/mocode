@@ -67,6 +67,10 @@
           <!-- 消息导航轨:一个用户消息一个点,点击跳到那条消息(见 renderer.ts 的 syncConvRail)。
                挂在 #conversation 之外 —— 它不能随内容滚动。 -->
           <nav id="conv-rail" class="conv-rail hidden" aria-label="消息导航" data-i18n-aria="a11y.convRail"></nav>
+          <!-- 本轮改动清单：一次任务跑完，把 agent 改过的文件摆成一条条长条，点击看该文件的 diff。
+               放在 #conversation 之后（flex:0 0 auto）= 会话下方、输入卡上方，不随消息滚走 ——
+               「这一轮改了什么」是需要随时回看的结果，滚上去就看不见等于没有。 -->
+          <section id="changes-bar" class="changes-bar hidden" role="status" aria-live="polite"></section>
           <!-- 审批卡:覆盖在会话区上的浮层。挂在 .thread 内,于是它的定位基准恒为会话槽位,
                天然停在输入卡上方,不需要知道输入卡有多高。 -->
           <section id="approval-panel" class="approval-panel hidden"></section>

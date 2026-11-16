@@ -109,3 +109,24 @@ test('read_file: 摘要第一趟就算好，语法高亮推迟到展开（回放
   assert.ok(html.includes('<span class="ln">1</span>'), html.slice(0, 200));
   assert.ok(html.includes('hl-keyword') || html.includes('const'), '应当带上语法高亮产物');
 });
+test('sub-agent: 内部调用渲染成可展开条目（折叠看命令，展开看入参与输出）', () => {
+  const output = [
+    '[sub-tool]{"phase":"start","name":"run_command","summary":"npm test","args":"{\\"command\\":\\"npm test\\"}"}',
+    '[sub-tool]{"phase":"end","name":"run_command","summary":"12 行","failed":false,"output":"ok 12 tests"}',
+    '[sub-tool]{"phase":"start","name":"read_file","summary":"b.ts","args":"{\\"path\\":\\"b.ts\\"}"}',
+    '子任务结论：全绿',
+  ].join('\n');
+  const view = buildToolView('sub-agent', JSON.stringify({ prompt: '跑测试' }), output, {}, labels);
+  assert.ok(view);
+  const html = htmlOf(view);
+  // 每条调用一个 <details>，而不是一行纯文本 —— 这是「打不开」的根因修复点。
+  assert.equal((html.match(/<details class="tool-sub-step/g) ?? []).length, 2, html.slice(0, 400));
+  assert.ok(html.includes('npm test'), '折叠行要带命令/对象');
+  assert.ok(html.includes('{&quot;command&quot;:&quot;npm test&quot;}'), '展开区要有完整入参（转义后）');
+  assert.ok(html.includes('ok 12 tests'), '展开区要有该次调用输出');
+  // 缺 end 的条目要走「运行中」态（本测试没传 stepRunning，故断言 class 而非文案）。
+  assert.equal((html.match(/tool-sub-state is-running/g) ?? []).length, 1, '缺 end 的条目要标出仍在跑');
+  assert.ok(html.includes('子任务结论：全绿'), '结论仍要渲染');
+  // 有结构化条目时不再重复铺一份 `▸` 清单。
+  assert.equal(html.includes('tool-progress'), false);
+});

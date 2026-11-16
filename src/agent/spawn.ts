@@ -92,6 +92,12 @@ export interface SpawnOptions {
    * host 里 `isTuiActive()` 为 false,于是 GUI 上派了 3 个子 agent 后是一张静止的「执行中」
    * 卡片,用户无法区分「在跑」和「卡死」。这里把每次内部工具调用/结果压成一行文本回调出去,
    * 由宿主自己的通道(GUI 走 tool_output)展示。
+   *
+   * 回调文本有两种行:
+   *  - 人类可读行 `▸ 工具名  对象`(纯文本,宿主可直接当日志铺开);
+   *  - 机器行 `[sub-tool]{…}`(见 SUB_TOOL_LINE_PREFIX),每次调用吐 start / end 两条,
+   *    带完整入参与该次调用的输出片段。宿主可据此把子 agent 的内部步骤渲染成可展开条目
+   *    (GUI 现在就是这条路)。不认识的宿主忽略它们即可——两种行互不依赖。
    */
   progress?: (line: string) => void;
 }
@@ -229,6 +235,27 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       : opts.prompt;
   }
 
+  // ── 结构化进度行(progress 通道的机器可读一半)──
+  // 人类可读的 `▸ 工具名 对象` 只有一行、且不含工具输出,GUI 侧没有任何可展开的内容。
+  // 这里对每次内部工具调用额外吐 start/end 两条**单行** JSON,宿主可据此把子 agent 的步骤
+  // 渲染成可展开条目(GUI 现在就是这么做的)。单行是硬约束:宿主按 \n 累积,JSON.stringify
+  // 会把内容里的换行转义掉;超长入参/输出裁到上限,避免一次 read_file 撑大 IPC 与恢复日志。
+  //
+  // 前缀常量在 packages/work-app/src/sub-agent-progress.ts 有一份同值拷贝:
+  // 渲染层是浏览器环境、不能 import src 的模块,故由那个纯函数模块承载解析(两边注释互指)。
+  const SUB_TOOL_PREFIX = '[sub-tool]';
+  const SUB_TOOL_MAX_CHARS = 6000;
+  const clipSubTool = (text: string): string =>
+    text.length <= SUB_TOOL_MAX_CHARS
+      ? text
+      : `${text.slice(0, SUB_TOOL_MAX_CHARS)}\n… (${text.length - SUB_TOOL_MAX_CHARS} more chars)`;
+  const emitSubTool = (payload: Record<string, unknown>): void => {
+    if (live || !opts.progress) return;
+    opts.progress(`${SUB_TOOL_PREFIX}${JSON.stringify(payload)}\n`);
+  };
+  /** 本子 agent 内部工具调用的单调序号:宿主按它对齐 start/end 两条(同一步并行调用时 tc.id 可能缺失)。 */
+  let stepToolSeq = 0;
+
   // 静默 hooks:缓冲中间过程到 transcript,不写主屏。
   let transcript = '';
   const buf: string[] = [];
@@ -340,6 +367,15 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       if (!live && opts.progress) {
         opts.progress(`▸ ${tc.name}  ${summary}\n`);
       }
+      // 结构化一条 start:带完整入参,宿主展开时能看到真实命令/替换片段。
+      emitSubTool({
+        phase: 'start',
+        seq: stepToolSeq++,
+        id: tc.id ?? '',
+        name: tc.name,
+        summary,
+        args: clipSubTool(tc.arguments ?? ''),
+      });
       // 实时写入主内容区:子 agent 的每次工具调用累计到摘要行计数。
       ensureQuietLine(opts.quietLabel ?? t('skill.executing', { name: opts.prompt.slice(0, 40) }));
       ensureLiveBatch();
@@ -355,6 +391,16 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     onToolResult: (tc, output) => {
       const preview = summarizeToolResult(tc.name, output);
       if (preview) writeBuf(`  ↳ ${preview}\n`);
+      // 结构化一条 end:带该次调用的输出(截断)。这是 GUI 展开子 agent 步骤时唯一的数据来源——
+      // 在此之前子 agent 的工具输出从未离开子进程。
+      emitSubTool({
+        phase: 'end',
+        id: tc.id ?? '',
+        name: tc.name,
+        summary: preview || t('toolSummary.noOutput'),
+        failed: isToolErrorOutput(output),
+        output: clipSubTool(output),
+      });
       if (liveBatchId) {
         // 子 agent 批不展示 diff(其写入已直接落工作区,由主 agent 的当前回滚事务统一追踪);
         // 空 preview 用占位标记 entry 已完成,避免折叠后摘要仍显示"运行中"。

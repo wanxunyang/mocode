@@ -124,3 +124,43 @@ test('spawnAgent 不传 progress 时结果不变（向后兼容）', async () =>
     clearToolsExtension(source);
   }
 });
+test('spawnAgent progress: 每次内部调用另吐 start/end 两条 [sub-tool] 机器行（带入参与输出）', async () => {
+  const source = 'subagent-progress-structured';
+  registerToolsExtension(source, [echoTool]);
+  stubOneToolCall();
+  const lines: string[] = [];
+  try {
+    const result = await spawnAgent({
+      prompt: '读一个文件',
+      maxSteps: 3,
+      progress: (line) => lines.push(line),
+      delegation: {
+        history: [
+          { role: 'system', content: 'PARENT' },
+          { role: 'user', content: 'go' },
+        ] as never[],
+        tools: [
+          { type: 'function', function: { name: 'progress_echo', description: 'echo', parameters: {} } },
+        ] as never[],
+      },
+    });
+    assert.equal(result.completed, true);
+    const machine = lines
+      .filter((line) => line.startsWith('[sub-tool]'))
+      .map((line) => JSON.parse(line.slice('[sub-tool]'.length)) as Record<string, unknown>);
+    const start = machine.find((entry) => entry.phase === 'start');
+    const end = machine.find((entry) => entry.phase === 'end');
+    assert.ok(start, `缺 start 机器行: ${JSON.stringify(lines)}`);
+    assert.ok(end, `缺 end 机器行: ${JSON.stringify(lines)}`);
+    assert.equal(start.name, 'progress_echo');
+    assert.match(String(start.args), /spawn\.ts/, 'start 必须带完整入参（展开区看的就是它）');
+    assert.equal(end.name, 'progress_echo');
+    assert.match(String(end.output), /read src\/agent\/spawn\.ts/, 'end 必须带该次调用输出');
+    assert.equal(end.failed, false);
+    // 单行是硬约束：宿主按 \n 累积，多行会把一条机器行劈成两半。
+    for (const line of lines) assert.ok(!line.replace(/\n$/, '').includes('\n'), '进度行内不得含裸换行');
+  } finally {
+    __setChatCreateImpl(null);
+    clearToolsExtension(source);
+  }
+});

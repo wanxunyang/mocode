@@ -339,10 +339,16 @@ export const zhCN = {
   'tool.summarySteps': '{done}/{total} 步',
   'tool.summaryChangedFiles': '{n} 个文件改动',
   'tool.moreLines': '…（还有 {n} 行未显示）',
+  'tool.openFile': '在右侧面板预览 {path}',
   'tool.askOptions': '{n} 个选项',
   'tool.askAnswered': '已回答',
   'tool.askCancelled': '已取消',
   'tool.askAnswer': '你的答复',
+  // 子 agent 卡片里可展开的内部步骤（tool-view.ts 的 sub-agent 视图）。
+  'tool.subStepArgs': '入参',
+  'tool.subStepResult': '输出',
+  'tool.subStepRunning': '运行中',
+  'tool.subStepMore': '…（还有 {n} 步未显示）',
 
   // ── 计划进度（会话区顶部面板 + 侧栏任务行）──
   'plan.title': '执行计划',
@@ -609,6 +615,11 @@ export const zhCN = {
   'changes.back': '← 改动',
   'changes.noDiff': '没有文本差异（二进制文件或仅权限变更）。',
   'changes.diffTruncated': '差异过长，已截断。',
+
+  // ── 会话下方的「本轮改动」长条（任务跑完后列出这轮改过的文件）──
+  'changesBar.title': '本轮改动 · {n} 个文件',
+  'changesBar.all': '全部改动',
+  'changesBar.open': '查看 {path} 的改动',
 
   // ── 「检查」面板（从 package.json 发现校验命令，点击填入终端）──
   'checks.noTask': '先选中一个任务，再看它的工作区该验什么。',
@@ -1377,10 +1388,16 @@ export const enUS: Record<LocaleKey, string> = {
   'tool.summarySteps': '{done}/{total} steps',
   'tool.summaryChangedFiles': '{n} files changed',
   'tool.moreLines': '… ({n} more lines)',
+  'tool.openFile': 'Preview {path} in the side panel',
   'tool.askOptions': '{n} option(s)',
   'tool.askAnswered': 'Answered',
   'tool.askCancelled': 'Cancelled',
   'tool.askAnswer': 'Your answer',
+  // Expandable inner steps of a sub-agent card (tool-view.ts sub-agent view).
+  'tool.subStepArgs': 'Arguments',
+  'tool.subStepResult': 'Output',
+  'tool.subStepRunning': 'Running',
+  'tool.subStepMore': '… ({n} more steps)',
 
   // ── Plan progress (conversation panel + sidebar task row) ──
   'plan.title': 'Execution plan',
@@ -1645,6 +1662,11 @@ export const enUS: Record<LocaleKey, string> = {
   'changes.back': '← Changes',
   'changes.noDiff': 'No textual diff (binary file or mode-only change).',
   'changes.diffTruncated': 'Diff too long; truncated.',
+
+  // ── "Changed in this run" bar under the conversation ──
+  'changesBar.title': '{n} files changed in this run',
+  'changesBar.all': 'All changes',
+  'changesBar.open': 'View changes in {path}',
 
   // ── Checks panel (scripts discovered from package.json; click fills the terminal) ──
   'checks.noTask': 'Select a task first to see what its workspace should verify.',

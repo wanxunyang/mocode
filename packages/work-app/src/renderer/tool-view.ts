@@ -15,6 +15,7 @@
  * 纯渲染叶子模块：不依赖 i18n 运行时（文案由调用方注入，同 diff-view.ts 的做法）。
  */
 import { highlightCodeLine, langForPath } from './markdown.js';
+import { splitSubAgentProgress, type SubAgentStep } from '../sub-agent-progress.js';
 
 /** 一次工具块能拿到的全部非文本信息（来自 host 转发的结构化字段，见 src/host/stdio.ts）。 */
 export interface ToolOutcomeInfo {
@@ -45,6 +46,12 @@ export interface ToolViewLabels {
   askAnswered: string;
   askCancelled: string;
   askAnswer: string;
+  /** sub-agent 内部步骤条目的分段标题（可选：老调用方不传时退化为符号）。 */
+  stepArgs?: string;
+  stepResult?: string;
+  stepRunning?: string;
+  /** 子 agent 步骤超上限时的「还有 n 条」提示（缺省退化为 moreLines，但那说的是行）。 */
+  stepsMore?: (n: number) => string;
 }
 
 /** 各视图函数内部的产物：摘要 + 已经建好的 HTML。 */
@@ -373,27 +380,69 @@ function subAgentView(args: Record<string, unknown> | null, output: string, labe
   // 折叠行已经显示 prompt（tool-target），这里只在它会被截断时补全文，否则重复两遍很吵。
   const head = prompt && prompt.length > 120 ? `<div class="tool-note-head">${escapeHtml(prompt)}</div>` : '';
 
-  const progress: string[] = [];
-  const rest: string[] = [];
-  for (const line of splitLines(body)) {
-    if (/^[▸●↳]\s/.test(line.trim())) progress.push(line.trim());
-    else rest.push(line);
-  }
+  const { steps, lines, rest } = splitSubAgentProgress(body);
   const conclusion = rest.join('\n').trim();
-  const progressHtml = progress.length
-    ? `<ul class="tool-progress">${progress
-        .slice(-40)
-        .map((line) => `<li><span class="tool-progress-mark">${escapeHtml(line[0] ?? '·')}</span>${escapeHtml(clipLine(line.slice(1).trim()))}</li>`)
-        .join('')}</ul>`
-    : '';
+  // 有结构化步骤时不再渲染 `▸` 行：两者描述同一批调用，而条目还能展开看命令与该次输出。
+  const progressHtml = steps.length
+    ? subAgentStepsHtml(steps, labels)
+    : lines.length
+      ? `<ul class="tool-progress">${lines
+          .slice(-40)
+          .map((line) => `<li><span class="tool-progress-mark">${escapeHtml(line[0] ?? '·')}</span>${escapeHtml(clipLine(line.slice(1).trim()))}</li>`)
+          .join('')}</ul>`
+      : '';
+  const progressCount = steps.length || lines.length;
   if (!conclusion) {
-    // 还在跑：只有进度行。
-    return { summary: labels.lines(progress.length), html: `${head}${progressHtml || `<pre class="tool-preview">${escapeHtml(labels.noOutput)}</pre>`}` };
+    // 还在跑：只有进度。
+    return { summary: labels.lines(progressCount), html: `${head}${progressHtml || `<pre class="tool-preview">${escapeHtml(labels.noOutput)}</pre>`}` };
   }
   return {
     summary: labels.lines(nonEmptyLines(conclusion).length),
     html: `${head}${progressHtml}<pre class="tool-preview">${escapeHtml(conclusion)}</pre>`,
   };
+}
+
+/** 子 agent 步骤最多渲染多少条（从尾部保留）：每条自带 6KB 输出上限，上百条就是几百 KB HTML，
+ *  而「它最后干了什么」才是要看的。折叠行仍给总数。 */
+const MAX_SUB_AGENT_STEPS = 60;
+
+/** 一条内部工具调用：折叠行 = 工具名 + 对象 + 状态，展开 = 完整入参与该次调用输出。 */
+function subAgentStepHtml(step: SubAgentStep, labels: ToolViewLabels): string {
+  const state = !step.done
+    ? `<span class="tool-sub-state is-running">${escapeHtml(labels.stepRunning ?? '…')}</span>`
+    : step.failed
+      ? `<span class="tool-sub-state is-failed">${escapeHtml(labels.failed)}</span>`
+      : '';
+  const sections: string[] = [];
+  if (step.args) {
+    sections.push(
+      `<section class="tool-sub-section"><span class="tool-sub-head">${escapeHtml(labels.stepArgs ?? 'args')}</span><pre class="tool-preview">${escapeHtml(step.args)}</pre></section>`,
+    );
+  }
+  if (step.done) {
+    sections.push(
+      step.output
+        ? `<section class="tool-sub-section"><span class="tool-sub-head">${escapeHtml(labels.stepResult ?? 'result')}</span><pre class="tool-preview">${escapeHtml(step.output)}</pre></section>`
+        : `<section class="tool-sub-section"><pre class="tool-preview">${escapeHtml(labels.noOutput)}</pre></section>`,
+    );
+  }
+  // 默认收起：一张卡片里常有几十条调用，全展开会把结论推到很远。
+  return (
+    `<details class="tool-sub-step${step.failed ? ' is-failed' : ''}"><summary>` +
+    `<span class="tool-chevron" data-icon="chevron-right"></span>` +
+    `<span class="tool-sub-name">${escapeHtml(step.name)}</span>` +
+    `<span class="tool-sub-target" title="${escapeHtml(step.summary)}">${escapeHtml(clipLine(step.summary))}</span>` +
+    `${state}</summary>${sections.join('')}</details>`
+  );
+}
+
+/** 结构化步骤清单；超出上限时头部折成一行「还有 n 条未显示」。 */
+function subAgentStepsHtml(steps: SubAgentStep[], labels: ToolViewLabels): string {
+  const hidden = Math.max(0, steps.length - MAX_SUB_AGENT_STEPS);
+  const shown = hidden > 0 ? steps.slice(-MAX_SUB_AGENT_STEPS) : steps;
+  const headNote =
+    hidden > 0 ? `<div class="tool-sub-more">${escapeHtml((labels.stepsMore ?? labels.moreLines)(hidden))}</div>` : '';
+  return `<div class="tool-sub-steps">${headNote}${shown.map((step) => subAgentStepHtml(step, labels)).join('')}</div>`;
 }
 
 /**

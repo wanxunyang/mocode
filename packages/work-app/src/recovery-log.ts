@@ -3,6 +3,7 @@ import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 
 import type { WorkAttachment } from './attachment-types.js';
+import { hasSubAgentProgressLine, isSubAgentProgressLine } from './sub-agent-progress.js';
 export type RecoveryAttachment = WorkAttachment;
 export interface RecoveryEnvelope {
   type: string;
@@ -328,8 +329,10 @@ function parseRecovery(source: string, running = false): RecoverySnapshot | null
         if (existing?.kind === 'tool') {
           existing.done = done;
           if (output) {
-            const progress = existing.output.split('\n').filter((line) => /^[▸●↳]\s/.test(line.trim())).join('\n');
-            existing.output = progress && !/^[▸●↳]\s/m.test(output) ? `${output}\n${progress}` : output;
+            // 子 agent 的进度行（tool_output 累积）不能被最终结论盖掉：`▸` 行是「它做过什么」，
+            // `[sub-tool]{…}` 机器行还带每次内部调用的入参与输出——丢了就再也展开不出来。
+            const progress = existing.output.split('\n').filter(isSubAgentProgressLine).join('\n');
+            existing.output = progress && !hasSubAgentProgressLine(output) ? `${output}\n${progress}` : output;
           }
           if (args) existing.args = args;
           existing.payload = { ...existing.payload, ...payload };
