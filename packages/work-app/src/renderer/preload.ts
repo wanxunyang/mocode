@@ -65,10 +65,10 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   removeProject: (projectId: string): Promise<{ state: ProjectState; removed: string } | null> => ipcRenderer.invoke('work:remove-project', projectId),
   projectOverview: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:project-overview'),
   // 某个空间里 mocode 终端留下的历史会话（只读列表），以及把其中一条接管成本空间的任务。
-  projectSessions: (projectId: string): Promise<Array<{ id: string; createdAt: string; model: string; firstUser: string }>> =>
+  projectSessions: (projectId: string): Promise<Array<{ id: string; createdAt: string; model: string; firstUser: string; lastActiveAt?: string }>> =>
     ipcRenderer.invoke('work:project-sessions', projectId),
   // 侧栏内联区用：每个空间最近 20 条会话，一次批量取回（内联要按时间与任务混排）。
-  spaceRecentSessions: (): Promise<Array<{ projectId: string; sessions: Array<{ id: string; createdAt: string; model: string; firstUser: string }> }>> =>
+  spaceRecentSessions: (): Promise<Array<{ projectId: string; sessions: Array<{ id: string; createdAt: string; model: string; firstUser: string; lastActiveAt?: string }> }>> =>
     ipcRenderer.invoke('work:space-recent-sessions'),
   adoptSession: (payload: { projectId: string; sessionId: string; title?: string }): Promise<{ ok: boolean; message?: string; state?: ProjectState; task?: Task; history?: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> }> =>
     ipcRenderer.invoke('work:adopt-session', payload),

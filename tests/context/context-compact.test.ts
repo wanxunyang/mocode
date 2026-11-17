@@ -6,12 +6,14 @@ import {
   capToolResultForHistory,
   compactHistory,
   createContextState,
+  defaultCompactionRuntime,
   extractProgressSnapshot,
   extractUserDirectives,
   keyFactsBudgetChars,
   mergeKeyFacts,
   maybeCompact,
   splitSummaryText,
+  type CompactProgressEvent,
   type CompactionRuntime,
 } from '../../src/session/compact.js';
 import { manualCompact } from '../../src/session/scheduler.js';
@@ -679,4 +681,67 @@ test('意图/约束账本:跨代钉住,抽取行不再进摘要器', async () =>
   const summaryText = contentAt(history, 1);
   assert.ok(summaryText.includes('未经确认不得删除任何文件'), '约束行两代后仍钉在 Key Facts');
   assert.ok(!transcripts[1]!.includes('未经确认'), '已钉住的抽取行不再喂给摘要器');
+});
+
+test('压缩进度事件:start → done 带前后占用,供宿主渲染「已压缩」', async () => {
+  const { history } = compactableHistory();
+  const events: CompactProgressEvent[] = [];
+  const result = await compactHistory(history, {
+    window: 100,
+    threshold: 100,
+    contextState: createContextState(),
+    summarize: async () => 'old work summary',
+    runtime: { ...defaultCompactionRuntime, onCompactProgress: (event) => events.push(event) },
+  });
+
+  assert.equal(result.reason, 'summarize');
+  assert.equal(events.length, 2, 'start + done 各一条');
+  assert.deepEqual(events[0], { phase: 'start', manual: false, force: false });
+  const done = events[1]!;
+  assert.equal(done.phase, 'done');
+  assert.equal(done.compacted, true);
+  assert.equal(done.summarized, true);
+  assert.equal(done.reason, 'summarize');
+  assert.equal(done.historyRebuilt, true);
+  assert.equal(done.estimateBefore, result.estimateBefore);
+  assert.equal(done.estimateAfter, result.estimateAfter);
+});
+
+test('压缩进度事件:摘要抛错也发 done(failed),否则宿主状态行永远挂着', async () => {
+  const { history } = compactableHistory();
+  const events: CompactProgressEvent[] = [];
+  await assert.rejects(
+    compactHistory(history, {
+      window: 100,
+      threshold: 100,
+      contextState: createContextState(),
+      summarize: async () => {
+        throw new DOMException('This operation was aborted', 'AbortError');
+      },
+      runtime: { ...defaultCompactionRuntime, onCompactProgress: (event) => events.push(event) },
+    }),
+    (error: unknown) => (error as { name?: string }).name === 'AbortError',
+  );
+  assert.equal(events.length, 2);
+  const done = events[1]!;
+  assert.equal(done.phase, 'done');
+  assert.equal(done.failed, true);
+  assert.equal(done.aborted, true);
+  assert.equal(done.compacted, false);
+});
+
+test('压缩进度事件:noop 也发 done 但 compacted=false(宿主据此不留系统行)', async () => {
+  const history: ChatMessage[] = [system(), { role: 'user', content: 'current turn' } as ChatMessage];
+  const events: CompactProgressEvent[] = [];
+  await compactHistory(history, {
+    window: 100,
+    threshold: 100,
+    contextState: createContextState(),
+    runtime: { ...defaultCompactionRuntime, onCompactProgress: (event) => events.push(event) },
+  });
+  assert.equal(events.length, 2);
+  const done = events[1]!;
+  assert.equal(done.phase, 'done');
+  assert.equal(done.compacted, false);
+  assert.equal(done.failed, undefined);
 });

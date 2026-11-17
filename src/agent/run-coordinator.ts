@@ -38,6 +38,7 @@ import { t } from '../i18n/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
+import type { CompactionRuntime } from '../session/compact.js';
 import type { HistoryManager } from './stages/contracts.js';
 import type { LegacyStageAdapters } from './stages/legacy-adapters.js';
 import { createLegacyModelRunner, createStagedModelRunner } from './stages/model-runner.js';
@@ -140,11 +141,20 @@ export async function runAgentCoreLegacy(
   let lifecycle: LifecycleEngine | null = ctx.config.contextLifecycle ? createLifecycleEngine(history) : null;
   runtimeContextState.lifecycleStats = lifecycle?.stats();
   rehydrateArtifacts(runtimeContextState, history);
+  // CompactionRuntime 是 session 层的最小依赖面(压缩只看 config / transport / rollback),
+  // 这里额外把 hooks.onCompactProgress 转发进去:压缩发生在 session 层,拿不到 AgentHooks,
+  // 而「压缩开始了/结束了」正是 work-app 里唯一能让用户感知到自动压缩的信号。
+  const compactionRuntime: CompactionRuntime = {
+    config: ctx.config,
+    modelTransport: ctx.modelTransport,
+    rollbackStore: ctx.rollbackStore,
+    onCompactProgress: (event) => opts.hooks.onCompactProgress?.(event),
+  };
   // The scheduler is the sole automatic history-rewrite entry point. It runs
   // superseded → stale artifact → old logs/search → compact at real pressure.
   // contextBudget=false keeps only the infrastructure compact fallback.
   const scheduler: BudgetScheduler | null =
-    ctx.config.contextBudget !== false ? createBudgetScheduler(runtimeContextState, ctx) : null;
+    ctx.config.contextBudget !== false ? createBudgetScheduler(runtimeContextState, compactionRuntime) : null;
   const modelRunner =
     stages.model.implementation === 'staged'
       ? createStagedModelRunner(ctx.modelTransport)
@@ -164,7 +174,7 @@ export async function runAgentCoreLegacy(
       : createLegacyCapabilityResolver();
   const terminationPolicy =
     stages.termination.implementation === 'staged' ? createStagedTerminationPolicy() : createLegacyTerminationPolicy();
-  const trimmerInit = { historyManager, scheduler, contextState: runtimeContextState, runtime: ctx };
+  const trimmerInit = { historyManager, scheduler, contextState: runtimeContextState, runtime: compactionRuntime };
   const contextTrimmer =
     stages.context.implementation === 'staged'
       ? createStagedContextTrimmer(trimmerInit)

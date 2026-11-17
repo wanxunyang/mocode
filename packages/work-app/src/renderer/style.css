@@ -185,8 +185,6 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .project-context-icon .icon { width: 14px; height: 14px; }
 .project-group-tasks { display: flex; flex-direction: column; gap: 1px; padding-top: 1px; padding-left: 18px; }
 .project-group.collapsed > .project-group-tasks { display: none; }
-/* 历史会话与任务列表同级，折叠空间时必须跟着收起 —— 否则折叠后底下仍留一行「历史会话」。 */
-.project-group.collapsed > .project-history { display: none; }
 /* 侧栏底栏 = 账户行(头像 + 品牌),点开设置。做成有呼吸的 38px 行,
    而不是原来那条 32px、字用等宽、贴着顶边的"状态条"。 */
 .sidebar-footer { width: 100%; min-height: 38px; margin-top: auto; padding: 5px 6px; border-top: var(--rule-hair); display: flex; align-items: center; gap: 9px; color: var(--text-default); font-size: var(--text-sm); font-weight: 500; text-align: left; cursor: pointer; border-radius: var(--radius-sm); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
@@ -1658,6 +1656,18 @@ body.inspector-resizing * { cursor: ew-resize !important; }
 .message-body.md-rendered > *:first-child { margin-top: 0; }
 .message-body.md-rendered > *:last-child { margin-bottom: 0; }
 .message-body.md-rendered p { margin: var(--space-xs) 0; line-height: 1.7; }
+
+/* 系统提示行（「上下文已压缩」这类）:属于会话流、不属于任何一轮对话。
+   刻意比错误行轻一档:左侧细规 + 中性面底 + 次级文字色,读起来是"记录"而不是"告警";
+   却又要能翻回去看见 —— 自动压缩若不落这一行,GUI 里它等于从未发生过。 */
+.thread-notice {
+  align-self: center; box-sizing: border-box; width: 100%;
+  margin: var(--space-xs) 0 var(--space-md); padding: var(--space-2xs) var(--space-md);
+  border-left: 2px solid var(--border-strong); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--surface-sunken); color: var(--text-muted);
+  font-size: var(--text-xs); line-height: 1.6; font-variant-numeric: tabular-nums;
+  white-space: pre-wrap; word-break: break-word;
+}
 /* 标题：上面的间距恒大于下面（贴近它所统领的内容），层级之间再靠字号 + 一丝上提的色重区分。
    h1/h2 带下划细线：长文档里它们就是章节边界，没有线时整页看不出分段。 */
 .message-body.md-rendered h1, .message-body.md-rendered h2, .message-body.md-rendered h3, .message-body.md-rendered h4, .message-body.md-rendered h5, .message-body.md-rendered h6 {
@@ -2040,30 +2050,17 @@ select.field-input { appearance: none; cursor: pointer; background-image: linear
 .usage-bar-value { font-size: var(--text-2xs); color: var(--color-ink); font-family: var(--font-outlier); min-width: 52px; text-align: right; }
 .usage-bar-sub { font-size: var(--text-2xs); color: var(--color-subtle); min-width: 56px; text-align: right; }
 
-/* ── 侧栏「历史会话」（终端留下的会话，可接管）──
- * 与任务行同一列表里出现，但语义是只读历史：字号更小、无状态徽标、hover 才显强调色，
- * 视觉上明显弱于「任务」——避免用户误以为它们已经在跑。 */
-.project-history { margin: 2px 0 4px; padding-left: 18px; }
-.history-toggle { display: flex; align-items: center; gap: 5px; width: 100%; padding: 3px 6px; border-radius: var(--radius-sm); color: var(--text-subtle); font-size: var(--text-2xs); text-align: left; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
-.history-toggle:hover { background: var(--surface-hover); color: var(--text-default); }
-.history-toggle-icon .icon { width: 11px; height: 11px; }
-.history-toggle-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.history-toggle-chevron .icon { width: 11px; height: 11px; transition: transform var(--dur-micro) var(--ease-out); }
-.history-toggle.open .history-toggle-chevron { transform: rotate(180deg); }
-.history-list { display: flex; flex-direction: column; gap: 1px; padding-left: 12px; }
-.history-list.hidden { display: none; }
-.history-item { display: flex; align-items: baseline; gap: var(--space-2xs); width: 100%; padding: 3px 6px; border-radius: var(--radius-sm); text-align: left; color: var(--color-muted); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
-.history-item:hover { background: var(--color-accent-soft); color: var(--color-accent-ink); }
-.history-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); }
-.history-item-meta { flex: 0 0 auto; font-size: var(--text-2xs); color: var(--color-subtle); font-family: var(--font-outlier); }
-
-/* ── 「还有 N 个任务」展开入口：与 history-toggle 同一视觉层级（弱于任务行）── */
+/* ── 侧栏「更多 (N)」：内联 6 条之后的任务 + 终端历史会话，一份按时间混排的列表 ──
+ * 入口比任务行弱（字号更小、常态无强调色），因为它是「翻旧账」而不是「正在发生的事」；
+ * 展开后的会话行仍带分支图标（.session-item），与任务行的状态徽标区分开。 */
 .task-more { display: flex; align-items: center; gap: 5px; width: 100%; padding: 3px 6px; border-radius: var(--radius-sm); color: var(--text-subtle); font-size: var(--text-2xs); text-align: left; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
 .task-more:hover { background: var(--surface-hover); color: var(--text-default); }
 .task-more-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-more-chevron .icon { width: 11px; height: 11px; }
 .task-more-list { display: flex; flex-direction: column; gap: 1px; }
-.task-more-list.hidden { display: none; }/* ── Git 历史视图 ───────────────────────────────────────
+.task-more-list.hidden { display: none; }
+/* 首次展开时要去磁盘取全量会话（大空间几百条），取的过程把列表压暗，避免看着像卡住。 */
+.task-more-list.loading { opacity: 0.5; }/* ── Git 历史视图 ───────────────────────────────────────
  * 三件事：泳道图（SVG，几何由 history-panel.ts 给、颜色留在这里）、提交行、
  * 以及点开后的「文件列表 / 文件内容」两级。
  * 行高必须与 history-panel.ts 的 ROW_H 一致（26px），否则泳道连线会错位。 */

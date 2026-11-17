@@ -11,7 +11,7 @@
  *
  * 两者都是「读，不改」——写注册表 / 归档会话仍然只有 core 做，避免两份实现打架。
  */
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import os from 'node:os';
 import path from 'node:path';
@@ -72,6 +72,14 @@ export interface ProjectSessionMeta {
   createdAt: string;
   model: string;
   firstUser: string;
+  /**
+   * 这条会话最后一次真正被写过的时间（`session.json` 的 mtime）。
+   *
+   * 与 createdAt 分开：createdAt 是「什么时候开始聊」，这个才是「最后一次聊到哪」。
+   * 侧栏「接管」用它当任务排序键 —— 接管只是打开看一眼，不该把一条三个月前的会话
+   * 顶成最新活动。
+   */
+  lastActiveAt?: string;
   /** true = 正文已压进 archive/<id>.json.gz，仍可 resume（core 的 load 会回退到 gz）。 */
   archived?: boolean;
 }
@@ -135,14 +143,20 @@ export function listProjectSessions(workspaceRoot: string, limit = 60): ProjectS
   } catch { ids = []; }
   for (const id of ids.sort().reverse()) {
     if (out.length >= limit) break;
+    const file = path.join(root, id, 'session.json');
     try {
-      const record = JSON.parse(readFileSync(path.join(root, id, 'session.json'), 'utf8')) as {
+      const record = JSON.parse(readFileSync(file, 'utf8')) as {
         id?: string; createdAt?: string; model?: string; firstUser?: string;
       };
+      // mtime 是「最后一次写这条会话」的时间，接管时用它当排序键 —— 只看一眼的旧会话
+      // 不该因为被接管就以 now 顶到最前面。
+      let lastActiveAt = '';
+      try { lastActiveAt = statSync(file).mtime.toISOString(); } catch { /* 读不到 mtime 就退回 createdAt */ }
       seen.add(id);
       out.push({
         id,
         createdAt: typeof record.createdAt === 'string' ? record.createdAt : '',
+        ...(lastActiveAt ? { lastActiveAt } : {}),
         model: typeof record.model === 'string' ? record.model : '',
         firstUser: typeof record.firstUser === 'string' ? record.firstUser : '',
       });
@@ -187,6 +201,25 @@ export function readSessionHistory(
     const record = JSON.parse(raw) as { history?: unknown };
     if (Array.isArray(record.history)) return record.history as Array<Record<string, unknown>>;
   } catch { /* 未归档 / 已 purge */ }
+  return null;
+}
+
+/**
+ * 一条会话「最后活动时间」的磁盘证据（活会话读 mtime，归档退回 gz 的 mtime）。
+ *
+ * 只为此单独读一次 stat：侧栏排序键修正（task-order.ts）要拿它跟任务的 updatedAt 对账，
+ * 判断这个时间戳是不是被人为写成 now。没有可读文件时返回 null —— 没有证据就不动数据。
+ */
+export function sessionLastActiveAt(workspaceRoot: string, sessionId: string): string | null {
+  const root = sessionsRootOf(workspaceRoot);
+  const candidates = [
+    path.join(root, sessionId, 'session.json'),
+    path.join(root, `${sessionId}.json`),
+    path.join(root, 'archive', `${sessionId}.json.gz`),
+  ];
+  for (const candidate of candidates) {
+    try { return statSync(candidate).mtime.toISOString(); } catch { /* 试下一个布局 */ }
+  }
   return null;
 }
 

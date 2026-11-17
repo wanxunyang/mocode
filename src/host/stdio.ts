@@ -32,6 +32,7 @@ import type { ToolRouteGroupName } from '../config/profiles.js';
 // 装配官方默认工具包:registry 不再顶层 import builtins(破模块循环),host 入口须显式装配。
 import '../tools/builtins/index.js';
 import type { InterventionRequest, InterventionResult } from '../ui/intervention.js';
+import { muteStdoutOutput } from '../ui/output-sink.js';
 import { setAskHumanHandler } from '../tools/builtins/ask-human.js';
 import { HOST_PROTOCOL_VERSION, parseCommand, type HostCommand, type HostEnvelope } from './protocol.js';
 // ── 面板数据源（会话 / 回滚 / 改动 / 用量 / 记忆 / 设置）──
@@ -393,6 +394,35 @@ function hooksFor(runId: string): AgentHooks {
       // usage.totalTokens 是本轮累计消耗，绝不是上下文占用；详情统一读当前 prompt 快照。
       emit('live_usage', { ...usage, contextUsage: contextUsageSnapshot() }, runId);
     },
+    // 自动压缩：终端有「压缩中」spinner + 压缩行，GUI 什么都看不到 —— 用户只会发现
+    // 上下文百分比莫名掉了一截。所以 start 立刻给状态行，done 在会话流里留一条系统行。
+    onCompactProgress: (event) => {
+      if (event.phase === 'start') {
+        emit('context_compacting', { manual: event.manual, ...(event.focus ? { focus: event.focus } : {}) }, runId);
+        return;
+      }
+      // 失败/中断只收状态行：没压成功就不该在会话流里留一条「已压缩」。
+      if (event.failed || event.aborted || !event.compacted) {
+        emit('context_compacting_done', { failed: event.failed === true, aborted: event.aborted === true }, runId);
+        return;
+      }
+      const usage = contextUsageSnapshot();
+      emit(
+        'context_compacted',
+        {
+          manual: event.manual,
+          summarized: event.summarized,
+          reason: event.reason,
+          historyRebuilt: event.historyRebuilt === true,
+          beforeTokens: event.estimateBefore,
+          afterTokens: event.estimateAfter,
+          usagePercent: usage.percent,
+          contextUsage: usage,
+          contextWindow: runtime().context.config.contextWindowTokens,
+        },
+        runId,
+      );
+    },
     onImageRelief: (info) => emit('image_relief', { ...info }, runId),
     onNoReply: () => emit('no_reply', {}, runId),
     onMaxSteps: () => emit('max_steps', {}, runId),
@@ -575,6 +605,7 @@ async function compact(command: Extract<HostCommand, { type: 'compact' }>): Prom
     if (closing) return;
     if (!sessionId) createSession();
     emit('status', { value: 'compacting' }, command.id);
+    emit('context_compacting', { manual: true, ...(command.focus ? { focus: command.focus } : {}) }, command.id);
     const activeRuntime = runtime();
     const log = await activeRuntime.compact(history, {
       focus: command.focus,
@@ -586,6 +617,23 @@ async function compact(command: Extract<HostCommand, { type: 'compact' }>): Prom
     // 旧实测锚点属于压缩前请求，不能跨摘要边界继续外推。
     contextState.promptAnchor = undefined;
     const usage = contextUsageSnapshot();
+    // 与自动路径同一个事件形状：GUI 的会话流据此留一条「已压缩」系统行（切走再回来还在）。
+    // compact_done 保留给旧客户端的 toast，两条事件在这里是有意的分工，不是重复。
+    emit(
+      'context_compacted',
+      {
+        manual: true,
+        summarized: log.compactDetail?.reason === 'summarize',
+        reason: log.compactDetail?.reason,
+        historyRebuilt: log.historyMutation === 'rebuild',
+        beforeTokens: log.compactDetail?.estimateBefore,
+        afterTokens: log.compactDetail?.estimateAfter,
+        usagePercent: usage.percent,
+        contextUsage: usage,
+        contextWindow: runtime().context.config.contextWindowTokens,
+      },
+      command.id,
+    );
     emit(
       'compact_done',
       {
@@ -1432,6 +1480,10 @@ function requestShutdownCancellation(): void {
 }
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+// host 的 stdout 是 NDJSON 协议通道：layout.contentWrite / Spinner 的「非 TTY 直接写」兜底
+// 会把压缩行、图片卡片行这类裸文本灌进来，客户端 JSON.parse 失败后当 diagnostic 丢掉。
+// 用户可见反馈必须走下面的事件（context_compacted / image_relief …），兜底写一律静音。
+muteStdoutOutput();
 const pendingCommands = new Set<Promise<void>>();
 const heartbeatTimer = startHeartbeat();
 const startupPromise = initializeRuntime();

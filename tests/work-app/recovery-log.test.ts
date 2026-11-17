@@ -199,6 +199,41 @@ test('拒绝路径逃逸，损坏记录不会混入会话，删除后恢复为�
     deleteRecoveryLog(root, 'task-4');
     assert.equal(readRecovery(root, 'task-4'), null);
   }));
+test('context_compacted 落成系统提示行：重启回放仍有「已压缩」，且刷新上下文快照', () =>
+  withRoot((root) => {
+    const log = recoveryLog(root, 'task-compact');
+    log.user('跑一个长任务');
+    log.event(event('run_started'));
+    log.event(
+      event('context_compacted', {
+        manual: false,
+        summarized: true,
+        beforeTokens: 205_000,
+        afterTokens: 29_000,
+        contextWindow: 262_144,
+        contextUsage: { tokens: 29_000, percent: 11 },
+      }),
+    );
+    log.event(event('text_delta', { text: '继续干活' }));
+    log.event(event('run_completed'));
+
+    const snapshot = readRecovery(root, 'task-compact');
+    assert.ok(snapshot);
+    // 只存结构不存译文：文案由渲染层按当前语言生成，切语言后回放不会残留旧语言。
+    assert.deepEqual(snapshot.items[1], {
+      kind: 'notice',
+      notice: {
+        type: 'contextCompacted',
+        beforeTokens: 205_000,
+        afterTokens: 29_000,
+        windowTokens: 262_144,
+        summarized: true,
+      },
+    });
+    assert.deepEqual(snapshot.contextUsage, { tokens: 29_000, percent: 11 });
+    assert.equal(snapshot.items[2]?.kind, 'text');
+  }));
+
 test('超长日志里的 truncate 不再抛 RangeError（展开传参上限）', () =>
   withRoot((root) => {
     // 真实事故：25 万条的恢复日志里只要有一条 truncate，`splice(0, len, ...cut)` 就会

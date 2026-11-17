@@ -16,7 +16,13 @@ export type RecoveryStreamItem =
   | { kind: 'user'; text: string; attachments?: RecoveryAttachment[] }
   | { kind: 'text'; text: string }
   | { kind: 'tool'; id: string; name: string; args: string; output: string; done: boolean; payload?: Record<string, unknown> }
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; message: string }
+  /** 系统提示行（如「上下文已压缩」）：既不是错误也不是模型输出，但必须在会话流里留痕，
+   *  否则切走再回来就只剩「百分比莫名掉了一截」。文案不落盘 —— 存结构，渲染层按当前语言生成。 */
+  | { kind: 'notice'; notice: StreamNotice };
+/** 结构化系统提示：字段是数据，不是译文（恢复日志会跨语言切换存续）。 */
+export type StreamNotice =
+  | { type: 'contextCompacted'; beforeTokens?: number; afterTokens?: number; windowTokens?: number; manual?: boolean; summarized?: boolean };
 export interface RecoverySnapshot {
   items: RecoveryStreamItem[];
   usagePercent: number | null;
@@ -352,6 +358,24 @@ function parseRecovery(source: string, running = false): RecoverySnapshot | null
           contextUsage = payload.contextUsage;
           if (typeof payload.contextUsage.percent === 'number') usagePercent = payload.contextUsage.percent;
         }
+        break;
+      case 'context_compacted':
+        // 压缩是这轮对话里发生过的事实：恢复现场时和实时一样，在会话流里留一条系统行。
+        if (isRecord(payload.contextUsage)) {
+          contextUsage = payload.contextUsage;
+          if (typeof payload.contextUsage.percent === 'number') usagePercent = payload.contextUsage.percent;
+        }
+        items.push({
+          kind: 'notice',
+          notice: {
+            type: 'contextCompacted',
+            ...(typeof payload.beforeTokens === 'number' ? { beforeTokens: payload.beforeTokens } : {}),
+            ...(typeof payload.afterTokens === 'number' ? { afterTokens: payload.afterTokens } : {}),
+            ...(typeof payload.contextWindow === 'number' ? { windowTokens: payload.contextWindow } : {}),
+            ...(payload.manual === true ? { manual: true } : {}),
+            ...(payload.summarized === true ? { summarized: true } : {}),
+          },
+        });
         break;
       case 'run_completed':
         if (isRecord(payload.contextUsage)) {

@@ -92,7 +92,40 @@ export interface CompactionRuntime {
   >;
   readonly modelTransport: ChatTransport;
   readonly rollbackStore?: Pick<RollbackStore, 'pruneAfterCompaction'>;
+  /**
+   * 一次 compression 的生命周期通知(start → done),供展示层把压缩这件事变得可感知。
+   *
+   * 为什么挂在 runtime 而不是 CompactOptions:调度器(自动路径)与 /compact(手动路径)
+   * 都经 maybeCompact → compactHistory,调用点拿不到 opts;逐层加参数会污染 3 个签名。
+   * host / GUI 只需要在构造 CompactionRuntime 时塞一个转发函数。
+   */
+  readonly onCompactProgress?: (event: CompactProgressEvent) => void;
 }
+
+/**
+ * 压缩进度事件。
+ *
+ * `done` 一定会到(成功 / noop / 异常 / 中断都发),展示层据此收掉「正在压缩」状态;
+ * 只有 `compacted === true` 的那一次才值得在会话流里留痕。
+ */
+export type CompactProgressEvent =
+  | { phase: 'start'; manual: boolean; force: boolean; focus?: string }
+  | {
+      phase: 'done';
+      manual: boolean;
+      /** 失败(摘要抛错等):此时 estimate 字段缺省,展示层只收状态行。 */
+      failed?: boolean;
+      /** 被 Ctrl+C 打断:同上,不收状态行、不写压缩行。 */
+      aborted?: boolean;
+      compacted: boolean;
+      summarized: boolean;
+      reason?: string;
+      /** 压缩前后占用(裸估算口径,与 80% 压力线同源)。 */
+      estimateBefore?: number;
+      estimateAfter?: number;
+      /** 是否原地重建了 history(摘要成功);微压缩为 false。 */
+      historyRebuilt?: boolean;
+    };
 
 /** 默认兼容依赖：旧调用方继续读取进程级 config/chat。 */
 export const defaultCompactionRuntime: CompactionRuntime = {
@@ -932,8 +965,40 @@ function compactionLogLine(label: string, before: number, after: number, window:
 /**
  * 压缩 history(原地)。手动 /compact 与自动 maybeCompact 都走这里。
  * 不检查阈值——调用方(maybeCompact)决定是否调;/compact 直接调以强制压缩。
+ *
+ * 这一层只做「进度广播 + 异常收口」:真正的压缩逻辑在 compactHistoryInner。
+ * done 事件在三类出口都发——成功/兜底返回、摘要抛错(failed)、abort(aborted)——
+ * 否则 GUI 的「正在压缩」状态行会在异常路径上永久挂着。
  */
 export async function compactHistory(history: ChatMessage[], opts: CompactOptions): Promise<CompactResult> {
+  const notify = opts.runtime?.onCompactProgress;
+  if (!notify) return compactHistoryInner(history, opts);
+  const manual = opts.manual === true;
+  const force = opts.force === true;
+  notify({ phase: 'start', manual, force, ...(opts.focus ? { focus: opts.focus } : {}) });
+  try {
+    const result = await compactHistoryInner(history, opts);
+    notify({
+      phase: 'done',
+      manual,
+      compacted: result.compacted,
+      summarized: result.summarized,
+      reason: result.reason,
+      estimateBefore: result.estimateBefore,
+      estimateAfter: result.estimateAfter,
+      historyRebuilt: result.historyRebuilt === true,
+    });
+    return result;
+  } catch (cause) {
+    const aborted =
+      opts.signal?.aborted === true ||
+      (cause instanceof Error && (cause.name === 'AbortError' || cause.name === 'APIUserAbortError'));
+    notify({ phase: 'done', manual, compacted: false, summarized: false, failed: true, aborted });
+    throw cause;
+  }
+}
+
+async function compactHistoryInner(history: ChatMessage[], opts: CompactOptions): Promise<CompactResult> {
   const state = opts.contextState ?? contextState;
   const activeTools = opts.tools ?? chatTools;
   const estimateBefore = rawPromptTokens(history, activeTools);

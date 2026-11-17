@@ -26,12 +26,8 @@ export const zhCN = {
   'sidebar.moreActions': '更多操作',
   'sidebar.moreActionsFor': '{name} 更多操作',
   'sidebar.toggleSection': '点击展开 / 折叠',
-  // 终端历史会话（mocode CLI 在该目录留下的会话）—— 与 work-app 任务不是同一套模型
-  'sidebar.historySessions': '历史会话 ({n})',
-  'sidebar.historySessionsEmpty': '历史会话',
-  'sidebar.historyLoading': '读取中…',
-  'sidebar.historyEmpty': '该空间还没有终端会话',
-  'sidebar.moreTasks': '还有 {n} 个任务',
+  // 「更多」= 内联 6 条之后的任务 + 终端历史会话（mocode CLI 在该目录留下的会话），混排一份
+  'sidebar.moreItems': '更多 ({n})',
   'sidebar.spaceNeedsYou': '该空间有 {n} 个任务在等你确认',
 
   // ── 任务行 ──
@@ -431,6 +427,11 @@ export const zhCN = {
   'toast.cacheCreated': '创建 {n} tokens',
   'toast.cacheHit': '命中 {n} tokens',
   'toast.compactDone': '上下文已压缩: {before}k → {after}k tokens{pct}',
+  // 会话流里的系统提示行（不是 toast）：「这件事发生过」要能翻回去看。
+  'notice.contextCompacted': '上下文已压缩  {before} → {after} tokens（{beforePct} → {afterPct}）',
+  'notice.contextCompactedPlain': '上下文已压缩  {before} → {after} tokens',
+  'notice.contextCompactedShort': '上下文已压缩',
+  'notice.contextCompactedManual': '{detail}（手动触发）',
   'toast.openProjectFailed': '无法打开项目选择器',
   'toast.switchedProject': '已切换到项目「{name}」',
   'toast.languageSwitched': '已切换到{lang}',
@@ -1088,11 +1089,7 @@ export const enUS: Record<LocaleKey, string> = {
   'sidebar.moreActions': 'More actions',
   'sidebar.moreActionsFor': 'More actions for {name}',
   'sidebar.toggleSection': 'Click to expand / collapse',
-  'sidebar.historySessions': 'History sessions ({n})',
-  'sidebar.historySessionsEmpty': 'History sessions',
-  'sidebar.historyLoading': 'Loading…',
-  'sidebar.historyEmpty': 'No terminal sessions in this space yet',
-  'sidebar.moreTasks': '{n} more tasks',
+  'sidebar.moreItems': '{n} more',
   'sidebar.spaceNeedsYou': '{n} task(s) in this space need your confirmation',
 
   // ── Task rows ─
@@ -1490,6 +1487,10 @@ export const enUS: Record<LocaleKey, string> = {
   'toast.cacheCreated': 'created {n} tokens',
   'toast.cacheHit': 'cached {n} tokens',
   'toast.compactDone': 'Context compacted: {before}k → {after}k tokens{pct}',
+  'notice.contextCompacted': 'Context compacted  {before} → {after} tokens ({beforePct} → {afterPct})',
+  'notice.contextCompactedPlain': 'Context compacted  {before} → {after} tokens',
+  'notice.contextCompactedShort': 'Context compacted',
+  'notice.contextCompactedManual': '{detail} (manual)',
   'toast.openProjectFailed': 'Cannot open the project picker',
   'toast.switchedProject': 'Switched to project “{name}”',
   'toast.languageSwitched': 'Switched to {lang}',

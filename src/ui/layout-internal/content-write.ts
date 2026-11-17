@@ -8,6 +8,7 @@ import * as content from '../content.js';
 import { reset as resetBatches, shiftBatchesAfter, shiftBatchesForReflow } from '../batch.js';
 import { renderMarkdownWithMeta } from '../markdown.js';
 import { state } from './state.js';
+import { isStdoutMuted } from '../output-sink.js';
 import { esc, cup, getGeo, setRegion, runningCaretPos } from './screen.js';
 import { viewportAbsStart, repaintViewport } from './scroll.js';
 
@@ -63,7 +64,7 @@ export function shouldRenderMdSegment(elapsedNow: number, pendingChars: number):
  */
 export function contentWrite(s: string): void {
   if (!state.active || !ui.isTTY) {
-    stdout.write(s);
+    if (!isStdoutMuted()) stdout.write(s);
     return;
   }
   if (state.mdActive) commitMd(); // 非 md 写接续:先收尾 md 段(清 segMark,否则 setLines 会截到旧段)
@@ -381,7 +382,7 @@ export function flushMdSegment(): void {
  */
 export function contentWriteMd(s: string): void {
   if (!state.active || !ui.isTTY) {
-    stdout.write(s);
+    if (!isStdoutMuted()) stdout.write(s);
     return;
   }
   if (!state.mdActive) beginMdSegment();
@@ -410,7 +411,7 @@ export function contentWriteMd(s: string): void {
  */
 export function contentWriteMdOnce(s: string): void {
   if (!state.active || !ui.isTTY) {
-    stdout.write(s);
+    if (!isStdoutMuted()) stdout.write(s);
     return;
   }
   if (state.mdActive) commitMd();

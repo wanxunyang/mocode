@@ -17,7 +17,7 @@ import { initBrowserPanel, showBrowserPanel, hideBrowserPanel, rememberDevServer
 // 终端面板：PTY 在主进程（node-pty 是原生模块），这里是 xterm 显示层。
 import { initTerminalPanel, showTerminalPanel, hideTerminalPanel, refreshTerminalProject, refreshTerminalTheme, refreshTerminalLabels, fillTerminalCommand } from './terminal-panel.js';
 import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, MOD, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
-import type { RecoverySnapshot } from '../recovery-log.js';
+import type { RecoverySnapshot, StreamNotice } from '../recovery-log.js';
 import type { WorkAttachment, AttachmentResult, AttachmentErrorCode } from '../attachment-types.js';
 import { parsePlan, planForRestore, type PlanSnapshot } from '../plan.js';
 import { pendingByProject, pendingTasks } from '../attention.js';
@@ -26,8 +26,8 @@ import { planPanelHtml } from './plan-panel.js';
 import { changesBarHtml, type ChangesBarFile, type ChangesBarLabels } from './changes-bar.js';
 // 「检查」面板把 `pm run x` 拼成命令行：与主进程用同一份纯函数，避免两处拼法漂移。
 import { checkCommand, type PackageManager } from '../checks.js';
-// 空间内联区要把「任务」与「终端会话」按时间混排：规则单独成纯函数，可单测。
-import { splitSpaceEntries, type SpaceSplit } from './space-entries.js';
+// 空间内联区/展开区都要把「任务」与「终端会话」按时间混排：规则单独成纯函数，可单测。
+import { splitSpaceEntries, isActiveTaskStatus, type SpaceEntry } from './space-entries.js';
 
 export {};
 
@@ -79,6 +79,9 @@ function applyLanguage(): void {
   if (plannedTask) syncPlanPanel(plannedTask);
   setRunning(isRunning(viewingTaskId()));
   updateContextUsage(streams.get(viewingTaskId() ?? '')?.contextUsage ?? null);
+  // 系统提示行（「上下文已压缩」）是生成时按当时语言写死的文案 —— 结构存在 data-notice 里，
+  // 这里就地按新语言重算一次，否则切语言后会话流里会残留旧语言的句子。
+  relabelNotices();
   renderAttachments();
   // 排队面板的文案（下一条 / 展开 / 附件数）按语言现取 → 就地重画。
   refreshQueuePanel();
@@ -106,7 +109,7 @@ onLangChange(() => applyLanguage());
 type TaskStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 type Project = { id: string; name: string; root: string; branch: string; auto?: boolean; sessionCount?: number };
 /** 终端留下的历史会话（work:project-sessions 的返回项）。 */
-type ProjectSession = { id: string; createdAt: string; model: string; firstUser: string };
+type ProjectSession = { id: string; createdAt: string; model: string; firstUser: string; lastActiveAt?: string };
 /** 各空间最近会话的批量快照（work:space-recent-sessions 的返回项）。 */
 type SpaceRecentSessions = Array<{ projectId: string; sessions: ProjectSession[] }>;
 type Task = { id: string; projectId: string; title: string; status: TaskStatus; sessionId?: string; changedFiles: string[]; createdAt: string; updatedAt: string; lastError?: string; plan?: TaskPlanProgress };
@@ -309,7 +312,9 @@ type StreamItem =
   | { kind: 'user'; text: string; attachments?: Attachment[] }
   | { kind: 'text'; text: string }
   | { kind: 'tool'; id: string; name: string; args: string; output: string; done: boolean; payload?: Record<string, unknown> }
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; message: string }
+  /** 系统提示行（「上下文已压缩」等）：不是错误也不是模型输出，但必须在会话流里留痕。 */
+  | { kind: 'notice'; notice: StreamNotice };
 interface ContextUsageSnapshot {
   tokens: number;
   window: number;
@@ -838,6 +843,60 @@ function showTurnError(message: string): void {
   if (isAtBottom()) smartScrollToBottom(true);
 }
 
+/**
+ * 系统提示行（「上下文已压缩」这类）。
+ *
+ * 与 showTurnError 的区别：它不是某一轮的失败，而是**会话里发生过的一件事**——所以不挂进
+ * 助手消息，直接追加到会话流；也不属于任何 turn，finalizeTurn 收口时不会把它带走。
+ * 文案按结构现算（notice 只存数据），切语言时和恢复日志重放都能得到当前语言的句子。
+ */
+function noticeText(notice: StreamNotice): string {
+  if (notice.type === 'contextCompacted') {
+    const before = typeof notice.beforeTokens === 'number' ? notice.beforeTokens : null;
+    const after = typeof notice.afterTokens === 'number' ? notice.afterTokens : null;
+    const window = typeof notice.windowTokens === 'number' && notice.windowTokens > 0 ? notice.windowTokens : null;
+    const pct = (n: number): string => `${Math.round((n / (window ?? 1)) * 100)}%`;
+    const detail = before !== null && after !== null
+      ? window
+        ? t('notice.contextCompacted', {
+            before: tokenShort(before), after: tokenShort(after), beforePct: pct(before), afterPct: pct(after),
+          })
+        : t('notice.contextCompactedPlain', { before: tokenShort(before), after: tokenShort(after) })
+      : t('notice.contextCompactedShort');
+    return notice.manual ? t('notice.contextCompactedManual', { detail }) : detail;
+  }
+  return '';
+}
+
+/** 与终端 fmtCompactTokens 同一口径：<1k 整数、<10k 一位小数 k、≥100k 用 M。 */
+function tokenShort(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '?';
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
+  return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+}
+
+function addNotice(notice: StreamNotice): void {
+  const text = noticeText(notice);
+  if (!text) return;
+  const block = document.createElement('div');
+  block.className = 'thread-notice';
+  block.dataset.notice = JSON.stringify(notice);
+  block.textContent = text;
+  emptyState.classList.add('hidden');
+  conversation.appendChild(block);
+  if (isAtBottom()) smartScrollToBottom(true);
+}
+
+/** 切语言后就地重算会话流里的系统提示行（结构留在 data-notice，不重新落盘）。 */
+function relabelNotices(): void {
+  for (const block of Array.from(conversation.querySelectorAll<HTMLElement>('.thread-notice'))) {
+    const raw = block.dataset.notice;
+    if (!raw) continue;
+    try { block.textContent = noticeText(JSON.parse(raw) as StreamNotice); } catch { /* 坏数据保持原样 */ }
+  }
+}
+
 function selectedProject(): Project | undefined { return state?.projects.find((project) => project.id === state?.selectedProjectId); }
 function selectedTask(): Task | undefined { return state?.tasks.find((task) => task.id === state?.selectedTaskId); }
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]!)); }
@@ -1001,7 +1060,7 @@ function timeAgo(iso: string): string {
 /** 任务按钮只绑定一次：结构重排时保留节点，不能在每次状态通知时重复绑定或替换它们。 */
 const wiredTaskOpenButtons = new WeakSet<HTMLButtonElement>();
 const wiredTaskMenuButtons = new WeakSet<HTMLButtonElement>();
-const wiredHistoryButtons = new WeakSet<HTMLButtonElement>();
+const wiredMoreButtons = new WeakSet<HTMLButtonElement>();
 let taskListStructure = '';
 
 /**
@@ -1088,54 +1147,109 @@ async function refreshSpaceSessions(): Promise<void> {
   renderTasks();
 }
 
-/** 各空间最近一次的内联拆分结果；历史会话列表按它剔除已内联/已接管的会话，避免重复。 */
-const spaceSplits = new Map<string, SpaceSplit>();
+/**
+ * 哪些空间的「更多 (N)」当前是展开的。放模块级而不是 DOM 上：侧栏重建会重铺模板，
+ * 展开态不能因为一次状态刷新就弹回去。
+ */
+const openMoreProjects = new Set<string>();
+
+/**
+ * 展开「更多」时从磁盘取回的全量会话（每个空间只取一次）。
+ *
+ * 首屏只有每空间最近 20 条的批量快照（spaceSessions），展开区的会话可能不全；真要找旧
+ * 会话时才去磁盘取一次全量（一个空间几百条）。取回后按空间缓存，侧栏重建直接复用，
+ * 保证「展开一次之后，随便状态怎么刷新列表都还在」。
+ */
+const moreSessions = new Map<string, ProjectSession[]>();
+
+/**
+ * 取某空间的全量会话并重绘侧栏（已取过就直接返回）。
+ *
+ * 只在「展开更多」和「新会话落盘导致缓存失效」两处调用 —— 后者必须真的重取，
+ * 否则用户盯着展开的列表时新会话永远不会出现。
+ */
+async function loadMoreSessions(projectId: string): Promise<void> {
+  if (moreSessions.has(projectId)) return;
+  try {
+    moreSessions.set(projectId, await window.mocodeWork.projectSessions(projectId));
+  } catch (error) {
+    console.error('[sidebar] project sessions', error);
+    moreSessions.set(projectId, []);
+  }
+  renderTasks();
+}
 
 /** 空间集合或会话数变了就重取一次缓存（首次启动也走这条路）。 */
 function syncSpaceSessionCache(): void {
   const key = (state?.projects ?? []).map((project) => `${project.id}:${project.sessionCount ?? 0}`).join('|');
   if (key === spaceSessionsKey) return;
   spaceSessionsKey = key;
+  // 新会话落盘后，展开「更多」时取回的那份全量已经过时：丢掉并就地重取正在展开的空间，
+  // 免得用户盯着列表时新会话一直不出现。
+  moreSessions.clear();
+  for (const projectId of openMoreProjects) void loadMoreSessions(projectId);
   void refreshSpaceSessions();
+}
+
+/**
+ * 侧栏排序：**只有运行中（running / waiting）的任务排在前面**，其余一律按
+ * 「最近一次用户消息」倒序。
+ *
+ * 曾经的实现是纯 `updatedAt` 倒序，于是「点开一条历史会话」= 接管 = 以 now 建任务，
+ * 只是看一眼就把一条几周前的旧会话顶到正在跑的任务上面。现在：
+ *   · 置顶只由运行状态决定（时间再新也压不过它）；
+ *   · 接管沿用会话原有时间（见 main.ts 的 adopt-session），浏览不再改排序。
+ */
+function byActiveThenUpdatedDesc(left: Task, right: Task): number {
+  const leftActive = isActiveTaskStatus(left.status);
+  const rightActive = isActiveTaskStatus(right.status);
+  if (leftActive !== rightActive) return leftActive ? -1 : 1;
+  return right.updatedAt.localeCompare(left.updatedAt);
 }
 
 function renderTasks(): void {
   const current = state; if (!current) return;
-  const byUpdatedDesc = (left: Task, right: Task) => right.updatedAt.localeCompare(left.updatedAt);
+  const byUpdatedDesc = byActiveThenUpdatedDesc;
   // 普通任务：projectId 为空，平铺在「任务」分组下；加入项目文件夹的任务归在「空间」分组对应文件夹下
   const normalTasks = current.tasks.filter((task) => !task.projectId).sort(byUpdatedDesc);
   const spaces = current.projects.map((project) => ({
     project,
     tasks: current.tasks.filter((task) => task.projectId === project.id).sort(byUpdatedDesc),
   }));
-  // 空间内联区 = 任务 + 终端会话按时间混排（规则见 space-entries.ts）。
-  // 混排在渲染时现算，但会话本体来自缓存，所以结构签名里必须带上「内联了哪几条会话」，
-  // 否则缓存晚一步到达时侧栏不会重建，用户看到的内联区就停在「只有任务」。
-  const splits = new Map(spaces.map(({ project, tasks }) => [
-    project.id,
-    splitSpaceEntries(tasks, spaceSessions.get(project.id) ?? []),
-  ]));
-  spaceSplits.clear();
-  for (const [projectId, split] of splits) spaceSplits.set(projectId, split);
-  // 「历史会话 (N)」的 N = 还没内联、也还没被接管成任务的会话数。
-  // 会话总数以 project.sessionCount（磁盘真实条数）为准，缓存只取了最近 20 条，
-  // 所以不能拿缓存长度去减，否则大空间会显示成「历史会话 (6)」。
-  const historyRemaining = (project: Project, tasks: readonly Task[]): number => {
-    const split = splits.get(project.id);
-    const inlineSessions = split ? split.inline.filter((entry) => entry.kind === 'session').length : 0;
-    const adopted = new Set(tasks.filter((task) => task.sessionId).map((task) => task.sessionId!)).size;
-    return Math.max(0, (project.sessionCount ?? 0) - inlineSessions - adopted);
+  // 空间内联区与「更多」展开区 = 任务 + 终端会话按时间混排（规则见 space-entries.ts）。
+  // 会话池 = 批量快照（每空间最近 20 条）+ 展开「更多」时从磁盘取回的全量。
+  const sessionPool = (projectId: string): ProjectSession[] => {
+    const pool = new Map((spaceSessions.get(projectId) ?? []).map((session) => [session.id, session]));
+    for (const session of moreSessions.get(projectId) ?? []) pool.set(session.id, session);
+    return [...pool.values()];
   };
-  // 只有增删、排序、归属变化才需要重建分组。状态、选中、标题变化走原地绘制。
+  const spaceViews = new Map(spaces.map(({ project, tasks }) => {
+    const split = splitSpaceEntries(tasks, sessionPool(project.id));
+    const overflowTasks = split.overflow.filter((entry) => entry.kind === 'task').length;
+    // 会话总数以 project.sessionCount（磁盘真实条数）为准：批量快照只取最近 20 条，
+    // 拿快照长度去减会在大空间里把「更多 (282)」显示成「更多 (6)」。
+    const overflowSessions = moreSessions.has(project.id)
+      ? split.overflow.filter((entry) => entry.kind === 'session').length
+      : Math.max(0, (project.sessionCount ?? 0)
+        - split.inline.filter((entry) => entry.kind === 'session').length
+        - new Set(tasks.filter((task) => task.sessionId).map((task) => task.sessionId!)).size);
+    return [project.id, { split, total: overflowTasks + overflowSessions }] as const;
+  }));
+  // 只有增删、排序、归属、展开区内容变化才需要重建分组。状态、选中、标题变化走原地绘制。
   const structure = JSON.stringify([
     getLang(),
     normalTasks.map((task) => task.id),
-    spaces.map(({ project, tasks }) => [
-      project.id,
-      tasks.map((task) => task.id),
-      splits.get(project.id)?.inline.map((entry) => `${entry.kind}:${entry.id}`) ?? [],
-      historyRemaining(project, tasks),
-    ]),
+    spaces.map(({ project, tasks }) => {
+      const view = spaceViews.get(project.id)!;
+      return [
+        project.id,
+        tasks.map((task) => task.id),
+        view.split.inline.map((entry) => `${entry.kind}:${entry.id}`),
+        // 展开区的顺序与计数同源：会话池一变（新会话落盘 / 全量取回）就要重建。
+        view.split.overflow.map((entry) => `${entry.kind}:${entry.id}`),
+        view.total,
+      ];
+    }),
   ]);
   // 「谁在等我」只由 attention.ts 判定一次（侧栏 / 标题栏 / 主进程通知同口径）。
   const waitingByProject = pendingByProject(current.tasks);
@@ -1166,11 +1280,12 @@ function renderTasks(): void {
       projectMenu.title = t('sidebar.moreActions');
       projectMenu.setAttribute('aria-label', t('sidebar.moreActionsFor', { name: project.name }));
     }
-    const history = heading.parentElement?.querySelector<HTMLElement>('.history-toggle-label');
-    const projectTasks = current.tasks.filter((task) => task.projectId === project.id);
-    const remaining = historyRemaining(project, projectTasks);
-    const historyLabel = remaining > 0 ? t('sidebar.historySessions', { n: remaining }) : t('sidebar.historySessionsEmpty');
-    if (history && history.textContent !== historyLabel) history.textContent = historyLabel;
+    const moreLabel = heading.parentElement?.querySelector<HTMLElement>('.task-more-label');
+    const view = spaceViews.get(project.id);
+    if (moreLabel && view) {
+      const label = t('sidebar.moreItems', { n: view.total });
+      if (moreLabel.textContent !== label) moreLabel.textContent = label;
+    }
   };
   const existingItems = new Map<string, HTMLElement>();
   taskList.querySelectorAll<HTMLElement>('.task-item[data-task-id]').forEach((item) => {
@@ -1210,24 +1325,16 @@ function renderTasks(): void {
    */
   const spaceSessionItemHtml = (projectId: string, session: ProjectSession): string => {
     const title = (session.firstUser || session.id).replace(/\s+/g, ' ').slice(0, 80);
-    return `<div class="task-item session-item" data-session-id="${escapeHtml(session.id)}"><button class="task-open" data-adopt="${escapeHtml(session.id)}" data-adopt-project="${projectId}" title="${escapeHtml(`${session.id} · ${session.model}`)}"><span class="task-kind">${icon('branch')}</span><span class="task-title">${escapeHtml(title)}</span><span class="task-meta"><small>${timeAgo(session.createdAt)}</small></span></button></div>`;
+    // 时间显示与排序键同源（lastActiveAt 优先）：否则列表按「最后活动」排序，却显示成
+    // 「三个月前」——用户会读成排序坏了。
+    const at = session.lastActiveAt || session.createdAt;
+    return `<div class="task-item session-item" data-session-id="${escapeHtml(session.id)}"><button class="task-open" data-adopt="${escapeHtml(session.id)}" data-adopt-project="${projectId}" title="${escapeHtml(`${session.id} · ${session.model}`)}"><span class="task-kind">${icon('branch')}</span><span class="task-title">${escapeHtml(title)}</span><span class="task-meta"><small>${timeAgo(at)}</small></span></button></div>`;
   };
 
   const tasksCollapsed = collapsedSections.has('tasks');
   const spacesCollapsed = collapsedSections.has('spaces');
   const sectionHeading = (key: string, title: string, count: number, collapsed: boolean, action?: { kind: string; title: string; label: string }): string =>
     `<div class="sidebar-group-heading" data-toggle-section="${key}" title="${t('sidebar.toggleSection')}" aria-expanded="${!collapsed}"><span class="sidebar-group-title">${title}</span><span class="sidebar-group-count">(${count})</span><span class="sidebar-group-chevron">${icon(collapsed ? 'chevron-right' : 'chevron-down')}</span>${action ? `<button class="sidebar-group-action" data-group-action="${action.kind}" title="${action.title}" aria-label="${action.title}">${icon(action.label)}</button>` : ''}</div>`;
-
-  const existingHistories = new Map<string, HTMLElement>();
-  taskList.querySelectorAll<HTMLElement>('.project-history').forEach((history) => {
-    const projectId = history.querySelector<HTMLElement>('[data-history]')?.dataset.history;
-    if (projectId) existingHistories.set(projectId, history);
-  });
-  const expandedMoreProjects = new Set<string>();
-  taskList.querySelectorAll<HTMLElement>('[data-more-tasks]').forEach((button) => {
-    const list = button.parentElement?.querySelector('.task-more-list');
-    if (list && !list.classList.contains('hidden') && button.dataset.moreTasks) expandedMoreProjects.add(button.dataset.moreTasks);
-  });
 
   taskList.innerHTML = `<div class="sidebar-group ${tasksCollapsed ? 'collapsed' : ''}">
   ${sectionHeading('tasks', t('sidebar.tasks'), normalTasks.length, tasksCollapsed, { kind: 'new-task', title: t('sidebar.newTaskNoSpace'), label: 'plus' })}
@@ -1248,30 +1355,29 @@ function renderTasks(): void {
     <span class="project-group-actions"><button class="project-menu-btn icon-button-square" data-new-task-project="${projectId}" title="${t('sidebar.newTaskInSpace')}" aria-label="${t('sidebar.newTaskInProject', { name: escapeHtml(project.name) })}">${icon('plus')}</button><button class="project-menu-btn icon-button-square" data-project-menu="${projectId}" title="${t('sidebar.moreActions')}" aria-label="${t('sidebar.moreActionsFor', { name: escapeHtml(project.name) })}">${icon('more')}</button></span>
   </div>
   <div class="project-group-tasks">${(() => {
-    const split = splits.get(project.id)!;
-    const inlineEntries = split.inline;
+    const view = spaceViews.get(project.id)!;
+    const split = view.split;
     const taskById = new Map(tasks.map((task) => [task.id, task]));
-    const sessionById = new Map((spaceSessions.get(project.id) ?? []).map((session) => [session.id, session]));
+    const sessionById = new Map(sessionPool(project.id).map((session) => [session.id, session]));
     // 内联区 = 任务与会话按时间混排的前 6 条（见 space-entries.ts）。
-    // 剩余任务仍按「还有 N 个任务」折叠；剩余会话留在下方的历史会话里。
-    const rows = inlineEntries.map((entry) => {
+    // 内联之后的条目全收进「更多 (N)」—— 不再分成「还有 N 个任务」与「历史会话」两块。
+    const rowHtml = (entry: SpaceEntry): string => {
       if (entry.kind === 'task') {
         const task = taskById.get(entry.id);
         return task ? taskItemHtml(task) : '';
       }
       const session = sessionById.get(entry.id);
       return session ? spaceSessionItemHtml(project.id, session) : '';
-    }).join('');
+    };
+    const rows = split.inline.map(rowHtml).join('');
     const listHtml = rows || `<p class="empty-tasks">${t('sidebar.emptyTasks')}</p>`;
-    const hiddenTasks = split.hiddenTaskIds
-      .map((taskId) => taskById.get(taskId))
-      .filter((task): task is Task => !!task);
-    const moreHtml = hiddenTasks.length > 0
-      ? `<button class="task-more" data-more-tasks="${projectId}" data-more-count="${hiddenTasks.length}"><span class="task-more-label">${t('sidebar.moreTasks', { n: hiddenTasks.length })}</span><span class="task-more-chevron">${icon('chevron-down')}</span></button><div class="task-more-list hidden">${hiddenTasks.map(taskItemHtml).join('')}</div>`
+    // 展开态由模块级 openMoreProjects 决定，侧栏重建后列表仍保持展开。
+    const isOpen = openMoreProjects.has(project.id);
+    const moreHtml = view.total > 0
+      ? `<button class="task-more ${isOpen ? 'open' : ''}" data-more-tasks="${projectId}" data-more-count="${view.total}"><span class="task-more-label">${t('sidebar.moreItems', { n: view.total })}</span><span class="task-more-chevron">${icon(isOpen ? 'chevron-up' : 'chevron-down')}</span></button><div class="task-more-list ${isOpen ? '' : 'hidden'}">${split.overflow.map(rowHtml).join('')}</div>`
       : '';
     return listHtml + moreHtml;
   })()}</div>
-  <div class="project-history"><button class="history-toggle" data-history="${projectId}"><span class="history-toggle-icon">${icon('branch')}</span><span class="history-toggle-label">${historyRemaining(project, tasks) > 0 ? t('sidebar.historySessions', { n: historyRemaining(project, tasks) }) : t('sidebar.historySessionsEmpty')}</span><span class="history-toggle-chevron">${icon('chevron-down')}</span></button><div class="history-list hidden"></div></div>
 </div>`;
   }).join('')}</div>
 </div>`;
@@ -1284,18 +1390,6 @@ function renderTasks(): void {
     if (item !== placeholder) placeholder.replaceWith(item);
     if (task) paintTaskItem(item, task, current);
   });
-  taskList.querySelectorAll<HTMLElement>('.project-history').forEach((placeholder) => {
-    const projectId = placeholder.querySelector<HTMLElement>('[data-history]')?.dataset.history ?? '';
-    const existing = existingHistories.get(projectId);
-    if (existing) placeholder.replaceWith(existing);
-  });
-  for (const projectId of expandedMoreProjects) {
-    const button = taskList.querySelector<HTMLButtonElement>(`[data-more-tasks="${CSS.escape(projectId)}"]`);
-    const list = button?.parentElement?.querySelector<HTMLElement>('.task-more-list');
-    list?.classList.remove('hidden');
-    const chevron = button?.querySelector<HTMLElement>('.task-more-chevron');
-    if (chevron) chevron.innerHTML = icon('chevron-up');
-  }
   taskList.querySelectorAll<HTMLElement>('[data-toggle-project]').forEach((heading) => {
     const project = current.projects.find((item) => item.id === heading.dataset.toggleProject);
     if (project) paintProject(heading, project);
@@ -1416,70 +1510,37 @@ function renderTasks(): void {
     void startNewTask(button.dataset.newTaskProject!);
   }));
 
-  // 「还有 N 个任务」：空间任务超过 6 条时的展开/折叠。剩余的已渲染进 .task-more-list，纯切换显隐。
-  taskList.querySelectorAll<HTMLButtonElement>('[data-more-tasks]').forEach((button) =>
-    button.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const box = button.parentElement?.querySelector<HTMLElement>('.task-more-list');
-      if (!box) return;
-      const isHidden = box.classList.contains('hidden');
-      box.classList.toggle('hidden', !isHidden);
-      const chevron = button.querySelector<HTMLElement>('.task-more-chevron');
-      if (chevron) chevron.innerHTML = icon(isHidden ? 'chevron-up' : 'chevron-down');
-    }),
-  );
-
   /**
-   * 空间下的「历史会话」折叠区：展开时才向主进程要列表（一次 readdir + 少量 session.json 头）。
+   * 空间下的「更多 (N)」：内联 6 条之后的任务 + 终端历史会话，一份按时间混排的列表。
    *
-   * 这些是 mocode 终端在该目录留下的会话，与 work-app 的任务是两套模型；点「接管」会
-   * 在该空间下建一个绑定该 sessionId 的任务，发第一句时 host 用 prepareSession 续上同一会话。
+   * 首屏那份列表来自每空间最近 20 条的批量快照，可能不全；第一次展开时去磁盘取一次
+   * 全量（一个空间几百条，readdir + 少量 session.json 头），取回后按空间缓存，
+   * 之后侧栏怎么重建都用这份缓存 —— 展开一次就一直在，直到 app 重启。
    */
-  taskList.querySelectorAll<HTMLButtonElement>('[data-history]').forEach((button) => {
-    if (wiredHistoryButtons.has(button)) return;
-    wiredHistoryButtons.add(button);
+  taskList.querySelectorAll<HTMLButtonElement>('[data-more-tasks]').forEach((button) => {
+    if (wiredMoreButtons.has(button)) return;
+    wiredMoreButtons.add(button);
     button.addEventListener('click', async (event) => {
       event.stopPropagation();
-      const projectId = button.dataset.history ?? '';
-      const box = button.parentElement?.querySelector<HTMLElement>('.history-list');
+      const projectId = button.dataset.moreTasks ?? '';
+      const box = button.parentElement?.querySelector<HTMLElement>('.task-more-list');
       if (!box) return;
-      if (!box.classList.contains('hidden')) {
-        box.classList.add('hidden');
-        button.classList.remove('open');
+      const opening = box.classList.contains('hidden');
+      box.classList.toggle('hidden', !opening);
+      button.classList.toggle('open', opening);
+      const chevron = button.querySelector<HTMLElement>('.task-more-chevron');
+      if (chevron) chevron.innerHTML = icon(opening ? 'chevron-up' : 'chevron-down');
+      if (!opening) {
+        openMoreProjects.delete(projectId);
         return;
       }
-      box.classList.remove('hidden');
-      button.classList.add('open');
-      box.innerHTML = `<p class="empty-tasks">${t('sidebar.historyLoading')}</p>`;
-      const sessions = await window.mocodeWork.projectSessions(projectId);
-      // 两类会话都不该再出现在历史里，口径与标题的「历史会话 (N)」严格同源：
-      //   · 内联区已经展示过的（space-entries.ts 的 inline）；
-      //   · 已经被某个任务接管的 —— 它以任务身份存在，再列一遍就是同一个会话两个入口。
-      const inlineIds = new Set(
-        (spaceSplits.get(projectId)?.inline ?? [])
-          .filter((entry) => entry.kind === 'session')
-          .map((entry) => entry.id),
-      );
-      for (const task of state?.tasks ?? []) {
-        if (task.projectId === projectId && task.sessionId) inlineIds.add(task.sessionId);
-      }
-      const rest = sessions.filter((session) => !inlineIds.has(session.id));
-      if (!rest.length) {
-        box.innerHTML = `<p class="empty-tasks">${t('sidebar.historyEmpty')}</p>`;
-        return;
-      }
-      box.innerHTML = rest
-        .map((session) => {
-          const title = (session.firstUser || session.id).replace(/\s+/g, ' ').slice(0, 60);
-          return `<button class="history-item" data-adopt="${escapeHtml(session.id)}" data-adopt-project="${escapeHtml(projectId)}" title="${escapeHtml(`${session.id} · ${session.model}`)}"><span class="history-item-title">${escapeHtml(title)}</span><span class="history-item-meta">${timeAgo(session.createdAt)}</span></button>`;
-        })
-        .join('');
-      box.querySelectorAll<HTMLButtonElement>('[data-adopt]').forEach((item) =>
-        item.addEventListener('click', (event) => {
-          event.stopPropagation();
-          void adoptSessionFrom(item.dataset.adoptProject ?? '', item.dataset.adopt ?? '');
-        }),
-      );
+      openMoreProjects.add(projectId);
+      if (moreSessions.has(projectId)) return;
+      // 取全量期间把列表压暗（`.loading`）：大空间 readdir + 读几十个 session.json 头要几十毫秒，
+      // 不压暗会看着像点了没反应。取回后 renderTasks 会按同一份 openMoreProjects 重铺并保持展开。
+      box.classList.add('loading');
+      await loadMoreSessions(projectId);
+      box.classList.remove('loading');
     });
   });
 
@@ -3925,12 +3986,43 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       else notifyBackground(taskId, t('status.completed'));
       break;
     }
+    case 'context_compacting': {
+      // 自动压缩要几十秒（一次完整的 LLM 摘要），不给状态行就是假死。
+      applyStatus(stream, viewing, busyStatus('compacting', 'status.compacting'));
+      break;
+    }
+    case 'context_compacting_done':
+      // 压缩失败 / 被取消 / 没压成：只收状态行，绝不在会话流里留「已压缩」。
+      applyStatus(stream, viewing, busyStatus('thinking', 'status.thinking'));
+      break;
+    case 'context_compacted': {
+      // 自动压缩的**唯一可见痕迹**：终端那边有「● 压缩上下文 205k → 29k」那行，
+      // GUI 以前什么都没有，用户只会发现上下文百分比莫名其妙掉了一截。
+      // 这里在会话流里留一条常驻系统行（切任务 / 重启后由恢复日志重放），并刷新百分比。
+      const notice: StreamNotice = {
+        type: 'contextCompacted',
+        ...(typeof payload.beforeTokens === 'number' ? { beforeTokens: payload.beforeTokens } : {}),
+        ...(typeof payload.afterTokens === 'number' ? { afterTokens: payload.afterTokens } : {}),
+        ...(typeof payload.contextWindow === 'number' ? { windowTokens: payload.contextWindow } : {}),
+        ...(payload.manual === true ? { manual: true } : {}),
+        ...(payload.summarized === true ? { summarized: true } : {}),
+      };
+      stream.items.push({ kind: 'notice', notice });
+      const usage = parseContextUsage(payload.contextUsage);
+      if (usage) stream.contextUsage = usage;
+      applyStatus(stream, viewing, busyStatus('thinking', 'status.thinking'));
+      if (viewing) {
+        addNotice(notice);
+        if (usage) updateContextUsage(usage);
+      } else {
+        notifyBackground(taskId, t('notice.contextCompactedShort'));
+      }
+      break;
+    }
     case 'compact_done': {
+      // 手动「压缩」按钮的回执：留痕由上面的 context_compacted 负责（同一次压缩两条事件，
+      // 前者是会话流里的常驻系统行，这里只管百分比与状态），不再额外弹 toast。
       stream.contextUsage = parseContextUsage(payload.contextUsage);
-      const pct = stream.contextUsage?.percent ?? null;
-      const before = typeof payload.beforeTokens === 'number' ? Math.round(payload.beforeTokens / 1000) : '?';
-      const after = typeof payload.afterTokens === 'number' ? Math.round(payload.afterTokens / 1000) : '?';
-      showToast('success', t('toast.compactDone', { before: before, after: after, pct: pct !== null ? ` (${pct}%)` : '' }), 4000);
       // 压缩不改变任务本身的终态,收尾回落到任务记录对应的状态。
       applyStatus(stream, viewing, statusFromTask(selectedTask()));
       if (viewing) updateContextUsage(stream.contextUsage);
@@ -4051,6 +4143,9 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
         } else if (item.kind === 'error') {
           if (!currentTurn()) startAssistantTurn();
           showTurnError(item.message);
+        } else if (item.kind === 'notice') {
+          // 系统提示行挂在会话流上、不挂助手消息：恢复现场时顺序与实时一致。
+          addNotice(item.notice);
         }
       }
     });
@@ -4081,7 +4176,8 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   attachments = []; renderAttachments();
   // 排队面板跟着切换:每个任务一份队列,切走就不该再显示上一个任务的待发消息。
   refreshQueuePanel();
-  emptyState.classList.toggle('hidden', conversation.querySelector('.message') != null);
+  // 系统提示行（.thread-notice）也算会话内容：只有压缩记录时不该显示空态。
+  emptyState.classList.toggle('hidden', conversation.querySelector('.message') != null || conversation.querySelector('.thread-notice') != null);
   promptInput.focus();
 }
 

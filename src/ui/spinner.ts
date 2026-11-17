@@ -1,5 +1,6 @@
 import { stdout } from 'node:process';
 import { ui } from './theme.js';
+import { isStdoutMuted } from './output-sink.js';
 
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -31,7 +32,7 @@ export class Spinner {
     this.stop();
     this.msg = msg;
     if (!ui.isTTY) {
-      stdout.write(`${ui.dim}${msg}…${ui.reset}\n`);
+      if (!isStdoutMuted()) stdout.write(`${ui.dim}${msg}…${ui.reset}\n`);
       return;
     }
     activeSpinner = this; // TTY 路径:登记为当前可暂停 spinner(介入面板进入前 pauseCurrent 停转)

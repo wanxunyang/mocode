@@ -1,7 +1,7 @@
 import type OpenAI from 'openai';
 import type { ChatMessage, ChatUsage, ToolCallRef } from '../llm/index.js';
 import type { PermissionCheckOptions } from '../permissions/index.js';
-import type { ContextState } from '../session/compact.js';
+import type { CompactProgressEvent, ContextState } from '../session/compact.js';
 import type { AgentTraceEvent, AgentTurnTrace } from '../session/trace.js';
 import type { ToolOutcome } from '../tools/registry.js';
 import type { ToolPolicyController } from '../tools/policy.js';
@@ -26,6 +26,14 @@ export interface AgentHooks {
    * 而不是并入压缩行之前那个仍未 flush 的 currentBatch。
    */
   onHistoryRebuilt?: () => void;
+  /**
+   * 上下文压缩的生命周期(start → done),自动路径与手动 /compact 都经此上报。
+   *
+   * 终端此刻已有自己的「压缩中」spinner 与压缩行(contentWrite),这个钩子是给
+   * 无 layout 的宿主(stdio host → work-app)用的:它们看不到 layout 输出,
+   * 没有这条钩子就只能靠上下文百分比莫名其妙地掉一截去猜发生过压缩。
+   */
+  onCompactProgress?: (event: CompactProgressEvent) => void;
   onLiveUsage?: (usage: {
     promptTokens: number;
     completionTokens: number;

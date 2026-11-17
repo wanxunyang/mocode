@@ -29,7 +29,9 @@ import {
   warmUpRecognizer,
   type VoiceDownloadProgress,
 } from './voice/asr.js';
-import { SESSION_DIR_RE, countProjectSessions, isNoiseWorkspace, listProjectSessions, readSessionHistory, readWorkspaceRegistry } from './workspace-sync.js';
+import { SESSION_DIR_RE, countProjectSessions, isNoiseWorkspace, listProjectSessions, readSessionHistory, readWorkspaceRegistry, sessionLastActiveAt } from './workspace-sync.js';
+// 侧栏排序键的对账规则（纯函数）：修复历史上被写成 now 的 updatedAt。
+import { planSortKeyRepair } from './task-order.js';
 import {
   deleteMcpServer,
   deleteSkill,
@@ -279,6 +281,9 @@ const RECOVERED_EVENTS = new Set([
   'run_started', 'text_delta', 'tool_started', 'tool_output', 'tool_completed',
   'live_usage', 'no_reply', 'max_steps', 'approval_requested', 'run_aborted',
   'run_completed', 'run_failed', 'host_exit',
+  // 压缩留下的系统行是**对话内容**：切走再回来、重启后打开会话都必须还在。
+  // 只持久化完成事件；context_compacting 是纯瞬时状态，恢复时没有意义。
+  'context_compacted',
 ]);
 
 /** 持久化与 renderer 相同的事件语义；面板回执不属于任务对话，绝不混进恢复日志。 */
@@ -820,6 +825,34 @@ async function loadState(): Promise<StoredState> {
 function saveState(): void {
   mkdirSync(path.dirname(statePath()), { recursive: true });
   writeFileSync(statePath(), JSON.stringify(state, null, 2), 'utf8');
+}
+
+/**
+ * 启动时对账侧栏排序键（`updatedAt`）。
+ *
+ * 旧版接管历史会话一律把 `updatedAt` 写成 `now`，真机上还成批把老任务写成了同一个
+ * 亚秒窗口，结果是「点开看一眼」就把几周前的会话顶到正在跑的任务上面、再也找不到自己
+ * 在找的那条。规则本身在 task-order.ts（纯函数，可单测），这里只负责取磁盘证据并落盘：
+ * 会话的最后活动时间以 `session.json` 的 mtime 为准，只在「明显对不上」且任务已终态时回退。
+ *
+ * 返回修正条数（0 表示无需落盘）。
+ */
+function repairTaskSortKeys(): number {
+  const repairs = planSortKeyRepair(state.tasks, (task) => {
+    if (!task.sessionId) return null;
+    const record = taskById(task.id);
+    if (!record) return null;
+    const project = workspaceForTask(record);
+    if (!project) return null;
+    try { return sessionLastActiveAt(project.root, task.sessionId); } catch { return null; }
+  });
+  if (!repairs.length) return 0;
+  for (const repair of repairs) {
+    const task = taskById(repair.taskId);
+    if (task) task.updatedAt = repair.to;
+  }
+  saveState();
+  return repairs.length;
 }
 function selectedProject(): Project { return state.projects.find((item) => item.id === state.selectedProjectId) ?? state.projects[0]; }
 function taskById(id?: string): TaskRecord | undefined { return state.tasks.find((item) => item.id === id); }
@@ -2040,7 +2073,11 @@ function installIpc(): void {
       : (meta?.firstUser?.replace(/\s+/g, ' ').trim().slice(0, 60) || sessionId);
     const task: TaskRecord = {
       id: randomUUID(), projectId, title, status: 'completed',
-      createdAt: meta?.createdAt || now, updatedAt: now, changedFiles: [], sessionId,
+      // 排序键沿用该会话自己的最后活动时间，**不是 now**：接管只是「打开看一眼」，
+      // 用 now 会把一条几个月前的旧会话顶到正在跑的任务上面（用户报的就是这个）。
+      createdAt: meta?.createdAt || now,
+      updatedAt: meta?.lastActiveAt || meta?.createdAt || now,
+      changedFiles: [], sessionId,
     };
     state.tasks.unshift(task);
     state.selectedTaskId = task.id;
@@ -2766,6 +2803,9 @@ app.whenReady().then(async () => {
   // 隐藏菜单栏 ≠ 卸载应用菜单：后者会带走标准复制/粘贴快捷键与菜单行为。
   Menu.setApplicationMenu(appMenu);
   state = await loadState();
+  // 存量数据修正：旧版接管历史会话时把 updatedAt 写成 now（真机上还成批写坏），
+  // 于是「点开看一眼」的旧会话会长期霸占置顶区。启动时用会话文件的 mtime 对账一次。
+  try { repairTaskSortKeys(); } catch { /* 修不了就按原数据渲染，排序本身已不再依赖这次修正 */ }
   // 启动时先让 .active 预设覆盖 config 裸键 —— 必须在 agent 启动之前，
   // 否则 host 会带着 config 里那个可能已过时的 LLM_MODEL 启动。
   applyActivePreset();
