@@ -16,7 +16,9 @@ const assert = (condition: unknown, message: string): void => {
 const section = buildWorkDisciplineSection();
 assert(section.includes('Use your judgment'), 'discipline must delegate strategy to the agent');
 assert(section.includes('optional, not a completion gate'), 'validation must be optional');
-assert(section.includes('do not run broad test/build suites by default'), 'broad checks must not be automatic');
+assert(section.includes('do not run broad suites'), 'broad checks must not be automatic');
+assert(section.includes('Do not chain typecheck'), 'validation must not escalate into a command chain');
+assert(section.includes('small local edits'), 'small local edits must be exempt from validation');
 assert(section.includes('## When to ask instead of guess'), 'ask whitelist must stay in the discipline section');
 assert(!section.includes('MUST complete'), 'discipline must not force phases');
 assert(!section.includes('hard prerequisite'), 'discipline must not impose a verification gate');

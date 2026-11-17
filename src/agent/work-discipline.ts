@@ -26,8 +26,8 @@ const CORE_SECTION = `Use your judgment to choose the shortest reliable path fro
 - Inspect only the code and context needed for the next decision; do not gather evidence "just in case".
 - Make the smallest coherent change and avoid unrelated refactors.
 - Preserve existing behavior and public API compatibility unless the task explicitly requires a change.
-- Validation (typecheck/lint/build/test, or running the change) applies only to work that changes code or behavior. Decide whether it is useful based on risk, scope, available commands, and the user's request; it is never required for pure questions, explanations, or read-only analysis. It is optional, not a completion gate, and the user asking for an answer is not asking for verification.
-- When validation is useful, choose the smallest relevant check yourself; do not run broad test/build suites by default. Trivial, self-evidently correct edits (comments, docs, typo fixes) need no check either.
+- Validation (typecheck/lint/build/test, or running the change) is a cost you pay only when the change could plausibly break something a check would catch. Skip it for small local edits — one file, a few dozen lines, no public API/schema/config/default-behavior change, nothing else imports the touched symbol: reading the diff back is the whole verification there. It is never required for pure questions, explanations, or read-only analysis, and the user asking for an answer is not asking for verification.
+- When validation is useful, run ONE smallest relevant check, once: the owning package's typecheck, a single targeted test, or the affected entry point. Do not chain typecheck → lint → build → test, do not re-run a check that already passed on code you have not touched since, and do not run broad suites "to be safe". Comments, docs, formatting, and typo fixes need no check at all. It is optional, not a completion gate.
 - Re-read or rerun only when evidence is stale or the next edit depends on exact current content.
 - On failure, diagnose before retrying; after repeated identical failures, change approach.
 - Report honestly what you changed, what you checked, and anything left uncertain.
