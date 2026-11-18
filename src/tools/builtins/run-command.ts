@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import type { Readable } from 'node:stream';
+import { TextDecoder } from 'node:util';
 import { MAX_OUTPUT } from '../constants.js';
 import { getSandboxRoot, filterEnv, isCommandDenied, jailResolve } from '../../sandbox/index.js';
 import type { Tool, ToolOutcome } from '../types.js';
@@ -34,6 +36,20 @@ export function clampCommandTimeout(raw: unknown): number {
   return Math.min(Math.max(Math.trunc(value), MIN_COMMAND_TIMEOUT_MS), MAX_COMMAND_TIMEOUT_MS);
 }
 
+/** 无编码标记的二进制或混合输出仍可包含诊断，只追加提示，保留正文。 */
+function hasEncodingHint(text: string): boolean {
+  const sample = text.slice(0, 4000);
+  if (!sample) return false;
+  let nul = 0;
+  let replacement = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const code = sample.charCodeAt(i);
+    if (code === 0) nul++;
+    else if (code === 0xfffd) replacement++;
+  }
+  return nul / sample.length > 0.1 || replacement / sample.length > 0.05;
+}
+
 /** 有界采集：短输出逐字保留；超限后保留 head+tail，避免构建/测试错误只出现在尾部时被丢弃。 */
 class BoundedCommandOutput {
   private head = '';
@@ -50,10 +66,39 @@ class BoundedCommandOutput {
   }
 
   render(): string {
-    if (this.total <= MAX_OUTPUT) return this.head + this.tail;
-    const removed = this.total - MAX_OUTPUT;
-    return `${this.head}\n${t('command.outputTruncated', { count: removed })}\n${this.tail}`;
+    const body =
+      this.total <= MAX_OUTPUT
+        ? this.head + this.tail
+        : `${this.head}\n${t('command.outputTruncated', { count: this.total - MAX_OUTPUT })}\n${this.tail}`;
+    return hasEncodingHint(body) ? `${body}\n${t('command.encodingHint')}` : body;
   }
+}
+
+/** 每个管道自行识别 BOM，跨 chunk 保留不完整的字符。 */
+function readCommandStream(stream: Readable, append: (text: string) => void): void {
+  let decoder: TextDecoder | undefined;
+  let prefix: Buffer | undefined;
+  stream.on('data', (chunk: Buffer) => {
+    if (!chunk.length) return;
+    if (!decoder) {
+      if (prefix) chunk = Buffer.concat([prefix, chunk]);
+      if (chunk.length === 1 && (chunk[0] === 0xff || chunk[0] === 0xfe)) {
+        prefix = chunk;
+        return;
+      }
+      prefix = undefined;
+      let encoding = 'utf-8';
+      if (chunk[0] === 0xff && chunk[1] === 0xfe) encoding = 'utf-16le';
+      if (chunk[0] === 0xfe && chunk[1] === 0xff) encoding = 'utf-16be';
+      decoder = new TextDecoder(encoding);
+    }
+    const text = decoder.decode(chunk, { stream: true });
+    if (text) append(text);
+  });
+  stream.on('end', () => {
+    const tail = (decoder ?? new TextDecoder()).decode(prefix);
+    if (tail) append(tail);
+  });
 }
 
 export interface RawCommandResult {
@@ -146,8 +191,7 @@ export async function runCommandRaw(
     const onAbort = (): void => {
       terminate('aborted');
     };
-    const onChunk = (chunk: Buffer): void => {
-      const text = chunk.toString('utf8');
+    const onText = (text: string): void => {
       output.append(text);
       try {
         onOutput?.(text);
@@ -162,8 +206,8 @@ export async function runCommandRaw(
       terminate('timed_out');
     }, effectiveTimeout);
 
-    child.stdout.on('data', onChunk);
-    child.stderr.on('data', onChunk);
+    readCommandStream(child.stdout, onText);
+    readCommandStream(child.stderr, onText);
     child.on('error', (error) => {
       if (!pendingTermination) finish({ status: 'spawn_error', exitCode: null, output: error.message });
     });

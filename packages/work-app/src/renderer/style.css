@@ -472,7 +472,8 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .workspace:not(:has(> #empty-state:not(.hidden))) .empty-chips { display: none; }
 /* 开场尚未产生会话：计划仍可预先选择；压缩和上下文占比都还没有意义。 */
 .workspace:has(> #empty-state:not(.hidden)) #compact-button,
-.workspace:has(> #empty-state:not(.hidden)) #context-usage { display: none; }
+.workspace:has(> #empty-state:not(.hidden)) #context-usage,
+.workspace:has(> #empty-state:not(.hidden)) #token-usage { display: none; }
 
 /* 聚焦:主题色描边 + ring —— 这是"光标在哪"的唯一视觉线索,不加位移、不加粗。 */
 .composer:focus-within { border-color: var(--color-accent); box-shadow: 0 0 0 3px var(--color-accent-ring), var(--shadow-soft); }
@@ -514,6 +515,11 @@ textarea::placeholder { color: var(--text-subtle); }
 .context-usage { font-size: var(--text-2xs); font-family: var(--font-outlier); color: var(--text-subtle); padding: 5px var(--space-2xs); min-width: 30px; text-align: center; border-radius: var(--radius-sm); cursor: help; transition: color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out); flex-shrink: 0; white-space: nowrap; }
 .context-usage:hover, .context-usage:focus-visible { color: var(--text-strong); background: var(--surface-hover); }
 .context-usage.usage-high { color: var(--color-warn); font-weight: 500; }
+/* 输入卡下面那行 token 消耗：本轮实时 + 本会话累计。
+   颜色取 --text-default（比正文的 --text-strong 淡一层），不用 --text-subtle —— 这是要被读的数字，
+   不能淡到像占位符。等宽字体让数字随流式刷新时不左右抖。 */
+.token-usage { width: var(--composer-width); margin-top: var(--space-2xs); padding: 0 var(--space-md); color: var(--text-default); font-size: var(--text-2xs); font-family: var(--font-outlier); line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: auto; cursor: help; }
+.token-usage.hidden { display: none; }
 .context-usage-popover { position: fixed; z-index: var(--z-tooltip); width: min(320px, calc(100vw - 24px)); padding: 14px; border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text-default); box-shadow: var(--shadow-raised); pointer-events: none; animation: fade-in var(--dur-micro) var(--ease-out) both; }
 .context-usage-popover.hidden { display: none; }
 .context-usage-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-strong); font-size: var(--text-sm); font-weight: 500; }
@@ -888,6 +894,10 @@ textarea::placeholder { color: var(--text-subtle); }
    finalizeTurn 摘掉 is-streaming 时自动恢复,与 hover 的 22px 常驻高度接得上,不会跳变。 */
 .message.assistant.is-streaming { row-gap: 0; }
 .message.assistant.is-streaming > .message-actions { min-height: 0; }
+/* 被压缩提示行切断的前半轮（见 renderer.ts 的 sealTurn）：它不是一次完整回答，
+   没有复制 / 重新生成按钮，按钮行与行距都收掉，让它和普通段落一样紧贴提示行。 */
+.message.assistant.is-sealed { row-gap: 0; }
+.message.assistant.is-sealed > .message-actions { display: none; }
 /* 本轮一个字都还没吐(思考阶段):消息整块也不留底部 margin ——
    此时它内部只有头像 + "MoCode" 标签,再往下垫一层就和状态行拉开一大截空白。
    有正文或工具行之后这条不生效,间距交回 .message 的常规节奏。 */

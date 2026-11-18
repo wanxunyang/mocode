@@ -224,4 +224,75 @@ export function summarizeGlobalUsage(records: readonly GlobalUsageRecord[], days
     sessionCount: sessions.size,
     workspaceCount: wsMap.size,
   };
+}/**
+ * 单条会话的 token 累计（输入框下方那行「会话 xx」的唯一数据源）。
+ *
+ * 主读 `<工作区>/.mocode/sessions/<id>/usage.jsonl` —— work-app 的 host 子进程 cwd 就是
+ * 该工作区根，所以 GUI 与终端看到的是同一份账。
+ *
+ * 会话被 retention 归档后（默认 30 天未活动）目录会被 gzip 掉，usage.jsonl 随之消失；
+ * 这时退回全局账本按 sessionId 过滤 —— 账本里每行都带 sessionId（实时记账上线后的会话），
+ * 拿不全是诚实的降级，总比整行消失好。
+ */
+export interface SessionUsageTotals {
+  input: number;
+  output: number;
+  cached: number;
+  reasoning: number;
+  cacheCreation: number;
+  calls: number;
+  /** session = 会话自己的 usage.jsonl；ledger = 目录已归档，按全局账本汇总；none = 没有任何记录。 */
+  source: 'session' | 'ledger' | 'none';
+}
+
+function emptySessionTotals(): SessionUsageTotals {
+  return { input: 0, output: 0, cached: 0, reasoning: 0, cacheCreation: 0, calls: 0, source: 'none' };
+}
+
+/** 汇总某条会话的 token 消耗；会话不存在 / 还没跑过时 source=none。 */
+export function summarizeSessionUsage(workspaceRoot: string, sessionId: string): SessionUsageTotals {
+  if (!workspaceRoot || !sessionId) return emptySessionTotals();
+  const totals = emptySessionTotals();
+  let raw = '';
+  let found = false;
+  try {
+    raw = readFileSync(path.join(workspaceRoot, '.mocode', 'sessions', sessionId, 'usage.jsonl'), 'utf8');
+    found = true;
+  } catch {
+    // 目录已被归档 / 还没落过 usage：走账本回退。
+  }
+  if (found) {
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const row = JSON.parse(trimmed) as Record<string, unknown>;
+        // 行形状不合法就跳过：NaN 会污染整行显示。
+        if (typeof row.inputTokens !== 'number' || typeof row.outputTokens !== 'number') continue;
+        totals.input += row.inputTokens;
+        totals.output += row.outputTokens;
+        totals.cached += num(row.cachedTokens);
+        totals.reasoning += num(row.reasoningTokens);
+        totals.cacheCreation += num(row.cacheCreationTokens);
+        totals.calls++;
+      } catch {
+        // 坏行跳过
+      }
+    }
+    if (totals.calls > 0) totals.source = 'session';
+    return totals;
+  }
+  for (const rec of readGlobalUsage()) {
+    if (rec.sessionId !== sessionId) continue;
+    // 账本只记工作区路径；同一 sessionId 跨工作区重名几乎不可能，仍顺手核对一次。
+    if (rec.workspace && workspaceRoot && path.resolve(rec.workspace) !== path.resolve(workspaceRoot)) continue;
+    totals.input += num(rec.input);
+    totals.output += num(rec.output);
+    totals.cached += num(rec.cached);
+    totals.reasoning += num(rec.reasoning);
+    totals.cacheCreation += num(rec.cacheCreation);
+    totals.calls++;
+  }
+  if (totals.calls > 0) totals.source = 'ledger';
+  return totals;
 }

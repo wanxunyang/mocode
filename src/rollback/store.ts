@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import * as fsp from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
 import path from 'node:path';
 import { config } from '../config/index.js';
 import { MAX_SNAPSHOT_TURNS } from '../tools/constants.js';
@@ -98,7 +99,7 @@ export interface CurrentTurnMutationState {
 export type RollbackRootProvider = () => string;
 export type RollbackRootSource = string | RollbackRootProvider;
 
-const EXCLUDED_WORKSPACE_DIRS: readonly string[] = Object.freeze([
+const EXCLUDED_WORKSPACE_DIRS = new Set([
   '.git',
   '.hg',
   '.svn',
@@ -474,34 +475,47 @@ export class RollbackStore {
     if (changed) this.mutationVersion += 1;
   }
 
-  private isWorkspaceExcluded(full: string, sessionsRoot: string): boolean {
-    const base = path.basename(full).toLowerCase();
-    if (EXCLUDED_WORKSPACE_DIRS.includes(base)) return true;
-    return this.isInside(sessionsRoot, full);
-  }
-
   private async scanWorkspace(workspaceRoot: string, sessionsRoot: string): Promise<Map<string, StoredState>> {
     const entries = new Map<string, StoredState>();
     const nextCache = new Map<string, CachedContent>();
     const paths: string[] = [];
-
+    if (this.isInside(sessionsRoot, workspaceRoot)) {
+      this.contentCache.clear();
+      return entries;
+    }
+    const prefix = workspaceRoot.endsWith(path.sep) ? workspaceRoot : workspaceRoot + path.sep;
+    const sessionName = path.basename(sessionsRoot).toLowerCase();
+    const excluded = (name: string, rel: string): boolean => {
+      const lower = name.toLowerCase();
+      return (
+        EXCLUDED_WORKSPACE_DIRS.has(lower) ||
+        (lower === sessionName && path.relative(sessionsRoot, prefix + rel) === '')
+      );
+    };
+    const readDir = (rel: string): Promise<Dirent[]> =>
+      fsp.readdir(prefix + rel, { withFileTypes: true }).catch(() => []);
+    // 仅读取本次扫描的目录。预取兄弟目录，仍按原来的深度优先顺序消费，保留条目上限的语义。
+    const ahead = new Map<string, Promise<Dirent[]>>();
     const walk = async (dir: string): Promise<void> => {
-      if (paths.length >= CAPTURE_ENTRY_LIMIT) return;
-      let children;
-      try {
-        children = await fsp.readdir(dir, { withFileTypes: true });
-      } catch {
-        return;
+      const listing = ahead.get(dir) ?? readDir(dir);
+      ahead.delete(dir);
+      const children = await listing;
+      const parent = dir ? dir + path.sep : '';
+      for (const child of children) {
+        if (ahead.size >= SCAN_CONCURRENCY) break;
+        if (!child.isDirectory()) continue;
+        const rel = parent + child.name;
+        if (!excluded(child.name, rel)) ahead.set(rel, readDir(rel));
       }
       for (const child of children) {
         if (paths.length >= CAPTURE_ENTRY_LIMIT) return;
-        const full = path.join(dir, child.name);
-        if (this.isWorkspaceExcluded(full, sessionsRoot)) continue;
-        paths.push(full);
-        if (child.isDirectory()) await walk(full);
+        const rel = parent + child.name;
+        if (excluded(child.name, rel)) continue;
+        paths.push(rel);
+        if (child.isDirectory() && paths.length < CAPTURE_ENTRY_LIMIT) await walk(rel);
       }
     };
-    await walk(workspaceRoot);
+    await walk('');
 
     let budget = CAPTURE_TOTAL_LIMIT;
     let cursor = 0;
@@ -509,7 +523,8 @@ export class RollbackStore {
     let bytesSinceYield = 0;
     const worker = async (): Promise<void> => {
       while (cursor < paths.length) {
-        const full = paths[cursor++];
+        const rel = paths[cursor++];
+        const full = prefix + rel;
         if (++processed % YIELD_EVERY === 0 || bytesSinceYield >= YIELD_BYTES) {
           bytesSinceYield = 0;
           await this.yieldToEventLoop();
@@ -547,7 +562,7 @@ export class RollbackStore {
         } catch {
           state = { kind: 'missing' };
         }
-        if (state.kind !== 'missing') entries.set(this.toRel(workspaceRoot, full), state);
+        if (state.kind !== 'missing') entries.set(rel, state);
       }
     };
     await Promise.all(Array.from({ length: Math.min(SCAN_CONCURRENCY, Math.max(1, paths.length)) }, worker));

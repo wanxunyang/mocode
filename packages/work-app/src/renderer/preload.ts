@@ -99,6 +99,9 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   /** 「改动」面板里展开单个文件（与列表同一基准：HEAD）。 */
   taskChangeDiff: (payload: { taskId?: string; path: string }): Promise<{ ok: boolean; content?: string; truncated?: boolean; message?: string }> =>
     ipcRenderer.invoke('work:task-change-diff', payload),
+  /** 输入框下面那行「本会话」token 消耗：主进程直接读该会话的 usage.jsonl 汇总。 */
+  sessionUsage: (payload: { taskId?: string }): Promise<{ ok: boolean; usage: { input: number; output: number; cached: number; reasoning: number; cacheCreation: number; calls: number; source: 'session' | 'ledger' | 'none' } | null; message?: string }> =>
+    ipcRenderer.invoke('work:session-usage', payload),
   /** 「检查」面板：从 package.json 发现的校验命令（只读，点击后填进终端）。 */
   checks: (payload: { taskId?: string }): Promise<{ ok: boolean; packageManager?: 'npm' | 'pnpm' | 'yarn' | 'bun'; groups?: Array<{ label: string; dir: string; packageManager: 'npm' | 'pnpm' | 'yarn' | 'bun'; scripts: Array<{ name: string; command: string }> }>; message?: string }> =>
     ipcRenderer.invoke('work:checks', payload),

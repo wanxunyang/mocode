@@ -31,6 +31,7 @@ import {
 } from './tool-helpers.js';
 import { contextState, summarizeToolArguments } from '../session/index.js';
 import { createReadDedup } from '../tools/read-dedup.js';
+import { createTurnProgressGuard } from './progress-guard.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
 import { invalidateArtifacts, rehydrateArtifacts } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
@@ -90,6 +91,9 @@ export async function runAgentCoreLegacy(
   // `memory-recall-stats.json` 正常写入)。包一层执行出口而非逐处插桩,5 个调度分支
   // (只读并发 / 串行 / 资源锁 / 编排 / 兜底)自然全覆盖。
   const proactiveOn = isMemoryEnabled() && isProactiveEnabled();
+  // #convergence A:本轮的无进展观测器。与 readDedup 同属 turn scope——同一用户轮内
+  // 才有「你在原地打转」这个语义,跨轮谈不到。
+  const progressGuard = createTurnProgressGuard();
   const runToolWithProactive = async (
     name: string,
     argsRaw: string,
@@ -285,6 +289,8 @@ export async function runAgentCoreLegacy(
           readDedup,
           memoryRecall,
           liveUpdateReminder: hasLiveUserUpdates ? liveUpdateReminder : undefined,
+          // #convergence A:一次性提醒,取走即清空;未踩线时是 undefined。
+          noProgressReminder: progressGuard.takeReminder(),
           cacheState: modelCacheState,
           turnLifecycle,
           cancellationLifecycle,
@@ -386,6 +392,7 @@ export async function runAgentCoreLegacy(
                       break;
                     case 'trace_end': {
                       const { outcome, call } = event;
+                      progressGuard.record(call.name, event.argumentSummary.sha256, outcome);
                       emitTrace(
                         'tool_call_end',
                         {
@@ -503,6 +510,7 @@ export async function runAgentCoreLegacy(
                     modelAttachments.push(...outcome.modelAttachments);
                   }
                   const traceCall = tracedCalls[index];
+                  progressGuard.record(tc.name, traceCall.args.sha256, outcome);
                   emitTrace(
                     'tool_call_end',
                     {

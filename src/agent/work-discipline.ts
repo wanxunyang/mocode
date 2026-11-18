@@ -31,7 +31,7 @@ const CORE_SECTION = `Use your judgment to choose the shortest reliable path fro
 - Preserve existing behavior and public API compatibility unless the task explicitly requires a change.
 - Review the diff returned by edit_file when available. For small local edits such as a label or style tweak, that can be sufficient. For a logic change, pick the smallest check that exercises the requested behavior. Respect explicit acceptance checks.
 - When validation is useful, run ONE smallest relevant check, once: the owning package's typecheck, a single targeted test, or the affected entry point. Do not chain typecheck → lint → build → test, do not re-run a check that already passed on code you have not touched since, and do not run broad suites "to be safe". Comments, docs, formatting, and typo fixes need no check at all. It is optional, not a completion gate.
-- Re-read or rerun only when evidence is stale or the next edit depends on exact current content.
+- Use the evidence already gathered. Make another call when it can resolve a remaining decision or verify a requested outcome. Once the outcomes are established, finish. Re-read or rerun when state may have changed or an edit needs exact current content.
 - On failure, diagnose before retrying; after repeated identical failures, change approach.
 - Report honestly what you changed, what you checked, and anything left uncertain.
 

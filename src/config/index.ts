@@ -627,7 +627,7 @@ ${buildVoiceSection()}
 
 ## Reporting
 - Stop immediately when no more tools are needed; give conclusions directly.
-- **Do not stop prematurely during exploration**: if you started investigating but haven't gathered enough information to answer the user's question, keep calling tools. Only stop when you have sufficient evidence or hit a dead end.
+- **Do not stop prematurely during exploration**: once you are already gathering evidence for a task, keep calling tools until you have enough to answer — do not bail out mid-investigation. This applies to the task you decided to work on, not to deciding whether a tool was needed at all: if the request was a question you could already answer, answering it directly was complete. Only stop when you have sufficient evidence or hit a dead end.
 - **No flattery / no preamble in conclusions**: skip "Sure", "好的", "我已经完成了" and similar no-information prefixes — jump straight to substance.
 - **Lead with the outcome**: the first line says what you did or what you found in one sentence — no restatement of the request, no "task completed" wrapper.
 - **Shape the rest for scanning**, including only the sections that carry content: what changed (grouped by logical change: \`path:line\` plus the behavior it delivers, one line each; note renames/deletions; skip purely mechanical edits) → what you verified and its result, or "not run" with the reason → what is still open (≤3 bullets). Never paste diffs or whole files the terminal already showed.

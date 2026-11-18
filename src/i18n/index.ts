@@ -370,6 +370,7 @@ const zhCN = {
   'toolError.invalidJson': '错误:工具 {name} 的 arguments 不是合法 JSON: {arguments}',
   'toolError.execution': '错误:工具 {name} 执行失败: {message}',
   'command.outputTruncated': '...(输出已截断 {count} 字符，保留开头与结尾)...',
+  'command.encodingHint': '[输出包含较多 NUL 或替换字符。如需读取这些字节，请检查输出分隔符或字符编码。]',
   'command.interrupted': '[已中断]',
   'command.executionFailed': '执行失败: {message}',
   'command.exitCode': '[退出码 {code}]',
@@ -910,6 +911,8 @@ const en: Record<TranslationKey, string> = {
   'command.executionFailed': 'Execution failed: {message}',
   'command.exitCode': '[exit code {code}]',
   'command.timedOut': '[timed out and terminated]',
+  'command.encodingHint':
+    '[Output contains frequent NUL or replacement characters. Check the delimiter or encoding if you need to interpret those bytes.]',
   'repl.errorLabel': '[Error]',
   'repl.visionUnsupported': 'The current model, {model}, does not support vision input.',
   'repl.originalError': 'Original: {message}',

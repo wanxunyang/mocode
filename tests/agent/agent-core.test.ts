@@ -1684,6 +1684,24 @@ test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后�
     assert.ok(!second.includes('the step-0 opening analysis'), '互斥后正文纪律的白名单不应再引用 step-0 开场分析');
     assert.ok(!second.includes('## Opening analysis'), 'Opening analysis 只该在 step 0 出现');
 
+    // ④ 「能答就直接答」的近场重申:每一步都有,不只在 step 0。
+    // 动机:history[0] 的 Answer first 离决策最远,而每轮都在的具体指令(codegraph 段、
+    // 知识图谱段、Do not stop prematurely)更容易被遵守 → 一句话能答的问题先跑三条 grep。
+    // 三条不变量(改措辞时守住即可,别锁死文案):
+    //   a. 必须以「已有同源证据」为前提,不能写成无条件的「核实不算回答」——
+    //      后者会把证据不全时的必要核查一起禁掉;
+    //   b. 必须显式把改代码/改行为排除,否则会被读成「改到一半就下结论也合规」;
+    //   c. 必须短:这段每步都发,长一倍的禁令换不来一倍遵守度。
+    for (const [index, text] of [first, second].entries()) {
+      const section = text.slice(text.indexOf('## Answer before investigating'));
+      assert.ok(section.length > 0, `step ${index} 应带 Answer-first 近场重申`);
+      const body = section.split('\n\n')[0]!;
+      assert.match(body, /if the evidence already sits in/, '前提必须是「证据已在上下文」,不是无条件禁核实');
+      assert.match(body, /skip the confirm-again read or re-run/);
+      assert.match(body, /Code changes keep/, '必须把实现任务排除在外');
+      assert.ok(body.split(/\s+/).length <= 60, `近场重申应保持简短,实际 ${body.split(/\s+/).length} 词`);
+    }
+
     // ③ ephemeral 段不得落进 history:system 仍是第一条且逐字节未变。
     assert.equal((history[0] as { content?: string }).content, 'sys-original');
     assert.ok(
@@ -1699,3 +1717,59 @@ test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const pipeline of ['legacy', 'staged'] as const) {
+  test(`重复结果在 ${pipeline} 调度器按模型轮次提醒，只进入当次请求`, async () => {
+    const { registerToolsExtension, clearToolsExtension } = await import('../../src/tools/registry.js');
+    const reminders: boolean[] = [];
+    __setChatCreateImpl(async (body) => {
+      const { messages } = body as unknown as { messages: ChatMessage[] };
+      const reminder = String(messages.at(-1)?.content ?? '').includes('## Repeated tool results');
+      reminders.push(reminder);
+      if (reminder || reminders.length > 4) return sseStream([{ delta: { content: 'done' } }]);
+      return sseStream([
+        {
+          delta: {
+            tool_calls: [
+              {
+                index: 0,
+                id: `probe-${reminders.length}`,
+                function: { name: 'probe_stuck', arguments: '{}' },
+              },
+            ],
+          },
+        },
+      ]);
+    });
+    const source = 'convergence-progress-test';
+    registerToolsExtension(source, [
+      {
+        name: 'probe_stuck',
+        description: 'Check a pending operation',
+        parameters: { type: 'object', properties: {} },
+        risk: 'safe',
+        capabilities: { effect: 'read', concurrency: 'parallel' },
+        async execute() {
+          return { status: 'error', code: 'EXECUTION_ERROR', retryable: false, output: 'Unavailable' };
+        },
+      },
+    ]);
+    try {
+      const history: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+      const result = await runAgentCore({
+        pipeline,
+        history,
+        userInput: 'Check the operation',
+        hooks: {},
+        runtimeContext: { ...defaultAgentRuntimeContext, getAgentMode: () => 'auto' as const },
+      });
+      assert.equal(result.completed, true);
+      assert.equal(result.finalText, 'done');
+      assert.deepEqual(reminders, [false, false, false, true]);
+      assert.ok(!history.some((m) => String(m.content ?? '').includes('## Repeated tool results')));
+    } finally {
+      __setChatCreateImpl(null);
+      clearToolsExtension(source);
+    }
+  });
+}

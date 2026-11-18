@@ -80,7 +80,7 @@ import {
 import { isUserConfigEnvKey } from '@mocode/protocol';
 import { commitStaged, gitCommitFile, gitCommitFiles, gitDiff, gitFileDiff, gitFileStats, gitLog, gitRepos, gitStatus, stageFiles, stagedDiff, unstageFiles, validateRepoRoot } from './git.js';
 import { buildCheckGroups, parsePackage, workspaceDirs } from './checks.js';
-import { readGlobalUsage, summarizeGlobalUsage } from './usage.js';
+import { readGlobalUsage, summarizeGlobalUsage, summarizeSessionUsage } from './usage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 开发环境从 workspace/root node_modules 解析；安装版只读随包发布的独立资源目录。
@@ -420,8 +420,9 @@ function applyActivePreset(): void {
 
 /**
  * 把指定模型切为当前激活:读目标 .json,把所有相关键写入 ~/.mocode/config 与 process.env。
- * 同时取消正在运行的任务 —— host 子进程持有自己的一份 config 快照,必须显式停掉它,
- * 下次 run 时 send() 会重建进程并读到新配置(见 LocalAgent.restart)。
+ * host 子进程持有自己的一份 config 快照,所以要换代;但**正在跑的任务绝不能被打断**:
+ * 那一轮继续用旧模型跑完,新模型只在它下一次 run 发出前重启 host 时才生效
+ * (见 restartAllAgents / LocalAgent.deferRestart)。
  *
  * **关键**:LLM_MODEL 必须写预设里的真实 API model 名(如 deepseek-v4.1-flash),
  * 绝不能写预设文件名(deepseek-v4-1-flash)。两者拼写常常不同(点号 vs 连字符),
@@ -439,11 +440,14 @@ function switchModel(name: string): { ok: boolean; message: string; model?: Mode
   try { writeFileSync(path.join(modelsDir(), '.active'), `${name}\n`, 'utf8'); }
   catch { /* 指针写失败不阻断切换 */ }
   applyPresetEnv(preset);
-  // 切模型 = 换 host 的 config 快照：先停掉所有在跑的任务,再让全部 host 下次 send 时按新配置重启。
+  // 切模型 = 换 host 的 config 快照。在跑的任务原地继续用旧模型跑完（不能被取消/重启打断），
+  // 新模型推迟到它下一次 run 前才换代生效。
+  const deferred = anyTaskBusy();
   restartAllAgents();
   return {
     ok: true,
-    message: tMain('main.switchModel.saved', { name, provider: preset.provider, cache: preset.anthropicPromptCache ? ' · cache on' : '' }),
+    message: tMain('main.switchModel.saved', { name, provider: preset.provider, cache: preset.anthropicPromptCache ? ' · cache on' : '' })
+      + (deferred ? tMain('main.switchModel.deferred') : ''),
     model: describePreset(preset, true),
   };
 }
@@ -577,17 +581,37 @@ function removePreset(name: string): { ok: boolean; message: string } {
   return { ok: true, message: tMain('main.preset.deleted', { name, active: wasActive ? tMain('main.preset.deletedActive') : '' }) };
 }
 
-/** 配置类变更（模型/行为开关）后统一走这里：停掉在跑任务，host 下次 send 时按新配置重启。 */
+/**
+ * 配置类变更（模型 / 行为开关 / MCP）后统一走这里。
+ *
+ * 关键：**正在跑的任务（含等审批）不能被打断**。以前这里一律 cancel + 杀 host，
+ * 于是「agent 跑着的时候切模型」会当场把这一轮打断（用户看到的就是报错）。
+ * 现在只给这类实例记一个「下一轮生效」标记：这一轮用旧配置跑完，
+ * 等下一次 run/compact 发出前才换代 host（LocalAgent.applyPendingRestart）。
+ * 空闲实例照旧立刻重启，下次 send 按新配置冷启动。
+ */
 function restartAllAgents(): void {
   for (const [id, agent] of agents) {
     const task = taskById(id);
-    // 只有真的在跑才值得发 cancel：host 还没起来时发 cancel 会顺带把预热好的进程换成新的，
-    // 白搭一次冷启动（这正是「刚发指令就报 Agent 进程已停止」的常见来源）。
-    if (task && (task.status === 'running' || task.status === 'waiting') && agent.isRunning) {
-      void agent.send({ type: 'cancel', id });
+    // runActive 是 host 那一侧的真实忙碌态；task.status 另有涵义（等审批时是 waiting，
+    // 而 run 刚发出时主进程已先把状态置成 running，所以两者取或才不漏。
+    const busy = agent.isBusy || (!!task && (task.status === 'running' || task.status === 'waiting'));
+    if (busy) {
+      agent.deferRestart();
+      continue;
     }
     agent.restart();
   }
+}
+
+/**
+ * 是否有任务正在跑或等审批 —— 切模型时据此决定要不要提示「下一轮生效」。
+ * 与 restartAllAgents 同口径：agent 自己的 runActive 也算（host 那边真的有一轮在跑）。
+ */
+function anyTaskBusy(): boolean {
+  if (state.tasks.some((task) => task.status === 'running' || task.status === 'waiting')) return true;
+  for (const agent of agents.values()) if (agent.isBusy) return true;
+  return false;
 }
 
 /* ── 行为开关（设置浮层用，语义对齐 mocode 终端的斜杠命令） ──
@@ -1130,6 +1154,10 @@ class LocalAgent {
   private lastStartError: string | null = null;
   /** 累计报过的错误条数：send() 用它判断「刚才那次 start() 到底报没报过」。 */
   private errorSeq = 0;
+  /** 配置类变更（切模型 / 开关 / MCP）在任务运行中被推迟到下一轮重启（见 deferRestart）。 */
+  private pendingRestart = false;
+  /** 本实例是否有一轮在跑（run 已发出、还没收到终态事件）。推迟的重启必须等它结束。 */
+  private runActive = false;
   private static MAX_CRASH_STREAK = 3;
 
   constructor(taskId: string) {
@@ -1139,6 +1167,9 @@ class LocalAgent {
       this.receive({ type: 'event', event: 'host_log', payload: { message } }),
     );
     this.client.onExit(({ code, expected }) => {
+      // 进程都没了就不存在「还在跑的一轮」：不清这一位，被推迟的配置重启会永远等不到下一次
+      // run 前那次换代（applyPendingRestart 依赖它）。
+      this.runActive = false;
       // host 一旦退出，未回执的面板请求已随进程终止，不能留在路由表里。
       for (const [id, pending] of pendingCommitMessages) {
         if (pending.agent === this) pendingCommitMessages.delete(id);
@@ -1267,6 +1298,10 @@ class LocalAgent {
     // stop() 之后实例已报废:任何未送达的指令本来就不再需要送达(调用方正在拆这个任务),
     // 直接静默返回 —— 否则 client 换代会让在飞的 send 抛「was replaced」,炸出一条假故障 toast。
     if (this.stopped) return false;
+    // 配置变更后的第一次开跑:先换代 host，让新模型/新开关对这一轮就生效。
+    // 推迟到此刻而不是切模型当下，正是为了不打断上一个还在跑的轮次。
+    // runActive 仍为真 = 本条 run 只是接进当前轮的消息队列，不能在这里换代（会杀掉那一轮）。
+    if ((value.type === 'run' || value.type === 'compact') && !this.runActive) this.applyPendingRestart();
     // 先等正在进行的 restart 收尾:client.stop() 只发了 kill,子进程尚未退出时
     // isRunning 仍为 true,若直接发会落到正在死掉的旧进程上(切换模型后最易踩)。
     if (this.restarting) await this.restarting;
@@ -1307,6 +1342,7 @@ class LocalAgent {
     try {
       await this.client.send(value);
       this.crashStreak = 0;
+      if (value.type === 'run') this.runActive = true;
       return true;
     } catch (cause) {
       // 与入口的 stopped 检查同理:stop() 与在飞的 send 竞态胜出时,client 换代抛
@@ -1374,11 +1410,33 @@ class LocalAgent {
   restart(): void {
     this.starting = null;
     this.crashStreak = 0;
+    this.pendingRestart = false;
+    this.runActive = false;
     const stopping = this.client.stop();
     this.restarting = stopping.catch(() => undefined);
     void this.restarting.finally(() => {
       if (this.restarting === stopping) this.restarting = null;
     });
+  }
+
+  /**
+   * 把「按新配置重启」推迟到下一次 run 之前。
+   * 正在跑的轮次必须用旧配置跑完 —— 就地重启会杀掉 host、打断这一轮。
+   */
+  deferRestart(): void {
+    if (this.stopped) return;
+    this.pendingRestart = true;
+  }
+
+  /** 消费推迟的重启：下一次 run 发出前换代，新 host 才会读到新 env/config。 */
+  private applyPendingRestart(): void {
+    if (!this.pendingRestart) return;
+    this.restart();
+  }
+
+  /** 本实例是否有一轮在跑（切模型等配置变更要据此推迟重启）。 */
+  get isBusy(): boolean {
+    return this.runActive;
   }
 
   private receive(envelope: HostEnvelope): void {
@@ -1397,6 +1455,17 @@ class LocalAgent {
           : { ok: true, sessionId: typeof payload.sessionId === 'string' ? payload.sessionId : undefined });
         return;
       }
+    }
+    // 一轮的终态事件到达 = 这一轮跑完了，下次 run 前可以安全换代（见 applyPendingRestart）。
+    // run_idle = host 那边本来就没有在跑的轮次（例如停止指令落到空转 host）。
+    if (envelope.type === 'event'
+      && (envelope.event === 'run_completed' || envelope.event === 'run_failed'
+        || envelope.event === 'run_aborted' || envelope.event === 'run_idle')) {
+      this.runActive = false;
+    }
+    if (envelope.type === 'error' && (envelope.requestId === undefined || envelope.requestId === this.taskId)) {
+      // 这一轮压根没发出去 / host 报错：同样不再算「在跑」，否则切模型的推迟重启会永远等下去。
+      this.runActive = false;
     }
     if (this.taskId.startsWith('workspace:')) {
       // 辅助 host 只给面板回执，不存在可失败的任务或恢复日志。
@@ -2114,6 +2183,18 @@ function installIpc(): void {
     if (!files.length) return { ok: true, files: [], truncated: false };
     const result = await gitFileStats(target.project.root, files);
     return { ok: result.ok, files: result.stats, truncated: files.length > 200, message: result.message };
+  });
+  /**
+   * 输入框下面那行 token 消耗里的「本会话」口径。
+   *
+   * 直接读 <工作区>/.mocode/sessions/<id>/usage.jsonl 就地汇总，**不启也不经过 host**：
+   * 这个数字每轮结束都要刷新，为一条只读统计唤醒一个 agent host 太重；行格式与 host 的
+   * 用量面板同源，两边算出来的数一致（会话目录已归档时回退全局账本）。
+   */
+  ipcMain.handle('work:session-usage', (_event, payload: Record<string, unknown>) => {
+    const target = taskWorkspaceTarget(payload);
+    if (!target || !target.task.sessionId) return { ok: true, usage: null };
+    return { ok: true, usage: summarizeSessionUsage(target.project.root, target.task.sessionId) };
   });
   /** 「改动」面板里展开单个文件：与列表同一基准（HEAD），不要求该文件仍在 git status 里。 */
   ipcMain.handle('work:task-change-diff', async (_event, payload: Record<string, unknown>) => {

@@ -61,6 +61,12 @@ export interface ModelTurnInput {
   memoryRecall?: string;
   /** Run-scoped reminder retained across steps and compaction after live user updates. */
   liveUpdateReminder?: string;
+  /**
+   * #convergence A:本 step 要捎给模型的一次性「你在原地打转」提醒。
+   * 由 run-coordinator 每步向 TurnProgressGuard 取一次(取走即清空),
+   * 因此它只会出现在真正踩线之后的那一步,不会常驻。
+   */
+  noProgressReminder?: string;
   cacheState: ModelTurnCacheState;
   turnLifecycle: TurnLifecycle;
   cancellationLifecycle: { restore(): void };
@@ -122,7 +128,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   const memoryRecallText = input.memoryRecall ?? '';
   const memoryTailText = opts.memoryTail ?? '';
   const ephemeralJoined = (): string =>
-    [sessionStateText, memoryRecallText, memoryTailText, input.liveUpdateReminder ?? '']
+    [sessionStateText, memoryRecallText, memoryTailText, input.liveUpdateReminder ?? '', input.noProgressReminder ?? '']
       .filter((s) => s.length > 0)
       .join('\n\n');
   /** 与 ephemeralJoined() 同源,保证「发了多少」与「算多大」永不漂移。 */
@@ -286,6 +292,23 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       !opts.suppressOpeningAnalysis && step === 0
         ? '## Opening analysis\nOpen this turn with one short sentence saying what you are about to do, then act — either answer directly when the conversation already provides the answer, or start with the needed tool call for a clear, focused change in AUTO. Keep it to that one sentence unless the approach needs a user decision or the task is complex.'
         : '',
+      // 就近重申 Answer-first。动机(2026-11-18):用户反馈「很简单的问题也要兜一大圈」。
+      // history[0] 的 Workflow 里已有 Answer first,但它离当前决策最远,而每轮都在的
+      // 具体指令(codegraph 段、知识图谱段、「Do not stop prematurely」)更容易被遵守,
+      // 结果是「一句话能答的问题先跑三条 grep」。ephemeral 段不写回 history,
+      // 所以这里补一次近场重申,不破坏前缀缓存。
+      // 措辞刻意压到三句:这段每步都发,长一倍的禁令换不来一倍遵守度,只换 token。
+      // 禁令范围收在「已有同源证据时的确认性查询」——早期写法是「核实不算回答的一部分」,
+      // 过宽,会把「证据不全时的必要核查」一起禁掉;这里要求先有同源证据才允许跳过。
+      // 末句把实现任务排除在外,否则会被读成「改到一半就下结论也合规」。
+      // 与 Silent work 无冲突:前者管「要不要动手」,后者管「要不要说」。
+      !opts.suppressOpeningAnalysis
+        ? '## Answer before investigating\n' +
+          'For a judgment, explanation or advice (not a code change), if the evidence already sits in this ' +
+          'conversation, the tool results above, or the injected project context, answer now — skip the ' +
+          'confirm-again read or re-run. Look up only a fact that is genuinely missing. Code changes keep ' +
+          'the normal edit-and-check loop.'
+        : '',
       remainingSteps <= 3
         ? `## Step budget warning\nOnly ${remainingSteps} step(s) remain before the hard step limit (${maxSteps}). ` +
           'Stop opening new lines of exploration NOW. Wind down: finish the current tool call if any, then use the remaining step(s) to produce your final summary — what you found, key files/evidence, and what remains undone. A terse partial report is far better than being cut off mid-work.'
@@ -308,6 +331,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       // 放在固定段之后能最大限度保住前缀缓存的可复用部分。
       opts.memoryTail ?? '',
       input.liveUpdateReminder ?? '',
+      input.noProgressReminder ?? '',
     ]
       .filter(Boolean)
       .join('\n\n');

@@ -85,6 +85,7 @@ function applyLanguage(): void {
   if (plannedTask) syncPlanPanel(plannedTask);
   setRunning(isRunning(viewingTaskId()));
   updateContextUsage(streams.get(viewingTaskId() ?? '')?.contextUsage ?? null);
+  refreshTokenUsage();
   // 系统提示行（「上下文已压缩」）是生成时按当时语言写死的文案 —— 结构存在 data-notice 里，
   // 这里就地按新语言重算一次，否则切语言后会话流里会残留旧语言的句子。
   relabelNotices();
@@ -211,6 +212,8 @@ declare global {
       taskChanges: (payload: { taskId?: string }) => Promise<{ ok: boolean; files: TaskChangeFile[]; truncated?: boolean; message?: string }>;
       /** 「改动」面板里展开单个文件（与列表同一基准：HEAD）。 */
       taskChangeDiff: (payload: { taskId?: string; path: string }) => Promise<{ ok: boolean; content?: string; truncated?: boolean; message?: string }>;
+      /** 输入框下面那行「本会话」token 消耗（读该会话的 usage.jsonl，不经过 host）。 */
+      sessionUsage: (payload: { taskId?: string }) => Promise<{ ok: boolean; usage: SessionUsageTotals | null; message?: string }>;
       /** 「检查」面板：从 package.json 发现的校验命令（只读，点击后填进终端）。 */
       checks: (payload: { taskId?: string }) => Promise<{ ok: boolean; packageManager?: string; groups?: CheckGroupView[]; message?: string }>;
       pickAttachment: () => Promise<AttachmentResult[]>;
@@ -289,6 +292,8 @@ const inspectorTitle = $('#inspector-title'); const inspectorTabs = $('#inspecto
 const attachmentList = $('#attachment-list'); const searchPanel = $('#search-panel'); const searchInput = $('#search-input') as HTMLInputElement;
 const contextUsageEl = $('#context-usage') as HTMLButtonElement;
 const contextUsagePopover = $('#context-usage-popover');
+/** 输入框下方那行 token 消耗（本轮实时 + 本会话累计）。 */
+const tokenUsageEl = $('#token-usage') as HTMLElement;
 const convRail = $('#conv-rail') as HTMLElement;
 const planPanel = $('#plan-panel') as HTMLElement;
 const attentionBar = $('#attention-bar') as HTMLElement;
@@ -337,6 +342,12 @@ interface TaskStream {
   items: StreamItem[];
   running: boolean;
   contextUsage: ContextUsageSnapshot | null;
+  /** 本轮（一次 run）累计消耗，live_usage 流式刷新；run 结束后保留最后一次的最终值。 */
+  turnUsage: TurnUsage | null;
+  /** 会话累计的文件快照（usage.jsonl，切任务与每轮结束后重取）。 */
+  sessionUsage: SessionUsageTotals | null;
+  /** 快照是否要比「本轮增量」再加一遍：只有本渲染层发起这一轮时才是 true（见 sessionDisplayTotals）。 */
+  sessionAddsTurn: boolean;
   pendingApproval: Record<string, unknown> | null;
   /** 最近一次 agent 状态 —— 切回这个任务时状态行按它还原(见 renderStatus)。 */
   status: AgentStatusState | null;
@@ -358,7 +369,10 @@ const streams = new Map<string, TaskStream>();
 function streamFor(taskId: string): TaskStream {
   let stream = streams.get(taskId);
   if (!stream) {
-    stream = { items: [], running: false, contextUsage: null, pendingApproval: null, status: null, startedAt: null, plan: null };
+    stream = {
+      items: [], running: false, contextUsage: null, turnUsage: null, sessionUsage: null, sessionAddsTurn: false,
+      pendingApproval: null, status: null, startedAt: null, plan: null,
+    };
     streams.set(taskId, stream);
   }
   return stream;
@@ -860,8 +874,17 @@ function armRunWatchdog(taskId: string): void {
 
 /** 把失败写进**对话流**（不只是 3 秒 toast）：翻回来看得见，也能顺手点重新生成。 */
 function showTurnError(message: string): void {
-  const messageEl = activeAssistant;
-  const content = messageEl?.querySelector('.message-content');
+  let messageEl = currentTurn();
+  if (!messageEl) {
+    // 压缩提示行会把当前轮封口并置空 activeAssistant（见 sealTurn）：此时错误属于「后半轮」，
+    // 必须另起一条 —— 否则「压完就失败」在会话流里只剩提示行，失败原因只有 3 秒 toast。
+    const tail = conversation.lastElementChild;
+    const messages = conversation.querySelectorAll<HTMLElement>('.message');
+    const afterNotice = tail instanceof HTMLElement && tail.classList.contains('thread-notice');
+    if (!afterNotice && !messages[messages.length - 1]?.classList.contains('is-sealed')) return;
+    messageEl = startAssistantTurn();
+  }
+  const content = messageEl.querySelector('.message-content');
   if (!content || content.querySelector('.message-error')) return;
   const block = document.createElement('div');
   block.className = 'message-error';
@@ -903,9 +926,40 @@ function tokenShort(n: number): string {
   return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
 }
 
+/**
+ * 把当前轮「就地封口」:提示行要插在它下面,而后续输出必须另起一条消息。
+ *
+ * 不做完整的 finalizeTurn —— 那一轮还在跑,挂上复制 / 重新生成 / 分叉按钮会让它看起来已经结束。
+ * 只做三件必须做的事:把待渲染的文字段渲染成 markdown、摘掉流式光标、丢掉一个字都没吐的空轮次。
+ * 返回**已经封好口**的消息(仍留在会话流里),没什么可封口时返回 null。
+ */
+function sealTurn(): HTMLElement | null {
+  const message = currentTurn();
+  if (!message) return null;
+  message.classList.remove('is-streaming');
+  if (mdRenderTimer !== null) { clearTimeout(mdRenderTimer); mdRenderTimer = null; pendingMdBlocks.clear(); }
+  for (const block of Array.from(message.querySelectorAll<HTMLElement>('.message-body'))) {
+    const text = textBlockRaw.get(block) ?? block.textContent ?? '';
+    if (!text.trim()) { block.remove(); continue; }
+    renderMessageBody(block, text);
+  }
+  // 与 finalizeTurn 同一条判据:有点内容才留(工具行 / 错误行也算),否则收掉这个空气泡。
+  const hasContent = !!message.querySelector('.message-body') || !!message.querySelector('.tool-entry') || !!message.querySelector('.message-error');
+  activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
+  if (!hasContent) { message.remove(); return null; }
+  message.dataset.sealed = '1';
+  // 前半轮不是一次完整的回答:不挂复制 / 重新生成 / 分叉按钮(见 style.css 的 is-sealed)。
+  message.classList.add('is-sealed');
+  return message;
+}
+
 function addNotice(notice: StreamNotice): void {
   const text = noticeText(notice);
   if (!text) return;
+  // 提示行是会话流的兄弟节点,而后续文字 / 工具仍会写进上面那条 assistant 消息内部 ——
+  // 不封口的话它们被追加到提示行**上面**,提示行于是永远吊在整轮输出的最底部(用户报的就是这个)。
+  // 封口后 resumableTurn 不再认领这条消息,后半轮另起一条,顺序变成「前半轮 → 提示行 → 后半轮」。
+  sealTurn();
   const block = document.createElement('div');
   block.className = 'thread-notice';
   block.dataset.notice = JSON.stringify(notice);
@@ -973,6 +1027,136 @@ function contextUsageDetails(usage: ContextUsageSnapshot): string {
     ${typeof usage.cachedTokens === 'number' ? row(t('composer.contextCached'), `${number(usage.cachedTokens)} tokens`) : ''}
     <div class="context-usage-source">${escapeHtml(source)}</div>
     <div class="context-usage-note">${escapeHtml(note)}</div>`;
+}
+
+/** 一轮 run 的累计消耗（live_usage 的 promptTokens 是**本轮累计**，不是上下文占用）。 */
+interface TurnUsage { prompt: number; completion: number; cached: number; }
+/** 主进程读 usage.jsonl 汇出来的会话累计（见 packages/work-app/src/usage.ts）。 */
+interface SessionUsageTotals {
+  input: number; output: number; cached: number; reasoning: number; cacheCreation: number;
+  calls: number; source: 'session' | 'ledger' | 'none';
+}
+
+function parseTurnUsage(value: Record<string, unknown>): TurnUsage | null {
+  const prompt = value.promptTokens;
+  const completion = value.completionTokens;
+  if (typeof prompt !== 'number' || typeof completion !== 'number') return null;
+  if (!Number.isFinite(prompt) || !Number.isFinite(completion)) return null;
+  const cached = typeof value.cachedTokens === 'number' && Number.isFinite(value.cachedTokens) ? value.cachedTokens : 0;
+  return { prompt: Math.max(0, prompt), completion: Math.max(0, completion), cached: Math.max(0, cached) };
+}
+
+/**
+ * 会话累计的展示口径 = 文件快照 + 本轮增量。
+ *
+ * 只有在**本渲染层自己发起**这一轮时（sessionAddsTurn）才把本轮加在快照上 —— usage.jsonl
+ * 每 step 追加一行，本轮进行中重读会把这轮已落盘的部分算两遍；而接管一条正在跑的会话
+ * （窗口重载 / 切回运行中任务）时，快照里本来就含这轮的已落盘步骤，再加就虚高。
+ */
+function sessionDisplayTotals(stream: TaskStream | undefined): { input: number; output: number; cached: number; calls: number } | null {
+  if (!stream) return null;
+  const base = stream.sessionUsage;
+  const turn = stream.sessionAddsTurn ? stream.turnUsage : null;
+  if (!base && !turn) return null;
+  return {
+    input: (base?.input ?? 0) + (turn?.prompt ?? 0),
+    output: (base?.output ?? 0) + (turn?.completion ?? 0),
+    cached: (base?.cached ?? 0) + (turn?.cached ?? 0),
+    calls: base?.calls ?? 0,
+  };
+}
+
+/** 悬浮明细里的精确数字：k/M 缩写只适合一行摘要，核账要看原数。 */
+function exactTokens(n: number): string { return Math.max(0, Math.round(n)).toLocaleString(); }
+
+let lastTokenUsageSignature = '';
+
+/** 重画输入框下面那行 token 消耗；没有会话或还没有任何消耗时整行隐藏。 */
+function refreshTokenUsage(): void {
+  const stream = streams.get(viewingTaskId() ?? '');
+  const turn = stream?.turnUsage ?? null;
+  const session = sessionDisplayTotals(stream);
+  // live_usage 每秒可达上百条：先用「原始数字 + 语言」的廉价签名挡掉无变化的那些，
+  // 缩写与 toLocaleString 只在真变了的时候才做。
+  const signature = [
+    getLang(),
+    turn?.prompt ?? -1, turn?.completion ?? -1, turn?.cached ?? -1,
+    session?.input ?? -1, session?.output ?? -1, session?.cached ?? -1, session?.calls ?? -1,
+  ].join('|');
+  if (signature === lastTokenUsageSignature) return;
+  lastTokenUsageSignature = signature;
+  const turnSpent = turn ? turn.prompt + turn.completion : 0;
+  const sessionSpent = session ? session.input + session.output : 0;
+  const parts: string[] = [];
+  if (turnSpent > 0) {
+    parts.push(
+      `${t('composer.tokenTurn')} ↑${tokenShort(turn!.prompt)} ↓${tokenShort(turn!.completion)}` +
+        (turn!.cached > 0 ? ` ↻${tokenShort(turn!.cached)}` : ''),
+    );
+  }
+  if (sessionSpent > 0) parts.push(`${t('composer.tokenSession')} ${tokenShort(sessionSpent)}`);
+  const text = parts.join(' · ');
+  const title = [
+    turnSpent > 0
+      ? `${t('composer.tokenTurn')}：${t('usage.input')} ${exactTokens(turn!.prompt)} · ${t('usage.output')} ${exactTokens(turn!.completion)}` +
+        (turn!.cached > 0 ? ` · ${t('usage.cached')} ${exactTokens(turn!.cached)}` : '') +
+        ` · ${t('composer.tokenTotal')} ${exactTokens(turnSpent)}`
+      : '',
+    sessionSpent > 0
+      ? `${t('composer.tokenSession')}：${t('usage.input')} ${exactTokens(session!.input)} · ${t('usage.output')} ${exactTokens(session!.output)}` +
+        (session!.cached > 0 ? ` · ${t('usage.cached')} ${exactTokens(session!.cached)}` : '') +
+        ` · ${t('composer.tokenTotal')} ${exactTokens(sessionSpent)}` +
+        (session!.calls > 0 ? ` · ${session!.calls} ${t('usage.calls')}` : '')
+      : '',
+  ].filter(Boolean).join('\n');
+  tokenUsageEl.textContent = text;
+  tokenUsageEl.title = title;
+  tokenUsageEl.classList.toggle('hidden', !text);
+}
+
+let sessionUsageQuerySequence = 0;
+const latestSessionUsageQuery = new Map<string, number>();
+/** 读该任务会话的 usage.jsonl 累计；主进程就地算，不启 host（见 work:session-usage）。 */
+async function refreshSessionUsage(taskId: string): Promise<void> {
+  const stream = streamFor(taskId);
+  // 本轮由本渲染层发起且仍在跑：磁盘快照已含本轮已落盘的 step，再叠一次 turnUsage 就双计。
+  // 这一轮结束时会由 settleTurnUsage 折进快照并重读（届时 sessionAddsTurn 已置 false）。
+  if (stream.sessionAddsTurn && stream.running) return;
+  const query = ++sessionUsageQuerySequence;
+  latestSessionUsageQuery.set(taskId, query);
+  try {
+    const result = await window.mocodeWork.sessionUsage({ taskId });
+    // 快速切任务时旧回执不能覆盖新任务的流。
+    if (latestSessionUsageQuery.get(taskId) !== query) return;
+    if (result.ok && result.usage) stream.sessionUsage = result.usage;
+  } catch {
+    // 记账读失败不该影响对话；留着上一次快照即可。
+  }
+  if (viewingTaskId() === taskId) refreshTokenUsage();
+}
+
+/**
+ * 一轮结束（完成 / 失败 / 中止）时给 token 行收尾。
+ *
+ * 本轮的数字当场就定下来（payload.usage 是终值）；会话累计则「先把本轮折进旧快照、再按
+ * usage.jsonl 重读」—— 直接置回旧快照会让数字先掉一截再跳回来，先折进去两次的数就一样了。
+ * usage.jsonl 是每 step 追加一行的，本轮各 step 早已落盘，所以重读结果正好含本轮。
+ */
+function settleTurnUsage(stream: TaskStream, taskId: string, finalUsage: Record<string, unknown> | null): void {
+  const turn = (finalUsage ? parseTurnUsage(finalUsage) : null) ?? stream.turnUsage;
+  stream.turnUsage = turn;
+  if (stream.sessionAddsTurn && turn) {
+    const base = stream.sessionUsage;
+    // 没有快照（新任务刚跑第一轮，sessionId 还没回到渲染层）时就地立一份：
+    // 否则会话那半句会先消失、等重读回来再冒出来，数字看着像掉了。
+    stream.sessionUsage = base
+      ? { ...base, input: base.input + turn.prompt, output: base.output + turn.completion, cached: base.cached + turn.cached }
+      : { input: turn.prompt, output: turn.completion, cached: turn.cached, reasoning: 0, cacheCreation: 0, calls: 0, source: 'session' };
+  }
+  // 快照自此已含本轮，别再叠一次。
+  stream.sessionAddsTurn = false;
+  if (viewingTaskId() === taskId) refreshTokenUsage();
+  void refreshSessionUsage(taskId);
 }
 
 /** 上一次真正写进 DOM 的上下文快照签名（见 updateContextUsage 的去重理由）。 */
@@ -1657,7 +1841,7 @@ function updateState(next: WorkState): void {
   // changedFiles 会随 run_completed 的广播更新（主进程落盘）→ 长条按最新一轮跟着变。
   syncChangesBar();
 }
-function clearWorkspace(): void { hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); hideChangesBar(); }
+function clearWorkspace(): void { lastTokenUsageSignature = ''; tokenUsageEl.textContent = ''; tokenUsageEl.title = ''; tokenUsageEl.classList.add('hidden'); hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); hideChangesBar(); }
 
 /**
  * 一轮 assistant 输出 = 一条 message 内的**有序 block 流**:
@@ -1710,6 +1894,8 @@ function resumableTurn(): HTMLElement | null {
   const last = messages[messages.length - 1];
   // 最后一条是用户气泡时不续写:那是新一轮的边界,输出必须挂在它后面。
   if (!last || !last.classList.contains('assistant')) return null;
+  // 被压缩提示行切断的轮次同样不续写(见 addNotice):续回去就把提示行又压到最下面了。
+  if (last.dataset.sealed === '1') return null;
   activeAssistant = last;
   last.classList.add('is-streaming');
   // 收口时挂上的按钮属于中断点之前的半截正文:换成一个无子节点、无监听器的同款容器,
@@ -3446,6 +3632,10 @@ async function regenerate(): Promise<void> {
   }
   stream.interrupted = false;
   stream.pendingApproval = null;
+  // 重新生成 = 同一会话又跑一轮：本轮归零，会话累计继续叠加。
+  stream.turnUsage = null;
+  stream.sessionAddsTurn = true;
+  refreshTokenUsage();
   stream.running = true;
   stream.startedAt = Date.now();
   approvalPanel.classList.add('hidden');
@@ -3767,6 +3957,10 @@ function startRun(task: Task, prompt: string, batch: Attachment[]): void {
     item.payload = { ...item.payload, status: 'aborted' };
   }
   stream.interrupted = false;
+  // 新一轮：本轮消耗归零，会话累计开始叠加本轮（见 sessionDisplayTotals）。
+  stream.turnUsage = null;
+  stream.sessionAddsTurn = true;
+  refreshTokenUsage();
   stream.items.push({ kind: 'user', text: prompt, attachments: batch });
   stream.running = true;
   stream.startedAt = Date.now();
@@ -3987,11 +4181,17 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       break;
     }
     case 'live_usage': {
-      // 累计 usage 只用于统计；上下文百分比必须取同事件里的 prompt 快照。
+      // 上下文百分比取同事件里的 prompt 快照；promptTokens/completionTokens 是**本轮累计**，
+      // 两者语义不同，别拿一个去算另一个。
       const contextUsage = parseContextUsage(payload.contextUsage);
       if (contextUsage) {
         stream.contextUsage = contextUsage;
         if (viewing) updateContextUsage(contextUsage);
+      }
+      const turn = parseTurnUsage(payload);
+      if (turn) {
+        stream.turnUsage = turn;
+        if (viewing) refreshTokenUsage();
       }
       break;
     }
@@ -4038,6 +4238,8 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       break;
     }
     case 'run_aborted':
+      // 中止也己经花掉 tokens，同样要收尾（并让会话累计重新读盘）。
+      settleTurnUsage(stream, taskId, null);
       applyStatus(stream, viewing, settledStatus('stopped', 'status.cancelled', 'idle'));
       endTaskRun(taskId);
       if (viewing) finish();
@@ -4054,6 +4256,7 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
         ].filter(Boolean).join(' · ');
         showToast('success', t('toast.promptCache', { details: details }), 3500);
       }
+      settleTurnUsage(stream, taskId, usage);
       applyStatus(stream, viewing, settledStatus('done', 'status.completed', 'ok', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
       // 本轮改动清单：事件里自带路径，直接用 —— 主进程的 state 广播可能还没到渲染层，
@@ -4112,6 +4315,7 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       break;
     case 'run_failed': {
       const message = humanizeError(String(payload.message ?? t('err.runFailed'))) ?? t('err.runFailed');
+      settleTurnUsage(stream, taskId, payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : null);
       stream.items.push({ kind: 'error', message });
       applyStatus(stream, viewing, settledStatus('failed', 'status.failed', 'fail', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
@@ -4124,6 +4328,7 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       const code = typeof payload.code === 'number' ? payload.code : null;
       const message = t('status.hostExit', { code: code ?? '?' });
       console.error('[Agent Host]', message);
+      settleTurnUsage(stream, taskId, null);
       stream.items.push({ kind: 'error', message });
       applyStatus(stream, viewing, settledStatus('failed', 'status.failed', 'fail'));
       endTaskRun(taskId);
@@ -4137,6 +4342,7 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     // 点了停止但 host 那边没有在跑（已经结束了）。把界面从「正在停止」收回可用态，
     // 否则按钮停在停止图标上，用户以为还在跑。
     case 'run_idle':
+      settleTurnUsage(stream, taskId, null);
       applyStatus(stream, viewing, statusFromTask(selectedTask()));
       endTaskRun(taskId);
       if (viewing) finish();
@@ -4244,6 +4450,8 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   hideContextUsageDetails();
   updateContextUsage(stream?.contextUsage ?? null);
   void refreshContextUsage(taskId);
+  refreshTokenUsage();
+  void refreshSessionUsage(taskId);
   // 计划面板按这个任务的缓冲还原（切任务时其它任务的计划不该留在屏上）。
   if (!stream?.plan) {
     const recovered = planForRestore(planFromItems(stream?.items) ?? planFromHistory(history));
