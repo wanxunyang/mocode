@@ -64,6 +64,8 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   renameTask: (id: string, title: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:rename-task', id, title),
   renameProject: (id: string, name: string): Promise<ProjectState | null> => ipcRenderer.invoke('work:rename-project', id, name),
   openFolder: (projectId: string): Promise<boolean> => ipcRenderer.invoke('work:open-folder', projectId),
+  /** 在系统文件管理器里定位一个文件（相对当前任务工作区或绝对路径）。 */
+  revealFile: (file: string): Promise<{ ok: boolean; path?: string; message?: string }> => ipcRenderer.invoke('work:reveal-file', file),
   removeProject: (projectId: string): Promise<{ state: ProjectState; removed: string } | null> => ipcRenderer.invoke('work:remove-project', projectId),
   projectOverview: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('work:project-overview'),
   // 某个空间里 mocode 终端留下的历史会话（只读列表），以及把其中一条接管成本空间的任务。

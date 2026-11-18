@@ -1958,12 +1958,30 @@ function installIpc(): void {
     saveState(); broadcastState();
     return state;
   });
-  // 在系统文件管理器中打开项目文件夹。
+  // 在系统文件管理器里打开项目文件夹。
   ipcMain.handle('work:open-folder', (_event, projectId: string) => {
     const project = state.projects.find((item) => item.id === projectId);
     if (!project) return false;
     shell.openPath(project.root).catch(() => {});
     return true;
+  });
+  /**
+   * 在文件管理器里**定位**一个文件（不是打开它）。
+   *
+   * 存在的理由：agent 跑完构建会在回复里给出产物路径（`packages/work-app/release/MoCode Work-1.1.0-setup.exe`），
+   * 用户真正想做的是去那个目录把文件拿出来 —— 让他在预览面板里看一个 148MB 的二进制毫无意义，
+   * 而手动从项目根逐级点进 release/ 又很繁琐。`showItemInFolder` 直接选中该文件。
+   *
+   * 路径可以是相对（按当前任务的工作区解析，产物与改动都记在任务里）或绝对
+   * （用户从别处粘来的路径）。只做存在性检查 —— 定位不会读文件内容，越界读取的风险不适用于这里。
+   */
+  ipcMain.handle('work:reveal-file', (_event, input: string) => {
+    if (typeof input !== 'string' || !input.trim()) return { ok: false, message: tMain('main.reveal.missing', { path: String(input ?? '') }) };
+    const root = taskWorkspaceTarget(undefined)?.project.root ?? state.projects[0]?.root ?? '';
+    const absolute = path.isAbsolute(input) ? input : root ? path.resolve(root, input) : '';
+    if (!absolute || !existsSync(absolute)) return { ok: false, message: tMain('main.reveal.missing', { path: input }) };
+    shell.showItemInFolder(absolute);
+    return { ok: true, path: absolute };
   });
   // 从空间列表中移除一个项目（不删除磁盘文件，仅从 UI 列表移除）。
   ipcMain.handle('work:remove-project', (_event, projectId: string) => {

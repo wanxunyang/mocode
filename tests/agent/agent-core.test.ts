@@ -1670,8 +1670,11 @@ test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后�
     const first = ephemeralOf(0);
     assert.match(first, /## Opening analysis/, 'step 0 必须带开场分析');
     assert.ok(!first.includes('## Silent work'), '互斥:step 0 不应同时出现正文纪律');
-    assert.match(first, /Answer directly/);
-    assert.match(first, /focused change in AUTO, start with the needed tool call/);
+    // 守行为而不是守措辞:「开场先说一句」必须是无条件祈使句。859b974 把它改成
+    // "Give a brief opening explanation only when ..." 之后,断言跟着新文案一起改了,
+    // 于是开场白静默消失而测试全绿。这里钉住「无条件开场」与「Answer-first 仍保留」两件事。
+    assert.match(first, /Open this turn with one short sentence/, '开场白必须是无条件祈使句,不能只在复杂任务时说明');
+    assert.match(first, /answer directly when the conversation already provides the answer/);
 
     // ② step 1:开场分析消失,正文纪律登场——互斥的另一半。
     const second = ephemeralOf(1);

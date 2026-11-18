@@ -278,9 +278,13 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
           "direct answers to the user's questions, blocking questions, " +
           'findings that change the next action, and the final report.'
         : '',
-      // 仅 step 0：就近重申 Answer-first；清晰的小改动可以直接调用工具。
+      // 仅 step 0：就近重申 Answer-first，并保留「开场一句」这条祈使要求。
+      // 859b974 曾把它改写成条件句（only when ... needs a user decision or complex），
+      // 于是「清晰的小改动」全被划进「直接调工具」一档，开场白彻底消失——那句原本无条件的
+      // 祈使主语在重写时丢了。这里把「先说一句」恢复成无条件的，Answer-first 只决定这一句
+      // 之后是回答还是动手，不再决定说不说。
       !opts.suppressOpeningAnalysis && step === 0
-        ? '## Opening analysis\nAnswer directly when the conversation already provides the answer. For a clear, focused change in AUTO, start with the needed tool call. Give a brief opening explanation only when the approach needs a user decision or the task is complex.'
+        ? '## Opening analysis\nOpen this turn with one short sentence saying what you are about to do, then act — either answer directly when the conversation already provides the answer, or start with the needed tool call for a clear, focused change in AUTO. Keep it to that one sentence unless the approach needs a user decision or the task is complex.'
         : '',
       remainingSteps <= 3
         ? `## Step budget warning\nOnly ${remainingSteps} step(s) remain before the hard step limit (${maxSteps}). ` +

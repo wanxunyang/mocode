@@ -1,7 +1,7 @@
 import { PET_CHARACTERS } from '../pet-characters.js';
 import { renderMarkdown, enhanceCodeBlocks, setMarkdownLabels } from './markdown.js';
 // 正文里的文件路径 → 可点击入口（点击后在本应用的右侧面板里预览）。
-import { linkifyFilePaths } from './file-links.js';
+import { isArtifactPath, linkifyFilePaths } from './file-links.js';
 import { buildFileChange, renderFileChangeHtml, summarizeFileChange, type FileChangeLabels } from './diff-view.js';
 import { buildToolView, type ToolViewLabels } from './tool-view.js';
 import { hasSubAgentProgressLine, isSubAgentProgressLine } from '../sub-agent-progress.js';
@@ -183,6 +183,8 @@ declare global {
       renameTask: (id: string, title: string) => Promise<WorkState | null>;
       renameProject: (id: string, name: string) => Promise<WorkState | null>;
       openFolder: (projectId: string) => Promise<boolean>;
+      /** 在系统文件管理器里定位一个文件（相对当前任务工作区或绝对路径）。 */
+      revealFile: (file: string) => Promise<{ ok: boolean; path?: string; message?: string }>;
       removeProject: (projectId: string) => Promise<{ state: WorkState; removed: string } | null>;
       projectOverview: () => Promise<Record<string, unknown>>;
       /** 某个空间里 mocode 终端留下的历史会话（只读列表）。 */
@@ -2164,14 +2166,14 @@ conversation.addEventListener('click', (event) => {
 });
 
 // 正文里的文件路径（`docs/x.md` 这类裸文本，由 file-links 包成 <a data-file-path>）：
-// 点击就地打开右侧面板的预览。href 恒为 `#`，不吃掉默认行为会让窗口滚到顶部。
+// 点击后的去向见 openFilePath。href 恒为 `#`，不吃掉默认行为会让窗口滚到顶部。
 conversation.addEventListener('click', (event) => {
   const link = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-file-path]');
   if (!link) return;
   event.preventDefault();
   // 工具行上的路径挂在 <summary> 里：不拦住冒泡，点它还会连带展开/收起那一行。
   event.stopPropagation();
-  void openFilePreview(link.dataset.filePath ?? '');
+  openFilePath(link.dataset.filePath ?? '', link.dataset.fileKind);
 });
 
 /**
@@ -2246,10 +2248,11 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   // 文件类工具的路径本身也是入口：点了就在右侧面板预览，不必去正文里找那句「已写完：…」。
   // 用 <a data-file-path> 而不是 <span>，沿用正文里路径链接的同一条点击通道。
   const filePath = toolFilePath(name, args);
+  // 产物（.exe/.zip 这类）点击是「去文件夹拿」，标题文案得跟着换，否则用户以为会进预览面板。
   const targetHtml = !target
     ? ''
     : filePath
-      ? `<a class="tool-target tool-target-file" href="#" data-file-path="${escapeHtml(filePath)}" title="${escapeHtml(t('tool.openFile', { path: filePath }))}">${escapeHtml(target)}</a>`
+      ? `<a class="tool-target tool-target-file" href="#" data-file-path="${escapeHtml(filePath)}" title="${escapeHtml(isArtifactPath(filePath) ? t('fileLink.reveal', { path: filePath }) : t('tool.openFile', { path: filePath }))}">${escapeHtml(target)}</a>`
       : `<span class="tool-target" title="${escapeHtml(target)}">${escapeHtml(target)}</span>`;
   entry.innerHTML = `<summary>
   <span class="tool-chevron" data-icon="chevron-right"></span>
@@ -4393,6 +4396,95 @@ function openFilePreview(file: string): Promise<void> {
   return refreshInspector();
 }
 
+/**
+ * 在系统文件管理器里定位一个文件（选中它，不打开）。
+ *
+ * 产物（安装包 / 压缩包 / 二进制）在应用里读没有意义，用户要的是去目录把它拿出来 ——
+ * 定位到选中状态比「打开所在文件夹」少点一次（不用在几十个文件里再找一遍）。
+ */
+async function revealFileInFolder(file: string): Promise<void> {
+  const result = await window.mocodeWork.revealFile(file);
+  if (!result.ok) showToast('warn', result.message ?? t('fileLink.reveal', { path: file }));
+}
+
+/**
+ * 路径点击的统一去向：产物去文件管理器定位，文本 / 代码进右侧面板预览。
+ *
+ * 正文链接、工具行路径、预览面板内的链接共用这一条，避免三处各判一次导致行为不一致。
+ * `kind` 来自 file-links 的数据属性；没有时按扩展名兜底（工具行不带这个属性）。
+ */
+function openFilePath(file: string, kind?: string): void {
+  if (!file) return;
+  if (kind === 'artifact' || (kind !== 'file' && isArtifactPath(file))) { void revealFileInFolder(file); return; }
+  void openFilePreview(file);
+}
+
+/**
+ * 右键目标上的路径：正文链接、工具行路径、「改动」面板行、文件树行都带路径属性。
+ * 「改动」面板与文件树用 data-change-path / data-path，正文与工具行用 data-file-path。
+ */
+function pathOfContextTarget(target: HTMLElement | null): string {
+  const link = target?.closest<HTMLElement>('[data-file-path]');
+  if (link?.dataset.filePath) return link.dataset.filePath;
+  const change = target?.closest<HTMLElement>('[data-change-path]');
+  if (change?.dataset.changePath) return change.dataset.changePath;
+  const generic = target?.closest<HTMLElement>('[data-path]');
+  return generic?.dataset.path ?? '';
+}
+
+/**
+ * 右键路径时的菜单：在文件夹中显示 / 复制路径。
+ *
+ * 为什么由渲染层弹 HTML 菜单而不是交给主进程的原生菜单：主进程看不见 DOM，拿不到
+ * 「右键的是哪个文件」，只能靠同步 IPC 回问，为一个菜单引入 sendSync 不值得。
+ * 复用侧栏 ... 菜单那套样式（.project-context-menu）。
+ *
+ * `preventDefault` 同时挡住主进程的原生「复制 / 全选」菜单 —— 实测渲染层拦了之后
+ * 主进程的 context-menu 事件不触发，两者不会双弹（见 context-menu.ts 注释）。
+ */
+function showPathMenu(file: string, x: number, y: number): void {
+  document.getElementById('path-context-menu')?.remove();
+  const menu = document.createElement('div');
+  menu.id = 'path-context-menu';
+  menu.className = 'project-context-menu';
+  menu.innerHTML = `<button class="project-context-item" data-path-action="reveal"><span class="project-context-icon" data-icon="folder-open"></span>${t('menu.revealFile')}</button>`
+    + `<button class="project-context-item" data-path-action="copy"><span class="project-context-icon" data-icon="copy"></span>${t('menu.copyPath')}</button>`;
+  document.body.append(menu);
+  mountIcons(menu);
+  // 先量再定位：贴光标弹出，但右侧/下侧放不下时往回收，否则菜单会跑出视口。
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - rect.width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - rect.height - 4))}px`;
+  const close = (): void => {
+    menu.remove();
+    document.removeEventListener('click', close);
+    document.removeEventListener('keydown', onKey);
+    window.removeEventListener('scroll', close, true);
+  };
+  const onKey = (event: KeyboardEvent): void => { if (event.key === 'Escape') close(); };
+  // 延一帧再挂：本次 contextmenu 之后紧跟着的那次 click 会立刻把菜单关掉。
+  requestAnimationFrame(() => {
+    document.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', close, true);
+  });
+  menu.querySelectorAll<HTMLButtonElement>('[data-path-action]').forEach((item) => item.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const action = item.dataset.pathAction;
+    close();
+    if (action === 'reveal') void revealFileInFolder(file);
+    else void navigator.clipboard.writeText(file).then(() => showToast('info', t('msg.copied')), () => showToast('error', t('msg.copyFailed')));
+  }));
+}
+
+// 右键任何带路径的目标 → 路径菜单（点击的补充通道：代码块 / diff / 文件树里的路径没被链接化）。
+document.addEventListener('contextmenu', (event) => {
+  const file = pathOfContextTarget(event.target as HTMLElement | null);
+  if (!file) return;
+  event.preventDefault();
+  showPathMenu(file, event.clientX, event.clientY);
+});
+
 async function previewFile(file: string): Promise<void> {
   const [content, diff] = await Promise.all([window.mocodeWork.readFile(file), window.mocodeWork.fileDiff(file)]); inspectorTitle.textContent = file;
   const raw = content.error ?? content.content ?? '';
@@ -4400,7 +4492,10 @@ async function previewFile(file: string): Promise<void> {
   // 其余仍是等宽原文：代码 / 日志的换行与缩进必须原样保留。
   const asDoc = !content.error && DOC_FILE_PATTERN.test(file);
   const body = asDoc ? `<div class="message-body md-rendered file-doc">${renderMarkdown(raw)}</div>` : `<pre class="file-preview">${escapeHtml(raw)}</pre>`;
-  inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button><button id="show-diff">${t('inspector.gitDiff')}</button></div>${body}`;
+  // 第三个按钮：在文件管理器里定位。预览是「读」，定位是「我要拿去用」—— 读完想拷/双击运行时不必手点目录。
+  inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button><button id="show-diff">${t('inspector.gitDiff')}</button><button id="reveal-file" data-icon="folder-open" title="${escapeHtml(t('fileLink.reveal', { path: file }))}">${t('inspector.reveal')}</button></div>${body}`;
+  mountIcons(inspectorContent);
+  $('#reveal-file').addEventListener('click', () => void revealFileInFolder(file));
   if (asDoc) {
     enhanceCodeBlocks(inspectorContent);
     // 文档里引用的其它文件（例如方案里提到的 `src/...`）也能继续点开，形成一条链路。
@@ -4412,7 +4507,8 @@ async function previewFile(file: string): Promise<void> {
         const link = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-file-path]');
         if (!link) return;
         event.preventDefault();
-        void openFilePreview(link.dataset.filePath ?? '');
+        // 文档里也可能写到产物（「安装包已生成：release/x-setup.exe」），走同一条分流。
+        openFilePath(link.dataset.filePath ?? '', link.dataset.fileKind);
       });
     }
   }

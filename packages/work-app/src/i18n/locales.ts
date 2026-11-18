@@ -515,6 +515,7 @@ export const zhCN = {
   'inspector.loading': '正在读取…',
   'inspector.backToFiles': '← 文件',
   'inspector.gitDiff': 'Git Diff',
+  'inspector.reveal': '在文件夹中显示',
   'inspector.filesTruncated': '文件过多，仅列出前 5000 个。',
   'inspector.noWorkspace': '当前任务没有关联工作空间。',
   'inspector.noFiles': '未发现可预览的文件',
@@ -632,6 +633,11 @@ export const zhCN = {
   'changesBar.open': '查看 {path} 的改动',
   'changesBar.collapse': '收起改动清单',
   'changesBar.expand': '展开改动清单',
+
+  // ── 文件路径链接（正文、工具行、面板）后的去向 ──
+  // 产物（安装包 / 压缩包 / 二进制）不进预览，点击直接在系统文件管理器里定位。
+  'fileLink.reveal': '在文件夹中显示 {path}',
+  'fileLink.missing': '找不到这个文件，它可能已被移动或删除：{path}',
 
   // ── 「检查」面板（从 package.json 发现校验命令，点击填入终端）──
   'checks.noTask': '先选中一个任务，再看它的工作区该验什么。',
@@ -792,6 +798,7 @@ export const zhCN = {
   'main.rollback.noHistory': '会话文件里没有历史记录。',
   'main.rollback.compacted': '这一步已经被上下文压缩掉了,回滚不到它。',
   'main.read.outside': '不允许读取项目目录外的文件。',
+  'main.reveal.missing': '找不到文件：{path}',
   'main.read.unreadable': '文件不可读取或不是文本文件。',
   'main.read.noDiff': '该文件没有已跟踪的 Git Diff。',
   'main.browser.badUrl': '浏览器面板只接受 http/https 地址。',
@@ -812,6 +819,8 @@ export const zhCN = {
   // 右键菜单（会话区 / 输入框）
   'menu.cut': '剪切',
   'menu.copy': '复制',
+  'menu.revealFile': '在文件夹中显示',
+  'menu.copyPath': '复制路径',
   'menu.paste': '粘贴',
   'menu.selectAll': '全选',
 
@@ -1587,6 +1596,7 @@ export const enUS: Record<LocaleKey, string> = {
   'inspector.loading': 'Loading…',
   'inspector.backToFiles': '← Files',
   'inspector.gitDiff': 'Git Diff',
+  'inspector.reveal': 'Show in folder',
   'inspector.filesTruncated': 'Too many files — only the first 5000 are listed.',
   'inspector.noWorkspace': 'The current task has no associated workspace.',
   'inspector.noFiles': 'No previewable files found',
@@ -1703,6 +1713,11 @@ export const enUS: Record<LocaleKey, string> = {
   'changesBar.open': 'View changes in {path}',
   'changesBar.collapse': 'Collapse change list',
   'changesBar.expand': 'Expand change list',
+
+  // ── Where a file-path link goes (body, tool rows, panels) ──
+  // Artifacts (installers / archives / binaries) skip the preview and are located in the OS file manager.
+  'fileLink.reveal': 'Show {path} in folder',
+  'fileLink.missing': 'File not found — it may have been moved or deleted: {path}',
 
   // ── Checks panel (scripts discovered from package.json; click fills the terminal) ──
   'checks.noTask': 'Select a task first to see what its workspace should verify.',
@@ -1862,6 +1877,7 @@ export const enUS: Record<LocaleKey, string> = {
   'main.rollback.noHistory': 'The session file has no history records.',
   'main.rollback.compacted': 'This step was removed by context compaction and cannot be rolled back to.',
   'main.read.outside': 'Reading files outside the project directory is not allowed.',
+  'main.reveal.missing': 'File not found: {path}',
   'main.read.unreadable': 'The file is unreadable or is not a text file.',
   'main.read.noDiff': 'This file has no tracked Git diff.',
   'main.browser.badUrl': 'The browser panel accepts http/https URLs only.',
@@ -1882,6 +1898,8 @@ export const enUS: Record<LocaleKey, string> = {
   // Context menu (conversation / inputs)
   'menu.cut': 'Cut',
   'menu.copy': 'Copy',
+  'menu.revealFile': 'Show in folder',
+  'menu.copyPath': 'Copy path',
   'menu.paste': 'Paste',
   'menu.selectAll': 'Select all',
 
