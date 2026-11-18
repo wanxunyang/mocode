@@ -1,0 +1,160 @@
+:root {
+  color-scheme: light;
+  font-family: 'Microsoft YaHei', system-ui, sans-serif;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  width: 240px;
+  height: 230px;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  color: #524869;
+}
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+button:focus-visible,
+canvas:focus-visible {
+  outline: 2px solid #b6a2ec;
+  outline-offset: 3px;
+}
+#bubble {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  left: 10px;
+  width: 220px;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border: 1px solid #e9dff5;
+  border-radius: 16px;
+  background: linear-gradient(130deg, #fffcf8, #f6f1ff);
+  box-shadow:
+    0 5px 18px #2d164015,
+    inset 0 1px 0 #fff;
+  text-align: left;
+}
+#bubble::after {
+  content: '';
+  position: absolute;
+  bottom: -5px;
+  left: 104px;
+  width: 10px;
+  height: 10px;
+  background: #faf6fc;
+  border-right: 1px solid #e9dff5;
+  border-bottom: 1px solid #e9dff5;
+  transform: rotate(45deg);
+}
+.status-dot {
+  flex: 0 0 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #a293cd;
+  box-shadow: 0 0 0 4px #a293cd14;
+}
+body[data-status='running'] .status-dot {
+  background: #73b4a5;
+}
+body[data-status='waiting'] .status-dot {
+  background: #d8a246;
+}
+body[data-status='failed'] .status-dot {
+  background: #d97c8d;
+}
+.bubble-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+#message {
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+}
+#detail {
+  color: #968ba3;
+  font-size: 12px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+#progress-label {
+  font-size: 11px;
+  color: #9c87c9;
+  font-variant-numeric: tabular-nums;
+}
+#progress-track {
+  position: absolute;
+  bottom: 0;
+  left: 16px;
+  right: 16px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #e9e0f4;
+}
+#progress-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: #a394cf;
+  transition: width 0.3s;
+}
+#pet-canvas {
+  position: absolute;
+  top: 88px;
+  left: 40px;
+  width: 160px;
+  height: 135px;
+  touch-action: none;
+  cursor: grab;
+  outline-offset: -12px;
+}
+#pet-canvas:active {
+  cursor: grabbing;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+#bubble[hidden] {
+  display: none;
+}
+#bubble:not([hidden]) {
+  animation: bubble-appear 160ms ease-out;
+}
+@keyframes bubble-appear {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #bubble:not([hidden]) {
+    animation: none;
+  }
+}

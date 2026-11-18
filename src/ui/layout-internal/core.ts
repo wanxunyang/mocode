@@ -72,7 +72,6 @@ export {
   paintLiveAtCursor,
   clearLiveAtCursor,
   setLiveUsage,
-  setQueuedTurn,
   setStatusBase,
   setPendingAttachChips,
   togglePlanExpanded,

@@ -5,7 +5,6 @@ import * as mouse from '../ui/mouse.js';
 import { promptComposer } from '../ui/composer.js';
 import { ensurePasteDetector, pasteState } from '../ui/prompt-internal/paste.js';
 import { appendCurrentSessionRuntimeEvent } from '../session/index.js';
-import { getAgentMode, type AgentMode } from '../agent/mode.js';
 
 /** stdin 的 keypress 事件接口(emitKeypressEvents 后发,不在 ReadStream 类型里)。 */
 interface KeypressEmitter {
@@ -21,17 +20,17 @@ let runningCursor = 0; // 缓冲内光标字符索引(0..len);运行态支持任
 let runningPlaceholder = '';
 let currentAbort: AbortController | null = null;
 let listening = false; // onRunningKey 是否处于挂载期(start → stop 之间)
-/**
- * 运行态「预加载/排队」消息:运行中打字后按 Enter 入队(支持多条,FIFO),
- * 当前 agent 结束后由主循环逐条自动发送,无需用户在 INPUT 态再按一次 Enter。
- * 空数组 = 没有排队。每条 mode 快照入队那一刻的模式,自动执行时沿用。
- * Ctrl+C 从队尾逐条撤回到输入框;Esc 取消队尾。
- */
-export interface QueuedTurn {
-  text: string;
-  mode: AgentMode;
+/** Submitted updates waiting for the next safe boundary of the current run. */
+const steeringMessages: string[] = [];
+
+export function submitSteeringMessage(text: string): void {
+  if (text.trim() && !text.trimStart().startsWith('/')) steeringMessages.push(text);
 }
-const queuedTurns: QueuedTurn[] = [];
+
+export function drainSteeringMessages(): string[] {
+  return steeringMessages.splice(0);
+}
+
 /** 运行态打开的输入面板(Ctrl+G);非 null = 面板仍开着。主循环进 INPUT 态前须等它关闭,否则两个 keypress 监听抢键。 */
 let composerPending: Promise<void> | null = null;
 /** 粘贴多行时 \r\n 合一:刚吃了 \r,尾随的 \n 需吞掉(与 INPUT 态编辑器一致)。 */
@@ -46,36 +45,6 @@ export function getRunningInput(): string {
 export function clearRunningInput(): void {
   runningInput = '';
   runningCursor = 0;
-}
-
-/** 排队条数。 */
-export function queuedTurnCount(): number {
-  return queuedTurns.length;
-}
-
-/** 队首(最早一条 / 下一条待自动发送)排队消息;无则 null。状态行 chip 始终展示它。 */
-function peekQueuedHead(): QueuedTurn | null {
-  return queuedTurns[0] ?? null;
-}
-
-/** 入队一条排队消息(运行态 Enter);多条按 FIFO 自动发送。同步状态行 chip。 */
-export function enqueueQueuedTurn(text: string, mode: AgentMode = getAgentMode()): void {
-  queuedTurns.push({ text, mode });
-  syncQueuedChip();
-}
-
-/** 取走队首(最早一条)排队消息并同步 chip;无则 null。主循环逐条消费自动发送。 */
-export function consumeQueuedTurn(): QueuedTurn | null {
-  const queued = queuedTurns.shift() ?? null;
-  syncQueuedChip();
-  return queued;
-}
-
-/** 把运行态排队队列镜像到状态行 chip:始终展示队首(第一条/下一条待发)+ 总条数;空队列撤下 chip。 */
-function syncQueuedChip(): void {
-  const head = peekQueuedHead();
-  if (head) layout.setQueuedTurn(head.text, head.mode, queuedTurns.length);
-  else layout.setQueuedTurn(undefined);
 }
 
 /**
@@ -144,26 +113,11 @@ function onRunningKey(_str: string, key?: Key): void {
   }
   // 用户在交互(非滚动键)→ 暂停流式物理写,避免光标去 contentRow 扰动 IME 候选窗(停手后自动 flush)
   layout.setUserActive();
-  // 滚动回看时打字 / 编辑(typeahead)不回尾——保持历史视图,便于运行中边看历史边预输入;
-  // 回尾时机:Enter 在运行态是 no-op,真正回尾发生在 agent 结束后 INPUT 态按 Enter 提交(见 prompt.ts submit 前)。
-  // Ctrl+C 逐级回退(RUNNING 态,fish 式,与 INPUT 态 onCtrlC 一致),每次只退一级:
-  //   1. 有 typeahead 草稿 → 只清草稿(不动排队、不中断);
-  //   2. 有排队消息 → 把队尾(最新一条)撤回到输入框(其余排队保留),仍不中断 agent;
-  //   3. 再按一次(输入框有内容)→ 清空;
-  //   4. 输入框也空 → abort 当前 agent。
-  // 多条排队时重复 2→3 即可逐条撤回,直到队列清空才会暂停 agent。
-  // raw 模式下 Ctrl+C 是按键不触发 SIGINT;signal 经 executeTool 串进工具,run_command/web_fetch 即时被杀。
+  // Ctrl+C clears an unsent draft first; otherwise cancels the current run.
   if (key.ctrl && key.name === 'c') {
     if (runningInput.length > 0) {
       runningInput = '';
       runningCursor = 0;
-      paint();
-    } else if (queuedTurns.length > 0) {
-      // 撤回队尾到输入框:内容进 typeahead(agent 结束后预填进 INPUT 态),其余排队保留,不中断 agent。
-      const tail = queuedTurns.pop()!;
-      runningInput = tail.text;
-      runningCursor = runningInput.length;
-      syncQueuedChip(); // 撤/更新状态行 chip,不在内容区写提示
       paint();
     } else if (currentAbort && !currentAbort.signal.aborted) {
       appendCurrentSessionRuntimeEvent('abort', { phase: 'requested', source: 'keyboard' });
@@ -172,8 +126,8 @@ function onRunningKey(_str: string, key?: Key): void {
     return;
   }
   // 粘贴中(块级/时间窗检测,与 INPUT 态编辑器共用 pasteState):整段累积进 typeahead 缓冲,
-  // 换行作为多行文本插入而非触发 Enter 入队——否则粘贴一段含上百行的日志会被拆成上百条排队消息。
-  // \r\n 合一成单个 \n(尾随 \n 吞掉);可打印字符在光标处插入。粘贴结束(50ms 静默)后用户按 Enter 才整条入队。
+  // 换行作为多行文本插入而非触发 Enter 提交——否则粘贴一段含上百行的日志会被拆成上百条排队消息。
+  // \r\n 合一成单个 \n(尾随 \n 吞掉);可打印字符在光标处插入。粘贴结束(50ms 静默)后用户按 Enter 才整条提交。
   if (pasteState.pasting) {
     const s = key.sequence ?? '';
     const isReturn = key.name === 'return' || key.name === 'enter';
@@ -240,28 +194,20 @@ function onRunningKey(_str: string, key?: Key): void {
     return;
   }
   if (key.name === 'escape') {
-    // 有排队消息时 Esc 只取消队尾(最新一条),不清空 typeahead 草稿(避免误删正在打的字);
-    // 无排队时维持原语义:清空 typeahead。
-    if (queuedTurns.length > 0) {
-      queuedTurns.pop();
-      syncQueuedChip(); // 撤/更新状态行 chip,不在内容区写提示
-      paint();
-    } else {
-      runningInput = '';
-      runningCursor = 0;
-      paint();
-    }
+    clearRunningInput();
+    paint();
     return;
   }
-  // Enter / Ctrl+J:把 typeahead 内容追加到排队队列(支持多条,FIFO)。当前 agent 结束后
-  // 主循环经 consumeQueuedTurn 逐条自动发送,无需在 INPUT 态再按 Enter。空内容 no-op。
+  // Enter / Ctrl+J:提交追加消息(支持多条,FIFO)，Agent 在安全边界消费。空内容 no-op。
   if (key.name === 'return' || key.name === 'enter' || (key.ctrl && key.name === 'j')) {
     const text = runningInput.trim();
     if (!text) return;
-    enqueueQueuedTurn(runningInput, getAgentMode());
+    // Slash commands stay as an editable draft for explicit submission when idle.
+    if (runningInput.trimStart().startsWith('/')) return;
+    submitSteeringMessage(runningInput);
     runningInput = '';
     runningCursor = 0;
-    paint(); // 清空底部 typeahead 回显;入队反映在状态行 `● 状态` 右侧的常驻 chip(预览/条数/模式)
+    paint(); // 清空已提交的运行态输入
     return;
   }
   // 可打印字符(>= 空格,非 ctrl/meta)→ 光标处插入 + 非 dim 回显(与空闲态一致)
@@ -285,7 +231,7 @@ export function startRunningListener(placeholder: string): AbortSignal {
   runningCursor = 0;
   pasteJustSawCR = false;
   // 粘贴检测(块级/时间窗)是 INPUT 态编辑器同款、全局幂等:运行态也装上,使多行/大段粘贴
-  // 在 onRunningKey 的 pasting 分支整段进 typeahead,而不是被换行拆成多条排队消息。
+  // 在 onRunningKey 的 pasting 分支整段进 typeahead,而不是被换行拆成多条追加消息。
   ensurePasteDetector();
   if (pasteState.pasteTimer) clearTimeout(pasteState.pasteTimer);
   pasteState.pasting = false;
@@ -311,6 +257,12 @@ export function startRunningListener(placeholder: string): AbortSignal {
  * 若输入面板仍开着,面板继续持有键盘;关闭时据 listening=false 不再恢复运行态监听(主循环 await waitForRunningComposer)。
  */
 export function stopRunningListener(): void {
+  // If cancelled before consumption, keep updates as a draft; never start another run automatically.
+  const unconsumed = drainSteeringMessages();
+  if (unconsumed.length > 0) {
+    runningInput = [...unconsumed, runningInput].filter(Boolean).join('\n');
+    runningCursor = runningInput.length;
+  }
   listening = false;
   emitter.off('keypress', onRunningKey);
   layout.setPasteHandler(null);

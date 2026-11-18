@@ -73,7 +73,7 @@ import {
   getRunningInput,
   clearRunningInput,
   waitForRunningComposer,
-  consumeQueuedTurn,
+  drainSteeringMessages,
 } from './running-input.js';
 
 // ── 斜杠命令树已移到 ./commands.ts ──
@@ -93,10 +93,6 @@ const emitter = stdin as unknown as KeypressEmitter;
 // ── 运行态交互已移到 ./running-input.ts ──
 // ── pendingPrefill / pendingTimer / pendingAttachments 保留在此(awaitPendingRecall / echoInput 用)
 let pendingPrefill: string[] | null = null; // /rollback 选中后预填的 user 输入(下轮 INPUT 态消费)
-// 排队队列里遇到斜杠命令时暂停自动消费:命令不静默自动跑,先填回输入框等用户确认;
-// 确认前队列里后面的消息也不得抢先发送,待该输入框轮次结束再恢复逐条自动发送。
-let queuedHold = false;
-
 // ── pending send 撤回窗口(用户按 Enter 后、agent 真发请求前)──
 // 500ms 内 Ctrl+C / Esc → 整条用户气泡从内容区擦掉 + 原行 prefilled 回输入框(可改可再发);
 // 期间再按 Enter 立即推进 / 时间到自然推进 → 走原流程 enterRunningMode + runTurn。
@@ -771,6 +767,12 @@ export async function startRepl(
         // history[0](否则整段对话的前缀缓存每轮失效)。基线无变化时返回空串 → 零注入。
         buildMemoryTailSection(isMemoryEnabled()),
         runtime,
+        () =>
+          drainSteeringMessages().map((text) => {
+            echoInput(text.split('\n'));
+            queryHistory.push(text);
+            return text;
+          }),
       );
       // 撞限 salvage 摘要要在 TUI 落地:runAgent 只把 finalText 带回不渲染,主线撞限的
       // 收尾摘要若不打印,这笔收尾请求的 token 就白花(用户只看到「达到最大步数」一行)。
@@ -934,16 +936,6 @@ export async function startRepl(
     // 运行态 Ctrl+G 打开的输入面板可能在 agent 结束时仍开着:等它关闭再进 INPUT 态,
     // 否则面板与 promptWithSlashMenu 两个 keypress 监听抢键;面板确认的内容随后经 getRunningInput 预填。
     await waitForRunningComposer();
-    // 消息预加载:上一轮运行中用户按 Enter 排了队(consumeQueuedTurn,支持多条 FIFO),agent 一结束就
-    // 逐条自动发送,跳过 INPUT 态输入框与撤回窗口(入队那一刻即已确认)。queuedHold=上一条是被拦的斜杠
-    // 命令、仍在输入框等确认,此时不消费队列(后面的消息不得抢先),等该输入框轮次结束再恢复。
-    const queued = queuedHold ? null : consumeQueuedTurn();
-    const autoSend = !!queued && queued.text.trim().length > 0;
-    if (autoSend && queued) {
-      // 排队时仍在输入框草稿里的字(typeahead)不能丢:回填为下一轮预填。
-      if (getRunningInput().trim()) pendingPrefill = [getRunningInput()];
-      clearRunningInput();
-    }
     refreshStatusBase(history);
     // 后台反思若已完成(上轮 fire-and-forget),在安全点 flush 一行 dim 摘要:
     // 不在 RUNNING 态写——防与正在跑的 agent 争屏(contentWrite / 状态行)。
@@ -954,61 +946,46 @@ export async function startRepl(
     }
 
     let input: string[];
-    let queuedMode: 'auto' | 'plan' | null = null;
-    if (autoSend && queued) {
-      input = queued.text.split('\n');
-      queuedMode = queued.mode;
-    } else {
-      // 所有斜杠命令和 Agent 轮次共用同一个输出→输入边界，避免某条命令漏写第二个 \n
-      // 后下一条 ❯ 气泡紧贴确认文案；已有多余空行也会收敛为恰好一行。
-      if (hasSubmittedInput) layout.normalizeInputBoundary();
-      layout.enterInputMode(t('repl.idle'));
-      try {
-        const picked = await promptWithSlashMenu({
-          prompt: PROMPT,
-          commands: buildSlashCommands(),
-          onCycleMode: cycleMode,
-          onPasteImage: pasteImageFromClipboard,
-          hasPendingAttachments: () => pendingAttachments.length > 0,
-          clearPendingAttachments: () => {
-            pendingAttachments = [];
-            syncPendingAttachChips();
-          },
-          // 第二输入源（supervise 派活 / 插话）：只在空闲输入框里取，人正在打字时不抢。
-          // 不传就是零行为变化——手敲 mocode 永远走不到这支分支。
-          ...(hooks.takeExternalTurn ? { takeExternalTurn: hooks.takeExternalTurn } : {}),
-          ...(hooks.externalExitRequested ? { externalExitRequested: hooks.externalExitRequested } : {}),
-          // Ctrl+R / Ctrl+P 历史搜索候选源:惰性工厂——当前会话内存 queryHistory + 最近落盘会话,
-          // 聚合要读盘,只有面板真正打开(Ctrl+R/P)才求值,平常轮次零开销
-          history: () => collectQueryHistory(queryHistory).map((e) => e.text),
-          // /rollback 预填优先;否则上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
-          ...(pendingPrefill
-            ? { initialLines: pendingPrefill }
-            : getRunningInput()
-              ? { initialLines: [getRunningInput()] }
-              : {}),
-        });
-        if (picked === null) break; // 空 prompt Ctrl+D
-        input = picked;
-      } catch {
-        break; // Ctrl+C(SIGINT)/ 异常 → 退出
-      }
-      pendingPrefill = null; // 预填已消费,清空
-      clearRunningInput(); // 预填已消费,清空(下轮运行态从空开始)
-      queuedHold = false; // 被拦的排队斜杠命令已在输入框处理完,恢复队列自动消费
+    // 所有斜杠命令和 Agent 轮次共用同一个输出→输入边界，避免某条命令漏写第二个 \n
+    // 后下一条 ❯ 气泡紧贴确认文案；已有多余空行也会收敛为恰好一行。
+    if (hasSubmittedInput) layout.normalizeInputBoundary();
+    layout.enterInputMode(t('repl.idle'));
+    try {
+      const picked = await promptWithSlashMenu({
+        prompt: PROMPT,
+        commands: buildSlashCommands(),
+        onCycleMode: cycleMode,
+        onPasteImage: pasteImageFromClipboard,
+        hasPendingAttachments: () => pendingAttachments.length > 0,
+        clearPendingAttachments: () => {
+          pendingAttachments = [];
+          syncPendingAttachChips();
+        },
+        // 第二输入源（supervise 派活 / 插话）：只在空闲输入框里取，人正在打字时不抢。
+        // 不传就是零行为变化——手敲 mocode 永远走不到这支分支。
+        ...(hooks.takeExternalTurn ? { takeExternalTurn: hooks.takeExternalTurn } : {}),
+        ...(hooks.externalExitRequested ? { externalExitRequested: hooks.externalExitRequested } : {}),
+        // Ctrl+R / Ctrl+P 历史搜索候选源:惰性工厂——当前会话内存 queryHistory + 最近落盘会话,
+        // 聚合要读盘,只有面板真正打开(Ctrl+R/P)才求值,平常轮次零开销
+        history: () => collectQueryHistory(queryHistory).map((e) => e.text),
+        // /rollback 预填优先;否则上一轮运行中 typeahead 打的字 → 预填进输入框,用户可改可发
+        ...(pendingPrefill
+          ? { initialLines: pendingPrefill }
+          : getRunningInput()
+            ? { initialLines: [getRunningInput()] }
+            : {}),
+      });
+      if (picked === null) break; // 空 prompt Ctrl+D
+      input = picked;
+    } catch {
+      break; // Ctrl+C(SIGINT)/ 异常 → 退出
     }
+    pendingPrefill = null; // 预填已消费,清空
+    clearRunningInput(); // 预填已消费,清空(下轮运行态从空开始)
 
     let joined = input.join('\n');
     const line = joined.trim();
     if (!line) continue;
-    // 排队预加载只对「发给 agent 的需求」自动执行;斜杠命令不静默自动跑
-    // (否则排队 /clear、/exit、/rollback 会在用户没看着时触发),改为填回输入框由用户显式确认。
-    if (autoSend && isCommandShape(line.split(/\s+/)[0] ?? '')) {
-      pendingPrefill = input;
-      queuedHold = true; // 暂停消费队列,等该命令在输入框被确认/处理完,后面的排队消息才继续
-      layout.contentWrite(`${ui.dim}  ↳ ${t('repl.queuedCommandHeld')}${ui.reset}\n`);
-      continue;
-    }
     hasSubmittedInput = true;
     if (line === '/exit' || line === '/quit') break;
 
@@ -1132,7 +1109,7 @@ export async function startRepl(
     const bubbleRows =
       input.length + 2 + pendingAttachments.length + downscaledCount + (pendingAttachments.length > 0 ? 1 : 0);
     // 排队消息入队时即已确认 → 跳过 500ms 撤回窗口,直接发送。
-    const shouldCommit = autoSend || (await awaitPendingRecall(input));
+    const shouldCommit = await awaitPendingRecall(input);
     if (!shouldCommit) {
       // 撤回:气泡从内容区擦掉 + 行放回输入框(下轮 promptWithSlashMenu 经 initialLines 消费)+ 切回 INPUT 视觉。
       // pendingAttachments **保留** —— 撤回的是输入文本不是意图,再发时随消息一起带走
@@ -1146,7 +1123,7 @@ export async function startRepl(
     // 只记录已过撤回窗口的真实用户 query；slash 命令和合成执行轮不会走到这里。
     queryHistory.push(joined);
     // 排队消息沿用「入队那一刻」的模式(用户在运行中预加载时选的模式);普通消息读当前模式。
-    const initialPlan = (queuedMode ?? getAgentMode()) === 'plan';
+    const initialPlan = getAgentMode() === 'plan';
     const turn = await runTurn(joined, initialPlan, placeholder);
     if (turn.routedCancel) {
       // 路由阶段 Ctrl+C 撤回:与 500ms 撤回窗口同语义——气泡擦掉 + 行回填输入框

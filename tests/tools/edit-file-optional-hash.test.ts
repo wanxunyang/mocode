@@ -59,6 +59,20 @@ test('edit_file: old_string 模式省略 expected_hash 也能成功', async () =
   assert.equal(out.status, 'success', out.output);
   assert.equal(read(f), 'alpha\nBETA\ngamma\n');
   assert.equal(out.changedFiles?.length, 1);
+  assert.match(out.output, /@@ -1,3 \+1,3 @@\n alpha\n-beta\n\+BETA\n gamma/);
+});
+
+test('edit_file: 大补丁和无净变化的编辑只返回提交摘要', async () => {
+  const f = seed('preview.txt', 'original');
+  const next = 'x'.repeat(3000);
+  const changed = await edit({ path: f, old_string: 'original', new_string: next });
+  assert.equal(changed.status, 'success');
+  assert.doesNotMatch(changed.output, /@@|x{100}/);
+  assert.equal(read(f), next);
+  const unchanged = await edit({ path: f, old_string: next, new_string: next });
+  assert.equal(unchanged.status, 'success');
+  assert.equal(unchanged.changedFiles?.length, 0);
+  assert.doesNotMatch(unchanged.output, /@@/);
 });
 
 test('edit_file: old_string 模式 expected_hash 为 null/空串视为未提供', async () => {

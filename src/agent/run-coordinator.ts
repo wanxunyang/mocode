@@ -189,6 +189,25 @@ export async function runAgentCoreLegacy(
   const modelCacheState = { lastStepPromptTokens: 0, providerCacheSeen: false };
   const cancellationLifecycle = turnLifecycle.createCancellation(historyManager, rebuildHistoryIndexes);
   cancellationLifecycle.checkpoint();
+  let hasLiveUserUpdates = false;
+  const liveUpdateReminder =
+    '## Live user updates — continue the current task\n' +
+    'The user sent additional messages while this task was running. Treat these messages as updates to the same ongoing task. ' +
+    'Consider the original request and all subsequent user updates together, preserving earlier requirements that were not changed. ' +
+    'Use the existing conversation, completed work, and tool results to continue from the current progress. ' +
+    'Apply newer corrections where they conflict with earlier requirements. Do not abandon unfinished work or restart from scratch merely because a new message arrived. ' +
+    'Only stop or replace the original task when the user explicitly asks to cancel, stop, or switch tasks. ' +
+    'Before the final response, check that both the original request and the applicable updates have been addressed.';
+  const acceptUserMessages = (): boolean => {
+    const messages = opts.drainUserMessages?.() ?? [];
+    for (const content of messages) historyManager.appendUserTurn(content);
+    if (messages.length > 0) {
+      hasLiveUserUpdates = true;
+      cancellationLifecycle.checkpoint();
+      hooks.onCheckpoint?.(history);
+    }
+    return messages.length > 0;
+  };
   try {
     for (let step = 0; step < maxSteps; step++) {
       turnLifecycle.setCurrentStep(step);
@@ -207,6 +226,7 @@ export async function runAgentCoreLegacy(
           turnLifecycle.markAborted();
           return turnLifecycle.buildAbortedResult();
         }
+        acceptUserMessages();
         // 本步只捕获一次不可变 policy snapshot。即便 add_tool_groups 在执行阶段扩容，
         // 本次模型响应仍必须按旧 snapshot 校验；新工具只在下一 step 的 schema 中出现。
         const planMode = ctx.getAgentMode() === 'plan';
@@ -264,6 +284,7 @@ export async function runAgentCoreLegacy(
           maxSteps,
           readDedup,
           memoryRecall,
+          liveUpdateReminder: hasLiveUserUpdates ? liveUpdateReminder : undefined,
           cacheState: modelCacheState,
           turnLifecycle,
           cancellationLifecycle,
@@ -1193,8 +1214,14 @@ export async function runAgentCoreLegacy(
         // 没有工具调用：接受 agent 的完成判断。框架不自动运行测试、构建或完成门，
         // 也不因缺少验证证据强制追加模型轮次；agent 仍可自行调用工具验证。
         if (!gotText) hooks.onNoReply?.();
-        historyManager.appendAssistantTurn({ content: result.content, toolCalls: [] });
+        historyManager.appendAssistantTurn({
+          content: result.content,
+          toolCalls: [],
+          reasoningContent: result.reasoningContent,
+        });
 
+        // A user update received during the final stream keeps this run alive.
+        if (acceptUserMessages()) continue;
         const finalMutation = ctx.getCurrentTurnMutationState();
         turnLifecycle.markCompleted();
         return {

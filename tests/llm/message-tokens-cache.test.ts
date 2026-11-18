@@ -95,3 +95,13 @@ describe('messageTokens 内容签名缓存', () => {
     assert.equal(asSystem, asUser - 1, 'system 的结构开销比 user 少 1');
   });
 });
+
+it('DeepSeek reasoning_content 计入 prompt，并在长度变化后重估', () => {
+  const message: ChatMessage = { role: 'assistant', content: 'ok', reasoning_content: 'think' };
+  const without = messageTokens({ role: 'assistant', content: 'ok' });
+  const before = messageTokens(message);
+  assert.ok(before > without, '官方 DeepSeek 带工具时思考进入上下文，不能漏算');
+  if (message.role === 'assistant') message.reasoning_content = 'think'.repeat(100);
+  const after = messageTokens(message);
+  assert.ok(after > before, '同一消息对象的思考长度变化不得命中旧缓存');
+});

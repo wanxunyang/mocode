@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { RecoverySnapshot } from '../recovery-log.js';
 import type { AttachmentResult, WorkAttachment } from '../attachment-types.js';
+import type { ReasoningCapability, WorkPresetDraft, WorkPresetFile } from '../model-config.js';
+
+export type ModelDraft = WorkPresetDraft;
+export type ModelPresetDetail = WorkPresetFile;
 
 type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: WorkAttachment[] };
 
@@ -13,13 +17,11 @@ type GitTarget = { taskId?: string; projectId?: string; repoRoot?: string };
 type GitCommitLogEntry = { sha: string; shortSha: string; parents: string[]; author: string; email: string; date: string; refs: string[]; subject: string };
 /** 历史视图里一个提交改动的文件。 */
 type GitCommitFileEntry = { path: string; previousPath?: string; code: string };
-type ModelDraft = { provider: 'openai' | 'anthropic'; baseURL: string; apiKey: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
-type ModelPresetDetail = ModelDraft & { name: string };
 type CatalogEntryView = {
   providerId: string; providerName: string; modelId: string; name?: string;
   contextWindow: number; reasoning: boolean; toolCall: boolean; attachment: boolean; releaseDate?: string;
 };
-type CatalogPrefill = { provider: 'openai' | 'anthropic'; baseURL: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
+type CatalogPrefill = import('../catalog.js').CatalogPrefill;
 type SkillItem = { name: string; description: string; version?: string; dir: string; origin: 'user' | 'claude' | 'project'; modelInvocable: boolean; allowedTools?: string[] };
 type ImportResult = { ok: boolean; message?: string; installed: Array<{ name: string; dir: string; updated: boolean }> };
 type MarketSkills = { ok: boolean; message?: string; skills: Array<{ name: string; description: string; version?: string; relDir: string }> };
@@ -102,11 +104,15 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   readAttachments: (paths: string[]): Promise<AttachmentResult[]> => ipcRenderer.invoke('work:read-attachments', paths),
   droppedFilePaths: (files: File[]): string[] => files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
   getConfig: (): Promise<{ model: string; label: string; provider: 'openai' | 'anthropic'; promptCache: boolean; baseUrl: string; contextWindow: number | null; language: string; theme: string }> => ipcRenderer.invoke('work:get-config'),
-  listModels: (): Promise<Array<{ name: string; label: string; provider: 'openai' | 'anthropic'; promptCache: boolean; baseURL: string; providerHost: string; contextWindow: number; isActive: boolean }>> => ipcRenderer.invoke('work:list-models'),
+  listModels: (): Promise<Array<{
+    name: string; label: string; provider: WorkPresetFile['provider']; promptCache: boolean;
+    baseURL: string; providerHost: string; contextWindow: number; maxTokens?: number;
+    reasoningEffort: import('../model-config.js').EffortValue; reasoning: ReasoningCapability; isActive: boolean;
+  }>> => ipcRenderer.invoke('work:list-models'),
   switchModel: (name: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:switch-model', name),
   // 预设的增删改查。getModel 会返回 apiKey 明文（编辑表单需要回填），
   // 但只在主进程与本应用渲染层之间流转，不落日志。
-  getModel: (name: string): Promise<{ ok: boolean; message?: string; preset?: ModelPresetDetail }> => ipcRenderer.invoke('work:get-model', name),
+  getModel: (name: string): Promise<{ ok: boolean; message?: string; preset?: ModelPresetDetail; reasoning?: ReasoningCapability }> => ipcRenderer.invoke('work:get-model', name),
   saveModel: (payload: { name: string; originalName?: string; draft: ModelDraft; activate?: boolean }): Promise<{ ok: boolean; message: string; name?: string }> => ipcRenderer.invoke('work:save-model', payload),
   deleteModel: (name: string): Promise<{ ok: boolean; message: string }> => ipcRenderer.invoke('work:delete-model', name),
   // 模型目录（models.dev）：load 拉全部可直发条目（refresh=true 强制联网刷新），

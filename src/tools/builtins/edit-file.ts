@@ -1,4 +1,6 @@
 import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
+import { unifiedFileDiff } from '../../changeset/unified-diff.js';
 import { jailResolve } from '../../sandbox/index.js';
 import {
   commitChangeSet,
@@ -12,6 +14,9 @@ import type { Tool, ToolOutcome } from '../types.js';
 
 /** 二进制嗅探只需文件头,与 read_file / write_file 同口径(16KB)。 */
 const SNIFF_BYTES = 16 * 1024;
+// 复用已有 diff 渲染，只给模型回传完整的小补丁。大文件免去额外的全文拆行。
+const MAX_PREVIEW_INPUT_CHARS = 256 * 1024;
+const MAX_PREVIEW_CHARS = 2000;
 
 function conflict(path: string, details: string): ToolOutcome {
   return {
@@ -262,6 +267,11 @@ export const editFileTool: Tool = {
       };
     }
     const summary = summarizeChangeSet(result.changeSet);
+    let preview = '';
+    if (result.changedFiles.length > 0 && data.length + replacement.length <= MAX_PREVIEW_INPUT_CHARS) {
+      const diff = unifiedFileDiff(basename(file), data, replacement, 1);
+      if (diff && diff.length <= MAX_PREVIEW_CHARS) preview = `\n${diff}`;
+    }
     return {
       status: 'success',
       code: 'OK',
@@ -271,7 +281,7 @@ export const editFileTool: Tool = {
       output:
         result.changedFiles.length === 0
           ? `文件 ${file} 内容未变化 (ChangeSet ${summary.id})。`
-          : `已事务化编辑 ${file} (ChangeSet ${summary.id}, sha256=${summary.changes[0]?.afterHash})。`,
+          : `已事务化编辑 ${file} (ChangeSet ${summary.id}, sha256=${summary.changes[0]?.afterHash})。${preview}`,
     };
   },
 };

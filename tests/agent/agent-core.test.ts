@@ -1670,9 +1670,8 @@ test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后�
     const first = ephemeralOf(0);
     assert.match(first, /## Opening analysis/, 'step 0 必须带开场分析');
     assert.ok(!first.includes('## Silent work'), '互斥:step 0 不应同时出现正文纪律');
-    // 收尾必须是明确指代(约束"分析"),不能是悬空的 "those 1-3 sentences"——
-    // 中间插入了 Answer-first 之后,those 会被误读成"整轮回复只 1-3 句"。
-    assert.match(first, /Keep the analysis to 1-3 sentences/);
+    assert.match(first, /Answer directly/);
+    assert.match(first, /focused change in AUTO, start with the needed tool call/);
 
     // ② step 1:开场分析消失,正文纪律登场——互斥的另一半。
     const second = ephemeralOf(1);

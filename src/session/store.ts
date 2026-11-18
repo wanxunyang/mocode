@@ -87,9 +87,35 @@ function idToIso(id: string): string {
   return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}${m[7] ? `.${m[7]}` : ''}`;
 }
 
+/**
+ * 一条 user 消息的 content → 一行人读文本。
+ *
+ * 多模态 content(文字 + 图片)**不能**直接 JSON.stringify:那会把
+ * `[{"type":"text","text":"这是？"},{"type":"image_url","image_url":{…}}]` 整段塞进
+ * firstUser,会话列表里就显示成一串 JSON(实测仓库里 13 条会话如此,侧栏读到的是
+ * 截到 40 字符的半截 JSON,既不是人话也解析不了)。图片按 `[图片]` 占位 ——
+ * 标题要的是「我第一句说了什么」,不是 base64。
+ */
 function toText(content: unknown): string {
   if (content == null) return '';
   if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const texts: string[] = [];
+    let hasImage = false;
+    for (const part of content) {
+      if (typeof part === 'string') {
+        texts.push(part);
+        continue;
+      }
+      if (!part || typeof part !== 'object') continue;
+      const piece = part as { type?: unknown; text?: unknown };
+      if (piece.type === 'text' && typeof piece.text === 'string') texts.push(piece.text);
+      else if (piece.type === 'image_url') hasImage = true;
+    }
+    const joined = texts.join(' ').trim();
+    if (joined) return joined;
+    if (hasImage) return '[图片]';
+  }
   try {
     return JSON.stringify(content);
   } catch {
@@ -103,9 +129,40 @@ function firstUserOf(history: ChatMessage[]): string {
     const text = toText((message as { content?: unknown }).content)
       .replace(/\n/g, ' ')
       .trim();
+    if (!text) continue;
     return truncateDisplay(text, 40);
   }
   return '';
+}
+
+/**
+ * 读侧修正老的 firstUser:早期版本把多模态 content 直接 JSON.stringify 存进了这个字段,
+ * 于是一批会话在列表里永远显示成 `[{"type":"text","text":"这是？"},…]`(落盘值不会自愈,
+ * 只有该会话下次 save 才会重算)。以 `[` / `{` 开头即视为序列化产物,改从 history 重算;
+ * history 不可用时退回原值。
+ *
+ * 用户真的把一段 JSON 当第一句话粘贴时也安全:content 是字符串,重算结果与落盘值逐字相同。
+ */
+function repairFirstUser(record: Partial<SessionRecord>): string {
+  const stored = typeof record.firstUser === 'string' ? record.firstUser : '';
+  const head = stored.trimStart()[0];
+  if (head !== '[' && head !== '{') return stored;
+  if (!Array.isArray(record.history)) return stored;
+  return firstUserOf(record.history as ChatMessage[]) || stored;
+}
+
+/**
+ * 归档会话的 firstUser 修正:归档条目只有索引里的标题,内联 history 在 `archive/<id>.json.gz`。
+ *
+ * 只为「看起来是序列化产物」的条目解一次 gz —— 每个工作空间这类条目通常 0~1 条,
+ * 不值得为它给整个列表加一次全量解压。
+ */
+function repairArchivedFirstUser(sessionsRoot: string, id: string, stored: string): string {
+  const head = stored.trimStart()[0];
+  if (head !== '[' && head !== '{') return stored;
+  const archived = loadArchivedSession(sessionsRoot, id);
+  if (!archived || !Array.isArray(archived.history)) return stored;
+  return firstUserOf(archived.history) || stored;
 }
 
 /** compacted/ 总量上限:MOCODE_MAX_COMPACTED_BYTES 覆盖(供测试/小盘),非法值回退默认。 */
@@ -559,7 +616,7 @@ export class SessionStore {
         id: rec.id,
         createdAt: rec.createdAt ?? idToIso(rec.id ?? id),
         model: rec.model ?? '',
-        firstUser: rec.firstUser ?? '',
+        firstUser: repairFirstUser(rec),
         history: rec.history,
         queryHistory: Array.isArray(rec.queryHistory)
           ? rec.queryHistory.filter((query): query is string => typeof query === 'string')
@@ -674,7 +731,7 @@ export class SessionStore {
           id: rec.id,
           createdAt: rec.createdAt ?? idToIso(rec.id),
           model: rec.model ?? '',
-          firstUser: rec.firstUser ?? '',
+          firstUser: repairFirstUser(rec),
         });
       } catch {
         // 跳过损坏文件。
@@ -690,7 +747,7 @@ export class SessionStore {
         id: e.id,
         createdAt: e.createdAt ?? idToIso(e.id),
         model: e.model ?? '',
-        firstUser: e.firstUser ?? '',
+        firstUser: repairArchivedFirstUser(root, e.id, e.firstUser ?? ''),
         archived: true,
       });
     }

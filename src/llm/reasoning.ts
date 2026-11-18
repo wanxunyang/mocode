@@ -51,6 +51,8 @@ export interface ReasoningTarget {
   model: string;
   /** Anthropic budget_tokens 的 clamp 上界(max_tokens);不传按 8192 处理。 */
   maxTokens?: number;
+  /** 实际下发请求的 baseURL;同一模型在官方端点与 DashScope 等网关上的方言不同。 */
+  baseURL?: string;
   /**
    * 模型目录(#model-catalog M3)来源信息。携带且方言可解析时,优先按目录能力下发,
    * 下面的型号正则降为兜底;缺失(旧路径/手填模型)则完全走正则,行为不变。
@@ -89,6 +91,7 @@ export function recognizesReasoning(target: ReasoningTarget): boolean {
     /gpt-?5/.test(m) ||
     /qwen[-_]?3/.test(m) ||
     /deepseek[-_]?r1/.test(m) ||
+    /deepseek[-_]?(?:v4|flash)/.test(m) ||
     /glm[-_]?4[.-]?[56]/.test(m) ||
     /glm[-_]?5/.test(m) ||
     /doubao[-_]?seed/.test(m)
@@ -102,6 +105,9 @@ export function resolveReasoningParams(effort: ReasoningEffort, target: Reasonin
   if (effort === 'auto') return {};
   // Gemini/Vertex provider 在 buildGeminiRequest 内直接生成 thinkingConfig；这里不应再注入 OpenAI 方言。
   if (target.provider === 'google') return {};
+
+  // 目录显式声明不支持思考是硬边界，不能因型号名命中正则又悄悄开启。
+  if (target.catalogReasoning === false) return {};
 
   // 目录优先:带 catalogProviderId 时按目录能力+厂商方言产出。
   // 注意 anthropic 路径的思考在 anthropic provider 内仍走它自己的 target.provider,
@@ -152,6 +158,18 @@ export function resolveReasoningParams(effort: ReasoningEffort, target: Reasonin
   if (/doubao[-_]?seed/.test(m)) {
     if (effort === 'off') return { thinking: { type: 'disabled' } };
     return { thinking: { type: 'enabled' } };
+  }
+
+  // DeepSeek V4 / Flash 是混合思考模型。官方端点用 thinking + reasoning_effort;
+  // DashScope 兼容端点用 enable_thinking + thinking_budget(两种写法均已实测,按端点选厂商原生方言)。
+  if (/deepseek[-_]?(?:v4|flash)/.test(m)) {
+    if (/dashscope(?:-[a-z]+)?\.aliyuncs\.com/i.test(target.baseURL ?? '')) {
+      if (effort === 'off') return { enable_thinking: false };
+      return { enable_thinking: true, thinking_budget: THINK_BUDGET[effort as 'low' | 'medium' | 'high'] };
+    }
+    if (effort === 'off') return { thinking: { type: 'disabled' } };
+    // DeepSeek 官方只有 low/high/max 三档,归一化 medium 映射到 high。
+    return { thinking: { type: 'enabled' }, reasoning_effort: effort === 'low' ? 'low' : 'high' };
   }
 
   // DeepSeek-R1:无开关参数,任何档位都不下发。

@@ -43,11 +43,19 @@ test('effort + openai 方言：档位映射进合法 values；off 落最低档',
   assert.ok(['low', 'high', 'max'].includes((r as { reasoning_effort: string }).reasoning_effort));
 });
 
-test('off + openai 方言：无法真关，落到 values 最低档', () => {
+test('off + openai 方言：显式关闭值优先，否则落到 values 最低档', () => {
   const opts = [{ type: 'effort' as const, values: ['low', 'high'] }];
   assert.deepEqual(paramsFromCatalog({ effort: 'off', catalogProviderId: 'openai', reasoningOptions: opts }), {
     reasoning_effort: 'low',
   });
+  assert.deepEqual(
+    paramsFromCatalog({
+      effort: 'off',
+      catalogProviderId: 'openai',
+      reasoningOptions: [{ type: 'effort', values: ['low', 'none', 'high'] }],
+    }),
+    { reasoning_effort: 'none' },
+  );
 });
 
 test('qwen 方言：off → enable_thinking false；非 off 带 budget（budget_tokens 选项）', () => {
@@ -70,6 +78,21 @@ test('qwen 方言：off → enable_thinking false；非 off 带 budget（budget_
     reasoningOptions: [{ type: 'budget_tokens', min: 2048 }],
   });
   assert.equal(minB.thinking_budget, 2048);
+});
+
+test('deepseek 目录方言：thinking 开关与 effort 同时下发', () => {
+  const options = [{ type: 'effort' as const, values: ['low', 'high', 'max'] }];
+  assert.deepEqual(paramsFromCatalog({ effort: 'off', catalogProviderId: 'deepseek', reasoningOptions: options }), {
+    thinking: { type: 'disabled' },
+  });
+  assert.deepEqual(paramsFromCatalog({ effort: 'medium', catalogProviderId: 'deepseek', reasoningOptions: options }), {
+    thinking: { type: 'enabled' },
+    reasoning_effort: 'high',
+  });
+  assert.deepEqual(paramsFromCatalog({ effort: 'high', catalogProviderId: 'deepseek', reasoningOptions: options }), {
+    thinking: { type: 'enabled' },
+    reasoning_effort: 'high',
+  });
 });
 
 test('无 reasoningOptions 但方言已知：openai 仍下发归一化档；qwen 仅开关', () => {

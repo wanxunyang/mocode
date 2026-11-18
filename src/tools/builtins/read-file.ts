@@ -19,6 +19,7 @@ import { config, isMemoryEnabled } from '../../config/index.js';
  * 配合 description 中的 PAGINATION IS MANDATORY 引导。
  * 300 行 ≈ 一个屏幕的源码量,够定位一段逻辑而不至于吃光上下文。 */
 const DEFAULT_READ_LIMIT = 300;
+const ANCHORED_READ_LIMIT = 80;
 
 /** 魔数嗅探只需文件头:16KB 足够覆盖 WebP(12 字节)/PNG(8)/GIF(6)/JPEG(SOF 位置不定)
  *  与二进制探测的 4KB 控制字符窗口。 */
@@ -53,18 +54,26 @@ export const readFileTool: Tool = {
   name: 'read_file',
   description:
     'Read a file: text with line numbers, images as visual model input.\n' +
-    'Text — read before editing. For files >500 lines, grep first to locate, then read_file with offset+limit (e.g. offset=350, limit=120); never read a whole large file in one call. ' +
+    'Text — read before editing. With a known path and declaration or snippet, pass anchor to locate it and read its code in one call. Use offset+limit for known line numbers, or grep to discover paths. ' +
     'Images — PNG/JPEG/GIF/WebP detected by MAGIC BYTES (extension ignored), attached as visual input; detail=low|high controls resolution, oversized PNGs downscale automatically. ' +
     'Other binaries are REJECTED with an explanation — use run_command with a proper tool (`file`, `strings`, disassembler) if you need their content.',
   parameters: {
     type: 'object',
     properties: {
       path: { type: 'string', description: 'File path, relative to the working directory' },
-      offset: { type: 'integer', description: 'Start line, 1-based (default 1). Text files only; ignored for images.' },
+      anchor: {
+        type: 'string',
+        description:
+          'Start the text read at the first line containing this exact, case-sensitive literal (e.g. "function parseConfig("). With offset, search from that line. Ignored for images.',
+      },
+      offset: {
+        type: 'integer',
+        description: 'First line to read or search for anchor, 1-based (default 1). Text only.',
+      },
       limit: {
         type: 'integer',
         description:
-          'Max lines to read (default 300, hard cap 2000). Size by OUTPUT, not lines: outputs are capped at ~32k chars per call, so a dense (CJK) file fits ~200-400 lines in one call while sparse code fits 1000+. If a range exceeds that, split it; the output tail always reports how many lines remain. Text only; ignored for images.',
+          'Max text lines to read (default 80 with anchor, otherwise 300; hard cap 2000). Aim for ~32k output characters or less per call. Ignored for images.',
       },
       detail: {
         type: 'string',
@@ -77,8 +86,12 @@ export const readFileTool: Tool = {
   async execute(args, toolCtx): Promise<ToolOutcome> {
     const path = String(args.path);
     const offset = Number(args.offset ?? 1);
+    const anchor = args.anchor;
     // 无论 LLM 传多大,单次硬钳到 MAX_FILE_LINES,杜绝「绕过分页引导一把全拿」。
-    const limit = Math.min(Number(args.limit ?? DEFAULT_READ_LIMIT), MAX_FILE_LINES);
+    const limit = Math.min(
+      Number(args.limit ?? (anchor === undefined ? DEFAULT_READ_LIMIT : ANCHORED_READ_LIMIT)),
+      MAX_FILE_LINES,
+    );
     // enforceSandbox 已把 args.path 重写为牢内绝对路径(sandbox/policy.ts SANDBOX_PATH_TOOLS),
     // resolve 对绝对路径原样返回。
     const absolute = resolve(path);
@@ -140,9 +153,22 @@ export const readFileTool: Tool = {
     // hash 仍取「UTF-8 解码后字符串」的摘要(与改动前逐字节一致):会话里已持久化的
     // expected_hash 与 context/artifacts 的 parseReadHash 都依赖这个口径,不能顺手换。
     const data = buffer.toString('utf8');
-    const artifactHeader = `[artifact source=read_file path=${path} hash=${contentHash(data)}]`;
     const lines = data.split(/\r?\n/);
-    const start = Math.max(0, offset - 1);
+    let start = Math.max(0, offset - 1);
+    if (anchor !== undefined) {
+      if (typeof anchor !== 'string' || !anchor.length || /[\r\n]/.test(anchor)) {
+        return failure('INVALID_ARGUMENTS', 'anchor 需要单行非空原文。');
+      }
+      while (start < lines.length && !lines[start].includes(anchor)) start++;
+      if (start >= lines.length) {
+        return failure(
+          'EXECUTION_ERROR',
+          `${path} 从第 ${Math.max(1, offset)} 行起未找到 anchor。请缩短原文片段或用 grep 搜索。`,
+        );
+      }
+    }
+    const fileHash = contentHash(data);
+    const artifactHeader = `[artifact source=read_file path=${path} hash=${fileHash}]`;
     const end = Math.min(lines.length, start + limit);
     const body = lines
       .slice(start, end)
@@ -157,7 +183,7 @@ export const readFileTool: Tool = {
     const reqEnd = end;
     const dedup = toolCtx?.readDedup;
     if (config.readDedup && dedup) {
-      const hit = dedup.findUnchanged(path, reqStart, reqEnd, contentHash(data));
+      const hit = dedup.findUnchanged(path, reqStart, reqEnd, fileHash);
       if (hit) {
         return {
           status: 'success',
@@ -186,11 +212,10 @@ export const readFileTool: Tool = {
     // 用 output(含回注段)判长度:最终进 history 的就是它,回注把长度顶过 cap 时
     // 必须按截断口径登记,否则会记成"完整保留"而制造幽灵命中。
     if (dedup && config.readDedup && output.length > MAX_HISTORY_RESULT) {
-      const fileHash = contentHash(data);
       const truncated = truncatedOutputRanges(lines, start, end, output.length, MAX_HISTORY_RESULT);
       for (const r of truncated) dedup.record(path, r.start, r.end, fileHash);
     } else {
-      dedup?.record(path, reqStart, reqEnd, contentHash(data));
+      dedup?.record(path, reqStart, reqEnd, fileHash);
     }
     return { status: 'success', code: 'OK', retryable: false, output };
   },

@@ -40,3 +40,29 @@ test('session: lastToolGroups 可往返，并在加载时过滤未知或损坏�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('session: DeepSeek 工具轮/最终轮 reasoning_content 与旧消息一起完整往返', () => {
+  const root = mkdtempSync(join(tmpdir(), 'mocode-session-reasoning-test-'));
+  const previousSessionDir = config.sessionDir;
+  config.sessionDir = root;
+  const id = '20261117-120000';
+  const history: ChatMessage[] = [
+    { role: 'user', content: 'read a file' },
+    {
+      role: 'assistant',
+      content: null,
+      reasoning_content: 'think-before-tool',
+      tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{}' } }],
+    },
+    { role: 'tool', tool_call_id: 'c1', content: 'contents' },
+    { role: 'assistant', content: 'done', reasoning_content: 'think-final' },
+    { role: 'assistant', content: 'old session without reasoning' },
+  ];
+  try {
+    saveSession(history, id);
+    assert.deepEqual(loadSession(id)?.history, history);
+  } finally {
+    config.sessionDir = previousSessionDir;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

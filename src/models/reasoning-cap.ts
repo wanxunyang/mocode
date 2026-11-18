@@ -13,7 +13,8 @@ import { THINK_BUDGET_BY_EFFORT } from './budgets.js';
 type Dialect =
   | 'openai-effort' // { reasoning_effort }
   | 'thinking-toggle' // { thinking: { type: 'enabled'|'disabled' } }
-  | 'qwen'; // { enable_thinking, thinking_budget? }
+  | 'qwen' // { enable_thinking, thinking_budget? }
+  | 'deepseek'; // { thinking, reasoning_effort? }
 
 /**
  * catalogProviderId → 方言。一家厂商一种方言（alibaba 全系 Qwen）。
@@ -26,7 +27,7 @@ const PROVIDER_DIALECT: Record<string, Dialect> = {
   alibaba: 'qwen',
   zhipuai: 'thinking-toggle',
   volcengine: 'thinking-toggle',
-  deepseek: 'thinking-toggle',
+  deepseek: 'deepseek',
   moonshotai: 'thinking-toggle',
 };
 
@@ -38,7 +39,7 @@ export function dialectForProvider(catalogProviderId: string | undefined): Diale
 function pickEffortValue(effort: 'low' | 'medium' | 'high', values: string[], off: boolean): string {
   const v = values.map((s) => s.toLowerCase());
   const priorities: Record<string, string[]> = off
-    ? { any: ['off', 'disabled', 'minimal', 'low'] }
+    ? { any: ['off', 'disabled', 'none', 'minimal', 'low'] }
     : effort === 'low'
       ? { any: ['low', 'minimal'] }
       : effort === 'medium'
@@ -99,6 +100,22 @@ export function paramsFromCatalog(input: CatalogReasoningInput): Record<string, 
     }
     // 无 effort/toggle 元数据但已知是 OpenAI 方言：直接下发归一化档位（off→low）。
     return { reasoning_effort: isOff ? 'low' : input.effort };
+  }
+
+  // ── DeepSeek：thinking 开关 + 官方 effort 档位 ──
+  if (dialect === 'deepseek') {
+    if (isOff) return { thinking: { type: 'disabled' } };
+    const base: Record<string, unknown> = { thinking: { type: 'enabled' } };
+    if (effortOpt?.values?.length) {
+      // DeepSeek 官方只有 low/high/max 时没有 medium，统一映射到 high。
+      base.reasoning_effort =
+        input.effort === 'medium' && !effortOpt.values.some((value) => /^(medium|mid)$/i.test(value))
+          ? 'high'
+          : pickEffortValue(input.effort as 'low' | 'medium' | 'high', effortOpt.values, false);
+    } else {
+      base.reasoning_effort = input.effort === 'low' ? 'low' : 'high';
+    }
+    return base;
   }
 
   // ── thinking-toggle 方言 ──

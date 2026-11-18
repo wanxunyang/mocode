@@ -36,13 +36,17 @@ function clipLine(line: string): string {
  *   `  --`             不相邻分块之间的分隔
  * 原文不 trim:缩进是代码结构信息。
  */
-function renderFileBodies(file: RgFileEvents, maxPerFile: number): string[] {
+function renderFileBodies(file: RgFileEvents, maxPerFile: number, context: number): string[] {
   const shown = file.matches.slice(0, maxPerFile);
   if (shown.length === 0) return [];
   const matched = new Set(shown.map((e) => e.line));
   const byLine = new Map<number, RgLineEvent>();
   for (const e of shown) byLine.set(e.line, e);
-  for (const e of file.contexts) byLine.set(e.line, e);
+  const lastContextLine = shown[shown.length - 1].line + context;
+  for (const e of file.contexts) {
+    if (e.line > lastContextLine) break;
+    byLine.set(e.line, e);
+  }
   const out: string[] = [];
   let previous = 0;
   for (const n of [...byLine.keys()].sort((a, b) => a - b)) {
@@ -56,27 +60,22 @@ function renderFileBodies(file: RgFileEvents, maxPerFile: number): string[] {
 
 /** 把聚合后的文件事件渲染成工具输出(配额/截断口径与旧实现一致)。 */
 function renderResults(files: RgFileEvents[], maxPerFile: number, context: number, truncated: boolean): string {
-  type Hit = { file: RgFileEvents; bodies: string[] };
-  const hits: Hit[] = [];
+  const out: string[] = [];
   let budgetTruncated = truncated;
+  let totalShown = 0;
   for (const file of files) {
     const bodyCost = Math.min(file.matches.length, maxPerFile) * (1 + 2 * context);
     const totalCost = file.matches.length + bodyCost;
-    if (hits.length >= MAX_RESULTS || totalCost > MAX_RESULTS * 4) {
-      if (hits.length < MAX_RESULTS) hits.push({ file, bodies: [] });
+    out.push(`${file.path}: ${file.matches.length} 处匹配,行号 [${file.matches.map((e) => e.line).join(', ')}]`);
+    totalShown += file.matches.length;
+    if (totalCost > MAX_RESULTS * 4) {
+      out.push('  (body 已折叠,见上方行号列表 → read_file 精读)');
       budgetTruncated = true;
-      continue;
+    } else {
+      const bodies = renderFileBodies(file, maxPerFile, context);
+      out.push(...bodies);
+      totalShown += bodies.length;
     }
-    hits.push({ file, bodies: renderFileBodies(file, maxPerFile) });
-  }
-
-  const out: string[] = [];
-  let totalShown = 0;
-  for (const h of hits) {
-    out.push(`${h.file.path}: ${h.file.matches.length} 处匹配,行号 [${h.file.matches.map((e) => e.line).join(', ')}]`);
-    if (h.bodies.length > 0) out.push(...h.bodies);
-    else out.push('  (body 已折叠,见上方行号列表 → read_file 精读)');
-    totalShown += h.file.matches.length + h.bodies.length;
     if (totalShown >= MAX_RESULTS) {
       out.push(
         `...(结果达到 ${MAX_RESULTS} 条上限${
@@ -220,7 +219,10 @@ export const grepTool: Tool = {
     try {
       // glob 显式限定到 .mocode(gitignore 内)时放开 VCS ignore,否则 rg 零文件退出。
       const noIgnoreVcs = glob === '.mocode/**' || glob.startsWith('.mocode/');
-      const result = await runRipgrep({ pattern, glob, context, noIgnoreVcs }, controller.signal);
+      const result = await runRipgrep(
+        { pattern, glob, context, noIgnoreVcs, maxMatches: MAX_RESULTS },
+        controller.signal,
+      );
       switch (result.status) {
         case 'regex_error':
           return `错误:非法正则 ${pattern}: ${result.message}`;

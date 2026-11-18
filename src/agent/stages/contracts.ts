@@ -39,6 +39,8 @@ export interface HistoryInit {
 export interface AssistantTurn {
   content: string | null;
   toolCalls: readonly ToolCallRef[];
+  /** DeepSeek 官方工具协议需要跨轮保留的完整思考内容。 */
+  reasoningContent?: string;
 }
 
 export interface OrderedToolCallResult {

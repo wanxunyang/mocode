@@ -1,4 +1,5 @@
 import type { Tool, ToolOutcome } from '../types.js';
+import { PLAN_USAGE_GUIDANCE } from '../../agent/work-discipline.js';
 import {
   PLAN_MAX_STEPS,
   readActivePlanTitle,
@@ -30,7 +31,8 @@ function normalizeStatus(raw: unknown): string {
 export const planUpdateTool: Tool = {
   name: 'plan_update',
   description:
-    'Record and update the session execution plan (the `## Plan:` block in notes.md). Use for any task with 3+ steps or context-loss risk. REPLACES the whole plan each call — always pass the full steps array. At most one step in_progress; mark a step completed as soon as its work is done, not batched to end of turn. Each step: short `title` (≤20 chars, shown in the status bar) + `content` self-contained enough to survive compaction (target file/symbol + the change; add the check only when the step is worth verifying). All steps completed → auto-settles to `## Done:`. Creates notes.md if missing. Safe in PLAN mode (writes only the session notepad).',
+    `Record and update the session execution plan in notes.md. ${PLAN_USAGE_GUIDANCE} ` +
+    'REPLACES the whole plan each call — always pass the full steps array. At most one step in_progress; mark a step completed as soon as its work is done. Each step needs a short title (≤20 chars) and self-contained content. All steps completed → auto-settles to `## Done:`. Safe in PLAN mode (writes only the session notepad).',
   risk: 'safe',
   parameters: {
     type: 'object',

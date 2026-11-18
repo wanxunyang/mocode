@@ -90,6 +90,45 @@ test('qwen3: enable_thinking + thinking_budget', () => {
 });
 
 // ── GLM / DeepSeek / 未知 ─────────────────────────────
+test('deepseek-v4/flash: DashScope 用 enable_thinking;官方端点用 thinking + reasoning_effort', () => {
+  const dashscope = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+  assert.equal(recognizesReasoning({ provider: 'openai', model: 'deepseek-v4.1-flash' }), true);
+  assert.deepEqual(
+    resolveReasoningParams('off', { provider: 'openai', model: 'deepseek-v4.1-flash', baseURL: dashscope }),
+    {
+      enable_thinking: false,
+    },
+  );
+  assert.deepEqual(
+    resolveReasoningParams('low', { provider: 'openai', model: 'deepseek-v4.1-flash', baseURL: dashscope }),
+    {
+      enable_thinking: true,
+      thinking_budget: 1024,
+    },
+  );
+  assert.deepEqual(
+    resolveReasoningParams('off', {
+      provider: 'openai',
+      model: 'deepseek-v4-flash',
+      baseURL: 'https://api.deepseek.com/v1',
+    }),
+    {
+      thinking: { type: 'disabled' },
+    },
+  );
+  assert.deepEqual(
+    resolveReasoningParams('medium', {
+      provider: 'openai',
+      model: 'deepseek-v4.1-flash',
+      baseURL: 'https://api.deepseek.com/v1',
+    }),
+    {
+      thinking: { type: 'enabled' },
+      reasoning_effort: 'high',
+    },
+  );
+});
+
 test('glm-4.5/4.6/5: thinking enabled/disabled; deepseek-r1/未知不下发', () => {
   assert.deepEqual(resolveReasoningParams('off', { provider: 'openai', model: 'glm-4.6' }), {
     thinking: { type: 'disabled' },
@@ -137,4 +176,26 @@ test('effort scope: scope 内可见, 嵌套覆盖, scope 外回退', async () =>
     assert.equal(getScopedEffort(), 'high');
   });
   assert.equal(getScopedEffort(), undefined);
+});
+
+test('目录明确声明不支持思考时禁止型号正则兜底开启；缺省声明保持兼容', () => {
+  assert.deepEqual(
+    resolveReasoningParams('high', {
+      provider: 'openai',
+      model: 'deepseek-v4-flash',
+      catalogProviderId: 'deepseek',
+      catalogReasoning: false,
+    }),
+    {},
+  );
+  assert.deepEqual(
+    resolveReasoningParams('low', {
+      provider: 'openai',
+      model: 'deepseek-v4-flash',
+      baseURL: 'https://api.deepseek.com/v1',
+      catalogProviderId: 'deepseek',
+      catalogReasoning: true,
+    }),
+    { thinking: { type: 'enabled' }, reasoning_effort: 'low' },
+  );
 });

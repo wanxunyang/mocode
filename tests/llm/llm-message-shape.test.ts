@@ -7,7 +7,11 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeAssistantContent, sanitizeContentParts } from '../../src/llm/message-shape.js';
+import {
+  prepareReasoningContent,
+  sanitizeAssistantContent,
+  sanitizeContentParts,
+} from '../../src/llm/message-shape.js';
 import { createLegacyHistoryManager, createStagedHistoryManager } from '../../src/agent/stages/history-manager.js';
 import type { ChatMessage } from '../../src/llm/index.js';
 
@@ -131,4 +135,37 @@ test('端到端回归:被污染的 session history 经 transport 消毒后不再
       !((m as { tool_calls?: unknown[] }).tool_calls ?? []).length,
   );
   assert.equal(bare.length, 0, '消毒后不得残留任何会被网关 400 的 assistant 形状');
+});
+
+test('prepareReasoningContent: DeepSeek 保留，其它端点只在请求副本剥离', () => {
+  const assistant = {
+    role: 'assistant' as const,
+    content: null,
+    reasoning_content: '完整思考',
+    tool_calls: [{ id: 'c1', type: 'function' as const, function: { name: 'x', arguments: '{}' } }],
+  };
+  const messages: ChatMessage[] = [user('hi'), assistant, user('next')];
+  assert.equal(prepareReasoningContent(messages, true), messages);
+  assert.equal(prepareReasoningContent(messages, true)[1], assistant);
+
+  const stripped = prepareReasoningContent(messages, false);
+  assert.notEqual(stripped, messages);
+  assert.equal('reasoning_content' in stripped[1], false);
+  assert.equal(stripped[0], messages[0], '未修改消息必须复用引用');
+  assert.equal(assistant.reasoning_content, '完整思考', '会话原消息不得被剥离');
+  assert.equal(prepareReasoningContent(stripped, false), stripped, '干净历史返回原数组');
+});
+
+test('prepareReasoningContent: 修复 content:null 时保留 DeepSeek 思考字段', () => {
+  const messages: ChatMessage[] = [
+    user('hi'),
+    { role: 'assistant', content: null, reasoning_content: 'final turn thinking' },
+  ];
+  const healed = prepareReasoningContent(sanitizeAssistantContent(messages), true);
+  assert.deepEqual(healed[1], {
+    role: 'assistant',
+    content: '',
+    reasoning_content: 'final turn thinking',
+  });
+  assert.equal(messages[1].content, null);
 });

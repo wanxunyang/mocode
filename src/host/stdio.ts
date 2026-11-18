@@ -83,7 +83,7 @@ interface ApprovalWaiter {
 
 let initialized: Promise<void> | null = null;
 let runtimeFacade: Runtime | null = null;
-let activeRun: { id: string; controller: AbortController } | null = null;
+let activeRun: { id: string; controller: AbortController; pending: Array<string | ContentPart[]> } | null = null;
 let closing = false;
 const hostClosedReason = new DOMException('Host input closed.', 'AbortError');
 const shutdownController = new AbortController();
@@ -431,9 +431,39 @@ function hooksFor(runId: string): AgentHooks {
   };
 }
 
+function inputForRun(command: Extract<HostCommand, { type: 'run' }>): string | ContentPart[] {
+  return command.attachments?.length
+    ? [
+        ...(command.prompt ? [{ type: 'text' as const, text: command.prompt }] : []),
+        ...command.attachments.flatMap((attachment): ContentPart[] => {
+          if (attachment.dataUrl)
+            return [{ type: 'image_url', name: attachment.name, image_url: { url: attachment.dataUrl } }];
+          if (typeof attachment.text !== 'string') return [];
+          // name/attachment/truncated 是会话回放元数据，transport 发送前统一移除。
+          return [
+            {
+              type: 'text',
+              name: attachment.name,
+              attachment: true,
+              truncated: attachment.truncated === true,
+              text: `用户附件 ${JSON.stringify(attachment.name)} 的提取文本如下。${attachment.truncated ? '（内容已截断，仅提供前 100000 字符）' : ''}\n\n${attachment.text}`,
+            },
+          ];
+        }),
+      ]
+    : command.prompt;
+}
+
 async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void> {
   if (closing) return;
-  if (activeRun) return error('An agent run is already active for this project.', command.id);
+  if (activeRun) {
+    if (activeRun.id !== command.id || activeRun.controller.signal.aborted)
+      return error('The active run cannot accept this message.', command.id);
+    activeRun.pending.push(inputForRun(command));
+    queryHistory.push(command.prompt);
+    emit('message_received', { pending: activeRun.pending.length }, command.id);
+    return;
+  }
   if (!command.prompt.trim() && !command.attachments?.length) return;
   let toolPolicy: ToolPolicyController | undefined;
   try {
@@ -444,30 +474,11 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
     // 每个被接受的 stdio run 都是真实用户 turn；在路由与 Agent 执行前清除上一轮 skill deny。
     clearSkillActivation();
     const controller = new AbortController();
-    activeRun = { id: command.id, controller };
+    activeRun = { id: command.id, controller, pending: [] };
     queryHistory.push(command.prompt);
     // 首个模型请求前也要有可恢复的用户轮。run-coordinator 的 cancellation checkpoint
     // 是内存快照、不会调用 onCheckpoint；这里追加 user 后再落盘，避免首轮崩溃只剩侧栏标题。
-    const userInput: string | ContentPart[] = command.attachments?.length
-      ? [
-          ...(command.prompt ? [{ type: 'text' as const, text: command.prompt }] : []),
-          ...command.attachments.flatMap((attachment): ContentPart[] => {
-            if (attachment.dataUrl)
-              return [{ type: 'image_url', name: attachment.name, image_url: { url: attachment.dataUrl } }];
-            if (typeof attachment.text !== 'string') return [];
-            // name/attachment/truncated 是会话回放元数据，transport 发送前统一移除。
-            return [
-              {
-                type: 'text',
-                name: attachment.name,
-                attachment: true,
-                truncated: attachment.truncated === true,
-                text: `用户附件 ${JSON.stringify(attachment.name)} 的提取文本如下。${attachment.truncated ? '（内容已截断，仅提供前 100000 字符）' : ''}\n\n${attachment.text}`,
-              },
-            ];
-          }),
-        ]
-      : command.prompt;
+    const userInput = inputForRun(command);
     history.push({ role: 'user', content: userInput });
     persistSession();
     emit(
@@ -522,6 +533,7 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       userInput,
       // 上面已把用户轮写入首个持久化检查点，core 不能再 append 一次。
       continueFromHistory: true,
+      drainUserMessages: () => activeRun?.pending.splice(0) ?? [],
       signal: controller.signal,
       hooks: hooksFor(command.id),
       contextState,
@@ -574,6 +586,12 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
         waiter.resolve({ action: 'cancelled' });
         approvals.delete(approvalId);
       }
+    }
+    // Accepted messages must survive cancellation or a step-limit exit before consumption.
+    const remaining = activeRun?.pending.splice(0) ?? [];
+    if (remaining.length > 0) {
+      for (const content of remaining) history.push({ role: 'user', content });
+      persistSession();
     }
     activeRun = null;
   }

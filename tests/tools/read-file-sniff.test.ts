@@ -143,6 +143,23 @@ test('read_file: 空文件报「(空文件)」而不是失败', async () => {
   assert.match(outcome.output, /\(空文件\)/);
 });
 
+test('read_file: anchor 直接返回匹配起点的普通分页、行号和完整文件 hash', async () => {
+  const path = 'anchored.ts';
+  writeFileSync(join(root, path), ['// 前言', 'fn(x)', '  first', 'fn(x)', '  second'].join('\r\n'));
+  const first = await runRead({ path, anchor: 'fn(x)', limit: 2 });
+  assert.equal(first.status, 'success');
+  assert.equal(first.output, (await runRead({ path, offset: 2, limit: 2 })).output);
+  const second = await runRead({ path, anchor: 'fn(x)', offset: 3, limit: 2 });
+  assert.equal(second.output, (await runRead({ path, offset: 4, limit: 2 })).output);
+  assert.match(second.output, /5\t  second/);
+
+  const missing = await runRead({ path, anchor: 'FN(x)' });
+  assert.equal(missing.status, 'error');
+  assert.doesNotMatch(missing.output, /\[artifact/);
+  const empty = await runRead({ path, anchor: '' });
+  assert.equal(empty.code, 'INVALID_ARGUMENTS');
+});
+
 test('read_file: PNG 走视觉通道(带 modelAttachments),output 只有可读摘要', async () => {
   const outcome = await runRead({ path: 'assets/small.png' });
   assert.equal(outcome.status, 'success');

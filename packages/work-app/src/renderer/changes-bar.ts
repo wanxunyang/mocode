@@ -25,6 +25,10 @@ export interface ChangesBarLabels {
   untracked: string;
   /** 单条长条的 title / aria-label：「查看 {path} 的改动」 */
   open: (path: string) => string;
+  /** 标题行 title / 无障碍文案：收起 {@link expanded} 的清单 */
+  collapse: string;
+  /** 标题行 title / 无障碍文案：展开清单 */
+  expand: string;
 }
 
 function escapeHtml(value: string): string {
@@ -48,8 +52,13 @@ function statsHtml(file: ChangesBarFile, labels: ChangesBarLabels): string {
   return parts.length ? `<span class="changes-bar-stat">${parts.join('')}</span>` : '';
 }
 
-/** 卡片内层 HTML。调用方负责塞进容器并挂事件（见 renderer.ts 的 syncChangesBar）。 */
-export function changesBarHtml(files: ChangesBarFile[], labels: ChangesBarLabels): string {
+/**
+ * 卡片内层 HTML。调用方负责塞进容器并挂事件（见 renderer.ts 的 syncChangesBar）。
+ *
+ * `expanded` 决定文件列表是否可见：标题行本身就是折叠开关（整行可点，只有「全部改动」
+ * 例外），与计划面板同一套交互，文件多到滚不完时用户能把它压成一行。
+ */
+export function changesBarHtml(files: ChangesBarFile[], expanded: boolean, labels: ChangesBarLabels): string {
   const rows = files.map((file) => {
     const { dir, base } = splitPath(file.path);
     return `<li><button type="button" class="changes-bar-row" data-change-path="${escapeHtml(file.path)}" title="${escapeHtml(labels.open(file.path))}" aria-label="${escapeHtml(labels.open(file.path))}">`
@@ -60,11 +69,15 @@ export function changesBarHtml(files: ChangesBarFile[], labels: ChangesBarLabels
       + `<span class="changes-bar-go" data-icon="chevron-right"></span>`
       + `</button></li>`;
   }).join('');
+  const toggleTitle = expanded ? labels.collapse : labels.expand;
   return `<div class="changes-bar-card">
   <div class="changes-bar-head">
-    <span class="changes-bar-title">${escapeHtml(labels.title(files.length))}</span>
+    <button type="button" class="changes-bar-toggle" data-changes-toggle aria-expanded="${expanded}" title="${escapeHtml(toggleTitle)}">
+      <span class="changes-bar-caret" data-icon="${expanded ? 'chevron-down' : 'chevron-right'}"></span>
+      <span class="changes-bar-title">${escapeHtml(labels.title(files.length))}</span>
+    </button>
     <button type="button" class="changes-bar-all" data-changes-all>${escapeHtml(labels.all)}</button>
   </div>
-  <ul class="changes-bar-list">${rows}</ul>
+  <ul class="changes-bar-list${expanded ? '' : ' hidden'}">${rows}</ul>
 </div>`;
 }

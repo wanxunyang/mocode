@@ -1,3 +1,4 @@
+import { PET_CHARACTERS } from '../pet-characters.js';
 import { renderMarkdown, enhanceCodeBlocks, setMarkdownLabels } from './markdown.js';
 // 正文里的文件路径 → 可点击入口（点击后在本应用的右侧面板里预览）。
 import { linkifyFilePaths } from './file-links.js';
@@ -5,8 +6,6 @@ import { buildFileChange, renderFileChangeHtml, summarizeFileChange, type FileCh
 import { buildToolView, type ToolViewLabels } from './tool-view.js';
 import { hasSubAgentProgressLine, isSubAgentProgressLine } from '../sub-agent-progress.js';
 import { renderUnifiedDiff } from './unified-diff.js';
-import { SendQueue } from './send-queue.js';
-import { renderQueuePanel, type QueuePanelItem } from './queue-view.js';
 import { mountIcons, icon } from './icons.js';
 import { initPanels, handlePanelEvent, renderPanel, requestPanelCommand, type PanelKind } from './panels.js';
 import { initSourceControl, refreshSourceControl, reopenSourceControl, closeSourceControl, type GitRepoView, type GitStatusView, type SourceControlTarget } from './source-control.js';
@@ -28,6 +27,13 @@ import { changesBarHtml, type ChangesBarFile, type ChangesBarLabels } from './ch
 import { checkCommand, type PackageManager } from '../checks.js';
 // 空间内联区/展开区都要把「任务」与「终端会话」按时间混排：规则单独成纯函数，可单测。
 import { splitSpaceEntries, isActiveTaskStatus, type SpaceEntry } from './space-entries.js';
+import {
+  reasoningCapabilityForPreset,
+  type EffortValue,
+  type ReasoningCapability,
+  type WorkPresetDraft,
+  type WorkPresetFile,
+} from '../model-capabilities.js';
 
 export {};
 
@@ -83,8 +89,6 @@ function applyLanguage(): void {
   // 这里就地按新语言重算一次，否则切语言后会话流里会残留旧语言的句子。
   relabelNotices();
   renderAttachments();
-  // 排队面板的文案（下一条 / 展开 / 附件数）按语言现取 → 就地重画。
-  refreshQueuePanel();
   // 改动长条的标题 / title / aria 也是生成时写死的 → 清掉签名强制重建一次。
   changesBarKey = '';
   syncChangesBar();
@@ -122,14 +126,18 @@ type ImageAttachment = WorkAttachment & { dataUrl: string };
 type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: Attachment[] };
 type LlmProvider = 'openai' | 'anthropic';
 type ModelConfig = { model: string; label: string; provider: LlmProvider; promptCache: boolean; baseUrl: string; contextWindow: number | null; language: string; theme: string };
-type ModelItem = { name: string; label: string; provider: LlmProvider; promptCache: boolean; baseURL: string; providerHost: string; contextWindow: number; isActive: boolean };
-type ModelDraft = { provider: LlmProvider; baseURL: string; apiKey: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
-type ModelPresetDetail = ModelDraft & { name: string };
+type ModelItem = {
+  name: string; label: string; provider: WorkPresetFile['provider']; promptCache: boolean;
+  baseURL: string; providerHost: string; contextWindow: number; maxTokens?: number;
+  reasoningEffort: EffortValue; reasoning: ReasoningCapability; isActive: boolean;
+};
+type ModelDraft = WorkPresetDraft;
+type ModelPresetDetail = WorkPresetFile;
 type CatalogEntryView = {
   providerId: string; providerName: string; modelId: string; name?: string;
   contextWindow: number; reasoning: boolean; toolCall: boolean; attachment: boolean; releaseDate?: string;
 };
-type CatalogPrefill = { provider: LlmProvider; baseURL: string; model: string; contextWindow: number; anthropicPromptCache: boolean };
+type CatalogPrefill = import('../catalog.js').CatalogPrefill;
 type SkillOrigin = 'user' | 'claude' | 'project';
 type SkillItem = { name: string; description: string; version?: string; dir: string; origin: SkillOrigin; modelInvocable: boolean; allowedTools?: string[] };
 type ImportResult = { ok: boolean; message?: string; installed: Array<{ name: string; dir: string; updated: boolean }> };
@@ -209,7 +217,7 @@ declare global {
       getConfig: () => Promise<ModelConfig>;
       listModels: () => Promise<ModelItem[]>;
       switchModel: (name: string) => Promise<{ ok: boolean; message: string }>;
-      getModel: (name: string) => Promise<{ ok: boolean; message?: string; preset?: ModelPresetDetail }>;
+      getModel: (name: string) => Promise<{ ok: boolean; message?: string; preset?: ModelPresetDetail; reasoning?: ReasoningCapability }>;
       saveModel: (payload: { name: string; originalName?: string; draft: ModelDraft; activate?: boolean }) => Promise<{ ok: boolean; message: string; name?: string }>;
       deleteModel: (name: string) => Promise<{ ok: boolean; message: string }>;
       /** 模型目录（models.dev，快照与 mocode 终端共用）。refresh=true 强制联网刷新。 */
@@ -283,7 +291,6 @@ const convRail = $('#conv-rail') as HTMLElement;
 const planPanel = $('#plan-panel') as HTMLElement;
 const attentionBar = $('#attention-bar') as HTMLElement;
 const attentionBadge = $('#attention-badge') as HTMLButtonElement;
-const queuePanel = $('#queue-panel') as HTMLElement;
 const changesBar = $('#changes-bar') as HTMLElement;
 
 let state: WorkState | null = null;
@@ -634,10 +641,20 @@ const changesBarLabels = (): ChangesBarLabels => ({
   all: t('changesBar.all'),
   untracked: t('changes.untracked'),
   open: (path) => t('changesBar.open', { path }),
+  collapse: t('changesBar.collapse'),
+  expand: t('changesBar.expand'),
 });
 
 /** 当前长条对应的数据签名（taskId + 路径列表）；相同就不重建 DOM，避免 hover/滚动被重置。 */
 let changesBarKey = '';
+/**
+ * 标题行是否被用户收起（只留一行标题 + 「全部改动」）。
+ *
+ * 默认展开 = 保持既有观感；不持久化 —— 收起是「这一眼嫌它太占地方」的临时动作，
+ * 记进 localStorage 会让下一次跑完任务时莫名看不到改动。新一轮跑完（explicitPaths）
+ * 强制复位成展开，因为那批文件正是用户要看的。
+ */
+let changesBarCollapsed = false;
 /**
  * 逐文件增删统计的缓存（按任务）。
  *
@@ -656,7 +673,7 @@ function hideChangesBar(): void {
 function paintChangesBar(key: string, taskId: string, files: ChangesBarFile[]): void {
   const entering = changesBar.classList.contains('hidden');
   changesBarKey = key;
-  changesBar.innerHTML = changesBarHtml(files, changesBarLabels());
+  changesBar.innerHTML = changesBarHtml(files, !changesBarCollapsed, changesBarLabels());
   changesBar.classList.remove('hidden');
   // 入场动画只在「从无到有」这一下播；同一轮重画（统计回来 / 切语言）不该重播，否则看着像闪。
   changesBar.classList.toggle('is-entering', entering);
@@ -665,6 +682,12 @@ function paintChangesBar(key: string, taskId: string, files: ChangesBarFile[]): 
     row.addEventListener('click', () => openChangeDiff(taskId, row.dataset.changePath ?? ''));
   });
   changesBar.querySelector('[data-changes-all]')?.addEventListener('click', () => openInspector('changes'));
+  // 标题行是折叠开关：整行可点（「全部改动」在它右边，不共用点击区）。
+  // 重画而非只切 class —— 开合状态同时决定 caret 方向与 aria-expanded。
+  changesBar.querySelector('[data-changes-toggle]')?.addEventListener('click', () => {
+    changesBarCollapsed = !changesBarCollapsed;
+    paintChangesBar(key, taskId, files);
+  });
 }
 
 /**
@@ -686,6 +709,8 @@ function syncChangesBar(taskId: string | undefined = viewingTaskId(), explicitPa
   // 但新一轮（调用方给了 explicitPaths）必须重画 + 重取统计 —— 连续两轮改同一批文件时
   // 路径一字不差而 +N/-N 已经变了，只按路径命中缓存就会把上一轮的行数当成这一轮的。
   if (!explicitPaths && key === changesBarKey && !changesBar.classList.contains('hidden')) return;
+  // 新一轮（explicitPaths）强制展开：这批文件正是用户回来要看的东西。
+  if (explicitPaths) changesBarCollapsed = false;
   const cached = changesBarStats.get(taskId);
   const fresh = cached && cached.pathsKey === pathsKey && !explicitPaths;
   // 先按路径画出来（没有 +N/-N 时先给上一轮的数），统计回来再补 —— 不让用户对着空白等。
@@ -1584,7 +1609,7 @@ function renderTasks(): void {
         const viewingBefore = state?.selectedTaskId;
         const result = await window.mocodeWork.removeProject(pid);
         if (!result) return;
-        // 这些任务的记录没了 → 渲染层的流缓冲 / 排队输入也一起作废。否则已删任务的事件还会
+        // 这些任务的记录没了 → 渲染层的流缓冲也一起作废。否则已删任务的事件还会
         // 继续 streamFor() 建缓冲，isRunning() 也会读到一个已经不存在的任务。
         for (const taskId of doomed) dropTaskRuntime(taskId);
         updateState(result.state);
@@ -1630,7 +1655,7 @@ function updateState(next: WorkState): void {
   // changedFiles 会随 run_completed 的广播更新（主进程落盘）→ 长条按最新一轮跟着变。
   syncChangesBar();
 }
-function clearWorkspace(): void { hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); refreshQueuePanel(); hideChangesBar(); }
+function clearWorkspace(): void { hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); hideChangesBar(); }
 
 /**
  * 一轮 assistant 输出 = 一条 message 内的**有序 block 流**:
@@ -1659,9 +1684,49 @@ function currentTurn(): HTMLElement | null {
   return turn && turn.isConnected ? turn : null;
 }
 
+/**
+ * 可续写的助手轮次:activeAssistant 还在文档里就用它;否则在**本轮仍处于运行态**时,
+ * 回落到会话里最后一条 assistant 消息,把它重新认领为当前轮。
+ *
+ * 为什么需要回落:activeAssistant 会被十来条路径置空(finish / addMessage('user') /
+ * switchToTask / clearWorkspace / renderHistory / submitEdited / regenerate / finalizeTurn)。
+ * 只要其中任何一条在本轮仍在产出时早到一步,后续的 text_delta / tool_started 就会走
+ * `currentTurn() ?? startAssistantTurn()` **凭空开一条新气泡** —— 一次 run 在界面上显示成
+ * 两条带 MoCode 头像的消息(实测:5 个 run_command 被切成「2 个 + 3 个」两组,中间多出一个
+ * 头像和第一段正文的完成态按钮)。恢复日志里那一轮只有一条 run_started,即铁证。
+ *
+ * 只在运行中回落:正常的第二轮由 startRun / regenerate 显式 startAssistantTurn,那时
+ * activeAssistant 一定非空;而 run_completed 之后才迟到的 delta 没有活跃 run,不该续到
+ * 已经收口的轮次上 —— 那是「本轮已结束」的语义,由调用方决定怎么处理。
+ */
+function resumableTurn(): HTMLElement | null {
+  const current = currentTurn();
+  if (current) return current;
+  if (!isRunning(viewingTaskId())) return null;
+  // 会话区尾元素可能是状态行 / 系统提示行,所以从 .message 里找最后一条,而不是 lastElementChild。
+  const messages = conversation.querySelectorAll<HTMLElement>('.message');
+  const last = messages[messages.length - 1];
+  // 最后一条是用户气泡时不续写:那是新一轮的边界,输出必须挂在它后面。
+  if (!last || !last.classList.contains('assistant')) return null;
+  activeAssistant = last;
+  last.classList.add('is-streaming');
+  // 收口时挂上的按钮属于中断点之前的半截正文:换成一个无子节点、无监听器的同款容器,
+  // 让 finalizeTurn 用完整文本重挂(直接清 innerHTML 会保留旧监听器,再挂一次就变成两个
+  // click 监听器,「重新生成」会被触发两遍)。
+  const actions = last.querySelector('.message-actions');
+  if (actions) actions.replaceWith(actions.cloneNode(false));
+  // 文字段一定新开:旧段已经做完 markdown 渲染,再往里追加原始文本会与 md 结构冲突。
+  activeTextBlock = null;
+  // 工具集合能续就续:被打断的那段文字是空白(会在 finalizeTurn 里丢弃),视觉上就是
+  // 一次连续的工具调用,不该因此拆成两组计数。
+  const tail = last.querySelector('.message-content')?.lastElementChild;
+  activeToolGroup = tail instanceof HTMLElement && tail.classList.contains('tool-group') ? tail : null;
+  return last;
+}
+
 /** 当前可写入的文字段。若最后一个 block 已不是文字段(刚插入了工具行),新开一段。 */
 function ensureTextBlock(): HTMLElement {
-  const current = currentTurn() ?? startAssistantTurn();
+  const current = resumableTurn() ?? startAssistantTurn();
   const content = current.querySelector('.message-content') as HTMLElement | null;
   if (activeTextBlock?.isConnected && content?.lastElementChild === activeTextBlock) return activeTextBlock;
   const block = document.createElement('div');
@@ -2120,8 +2185,9 @@ function addTool(payload: Record<string, unknown>, completed = false): void {
   // 批量回放期间不逐条读 scrollHeight（每次读都是强制布局），用批量入口那一次判定。
   const pinned = batchRenderDepth > 0 ? batchPinnedToBottom : isAtBottom();
   emptyState.classList.add('hidden');
-  // 工具事件可能早于首个文字到达：先确保存在活跃的助手消息，工具行挂在其内容区内部
-  const current = currentTurn() ?? startAssistantTurn();
+  // 工具事件可能早于首个文字到达：先确保存在活跃的助手消息，工具行挂在其内容区内部。
+  // 走 resumableTurn：本轮运行中被提前收口过的消息要续回去，不能另起一条气泡（见其注释）。
+  const current = resumableTurn() ?? startAssistantTurn();
   const id = payload.id == null ? '' : String(payload.id);
   const existing = id ? activeTools.get(id) : undefined;
   const entry = existing?.isConnected ? existing : document.createElement('details');
@@ -2412,14 +2478,12 @@ async function openTask(taskId: string): Promise<void> {
  * 丢弃一个「任务记录已经不存在」的任务在渲染层的运行时残留。
  *
  * 删任务、删空间都走这里。不清的后果很具体：已删任务的事件到达时 streamFor() 会照旧建出
- * 缓冲，isRunning() 读到一个不存在的任务，排队面板里也留着一份永远不会再跑的输入。
+ * 缓冲，isRunning() 读到一个不存在的任务。
  *
  * ⚠ 只清与任务绑定的内存状态，**不碰 DOM**：当前正在看的是谁由调用方按 viewingTaskId 判断
  * —— 删空间时把别的空间正在跑的会话一并清空，就是「会话泄出来」那个 bug 的来源。
  */
 function dropTaskRuntime(taskId: string): void {
-  pendingSends.clear(taskId);
-  queueExpanded.delete(taskId);
   streams.delete(taskId);
   clearRunWatchdog(taskId);
 }
@@ -2434,13 +2498,9 @@ async function deleteTask(taskId: string): Promise<void> {
   const deletingSelectedTask = state?.selectedTaskId === taskId;
   const next = await window.mocodeWork.deleteTask(taskId);
   if (!next) return;
-  // 任务没了，排队里的输入也跟着没意义（host 侧会话已删，发出去只会报错）。
-  const dropped = pendingSends.size(taskId);
   dropTaskRuntime(taskId);
-  if (dropped > 0) showToast('warn', t('toast.queueDropped', { n: dropped }), 3200);
   updateState(next);
   if (deletingSelectedTask && next.selectedTaskId !== taskId) clearWorkspace();
-  else refreshQueuePanel();
   showToast('info', t('toast.deletedTask'));
 }
 
@@ -2576,8 +2636,8 @@ function showApproval(taskId: string, payload: Record<string, unknown>, intent?:
     }
   }
 }
-function setRunning(running: boolean): void { sendButton.innerHTML = icon(running ? 'square' : 'paper-airplane'); sendButton.classList.toggle('stop', running); sendButton.title = running ? t('composer.stop') : t('composer.send'); sendButton.setAttribute('aria-label', running ? t('composer.stopAria') : t('composer.sendAria')); }
-function resizePrompt(): void { promptInput.style.height = 'auto'; promptInput.style.height = `${Math.min(promptInput.scrollHeight, 128)}px`; }
+function setRunning(running: boolean): void { running = running && !promptInput.value.trim() && !attachments.length; sendButton.innerHTML = icon(running ? 'square' : 'paper-airplane'); sendButton.classList.toggle('stop', running); sendButton.title = running ? t('composer.stop') : t('composer.send'); sendButton.setAttribute('aria-label', running ? t('composer.stopAria') : t('composer.sendAria')); }
+function resizePrompt(): void { promptInput.style.height = 'auto'; promptInput.style.height = `${Math.min(promptInput.scrollHeight, 128)}px`; setRunning(isRunning(viewingTaskId())); }
 
 /**
  * 输入卡变高/变矮时，若用户本来就在底部，把会话重新贴到底。
@@ -3615,56 +3675,6 @@ function summarizePrompt(prompt: string, maxWidth = 40): string {
   if (!text) text = prompt.replace(/\s+/g, ' ').trim();
   return text ? truncateByWidth(text, maxWidth) : t('empty.draft');
 }
-/**
- * 每个任务一份待发队列（见 send-queue.ts）。
- *
- * 旧行为是「正在跑时点发送 = 取消当前运行」——而 Enter 也走 submit()，
- * 于是「边看输出边想补一句」会直接把这一轮掐掉。现在拆成两条路径：
- *   - **Enter / 发送键**：任务在跑就排队（沿用 FIFO），跑完自动接上；
- *   - **停止键**（正在跑时发送按钮变成方框）：仍然立刻取消。
- */
-const pendingSends = new SendQueue<{ prompt: string; attachments: Attachment[] }>();
-
-/** 排队面板的展开态按任务记：切走再回来时保留用户当时的选择。 */
-const queueExpanded = new Map<string, boolean>();
-
-/** 面板里一条排队消息的正文；纯附件消息没有 prompt，得说清它带了什么。 */
-function queueItemText(payload: { prompt: string; attachments: Attachment[] }): string {
-  const prompt = payload.prompt.replace(/\s+/g, ' ').trim();
-  if (prompt) return prompt;
-  const first = payload.attachments[0]?.name;
-  return first ? t('queue.attachmentsOnlyName', { name: first }) : t('queue.attachmentsOnly');
-}
-
-/**
- * 重画排队面板（输入卡正上方）。只跟随「队列变化 + 是否展开」，
- * 不接流式事件 —— 否则用户点开列表的那一下会被状态推送打断。
- */
-function refreshQueuePanel(): void {
-  const taskId = viewingTaskId();
-  const items: QueuePanelItem[] = taskId
-    ? pendingSends.snapshot(taskId).map((entry) => ({
-      key: entry.seq,
-      text: queueItemText(entry.payload),
-      attachmentCount: entry.payload.attachments.length,
-    }))
-    : [];
-  renderQueuePanel(queuePanel, items, {
-    expanded: taskId ? queueExpanded.get(taskId) === true : false,
-    labels: {
-      next: t('queue.next'),
-      expand: t('queue.expand'),
-      collapse: t('queue.collapse'),
-      attachments: (n) => t('queue.attachments', { n }),
-    },
-    onToggle: () => {
-      if (!taskId) return;
-      queueExpanded.set(taskId, queueExpanded.get(taskId) !== true);
-      refreshQueuePanel();
-    },
-  });
-}
-
 /** 真正发起一轮 run：渲染用户气泡、起状态行、挂看门狗、发协议命令。 */
 function startRun(task: Task, prompt: string, batch: Attachment[]): void {
   const stream = streamFor(task.id);
@@ -3690,24 +3700,6 @@ function startRun(task: Task, prompt: string, batch: Attachment[]): void {
   window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments: batch });
 }
 
-/**
- * 队列出队：上一条结束后自动接上下一条。
- * 只在**确实空闲**时出队——run_completed 与 endTaskRun 两条路径都会调到这里，
- * 靠 stream.running 去重，避免同一刻发两条 run（host 会以「已有任务在跑」拒掉第二条）。
- */
-function drainSendQueue(taskId: string): void {
-  const stream = streams.get(taskId);
-  if (stream?.running) return;
-  const task = state?.tasks.find((item) => item.id === taskId);
-  if (!task) { pendingSends.clear(taskId); return; }
-  const next = pendingSends.dequeue(taskId);
-  if (!next) return;
-  startRun(task, next.payload.prompt, next.payload.attachments);
-  if (viewingTaskId() === taskId) refreshQueuePanel();
-  const left = pendingSends.size(taskId);
-  if (left > 0) showToast('info', t('toast.queuedLeft', { n: left }), 2200);
-}
-
 async function submit(): Promise<void> {
   const prompt = promptInput.value.trim();
   if (!prompt && !attachments.length) return;
@@ -3723,16 +3715,21 @@ async function submit(): Promise<void> {
     const next = await window.mocodeWork.renameTask(task.id, prompt ? summarizePrompt(prompt) : attachments[0]?.name ?? t('composer.fileFallback'));
     if (next) updateState(next);
   }
-  // 排序记在用户实际提交时：即使消息排队，也立即置顶；稍后出队不会再次刷新。
+  // 用户实际提交消息时立即置顶。
   window.mocodeWork.send({ type: 'user_message', id: task.id });
   // 刚建的任务 stream 里不会有 running；这里用 isRunning 而不是 selectedTask().status，
   // 因为后者是主进程异步刷新的，落后于「刚点发送」的瞬间。
   if (isRunning(task.id)) {
-    const depth = pendingSends.enqueue(task.id, { prompt, attachments });
+    const batch = attachments;
+    const stream = streamFor(task.id);
+    stream.items.push({ kind: 'user', text: prompt, attachments: batch });
+    finalizeTurn(activeAssistant);
+    activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
+    addMessage('user', prompt, batch);
+    startAssistantTurn();
+    window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments: batch });
     promptInput.value = ''; resizePrompt();
     attachments = []; renderAttachments();
-    refreshQueuePanel();
-    showToast('info', t('toast.queued', { n: depth }), 2600);
     return;
   }
   const batch = attachments;
@@ -3746,10 +3743,7 @@ function endTaskRun(taskId: string): void {
   const stream = streams.get(taskId);
   if (stream) stream.running = false;
   if (viewingTaskId() === taskId) setRunning(false);
-  // 队列里有东西就接着跑。**必须延到当前事件处理之后**：调用方紧接着还会
-  // finish()（收口本轮助手消息、把按钮恢复成发送），若在这里同步发下一轮，
-  // finish() 会把新一轮的 assistant 消息当上一轮收掉、并把运行态按钮按回静止。
-  if (pendingSends.size(taskId) > 0) setTimeout(() => drainSendQueue(taskId), 0);
+
 }
 
 function finish(): void {
@@ -3821,6 +3815,9 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     case 'run_started':
       // 「工具组路由」本身就是一次 LLM 调用 —— 首个 thinking 到来前的空窗必须有人交代。
       applyStatus(stream, viewing, busyStatus('starting', 'status.analyzing'));
+      break;
+    case 'message_received':
+      if (viewing) showToast('info', t('toast.steering'), 2600);
       break;
     case 'tool_route':
       applyStatus(stream, viewing, busyStatus('thinking', 'status.thinking'));
@@ -3933,13 +3930,13 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
     case 'no_reply':
       // 「模型没吐任何内容」是一个有意义的终态，不能让它表现为「跑完了但空白」。
       stream.items.push({ kind: 'error', message: t('status.noReply') });
-      if (viewing) { if (!currentTurn()) startAssistantTurn(); showTurnError(t('status.noReply')); }
+      if (viewing) { if (!resumableTurn()) startAssistantTurn(); showTurnError(t('status.noReply')); }
       break;
     case 'max_steps': {
       // onMaxSteps 不带次数（AgentHooks 的签名就是 () => void），文案也不能假装知道数字。
       const message = t('status.maxSteps');
       stream.items.push({ kind: 'error', message });
-      if (viewing) { if (!currentTurn()) startAssistantTurn(); showTurnError(message); }
+      if (viewing) { if (!resumableTurn()) startAssistantTurn(); showTurnError(message); }
       break;
     }
     case 'approval_requested': {
@@ -4152,7 +4149,10 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
     if (!stream.running) finish();
     else {
       setRunning(true);
-      if (!currentTurn()) startAssistantTurn();
+      // 运行中的任务切回来：重放后游标为空，此时必须**续回**最后一条 assistant 消息，
+      // 而不是新开一条 —— 否则切出去再切回来，屏幕尾部就多出一个 MoCode 头像
+      // （同一次 run 被画成两段回答）。没有可续的（重放末尾是 user 气泡）才新建。
+      if (!resumableTurn()) startAssistantTurn();
     }
     // 只有仍活着的 host 才能接受审批；崩溃恢复的卡片不可操作。
     if (stream.running && stream.pendingApproval) showApproval(taskId, stream.pendingApproval);
@@ -4174,8 +4174,6 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   renderStatus(stream?.status ?? statusFromTask(selectedTask()), { replay: true });
   smartScrollToBottom(true);
   attachments = []; renderAttachments();
-  // 排队面板跟着切换:每个任务一份队列,切走就不该再显示上一个任务的待发消息。
-  refreshQueuePanel();
   // 系统提示行（.thread-notice）也算会话内容：只有压缩记录时不该显示空态。
   emptyState.classList.toggle('hidden', conversation.querySelector('.message') != null || conversation.querySelector('.thread-notice') != null);
   promptInput.focus();
@@ -4420,9 +4418,13 @@ async function previewFile(file: string): Promise<void> {
   }
   $('#back-to-files').addEventListener('click', () => { previewFilePath = null; activeInspectorTab = 'files'; void refreshInspector(); });
   $('#show-diff').addEventListener('click', () => {
-    // 与源代码管理面板同一套行级渲染：红绿底色 + 双行号。解析不了才退回原文。
+    // 与源代码管理面板同一套并排渲染：左原始 / 右改动后 + 双行号。解析不了才退回原文。
     const raw = diff.error ?? diff.content ?? '';
-    const rendered = diff.error ? null : renderUnifiedDiff(raw, { moreLines: (n) => t('tool.moreLines', { n }) });
+    const rendered = diff.error ? null : renderUnifiedDiff(raw, {
+      moreLines: (n) => t('tool.moreLines', { n }),
+      oldSide: t('diff.oldSide'),
+      newSide: t('diff.newSide'),
+    });
     inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-files">${t('inspector.backToFiles')}</button></div>${rendered ?? `<pre class="file-preview diff-preview">${escapeHtml(raw)}</pre>`}`;
     $('#back-to-files').addEventListener('click', () => void previewFile(file));
   });
@@ -4474,9 +4476,15 @@ async function showChangeDiff(taskId: string, path: string): Promise<void> {
   const result = await window.mocodeWork.taskChangeDiff({ taskId, path });
   if (activeInspectorTab !== 'changes' || viewingTaskId() !== taskId) return;
   const body = result.ok ? (result.content ?? '') : (result.message ?? t('changes.failed'));
-  // 统一 diff 走行级渲染：红绿底色 + 双行号，一眼能看出哪几行增删。解析不了（二进制、
+  // 统一 diff 走并排渲染：左原始 / 右改动后 + 双行号，改动一眼可扫。解析不了（二进制、
   // mode-only、错误文案）才退回原文 <pre>。
-  const rendered = result.ok ? renderUnifiedDiff(body, { moreLines: (n) => t('tool.moreLines', { n }) }) : null;
+  const rendered = result.ok
+    ? renderUnifiedDiff(body, {
+      moreLines: (n) => t('tool.moreLines', { n }),
+      oldSide: t('diff.oldSide'),
+      newSide: t('diff.newSide'),
+    })
+    : null;
   inspectorContent.innerHTML = `<div class="file-actions"><button id="back-to-changes">${t('changes.back')}</button></div>`
     + (rendered ?? (body.trim() ? `<pre class="file-preview diff-preview">${escapeHtml(body)}</pre>` : `<p class="inspector-empty">${t('changes.noDiff')}</p>`))
     + (result.truncated ? `<p class="inspector-empty">${t('changes.diffTruncated')}</p>` : '');
@@ -4989,7 +4997,7 @@ const SETTING_GROUPS: Array<{ titleKey: LocaleKey; hintKey: LocaleKey; items: Ar
 ];
 const SETTING_ITEMS = SETTING_GROUPS.flatMap((group) => group.items);
 /** 思考强度五档，与 core 的 ReasoningEffort 同集合（/effort 对应的用户面）。 */
-const EFFORT_ITEMS: Array<{ value: string; labelKey: LocaleKey; hintKey: LocaleKey }> = [
+const EFFORT_ITEMS: Array<{ value: EffortValue; labelKey: LocaleKey; hintKey: LocaleKey }> = [
   { value: 'off', labelKey: 'effort.off', hintKey: 'effort.offHint' },
   { value: 'low', labelKey: 'effort.low', hintKey: 'effort.lowHint' },
   { value: 'medium', labelKey: 'effort.medium', hintKey: 'effort.mediumHint' },
@@ -5876,8 +5884,78 @@ let modelFormEl: HTMLElement | null = null;
 let modelFormEditing: string | undefined;
 /** 表单里新建时的默认「立即启用」值（沿用上次选择，避免每次都重新勾）。 */
 let modelFormActivate = true;
+/** 目录/原预设的元数据；模型或端点被改后不再沿用，避免能力张冠李戴。 */
+let modelFormSource: Partial<WorkPresetDraft> = {};
+let modelFormEffort: EffortValue = 'auto';
+/** 每次打开/关闭都作废旧 IPC；迟到的 A 回读不能覆盖 B 或新建表单。 */
+let modelFormGeneration = 0;
 
 const modelFormField = <T extends HTMLElement>(id: string): T => modelFormEl!.querySelector(`#${id}`) as T;
+
+function effortLabel(value: EffortValue): string {
+  return t(`effort.${value}` as LocaleKey);
+}
+
+/** 自动始终可选；其它档位严格按该模型 + 端点的能力开放。 */
+function effortOptionsHtml(capability: ReasoningCapability, selected: EffortValue): string {
+  return EFFORT_ITEMS.map((item) => {
+    const enabled = item.value === 'auto' || capability.supportedEfforts.includes(item.value);
+    return `<button type="button" class="effort-option" data-effort="${item.value}" aria-pressed="${selected === item.value}" ${enabled ? '' : 'disabled'}>${escapeHtml(t(item.labelKey))}</button>`;
+  }).join('');
+}
+
+function reasoningHelpText(capability: ReasoningCapability, selected: EffortValue): string {
+  const key: LocaleKey = capability.requiresLargerOutput
+    ? 'modelForm.reasoningNeedsOutput'
+    : capability.mode === 'unknown'
+      ? 'modelForm.reasoningUnknown'
+      : capability.mode === 'unsupported'
+        ? 'modelForm.reasoningUnsupported'
+        : selected === 'auto'
+          ? 'modelForm.reasoningAuto'
+          : capability.mode === 'toggle'
+            ? 'modelForm.reasoningToggle'
+            : 'modelForm.reasoningLevels';
+  const mapping = selected !== 'auto' && capability.effortMap[selected]
+    ? ` ${t('modelForm.reasoningMapped', { from: effortLabel(selected), to: capability.effortMap[selected]! })}`
+    : '';
+  return `${t(key)}${mapping}`;
+}
+
+function modelFormMetadata(
+  model: string,
+  baseURL: string,
+  provider: WorkPresetFile['provider'],
+): Partial<Pick<WorkPresetDraft, 'catalogProvider' | 'catalogModel' | 'capabilities' | 'pricing'>> {
+  const source = modelFormSource;
+  if (source.model?.trim() !== model || source.baseURL?.trim() !== baseURL || (source.provider ?? 'openai') !== provider) return {};
+  return {
+    ...(source.catalogProvider ? { catalogProvider: source.catalogProvider } : {}),
+    ...(source.catalogModel ? { catalogModel: source.catalogModel } : {}),
+    ...(source.capabilities ? { capabilities: source.capabilities } : {}),
+    ...(source.pricing ? { pricing: source.pricing } : {}),
+  };
+}
+
+function syncFormReasoning(): void {
+  if (!modelFormEl) return;
+  const provider = modelFormField<HTMLSelectElement>('model-form-provider').value as WorkPresetFile['provider'];
+  const baseURL = modelFormField<HTMLInputElement>('model-form-baseurl').value.trim();
+  const model = modelFormField<HTMLInputElement>('model-form-model').value.trim();
+  const rawMaxTokens = modelFormField<HTMLInputElement>('model-form-max-tokens').value.trim();
+  const capability = reasoningCapabilityForPreset({
+    provider,
+    baseURL,
+    model,
+    apiKey: '',
+    contextWindow: 0,
+    maxTokens: rawMaxTokens ? Number(rawMaxTokens) : undefined,
+    ...modelFormMetadata(model, baseURL, provider),
+  });
+  if (modelFormEffort !== 'auto' && !capability.supportedEfforts.includes(modelFormEffort)) modelFormEffort = 'auto';
+  modelFormField<HTMLElement>('model-form-effort').innerHTML = effortOptionsHtml(capability, modelFormEffort);
+  modelFormField<HTMLElement>('model-form-reasoning-hint').textContent = reasoningHelpText(capability, modelFormEffort);
+}
 
 /** 重建模板下拉（切语言时也要重建：选项文案是本地化的）。保留当前选中项。 */
 function rebuildModelTemplates(): void {
@@ -5908,10 +5986,13 @@ function ensureModelForm(): HTMLElement {
     if (select.value === '') return;
     const template = MODEL_TEMPLATES[Number(select.value)];
     if (!template) return;
+    modelFormSource = {};
+    modelFormEffort = 'auto';
     modelFormField<HTMLSelectElement>('model-form-provider').value = template.provider;
     modelFormField<HTMLInputElement>('model-form-baseurl').value = template.baseURL;
     modelFormField<HTMLInputElement>('model-form-model').value = template.model;
     modelFormField<HTMLInputElement>('model-form-window').value = String(template.contextWindow);
+    modelFormField<HTMLInputElement>('model-form-max-tokens').value = '';
     setFormToggle('model-form-cache', template.promptCache);
     syncFormVisibility();
     // 只在用户没自己填过预设名时才带出建议名，避免覆盖手输内容。
@@ -5927,6 +6008,15 @@ function ensureModelForm(): HTMLElement {
   // 用户开始改任何一格就把上一次的报错收掉：错误提示挂着不动会让人以为还没修好。
   el.querySelector('.model-form-body')?.addEventListener('input', () => clearFormError());
   modelFormField<HTMLSelectElement>('model-form-provider').addEventListener('change', syncFormVisibility);
+  for (const id of ['model-form-baseurl', 'model-form-model', 'model-form-max-tokens']) {
+    modelFormField<HTMLInputElement>(id).addEventListener('input', syncFormReasoning);
+  }
+  modelFormField<HTMLElement>('model-form-effort').addEventListener('click', (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-effort]');
+    if (!button || button.disabled) return;
+    modelFormEffort = (button.dataset.effort ?? 'auto') as EffortValue;
+    syncFormReasoning();
+  });
   modelFormField<HTMLElement>('model-form-cache').addEventListener('click', () => {
     setFormToggle('model-form-cache', modelFormField<HTMLElement>('model-form-cache').getAttribute('aria-checked') !== 'true');
   });
@@ -5967,6 +6057,7 @@ function setFormToggle(id: string, on: boolean): void {
 function syncFormVisibility(): void {
   const isAnthropic = modelFormField<HTMLSelectElement>('model-form-provider').value === 'anthropic';
   modelFormField<HTMLElement>('model-form-cache').classList.toggle('field-hidden', !isAnthropic);
+  syncFormReasoning();
 }
 
 function showFormError(message: string): void {
@@ -5984,6 +6075,8 @@ function clearFormError(): void {
 }
 
 function clearModelFormFields(): void {
+  modelFormSource = {};
+  modelFormEffort = 'auto';
   modelFormField<HTMLSelectElement>('model-form-template').value = '';
   modelFormField<HTMLSelectElement>('model-form-template').disabled = false;
   modelFormField<HTMLSelectElement>('model-form-provider').value = 'openai';
@@ -5994,6 +6087,7 @@ function clearModelFormFields(): void {
   modelFormField<HTMLInputElement>('model-form-model').value = '';
   modelFormField<HTMLInputElement>('model-form-apikey').value = '';
   modelFormField<HTMLInputElement>('model-form-window').value = t('modelForm.contextWindowPlaceholder');
+  modelFormField<HTMLInputElement>('model-form-max-tokens').value = '';
   setFormToggle('model-form-cache', false);
   syncFormVisibility();
   clearFormError();
@@ -6004,6 +6098,7 @@ function clearModelFormFields(): void {
  *  不传 name 但传 prefill = 从模型目录选中后预填（仍是新增态）；都不传 = 空白新增。 */
 function openModelForm(name?: string, prefill?: CatalogPrefill & { suggestedName?: string; apiKeySeed?: string }): void {
   const el = ensureModelForm();
+  const generation = ++modelFormGeneration;
   modelFormEditing = name;
   const isEdit = !!name;
   const title = el.querySelector('#model-form-title') as HTMLElement;
@@ -6021,15 +6116,19 @@ function openModelForm(name?: string, prefill?: CatalogPrefill & { suggestedName
   saveButton.textContent = t('modelForm.save');
   clearModelFormFields();
   templateSelect.disabled = isEdit;
+  // 回读完成前不能用半空草稿覆盖原预设；回包后仅同代次请求可以解锁。
+  saveButton.disabled = isEdit;
   el.classList.remove('hidden');
 
   if (!isEdit) {
     if (prefill) {
-      // 目录预填：字段与 mocode 终端 buildPreset 的产物一致，apiKey 用户仍需确认/粘贴。
+      // 目录预填同时携带 reasoning_options / output limit，表单据此开放真实可用档位。
+      modelFormSource = { ...prefill };
       modelFormField<HTMLSelectElement>('model-form-provider').value = prefill.provider;
       modelFormField<HTMLInputElement>('model-form-baseurl').value = prefill.baseURL;
       modelFormField<HTMLInputElement>('model-form-model').value = prefill.model;
       modelFormField<HTMLInputElement>('model-form-window').value = String(prefill.contextWindow);
+      modelFormField<HTMLInputElement>('model-form-max-tokens').value = prefill.maxTokens ? String(prefill.maxTokens) : '';
       setFormToggle('model-form-cache', prefill.anthropicPromptCache);
       if (prefill.apiKeySeed) modelFormField<HTMLInputElement>('model-form-apikey').value = prefill.apiKeySeed;
       const nameInput = modelFormField<HTMLInputElement>('model-form-name');
@@ -6044,6 +6143,7 @@ function openModelForm(name?: string, prefill?: CatalogPrefill & { suggestedName
   }
   void (async () => {
     const detail = await window.mocodeWork.getModel(name!);
+    if (generation !== modelFormGeneration || modelFormEditing !== name) return;
     if (!detail.ok || !detail.preset) {
       deleteButton.hidden = true;
       saveButton.disabled = true;
@@ -6052,12 +6152,15 @@ function openModelForm(name?: string, prefill?: CatalogPrefill & { suggestedName
     }
     saveButton.disabled = false;
     const preset = detail.preset;
+    modelFormSource = { ...preset };
+    modelFormEffort = preset.reasoningEffort ?? 'auto';
     modelFormField<HTMLInputElement>('model-form-name').value = preset.name;
     modelFormField<HTMLSelectElement>('model-form-provider').value = preset.provider;
     modelFormField<HTMLInputElement>('model-form-baseurl').value = preset.baseURL;
     modelFormField<HTMLInputElement>('model-form-model').value = preset.model;
     modelFormField<HTMLInputElement>('model-form-apikey').value = preset.apiKey;
     modelFormField<HTMLInputElement>('model-form-window').value = String(preset.contextWindow);
+    modelFormField<HTMLInputElement>('model-form-max-tokens').value = preset.maxTokens ? String(preset.maxTokens) : '';
     setFormToggle('model-form-cache', preset.anthropicPromptCache);
     syncFormVisibility();
     modelFormField<HTMLInputElement>('model-form-name').focus();
@@ -6065,8 +6168,10 @@ function openModelForm(name?: string, prefill?: CatalogPrefill & { suggestedName
 }
 
 function closeModelForm(): void {
+  modelFormGeneration += 1;
   modelFormEl?.classList.add('hidden');
   modelFormEditing = undefined;
+  modelFormSource = {};
 }
 
 function collectModelDraft(): ModelDraft | null {
@@ -6078,7 +6183,7 @@ function collectModelDraft(): ModelDraft | null {
     nameInput.focus();
     return null;
   }
-  const provider = modelFormField<HTMLSelectElement>('model-form-provider').value as LlmProvider;
+  const provider = modelFormField<HTMLSelectElement>('model-form-provider').value as WorkPresetFile['provider'];
   const baseURL = modelFormField<HTMLInputElement>('model-form-baseurl').value.trim();
   const apiKey = modelFormField<HTMLInputElement>('model-form-apikey').value.trim();
   const model = modelFormField<HTMLInputElement>('model-form-model').value.trim();
@@ -6096,13 +6201,27 @@ function collectModelDraft(): ModelDraft | null {
   if (!apiKey) return flag('model-form-apikey', t('modelForm.errorApiKey'));
   if (!model) return flag('model-form-model', t('modelForm.errorModel'));
   if (!windowValue || !Number.isFinite(contextWindow) || contextWindow <= 0) return flag('model-form-window', t('modelForm.errorWindow'));
+  const maxTokensValue = modelFormField<HTMLInputElement>('model-form-max-tokens').value.trim();
+  const maxTokens = maxTokensValue ? Number(maxTokensValue) : undefined;
+  if (maxTokens !== undefined && (!Number.isInteger(maxTokens) || maxTokens <= 0)) return flag('model-form-max-tokens', t('modelForm.errorMaxTokens'));
+  const capability = reasoningCapabilityForPreset({
+    provider, baseURL, apiKey, model, contextWindow, maxTokens,
+    ...modelFormMetadata(model, baseURL, provider),
+  });
+  if (modelFormEffort !== 'auto' && !capability.supportedEfforts.includes(modelFormEffort)) {
+    showFormError(t('modelForm.errorEffortUnsupported'));
+    return null;
+  }
   return {
     provider,
     baseURL,
     apiKey,
     model,
     contextWindow: Math.floor(contextWindow),
+    maxTokens,
+    reasoningEffort: modelFormEffort,
     anthropicPromptCache: provider === 'anthropic' && modelFormField<HTMLElement>('model-form-cache').getAttribute('aria-checked') === 'true',
+    ...modelFormMetadata(model, baseURL, provider),
   };
 }
 
@@ -6111,15 +6230,17 @@ async function submitModelForm(): Promise<void> {
   const draft = collectModelDraft();
   if (!draft) return;
   const name = modelFormField<HTMLInputElement>('model-form-name').value.trim();
+  const originalName = modelFormEditing;
+  const activate = !originalName && modelFormActivate;
   const saveButton = modelFormField<HTMLButtonElement>('model-form-save');
+  // Enter 不会触发 disabled 按钮的原生 click 拦截，在这里统一挡住加载中和重复提交。
+  if (saveButton.disabled) return;
+  const generation = modelFormGeneration;
   saveButton.disabled = true;
   try {
-    const result = await window.mocodeWork.saveModel({
-      name,
-      originalName: modelFormEditing,
-      draft,
-      activate: modelFormEditing ? false : modelFormActivate,
-    });
+    const result = await window.mocodeWork.saveModel({ name, originalName, draft, activate });
+    // 用户已关掉或换成另一份表单时，保存照常完成，但不再替新表单报错或关窗。
+    if (generation !== modelFormGeneration) return;
     if (!result.ok) { showFormError(result.message); return; }
     showToast('success', result.message);
     closeModelForm();
@@ -6127,9 +6248,9 @@ async function submitModelForm(): Promise<void> {
     try { setModeButton(await window.mocodeWork.getConfig()); } catch { /* 忽略 */ }
     await renderSettingsModelSection();
   } catch (error) {
-    showFormError(t('modelForm.saveFailed', { msg: (error as Error).message }));
+    if (generation === modelFormGeneration) showFormError(t('modelForm.saveFailed', { msg: (error as Error).message }));
   } finally {
-    saveButton.disabled = false;
+    if (generation === modelFormGeneration) saveButton.disabled = false;
   }
 }
 
@@ -6561,6 +6682,23 @@ function renderSettingsAppearanceSection(): void {
   }));
   settingsSection.innerHTML = `
     <div class="settings-block">
+      <div class="settings-block-head"><b>${getLang() === 'zh-CN' ? '桌面伙伴' : 'Desktop companion'}</b></div>
+      <button class="settings-row settings-toggle" data-desktop-pet role="switch" aria-checked="${settingsState.desktopPet === true}">
+        <span class="settings-row-body"><span class="settings-row-title">${getLang() === 'zh-CN' ? '3D 桌宠' : '3D desktop companion'}</span><span class="settings-row-sub">${getLang() === 'zh-CN' ? '点身体抱抱，点头摸摸，拖动转圈并移动。随任务进度切换动作，双击查看任务。' : 'Tap its body for a hug, pet its head, or drag to spin and move. Reacts to task progress; double-click to open task.'}</span></span>
+        <span class="settings-switch" aria-hidden="true"></span>
+      </button>
+      <div class="settings-list" role="radiogroup" aria-label="${getLang() === 'zh-CN' ? '选择宠物' : 'Choose companion'}">
+        ${PET_CHARACTERS.map(character => {
+          const selected = (settingsState.petCharacter || 'byte') === character.id;
+          return `<button type="button" class="settings-row${selected ? ' active' : ''}" data-pet-character="${character.id}" role="radio" aria-checked="${selected}">
+            <span class="settings-row-radio">${selected ? icon('check') : ''}</span>
+            <img src="../assets/pet-portraits/${character.id}.png" alt="" width="48" height="41">
+            <span class="settings-row-body"><span class="settings-row-title">${getLang() === 'zh-CN' ? character.name : character.englishName}</span><span class="settings-row-sub">${getLang() === 'zh-CN' ? character.description : character.englishDescription}</span></span>
+          </button>`;
+        }).join('')}
+      </div>
+    </div>
+    <div class="settings-block">
       <div class="settings-block-head"><b>${t('appearance.theme')}</b><span>${t('appearance.themeHint')}</span></div>
       <div class="settings-list">
         ${themes.map(([value, label, iconName, hint]) => `
@@ -6605,6 +6743,19 @@ function renderSettingsAppearanceSection(): void {
       </div>
     </div>
   `;
+  settingsSection.querySelector<HTMLButtonElement>('[data-desktop-pet]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    try { settingsState = await window.mocodeWork.setSettings({ desktopPet: settingsState.desktopPet !== true }); renderSettingsAppearanceSection(); }
+    catch (error) { button.disabled = false; showToast('error', String(error)); }
+  });
+  settingsSection.querySelectorAll<HTMLButtonElement>('[data-pet-character]').forEach(button => {
+    button.addEventListener('click', async () => {
+      button.disabled = true;
+      try { settingsState = await window.mocodeWork.setSettings({petCharacter: button.dataset.petCharacter!}); renderSettingsAppearanceSection(); }
+      catch (error) { button.disabled = false; showToast('error', String(error)); }
+    });
+  });
   refreshThemeSegmented();
   refreshLanguageSegmented();
   refreshAccentChips();
@@ -6943,6 +7094,17 @@ window.addEventListener('resize', () => { applyInspectorWidth(getSavedInspectorW
 /* ── Model picker ─────────────────────────────────────── */
 let modelPickerEl: HTMLElement | null = null;
 let modelList: ModelItem[] = [];
+let modelHoverEl: HTMLElement | null = null;
+let modelHoverName: string | null = null;
+let modelHoverPreset: ModelPresetDetail | null = null;
+let modelHoverAnchor: HTMLElement | null = null;
+let modelHoverEffort: EffortValue = 'auto';
+let modelHoverGeneration = 0;
+let modelHoverSaving = false;
+/** change 与 click 同一次操作可能各触发一次保存：合并到同一条写入链，禁止旧回包覆盖新选择。 */
+let modelHoverSaveQueue: Promise<void> = Promise.resolve();
+let modelHoverOpenTimer: ReturnType<typeof setTimeout> | undefined;
+let modelHoverCloseTimer: ReturnType<typeof setTimeout> | undefined;
 /** 最近一次 getConfig 的结果 —— 切语言时用它原地重画按钮（不再多发一次 IPC）。 */
 let lastModelConfig: ModelConfig | null = null;
 
@@ -6961,7 +7123,11 @@ function setModeButton(config: ModelConfig): void {
   const cacheBadge = config.provider === 'anthropic' && config.promptCache
     ? '<span class="model-picker-cache">cache</span>'
     : '';
-  button.innerHTML = `<span class="mode-label">${escapeHtml(label)}</span>${cacheBadge}<svg class="icon icon-inline" data-icon="chevron-down"></svg>`;
+  const active = modelList.find((item) => item.isActive && item.label === config.model);
+  const effortBadge = active && active.reasoningEffort !== 'auto'
+    ? `<span class="model-picker-effort">${escapeHtml(effortLabel(active.reasoningEffort))}</span>`
+    : '';
+  button.innerHTML = `<span class="mode-label">${escapeHtml(label)}</span>${effortBadge}${cacheBadge}<svg class="icon icon-inline" data-icon="chevron-down"></svg>`;
   mountIcons(button);
   const detail = [
     config.model ? `${t('modelDetail.alias')}: ${config.model}` : null,
@@ -6970,6 +7136,7 @@ function setModeButton(config: ModelConfig): void {
     config.provider === 'anthropic' ? t('toast.promptCache', { details: config.promptCache ? 'on' : 'off' }) : null,
     config.baseUrl ? `API: ${config.baseUrl}` : null,
     config.contextWindow ? `${t('modelDetail.context')}: ${(config.contextWindow / 1000).toFixed(0)}k tokens` : null,
+    active ? `${t('modelForm.reasoning')}: ${effortLabel(active.reasoningEffort)}` : null,
   ].filter(Boolean).join('\n');
   button.title = detail || t('composer.switchModel');
 }
@@ -6990,6 +7157,7 @@ function renderModelPickerIfOpen(): void {
 async function refreshModelList(): Promise<void> {
   try { modelList = await window.mocodeWork.listModels(); }
   catch (error) { modelList = []; console.error('[models]', error); }
+  if (lastModelConfig) setModeButton(lastModelConfig);
 }
 
 function ensureModelPicker(): HTMLElement {
@@ -7004,6 +7172,7 @@ function modelPickerItem(model: ModelItem): string {
   const meta = [
     `<span class="model-picker-alias">${t('picker.alias', { name: escapeHtml(model.name) })}</span>`,
     model.contextWindow ? `<span class="model-picker-ctx">${(model.contextWindow / 1000).toFixed(0)}k ${t('modelDetail.context')}</span>` : '',
+    `<span class="model-picker-effort ${model.reasoningEffort === 'auto' ? 'hidden' : ''}">${model.reasoningEffort === 'auto' ? '' : escapeHtml(effortLabel(model.reasoningEffort))}</span>`,
     model.provider === 'anthropic' && model.promptCache ? '<span class="model-picker-cache">cache</span>' : '',
   ].filter(Boolean).join('');
   return `
@@ -7017,6 +7186,7 @@ function modelPickerItem(model: ModelItem): string {
 }
 
 function renderModelPicker(): void {
+  hideModelHover();
   const el = ensureModelPicker();
   if (!modelList.length) {
     el.innerHTML = `<div class="model-picker-empty">${icon('warn')}<span>${t('settings.noModelPresets')}</span></div><div class="model-picker-hint">${t('picker.hint')}</div><div class="model-picker-foot"><button class="model-picker-add" id="picker-add-model">${icon('plus')}<span>${t('settings.addModel')}</span></button></div>`;
@@ -7061,6 +7231,16 @@ function renderModelPicker(): void {
     openSettings('model');
   });
   el.querySelectorAll<HTMLButtonElement>('.model-picker-item').forEach((button) => {
+    button.addEventListener('pointerenter', () => {
+      const name = button.dataset.model;
+      if (name) scheduleModelHoverOpen(name, button);
+    });
+    button.addEventListener('pointerleave', scheduleModelHoverClose);
+    button.addEventListener('focusin', () => {
+      const name = button.dataset.model;
+      if (name) scheduleModelHoverOpen(name, button);
+    });
+    button.addEventListener('focusout', scheduleModelHoverClose);
     button.addEventListener('click', async () => {
       const name = button.dataset.model;
       if (!name) return;
@@ -7079,6 +7259,280 @@ function renderModelPicker(): void {
       }
     });
   });
+}
+
+/* ── 模型行的悬停控制页 ───────────────────────────────────
+ * 350ms 打开、200ms 关闭。控制页与模型行并列展开，而不是在狭窄下拉里展开，
+ * 这样鼠标可以跨过去输入；打开/保存期间重新 hover 或切模型会作废旧 IPC 回包。
+ */
+const MODEL_HOVER_OPEN_MS = 350;
+const MODEL_HOVER_CLOSE_MS = 200;
+
+function ensureModelHover(): HTMLElement {
+  if (modelHoverEl) return modelHoverEl;
+  const el = $('#model-hover-panel') as HTMLElement;
+  modelHoverEl = el;
+  el.addEventListener('pointerenter', () => {
+    if (modelHoverCloseTimer !== undefined) { clearTimeout(modelHoverCloseTimer); modelHoverCloseTimer = undefined; }
+  });
+  el.addEventListener('pointerleave', scheduleModelHoverClose);
+  el.addEventListener('focusin', () => {
+    if (modelHoverCloseTimer !== undefined) { clearTimeout(modelHoverCloseTimer); modelHoverCloseTimer = undefined; }
+  });
+  el.addEventListener('focusout', () => {
+    if (!el.contains(document.activeElement)) scheduleModelHoverClose();
+  });
+  el.addEventListener('input', (event) => {
+    const input = event.target as HTMLInputElement;
+    if (!input.matches('[data-hover-max-tokens]') || !modelHoverPreset) return;
+    const raw = input.value.trim();
+    const capability = reasoningCapabilityForPreset({ ...modelHoverPreset, maxTokens: raw ? Number(raw) : undefined });
+    if (modelHoverEffort !== 'auto' && !capability.supportedEfforts.includes(modelHoverEffort)) {
+      modelHoverEffort = 'auto';
+      el.querySelectorAll<HTMLButtonElement>('[data-effort]').forEach((option) => {
+        option.setAttribute('aria-pressed', String(option.dataset.effort === 'auto'));
+      });
+    }
+    syncModelHoverControls();
+  });
+  el.addEventListener('change', (event) => {
+    const input = event.target as HTMLInputElement;
+    if (input.matches('[data-hover-window], [data-hover-max-tokens]')) void saveModelHover();
+  });
+  el.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.target as HTMLElement).matches('input')) {
+      event.preventDefault();
+      void saveModelHover();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      hideModelHover();
+      $('#mode-button')?.focus();
+    }
+  });
+  el.addEventListener('click', (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-effort]');
+    if (!button || button.disabled || !modelHoverPreset) return;
+    modelHoverEffort = (button.dataset.effort ?? 'auto') as EffortValue;
+    el.querySelectorAll<HTMLButtonElement>('[data-effort]').forEach((option) => {
+      option.setAttribute('aria-pressed', String(option.dataset.effort === modelHoverEffort));
+    });
+    const hint = el.querySelector<HTMLElement>('[data-hover-reasoning-hint]');
+    if (hint) hint.textContent = reasoningHelpText(reasoningCapabilityForPreset(modelHoverPreset), modelHoverEffort);
+    void saveModelHover();
+  });
+  return el;
+}
+
+function clearModelHoverTimers(): void {
+  if (modelHoverOpenTimer !== undefined) { clearTimeout(modelHoverOpenTimer); modelHoverOpenTimer = undefined; }
+  if (modelHoverCloseTimer !== undefined) { clearTimeout(modelHoverCloseTimer); modelHoverCloseTimer = undefined; }
+}
+
+function scheduleModelHoverOpen(name: string, anchor: HTMLElement): void {
+  if (modelHoverCloseTimer !== undefined) { clearTimeout(modelHoverCloseTimer); modelHoverCloseTimer = undefined; }
+  if (modelHoverName === name && modelHoverEl && !modelHoverEl.classList.contains('hidden')) return;
+  if (modelHoverOpenTimer !== undefined) clearTimeout(modelHoverOpenTimer);
+  modelHoverOpenTimer = setTimeout(() => {
+    modelHoverOpenTimer = undefined;
+    void openModelHover(name, anchor);
+  }, MODEL_HOVER_OPEN_MS);
+}
+
+function scheduleModelHoverClose(): void {
+  if (modelHoverOpenTimer !== undefined) { clearTimeout(modelHoverOpenTimer); modelHoverOpenTimer = undefined; }
+  if (modelHoverCloseTimer !== undefined) clearTimeout(modelHoverCloseTimer);
+  modelHoverCloseTimer = setTimeout(() => {
+    modelHoverCloseTimer = undefined;
+    // Tab 从模型行进入控制页时，pointerleave/focusout 已排了关闭；不能在焦点落稳前把输入框删掉。
+    if (modelHoverEl?.contains(document.activeElement)) return;
+    hideModelHover();
+  }, MODEL_HOVER_CLOSE_MS);
+}
+
+function hideModelHover(): void {
+  clearModelHoverTimers();
+  modelHoverGeneration += 1;
+  modelHoverName = null;
+  modelHoverPreset = null;
+  modelHoverAnchor = null;
+  modelHoverSaving = false;
+  modelHoverEl?.classList.add('hidden');
+}
+
+function syncModelHoverControls(): void {
+  const rawMaxTokens = modelHoverEl?.querySelector<HTMLInputElement>('[data-hover-max-tokens]')?.value.trim();
+  const capability = modelHoverPreset ? reasoningCapabilityForPreset({
+    ...modelHoverPreset,
+    maxTokens: rawMaxTokens ? Number(rawMaxTokens) : undefined,
+  }) : null;
+  modelHoverEl?.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button').forEach((control) => {
+    const effort = control.dataset.effort as EffortValue | undefined;
+    // 保存期间仍接受新的输入/档位；saveModelHover 会把最新草稿排到写入链末尾。
+    // 加载阶段面板里还没有控件，因此不需要再用 modelHoverSaving 禁用整页。
+    control.disabled = !!effort && effort !== 'auto' && !capability?.supportedEfforts.includes(effort);
+  });
+  const hint = modelHoverEl?.querySelector<HTMLElement>('[data-hover-reasoning-hint]');
+  if (hint && capability) hint.textContent = reasoningHelpText(capability, modelHoverEffort);
+}
+
+function modelHoverStatus(message = '', error = false): void {
+  const status = modelHoverEl?.querySelector<HTMLElement>('[data-hover-status]');
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle('error', error);
+}
+
+function positionModelHover(): void {
+  const el = modelHoverEl;
+  const anchor = modelHoverAnchor;
+  const picker = modelPickerEl;
+  if (!el || !anchor || !picker) return;
+  // 下拉滚动时按钮的 rect 会更新；控制页跟随原模型行，而不是悬在旧位置。
+  if (!anchor.isConnected || !picker.contains(anchor)) return;
+  const rect = anchor.getBoundingClientRect();
+  const pickerRect = picker.getBoundingClientRect();
+  const panelRect = el.getBoundingClientRect();
+  // 默认在右侧展开，像常见模型选择器；右侧放不下才换到左侧。
+  const rightX = pickerRect.right + 8;
+  const x = rightX + panelRect.width <= window.innerWidth - 8
+    ? rightX
+    : Math.max(8, pickerRect.left - panelRect.width - 8);
+  const y = Math.max(8, Math.min(window.innerHeight - panelRect.height - 8, rect.top - 4));
+  el.style.left = `${Math.max(8, x)}px`;
+  el.style.top = `${y}px`;
+}
+
+async function openModelHover(name: string, anchor: HTMLElement): Promise<void> {
+  if (modelPickerEl?.classList.contains('hidden')) return;
+  const generation = ++modelHoverGeneration;
+  const el = ensureModelHover();
+  modelHoverName = name;
+  modelHoverAnchor = anchor;
+  modelHoverPreset = null;
+  modelHoverSaving = true;
+  const item = modelList.find((model) => model.name === name);
+  el.innerHTML = `
+    <div class="model-hover-head"><span class="model-hover-title">${escapeHtml(item?.label ?? name)}</span><span class="model-hover-provider">${escapeHtml(item?.providerHost ?? '')}</span></div>
+    <div class="model-hover-status" data-hover-status>${t('modelForm.hoverSaving')}</div>`;
+  el.classList.remove('hidden');
+  positionModelHover();
+  try {
+    // 同一模型保存途中重新打开时，必须先等写入完成再回读；否则新面板会拿到旧预设，
+    // 下一次只改档位也会把旧的上下文/输出上限一并写回，覆盖刚保存的值。
+    await modelHoverSaveQueue;
+    if (generation !== modelHoverGeneration || modelHoverName !== name) return;
+    const detail = await window.mocodeWork.getModel(name);
+    if (generation !== modelHoverGeneration || modelHoverName !== name) return;
+    if (!detail.ok || !detail.preset) throw new Error(detail.message ?? t('modelForm.errorRead', { name }));
+    modelHoverPreset = detail.preset;
+    modelHoverEffort = detail.preset.reasoningEffort ?? 'auto';
+    const capability = detail.reasoning ?? reasoningCapabilityForPreset(detail.preset);
+    el.innerHTML = `
+      <div class="model-hover-head"><span class="model-hover-title">${escapeHtml(detail.preset.model)}</span><span class="model-hover-provider">${escapeHtml(item?.providerHost ?? detail.preset.provider)}</span></div>
+      <div class="model-hover-grid">
+        <label class="model-hover-field"><span>${t('modelForm.contextWindow')} · tokens</span><input class="model-hover-input" data-hover-window type="number" min="1" step="1000" value="${detail.preset.contextWindow}" /></label>
+        <label class="model-hover-field"><span>${t('modelForm.maxTokens')} · tokens</span><input class="model-hover-input" data-hover-max-tokens type="number" min="1" step="1000" value="${detail.preset.maxTokens ?? ''}" /></label>
+      </div>
+      <div class="model-hover-section"><div class="model-hover-section-head"><span>${t('modelForm.reasoning')}</span><span>${escapeHtml(detail.preset.name)}</span></div>
+        <div class="effort-segmented" role="group" aria-label="${t('modelForm.reasoning')}">${effortOptionsHtml(capability, modelHoverEffort)}</div>
+        <p class="model-hover-hint" data-hover-reasoning-hint>${escapeHtml(reasoningHelpText(capability, modelHoverEffort))}</p>
+      </div>
+      <p class="model-hover-hint">${t('modelForm.hoverHint')}</p>
+      <div class="model-hover-status" data-hover-status aria-live="polite"></div>`;
+    modelHoverSaving = false;
+    syncModelHoverControls();
+    positionModelHover();
+  } catch (error) {
+    if (generation !== modelHoverGeneration) return;
+    modelHoverSaving = false;
+    modelHoverStatus((error as Error).message, true);
+  }
+}
+
+interface ModelHoverSaveRequest {
+  name: string;
+  draft: WorkPresetDraft;
+  /** 用于判定回包能否更新当前控制页，不用于决定写哪个模型。 */
+  generation: number;
+}
+
+function saveModelHover(): Promise<void> {
+  const name = modelHoverName;
+  const preset = modelHoverPreset;
+  const el = modelHoverEl;
+  if (!name || !preset || !el) return Promise.resolve();
+  const contextWindow = Number(el.querySelector<HTMLInputElement>('[data-hover-window]')?.value);
+  const rawMaxTokens = el.querySelector<HTMLInputElement>('[data-hover-max-tokens]')?.value.trim() ?? '';
+  const maxTokens = rawMaxTokens ? Number(rawMaxTokens) : undefined;
+  const effort = modelHoverEffort;
+  const capability = reasoningCapabilityForPreset({ ...preset, maxTokens });
+  if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
+    modelHoverStatus(t('modelForm.errorWindow'), true);
+    return Promise.resolve();
+  }
+  if (maxTokens !== undefined && (!Number.isInteger(maxTokens) || maxTokens <= 0)) {
+    modelHoverStatus(t('modelForm.errorMaxTokens'), true);
+    return Promise.resolve();
+  }
+  if (effort !== 'auto' && !capability.supportedEfforts.includes(effort)) {
+    modelHoverStatus(t('modelForm.errorEffortUnsupported'), true);
+    return Promise.resolve();
+  }
+  // 入队时就冻结名称与草稿。之后 hover 到 B / 关闭面板都不能让 A 的待写操作变成写 B。
+  // 是否刷新运行配置由主进程按保存执行时的 .active 决定，不能相信打开面板时的激活状态。
+  const request: ModelHoverSaveRequest = {
+    name,
+    draft: { ...preset, contextWindow, maxTokens, reasoningEffort: effort },
+    generation: ++modelHoverGeneration,
+  };
+  const run = modelHoverSaveQueue.then(() => saveModelHoverNow(request));
+  modelHoverSaveQueue = run.catch(() => { /* 单个请求失败不阻断后续保存 */ });
+  return run;
+}
+
+async function saveModelHoverNow(request: ModelHoverSaveRequest): Promise<void> {
+  const { name, draft } = request;
+  const visible = modelHoverName === name && modelHoverGeneration === request.generation;
+  if (visible) {
+    modelHoverSaving = true;
+    modelHoverStatus(t('modelForm.hoverSaving'));
+    syncModelHoverControls();
+  }
+  try {
+    const result = await window.mocodeWork.saveModel({ name, draft, activate: false });
+    if (!result.ok) throw new Error(result.message);
+    if (visible && modelHoverName === name && modelHoverGeneration === request.generation) {
+      modelHoverPreset = { ...modelHoverPreset!, ...draft };
+      modelHoverSaving = false;
+      syncModelHoverControls();
+      modelHoverStatus(t('modelForm.hoverSaved'));
+    }
+    await refreshModelList();
+    const current = modelList.find((model) => model.name === name);
+    if (current) {
+      const effort = draft.reasoningEffort ?? 'auto';
+      const contextBadge = modelPickerEl?.querySelector<HTMLElement>(`[data-model="${CSS.escape(name)}"] .model-picker-ctx`);
+      if (contextBadge) contextBadge.textContent = `${(draft.contextWindow / 1000).toFixed(0)}k ${t('modelDetail.context')}`;
+      const badge = modelPickerEl?.querySelector<HTMLElement>(`[data-model="${CSS.escape(name)}"] .model-picker-effort`);
+      if (badge) {
+        badge.textContent = effort === 'auto' ? '' : effortLabel(effort);
+        badge.classList.toggle('hidden', effort === 'auto');
+      }
+      try { setModeButton(await window.mocodeWork.getConfig()); } catch { /* 配置查询失败不撤回已保存的预设 */ }
+    }
+  } catch (error) {
+    if (visible && modelHoverName === name && modelHoverGeneration === request.generation) {
+      modelHoverSaving = false;
+      syncModelHoverControls();
+      modelHoverStatus((error as Error).message, true);
+    } else {
+      showToast('error', (error as Error).message);
+    }
+  }
+}
+
+function presetIsActive(name: string): boolean {
+  return modelList.some((model) => model.name === name && model.isActive);
 }
 
 /* 把下拉锚定在**模型按钮**正上方，而不是 .composer-area 那一整条。CSS 的
@@ -7104,6 +7558,7 @@ function positionModelPicker(): void {
 }
 
 function showModelPicker(): void {
+  hideModelHover();
   const el = ensureModelPicker();
   el.classList.remove('hidden');
   positionModelPicker();
@@ -7111,6 +7566,7 @@ function showModelPicker(): void {
   requestAnimationFrame(() => el.classList.add('model-picker-in'));
 }
 function hideModelPicker(): void {
+  hideModelHover();
   const el = ensureModelPicker();
   el.classList.remove('model-picker-in');
   el.classList.add('hidden');
@@ -7130,6 +7586,7 @@ document.addEventListener('click', (event) => {
   if (!modelPickerEl || modelPickerEl.classList.contains('hidden')) return;
   const target = event.target as Node;
   if (modelPickerEl.contains(target)) return;
+  if (modelHoverEl?.contains(target)) return;
   if ($('#mode-button')?.contains(target)) return;
   hideModelPicker();
 });
@@ -7167,18 +7624,19 @@ window.mocodeWork.onVoiceProgress((progress) => {
 });
 /**
  * 发送 / 停止是**两个不同动作**，共用一枚按钮但语义分开：
- *   - 任务正在跑 → 按钮显示方框，点击 = 取消这一轮（Enter 仍是排队，见 submit）；
- *   - 空闲 → 点击 = 发送（有队列残留时也走排队路径，不会被吞）。
+ *   - 任务正在跑 → 按钮显示方框，点击 = 取消这一轮（有输入时点击或 Enter 追加到当前任务，见 submit）；
+ *   - 空闲 → 点击 = 发送。
  * 以前两条路径都落到 submit()，导致「想接着说一句」直接掐掉正在跑的活。
  */
 sendButton.addEventListener('click', () => {
   const viewing = viewingTaskId();
-  if (isRunning(viewing)) { window.mocodeWork.send({ type: 'cancel', id: viewing }); return; }
+  if (isRunning(viewing) && !promptInput.value.trim() && !attachments.length) { window.mocodeWork.send({ type: 'cancel', id: viewing }); return; }
   void submit();
 });
 promptInput.addEventListener('input', resizePrompt);
 promptInput.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void submit(); } });
 window.addEventListener('resize', () => {
+  hideModelHover();
   if (modelPickerEl && !modelPickerEl.classList.contains('hidden')) positionModelPicker();
   positionToolsMenu();
 });

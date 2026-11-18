@@ -96,6 +96,8 @@ export interface AgentRunResult {
 
 export interface AgentRunOptions {
   history: ChatMessage[];
+  /** Drain live user updates only at complete model/tool boundaries. */
+  drainUserMessages?: () => Array<string | ContentPart[]>;
   pipeline?: AgentPipeline;
   stageOverrides?: Partial<Record<AgentStageName, AgentStageImplementation>>;
   userInput: string | ContentPart[];

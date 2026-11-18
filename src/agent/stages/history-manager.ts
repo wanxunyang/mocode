@@ -30,7 +30,7 @@ function replaceMessages(backing: ChatMessage[], messages: readonly ChatMessage[
 
 function assistantMessage(turn: AssistantTurn): ChatMessage {
   const hasToolCalls = turn.toolCalls.length > 0;
-  const message: OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam = {
+  const message: ChatMessage & { role: 'assistant' } = {
     role: 'assistant',
     // 无 tool_calls 时 content 不能是 null:那是 OpenAI 自己吐 tool_call 时的规范形状,
     // 纯文本轮次写 null 会被严格 OpenAI 兼容网关整请求 400(实测 speedbear:
@@ -40,6 +40,7 @@ function assistantMessage(turn: AssistantTurn): ChatMessage {
     // 「agent 完成了这一轮」写盘。构造点在此收敛,transport 边界另有兜底
     // (src/llm/message-shape.ts)负责让存量中毒会话自愈。
     content: !hasToolCalls && turn.content === null ? '' : turn.content,
+    ...(turn.reasoningContent ? { reasoning_content: turn.reasoningContent } : {}),
   };
   if (hasToolCalls) {
     // thoughtSignature 不是 OpenAI 字段，是 mocode 给 Gemini/Vertex 透传用的；

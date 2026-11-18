@@ -13,7 +13,8 @@ import { grepTool } from '../../src/tools/builtins/grep.js';
 import { searchEncoder } from '../../src/context/encoders/search.js';
 import { summarizeToolResult } from '../../src/ui/render.js';
 import { t } from '../../src/i18n/index.js';
-import { setSandboxRoot } from '../../src/sandbox/root.js';
+import { setSandboxRoot, withSandboxRoot } from '../../src/sandbox/root.js';
+import { runRipgrep } from '../../src/tools/ripgrep-client.js';
 
 let root: string;
 
@@ -104,6 +105,13 @@ test('grep context: 非法/越界值钳制(负数→0,超大→10,NaN→0)', asy
   assert.ok(!/L5/.test(nan), 'NaN context 应按 0 处理');
 });
 
+test('grep: max_per_file 保留所有行号，只回传已展示命中的邻居', async () => {
+  const out = await run({ pattern: 'target line here', glob: 'src/spread.ts', context: 1, max_per_file: 1 });
+  assert.match(out, /行号 \[3, 21\]/);
+  assert.match(out, /L4- filler 3/);
+  assert.doesNotMatch(out, /L(?:20|21|22)[:-]/);
+});
+
 test('grep: 大文件由 ripgrep 流式扫描,命中照常返回(2MiB 体积闸门只 Node 兜底路径需要)', async () => {
   const out = await run({ pattern: 'NEEDLE', glob: 'src/huge.txt' });
   assert.match(out, /src\/huge\.txt: 1 处匹配,行号 \[1\]/, 'ripgrep 流式读不撑内存,不应跳过');
@@ -119,6 +127,34 @@ test('grep: 二进制文件仍然跳过(ripgrep 原生 NUL 探测;Node 兜底走
 test('grep: 非法正则返回明确错误(不启动扫描)', async () => {
   const out = await run({ pattern: '[' });
   assert.match(out, /非法正则/);
+});
+
+test('grep: 文件收齐后才提前结束；完整行号和末尾 context 都能取到', async () => {
+  mkdirSync(join(root, 'budget'));
+  const input = 'needle\nneedle\nneedle\n末尾\n';
+  for (const name of ['a', 'b']) writeFileSync(join(root, 'budget', name), input);
+  await withSandboxRoot(root, async () => {
+    const params = { pattern: 'needle', glob: 'budget/**', maxMatches: 2, context: 1 };
+    const result = await runRipgrep(params);
+    assert.equal(result.status, 'ok');
+    if (result.status !== 'ok') return;
+    assert.equal(result.truncated, true);
+    assert.equal(result.files.length, 1);
+    assert.deepEqual(
+      result.files[0].matches.map((match) => match.line),
+      [1, 2, 3],
+    );
+    assert.deepEqual(result.files[0].contexts, [{ line: 4, text: '末尾' }]);
+
+    const only = await runRipgrep({ ...params, glob: 'budget/a' });
+    assert.equal(only.status, 'ok');
+    if (only.status === 'ok') assert.equal(only.truncated, false);
+  });
+});
+
+test('grep: 零命中报告实际搜索过的文件数', async () => {
+  const out = await run({ pattern: 'MISSING_MARKER', glob: 'src/nested.ts' });
+  assert.match(out, /无匹配\(扫描了 1 个文件\)/);
 });
 
 test('grep: 尊重 .gitignore,被忽略目录不扫描', async () => {

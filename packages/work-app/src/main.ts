@@ -1,3 +1,5 @@
+import { isPetCharacter, normalizePetCharacter, type PetCharacterId } from './pet-characters.js';
+import { DesktopPet } from './desktop-pet.js';
 import { app, BrowserWindow, Menu, Notification, clipboard, dialog, ipcMain, nativeTheme, screen, session as electronSession, shell, type MenuItemConstructorOptions } from 'electron';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -6,6 +8,17 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import dotenv from 'dotenv';
+import {
+  EFFORT_VALUES,
+  normalizeWorkPresetDraft,
+  readWorkPreset,
+  reasoningCapabilityForPreset,
+  writeWorkPreset,
+  type EffortValue,
+  type ReasoningCapability,
+  type WorkPresetDraft,
+  type WorkPresetFile,
+} from './model-config.js';
 import { ATTACHMENT_EXTENSIONS, configureAttachmentModulePath, historyAttachments, readAttachment, type WorkAttachment } from './attachments.js';
 // 计划解析与渲染层共用同一份（renderer 走 ../plan.js），否则侧栏的 n/m 与面板会对不上。
 import { parsePlan } from './plan.js';
@@ -32,6 +45,8 @@ import {
 import { SESSION_DIR_RE, countProjectSessions, isNoiseWorkspace, listProjectSessions, readSessionHistory, readWorkspaceRegistry, sessionLastActiveAt } from './workspace-sync.js';
 // 侧栏排序键的对账规则（纯函数）：修复历史上被写成 now 的 updatedAt。
 import { planSortKeyRepair } from './task-order.js';
+// 「点了 + 但一句话都没发」的空草稿判定（纯函数）：选中项离开它就丢弃，见 discardEmptyDrafts。
+import { discardableDraftIds } from './task-draft.js';
 import {
   deleteMcpServer,
   deleteSkill,
@@ -304,7 +319,7 @@ function pushRenderer(channel: string, payload: unknown): void {
     w.webContents.send(channel, payload);
   }
 }
-function broadcastState(): void { pushRenderer('work:state', state); }
+function broadcastState(): void { pushRenderer('work:state', state); desktopPet.update(state.tasks); }
 
 /** 读取 ~/.mocode/config 的所有键(不写 process.env,仅作查询)。 */
 function readUserConfig(): Record<string, string> {
@@ -312,14 +327,18 @@ function readUserConfig(): Record<string, string> {
 }
 
 /** 写入 ~/.mocode/config —— 保留文件中其它键,只覆盖传入的。 */
-function writeUserConfig(patch: Record<string, string>): void {
+function writeUserConfig(patch: Record<string, string | null>): void {
   const existing = readUserConfig();
-  const merged = { ...existing, ...patch };
+  const merged: Record<string, string> = { ...existing };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
   mkdirSync(path.dirname(userConfigPath()), { recursive: true });
   // 保持稳定顺序:patch 中声明的键排在最前
   const ordered: string[] = [];
-  for (const k of Object.keys(patch)) ordered.push(k);
-  for (const k of Object.keys(existing)) if (!ordered.includes(k)) ordered.push(k);
+  for (const k of Object.keys(patch)) if (merged[k] !== undefined) ordered.push(k);
+  for (const k of Object.keys(existing)) if (!ordered.includes(k) && merged[k] !== undefined) ordered.push(k);
   const text = `${ordered.map((k) => `${k}=${merged[k] ?? ''}`).join('\n')}\n`;
   writeFileSync(userConfigPath(), text, 'utf8');
 }
@@ -327,11 +346,14 @@ function writeUserConfig(patch: Record<string, string>): void {
 interface ModelDescriptor {
   name: string;          // 文件名(去掉 .json),用户标识 / 写入 config 的 LLM_MODEL
   label: string;         // 实际 API 的 model 名
-  provider: 'openai' | 'anthropic';
+  provider: 'openai' | 'anthropic' | 'google';
   promptCache: boolean;
   baseURL: string;       // 仅显示用(只返回 host,不泄漏完整 endpoint)
   providerHost: string;  // 归一化后的提供商标识(剥掉 api./www. 等前缀),renderer 按它分组
   contextWindow: number; // tokens
+  maxTokens?: number;
+  reasoningEffort: EffortValue;
+  reasoning: ReasoningCapability;
   isActive: boolean;
 }
 
@@ -367,27 +389,11 @@ function listModels(): ModelDescriptor[] {
   try { entries = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return []; }
   const out: ModelDescriptor[] = [];
   for (const file of entries) {
-    try {
-      const raw = JSON.parse(readFileSync(path.join(dir, file), 'utf8')) as Record<string, unknown>;
-      const name = path.basename(file, '.json');
-      const baseURL = typeof raw.baseURL === 'string' ? raw.baseURL : '';
-      const model = typeof raw.model === 'string' ? raw.model : name;
-      const provider = raw.provider === 'anthropic' ? 'anthropic' : 'openai';
-      const promptCache = provider === 'anthropic' && raw.anthropicPromptCache !== false;
-      const contextWindow = Number(raw.contextWindow ?? 0) || 0;
-      out.push({
-        name,
-        label: model,
-        provider,
-        promptCache,
-        baseURL: maskUrl(baseURL),
-        providerHost: providerHostOf(baseURL),
-        contextWindow,
-        // 激活身份只看 .active 指针(它是 mocode 唯一的真相源);指针缺失时才退回比对真实 model 名。
-        // 绝不能拿 baseURL 反推激活项 —— 同一家提供商的多个预设主机名相同,会把整组都标成"当前"。
-        isActive: activeName ? name === activeName : model === activeModel,
-      });
-    } catch { /* 跳过解析失败的文件 */ }
+    const preset = readWorkPreset(path.join(dir, file));
+    if (!preset) continue;
+    // 激活身份只看 .active 指针(它是 mocode 唯一的真相源);指针缺失时才退回比对真实 model 名。
+    // 绝不能拿 baseURL 反推激活项 —— 同一家提供商的多个预设主机名相同,会把整组都标成"当前"。
+    out.push(describePreset(preset, activeName ? preset.name === activeName : preset.model === activeModel));
   }
   // 激活项置顶,其余按名称字典序
   out.sort((a, b) => (a.isActive === b.isActive ? a.name.localeCompare(b.name) : a.isActive ? -1 : 1));
@@ -408,18 +414,8 @@ function listModels(): ModelDescriptor[] {
 function applyActivePreset(): void {
   const name = readActivePreset();
   if (!name) return;
-  try {
-    const raw = JSON.parse(readFileSync(path.join(modelsDir(), `${name}.json`), 'utf8')) as Record<string, unknown>;
-    if (typeof raw.baseURL === 'string' && raw.baseURL) process.env.LLM_BASE_URL = raw.baseURL;
-    if (typeof raw.apiKey === 'string' && raw.apiKey) process.env.LLM_API_KEY = raw.apiKey;
-    // 写真实 API model 名(预设里的 model 字段),不是预设文件名。
-    if (typeof raw.model === 'string' && raw.model) process.env.LLM_MODEL = raw.model;
-    if (raw.provider === 'anthropic' || raw.provider === 'openai') process.env.LLM_PROVIDER = raw.provider;
-    const contextWindow = Number(raw.contextWindow ?? 0);
-    if (contextWindow > 0) process.env.CONTEXT_WINDOW_TOKENS = String(contextWindow);
-    const promptCache = raw.provider === 'anthropic' && raw.anthropicPromptCache !== false;
-    process.env.ANTHROPIC_PROMPT_CACHE = promptCache ? 'true' : 'false';
-  } catch { /* 预设文件损坏:保持 config 裸键,别让切换把整个应用拖垮 */ }
+  const preset = readWorkPreset(path.join(modelsDir(), `${name}.json`));
+  if (preset) applyPresetEnv(preset);
 }
 
 /**
@@ -433,43 +429,22 @@ function applyActivePreset(): void {
  * `404 The model ... does not exist`。真正"当前激活预设"的身份由 .active 指针文件承载。
  */
 function switchModel(name: string): { ok: boolean; message: string; model?: ModelDescriptor } {
-  const target = path.join(modelsDir(), `${name}.json`);
-  if (!existsSync(target)) return { ok: false, message: tMain('main.switchModel.exists', { name }) };
-  let raw: Record<string, unknown>;
-  try { raw = JSON.parse(readFileSync(target, 'utf8')) as Record<string, unknown>; }
-  catch { return { ok: false, message: tMain('main.switchModel.cannotRead', { name }) }; }
-  const baseURL = typeof raw.baseURL === 'string' ? raw.baseURL : '';
-  const apiKey = typeof raw.apiKey === 'string' ? raw.apiKey : '';
-  const model = typeof raw.model === 'string' ? raw.model : name;
-  const provider = raw.provider === 'anthropic' ? 'anthropic' : 'openai';
-  const promptCache = provider === 'anthropic' && raw.anthropicPromptCache !== false;
-  const contextWindow = Number(raw.contextWindow ?? 0) || 0;
-  if (!baseURL || !model) return { ok: false, message: tMain('main.switchModel.missingFields', { name }) };
-  const patch: Record<string, string> = {
-    LLM_PROVIDER: provider,
-    LLM_BASE_URL: baseURL,
-    LLM_API_KEY: apiKey,
-    LLM_MODEL: model, // 真实 API model 名,不是预设文件名
-    ANTHROPIC_PROMPT_CACHE: promptCache ? 'true' : 'false',
-  };
-  if (contextWindow) patch.CONTEXT_WINDOW_TOKENS = String(contextWindow);
+  if (!PRESET_NAME_RE.test(name)) return { ok: false, message: tMain('main.preset.nameInvalid') };
+  const preset = readWorkPreset(path.join(modelsDir(), `${name}.json`));
+  if (!preset) return { ok: false, message: tMain('main.switchModel.cannotRead', { name }) };
+  const patch = presetConfigPatch(preset);
   try { writeUserConfig(patch); }
   catch (error) { return { ok: false, message: tMain('main.switchModel.writeFail', { msg: (error as Error).message }) }; }
   // 同步 .active 指针,否则下次启动 config/index.ts 会用指针指向的旧预设覆盖刚写的键。
   try { writeFileSync(path.join(modelsDir(), '.active'), `${name}\n`, 'utf8'); }
   catch { /* 指针写失败不阻断切换 */ }
-  process.env.LLM_PROVIDER = provider;
-  process.env.LLM_BASE_URL = baseURL;
-  process.env.LLM_API_KEY = apiKey;
-  process.env.LLM_MODEL = model;
-  process.env.ANTHROPIC_PROMPT_CACHE = promptCache ? 'true' : 'false';
-  if (contextWindow) process.env.CONTEXT_WINDOW_TOKENS = String(contextWindow);
+  applyPresetEnv(preset);
   // 切模型 = 换 host 的 config 快照：先停掉所有在跑的任务,再让全部 host 下次 send 时按新配置重启。
   restartAllAgents();
   return {
     ok: true,
-    message: tMain('main.switchModel.saved', { name, provider, cache: promptCache ? ' · cache on' : '' }),
-    model: { name, label: model, provider, promptCache, baseURL: maskUrl(baseURL), providerHost: providerHostOf(baseURL), contextWindow, isActive: true },
+    message: tMain('main.switchModel.saved', { name, provider: preset.provider, cache: preset.anthropicPromptCache ? ' · cache on' : '' }),
+    model: describePreset(preset, true),
   };
 }
 
@@ -481,102 +456,67 @@ function switchModel(name: string): { ok: boolean; message: string; model?: Mode
 const PRESET_NAME_RE = /^[a-zA-Z0-9_-]{1,32}$/;
 
 /** 磁盘上的完整预设（含 apiKey 明文）。只允许在主进程内流转，绝不整条发往 renderer。 */
-interface PresetFile {
-  name: string;
-  provider: 'openai' | 'anthropic';
-  baseURL: string;
-  apiKey: string;
-  model: string;
-  contextWindow: number;
-  anthropicPromptCache: boolean;
-}
+type PresetFile = WorkPresetFile;
 
-/** 用户可编辑的字段。name 单独处理（改名走 renamePresetFile）。 */
-interface PresetDraft {
-  provider: 'openai' | 'anthropic';
-  baseURL: string;
-  apiKey: string;
-  model: string;
-  contextWindow: number;
-  anthropicPromptCache: boolean;
-}
+/** 用户可编辑的字段。name 单独处理（改名走 savePresetFromRenderer）。 */
+type PresetDraft = WorkPresetDraft;
 
 function presetPathFor(name: string): string {
   return path.join(modelsDir(), `${name}.json`);
 }
 
-/** 规范化一份草稿：校验必填项，把可选项归一到 core 读取时的形态。 */
-function normalizeDraft(input: Partial<PresetDraft>): { ok: true; value: PresetDraft } | { ok: false; message: string } {
-  const baseURL = String(input.baseURL ?? '').trim();
-  const apiKey = String(input.apiKey ?? '').trim();
-  const model = String(input.model ?? '').trim();
-  const window = Number(input.contextWindow ?? 0);
-  const provider = input.provider === 'anthropic' ? 'anthropic' : 'openai';
-  if (!baseURL) return { ok: false, message: tMain('modelForm.errorBaseUrl') };
-  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(baseURL)) return { ok: false, message: tMain('modelForm.errorBaseUrl') };
-  try { new URL(baseURL); } catch { return { ok: false, message: tMain('modelForm.errorBaseUrl') }; }
-  if (!apiKey) return { ok: false, message: tMain('modelForm.errorApiKey') };
-  if (!model) return { ok: false, message: tMain('modelForm.errorModel') };
-  if (!Number.isFinite(window) || window <= 0) return { ok: false, message: tMain('modelForm.errorWindow') };
+function describePreset(preset: WorkPresetFile, isActive: boolean): ModelDescriptor {
   return {
-    ok: true,
-    value: {
-      provider,
-      baseURL,
-      apiKey,
-      model,
-      contextWindow: Math.floor(window),
-      // core 的 parsePreset 只在 anthropic 下认这个键，openai 一律落 false。
-      anthropicPromptCache: provider === 'anthropic' && input.anthropicPromptCache !== false,
-    },
+    name: preset.name,
+    label: preset.model,
+    provider: preset.provider,
+    promptCache: preset.anthropicPromptCache,
+    baseURL: maskUrl(preset.baseURL),
+    providerHost: providerHostOf(preset.baseURL),
+    contextWindow: preset.contextWindow,
+    ...(preset.maxTokens ? { maxTokens: preset.maxTokens } : {}),
+    reasoningEffort: preset.reasoningEffort ?? 'auto',
+    reasoning: reasoningCapabilityForPreset(preset),
+    isActive,
   };
 }
 
-/** 原子写预设（写 tmp 再 rename），与 core 的 savePreset 同策略。 */
-function writePresetFile(name: string, draft: PresetDraft): void {
-  mkdirSync(modelsDir(), { recursive: true });
-  const dest = presetPathFor(name);
-  const payload: PresetFile = { name, ...draft };
-  const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
-  renameSync(tmp, dest);
-}
-
-/** 读一个预设文件为草稿；文件缺失/损坏返回 null。 */
-function readPresetFile(name: string): PresetFile | null {
-  try {
-    const raw = JSON.parse(readFileSync(presetPathFor(name), 'utf8')) as Record<string, unknown>;
-    const draft = normalizeDraft({
-      provider: raw.provider === 'anthropic' ? 'anthropic' : 'openai',
-      baseURL: typeof raw.baseURL === 'string' ? raw.baseURL : '',
-      apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : '',
-      model: typeof raw.model === 'string' ? raw.model : '',
-      contextWindow: Number(raw.contextWindow ?? 0) || 0,
-      anthropicPromptCache: raw.anthropicPromptCache !== false,
-    });
-    if (!draft.ok) return null;
-    return { name, ...draft.value };
-  } catch { return null; }
-}
-
-/** 把一个预设激活（写 config + .active + process.env），供新建/编辑后自动生效使用。 */
-function activatePreset(name: string, draft: PresetDraft): void {
-  const patch: Record<string, string> = {
-    LLM_PROVIDER: draft.provider,
+function presetConfigPatch(draft: PresetDraft): Record<string, string | null> {
+  return {
+    LLM_PROVIDER: draft.provider ?? 'openai',
     LLM_BASE_URL: draft.baseURL,
     LLM_API_KEY: draft.apiKey,
     LLM_MODEL: draft.model,
     ANTHROPIC_PROMPT_CACHE: draft.anthropicPromptCache ? 'true' : 'false',
     CONTEXT_WINDOW_TOKENS: String(draft.contextWindow),
+    REASONING_EFFORT: draft.reasoningEffort ?? 'auto',
+    MAX_TOKENS: draft.maxTokens ? String(draft.maxTokens) : null,
   };
-  try { writeUserConfig(patch); } catch { /* 写 config 失败不阻断 .active */ }
+}
+
+function applyPresetEnv(draft: PresetDraft): void {
+  const patch = presetConfigPatch(draft);
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+/** 原子写预设（写 tmp 再 rename），与 core 的 savePreset 同策略。 */
+function writePresetFile(name: string, draft: PresetDraft): void {
+  writeWorkPreset(presetPathFor(name), { name, ...draft, provider: draft.provider ?? 'openai', anthropicPromptCache: draft.anthropicPromptCache ?? false });
+}
+
+/** 读一个预设文件为草稿；文件缺失/损坏返回 null。 */
+function readPresetFile(name: string): PresetFile | null {
+  return readWorkPreset(presetPathFor(name));
+}
+
+/** 把一个预设激活（写 config + .active + process.env），供新建/编辑后自动生效使用。 */
+function activatePreset(name: string, draft: PresetDraft): void {
+  try { writeUserConfig(presetConfigPatch(draft)); } catch { /* 写 config 失败不阻断 .active */ }
   try { writeFileSync(path.join(modelsDir(), '.active'), `${name}\n`, 'utf8'); } catch { /* 指针写失败不阻断 */ }
-  process.env.LLM_PROVIDER = draft.provider;
-  process.env.LLM_BASE_URL = draft.baseURL;
-  process.env.LLM_API_KEY = draft.apiKey;
-  process.env.LLM_MODEL = draft.model;
-  process.env.ANTHROPIC_PROMPT_CACHE = draft.anthropicPromptCache ? 'true' : 'false';
-  process.env.CONTEXT_WINDOW_TOKENS = String(draft.contextWindow);
+  applyPresetEnv(draft);
 }
 
 /**
@@ -592,8 +532,9 @@ function savePresetFromRenderer(input: {
 }): { ok: boolean; message: string; name?: string } {
   const name = String(input.name ?? '').trim();
   if (!PRESET_NAME_RE.test(name)) return { ok: false, message: tMain('main.preset.nameInvalid') };
-  const draft = normalizeDraft((input.draft ?? {}) as Partial<PresetDraft>);
-  if (!draft.ok) return { ok: false, message: draft.message };
+  const normalized = normalizeWorkPresetDraft((input.draft ?? {}) as Partial<PresetDraft>);
+  if (!normalized.ok) return { ok: false, message: tMain(normalized.message as Parameters<typeof tMain>[0]) };
+  const draft = normalized.value;
 
   const originalName = String(input.originalName ?? '').trim();
   const renaming = !!originalName && originalName !== name;
@@ -603,7 +544,7 @@ function savePresetFromRenderer(input: {
     if (!existsSync(presetPathFor(originalName))) return { ok: false, message: tMain('main.preset.notExist', { name: originalName }) };
   }
   try {
-    writePresetFile(name, draft.value);
+    writePresetFile(name, draft);
     if (renaming) {
       // 先写新文件再删旧文件：中途失败也不会丢配置。
       try { unlinkSync(presetPathFor(originalName)); } catch { /* 旧文件已被手动删掉 */ }
@@ -617,7 +558,7 @@ function savePresetFromRenderer(input: {
 
   const wasActive = readActivePreset() === name || readActivePreset() === originalName;
   if (input.activate === true || wasActive) {
-    activatePreset(name, draft.value);
+    activatePreset(name, draft);
     restartAllAgents();
   }
   return { ok: true, message: renaming ? tMain('main.preset.renamed', { name }) : tMain('main.preset.saved', { name }), name };
@@ -689,23 +630,23 @@ const SETTING_TOGGLES = {
 } as const;
 type SettingKey = keyof typeof SETTING_TOGGLES;
 
-/** 思考强度五档（与 core 的 ReasoningEffort 同集合）；设置页作为单选呈现。 */
-const EFFORT_VALUES = ['off', 'low', 'medium', 'high', 'auto'] as const;
-type EffortValue = (typeof EFFORT_VALUES)[number];
+/** 思考强度五档由 model-config 与 core 的 ReasoningEffort 同集合。 */
 
 /** 来回读一份配置（env 优先，其次 ~/.mocode/config），开关与 effort 共用。 */
+const desktopPet = new DesktopPet();
+
 function settingsValue(env: string): string | undefined {
   return process.env[env] ?? readUserConfig()[env];
 }
 
-function readSettings(): Record<SettingKey, boolean> & { effort: EffortValue } {
+function readSettings(): Record<SettingKey, boolean> & { effort: EffortValue; desktopPet: boolean; petCharacter: PetCharacterId } {
   const out = {} as Record<SettingKey, boolean> & { effort: EffortValue };
   for (const [key, def] of Object.entries(SETTING_TOGGLES)) {
     out[key as SettingKey] = def.on(settingsValue(def.env));
   }
   const raw = (settingsValue('REASONING_EFFORT') ?? '').trim().toLowerCase();
   out.effort = (EFFORT_VALUES as readonly string[]).includes(raw) ? (raw as EffortValue) : 'auto';
-  return out;
+  return Object.assign(out, { desktopPet: settingsValue('MOCODE_DESKTOP_PET') === 'true', petCharacter: normalizePetCharacter(settingsValue('MOCODE_PET_CHARACTER')) });
 }
 
 
@@ -856,6 +797,33 @@ function repairTaskSortKeys(): number {
 }
 function selectedProject(): Project { return state.projects.find((item) => item.id === state.selectedProjectId) ?? state.projects[0]; }
 function taskById(id?: string): TaskRecord | undefined { return state.tasks.find((item) => item.id === id); }
+
+/**
+ * 丢弃「点了 + 但一句话都没发」的空草稿任务（判定见 task-draft.ts）。
+ *
+ * 触发时机：**选中项要离开一条空草稿时**。点「+」会立刻落一条任务记录并预热一个 host
+ * 子进程；用户若只是打开看一眼又切去别的会话，这条记录会永远挂在空间下面显示成
+ * 「新任务」，还白占着一个闲置的 host —— 这正是一句没聊却在侧栏留下空任务的原因。
+ *
+ * `keepId` 是马上要被选中的那条（它自己也可能仍是空草稿，比如连点两次 +）：留着，
+ * 否则界面会在用户敲第一个字之前闪一下空状态。它会在用户真正切走时被下一次调用收走。
+ *
+ * 只 saveState 不 broadcast：调用方紧接着就会改 selectedTaskId 并广播完整状态。
+ */
+function discardEmptyDrafts(keepId?: string): boolean {
+  const ids = discardableDraftIds(state.tasks, keepId);
+  if (!ids.length) return false;
+  for (const id of ids) {
+    const agent = agents.get(id);
+    if (agent) { agent.stop(); agents.delete(id); }
+    removeRecovery(id);
+  }
+  const doomed = new Set(ids);
+  state.tasks = state.tasks.filter((task) => !doomed.has(task.id));
+  if (state.selectedTaskId && doomed.has(state.selectedTaskId)) state.selectedTaskId = undefined;
+  saveState();
+  return true;
+}
 
 /**
  * 普通任务（无项目文件夹）的 pseudo-project：agent host 需要一个 cwd 跑子进程、
@@ -1580,6 +1548,10 @@ function createWindow(): void {
   // 必须用 move/resize 而不是 moved/resized：后者只在 WM_EXITSIZEMOVE（用户松手）时触发，
   // 程序化改窗口（Snap、其它工具、本函数的 setBounds）一次都不会走到，实测漏事件。
   const win = windowRef;
+  win.on('closed', () => desktopPet.setEnabled(false));
+  desktopPet.setCharacter(readSettings().petCharacter);
+  desktopPet.setEnabled(readSettings().desktopPet);
+  desktopPet.update(state.tasks);
   let settleTimer: ReturnType<typeof setTimeout> | undefined;
   const settle = (): void => {
     if (settleTimer) clearTimeout(settleTimer);
@@ -1785,6 +1757,8 @@ function installIpc(): void {
     state.selectedProjectId = project.id;
     // 打开新空间只切换浏览器上下文，不动任何任务的归属 ——
     // 归属变更走 work:set-task-project（chip / 任务菜单显式触发）。
+    // 顺带收走没人要的空草稿：切走之后它连「当前正在编辑」都不是了。
+    discardEmptyDrafts();
     state.selectedTaskId = undefined;
     saveState(); broadcastState(); return state;
   });
@@ -1805,6 +1779,8 @@ function installIpc(): void {
       targetProjectId = selectedProject().id;
     }
     const task: TaskRecord = { id: randomUUID(), projectId: targetProjectId, title: title.slice(0, 160), status: 'queued', createdAt: now, updatedAt: now, changedFiles: [] };
+    // 新建即意味着「上一个空草稿没人要了」：连点两个空间的 + 不该在两个空间下各留一条空任务。
+    discardEmptyDrafts(task.id);
     state.tasks.unshift(task); state.selectedTaskId = task.id;
     if (targetProjectId) state.selectedProjectId = targetProjectId;
     saveState(); broadcastState();
@@ -1837,6 +1813,8 @@ function installIpc(): void {
   });
   ipcMain.handle('work:select-task', async (_event, taskId: string) => {
     const task = taskById(taskId); if (!task) return null;
+    // 选中项离开一条空草稿 → 丢弃它（判定与理由见 discardEmptyDrafts / task-draft.ts）。
+    discardEmptyDrafts(task.id);
     state.selectedTaskId = task.id;
     // 普通任务不改变当前选中的项目（空间高亮保持不变）
     if (task.projectId) {
@@ -1925,6 +1903,7 @@ function installIpc(): void {
       title: tMain('main.fork.title', { title: task.title }).slice(0, 160),
       status: 'completed', createdAt: now, updatedAt: now, changedFiles: [], sessionId: newSessionId,
     };
+    discardEmptyDrafts(branch.id);
     state.tasks.unshift(branch);
     state.selectedTaskId = branch.id;
     if (branch.projectId) state.selectedProjectId = branch.projectId;
@@ -2062,6 +2041,8 @@ function installIpc(): void {
     if (!project || !SESSION_DIR_RE.test(sessionId)) return { ok: false, message: tMain('main.task.projectNotExist') };
     const existing = state.tasks.find((task) => task.projectId === projectId && task.sessionId === sessionId);
     if (existing) {
+      // 接管一条已有会话 = 离开当前那个空草稿，把它收走。
+      discardEmptyDrafts(existing.id);
       state.selectedTaskId = existing.id;
       saveState(); broadcastState();
       return { ok: true, state, task: existing, ...await currentTaskWorkspace(existing) };
@@ -2079,6 +2060,7 @@ function installIpc(): void {
       updatedAt: meta?.lastActiveAt || meta?.createdAt || now,
       changedFiles: [], sessionId,
     };
+    discardEmptyDrafts(task.id);
     state.tasks.unshift(task);
     state.selectedTaskId = task.id;
     state.selectedProjectId = projectId;
@@ -2209,7 +2191,7 @@ function installIpc(): void {
     if (typeof name !== 'string' || !PRESET_NAME_RE.test(name)) return { ok: false, message: tMain('main.preset.nameInvalid') };
     const preset = readPresetFile(name);
     if (!preset) return { ok: false, message: tMain('main.preset.readFail', { name }) };
-    return { ok: true, preset: { ...preset } };
+    return { ok: true, preset: { ...preset }, reasoning: reasoningCapabilityForPreset(preset) };
   });
   ipcMain.handle('work:save-model', (_event, payload: Record<string, unknown>) => {
     const result = savePresetFromRenderer(payload ?? {});
@@ -2277,6 +2259,17 @@ function installIpc(): void {
   ipcMain.handle('work:get-settings', () => readSettings());
   ipcMain.handle('work:set-settings', (_event, patch: Record<string, unknown>) => {
     if (!patch || typeof patch !== 'object') return readSettings();
+    if (isPetCharacter(patch.petCharacter)) {
+      writeUserConfig({ MOCODE_PET_CHARACTER: patch.petCharacter });
+      process.env.MOCODE_PET_CHARACTER = patch.petCharacter;
+      desktopPet.setCharacter(patch.petCharacter);
+    }
+    if (typeof patch.desktopPet === 'boolean') {
+      writeUserConfig({ MOCODE_DESKTOP_PET: String(patch.desktopPet) });
+      process.env.MOCODE_DESKTOP_PET = String(patch.desktopPet);
+      desktopPet.setEnabled(patch.desktopPet);
+      desktopPet.update(state.tasks);
+    }
     const configPatch: Record<string, string> = {};
     for (const [key, value] of Object.entries(patch)) {
       // 思考强度是字符串键，不走 SETTING_TOGGLES 那张布尔表（它决定的是「默认开还是关」）。
@@ -2806,6 +2799,9 @@ app.whenReady().then(async () => {
   // 存量数据修正：旧版接管历史会话时把 updatedAt 写成 now（真机上还成批写坏），
   // 于是「点开看一眼」的旧会话会长期霸占置顶区。启动时用会话文件的 mtime 对账一次。
   try { repairTaskSortKeys(); } catch { /* 修不了就按原数据渲染，排序本身已不再依赖这次修正 */ }
+  // 存量清理：旧版「点 + 就落一条任务记录」会留下没人要的空草稿（侧栏显示成「新任务」）。
+  // 除当前选中的那条外全部丢弃 —— 启动后用户看到的侧栏就是干净的。
+  try { discardEmptyDrafts(state.selectedTaskId); } catch { /* 清理失败不该挡住启动 */ }
   // 启动时先让 .active 预设覆盖 config 裸键 —— 必须在 agent 启动之前，
   // 否则 host 会带着 config 里那个可能已过时的 LLM_MODEL 启动。
   applyActivePreset();

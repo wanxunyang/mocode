@@ -137,9 +137,9 @@ test('三级跳：点提交列文件、点文件看 diff + 内容、返回逐级
   await container.settle();
   assert.deepEqual(fileCalls.at(-1), `file:${SHA_TIP}:src/app.ts`);
   assert.ok(container.innerHTML.includes('history.diffTitle'));
-  // diff 走行级渲染：删行/加行各自成行、前缀剥到 gutter、代码留在 code 里。
-  assert.equal((container.innerHTML.match(/udiff-row del/g) ?? []).length, 1);
-  assert.equal((container.innerHTML.match(/udiff-row add/g) ?? []).length, 1);
+  // diff 走并排渲染：删除在左、新增在右，前缀剥到 gutter、代码留在 code 里。
+  assert.equal((container.innerHTML.match(/udiff-side old del/g) ?? []).length, 1);
+  assert.equal((container.innerHTML.match(/udiff-side new add/g) ?? []).length, 1);
   assert.ok(container.innerHTML.includes('<code>line2</code>'), 'diff 内容原样展示在代码列');
   assert.ok(container.innerHTML.includes('line1\nline2'), '该提交时的文件内容原样展示');
   assert.ok(container.innerHTML.includes('history.contentTitle'));

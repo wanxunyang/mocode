@@ -322,9 +322,14 @@ async function showFileDiff(container: HTMLElement, repoRoot: string, path: stri
     if (seq !== requestSequence || key !== workspaceKey || !visible) return;
     const title = staged ? api.t('scm.stagedDiff') : api.t('scm.workingDiff');
     const text = result.content ?? errorText(result.message);
-    // 统一 diff 走行级渲染（行号 + 红绿底 + 语法高亮）；解析不了才退回原文 <pre>，
-    // 例如二进制文件、mode-only 改动、冲突提示 —— 那几种本来就没有可染色的行。
-    const rendered = renderUnifiedDiff(text, { moreLines: (n) => api.t('tool.moreLines', { n }) });
+    // 统一 diff 走并排行级渲染（左原始 / 右改动后、双行号、红绿底 + 语法高亮）；
+    // 解析不了才退回原文 <pre>，例如二进制文件、mode-only 改动、冲突提示 —— 那几种
+    // 本来就没有可染色的行。
+    const rendered = renderUnifiedDiff(text, {
+      moreLines: (n) => api.t('tool.moreLines', { n }),
+      oldSide: api.t('diff.oldSide'),
+      newSide: api.t('diff.newSide'),
+    });
     const body = rendered ?? `<pre class="file-preview diff-preview scm-diff">${api.escapeHtml(text)}</pre>`;
     container.innerHTML = `<div class="scm-diff-header"><button data-scm-action="back">${api.icon('arrow-left')}<span>${api.t('scm.back')}</span></button><span>${api.escapeHtml(title)}</span></div><h3 class="scm-diff-path">${api.escapeHtml(path)}</h3>${body}${result.truncated ? `<p class="scm-hint">${api.t('scm.diffTruncated')}</p>` : ''}`;
     wireDiff(container);

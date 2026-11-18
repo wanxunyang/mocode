@@ -1,16 +1,24 @@
 /**
- * git 统一 diff（unified diff）的人读渲染。
+ * git 统一 diff（unified diff）的人读渲染 —— **并排两列**版本。
  *
  * 为什么需要它：源代码管理面板以前把 `git diff` 原文塞进 <pre>，整块同色等宽文字 ——
  * 添加行和删除行只差首字符，扫一眼完全看不出改了什么，等于没有可视化。
  *
- * 形态对齐 VS Code / GitHub 的行内 diff：
- *   · 旧行号 + 新行号两列（添加行只有新行号、删除行只有旧行号，一眼看出「插在哪」）；
- *   · `+` 行绿底绿栏、`−` 行红底红栏 —— 底色比工具块的 diff 更实，这里是主视图，
- *     不是折叠卡片里的次要信息；
- *   · `@@ … @@` 渲染成分隔带，`diff --git` / `index` / `---` / `+++` 收敛成灰色元信息，
- *     不跟代码抢注意力；
+ * 为什么是两列而不是单列：单列里删除与新增是**上下相邻**的，中间还夹着 hunk 头与上下文行，
+ * 读者要在脑内把「上面那几行」和「下面那几行」对上才知道改了什么；改动块一长，就只能逐字比对。
+ * 两列把「原始」和「改动后」摆成同一行的左右两半，差异变成水平方向的一次扫视。
+ *
+ * 形态要点：
+ *   · 左半 = 原文件（旧行号 + `−` 红底），右半 = 改动后（新行号 + `+` 绿底）；
+ *   · 一段「删 N 行 + 加 M 行」按行对齐成 max(N, M) 行，少的那侧留空占位
+ *     （`.udiff-side.empty`），左右行号不会因为行数不等而整体错位；
+ *   · 上下文行两侧是同一行文字、各带自己的行号；窄容器下 CSS 只保留左侧那份
+ *     （右侧带 `dup` 类），视觉上退化成传统 unified diff；
+ *   · `@@ … @@` 渲染成分隔带，`diff --git` / `index` / `---` / `+++` 收敛成灰色元信息；
  *   · 代码按文件后缀做语法高亮（复用 markdown.ts 的单行高亮器，不另起一套配色）。
+ *
+ * 用 `<table>` 而不是每行各自 grid：表格的 `table-layout: auto` 让所有行共享同一组列宽，
+ * 长行不会把某几行的分栏位置推歪（这点是并排 diff 可读性的前提）。
  *
  * 纯字符串渲染：无 DOM、无 fs，便于单测。返回 null 表示「这不是一份可解析的 diff」
  * （二进制 / 无文本差异 / 冲突提示），调用方回退到原文 <pre>。
@@ -20,6 +28,10 @@ import { highlightCodeLine, langForPath } from './markdown.js';
 export interface UnifiedDiffLabels {
   /** 行数超上限时的尾注（不传就不显示尾注行）。 */
   moreLines?: (n: number) => string;
+  /** 左列表头（与 newSide 同时给才画表头）。 */
+  oldSide?: string;
+  /** 右列表头。 */
+  newSide?: string;
 }
 
 /**
@@ -32,12 +44,30 @@ export interface UnifiedDiffLabels {
 const MAX_ROWS = 2000;
 
 type RowKind = 'file' | 'meta' | 'hunk' | 'add' | 'del' | 'ctx';
+type CellKind = 'add' | 'del' | 'ctx';
 
 interface Row {
   kind: RowKind;
   text: string;
   oldNo?: number;
   newNo?: number;
+}
+
+/** 并排的一行：两侧各一格，缺的那格为 undefined（渲染成空占位）。 */
+interface SideCell {
+  kind: CellKind;
+  text: string;
+  no?: number;
+}
+
+interface PairUnit {
+  /** pair = 左右两格；其余是整行铺满的元信息。 */
+  kind: 'pair' | 'file' | 'meta' | 'hunk' | 'more';
+  /** 这个单元吃掉了源 diff 的几行（用于算「还有 N 行」）。 */
+  sourceRows: number;
+  text?: string;
+  old?: SideCell;
+  new?: SideCell;
 }
 
 function escapeHtml(value: string): string {
@@ -131,21 +161,75 @@ function parse(text: string): { rows: Row[]; sawHunk: boolean } {
   return { rows, sawHunk };
 }
 
-function renderRow(row: Row, lang: string): string {
-  if (row.kind === 'file') {
-    return `<div class="udiff-row file"><span class="ln"></span><span class="ln"></span><span class="gut"></span><code>${escapeHtml(row.text)}</code></div>`;
+/**
+ * 把行序列折成并排单元。
+ *
+ * git 在同一个 hunk 里总是**先列完所有删除、再列所有新增**，所以「一个 del 段 + 紧跟的
+ * add 段」就是一处改动，按行 zip 起来即是左右对齐的改法；段长不等时余下的行另一侧留空。
+ */
+function toPairs(rows: readonly Row[]): PairUnit[] {
+  const units: PairUnit[] = [];
+  let index = 0;
+  while (index < rows.length) {
+    const row = rows[index]!;
+    if (row.kind === 'del') {
+      const dels: Row[] = [];
+      while (index < rows.length && rows[index]!.kind === 'del') dels.push(rows[index++]!);
+      const adds: Row[] = [];
+      while (index < rows.length && rows[index]!.kind === 'add') adds.push(rows[index++]!);
+      const sourceRows = dels.length + adds.length;
+      const pairs = Math.max(dels.length, adds.length);
+      for (let k = 0; k < pairs; k++) {
+        const del = dels[k];
+        const add = adds[k];
+        units.push({
+          kind: 'pair',
+          // 源行数记在这一组的最后一个单元上：算尾注时只需累加。
+          sourceRows: k === pairs - 1 ? sourceRows : 0,
+          ...(del ? { old: { kind: 'del' as const, text: del.text, no: del.oldNo } } : {}),
+          ...(add ? { new: { kind: 'add' as const, text: add.text, no: add.newNo } } : {}),
+        });
+      }
+      continue;
+    }
+    if (row.kind === 'add') {
+      units.push({ kind: 'pair', sourceRows: 1, new: { kind: 'add', text: row.text, no: row.newNo } });
+      index++;
+      continue;
+    }
+    if (row.kind === 'ctx') {
+      // 上下文行两侧是同一行文字、各带自己的行号：左旧右新，对齐关系一目了然。
+      units.push({
+        kind: 'pair',
+        sourceRows: 1,
+        old: { kind: 'ctx', text: row.text, no: row.oldNo },
+        new: { kind: 'ctx', text: row.text, no: row.newNo },
+      });
+      index++;
+      continue;
+    }
+    units.push({ kind: row.kind, sourceRows: 1, text: row.text });
+    index++;
   }
-  if (row.kind === 'hunk') {
-    return `<div class="udiff-row hunk"><span class="ln"></span><span class="ln"></span><span class="gut"></span><code>${escapeHtml(row.text)}</code></div>`;
+  return units;
+}
+
+function renderCell(cell: SideCell | undefined, side: 'old' | 'new', lang: string): string {
+  if (!cell) return `<td class="udiff-side ${side} empty"></td>`;
+  const no = cell.no === undefined ? '' : String(cell.no);
+  const gut = cell.kind === 'add' ? '+' : cell.kind === 'del' ? '-' : '';
+  const code = cell.text === '' ? '&nbsp;' : highlightCodeLine(cell.text, lang);
+  // ctx 的右侧是左侧的副本：窄容器下由 CSS 隐藏，退化成传统单列 diff。
+  const dup = side === 'new' && cell.kind === 'ctx' ? ' dup' : '';
+  return `<td class="udiff-side ${side} ${cell.kind}${dup}"><span class="ln">${no}</span><span class="gut">${gut}</span><code>${code}</code></td>`;
+}
+
+function renderUnit(unit: PairUnit, lang: string): string {
+  if (unit.kind === 'pair') {
+    const cls = unit.old?.kind === 'ctx' ? 'pair ctx' : 'pair change';
+    return `<tr class="udiff-row ${cls}">${renderCell(unit.old, 'old', lang)}${renderCell(unit.new, 'new', lang)}</tr>`;
   }
-  if (row.kind === 'meta') {
-    return `<div class="udiff-row meta"><span class="ln"></span><span class="ln"></span><span class="gut"></span><code>${escapeHtml(row.text)}</code></div>`;
-  }
-  const oldCell = row.oldNo === undefined ? '' : String(row.oldNo);
-  const newCell = row.newNo === undefined ? '' : String(row.newNo);
-  const sign = row.kind === 'add' ? '+' : row.kind === 'del' ? '-' : '';
-  const code = row.text === '' ? '&nbsp;' : highlightCodeLine(row.text, lang);
-  return `<div class="udiff-row ${row.kind}"><span class="ln">${oldCell}</span><span class="ln">${newCell}</span><span class="gut">${sign}</span><code>${code}</code></div>`;
+  return `<tr class="udiff-row ${unit.kind}"><td class="udiff-full" colspan="2"><code>${escapeHtml(unit.text ?? '')}</code></td></tr>`;
 }
 
 /**
@@ -157,21 +241,26 @@ export function renderUnifiedDiff(text: string, labels: UnifiedDiffLabels = {}):
   // 没有任何 hunk 头 = 这不是 git 的 diff 输出（可能是 "Binary files differ"、
   // "Unresolved merge conflict." 或一段普通文本）—— 交给原文展示，别硬套颜色。
   if (!sawHunk) return null;
+  const units = toPairs(rows);
   let lang = 'text';
   const html: string[] = [];
-  for (let index = 0; index < rows.length; index++) {
-    const row = rows[index]!;
-    if (index >= MAX_ROWS) {
-      const hidden = rows.length - MAX_ROWS;
-      if (labels.moreLines) html.push(`<div class="udiff-row more"><span class="ln"></span><span class="ln"></span><span class="gut"></span><code>${escapeHtml(labels.moreLines(hidden))}</code></div>`);
+  if (labels.oldSide && labels.newSide) {
+    html.push(`<tr class="udiff-row head"><td class="udiff-side old"><span class="udiff-head-label">${escapeHtml(labels.oldSide)}</span></td><td class="udiff-side new"><span class="udiff-head-label">${escapeHtml(labels.newSide)}</span></td></tr>`);
+  }
+  let consumed = 0;
+  for (const unit of units) {
+    if (consumed >= MAX_ROWS) {
+      const hidden = rows.length - consumed;
+      if (labels.moreLines) html.push(`<tr class="udiff-row more"><td class="udiff-full" colspan="2"><code>${escapeHtml(labels.moreLines(hidden))}</code></td></tr>`);
       break;
     }
     // 路径来自 `+++` / `diff --git`；同一份 diff 里换文件时更新高亮语言。
-    if (row.kind === 'file') {
-      const found = pathFromLine(row.text);
+    if (unit.kind === 'file') {
+      const found = pathFromLine(unit.text ?? '');
       if (found) lang = langForPath(found);
     }
-    html.push(renderRow(row, lang));
+    html.push(renderUnit(unit, lang));
+    consumed += unit.sourceRows;
   }
-  return `<div class="udiff">${html.join('')}</div>`;
+  return `<div class="udiff"><table class="udiff-table"><tbody>${html.join('')}</tbody></table></div>`;
 }

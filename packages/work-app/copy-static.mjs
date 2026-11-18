@@ -52,11 +52,36 @@ try {
 if (existsSync(path.join(root, 'assets'))) {
   cpSync(path.join(root, 'assets'), path.join(root, 'dist', 'assets'), { recursive: true });
 }
-cpSync(path.join(root, 'dist-preload-tmp', 'renderer', 'preload.js'), path.join(root, 'dist', 'renderer', 'preload.js'));
+cpSync(
+  path.join(root, 'dist-preload-tmp', 'renderer', 'preload.js'),
+  path.join(root, 'dist', 'renderer', 'preload.js'),
+);
 // 某些环境下 fs.rmSync 被「安全删除」拦截、走回收站会失败；
 // 这个 tmp 目录是构建中间产物，删除失败不影响产物，忽略即可。
 try {
   rmSync(path.join(root, 'dist-preload-tmp'), { recursive: true, force: true });
 } catch (error) {
   console.warn('[copy-static] 清理临时目录失败（可忽略）：', error?.message ?? error);
+}
+
+for (const file of [
+  'pet.html',
+  'pet.css',
+  'pet.js',
+  'pet-model.js',
+  'pet-animals.js',
+  'pet-rig.js',
+  'pet-shapes.js',
+  'pet-studio.js',
+  'pet-characters.js',
+  'pet-preload.cjs',
+]) {
+  cpSync(path.join(root, 'src', 'renderer', file), path.join(root, 'dist', 'renderer', file));
+}
+{
+  const require = createRequire(import.meta.url);
+  const threeBuild = path.dirname(require.resolve('three'));
+  for (const file of ['three.module.js', 'three.core.js']) {
+    cpSync(path.join(threeBuild, file), path.join(root, 'dist', 'renderer', 'vendor', file));
+  }
 }

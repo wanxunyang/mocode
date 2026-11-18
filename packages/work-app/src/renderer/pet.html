@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';"
+    />
+    <title>Mo · 桌面伙伴</title>
+    <link rel="stylesheet" href="pet.css" />
+  </head>
+  <body>
+    <button id="bubble" type="button" title="查看当前任务" hidden>
+      <span class="status-dot" aria-hidden="true"></span>
+      <span class="bubble-copy"><strong id="message">Mo 在这里</strong><span id="detail">点点我，一起开工</span></span>
+      <span id="progress-label" hidden></span>
+      <span id="progress-track" hidden><span id="progress-fill"></span></span>
+    </button>
+    <canvas
+      id="pet-canvas"
+      tabindex="0"
+      role="button"
+      aria-label="Mo 桌宠。点身体抱抱，点头摸摸，拖动转圈并移动。空格摸头，上方向键跳跃，下方向键挥手，左方向键抱抱，右方向键转圈，回车查看任务。"
+    ></canvas>
+    <span id="announcement" class="sr-only" aria-live="polite"></span>
+    <script type="module" src="pet.js"></script>
+  </body>
+</html>

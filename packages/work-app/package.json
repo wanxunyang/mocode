@@ -7,8 +7,10 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.preload.json && node copy-static.mjs",
+    "prestart": "npm run build:electron",
     "start": "electron dist/main.js",
     "typecheck": "tsc --noEmit",
+    "check:pet": "npm run build && node scripts/check-pet.mjs",
     "build:electron": "npm --prefix ../.. run build && npm run build",
     "stage:host": "node scripts/stage-host.mjs",
     "pack:dir": "npm run build:electron && npm run stage:host && electron-builder --dir -c.npmRebuild=false && node scripts/verify-pack.mjs",
@@ -34,7 +36,8 @@
     "mammoth": "1.13.0",
     "node-pty": "^1.1.0",
     "pdfjs-dist": "3.11.174",
-    "sherpa-onnx-node": "^2.0.1"
+    "sherpa-onnx-node": "^2.0.1",
+    "three": "^0.187.0"
   },
   "build": {
     "appId": "com.mocode.work",

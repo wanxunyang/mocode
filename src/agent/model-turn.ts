@@ -59,6 +59,8 @@ export interface ModelTurnInput {
    * 现算等于一轮跑 N 次检索、N 次建索引,还会把观测计数翻 N 倍。
    */
   memoryRecall?: string;
+  /** Run-scoped reminder retained across steps and compaction after live user updates. */
+  liveUpdateReminder?: string;
   cacheState: ModelTurnCacheState;
   turnLifecycle: TurnLifecycle;
   cancellationLifecycle: { restore(): void };
@@ -120,7 +122,9 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   const memoryRecallText = input.memoryRecall ?? '';
   const memoryTailText = opts.memoryTail ?? '';
   const ephemeralJoined = (): string =>
-    [sessionStateText, memoryRecallText, memoryTailText].filter((s) => s.length > 0).join('\n\n');
+    [sessionStateText, memoryRecallText, memoryTailText, input.liveUpdateReminder ?? '']
+      .filter((s) => s.length > 0)
+      .join('\n\n');
   /** 与 ephemeralJoined() 同源,保证「发了多少」与「算多大」永不漂移。 */
   const ephemeralTokenEstimate = (): number => {
     const joined = ephemeralJoined();
@@ -274,13 +278,9 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
           "direct answers to the user's questions, blocking questions, " +
           'findings that change the next action, and the final report.'
         : '',
-      // 仅 step 0:先说明思路。与上面的正文纪律互斥(step > 0),两段永不同框。
-      // 曾经的结尾是"then start tool calls"——每个用户轮的第一步都无条件命令模型动手,
-      // 而 "Answer first" 在 history[0] 尾部隔了几万 token,权重被压过。结果:追问一件
-      // 已完成工作的细节时,模型也能答却先跑去排一堆工具调用。改为显式指向 Answer-first,
-      // 让近处指令与远处规则同向,而不是删掉动手要求(那会在真该干活的轮次矫枉过正)。
+      // 仅 step 0：就近重申 Answer-first；清晰的小改动可以直接调用工具。
       !opts.suppressOpeningAnalysis && step === 0
-        ? '## Opening analysis\nStart your first response of this turn with a brief analysis of the request and approach (1-3 sentences, no filler). Then follow Answer-first: answer directly when the conversation above already contains what is needed, and start tool calls only when this turn actually needs work. Keep the analysis to 1-3 sentences.'
+        ? '## Opening analysis\nAnswer directly when the conversation already provides the answer. For a clear, focused change in AUTO, start with the needed tool call. Give a brief opening explanation only when the approach needs a user decision or the task is complex.'
         : '',
       remainingSteps <= 3
         ? `## Step budget warning\nOnly ${remainingSteps} step(s) remain before the hard step limit (${maxSteps}). ` +
@@ -303,6 +303,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       // R17:会话内记忆尾注。放最后——它是最"新"的信息,且每轮可能不同,
       // 放在固定段之后能最大限度保住前缀缓存的可复用部分。
       opts.memoryTail ?? '',
+      input.liveUpdateReminder ?? '',
     ]
       .filter(Boolean)
       .join('\n\n');

@@ -102,7 +102,6 @@
         </section>
         <footer class="composer-area">
           <!-- 排队消息面板：agent 正在跑时发出的消息排在这里，默认只露下一条。 -->
-          <div id="queue-panel" class="queue-panel hidden"></div>
           <div class="composer">
             <div id="attachment-list" class="attachment-list"></div>
             <textarea id="prompt" rows="1" data-i18n-placeholder="composer.placeholder"></textarea>
@@ -115,6 +114,7 @@
                bottom: 100%+6px 直接把面板顶到视口上方被裁掉）。挂在 .composer-area 下，
                只要 .composer-area 在两种状态下都是定位元素，锚点就恒定。 -->
           <div id="model-picker" class="model-picker hidden" role="listbox" data-i18n-aria="picker.selectModel"></div>
+          <aside id="model-hover-panel" class="model-hover-panel hidden" data-i18n-aria="modelForm.hoverTitle"></aside>
           <div class="empty-chips" aria-label="会话上下文" data-i18n-aria="a11y.conversationContext">
             <div class="chip-menu-wrap">
               <button class="empty-chip" type="button" id="empty-chip-project" data-i18n-title="workspace.switchSpace" aria-haspopup="listbox" aria-expanded="false"><svg class="icon" data-icon="folder"></svg><span class="empty-chip-label" data-i18n="workspace.selectSpace">选择工作空间</span><svg class="icon" data-icon="chevron-down"></svg></button>
@@ -182,6 +182,15 @@
               <span class="field-label"><span data-i18n="modelForm.contextWindow">上下文窗口</span> <span class="field-optional" data-i18n="modelForm.contextWindowOptional">tokens</span></span>
               <input id="model-form-window" class="field-input" type="number" min="1" step="1000" autocomplete="off" data-i18n-placeholder="modelForm.contextWindowPlaceholder" />
             </label>
+            <label class="field">
+              <span class="field-label"><span data-i18n="modelForm.maxTokens">输出上限</span> <span class="field-optional" data-i18n="modelForm.maxTokensOptional">tokens · 留空用模型默认</span></span>
+              <input id="model-form-max-tokens" class="field-input" type="number" min="1" step="1000" autocomplete="off" data-i18n-placeholder="modelForm.maxTokensPlaceholder" />
+            </label>
+            <fieldset class="model-reasoning-field" id="model-form-reasoning">
+              <legend class="field-label" data-i18n="modelForm.reasoning">思考配置</legend>
+              <div id="model-form-effort" class="effort-segmented" role="group" data-i18n-aria="modelForm.reasoning"></div>
+              <p class="model-reasoning-hint" id="model-form-reasoning-hint"></p>
+            </fieldset>
             <button class="settings-row settings-toggle field-hidden" id="model-form-cache" role="switch" aria-checked="false">
               <span class="settings-row-body"><span class="settings-row-title" data-i18n="modelForm.promptCache">Prompt Cache</span><span class="settings-row-sub" data-i18n="modelForm.promptCacheSub">仅 anthropic 协议生效，可显著降低重复前缀成本</span></span>
               <span class="settings-switch" aria-hidden="true"></span>

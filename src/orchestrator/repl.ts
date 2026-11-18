@@ -24,7 +24,6 @@ import { padEndDisplay, summarizeToolCall, truncateDisplay } from '../ui/render.
 import { promptWithSlashMenu, type SlashCommand } from '../ui/prompt.js';
 import {
   clearRunningInput,
-  consumeQueuedTurn,
   getRunningInput,
   startRunningListener,
   stopRunningListener,
@@ -336,53 +335,35 @@ export async function runSupervisorChat(options: SupervisorChatOptions): Promise
       // 否则两个 keypress 监听抢键（面板内容随后经 getRunningInput 预填）。
       await waitForRunningComposer();
 
-      // 运行中按 Enter 排队的句子：agent 一结束就自动发送，跳过输入框（入队那一刻即已确认）。
-      // 斜杠命令不静默执行（否则排队 /exit 会在用户没看着时触发），改为填回输入框等确认。
-      const queued = consumeQueuedTurn();
       let input: string[] | null = null;
-      let autoSend = false;
-      if (queued && queued.text.trim().length > 0) {
-        if (queued.text.trim().startsWith('/')) {
-          pendingPrefill = queued.text.split('\n');
-        } else {
-          input = queued.text.split('\n');
-          autoSend = true;
-          // 排队时仍在输入框草稿里的字（typeahead）不能丢：回填为下一轮预填。
-          if (getRunningInput().trim()) pendingPrefill = [getRunningInput()];
-          clearRunningInput();
-        }
+      if (hasSubmitted) layout.normalizeInputBoundary();
+      layout.enterInputMode('supervisor 待命');
+      try {
+        input = await promptWithSlashMenu({
+          prompt: PROMPT,
+          commands: supervisorCommands(),
+          history: () => collectQueryHistory(queryHistory).map((entry) => entry.text),
+          // 第二输入源（静默唤醒）：只在**空输入框**里取，人正在打字时绝不抢。
+          // 排队的多条合并成一条——五个 Run 同时跑完，合成一次查收比五次清楚。
+          takeExternalTurn: () => {
+            if (wakeQueue.length === 0) return null;
+            const batch = wakeQueue.splice(0, wakeQueue.length);
+            wakeText = batch.join('\n---\n');
+            return wakeText;
+          },
+          // 预填：命令预填优先，否则使用运行中的草稿。
+          ...(pendingPrefill
+            ? { initialLines: pendingPrefill }
+            : getRunningInput()
+              ? { initialLines: [getRunningInput()] }
+              : {}),
+        });
+      } catch {
+        break; // Ctrl+C / Ctrl+D
       }
-
-      if (!autoSend) {
-        if (hasSubmitted) layout.normalizeInputBoundary();
-        layout.enterInputMode('supervisor 待命');
-        try {
-          input = await promptWithSlashMenu({
-            prompt: PROMPT,
-            commands: supervisorCommands(),
-            history: () => collectQueryHistory(queryHistory).map((entry) => entry.text),
-            // 第二输入源（静默唤醒）：只在**空输入框**里取，人正在打字时绝不抢。
-            // 排队的多条合并成一条——五个 Run 同时跑完，合成一次查收比五次清楚。
-            takeExternalTurn: () => {
-              if (wakeQueue.length === 0) return null;
-              const batch = wakeQueue.splice(0, wakeQueue.length);
-              wakeText = batch.join('\n---\n');
-              return wakeText;
-            },
-            // 预填：待确认的排队斜杠命令优先，否则运行中打的字。
-            ...(pendingPrefill
-              ? { initialLines: pendingPrefill }
-              : getRunningInput()
-                ? { initialLines: [getRunningInput()] }
-                : {}),
-          });
-        } catch {
-          break; // Ctrl+C / Ctrl+D
-        }
-        pendingPrefill = null;
-        // 预填已消费：不清会一直重填同一段（主 REPL 同款约定）。
-        clearRunningInput();
-      }
+      pendingPrefill = null;
+      // 预填已消费：不清会一直重填同一段（主 REPL 同款约定）。
+      clearRunningInput();
 
       if (input === null) break;
       const line = input.join('\n').trim();

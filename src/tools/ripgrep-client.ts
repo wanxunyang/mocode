@@ -38,6 +38,8 @@ export interface RgParams {
   /** fast-glob 口径的 glob;**\/* 视为不限定。 */
   glob: string;
   context: number;
+  /** 已收齐这么多命中后，下一份文件的结果不再需要。已返回文件保留完整行号。 */
+  maxMatches?: number;
   /**
    * 放开 VCS ignore(.gitignore)。默认遵守 .gitignore(配合 --no-require-git,
    * 非 git 项目也生效)——.mocode/ 在 .gitignore 里,故模型用 glob 显式限定
@@ -122,6 +124,7 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
     let buffer = '';
     const byPath = new Map<string, RgFileEvents>();
     let scanned = 0;
+    let completeMatches = 0;
 
     const finish = (result: RgResult): void => {
       if (settled) return;
@@ -133,6 +136,11 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
       killTree(child);
       finish({ status: 'aborted' });
     };
+    const stopCollecting = (): void => {
+      truncated = true;
+      buffer = '';
+      killTree(child);
+    };
 
     const handleLine = (line: string): void => {
       let evt: { type?: string; data?: Record<string, unknown> };
@@ -143,19 +151,31 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
       }
       const data = evt.data;
       if (!data) return;
+      if (evt.type === 'summary') {
+        // end 事件只来自命中文件；零命中时由 summary 区分「搜过」和「没有文件可搜」。
+        const searches = (data.stats as { searches?: number } | undefined)?.searches;
+        if (typeof searches === 'number') scanned = searches;
+        return;
+      }
+      const pathText = (data.path as { text?: string } | undefined)?.text;
+      if (typeof pathText !== 'string') return;
       if (evt.type === 'end') {
         scanned++;
+        completeMatches += byPath.get(normalizePath(pathText))?.matches.length ?? 0;
         return;
       }
       if (evt.type !== 'match' && evt.type !== 'context') return;
-      const pathText = (data.path as { text?: string } | undefined)?.text;
       const lineNo = data.line_number;
       const linesText = (data.lines as { text?: string } | undefined)?.text;
-      if (typeof pathText !== 'string' || typeof lineNo !== 'number' || typeof linesText !== 'string') return;
+      if (typeof lineNo !== 'number' || typeof linesText !== 'string') return;
       const path = normalizePath(pathText);
-      if (!isInsideRoot(path)) return; // 后置兜底:仅留牢内
       let bucket = byPath.get(path);
       if (!bucket) {
+        if (!isInsideRoot(path)) return;
+        if (params.maxMatches !== undefined && completeMatches >= params.maxMatches) {
+          stopCollecting();
+          return;
+        }
         bucket = { path, matches: [], contexts: [] };
         byPath.set(path, bucket);
       }
@@ -164,15 +184,15 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
       else bucket.contexts.push(event);
     };
 
-    child.stdout.on('data', (chunk: Buffer) => {
-      if (settled) return;
-      collected += chunk.length;
-      if (collected > MAX_JSON_BYTES && !truncated) {
-        truncated = true;
-        killTree(child); // 输出已超预算,没必要继续
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      if (settled || truncated) return;
+      collected += Buffer.byteLength(chunk);
+      if (collected > MAX_JSON_BYTES) {
+        stopCollecting();
         return;
       }
-      buffer += chunk.toString('utf8');
+      buffer += chunk;
       let idx: number;
       while ((idx = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, idx);

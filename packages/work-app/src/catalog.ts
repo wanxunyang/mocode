@@ -8,8 +8,8 @@
  * 仅在用户显式打开目录弹窗时联网，不随启动拉取。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 export const CATALOG_URL = 'https://models.dev/api.json';
 export const CATALOG_FETCH_TIMEOUT_MS = 10_000;
@@ -25,6 +25,7 @@ export interface CatalogModelInfo {
   family?: string;
   attachment?: boolean;
   reasoning?: boolean;
+  reasoning_options?: import('./model-config.js').CatalogReasoningOption[];
   tool_call?: boolean;
   limit?: { context?: number; input?: number; output?: number };
   release_date?: string;
@@ -239,7 +240,16 @@ export interface CatalogPrefill {
   baseURL: string;
   model: string;
   contextWindow: number;
+  maxTokens?: number;
   anthropicPromptCache: boolean;
+  catalogProvider: string;
+  catalogModel: string;
+  capabilities: {
+    reasoning?: boolean;
+    reasoningOptions?: import('./model-config.js').CatalogReasoningOption[];
+    toolCall?: boolean;
+    attachment?: boolean;
+  };
 }
 
 /** 目录来源拼合法预设名：`<provider>-<model>` 去非法字符（与 core 的 defaultPresetName 一致）。 */
@@ -295,7 +305,16 @@ export function buildCatalogPick(
       baseURL,
       model: modelId,
       contextWindow,
+      ...(typeof model.limit?.output === 'number' && model.limit.output > 0 ? { maxTokens: Math.floor(model.limit.output) } : {}),
       anthropicPromptCache: presetProvider === 'anthropic',
+      catalogProvider: providerId,
+      catalogModel: modelId,
+      capabilities: {
+        ...(typeof model.reasoning === 'boolean' ? { reasoning: model.reasoning } : {}),
+        ...(model.reasoning_options ? { reasoningOptions: model.reasoning_options } : {}),
+        ...(typeof model.tool_call === 'boolean' ? { toolCall: model.tool_call } : {}),
+        ...(typeof model.attachment === 'boolean' ? { attachment: model.attachment } : {}),
+      },
     },
     suggestedName: defaultPresetName(providerId, modelId),
     providerName: provider.name || providerId,

@@ -376,3 +376,23 @@ test('runAgentCore staged: 反序完成仍原序回灌，commit 前不可见，a
     clearToolsExtension(source);
   }
 });
+
+test('HistoryManager: 工具轮和最终轮都保留 reasoning_content；缺省消息形状不变', () => {
+  for (const create of [createLegacyHistoryManager, createStagedHistoryManager]) {
+    const backing: ChatMessage[] = [{ role: 'system', content: 'sys' }];
+    const manager = create({ messages: backing });
+    const calls = [call('reasoning-call')];
+    manager.appendAssistantTurn({ content: null, toolCalls: calls, reasoningContent: 'think-before-tool' });
+    const transaction = manager.beginToolBatch(calls);
+    transaction.workingMessages.push(toolMessage('reasoning-call', 'ok'));
+    transaction.commit();
+    manager.appendAssistantTurn({ content: 'done', toolCalls: [], reasoningContent: 'think-final' });
+    manager.appendAssistantTurn({ content: 'legacy', toolCalls: [] });
+
+    assert.equal(backing[1].role, 'assistant');
+    assert.equal(backing[1].reasoning_content, 'think-before-tool');
+    assert.equal(backing[3].role, 'assistant');
+    assert.equal(backing[3].reasoning_content, 'think-final');
+    assert.equal('reasoning_content' in backing[4], false);
+  }
+});

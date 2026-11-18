@@ -5,7 +5,8 @@ import { getPlanDisabledTools, getProfileDisabledTools } from '../tools/constant
 import { imageSizeFromDataUrl } from '../attachments/image.js';
 import { ThinkTagFilter } from './think-filter.js';
 import { sanitizeToolSchemas } from './tool-schema.js';
-import { sanitizeAssistantContent, sanitizeContentParts } from './message-shape.js';
+import { prepareReasoningContent, sanitizeAssistantContent, sanitizeContentParts } from './message-shape.js';
+import type { ChatMessage } from './message-shape.js';
 import { isMarkedStreamInterrupted } from './stream-interrupt.js';
 import { defaultAnthropicFetch, anthropicChatOnce } from './providers/anthropic.js';
 import { vertexChatOnce } from './providers/vertex.js';
@@ -518,8 +519,17 @@ export function __setChatCreateImpl(impl: ChatCreateImpl | null): void {
   defaultClientState.openAICreateImpl = impl;
 }
 
-export type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+export type { ChatMessage } from './message-shape.js';
 export type ChatTool = OpenAI.Chat.Completions.ChatCompletionTool;
+
+/** 仅 DeepSeek 官方端点要求 tools 请求回传 reasoning_content；代理与 DashScope 不套用。 */
+function isOfficialDeepSeekEndpoint(baseURL: string): boolean {
+  try {
+    return /(?:^|\.)deepseek\.com$/i.test(new URL(baseURL).hostname);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * 工具 schema 保持稳定数组引用，再在 MCP 发现或扩展变动后原地刷新；
@@ -671,6 +681,8 @@ function firstNumber(arr: readonly unknown[]): number | undefined {
 export interface ChatResult {
   content: string | null;
   toolCalls: ToolCallRef[];
+  /** OpenAI 兼容后端的完整思考内容；内存 camelCase，落盘/回传统一 reasoning_content。 */
+  reasoningContent?: string;
   usage?: ChatUsage;
   /**
    * 归一化的停止原因,各 provider 映射到 OpenAI 词表:
@@ -920,6 +932,7 @@ async function chatOnce(
           provider: runtimeConfig.provider,
           model: runtime.getModel(),
           maxTokens: runtimeConfig.maxTokens,
+          baseURL: runtimeConfig.baseURL,
           // 仅当激活预设来自目录且对应当前模型时携带,否则走正则兜底。
           ...(activePreset && activePreset.catalogProvider && activePreset.model === runtime.getModel()
             ? {
@@ -934,7 +947,12 @@ async function chatOnce(
   const stream = await create(
     {
       model: runtime.getModel(),
-      messages: sanitizeContentParts(sanitizeAssistantContent(normalizeImageDetail(messages))),
+      messages: prepareReasoningContent(
+        sanitizeContentParts(sanitizeAssistantContent(normalizeImageDetail(messages))),
+        // DeepSeek 官方 thinking 默认开启；带工具时必须回传完整历史思考，auto 也要保留。
+        // DashScope 与其它 OpenAI 兼容端点不认这个扩展字段，统一剥离。
+        activeTools.length > 0 && effort !== 'off' && isOfficialDeepSeekEndpoint(runtimeConfig.baseURL),
+      ),
       stream: true,
       // 空工具表(如摘要请求)不发 tools 字段——部分网关拒绝空数组。
       ...(activeTools.length > 0
@@ -955,6 +973,7 @@ async function chatOnce(
   // content 内嵌 think 标签由独立增量状态机过滤。它只暂存“可能组成标签”的后缀，
   // 因而既能覆盖标签任意位置跨 chunk，也不会让普通正文固定延迟数个字符。
   let visibleContent = '';
+  let reasoningContent = '';
   let consumedAny = false;
   const thinkFilter = new ThinkTagFilter();
   let usage: ChatUsage | undefined;
@@ -1000,6 +1019,7 @@ async function chatOnce(
     choices?: Array<{
       delta?: {
         content?: string | null;
+        reasoning_content?: string | null;
         tool_calls?: Array<{
           index?: number;
           id?: string;
@@ -1032,6 +1052,12 @@ async function chatOnce(
       finishReason = choice0.finish_reason;
     }
     if (!delta) continue; // 末尾 usage-only chunk 等无 delta
+
+    if (delta.reasoning_content) {
+      reasoningContent += delta.reasoning_content;
+      // reasoning_content 同样计费，但不作为可见正文或触发 onText。
+      if (handlers.onProgress) countLive(delta.reasoning_content);
+    }
 
     if (delta.content) {
       if (handlers.onProgress) countLive(delta.content);
@@ -1080,6 +1106,7 @@ async function chatOnce(
   return {
     content: consumedAny ? visibleContent : null,
     toolCalls,
+    ...(reasoningContent ? { reasoningContent } : {}),
     usage,
     finishReason,
   };
@@ -1192,7 +1219,8 @@ const messageTokensCache = new WeakMap<object, { sig: string; tokens: number }>(
 function messageSignature(m: ChatMessage): string {
   const c = (m as { content?: unknown }).content;
   const tcs = (m as { tool_calls?: unknown }).tool_calls;
-  return `${(m as { role?: string }).role ?? ''}|${typeof c === 'string' ? c.length : -1}|${tcs ? 1 : 0}`;
+  const reasoning = m.role === 'assistant' ? m.reasoning_content : undefined;
+  return `${(m as { role?: string }).role ?? ''}|${typeof c === 'string' ? c.length : -1}|${tcs ? 1 : 0}|${reasoning?.length ?? 0}`;
 }
 
 /** 估算单条消息的 token 数:结构开销 + content + tool_calls 参数。内容签名命中则复用上次结果。 */
@@ -1206,6 +1234,7 @@ export function messageTokens(m: ChatMessage): number {
   if (role === 'system') structural = 3;
   else if (role === 'tool') structural = 6;
   let body = contentTokens((m as { content?: unknown }).content);
+  if (m.role === 'assistant' && m.reasoning_content) body += estimateTokens(m.reasoning_content);
   const tcs = (m as { tool_calls?: { function?: { arguments?: string } }[] }).tool_calls;
   if (tcs) {
     for (const tc of tcs) body += estimateTokens(tc?.function?.arguments ?? '');

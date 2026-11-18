@@ -16,6 +16,8 @@ const labels: ChangesBarLabels = {
   all: '全部改动',
   untracked: '新文件',
   open: (path) => `查看 ${path} 的改动`,
+  collapse: '收起改动清单',
+  expand: '展开改动清单',
 };
 
 /** 每个长条的 data-change-path（点击时用它定位文件）。 */
@@ -27,6 +29,7 @@ test('每个文件一条长条，data-change-path 保留完整相对路径', () 
       { path: 'docs/design.md', added: 3, removed: 1, untracked: false },
       { path: 'src/index.ts', added: 0, removed: 0, untracked: false },
     ],
+    true,
     labels,
   );
   assert.deepEqual(paths(html), ['docs/design.md', 'src/index.ts']);
@@ -36,6 +39,7 @@ test('每个文件一条长条，data-change-path 保留完整相对路径', () 
 test('路径拆成目录 + 文件名：文件名在前（用户扫读对象），目录单独弱化', () => {
   const html = changesBarHtml(
     [{ path: 'packages/work-app/src/renderer/renderer.ts', added: 1, removed: 0, untracked: false }],
+    true,
     labels,
   );
   assert.match(html, /<span class="changes-bar-name">renderer\.ts<\/span>/);
@@ -43,32 +47,36 @@ test('路径拆成目录 + 文件名：文件名在前（用户扫读对象）�
 });
 
 test('无目录（仓库根文件）时不产出空的目录节点', () => {
-  const html = changesBarHtml([{ path: 'README.md', added: 1, removed: 0, untracked: false }], labels);
+  const html = changesBarHtml([{ path: 'README.md', added: 1, removed: 0, untracked: false }], true, labels);
   assert.doesNotMatch(html, /changes-bar-dir/);
 });
 
 test('Windows 反斜杠路径按正斜杠拆分，不会把整串当文件名', () => {
-  const html = changesBarHtml([{ path: 'src\\agent\\model-turn.ts', added: 2, removed: 0, untracked: false }], labels);
+  const html = changesBarHtml(
+    [{ path: 'src\\agent\\model-turn.ts', added: 2, removed: 0, untracked: false }],
+    true,
+    labels,
+  );
   assert.match(html, /<span class="changes-bar-name">model-turn\.ts<\/span>/);
   assert.match(html, /<span class="changes-bar-dir">src\/agent\/<\/span>/);
 });
 
 test('增删统计：只显示非零项，两侧为零就不出现统计块', () => {
-  const onlyAdded = changesBarHtml([{ path: 'a.ts', added: 7, removed: 0, untracked: false }], labels);
+  const onlyAdded = changesBarHtml([{ path: 'a.ts', added: 7, removed: 0, untracked: false }], true, labels);
   assert.match(onlyAdded, /\+\d*7|>\+7</);
   assert.doesNotMatch(onlyAdded, /diff-del/);
 
-  const none = changesBarHtml([{ path: 'b.ts', added: 0, removed: 0, untracked: false }], labels);
+  const none = changesBarHtml([{ path: 'b.ts', added: 0, removed: 0, untracked: false }], true, labels);
   assert.doesNotMatch(none, /changes-bar-stat/);
 });
 
 test('新文件带角标（与「改动」面板同一个词）', () => {
-  const html = changesBarHtml([{ path: 'new.md', added: 10, removed: 0, untracked: true }], labels);
+  const html = changesBarHtml([{ path: 'new.md', added: 10, removed: 0, untracked: true }], true, labels);
   assert.match(html, /changes-bar-badge">新文件</);
 });
 
 test('路径整体转义：HTML 尖括号不会变成标签，标题里也不留原样', () => {
-  const html = changesBarHtml([{ path: 'a/<script>.ts', added: 1, removed: 0, untracked: false }], labels);
+  const html = changesBarHtml([{ path: 'a/<script>.ts', added: 1, removed: 0, untracked: false }], true, labels);
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /&lt;script&gt;/);
   // title / aria-label 同样是转义后的字符串，不会提前闭合属性。
@@ -76,13 +84,33 @@ test('路径整体转义：HTML 尖括号不会变成标签，标题里也不留
 });
 
 test('「全部改动」按钮带 data-changes-all（renderer 据此打开改动面板）', () => {
-  const html = changesBarHtml([{ path: 'a.ts', added: 1, removed: 0, untracked: false }], labels);
+  const html = changesBarHtml([{ path: 'a.ts', added: 1, removed: 0, untracked: false }], true, labels);
   assert.match(html, /data-changes-all/);
   assert.match(html, /全部改动/);
 });
 
+test('标题行是折叠开关：展开态列表可见、caret 朝下、aria-expanded=true', () => {
+  const html = changesBarHtml([{ path: 'a.ts', added: 1, removed: 0, untracked: false }], true, labels);
+  assert.match(html, /data-changes-toggle/);
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /data-icon="chevron-down"/);
+  assert.match(html, /<ul class="changes-bar-list">/);
+  assert.match(html, /title="收起改动清单"/);
+});
+
+test('收起态：列表挂 hidden、caret 朝右、aria-expanded=false，标题与「全部改动」仍在', () => {
+  const html = changesBarHtml([{ path: 'a.ts', added: 1, removed: 0, untracked: false }], false, labels);
+  assert.match(html, /<ul class="changes-bar-list hidden">/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /data-icon="chevron-right"/);
+  assert.match(html, /title="展开改动清单"/);
+  // 收起只是藏列表：文件行仍在内层 HTML 里（再次展开无需重取数据），标题行照常可读。
+  assert.match(html, /本轮改动 · 1 个文件/);
+  assert.match(html, /data-changes-all/);
+});
+
 test('空列表仍产出卡片骨架（调用方据此判空来决定是否显示该区域）', () => {
-  const html = changesBarHtml([], labels);
+  const html = changesBarHtml([], true, labels);
   assert.match(html, /本轮改动 · 0 个文件/);
   assert.doesNotMatch(html, /data-change-path/);
 });

@@ -113,6 +113,11 @@ function readArchiveIndex(workspaceRoot: string): ArchiveIndexEntry[] {
  *
  * 用这个而不是注册表里的 `sessions` 字段：注册表是**登记那一刻**的快照，之后再没更新过，
  * 而本函数每次现算，所以侧栏的数字不会停在几个月前。
+ *
+ * 口径是**磁盘条数**，比 `listProjectSessions` 多算那些没有用户发言的空壳会话（实测
+ * mocode 284 条里 6 条）。刻意不跟着过滤：判定空壳要逐条 parse session.json，79 个空间
+ * 实测 ~350ms，而这个函数在每次状态变化时都会跑；代价（「更多 (N)」偶尔多算几条）
+ * 远小于收益。
  */
 export function countProjectSessions(workspaceRoot: string): number {
   let live = 0;
@@ -125,10 +130,83 @@ export function countProjectSessions(workspaceRoot: string): number {
 }
 
 /**
+ * 一条 user 消息是不是一次真实的人类发言（有文字或有图片）。
+ *
+ * 判定看 content 形态而不是 `firstUser` 字段：老会话的 firstUser 可能是空串，也可能被
+ * 序列化成了 `[{"type":"text",…}]`，只有 history 能回答「到底聊没聊过」。
+ * 只有图片、没有文字的多模态发言算真实发言 —— 用户确实发了东西，只是没打字。
+ */
+function isRealUserTurn(message: Record<string, unknown>): boolean {
+  const content = message.content;
+  if (typeof content === 'string') return content.trim().length > 0;
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => {
+    if (!part || typeof part !== 'object') return false;
+    const piece = part as { type?: unknown; text?: unknown };
+    if (piece.type === 'text') return typeof piece.text === 'string' && piece.text.trim().length > 0;
+    return piece.type === 'image_url';
+  });
+}
+
+/** 这条会话里有没有真实用户发言；没有就是一次「什么都没聊」的空壳。 */
+export function hasRealUserTurn(history: unknown): boolean {
+  return (
+    Array.isArray(history) &&
+    history.some(
+      (message) =>
+        !!message &&
+        typeof message === 'object' &&
+        (message as { role?: unknown }).role === 'user' &&
+        isRealUserTurn(message as Record<string, unknown>),
+    )
+  );
+}
+
+/**
+ * 会话标题的人读文本（与 core 的 `src/session/store.ts` firstUserOf 同口径、同步维护）。
+ *
+ * 多模态 content 直接 `JSON.stringify` 会得到一串 `[{"type":"text","text":"这是？"},…]` ——
+ * 早期版本正是那么写 firstUser 的，侧栏就读作一行 JSON。这里现算：取文字段拼接，
+ * 只有图片时给 `[图片]` 占位（标题要的是「我第一句说了什么」，不是 base64）。
+ */
+export function titleFromHistory(history: unknown): string {
+  if (!Array.isArray(history)) return '';
+  const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim().slice(0, 40);
+  for (const message of history) {
+    if (!message || typeof message !== 'object') continue;
+    if ((message as { role?: unknown }).role !== 'user') continue;
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === 'string') {
+      const text = oneLine(content);
+      if (text) return text;
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    const texts: string[] = [];
+    let hasImage = false;
+    for (const part of content) {
+      if (!part || typeof part !== 'object') continue;
+      const piece = part as { type?: unknown; text?: unknown };
+      if (piece.type === 'text' && typeof piece.text === 'string') texts.push(piece.text);
+      else if (piece.type === 'image_url') hasImage = true;
+    }
+    const joined = oneLine(texts.join(' '));
+    if (joined) return joined;
+    if (hasImage) return '[图片]';
+  }
+  return '';
+}
+
+/**
  * 列某工作空间的历史会话，按时间倒序。
  *
  * 口径与 core 的 `SessionStore.list()` 保持一致：先活会话（读 `session.json` 的头部字段），
  * 再把归档索引里未 purge、且不与活会话重名的条目并进来。
+ *
+ * 没有真实用户发言的会话（history 只有 system，或留下的测试壳子）**不进列表**：
+ * 点开是空的，占着位置只会让人以为「我聊过这个」。标题同样从 history 现算，
+ * 修掉老会话被 JSON 序列化的 firstUser。
+ *
  * 只读头部几行、按需截断 —— 48 个会话实测 ~50ms，不值得做缓存层。
  */
 export function listProjectSessions(workspaceRoot: string, limit = 60): ProjectSessionMeta[] {
@@ -146,8 +224,11 @@ export function listProjectSessions(workspaceRoot: string, limit = 60): ProjectS
     const file = path.join(root, id, 'session.json');
     try {
       const record = JSON.parse(readFileSync(file, 'utf8')) as {
-        id?: string; createdAt?: string; model?: string; firstUser?: string;
+        id?: string; createdAt?: string; model?: string; firstUser?: string; history?: unknown;
       };
+      // 没有真实用户发言的会话不进列表：history 只有 system（首轮还没发出去就退出）或者
+      // 只剩测试壳子。它们点开是空的，留在列表里只会让人以为「我聊过这个」。
+      if (!hasRealUserTurn(record.history)) continue;
       // mtime 是「最后一次写这条会话」的时间，接管时用它当排序键 —— 只看一眼的旧会话
       // 不该因为被接管就以 now 顶到最前面。
       let lastActiveAt = '';
@@ -158,17 +239,22 @@ export function listProjectSessions(workspaceRoot: string, limit = 60): ProjectS
         createdAt: typeof record.createdAt === 'string' ? record.createdAt : '',
         ...(lastActiveAt ? { lastActiveAt } : {}),
         model: typeof record.model === 'string' ? record.model : '',
-        firstUser: typeof record.firstUser === 'string' ? record.firstUser : '',
+        // 标题以 history 现算为准：落盘的 firstUser 可能是老版本序列化出来的 JSON 串。
+        firstUser: titleFromHistory(record.history) || (typeof record.firstUser === 'string' ? record.firstUser : ''),
       });
     } catch { /* 目录里还没有 session.json（首轮未结束）或旧布局，跳过 */ }
   }
   for (const entry of readArchiveIndex(workspaceRoot)) {
     if (seen.has(entry.id)) continue;
+    const firstUser = typeof entry.firstUser === 'string' ? entry.firstUser : '';
+    // 归档会话的正文在 gz 里，逐条解压不可接受（本仓库 206 条归档）；索引里的 firstUser
+    // 就是「有没有聊过」的唯一廉价证据 —— 空串说明存档时就没有用户发言。
+    if (!firstUser.trim()) continue;
     out.push({
       id: entry.id,
       createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : '',
       model: typeof entry.model === 'string' ? entry.model : '',
-      firstUser: typeof entry.firstUser === 'string' ? entry.firstUser : '',
+      firstUser,
       archived: true,
     });
   }

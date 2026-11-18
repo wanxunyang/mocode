@@ -70,7 +70,11 @@ export async function runToolTurn(input: ToolTurnInput): Promise<void> {
     stream.lastChar = '';
   }
   if (stream.mode !== 'idle' && stream.lastChar !== '\n') hooks.onTextEnd?.();
-  historyManager.appendAssistantTurn({ content: result.content, toolCalls: result.toolCalls });
+  historyManager.appendAssistantTurn({
+    content: result.content,
+    toolCalls: result.toolCalls,
+    reasoningContent: result.reasoningContent,
+  });
   const toolBatch = historyManager.beginToolBatch(result.toolCalls);
   const workingHistory = toolBatch.workingMessages;
   try {

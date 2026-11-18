@@ -46,7 +46,8 @@ function normalizedInteger(value: unknown, fallback: number): number {
  *  无法解析参数时返 null(调用方保守跳过,不做区间淘汰)。 */
 function readRange(argsRaw: string): { offset: number; limit: number } | null {
   const args = parseArgs(argsRaw);
-  if (!args) return null;
+  // 带 anchor 时 offset 是查找起点，实际返回区间取决于文件内容。
+  if (!args || args.anchor !== undefined) return null;
   const offset = Math.max(1, normalizedInteger(args.offset, 1));
   const limit = Math.max(1, Math.min(normalizedInteger(args.limit, READ_DEFAULT_LIMIT), READ_LIMIT_CAP));
   return { offset, limit };

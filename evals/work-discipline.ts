@@ -5,7 +5,11 @@ process.env.LLM_API_KEY ||= 'test';
 export {};
 
 const { config, buildBasePrompt, buildMocodeCorePrompt } = await import('../src/config/index.js');
-const { buildWorkDisciplineSection, inferModelFamily } = await import('../src/agent/work-discipline.js');
+const { buildWorkDisciplineSection, inferModelFamily, PLAN_USAGE_GUIDANCE } = await import(
+  '../src/agent/work-discipline.js'
+);
+const { planUpdateTool } = await import('../src/tools/builtins/plan-update.js');
+const { askHumanTool } = await import('../src/tools/builtins/ask-human.js');
 const { buildValidationCommandsSection } = await import('../src/verification/prompt.js');
 
 const assert = (condition: unknown, message: string): void => {
@@ -37,6 +41,15 @@ const workflowIdx = prompt.indexOf('## Workflow');
 const principlesIdx = prompt.indexOf('## Engineering principles');
 assert(workflowIdx > 0 && principlesIdx > workflowIdx, 'engineering principles must follow the workflow');
 assert(prompt.includes(section), 'base prompt must embed the advisory discipline verbatim');
+assert(
+  prompt.includes(PLAN_USAGE_GUIDANCE) && planUpdateTool.description.includes(PLAN_USAGE_GUIDANCE),
+  'prompt and plan tool must agree on when a focused change needs a plan',
+);
+assert(!/3\+ steps/.test(prompt + planUpdateTool.description), 'tool-call count must not trigger plan bookkeeping');
+assert(
+  askHumanTool.description.includes('routine, reversible') && section.includes('routine, reversible'),
+  'ordinary implementation choices should not trigger a clarification',
+);
 assert(
   prompt.includes('Whether and what to run follows Engineering principles'),
   'workflow must preserve agent choice over validation',

@@ -29,7 +29,8 @@ export function applyPresetConfig(ctx: CommandContext, p: ModelPreset): void {
     // 预设带值用值;不带显式清除(否则旧 MAX_TOKENS 残留会盖过新预设)。
     maxTokens: p.maxTokens ?? null,
     anthropicPromptCache: p.anthropicPromptCache,
-    ...(p.reasoningEffort ? { reasoningEffort: p.reasoningEffort } : {}),
+    // 预设缺省必须显式回 auto，不能残留上一个模型或全局设置的高档思考。
+    reasoningEffort: p.reasoningEffort ?? 'auto',
   });
   writeConfigKeys({
     LLM_PROVIDER: p.provider,
@@ -38,6 +39,7 @@ export function applyPresetConfig(ctx: CommandContext, p: ModelPreset): void {
     LLM_MODEL: p.model,
     CONTEXT_WINDOW_TOKENS: String(p.contextWindow),
     MAX_TOKENS: p.maxTokens ? String(p.maxTokens) : null,
+    REASONING_EFFORT: p.reasoningEffort ?? 'auto',
     ANTHROPIC_PROMPT_CACHE: p.anthropicPromptCache ? 'true' : 'false',
   });
   // 关键不变量：应用预设即激活——必须同步 .active 指针。否则重启时旧激活预设的优先级

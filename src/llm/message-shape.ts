@@ -6,7 +6,17 @@
  */
 import type OpenAI from 'openai';
 
-type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+/** DeepSeek 在 OpenAI assistant 消息上扩展的协议字段。 */
+export type AssistantMessageWithReasoning = OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam & {
+  reasoning_content?: string;
+};
+
+export type ChatMessage =
+  | Exclude<
+      OpenAI.Chat.Completions.ChatCompletionMessageParam,
+      OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam
+    >
+  | AssistantMessageWithReasoning;
 
 /**
  * 会话 part 上的文件名、附件标记、截断标记只供 GUI 回放，不属于 OpenAI 协议。
@@ -68,6 +78,23 @@ export function sanitizeAssistantContent(messages: ChatMessage[]): ChatMessage[]
     if (raw.content !== null) return message;
     changed = true;
     return { ...(message as object), content: '' } as ChatMessage;
+  });
+  return changed ? next : messages;
+}
+
+/**
+ * DeepSeek 官方 thinking + tools 要求所有历史 assistant 轮原样回传 reasoning_content。
+ * 字段仍完整保存在会话中；其它 provider / 无工具请求只在 transport 的副本上剥离。
+ * 无需改写时复用原数组和消息引用，保持长会话的前缀缓存稳定。
+ */
+export function prepareReasoningContent(messages: ChatMessage[], preserve: boolean): ChatMessage[] {
+  if (preserve) return messages;
+  let changed = false;
+  const next = messages.map((message) => {
+    if (message.role !== 'assistant' || message.reasoning_content === undefined) return message;
+    const { reasoning_content: _reasoning, ...clean } = message;
+    changed = true;
+    return clean;
   });
   return changed ? next : messages;
 }

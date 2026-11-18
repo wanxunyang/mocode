@@ -334,6 +334,7 @@ export async function runAgent(
   memoryTail?: string,
   /** TUI composition root 绑定的 Runtime；旧调用传 AgentRuntimeContext 仍兼容。 */
   runtimeOrContext: Runtime | AgentRuntimeContext = defaultRuntime,
+  drainUserMessages?: () => Array<string | ContentPart[]>,
 ): Promise<AgentRunResult> {
   const runtime =
     runtimeOrContext instanceof Runtime
@@ -582,6 +583,7 @@ export async function runAgent(
       turnLabel: truncateDisplay(firstLineOf(userInput), 40),
       history,
       userInput,
+      drainUserMessages,
       signal,
       onContextUpdate,
       hooks: combinedHooks,

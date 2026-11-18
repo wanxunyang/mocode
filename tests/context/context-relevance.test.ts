@@ -72,6 +72,15 @@ test('同 path 同区间 fresh read 仍淘汰旧 read', () => {
   assert.equal(contentAt(history, freshIdx), 'fresh contents');
 });
 
+test('anchor 的搜索起点相同也可能读到不同页，不能据此淘汰锚定页或普通首页', () => {
+  const history: ChatMessage[] = [system()];
+  const args = { path: 'src/a.ts', limit: 3 };
+  appendTool(history, 'read_file', 'first', args, 'first page');
+  appendTool(history, 'read_file', 'a', { ...args, anchor: 'function a(' }, 'page a');
+  appendTool(history, 'read_file', 'b', { ...args, anchor: 'function b(' }, 'page b');
+  assert.equal(new RelevancePruner().pruneSuperseded(history, history.length), 0);
+});
+
 test('mutation 淘汰该 path 所有区间的旧 read,不影响其他文件', () => {
   const history: ChatMessage[] = [system()];
   const p1 = appendTool(history, 'read_file', 'p1', { path: 'src/big.ts', offset: 1, limit: 300 }, 'c1');

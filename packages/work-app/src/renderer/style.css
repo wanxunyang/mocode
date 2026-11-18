@@ -410,32 +410,6 @@ body.sidebar-resizing * { cursor: ew-resize !important; }
 .composer-area { position: relative; z-index: var(--z-sticky); flex: 0 0 auto; padding: 0 var(--gutter-x) var(--space-md); display: flex; flex-direction: column; align-items: center; pointer-events: none; }
 .composer-context { width: var(--composer-width); height: 34px; margin-bottom: -1px; padding: 0 var(--space-md); border: var(--rule-hair); border-bottom: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; background: var(--surface-app); display: flex; align-items: center; gap: var(--space-md); color: var(--text-muted); font-size: var(--text-2xs); pointer-events: auto; }
 
-/* ── 排队消息面板（输入卡正上方）─────────────────────────
- * agent 正在跑时发出的消息排在这里。默认折叠成**一行**（只露下一条），
- * 因为输入区高度属于「已经能打字了」的稳定感：队列再长也不能把输入卡顶走。
- * 展开态才列出全部，列表自己有 max-height，长队列不会撑破窗口。
- * 宽度跟输入卡同源（--composer-width / 空态 --empty-col-w），左右边界永远对齐。 */
-.queue-panel { width: var(--composer-width); margin-bottom: var(--space-2xs); display: flex; flex-direction: column; pointer-events: auto; }
-.workspace:has(> #empty-state:not(.hidden)) .queue-panel { width: var(--empty-col-w); }
-.queue-panel.hidden { display: none; }
-.queue-summary { width: 100%; min-width: 0; height: 28px; padding: 0 var(--space-2xs); display: flex; align-items: center; gap: 6px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); font-size: var(--text-2xs); text-align: left; }
-button.queue-summary { cursor: pointer; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
-button.queue-summary:hover { background: var(--surface-hover); color: var(--text-default); }
-.queue-count { flex: 0 0 auto; min-width: 17px; height: 17px; padding: 0 5px; display: inline-grid; place-items: center; border-radius: var(--radius-full); background: var(--color-accent-soft); color: var(--color-accent-ink); font-family: var(--font-outlier); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; }
-.queue-label { flex: 0 0 auto; color: var(--text-subtle); }
-/* 关键一行：下一条消息单行截断。min-width: 0 是 flex 子项能省略的前提。 */
-.queue-next { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--text-default); text-overflow: ellipsis; white-space: nowrap; }
-.queue-caret { flex: 0 0 auto; width: 16px; height: 16px; display: grid; place-items: center; color: var(--text-subtle); }
-.queue-caret .icon { width: 12px; height: 12px; transition: transform var(--dur-micro) var(--ease-out); }
-.queue-panel.is-expanded .queue-caret .icon { transform: rotate(180deg); }
-.queue-list { margin: 4px 0 0; padding: 2px; list-style: none; max-height: 168px; overflow-y: auto; overscroll-behavior: contain; border: var(--rule-hair); border-radius: var(--radius-sm); background: var(--surface-raised); box-shadow: var(--shadow-soft); }
-.queue-list.hidden { display: none; }
-.queue-item { display: flex; align-items: baseline; gap: 6px; padding: 3px var(--space-2xs); border-radius: var(--radius-sm); color: var(--text-muted); font-size: var(--text-2xs); line-height: 1.5; }
-.queue-item-index { flex: 0 0 1.4em; text-align: right; color: var(--text-subtle); font-family: var(--font-outlier); font-variant-numeric: tabular-nums; }
-.queue-item-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
-/* 下一条高亮：它是「马上要发出去」的那条，和其余排队项要能一眼分开。 */
-.queue-item.is-next .queue-item-text { color: var(--text-strong); }
-.queue-item-meta { flex: 0 0 auto; color: var(--text-subtle); }
 .composer-context > span { display: inline-flex; align-items: center; gap: 5px; }
 .composer-context .icon { width: 13px; height: 13px; color: var(--text-subtle); }
 /* 输入卡:抬升面 + 明确描边 + 双层柔和阴影,聚焦时给主题色 ring(不再"点了没反应")。 */
@@ -604,6 +578,31 @@ textarea::placeholder { color: var(--text-subtle); }
 .model-picker-add { flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 5px var(--space-xs); border-radius: var(--radius-sm); color: var(--color-muted); font-size: var(--text-2xs); transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
 .model-picker-add:hover { background: var(--surface-hover); color: var(--text-strong); }
 .model-picker-add .icon { width: 12px; height: 12px; flex-shrink: 0; }
+.model-picker-effort { padding: 1px 5px; border-radius: 3px; background: var(--color-paper-3); color: var(--color-muted); }
+/* 模型行的二级控制页：fixed 定位，不能被下拉滚动盒裁掉。 */
+.model-hover-panel { position: fixed; z-index: calc(var(--z-dropdown) + 2); width: min(292px, calc(100vw - 16px)); padding: var(--space-sm); pointer-events: auto; border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-raised); }
+.model-hover-panel.hidden { display: none; }
+.model-hover-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-xs); margin-bottom: var(--space-sm); }
+.model-hover-title { min-width: 0; color: var(--color-ink); font-size: var(--text-xs); font-weight: 600; overflow-wrap: anywhere; }
+.model-hover-provider { flex: 0 0 auto; color: var(--color-subtle); font-size: var(--text-2xs); }
+.model-hover-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-xs); }
+.model-hover-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; color: var(--color-muted); font-size: var(--text-2xs); }
+.model-hover-input { width: 100%; min-width: 0; padding: 5px 7px; border: var(--rule-soft); border-radius: var(--radius-sm); background: var(--surface-raised); color: var(--color-ink); font-family: var(--font-outlier); font-size: var(--text-xs); }
+.model-hover-input:focus { border-color: var(--color-accent); outline: none; }
+.model-hover-section { margin-top: var(--space-sm); }
+.model-hover-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-xs); margin-bottom: 5px; color: var(--color-muted); font-size: var(--text-2xs); }
+.effort-segmented { display: flex; flex-wrap: wrap; gap: 3px; }
+.effort-option { flex: 1 1 42px; min-width: 0; padding: 5px 6px; border: var(--rule-soft); border-radius: var(--radius-sm); background: var(--surface-raised); color: var(--color-muted); font-size: var(--text-2xs); text-align: center; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
+.effort-option:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-strong); }
+.effort-option[aria-pressed="true"] { border-color: var(--color-accent); background: var(--color-accent-soft); color: var(--color-accent-ink); }
+.effort-option:disabled { opacity: 0.38; cursor: not-allowed; }
+.model-reasoning-hint, .model-hover-hint { margin: 5px 0 0; color: var(--color-subtle); font-size: var(--text-2xs); line-height: 1.5; }
+.model-hover-status { min-height: 16px; margin-top: var(--space-xs); color: var(--color-muted); font-size: var(--text-2xs); }
+.model-hover-status.error { color: var(--color-fail); }
+.model-reasoning-field { min-width: 0; margin: 0; padding: 0; border: 0; }
+.model-reasoning-field > legend { margin-bottom: 6px; padding: 0; }
+.model-form-body .effort-option { padding-block: 7px; }
+
 
 /* ── Conversation ───────────────────────────────────── */
 /* 左右边界对齐输入卡:左 padding = --gutter-x,右侧让出 --gutter-x 的方式是
@@ -726,13 +725,20 @@ textarea::placeholder { color: var(--text-subtle); }
 .changes-bar.hidden { display: none; }
 .changes-bar.is-entering .changes-bar-card { animation: plan-in var(--dur-short) var(--ease-out) both; }
 .changes-bar-card { border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-soft); overflow: hidden; }
-.changes-bar-head { display: flex; align-items: center; gap: var(--space-xs); padding: 6px var(--space-xs) 6px var(--space-sm); border-bottom: var(--rule-soft); }
-.changes-bar-title { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-ink-soft); font-size: var(--text-2xs); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.changes-bar-head { display: flex; align-items: center; gap: var(--space-xs); padding: 2px var(--space-xs) 2px var(--space-sm); border-bottom: var(--rule-soft); }
+/* 标题行整行就是折叠开关（与计划面板同构）：caret 指方向，右侧「全部改动」独立成按钮。 */
+.changes-bar-toggle { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: var(--space-2xs); padding: 4px 2px; border-radius: var(--radius-sm); text-align: left; transition: color var(--dur-micro) var(--ease-out); }
+.changes-bar-toggle:hover { color: var(--text-strong); }
+.changes-bar-toggle:hover .changes-bar-title { color: var(--text-strong); }
+.changes-bar-caret { flex: 0 0 14px; width: 14px; height: 14px; display: grid; place-items: center; color: var(--color-subtle); }
+.changes-bar-caret .icon { width: 12px; height: 12px; }
+.changes-bar-title { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-ink-soft); font-size: var(--text-2xs); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; transition: color var(--dur-micro) var(--ease-out); }
 .changes-bar-all { flex: 0 0 auto; padding: 2px 8px; border-radius: var(--radius-full); color: var(--color-accent-ink); font-size: var(--text-2xs); transition: background var(--dur-micro) var(--ease-out); }
 .changes-bar-all:hover { background: var(--surface-hover); }
 /* 长条列表：文件多时自己滚，高度上限按「大约 6 条」定 —— 一次重构改二三十个文件时，
  * 不能让这块把输入卡挤出屏幕。 */
 .changes-bar-list { margin: 0; padding: 2px; list-style: none; max-height: 216px; overflow-y: auto; overscroll-behavior: contain; }
+.changes-bar-list.hidden { display: none; }
 .changes-bar-row { display: flex; align-items: center; gap: 6px; width: 100%; min-height: 30px; padding: 4px var(--space-xs); border-radius: var(--radius-sm); color: var(--color-muted); text-align: left; transition: background var(--dur-micro) var(--ease-out), color var(--dur-micro) var(--ease-out); }
 .changes-bar-row:hover { background: var(--surface-hover); color: var(--text-strong); }
 .changes-bar-mark, .changes-bar-go { flex: 0 0 14px; width: 14px; height: 14px; color: var(--color-subtle); }
@@ -1482,41 +1488,49 @@ body.inspector-resizing * { cursor: ew-resize !important; }
 .scm-diff { max-height: none; white-space: pre; overflow-wrap: normal; word-break: normal; }
 
 /* ── 统一 diff 的行级渲染(unified-diff.ts)───────────────────────
- * 以前源代码管理把 `git diff` 原文塞进 <pre>:整块同色,添加/删除只差首字符,
- * 扫一眼看不出改了什么 —— 等于没有可视化。这里按行渲染:
- *   旧行号 | 新行号 | ± 栏 | 代码
- * 添加行绿底绿栏、删除行红底红栏。底色比工具块里的 diff 更实(12% vs 10%),
- * 因为这是主视图而不是折叠卡片里的次要信息。
+ * 布局是**并排两列**:左「原始」右「改动后」,同一处改动的删/加落在同一行的左右两半,
+ * 差异变成水平方向的一次扫视 —— 单列里删加上下相邻、中间还夹着上下文,只能逐字比对。
  *
- * 行号两列都是右对齐 + 等宽数字:行号宽度不变,代码列就不会横向抖动。
+ * 用 <table> 而不是每行各自 grid:auto 布局让所有行共享同一组列宽,长行不会把某几行的
+ * 中缝推歪(中缝错位是并排 diff 最要命的可读性事故)。
  *
- * 不折行、横向滚动:diff 的语义单位是「一行」,自动折行会让行号与内容错位。
- * 行 `width: max-content` + `min-width: 100%`:短内容时仍占满整宽(底色连成一片),
- * 长行把容器撑出横向滚动条。 */
-.udiff { border: var(--rule-hair); border-radius: var(--radius-sm); background: var(--surface-sunken); overflow-x: auto; overflow-y: hidden; }
+ * 单元格语义:.udiff-side.{old,new} × .{del,add,ctx,empty}
+ *   · 只有删除的行右半边是 .empty 占位(灰底),左右行号不会因为行数不等而错位;
+ *   · 上下文行两侧文字相同(右侧带 .dup),窄容器下隐藏右侧那份,退化成传统单列。
+ *
+ * 不折行、横向滚动:diff 的语义单位是「一行」,自动折行会让行号与内容错位。 */
+.udiff { border: var(--rule-hair); border-radius: var(--radius-sm); background: var(--surface-sunken); overflow-x: auto; overflow-y: hidden; container-type: inline-size; }
 .udiff::-webkit-scrollbar { height: 8px; }
 .udiff::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--radius-full); }
-.udiff-row { display: grid; grid-template-columns: 4ch 4ch 1.4ch minmax(0, 1fr); column-gap: 6px; width: max-content; min-width: 100%; box-sizing: border-box; padding: 0 var(--space-xs); font-family: var(--font-outlier); font-size: var(--text-2xs); line-height: 1.65; }
-.udiff-row .ln { color: var(--color-subtle); text-align: right; font-variant-numeric: tabular-nums; user-select: none; opacity: 0.75; }
-.udiff-row .gut { color: var(--color-subtle); text-align: center; user-select: none; }
+.udiff-table { border-collapse: collapse; table-layout: auto; min-width: 100%; font-family: var(--font-outlier); font-size: var(--text-2xs); line-height: 1.65; }
+.udiff-row > td { padding: 0 var(--space-2xs) 0 var(--space-xs); vertical-align: top; }
+/* 中缝:左侧单元格统一带右边框,连成一条贯穿整份 diff 的竖线。 */
+.udiff-side.old { border-right: var(--rule-hair); }
+.udiff-side .ln { display: inline-block; min-width: 3.5ch; color: var(--color-subtle); text-align: right; font-variant-numeric: tabular-nums; user-select: none; opacity: 0.75; }
+.udiff-side .gut { display: inline-block; width: 1.4ch; margin: 0 4px 0 2px; color: var(--color-subtle); text-align: center; user-select: none; }
 /* 代码不换行:diff 的语义单位是「一行」,自动折行会让行号与内容错位。 */
-.udiff-row code { min-width: 0; color: var(--color-ink-soft); white-space: pre; }
-.udiff-row.add { background: color-mix(in oklch, var(--color-success) 14%, transparent); box-shadow: inset 2px 0 0 var(--color-success); }
-.udiff-row.add .ln, .udiff-row.add .gut { color: var(--color-success); opacity: 1; }
-.udiff-row.add code { color: var(--color-ink); }
-.udiff-row.del { background: color-mix(in oklch, var(--color-fail) 14%, transparent); box-shadow: inset 2px 0 0 var(--color-fail); }
-.udiff-row.del .ln, .udiff-row.del .gut { color: var(--color-fail); opacity: 1; }
-.udiff-row.del code { color: var(--color-ink); }
+.udiff-side code { white-space: pre; color: var(--color-ink-soft); }
+.udiff-side.del { background: color-mix(in oklch, var(--color-fail) 14%, transparent); }
+.udiff-side.del .ln, .udiff-side.del .gut { color: var(--color-fail); opacity: 1; }
+.udiff-side.del code { color: var(--color-ink); }
+.udiff-side.add { background: color-mix(in oklch, var(--color-success) 14%, transparent); }
+.udiff-side.add .ln, .udiff-side.add .gut { color: var(--color-success); opacity: 1; }
+.udiff-side.add code { color: var(--color-ink); }
+/* 空占位:对侧有内容、这侧没有(一段删除比新增长)。浅灰底,一眼看出「这半边本就没东西」。 */
+.udiff-side.empty { background: color-mix(in oklch, var(--color-ink-soft) 7%, transparent); }
+/* 表头(原始 / 改动后):只在渲染层给了 labels 时出现。 */
+.udiff-row.head > td { padding-top: 3px; padding-bottom: 3px; border-bottom: var(--rule-soft); background: var(--surface-raised); }
+.udiff-head-label { color: var(--color-subtle); font-size: var(--text-2xs); font-weight: 500; letter-spacing: 0.02em; }
 /* 文件头(diff --git / --- / +++):加一条上分隔,多文件 diff 才分得清边界。 */
-.udiff-row.file { padding-top: 3px; padding-bottom: 3px; border-top: var(--rule-soft); background: var(--surface-raised); font-weight: 500; }
-.udiff-row.file:first-child { border-top: 0; }
-.udiff-row.file code { color: var(--color-ink); }
+.udiff-row.file > .udiff-full { padding-top: 3px; padding-bottom: 3px; border-top: var(--rule-soft); background: var(--surface-raised); }
+.udiff-row.file:first-child > .udiff-full { border-top: 0; }
+.udiff-row.file code { color: var(--color-ink); font-weight: 500; }
 /* hunk 头 @@ … @@:主题色细带,一眼看出「跳到下一段改动」。 */
-.udiff-row.hunk { padding-top: 2px; padding-bottom: 2px; background: color-mix(in oklch, var(--color-accent) 8%, transparent); }
+.udiff-row.hunk > .udiff-full { padding-top: 2px; padding-bottom: 2px; background: color-mix(in oklch, var(--color-accent) 8%, transparent); }
 .udiff-row.hunk code { color: var(--color-accent-ink); }
 .udiff-row.meta { opacity: 0.7; }
 .udiff-row.meta code { color: var(--color-subtle); }
-.udiff-row.more { padding-top: 3px; padding-bottom: 3px; border-top: var(--rule-soft); }
+.udiff-row.more > .udiff-full { padding-top: 3px; padding-bottom: 3px; border-top: var(--rule-soft); }
 .udiff-row.more code { color: var(--color-subtle); font-style: italic; }
 /* 行内高亮与工具块 diff 共用一套 token 配色,避免同一个文件在两处呈现不同颜色。 */
 .udiff-row .hl-k { color: var(--color-accent-ink); font-weight: 500; }
@@ -1527,8 +1541,13 @@ body.inspector-resizing * { cursor: ew-resize !important; }
 :root[data-theme="dark"] .udiff-row .hl-s { color: oklch(70% 0.14 30); }
 :root[data-theme="dark"] .udiff-row .hl-n { color: oklch(74% 0.14 280); }
 /* 加了 diff 底色后,删除行的暗色底会把注释/字符串压得失衡 —— 深色主题下稍微提亮。 */
-:root[data-theme="dark"] .udiff-row.del code { color: var(--text-strong); }
-:root[data-theme="dark"] .udiff-row.add code { color: var(--text-strong); }
+:root[data-theme="dark"] .udiff-side.del code { color: var(--text-strong); }
+:root[data-theme="dark"] .udiff-side.add code { color: var(--text-strong); }
+/* 窄容器(侧栏展开、内嵌预览):两列各自会被压到十几个字符。此时不再重复打印上下文行
+ * 右侧那份副本 —— 改动行仍是两列(那是并排的意义),上下文行退化成单列,宽度省一半。 */
+@container (max-width: 680px) {
+  .udiff-side.new.dup { display: none; }
+}
 .scm-ai .icon[data-icon="loader"], .scm-ai .icon { flex: 0 0 auto; }
 .scm-commit button:disabled, .scm-group button:disabled, .scm-file-action:disabled { cursor: default; opacity: .45; }
 

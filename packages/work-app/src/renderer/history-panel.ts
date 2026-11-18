@@ -167,8 +167,15 @@ function filesMarkup(files: GitCommitFileEntry[], message?: string): string {
 function fileMarkup(sha: string, path: string, result: { ok: boolean; content?: string; diff?: string; binary?: boolean; truncated?: boolean; message?: string }): string {
   const api = need();
   if (!result.ok) return `<p class="inspector-empty">${api.escapeHtml(result.message ?? api.t('history.failed'))}</p>`;
-  // 统一 diff 走行级渲染（红绿底色 + 双行号）；解析不了才退回原文（二进制、mode-only 改动）。
-  const rendered = result.diff?.trim() ? renderUnifiedDiff(result.diff, { moreLines: (n) => api.t('tool.moreLines', { n }) }) : null;
+  // 统一 diff 走并排行级渲染（左原始 / 右改动后、双行号、红绿底）；
+  // 解析不了才退回原文（二进制、mode-only 改动）。
+  const rendered = result.diff?.trim()
+    ? renderUnifiedDiff(result.diff, {
+      moreLines: (n) => api.t('tool.moreLines', { n }),
+      oldSide: api.t('diff.oldSide'),
+      newSide: api.t('diff.newSide'),
+    })
+    : null;
   const diff = rendered
     ? rendered
     : result.diff?.trim()
