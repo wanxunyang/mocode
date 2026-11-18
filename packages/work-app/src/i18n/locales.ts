@@ -387,6 +387,7 @@ export const zhCN = {
   'msg.editSend': '发送',
   'msg.editCancel': '取消',
   'msg.railTip': '第 {n} 条提问',
+  'msg.railImageOnly': '（仅图片）',
 
   // ── Markdown 代码块 ──
   'md.copy': '复制',
@@ -1470,6 +1471,7 @@ export const enUS: Record<LocaleKey, string> = {
   'msg.editSend': 'Send',
   'msg.editCancel': 'Cancel',
   'msg.railTip': 'Question {n}',
+  'msg.railImageOnly': '(image only)',
 
   // ── Markdown code block ──
   'md.copy': 'Copy',

@@ -2996,8 +2996,10 @@ function syncConvRail(): void {
     ? users.map((_, index) => index)
     : Array.from({ length: count }, (_, i) => Math.round((i * (users.length - 1)) / (count - 1)));
   const tip = (index: number): string => escapeHtml(t('msg.railTip', { n: index + 1 }));
+  // 不再写 title:悬停提示改由自绘气泡负责(见下方小点悬停气泡),留着 title 会在
+  // 约 1 秒后再叠一个原生提示框。aria-label 保留 —— 无障碍名不能靠视觉气泡承载。
   convRail.innerHTML = railTargets
-    .map((messageIndex, i) => `<button class="conv-rail-dot" type="button" data-rail="${messageIndex}" title="${tip(messageIndex)}" aria-label="${tip(messageIndex)}"${count < users.length ? ' data-sampled="1"' : ''}></button>`)
+    .map((messageIndex, i) => `<button class="conv-rail-dot" type="button" data-rail="${messageIndex}" aria-label="${tip(messageIndex)}"${count < users.length ? ' data-sampled="1"' : ''}></button>`)
     .join('');
   convRail.style.setProperty('--rail-dot', `${dot}px`);
   convRail.style.setProperty('--rail-gap', `${gap}px`);
@@ -3053,6 +3055,83 @@ convRail.addEventListener('click', (event) => {
   // 手写滚动而不是 scrollIntoView:要控制"停在顶部往下一点"。
   conversation.scrollTo({ top: Math.max(0, message.offsetTop - RAIL_ANCHOR_OFFSET), behavior: 'smooth' });
 });
+
+/* ── 小点悬停气泡 ────────────────────────────────────────
+ * 点只有 2–6px,原生 `title` 要等约 1 秒、不换行、长提问根本认不出是哪一条
+ * (抽稀后的点更认不出)。鼠标进入即弹一条气泡显示那条用户消息的原文。
+ *
+ * 三条硬约束(改之前先读):
+ *  1. **气泡挂 body + position: fixed** —— 轨道在 .thread 里,祖先的 overflow 与
+ *     transform 都可能把它裁掉;fixed 也免去"相对哪个祖先定位"的推理。
+ *  2. **pointer-events: none** —— 气泡绝不能吃到鼠标:一进气泡就触发 mouseleave,
+ *     气泡消失 → 鼠标回到点 → 再出现,肉眼看到的是高频闪烁。
+ *  3. **隐藏延后 80ms** —— 相邻两点只隔 --rail-gap(2–6px),鼠标横穿时会连续
+ *     mouseleave/mouseover;立刻隐藏会让气泡在几毫米的间隙里闪一下。
+ */
+/** 气泡里最多显示多少字 —— 小点只是定位用,要看全文点下去就是了。 */
+const RAIL_BUBBLE_CHARS = 240;
+let railBubbleEl: HTMLElement | null = null;
+let railBubbleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function hideRailBubble(): void {
+  // 滚动/缩放会直接调用本函数,而那时可能还挂着一个待触发的延时隐藏 —— 不清掉它,
+  // 定时器回调随后会把「刚显示的新气泡」一起按掉。
+  if (railBubbleTimer) { clearTimeout(railBubbleTimer); railBubbleTimer = null; }
+  railBubbleEl?.classList.add('hidden');
+}
+
+function scheduleHideRailBubble(): void {
+  if (railBubbleTimer) clearTimeout(railBubbleTimer);
+  railBubbleTimer = setTimeout(hideRailBubble, 80);
+}
+
+function showRailBubble(dot: HTMLElement): void {
+  const index = Number(dot.dataset.rail ?? '');
+  const message = conversation.querySelectorAll<HTMLElement>('.message.user')[index];
+  if (!message) return;
+  if (railBubbleTimer) { clearTimeout(railBubbleTimer); railBubbleTimer = null; }
+  if (!railBubbleEl) {
+    const bubble = document.createElement('div');
+    bubble.className = 'conv-rail-bubble hidden';
+    bubble.setAttribute('role', 'tooltip');
+    bubble.innerHTML = '<span class="conv-rail-bubble-label"></span><span class="conv-rail-bubble-text"></span>';
+    document.body.append(bubble);
+    railBubbleEl = bubble;
+  }
+  // 原文优先取 messageText:纯图片消息没有 .message-body,从 DOM 反推只会得到空串。
+  const raw = (messageText.get(message) ?? message.querySelector('.message-body')?.textContent ?? '').trim();
+  // 按码点截断:用 slice 会把 emoji 的代理对劈成半个,气泡里显示成乱码方块。
+  const chars = [...raw];
+  const text = chars.length > RAIL_BUBBLE_CHARS ? `${chars.slice(0, RAIL_BUBBLE_CHARS).join('')}…` : raw;
+  (railBubbleEl.querySelector('.conv-rail-bubble-label') as HTMLElement).textContent = t('msg.railTip', { n: index + 1 });
+  (railBubbleEl.querySelector('.conv-rail-bubble-text') as HTMLElement).textContent = text || t('msg.railImageOnly');
+  railBubbleEl.classList.remove('hidden');
+  // 必须先显示再量尺寸:隐藏状态下 getBoundingClientRect 全为 0,算不出该往上还是往下。
+  const anchor = dot.getBoundingClientRect();
+  const box = railBubbleEl.getBoundingClientRect();
+  const margin = 8;
+  const left = Math.max(margin, Math.min(anchor.right + 10, window.innerWidth - box.width - margin));
+  const top = Math.max(margin, Math.min(anchor.top + anchor.height / 2 - box.height / 2, window.innerHeight - box.height - margin));
+  railBubbleEl.style.left = `${Math.round(left)}px`;
+  railBubbleEl.style.top = `${Math.round(top)}px`;
+}
+
+convRail.addEventListener('mouseover', (event) => {
+  const dot = (event.target as HTMLElement).closest<HTMLElement>('.conv-rail-dot');
+  if (dot) showRailBubble(dot);
+});
+convRail.addEventListener('mouseout', (event) => {
+  if ((event.target as HTMLElement).closest('.conv-rail-dot')) scheduleHideRailBubble();
+});
+// 小点本来就是 <button>,Tab 到它时也给同样的信息。
+convRail.addEventListener('focusin', (event) => {
+  const dot = (event.target as HTMLElement).closest<HTMLElement>('.conv-rail-dot');
+  if (dot) showRailBubble(dot);
+});
+convRail.addEventListener('focusout', () => scheduleHideRailBubble());
+// 滚动 / 窗口尺寸变化会让气泡的锚点失效,直接收起而不是跟着飘。
+conversation.addEventListener('scroll', () => { hideRailBubble(); }, { passive: true });
+window.addEventListener('resize', () => hideRailBubble());
 
 /**
  * 请求重建轨道。**用微任务而不是 rAF 合并**,两个原因:

@@ -826,6 +826,27 @@ textarea::placeholder { color: var(--text-subtle); }
 .conv-rail-dot:hover::before { background: var(--text-muted); transform: scale(1.35); }
 /* 当前读到的那一轮:实心底色(浅色主题 = 近黑,深色主题 = 近白)。 */
 .conv-rail-dot.is-current::before { background: var(--text-strong); }
+/* 悬停气泡:小点只有 2–6px,原生 title 要等约 1s 且不换行 —— 换成进入即弹。
+ * pointer-events: none 让气泡永不吃掉鼠标(否则一进气泡就 mouseleave → 闪烁);
+ * position: fixed 由 JS 定 left/top,理由见 renderer.ts 的 showRailBubble 注释。 */
+.conv-rail-bubble {
+  position: fixed;
+  z-index: var(--z-tooltip);
+  width: min(360px, calc(100vw - 24px));
+  padding: var(--space-2xs) var(--space-xs);
+  border: var(--rule-hair);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-default);
+  box-shadow: var(--shadow-raised);
+  pointer-events: none;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  animation: fade-in var(--dur-micro) var(--ease-out) both;
+}
+.conv-rail-bubble.hidden { display: none; }
+.conv-rail-bubble-label { display: block; margin-bottom: 2px; color: var(--text-muted); font-size: var(--text-2xs); }
+.conv-rail-bubble-text { display: block; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 /* 消息列 = 撑满 .conversation 内容盒(其左右 padding 已做成与输入卡同边界),
  * 不再自带宽高,避免与输入卡各算一套宽度。 */
 .message { display: flex; flex: 0 0 auto; gap: var(--space-md); width: 100%; padding: 0; margin: 0 0 var(--space-lg); align-self: center; align-items: flex-start; box-sizing: border-box; animation: msg-in var(--dur-short) var(--ease-out) both; }
