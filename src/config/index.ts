@@ -127,8 +127,6 @@ export interface Config {
   readDedup: boolean;
   /** 明确的单文件字面量替换可按工具证据直接收尾，默认关闭。 */
   shortPathCompletion: boolean;
-  /** 实验：将本轮已通过的检查作为临时收尾证据。 */
-  verificationEvidence: boolean;
   /** Typed context encoding for old logs/searches during real pressure only.
    * Normal tool results remain raw (apart from the hard per-result safety cap).
    * Default true; set MOCODE_CONTEXT_OPTIMIZE=false to disable this stage. */
@@ -749,7 +747,6 @@ export const config: Config = {
   compactFork: process.env.MOCODE_COMPACT_FORK !== 'false',
   readDedup: process.env.MOCODE_READ_DEDUP !== 'false',
   shortPathCompletion: process.env.MOCODE_SHORT_PATH_COMPLETION === 'true',
-  verificationEvidence: process.env.MOCODE_VERIFICATION_EVIDENCE === 'true',
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',
