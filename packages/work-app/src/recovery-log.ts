@@ -3,6 +3,7 @@ import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 
 import type { WorkAttachment } from './attachment-types.js';
+import { changeFilesFrom, completedChangeSnapshot, updateChangeSnapshot, type ChangeSnapshot } from './change-snapshot.js';
 import { hasSubAgentProgressLine, isSubAgentProgressLine } from './sub-agent-progress.js';
 export type RecoveryAttachment = WorkAttachment;
 export interface RecoveryEnvelope {
@@ -27,15 +28,7 @@ export type RecoveryStreamItem =
    * 对历史轮次会变成累计差异（甚至因后续提交而归零）。所以每轮结束时由主进程算一次、
    * 落进日志 —— 回放看到的 +N/-N 就是那一轮当时的数字。
    */
-  | { kind: 'changes'; files: RecoveryChangeFile[] };
-
-/** 「本轮改动」清单的一行（与渲染层 changes-bar.ts 的 ChangesBarFile 同形）。 */
-export interface RecoveryChangeFile {
-  path: string;
-  added: number;
-  removed: number;
-  untracked: boolean;
-}
+  | ChangeSnapshot;
 /** 结构化系统提示：字段是数据，不是译文（恢复日志会跨语言切换存续）。 */
 export type StreamNotice =
   | { type: 'contextCompacted'; beforeTokens?: number; afterTokens?: number; windowTokens?: number; manual?: boolean; summarized?: boolean };
@@ -302,6 +295,7 @@ function parseRecovery(source: string, running = false): RecoverySnapshot | null
   let pendingApproval: Record<string, unknown> | null = null;
   let runOpen = false;
   let interrupted = false;
+  let legacyChangesPending = false;
   const settleOpenTools = (): void => {
     for (const item of items) {
       if (item.kind !== 'tool' || item.done) continue;
@@ -321,6 +315,7 @@ function parseRecovery(source: string, running = false): RecoverySnapshot | null
     }
     switch (envelope.event) {
       case 'run_started': {
+        legacyChangesPending = false;
         const timestamp = Date.parse(at);
         startedAt = Number.isFinite(timestamp) ? timestamp : null;
         // 新一轮已开始：旧中断只属于上一轮，未完成工具永久定格为中止。
@@ -393,29 +388,26 @@ function parseRecovery(source: string, running = false): RecoverySnapshot | null
           },
         });
         break;
-      case 'run_completed':
+      case 'run_completed': {
         if (isRecord(payload.contextUsage)) {
           contextUsage = payload.contextUsage;
           if (typeof payload.contextUsage.percent === 'number') usagePercent = payload.contextUsage.percent;
         }
         runOpen = false;
         pendingApproval = null;
+        const snapshot = completedChangeSnapshot(payload);
+        if (snapshot) items.push(snapshot);
+        legacyChangesPending = !snapshot && typeof payload.changeSnapshotId !== 'string';
         break;
+      }
       case 'run_changed_files': {
-        // 这一轮的改动清单：主进程在 run_completed 之后立刻取快照（见 main.ts 的
-        // announceChangedFiles），与那一轮的助手消息同行排列 —— 回放时 +N/-N 仍是当时的值。
-        const files = Array.isArray(payload.files) ? payload.files : [];
-        const parsed: RecoveryChangeFile[] = [];
-        for (const item of files) {
-          if (!isRecord(item) || typeof item.path !== 'string' || !item.path) continue;
-          parsed.push({
-            path: item.path,
-            added: typeof item.added === 'number' && Number.isFinite(item.added) ? item.added : 0,
-            removed: typeof item.removed === 'number' && Number.isFinite(item.removed) ? item.removed : 0,
-            untracked: item.untracked === true,
-          });
+        const files = changeFilesFrom(payload.files);
+        if (typeof payload.changeSnapshotId === 'string') {
+          updateChangeSnapshot(items, payload.changeSnapshotId, files);
+        } else if (legacyChangesPending && files.length) {
+          items.push({ kind: 'changes', files });
+          legacyChangesPending = false;
         }
-        if (parsed.length) items.push({ kind: 'changes', files: parsed });
         break;
       }
       case 'run_failed':
@@ -438,7 +430,10 @@ function parseRecovery(source: string, running = false): RecoverySnapshot | null
     }
   };
   for (const entry of effective) {
-    if (entry.type === 'user') items.push({ kind: 'user', text: entry.text, ...(entry.attachments?.length ? { attachments: entry.attachments } : {}) });
+    if (entry.type === 'user') {
+      legacyChangesPending = false;
+      items.push({ kind: 'user', text: entry.text, ...(entry.attachments?.length ? { attachments: entry.attachments } : {}) });
+    }
     else if (entry.type === 'event') event(entry.event, entry.at);
   }
   // 上面整段跳过了 live_usage 行；若这一轮没有走到 run_completed（崩溃 / 被中止），

@@ -325,7 +325,7 @@ const changedFilesSeq = new Map<string, number>();
  * 取不到统计（不是 git 仓库 / git 失败）时仍然发清单，只是不带 +N/-N：
  * 「这一轮动了哪些文件」本身仍然成立，行数缺失不该让整块消失。
  */
-function announceChangedFiles(taskId: string, payload: Record<string, unknown>): void {
+function announceChangedFiles(taskId: string, payload: Record<string, unknown>, changeSnapshotId: string): void {
   const files = Array.isArray(payload.changedFiles)
     ? payload.changedFiles.filter((item): item is string => typeof item === 'string' && item !== '')
     : [];
@@ -337,11 +337,11 @@ function announceChangedFiles(taskId: string, payload: Record<string, unknown>):
   changedFilesSeq.set(taskId, seq);
   void gitFileStats(project.root, files).then((result) => {
     // 期间又开了新一轮（或任务被删）：这份快照已经不属于屏上那条消息了。
-    if (changedFilesSeq.get(taskId) !== seq) return;
+    if (changedFilesSeq.get(taskId) !== seq || !taskById(taskId)) return;
     const stats = result.ok && result.stats.length
       ? result.stats
       : files.map((file) => ({ path: file, added: 0, removed: 0, untracked: false }));
-    const envelope: RecoveryEnvelope = { type: 'event', event: 'run_changed_files', requestId: taskId, payload: { files: stats } };
+    const envelope: RecoveryEnvelope = { type: 'event', event: 'run_changed_files', requestId: taskId, payload: { changeSnapshotId, files: stats } };
     recordRecoveryEvent(taskId, envelope);
     pushRenderer('work:agent-event', envelope);
   });
@@ -1518,14 +1518,16 @@ class LocalAgent {
     if (envelope.type === 'event') updateTaskFromAgent(envelope);
     const attributed = envelope.requestId === this.taskId || envelope.requestId === undefined
       && (envelope.type === 'error' || envelope.event === 'host_exit');
-    if (attributed) recordRecoveryEvent(this.taskId, envelope);
-    // 每轮改动清单：紧接着 run_completed 落一份快照（顺序即「那一轮之后」），
-    // 渲染层把它挂到刚收口的那条助手消息尾部。
     if (attributed && envelope.type === 'event' && envelope.event === 'run_completed') {
-      announceChangedFiles(this.taskId, (envelope.payload ?? {}) as Record<string, unknown>);
+      const payload = (envelope.payload ?? {}) as Record<string, unknown>;
+      if (Array.isArray(payload.changedFiles) && payload.changedFiles.length) {
+        const changeSnapshotId = randomUUID();
+        envelope = { ...envelope, payload: { ...payload, changeSnapshotId } };
+        announceChangedFiles(this.taskId, payload, changeSnapshotId);
+      }
     }
-    // 新一轮已经开跑：尚未回来的上一轮统计作废（否则那份清单会落进新轮的日志区间，
-    // 回放时被挂到下一轮的助手消息上）。
+    if (attributed) recordRecoveryEvent(this.taskId, envelope);
+    // 新一轮开始后不采用新的磁盘统计，上一轮的文件清单已随完成事件保存。
     if (attributed && envelope.type === 'event' && envelope.event === 'run_started') {
       changedFilesSeq.set(this.taskId, (changedFilesSeq.get(this.taskId) ?? 0) + 1);
     }

@@ -17,6 +17,7 @@ import { initBrowserPanel, showBrowserPanel, hideBrowserPanel, rememberDevServer
 import { initTerminalPanel, showTerminalPanel, hideTerminalPanel, refreshTerminalProject, refreshTerminalTheme, refreshTerminalLabels, fillTerminalCommand } from './terminal-panel.js';
 import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, MOD, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
 import type { RecoverySnapshot, StreamNotice } from '../recovery-log.js';
+import { changeFilesFrom, completedChangeSnapshot, updateChangeSnapshot, type ChangeSnapshot } from '../change-snapshot.js';
 import { transcriptSource, type HistoryItem } from '../transcript-view.js';
 import type { WorkAttachment, AttachmentResult, AttachmentErrorCode } from '../attachment-types.js';
 import { parsePlan, planForRestore, type PlanSnapshot } from '../plan.js';
@@ -298,15 +299,6 @@ const convRail = $('#conv-rail') as HTMLElement;
 const planPanel = $('#plan-panel') as HTMLElement;
 const attentionBar = $('#attention-bar') as HTMLElement;
 const attentionBadge = $('#attention-badge') as HTMLButtonElement;
-/**
- * 收到 run_changed_files 时要挂卡片的那条助手消息。
- *
- * 为什么不在收到事件时取「最后一条 assistant」：改动清单是主进程跑完一次 git 统计之后
- * 才异步下发的，那期间用户可能已经发了下一轮、屏尾已经多出一条新的空消息 —— 卡片就会
- * 挂到错误的那一轮上。run_completed 那一刻先记住，回来时只认它。
- */
-let pendingChangesTurn: HTMLElement | null = null;
-
 let state: WorkState | null = null;
 let collapsedProjects: Set<string> = new Set();
 let collapsedSections: Set<string> = new Set();
@@ -337,7 +329,7 @@ type StreamItem =
   /** 系统提示行（「上下文已压缩」等）：不是错误也不是模型输出，但必须在会话流里留痕。 */
   | { kind: 'notice'; notice: StreamNotice }
   /** 这一轮改过的文件：挂在那一轮助手消息的尾部，每轮各留一份。 */
-  | { kind: 'changes'; files: ChangesBarFile[] };
+  | ChangeSnapshot;
 interface ContextUsageSnapshot {
   tokens: number;
   window: number;
@@ -671,28 +663,14 @@ const changesBarLabels = (): ChangesBarLabels => ({
   expand: t('changesBar.expand'),
 });
 
-/** 会话流里最后一条助手消息 —— 本轮改动清单就挂在它尾部。 */
-function lastAssistantTurn(): HTMLElement | null {
-  const all = conversation.querySelectorAll<HTMLElement>('.message.assistant');
-  return all[all.length - 1] ?? null;
-}
-
-/** 事件 / 恢复日志里的文件清单 → 卡片可用的形状（坏数据一律跳过）。 */
-function changeFilesFrom(raw: unknown): ChangesBarFile[] {
-  if (!Array.isArray(raw)) return [];
-  const files: ChangesBarFile[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') continue;
-    const record = item as Record<string, unknown>;
-    if (typeof record.path !== 'string' || !record.path) continue;
-    files.push({
-      path: record.path,
-      added: typeof record.added === 'number' && Number.isFinite(record.added) ? record.added : 0,
-      removed: typeof record.removed === 'number' && Number.isFinite(record.removed) ? record.removed : 0,
-      untracked: record.untracked === true,
-    });
+/** 轮末定位回复时不越过用户气泡，空轮次也不会把卡片挂到上一轮。 */
+function completedAssistantTurn(): HTMLElement | null {
+  for (let node = conversation.lastElementChild; node; node = node.previousElementSibling) {
+    if (node.classList.contains('message')) {
+      return node.classList.contains('assistant') ? node as HTMLElement : null;
+    }
   }
-  return files;
+  return null;
 }
 
 /**
@@ -737,6 +715,13 @@ function attachTurnChanges(turn: HTMLElement | null, taskId: string, files: Chan
   paintTurnChanges(container, taskId, files);
 }
 
+function renderChangeSnapshot(taskId: string, snapshot: ChangeSnapshot): void {
+  const turn = completedAssistantTurn();
+  if (!turn) return;
+  if (snapshot.snapshotId) turn.dataset.changeSnapshotId = snapshot.snapshotId;
+  attachTurnChanges(turn, taskId, snapshot.files);
+}
+
 /** 切语言：卡片文案是生成时写死的，就地按新语言重画每一张（文件清单从 dataset 里取回来）。 */
 function relabelTurnChanges(): void {
   for (const container of Array.from(conversation.querySelectorAll<HTMLElement>('.message-changes'))) {
@@ -744,26 +729,6 @@ function relabelTurnChanges(): void {
     if (!raw) continue;
     try { paintTurnChanges(container, container.dataset.taskId ?? '', changeFilesFrom(JSON.parse(raw))); } catch { /* 坏数据保持原样 */ }
   }
-}
-
-/**
- * 老会话兜底：恢复日志里还没有本轮改动快照（这个能力之前存下的会话）时，
- * 按任务记录的 changedFiles 现取一次统计补一张。数字是「此刻 vs HEAD」的累计值 ——
- * 与「改动」面板同口径，聊胜于无；新会话一律走 run_changed_files 的逐轮快照。
- */
-function restoreLegacyChanges(taskId: string): void {
-  const task = state?.tasks.find((item) => item.id === taskId);
-  const paths = (task?.changedFiles ?? []).filter((path) => typeof path === 'string' && path !== '');
-  if (!paths.length) return;
-  void (async () => {
-    const result = await window.mocodeWork.taskChanges({ taskId });
-    // 期间切了任务 / 又跑完一轮：这份数据已经不属于屏上那条消息。
-    if (viewingTaskId() !== taskId) return;
-    const files = result.ok && result.files?.length
-      ? result.files
-      : paths.map((path) => ({ path, added: 0, removed: 0, untracked: false }));
-    attachTurnChanges(lastAssistantTurn(), taskId, files);
-  })();
 }
 
 /**
@@ -4314,21 +4279,12 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       if (viewing) finish();
       break;
     case 'run_changed_files': {
-      // 这一轮改过的文件（含当时的 +N/-N）：进事件流，切走再回来 / 重启后按原样重放。
-      const files = changeFilesFrom(payload.files);
-      if (!files.length) break;
-      stream.items.push({ kind: 'changes', files });
-      if (!viewing) break;
-      // pendingChangesTurn 是常规路径（run_completed 刚收口的那条）。它为空时回放兜底：
-      // 切走又切回来时卡片已由 replay 画好，这里只补「还没有卡片」的那条；
-      // 而这份统计迟到、用户已经发了下一轮时 stream.running 为真 —— 绝不往新消息上挂。
-      let turn = pendingChangesTurn?.isConnected ? pendingChangesTurn : null;
-      pendingChangesTurn = null;
-      if (!turn && !stream.running) {
-        const last = lastAssistantTurn();
-        if (last && !last.querySelector('.message-changes')) turn = last;
-      }
-      attachTurnChanges(turn, taskId, files);
+      const id = payload.changeSnapshotId;
+      if (typeof id !== 'string') break;
+      const snapshot = updateChangeSnapshot(stream.items, id, changeFilesFrom(payload.files));
+      if (!snapshot || !viewing) break;
+      const turn = conversation.querySelector<HTMLElement>(`.message.assistant[data-change-snapshot-id="${CSS.escape(id)}"]`);
+      attachTurnChanges(turn, taskId, snapshot.files);
       break;
     }
     case 'run_completed': {
@@ -4346,13 +4302,12 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       settleTurnUsage(stream, taskId, usage);
       applyStatus(stream, viewing, settledStatus('done', 'status.completed', 'ok', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
-      // 本轮改动清单由紧随其后的 run_changed_files 带来（主进程先跑一次 git 统计）。
-      // 这里只把「这一轮是哪条消息」记下来，收尾前取 —— finish() 会把空轮次整条移除。
+      const snapshot = completedChangeSnapshot(payload);
+      if (snapshot) stream.items.push(snapshot);
       if (viewing) {
-        const turn = currentTurn();
         updateContextUsage(stream.contextUsage);
         finish();
-        pendingChangesTurn = turn && turn.isConnected ? turn : null;
+        if (snapshot) renderChangeSnapshot(taskId, snapshot);
       }
       else notifyBackground(taskId, t('status.completed'));
       break;
@@ -4518,8 +4473,7 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
           // 系统提示行挂在会话流上、不挂助手消息：恢复现场时顺序与实时一致。
           addNotice(item.notice);
         } else if (item.kind === 'changes') {
-          // 挂在刚刚回放完的那条助手消息尾部 —— 与实时渲染同一位置。
-          attachTurnChanges(lastAssistantTurn(), taskId, item.files);
+          renderChangeSnapshot(taskId, item);
         }
       }
     });
@@ -4548,9 +4502,6 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   }
   syncPlanPanel(taskId);
   syncAttention();
-  // 老会话（逐轮快照上线前存下的恢复日志）里没有任何 changes 项：按任务记录补一张，
-  // 数字是「此刻 vs HEAD」的累计值，与右侧「改动」面板同口径。
-  if (!stream?.items.some((item) => item.kind === 'changes')) restoreLegacyChanges(taskId);
   renderStatus(stream?.status ?? statusFromTask(selectedTask()), { replay: true });
   smartScrollToBottom(true);
   attachments = []; renderAttachments();

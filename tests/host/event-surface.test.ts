@@ -118,7 +118,7 @@ test('panels.ts 认领的回执都有 host 侧 emit（不留空等）', () => {
 test('渲染层的每个 case 都是 host 真的会发的事件（不留死分支）', () => {
   const cases = rendererCases();
   const emitted = hostEvents();
-  // 这四条由渲染层/localAgent 自己合成，不来自 host 的 emit：
+  // 这些事件由渲染层或桌面主进程合成，不来自 host 的 emit：
   //   host_stopped / host_exit 由 main.ts（LocalAgent 的 onExit）产生；
   //   cheatsheet / search 是纯 UI 交互（快捷键面板、会话内搜索）。
   // host_log 同时存在于全局通道与 switch 内（运行期日志也带 requestId），两侧都合法。
@@ -133,6 +133,7 @@ test('渲染层的每个 case 都是 host 真的会发的事件（不留死分�
     'search',
     'host_log',
     'attention_open',
+    'run_changed_files',
   ]);
   const orphan = [...cases].filter((name) => !emitted.has(name) && !locallySynthesized.has(name)).sort();
   assert.deepEqual(orphan, [], `渲染层的这些 case 永远收不到 host 事件：${orphan.join(', ')}`);

@@ -324,6 +324,53 @@ test('run_changed_files 落成逐轮的 changes 项：行数按当时快照保�
     );
   }));
 
+test('上一轮文件统计迟到时只更新原轮快照，下一轮运行中不出现卡片', () =>
+  withRoot((root) => {
+    const log = recoveryLog(root, 'late-changes');
+    log.user('第一轮');
+    log.event(event('run_started'));
+    log.event(event('text_delta', { text: '历史回复' }));
+    log.event(event('run_completed', { changeSnapshotId: 'old', changedFiles: ['old.ts'] }));
+    log.user('开始第二轮');
+    log.event(event('run_started'));
+    log.event(event('text_delta', { text: '正在打包' }));
+    log.event(
+      event('run_changed_files', {
+        changeSnapshotId: 'old',
+        files: [
+          { path: 'old.ts', added: 5, removed: 1 },
+          { path: 'foreign.ts', added: 900 },
+        ],
+      }),
+    );
+    log.event(event('run_changed_files', { files: [{ path: 'untagged-late.ts', added: 1 }] }));
+    log.event(event('run_changed_files', { changeSnapshotId: 'unknown', files: [{ path: 'wrong.ts', added: 40 }] }));
+    const snapshot = readRecovery(root, 'late-changes', true);
+    assert.deepEqual(snapshot?.items, [
+      { kind: 'user', text: '第一轮' },
+      { kind: 'text', text: '历史回复' },
+      { kind: 'changes', snapshotId: 'old', files: [{ path: 'old.ts', added: 5, removed: 1, untracked: false }] },
+      { kind: 'user', text: '开始第二轮' },
+      { kind: 'text', text: '正在打包' },
+    ]);
+  }));
+
+test('行数尚未算出就切换轮次时，完成事件仍保留原来的文件清单', () =>
+  withRoot((root) => {
+    const log = recoveryLog(root, 'pending-changes');
+    log.user('第一轮');
+    log.event(event('run_started'));
+    log.event(event('text_delta', { text: '历史回复' }));
+    log.event(event('run_completed', { changeSnapshotId: 'known', changedFiles: ['old.ts'] }));
+    log.user('第二轮');
+    log.event(event('run_started'));
+    assert.deepEqual(readRecovery(root, 'pending-changes', true)?.items[2], {
+      kind: 'changes',
+      snapshotId: 'known',
+      files: [{ path: 'old.ts', added: 0, removed: 0, untracked: false }],
+    });
+  }));
+
 test('超长日志里的 truncate 不再抛 RangeError（展开传参上限）', () =>
   withRoot((root) => {
     // 真实事故：25 万条的恢复日志里只要有一条 truncate，`splice(0, len, ...cut)` 就会
