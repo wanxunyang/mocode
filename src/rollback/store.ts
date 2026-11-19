@@ -2,9 +2,12 @@ import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  lstat,
   lstatSync,
   mkdirSync,
+  readFile,
   readFileSync,
+  readdir,
   readlinkSync,
   rmdirSync,
   rmSync,
@@ -12,9 +15,10 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import * as fsp from 'node:fs/promises';
+import { readlink } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { config } from '../config/index.js';
 import { MAX_SNAPSHOT_TURNS } from '../tools/constants.js';
 import { toText } from '../context/utils.js';
@@ -202,6 +206,11 @@ const SCAN_CONCURRENCY = 16;
 const YIELD_EVERY = 64;
 const YIELD_BYTES = 1024 * 1024;
 const FRESH_WINDOW_MS = 2000;
+
+// 扫描会发出数千次 I/O。用开销更低的 fs 回调实现，仍异步等待，避免阻塞界面。
+const statEntry = promisify(lstat);
+const listDirectory = promisify(readdir);
+const readEntry = promisify(readFile);
 
 /**
  * contentCache 的常驻字节上限(base64 后的长度和);0 = 不限。
@@ -493,7 +502,7 @@ export class RollbackStore {
       );
     };
     const readDir = (rel: string): Promise<Dirent[]> =>
-      fsp.readdir(prefix + rel, { withFileTypes: true }).catch(() => []);
+      listDirectory(prefix + rel, { withFileTypes: true }).catch(() => []);
     // 仅读取本次扫描的目录。预取兄弟目录，仍按原来的深度优先顺序消费，保留条目上限的语义。
     const ahead = new Map<string, Promise<Dirent[]>>();
     const walk = async (dir: string): Promise<void> => {
@@ -512,10 +521,12 @@ export class RollbackStore {
         const rel = parent + child.name;
         if (excluded(child.name, rel)) continue;
         paths.push(rel);
-        if (child.isDirectory() && paths.length < CAPTURE_ENTRY_LIMIT) await walk(rel);
+        if (child.isDirectory() && paths.length < CAPTURE_ENTRY_LIMIT) {
+          startWorkers();
+          await walk(rel);
+        }
       }
     };
-    await walk('');
 
     let budget = CAPTURE_TOTAL_LIMIT;
     let cursor = 0;
@@ -531,10 +542,10 @@ export class RollbackStore {
         }
         let state: StoredState;
         try {
-          const stat = await fsp.lstat(full, { bigint: true });
+          const stat = await statEntry(full, { bigint: true });
           const mode = Number(stat.mode) & 0o777;
           if (stat.isSymbolicLink()) {
-            const target = await fsp.readlink(full);
+            const target = await readlink(full);
             state = { kind: 'symlink', data: target, stamp: target, mode };
           } else if (stat.isDirectory()) {
             state = { kind: 'directory', mode, stamp: '' };
@@ -550,7 +561,7 @@ export class RollbackStore {
             } else if (size <= CAPTURE_FILE_LIMIT && budget - size >= 0) {
               budget -= size;
               bytesSinceYield += size;
-              const data = (await fsp.readFile(full)).toString('base64');
+              const data = await readEntry(full, 'base64');
               state = { kind: 'file', data, stamp, mode };
               nextCache.set(full, { stamp, mode, data });
             } else {
@@ -565,7 +576,18 @@ export class RollbackStore {
         if (state.kind !== 'missing') entries.set(rel, state);
       }
     };
-    await Promise.all(Array.from({ length: Math.min(SCAN_CONCURRENCY, Math.max(1, paths.length)) }, worker));
+    // 深度优先枚举仍决定条目上限，同时让已发现的路径与后续目录读取并行。
+    const workers = new Set<Promise<void>>();
+    const startWorkers = (): void => {
+      const count = Math.min(SCAN_CONCURRENCY - workers.size, paths.length - cursor);
+      for (let i = 0; i < count; i++) {
+        const pending = worker().finally(() => workers.delete(pending));
+        workers.add(pending);
+      }
+    };
+    await walk('');
+    startWorkers();
+    await Promise.all(workers);
     this.contentCache = trimContentCache(nextCache);
     return entries;
   }
@@ -587,14 +609,18 @@ export class RollbackStore {
 
   async endWorkspaceMutation(capture: WorkspaceMutationCapture, op: string): Promise<void> {
     const after = await this.scanWorkspace(capture.workspaceRoot, capture.sessionsRoot);
-    const paths = new Set([...capture.entries.keys(), ...after.keys()]);
+    const missing: StoredState = { kind: 'missing' };
     let changed = false;
-    for (const rel of paths) {
-      const beforeState = capture.entries.get(rel) ?? { kind: 'missing' as const };
-      const afterState = after.get(rel) ?? { kind: 'missing' as const };
-      if (this.sameState(beforeState, afterState)) continue;
+    const recordChange = (rel: string, beforeState: StoredState, afterState: StoredState): void => {
+      if (this.sameState(beforeState, afterState)) return;
       changed = true;
       this.addSnapshot(this.snapshotFromState(capture.turnId, rel, beforeState, capture.sequence, op, [], afterState));
+    };
+    for (const [rel, beforeState] of capture.entries) {
+      recordChange(rel, beforeState, after.get(rel) ?? missing);
+    }
+    for (const [rel, afterState] of after) {
+      if (!capture.entries.has(rel)) recordChange(rel, missing, afterState);
     }
     if (changed) this.mutationVersion += 1;
   }
