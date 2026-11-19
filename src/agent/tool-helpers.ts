@@ -221,10 +221,10 @@ export function pushToolResult(
   const succeeded = succeededOverride ?? isToolResultSuccess(output);
   const capped = capToolResultForHistory(tc.name, output);
   // push-time 截断兜底:完整结果另存 compacted/result-<id>.txt,并在进 history 的
-  // 截断内容尾部留一行全文指针。仅主 agent(共享 contextState)落盘——子 agent 的
+  // 截断内容尾部留一行全文指针。仅持久化会话落盘——子 agent 的
   // 结果随其临时 history 消亡,不污染主会话。best-effort:存不上就只保留截断内容。
   let content = capped;
-  if (capped.length < output.length && runtimeContextState === contextState) {
+  if (capped.length < output.length && runtimeContextState.archiveHistory) {
     try {
       const rel = getActiveSessionStore().archiveToolResult(getCurrentSessionId() ?? '', tc.id, output);
       if (rel) content = `${capped.replace(/\s+$/, '')}\n…[完整结果已归档,需要原文时 grep/read_file:${rel}]`;

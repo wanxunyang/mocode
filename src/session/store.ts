@@ -17,6 +17,12 @@ import path from 'node:path';
 import { MAX_TRACE_BYTES, MAX_TRACE_ROTATIONS, MAX_COMPACTED_ARCHIVE_BYTES } from '../tools/constants.js';
 import { loadArchivedSession, readArchiveIndex, retentionPaths } from './retention.js';
 import {
+  parseTerminalTranscript,
+  readTerminalTranscriptFile,
+  writeTerminalTranscriptFile,
+  type TerminalTranscript,
+} from './terminal-transcript.js';
+import {
   COMPACTED_DIRNAME,
   isCompactedAssetName,
   parseSegmentMeta,
@@ -59,6 +65,8 @@ export interface SessionRecord extends SessionMeta {
    * SessionStore.load 据此把文件写回 <id>/compacted/。
    */
   compactedAssets?: Record<string, string>;
+  /** TUI 回放资产只在归档时内嵌，活会话使用独立文件。 */
+  terminalTranscript?: TerminalTranscript;
 }
 
 export interface SessionStoreOptions {
@@ -594,6 +602,19 @@ export class SessionStore {
         if (attempt === 1) throw error;
       }
     }
+  }
+
+  loadTerminalTranscript(id: string): TerminalTranscript | undefined {
+    return (
+      readTerminalTranscriptFile(path.join(this.sessionsRoot, id)) ??
+      parseTerminalTranscript(loadArchivedSession(this.sessionsRoot, id)?.terminalTranscript)
+    );
+  }
+
+  saveTerminalTranscript(id: string, transcript: TerminalTranscript): void {
+    const dir = path.join(this.sessionsRoot, id);
+    this.ensureDir(dir);
+    writeTerminalTranscriptFile(dir, transcript);
   }
 
   load(id: string, opts?: { restoreAssets?: boolean }): SessionRecord | null {

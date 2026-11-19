@@ -515,10 +515,11 @@ textarea::placeholder { color: var(--text-subtle); }
 .context-usage { font-size: var(--text-2xs); font-family: var(--font-outlier); color: var(--text-subtle); padding: 5px var(--space-2xs); min-width: 30px; text-align: center; border-radius: var(--radius-sm); cursor: help; transition: color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out); flex-shrink: 0; white-space: nowrap; }
 .context-usage:hover, .context-usage:focus-visible { color: var(--text-strong); background: var(--surface-hover); }
 .context-usage.usage-high { color: var(--color-warn); font-weight: 500; }
-/* 输入卡下面那行 token 消耗：本轮实时 + 本会话累计。
+/* 会话 token 消耗（本轮实时 + 本会话累计），排在输入卡右栏、「上下文占比」左侧。
    颜色取 --text-default（比正文的 --text-strong 淡一层），不用 --text-subtle —— 这是要被读的数字，
-   不能淡到像占位符。等宽字体让数字随流式刷新时不左右抖。 */
-.token-usage { width: var(--composer-width); margin-top: var(--space-2xs); padding: 0 var(--space-md); color: var(--text-default); font-size: var(--text-2xs); font-family: var(--font-outlier); line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: auto; cursor: help; }
+   不能淡到像占位符。等宽字体让数字随流式刷新时不左右抖。
+   横向可压缩：窗口窄时先让这行自己省略，右栏其它按钮固定宽（flex-shrink: 0）不被挤变形。 */
+.token-usage { flex: 0 1 auto; min-width: 0; max-width: 260px; padding: 5px var(--space-2xs); margin-right: 2px; color: var(--text-default); font-size: var(--text-2xs); font-family: var(--font-outlier); line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
 .token-usage.hidden { display: none; }
 .context-usage-popover { position: fixed; z-index: var(--z-tooltip); width: min(320px, calc(100vw - 24px)); padding: 14px; border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); color: var(--text-default); box-shadow: var(--shadow-raised); pointer-events: none; animation: fade-in var(--dur-micro) var(--ease-out) both; }
 .context-usage-popover.hidden { display: none; }
@@ -1725,6 +1726,12 @@ body.inspector-resizing * { cursor: ew-resize !important; }
   font-size: var(--text-xs); line-height: 1.6; font-variant-numeric: tabular-nums;
   white-space: pre-wrap; word-break: break-word;
 }
+.compacted-history > summary { cursor: pointer; }
+.compacted-history > div {
+  margin-top: var(--space-xs);
+  max-height: 18rem;
+  overflow: auto;
+}
 /* 标题：上面的间距恒大于下面（贴近它所统领的内容），层级之间再靠字号 + 一丝上提的色重区分。
    h1/h2 带下划细线：长文档里它们就是章节边界，没有线时整页看不出分段。 */
 .message-body.md-rendered h1, .message-body.md-rendered h2, .message-body.md-rendered h3, .message-body.md-rendered h4, .message-body.md-rendered h5, .message-body.md-rendered h6 {
@@ -2110,6 +2117,47 @@ select.field-input { appearance: none; cursor: pointer; background-image: linear
 .usage-bar-fill { display: block; height: 100%; border-radius: var(--radius-full); background: linear-gradient(90deg, color-mix(in oklab, var(--color-accent) 55%, var(--surface-sunken)), var(--color-accent)); }
 .usage-bar-value { font-size: var(--text-2xs); color: var(--color-ink); font-family: var(--font-outlier); min-width: 52px; text-align: right; }
 .usage-bar-sub { font-size: var(--text-2xs); color: var(--color-subtle); min-width: 56px; text-align: right; }
+
+/* ── 用量图表：环形占比（按模型 / 按工作空间）+ 日柱状（按天）──
+ * 形状由 panels.ts 生成，这里只管配色与状态。色板 8 色与 .lane-N 同一套
+ * （明暗底都可读），尾部超出 8 类的部分在 JS 里并成「其它」。
+ * 扇区是 <circle tabindex=0>，图例行是 <button>，两者共用 data-usage-slice 同步选中态。 */
+.usage-donut { --usage-c0: oklch(58% 0.15 255); --usage-c1: oklch(60% 0.16 150); --usage-c2: oklch(62% 0.16 55);
+  --usage-c3: oklch(56% 0.18 20); --usage-c4: oklch(58% 0.15 300); --usage-c5: oklch(60% 0.13 200);
+  --usage-c6: oklch(58% 0.15 100); --usage-c7: oklch(58% 0.14 340);
+  display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: center; gap: var(--space-sm); }
+.usage-donut-figure svg { display: block; width: 140px; height: 140px; }
+.usage-donut-track { fill: none; stroke: var(--surface-sunken); stroke-width: 18; }
+/* 扇区：dashoffset 由 JS 按累计角度给，圆头/平头必须平头，否则相邻扇区会互压。 */
+.usage-donut-slice { fill: none; stroke-width: 18; stroke-linecap: butt; cursor: pointer; transition: stroke-width var(--dur-micro) var(--ease-out), opacity var(--dur-micro) var(--ease-out); }
+.usage-donut-slice:hover, .usage-donut-slice.is-selected { stroke-width: 24; }
+.usage-donut-slice:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+/* 有一片被选中时，其余扇区淡出，选中项一眼可辨。 */
+.usage-donut:has(.usage-donut-slice.is-selected) .usage-donut-slice:not(.is-selected) { opacity: 0.35; }
+.usage-donut-total { fill: var(--color-ink); font-family: var(--font-outlier); font-size: 16px; font-weight: 500; }
+.usage-donut-cap { fill: var(--color-subtle); font-size: 9px; }
+.usage-legend { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.usage-legend-item { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-2xs); width: 100%; padding: 3px 6px; border-radius: var(--radius-sm); text-align: left; transition: background var(--dur-micro) var(--ease-out); }
+.usage-legend-item:hover { background: var(--surface-hover); }
+.usage-legend-item.is-selected { background: var(--surface-hover); }
+.usage-legend-chip { width: 8px; height: 8px; border-radius: 2px; }
+.usage-legend-label { font-size: var(--text-xs); color: var(--color-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-legend-pct { font-size: var(--text-2xs); color: var(--color-subtle); font-family: var(--font-outlier); min-width: 42px; text-align: right; }
+.usage-legend-value { font-size: var(--text-2xs); color: var(--color-ink); font-family: var(--font-outlier); min-width: 52px; text-align: right; }
+.usage-donut-detail, .usage-col-detail { grid-column: 1 / -1; font-size: var(--text-2xs); color: var(--color-subtle); padding-top: var(--space-2xs); border-top: var(--rule-hair); min-height: 18px; }
+.usage-donut-detail b, .usage-col-detail b { color: var(--color-ink); font-family: var(--font-outlier); font-weight: 500; }
+/* 日柱状：柱宽由 JS 按窗口天数注入（--col-w），365 天靠横向滚动而不是压成一条线。 */
+.usage-columns { display: flex; align-items: flex-end; gap: 2px; height: 110px; overflow-x: auto; padding-bottom: 14px; }
+.usage-col-wrap { position: relative; display: flex; align-items: flex-end; justify-content: center; width: var(--col-w, 12px); flex: 0 0 auto; height: 100%; }
+.usage-col { display: flex; align-items: flex-end; width: 100%; height: 100%; padding: 0; border-radius: 2px; background: transparent; overflow: hidden; transition: background var(--dur-micro) var(--ease-out); }
+.usage-col:hover { background: var(--surface-hover); }
+.usage-col-fill { display: block; width: 100%; border-radius: 2px 2px 0 0; background: color-mix(in oklab, var(--color-accent) 70%, var(--surface-sunken)); transition: background var(--dur-micro) var(--ease-out); }
+.usage-col:hover .usage-col-fill, .usage-col.is-selected .usage-col-fill { background: var(--color-accent); }
+.usage-col.is-selected { outline: 1px solid var(--color-ink); outline-offset: 1px; }
+.usage-col:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+/* 日期标签压在柱底（绝对定位，不占柱高），只在 JS 指定的少数几根柱上出现。 */
+.usage-col-label { position: absolute; bottom: -14px; left: 50%; transform: translateX(-50%); font-size: 9px; line-height: 1; color: var(--color-subtle); font-family: var(--font-outlier); white-space: nowrap; }
+@media (max-width: 720px) { .usage-donut { grid-template-columns: 1fr; justify-items: center; } }
 
 /* ── 侧栏「更多 (N)」：内联 6 条之后的任务 + 终端历史会话，一份按时间混排的列表 ──
  * 入口比任务行弱（字号更小、常态无强调色），因为它是「翻旧账」而不是「正在发生的事」；

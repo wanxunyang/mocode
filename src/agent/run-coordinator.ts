@@ -216,6 +216,7 @@ export async function runAgentCoreLegacy(
   const cancellationLifecycle = turnLifecycle.createCancellation(historyManager, rebuildHistoryIndexes);
   cancellationLifecycle.checkpoint();
   let hasLiveUserUpdates = false;
+  let steeringOpeningPending = false;
   const liveUpdateReminder =
     '## Live user updates — continue the current task\n' +
     'The user sent additional messages while this task was running. Treat these messages as updates to the same ongoing task. ' +
@@ -229,6 +230,7 @@ export async function runAgentCoreLegacy(
     for (const content of messages) historyManager.appendUserTurn(content);
     if (messages.length > 0) {
       hasLiveUserUpdates = true;
+      steeringOpeningPending = true;
       cancellationLifecycle.checkpoint();
       hooks.onCheckpoint?.(history);
     }
@@ -264,6 +266,14 @@ export async function runAgentCoreLegacy(
           return turnLifecycle.buildAbortedResult();
         }
         acceptUserMessages();
+        const opening = opts.suppressOpeningAnalysis
+          ? undefined
+          : steeringOpeningPending
+            ? 'steering'
+            : step === 0
+              ? 'initial'
+              : undefined;
+        steeringOpeningPending = false;
         // 本步只捕获一次不可变 policy snapshot。即便 add_tool_groups 在执行阶段扩容，
         // 本次模型响应仍必须按旧 snapshot 校验；新工具只在下一 step 的 schema 中出现。
         const planMode = ctx.getAgentMode() === 'plan';
@@ -318,6 +328,7 @@ export async function runAgentCoreLegacy(
           activeTools,
           runPolicy,
           step,
+          opening,
           maxSteps,
           readDedup,
           memoryRecall,
@@ -352,6 +363,7 @@ export async function runAgentCoreLegacy(
             result,
             stream,
             step,
+            opening,
             maxSteps,
             planState: toolTurnPlanState,
             turnLifecycle,

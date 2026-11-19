@@ -5,7 +5,7 @@ import type { AgentRuntimeContext } from './runtime-context.js';
 import type { HistoryManager, TerminationPolicy } from './stages/contracts.js';
 import { isToolResultsNoise, parseArgs } from './tool-helpers.js';
 import { t } from '../i18n/index.js';
-import type { ModelStreamState } from './model-turn.js';
+import type { ModelOpening, ModelStreamState } from './model-turn.js';
 import type { TurnLifecycle } from './turn-lifecycle.js';
 
 const PLAN_NAG_THRESHOLD = 3;
@@ -61,6 +61,7 @@ export interface ToolTurnInput {
   result: ChatResult;
   stream: ModelStreamState;
   step: number;
+  opening?: ModelOpening;
   maxSteps: number;
   planState: ToolTurnPlanState;
   turnLifecycle: TurnLifecycle;
@@ -82,6 +83,7 @@ export async function runToolTurn(input: ToolTurnInput): Promise<void> {
     result,
     stream,
     step,
+    opening,
     maxSteps,
     planState,
     turnLifecycle,
@@ -99,16 +101,16 @@ export async function runToolTurn(input: ToolTurnInput): Promise<void> {
     stream.gotText = false;
     stream.lastChar = '';
   }
-  const firstUserStep = step === 0 && !opts.suppressOpeningAnalysis;
-  const needsOpening = firstUserStep && (!stream.gotText || !result.content?.trim());
+  const needsOpening = opening && (!stream.gotText || !result.content?.trim());
   if (needsOpening) {
     // UI 兜底只陈述已知动作，不伪造模型正文或把工具参数写进模型历史。
     const call = result.toolCalls[0];
-    hooks.onText?.(describeFirstAction(call));
-    turnLifecycle.emitTrace('opening_fallback', { tool: call.name });
+    const action = describeFirstAction(call);
+    hooks.onText?.(opening === 'steering' ? t('agent.openingSteered', { action }) : action);
+    turnLifecycle.emitTrace('opening_fallback', { tool: call.name, ...(opening === 'steering' ? { opening } : {}) });
   }
   if (needsOpening || (stream.mode !== 'idle' && stream.lastChar !== '\n')) hooks.onTextEnd?.();
-  if (firstUserStep) {
+  if (opening) {
     for (const call of result.toolCalls) hooks.onToolCall?.(call.name);
     hooks.onChatDone?.();
   }

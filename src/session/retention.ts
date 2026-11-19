@@ -25,6 +25,7 @@ import path from 'node:path';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import type { ChatMessage } from '../llm/index.js';
 import type { SessionRecord } from './store.js';
+import { readTerminalTranscriptFile } from './terminal-transcript.js';
 import { COMPACTED_DIRNAME, isCompactedAssetName } from './compact-archive.js';
 import { TextSearchIndex } from '../context/text-search.js';
 import { config } from '../config/index.js';
@@ -278,6 +279,8 @@ function archiveSession(sessionsRoot: string, id: string, now: number): void {
   // ——否则 30 天后 resume,历史回捞链整体消失。purge 时随 gz 一起删。
   const assets = readCompactedAssets(sessionsRoot, id);
   if (Object.keys(assets).length > 0) record.compactedAssets = assets;
+  const terminalTranscript = readTerminalTranscriptFile(dir);
+  if (terminalTranscript) record.terminalTranscript = terminalTranscript;
   mkdirSync(paths.archiveDir, { recursive: true });
   const gzPath = path.join(paths.archiveDir, `${id}.json.gz`);
   writeFileSync(gzPath + '.tmp', gzipSync(Buffer.from(JSON.stringify(record), 'utf8')));

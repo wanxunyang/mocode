@@ -17,6 +17,7 @@ import { initBrowserPanel, showBrowserPanel, hideBrowserPanel, rememberDevServer
 import { initTerminalPanel, showTerminalPanel, hideTerminalPanel, refreshTerminalProject, refreshTerminalTheme, refreshTerminalLabels, fillTerminalCommand } from './terminal-panel.js';
 import { t, getLang, setLang, onLangChange, applyStaticI18n, initLangFromConfig, MOD, SUPPORTED_LANGS, LANG_NAMES, type LocaleKey, type SupportedLang } from '../i18n/index.js';
 import type { RecoverySnapshot, StreamNotice } from '../recovery-log.js';
+import { transcriptSource, type HistoryItem } from '../transcript-view.js';
 import type { WorkAttachment, AttachmentResult, AttachmentErrorCode } from '../attachment-types.js';
 import { parsePlan, planForRestore, type PlanSnapshot } from '../plan.js';
 import { pendingByProject, pendingTasks } from '../attention.js';
@@ -124,7 +125,6 @@ type WorkState = { version: 1; projects: Project[]; selectedProjectId: string; t
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
 type Attachment = WorkAttachment;
 type ImageAttachment = WorkAttachment & { dataUrl: string };
-type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: Attachment[] };
 type LlmProvider = 'openai' | 'anthropic';
 type ModelConfig = { model: string; label: string; provider: LlmProvider; promptCache: boolean; baseUrl: string; contextWindow: number | null; language: string; theme: string };
 type ModelItem = {
@@ -991,6 +991,9 @@ function addNotice(notice: StreamNotice): void {
 
 /** 切语言后就地重算会话流里的系统提示行（结构留在 data-notice，不重新落盘）。 */
 function relabelNotices(): void {
+  for (const label of Array.from(conversation.querySelectorAll('details.compacted-history > summary'))) {
+    label.textContent = t('notice.compactedHistory');
+  }
   for (const block of Array.from(conversation.querySelectorAll<HTMLElement>('.thread-notice'))) {
     const raw = block.dataset.notice;
     if (!raw) continue;
@@ -2618,6 +2621,20 @@ function renderHistory(history: HistoryItem[]): void {
   // 会触发上百次强制布局 —— 那是「点开会话要卡一下」的渲染侧主因。
   batchRender(() => {
     for (const item of history) {
+      if (item.role === 'summary') {
+        const card = document.createElement('details');
+        card.className = 'thread-notice compacted-history';
+        const label = document.createElement('summary');
+        label.textContent = t('notice.compactedHistory');
+        card.appendChild(label);
+        if (item.text) {
+          const body = document.createElement('div');
+          body.textContent = item.text;
+          card.appendChild(body);
+        }
+        conversation.appendChild(card);
+        continue;
+      }
       if (item.role === 'user') {
         finalizeTurn(activeAssistant);
         activeAssistant = null; activeTextBlock = null; activeToolGroup = null;
@@ -2711,7 +2728,7 @@ async function openTask(taskId: string): Promise<void> {
   // 快速连点以最后一次为准：旧会话读取慢时，不能把已经打开的新会话覆盖回去。
   if (!workspace || sequence !== openTaskSequence) return;
   updateState(workspace.state);
-  // 运行中/本周期跑过的任务用事件缓冲重放;旧任务(重启后)用 session 历史回放。
+  // 回放桌面记录；缺失时才用模型侧还保留的历史与摘要。
   switchToTask(taskId, workspace.history, workspace.recovery);
 }
 
@@ -4461,9 +4478,7 @@ function handleRuntimeReady(payload: Record<string, unknown>): void {
 }
 
 /**
- * 切换查看的任务。三种来源,渲染优先级:
- * 1. 本周期内跑过(streams 里有缓冲) → 从事件缓冲全量重建,顺序与实时渲染一致;
- * 2. 否则用 select-task 返回的 session 历史(重启后打开旧任务)。
+ * 切换查看的任务：桌面事件流用于重放正文和工具，模型历史用于兼容没有完整桌面记录的任务。
  */
 function switchToTask(taskId: string, history?: HistoryItem[], recovery?: RecoverySnapshot | null): void {
   conversation.innerHTML = '';
@@ -4472,9 +4487,9 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   activeTools.clear(); toolStartTimes.clear();
   approvalPanel.classList.add('hidden');
   const cached = streams.get(taskId);
-  // select-task 等待期间若实时事件已经到达，内存流更新，不能用旧快照覆盖它。
-  let stream = cached && (cached.items.length > 0 || cached.running) ? cached : undefined;
-  if (!stream && recovery) {
+  const source = transcriptSource(cached, recovery, history);
+  let stream = source === 'live' ? cached : undefined;
+  if (source === 'recovery' && recovery) {
     stream = streamFor(taskId);
     stream.items = recovery.items;
     stream.running = recovery.running === true;
@@ -4484,7 +4499,6 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
     stream.interrupted = recovery.interrupted === true && !stream.running;
     if (stream.interrupted) stream.items.push({ kind: 'error', message: t('main.task.staleRun') });
   }
-  stream ??= cached;
   if (stream && stream.items.length) {
     // 回放整段放进 batchRender：一次切换要重建几百条消息与工具块，逐条各滚一次底、
     // 各重算一次工具集合行会触发上百次强制布局（用户感受就是「点会话卡一下」）。
@@ -8272,8 +8286,7 @@ function renderWorkspacePicker(): void {
     const result = await window.mocodeWork.setTaskProject(current.id, projectId);
     if (!result.ok) { showToast('warn', result.message ?? t('toast.cannotChangeWorkspace')); return; }
     if (result.state) updateState(result.state);
-    const selected = await window.mocodeWork.selectTask(current.id);
-    if (selected) { updateState(selected.state); switchToTask(selected.task.id, selected.history); }
+    await openTask(current.id);
     showToast('success', okMessage);
   };
 

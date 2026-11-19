@@ -372,6 +372,121 @@ function usageBars(rows: Array<{ label: string; value: number; sub?: string }>):
     .join('')}</div>`;
 }
 
+/* ── 用量图表：环形占比 + 日柱状 ──
+ * renderer 没有打包器（见 work-app 的裸包名限制），引不进图表库；形状本身简单，
+ * 圆环用 SVG 的 stroke-dasharray、柱子用 DOM，交互由 attachUsageCharts 挂。 */
+
+/** 单个环形图最多 8 片：色板只有 8 色，尾部并成一块「其它」。 */
+const USAGE_SLICES = 8;
+
+interface UsagePiece { label: string; value: number; calls: number; sessions: number }
+
+/**
+ * 分类行裁到色板容量。
+ *
+ * 工作空间显示目录名而不是完整路径（图例一行放不下绝对路径）。
+ */
+function usagePieces(rows: Array<Record<string, unknown>>, labelKey: string): UsagePiece[] {
+  const api = need();
+  const pieces = rows
+    .map((row) => {
+      const raw = str(row[labelKey]);
+      const short = raw.includes('\\') || raw.includes('/') ? raw.split(/[\\/]/).filter(Boolean).pop() ?? raw : raw;
+      return { label: short, value: num(row.input) + num(row.output), calls: num(row.calls), sessions: num(row.sessions) };
+    })
+    .filter((row) => row.value > 0);
+  if (pieces.length <= USAGE_SLICES) return pieces;
+  const tail = pieces.slice(USAGE_SLICES - 1);
+  return [
+    ...pieces.slice(0, USAGE_SLICES - 1),
+    {
+      label: api.t('usage.others'),
+      value: tail.reduce((sum, row) => sum + row.value, 0),
+      calls: tail.reduce((sum, row) => sum + row.calls, 0),
+      // 会话数不能相加（同一个会话会跨条目重复出现），「其它」只报调用数。
+      sessions: 0,
+    },
+  ];
+}
+
+/**
+ * 环形占比图：扇区与右侧图例都能点（键盘 Enter/Space 同样生效），点中时下方给出明细。
+ *
+ * 数据全部落在 DOM 的 data-* 上，attachUsageCharts 只读 DOM 回填明细 —— 重绘后不会出现
+ * 「图是新的、明细还是上一份数据」。
+ */
+function usageDonut(rows: Array<Record<string, unknown>>, labelKey: string): string {
+  const api = need();
+  const pieces = usagePieces(rows, labelKey);
+  if (!pieces.length) return '';
+  const total = pieces.reduce((sum, piece) => sum + piece.value, 0) || 1;
+  const R = 54;
+  const C = 2 * Math.PI * R;
+  let drawn = 0;
+  const arcs = pieces
+    .map((piece, index) => {
+      const length = (piece.value / total) * C;
+      const pct = ((piece.value / total) * 100).toFixed(1);
+      const title = `${piece.label} · ${tokenText(piece.value)} tokens · ${pct}% · ${piece.calls} ${api.t('usage.calls')}` + (piece.sessions ? ` · ${api.t('usage.sessions', { n: piece.sessions })}` : '');
+      // 与图例行带同一组 data-*：点扇区时明细箱也能直接读，不必反查图例 DOM。
+      const arc = `<circle class="usage-donut-slice" data-usage-slice="${index}" data-label="${api.escapeHtml(piece.label)}" data-value="${piece.value}" data-pct="${pct}" data-calls="${piece.calls}" data-sessions="${piece.sessions}" tabindex="0" role="button" cx="70" cy="70" r="${R}" stroke-dasharray="${length.toFixed(3)} ${(C - length).toFixed(3)}" stroke-dashoffset="${(-drawn).toFixed(3)}" style="stroke:var(--usage-c${index})"><title>${api.escapeHtml(title)}</title></circle>`;
+      drawn += length;
+      return arc;
+    })
+    .join('');
+  const legend = pieces
+    .map((piece, index) => {
+      const pct = ((piece.value / total) * 100).toFixed(1);
+      const title = `${piece.label} · ${tokenText(piece.value)} tokens · ${pct}% · ${piece.calls} ${api.t('usage.calls')}` + (piece.sessions ? ` · ${api.t('usage.sessions', { n: piece.sessions })}` : '');
+      return `<button type="button" class="usage-legend-item" data-usage-slice="${index}" data-label="${api.escapeHtml(piece.label)}" data-value="${piece.value}" data-pct="${pct}" data-calls="${piece.calls}" data-sessions="${piece.sessions}" title="${api.escapeHtml(title)}"><span class="usage-legend-chip" style="background:var(--usage-c${index})"></span><span class="usage-legend-label">${api.escapeHtml(piece.label)}</span><span class="usage-legend-pct">${pct}%</span><span class="usage-legend-value">${api.escapeHtml(tokenText(piece.value))}</span></button>`;
+    })
+    .join('');
+  return `<div class="usage-donut" data-usage-donut><div class="usage-donut-figure"><svg viewBox="0 0 140 140" role="group" aria-label="${api.escapeHtml(api.t('usage.donutPick'))}"><circle class="usage-donut-track" cx="70" cy="70" r="${R}"></circle><g transform="rotate(-90 70 70)">${arcs}</g><text class="usage-donut-total" x="70" y="68" text-anchor="middle">${api.escapeHtml(tokenText(total))}</text><text class="usage-donut-cap" x="70" y="83" text-anchor="middle">${api.escapeHtml(api.t('usage.dayTotal'))}</text></svg></div><div class="usage-legend">${legend}</div><div class="usage-donut-detail" data-usage-donut-detail>${api.escapeHtml(api.t('usage.donutPick'))}</div></div>`;
+}
+
+/** 柱状图/热力图的点选明细：日期 + 合计 + 输入/输出拆分 + 调用数。 */
+function usageBarDetail(day: string, row: Record<string, unknown> | undefined): string {
+  const api = need();
+  if (!row) return api.escapeHtml(api.t('usage.dayEmpty'));
+  const input = num(row.input);
+  const output = num(row.output);
+  return `<b>${api.escapeHtml(day)}</b> ${api.escapeHtml(tokenText(input + output))} tokens · ${api.escapeHtml(api.t('usage.input'))} ${api.escapeHtml(tokenText(input))} · ${api.escapeHtml(api.t('usage.output'))} ${api.escapeHtml(tokenText(output))} · ${num(row.calls)} ${api.escapeHtml(api.t('usage.calls'))}`;
+}
+
+/**
+ * 按天的竖向柱状图（一格一天，柱高按窗口内最大值归一）。
+ *
+ * 柱子是 `<button>`：点一根就把那天的明细写到图下方，键盘也能走到；窗口很长时靠横向
+ * 滚动（柱宽随天数收缩），而不是把 365 根压成一条线。
+ */
+function usageColumns(rows: Array<Record<string, unknown>>, selectedDay: string): string {
+  const api = need();
+  if (!rows.length) return '';
+  const points = rows.map((row) => ({
+    day: str(row.day),
+    input: num(row.input),
+    output: num(row.output),
+    value: num(row.input) + num(row.output),
+    calls: num(row.calls),
+  }));
+  const max = points.reduce((most, point) => Math.max(most, point.value), 0) || 1;
+  const width = points.length <= 14 ? 20 : points.length <= 31 ? 12 : points.length <= 90 ? 7 : 4;
+  const labelEvery = Math.max(1, Math.ceil(points.length / 8));
+  const bars = points
+    .map((point, index) => {
+      const height = point.value > 0 ? Math.max(2, Math.round((point.value / max) * 100)) : 0;
+      const title = `${point.day} · ${tokenText(point.value)} tokens · ${point.calls} ${api.t('usage.calls')}`;
+      const label = index % labelEvery === 0 ? `<span class="usage-col-label">${api.escapeHtml(point.day.slice(5))}</span>` : '<span class="usage-col-label"></span>';
+      const selected = point.day === selectedDay ? ' is-selected' : '';
+      // 拆分数字直接写在 data-* 上：点柱子时只读 DOM 回填明细，不必再查一遍 rows。
+      return `<div class="usage-col-wrap" style="--col-w:${width}px"><button type="button" class="usage-col${selected}" data-day="${api.escapeHtml(point.day)}" data-input="${point.input}" data-output="${point.output}" data-calls="${point.calls}" title="${api.escapeHtml(title)}" aria-label="${api.escapeHtml(title)}"><span class="usage-col-fill" style="height:${height}%"></span></button>${label}</div>`;
+    })
+    .join('');
+  const picked = rows.find((row) => str(row.day) === selectedDay);
+  const detail = picked ? usageBarDetail(selectedDay, picked) : api.escapeHtml(api.t('usage.barPick'));
+  return `<div class="usage-columns" data-usage-columns>${bars}</div><div class="usage-col-detail" data-usage-bar-detail>${detail}</div>`;
+}
+
 /** 热力图窗口档位：方块数与统计窗口完全一致（一格 = 一天）。 */
 const USAGE_WINDOWS = [7, 30, 180, 365] as const;
 
@@ -473,6 +588,63 @@ function usageHeatmap(days: Array<Record<string, unknown>>, selectedDay: string)
 }
 
 /**
+ * 给环形图与日柱状图挂交互；重绘时整块 innerHTML 换掉，监听随旧节点一起回收。
+ *
+ * 两种图都只改自己那块明细文案，不重新请求：数据已在 DOM 的 data-* 里。
+ * `data-usage-slice` 同时出现在扇区（<circle>）和图例行（<button>）上，选中态要两边同步。
+ */
+function attachUsageCharts(container: HTMLElement): void {
+  for (const donut of Array.from(container.querySelectorAll<HTMLElement>('[data-usage-donut]'))) {
+    const detail = donut.querySelector<HTMLElement>('[data-usage-donut-detail]');
+    const targets = Array.from(donut.querySelectorAll<HTMLElement>('[data-usage-slice]'));
+    for (const target of targets) {
+      const select = (): void => {
+        const pct = target.dataset.pct ?? '0.0';
+        const label = target.dataset.label ?? '';
+        if (!detail) return;
+        if (label) {
+          const sessions = Number(target.dataset.sessions ?? 0);
+          const api = need();
+          detail.textContent =
+            `${label} · ${tokenText(Number(target.dataset.value ?? 0))} tokens · ${api.t('usage.share', { pct })} · ` +
+            `${target.dataset.calls ?? 0} ${api.t('usage.calls')}` +
+            (sessions > 0 ? ` · ${api.t('usage.sessions', { n: sessions })}` : '');
+        }
+        for (const other of targets) other.classList.toggle('is-selected', other.dataset.usageSlice === target.dataset.usageSlice);
+      };
+      target.addEventListener('click', select);
+      // 扇区是 <circle tabindex=0>，浏览器不会替它合成 click；图例行本身是 <button>，
+      // 回车/空格已由浏览器转成 click，再加一个 keydown 会双触发（幂等但没必要）。
+      if (target.tagName.toLowerCase() !== 'button') {
+        target.addEventListener('keydown', (event) => {
+          const key = (event as KeyboardEvent).key;
+          if (key !== 'Enter' && key !== ' ') return;
+          event.preventDefault();
+          select();
+        });
+      }
+    }
+  }
+
+  const columns = container.querySelector<HTMLElement>('[data-usage-columns]');
+  const barDetail = container.querySelector<HTMLElement>('[data-usage-bar-detail]');
+  if (columns && barDetail) {
+    const bars = Array.from(columns.querySelectorAll<HTMLButtonElement>('.usage-col[data-day]'));
+    for (const bar of bars) {
+      bar.addEventListener('click', () => {
+        for (const other of bars) other.classList.toggle('is-selected', other === bar);
+        // 明细只用行上的数字：raw tokens 已在 title 里，这里要保持「输入/输出拆分」→ 从 title 拿不到，
+        // 所以把拆分也写进 data-*（见 usageColumns）。
+        const input = Number(bar.dataset.input ?? 0);
+        const output = Number(bar.dataset.output ?? 0);
+        const api = need();
+        barDetail.innerHTML = `<b>${api.escapeHtml(bar.dataset.day ?? '')}</b> ${api.escapeHtml(tokenText(input + output))} tokens · ${api.escapeHtml(api.t('usage.input'))} ${api.escapeHtml(tokenText(input))} · ${api.escapeHtml(api.t('usage.output'))} ${api.escapeHtml(tokenText(output))} · ${bar.dataset.calls ?? 0} ${api.escapeHtml(api.t('usage.calls'))}`;
+      });
+    }
+  }
+}
+
+/**
  * 给热力图的方块挂点击：只重绘底部明细卡片，不重新请求、不重画整张图。
  * `onPick` 把选中的日期回传给 renderUsage —— 切窗口后仍能停在同一天（若该天在新窗口内）。
  */
@@ -570,37 +742,20 @@ async function renderUsage(container: HTMLElement): Promise<void> {
       const byWorkspace = Array.isArray(summary.byWorkspace) ? (summary.byWorkspace as Array<Record<string, unknown>>) : [];
       const calendar = (payload.calendar ?? {}) as Record<string, unknown>;
       const calendarDays = Array.isArray(calendar.days) ? (calendar.days as Array<Record<string, unknown>>) : [];
-      const barRows = (rows: Array<Record<string, unknown>>, labelKey: string): Array<{ label: string; value: number; sub?: string }> =>
-        rows
-          .slice(0, 8)
-          .map((row) => ({
-            label: str(row[labelKey]),
-            value: num(row.input) + num(row.output),
-            sub: api.t('usage.sessions', { n: num(row.sessions) }),
-          }))
-          // 工作空间显示目录名而不是完整路径（侧栏宽度有限，完整路径放到 title 里）。
-          .map((row) => ({ ...row, label: row.label.includes('\\') || row.label.includes('/') ? row.label.split(/[\\/]/).filter(Boolean).pop() ?? row.label : row.label }));
       const windowHint = api.t('usage.windowHint', { label: windowLabel(days) });
       const section = (title: string, hint: string, body: string): string =>
         `<div class="settings-block"><div class="settings-block-head"><b>${api.escapeHtml(title)}</b><span>${api.escapeHtml(hint)}</span></div>${body}</div>`;
       // 选中的那天可能落在新窗口外（例如从一年切到 7 天）：此时清掉，明细箱回到「点一格看当天」。
       if (selectedDay && !calendarDays.some((row) => str(row.day) === selectedDay)) selectedDay = '';
-      // 按天条形最多 14 行（再多就成了一张不 readable 的长表）；窗口内天数不足时全列。
-      const dayRows = byDay
-        .slice(-Math.min(14, Math.max(7, byDay.length)))
-        .map((row) => ({
-          label: str(row.day).slice(5),
-          value: num(row.input) + num(row.output),
-          sub: api.t('usage.sessions', { n: num(row.sessions) }),
-        }));
       container.innerHTML =
         head +
         usageHeatmap(calendarDays, selectedDay) +
         `<div class="settings-block">${tiles}</div>` +
-        section(api.t('usage.byModel'), windowHint, byModel.length ? usageBars(barRows(byModel, 'key')) : emptyBlock(api.t('usage.empty'))) +
-        section(api.t('usage.byWorkspace'), windowHint, byWorkspace.length ? usageBars(barRows(byWorkspace, 'key')) : emptyBlock(api.t('usage.empty'))) +
-        section(api.t('usage.byDay'), windowHint, byDay.length ? usageBars(dayRows) : emptyBlock(api.t('usage.empty')));
+        section(api.t('usage.byModel'), windowHint, byModel.length ? usageDonut(byModel, 'key') : emptyBlock(api.t('usage.empty'))) +
+        section(api.t('usage.byWorkspace'), windowHint, byWorkspace.length ? usageDonut(byWorkspace, 'key') : emptyBlock(api.t('usage.empty'))) +
+        section(api.t('usage.byDay'), windowHint, byDay.length ? usageColumns(byDay, selectedDay) : emptyBlock(api.t('usage.empty')));
       attachHeatmap(container, calendarDays, (day) => { selectedDay = day; });
+      attachUsageCharts(container);
     } else {
       const main = (summary.main ?? {}) as Record<string, unknown>;
       const compact = (summary.compact ?? {}) as Record<string, unknown>;

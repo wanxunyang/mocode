@@ -12,7 +12,6 @@ import { writeConfigKeys } from '../../config/file.js';
 import { savePreset, setActivePresetName, type ModelPreset } from '../../config/presets.js';
 import { reconfigureClient } from '../../llm/index.js';
 import { promptIntervention } from '../../ui/intervention.js';
-import { renderHistory } from '../message-format.js';
 import { refreshCatalog } from '../../models/catalog.js';
 import type { CatalogEntry } from '../../models/search.js';
 import { buildPreset, defaultPresetName, preferredKeyEnvName, resolveApiKey } from '../../models/map-preset.js';
@@ -52,7 +51,7 @@ export function applyPresetConfig(ctx: CommandContext, p: ModelPreset): void {
   reconfigureClient();
   ctx.refreshStatusBase(ctx.history);
   layout.clearContent();
-  if (ctx.history.some((m) => m.role === 'user')) renderHistory(ctx.history);
+  if (ctx.history.some((m) => m.role === 'user')) ctx.renderTranscript();
   else layout.writeBanner(bannerLines(ctx.banner()));
 }
 

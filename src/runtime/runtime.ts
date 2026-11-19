@@ -174,7 +174,7 @@ export class Runtime {
   constructor(init: RuntimeInit = {}) {
     const { context, contextState, onStart, onClose, ...contextInit } = init;
     this.context = context ?? createAgentRuntimeContext(contextInit);
-    this.contextState = contextState ?? createContextState();
+    this.contextState = contextState ?? createContextState({ archiveHistory: true });
     this.onStart = onStart;
     this.onClose = onClose;
 

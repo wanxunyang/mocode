@@ -11,6 +11,7 @@ import {
   readRecoveryAsync,
   recoveryLog,
 } from '../../packages/work-app/src/recovery-log.js';
+import { compactedHistorySummary, transcriptSource } from '../../packages/work-app/src/transcript-view.js';
 
 /** 临时 root：同步 / 异步回调都支持（瘦身那几条要走 await）。 */
 async function withRoot(run: (root: string) => void | Promise<void>): Promise<void> {
@@ -23,6 +24,49 @@ async function withRoot(run: (root: string) => void | Promise<void>): Promise<vo
 }
 
 const event = (name: string, payload: Record<string, unknown> = {}) => ({ type: 'event', event: name, payload });
+
+test('压缩后的模型历史不遮住桌面正文，旧快照也不会覆盖更新的实时输入', () =>
+  withRoot(async (root) => {
+    const log = recoveryLog(root, 'compacted-task');
+    log.user('第一轮');
+    log.event(event('text_delta', { text: '旧回复原文' }));
+    log.event(event('context_compacted', { summarized: true }));
+    log.user('第二轮');
+    log.event(event('text_delta', { text: '最近回复原文' }));
+    const recovery = await readRecoveryAsync(root, 'compacted-task');
+    assert.ok(recovery);
+
+    const summary = compactedHistorySummary({ role: 'system', content: '# 会话摘要\n较早的进度' }, 1);
+    assert.deepEqual(summary, { role: 'summary', text: '较早的进度' });
+    assert.equal(compactedHistorySummary({ role: 'system', content: '# 会话摘要\n系统提示' }, 0), undefined);
+    assert.equal(compactedHistorySummary({ role: 'system', content: '# 会话摘要设置' }, 1), undefined);
+    const history = [summary!, { role: 'user', text: '第一轮' }, { role: 'user', text: '第二轮' }] as const;
+    const userOnly = recovery.items.filter((item) => item.kind === 'user');
+    assert.equal(transcriptSource({ running: false, items: userOnly }, recovery, history), 'recovery');
+    assert.deepEqual(
+      recovery.items.flatMap((item) => (item.kind === 'text' ? [item.text] : [])),
+      ['旧回复原文', '最近回复原文'],
+    );
+    assert.equal(transcriptSource(undefined, { ...recovery, items: userOnly }, history), 'history');
+    assert.equal(transcriptSource(undefined, { ...recovery, items: userOnly, running: true }, history), 'recovery');
+    assert.equal(
+      transcriptSource(
+        undefined,
+        {
+          ...recovery,
+          items: [...userOnly, { kind: 'error', message: '连接断开' }],
+        },
+        history,
+      ),
+      'recovery',
+    );
+    assert.equal(transcriptSource(undefined, null, history), 'history');
+    assert.equal(
+      transcriptSource({ running: true, items: [{ kind: 'user', text: '第三轮，尚未落盘' }] }, recovery, history),
+      'live',
+    );
+    assert.equal(transcriptSource({ running: false, items: recovery.items.slice(-2) }, recovery, history), 'recovery');
+  }));
 
 test('恢复多轮用户消息、附件、正文、工具结构化结果和上下文快照', () =>
   withRoot((root) => {

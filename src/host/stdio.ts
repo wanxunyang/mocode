@@ -91,7 +91,7 @@ let sessionId = '';
 let history: ChatMessage[] = [];
 let queryHistory: string[] = [];
 let lastToolGroups: ToolRouteGroupName[] = [];
-let contextState = createContextState();
+let contextState = createContextState({ archiveHistory: true });
 const approvals = new Map<string, ApprovalWaiter>();
 /** 独立 AI 请求按面板 requestId 取消；不得复用任务 run 的 activeRun。 */
 const commitMessageRequests = new Map<string, AbortController>();
@@ -254,7 +254,7 @@ function createSession(): void {
   history = [{ role: 'system', content: currentSystemMessage() }];
   queryHistory = [];
   lastToolGroups = [];
-  contextState = createContextState();
+  contextState = createContextState({ archiveHistory: true });
   // R17 基线必须跟着「会话真正开始」这一刻拍：/clear、resume 之后旧基线作废，
   // 否则新会话第一条消息会把上一会话的改动当成「本轮新增」播报一遍。
   captureMemoryBaseline();
@@ -271,7 +271,7 @@ function restoreSession(id: string): boolean {
   else history.unshift({ role: 'system', content: currentSystemMessage() });
   queryHistory = [...(loaded.queryHistory ?? [])];
   lastToolGroups = [...(loaded.lastToolGroups ?? [])];
-  contextState = createContextState();
+  contextState = createContextState({ archiveHistory: true });
   captureMemoryBaseline();
   return true;
 }

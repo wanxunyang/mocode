@@ -19,7 +19,7 @@ import {
   type WorkPresetDraft,
   type WorkPresetFile,
 } from './model-config.js';
-import { ATTACHMENT_EXTENSIONS, configureAttachmentModulePath, historyAttachments, readAttachment, type WorkAttachment } from './attachments.js';
+import { ATTACHMENT_EXTENSIONS, configureAttachmentModulePath, historyAttachments, readAttachment } from './attachments.js';
 // 计划解析与渲染层共用同一份（renderer 走 ../plan.js），否则侧栏的 n/m 与面板会对不上。
 import { parsePlan } from './plan.js';
 // 右键菜单的「弹哪些项」是纯决策，抽成纯函数便于单测（Menu 在无头环境造不出来）。
@@ -27,6 +27,7 @@ import { contextMenuPlan } from './context-menu.js';
 import { truncateSessionAfterUser, truncateSessionAtUser, type RawSessionRecord } from './truncate-session.js';
 import { clampToWorkArea } from './window-fit.js';
 import { compactRecoveryLogs, deleteRecoveryLog, readRecoveryAsync, recoveryLog, type RecoveryAttachment, type RecoveryEnvelope, type RecoveryLog } from './recovery-log.js';
+import { compactedHistorySummary, type HistoryItem } from './transcript-view.js';
 import { tMain } from './i18n/main.js';
 // 浏览器面板的分区名由主进程与渲染层共用，见 browser-panel.ts。
 import { panelPartitionFor } from './browser-panel.js';
@@ -926,12 +927,15 @@ function sessionHistory(project: Project, sessionId?: string): HistoryItem[] {
   return messages ? flattenHistory(messages) : [];
 }
 
-type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: WorkAttachment[] };
-
 function flattenHistory(messages: Array<Record<string, unknown>>): HistoryItem[] {
   const items: HistoryItem[] = [];
   const calls = new Map<string, { name: string; arguments: string }>();
-  for (const message of messages) {
+  for (const [index, message] of messages.entries()) {
+    const summary = compactedHistorySummary(message, index);
+    if (summary) {
+      items.push(summary);
+      continue;
+    }
     const role = message.role;
     if (role === 'user' || role === 'assistant') {
       const text = contentText(message.content);

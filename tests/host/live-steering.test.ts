@@ -28,8 +28,24 @@ test('public host accepts a live multimodal update without starting another run'
       if (requests.length === 1) {
         held = res;
         res.write(frame('working'));
-      } else {
+      } else if (requests.length === 2) {
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: 'steered-tool', function: { name: 'glob', arguments: '{"pattern":"*.js"}' } },
+                  ],
+                },
+              },
+            ],
+          })}\n\n`,
+        );
         res.write(frame('updated'));
+        res.end('data: [DONE]\n\n');
+      } else {
+        res.write(frame('done'));
         res.end('data: [DONE]\n\n');
       }
     });
@@ -109,7 +125,15 @@ test('public host accepts a live multimodal update without starting another run'
     }
     assert.equal(events.filter((event) => event.event === 'run_started').length, 1);
     assert.equal(events.filter((event) => event.event === 'message_received').length, 1);
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 3);
+    const openingIndex = events.findIndex((event) => event.event === 'text_delta' && event.payload?.text === 'updated');
+    const preparingIndex = events.findIndex(
+      (event) => event.event === 'status' && event.payload?.value === 'preparing_tool',
+    );
+    const toolIndex = events.findIndex(
+      (event) => event.event === 'tool_started' && event.payload?.id === 'steered-tool',
+    );
+    assert.ok(openingIndex >= 0 && openingIndex < preparingIndex && preparingIndex < toolIndex);
     const reminders = requests[1]
       .filter((message) => message.role === 'system')
       .map((message) => String(message.content))
@@ -118,6 +142,8 @@ test('public host accepts a live multimodal update without starting another run'
     assert.match(reminders, /original request and all subsequent user updates together/);
     assert.match(reminders, /preserving earlier requirements/);
     assert.match(reminders, /continue from the current progress/);
+    assert.match(reminders, /## Steering opening/);
+    assert.ok(!requests[2].some((message) => String(message.content).includes('## Steering opening')));
     assert.match(reminders, /explicitly asks to cancel, stop, or switch tasks/);
     assert.equal(
       requests[0].some((message) => String(message.content).includes('## Live user updates')),

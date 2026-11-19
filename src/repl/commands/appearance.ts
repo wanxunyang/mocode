@@ -15,7 +15,6 @@ import { config } from '../../config/index.js';
 import { updateConfigKey } from '../../config/file.js';
 import { promptThemePicker, type SessionPickerItem } from '../../ui/prompt.js';
 import { themeDescription } from '../commands.js';
-import { renderHistory } from '../message-format.js';
 import { unhandled, next, type CommandHandler } from './types.js';
 
 export const appearanceCommands: CommandHandler[] = [
@@ -53,7 +52,7 @@ export const appearanceCommands: CommandHandler[] = [
     ctx.refreshStatusBase(ctx.history);
     layout.clearContent();
     if (ctx.history.some((m) => m.role === 'user')) {
-      renderHistory(ctx.history);
+      ctx.renderTranscript();
     } else {
       layout.writeBanner(bannerLines(ctx.banner()));
     }

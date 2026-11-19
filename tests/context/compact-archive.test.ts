@@ -130,7 +130,7 @@ test('SessionStore.archiveCompactedMessages: 超总量预算从最老段淘汰,�
   }
 });
 
-test('compactHistory 摘要成功后归档旧区原文并在摘要尾部写 [archived] 指针(仅主 agent)', async () => {
+test('compactHistory 独立宿主状态也归档旧区原文并在摘要尾部写 [archived] 指针', async () => {
   const root = mkdtempSync(join(tmpdir(), 'mocode-compact-integ-'));
   const prevSessionDir = config.sessionDir;
   config.sessionDir = join(root, '.mocode', 'sessions');
@@ -145,6 +145,7 @@ test('compactHistory 摘要成功后归档旧区原文并在摘要尾部写 [arc
     const result = await compactHistory(history, {
       window: 1_200,
       threshold: 100,
+      contextState: createContextState({ archiveHistory: true }),
       summarize: async () => '## Completed\n压完了',
     });
     assert.equal(result.reason, 'summarize');

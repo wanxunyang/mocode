@@ -189,6 +189,8 @@ export interface CompactResult {
  * scheduler.ts 写最近一次调度日志(可选,repl 可读不到时 no-op)。
  * correction 是按 provider/model/tool-set 持久化的 EWMA；压缩或清空 history 不应重置。 */
 export interface ContextState {
+  /** 此状态属于持久化会话，压缩旧区和截断工具原文可写入会话归档。 */
+  readonly archiveHistory?: true;
   lastUsage?: ChatUsage;
   lastEstimate: number;
   /** 当前 agent step(compact usage 记录用);model-turn 每步写入。 */
@@ -235,11 +237,16 @@ export interface ContextState {
   };
 }
 
-export function createContextState(): ContextState {
-  return { lastEstimate: 0, correction: 1, calibrationSamples: 0 };
+export function createContextState(options: { archiveHistory?: boolean } = {}): ContextState {
+  return {
+    lastEstimate: 0,
+    correction: 1,
+    calibrationSamples: 0,
+    ...(options.archiveHistory ? { archiveHistory: true as const } : {}),
+  };
 }
 
-export const contextState: ContextState = createContextState();
+export const contextState: ContextState = createContextState({ archiveHistory: true });
 
 /** 中截:text 太长时保 head + 标记 + tail,总长 ≤ max。 */
 export function truncateMid(text: string, max: number): string {
@@ -1238,7 +1245,7 @@ async function compactHistoryInner(history: ChatMessage[], opts: CompactOptions)
     // 随后被覆盖——落盘 compacted/seg-NNN.md,模型事后靠 grep/read_file 回捞精确原文。
     // best-effort:失败只丢回捞能力,绝不阻塞压缩。
     let archivedPath: string | null = null;
-    if (state === contextState) {
+    if (state.archiveHistory) {
       try {
         archivedPath = getActiveSessionStore().archiveCompactedMessages(getCurrentSessionId() ?? '', older);
       } catch {

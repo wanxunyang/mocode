@@ -28,7 +28,6 @@ import {
 import { reconfigureClient } from '../../llm/index.js';
 import { recognizesReasoning, type ReasoningEffort } from '../../llm/reasoning.js';
 import { promptIntervention } from '../../ui/intervention.js';
-import { renderHistory } from '../message-format.js';
 import { MODEL_PRESETS, maskKey } from '../commands.js';
 import { unhandled, next, type CommandContext, type CommandHandler } from './types.js';
 import type { PresetProvider } from '../../config/presets.js';
@@ -129,7 +128,7 @@ export const modelCommands: CommandHandler[] = [
       ctx.refreshStatusBase(history);
       layout.clearContent();
       if (history.some((m) => m.role === 'user')) {
-        renderHistory(history);
+        ctx.renderTranscript();
       } else {
         layout.writeBanner(bannerLines(ctx.banner()));
       }
@@ -513,7 +512,7 @@ export const modelCommands: CommandHandler[] = [
     ctx.refreshStatusBase(history);
     layout.clearContent();
     if (history.some((m) => m.role === 'user')) {
-      renderHistory(history);
+      ctx.renderTranscript();
     } else {
       layout.writeBanner(bannerLines(ctx.banner()));
     }

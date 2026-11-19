@@ -74,6 +74,9 @@ export interface CommandContext {
   };
   /** 欢迎引导块行(/clear 后重写)。 */
   readonly welcomeLines: () => string[];
+  /** 使用展示记录重绘，供主题/模型切换以及会话恢复共用。 */
+  readonly renderTranscript: () => void;
+  readonly recordCompaction: (before: ChatMessage[]) => void;
 
   /** 刷状态行基线(不改滚动位置)。 */
   readonly refreshStatusBase: (history: ChatMessage[], usage?: ChatUsage) => void;

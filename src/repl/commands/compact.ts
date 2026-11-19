@@ -15,6 +15,7 @@ import { t } from '../../i18n/index.js';
 import { appendCurrentSessionRuntimeEvent, hashTraceValue } from '../../session/index.js';
 import { startRunningListener, stopRunningListener } from '../running-input.js';
 import { unhandled, next, type CommandHandler } from './types.js';
+import { createTerminalTranscript } from '../../session/terminal-transcript.js';
 
 export const compactCommands: CommandHandler[] = [
   async (ctx) => {
@@ -32,6 +33,7 @@ export const compactCommands: CommandHandler[] = [
     // 走调度器路径:与自动每步压缩完全一致——先跑零成本清理(cold tools 优先),最后才 LLM 摘要。
     // focus 透传到 compact_history action 的 LLM 摘要 prompt。
     // 返回 SchedulerRunLog 给 UI 显示决策;退化路径(开关关时)在 manualCompact 内部走 compactHistory。
+    const beforeReplay = createTerminalTranscript(ctx.history).base;
     const log = await (async () => {
       const signal = startRunningListener(t('running.compacting'));
       try {
@@ -48,6 +50,7 @@ export const compactCommands: CommandHandler[] = [
       throw e;
     });
     if (!log) return next();
+    if (log.historyMutation !== 'none') ctx.recordCompaction(beforeReplay);
     const d = log.compactDetail;
     appendCurrentSessionRuntimeEvent('compact', {
       source: 'manual',

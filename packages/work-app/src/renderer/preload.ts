@@ -1,12 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { RecoverySnapshot } from '../recovery-log.js';
+import type { HistoryItem } from '../transcript-view.js';
 import type { AttachmentResult, WorkAttachment } from '../attachment-types.js';
 import type { ReasoningCapability, WorkPresetDraft, WorkPresetFile } from '../model-config.js';
 
 export type ModelDraft = WorkPresetDraft;
 export type ModelPresetDetail = WorkPresetFile;
-
-type HistoryItem = { role: 'user' | 'assistant' | 'tool'; text: string; name?: string; arguments?: string; attachments?: WorkAttachment[] };
 
 type AgentEnvelope = { type: string; event?: string; requestId?: string; payload?: Record<string, unknown>; error?: string };
 type Project = { id: string; name: string; root: string; branch: string; auto?: boolean; sessionCount?: number };
@@ -74,7 +73,7 @@ contextBridge.exposeInMainWorld('mocodeWork', {
   // 侧栏内联区用：每个空间最近 20 条会话，一次批量取回（内联要按时间与任务混排）。
   spaceRecentSessions: (): Promise<Array<{ projectId: string; sessions: Array<{ id: string; createdAt: string; model: string; firstUser: string; lastActiveAt?: string }> }>> =>
     ipcRenderer.invoke('work:space-recent-sessions'),
-  adoptSession: (payload: { projectId: string; sessionId: string; title?: string }): Promise<{ ok: boolean; message?: string; state?: ProjectState; task?: Task; history?: Array<{ role: 'user' | 'assistant' | 'tool'; text: string }> }> =>
+  adoptSession: (payload: { projectId: string; sessionId: string; title?: string }): Promise<{ ok: boolean; message?: string; state?: ProjectState; task?: Task; history?: HistoryItem[]; recovery?: RecoverySnapshot | null }> =>
     ipcRenderer.invoke('work:adopt-session', payload),
   readFile: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:read-file', file),
   fileDiff: (file: string): Promise<{ path?: string; content?: string; error?: string }> => ipcRenderer.invoke('work:file-diff', file),

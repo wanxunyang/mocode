@@ -140,7 +140,7 @@ export function queryHistoryFromMessages(messages: ChatMessage[]): string[] {
  * 用 batch.writeSummaryOnly 出单行摘要(与实时 runAgent 同一渲染器,UI 一致)。
  * 回放默认全折叠;用户可鼠标点击摘要行展开(由 BatchRenderer 接管,见 ui/batch.ts)。
  */
-export function renderHistory(history: ChatMessage[]): void {
+export function renderHistory(history: ChatMessage[], useLiveAttachments = true): void {
   const idToEntry = new Map<string, batch.BatchEntry>();
   const idToArgs = new Map<string, string>(); // tool_call id → 原始参数 JSON,供重建 mutation diff
   // 普通工具可跨 assistant 步聚合；mutation 各自占一个 group，并切断前后普通工具。
@@ -158,19 +158,19 @@ export function renderHistory(history: ChatMessage[]): void {
   for (let idx = 0; idx < history.length; idx++) {
     const m = history[idx];
     if (m.role === 'system') {
-      // compact 摘要是被压缩掉的助手回复/工具过程的唯一留存:回放时显示出来(history[0] 的系统提示仍跳过)。
+      // 旧会话有摘要时显示摘要正文；展示记录中的无正文标记只提示模型做过压缩。
       const body = textOf((m as { content?: unknown }).content);
       if (idx > 0 && body.startsWith(SUMMARY_MARKER)) {
         flushBatch();
         layout.normalizeMutationBoundary();
-        layout.contentWrite(`${ui.dim}${t('repl.compactedNotice')}${ui.reset}\n\n`);
         const text = body.slice(SUMMARY_MARKER.length).trim();
+        layout.contentWrite(`${ui.dim}${t(text ? 'repl.compactedNotice' : 'repl.modelCompacted')}${ui.reset}\n\n`);
         if (text.length > SUMMARY_REPLAY_MAX_CHARS) {
           layout.contentWriteMdOnce(text.slice(0, SUMMARY_REPLAY_MAX_CHARS));
           layout.contentWrite(
             `${ui.dim}${t('repl.compactedTruncated', { total: text.length, shown: SUMMARY_REPLAY_MAX_CHARS })}${ui.reset}\n`,
           );
-        } else {
+        } else if (text) {
           layout.contentWriteMdOnce(text);
         }
         layout.normalizeMutationBoundary();
@@ -184,7 +184,7 @@ export function renderHistory(history: ChatMessage[]): void {
       layout.normalizeInputBoundary();
       const lines = textOf((m as { content?: unknown }).content).split('\n');
       layout.contentWrite(formatUserMessage(lines));
-      const atts = messageAttachments.get(idx);
+      const atts = useLiveAttachments ? messageAttachments.get(idx) : undefined;
       if (atts && atts.length > 0) {
         for (const a of atts) {
           layout.contentWrite(`  ${ui.dim}${renderChip(a)}${ui.reset}\n`);
@@ -211,7 +211,8 @@ export function renderHistory(history: ChatMessage[]): void {
           if (p && typeof p === 'object' && (p as { type?: string }).type === 'image_url') {
             const url = (p as { image_url?: { url?: string } }).image_url?.url ?? '';
             const mime = url.startsWith('data:') ? url.slice(5, url.indexOf(';')) : 'image';
-            layout.contentWrite(`  ${ui.dim}📷 ${mime}${ui.reset}\n`);
+            const name = (p as { name?: unknown }).name;
+            layout.contentWrite(`  ${ui.dim}📷 ${typeof name === 'string' && name ? name : mime}${ui.reset}\n`);
             fallbackChips++;
           }
         }

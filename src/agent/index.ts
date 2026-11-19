@@ -17,7 +17,8 @@ import { createPetHooks } from '../pet/state.js';
 import { defaultAgentRuntimeContext, type AgentRuntimeContext } from './runtime-context.js';
 import { t } from '../i18n/index.js';
 import { isToolErrorOutput } from '../tools/result.js';
-import { appendCurrentSessionTraceEvent } from '../session/index.js';
+import { appendCurrentSessionTraceEvent, capToolResultForHistory } from '../session/index.js';
+import type { TerminalTurnTranscript } from '../session/terminal-transcript.js';
 import type { ToolPolicyController } from '../tools/policy.js';
 import { buildTurnRecallSection, isTurnRecallEnabled } from '../memory/turn-recall.js';
 import { memoryTailChangedIds } from '../memory/tail.js';
@@ -335,6 +336,7 @@ export async function runAgent(
   /** TUI composition root 绑定的 Runtime；旧调用传 AgentRuntimeContext 仍兼容。 */
   runtimeOrContext: Runtime | AgentRuntimeContext = defaultRuntime,
   drainUserMessages?: () => Array<string | ContentPart[]>,
+  transcript?: TerminalTurnTranscript,
 ): Promise<AgentRunResult> {
   const runtime =
     runtimeOrContext instanceof Runtime
@@ -411,6 +413,7 @@ export async function runAgent(
     if (followsToolBatch && visible) layout.normalizeMutationBoundary();
     spinner.stop(); // 任何正文 token 都停 spinner(首 token 停「思考中」;onToolCall 重启后若又来文本则停「生成中」)。未旋转时 stop 为 no-op。
     layout.contentWriteMd(visible); // 正文走 markdown 渲染(代码块高亮 / 标题 / 列表 / 行内 …),见 ui/markdown.ts
+    transcript?.addText(visible);
     if (visible) {
       lastChar = visible[visible.length - 1];
       if (visible.trim().length > 0) {
@@ -517,8 +520,13 @@ export async function runAgent(
     onToolStart: (name) => spinner.start(t('agent.executing', { tool: name })),
     onToolOutput: (tc, chunk) => batch.recordOutput(tc.id, chunk, layout),
     onToolDone: () => spinner.stop(),
-    onToolResult: (tc, output, parsed, preWriteOld, editStartLine, multiHunks) =>
-      writeToolResult(tc, output, parsed, preWriteOld, editStartLine, runtime.context.toolRuntime, multiHunks),
+    onToolResult: (tc, output, parsed, preWriteOld, editStartLine, multiHunks) => {
+      if (transcript) transcript.addTool(tc, capToolResultForHistory(tc.name, output));
+      writeToolResult(tc, output, parsed, preWriteOld, editStartLine, runtime.context.toolRuntime, multiHunks);
+    },
+    onCompactProgress: (event) => {
+      if (event.phase === 'done' && event.compacted) transcript?.compacted();
+    },
     onToolBatchEnd: () => {
       // 一次工具轮次结束不再切 UI batch；下一轮若仍无正文，继续复用 currentBatchId。
     },

@@ -27,6 +27,13 @@ import { readClipboardAsAttachment } from '../attachments/clipboard.js';
 import { modelSupportsVision } from '../llm/capabilities.js';
 import type { ContentPart } from '../agent/core.js';
 import { contextState, appendCurrentSessionRuntimeEvent } from '../session/index.js';
+import {
+  createTerminalTranscript,
+  createTerminalTurn,
+  rollbackTerminalTranscript,
+  terminalCompactionMarker,
+  type TerminalTurnTranscript,
+} from '../session/terminal-transcript.js';
 import { skillsChangedSinceLastObserve } from '../skills/index.js';
 import { clearSkillActivation } from '../skills/activation.js';
 import {
@@ -372,6 +379,49 @@ export async function startRepl(
   // 否则新会话只塞 system 提示(默认 auto)。
   const history: ChatMessage[] =
     initialHistory && initialHistory.length ? initialHistory : [{ role: 'system', content: buildSystemMessage(false) }];
+  let transcriptSessionId: string | undefined = currentSessionId;
+  const loadTerminalTranscript = () => {
+    if (!currentSessionId) return;
+    const transcript = runtimeContext.sessionStore.loadTerminalTranscript(currentSessionId);
+    const latest = transcript?.turns.at(-1);
+    const lastRollbackId = runtime.rollback.list().at(-1)?.turnId ?? 0;
+    if (transcript && latest && latest.turnId > lastRollbackId) {
+      // 归档恢复或重建快照后，模型侧可能重新编号。保留所有显示内容，但旧编号不能用于回滚。
+      return { base: transcript.base.concat(transcript.turns.flatMap((turn) => turn.messages)), turns: [] };
+    }
+    return transcript;
+  };
+  let terminalTranscript = loadTerminalTranscript();
+  const syncTerminalTranscript = (): void => {
+    if (transcriptSessionId === currentSessionId) return;
+    transcriptSessionId = currentSessionId;
+    terminalTranscript = loadTerminalTranscript();
+  };
+  const visibleHistory = (): ChatMessage[] => {
+    syncTerminalTranscript();
+    return terminalTranscript
+      ? terminalTranscript.base.concat(terminalTranscript.turns.flatMap((turn) => turn.messages))
+      : history;
+  };
+  const renderTranscript = (): void => {
+    const visible = visibleHistory();
+    renderHistory(visible, visible === history);
+  };
+  const saveTerminalTranscript = (): void => {
+    if (!currentSessionId || !terminalTranscript) return;
+    try {
+      runtimeContext.sessionStore.saveTerminalTranscript(currentSessionId, terminalTranscript);
+    } catch {
+      // 独立回放记录写失败时，仍保留核心模型会话。
+    }
+  };
+  const recordCompaction = (before: ChatMessage[]): void => {
+    syncTerminalTranscript();
+    terminalTranscript ??= { base: before, turns: [] };
+    const last = terminalTranscript.turns.at(-1)?.messages ?? terminalTranscript.base;
+    last.push(terminalCompactionMarker());
+    saveTerminalTranscript();
+  };
   // 新 session 使用独立输入历史；旧 session 没有该字段时从 user 消息兼容回填一次。
   let queryHistory: string[] = initialQueryHistory ? [...initialQueryHistory] : queryHistoryFromMessages(history);
   /** 上一真实用户 turn 的最终工具簇；仅作为下一次 LLM 路由失败/续接时的回退。 */
@@ -439,11 +489,11 @@ export async function startRepl(
   if (history.some((m) => m.role === 'user')) {
     // --resume 锚点:先给一行会话摘要(id/消息数/当前模型),新手对恢复状态有定位感,
     // 再铺历史对话。renderHistory 之后不再追加,锚点恒为恢复内容的第一行。
-    const anchorCount = history.filter((m) => m.role !== 'system').length;
+    const anchorCount = visibleHistory().filter((m) => m.role !== 'system').length;
     layout.contentWrite(
       `${ui.dim}${t('repl.resumeAnchor', { id: currentSessionId, count: anchorCount, model: config.model })}${ui.reset}\n`,
     );
-    renderHistory(history);
+    renderTranscript();
     // 强制回尾:同 /resume 命令,renderHistory 展开详情会设 scrollOffset>0,需复位避免闪烁。
     layout.resetScroll();
     layout.repaintViewport();
@@ -562,6 +612,7 @@ export async function startRepl(
     // 预填该轮 user 输入。必须经 store 按"尾部对齐的真实用户轮消息"定位——直接按 history 里
     // role==='user' 数下标会把工具附件的合成 user 消息/被剪枝老轮算进去,预填错轮。
     const pickedMessage = runtime.rollback.turnUserMessage(picked, history);
+    const firstDiscardedTurnId = runtime.rollback.list()[picked]?.turnId;
     const prefillText = pickedMessage ? textOf((pickedMessage as { content?: unknown }).content) : '';
     const plan = runtime.rollback.plan(picked, history);
     // 清屏(擦选轮菜单 + /rollback 回显)+ 复位 lastView(dim 空),给文件询问一个干净、resize 安全的画面
@@ -595,6 +646,11 @@ export async function startRepl(
     const rolledBackFromTurnId = runtimeContext.getCurrentTurnId();
     const turnCountBeforeRollback = runtime.rollback.list().length;
     const rollbackResult = runtime.rollback.apply(plan, history, revertPaths);
+    syncTerminalTranscript();
+    if (terminalTranscript) {
+      terminalTranscript = rollbackTerminalTranscript(terminalTranscript, firstDiscardedTurnId, history);
+      saveTerminalTranscript();
+    }
     // 被撤销轮次的最终 route 无法再作为可靠 continuation 基线；下一真实 turn 重新由 LLM 选择。
     lastToolGroups = [];
     if (!currentSessionId) currentSessionId = runtime.session.create();
@@ -620,7 +676,7 @@ export async function startRepl(
     }
     // 复显剩余对话(无提示行),输入框预填该轮 user 输入 → 下轮 Enter 重新跑
     layout.clearContent();
-    renderHistory(history);
+    renderTranscript();
     if (rollbackResult.conflictedFiles.length > 0) {
       layout.contentWrite(
         `${ui.yellow}  ⚠ rollback conflict: ${rollbackResult.conflictedFiles.join(', ')} 已在 Agent 提交后变化，未覆盖。${ui.reset}\n`,
@@ -665,6 +721,8 @@ export async function startRepl(
     let initialToolRoute: Record<string, unknown> | undefined;
     /** 本轮最后一条 assistant 正文（外部观察者要在轮末拿它当交接摘要）。 */
     let finalText: string | null = null;
+    let terminalTurn: TerminalTurnTranscript | undefined;
+    const priorTurnId = runtimeContext.getCurrentTurnId();
     // 继承 toolPolicy 的合成执行轮没有独立路由;真实用户轮在 await routeToolGroups 完成后置 true。
     // 路由完成前 Ctrl+C = 撤回本轮消息(routedCancel),之后才是"中断 agent 执行"(原 abort 语义)。
     let routingDone = toolPolicy != null;
@@ -753,6 +811,12 @@ export async function startRepl(
       // 否则整轮冻结在轮首 refreshStatusBase 的值,「执行 grep」时 2k/1000k 不动。
       // 前摄通道的每轮限额在此重置(R3.4):按进程计会让常驻 REPL 几轮后永久静默。
       resetProactiveTurn();
+      syncTerminalTranscript();
+      terminalTranscript ??= createTerminalTranscript(history);
+      terminalTurn = createTerminalTurn(
+        userInput,
+        imgs.map((image) => image.name),
+      );
       const result = await runAgent(
         history,
         userInput,
@@ -771,13 +835,16 @@ export async function startRepl(
           drainSteeringMessages().map((text) => {
             echoInput(text.split('\n'));
             queryHistory.push(text);
+            terminalTurn?.addUser(text);
             return text;
           }),
+        terminalTurn,
       );
       // 撞限 salvage 摘要要在 TUI 落地:runAgent 只把 finalText 带回不渲染,主线撞限的
       // 收尾摘要若不打印,这笔收尾请求的 token 就白花(用户只看到「达到最大步数」一行)。
       if (result.terminationReason === 'max_steps' && result.finalText) {
         layout.contentWrite(result.finalText.endsWith('\n') ? result.finalText : `${result.finalText}\n`);
+        terminalTurn.addText(result.finalText);
       }
       finalText = result.finalText;
       if (toolPolicy) lastToolGroups = toolPolicy.groupNames;
@@ -872,6 +939,11 @@ export async function startRepl(
         }
       }
     } finally {
+      const turnId = runtimeContext.getCurrentTurnId();
+      if (terminalTurn && terminalTranscript && turnId !== undefined && turnId !== priorTurnId) {
+        terminalTranscript.turns.push({ turnId, messages: terminalTurn.messages });
+        saveTerminalTranscript();
+      }
       stopRunningListener();
       // 纯 plan 轮正常结束后仍需等待审批/细化，继续展示；其余终态统一结算。
       // 结算只隐藏当前 fingerprint，不修改 notes；后续内容或 mtime 变化会自动重新显示。
@@ -920,11 +992,11 @@ export async function startRepl(
     lastTurnUsage = undefined; // 续接:旧会话的 token 累计已无意义,清空等下轮覆写
     layout.clearContent();
     // 锚点行:会话 id / 消息数 / 当前模型,给续接的会话一个定位起点(与 --resume 启动路径同文案)。
-    const anchorCount = history.filter((m) => m.role !== 'system').length;
+    const anchorCount = visibleHistory().filter((m) => m.role !== 'system').length;
     layout.contentWrite(
       `${ui.dim}${t('repl.resumeAnchor', { id: loaded.id, count: anchorCount, model: config.model })}${ui.reset}\n\n`,
     );
-    renderHistory(history);
+    renderTranscript();
     // 强制回尾:renderHistory 展开 mutation 工具详情会经 contentInsertAfter 设置 scrollOffset>0;
     // 先把"已续接会话"提示写入缓冲，再统一回尾重画，避免切换后视口停留在历史顶部。
     layout.resetScroll();
@@ -1062,6 +1134,8 @@ export async function startRepl(
         buildSystemMessage,
         banner,
         welcomeLines,
+        renderTranscript,
+        recordCompaction,
         refreshStatusBase,
         applyMode,
         cycleMode,

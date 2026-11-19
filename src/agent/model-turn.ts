@@ -34,6 +34,8 @@ export interface ModelStreamState {
   lastChar: string;
 }
 
+export type ModelOpening = 'initial' | 'steering';
+
 export type ModelTurnOutcome =
   | { kind: 'aborted'; result: AgentRunResult }
   | { kind: 'result'; result: ChatResult; stream: ModelStreamState };
@@ -50,6 +52,7 @@ export interface ModelTurnInput {
   activeTools: OpenAI.Chat.Completions.ChatCompletionTool[];
   runPolicy: RunPolicySnapshot;
   step: number;
+  opening?: ModelOpening;
   /** 本次 run 的步数上限(来自 opts.maxSteps,经 profile cap);用于剩余步数预警。 */
   maxSteps: number;
   readDedup: ReadDedup;
@@ -260,8 +263,8 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     // 流中即发 onTextEnd 会让 UI 在词中间硬换行并封死 markdown 段(「继续通读:d / ispatcher」
     // 断词 bug)。onToolCall 此刻只驱动「生成中」spinner;正文收尾换行统一由流末
     // (tool-turn / run-coordinator)依据 stream.lastChar 发一次 onTextEnd,届时全部 content 已到齐。
-    // 首步等开场文字收齐，由 tool-turn 先显示开场，再通知 UI 准备执行。
-    if (step !== 0 || opts.suppressOpeningAnalysis) hooks.onToolCall?.(name);
+    // 新任务或收到引导后的首步，从 tool-turn 发开场后的工具状态。
+    if (!input.opening) hooks.onToolCall?.(name);
   };
 
   let result: ChatResult;
@@ -280,7 +283,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       // step 0 由 Opening analysis 独自承担:那里既没有工具结果可复述,也没有"已说过的观点",
       // 而"能直接答就直接答"的授权已写在 Answer-first 里,本段三条约束在 step 0 均无对象。
       // 子 agent 静默执行、不写屏,沿用 suppressOpeningAnalysis 一并免注入。
-      !opts.suppressOpeningAnalysis && step > 0
+      !opts.suppressOpeningAnalysis && step > 0 && !input.opening
         ? '## Silent work\n' +
           // 禁令范围收在「调用之间」,而不是「不要宣布你要做什么」:后者与 step 0 的
           // Opening analysis(要求说明打算怎么入手)字面冲突,只能靠下面的白名单化解,
@@ -299,12 +302,18 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       // 于是「清晰的小改动」全被划进「直接调工具」一档，开场白彻底消失——那句原本无条件的
       // 祈使主语在重写时丢了。这里把「先说一句」恢复成无条件的，Answer-first 只决定这一句
       // 之后是回答还是动手，不再决定说不说。
-      !opts.suppressOpeningAnalysis && step === 0
+      input.opening === 'initial'
         ? '## Opening analysis\n' +
           'Before your first tool call in every user-facing turn, you MUST output exactly one short visible sentence ' +
           'telling the user what you will check or change first and what it will help you establish. ' +
           'Use plain language and put the sentence first in the SAME assistant response as the tool calls. ' +
           'If no tools are needed, answer directly. After this opening, work silently.'
+        : '',
+      input.opening === 'steering'
+        ? '## Steering opening\n' +
+          'If you need tools after the latest user updates, start the same response with one short visible sentence ' +
+          'explaining how the update changes what you will do next. Continue from the work already done. ' +
+          'If you can answer directly, do so. After the opening, work silently.'
         : '',
       // 就近重申 Answer-first。动机(2026-11-18):用户反馈「很简单的问题也要兜一大圈」。
       // history[0] 的 Workflow 里已有 Answer first,但它离当前决策最远,而每轮都在的
@@ -688,7 +697,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       ephemeralText: requestEphemeral,
     };
   }
-  if (step !== 0 || opts.suppressOpeningAnalysis || !result.toolCalls.length) hooks.onChatDone?.();
+  if (!input.opening || !result.toolCalls.length) hooks.onChatDone?.();
   onContextUpdate?.();
 
   return { kind: 'result', result, stream };
