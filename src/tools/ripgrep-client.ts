@@ -13,8 +13,8 @@ import { getSandboxRoot, isInsideRoot } from '../sandbox/index.js';
 const require = createRequire(import.meta.url);
 const isWin = process.platform === 'win32';
 
-/** JSON 采集上限:约可容纳数万条命中,超出即杀进程并标 truncated。 */
-const MAX_JSON_BYTES = 8 * 1024 * 1024;
+/** stdout 采集上限，超出即杀进程并标 truncated。 */
+const MAX_RG_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 export interface RgLineEvent {
   line: number;
@@ -28,6 +28,7 @@ export interface RgFileEvents {
 
 export type RgResult =
   | { status: 'ok'; files: RgFileEvents[]; scanned: number; truncated: boolean }
+  | { status: 'paths'; paths: string[]; truncated: boolean }
   | { status: 'no-match'; scanned: number; truncated: boolean }
   | { status: 'regex_error'; message: string }
   | { status: 'aborted' }
@@ -38,6 +39,8 @@ export interface RgParams {
   /** fast-glob 口径的 glob;**\/* 视为不限定。 */
   glob: string;
   context: number;
+  /** 启用 -l 后按命中文件计费，达到上限后仍观察是否存在下一份文件。 */
+  maxFiles?: number;
   /** 已收齐这么多命中后，下一份文件的结果不再需要。已返回文件保留完整行号。 */
   maxMatches?: number;
   /**
@@ -93,20 +96,29 @@ function normalizePath(p: string): string {
 }
 
 /**
- * 跑一次 ripgrep(--json NDJSON),聚合成每文件事件。永不抛错:
+ * 跑一次 ripgrep，收集每文件的行事件或 NUL 分隔的命中文件路径。
  * 进程起不来 → unavailable;非法正则 → regex_error;signal 中止 → aborted。
  */
 export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgResult> {
+  if (signal?.aborted) return Promise.resolve({ status: 'aborted' });
   const rgPath = resolveRgPath();
-  if (!rgPath || signal?.aborted) return Promise.resolve({ status: 'aborted' });
+  if (!rgPath) return Promise.resolve({ status: 'unavailable' });
 
   const cwd = getSandboxRoot() ?? process.cwd();
+  const maxFiles = params.maxFiles;
+  const pathsOnly = maxFiles !== undefined;
   // --no-require-git:rg 默认只在 git 仓库内才读 .gitignore;加上后非 git 项目的 .gitignore
   // 同样生效(实测不加时 ignored/ 会被扫到)。
-  const args = ['--json', '--hidden', '--no-require-git', '--path-separator', '/'];
+  const args = [
+    ...(pathsOnly ? ['--no-json', '--files-with-matches', '--null', '--color', 'never'] : ['--json']),
+    '--hidden',
+    '--no-require-git',
+    '--path-separator',
+    '/',
+  ];
   // glob 显式指向 gitignore 内的 .mocode(回捞压缩归档等)时放开 VCS ignore。
   if (params.noIgnoreVcs) args.push('--no-ignore-vcs');
-  if (params.context > 0) args.push('-C', String(params.context));
+  if (!pathsOnly && params.context > 0) args.push('-C', String(params.context));
   if (params.glob && params.glob !== '**/*') args.push('-g', params.glob);
   for (const entry of IGNORE) args.push('-g', `!${entry}`);
   args.push('-e', params.pattern);
@@ -123,6 +135,7 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
     let stderr = '';
     let buffer = '';
     const byPath = new Map<string, RgFileEvents>();
+    const matchedPaths = new Set<string>();
     let scanned = 0;
     let completeMatches = 0;
 
@@ -142,7 +155,14 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
       killTree(child);
     };
 
-    const handleLine = (line: string): void => {
+    const handleRecord = (line: string): void => {
+      if (maxFiles !== undefined) {
+        const path = isWin ? normalizePath(line) : line.replace(/^\.\//, '');
+        if (!isInsideRoot(path) || matchedPaths.has(path)) return;
+        if (matchedPaths.size >= maxFiles) stopCollecting();
+        else matchedPaths.add(path);
+        return;
+      }
       let evt: { type?: string; data?: Record<string, unknown> };
       try {
         evt = JSON.parse(line) as { type?: string; data?: Record<string, unknown> };
@@ -185,19 +205,20 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
     };
 
     child.stdout.setEncoding('utf8');
+    const separator = pathsOnly ? '\0' : '\n';
     child.stdout.on('data', (chunk: string) => {
       if (settled || truncated) return;
       collected += Buffer.byteLength(chunk);
-      if (collected > MAX_JSON_BYTES) {
+      if (collected > MAX_RG_OUTPUT_BYTES) {
         stopCollecting();
         return;
       }
       buffer += chunk;
       let idx: number;
-      while ((idx = buffer.indexOf('\n')) >= 0) {
+      while (!truncated && (idx = buffer.indexOf(separator)) >= 0) {
         const line = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 1);
-        if (line) handleLine(line);
+        if (line) handleRecord(line);
       }
     });
     child.stderr.on('data', (chunk: Buffer) => {
@@ -207,20 +228,24 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
     child.on('error', (error) => {
       // ENOENT / EACCES / exec 格式错误 = 二进制不可用,交给 Node 兜底。
       const code = (error as { code?: string }).code;
-      finish({ status: code === 'ENOENT' || code === 'EACCES' ? 'unavailable' : 'aborted' });
+      finish({ status: code === 'ENOENT' || code === 'EACCES' || code === 'ENOEXEC' ? 'unavailable' : 'aborted' });
     });
     child.on('close', (code) => {
-      if (buffer.trim()) handleLine(buffer.trim());
+      if (!pathsOnly && buffer.trim()) handleRecord(buffer.trim());
       // exit 2 + stderr = 正则/参数错误;无命中事件时按 regex_error 上报。
-      if (code === 2 && byPath.size === 0 && stderr.trim()) {
+      if (code === 2 && byPath.size === 0 && matchedPaths.size === 0 && stderr.trim()) {
         const message = stderr.trim();
         // 过滤器把所有文件排除(典型:glob 指向 .gitignore 内的 .mocode 却没放开 ignore)
         // 不是正则错误——按无匹配处理,避免误导模型去改 pattern。
         if (/No files were searched/i.test(message)) {
-          finish({ status: 'no-match', scanned, truncated });
+          finish(pathsOnly ? { status: 'paths', paths: [], truncated } : { status: 'no-match', scanned, truncated });
           return;
         }
         finish({ status: 'regex_error', message });
+        return;
+      }
+      if (pathsOnly) {
+        finish({ status: 'paths', paths: [...matchedPaths], truncated: truncated || (code !== 0 && code !== 1) });
         return;
       }
       if (byPath.size === 0) {

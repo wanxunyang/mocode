@@ -27,6 +27,7 @@ const MAX_CONTEXT_LINES = 10;
 const MAX_EDIT_CANDIDATES = 8;
 const MAX_EDIT_EXCERPTS = 3;
 const MAX_MULTI_EDIT_CONTEXT_CHARS = 4_000;
+const MAX_PATH_OUTPUT_CHARS = 16_000;
 
 function abortedResult(timedOut: boolean): string | ToolOutcome {
   if (!timedOut) return '已中断';
@@ -103,6 +104,23 @@ function renderResults(files: RgFileEvents[], maxPerFile: number, context: numbe
   return out.join('\n');
 }
 
+function renderMatchedPaths(paths: string[], truncated: boolean): string {
+  const shown: string[] = [];
+  let chars = 0;
+  for (const path of paths) {
+    const line = /[\r\n]/.test(path) ? JSON.stringify(path) : path;
+    chars += line.length + 1;
+    if (chars > MAX_PATH_OUTPUT_CHARS) {
+      truncated = true;
+      break;
+    }
+    shown.push(line);
+  }
+  const output = shown.length > 0 ? [`[grep files=${shown.length}]`, ...shown] : ['无匹配文件'];
+  if (truncated) output.push('...(文件列表不完整，缩小 glob 或收窄正则)');
+  return output.join('\n');
+}
+
 function renderEditCandidates(files: RgFileEvents[], truncated: boolean): string {
   const out: string[] = [];
   for (const file of files) {
@@ -146,14 +164,14 @@ async function renderEditContext(
 }
 
 /**
- * Node 兜底:rg 二进制不可用(可选依赖缺失且 PATH 无 rg)时走旧路径。
- * 与旧实现的唯一差异——每两个文件之间检查 abort 信号,使 Ctrl+C / 超时墙能即时打断。
+ * Node 兜底:rg 二进制不可用时用 fast-glob 枚举，再按行查找。
  */
 async function nodeFallback(
   pattern: string,
   glob: string,
   maxPerFile: number,
   editContext: boolean,
+  filesOnly: boolean,
   signal: AbortSignal,
   externalSignal?: AbortSignal,
 ): Promise<ToolExecuteResult> {
@@ -170,7 +188,7 @@ async function nodeFallback(
       cwd,
       onlyFiles: true,
       dot: true,
-      ignore: IGNORE,
+      ignore: glob.startsWith('.mocode/') ? IGNORE : [...IGNORE, '**/.mocode/**'],
       stats: true,
       followSymbolicLinks: false,
       throwErrorOnBrokenSymbolicLink: false,
@@ -178,6 +196,8 @@ async function nodeFallback(
   ).filter((entry) => isInsideRoot(entry.path)); // 后置兜底:仅留牢内
 
   const files: RgFileEvents[] = [];
+  const paths: string[] = [];
+  let truncated = false;
   let scanned = 0;
   let skippedTooLarge = 0;
   const abortNote = (): ToolOutcome =>
@@ -189,22 +209,30 @@ async function nodeFallback(
           retryable: false,
           output: `错误:grep 超过 ${GREP_TIMEOUT_MS / 1000}s 超时墙已被中止(收窄 glob 后重试)`,
         };
-  for (let fi = 0; fi < entries.length; fi++) {
-    const entry = entries[fi];
-    if ((fi & 31) === 0 && signal.aborted) return abortNote();
+  for (const entry of entries) {
+    if (signal.aborted) return abortNote();
     if (entry.stats && entry.stats.size > MAX_FILE_BYTES) {
       skippedTooLarge++;
       continue;
     }
     let content: string;
     try {
-      content = await readFile(jailResolve(entry.path), 'utf8');
+      content = await readFile(jailResolve(entry.path), { encoding: 'utf8', signal });
     } catch {
       continue;
     }
     scanned++;
     if (isProbablyBinary(content)) continue;
     const lines = content.split(/\r?\n/);
+    if (filesOnly) {
+      if (!lines.some((line) => re.test(line))) continue;
+      if (paths.length === MAX_RESULTS) {
+        truncated = true;
+        break;
+      }
+      paths.push(entry.path);
+      continue;
+    }
     const matches: RgLineEvent[] = [];
     for (let i = 0; i < lines.length; i++) {
       if (re.test(lines[i])) matches.push({ line: i + 1, text: lines[i] });
@@ -213,6 +241,10 @@ async function nodeFallback(
   }
   if (signal.aborted) return abortNote();
 
+  if (filesOnly) {
+    const output = renderMatchedPaths(paths, truncated);
+    return skippedTooLarge ? `${output}\n...(跳过 ${skippedTooLarge} 个超过 2MiB 的文件)` : output;
+  }
   if (files.length === 0) {
     const note = skippedTooLarge ? `,跳过 ${skippedTooLarge} 个超过 2MiB 的文件` : '';
     return `无匹配(扫描了 ${scanned} 个文件${note})`;
@@ -230,6 +262,7 @@ export const grepTool: Tool = {
   description:
     'Search file contents by regex (recursive; powered by ripgrep: respects .gitignore, skips binaries).\n' +
     'Output: per-file header "<path>: N matches, lines [l1, l2, ...]" plus rendered lines with ORIGINAL INDENTATION kept.\n' +
+    'For tasks that only need to know which files contain a match, use mode="files" to list paths once per file.\n' +
     'Pass context=2..5 for neighbouring lines. For an edit in an unknown file, use edit_context=true with a narrow pattern. Use max_edit_candidates=3 when definitions, tests or other versions may share the same match. An [edit_context ...] block gives exact text; use the chosen block’s path and hash as expected_hash in edit_file. Searches over budget return locations only. Hard wall 120s.\n' +
     'Note: .mocode/ is gitignored; to search session data (e.g. .mocode/sessions/<id>/compacted archived history) you MUST narrow glob to that path, e.g. glob=".mocode/sessions/**".',
   parameters: {
@@ -237,6 +270,12 @@ export const grepTool: Tool = {
     properties: {
       pattern: { type: 'string', description: 'Regular expression (ripgrep/Rust regex syntax)' },
       glob: { type: 'string', description: 'Optional, restrict to a file glob, e.g. *.ts' },
+      mode: {
+        type: 'string',
+        enum: ['matches', 'files'],
+        description:
+          'Default matches returns lines. Files lists paths only, ignores context and max_per_file, and cannot be combined with edit_context=true.',
+      },
       edit_context: {
         type: 'boolean',
         description:
@@ -267,6 +306,15 @@ export const grepTool: Tool = {
     const pattern = String(args.pattern);
     const glob = String(args.glob ?? '**/*');
     const editContext = args.edit_context === true;
+    const filesOnly = args.mode === 'files';
+    if (filesOnly && editContext) {
+      return {
+        status: 'error',
+        code: 'INVALID_ARGUMENTS',
+        retryable: false,
+        output: '错误:mode="files" 只返回路径；获取可编辑原文时用 mode="matches" 与 edit_context=true。',
+      };
+    }
     const requestedCandidates = Number(args.max_edit_candidates ?? 1);
     const maxEditCandidates = Number.isInteger(requestedCandidates)
       ? Math.max(1, Math.min(MAX_EDIT_EXCERPTS, requestedCandidates))
@@ -299,10 +347,13 @@ export const grepTool: Tool = {
           context: editContext ? 0 : context,
           noIgnoreVcs,
           maxMatches: editContext ? MAX_EDIT_CANDIDATES : MAX_RESULTS,
+          ...(filesOnly ? { maxFiles: MAX_RESULTS } : {}),
         },
         controller.signal,
       );
       switch (result.status) {
+        case 'paths':
+          return renderMatchedPaths(result.paths, result.truncated);
         case 'regex_error':
           return `错误:非法正则 ${pattern}: ${result.message}`;
         case 'no-match': {
@@ -315,7 +366,7 @@ export const grepTool: Tool = {
           return controller.signal.aborted ? abortedResult(timedOut) : output;
         }
         case 'unavailable':
-          return await nodeFallback(pattern, glob, maxPerFile, editContext, controller.signal, external);
+          return await nodeFallback(pattern, glob, maxPerFile, editContext, filesOnly, controller.signal, external);
         case 'aborted':
           return abortedResult(timedOut);
       }

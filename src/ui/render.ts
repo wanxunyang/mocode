@@ -573,6 +573,8 @@ export function summarizeToolResult(name: string, output: string): string {
     case 'grep': {
       // 「无匹配」结果不含任何文件头:必须显式识别,否则会被当成 1 处匹配(nonEmpty 只有 1 行)。
       if (!nonEmpty.length || nonEmpty[0].startsWith('无匹配')) return t('toolSummary.noMatches');
+      const paths = /^\[grep files=(\d+)\]$/.exec(nonEmpty[0]);
+      if (paths) return t('toolSummary.files', { count: Number(paths[1]) });
       // 带 context 时 body 行数 ≠ 命中数(邻居行 + `  --` 分隔都在里面),
       // 按每文件头的真实命中数求和才对得上模型看到的「N 处匹配」。
       let matches = 0;

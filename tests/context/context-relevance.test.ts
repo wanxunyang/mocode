@@ -81,6 +81,18 @@ test('anchor 的搜索起点相同也可能读到不同页，不能据此淘汰�
   assert.equal(new RelevancePruner().pruneSuperseded(history, history.length), 0);
 });
 
+test('grep 文件列表不会淘汰同一查询的逐行命中', () => {
+  const history: ChatMessage[] = [system()];
+  const query = { pattern: 'target', glob: 'src/**' };
+  const lines = appendTool(history, 'grep', 'lines', query, 'src/a.ts: 1 处匹配,行号 [6]');
+  const oldPaths = appendTool(history, 'grep', 'paths-old', { ...query, mode: 'files' }, '[grep files=1]\nsrc/a.ts');
+  const newPaths = appendTool(history, 'grep', 'paths-new', { ...query, mode: 'files' }, '[grep files=1]\nsrc/b.ts');
+  assert.equal(new RelevancePruner().pruneSuperseded(history, history.length), 1);
+  assert.equal(contentAt(history, lines), 'src/a.ts: 1 处匹配,行号 [6]');
+  assert.match(contentAt(history, oldPaths), /^⌦\[已过时:相同 grep/);
+  assert.equal(contentAt(history, newPaths), '[grep files=1]\nsrc/b.ts');
+});
+
 test('mutation 淘汰该 path 所有区间的旧 read,不影响其他文件', () => {
   const history: ChatMessage[] = [system()];
   const p1 = appendTool(history, 'read_file', 'p1', { path: 'src/big.ts', offset: 1, limit: 300 }, 'c1');

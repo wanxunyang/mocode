@@ -64,7 +64,15 @@ function observationKey(call: ToolCallInfo): string | null {
       tool: 'grep',
       pattern: args.pattern,
       glob: typeof args.glob === 'string' ? args.glob : '**/*',
-      maxPerFile: Math.min(Math.max(rawMax, 1), 50),
+      ...(args.mode === 'files'
+        ? { mode: 'files' }
+        : {
+            mode: 'matches',
+            maxPerFile: Math.min(Math.max(rawMax, 1), 50),
+            context: Math.min(Math.max(normalizedInteger(args.context, 0), 0), 10),
+            editContext: args.edit_context === true,
+            maxEditCandidates: normalizedInteger(args.max_edit_candidates, 1),
+          }),
     });
   }
   return null;

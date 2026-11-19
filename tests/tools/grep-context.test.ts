@@ -7,6 +7,7 @@
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { grepTool } from '../../src/tools/builtins/grep.js';
@@ -202,6 +203,69 @@ test('grep context: 默认 context=0 时行为与旧版一致(只有命中行)',
   assert.ok(!/^ {2}--$/m.test(out), 'context=0 不应输出分块分隔符');
 });
 
+test('grep files 按文件计数，重复命中不挤掉另一个实现，也不输出正文', async () => {
+  const dir = join(root, 'path-mode');
+  mkdirSync(dir);
+  writeFileSync(join(dir, 'generated.ts'), 'FIND_ME_EXACTLY\n'.repeat(450));
+  writeFileSync(join(dir, 'implementation.ts'), 'export const FIND_ME_EXACTLY = 1;\n');
+  writeFileSync(join(dir, 'unused.ts'), 'no result');
+  const output = await run({ pattern: 'FIND_ME_EXACTLY', glob: 'path-mode/*.ts', mode: 'files', context: 5 });
+  assert.deepEqual(output.split('\n').sort(), [
+    '[grep files=2]',
+    'path-mode/generated.ts',
+    'path-mode/implementation.ts',
+  ]);
+  assert.equal(summarizeToolResult('grep', output), t('toolSummary.files', { count: 2 }));
+  assert.match(await run({ pattern: 'NOT_PRESENT', glob: 'path-mode/*.ts', mode: 'files' }), /^无匹配文件$/);
+  assert.match(await run({ pattern: '[', mode: 'files' }), /非法正则/);
+  assert.match(await run({ pattern: 'FIND_ME_EXACTLY', mode: 'files', edit_context: true }), /错误:mode=/);
+});
+
+test('grep files 配额只在有额外命中文件时报告截断', async () => {
+  const dir = join(root, 'path-limit');
+  mkdirSync(dir);
+  for (let i = 0; i < 100; i++) writeFileSync(join(dir, `${i}.txt`), 'BATTERY_WORD');
+  const args = { pattern: 'BATTERY_WORD', glob: 'path-limit/*.txt', mode: 'files' };
+  const exact = await run(args);
+  assert.equal(exact.split('\n').length, 101);
+  assert.doesNotMatch(exact, /列表不完整/);
+  writeFileSync(join(dir, 'overflow.txt'), 'BATTERY_WORD');
+  const capped = await run(args);
+  assert.equal(capped.split('\n').length, 102);
+  assert.match(capped, /\[grep files=100\]/);
+  assert.match(capped, /列表不完整/);
+});
+
+test('grep 缺少 rg 时进入 Node 兜底，两种模式均可搜索', () => {
+  // 在独立子进程模拟缺少可选依赖和 PATH 二进制，避免污染共享测试进程。
+  const preload = join(root, 'missing-rg.cjs');
+  writeFileSync(
+    preload,
+    [
+      "const Module = require('node:module');",
+      'const load = Module._load;',
+      'Module._load = function(name, ...args) {',
+      "  if (name === '@vscode/ripgrep') return {};",
+      '  return load.call(this, name, ...args);',
+      '};',
+    ].join('\n'),
+  );
+  const toolUri = new URL('../../src/tools/builtins/grep.js', import.meta.url).href;
+  const script = `
+    import { grepTool } from ${JSON.stringify(toolUri)};
+    const args = { pattern: 'return value', glob: 'src/nested.ts' };
+    console.log(JSON.stringify([await grepTool.execute(args), await grepTool.execute({ ...args, mode: 'files' })]));
+  `;
+  const output = execFileSync(process.execPath, ['--require', preload, '--input-type=module', '-e', script], {
+    cwd: root,
+    env: { ...process.env, PATH: root, MOCODE_RG_PATH: '' },
+    encoding: 'utf8',
+  });
+  const [matches, files] = JSON.parse(output);
+  assert.match(matches, /L4: {5}return value/);
+  assert.equal(files, '[grep files=1]\nsrc/nested.ts');
+});
+
 test('grep context: 两处相距较远的命中用 `  --` 分块,不输出中间全部行', async () => {
   const out = await run({ pattern: 'target line here', glob: 'src/spread.ts', context: 1 });
   assert.match(out, /行号 \[3, 21\]/);
@@ -236,6 +300,7 @@ test('grep: 二进制文件仍然跳过(ripgrep 原生 NUL 探测;Node 兜底走
   writeFileSync(join(root, 'src', 'blob.bin'), Buffer.concat([Buffer.from('NEEDLE'), Buffer.from([0x00, 0x01, 0x02])]));
   const out = await run({ pattern: 'NEEDLE', glob: 'src/*' });
   assert.ok(!/blob\.bin:/.test(out), '二进制文件不应产出命中');
+  assert.doesNotMatch(await run({ pattern: 'NEEDLE', glob: 'src/*', mode: 'files' }), /blob\.bin/);
 });
 
 test('grep: 非法正则返回明确错误(不启动扫描)', async () => {
@@ -277,6 +342,7 @@ test('grep: 尊重 .gitignore,被忽略目录不扫描', async () => {
   writeFileSync(join(root, 'ignored', 'secret.py'), 'preference_engine_enabled = True');
   const out = await run({ pattern: 'preference_engine_enabled' });
   assert.match(out, /无匹配/, '.gitignore 忽略的目录不应被扫描');
+  assert.equal(await run({ pattern: 'preference_engine_enabled', mode: 'files' }), '无匹配文件');
 });
 
 test('grep: 外部信号已中止时立即返回,不启动扫描', async () => {
