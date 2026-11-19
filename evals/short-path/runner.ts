@@ -232,6 +232,7 @@ function configureGrepControl(runtimeContext: AgentRuntimeContext): void {
     if (tool.name === 'grep') {
       const properties = { ...(tool.parameters.properties as Record<string, unknown>) };
       delete properties.edit_context;
+      delete properties.max_edit_candidates;
       return {
         ...tool,
         parameters: { ...tool.parameters, properties },

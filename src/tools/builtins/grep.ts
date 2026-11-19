@@ -5,7 +5,7 @@ import { isProbablyBinary } from '../../attachments/image.js';
 import { getSandboxRoot, isInsideRoot, jailResolve } from '../../sandbox/index.js';
 import { runRipgrep, type RgFileEvents, type RgLineEvent } from '../ripgrep-client.js';
 import type { Tool, ToolOutcome } from '../types.js';
-import { readSearchEditExcerpt } from './read-file.js';
+import { readSearchEditExcerpts } from './read-file.js';
 
 /**
  * grep 超时墙。
@@ -25,6 +25,8 @@ const MAX_BODY_LINE_CHARS = 400;
 /** context 参数上限:邻居行是 ×(1+2C) 放大,给到 10 已远超需要。 */
 const MAX_CONTEXT_LINES = 10;
 const MAX_EDIT_CANDIDATES = 8;
+const MAX_EDIT_EXCERPTS = 3;
+const MAX_MULTI_EDIT_CONTEXT_CHARS = 4_000;
 
 function abortedResult(timedOut: boolean): string | ToolOutcome {
   if (!timedOut) return '已中断';
@@ -115,21 +117,32 @@ function renderEditCandidates(files: RgFileEvents[], truncated: boolean): string
   return out.join('\n');
 }
 
-async function renderEditContext(files: RgFileEvents[], truncated: boolean, signal: AbortSignal): Promise<string> {
-  const file = files[0];
-  if (!truncated && files.length === 1 && file.matches.length === 1) {
+async function renderEditContext(
+  files: RgFileEvents[],
+  truncated: boolean,
+  maxCandidates: number,
+  signal: AbortSignal,
+): Promise<string> {
+  const matchCount = files.reduce((total, file) => total + file.matches.length, 0);
+  if (truncated || matchCount === 0 || matchCount > maxCandidates) return renderEditCandidates(files, truncated);
+
+  const excerpts: string[] = [];
+  for (const file of files) {
     let absolutePath: string | undefined;
     try {
       absolutePath = jailResolve(file.path);
     } catch {
       // 路径可能在搜索与读取之间变成越界链接。
     }
-    if (absolutePath) {
-      const excerpt = await readSearchEditExcerpt(absolutePath, file.matches[0], signal);
-      if (excerpt) return excerpt;
-    }
+    if (!absolutePath) return renderEditCandidates(files, truncated);
+    const excerpt = await readSearchEditExcerpts(absolutePath, file.matches, signal);
+    if (!excerpt) return renderEditCandidates(files, truncated);
+    excerpts.push(excerpt);
   }
-  return renderEditCandidates(files, truncated);
+  const output = excerpts.join('\n\n');
+  return matchCount > 1 && output.length > MAX_MULTI_EDIT_CONTEXT_CHARS
+    ? renderEditCandidates(files, truncated)
+    : output;
 }
 
 /**
@@ -217,7 +230,7 @@ export const grepTool: Tool = {
   description:
     'Search file contents by regex (recursive; powered by ripgrep: respects .gitignore, skips binaries).\n' +
     'Output: per-file header "<path>: N matches, lines [l1, l2, ...]" plus rendered lines with ORIGINAL INDENTATION kept.\n' +
-    'Pass context=2..5 for neighbouring lines. When locating an edit target in an unknown file, use edit_context=true with a narrow pattern. A unique hit can return an exact, bounded [edit_context ...] excerpt; use its path and hash as expected_hash in edit_file. Otherwise you get at most 8 candidate lines; use read_file for exact text. Hard wall 120s.\n' +
+    'Pass context=2..5 for neighbouring lines. For an edit in an unknown file, use edit_context=true with a narrow pattern. Use max_edit_candidates=3 when definitions, tests or other versions may share the same match. An [edit_context ...] block gives exact text; use the chosen block’s path and hash as expected_hash in edit_file. Searches over budget return locations only. Hard wall 120s.\n' +
     'Note: .mocode/ is gitignored; to search session data (e.g. .mocode/sessions/<id>/compacted archived history) you MUST narrow glob to that path, e.g. glob=".mocode/sessions/**".',
   parameters: {
     type: 'object',
@@ -227,7 +240,14 @@ export const grepTool: Tool = {
       edit_context: {
         type: 'boolean',
         description:
-          'Return an exact edit excerpt for a unique match, or a short candidate list. Ignores context and max_per_file.',
+          'Return exact edit excerpts within max_edit_candidates and a shared output budget, or a short candidate list. Ignores context and max_per_file.',
+      },
+      max_edit_candidates: {
+        type: 'integer',
+        minimum: 1,
+        maximum: MAX_EDIT_EXCERPTS,
+        description:
+          'Match limit for edit_context, default 1. Set 3 to request original text for a small set of candidates.',
       },
       max_per_file: {
         type: 'integer',
@@ -247,6 +267,10 @@ export const grepTool: Tool = {
     const pattern = String(args.pattern);
     const glob = String(args.glob ?? '**/*');
     const editContext = args.edit_context === true;
+    const requestedCandidates = Number(args.max_edit_candidates ?? 1);
+    const maxEditCandidates = Number.isInteger(requestedCandidates)
+      ? Math.max(1, Math.min(MAX_EDIT_EXCERPTS, requestedCandidates))
+      : 1;
     const maxPerFile = Math.min(Math.max(Number(args.max_per_file ?? 15), 1), 50);
     const contextRaw = Number(args.context ?? 0);
     const context = Number.isFinite(contextRaw) ? Math.min(Math.max(Math.trunc(contextRaw), 0), MAX_CONTEXT_LINES) : 0;
@@ -287,7 +311,7 @@ export const grepTool: Tool = {
         }
         case 'ok': {
           if (!editContext) return renderResults(result.files, maxPerFile, context, result.truncated);
-          const output = await renderEditContext(result.files, result.truncated, controller.signal);
+          const output = await renderEditContext(result.files, result.truncated, maxEditCandidates, controller.signal);
           return controller.signal.aborted ? abortedResult(timedOut) : output;
         }
         case 'unavailable':

@@ -123,6 +123,60 @@ test('grep edit_context: 同名和超长候选只定位，普通搜索保持旧�
   assert.doesNotMatch(long, /\[edit_context |sha256:|x{100}/);
 });
 
+test('grep edit_context: 多候选保留各自的文件哈希，同文件相交片段合并', async () => {
+  const other = 'other candidate\n  target line here\n';
+  writeFileSync(join(root, 'src', 'multi-other.ts'), other);
+  const result = await run({
+    pattern: 'target line here',
+    glob: 'src/*.ts',
+    edit_context: true,
+    max_edit_candidates: 3,
+  });
+  const blocks = result.split('\n').filter((line) => line.startsWith('[edit_context '));
+  assert.equal(blocks.length, 2, result);
+  assert.match(result, /spread\.ts".* lines=1-30 match=3,21\]/);
+  assert.match(result, new RegExp(`multi-other\\.ts" hash=${contentHash(other)} .* match=2\\]`));
+  assert.match(result, /^ {5}2\t  target line here$/m);
+  const limited = await run({
+    pattern: 'target line here',
+    glob: 'src/*.ts',
+    edit_context: true,
+    max_edit_candidates: 2,
+  });
+  assert.doesNotMatch(limited, /\[edit_context /);
+  assert.match(limited, /multi-other\.ts:2:/);
+
+  const file = join(root, 'src', 'multi-other.ts');
+  const updated = other + '// changed since the search\n';
+  writeFileSync(file, updated);
+  await withSandboxRoot(root, async () => {
+    const stale = await editFileTool.execute({
+      path: file,
+      old_string: 'target line here',
+      new_string: 'replacement',
+      expected_hash: contentHash(other),
+    });
+    assert.ok(typeof stale !== 'string');
+    assert.equal(stale.code, 'CHANGE_CONFLICT');
+  });
+  assert.equal(readFileSync(file, 'utf8'), updated);
+});
+
+test('grep edit_context: 多候选共用预算，超预算时只返回位置', async () => {
+  for (const name of ['a', 'b']) {
+    writeFileSync(join(root, 'src', `budget-${name}.txt`), 'CANDIDATE\n' + 'x'.repeat(2300));
+  }
+  const result = await run({
+    pattern: 'CANDIDATE',
+    glob: 'src/budget-*.txt',
+    edit_context: true,
+    max_edit_candidates: 3,
+  });
+  assert.doesNotMatch(result, /\[edit_context |x{100}/);
+  assert.match(result, /budget-a\.txt:1:/);
+  assert.match(result, /budget-b\.txt:1:/);
+});
+
 test('grep context: 默认 context=0 时行为与旧版一致(只有命中行)', async () => {
   const out = await run({ pattern: 'return null', glob: 'src/nested.ts' });
   assert.match(out, /^ {2}L6: {3}return null;$/m);

@@ -97,9 +97,9 @@ function formatNumberedLines(lines: string[], start: number, end: number): strin
 }
 
 /** 只为已定位且已通过沙箱解析的命中返回未截断原文与同一份内容的版本。 */
-export async function readSearchEditExcerpt(
+export async function readSearchEditExcerpts(
   absolutePath: string,
-  match: { line: number; text: string },
+  matches: readonly { line: number; text: string }[],
   signal: AbortSignal,
 ): Promise<string | undefined> {
   const loaded = await loadReadableFile(absolutePath, signal);
@@ -111,13 +111,29 @@ export async function readSearchEditExcerpt(
   const data = buffer.toString('utf8');
   if (!Buffer.from(data, 'utf8').equals(buffer)) return;
   const lines = data.split(/\r?\n/);
-  if (lines[match.line - 1] !== match.text) return;
-  const start = Math.max(0, match.line - 9);
-  const end = Math.min(lines.length, match.line + 12);
-  const body = formatNumberedLines(lines, start, end);
-  // 超长行退回定位结果，避免向模型提供只能用于定位的截断源码。
-  if (body.length > 4_000) return;
-  return `[edit_context path=${JSON.stringify(absolutePath)} hash=${contentHash(buffer)} lines=${start + 1}-${end} match=${match.line}]\n${body}`;
+  const ranges: Array<{ start: number; end: number; matches: number[] }> = [];
+  for (const match of matches) {
+    if (lines[match.line - 1] !== match.text) return;
+    const start = Math.max(0, match.line - 9);
+    const end = Math.min(lines.length, match.line + 12);
+    const previous = ranges.at(-1);
+    if (previous && start < previous.end) {
+      previous.end = Math.max(previous.end, end);
+      previous.matches.push(match.line);
+    } else {
+      ranges.push({ start, end, matches: [match.line] });
+    }
+  }
+  const file = `path=${JSON.stringify(absolutePath)} hash=${contentHash(buffer)}`;
+  const excerpts: string[] = [];
+  for (const range of ranges) {
+    const body = formatNumberedLines(lines, range.start, range.end);
+    if (body.length > 4_000) return;
+    excerpts.push(
+      `[edit_context ${file} lines=${range.start + 1}-${range.end} match=${range.matches.join(',')}]\n${body}`,
+    );
+  }
+  return excerpts.join('\n\n');
 }
 
 // ---------- read_file ----------
