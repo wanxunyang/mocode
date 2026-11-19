@@ -453,13 +453,22 @@ function usageBarDetail(day: string, row: Record<string, unknown> | undefined): 
   return `<b>${api.escapeHtml(day)}</b> ${api.escapeHtml(tokenText(input + output))} tokens · ${api.escapeHtml(api.t('usage.input'))} ${api.escapeHtml(tokenText(input))} · ${api.escapeHtml(api.t('usage.output'))} ${api.escapeHtml(tokenText(output))} · ${num(row.calls)} ${api.escapeHtml(api.t('usage.calls'))}`;
 }
 
+/** 按天折线里「一天占多少像素」：固定（不按窗口天数缩）才有清晰的横轴与可拖的滚动条。 */
+const USAGE_DAY_W = 20;
+
 /**
- * 按天的竖向柱状图（一格一天，柱高按窗口内最大值归一）。
+ * 按天的折线图（一天一个点，纵轴按窗口内最大值归一）。
  *
- * 柱子是 `<button>`：点一根就把那天的明细写到图下方，键盘也能走到；窗口很长时靠横向
- * 滚动（柱宽随天数收缩），而不是把 365 根压成一条线。
+ * 三处都不能省（都来自反馈）：
+ *  1. **一天固定 20px**，窗口多长就把画布画多宽（365 天 ≈ 7300px），靠横向滚动看历史。
+ *     按天数均分的话，一年窗口又会挤成一条线（「太小了，看不清」）。
+ *  2. 默认**停靠最右端**（最新一天），所以打开就是一屏「最近一个月」；往左拖才回到更早的日期。
+ *  3. 纵轴在滚动区之外，拖动时刻度不动；横轴日期跟画布一起滚，才不会和折线错位。
+ *
+ * 命中区是一天一个透明 `<button>`（不是 SVG 里的点）：SVG 靠 preserveAspectRatio="none"
+ * 拉伸，点会变成椭圆；所以图只画线，交互交给叠在上面的按钮 —— 键盘也能 Tab 到某一天。
  */
-function usageColumns(rows: Array<Record<string, unknown>>, selectedDay: string): string {
+function usageLine(rows: Array<Record<string, unknown>>, selectedDay: string): string {
   const api = need();
   if (!rows.length) return '';
   const points = rows.map((row) => ({
@@ -470,21 +479,63 @@ function usageColumns(rows: Array<Record<string, unknown>>, selectedDay: string)
     calls: num(row.calls),
   }));
   const max = points.reduce((most, point) => Math.max(most, point.value), 0) || 1;
-  const width = points.length <= 14 ? 20 : points.length <= 31 ? 12 : points.length <= 90 ? 7 : 4;
-  const labelEvery = Math.max(1, Math.ceil(points.length / 8));
-  const bars = points
+  const count = points.length;
+  // 坐标系是 0~100 的百分比：x 铺满、y 反转（SVG 向下为正），换算只此一处。
+  // x 取每格**中心**（(i+0.5)/n）：画布宽度 = 天数 × 每日像素，命中按钮也均分同一画布，
+  // 这样折线上的点正好落在各自格子的中间 —— 点击位置与看到的点不会错半格。
+  const xOf = (index: number): number => ((index + 0.5) / count) * 100;
+  const yOf = (value: number): number => 100 - (value / max) * 100;
+  const coords = points.map((point, index) => ({ x: xOf(index), y: yOf(point.value) }));
+  const line = coords.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');
+  // 面积 = 折线 + 底边闭合；只有一天时折线本身不成形，直接补成整幅梯形。
+  const area = count === 1
+    ? `0,100 50,${coords[0]!.y.toFixed(2)} 100,100`
+    : `0,100 ${line} 100,100`;
+  // 横轴刻度按像素密度决定：两天一标太密、十天一标太疏，约 64px 一个日期。
+  // 末点单独补一个（离上一个太近就跳过，避免日期叠字）。
+  const tickEvery = Math.max(1, Math.ceil(64 / USAGE_DAY_W));
+  let lastTickAt = -1;
+  const ticks = points
     .map((point, index) => {
-      const height = point.value > 0 ? Math.max(2, Math.round((point.value / max) * 100)) : 0;
-      const title = `${point.day} · ${tokenText(point.value)} tokens · ${point.calls} ${api.t('usage.calls')}`;
-      const label = index % labelEvery === 0 ? `<span class="usage-col-label">${api.escapeHtml(point.day.slice(5))}</span>` : '<span class="usage-col-label"></span>';
-      const selected = point.day === selectedDay ? ' is-selected' : '';
-      // 拆分数字直接写在 data-* 上：点柱子时只读 DOM 回填明细，不必再查一遍 rows。
-      return `<div class="usage-col-wrap" style="--col-w:${width}px"><button type="button" class="usage-col${selected}" data-day="${api.escapeHtml(point.day)}" data-input="${point.input}" data-output="${point.output}" data-calls="${point.calls}" title="${api.escapeHtml(title)}" aria-label="${api.escapeHtml(title)}"><span class="usage-col-fill" style="height:${height}%"></span></button>${label}</div>`;
+      const isLast = index === count - 1;
+      const wanted = index % tickEvery === 0 || isLast;
+      if (!wanted) return '';
+      if (isLast && lastTickAt >= 0 && xOf(index) - lastTickAt < 12) return '';
+      lastTickAt = xOf(index);
+      const edge = index === 0 ? ' is-first' : isLast ? ' is-last' : '';
+      return `<span class="usage-line-tick${edge}" style="left:${xOf(index).toFixed(2)}%">${api.escapeHtml(point.day.slice(5))}</span>`;
     })
     .join('');
-  const picked = rows.find((row) => str(row.day) === selectedDay);
-  const detail = picked ? usageBarDetail(selectedDay, picked) : api.escapeHtml(api.t('usage.barPick'));
-  return `<div class="usage-columns" data-usage-columns>${bars}</div><div class="usage-col-detail" data-usage-bar-detail>${detail}</div>`;
+  const hits = points
+    .map((point, index) => {
+      const title = `${point.day} · ${tokenText(point.value)} tokens · ${point.calls} ${api.t('usage.calls')}`;
+      const selected = point.day === selectedDay ? ' is-selected' : '';
+      // 拆分数字直接写在 data-* 上：点某一天时只读 DOM 回填明细，不必再查一遍 rows。
+      return `<button type="button" class="usage-line-hit${selected}" data-usage-line-hit data-day="${api.escapeHtml(point.day)}" data-input="${point.input}" data-output="${point.output}" data-calls="${point.calls}" data-x="${coords[index]!.x.toFixed(2)}" data-y="${coords[index]!.y.toFixed(2)}" title="${api.escapeHtml(title)}" aria-label="${api.escapeHtml(title)}"></button>`;
+    })
+    .join('');
+  const picked = rows.findIndex((row) => str(row.day) === selectedDay);
+  const pickedAt = picked >= 0 ? coords[picked]! : null;
+  const plotStyle = pickedAt ? ` style="--sel-x:${pickedAt.x.toFixed(2)}%;--sel-y:${pickedAt.y.toFixed(2)}%"` : '';
+  const detail = picked >= 0 ? usageBarDetail(selectedDay, rows[picked]) : api.escapeHtml(api.t('usage.barPick'));
+  const grid = '<i></i><i></i><i></i>';
+  return (
+    `<div class="usage-line" data-usage-columns>` +
+      `<div class="usage-line-axis" aria-hidden="true"><span>${api.escapeHtml(tokenText(max))}</span><span>${api.escapeHtml(tokenText(max / 2))}</span><span>0</span></div>` +
+      `<div class="usage-line-scroll" data-usage-line-scroll>` +
+        `<div class="usage-line-canvas" style="width:${count * USAGE_DAY_W}px">` +
+          `<div class="usage-line-plot${pickedAt ? ' has-pick' : ''}"${plotStyle}>` +
+            `<div class="usage-line-grid" aria-hidden="true">${grid}</div>` +
+            `<svg class="usage-line-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon class="usage-line-area" points="${area}"></polygon><polyline class="usage-line-path" points="${line}" vector-effect="non-scaling-stroke"></polyline></svg>` +
+            `<div class="usage-line-hits">${hits}</div>` +
+            `<span class="usage-line-dot" aria-hidden="true"></span>` +
+          `</div>` +
+          `<div class="usage-line-x" aria-hidden="true">${ticks}</div>` +
+        `</div>` +
+      `</div>` +
+    `</div>` +
+    `<div class="usage-col-detail" data-usage-bar-detail>${detail}</div>`
+  );
 }
 
 /** 热力图窗口档位：方块数与统计窗口完全一致（一格 = 一天）。 */
@@ -629,12 +680,28 @@ function attachUsageCharts(container: HTMLElement): void {
   const columns = container.querySelector<HTMLElement>('[data-usage-columns]');
   const barDetail = container.querySelector<HTMLElement>('[data-usage-bar-detail]');
   if (columns && barDetail) {
-    const bars = Array.from(columns.querySelectorAll<HTMLButtonElement>('.usage-col[data-day]'));
+    // 滚动起点：默认贴最右（最新一天），打开即「最近一个月」；已经点了某一天就把它带到视野中央。
+    // 必须在写入 innerHTML 之后同步做 —— 画布宽度是内联样式算出来的，此时才量得准。
+    const scroll = columns.querySelector<HTMLElement>('[data-usage-line-scroll]');
+    const pickedHit = columns.querySelector<HTMLElement>('.usage-line-hit.is-selected');
+    if (scroll) {
+      scroll.scrollLeft = pickedHit
+        ? pickedHit.offsetLeft + pickedHit.offsetWidth / 2 - scroll.clientWidth / 2
+        : scroll.scrollWidth;
+    }
+    const plot = columns.querySelector<HTMLElement>('.usage-line-plot');
+    const bars = Array.from(columns.querySelectorAll<HTMLButtonElement>('[data-usage-line-hit]'));
     for (const bar of bars) {
       bar.addEventListener('click', () => {
         for (const other of bars) other.classList.toggle('is-selected', other === bar);
+        // 选中点只挪坐标变量（CSS 负责画那个圆点），不重绘整张图。
+        if (plot) {
+          plot.classList.add('has-pick');
+          plot.style.setProperty('--sel-x', `${bar.dataset.x ?? 0}%`);
+          plot.style.setProperty('--sel-y', `${bar.dataset.y ?? 0}%`);
+        }
         // 明细只用行上的数字：raw tokens 已在 title 里，这里要保持「输入/输出拆分」→ 从 title 拿不到，
-        // 所以把拆分也写进 data-*（见 usageColumns）。
+        // 所以把拆分也写进 data-*（见 usageLine）。
         const input = Number(bar.dataset.input ?? 0);
         const output = Number(bar.dataset.output ?? 0);
         const api = need();
@@ -753,7 +820,7 @@ async function renderUsage(container: HTMLElement): Promise<void> {
         `<div class="settings-block">${tiles}</div>` +
         section(api.t('usage.byModel'), windowHint, byModel.length ? usageDonut(byModel, 'key') : emptyBlock(api.t('usage.empty'))) +
         section(api.t('usage.byWorkspace'), windowHint, byWorkspace.length ? usageDonut(byWorkspace, 'key') : emptyBlock(api.t('usage.empty'))) +
-        section(api.t('usage.byDay'), windowHint, byDay.length ? usageColumns(byDay, selectedDay) : emptyBlock(api.t('usage.empty')));
+        section(api.t('usage.byDay'), windowHint, byDay.length ? usageLine(byDay, selectedDay) : emptyBlock(api.t('usage.empty')));
       attachHeatmap(container, calendarDays, (day) => { selectedDay = day; });
       attachUsageCharts(container);
     } else {
@@ -779,12 +846,13 @@ async function renderUsage(container: HTMLElement): Promise<void> {
       button.addEventListener('click', () => void draw(button.dataset.scope === 'global' ? 'global' : 'session', Number(button.dataset.days ?? 7))),
     );
   };
-  // 首屏永远进「近一年（跨项目）」：
-  //   1) 热力图是跨项目的年视图，只有 global 口径才拿得到 calendar；
-  //   2) 刚新建 / 刚切换的任务本会话还没有用量，进来先看到一个空白页 + 死页签，
-  //      用户会以为「用量根本查不到」（这正是反馈里那条）；
-  //   3) 进来就是想看「一共用了多少」，7 天窗口把历史都藏在页签后面（用户要求默认一年）。
-  // 本会话仍是一个页签，一处不漏。
+  // 首屏进「近一年（跨项目）」+ 画布默认停靠最右端：
+  //   1) 按天图一天固定 20px，一年 ≈ 7300px、视口约 900px，**打开看到的就是最近一个月**，
+  //      往左拖才是更早的日期（用户要求：「展示最新一个月的，加上可往左边拖动的进度条」）。
+  //      窗口只给 30 天的话画布比视口还窄，滚动条根本不存在，也就没得拖。
+  //   2) 必须走 global 口径：热力图/按天图的数据只有它带 calendar，且刚切换的任务本会话
+  //      还没有用量，进 session 口径会先撞一个空白页 + 死页签。
+  // 更短窗口都在页签上（7 天 / 近 30 天 / 近半年）。
   await draw('global', 365);
 }
 

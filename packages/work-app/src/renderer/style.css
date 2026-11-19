@@ -2146,17 +2146,38 @@ select.field-input { appearance: none; cursor: pointer; background-image: linear
 .usage-legend-value { font-size: var(--text-2xs); color: var(--color-ink); font-family: var(--font-outlier); min-width: 52px; text-align: right; }
 .usage-donut-detail, .usage-col-detail { grid-column: 1 / -1; font-size: var(--text-2xs); color: var(--color-subtle); padding-top: var(--space-2xs); border-top: var(--rule-hair); min-height: 18px; }
 .usage-donut-detail b, .usage-col-detail b { color: var(--color-ink); font-family: var(--font-outlier); font-weight: 500; }
-/* 日柱状：柱宽由 JS 按窗口天数注入（--col-w），365 天靠横向滚动而不是压成一条线。 */
-.usage-columns { display: flex; align-items: flex-end; gap: 2px; height: 110px; overflow-x: auto; padding-bottom: 14px; }
-.usage-col-wrap { position: relative; display: flex; align-items: flex-end; justify-content: center; width: var(--col-w, 12px); flex: 0 0 auto; height: 100%; }
-.usage-col { display: flex; align-items: flex-end; width: 100%; height: 100%; padding: 0; border-radius: 2px; background: transparent; overflow: hidden; transition: background var(--dur-micro) var(--ease-out); }
-.usage-col:hover { background: var(--surface-hover); }
-.usage-col-fill { display: block; width: 100%; border-radius: 2px 2px 0 0; background: color-mix(in oklab, var(--color-accent) 70%, var(--surface-sunken)); transition: background var(--dur-micro) var(--ease-out); }
-.usage-col:hover .usage-col-fill, .usage-col.is-selected .usage-col-fill { background: var(--color-accent); }
-.usage-col.is-selected { outline: 1px solid var(--color-ink); outline-offset: 1px; }
-.usage-col:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
-/* 日期标签压在柱底（绝对定位，不占柱高），只在 JS 指定的少数几根柱上出现。 */
-.usage-col-label { position: absolute; bottom: -14px; left: 50%; transform: translateX(-50%); font-size: 9px; line-height: 1; color: var(--color-subtle); font-family: var(--font-outlier); white-space: nowrap; }
+/* 按天折线：一天固定 20px（宽度由 JS 写进画布的 width），所以窗口越长画布越宽，
+ * 靠横向滚动看历史；纵轴在滚动区之外，拖动时刻度不动。 */
+.usage-line { display: grid; grid-template-columns: 42px minmax(0, 1fr); column-gap: var(--space-2xs); padding-top: var(--space-xs); }
+.usage-line-axis { grid-column: 1; height: 150px; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-end; padding: 2px 0; font-size: 9px; line-height: 1; color: var(--color-subtle); font-family: var(--font-outlier); }
+/* 横向滚动条就是「往左拖看更早」的进度条：常驻可见、细、不吃垂直空间。 */
+.usage-line-scroll { grid-column: 2; min-width: 0; overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--color-accent) 55%, var(--surface-sunken)) var(--surface-sunken); }
+/* 原生滚动条在深色主题下太隐晦，抓不住：显式给一条 8px 高的「进度条」，滑块用强调色。 */
+.usage-line-scroll::-webkit-scrollbar { height: 8px; }
+.usage-line-scroll::-webkit-scrollbar-track { background: var(--surface-sunken); border-radius: var(--radius-full); }
+.usage-line-scroll::-webkit-scrollbar-thumb { background: color-mix(in oklab, var(--color-accent) 55%, var(--surface-sunken)); border-radius: var(--radius-full); }
+.usage-line-scroll::-webkit-scrollbar-thumb:hover { background: var(--color-accent); }
+.usage-line-canvas { position: relative; }
+.usage-line-plot { position: relative; height: 150px; }
+.usage-line-grid { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; pointer-events: none; }
+.usage-line-grid i { display: block; height: 0; border-top: var(--rule-hair); }
+.usage-line-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.usage-line-area { fill: color-mix(in oklab, var(--color-accent) 14%, transparent); stroke: none; }
+.usage-line-path { fill: none; stroke: color-mix(in oklab, var(--color-accent) 88%, var(--color-ink)); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.usage-line-hits { position: absolute; inset: 0; display: flex; }
+.usage-line-hit { flex: 1 1 0; min-width: 0; height: 100%; padding: 0; border: 0; border-radius: 2px; background: transparent; cursor: pointer; transition: background var(--dur-micro) var(--ease-out); }
+.usage-line-hit:hover { background: color-mix(in oklab, var(--color-accent) 10%, transparent); }
+.usage-line-hit.is-selected { background: color-mix(in oklab, var(--color-accent) 16%, transparent); }
+.usage-line-hit:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+/* 选中点：零尺寸锚点 + ::before 自居中，坐标由 JS 写进 --sel-x/--sel-y（百分比，与横轴对齐）。 */
+.usage-line-dot { position: absolute; left: var(--sel-x, 0%); top: var(--sel-y, 0%); width: 0; height: 0; display: none; pointer-events: none; }
+.usage-line-plot.has-pick .usage-line-dot { display: block; }
+.usage-line-plot.has-pick .usage-line-dot::before { content: ''; position: absolute; top: 0; left: 0; width: 7px; height: 7px; margin: -4px 0 0 -4px; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 0 2px var(--surface-raised); }
+/* 横轴日期跟着画布一起滚（在 canvas 内），首末两端分别左/右贴齐，避免被裁掉半截。 */
+.usage-line-x { position: relative; height: 16px; margin-top: var(--space-2xs); }
+.usage-line-tick { position: absolute; top: 0; transform: translateX(-50%); font-size: 9px; line-height: 1; color: var(--color-subtle); font-family: var(--font-outlier); white-space: nowrap; }
+.usage-line-tick.is-first { transform: translateX(0); }
+.usage-line-tick.is-last { transform: translateX(-100%); }
 @media (max-width: 720px) { .usage-donut { grid-template-columns: 1fr; justify-items: center; } }
 
 /* ── 侧栏「更多 (N)」：内联 6 条之后的任务 + 终端历史会话，一份按时间混排的列表 ──
