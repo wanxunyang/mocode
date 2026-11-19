@@ -10,6 +10,7 @@ import { imageTurnAgingEnabled, visionBatch, visionKeep } from '../config/index.
 import { estimateRequestBytes, learnRequestByteLimit, requestByteLimit } from '../context/request-limit.js';
 import { createImageDescriber, relieveRequestBytes } from './request-governor.js';
 import { countOversizedImages } from '../context/vision-window.js';
+import { compactOverlappingReads } from '../context/overlapping-reads.js';
 import type { ContextState } from '../session/compact.js';
 import { getActiveSessionStore } from '../session/store.js';
 import { getCurrentSessionId } from '../session/state.js';
@@ -365,7 +366,8 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     // 放在这里统一更新：首次请求与 overflow 重建都会经过，UI 不会拿旧一段继续外推。
     runtimeContextState.ephemeralText = ephemeralReminder || undefined;
     onContextUpdate?.();
-    return ephemeralReminder ? [...history, { role: 'system', content: ephemeralReminder } as ChatMessage] : history;
+    const request = compactOverlappingReads(history);
+    return ephemeralReminder ? [...request, { role: 'system', content: ephemeralReminder } as ChatMessage] : request;
   };
   let requestHistory = buildRequestHistory();
   // 每次真正发请求前刷新：overflow 去图/压缩会替换 requestHistory，锚点不能钉在首次尝试上。

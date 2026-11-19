@@ -11,22 +11,72 @@ import {
 } from '../../changeset/index.js';
 import { isProbablyBinary } from '../../attachments/image.js';
 import type { Tool, ToolOutcome } from '../types.js';
+import { formatNumberedLines } from './read-file.js';
 
 /** 二进制嗅探只需文件头,与 read_file / write_file 同口径(16KB)。 */
 const SNIFF_BYTES = 16 * 1024;
 // 复用已有 diff 渲染，只给模型回传完整的小补丁。大文件免去额外的全文拆行。
 const MAX_PREVIEW_INPUT_CHARS = 256 * 1024;
 const MAX_PREVIEW_CHARS = 2000;
+const MAX_CONFLICT_CANDIDATES = 2;
+const MAX_CONFLICT_EVIDENCE_CHARS = 2400;
 
-function conflict(path: string, details: string): ToolOutcome {
+function conflict(path: string, details: string, evidence?: { excerpts: string; next: string }): ToolOutcome {
+  const recovery = evidence
+    ? `${evidence.next} If the target is still unclear, use read_file on the affected range.\n${evidence.excerpts}`
+    : 'Use read_file on the affected range of this exact path and copy the latest text and hash before editing again.';
   return {
     status: 'error',
     code: 'CHANGE_CONFLICT',
     retryable: false,
     changedFiles: [],
     staleFiles: [path],
-    output: `CHANGE_CONFLICT: ${path} was not changed. ${details} Do not retry these arguments. Use read_file on the affected range of this exact path and copy the latest text and hash before editing again.`,
+    output: `CHANGE_CONFLICT: ${path} was not changed. ${details} Do not retry these arguments. ${recovery}`,
   };
+}
+
+function findOccurrences(text: string, needle: string): number[] {
+  const hits: number[] = [];
+  let from = 0;
+  while (hits.length <= MAX_CONFLICT_CANDIDATES) {
+    const hit = text.indexOf(needle, from);
+    if (hit < 0) break;
+    hits.push(hit);
+    from = hit + needle.length;
+  }
+  return hits;
+}
+
+function ambiguousConflict(
+  path: string,
+  label: string,
+  text: string,
+  needle: string,
+  hits: readonly number[],
+  buffer: Buffer,
+  expectedHash: string,
+): ToolOutcome {
+  const capped = hits.length > MAX_CONFLICT_CANDIDATES;
+  const details = `${label} 出现 ${capped ? '至少 ' : ''}${hits.length} 次；请选定目标范围。`;
+  if (capped || buffer.length > MAX_PREVIEW_INPUT_CHARS || contentHash(buffer) !== expectedHash) {
+    return conflict(path, details);
+  }
+  if (!Buffer.from(buffer.toString('utf8')).equals(buffer)) return conflict(path, details);
+  const lines = text.split('\n');
+  const matchLineCount = needle.split('\n').length - Number(needle.endsWith('\n'));
+  const excerpts = hits.map((hit) => {
+    const matchLine = text.slice(0, hit).split('\n').length;
+    const start = Math.max(0, matchLine - 4);
+    const end = Math.min(lines.length, matchLine - 1 + matchLineCount + 3);
+    return `[edit_context path=${JSON.stringify(path)} hash=${expectedHash} lines=${start + 1}-${end} match=${matchLine}]\n${formatNumberedLines(lines, start, end)}`;
+  });
+  const evidence = excerpts.join('\n\n');
+  if (evidence.length > MAX_CONFLICT_EVIDENCE_CHARS) return conflict(path, details);
+  const next =
+    label === 'old_string'
+      ? "Use the candidate that matches the user's target. Copy its exact text or use the shown lines with its expected_hash."
+      : `Use the matching candidate to expand ${label} into unique exact text. Resubmit the complete replacements array with the shown expected_hash.`;
+  return conflict(path, details, { excerpts: evidence, next });
 }
 
 export const editFileTool: Tool = {
@@ -165,13 +215,13 @@ export const editFileTool: Tool = {
       // String replacement mode
       const newNormalized = toLf(String(args.new_string));
       const oldNormalized = toLf(String(args.old_string));
-      const count = normalized.split(oldNormalized).length - 1;
-
-      if (count === 0) {
+      if (!oldNormalized) return conflict(file, 'old_string 不能为空。');
+      const hits = findOccurrences(normalized, oldNormalized);
+      if (hits.length === 0) {
         return conflict(file, 'old_string 未找到；请重新 read_file 并复制最新内容。');
       }
-      if (count > 1) {
-        return conflict(file, `old_string 出现 ${count} 次；请增加上下文使其唯一。`);
+      if (hits.length > 1) {
+        return ambiguousConflict(file, 'old_string', normalized, oldNormalized, hits, buffer, expectedHash);
       }
       updated = normalized.replace(oldNormalized, () => newNormalized);
     } else if (mode === 'multi') {
@@ -180,19 +230,20 @@ export const editFileTool: Tool = {
       const located: Array<{ start: number; end: number; next: string }> = [];
       for (let i = 0; i < multiEdits.length; i++) {
         const edit = multiEdits[i];
-        const hits: number[] = [];
-        let from = 0;
-        let hit: number;
-        // 空串已在上面拒绝;indexOf 步进至少 1 不会死循环。
-        while ((hit = normalized.indexOf(edit.old, from)) !== -1) {
-          hits.push(hit);
-          from = hit + edit.old.length;
-        }
+        const hits = findOccurrences(normalized, edit.old);
         if (hits.length === 0) {
           return conflict(file, `replacements[${i}].old_string 未找到;请重新 read_file 并复制最新内容。`);
         }
         if (hits.length > 1) {
-          return conflict(file, `replacements[${i}].old_string 出现 ${hits.length} 次;请增加上下文使其唯一。`);
+          return ambiguousConflict(
+            file,
+            `replacements[${i}].old_string`,
+            normalized,
+            edit.old,
+            hits,
+            buffer,
+            expectedHash,
+          );
         }
         located.push({ start: hits[0], end: hits[0] + edit.old.length, next: edit.next });
       }

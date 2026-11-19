@@ -89,7 +89,7 @@ async function loadReadableFile(
   }
 }
 
-function formatNumberedLines(lines: string[], start: number, end: number): string {
+export function formatNumberedLines(lines: string[], start: number, end: number): string {
   return lines
     .slice(start, end)
     .map((line, i) => `${String(start + i + 1).padStart(6, ' ')}\t${line}`)
@@ -110,7 +110,9 @@ export async function readSearchEditExcerpts(
   if (sniffImageMime(head) || isProbablyBinary(head)) return;
   const data = buffer.toString('utf8');
   if (!Buffer.from(data, 'utf8').equals(buffer)) return;
-  const lines = data.split(/\r?\n/);
+  // 版本仍取自完整文件。原文只需要拆到最后一个命中附近，避免为文件前部的命中拆出整个大文件。
+  const lastNeededLine = matches.reduce((last, match) => Math.max(last, match.line + 12), 0);
+  const lines = data.split(/\r?\n/, lastNeededLine);
   const ranges: Array<{ start: number; end: number; matches: number[] }> = [];
   for (const match of matches) {
     if (lines[match.line - 1] !== match.text) return;

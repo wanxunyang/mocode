@@ -128,12 +128,26 @@ test('edit_file: old_string 未找到 → 冲突,文件不变', async () => {
 });
 
 test('edit_file: old_string 多次出现 → 冲突,文件不变', async () => {
-  const f = seed('g.txt', 'dup\ndup\n');
+  const content = 'dup\ndup\n';
+  const f = seed('g.txt', content);
   const out = await edit({ path: f, old_string: 'dup', new_string: 'x' });
   assert.equal(out.status, 'error');
   assert.equal(out.code, 'CHANGE_CONFLICT');
   assert.match(out.output, /出现 2 次/);
-  assert.equal(read(f), 'dup\ndup\n');
+  assert.match(out.output, /match=1\]/);
+  assert.match(out.output, /match=2\]/);
+  const hash = /hash=(sha256:[a-f0-9]{64})/.exec(out.output)?.[1];
+  assert.equal(hash, contentHash(content));
+  assert.equal(read(f), content);
+  const stale = await edit({ path: f, old_string: 'dup', new_string: 'x', expected_hash: contentHash('stale') });
+  assert.doesNotMatch(stale.output, /\[edit_context /);
+  const repaired = await edit({ path: f, line_start: 2, line_end: 2, new_string: 'x', expected_hash: hash });
+  assert.equal(repaired.status, 'success');
+  assert.equal(read(f), 'dup\nx\n');
+  const broad = seed('g-broad.txt', 'dup\ndup\ndup\n');
+  const broadConflict = await edit({ path: broad, old_string: 'dup', new_string: 'x' });
+  assert.match(broadConflict.output, /至少 3 次/);
+  assert.doesNotMatch(broadConflict.output, /\[edit_context /);
 });
 
 test('edit_file: 行号模式缺 hash 被拒绝,文件不变', async () => {

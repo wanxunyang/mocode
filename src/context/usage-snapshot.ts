@@ -7,6 +7,7 @@ import {
   type ChatMessage,
 } from '../llm/index.js';
 import type { ContextState } from '../session/compact.js';
+import { compactOverlappingReads } from './overlapping-reads.js';
 
 /** 当前上下文占用的可序列化快照；percent 仅在展示层封顶为 100。 */
 export interface ContextUsageSnapshot {
@@ -35,13 +36,15 @@ export function measureContextUsage(
     const activeTools = contextState.activeTools ?? chatTools;
     const ephemeralText = contextState.ephemeralText ?? '';
     const ephemeralRaw = ephemeralText ? estimateTokens(ephemeralText) : 0;
-    const fullRaw = estimateMessagesTokens([...history]) + estimateToolSchemaTokens(activeTools) + ephemeralRaw;
+    const historyRaw = estimateMessagesTokens(compactOverlappingReads([...history]));
+    const schemaRaw = estimateToolSchemaTokens(activeTools);
+    const fullRaw = historyRaw + schemaRaw + ephemeralRaw;
     const anchor = contextState.promptAnchor;
-    const anchorHistory = anchor ? history.slice(0, anchor.historyLen) : history;
+    const anchorPrefixRaw = anchor
+      ? estimateMessagesTokens(compactOverlappingReads(history.slice(0, anchor.historyLen)))
+      : 0;
     const anchorHistoryRaw = anchor
-      ? estimateMessagesTokens([...anchorHistory]) +
-        estimateToolSchemaTokens(activeTools) +
-        (anchor.ephemeralText ? estimateTokens(anchor.ephemeralText) : 0)
+      ? anchorPrefixRaw + schemaRaw + (anchor.ephemeralText ? estimateTokens(anchor.ephemeralText) : 0)
       : 0;
     if (
       anchor &&
@@ -52,7 +55,7 @@ export function measureContextUsage(
       Math.abs(anchorHistoryRaw - anchor.baseRaw) <= 4 &&
       fullRaw >= anchor.baseRaw - 4
     ) {
-      const grownRaw = estimateMessagesTokens([...history]) - estimateMessagesTokens([...anchorHistory]);
+      const grownRaw = historyRaw - anchorPrefixRaw;
       tokens = anchor.measuredPromptTokens + Math.max(0, grownRaw);
       // 只有完全同一请求快照才全是实测；后续新增内容仍属于估算。
       source = history.length === anchor.historyLen && fullRaw <= anchor.baseRaw + 4 ? 'measured' : 'estimated';

@@ -136,7 +136,7 @@ test('grep edit_context: 多候选保留各自的文件哈希，同文件相交�
   assert.equal(blocks.length, 2, result);
   assert.match(result, /spread\.ts".* lines=1-30 match=3,21\]/);
   assert.match(result, new RegExp(`multi-other\\.ts" hash=${contentHash(other)} .* match=2\\]`));
-  assert.match(result, /^ {5}2\t  target line here$/m);
+  assert.match(result, /^ {5}2\t {2}target line here$/m);
   const limited = await run({
     pattern: 'target line here',
     glob: 'src/*.ts',
@@ -175,6 +175,24 @@ test('grep edit_context: 多候选共用预算，超预算时只返回位置', a
   assert.doesNotMatch(result, /\[edit_context |x{100}/);
   assert.match(result, /budget-a\.txt:1:/);
   assert.match(result, /budget-b\.txt:1:/);
+});
+
+test('grep edit_context: 文件前部与末尾命中均带完整文件 hash 和原行号', async () => {
+  const lines = Array.from({ length: 500 }, (_, i) => {
+    if (i === 3) return '  MATCH_ME_FIRST';
+    if (i === 499) return '  MATCH_ME_LAST';
+    return `record ${i + 1}`;
+  });
+  const content = lines.join('\r\n');
+  writeFileSync(join(root, 'src', 'pages.ts'), content);
+  const hash = contentHash(content);
+  const early = await run({ pattern: 'MATCH_ME_FIRST', glob: 'src/pages.ts', edit_context: true });
+  assert.match(early, new RegExp(`hash=${hash} lines=1-16 match=4\\]`));
+  const both = await run({ pattern: 'MATCH_ME', glob: 'src/pages.ts', edit_context: true, max_edit_candidates: 2 });
+  assert.match(both, new RegExp(`hash=${hash} lines=1-16 match=4\\]`));
+  assert.match(both, new RegExp(`hash=${hash} lines=492-500 match=500\\]`));
+  assert.match(both, /^ {3}500\t {2}MATCH_ME_LAST$/m);
+  assert.doesNotMatch(both, /\trecord 250/);
 });
 
 test('grep context: 默认 context=0 时行为与旧版一致(只有命中行)', async () => {
