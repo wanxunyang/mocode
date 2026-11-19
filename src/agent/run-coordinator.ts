@@ -7,6 +7,7 @@
 
 import type OpenAI from 'openai';
 import { estimateTokens, type ChatMessage, type ToolCallRef } from '../llm/index.js';
+import { withReadFileBatch } from '../tools/builtins/read-file.js';
 import { type ToolExecutionOptions, type ToolOutcome } from '../tools/registry.js';
 import { validateToolArguments } from '../tools/validation.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools, getSkillRuntimeDisabledTools } from '../tools/constants.js';
@@ -610,16 +611,23 @@ export async function runAgentCoreLegacy(
                   );
                   if (eligibleReadonly.length > 0) {
                     hooks.onToolStart?.(calls[eligibleReadonly[0]].name);
-                    for (const index of eligibleReadonly) {
-                      startedReadonly[index] = runToolWithProactive(calls[index].name, calls[index].arguments, signal, {
-                        callId: calls[index].id,
-                        onOutput: (chunk) => hooks.onToolOutput?.(calls[index], chunk),
-                        allowedToolNames: currentAllowedToolNames(),
-                        delegation: delegationForOrchestrator(),
-                        readDedup,
-                        ...(result.finishReason ? { finishReason: result.finishReason } : {}),
-                      });
-                    }
+                    withReadFileBatch(() => {
+                      for (const index of eligibleReadonly) {
+                        startedReadonly[index] = runToolWithProactive(
+                          calls[index].name,
+                          calls[index].arguments,
+                          signal,
+                          {
+                            callId: calls[index].id,
+                            onOutput: (chunk) => hooks.onToolOutput?.(calls[index], chunk),
+                            allowedToolNames: currentAllowedToolNames(),
+                            delegation: delegationForOrchestrator(),
+                            readDedup,
+                            ...(result.finishReason ? { finishReason: result.finishReason } : {}),
+                          },
+                        );
+                      }
+                    });
                   }
                   const lastReadonlyIndex =
                     eligibleReadonly.length > 0 ? eligibleReadonly[eligibleReadonly.length - 1] : -1;
@@ -826,15 +834,17 @@ export async function runAgentCoreLegacy(
                     const batch = calls.slice(i, j);
                     for (const tc of batch) hooks.onToolHeader?.(tc);
                     hooks.onToolStart?.(batch[0].name);
-                    const started = batch.map((tc) =>
-                      runToolWithProactive(tc.name, tc.arguments, signal, {
-                        callId: tc.id,
-                        onOutput: (chunk) => hooks.onToolOutput?.(tc, chunk),
-                        allowedToolNames: currentAllowedToolNames(),
-                        delegation: delegationForOrchestrator(),
-                        readDedup,
-                        ...(result.finishReason ? { finishReason: result.finishReason } : {}),
-                      }),
+                    const started = withReadFileBatch(() =>
+                      batch.map((tc) =>
+                        runToolWithProactive(tc.name, tc.arguments, signal, {
+                          callId: tc.id,
+                          onOutput: (chunk) => hooks.onToolOutput?.(tc, chunk),
+                          allowedToolNames: currentAllowedToolNames(),
+                          delegation: delegationForOrchestrator(),
+                          readDedup,
+                          ...(result.finishReason ? { finishReason: result.finishReason } : {}),
+                        }),
+                      ),
                     );
                     // 完成即发:usage/onToolOutcome/trace 在各 outcome 落地瞬间发出(1s 的
                     // grep 不再被 60s 的 web_fetch 卡住可见性);history 回灌严格按原序。

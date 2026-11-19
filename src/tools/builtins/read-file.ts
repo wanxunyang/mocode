@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { contentHash } from '../../changeset/index.js';
@@ -87,6 +88,43 @@ async function loadReadableFile(
       `读取 ${path} 失败: ${e?.message ?? String(error)}`,
     );
   }
+}
+
+type ReadFileSnapshot =
+  | { kind: 'text'; data: string; lines: string[]; hash?: string }
+  | { kind: 'image'; mime: ImageMime; size: number }
+  | { kind: 'binary' }
+  | ToolOutcome;
+
+const pendingBatchReads = new AsyncLocalStorage<Map<string, Promise<ReadFileSnapshot>>>();
+
+/** 只在并行工具组内共享仍在进行的读取。等锁的后续调用会重新取文件。 */
+export function withReadFileBatch<T>(start: () => T): T {
+  return pendingBatchReads.run(new Map(), start);
+}
+
+async function loadReadFileSnapshot(path: string): Promise<ReadFileSnapshot> {
+  const loaded = await loadReadableFile(path);
+  if (!('buffer' in loaded)) return loaded;
+  const { buffer, size } = loaded;
+  // 图片与普通二进制都用实际字节识别，文件扩展名不参与判定。
+  const head = buffer.subarray(0, SNIFF_BYTES);
+  const mime = sniffImageMime(head);
+  if (mime) return { kind: 'image', mime, size };
+  if (isProbablyBinary(head)) return { kind: 'binary' };
+  const data = buffer.toString('utf8');
+  return { kind: 'text', data, lines: data.split(/\r?\n/) };
+}
+
+function readFileSnapshot(path: string): Promise<ReadFileSnapshot> {
+  const pending = pendingBatchReads.getStore();
+  if (!pending) return loadReadFileSnapshot(path);
+  const key = resolve(path);
+  const existing = pending.get(key);
+  if (existing) return existing;
+  const load = loadReadFileSnapshot(path).finally(() => pending.delete(key));
+  pending.set(key, load);
+  return load;
 }
 
 export function formatNumberedLines(lines: string[], start: number, end: number): string {
@@ -183,18 +221,10 @@ export const readFileTool: Tool = {
     );
     // enforceSandbox 已把 args.path 重写为牢内绝对路径(sandbox/policy.ts SANDBOX_PATH_TOOLS),
     // resolve 对绝对路径原样返回。
-    const loaded = await loadReadableFile(path);
-    if (!('buffer' in loaded)) return loaded;
-    const { buffer, size } = loaded;
-
-    // ── 2. 魔数嗅探:图片走视觉通道,其余二进制明确拒绝 ──────────────────────
-    // 为什么必须嗅探而不看扩展名:扩展名会说谎(截图缓存 / 构建产物常无扩展名或错扩展名),
-    // 而把二进制当 UTF-8 解码的代价是实测一张 42KB PNG 产出 17862 个 U+FFFD(占 45%),
-    // 经 history 上限中截后仍有数千字符纯乱码进上下文 —— 既烧 token 又误导模型。
-    const head = buffer.subarray(0, SNIFF_BYTES);
-    const sniffed: ImageMime | null = sniffImageMime(head);
-    if (sniffed) return await readAsImage(path, sniffed, args.detail, size);
-    if (isProbablyBinary(head)) {
+    const snapshot = await readFileSnapshot(path);
+    if (!('kind' in snapshot)) return snapshot;
+    if (snapshot.kind === 'image') return await readAsImage(path, snapshot.mime, args.detail, snapshot.size);
+    if (snapshot.kind === 'binary') {
       return failure(
         'INVALID_ARGUMENTS',
         `${path} 是二进制文件(头部含控制字符),不能按文本读取 —— 强行解码只会得到乱码。` +
@@ -206,8 +236,7 @@ export const readFileTool: Tool = {
     // ── 3. 文本:沿用既有 artifact header + 行号分页 ────────────────────────
     // hash 仍取「UTF-8 解码后字符串」的摘要(与改动前逐字节一致):会话里已持久化的
     // expected_hash 与 context/artifacts 的 parseReadHash 都依赖这个口径,不能顺手换。
-    const data = buffer.toString('utf8');
-    const lines = data.split(/\r?\n/);
+    const { data, lines } = snapshot;
     let start = Math.max(0, offset - 1);
     if (anchor !== undefined) {
       if (typeof anchor !== 'string' || !anchor.length || /[\r\n]/.test(anchor)) {
@@ -221,7 +250,7 @@ export const readFileTool: Tool = {
         );
       }
     }
-    const fileHash = contentHash(data);
+    const fileHash = (snapshot.hash ??= contentHash(data));
     const artifactHeader = `[artifact source=read_file path=${path} hash=${fileHash}]`;
     const end = Math.min(lines.length, start + limit);
     const body = formatNumberedLines(lines, start, end);

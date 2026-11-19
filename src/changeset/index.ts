@@ -207,7 +207,8 @@ export async function commitChangeSet(changeSet: ChangeSet, signal?: AbortSignal
 
       const captures = effective.map((change) => ({
         change,
-        capture: beginPathMutation(change.absolutePath),
+        // dry-run 已读取原文。首次替换前仍会逐路径复核 hash，复核失败时整批不落回滚快照。
+        capture: beginPathMutation(change.absolutePath, change.before ?? undefined),
       }));
       const createdDirectories = new Set<string>();
       const tempByPath = new Map<string, string>();

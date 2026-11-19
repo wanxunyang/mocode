@@ -325,13 +325,13 @@ export class RollbackStore {
     return full !== root && this.isInside(root, full) ? full : null;
   }
 
-  private readState(full: string): StoredState {
+  private readState(full: string, preparedFile?: Buffer): StoredState {
     try {
       const stat = lstatSync(full);
       const mode = stat.mode & 0o777;
       if (stat.isSymbolicLink()) return { kind: 'symlink', data: readlinkSync(full), mode };
       if (stat.isDirectory()) return { kind: 'directory', mode };
-      if (stat.isFile()) return { kind: 'file', data: readFileSync(full).toString('base64'), mode };
+      if (stat.isFile()) return { kind: 'file', data: (preparedFile ?? readFileSync(full)).toString('base64'), mode };
     } catch {
       // 不存在或不可读均按 missing；工具若最终也不可读，不会产生伪变化。
     }
@@ -438,12 +438,12 @@ export class RollbackStore {
     return this.currentTurnId;
   }
 
-  beginPathMutation(value: string): PathMutationCapture {
+  beginPathMutation(value: string, preparedFile?: Buffer): PathMutationCapture {
     const workspaceRoot = this.rootDir();
     const full = path.resolve(workspaceRoot, value);
     return {
       path: this.toRel(workspaceRoot, full),
-      before: this.readState(full),
+      before: this.readState(full, preparedFile),
       sequence: ++this.sequenceCounter,
       createdParents: this.missingParents(workspaceRoot, full),
       turnId: this.currentTurnId,

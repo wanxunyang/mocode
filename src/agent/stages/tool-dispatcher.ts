@@ -6,6 +6,7 @@ import { checkPermission as defaultCheckPermission, type PermissionCheckOptions 
 import { jailResolve as defaultJailResolve } from '../../sandbox/index.js';
 import { summarizeToolArguments } from '../../session/index.js';
 import { getPlanDisabledTools } from '../../tools/constants.js';
+import { withReadFileBatch } from '../../tools/builtins/read-file.js';
 import { defaultToolRuntime, type ToolOutcome, type ToolRuntime } from '../../tools/registry.js';
 import { validateToolArguments } from '../../tools/validation.js';
 import {
@@ -171,7 +172,9 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
       );
       if (eligibleReadonly.length > 0) {
         request.onEvent({ type: 'start', tool: calls[eligibleReadonly[0]].name });
-        for (const index of eligibleReadonly) startedReadonly[index] = execute(calls[index]);
+        withReadFileBatch(() => {
+          for (const index of eligibleReadonly) startedReadonly[index] = execute(calls[index]);
+        });
       }
       const lastReadonlyIndex = eligibleReadonly.length > 0 ? eligibleReadonly[eligibleReadonly.length - 1] : -1;
 
@@ -317,7 +320,7 @@ class LegacyCompatibleToolDispatcher implements ToolDispatcher {
         const batch = calls.slice(index, end);
         for (const call of batch) request.onEvent({ type: 'header', call });
         request.onEvent({ type: 'start', tool: batch[0].name });
-        const started = batch.map((call) => execute(call));
+        const started = withReadFileBatch(() => batch.map((call) => execute(call)));
         // 完成即发:usage/host_outcome/trace_end 在各 outcome 落地瞬间发出(1s 的 grep 不再
         // 被 60s 的 run_command 卡住可见性);result(history 回灌)严格保持原序。
         await Promise.all(

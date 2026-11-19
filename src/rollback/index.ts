@@ -51,8 +51,8 @@ export function getCurrentTurnId(): number {
   return getActiveRollbackStore().getCurrentTurnId();
 }
 
-export function beginPathMutation(path: string): PathMutationCapture {
-  return getActiveRollbackStore().beginPathMutation(path);
+export function beginPathMutation(path: string, preparedFile?: Buffer): PathMutationCapture {
+  return getActiveRollbackStore().beginPathMutation(path, preparedFile);
 }
 
 export function endPathMutation(capture: PathMutationCapture, op: string): void {

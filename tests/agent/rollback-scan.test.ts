@@ -6,6 +6,8 @@ import test, { type TestContext } from 'node:test';
 import { RollbackStore } from '../../src/rollback/store.js';
 import { createRuntime } from '../../src/runtime/index.js';
 import { builtinTools } from '../../src/tools/builtins/index.js';
+import { withReadFileBatch } from '../../src/tools/builtins/read-file.js';
+import { contentHash } from '../../src/changeset/hash.js';
 
 async function createWorkspace(t: TestContext): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'mocode-rollback-scan-'));
@@ -58,6 +60,44 @@ test('工作区扫描保留自定义会话目录边界，回滚以本次调用�
   assert.equal(await readFile(join(root, removed), 'utf8'), 'keep');
   await assert.rejects(readFile(join(root, created)), { code: 'ENOENT' });
   assert.equal(await readFile(join(sessions, 'history'), 'utf8'), 'updated');
+});
+
+test('并行分页使用同一版本，后续编辑和重读能看见新版本，回滚恢复原字节', async (t) => {
+  const root = await createWorkspace(t);
+  const absolute = join(root, 'pages.txt');
+  const original = 'original\r\nsecond\r\n';
+  const beforeHash = contentHash(original);
+  await writeFile(absolute, original);
+  const runtime = createRuntime({ sandboxRoot: root, tools: builtinTools });
+  t.after(() => runtime.close());
+  runtime.context.beginTurn('edit paged file');
+  await runtime.context.runInScope(() =>
+    withReadFileBatch(async () => {
+      const invoke = (tool: string, args: Record<string, unknown>) =>
+        runtime.context.toolRuntime.executeToolOutcome(tool, JSON.stringify({ path: 'pages.txt', ...args }));
+      const [first, second] = await Promise.all([
+        invoke('read_file', { offset: 1, limit: 1 }),
+        invoke('read_file', { anchor: 'second', limit: 1 }),
+      ]);
+      assert.ok(first.output.includes(beforeHash) && second.output.includes(beforeHash));
+      assert.match(first.output, /1\toriginal/);
+      assert.match(second.output, /2\tsecond/);
+
+      const edited = await invoke('edit_file', {
+        old_string: 'original',
+        new_string: 'updated!',
+        expected_hash: beforeHash,
+      });
+      assert.equal(edited.status, 'success', edited.output);
+      const fresh = await invoke('read_file', { offset: 1, limit: 1 });
+      assert.match(fresh.output, /1\tupdated!/);
+      assert.doesNotMatch(fresh.output, new RegExp(beforeHash));
+    }),
+  );
+  const history = [{ role: 'user' as const, content: 'edit paged file' }];
+  const result = runtime.rollback.apply(runtime.rollback.plan(0, history), history, new Set(['pages.txt']));
+  assert.deepEqual(result.conflictedFiles, []);
+  assert.equal(await readFile(absolute, 'utf8'), original);
 });
 
 test('run_command 非零退出时也能回滚目录改名和二进制内容，并保留后续外部修改', async (t) => {
