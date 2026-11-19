@@ -101,6 +101,8 @@ export interface ToolOutcome {
   staleFiles?: string[];
   /** The committed transaction; diff, rollback, tracing and freshness share this identity. */
   changeSet?: import('../changeset/types.js').ChangeSetSummary;
+  /** edit_file 已提交的内容恰好等于一次字面量替换，保留其余字节。 */
+  exactTextReplacement?: true;
   durationMs?: number;
   /** LLM usage incurred inside an orchestrating tool (for example sub-agent). */
   usage?: import('../llm/index.js').ChatUsage;

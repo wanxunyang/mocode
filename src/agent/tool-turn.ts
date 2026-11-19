@@ -3,7 +3,8 @@ import type { ToolOutcome } from '../tools/registry.js';
 import type { AgentRunOptions, ContentPart } from './run-contracts.js';
 import type { AgentRuntimeContext } from './runtime-context.js';
 import type { HistoryManager, TerminationPolicy } from './stages/contracts.js';
-import { isToolResultsNoise } from './tool-helpers.js';
+import { isToolResultsNoise, parseArgs } from './tool-helpers.js';
+import { t } from '../i18n/index.js';
 import type { ModelStreamState } from './model-turn.js';
 import type { TurnLifecycle } from './turn-lifecycle.js';
 
@@ -19,6 +20,35 @@ const PLAN_NAG_TEXT =
  * 新增附件产出点**必须**复用这一个前言。
  */
 export const ATTACHMENT_PREAMBLE = 'The read_file tool loaded the following visual input: ';
+
+function describeFirstAction(call: ChatResult['toolCalls'][number]): string {
+  switch (call.name) {
+    case 'read_file':
+    case 'edit_file':
+    case 'write_file': {
+      const path = parseArgs(call.arguments)?.path;
+      const file =
+        typeof path === 'string' && path.trim() && !/[\p{Cc}\p{Cf}]/u.test(path)
+          ? JSON.stringify(path.length > 100 ? path.slice(0, 97) + '…' : path)
+          : t('agent.openingTargetFile');
+      return t(call.name === 'read_file' ? 'agent.openingRead' : 'agent.openingEdit', { file });
+    }
+    case 'grep':
+    case 'glob':
+      return t('agent.openingSearch');
+    case 'run_command':
+      return t('agent.openingCommand');
+    case 'web_search':
+    case 'web_fetch':
+      return t('agent.openingWeb');
+    case 'ask_human':
+      return t('agent.openingClarify');
+    case 'add_tool_groups':
+      return t('agent.openingTools');
+    default:
+      return t('agent.openingGeneric');
+  }
+}
 
 export interface ToolTurnPlanState {
   stepsSincePlanTouch: number;
@@ -69,7 +99,19 @@ export async function runToolTurn(input: ToolTurnInput): Promise<void> {
     stream.gotText = false;
     stream.lastChar = '';
   }
-  if (stream.mode !== 'idle' && stream.lastChar !== '\n') hooks.onTextEnd?.();
+  const firstUserStep = step === 0 && !opts.suppressOpeningAnalysis;
+  const needsOpening = firstUserStep && (!stream.gotText || !result.content?.trim());
+  if (needsOpening) {
+    // UI 兜底只陈述已知动作，不伪造模型正文或把工具参数写进模型历史。
+    const call = result.toolCalls[0];
+    hooks.onText?.(describeFirstAction(call));
+    turnLifecycle.emitTrace('opening_fallback', { tool: call.name });
+  }
+  if (needsOpening || (stream.mode !== 'idle' && stream.lastChar !== '\n')) hooks.onTextEnd?.();
+  if (firstUserStep) {
+    for (const call of result.toolCalls) hooks.onToolCall?.(call.name);
+    hooks.onChatDone?.();
+  }
   historyManager.appendAssistantTurn({
     content: result.content,
     toolCalls: result.toolCalls,

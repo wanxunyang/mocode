@@ -90,9 +90,9 @@ function applyLanguage(): void {
   // 这里就地按新语言重算一次，否则切语言后会话流里会残留旧语言的句子。
   relabelNotices();
   renderAttachments();
-  // 改动长条的标题 / title / aria 也是生成时写死的 → 清掉签名强制重建一次。
-  changesBarKey = '';
-  syncChangesBar();
+  // 改动清单卡片的标题 / title / aria 也是生成时写死的 → 就地按新语言重画一遍
+  // （卡片挂在各自那条助手消息尾部，没法靠「清签名 + 重建」统一重生成）。
+  relabelTurnChanges();
   // 轨道点的 title / aria-label 是生成时按当时语言写死的 → 强制重建一次。
   scheduleConvRail(true);
   refreshBrowserPanelLabels();
@@ -298,7 +298,14 @@ const convRail = $('#conv-rail') as HTMLElement;
 const planPanel = $('#plan-panel') as HTMLElement;
 const attentionBar = $('#attention-bar') as HTMLElement;
 const attentionBadge = $('#attention-badge') as HTMLButtonElement;
-const changesBar = $('#changes-bar') as HTMLElement;
+/**
+ * 收到 run_changed_files 时要挂卡片的那条助手消息。
+ *
+ * 为什么不在收到事件时取「最后一条 assistant」：改动清单是主进程跑完一次 git 统计之后
+ * 才异步下发的，那期间用户可能已经发了下一轮、屏尾已经多出一条新的空消息 —— 卡片就会
+ * 挂到错误的那一轮上。run_completed 那一刻先记住，回来时只认它。
+ */
+let pendingChangesTurn: HTMLElement | null = null;
 
 let state: WorkState | null = null;
 let collapsedProjects: Set<string> = new Set();
@@ -328,7 +335,9 @@ type StreamItem =
   | { kind: 'tool'; id: string; name: string; args: string; output: string; done: boolean; payload?: Record<string, unknown> }
   | { kind: 'error'; message: string }
   /** 系统提示行（「上下文已压缩」等）：不是错误也不是模型输出，但必须在会话流里留痕。 */
-  | { kind: 'notice'; notice: StreamNotice };
+  | { kind: 'notice'; notice: StreamNotice }
+  /** 这一轮改过的文件：挂在那一轮助手消息的尾部，每轮各留一份。 */
+  | { kind: 'changes'; files: ChangesBarFile[] };
 interface ContextUsageSnapshot {
   tokens: number;
   window: number;
@@ -643,14 +652,15 @@ function renderPlanPanel(taskId: string, stream: TaskStream, plan: PlanSnapshot)
   });
 }
 
-/* ── 本轮改动清单（会话下方、输入卡上方）─────────────────────
- * 语义：一次任务跑完，把这一轮 agent 改过的文件一条条摆出来，点一条看该文件的 diff。
- * 为什么挂在 #conversation 之外：它是**这一轮的结果**，不是会话里的一句话 —— 跟着消息
- * 滚上去就找不到了，而「刚才它改了什么」恰恰是用户回来第一件要看的事。
+/* ── 本轮改动清单（挂在每条助手消息的尾部）─────────────────────
+ * 语义：每一轮 agent 跑完，把**这一轮**改过的文件一条条摆出来，点一条看该文件的 diff。
+ * 为什么挂在消息里、而不是会话下方的一条全局卡片：只留最新一轮的话，问到第二轮时
+ * 第一轮改了什么就查不到了 —— 而「这次回答顺手动了哪几个文件」本来属于那一条回答本身。
+ * 逐轮保留之后，往回翻聊天记录就能看到每轮的手笔。
  *
- * 数据源与右侧「改动」面板同源（task.changedFiles + work:task-changes 的逐文件统计），
- * 不另建事实源：主进程在 run_completed 时落盘，这里只负责展示与点击。
- * 只保留**最新一轮**：新的一轮跑完直接替换，会话里不留历史轮次的清单（翻旧账走「改动」面板）。
+ * 数据源：主进程在 run_completed 之后立刻取一次 gitFileStats 快照，作为 run_changed_files
+ * 事件下发并落进恢复日志（见 main.ts 的 announceChangedFiles）。行数必须是「那一轮当时」的值 ——
+ * 事后按 HEAD 重算出来的是累计差异，历史轮次甚至会因后续提交归零。
  */
 const changesBarLabels = (): ChangesBarLabels => ({
   title: (n) => t('changesBar.title', { n: String(n) }),
@@ -661,88 +671,98 @@ const changesBarLabels = (): ChangesBarLabels => ({
   expand: t('changesBar.expand'),
 });
 
-/** 当前长条对应的数据签名（taskId + 路径列表）；相同就不重建 DOM，避免 hover/滚动被重置。 */
-let changesBarKey = '';
-/**
- * 标题行是否被用户收起（只留一行标题 + 「全部改动」）。
- *
- * 默认展开 = 保持既有观感；不持久化 —— 收起是「这一眼嫌它太占地方」的临时动作，
- * 记进 localStorage 会让下一次跑完任务时莫名看不到改动。新一轮跑完（explicitPaths）
- * 强制复位成展开，因为那批文件正是用户要看的。
- */
-let changesBarCollapsed = false;
-/**
- * 逐文件增删统计的缓存（按任务）。
- *
- * ⚠ 必须与「这一轮」绑定，不能只按路径缓存：连续两轮改同一批文件时路径完全一样，
- * 但 +N/-N 已经变了 —— 只按路径命中缓存就会把上一轮的行数当成这一轮的展示。
- * 所以每次 run_completed（带 explicitPaths 的调用）都把该任务的条目作废重取。
- */
-const changesBarStats = new Map<string, { pathsKey: string; files: TaskChangeFile[] }>();
-
-function hideChangesBar(): void {
-  changesBar.classList.add('hidden');
-  changesBar.innerHTML = '';
-  changesBarKey = '';
+/** 会话流里最后一条助手消息 —— 本轮改动清单就挂在它尾部。 */
+function lastAssistantTurn(): HTMLElement | null {
+  const all = conversation.querySelectorAll<HTMLElement>('.message.assistant');
+  return all[all.length - 1] ?? null;
 }
 
-function paintChangesBar(key: string, taskId: string, files: ChangesBarFile[]): void {
-  const entering = changesBar.classList.contains('hidden');
-  changesBarKey = key;
-  changesBar.innerHTML = changesBarHtml(files, !changesBarCollapsed, changesBarLabels());
-  changesBar.classList.remove('hidden');
-  // 入场动画只在「从无到有」这一下播；同一轮重画（统计回来 / 切语言）不该重播，否则看着像闪。
-  changesBar.classList.toggle('is-entering', entering);
-  mountIcons(changesBar);
-  changesBar.querySelectorAll<HTMLButtonElement>('[data-change-path]').forEach((row) => {
+/** 事件 / 恢复日志里的文件清单 → 卡片可用的形状（坏数据一律跳过）。 */
+function changeFilesFrom(raw: unknown): ChangesBarFile[] {
+  if (!Array.isArray(raw)) return [];
+  const files: ChangesBarFile[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.path !== 'string' || !record.path) continue;
+    files.push({
+      path: record.path,
+      added: typeof record.added === 'number' && Number.isFinite(record.added) ? record.added : 0,
+      removed: typeof record.removed === 'number' && Number.isFinite(record.removed) ? record.removed : 0,
+      untracked: record.untracked === true,
+    });
+  }
+  return files;
+}
+
+/**
+ * 画一张「本轮改动」卡片。
+ *
+ * `expanded` 存在容器自己的 dataset 上而不是模块级单例：每轮各一张卡片，收起 A 轮
+ * 不该影响 B 轮（早先那条全局长条只有一个开关，是因为那时只显示最新一轮）。
+ * 重画而非只切 class —— 开合状态同时决定 caret 方向与 aria-expanded。
+ */
+function paintTurnChanges(container: HTMLElement, taskId: string, files: ChangesBarFile[]): void {
+  const expanded = container.dataset.expanded !== '0';
+  container.innerHTML = changesBarHtml(files, expanded, changesBarLabels());
+  mountIcons(container);
+  container.querySelectorAll<HTMLButtonElement>('[data-change-path]').forEach((row) => {
     row.addEventListener('click', () => openChangeDiff(taskId, row.dataset.changePath ?? ''));
   });
-  changesBar.querySelector('[data-changes-all]')?.addEventListener('click', () => openInspector('changes'));
-  // 标题行是折叠开关：整行可点（「全部改动」在它右边，不共用点击区）。
-  // 重画而非只切 class —— 开合状态同时决定 caret 方向与 aria-expanded。
-  changesBar.querySelector('[data-changes-toggle]')?.addEventListener('click', () => {
-    changesBarCollapsed = !changesBarCollapsed;
-    paintChangesBar(key, taskId, files);
+  container.querySelector('[data-changes-all]')?.addEventListener('click', () => openInspector('changes'));
+  // 标题行整行都是折叠开关（「全部改动」在它右边，不共用点击区）。
+  container.querySelector('[data-changes-toggle]')?.addEventListener('click', () => {
+    container.dataset.expanded = expanded ? '0' : '1';
+    paintTurnChanges(container, taskId, files);
   });
 }
 
+/** 把改动清单挂到某条助手消息尾部；同一轮再次到来时原地重画，不叠第二张。 */
+function attachTurnChanges(turn: HTMLElement | null, taskId: string, files: ChangesBarFile[]): void {
+  if (!turn || !files.length) return;
+  // 挂在正文容器里（正文 / 工具行之后）：它是这一轮回答的收尾，不是独立的一段消息。
+  // 落到 .message 上会被 grid 摆到操作按钮那一行，还得为「没改文件的轮次」多留一个空行。
+  const host = turn.querySelector<HTMLElement>('.message-content') ?? turn;
+  let container = host.querySelector<HTMLElement>('.message-changes');
+  if (!container) {
+    container = document.createElement('div');
+    container.className = 'message-changes is-entering';
+    host.append(container);
+    // 入场动画只播一次：折叠 / 展开与本轮重画都走 paintTurnChanges，不该再闪一遍。
+    container.addEventListener('animationend', () => container!.classList.remove('is-entering'), { once: true });
+  }
+  // 数据同时留在 dataset 上：切语言要按新文案重画，而那次重画没有事件可用。
+  container.dataset.taskId = taskId;
+  container.dataset.changes = JSON.stringify(files);
+  paintTurnChanges(container, taskId, files);
+}
+
+/** 切语言：卡片文案是生成时写死的，就地按新语言重画每一张（文件清单从 dataset 里取回来）。 */
+function relabelTurnChanges(): void {
+  for (const container of Array.from(conversation.querySelectorAll<HTMLElement>('.message-changes'))) {
+    const raw = container.dataset.changes;
+    if (!raw) continue;
+    try { paintTurnChanges(container, container.dataset.taskId ?? '', changeFilesFrom(JSON.parse(raw))); } catch { /* 坏数据保持原样 */ }
+  }
+}
+
 /**
- * 按「这一轮改了哪些文件」刷新长条。三个调用点：run_completed（本轮结果）、
- * switchToTask（切任务时还原）、updateState（主进程广播的 changedFiles 更新）。
- *
- * `explicitPaths` 用于 run_completed：那一刻的 state 广播可能还没到渲染层，
- * 直接用事件里带的路径，别让第一条渲染空着。
+ * 老会话兜底：恢复日志里还没有本轮改动快照（这个能力之前存下的会话）时，
+ * 按任务记录的 changedFiles 现取一次统计补一张。数字是「此刻 vs HEAD」的累计值 ——
+ * 与「改动」面板同口径，聊胜于无；新会话一律走 run_changed_files 的逐轮快照。
  */
-function syncChangesBar(taskId: string | undefined = viewingTaskId(), explicitPaths?: string[]): void {
-  const task = taskId ? state?.tasks.find((item) => item.id === taskId) : undefined;
-  const paths = (explicitPaths ?? task?.changedFiles ?? []).filter((path) => typeof path === 'string' && path !== '');
-  // 跑着的这一轮还没收口：此时屏上那批文件属于**上一轮**，摆出来只会误导（用户会以为
-  // 这就是这一轮的结果）。等 run_completed 再出现 —— 反正那一刻它才真正成立。
-  if (!taskId || !paths.length || isRunning(taskId)) { hideChangesBar(); return; }
-  const pathsKey = paths.join('\u0000');
-  const key = `${taskId}\u0000${pathsKey}`;
-  // 同一轮被反复通知（状态广播 / 重新进入视图）时不重建 DOM，保住 hover 与滚动位置；
-  // 但新一轮（调用方给了 explicitPaths）必须重画 + 重取统计 —— 连续两轮改同一批文件时
-  // 路径一字不差而 +N/-N 已经变了，只按路径命中缓存就会把上一轮的行数当成这一轮的。
-  if (!explicitPaths && key === changesBarKey && !changesBar.classList.contains('hidden')) return;
-  // 新一轮（explicitPaths）强制展开：这批文件正是用户回来要看的东西。
-  if (explicitPaths) changesBarCollapsed = false;
-  const cached = changesBarStats.get(taskId);
-  const fresh = cached && cached.pathsKey === pathsKey && !explicitPaths;
-  // 先按路径画出来（没有 +N/-N 时先给上一轮的数），统计回来再补 —— 不让用户对着空白等。
-  paintChangesBar(key, taskId, cached && cached.pathsKey === pathsKey
-    ? cached.files
-    : paths.map((path) => ({ path, added: 0, removed: 0, untracked: false })));
-  if (fresh) return;
+function restoreLegacyChanges(taskId: string): void {
+  const task = state?.tasks.find((item) => item.id === taskId);
+  const paths = (task?.changedFiles ?? []).filter((path) => typeof path === 'string' && path !== '');
+  if (!paths.length) return;
   void (async () => {
     const result = await window.mocodeWork.taskChanges({ taskId });
-    // 非 git 仓库（普通任务的 scratch 目录）没有基准，这不影响「改了哪些文件」本身。
-    if (!result.ok) return;
-    const files = result.files ?? [];
-    changesBarStats.set(taskId, { pathsKey, files });
-    // 期间换了任务或又跑完一轮：这份统计已经不属于屏上那条。
-    if (changesBarKey !== key) return;
-    paintChangesBar(key, taskId, files);
+    // 期间切了任务 / 又跑完一轮：这份数据已经不属于屏上那条消息。
+    if (viewingTaskId() !== taskId) return;
+    const files = result.ok && result.files?.length
+      ? result.files
+      : paths.map((path) => ({ path, added: 0, removed: 0, untracked: false }));
+    attachTurnChanges(lastAssistantTurn(), taskId, files);
   })();
 }
 
@@ -1838,10 +1858,8 @@ function updateState(next: WorkState): void {
     refreshTerminalProject();
   }
   if (activeInspectorTab === 'source' && !inspector.classList.contains('hidden')) void refreshSourceControl(inspectorContent);
-  // changedFiles 会随 run_completed 的广播更新（主进程落盘）→ 长条按最新一轮跟着变。
-  syncChangesBar();
 }
-function clearWorkspace(): void { lastTokenUsageSignature = ''; tokenUsageEl.textContent = ''; tokenUsageEl.title = ''; tokenUsageEl.classList.add('hidden'); hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); hideChangesBar(); }
+function clearWorkspace(): void { lastTokenUsageSignature = ''; tokenUsageEl.textContent = ''; tokenUsageEl.title = ''; tokenUsageEl.classList.add('hidden'); hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); }
 
 /**
  * 一轮 assistant 输出 = 一条 message 内的**有序 block 流**:
@@ -1857,9 +1875,39 @@ function clearWorkspace(): void { lastTokenUsageSignature = ''; tokenUsageEl.tex
  * "MoCode" 标签要等第一个 text_delta 才凭空冒出来,还会把状态行顶到它上面跳一次位。
  * 代价:可能出现「一个字都没吐」的空轮次(失败 / 中止),由 finalizeTurn 负责收掉。
  */
+
+/**
+ * 这次新开的助手消息是不是**同一次 run 的后半轮**。
+ *
+ * 判据:从会话流尾往前跳过提示行 / 状态行等非消息节点,落在一条**已被压缩提示行封口**的
+ * assistant 消息上(`dataset.sealed`,由 sealTurn 设置)。
+ * 上下文压缩提示行会把一轮切成「前半轮 → 提示行 → 后半轮」(见 addNotice 的封口),
+ * 而封口后 resumableTurn 不再认领前半轮,后半轮只能另起一条消息 —— 若这条消息再画一次
+ * 头像 + "MoCode",读起来就像用户又提了一次问、新一轮回答开始了(工具计数也跟着重新起算)。
+ * 所以后半轮继承同一轮的身份:保留正文与工具行的连续性,只把重复的署名行隐掉(见 style.css 的
+ * `.message.assistant.is-continuation`)。
+ *
+ * 必须认 sealed 而不是「上一条消息是 assistant」:run 结束后迟到的 no_reply / max_steps
+ * 也会另起一条消息,那种情况是**新一轮的收尾**,署名行得照画。
+ */
+function isContinuationTurn(): boolean {
+  const nodes = conversation.children;
+  for (let i = nodes.length - 1; i >= 0; i -= 1) {
+    const node = nodes[i] as HTMLElement;
+    // 会话流尾常常不是消息本身:压缩提示行、状态行(ensureStatusRow 保证自己永远压在最后)
+    // 都排在消息之后,直接取最后一个子节点会永远判定为「新一轮」。
+    if (!node.classList.contains('message')) continue;
+    return node.classList.contains('assistant') && node.dataset.sealed === '1';
+  }
+  return false;
+}
+
 function startAssistantTurn(): HTMLElement {
+  // 必须在 addMessage 之前判定:它自己会把新消息 append 进来。
+  const continuation = isContinuationTurn();
   activeAssistant = addMessage('assistant');
   activeAssistant.classList.add('is-streaming');
+  if (continuation) activeAssistant.classList.add('is-continuation');
   activeToolGroup = null;
   return activeAssistant;
 }
@@ -1920,6 +1968,10 @@ function ensureTextBlock(): HTMLElement {
   const block = document.createElement('div');
   block.className = 'message-body text-block';
   (content ?? current).append(block);
+  // 这一轮已有「本轮改动」卡片时把它挪回末尾：卡片是回答的收尾，新文字必须接在它上面
+  // （上下文压缩切断后继续写的那半轮会走到这里 —— 不挪就会在卡片下方再长出一段正文）。
+  const card = content?.querySelector('.message-changes');
+  if (card) content!.append(card);
   activeTextBlock = block;
   // 文字打断工具集合:之后到来的工具另起一个新集合。
   activeToolGroup = null;
@@ -4244,6 +4296,24 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       endTaskRun(taskId);
       if (viewing) finish();
       break;
+    case 'run_changed_files': {
+      // 这一轮改过的文件（含当时的 +N/-N）：进事件流，切走再回来 / 重启后按原样重放。
+      const files = changeFilesFrom(payload.files);
+      if (!files.length) break;
+      stream.items.push({ kind: 'changes', files });
+      if (!viewing) break;
+      // pendingChangesTurn 是常规路径（run_completed 刚收口的那条）。它为空时回放兜底：
+      // 切走又切回来时卡片已由 replay 画好，这里只补「还没有卡片」的那条；
+      // 而这份统计迟到、用户已经发了下一轮时 stream.running 为真 —— 绝不往新消息上挂。
+      let turn = pendingChangesTurn?.isConnected ? pendingChangesTurn : null;
+      pendingChangesTurn = null;
+      if (!turn && !stream.running) {
+        const last = lastAssistantTurn();
+        if (last && !last.querySelector('.message-changes')) turn = last;
+      }
+      attachTurnChanges(turn, taskId, files);
+      break;
+    }
     case 'run_completed': {
       stream.contextUsage = parseContextUsage(payload.contextUsage);
       const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : null;
@@ -4259,12 +4329,14 @@ function handleAgentEvent(envelope: AgentEnvelope): void {
       settleTurnUsage(stream, taskId, usage);
       applyStatus(stream, viewing, settledStatus('done', 'status.completed', 'ok', elapsedDetail(stream.startedAt)));
       endTaskRun(taskId);
-      // 本轮改动清单：事件里自带路径，直接用 —— 主进程的 state 广播可能还没到渲染层，
-      // 等广播再画会让「跑完了」和「改了什么」之间空一拍。
+      // 本轮改动清单由紧随其后的 run_changed_files 带来（主进程先跑一次 git 统计）。
+      // 这里只把「这一轮是哪条消息」记下来，收尾前取 —— finish() 会把空轮次整条移除。
       if (viewing) {
-        syncChangesBar(taskId, Array.isArray(payload.changedFiles) ? payload.changedFiles.map(String) : []);
+        const turn = currentTurn();
+        updateContextUsage(stream.contextUsage);
+        finish();
+        pendingChangesTurn = turn && turn.isConnected ? turn : null;
       }
-      if (viewing) { updateContextUsage(stream.contextUsage); finish(); }
       else notifyBackground(taskId, t('status.completed'));
       break;
     }
@@ -4431,6 +4503,9 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
         } else if (item.kind === 'notice') {
           // 系统提示行挂在会话流上、不挂助手消息：恢复现场时顺序与实时一致。
           addNotice(item.notice);
+        } else if (item.kind === 'changes') {
+          // 挂在刚刚回放完的那条助手消息尾部 —— 与实时渲染同一位置。
+          attachTurnChanges(lastAssistantTurn(), taskId, item.files);
         }
       }
     });
@@ -4459,8 +4534,9 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   }
   syncPlanPanel(taskId);
   syncAttention();
-  // 切任务时把这一轮的改动清单一起还原（数据来自任务记录，重启后也在）。
-  syncChangesBar(taskId);
+  // 老会话（逐轮快照上线前存下的恢复日志）里没有任何 changes 项：按任务记录补一张，
+  // 数字是「此刻 vs HEAD」的累计值，与右侧「改动」面板同口径。
+  if (!stream?.items.some((item) => item.kind === 'changes')) restoreLegacyChanges(taskId);
   renderStatus(stream?.status ?? statusFromTask(selectedTask()), { replay: true });
   smartScrollToBottom(true);
   attachments = []; renderAttachments();

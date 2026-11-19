@@ -296,6 +296,9 @@ const RECOVERED_EVENTS = new Set([
   'run_started', 'text_delta', 'tool_started', 'tool_output', 'tool_completed',
   'live_usage', 'no_reply', 'max_steps', 'approval_requested', 'run_aborted',
   'run_completed', 'run_failed', 'host_exit',
+  // 本轮改动快照（run_completed 之后由主进程算好追加）：是对话内容的一部分，
+  // 每条助手消息尾部的清单都靠它重放。
+  'run_changed_files',
   // 压缩留下的系统行是**对话内容**：切走再回来、重启后打开会话都必须还在。
   // 只持久化完成事件；context_compacting 是纯瞬时状态，恢复时没有意义。
   'context_compacted',
@@ -306,6 +309,41 @@ function recordRecoveryEvent(taskId: string, envelope: RecoveryEnvelope): void {
   if (envelope.type === 'error' || (envelope.type === 'event' && RECOVERED_EVENTS.has(envelope.event ?? ''))) {
     taskRecovery(taskId).event({ ...envelope, requestId: taskId });
   }
+}
+
+/** 每个任务「改动快照」的代号：只有最新一轮的那次 git 统计允许落盘与下发。 */
+const changedFilesSeq = new Map<string, number>();
+
+/**
+ * 本轮改动清单：run_completed 之后立刻取一次快照，作为独立的 run_changed_files 事件下发 + 落盘。
+ *
+ * 为什么必须**现在**取，不能等渲染层需要时再算：清单要挂在**这一条**助手消息尾部，
+ * 切走再回来看、重启后打开会话都得复现。而 gitFileStats 的基准是 HEAD —— 事后算出来的是
+ * 「此刻 vs HEAD」的累计差异，历史轮次甚至可能因后续提交归零。所以这里抓住那一轮的瞬间值。
+ *
+ * 取不到统计（不是 git 仓库 / git 失败）时仍然发清单，只是不带 +N/-N：
+ * 「这一轮动了哪些文件」本身仍然成立，行数缺失不该让整块消失。
+ */
+function announceChangedFiles(taskId: string, payload: Record<string, unknown>): void {
+  const files = Array.isArray(payload.changedFiles)
+    ? payload.changedFiles.filter((item): item is string => typeof item === 'string' && item !== '')
+    : [];
+  if (!files.length) return;
+  const task = taskById(taskId);
+  const project = task ? workspaceForTask(task) : undefined;
+  if (!project) return;
+  const seq = (changedFilesSeq.get(taskId) ?? 0) + 1;
+  changedFilesSeq.set(taskId, seq);
+  void gitFileStats(project.root, files).then((result) => {
+    // 期间又开了新一轮（或任务被删）：这份快照已经不属于屏上那条消息了。
+    if (changedFilesSeq.get(taskId) !== seq) return;
+    const stats = result.ok && result.stats.length
+      ? result.stats
+      : files.map((file) => ({ path: file, added: 0, removed: 0, untracked: false }));
+    const envelope: RecoveryEnvelope = { type: 'event', event: 'run_changed_files', requestId: taskId, payload: { files: stats } };
+    recordRecoveryEvent(taskId, envelope);
+    pushRenderer('work:agent-event', envelope);
+  });
 }
 
 function statePath(): string { return path.join(app.getPath('userData'), 'work-projects.json'); }
@@ -1477,6 +1515,16 @@ class LocalAgent {
     const attributed = envelope.requestId === this.taskId || envelope.requestId === undefined
       && (envelope.type === 'error' || envelope.event === 'host_exit');
     if (attributed) recordRecoveryEvent(this.taskId, envelope);
+    // 每轮改动清单：紧接着 run_completed 落一份快照（顺序即「那一轮之后」），
+    // 渲染层把它挂到刚收口的那条助手消息尾部。
+    if (attributed && envelope.type === 'event' && envelope.event === 'run_completed') {
+      announceChangedFiles(this.taskId, (envelope.payload ?? {}) as Record<string, unknown>);
+    }
+    // 新一轮已经开跑：尚未回来的上一轮统计作废（否则那份清单会落进新轮的日志区间，
+    // 回放时被挂到下一轮的助手消息上）。
+    if (attributed && envelope.type === 'event' && envelope.event === 'run_started') {
+      changedFilesSeq.set(this.taskId, (changedFilesSeq.get(this.taskId) ?? 0) + 1);
+    }
     if (envelope.type === 'error') {
       this.errorSeq += 1;
       // 面板命令（requestId = panel-*）的失败不属于任何一次 run：交给面板自己显示，

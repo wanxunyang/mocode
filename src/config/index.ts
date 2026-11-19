@@ -125,6 +125,8 @@ export interface Config {
   /** read_file 重复读短路:同区间、文件未变、内容仍在 context 时返短指针。
    *  默认 true;MOCODE_READ_DEDUP=false 关闭。 */
   readDedup: boolean;
+  /** 明确的单文件字面量替换可按工具证据直接收尾，默认关闭。 */
+  shortPathCompletion: boolean;
   /** Typed context encoding for old logs/searches during real pressure only.
    * Normal tool results remain raw (apart from the hard per-result safety cap).
    * Default true; set MOCODE_CONTEXT_OPTIMIZE=false to disable this stage. */
@@ -606,8 +608,8 @@ ${buildValidationCommandsSection()}
 ${buildWorkDisciplineSection(inferModelFamily(config.model))}
 
 ## Tool policy
-- Silent Execution: begin a focused change with the needed tool call. For complex work, keep any opening brief. Strictly no step-by-step narration (no "let me…", "让我先…", "now checking…" between calls).
-- For a known file and symbol, use read_file(path, anchor, limit) to locate and read the implementation in one call. For an unknown path, grep with a narrow pattern and context to inspect nearby code immediately.
+- Opening and silent execution: the main agent starts every tool-using user turn with exactly one short visible sentence explaining what it will check or change first and why, in the SAME assistant response as the first tool calls. Sub-agents stay silent. After the opening, strictly no step-by-step narration (no "let me…", "让我先…", "now checking…" between calls).
+- Known vs unknown target: when the request already names the file (a filename or path appears in the user's message), that file is KNOWN — make read_file on it your FIRST tool call. Do NOT grep/glob beforehand to "locate" or "confirm" a file the request already identified; that burns a full model round-trip for zero new information. Search only when the target file or symbol is genuinely unknown: grep with a narrow pattern and context to inspect nearby code immediately. For a known file and symbol, read_file(path, anchor, limit) locates and reads the implementation in one call.
 - Edit against a FRESH read: before editing, call read_file on the exact path and copy the exact target text. Never reconstruct old_string from a grep/summary/diff — those lose whitespace and indentation and cause edit failures.
 - Pick the right file tool: for an EXISTING file, DEFAULT to edit_file — one old_string for a single change, replacements[] for many separate changes in one atomic call, or a line range for a big block. Do NOT overwrite an existing file with write_file just to tweak parts of it (re-sending the whole file wastes tokens and its long JSON is truncation-prone). Use write_file only to create a new file, to append (append=true needs no read_file and no hash), or to rewrite essentially the WHOLE file (a full rewrite needs the latest read_file hash). expected_hash is OPTIONAL in edit_file old_string/replacements mode, REQUIRED in line-range mode. Never write a throwaway script (tmp_patch*.cjs, fix_*.py, ...) to modify source files: scripts run outside ChangeSet tracking, so rollback and diff cannot see them.
 - A read_file hash from before a compaction, session resume, edit conflict, or external change is STALE and will be rejected if you pass it. In edit_file old_string mode just omit expected_hash; otherwise re-read rather than reuse an old hash.
@@ -742,6 +744,7 @@ export const config: Config = {
     : (__activePreset?.reasoningEffort ?? parseReasoningEffort(process.env.REASONING_EFFORT) ?? 'auto'),
   compactFork: process.env.MOCODE_COMPACT_FORK !== 'false',
   readDedup: process.env.MOCODE_READ_DEDUP !== 'false',
+  shortPathCompletion: process.env.MOCODE_SHORT_PATH_COMPLETION === 'true',
   contextOptimize: process.env.MOCODE_CONTEXT_OPTIMIZE !== 'false',
   contextRelprune: process.env.MOCODE_CONTEXT_RELPRUNE !== 'false',
   contextLifecycle: process.env.MOCODE_LIFECYCLE !== 'false',

@@ -15,8 +15,10 @@ import { isProactiveEnabled, proactiveHint } from '../memory/proactive.js';
 import { ADD_TOOL_GROUPS_TOOL_NAME } from '../config/profiles.js';
 import { defaultAgentRuntimeContext, type AgentRuntimeContext } from './runtime-context.js';
 import type { AgentRunOptions, AgentRunResult } from './run-contracts.js';
+import { buildMentionedFilesReminder } from './mentioned-files.js';
 import { runModelTurn } from './model-turn.js';
 import { runToolTurn } from './tool-turn.js';
+import { createShortPathCompletion } from './short-path-completion.js';
 import { createTurnLifecycle } from './turn-lifecycle.js';
 import {
   parseArgs,
@@ -113,6 +115,17 @@ export async function runAgentCoreLegacy(
   // core 不读记忆库,否则每个 agent 单测都会去读真实的 ~/.mocode/memory.jsonl,
   // 测试既失去隔离性、断言也会被本机记忆内容污染;spawn 不传即天然零注入。
   const memoryRecall = opts.memoryRecall ?? '';
+  // 短路径优化:从本用户轮文本确定性提取已知名文件(存在性过滤),生成 ephemeral
+  // 近因提示。只对 string/含 text part 的输入生效;cwd 即 workspace(REPL 与 eval 一致)。
+  const mentionedFilesReminder = buildMentionedFilesReminder(
+    typeof opts.userInput === 'string'
+      ? opts.userInput
+      : opts.userInput
+          .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+          .map((part) => part.text)
+          .join('\n'),
+    process.cwd(),
+  );
   const runtimeToolSchemas: OpenAI.Chat.Completions.ChatCompletionTool[] = ctx.toolRuntime.tools.map((tool) => ({
     type: 'function',
     function: {
@@ -132,6 +145,15 @@ export async function runAgentCoreLegacy(
   // 中断还原:repl 的 /plan / /auto / Shift+Tab 等用户面触发 setAgentMode 中途切了模式,
   // abort 时连同模式一起还原回轮首。模型不再持有 switch_mode 工具,无法自切。
   const savedMode = ctx.getAgentMode();
+  const shortPath =
+    ctx.config.shortPathCompletion &&
+    savedMode === 'auto' &&
+    !opts.continueFromHistory &&
+    !opts.suppressOpeningAnalysis &&
+    typeof userInput === 'string'
+      ? createShortPathCompletion(userInput, ctx)
+      : undefined;
+  let shortPathCompleted = false;
   const turnLifecycle = createTurnLifecycle(opts, ctx, stages, savedMode);
   const { usageMeter, emitTrace, traceTurnId } = turnLifecycle;
   const toolTurnPlanState = { stepsSincePlanTouch: 0 };
@@ -212,6 +234,17 @@ export async function runAgentCoreLegacy(
     }
     return messages.length > 0;
   };
+  const completeTurn = (finalText: string | null): AgentRunResult => {
+    const finalMutation = ctx.getCurrentTurnMutationState();
+    turnLifecycle.markCompleted();
+    return {
+      completed: true,
+      terminationReason: 'completed',
+      finalText,
+      usage: usageMeter.snapshot(),
+      changedFiles: finalMutation.changedFiles.map((item) => item.path),
+    };
+  };
   try {
     for (let step = 0; step < maxSteps; step++) {
       turnLifecycle.setCurrentStep(step);
@@ -288,6 +321,7 @@ export async function runAgentCoreLegacy(
           maxSteps,
           readDedup,
           memoryRecall,
+          mentionedFilesReminder,
           liveUpdateReminder: hasLiveUserUpdates ? liveUpdateReminder : undefined,
           // #convergence A:一次性提醒,取走即清空;未踩线时是 undefined。
           noProgressReminder: progressGuard.takeReminder(),
@@ -308,6 +342,9 @@ export async function runAgentCoreLegacy(
           modelResult: result,
         });
         if (modelDecision.kind === 'continue') {
+          if (result.toolCalls.length !== 1 || result.finishReason === 'length') {
+            shortPath?.reject('unexpected_tool');
+          }
           await runToolTurn({
             opts,
             ctx,
@@ -392,6 +429,7 @@ export async function runAgentCoreLegacy(
                       break;
                     case 'trace_end': {
                       const { outcome, call } = event;
+                      shortPath?.observe(call, outcome);
                       progressGuard.record(call.name, event.argumentSummary.sha256, outcome);
                       emitTrace(
                         'tool_call_end',
@@ -506,6 +544,7 @@ export async function runAgentCoreLegacy(
                   );
                 }
                 const traceToolEnd = (tc: ToolCallRef, index: number, outcome: ToolOutcome): void => {
+                  shortPath?.observe(tc, outcome);
                   if (outcome.status === 'success' && outcome.modelAttachments?.length) {
                     modelAttachments.push(...outcome.modelAttachments);
                   }
@@ -1211,6 +1250,30 @@ export async function runAgentCoreLegacy(
               }
             },
           });
+          if (shortPath && !shortPath.fallback) {
+            if (step === 0 && (!stream.gotText || !result.content?.trim())) shortPath.reject('opening_missing');
+            if (hasLiveUserUpdates) shortPath.reject('user_update');
+            if (signal?.aborted || ctx.getAgentMode() !== 'auto' || step + 1 >= maxSteps) {
+              shortPath.reject('turn_state_changed');
+            }
+            const finalText = shortPath.finalText();
+            if (finalText) {
+              if (acceptUserMessages()) shortPath.reject('user_update');
+              else if (signal?.aborted || ctx.getAgentMode() !== 'auto' || ctx.extractActivePlanSection()) {
+                shortPath.reject('turn_state_changed');
+              } else {
+                hooks.onText?.(finalText);
+                hooks.onTextEnd?.();
+                historyManager.appendAssistantTurn({ content: finalText, toolCalls: [] });
+                if (acceptUserMessages()) shortPath.reject('user_update');
+                else if (signal?.aborted) shortPath.reject('turn_state_changed');
+                else {
+                  shortPathCompleted = true;
+                  return completeTurn(finalText);
+                }
+              }
+            }
+          }
           continue; // 带着工具结果再调一次 LLM
         }
 
@@ -1230,15 +1293,7 @@ export async function runAgentCoreLegacy(
 
         // A user update received during the final stream keeps this run alive.
         if (acceptUserMessages()) continue;
-        const finalMutation = ctx.getCurrentTurnMutationState();
-        turnLifecycle.markCompleted();
-        return {
-          completed: true,
-          terminationReason: 'completed',
-          finalText: modelDecision.finalText,
-          usage: usageMeter.snapshot(),
-          changedFiles: finalMutation.changedFiles.map((item) => item.path),
-        };
+        return completeTurn(modelDecision.finalText);
       } finally {
         emitTrace('step_end', {
           durationMs: Date.now() - stepStartedAt,
@@ -1307,6 +1362,17 @@ export async function runAgentCoreLegacy(
       changedFiles: finalMutation.changedFiles.map((item) => item.path),
     };
   } finally {
+    if (shortPath) {
+      emitTrace(
+        'short_path_completion',
+        shortPathCompleted
+          ? { status: 'completed' }
+          : {
+              status: 'fallback',
+              reason: shortPath.fallback ?? (signal?.aborted ? 'turn_state_changed' : 'model_finished'),
+            },
+      );
+    }
     turnLifecycle.finalize();
   }
 }

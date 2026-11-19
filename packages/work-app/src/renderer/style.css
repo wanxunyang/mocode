@@ -645,7 +645,7 @@ textarea::placeholder { color: var(--text-subtle); }
  *   · 展开是完整步骤清单（完成压暗带删除线 / 当前步高亮 + 脉冲点 / 待办灰）；
  *   · 全部完成 → 先显示完成态，再自动关闭（renderer.ts 的 syncPlanPanel）。
  * 左右边界与会话列对齐：右侧要扣掉 conversation 恒定预留的滚动条槽。 */
-/* 右侧同 .changes-bar：卡片不在滚动盒内，无滚动条槽可让，两侧都用 --gutter-x 才能与输入卡同宽。 */
+/* 右侧同 .plan-panel：卡片不在滚动盒内，无滚动条槽可让，两侧都用 --gutter-x 才能与输入卡同宽。 */
 .plan-panel { flex: 0 0 auto; width: 100%; padding: var(--space-md) var(--gutter-x) 0; }
 .plan-panel.hidden { display: none; }
 .plan-card { position: relative; overflow: hidden; border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-soft); }
@@ -721,20 +721,20 @@ textarea::placeholder { color: var(--text-subtle); }
 /* 窄屏把提示语收掉，别把「在等什么」挤没。 */
 @media (max-width: 60rem) { .attention-bar-hint { display: none; } }
 
-/* ── 本轮改动清单（会话下方、输入卡上方）──────────────────────
- * 「这一轮 agent 改了哪些文件」是任务跑完后用户第一件要看的事，所以要一直摆在那儿，
- * 而不是塞进会话流里跟着消息滚走。与计划面板同列同边界（都挂在 .thread 内）。
+/* ── 本轮改动清单（挂在每条助手消息尾部）──────────────────────
+ * 「这一轮 agent 改了哪些文件」属于那条回答本身：跟着消息走，往回翻聊天记录就能看到
+ * 每轮各自的手笔（早年只留最新一轮的全局卡片，问到第二轮时第一轮就查不到了）。
  *
  * 结构：一条卡片 = 一行标题（本轮改动 · N 个文件 + 全部改动）+ 一串长条。
  * 单条长条的信息优先级：文件名 > 目录 > +N/-N —— 用户扫的是「动了哪个文件」，
  * 目录只用弱化色跟在后面区分同名文件，不抢先占注意力。 */
-/* 右侧**不能**像 .conversation 那样扣掉 --scrollbar-w：这条卡片挂在 .thread 里、不在滚动盒内，
- * 它旁边没有滚动条槽。扣 10px 会让卡片比输入卡右边多出 10px（2026-11-18 修的就是这个）。
- * 两侧都用 --gutter-x，与 .composer 严格同宽。 */
-.changes-bar { flex: 0 0 auto; width: 100%; padding: var(--space-xs) var(--gutter-x) 0; }
-.changes-bar.hidden { display: none; }
-.changes-bar.is-entering .changes-bar-card { animation: plan-in var(--dur-short) var(--ease-out) both; }
+/* 卡片是 .message-content 的最后一个子节点（正文 / 工具行之后、操作按钮之前）：
+   宽度随正文列（= .conversation 内容盒 = 与 .composer 同宽），不需要自己再算 gutter。
+   不放进 grid 第 2 行 —— 那一行在没改文件的轮次里是空的，但空行仍会吃两次 row-gap。 */
+.message-changes { margin-top: var(--space-sm); }
 .changes-bar-card { border: var(--rule-hair); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-soft); overflow: hidden; }
+/* 入场动画只在卡片第一次出现时播：容器带 is-entering，折叠 / 展开的重画不该再闪一次。 */
+.message-changes.is-entering .changes-bar-card { animation: plan-in var(--dur-short) var(--ease-out) both; }
 .changes-bar-head { display: flex; align-items: center; gap: var(--space-xs); padding: 2px var(--space-xs) 2px var(--space-sm); border-bottom: var(--rule-soft); }
 /* 标题行整行就是折叠开关（与计划面板同构）：caret 指方向，右侧「全部改动」独立成按钮。 */
 .changes-bar-toggle { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: var(--space-2xs); padding: 4px 2px; border-radius: var(--radius-sm); text-align: left; transition: color var(--dur-micro) var(--ease-out); }
@@ -898,6 +898,9 @@ textarea::placeholder { color: var(--text-subtle); }
    没有复制 / 重新生成按钮，按钮行与行距都收掉，让它和普通段落一样紧贴提示行。 */
 .message.assistant.is-sealed { row-gap: 0; }
 .message.assistant.is-sealed > .message-actions { display: none; }
+/* 同一次 run 的后半轮（被压缩提示行切断的那一段，见 renderer.ts 的 isContinuationTurn）：
+   它不是新一轮提问，署名行（头像 + "MoCode"）隐掉，读起来是一次连续回答。 */
+.message.assistant.is-continuation > .message-content > .message-label { display: none; }
 /* 本轮一个字都还没吐(思考阶段):消息整块也不留底部 margin ——
    此时它内部只有头像 + "MoCode" 标签,再往下垫一层就和状态行拉开一大截空白。
    有正文或工具行之后这条不生效,间距交回 .message 的常规节奏。 */

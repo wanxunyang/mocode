@@ -19,7 +19,23 @@ export type RecoveryStreamItem =
   | { kind: 'error'; message: string }
   /** 系统提示行（如「上下文已压缩」）：既不是错误也不是模型输出，但必须在会话流里留痕，
    *  否则切走再回来就只剩「百分比莫名掉了一截」。文案不落盘 —— 存结构，渲染层按当前语言生成。 */
-  | { kind: 'notice'; notice: StreamNotice };
+  | { kind: 'notice'; notice: StreamNotice }
+  /**
+   * 这一轮改过的文件（挂在对应那条助手消息的尾部）。
+   *
+   * 为什么统计要跟着事件走、而不是恢复时现算：`git diff HEAD` 算的是「此刻 vs HEAD」，
+   * 对历史轮次会变成累计差异（甚至因后续提交而归零）。所以每轮结束时由主进程算一次、
+   * 落进日志 —— 回放看到的 +N/-N 就是那一轮当时的数字。
+   */
+  | { kind: 'changes'; files: RecoveryChangeFile[] };
+
+/** 「本轮改动」清单的一行（与渲染层 changes-bar.ts 的 ChangesBarFile 同形）。 */
+export interface RecoveryChangeFile {
+  path: string;
+  added: number;
+  removed: number;
+  untracked: boolean;
+}
 /** 结构化系统提示：字段是数据，不是译文（恢复日志会跨语言切换存续）。 */
 export type StreamNotice =
   | { type: 'contextCompacted'; beforeTokens?: number; afterTokens?: number; windowTokens?: number; manual?: boolean; summarized?: boolean };
@@ -385,6 +401,23 @@ function parseRecovery(source: string, running = false): RecoverySnapshot | null
         runOpen = false;
         pendingApproval = null;
         break;
+      case 'run_changed_files': {
+        // 这一轮的改动清单：主进程在 run_completed 之后立刻取快照（见 main.ts 的
+        // announceChangedFiles），与那一轮的助手消息同行排列 —— 回放时 +N/-N 仍是当时的值。
+        const files = Array.isArray(payload.files) ? payload.files : [];
+        const parsed: RecoveryChangeFile[] = [];
+        for (const item of files) {
+          if (!isRecord(item) || typeof item.path !== 'string' || !item.path) continue;
+          parsed.push({
+            path: item.path,
+            added: typeof item.added === 'number' && Number.isFinite(item.added) ? item.added : 0,
+            removed: typeof item.removed === 'number' && Number.isFinite(item.removed) ? item.removed : 0,
+            untracked: item.untracked === true,
+          });
+        }
+        if (parsed.length) items.push({ kind: 'changes', files: parsed });
+        break;
+      }
       case 'run_failed':
         items.push({ kind: 'error', message: String(payload.message ?? 'Agent run failed') });
         runOpen = false;

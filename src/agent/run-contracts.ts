@@ -137,4 +137,11 @@ export interface AgentRunOptions {
    * 空串/undefined 时零注入。
    */
   memoryRecall?: string;
+  /**
+   * 短路径优化:已知名文件提示,由 core 入口从本用户轮文本**确定性提取**(见
+   * mentioned-files.ts)后传入,作为 ephemeral 段拼接。任务内近因提示对弱指令遵循
+   * 模型比系统提示中段规则更有效(eval trace 实测:冷启动首改前 3 请求 → 2)。
+   * 空串/undefined 时零注入。
+   */
+  mentionedFilesReminder?: string;
 }

@@ -53,7 +53,7 @@ function statsHtml(file: ChangesBarFile, labels: ChangesBarLabels): string {
 }
 
 /**
- * 卡片内层 HTML。调用方负责塞进容器并挂事件（见 renderer.ts 的 syncChangesBar）。
+ * 卡片内层 HTML。调用方负责塞进容器并挂事件（见 renderer.ts 的 paintTurnChanges）。
  *
  * `expanded` 决定文件列表是否可见：标题行本身就是折叠开关（整行可点，只有「全部改动」
  * 例外），与计划面板同一套交互，文件多到滚不完时用户能把它压成一行。

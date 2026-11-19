@@ -59,6 +59,8 @@ export interface ModelTurnInput {
    * 现算等于一轮跑 N 次检索、N 次建索引,还会把观测计数翻 N 倍。
    */
   memoryRecall?: string;
+  /** 短路径优化:已知名文件提示(run-coordinator 在 run 开头算一次,见 mentioned-files.ts)。 */
+  mentionedFilesReminder?: string;
   /** Run-scoped reminder retained across steps and compaction after live user updates. */
   liveUpdateReminder?: string;
   /**
@@ -128,7 +130,14 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
   const memoryRecallText = input.memoryRecall ?? '';
   const memoryTailText = opts.memoryTail ?? '';
   const ephemeralJoined = (): string =>
-    [sessionStateText, memoryRecallText, memoryTailText, input.liveUpdateReminder ?? '', input.noProgressReminder ?? '']
+    [
+      sessionStateText,
+      memoryRecallText,
+      memoryTailText,
+      input.mentionedFilesReminder ?? '',
+      input.liveUpdateReminder ?? '',
+      input.noProgressReminder ?? '',
+    ]
       .filter((s) => s.length > 0)
       .join('\n\n');
   /** 与 ephemeralJoined() 同源,保证「发了多少」与「算多大」永不漂移。 */
@@ -251,7 +260,8 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     // 流中即发 onTextEnd 会让 UI 在词中间硬换行并封死 markdown 段(「继续通读:d / ispatcher」
     // 断词 bug)。onToolCall 此刻只驱动「生成中」spinner;正文收尾换行统一由流末
     // (tool-turn / run-coordinator)依据 stream.lastChar 发一次 onTextEnd,届时全部 content 已到齐。
-    hooks.onToolCall?.(name);
+    // 首步等开场文字收齐，由 tool-turn 先显示开场，再通知 UI 准备执行。
+    if (step !== 0 || opts.suppressOpeningAnalysis) hooks.onToolCall?.(name);
   };
 
   let result: ChatResult;
@@ -290,7 +300,11 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       // 祈使主语在重写时丢了。这里把「先说一句」恢复成无条件的，Answer-first 只决定这一句
       // 之后是回答还是动手，不再决定说不说。
       !opts.suppressOpeningAnalysis && step === 0
-        ? '## Opening analysis\nOpen this turn with one short sentence saying what you are about to do, then act — either answer directly when the conversation already provides the answer, or start with the needed tool call for a clear, focused change in AUTO. Keep it to that one sentence unless the approach needs a user decision or the task is complex.'
+        ? '## Opening analysis\n' +
+          'Before your first tool call in every user-facing turn, you MUST output exactly one short visible sentence ' +
+          'telling the user what you will check or change first and what it will help you establish. ' +
+          'Use plain language and put the sentence first in the SAME assistant response as the tool calls. ' +
+          'If no tools are needed, answer directly. After this opening, work silently.'
         : '',
       // 就近重申 Answer-first。动机(2026-11-18):用户反馈「很简单的问题也要兜一大圈」。
       // history[0] 的 Workflow 里已有 Answer first,但它离当前决策最远,而每轮都在的
@@ -327,6 +341,9 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       // R18:每轮静默召回。放在 R17 尾注之前:尾注说的是「刚变了什么」(时间上最新),
       // 召回说的是「这轮可能用得上什么」(topic 相关),新的信息靠后更能被看见。
       input.memoryRecall ?? '',
+      // 短路径优化:已知名文件近因提示(见 mentioned-files.ts)。放在召回段之后:
+      // 它是本 turn 的任务级事实,靠后位置对弱指令遵循模型更可见。
+      input.mentionedFilesReminder ?? '',
       // R17:会话内记忆尾注。放最后——它是最"新"的信息,且每轮可能不同,
       // 放在固定段之后能最大限度保住前缀缓存的可复用部分。
       opts.memoryTail ?? '',
@@ -671,7 +688,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       ephemeralText: requestEphemeral,
     };
   }
-  hooks.onChatDone?.();
+  if (step !== 0 || opts.suppressOpeningAnalysis || !result.toolCalls.length) hooks.onChatDone?.();
   onContextUpdate?.();
 
   return { kind: 'result', result, stream };

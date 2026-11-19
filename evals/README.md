@@ -209,3 +209,64 @@ npm run eval:memory-retrieval:live   # 同一组探针直读本机真实记忆�
 `corpus.json` 需要扩语料时，从真实库导出后必须重新跑 `tests/memory/memory-retrieval.test.ts`，隐私断言会把不该进来的条目挡下来。
 
 `evals/memory-compact-handoff.ts`（`npm run eval:memory-handoff`）是另一条记忆评测：压缩→记忆交接的真实验收，**需要 LLM 配置**，无密钥时打印 skip 并 exit 0。
+
+## 短路径效率基准（short-path）
+
+`evals/short-path/` 回答另一个维度的问题：**coding benchmark 测「能不能做到」，这里测「做到了但绕了多远」。** 针对「简单任务走长路径」「已有上下文还重新探索」两类浪费给出可量化的标尺。指标定义借鉴 SWE-Effi（资源约束下的有效性）与 HAL（cost-of-pass）的思路，任务与指标全部本地计算。
+
+### 复杂度分级（L1-L10，对标 SWE-bench / Terminal-Bench / METR time-horizon 口径）
+
+| 级别 | 定义 | 覆盖 |
+|---|---|---|
+| L1 | 机械单点：单文件单处修改，无需理解逻辑（常量/拼写/导出缺失/文案/风格） | 12 题 |
+| L2 | 单文件逻辑修复：需理解函数内行为（边界/异步/正则/算法小错） | 12 题 |
+| L3 | 多文件局部修复：2-3 文件调用链，带精确提示（路径/堆栈/复现） | 16 题 |
+| L4 | 会话内上下文延续：先建上下文再追加小改动 | 16 题 |
+| L5 | 真实仓库定位 + 增量修改：陌生仓库定位 leaf 模块做增量任务 | 12 题 |
+| L6 | 多文件功能开发：只给新文件名+导出签名+行为契约，无实现模板 | 16 题 |
+| L7 | 测试驱动修复/重构：按测试补实现或重构，含 CRLF/事务等边界语义 | 预留 |
+| L8 | 跨模块重构：API 变更跨包传导、monorepo 边界、契约同步 | 预留 |
+| L9 | 系统级任务：并发/事务/缓存/流式等横切语义，性能与正确性双约束 | 预留 |
+| L10 | 长程工程：架构级、多阶段规格演进的长 horizon 任务 | 预留 |
+
+level 与 scenario（运行形态）正交：L1/L2 跑 micro 形态、L3 hinted、L4 warm、L5 repo、L6 复用 hinted 形态（spec 驱动的功能开发）。`--level N` 按级选题；报告自动输出按级小计。基线按运行组分文件（`baseline-<group>.json`，L6 为 `baseline-l6.json`）。
+
+四个场景层（共 84 题，按任务形态保持多样性）：
+
+- `micro`（24 题 = L1×12 + L2×12）：单文件小修，gold 路径 ≈ read → edit（→ verify）。测会不会直奔目标。形态覆盖：常量/类型、导出缺失、拼写、文案、风格、边界条件、默认参数、比较器、正则/格式化、异步 await、空值保护、命名转换等。
+- `hinted`（16 题）：多文件迷你仓库，任务文本自带精确路径/报错。测会不会利用提示省掉全树搜索。形态覆盖：堆栈定位、遍历优先级、URL 编码、大小写归一、二分边界、监听器泄漏、Promise 部分失败、LRU 淘汰、TTL 边界、引号解析等。
+- `warm`（16 题）：**两段式会话**——第一轮只读预热建立上下文（不计分），第二轮在同一段 history 上追加小改动任务（计分）。测会不会复用上下文而不是重新探索。预热形态覆盖：双文件对比（含干扰项）、跨文件调用链、诊断后再修、测试优先（verifier 即测试，防篡改布局）、配置 schema、枚举扩展、文案变更等。预热轮发生任何改动直接判失败。
+- `repo`（12 题）：**self-host 真实仓库**——把 `git archive HEAD` 解包到临时目录、junction 共享主仓库 node_modules，在 mocode 自己的代码上做增量任务（新增导出函数），verifier 用 tsx 对真实 TS 模块做运行时断言。目标模块覆盖 12 个纯叶子文件：changeset（hash/unified-diff）、tools/result、session（trace-sanitize）、jobs/dir-snapshot、context/request-limit、i18n、attachments/image、llm（token 估算）、models/catalog、permissions、sandbox/command。测 AGENTS.md 目录指引的真实利用效率。
+- `l6`（16 题）：**功能开发**——迷你仓库（事件总线/DI 容器/限流器/求值器/插件系统等），只给新文件名+导出签名+行为契约，不给实现模板；agent 自行设计内部结构。verifier 静态 import 新导出，未实现必失败。gold ≤ 10 次调用。
+
+核心指标（全部由 trace 事件归约，见 `src/session/short-path-metrics.ts`）：
+
+- **path ratio** = 实际工具调用数 / gold 上限。micro 目标 < 2.0x，repo < 3.0x。
+- **首改前模型请求数 / 只读调用数**：首个 workspace mutation 之前烧掉多少探索成本。
+- **重复相同只读调用**：相同（工具， 参数指纹）的重复 read/grep/glob，除首次外全部计冗余。
+- **改后再探索**：首个 mutation 之后的只读调用数。
+- **分阶段开销**：预路由、主模型请求和重试、改后命令，以及最后一次工具调用之后的模型收尾。报告展示通过题的端到端 P50/P95 和未命中缓存的输入 token。端到端耗时含路由和 warm 预热，独立判分脚本在其后执行。
+
+运行：
+
+```powershell
+npm run eval:short:list
+npm run eval:short -- --task micro-01
+npm run eval:short -- --group micro        # 单场景组运行(混合场景会被拒绝:AGENTS.md 注入随场景变化)
+npm run eval:short -- --group repo         # 真实仓库层,单题预算 300s
+npm run eval:short -- --group micro --update-baseline   # 录制基线(按场景分文件:baseline-<scenario>.json)
+npm run eval:short -- --group micro --efficiency-gate   # 效率劣化从告警升级为阻断
+```
+
+基线按运行组分文件。新基线记录模型、系统提示词、题集内容指纹、思考档和路由模式。比较前会检查这些条件是否一致。旧基线仍可读取，比较时按已有字段检查。
+
+确定性收尾实验默认关闭，可用 `MOCODE_SHORT_PATH_COMPLETION=true` 启用。比如提交“将 `config.js` 中的 `MAX_RETRIES = 2` 替换为 `MAX_RETRIES = 3`。然后运行 `node verify.mjs`。”，正常开场、改动和检查均有证据时，runtime 直接给出结果。明确写“无需运行检查。”也可以使用此路径。验证要求未明确时，继续由模型决定如何验证与收尾。报告会记录开关、自动收尾次数和回退原因。
+
+门禁语义（`--group` 完整场景组运行时与对应的 `baseline-<scenario>.json` 比较）：
+
+- **质量是硬门禁**：通过数回落即失败（与 coding baseline 同语义，任务集/模型/提示词漂移直接拒绝比较）。
+- **效率默认只告警**：均值劣化超过基线 +20% 打 `[warn]`；这是刻意设计——先观察分布再收紧，等效率基线稳定后用 `--efficiency-gate` 升级为阻断。
+
+结构自检（零模型调用）：`evals/short-path/smoke.ts` 已并入 `npm run eval:smoke`，校验 fixture 不变量与「初始状态 verifier 必须失败」铁律；repo 层的执行检查需要解包真实快照，用 `tsx evals/short-path/smoke.ts --with-repo` 单独跑。
+
+repo 题目失效时的校准流程：仓库演进让「新增导出函数」类任务失去前提时，对应 verifier 会持续失败——修改题目或目标模块，然后 `--group repo --update-baseline` 重录。

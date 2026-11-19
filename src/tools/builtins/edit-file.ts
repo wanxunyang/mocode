@@ -267,6 +267,18 @@ export const editFileTool: Tool = {
       };
     }
     const summary = summarizeChangeSet(result.changeSet);
+    const committed = result.changeSet.prepared[0];
+    const literal = mode === 'single' ? String(args.old_string) : '';
+    const literalStart = literal ? data.indexOf(literal) : -1;
+    // CRLF 归一化、非 UTF-8 和重叠命中可能改变替换范围，只有实际事务满足才提供证明。
+    const exactTextReplacement =
+      literalStart >= 0 &&
+      result.changedFiles.length === 1 &&
+      data.length + replacement.length <= MAX_PREVIEW_INPUT_CHARS &&
+      committed.before?.equals(buffer) &&
+      Buffer.from(data).equals(buffer) &&
+      data.indexOf(literal, literalStart + 1) < 0 &&
+      data.replace(literal, () => String(args.new_string)) === replacement;
     let preview = '';
     if (result.changedFiles.length > 0 && data.length + replacement.length <= MAX_PREVIEW_INPUT_CHARS) {
       const diff = unifiedFileDiff(basename(file), data, replacement, 1);
@@ -278,6 +290,7 @@ export const editFileTool: Tool = {
       retryable: false,
       changedFiles: result.changedFiles,
       changeSet: summary,
+      ...(exactTextReplacement ? { exactTextReplacement: true as const } : {}),
       output:
         result.changedFiles.length === 0
           ? `文件 ${file} 内容未变化 (ChangeSet ${summary.id})。`

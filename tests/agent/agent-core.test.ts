@@ -16,17 +16,20 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runAgentCore, type AgentHooks } from '../../src/agent/core.js';
 import { defaultAgentRuntimeContext } from '../../src/agent/runtime-context.js';
-import { __setChatCreateImpl, type ChatMessage } from '../../src/llm/index.js';
+import { __setChatCreateImpl, type ChatClientOverrides, type ChatMessage } from '../../src/llm/index.js';
 import { setSandboxRoot } from '../../src/sandbox/root.js';
 import { ToolPolicyController } from '../../src/tools/policy.js';
 import { defaultToolRuntime } from '../../src/tools/registry.js';
 import { unregisteredToolOutcome } from '../../src/agent/tool-helpers.js';
-import { config } from '../../src/config/index.js';
+import { buildBasePrompt, config } from '../../src/config/index.js';
+import { t } from '../../src/i18n/index.js';
+import { createRuntime } from '../../src/runtime/index.js';
+import type { AgentTraceEvent } from '../../src/session/trace.js';
 import type { Tool } from '../../src/tools/types.js';
 // 装配官方默认工具包(提供本测试真执行的 read_file):registry 不再顶层 import builtins,须显式装配。
 import '../../src/tools/builtins/index.js';
@@ -141,13 +144,12 @@ test('runAgentCore: 单 tool_call → 文本回复,history 与 hooks 字节级�
     assert.equal(history[4].role, 'assistant');
     assert.equal((history[4] as { content?: string }).content, 'done');
 
-    // ── hooks 顺序断言:验证执行编排未变 ──
-    // 流式解析顺序:onToolCall(生成中 spinner)在 chunk 到达时即发,先于 onChatDone;
-    // onText 同理(chunk 到达即回调),先于 onChatDone。
-    // 第一次 chat 完成 → tool header → tool start → tool result → tool done → batch end
-    // 第二次 chat 文本流 → text → chat done → text_end → done
+    // 模型漏写开场时，UI 先按实际参数说明动作，随后才显示工具状态并执行。
+    assert.equal(history[2].content, null, '兜底开场不写进模型历史');
     const expectedSequence = [
       'step_start',
+      `text:${t('agent.openingRead', { file: '"fixture.txt"' })}`,
+      'text_end',
       'tool_call:read_file',
       'chat_done',
       'tool_header:read_file',
@@ -169,7 +171,7 @@ test('runAgentCore: 单 tool_call → 文本回复,history 与 hooks 字节级�
   }
 });
 
-test('runAgentCore: content 与 tool_calls 交错分片时 onTextEnd 只在流末触发一次', async () => {
+test('runAgentCore: 工具名先到时完整开场仍显示在工具状态之前', async () => {
   // 回归:部分 OpenAI 兼容网关把 content 与 tool_calls delta 交错下发(正文流到一半先到
   // 工具名,剩余 content 随后补完)。onTextEnd 不能在工具名到达时就发,否则 TUI 会在
   // 词中间硬换行并封死 markdown 段(「d / ispatcher」断词 bug);它只能在整个流结束后、
@@ -183,12 +185,12 @@ test('runAgentCore: content 与 tool_calls 交错分片时 onTextEnd 只在流�
     createCallCount++;
     if (createCallCount === 1) {
       return sseStream([
-        { delta: { content: '继续通读：d' } },
         {
           delta: {
             tool_calls: [{ index: 0, id: 'call-1', function: { name: 'read_file', arguments: '' } }],
           },
         },
+        { delta: { content: '继续通读：d' } },
         { delta: { tool_calls: [{ index: 0, function: { arguments: '{"path":"fixture.txt"}' } }] } },
         { delta: { content: 'ispatcher 的执行段' } },
         { usage: { prompt_tokens: 100, completion_tokens: 12, total_tokens: 112 } },
@@ -230,7 +232,7 @@ test('runAgentCore: content 与 tool_calls 交错分片时 onTextEnd 只在流�
     const firstStep = events.slice(0, events.indexOf('tool_header:read_file') + 1);
     assert.deepEqual(
       firstStep,
-      ['text:继续通读：d', 'tool_call:read_file', 'text:ispatcher 的执行段', 'text_end', 'tool_header:read_file'],
+      ['text:继续通读：d', 'text:ispatcher 的执行段', 'text_end', 'tool_call:read_file', 'tool_header:read_file'],
       `交错分片下 text_end 应只在流末触发:\n实际: ${JSON.stringify(firstStep)}`,
     );
     assert.equal(events.filter((e) => e === 'text_end').length, 2, '两次 chat 各一个 text_end');
@@ -1670,11 +1672,19 @@ test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后�
     const first = ephemeralOf(0);
     assert.match(first, /## Opening analysis/, 'step 0 必须带开场分析');
     assert.ok(!first.includes('## Silent work'), '互斥:step 0 不应同时出现正文纪律');
-    // 守行为而不是守措辞:「开场先说一句」必须是无条件祈使句。859b974 把它改成
-    // "Give a brief opening explanation only when ..." 之后,断言跟着新文案一起改了,
-    // 于是开场白静默消失而测试全绿。这里钉住「无条件开场」与「Answer-first 仍保留」两件事。
-    assert.match(first, /Open this turn with one short sentence/, '开场白必须是无条件祈使句,不能只在复杂任务时说明');
-    assert.match(first, /answer directly when the conversation already provides the answer/);
+    // 守行为而不是守措辞:静态 Tool policy 与近场提醒必须同向,不能一个要求开场、
+    // 另一个允许 focused change 直接以工具调用开场。首轮带工具时必须「同一响应先文本」。
+    const staticPrompt = buildBasePrompt('opening-analysis-test');
+    assert.match(staticPrompt, /main agent starts every tool-using user turn with exactly one short visible sentence/);
+    assert.match(staticPrompt, /SAME assistant response as the first tool calls/);
+    assert.doesNotMatch(staticPrompt, /begin a focused change with the needed tool call/);
+    assert.match(
+      first,
+      /Before your first tool call in every user-facing turn, you MUST output exactly one short visible sentence/,
+    );
+    assert.match(first, /what you will check or change first and what it will help you establish/);
+    assert.match(first, /put the sentence first in the SAME assistant response as the tool calls/);
+    assert.match(first, /If no tools are needed, answer directly/);
 
     // ② step 1:开场分析消失,正文纪律登场——互斥的另一半。
     const second = ephemeralOf(1);
@@ -1714,6 +1724,178 @@ test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后�
   } finally {
     __setChatCreateImpl(null);
     setSandboxRoot(prevRoot);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('短路径只省略已验收的收尾请求，保留原有请求尾段和回退路径', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'mocode-short-path-test-'));
+  const previousCwd = process.cwd();
+  const file = 'target.js';
+  const opening = '我先读取目标文件。';
+  const command = 'node --version';
+  const input = '将 `target.js` 中的 `before` 替换为 `after`。然后运行 `' + command + '`。';
+  const modelFinal = '模型收尾。';
+  process.chdir(root);
+
+  async function run({
+    enabled = true,
+    pipeline = 'legacy',
+    update = false,
+    failedCheck = false,
+    missingOpening = false,
+    requireCheck = true,
+    explicitSkip = true,
+    wrongEdit = false,
+    externallyChanged = false,
+    multiFile = false,
+  }: {
+    enabled?: boolean;
+    pipeline?: 'legacy' | 'staged';
+    update?: boolean;
+    failedCheck?: boolean;
+    missingOpening?: boolean;
+    requireCheck?: boolean;
+    explicitSkip?: boolean;
+    wrongEdit?: boolean;
+    externallyChanged?: boolean;
+    multiFile?: boolean;
+  } = {}) {
+    writeFileSync(file, 'before\n', 'utf8');
+    const request = failedCheck ? input.replace(command, 'node missing-short-path-test-file.js') : input;
+    const replacement = request.split('。')[0] + '。';
+    const userInput = multiFile
+      ? request + ' 也修改其他文件。'
+      : requireCheck
+        ? request
+        : replacement + (explicitSkip ? '无需运行检查。' : '');
+    const calls = [
+      { name: 'read_file', arguments: JSON.stringify({ path: file }) },
+      {
+        name: 'edit_file',
+        arguments: JSON.stringify({ path: file, old_string: 'before', new_string: wrongEdit ? 'other' : 'after' }),
+      },
+      ...(requireCheck
+        ? [
+            {
+              name: 'run_command',
+              arguments: JSON.stringify({ command: failedCheck ? 'node missing-short-path-test-file.js' : command }),
+            },
+          ]
+        : []),
+    ];
+    const output: string[] = [];
+    const tails: string[] = [];
+    const traces: AgentTraceEvent[] = [];
+    let batches = 0;
+    let sentUpdate = false;
+    const history: ChatMessage[] = [{ role: 'system', content: 'unchanged prefix' }];
+    const options = {
+      pipeline,
+      history,
+      hooks: {
+        onText: (part: string) => output.push(part),
+        onToolBatchEnd: () => {
+          batches += 1;
+          if (externallyChanged && batches === calls.length) writeFileSync(file, 'changed outside agent\n');
+        },
+      },
+      toolPolicy: new ToolPolicyController({ id: 'short-path-compatibility', maxExpansions: 0 }),
+      memoryRecall: 'recall fixture',
+      memoryTail: 'memory tail fixture',
+      onTraceEvent: (event: AgentTraceEvent) => traces.push(event),
+    };
+    const openAICreateImpl: ChatClientOverrides['openAICreateImpl'] = async (body) => {
+      const step = tails.length;
+      const { messages } = body as unknown as { messages: ChatMessage[] };
+      tails.push(String(messages.at(-1)?.content ?? ''));
+      const call = calls[step];
+      if (!call) return sseStream([{ delta: { content: modelFinal } }]);
+      return sseStream([
+        {
+          delta: {
+            ...(step === 0 && !missingOpening ? { content: opening } : {}),
+            tool_calls: [{ index: 0, id: `short-path-${step}`, function: call }],
+          },
+        },
+      ]);
+    };
+    const runtime = createRuntime({
+      sandboxRoot: root,
+      initialMode: 'auto',
+      configOverrides: {
+        permissionEnabled: false,
+        shortPathCompletion: enabled,
+        provider: 'openai',
+        baseURL: 'http://127.0.0.1:1/v1',
+        apiKey: 'short-path-test',
+      },
+      modelClientOverrides: { openAICreateImpl },
+    });
+    try {
+      const result = await runtime.run({
+        ...options,
+        userInput,
+        drainUserMessages: () => {
+          if (!update || sentUpdate || batches !== calls.length) return [];
+          sentUpdate = true;
+          return ['保留先前要求，并说明检查的结果。'];
+        },
+      });
+      return { result, tails, output, traces, history, fileContent: readFileSync(file, 'utf8') };
+    } finally {
+      await runtime.close();
+    }
+  }
+
+  try {
+    const control = await run({ enabled: false });
+    assert.equal(control.tails.length, 4);
+    assert.equal(control.result.finalText, modelFinal);
+    assert.ok(!control.traces.some((event) => event.type === 'short_path_completion'));
+    for (const pipeline of ['legacy', 'staged'] as const) {
+      const treatment = await run({ pipeline });
+      assert.equal(treatment.result.completed, true);
+      assert.equal(treatment.fileContent, 'after\n');
+      assert.deepEqual(treatment.tails, control.tails.slice(0, 3));
+      assert.match(treatment.tails[0], /Opening analysis/);
+      assert.match(treatment.tails[1], /Silent work/);
+      assert.match(treatment.tails[1], /recall fixture[\s\S]*target\.js[\s\S]*memory tail fixture/);
+      assert.equal(treatment.tails[1].includes('Opening analysis'), false);
+      assert.deepEqual(treatment.output, [opening, '已在`target.js`完成替换，指定检查已通过。']);
+      assert.equal(treatment.history.at(-1)?.content, treatment.result.finalText);
+      assert.equal(treatment.history[0].content, 'unchanged prefix');
+      assert.equal(treatment.history.filter((m) => m.role === 'system').length, 1);
+      assert.deepEqual(treatment.traces.find((e) => e.type === 'short_path_completion')?.data, { status: 'completed' });
+    }
+    const withoutCheck = await run({ requireCheck: false });
+    assert.equal(withoutCheck.tails.length, 2);
+    assert.equal(withoutCheck.result.finalText, '已在`target.js`完成替换。');
+    const unspecifiedCheck = await run({ requireCheck: false, explicitSkip: false });
+    assert.equal(unspecifiedCheck.result.finalText, modelFinal);
+    assert.equal(unspecifiedCheck.tails.length, 3);
+
+    for (const [args, reason] of [
+      [{ update: true }, 'user_update'],
+      [{ failedCheck: true }, 'tool_failed'],
+      [{ missingOpening: true }, 'opening_missing'],
+      [{ wrongEdit: true }, 'edit_unproven'],
+      [{ externallyChanged: true }, 'workspace_changed'],
+    ] as const) {
+      const runResult = await run(args);
+      assert.equal(runResult.result.finalText, modelFinal, reason);
+      assert.equal(runResult.tails.length, 4, reason);
+      assert.deepEqual(runResult.traces.find((e) => e.type === 'short_path_completion')?.data, {
+        status: 'fallback',
+        reason,
+      });
+      if (reason === 'user_update') assert.match(runResult.tails.at(-1) ?? '', /Live user updates/);
+    }
+    const complex = await run({ multiFile: true });
+    assert.equal(complex.result.finalText, modelFinal);
+    assert.ok(!complex.traces.some((event) => event.type === 'short_path_completion'));
+  } finally {
+    process.chdir(previousCwd);
     rmSync(root, { recursive: true, force: true });
   }
 });

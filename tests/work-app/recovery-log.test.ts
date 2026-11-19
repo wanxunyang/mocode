@@ -234,6 +234,52 @@ test('context_compacted 落成系统提示行：重启回放仍有「已压缩�
     assert.equal(snapshot.items[2]?.kind, 'text');
   }));
 
+test('run_changed_files 落成逐轮的 changes 项：行数按当时快照保留，坏数据丢弃', () =>
+  withRoot((root) => {
+    const log = recoveryLog(root, 'task-changes');
+    log.user('改两个文件');
+    log.event(event('run_started'));
+    log.event(event('text_delta', { text: '改好了' }));
+    log.event(event('run_completed', { terminationReason: 'completed', changedFiles: ['a.ts', 'b.ts'] }));
+    log.event(
+      event('run_changed_files', {
+        files: [
+          { path: 'a.ts', added: 12, removed: 2, untracked: false },
+          { path: 'b.ts', added: 3, removed: 0, untracked: true },
+          // 缺 path / 非法条目一律丢掉，不能让一张畸形卡片在回放时崩掉整段会话。
+          { added: 1, removed: 1, untracked: false },
+          'nope',
+        ],
+      }),
+    );
+    log.user('第二轮');
+    log.event(event('run_started'));
+    log.event(event('run_completed', { terminationReason: 'completed', changedFiles: ['a.ts'] }));
+    log.event(event('run_changed_files', { files: [{ path: 'a.ts', added: 40, removed: 5, untracked: false }] }));
+
+    const snapshot = readRecovery(root, 'task-changes');
+    assert.ok(snapshot);
+    // 每轮各一份，且行数是「那一轮当时」的值 —— 第二轮不会覆盖第一轮（这是按轮保留的全部意义）。
+    const rounds = snapshot.items.filter((item) => item.kind === 'changes');
+    assert.equal(rounds.length, 2);
+    assert.deepEqual(rounds[0], {
+      kind: 'changes',
+      files: [
+        { path: 'a.ts', added: 12, removed: 2, untracked: false },
+        { path: 'b.ts', added: 3, removed: 0, untracked: true },
+      ],
+    });
+    assert.deepEqual(rounds[1], {
+      kind: 'changes',
+      files: [{ path: 'a.ts', added: 40, removed: 5, untracked: false }],
+    });
+    // 位置：紧跟在第一轮正文之后（渲染层据此把它挂到那一条助手消息尾部）。
+    assert.deepEqual(
+      snapshot.items.map((item) => item.kind),
+      ['user', 'text', 'changes', 'user', 'changes'],
+    );
+  }));
+
 test('超长日志里的 truncate 不再抛 RangeError（展开传参上限）', () =>
   withRoot((root) => {
     // 真实事故：25 万条的恢复日志里只要有一条 truncate，`splice(0, len, ...cut)` 就会
