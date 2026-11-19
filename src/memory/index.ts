@@ -142,9 +142,10 @@ export {
 export {
   captureMemoryBaseline,
   buildMemoryTailSection,
-  memoryTailChangedIds,
+  buildMemoryTailSnapshot,
   __resetMemoryBaselineForTests,
   type MemoryBaseline,
+  type MemoryTailSnapshot,
 } from './tail.js';
 
 export {

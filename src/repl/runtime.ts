@@ -54,7 +54,7 @@ import {
   writeMemoryHealth,
   resetProactiveTurn,
   captureMemoryBaseline,
-  buildMemoryTailSection,
+  buildMemoryTailSnapshot,
   loadAll,
 } from '../memory/index.js';
 import { finalizeCurrentEpisode } from './episode-finalize.js';
@@ -829,7 +829,7 @@ export async function startRepl(
         initialToolRoute,
         // R17:每用户轮现算一次「本会话内新增/更新的记忆」。走 ephemeral 尾注,不重建
         // history[0](否则整段对话的前缀缓存每轮失效)。基线无变化时返回空串 → 零注入。
-        buildMemoryTailSection(isMemoryEnabled()),
+        buildMemoryTailSnapshot(isMemoryEnabled()),
         runtime,
         () =>
           drainSteeringMessages().map((text) => {

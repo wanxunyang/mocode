@@ -57,8 +57,7 @@ export interface TurnRecallOptions {
   enabled?: boolean;
   limit?: number;
   /**
-   * 本会话内已变更的条目 id。R17 尾注会逐条播报这批条目,这里再送一遍等于
-   * 同一轮把同一条记忆说两次——模型会当成两件不同的事,还白烧 token。
+   * R17 尾注实际展示的条目 id。被尾注上限省略的条目仍可召回。
    */
   excludeIds?: ReadonlySet<string>;
 }

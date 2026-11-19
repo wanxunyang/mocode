@@ -16,7 +16,13 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { __resetMemoryBaselineForTests, buildMemoryTailSection, captureMemoryBaseline } from '../../src/memory/tail.js';
+import {
+  __resetMemoryBaselineForTests,
+  buildMemoryTailSection,
+  buildMemoryTailSnapshot,
+  captureMemoryBaseline,
+} from '../../src/memory/tail.js';
+import { __resetTurnRecallForTests, buildTurnRecallSection } from '../../src/memory/turn-recall.js';
 import { __resetPendingRecallForTests, forgetEntry, saveEntry, updateEntry } from '../../src/memory/store.js';
 import { recordSessionEpisode } from '../../src/memory/episodic.js';
 
@@ -164,6 +170,41 @@ test(
     const bullets = out.split('\n').filter((l) => l.startsWith('- ['));
     assert.equal(bullets.length, 3, '最多 3 条,上下文不是公告栏');
     assert.match(out, /\(2 more changed/, '被截掉的要报数,不能静默消失');
+  }),
+);
+
+test(
+  'R17/R18:召回只排除尾注实际展示的条目，超出上限的更新仍能召回',
+  isolated(() => {
+    const target = writeEntry({ name: 'quartz-failover-route', summary: 'quartz failover uses the old route' });
+    backdateUpdatedAt(target.id, 120);
+    captureMemoryBaseline();
+    const updated = updateEntry(target.id, {
+      summary: 'quartz failover uses the corrected route',
+      reason: 'route changed',
+    });
+    assert.equal(updated.ok, true);
+    backdateUpdatedAt(target.id, 60);
+
+    const shown = [
+      writeEntry({ name: 'quartz-failover-check', summary: 'quartz failover readiness check' }),
+      writeEntry({ name: 'retry-budget', summary: 'backoff before retry' }),
+      writeEntry({ name: 'trace-report', summary: 'summarize tracing status' }),
+    ];
+    const tail = buildMemoryTailSnapshot();
+    assert.deepEqual(tail.shownIds, new Set(shown.map((entry) => entry.id)));
+    assert.match(tail.text, /quartz-failover-check/);
+    assert.match(tail.text, /1 more changed/);
+    assert.doesNotMatch(tail.text, /corrected route/);
+    assert.deepEqual(buildMemoryTailSnapshot(false), { text: '', shownIds: new Set() });
+
+    try {
+      const recall = buildTurnRecallSection('quartz failover route', { excludeIds: tail.shownIds });
+      assert.match(recall, /quartz failover uses the corrected route/);
+      assert.doesNotMatch(recall, /quartz-failover-check/);
+    } finally {
+      __resetTurnRecallForTests();
+    }
   }),
 );
 

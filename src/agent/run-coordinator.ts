@@ -34,6 +34,7 @@ import {
 import { contextState, summarizeToolArguments } from '../session/index.js';
 import { createReadDedup } from '../tools/read-dedup.js';
 import { createTurnProgressGuard } from './progress-guard.js';
+import { createVerificationEvidence } from '../verification/evidence.js';
 import { createBudgetScheduler } from '../session/scheduler.js';
 import { invalidateArtifacts, rehydrateArtifacts } from '../context/index.js';
 import { createRelevancePruner } from '../context/relevance.js';
@@ -96,6 +97,7 @@ export async function runAgentCoreLegacy(
   // #convergence A:本轮的无进展观测器。与 readDedup 同属 turn scope——同一用户轮内
   // 才有「你在原地打转」这个语义,跨轮谈不到。
   const progressGuard = createTurnProgressGuard();
+  const verificationEvidence = ctx.config.verificationEvidence ? createVerificationEvidence() : undefined;
   const runToolWithProactive = async (
     name: string,
     argsRaw: string,
@@ -229,6 +231,7 @@ export async function runAgentCoreLegacy(
     const messages = opts.drainUserMessages?.() ?? [];
     for (const content of messages) historyManager.appendUserTurn(content);
     if (messages.length > 0) {
+      verificationEvidence?.invalidate();
       hasLiveUserUpdates = true;
       steeringOpeningPending = true;
       cancellationLifecycle.checkpoint();
@@ -336,6 +339,7 @@ export async function runAgentCoreLegacy(
           liveUpdateReminder: hasLiveUserUpdates ? liveUpdateReminder : undefined,
           // #convergence A:一次性提醒,取走即清空;未踩线时是 undefined。
           noProgressReminder: progressGuard.takeReminder(),
+          verificationReminder: verificationEvidence?.takeReminder(),
           cacheState: modelCacheState,
           turnLifecycle,
           cancellationLifecycle,
@@ -443,6 +447,11 @@ export async function runAgentCoreLegacy(
                       const { outcome, call } = event;
                       shortPath?.observe(call, outcome);
                       progressGuard.record(call.name, event.argumentSummary.sha256, outcome);
+                      verificationEvidence?.observe(
+                        call.name,
+                        call.name === 'run_command' ? parseArgs(call.arguments) : null,
+                        outcome,
+                      );
                       emitTrace(
                         'tool_call_end',
                         {
@@ -564,6 +573,11 @@ export async function runAgentCoreLegacy(
                   }
                   const traceCall = tracedCalls[index];
                   progressGuard.record(tc.name, traceCall.args.sha256, outcome);
+                  verificationEvidence?.observe(
+                    tc.name,
+                    tc.name === 'run_command' ? parseArgs(tc.arguments) : null,
+                    outcome,
+                  );
                   emitTrace(
                     'tool_call_end',
                     {

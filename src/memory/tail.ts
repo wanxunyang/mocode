@@ -23,6 +23,11 @@ import { loadAll, type MemoryEntry } from './store.js';
 /** 基线:会话开始时的 id → updatedAt 快照。 */
 export type MemoryBaseline = Map<string, string>;
 
+export interface MemoryTailSnapshot {
+  text: string;
+  shownIds: ReadonlySet<string>;
+}
+
 /** 尾注最多带几条。3 与 R2.4 锚点回注同口径——宁可少说,也不要把上下文变成公告栏。 */
 const MAX_TAIL_ENTRIES = 3;
 /** 单条 body 截断。留够「结论 + 理由」,砍掉长表格与代码块。 */
@@ -51,9 +56,8 @@ export function captureMemoryBaseline(): void {
  * 只看 updatedAt 变化,不看 body 内容——reason 改一个字的编辑也算更新,
  * 这是刻意的:能更新说明模型认为它值得改,那下一轮就该知道改了什么。
  */
-export function buildMemoryTailSection(enabled: boolean = true): string {
-  if (!enabled) return '';
-  if (!baseline) return ''; // 没拍过基线 = 调用方没接线,静默不猜
+export function buildMemoryTailSnapshot(enabled = true): MemoryTailSnapshot {
+  if (!enabled || !baseline) return { text: '', shownIds: new Set() };
 
   const changed: MemoryEntry[] = [];
   for (const e of loadAll()) {
@@ -64,7 +68,7 @@ export function buildMemoryTailSection(enabled: boolean = true): string {
     const before = baseline.get(e.id);
     if (before === undefined || before !== e.updatedAt) changed.push(e);
   }
-  if (changed.length === 0) return '';
+  if (changed.length === 0) return { text: '', shownIds: new Set() };
 
   changed.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
   const shown = changed.slice(0, MAX_TAIL_ENTRIES);
@@ -77,7 +81,7 @@ export function buildMemoryTailSection(enabled: boolean = true): string {
     return `${head}\n  ${clipped}`;
   });
   const omitted = changed.length - shown.length;
-  return [
+  const text = [
     '## Memory updated during this session',
     'These entries were created or updated after this session started — by background reflection, an earlier turn, or a save you made. They are NOT in the Memory Index at the top (that is a startup snapshot). Treat them as current context; if one contradicts what the code now says, the code wins.',
     ...lines,
@@ -85,24 +89,12 @@ export function buildMemoryTailSection(enabled: boolean = true): string {
   ]
     .filter((s) => s.length > 0)
     .join('\n');
+  return { text, shownIds: new Set(shown.map((entry) => entry.id)) };
 }
 
-/**
- * 本会话内新增或变更过的条目 id。
- *
- * 给 R18 每轮静默召回用:这批条目已经由这里(尾注)负责播报,召回再讲一遍等于
- * 同一轮把同一条记忆说两次——模型会以为那是两件事,而且白烧 token。
- * 基线未拍过时返回空集(调用方未接线,此时不该替它推断谁是新条目)。
- */
-export function memoryTailChangedIds(): Set<string> {
-  if (!baseline) return new Set();
-  const out = new Set<string>();
-  for (const e of loadAll()) {
-    if (e.type === 'episode') continue;
-    const before = baseline.get(e.id);
-    if (before === undefined || before !== e.updatedAt) out.add(e.id);
-  }
-  return out;
+/** 仅需要正文的调用方可继续使用字符串接口。 */
+export function buildMemoryTailSection(enabled = true): string {
+  return buildMemoryTailSnapshot(enabled).text;
 }
 
 /** 仅供测试:清掉基线,避免共享进程里上一个测试的基线串味。 */

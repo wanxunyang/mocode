@@ -72,6 +72,7 @@ export interface ModelTurnInput {
    * 因此它只会出现在真正踩线之后的那一步,不会常驻。
    */
   noProgressReminder?: string;
+  verificationReminder?: string;
   cacheState: ModelTurnCacheState;
   turnLifecycle: TurnLifecycle;
   cancellationLifecycle: { restore(): void };
@@ -140,6 +141,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       input.mentionedFilesReminder ?? '',
       input.liveUpdateReminder ?? '',
       input.noProgressReminder ?? '',
+      input.verificationReminder ?? '',
     ]
       .filter((s) => s.length > 0)
       .join('\n\n');
@@ -358,6 +360,7 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
       opts.memoryTail ?? '',
       input.liveUpdateReminder ?? '',
       input.noProgressReminder ?? '',
+      input.verificationReminder ?? '',
     ]
       .filter(Boolean)
       .join('\n\n');

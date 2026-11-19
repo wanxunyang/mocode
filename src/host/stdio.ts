@@ -18,13 +18,12 @@ import { registerWorkspace, readWorkspaceRegistry } from '../workspace/registry.
 import { clearSkillActivation } from '../skills/activation.js';
 import { buildSystemMessage } from '../prompt/system-prompt.js';
 import {
-  buildMemoryTailSection,
+  buildMemoryTailSnapshot,
   buildTurnRecallSection,
   captureMemoryBaseline,
   gcMemories,
   initPersona,
   isTurnRecallEnabled,
-  memoryTailChangedIds,
 } from '../memory/index.js';
 import { ToolPolicyController } from '../tools/policy.js';
 import { routeToolGroups } from '../tools/router.js';
@@ -234,15 +233,6 @@ function setMode(command: Extract<HostCommand, { type: 'set_mode' }>): void {
     history[0] = { role: 'system', content: currentSystemMessage() };
   }
   emit('mode_changed', { mode: command.mode, previous }, command.id);
-}
-
-/**
- * R18 每轮静默召回段。开关求与的写法与 REPL 一致（src/agent/index.ts 的 runAgent）：
- * 记忆总开关 × 召回子开关。排除 memoryTailChangedIds() —— 那批已由 R17 尾注播报。
- */
-function turnRecallFor(prompt: string): string {
-  if (!isMemoryEnabled() || !isTurnRecallEnabled()) return '';
-  return buildTurnRecallSection(prompt, { excludeIds: memoryTailChangedIds() });
 }
 
 function createSession(): void {
@@ -526,6 +516,12 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       planMode,
     };
     emit('tool_route', initialToolRoute, command.id);
+    const memoryEnabled = isMemoryEnabled();
+    const memoryTail = buildMemoryTailSnapshot(memoryEnabled);
+    const memoryRecall =
+      memoryEnabled && isTurnRecallEnabled()
+        ? buildTurnRecallSection(command.prompt, { excludeIds: memoryTail.shownIds })
+        : '';
     const result = await runtime().run({
       turn: 'new',
       turnLabel: command.prompt.split('\n')[0]?.slice(0, 40) ?? command.prompt.slice(0, 40),
@@ -542,11 +538,8 @@ async function run(command: Extract<HostCommand, { type: 'run' }>): Promise<void
       traceContext: { sessionId },
       onTraceEvent: appendCurrentSessionTraceEvent,
       permissionPrompt: (request) => waitForApproval(command.id, request),
-      // R17 尾注 + R18 静默召回：与 REPL 同口径（src/agent/index.ts 的 runAgent）。
-      // 两者都走 ephemeral 段，不重建 history[0]，前缀缓存不受影响；
-      // 排除 memoryTailChangedIds() 是刻意的——那批条目已由尾注播报，同一轮不重复讲。
-      memoryTail: buildMemoryTailSection(isMemoryEnabled()),
-      memoryRecall: turnRecallFor(command.prompt),
+      memoryTail: memoryTail.text,
+      memoryRecall,
     });
     lastToolGroups = toolPolicy.groupNames;
     persistSession();

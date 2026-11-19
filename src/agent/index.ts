@@ -21,7 +21,7 @@ import { appendCurrentSessionTraceEvent, capToolResultForHistory } from '../sess
 import type { TerminalTurnTranscript } from '../session/terminal-transcript.js';
 import type { ToolPolicyController } from '../tools/policy.js';
 import { buildTurnRecallSection, isTurnRecallEnabled } from '../memory/turn-recall.js';
-import { memoryTailChangedIds } from '../memory/tail.js';
+import type { MemoryTailSnapshot } from '../memory/tail.js';
 import { createHandoffStripper, handoffDisplaySuppressed } from '../ui/handoff-block.js';
 
 /** 当前 turn 的 batch id(runAgent 内闭包变量;一条 turn 一轮 tool batch 结束即清空)。 */
@@ -332,7 +332,7 @@ export async function runAgent(
    * R17:会话内记忆尾注,由调用方每个用户轮现算(见 memory/tail.ts)。
    * 走 ephemeral 段而非重建 history[0]——后者会让整段对话的前缀缓存每轮失效。
    */
-  memoryTail?: string,
+  memoryTail?: MemoryTailSnapshot | string,
   /** TUI composition root 绑定的 Runtime；旧调用传 AgentRuntimeContext 仍兼容。 */
   runtimeOrContext: Runtime | AgentRuntimeContext = defaultRuntime,
   drainUserMessages?: () => Array<string | ContentPart[]>,
@@ -574,7 +574,7 @@ export async function runAgent(
   // ① runAgent 是 TUI 组合根,只有真实用户轮会走到;runAgentCore 被全部 agent 单测
   //    直接调用,在那儿读记忆库会让测试读到本机真实记忆、失去隔离性;
   // ② spawn 走 runtime.run 不经过这里,子 agent 天然零注入。
-  // 排除 memoryTailChangedIds():那批条目由 R17 尾注播报,同一轮不应讲两遍。
+  // R17 尾注的正文和排除集来自同一份快照。
   const userText = Array.isArray(userInput)
     ? userInput
         .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
@@ -583,7 +583,9 @@ export async function runAgent(
     : userInput;
   const memoryRecall =
     isMemoryEnabled() && isTurnRecallEnabled()
-      ? buildTurnRecallSection(userText, { excludeIds: memoryTailChangedIds() })
+      ? buildTurnRecallSection(userText, {
+          excludeIds: typeof memoryTail === 'string' ? undefined : memoryTail?.shownIds,
+        })
       : '';
   try {
     result = await runtime.run({
@@ -597,7 +599,7 @@ export async function runAgent(
       hooks: combinedHooks,
       toolPolicy,
       initialToolRoute,
-      memoryTail,
+      memoryTail: typeof memoryTail === 'string' ? memoryTail : memoryTail?.text,
       memoryRecall,
       onTraceEvent: appendCurrentSessionTraceEvent,
     });
