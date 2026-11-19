@@ -227,7 +227,7 @@ export function runRipgrep(params: RgParams, signal?: AbortSignal): Promise<RgRe
         finish({ status: 'no-match', scanned, truncated });
         return;
       }
-      finish({ status: 'ok', files: [...byPath.values()], scanned, truncated });
+      finish({ status: 'ok', files: [...byPath.values()], scanned, truncated: truncated || code !== 0 });
     });
     if (signal) {
       if (signal.aborted) onAbort();

@@ -14,6 +14,8 @@ import type { ChatMessage } from '../../src/llm/index.js';
 import type { AgentTraceEvent } from '../../src/session/trace.js';
 import { countReadOnlyCalls, reduceShortPathEfficiency } from '../../src/session/short-path-metrics.js';
 import { clearSkillActivation } from '../../src/skills/activation.js';
+import type { Tool } from '../../src/tools/types.js';
+import { locateTasks } from './fixtures-locate.js';
 import { CODING_EVAL_SESSION_ID, assembleCodingEvalTurn, buildCodingEvalSystemPrompt } from '../coding/runtime.js';
 import {
   compareShortPathPreflight,
@@ -47,6 +49,7 @@ export interface ShortPathCliOptions {
   efficiencyGate: boolean;
   list: boolean;
   keep: boolean;
+  withoutGrepEditContext?: true;
   timeoutMs?: number;
 }
 
@@ -73,6 +76,7 @@ export function parseShortPathArgs(args: string[]): ShortPathCliOptions {
   let efficiencyGate = false;
   let list = false;
   let keep = false;
+  let withoutGrepEditContext: true | undefined;
   let timeoutMs: number | undefined;
   let level: number | undefined;
 
@@ -99,6 +103,7 @@ export function parseShortPathArgs(args: string[]): ShortPathCliOptions {
     else if (arg === '--efficiency-gate') efficiencyGate = true;
     else if (arg === '--list') list = true;
     else if (arg === '--keep-workspaces') keep = true;
+    else if (arg === '--without-grep-edit-context') withoutGrepEditContext = true;
     else if (!arg.startsWith('-') && !positionalSelection) positionalSelection = arg;
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -123,6 +128,7 @@ export function parseShortPathArgs(args: string[]): ShortPathCliOptions {
     efficiencyGate,
     list,
     keep,
+    ...(withoutGrepEditContext ? { withoutGrepEditContext } : {}),
     timeoutMs,
   };
 }
@@ -132,9 +138,12 @@ export function validateShortPathOptions(
   options: ShortPathCliOptions,
   selectionScenarioName: ShortPathScenario | null,
 ): void {
+  if (options.withoutGrepEditContext && (options.updateBaseline || options.efficiencyGate)) {
+    throw new Error('--without-grep-edit-context is for comparisons and cannot update or gate a baseline');
+  }
   if (!options.updateBaseline) return;
   if (options.selectionSource !== 'group' || selectionScenarioName === null) {
-    throw new Error('--update-baseline requires a single-scenario --group (micro|hinted|warm|repo|l6)');
+    throw new Error('--update-baseline requires a single-scenario --group (micro|hinted|warm|repo|l6|locate)');
   }
 }
 
@@ -207,17 +216,71 @@ export function shortPathPromptHash(systemPrompt: string): string {
   return createHash('sha256').update(systemPrompt).digest('hex').slice(0, 16);
 }
 
-/** 与 coding 基线同款:在「物化后的任务工作区」里构建系统提示并取 hash。repo 场景必须
- * 走与 runTask 完全相同的 archive 解包路径——archive 内容(有无 AGENTS.md/.mocode 等
- * 跟踪文件)决定提示词,任何工作区拷贝补丁都会造成 hash 漂移。 */
-export async function probePromptHash(fixture: ShortPathTask): Promise<string> {
+function buildExperimentPrompt(withoutGrepEditContext: boolean): string {
+  const prompt = buildCodingEvalSystemPrompt(CODING_EVAL_SESSION_ID);
+  if (!withoutGrepEditContext) return prompt;
+  const rule = /^- Edit against fresh exact text\..*$/m;
+  if (!rule.test(prompt)) throw new Error('Cannot identify the grep edit-context rule for the control prompt');
+  const legacyReadRule =
+    '- Edit against a FRESH read: before editing, call read_file on the exact path and copy the exact target text. Never reconstruct old_string from a grep/summary/diff.';
+  return prompt.replace(rule, legacyReadRule);
+}
+
+function configureGrepControl(runtimeContext: AgentRuntimeContext): void {
+  const runtime = runtimeContext.toolRuntime;
+  const tools = runtime.builtinTools.map<Tool>((tool) => {
+    if (tool.name === 'grep') {
+      const properties = { ...(tool.parameters.properties as Record<string, unknown>) };
+      delete properties.edit_context;
+      return {
+        ...tool,
+        parameters: { ...tool.parameters, properties },
+        execute: (args, context) => tool.execute({ ...args, edit_context: false }, context),
+        description: tool.description.replace(
+          /^Pass context=.*$/m,
+          'Pass context=2..5 to include neighbouring lines. Use read_file when you need exact edit text.',
+        ),
+      };
+    }
+    if (tool.name === 'edit_file') {
+      return {
+        ...tool,
+        parameters: {
+          ...tool.parameters,
+          properties: {
+            ...(tool.parameters.properties as Record<string, unknown>),
+            expected_hash: {
+              type: 'string',
+              description:
+                'SHA-256 from the latest read_file; required for line ranges, optional for text replacements.',
+            },
+          },
+        },
+        description: tool.description
+          .replace(
+            /^\*\*String replacement.*$/m,
+            '**String replacement (default):** Copy old_string verbatim from a fresh read_file. It must occur exactly once; expected_hash is optional.',
+          )
+          .replace(
+            'expected_hash from a fresh read_file or [edit_context ...] header',
+            'expected_hash from a fresh read_file',
+          ),
+      };
+    }
+    return tool;
+  });
+  runtime.installBuiltinTools(tools);
+}
+
+/** 在物化后的工作区取提示词 hash，repo 场景与 runTask 使用相同的 archive 解包方式。 */
+export async function probePromptHash(fixture: ShortPathTask, withoutGrepEditContext = false): Promise<string> {
   const root = mkdtempSync(path.join(tmpdir(), `${RUN_PREFIX}prompt-${fixture.id}-`));
   const previousCwd = process.cwd();
   try {
     if (fixture.repoSnapshot) await extractRepoSnapshot(root, { junctionNodeModules: false });
     materialize(root, fixture);
     process.chdir(root);
-    return shortPathPromptHash(buildCodingEvalSystemPrompt(CODING_EVAL_SESSION_ID));
+    return shortPathPromptHash(buildExperimentPrompt(withoutGrepEditContext));
   } finally {
     process.chdir(previousCwd);
     rmSync(root, { recursive: true, force: true });
@@ -254,6 +317,7 @@ async function runTask(
   keep: boolean,
   expectedPromptHash: string,
   timeoutOverride?: number,
+  withoutGrepEditContext = false,
   traceCollector?: (trace: { id: string; events: AgentTraceEvent[]; warmupEvents: AgentTraceEvent[] }) => void,
 ): Promise<ShortPathTaskResult> {
   const root = mkdtempSync(path.join(tmpdir(), `${RUN_PREFIX}${fixture.id}-`));
@@ -266,6 +330,7 @@ async function runTask(
     initialMode: 'auto',
   });
   const runtimeContext = runtime.context;
+  if (withoutGrepEditContext) configureGrepControl(runtimeContext);
   const timeoutMs = timeoutOverride ?? fixture.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const verifyTimeoutMs = fixture.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS;
   const controller = new AbortController();
@@ -283,7 +348,7 @@ async function runTask(
 
   try {
     process.chdir(root);
-    const systemPrompt = buildCodingEvalSystemPrompt(CODING_EVAL_SESSION_ID);
+    const systemPrompt = buildExperimentPrompt(withoutGrepEditContext);
     const actualPromptHash = shortPathPromptHash(systemPrompt);
     if (actualPromptHash !== expectedPromptHash) {
       throw new Error(
@@ -405,9 +470,10 @@ async function runTask(
 export async function shortPathMain(args = process.argv.slice(2)): Promise<void> {
   const options = parseShortPathArgs(args);
   if (options.list || (options.selection === '' && options.level === undefined)) {
-    for (const task of shortPathTasks) console.log(`${task.id}\tL${task.level}\t${task.scenario}\t${task.title}`);
+    for (const task of [...shortPathTasks, ...locateTasks])
+      console.log(`${task.id}\tL${task.level}\t${task.scenario}\t${task.title}`);
     if (!options.list) {
-      console.log('\nChoose tasks explicitly; groups: micro|hinted|warm|repo; or --level 1..5.');
+      console.log('\nChoose tasks explicitly; groups: micro|hinted|warm|repo|l6|locate; or --level 1..6.');
     }
     return;
   }
@@ -415,12 +481,15 @@ export async function shortPathMain(args = process.argv.slice(2)): Promise<void>
   const selected = options.selection ? selectShortPathTasks(options.selection) : selectByLevel(options.level!);
   const scenario = selectionScenario(selected);
   validateShortPathOptions(options, options.selectionSource === 'group' ? scenario : null);
-  const promptHash = await probePromptHash(selected[0]);
+  const promptHash = await probePromptHash(selected[0], options.withoutGrepEditContext);
   const experiment: NonNullable<ShortPathReport['experiment']> = {
     fixtureHash: shortPathPromptHash(JSON.stringify([...selected].sort((a, b) => a.id.localeCompare(b.id)))),
     reasoningEffort: config.reasoningEffort,
     routing: isToolRoutingEnabled() ? getRouterMode() : 'off',
     shortPathCompletion: config.shortPathCompletion,
+    ...(options.withoutGrepEditContext || options.selection === 'locate'
+      ? { grepEditContext: !options.withoutGrepEditContext }
+      : {}),
   };
   const identity = {
     schemaVersion: 1 as const,
@@ -442,7 +511,7 @@ export async function shortPathMain(args = process.argv.slice(2)): Promise<void>
   const baselinePath = resolveBaselinePath(options.baselinePath, baselineKey);
   // 基线只对「完整场景组」有意义;--task 混选/--level/跨组混选都会被拦下或降级。
   const isFullScenarioRun = options.selectionSource === 'group';
-  if (isFullScenarioRun && !options.updateBaseline) {
+  if (isFullScenarioRun && !options.updateBaseline && !options.withoutGrepEditContext) {
     // 基线文件缺失 = 首次运行,降级为无门禁继续跑(等 --update-baseline 录制后再启用)。
     if (existsSync(baselinePath)) {
       baseline = readShortPathBaseline(baselinePath);
@@ -459,8 +528,13 @@ export async function shortPathMain(args = process.argv.slice(2)): Promise<void>
   const perTaskTraces: Array<{ id: string; events: AgentTraceEvent[]; warmupEvents: AgentTraceEvent[] }> = [];
   for (const fixture of selected) {
     process.stdout.write(`[short-path] ${fixture.id} ${fixture.title} ... `);
-    const result = await runTask(fixture, options.keep, promptHash, options.timeoutMs, (trace) =>
-      perTaskTraces.push(trace),
+    const result = await runTask(
+      fixture,
+      options.keep,
+      promptHash,
+      options.timeoutMs,
+      options.withoutGrepEditContext,
+      (trace) => perTaskTraces.push(trace),
     );
     results.push(result);
     console.log(`${result.status} (calls=${result.efficiency.toolCalls}, ratio=${result.pathRatio.toFixed(2)}x)`);

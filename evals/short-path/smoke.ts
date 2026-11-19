@@ -19,6 +19,7 @@ import {
   readShortPathBaseline,
 } from './baseline.js';
 import { shortPathTasks } from './fixtures.js';
+import { locateTasks } from './fixtures-locate.js';
 import { createReport } from './report.js';
 import type { ShortPathTask, ShortPathTaskResult } from './types.js';
 
@@ -73,7 +74,7 @@ function materialize(root: string, fixture: ShortPathTask): void {
 }
 
 async function checkSyntheticVerifiersFailInitially(): Promise<void> {
-  const synthetic = shortPathTasks.filter((task) => task.scenario !== 'repo');
+  const synthetic = [...shortPathTasks.filter((task) => task.scenario !== 'repo'), ...locateTasks];
   for (const task of synthetic) {
     const root = mkdtempSync(path.join(tmpdir(), `mocode-shortpath-smoke-${task.id}-`));
     try {

@@ -6,10 +6,12 @@
  */
 import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { grepTool } from '../../src/tools/builtins/grep.js';
+import { editFileTool } from '../../src/tools/builtins/edit-file.js';
+import { contentHash } from '../../src/changeset/index.js';
 import { searchEncoder } from '../../src/context/encoders/search.js';
 import { summarizeToolResult } from '../../src/ui/render.js';
 import { t } from '../../src/i18n/index.js';
@@ -79,6 +81,46 @@ test('grep context: 命中行保留原始缩进(旧实现 trim() 会丢层级)',
   // 4 个空格缩进必须逐字保留:这是「不 trim」的核心断言。
   assert.match(withoutCtx, /^ {2}L4: {5}return value;$/m);
   assert.ok(!/^ {2}L4: return value;$/m.test(withoutCtx), '命中行不应被 trim');
+});
+
+test('grep edit_context: 唯一命中给出精确原文和版本，可直接编辑，旧版本拒写', async () => {
+  const file = join(root, 'src', 'edit target.ts');
+  const original = 'export function answer() {\r\n\treturn 41;  \r\n}\r\n';
+  writeFileSync(file, original);
+  const args = { pattern: 'return 41', glob: 'src/*.ts', edit_context: true };
+  const out = await run(args);
+  const header = out.match(/^\[edit_context path=(".*") hash=(sha256:[a-f0-9]{64}) lines=1-4 match=2\]$/m);
+  assert.ok(header, out);
+  assert.equal(header[2], contentHash(original));
+  assert.match(out, /^ {5}2\t\treturn 41; {2}$/m);
+
+  const edit = { path: JSON.parse(header[1]) as string, old_string: '\treturn 41;  ', new_string: '\treturn 42;' };
+  const external = original + '// external change\r\n';
+  writeFileSync(file, external);
+  await withSandboxRoot(root, async () => {
+    const stale = await editFileTool.execute({ ...edit, expected_hash: header[2] });
+    assert.ok(typeof stale !== 'string');
+    assert.equal(stale.code, 'CHANGE_CONFLICT');
+    assert.equal(readFileSync(file, 'utf8'), external);
+  });
+  const fresh = await run(args);
+  assert.match(fresh, new RegExp(contentHash(external)));
+  await withSandboxRoot(root, async () => {
+    const applied = await editFileTool.execute({ ...edit, expected_hash: contentHash(external) });
+    assert.ok(typeof applied !== 'string');
+    assert.equal(applied.status, 'success', applied.output);
+  });
+  assert.equal(readFileSync(file, 'utf8'), external.replace(edit.old_string, edit.new_string));
+});
+
+test('grep edit_context: 同名和超长候选只定位，普通搜索保持旧格式', async () => {
+  const ambiguous = await run({ pattern: 'target line here', glob: 'src/spread.ts', edit_context: true });
+  assert.match(ambiguous, /src\/spread\.ts:3: target line here/);
+  assert.match(ambiguous, /src\/spread\.ts:21: target line here/);
+  assert.doesNotMatch(ambiguous, /\[edit_context |sha256:/);
+  const long = await run({ pattern: 'NEEDLE', glob: 'src/huge.txt', edit_context: true });
+  assert.match(long, /src\/huge\.txt:1: NEEDLE/);
+  assert.doesNotMatch(long, /\[edit_context |sha256:|x{100}/);
 });
 
 test('grep context: 默认 context=0 时行为与旧版一致(只有命中行)', async () => {

@@ -132,6 +132,50 @@ test('多文件 mutation 与 cached token 拆分', () => {
   assert.equal(m.cachedTokens, 40);
 });
 
+test('首改成本计入失败尝试、排除改后输出和请求，普通命令的文件变化不算编辑', () => {
+  const events = [
+    modelEnd({ cachedTokens: 80 }),
+    ev('tool_call_end', {
+      tool: 'run_command',
+      status: 'success',
+      changedFiles: ['diag.log'],
+      outputTokensEstimate: 5,
+    }),
+    ev('tool_call_end', { tool: 'grep', status: 'success', outputTokensEstimate: 30 }),
+    modelEnd({ cachedTokens: 60 }),
+    ev('tool_call_start', { tool: 'edit_file' }),
+    ev('tool_call_end', { tool: 'edit_file', status: 'error', code: 'CHANGE_CONFLICT', outputTokensEstimate: 12 }),
+    modelEnd({ cachedTokens: 90 }),
+    ...mutationCall(),
+    ev('tool_call_end', { tool: 'read_file', status: 'success', outputTokensEstimate: 300 }),
+    modelEnd({ cachedTokens: 0 }),
+  ];
+  const metrics = reduceShortPathEfficiency(events);
+  assert.deepEqual(metrics.firstEdit, {
+    firstAttemptApplied: false,
+    requests: 3,
+    toolOutputTokensEstimate: 47,
+    uncachedInputTokens: 70,
+  });
+});
+
+test('并发编辑用调用 ID 识别首次尝试，缺失的计量保留为 null', () => {
+  const events = [
+    modelEnd(),
+    ...readCall('legacy-read'),
+    { ...ev('tool_call_start', { tool: 'edit_file' }), toolCallId: 'first' },
+    { ...ev('tool_call_start', { tool: 'edit_file' }), toolCallId: 'second' },
+    { ...ev('tool_call_end', { tool: 'edit_file', status: 'success', changedFiles: ['a.js'] }), toolCallId: 'second' },
+    { ...ev('tool_call_end', { tool: 'edit_file', status: 'error' }), toolCallId: 'first' },
+  ];
+  assert.deepEqual(reduceShortPathEfficiency(events).firstEdit, {
+    firstAttemptApplied: false,
+    requests: 1,
+    toolOutputTokensEstimate: null,
+    uncachedInputTokens: null,
+  });
+});
+
 test('countReadOnlyCalls 统计含 glob/grep 的全部只读调用', () => {
   const events = [
     ...readCall('1'),

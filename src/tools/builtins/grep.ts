@@ -5,6 +5,7 @@ import { isProbablyBinary } from '../../attachments/image.js';
 import { getSandboxRoot, isInsideRoot, jailResolve } from '../../sandbox/index.js';
 import { runRipgrep, type RgFileEvents, type RgLineEvent } from '../ripgrep-client.js';
 import type { Tool, ToolOutcome } from '../types.js';
+import { readSearchEditExcerpt } from './read-file.js';
 
 /**
  * grep 超时墙。
@@ -23,6 +24,17 @@ const MAX_BODY_LINE_CHARS = 400;
 
 /** context 参数上限:邻居行是 ×(1+2C) 放大,给到 10 已远超需要。 */
 const MAX_CONTEXT_LINES = 10;
+const MAX_EDIT_CANDIDATES = 8;
+
+function abortedResult(timedOut: boolean): string | ToolOutcome {
+  if (!timedOut) return '已中断';
+  return {
+    status: 'error',
+    code: 'TIMEOUT',
+    retryable: false,
+    output: `错误:grep 超过 ${GREP_TIMEOUT_MS / 1000}s 超时墙已被中止(收窄 glob 或确认无网络盘挂载后重试)`,
+  };
+}
 
 function clipLine(line: string): string {
   if (line.length <= MAX_BODY_LINE_CHARS) return line;
@@ -89,6 +101,37 @@ function renderResults(files: RgFileEvents[], maxPerFile: number, context: numbe
   return out.join('\n');
 }
 
+function renderEditCandidates(files: RgFileEvents[], truncated: boolean): string {
+  const out: string[] = [];
+  for (const file of files) {
+    if (out.length === MAX_EDIT_CANDIDATES) break;
+    for (const match of file.matches.slice(0, MAX_EDIT_CANDIDATES - out.length)) {
+      out.push(`${file.path}:${match.line}: ${clipLine(match.text)}`);
+    }
+  }
+  const omitted = truncated || files.reduce((total, file) => total + file.matches.length, 0) > out.length;
+  if (omitted) out.push('...(还有更多候选)');
+  out.push('未提供编辑原文。请收窄搜索，或对选中的路径和行号使用 read_file。');
+  return out.join('\n');
+}
+
+async function renderEditContext(files: RgFileEvents[], truncated: boolean, signal: AbortSignal): Promise<string> {
+  const file = files[0];
+  if (!truncated && files.length === 1 && file.matches.length === 1) {
+    let absolutePath: string | undefined;
+    try {
+      absolutePath = jailResolve(file.path);
+    } catch {
+      // 路径可能在搜索与读取之间变成越界链接。
+    }
+    if (absolutePath) {
+      const excerpt = await readSearchEditExcerpt(absolutePath, file.matches[0], signal);
+      if (excerpt) return excerpt;
+    }
+  }
+  return renderEditCandidates(files, truncated);
+}
+
 /**
  * Node 兜底:rg 二进制不可用(可选依赖缺失且 PATH 无 rg)时走旧路径。
  * 与旧实现的唯一差异——每两个文件之间检查 abort 信号,使 Ctrl+C / 超时墙能即时打断。
@@ -97,7 +140,7 @@ async function nodeFallback(
   pattern: string,
   glob: string,
   maxPerFile: number,
-  context: number,
+  editContext: boolean,
   signal: AbortSignal,
   externalSignal?: AbortSignal,
 ): Promise<ToolExecuteResult> {
@@ -162,7 +205,7 @@ async function nodeFallback(
     return `无匹配(扫描了 ${scanned} 个文件${note})`;
   }
   // 兜底路径无 context 事件来源(rg 缺失),context 参数退化为只给命中行。
-  const out = renderResults(files, maxPerFile, 0, false);
+  const out = editContext ? renderEditCandidates(files, false) : renderResults(files, maxPerFile, 0, false);
   return skippedTooLarge ? `${out}\n...(跳过 ${skippedTooLarge} 个超过 2MiB 的文件)` : out;
 }
 
@@ -174,13 +217,18 @@ export const grepTool: Tool = {
   description:
     'Search file contents by regex (recursive; powered by ripgrep: respects .gitignore, skips binaries).\n' +
     'Output: per-file header "<path>: N matches, lines [l1, l2, ...]" plus rendered lines with ORIGINAL INDENTATION kept.\n' +
-    'Pass context=2..5 to include neighbouring lines inline (like ripgrep -C) instead of following each hit with a read_file round-trip. Hard wall 120s; narrow the glob if a tree contains network mounts. Use read_file when you need a whole region or exact edit text.\n' +
+    'Pass context=2..5 for neighbouring lines. When locating an edit target in an unknown file, use edit_context=true with a narrow pattern. A unique hit can return an exact, bounded [edit_context ...] excerpt; use its path and hash as expected_hash in edit_file. Otherwise you get at most 8 candidate lines; use read_file for exact text. Hard wall 120s.\n' +
     'Note: .mocode/ is gitignored; to search session data (e.g. .mocode/sessions/<id>/compacted archived history) you MUST narrow glob to that path, e.g. glob=".mocode/sessions/**".',
   parameters: {
     type: 'object',
     properties: {
       pattern: { type: 'string', description: 'Regular expression (ripgrep/Rust regex syntax)' },
       glob: { type: 'string', description: 'Optional, restrict to a file glob, e.g. *.ts' },
+      edit_context: {
+        type: 'boolean',
+        description:
+          'Return an exact edit excerpt for a unique match, or a short candidate list. Ignores context and max_per_file.',
+      },
       max_per_file: {
         type: 'integer',
         description:
@@ -198,6 +246,7 @@ export const grepTool: Tool = {
   async execute(args, ctx) {
     const pattern = String(args.pattern);
     const glob = String(args.glob ?? '**/*');
+    const editContext = args.edit_context === true;
     const maxPerFile = Math.min(Math.max(Number(args.max_per_file ?? 15), 1), 50);
     const contextRaw = Number(args.context ?? 0);
     const context = Number.isFinite(contextRaw) ? Math.min(Math.max(Math.trunc(contextRaw), 0), MAX_CONTEXT_LINES) : 0;
@@ -220,7 +269,13 @@ export const grepTool: Tool = {
       // glob 显式限定到 .mocode(gitignore 内)时放开 VCS ignore,否则 rg 零文件退出。
       const noIgnoreVcs = glob === '.mocode/**' || glob.startsWith('.mocode/');
       const result = await runRipgrep(
-        { pattern, glob, context, noIgnoreVcs, maxMatches: MAX_RESULTS },
+        {
+          pattern,
+          glob,
+          context: editContext ? 0 : context,
+          noIgnoreVcs,
+          maxMatches: editContext ? MAX_EDIT_CANDIDATES : MAX_RESULTS,
+        },
         controller.signal,
       );
       switch (result.status) {
@@ -230,21 +285,15 @@ export const grepTool: Tool = {
           const trunc = result.truncated ? '\n...(输出截断,缩小 glob 或收窄正则后重试)' : '';
           return `无匹配(扫描了 ${result.scanned} 个文件)${trunc}`;
         }
-        case 'ok':
-          return renderResults(result.files, maxPerFile, context, result.truncated);
+        case 'ok': {
+          if (!editContext) return renderResults(result.files, maxPerFile, context, result.truncated);
+          const output = await renderEditContext(result.files, result.truncated, controller.signal);
+          return controller.signal.aborted ? abortedResult(timedOut) : output;
+        }
         case 'unavailable':
-          return nodeFallback(pattern, glob, maxPerFile, context, controller.signal, external);
+          return await nodeFallback(pattern, glob, maxPerFile, editContext, controller.signal, external);
         case 'aborted':
-          if (timedOut) {
-            return {
-              status: 'error',
-              code: 'TIMEOUT',
-              retryable: false,
-              output: `错误:grep 超过 ${GREP_TIMEOUT_MS / 1000}s 超时墙已被中止(收窄 glob 或确认无网络盘挂载后重试)`,
-            } satisfies ToolOutcome;
-          }
-          // 外部 Ctrl+C:返回中断串,tool-runtime 见 signal.aborted 会归一为 aborted。
-          return '已中断';
+          return abortedResult(timedOut);
       }
     } finally {
       clearTimeout(timer);

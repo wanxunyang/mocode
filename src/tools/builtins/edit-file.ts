@@ -25,7 +25,7 @@ function conflict(path: string, details: string): ToolOutcome {
     retryable: false,
     changedFiles: [],
     staleFiles: [path],
-    output: `CHANGE_CONFLICT: ${path} was not changed. ${details} Do not retry these arguments. Call read_file on this exact path and copy the exact target text (plus its latest hash if you pass expected_hash, which line-range mode requires) before editing again.`,
+    output: `CHANGE_CONFLICT: ${path} was not changed. ${details} Do not retry these arguments. Use read_file on the affected range of this exact path and copy the latest text and hash before editing again.`,
   };
 }
 
@@ -33,11 +33,11 @@ export const editFileTool: Tool = {
   name: 'edit_file',
   description: `The DEFAULT tool for changing an EXISTING file: transactional, surgical edits — use this instead of re-writing the whole file with write_file. Pick ONE of three modes per call:
 
-**String replacement (default):** old_string must occur EXACTLY once; copy it verbatim from a fresh read_file output (see Tool policy — never reconstruct it from memory, summaries, or grep output). expected_hash is OPTIONAL in this mode: omit it and the tool checks the file itself (old_string must still match exactly once, and the commit is conflict-checked). If you do pass it, it must match the current file or the edit is rejected.
+**String replacement (default):** old_string must occur EXACTLY once. Copy it verbatim from fresh read_file output or a complete [edit_context ...] excerpt from grep. Always pass the excerpt's hash as expected_hash when using grep evidence. With read_file, the hash is optional; the tool still checks uniqueness and conflicts at commit. Ordinary search results, summaries and diffs are not exact edit evidence.
 
 **Multiple replacements:** pass replacements: [{ old_string, new_string }, …] to apply MANY edits across the file in ONE atomic call. Each old_string must occur exactly once in the original file and the matches must not overlap; if ANY of them is missing, ambiguous, or overlapping, the whole call is rejected and nothing is written. Prefer this over write_file whenever you change several spots — it keeps each payload small and never touches unrelated content. Mutually exclusive with the single old_string and line-range modes.
 
-**Line-range:** line_start/line_end (1-based, inclusive) instead of old_string — for large blocks, repeated patterns, or hard-to-reproduce text. Line numbers drift when a file changes, so expected_hash (sha256 from the read_file artifact header) is REQUIRED here; if it is stale, re-read and retry with the new hash.`,
+**Line-range:** line_start/line_end (1-based, inclusive) instead of old_string — for large blocks, repeated patterns, or hard-to-reproduce text. expected_hash from a fresh read_file or [edit_context ...] header is REQUIRED. If stale, reread only the affected range and retry with the new hash.`,
   risk: 'confirm',
   parameters: {
     type: 'object',
@@ -77,7 +77,7 @@ export const editFileTool: Tool = {
       expected_hash: {
         type: 'string',
         description:
-          'sha256 hash from the latest read_file artifact header (sha256:<64 hex>). Optional for old_string / replacements modes; required for line-range mode.',
+          'Latest sha256:<64 hex> from read_file or [edit_context ...]. Always pass it with grep edit evidence or line-range edits.',
       },
     },
     // 注意:expected_hash 与模式专属字段(new_string / replacements / line_*)都不放进 schema required。

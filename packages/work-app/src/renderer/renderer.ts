@@ -1817,7 +1817,11 @@ function updateState(next: WorkState): void {
   // IPC 的广播与 invoke 回执可能携带同一份状态；重复回执不做任何 DOM 工作。
   if (state && JSON.stringify(next) === JSON.stringify(state)) return;
   const previousProject = activeProjectId();
+  // 选中任务变了（切会话、删会话、接管历史会话…）→ 输入框换成新任务自己的草稿。
+  // 放在 state 赋值之后：stashComposer 要按新列表判断旧任务是否还活着。
+  const previousTask = state?.selectedTaskId;
   state = next; renderProjects(); renderTasks(); renderEmptyChips(); syncAttention();
+  if (next.selectedTaskId !== previousTask) syncComposerTo(next.selectedTaskId);
   // 空间集合或会话数变了才重取内联区要用的会话快照（内部自己判断，不额外加 IPC）。
   syncSpaceSessionCache();
   // 切空间 = 切浏览器分区 + 换一份 PTY（shell 的 cwd 绑在空间根上）。
@@ -1827,7 +1831,7 @@ function updateState(next: WorkState): void {
   }
   if (activeInspectorTab === 'source' && !inspector.classList.contains('hidden')) void refreshSourceControl(inspectorContent);
 }
-function clearWorkspace(): void { lastTokenUsageSignature = ''; tokenUsageEl.textContent = ''; tokenUsageEl.title = ''; tokenUsageEl.classList.add('hidden'); hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); attachments = []; renderAttachments(); renderStatus(IDLE_STATUS); }
+function clearWorkspace(): void { lastTokenUsageSignature = ''; tokenUsageEl.textContent = ''; tokenUsageEl.title = ''; tokenUsageEl.classList.add('hidden'); hideExtensionsView(); conversation.innerHTML = ''; userTurnIndex = 0; emptyState.classList.remove('hidden'); activeAssistant = null; activeTextBlock = null; activeToolGroup = null; setRunning(false); renderStatus(IDLE_STATUS); syncComposerTo(state?.selectedTaskId); }
 
 /**
  * 一轮 assistant 输出 = 一条 message 内的**有序 block 流**:
@@ -2709,6 +2713,8 @@ async function openTask(taskId: string): Promise<void> {
 function dropTaskRuntime(taskId: string): void {
   streams.delete(taskId);
   clearRunWatchdog(taskId);
+  // 草稿跟着任务一起消失：留着的话，同 id 复用的任务会凭空冒出一段旧输入。
+  drafts.delete(taskId);
 }
 
 async function deleteTask(taskId: string): Promise<void> {
@@ -3047,6 +3053,53 @@ function renderAttachments(): void {
     chip.append(remove);
     attachmentList.append(chip);
   });
+}
+
+/* ── 按会话隔离的输入框草稿 ──────────────────────────────
+ * 输入框天然是全局的一个 DOM 节点，但用户心里的归属是「我正在看的这个会话」：
+ * 在 A 里敲了半句话切到 B，B 的框里就该是 B 自己的内容（可能是空的），A 的那半句
+ * 在切回来时原样还在。图片/文件附件同理。
+ *
+ * 实现：每个任务一份草稿，`''` 桶收「还没选中任何任务时」敲的内容；输入框始终只呈现
+ * `composerTaskId` 那一份。切会话的入口不止一处（updateState 的选中态变化、switchToTask、
+ * clearWorkspace），统一在这里换算 —— 各调用点只管说「现在该是谁」，不各自搬内容。
+ */
+interface ComposerDraft { text: string; attachments: Attachment[] }
+const drafts = new Map<string, ComposerDraft>();
+/** 输入框此刻承载的是哪个任务的草稿；`''` = 还没归属任何任务（空态下敲的字）。 */
+let composerTaskId = '';
+
+/** 把输入框现状存回它的归属任务（空白内容等于没有草稿，别留空壳）。 */
+function stashComposer(): void {
+  const text = promptInput.value;
+  // 任务已经被删掉时不留草稿：否则同 id 复用、或删完再切回来，会诈尸出一段无主的输入。
+  // `''` 桶（还没选中任务时敲的字）照留：用户切去看别的会话再回来，写了一半的要求还在。
+  const alive = composerTaskId === '' || (state?.tasks ?? []).some((task) => task.id === composerTaskId);
+  if (!alive || (!text.trim() && !attachments.length)) drafts.delete(composerTaskId);
+  else drafts.set(composerTaskId, { text, attachments: [...attachments] });
+}
+
+/** 把输入框切到某个任务的草稿：先存旧的，再装回目标的（没有就清空）。 */
+function syncComposerTo(taskId: string | undefined): void {
+  if ((taskId ?? '') === composerTaskId) return;
+  stashComposer();
+  composerTaskId = taskId ?? '';
+  const draft = drafts.get(composerTaskId);
+  promptInput.value = draft?.text ?? '';
+  attachments = draft ? [...draft.attachments] : [];
+  renderAttachments();
+  // 高度按文本重算（切到一条长草稿时不能停在单行高度上）。
+  resizePrompt();
+}
+
+/** 发送成功：这份内容已被消费，草稿与输入框都收掉。 */
+function clearComposerFor(taskId: string): void {
+  drafts.delete(taskId);
+  if (composerTaskId !== taskId) return;
+  promptInput.value = '';
+  attachments = [];
+  renderAttachments();
+  resizePrompt();
 }
 
 /* ── Smart scroll ──────────────────────────────────────── */
@@ -4012,17 +4065,22 @@ function startRun(task: Task, prompt: string, batch: Attachment[]): void {
 
 async function submit(): Promise<void> {
   const prompt = promptInput.value.trim();
-  if (!prompt && !attachments.length) return;
+  // 附件先取快照：下面首次使用时可能新建任务，而建任务会改选中态 → 输入区被同步成
+  // 新任务的空草稿（见 syncComposerTo），那时再读 attachments 就只剩空数组了。
+  const batch = attachments;
+  if (!prompt && !batch.length) return;
   // 目标任务是当前查看的那个；没有就新建（第一次使用）。
   let task = selectedTask();
   if (!task) {
+    // 这段内容马上要发出去：先清空输入区，避免建任务引发的切换把它存成「未归属草稿」。
+    promptInput.value = ''; attachments = []; renderAttachments();
     const created = await window.mocodeWork.createTask('', undefined);
     updateState(created.state);
     task = created.task;
   }
   // 标题自动摘要：新建后还没命名的任务，用这一条指令就地命名（用户手动改过就不动）。
   if (!task.title.trim() && !task.sessionId) {
-    const next = await window.mocodeWork.renameTask(task.id, prompt ? summarizePrompt(prompt) : attachments[0]?.name ?? t('composer.fileFallback'));
+    const next = await window.mocodeWork.renameTask(task.id, prompt ? summarizePrompt(prompt) : batch[0]?.name ?? t('composer.fileFallback'));
     if (next) updateState(next);
   }
   // 用户实际提交消息时立即置顶。
@@ -4030,7 +4088,6 @@ async function submit(): Promise<void> {
   // 刚建的任务 stream 里不会有 running；这里用 isRunning 而不是 selectedTask().status，
   // 因为后者是主进程异步刷新的，落后于「刚点发送」的瞬间。
   if (isRunning(task.id)) {
-    const batch = attachments;
     const stream = streamFor(task.id);
     stream.items.push({ kind: 'user', text: prompt, attachments: batch });
     finalizeTurn(activeAssistant);
@@ -4038,13 +4095,11 @@ async function submit(): Promise<void> {
     addMessage('user', prompt, batch);
     startAssistantTurn();
     window.mocodeWork.send({ type: 'run', id: task.id, prompt, sessionId: task.sessionId, attachments: batch });
-    promptInput.value = ''; resizePrompt();
-    attachments = []; renderAttachments();
+    clearComposerFor(task.id);
     return;
   }
-  const batch = attachments;
-  attachments = []; renderAttachments();
-  promptInput.value = ''; resizePrompt();
+  // 先收输入区再 startRun：setRunning 按「框里还有没有内容」决定按钮是发送还是停止。
+  clearComposerFor(task.id);
   startRun(task, prompt, batch);
 }
 
@@ -4504,7 +4559,9 @@ function switchToTask(taskId: string, history?: HistoryItem[], recovery?: Recove
   syncAttention();
   renderStatus(stream?.status ?? statusFromTask(selectedTask()), { replay: true });
   smartScrollToBottom(true);
-  attachments = []; renderAttachments();
+  // 输入框跟着会话走：切过来只显示这个会话自己的草稿（文本 + 待发送附件），
+  // 别把上一个会话敲了一半的话带过来（切回去时它也还在）。
+  syncComposerTo(taskId);
   // 系统提示行（.thread-notice）也算会话内容：只有压缩记录时不该显示空态。
   emptyState.classList.toggle('hidden', conversation.querySelector('.message') != null || conversation.querySelector('.thread-notice') != null);
   promptInput.focus();
@@ -5053,11 +5110,16 @@ async function startNewTask(projectId?: string): Promise<void> {
   // 已经有一个「刚新建、还没发过消息、且归属相同」的任务时直接续用，避免连点堆出一串空任务。
   // 归属不同不能续用 —— 否则点了「任务」分组的 + 却复用了空间里的草稿，用户会以为按钮坏了。
   const sameScope = current && (projectId === undefined || (current.projectId || '') === projectId);
-  if (current && sameScope && !current.sessionId && !conversation.querySelector('.message')) { promptInput.focus(); return; }
+  if (current && sameScope && !current.sessionId && !conversation.querySelector('.message')) {
+    syncComposerTo(current.id);
+    promptInput.focus();
+    return;
+  }
   const created = await window.mocodeWork.createTask('', projectId);
+  // 选中态一变，上一个任务的输入内容就被存进它自己的草稿、框里换成新任务的那一份。
   updateState(created.state);
   clearWorkspace();
-  promptInput.value = ''; resizePrompt(); updateContextUsage(null);
+  updateContextUsage(null);
   promptInput.focus();
 }
 

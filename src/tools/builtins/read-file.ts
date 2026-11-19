@@ -49,6 +49,77 @@ function failure(code: ToolOutcome['code'], message: string): ToolOutcome {
   return { status: 'error', code, retryable: false, output: `错误:${message}` };
 }
 
+async function loadReadableFile(
+  path: string,
+  signal?: AbortSignal,
+): Promise<{ buffer: Buffer; size: number } | ToolOutcome> {
+  const absolute = resolve(path);
+  let info;
+  try {
+    info = await stat(absolute);
+  } catch (error) {
+    const e = error as NodeJS.ErrnoException;
+    if (e?.code === 'ENOENT') return failure('EXECUTION_ERROR', `文件不存在: ${path}`);
+    return failure('EXECUTION_ERROR', `无法访问文件 ${path}: ${e?.message ?? String(error)}`);
+  }
+  if (info.isDirectory()) {
+    return failure(
+      'INVALID_ARGUMENTS',
+      `${path} 是目录,不是文件。用 glob(pattern="${path}/**") 列目录内容,或用 grep 在目录下搜内容。`,
+    );
+  }
+  if (!info.isFile()) {
+    return failure('INVALID_ARGUMENTS', `${path} 不是普通文件(设备/套接字/特殊文件),无法读取。`);
+  }
+  if (info.size > MAX_FILE_BYTES) {
+    return failure(
+      'INVALID_ARGUMENTS',
+      `${path} 有 ${formatBytes(info.size)},超过 read_file 的 ${formatBytes(MAX_FILE_BYTES)} 上限` +
+        '(行号分页需整文件载入内存)。先用 grep 定位行号,再用 run_command 配合系统工具按段取。',
+    );
+  }
+  try {
+    return { buffer: await readFile(absolute, { signal }), size: info.size };
+  } catch (error) {
+    const e = error as NodeJS.ErrnoException;
+    return failure(
+      e?.code === 'EACCES' || e?.code === 'EPERM' ? 'SANDBOX_DENIED' : 'EXECUTION_ERROR',
+      `读取 ${path} 失败: ${e?.message ?? String(error)}`,
+    );
+  }
+}
+
+function formatNumberedLines(lines: string[], start: number, end: number): string {
+  return lines
+    .slice(start, end)
+    .map((line, i) => `${String(start + i + 1).padStart(6, ' ')}\t${line}`)
+    .join('\n');
+}
+
+/** 只为已定位且已通过沙箱解析的命中返回未截断原文与同一份内容的版本。 */
+export async function readSearchEditExcerpt(
+  absolutePath: string,
+  match: { line: number; text: string },
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  const loaded = await loadReadableFile(absolutePath, signal);
+  if (!('buffer' in loaded) || signal.aborted) return;
+  const { buffer } = loaded;
+  if (buffer.length > MAX_FILE_BYTES) return;
+  const head = buffer.subarray(0, SNIFF_BYTES);
+  if (sniffImageMime(head) || isProbablyBinary(head)) return;
+  const data = buffer.toString('utf8');
+  if (!Buffer.from(data, 'utf8').equals(buffer)) return;
+  const lines = data.split(/\r?\n/);
+  if (lines[match.line - 1] !== match.text) return;
+  const start = Math.max(0, match.line - 9);
+  const end = Math.min(lines.length, match.line + 12);
+  const body = formatNumberedLines(lines, start, end);
+  // 超长行退回定位结果，避免向模型提供只能用于定位的截断源码。
+  if (body.length > 4_000) return;
+  return `[edit_context path=${JSON.stringify(absolutePath)} hash=${contentHash(buffer)} lines=${start + 1}-${end} match=${match.line}]\n${body}`;
+}
+
 // ---------- read_file ----------
 export const readFileTool: Tool = {
   name: 'read_file',
@@ -94,44 +165,9 @@ export const readFileTool: Tool = {
     );
     // enforceSandbox 已把 args.path 重写为牢内绝对路径(sandbox/policy.ts SANDBOX_PATH_TOOLS),
     // resolve 对绝对路径原样返回。
-    const absolute = resolve(path);
-
-    // ── 1. stat:目录 / 不存在 / 超大文件在这里分流,不把字节读进来再说 ────────
-    let info;
-    try {
-      info = await stat(absolute);
-    } catch (error) {
-      const e = error as NodeJS.ErrnoException;
-      if (e?.code === 'ENOENT') return failure('EXECUTION_ERROR', `文件不存在: ${path}`);
-      return failure('EXECUTION_ERROR', `无法访问文件 ${path}: ${e?.message ?? String(error)}`);
-    }
-    if (info.isDirectory()) {
-      return failure(
-        'INVALID_ARGUMENTS',
-        `${path} 是目录,不是文件。用 glob(pattern="${path}/**") 列目录内容,或用 grep 在目录下搜内容。`,
-      );
-    }
-    if (!info.isFile()) {
-      return failure('INVALID_ARGUMENTS', `${path} 不是普通文件(设备/套接字/特殊文件),无法读取。`);
-    }
-    if (info.size > MAX_FILE_BYTES) {
-      return failure(
-        'INVALID_ARGUMENTS',
-        `${path} 有 ${formatBytes(info.size)},超过 read_file 的 ${formatBytes(MAX_FILE_BYTES)} 上限` +
-          '(行号分页需整文件载入内存)。先用 grep 定位行号,再用 run_command 配合系统工具按段取。',
-      );
-    }
-
-    let buffer: Buffer;
-    try {
-      buffer = await readFile(absolute);
-    } catch (error) {
-      const e = error as NodeJS.ErrnoException;
-      return failure(
-        e?.code === 'EACCES' || e?.code === 'EPERM' ? 'SANDBOX_DENIED' : 'EXECUTION_ERROR',
-        `读取 ${path} 失败: ${e?.message ?? String(error)}`,
-      );
-    }
+    const loaded = await loadReadableFile(path);
+    if (!('buffer' in loaded)) return loaded;
+    const { buffer, size } = loaded;
 
     // ── 2. 魔数嗅探:图片走视觉通道,其余二进制明确拒绝 ──────────────────────
     // 为什么必须嗅探而不看扩展名:扩展名会说谎(截图缓存 / 构建产物常无扩展名或错扩展名),
@@ -139,7 +175,7 @@ export const readFileTool: Tool = {
     // 经 history 上限中截后仍有数千字符纯乱码进上下文 —— 既烧 token 又误导模型。
     const head = buffer.subarray(0, SNIFF_BYTES);
     const sniffed: ImageMime | null = sniffImageMime(head);
-    if (sniffed) return await readAsImage(path, sniffed, args.detail, info.size);
+    if (sniffed) return await readAsImage(path, sniffed, args.detail, size);
     if (isProbablyBinary(head)) {
       return failure(
         'INVALID_ARGUMENTS',
@@ -170,10 +206,7 @@ export const readFileTool: Tool = {
     const fileHash = contentHash(data);
     const artifactHeader = `[artifact source=read_file path=${path} hash=${fileHash}]`;
     const end = Math.min(lines.length, start + limit);
-    const body = lines
-      .slice(start, end)
-      .map((l, i) => `${String(start + i + 1).padStart(6, ' ')}\t${l}`)
-      .join('\n');
+    const body = formatNumberedLines(lines, start, end);
     // 空文件(0 字节)显式报「(空文件)」:''.split 得到 [''],行号分页会渲染成 `     1\t`,
     // 让模型误以为读到了带一行空白的文件。data.length===0 才是真·空的判据。
     if (data.length === 0)

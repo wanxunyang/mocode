@@ -104,6 +104,13 @@ export interface ToolOutcome {
   /** edit_file 已提交的内容恰好等于一次字面量替换，保留其余字节。 */
   exactTextReplacement?: true;
   durationMs?: number;
+  /** Timing after validation, including lock acquisition and rollback capture, for run_command. */
+  commandTiming?: {
+    totalMs: number;
+    commandMs?: number;
+    workspaceBeforeMs?: number;
+    workspaceAfterMs?: number;
+  };
   /** LLM usage incurred inside an orchestrating tool (for example sub-agent). */
   usage?: import('../llm/index.js').ChatUsage;
 }

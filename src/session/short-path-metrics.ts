@@ -34,6 +34,13 @@ export interface ShortPathEfficiency {
   cachedTokens: number | null;
   totalTokens: number | null;
   durationMs: number;
+  /** 只统计 edit_file / write_file，避免命令生成日志被当作首次编辑。 */
+  firstEdit?: {
+    firstAttemptApplied: boolean | null;
+    requests: number | null;
+    toolOutputTokensEstimate: number | null;
+    uncachedInputTokens: number | null;
+  };
   /** 旧报告没有分阶段数据。 */
   phases?: {
     routeDurationMs: number | null;
@@ -86,6 +93,15 @@ export function reduceShortPathEfficiency(events: readonly AgentTraceEvent[]): S
   let uncachedPromptTokens = 0;
   let requestsWithCacheUsage = 0;
   const modelDurations = new Map<string | number, number>();
+  const firstEdit: NonNullable<ShortPathEfficiency['firstEdit']> = {
+    firstAttemptApplied: null,
+    requests: null,
+    toolOutputTokensEstimate: null,
+    uncachedInputTokens: null,
+  };
+  let firstEditCall: AgentTraceEvent | undefined;
+  let exploredToolTokens = 0;
+  let completeToolEstimates = true;
 
   for (const event of events) {
     if (event.type === 'tool_route') {
@@ -138,6 +154,7 @@ export function reduceShortPathEfficiency(events: readonly AgentTraceEvent[]): S
       phases.finalModelRequests = 0;
       phases.finalModelDurationMs = 0;
       const tool = typeof event.data.tool === 'string' ? event.data.tool : '';
+      if ((tool === 'edit_file' || tool === 'write_file') && !firstEditCall) firstEditCall = event;
       if (!READ_ONLY_TOOLS.has(tool)) continue;
       readOnlyCalls += 1;
       if (firstEditSeen) postEditReadOnlyCalls += 1;
@@ -154,7 +171,31 @@ export function reduceShortPathEfficiency(events: readonly AgentTraceEvent[]): S
         phases.postEditCommandDurationMs += finiteNumber(event.data.durationMs) ?? 0;
       }
       const changedFiles = event.data.changedFiles;
-      if (!Array.isArray(changedFiles) || changedFiles.length === 0) continue;
+      const changed = Array.isArray(changedFiles) && changedFiles.length > 0;
+      const tool = event.data.tool;
+      const isEdit = tool === 'edit_file' || tool === 'write_file';
+      const applied = event.data.status === 'success' && changed;
+      if (
+        isEdit &&
+        firstEdit.firstAttemptApplied === null &&
+        (!firstEditCall ||
+          (firstEditCall.toolCallId ? firstEditCall.toolCallId === event.toolCallId : firstEditCall.data.tool === tool))
+      ) {
+        firstEdit.firstAttemptApplied = applied;
+      }
+      if (firstEdit.requests === null) {
+        if (isEdit && applied) {
+          firstEdit.requests = modelRequests;
+          firstEdit.toolOutputTokensEstimate = completeToolEstimates ? exploredToolTokens : null;
+          firstEdit.uncachedInputTokens =
+            modelRequests > 0 && requestsWithCacheUsage === modelRequests ? uncachedPromptTokens : null;
+        } else {
+          const outputTokens = finiteNumber(event.data.outputTokensEstimate);
+          if (outputTokens === null) completeToolEstimates = false;
+          else exploredToolTokens += outputTokens;
+        }
+      }
+      if (!changed) continue;
       mutationCalls += 1;
       if (!firstEditSeen) {
         firstEditSeen = true;
@@ -186,6 +227,7 @@ export function reduceShortPathEfficiency(events: readonly AgentTraceEvent[]): S
     cachedTokens: hasCached ? cachedTokens : null,
     totalTokens: hasTokens ? totalTokens : null,
     durationMs,
+    firstEdit,
     phases,
   };
 }

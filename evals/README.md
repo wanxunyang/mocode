@@ -258,6 +258,15 @@ npm run eval:short -- --group micro --update-baseline   # 录制基线(按场景
 npm run eval:short -- --group micro --efficiency-gate   # 效率劣化从告警升级为阻断
 ```
 
+用 `--group locate` 对照首次成功编辑前的探索成本。该组包含已知路径、只知符号和同名歧义三类任务，每类两题。使用相同模型、思考强度和路由配置执行两组命令。
+
+```bash
+npm run eval:short -- --group locate --without-grep-edit-context --out evals/results/short-path/locate/control
+npm run eval:short -- --group locate --out evals/results/short-path/locate/optimized
+```
+
+报告列出首次文件编辑尝试是否实际应用、首次成功编辑前已完成的模型请求数、工具文本输出 token 估算和未缓存输入 token。工具文本按历史上限计量，失败编辑返回的文本也计入重试成本。未缓存输入包含生成首次成功编辑调用的请求，要求 provider 完整提供缓存用量。独立 verifier 另外检查最终结果与同名候选是否保持预期内容。
+
 基线按运行组分文件。新基线记录模型、系统提示词、题集内容指纹、思考档和路由模式。比较前会检查这些条件是否一致。旧基线仍可读取，比较时按已有字段检查。
 
 确定性收尾实验默认关闭，可用 `MOCODE_SHORT_PATH_COMPLETION=true` 启用。比如提交“将 `config.js` 中的 `MAX_RETRIES = 2` 替换为 `MAX_RETRIES = 3`。然后运行 `node verify.mjs`。”，正常开场、改动和检查均有证据时，runtime 直接给出结果。明确写“无需运行检查。”也可以使用此路径。验证要求未明确时，继续由模型决定如何验证与收尾。报告会记录开关、自动收尾次数和回退原因。

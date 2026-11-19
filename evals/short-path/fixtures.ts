@@ -4,6 +4,7 @@ import { l6TasksB } from './fixtures-l6b.js';
 import { microTasks } from './fixtures-micro.js';
 import { repoTasks } from './fixtures-repo.js';
 import { warmTasks } from './fixtures-warm.js';
+import { locateTasks } from './fixtures-locate.js';
 import type { ShortPathScenario, ShortPathTask } from './types.js';
 
 export const shortPathTasks: ShortPathTask[] = [
@@ -15,7 +16,7 @@ export const shortPathTasks: ShortPathTask[] = [
   ...l6TasksB,
 ];
 
-export const SHORT_PATH_GROUPS = ['micro', 'hinted', 'warm', 'repo', 'l6'] as const;
+export const SHORT_PATH_GROUPS = ['micro', 'hinted', 'warm', 'repo', 'l6', 'locate'] as const;
 export type ShortPathGroup = (typeof SHORT_PATH_GROUPS)[number];
 
 export function groupTasks(group: ShortPathGroup): ShortPathTask[] {
@@ -30,6 +31,8 @@ export function groupTasks(group: ShortPathGroup): ShortPathTask[] {
       return repoTasks;
     case 'l6':
       return [...l6TasksA, ...l6TasksB];
+    case 'locate':
+      return locateTasks;
   }
 }
 
@@ -60,7 +63,7 @@ export function selectShortPathTasks(selection: string): ShortPathTask[] {
     .map((id) => id.trim())
     .filter(Boolean);
   const selected = ids.map((id) => {
-    const task = shortPathTasks.find((candidate) => candidate.id === id);
+    const task = [...shortPathTasks, ...locateTasks].find((candidate) => candidate.id === id);
     if (!task) throw new Error(`Unknown short-path task id: ${id}`);
     return task;
   });

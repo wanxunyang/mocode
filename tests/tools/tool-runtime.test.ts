@@ -78,6 +78,46 @@ test('ToolRuntime uses its injected sandbox enforcement and normalizes denial', 
   assert.deepEqual(outcome.changedFiles, []);
 });
 
+test('ToolRuntime records workspace capture around a timed-out command without changing its duration', async () => {
+  const phases: string[] = [];
+  const capture = { sequence: 1, entries: new Map(), turnId: 1, workspaceRoot: '', sessionsRoot: '' };
+  const runtime = new ToolRuntime({
+    enforceSandbox: () => null,
+    beginWorkspaceMutation: async () => {
+      phases.push('before');
+      return capture;
+    },
+    endWorkspaceMutation: async (completedCapture, toolName) => {
+      assert.equal(completedCapture, capture);
+      assert.equal(toolName, 'run_command');
+      phases.push('after');
+    },
+  });
+  runtime.installBuiltinTools([
+    {
+      ...fakeTool('run_command', ''),
+      capabilities: { effect: 'process', concurrency: 'serial' },
+      execute: async () => {
+        phases.push('command');
+        return { status: 'error', code: 'TIMEOUT', retryable: false, output: 'timed out', durationMs: 0 };
+      },
+    },
+    fakeTool('other_tool', 'done'),
+  ]);
+
+  const outcome = await runtime.executeToolOutcome('run_command', '{}');
+  assert.deepEqual(phases, ['before', 'command', 'after']);
+  assert.equal(outcome.code, 'TIMEOUT');
+  assert.equal(outcome.durationMs, 0);
+  const timing = outcome.commandTiming;
+  assert.ok(timing);
+  assert.equal(timing.commandMs, outcome.durationMs);
+  assert.ok(timing.workspaceBeforeMs !== undefined && timing.workspaceBeforeMs >= 0);
+  assert.ok(timing.workspaceAfterMs !== undefined && timing.workspaceAfterMs >= 0);
+  assert.ok(timing.totalMs >= timing.workspaceBeforeMs + timing.workspaceAfterMs);
+  assert.equal((await runtime.executeToolOutcome('other_tool', '{}')).commandTiming, undefined);
+});
+
 /**
  * 弱模型/中转网关常把 integer 参数序列化成字符串(真实会话 2026-10-08:
  * read_file {"offset":"124","limit":"22"} / run_command {"timeout":"90000"}),

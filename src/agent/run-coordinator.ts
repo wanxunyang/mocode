@@ -6,7 +6,7 @@
 // spawn.ts 的 spawnAgent = runAgentCore + 静默 hooks(子 agent)。
 
 import type OpenAI from 'openai';
-import { type ChatMessage, type ToolCallRef } from '../llm/index.js';
+import { estimateTokens, type ChatMessage, type ToolCallRef } from '../llm/index.js';
 import { type ToolExecutionOptions, type ToolOutcome } from '../tools/registry.js';
 import { validateToolArguments } from '../tools/validation.js';
 import { getPlanDisabledTools, getRuntimeDisabledTools, getSkillRuntimeDisabledTools } from '../tools/constants.js';
@@ -41,7 +41,7 @@ import { t } from '../i18n/index.js';
 import { createLifecycleEngine } from '../context/lifecycle.js';
 import type { LifecycleEngine } from '../context/lifecycle.js';
 import type { BudgetScheduler } from '../session/scheduler.js';
-import type { CompactionRuntime } from '../session/compact.js';
+import { capToolResultForHistory, type CompactionRuntime } from '../session/compact.js';
 import type { HistoryManager } from './stages/contracts.js';
 import type { LegacyStageAdapters } from './stages/legacy-adapters.js';
 import { createLegacyModelRunner, createStagedModelRunner } from './stages/model-runner.js';
@@ -452,6 +452,8 @@ export async function runAgentCoreLegacy(
                           code: outcome.code,
                           retryable: outcome.retryable,
                           durationMs: outcome.durationMs ?? 0,
+                          outputTokensEstimate: estimateTokens(capToolResultForHistory(call.name, outcome.output)),
+                          ...(outcome.commandTiming ? { commandTiming: outcome.commandTiming } : {}),
                           changedFiles: outcome.changedFiles ?? [],
                           staleFiles: outcome.staleFiles ?? [],
                           ...(outcome.changeSet ? { changeSet: outcome.changeSet } : {}),
@@ -571,6 +573,8 @@ export async function runAgentCoreLegacy(
                       code: outcome.code,
                       retryable: outcome.retryable,
                       durationMs: outcome.durationMs ?? 0,
+                      outputTokensEstimate: estimateTokens(capToolResultForHistory(tc.name, outcome.output)),
+                      ...(outcome.commandTiming ? { commandTiming: outcome.commandTiming } : {}),
                       changedFiles: outcome.changedFiles ?? [],
                       staleFiles: outcome.staleFiles ?? [],
                       ...(outcome.changeSet ? { changeSet: outcome.changeSet } : {}),

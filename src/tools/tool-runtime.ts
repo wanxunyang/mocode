@@ -443,11 +443,27 @@ export class ToolRuntime {
   ): Promise<ToolOutcome> {
     const startedAt = Date.now();
     const capabilities = this.getToolCapabilities(tool);
+    const commandStartedAt = tool.name === 'run_command' ? performance.now() : undefined;
+    const commandTiming: NonNullable<ToolOutcome['commandTiming']> | undefined =
+      commandStartedAt === undefined ? undefined : { totalMs: 0 };
+    const captureWorkspace = async <T>(
+      phase: 'workspaceBeforeMs' | 'workspaceAfterMs',
+      capture: () => Promise<T>,
+    ): Promise<T> => {
+      if (!commandTiming) return capture();
+      const captureStartedAt = performance.now();
+      try {
+        return await capture();
+      } finally {
+        commandTiming[phase] = performance.now() - captureStartedAt;
+      }
+    };
     let mutationVersionBefore: number | undefined;
     let capturedPath: string | undefined;
+    let outcome: ToolOutcome;
     try {
       const requests = this.dependencies.resolveResourceLockRequests(capabilities, args);
-      return await this.dependencies.resourceLockManager.withLocks(requests, signal, async () => {
+      outcome = await this.dependencies.resourceLockManager.withLocks(requests, signal, async () => {
         opts?.onLockAcquired?.(args);
         const mutationBefore = this.dependencies.getCurrentTurnMutationState();
         mutationVersionBefore = mutationBefore.version;
@@ -461,7 +477,7 @@ export class ToolRuntime {
         capturedPath = pathCapture?.path;
         const workspaceCapture =
           capabilities.effect === 'process' || capabilities.effect === 'unknown'
-            ? await this.dependencies.beginWorkspaceMutation()
+            ? await captureWorkspace('workspaceBeforeMs', () => this.dependencies.beginWorkspaceMutation())
             : null;
 
         let raw: ToolExecuteResult;
@@ -474,9 +490,14 @@ export class ToolRuntime {
             delegation: opts?.delegation,
             readDedup: opts?.readDedup,
           });
+          if (commandTiming && isStructuredOutcome(raw)) commandTiming.commandMs = raw.durationMs;
         } finally {
           if (pathCapture) this.dependencies.endPathMutation(pathCapture, tool.name);
-          if (workspaceCapture) await this.dependencies.endWorkspaceMutation(workspaceCapture, tool.name);
+          if (workspaceCapture) {
+            await captureWorkspace('workspaceAfterMs', () =>
+              this.dependencies.endWorkspaceMutation(workspaceCapture, tool.name),
+            );
+          }
         }
 
         const mutationAfter = this.dependencies.getCurrentTurnMutationState();
@@ -506,10 +527,13 @@ export class ToolRuntime {
             ? mutationAfter.changedFiles.filter((item) => item.path === capturedPath).map((item) => item.path)
             : mutationAfter.changedFiles.map((item) => item.path)
           : [];
-      if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
-        return terminalOutcome('aborted', 'ABORTED', t('command.interrupted'), startedAt, changedFiles);
-      }
-      return executionErrorOutcome(tool.name, error, startedAt, changedFiles);
+      outcome =
+        signal?.aborted || (error instanceof Error && error.name === 'AbortError')
+          ? terminalOutcome('aborted', 'ABORTED', t('command.interrupted'), startedAt, changedFiles)
+          : executionErrorOutcome(tool.name, error, startedAt, changedFiles);
     }
+    if (!commandTiming || commandStartedAt === undefined) return outcome;
+    commandTiming.totalMs = performance.now() - commandStartedAt;
+    return { ...outcome, commandTiming };
   }
 }

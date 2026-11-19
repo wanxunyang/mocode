@@ -6,6 +6,31 @@ const mean = (values: number[]): number => (values.length ? values.reduce((a, b)
 const round = (n: number): number => Number(n.toFixed(2));
 const seconds = (n: number): string => `${(n / 1000).toFixed(2)}s`;
 
+function renderFirstEditMetrics(tasks: ShortPathTaskResult[]): string[] {
+  const measured = tasks.flatMap((task) => task.efficiency.firstEdit ?? []);
+  if (!measured.length) return [];
+  const attempts = measured.flatMap((phase) => phase.firstAttemptApplied ?? []);
+  const toolTokens = measured.flatMap((phase) => phase.toolOutputTokensEstimate ?? []);
+  const inputTokens = measured.flatMap((phase) => phase.uncachedInputTokens ?? []);
+  const meanWithCount = (values: number[]): string =>
+    values.length ? `${Math.round(mean(values))} (n=${values.length})` : 'unavailable';
+  return [
+    '',
+    '## Before the first applied file edit',
+    '',
+    `- First edit attempt applied: ${attempts.filter(Boolean).length}/${attempts.length} measured tasks`,
+    `- Mean tool output tokens (estimate): ${meanWithCount(toolTokens)}`,
+    `- Mean uncached input tokens: ${meanWithCount(inputTokens)}`,
+    '',
+    '| Task | Requests | Tool output tokens (est.) | Uncached input tokens | First attempt applied |',
+    '|---|---:|---:|---:|---|',
+    ...tasks.map(
+      ({ id, efficiency: { firstEdit } }) =>
+        `| ${id} | ${firstEdit?.requests ?? '-'} | ${firstEdit?.toolOutputTokensEstimate ?? '-'} | ${firstEdit?.uncachedInputTokens ?? '-'} | ${firstEdit?.firstAttemptApplied == null ? '-' : firstEdit.firstAttemptApplied ? 'yes' : 'no'} |`,
+    ),
+  ];
+}
+
 function renderPathMetrics(tasks: ShortPathTaskResult[]): string[] {
   if (!tasks.some((task) => task.efficiency.phases)) return [];
   const passed = tasks.filter((task) => task.status === 'passed');
@@ -108,7 +133,7 @@ export function renderSummary(report: ShortPathReport): string {
     `- Tasks: ${report.summary.passed}/${report.summary.tasks} passed (verified ${pct(report.summary.verifiedRate)})`,
     ...(report.experiment
       ? [
-          `- Fixture hash: ${report.experiment.fixtureHash}; effort: ${report.experiment.reasoningEffort}; routing: ${report.experiment.routing}; automatic completion: ${report.experiment.shortPathCompletion ? 'on' : 'off'}`,
+          `- Fixture hash: ${report.experiment.fixtureHash}; effort: ${report.experiment.reasoningEffort}; routing: ${report.experiment.routing}; automatic completion: ${report.experiment.shortPathCompletion ? 'on' : 'off'}${report.experiment.grepEditContext === undefined ? '' : `; grep edit context: ${report.experiment.grepEditContext ? 'on' : 'off'}`}`,
         ]
       : []),
     ...renderPathMetrics(report.tasks),
@@ -125,6 +150,7 @@ export function renderSummary(report: ShortPathReport): string {
       (task) =>
         `| ${task.id} | ${task.status} | ${task.efficiency.toolCalls} | ${task.goldMaxToolCalls} | ${task.pathRatio.toFixed(2)}x | ${task.efficiency.requestsBeforeFirstEdit ?? '-'} | ${task.efficiency.repeatedIdenticalReadOnlyCalls} | ${task.efficiency.postEditReadOnlyCalls} | ${task.promptTokens ?? '-'} | ${(task.durationMs / 1000).toFixed(1)}s |`,
     ),
+    ...renderFirstEditMetrics(report.tasks),
     '',
     `## By complexity level`,
     '| Level | Tasks | Passed | Mean calls | Mean ratio |',

@@ -121,6 +121,7 @@ export interface ShortPathReport {
     reasoningEffort: ReasoningEffort;
     routing: 'off' | 'llm' | 'jev';
     shortPathCompletion: boolean;
+    grepEditContext?: boolean;
   };
   summary: ShortPathScenarioSummary;
   tasks: ShortPathTaskResult[];
