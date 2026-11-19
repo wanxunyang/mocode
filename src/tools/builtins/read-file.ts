@@ -141,7 +141,7 @@ export const readFileTool: Tool = {
   name: 'read_file',
   description:
     'Read a file: text with line numbers, images as visual model input.\n' +
-    'Text — read before editing. With a known path and declaration or snippet, pass anchor to locate it and read its code in one call. Use offset+limit for known line numbers, or grep to discover paths. ' +
+    'Text — read before editing. Use anchor for a known declaration or literal, offset+limit for known line numbers, or grep to discover unknown paths. ' +
     'Images — PNG/JPEG/GIF/WebP detected by MAGIC BYTES (extension ignored), attached as visual input; detail=low|high controls resolution, oversized PNGs downscale automatically. ' +
     'Other binaries are REJECTED with an explanation — use run_command with a proper tool (`file`, `strings`, disassembler) if you need their content.',
   parameters: {
@@ -160,7 +160,7 @@ export const readFileTool: Tool = {
       limit: {
         type: 'integer',
         description:
-          'Max text lines to read (default 80 with anchor, otherwise 300; hard cap 2000). Aim for ~32k output characters or less per call. Ignored for images.',
+          'Max text lines (default 80 with anchor, otherwise 300; hard cap 2000). Match the limit to the code needed. Text only.',
       },
       detail: {
         type: 'string',
@@ -246,7 +246,7 @@ export const readFileTool: Tool = {
     }
     const baseOutput =
       end < lines.length
-        ? `${artifactHeader}\n${body}\n\n... (${lines.length - end} 行未显示,共 ${lines.length} 行)`
+        ? `${artifactHeader}\n${body}\n\n... (${lines.length - end} 行未显示,共 ${lines.length} 行,续读 offset=${end + 1})`
         : `${artifactHeader}\n${body}`;
     // R2.4:回注锚定本文件的记忆(最多 3 条,只回 fresh)。
     // 为什么放在 read_file 而不是 system prompt:prompt 每轮注入会撞 cache,而且

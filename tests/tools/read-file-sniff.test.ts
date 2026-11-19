@@ -160,6 +160,25 @@ test('read_file: anchor 直接返回匹配起点的普通分页、行号和完�
   assert.equal(empty.code, 'INVALID_ARGUMENTS');
 });
 
+test('read_file: 窄读可以按提示续读，所有分页返回同一个完整文件 hash', async () => {
+  const path = 'long-anchored.ts';
+  writeFileSync(join(root, path), Array.from({ length: 100 }, (_, i) => `code-${i + 1}`).join('\n'));
+  const focused = await runRead({ path, anchor: 'code-10', limit: 40 });
+  assert.equal(focused.status, 'success');
+  assert.match(focused.output, /49\tcode-49\n/);
+  assert.doesNotMatch(focused.output, /50\tcode-50/);
+  assert.match(focused.output, /offset=50/);
+  const next = await runRead({ path, offset: 50, limit: 2 });
+  assert.match(next.output, /50\tcode-50\n\s+51\tcode-51/);
+  const expanded = await runRead({ path, anchor: 'code-10' });
+  assert.match(expanded.output, /89\tcode-89\n/);
+  const broad = await runRead({ path });
+  assert.match(broad.output, /100\tcode-100$/);
+  for (const page of [next, expanded, broad]) {
+    assert.equal(page.output.split('\n')[0], focused.output.split('\n')[0]);
+  }
+});
+
 test('read_file: PNG 走视觉通道(带 modelAttachments),output 只有可读摘要', async () => {
   const outcome = await runRead({ path: 'assets/small.png' });
   assert.equal(outcome.status, 'success');
