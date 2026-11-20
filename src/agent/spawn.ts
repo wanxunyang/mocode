@@ -33,12 +33,15 @@ import {
   type AgentRuntimeContext,
 } from './runtime-context.js';
 
+const SUBAGENT_SILENT_WORK = 'Work silently until your final reply.';
+
 /** 子 agent 系统提示后缀(仅 legacy 直接调用路径用;共享前缀路径的系统提示直接复用父 agent)。 */
 const SUBAGENT_SUFFIX = `
 
 ## ⛯ SUB-AGENT MODE (you are a sub-agent)
 You are a sub-agent spawned by the main agent to handle a delegated sub-task, with the same tools and full capabilities as the main agent.
 - Focus on the assigned sub-task and see it through to completion.
+- ${SUBAGENT_SILENT_WORK}
 - When done, your final text reply is returned to the main agent as the result — concise and actionable: what you did, key findings, files changed, blockers.`;
 
 const SUBAGENT_ROLE = `## Sub-agent execution
@@ -200,6 +203,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       `Sub-task:\n${opts.prompt}`,
       [
         "You have the same tools and the same full capabilities as the main agent. Your file writes land directly in the workspace and belong to the main agent's current rollback transaction.",
+        // 只在新追加的委派消息里约束静默，保留父会话的缓存前缀。
+        SUBAGENT_SILENT_WORK,
         'Your final text reply is returned to the main agent as the result — concise and actionable: what you did, key findings, files changed, blockers.',
       ].join('\n'),
       opts.systemPromptSuffix ?? '',

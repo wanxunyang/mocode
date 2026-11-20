@@ -277,26 +277,16 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
     const remainingSteps = maxSteps - step;
     const ephemeralReminder = [
       runPolicy.reminder,
-      // 正文纪律:与 step 0 的 Opening analysis 互斥——两段永远不同框,不再需要白名单交叉引用。
-      // 原先这半句只挂在 step 0 的 Opening analysis 里,而本段是临时拼进本次请求、不写回 history
-      // 的(见下方 return),于是从每个用户轮的第 2 步起就彻底消失——长任务后半程等于裸奔
-      // (实测:同一结论换个措辞每步复述一遍,屏幕上像卡死循环)。
-      // step 0 由 Opening analysis 独自承担:那里既没有工具结果可复述,也没有"已说过的观点",
-      // 而"能直接答就直接答"的授权已写在 Answer-first 里,本段三条约束在 step 0 均无对象。
-      // 子 agent 静默执行、不写屏,沿用 suppressOpeningAnalysis 一并免注入。
+      // 主 agent 在后续请求中就近约束工具期间的正文。首轮与引导开场由各自的动态段负责。
+      // 子 agent 由委派提示约束静默，本段随 suppressOpeningAnalysis 跳过。
       !opts.suppressOpeningAnalysis && step > 0 && !input.opening
         ? '## Silent work\n' +
-          // 禁令范围收在「调用之间」,而不是「不要宣布你要做什么」:后者与 step 0 的
-          // Opening analysis(要求说明打算怎么入手)字面冲突,只能靠下面的白名单化解,
-          // 模型得读完清单才解开。开场分析发生在首次工具调用之前,天然不在本禁令范围内。
-          'Prefer doing over narrating. Do not narrate between tool calls: no sentence announcing ' +
-          'the next call, and no sentence restating what a result means — one such sentence per ' +
-          'call is noise, and repeated variants of ' +
-          'the same conclusion read to the user as a stuck loop. If something genuinely must be said ' +
-          'mid-task (a blocking decision, or a finding that changes what happens next), say it in one ' +
-          'short sentence and keep going. Never repeat a point already made in this turn. Text is for: ' +
-          "direct answers to the user's questions, blocking questions, " +
-          'findings that change the next action, and the final report.'
+          'When continuing independently with tools, emit only tool calls. ' +
+          'Handle findings, recoverable errors, and verification silently. ' +
+          'If you need user input to proceed, ask one concise question. ' +
+          'Use `ask_human` when available, or ask in a text-only reply and wait. ' +
+          'Answer direct questions and save material findings for the final report. ' +
+          'Never repeat a point already made in this turn.'
         : '',
       // 仅 step 0：就近重申 Answer-first，并保留「开场一句」这条祈使要求。
       // 859b974 曾把它改写成条件句（only when ... needs a user decision or complex），
@@ -308,7 +298,9 @@ export async function runModelTurn(input: ModelTurnInput): Promise<ModelTurnOutc
           'Before your first tool call in every user-facing turn, you MUST output exactly one short visible sentence ' +
           'telling the user what you will check or change first and what it will help you establish. ' +
           'Use plain language and put the sentence first in the SAME assistant response as the tool calls. ' +
-          'If no tools are needed, answer directly. After this opening, work silently.'
+          'If no tools are needed, answer directly. ' +
+          'If the task already warrants a new plan and `plan_update` is available, make it your first tool call. ' +
+          'After this opening, work silently.'
         : '',
       input.opening === 'steering'
         ? '## Steering opening\n' +

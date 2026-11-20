@@ -43,9 +43,18 @@ assert(workflowIdx > 0 && principlesIdx > workflowIdx, 'engineering principles m
 assert(prompt.includes(section), 'base prompt must embed the advisory discipline verbatim');
 assert(
   prompt.includes(PLAN_USAGE_GUIDANCE) && planUpdateTool.description.includes(PLAN_USAGE_GUIDANCE),
-  'prompt and plan tool must agree on when a focused change needs a plan',
+  'prompt and plan tool must share the same planning criteria',
 );
-assert(!/3\+ steps/.test(prompt + planUpdateTool.description), 'tool-call count must not trigger plan bookkeeping');
+assert(
+  PLAN_USAGE_GUIDANCE.includes('at least three substantive phases') &&
+    PLAN_USAGE_GUIDANCE.includes('crosses components with separate checks') &&
+    PLAN_USAGE_GUIDANCE.includes('risks context loss'),
+  'complex work needs a plan even when it has one deliverable',
+);
+assert(
+  PLAN_USAGE_GUIDANCE.includes('Locating, editing and checking one focused change count as one phase'),
+  'ordinary tool calls for one focused change count as one phase',
+);
 assert(
   askHumanTool.description.includes('routine, reversible') && section.includes('routine, reversible'),
   'ordinary implementation choices should not trigger a clarification',

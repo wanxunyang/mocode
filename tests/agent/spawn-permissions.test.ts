@@ -11,6 +11,7 @@ import { mapSkillTools } from '../../src/skills/toolmap.js';
 import '../../src/tools/builtins/index.js';
 
 interface CapturedRequest {
+  messages?: CapturedMessage[];
   tools?: Array<{ function: { name: string } }>;
 }
 
@@ -56,6 +57,7 @@ test('spawnAgent: 父 snapshot、局部白名单和显式空数组只会缩小�
     assert.equal(explicitEmpty.completed, true);
     assert.equal(emptyParent.completed, true);
     assert.equal(requests.length, 3);
+    assert.match(String(requests[0].messages?.[0]?.content), /Work silently until your final reply\./);
     assert.deepEqual(requestToolNames(requests[0]), ['read_file']);
     assert.deepEqual(requestToolNames(requests[1]), [], 'tools: [] 不得回退全局工具表');
     assert.deepEqual(requestToolNames(requests[2]), [], '父显式零权限不得回退全局工具表');
@@ -157,7 +159,7 @@ interface CapturedMessage {
 test('spawnAgent: delegation 模式逐字节复用父前缀，委派消息只追加在尾部，子 agent 与主 agent 同权', async () => {
   const previousSubagent = process.env.MOCODE_SUBAGENT_ENABLED;
   process.env.MOCODE_SUBAGENT_ENABLED = 'true';
-  const requests: Array<{ messages?: CapturedMessage[]; tools?: Array<{ function: { name: string } }> }> = [];
+  const requests: CapturedRequest[] = [];
   __setChatCreateImpl(async (body) => {
     requests.push(body as never);
     return textStream('worker done');
@@ -180,6 +182,8 @@ test('spawnAgent: delegation 模式逐字节复用父前缀，委派消息只追
     { type: 'function', function: { name: 'sub-agent', description: 's', parameters: {} } },
     { type: 'function', function: { name: 'plan_update', description: 'p', parameters: {} } },
   ] as never[];
+  const expectedHistoryPrefix = JSON.stringify(parentHistory);
+  const expectedTools = JSON.stringify(parentTools);
 
   try {
     const result = await spawnAgent({
@@ -191,24 +195,19 @@ test('spawnAgent: delegation 模式逐字节复用父前缀，委派消息只追
     assert.equal(result.completed, true);
     assert.equal(requests.length, 1);
     const messages = requests[0].messages ?? [];
-    // 前缀逐字节复用:前 4 条与父 history 完全相等(命中缓存的前提)。
-    assert.deepEqual(messages.slice(0, 4), parentHistory);
+    // 序列化后逐字节比较，也能捕获对共享消息对象的意外原地修改。
+    assert.equal(JSON.stringify(messages.slice(0, parentHistory.length)), expectedHistoryPrefix);
     // 委派消息紧随父前缀之后、角色为 user;其后的 assistant 回复是子 agent 产出。
     const delegation = messages[parentHistory.length];
     assert.equal(delegation.role, 'user');
     const delegationText = String(delegation.content);
     assert.match(delegationText, /Sub-agent delegation/);
     assert.match(delegationText, /summarize the file you already read/);
+    assert.match(delegationText, /Work silently until your final reply\./);
     // 与主 agent 同权:委派消息明说能力一致,不得再出现任何限权措辞。
     assert.match(delegationText, /same full capabilities as the main agent/);
     assert.ok(!/Do NOT call|Read-only|disabled for you/i.test(delegationText), '委派消息不得再有限权措辞');
-    // schema 与父 step 逐字节一致:写工具与编排工具全部保留,无任何裁剪。
-    assert.deepEqual(requestToolNames(requests[0] as CapturedRequest), [
-      'read_file',
-      'write_file',
-      'sub-agent',
-      'plan_update',
-    ]);
+    assert.equal(JSON.stringify(requests[0].tools), expectedTools, '工具 schema 必须逐字节复用');
   } finally {
     __setChatCreateImpl(null);
     if (previousSubagent === undefined) delete process.env.MOCODE_SUBAGENT_ENABLED;

@@ -1610,12 +1610,9 @@ test('R17: 无 memoryTail 时请求里不出现该段(零注入)', async () => {
 });
 
 test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后者(且都不落进 history)', async () => {
-  // 钉的是一条曾经静默失效的约束:ephemeralReminder 只拼进本次请求、不写回 history,
-  // 所以「安静干活」这半句若只挂在 step 0 的 Opening analysis 里,从第 2 步起就彻底
-  // 消失——模型只剩 history[0] 里那条最远的 Silent Execution,长任务后半程等于裸奔
-  // (实测:同一结论换个措辞每步复述一遍)。这里抓两次真实请求体证明:
-  //   ① step 0 同时有 Opening analysis 与 Silent work;
-  //   ② step 1 仍有无条件注入的 Silent work,但没有 Opening analysis;
+  // 捕获两次模型请求，验证开场和静默提示各自在需要时注入。
+  //   ① step 0 只有 Opening analysis;
+  //   ② step 1 有 Silent work,没有 Opening analysis;
   //   ③ 两段都没有写进 history(否则会被压缩反复带下去,并在下一用户轮重复出现)。
   const root = mkdtempSync(join(tmpdir(), 'mocode-silent-work-test-'));
   writeFileSync(join(root, 'fixture.txt'), 'mocode-fixture-content', 'utf8');
@@ -1672,11 +1669,12 @@ test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后�
     const first = ephemeralOf(0);
     assert.match(first, /## Opening analysis/, 'step 0 必须带开场分析');
     assert.ok(!first.includes('## Silent work'), '互斥:step 0 不应同时出现正文纪律');
-    // 守行为而不是守措辞:静态 Tool policy 与近场提醒必须同向,不能一个要求开场、
-    // 另一个允许 focused change 直接以工具调用开场。首轮带工具时必须「同一响应先文本」。
+    // 主 agent 的开场和静默规则由阶段提示负责，子 agent 的静默规则随委派注入。
     const staticPrompt = buildBasePrompt('opening-analysis-test');
-    assert.match(staticPrompt, /main agent starts every tool-using user turn with exactly one short visible sentence/);
-    assert.match(staticPrompt, /SAME assistant response as the first tool calls/);
+    assert.doesNotMatch(
+      staticPrompt,
+      /Opening and silent execution:|Sub-agents stay silent|Work silently until your final reply/,
+    );
     assert.doesNotMatch(staticPrompt, /begin a focused change with the needed tool call/);
     assert.match(
       first,
@@ -1685,13 +1683,21 @@ test('Opening analysis 与 Silent work 互斥:step 0 只前者,step≥1 只后�
     assert.match(first, /what you will check or change first and what it will help you establish/);
     assert.match(first, /put the sentence first in the SAME assistant response as the tool calls/);
     assert.match(first, /If no tools are needed, answer directly/);
+    assert.match(
+      first,
+      /If the task already warrants a new plan and `plan_update` is available, make it your first tool call/,
+    );
 
-    // ② step 1:开场分析消失,正文纪律登场——互斥的另一半。
+    // ② 继续调用工具时保持静默，只有等用户输入才能继续时才提问。
     const second = ephemeralOf(1);
-    assert.match(second, /## Silent work/, 'step≥1 必须带正文纪律');
-    assert.match(second, /Never repeat a point already made in this turn/);
-    // 互斥后白名单不该再提开场分析:它已不可能同框。
-    assert.ok(!second.includes('the step-0 opening analysis'), '互斥后正文纪律的白名单不应再引用 step-0 开场分析');
+    const silentWork = second.match(/## Silent work\n([^\n]+)/)?.[1];
+    assert.ok(silentWork, 'step≥1 必须带正文纪律');
+    assert.match(silentWork, /emit only tool calls/);
+    assert.match(silentWork, /need user input to proceed.*ask_human/);
+    assert.match(silentWork, /text-only reply and wait/);
+    assert.match(silentWork, /material findings for the final report/);
+    assert.match(silentWork, /Never repeat a point already made in this turn/);
+    assert.doesNotMatch(silentWork, /findings? that changes? (what happens next|the next action)/);
     assert.ok(!second.includes('## Opening analysis'), 'Opening analysis 只该在 step 0 出现');
 
     // ④ 「能答就直接答」的近场重申:每一步都有,不只在 step 0。

@@ -4,7 +4,10 @@
 export type ModelFamily = 'anthropic' | 'openai' | 'qwen' | 'other';
 
 export const PLAN_USAGE_GUIDANCE =
-  'Use a plan for distinct deliverables, work that needs a durable handoff, or when the user requests one. Locating, editing and checking one focused change are one task.';
+  'For tool-using work, call `plan_update` before broad investigation or implementation when the user requests a plan, ' +
+  'the task has distinct deliverables or at least three substantive phases, crosses components with separate checks, risks context loss, or needs a durable handoff. ' +
+  'If a focused check reveals that the task meets these criteria, create or update the plan before continuing. Reuse a plan that already fits the task. ' +
+  'Locating, editing and checking one focused change count as one phase.';
 
 /**
  * 从 config.model 字符串里嗅探 model family。匹配规则尽量宽松,够用即可。
